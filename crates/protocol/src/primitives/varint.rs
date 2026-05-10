@@ -1,0 +1,152 @@
+use bytes::{Buf, BufMut};
+
+use crate::ProtocolError;
+
+const MAX_VARINT_BYTES: usize = 5;   // 32-bit
+const MAX_VARLONG_BYTES: usize = 10; // 64-bit
+
+pub fn put_uvarint<B: BufMut>(buf: &mut B, mut v: u32) {
+    while (v & !0x7F) != 0 {
+        buf.put_u8(((v & 0x7F) as u8) | 0x80);
+        v >>= 7;
+    }
+    buf.put_u8(v as u8);
+}
+
+pub fn get_uvarint<B: Buf>(buf: &mut B) -> Result<u32, ProtocolError> {
+    let mut result: u32 = 0;
+    let mut shift = 0;
+    for _ in 0..MAX_VARINT_BYTES {
+        if buf.remaining() == 0 {
+            return Err(ProtocolError::UnexpectedEof { needed: 1 });
+        }
+        let b = buf.get_u8();
+        result |= u32::from(b & 0x7F) << shift;
+        if (b & 0x80) == 0 {
+            return Ok(result);
+        }
+        shift += 7;
+    }
+    Err(ProtocolError::VarintTooLong { max: MAX_VARINT_BYTES })
+}
+
+pub fn uvarint_len(v: u32) -> usize {
+    if v == 0 { return 1; }
+    let bits = 32 - v.leading_zeros() as usize;
+    (bits + 6) / 7
+}
+
+pub fn put_varint<B: BufMut>(buf: &mut B, v: i32) {
+    let zz = ((v << 1) ^ (v >> 31)) as u32;
+    put_uvarint(buf, zz);
+}
+
+pub fn get_varint<B: Buf>(buf: &mut B) -> Result<i32, ProtocolError> {
+    let zz = get_uvarint(buf)?;
+    Ok(((zz >> 1) as i32) ^ -((zz & 1) as i32))
+}
+
+pub fn varint_len(v: i32) -> usize {
+    let zz = ((v << 1) ^ (v >> 31)) as u32;
+    uvarint_len(zz)
+}
+
+pub fn put_uvarlong<B: BufMut>(buf: &mut B, mut v: u64) {
+    while (v & !0x7F) != 0 {
+        buf.put_u8(((v & 0x7F) as u8) | 0x80);
+        v >>= 7;
+    }
+    buf.put_u8(v as u8);
+}
+
+pub fn get_uvarlong<B: Buf>(buf: &mut B) -> Result<u64, ProtocolError> {
+    let mut result: u64 = 0;
+    let mut shift = 0;
+    for _ in 0..MAX_VARLONG_BYTES {
+        if buf.remaining() == 0 {
+            return Err(ProtocolError::UnexpectedEof { needed: 1 });
+        }
+        let b = buf.get_u8();
+        result |= u64::from(b & 0x7F) << shift;
+        if (b & 0x80) == 0 {
+            return Ok(result);
+        }
+        shift += 7;
+    }
+    Err(ProtocolError::VarintTooLong { max: MAX_VARLONG_BYTES })
+}
+
+pub fn put_varlong<B: BufMut>(buf: &mut B, v: i64) {
+    let zz = ((v << 1) ^ (v >> 63)) as u64;
+    put_uvarlong(buf, zz);
+}
+
+pub fn get_varlong<B: Buf>(buf: &mut B) -> Result<i64, ProtocolError> {
+    let zz = get_uvarlong(buf)?;
+    Ok(((zz >> 1) as i64) ^ -((zz & 1) as i64))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::BytesMut;
+
+    #[test]
+    fn uvarint_known_vectors() {
+        // (value, expected bytes) — pulled from KIP-482 / protobuf reference.
+        let cases: &[(u32, &[u8])] = &[
+            (0,          &[0x00]),
+            (1,          &[0x01]),
+            (127,        &[0x7F]),
+            (128,        &[0x80, 0x01]),
+            (16_383,     &[0xFF, 0x7F]),
+            (16_384,     &[0x80, 0x80, 0x01]),
+            (u32::MAX,   &[0xFF, 0xFF, 0xFF, 0xFF, 0x0F]),
+        ];
+        for (v, expected) in cases {
+            let mut buf = BytesMut::new();
+            put_uvarint(&mut buf, *v);
+            assert_eq!(&buf[..], *expected, "encoding {v}");
+            let mut cur = *expected;
+            assert_eq!(get_uvarint(&mut cur).unwrap(), *v);
+            assert!(cur.is_empty());
+            assert_eq!(uvarint_len(*v), expected.len());
+        }
+    }
+
+    #[test]
+    fn varint_zigzag_sample() {
+        // (value, expected bytes) — protobuf zig-zag examples.
+        let cases: &[(i32, &[u8])] = &[
+            (0,          &[0x00]),
+            (-1,         &[0x01]),
+            (1,          &[0x02]),
+            (-2,         &[0x03]),
+            (2,          &[0x04]),
+            (i32::MAX,   &[0xFE, 0xFF, 0xFF, 0xFF, 0x0F]),
+            (i32::MIN,   &[0xFF, 0xFF, 0xFF, 0xFF, 0x0F]),
+        ];
+        for (v, expected) in cases {
+            let mut buf = BytesMut::new();
+            put_varint(&mut buf, *v);
+            assert_eq!(&buf[..], *expected, "encoding {v}");
+            let mut cur = *expected;
+            assert_eq!(get_varint(&mut cur).unwrap(), *v);
+            assert_eq!(varint_len(*v), expected.len());
+        }
+    }
+
+    #[test]
+    fn uvarint_rejects_overlong() {
+        let too_long = [0x80u8, 0x80, 0x80, 0x80, 0x80, 0x01];
+        let mut cur = &too_long[..];
+        assert!(matches!(get_uvarint(&mut cur), Err(ProtocolError::VarintTooLong { .. })));
+    }
+
+    #[test]
+    fn uvarint_eof() {
+        let truncated = [0x80u8];
+        let mut cur = &truncated[..];
+        assert!(matches!(get_uvarint(&mut cur), Err(ProtocolError::UnexpectedEof { .. })));
+    }
+}
