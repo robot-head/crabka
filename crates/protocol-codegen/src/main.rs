@@ -1,28 +1,21 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-mod ir;
+use crabka_protocol_codegen::ir;
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
-    let schemas_dir = match args.next() {
-        Some(s) => PathBuf::from(s),
-        None => {
-            eprintln!("usage: crabka-protocol-codegen <schemas-dir> <out-dir>");
-            return ExitCode::from(2);
-        }
+    let Some(schemas) = args.next() else {
+        eprintln!("usage: crabka-protocol-codegen <schemas-dir> <out-dir>");
+        return ExitCode::from(2);
     };
-    let out_dir = match args.next() {
-        Some(s) => PathBuf::from(s),
-        None => {
-            eprintln!("usage: crabka-protocol-codegen <schemas-dir> <out-dir>");
-            return ExitCode::from(2);
-        }
+    let Some(out) = args.next() else {
+        eprintln!("usage: crabka-protocol-codegen <schemas-dir> <out-dir>");
+        return ExitCode::from(2);
     };
-
-    match run(&schemas_dir, &out_dir) {
+    match run(&PathBuf::from(schemas), &PathBuf::from(out)) {
         Ok(n) => {
-            eprintln!("Generated code for {n} messages into {}", out_dir.display());
+            eprintln!("Generated code for {n} messages");
             ExitCode::SUCCESS
         }
         Err(e) => {
@@ -32,6 +25,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(_schemas: &std::path::Path, _out: &std::path::Path) -> Result<usize, ir::IrError> {
-    Ok(0) // filled in later
+fn run(schemas: &std::path::Path, _out: &std::path::Path) -> Result<usize, ir::IrError> {
+    let specs = ir::load_dir(schemas)?;
+    Ok(specs.len())
 }
