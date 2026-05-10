@@ -1,0 +1,20 @@
+[package]
+name = "crabka-protocol-codegen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Code generator for crabka-protocol"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[[bin]]
+name = "crabka-protocol-codegen"
+path = "src/main.rs"
