@@ -4,10 +4,10 @@ members = ["crates/*"]
 
 [workspace.package]
 version = "0.0.0"
-edition = "2021"
+edition = "2024"
 license = "Apache-2.0"
 authors = ["The Crabka Authors"]
-rust-version = "1.85.0"
+rust-version = "1.95.0"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
