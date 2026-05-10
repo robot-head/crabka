@@ -4,5 +4,8 @@ target/
 .vscode/
 *.iml
 .DS_Store
-tools/oracle/.gradle/
-tools/oracle/build/
+
+# Gradle / Java — match any nested subproject, not just tools/oracle/
+**/.gradle/
+**/build/
+*.class
