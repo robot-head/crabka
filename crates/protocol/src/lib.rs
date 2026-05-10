@@ -2,6 +2,7 @@
 
 mod codec;
 mod error;
+pub mod owned;
 pub mod primitives;
 pub mod tagged_fields;
 
