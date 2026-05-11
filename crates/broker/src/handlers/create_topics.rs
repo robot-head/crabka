@@ -102,6 +102,10 @@ pub(crate) fn handle(
             result.error_code = codes::NONE;
             result.num_partitions = partition_count;
             result.replication_factor = 1;
+            // KIP-525 (v5+): client unconditionally calls `configs().stream()`,
+            // which NPEs if we leave this as `None`. Return an empty list to
+            // signal "no topic-level overrides" while keeping the call safe.
+            result.configs = Some(Vec::new());
             results.push(result);
         }
 
