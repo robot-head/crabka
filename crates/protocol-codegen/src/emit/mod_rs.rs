@@ -14,7 +14,12 @@ use crate::name_conv;
 /// set in Task 2; expanded to all active schemas in Task 3).
 /// If `has_common` is true, a `pub mod common;` entry is also emitted.
 #[must_use]
-pub fn emit(specs: &[&MessageSpec], flavor: Flavor, schemas_version: &str, has_common: bool) -> String {
+pub fn emit(
+    specs: &[&MessageSpec],
+    flavor: Flavor,
+    schemas_version: &str,
+    has_common: bool,
+) -> String {
     let flavor_comment = match flavor {
         Flavor::Owned => "Owned (heap-allocated) message types.",
         Flavor::Borrowed => "Borrowed-flavor generated message types.",
@@ -22,16 +27,16 @@ pub fn emit(specs: &[&MessageSpec], flavor: Flavor, schemas_version: &str, has_c
     let mut out = banner(schemas_version);
     writeln!(out, "//! {flavor_comment}").unwrap();
     writeln!(out).unwrap();
-    // Emit the common submodule first if it exists.
-    if has_common {
-        writeln!(out, "pub mod common;").unwrap();
-    }
     // Collect snake-case names, sort, deduplicate.
     let mut entries: Vec<String> = specs
         .iter()
         .filter(|s| !s.valid_versions.is_empty())
         .map(|s| name_conv::module_name(&s.name))
         .collect();
+    // Include `common` in the sorted list if this flavor has a common submodule.
+    if has_common {
+        entries.push("common".to_string());
+    }
     entries.sort();
     entries.dedup();
     for snake in &entries {

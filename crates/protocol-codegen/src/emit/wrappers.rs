@@ -26,10 +26,14 @@ impl Flavor {
 /// The standard clippy-suppress header that all generated wrapper files receive.
 /// This is the union of lints that the generated `.rs` bodies (via `include!`)
 /// are known to fire, mirroring the hand-written wrappers' `#![allow]` lists.
-fn allow_header() -> &'static str {
+#[must_use]
+pub fn allow_header() -> &'static str {
     concat!(
         "#![allow(\n",
+        "    clippy::absurd_extreme_comparisons,\n",
+        "    clippy::double_comparisons,\n",
         "    clippy::elidable_lifetime_names,\n",
+        "    clippy::manual_string_new,\n",
         "    clippy::must_use_candidate,\n",
         "    clippy::unnecessary_wraps,\n",
         "    clippy::cast_sign_loss,\n",
@@ -49,7 +53,8 @@ fn allow_header() -> &'static str {
         "    clippy::borrow_deref_ref,\n",
         "    clippy::explicit_auto_deref,\n",
         "    clippy::unnecessary_semicolon,\n",
-        "    unused_imports\n",
+        "    unused_imports,\n",
+        "    unused_variables\n",
         ")]",
     )
 }

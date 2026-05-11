@@ -20,6 +20,10 @@ pub struct Resolution {
     pub kind: StructKind,
     /// The path to use in generated code (owned flavor without `<'a>`).
     pub rust_path: String,
+    /// Whether the borrowed-flavor type for this struct carries a `'a` lifetime
+    /// parameter (true for common structs with string/bytes/records fields, and
+    /// for nested structs whose fields recursively need a lifetime).
+    pub needs_lifetime: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -36,16 +40,32 @@ fn is_struct_type(t: &str) -> bool {
     t.chars().next().is_some_and(char::is_uppercase)
 }
 
+/// Returns true if any field (recursively) carries a borrowed lifetime in the
+/// generated Rust type — i.e., `string`, `bytes`, `records`, or a nested struct
+/// whose own fields recursively need a lifetime.
+///
+/// For common-struct references (`PascalCase` type where `f.fields.is_empty()`), the
+/// caller must consult the resolution map being built; those are handled separately.
+fn fields_need_lifetime(fields: &[FieldSpec]) -> bool {
+    fields.iter().any(|f| {
+        let base = base_type(&f.field_type);
+        matches!(base, "string" | "bytes" | "records")
+            || (!f.fields.is_empty() && fields_need_lifetime(&f.fields))
+    })
+}
+
 /// Walk fields to find inline-defined nested structs (those with `fields:`).
 fn walk(fields: &[FieldSpec], map: &mut HashMap<String, Resolution>) {
     for f in fields {
         if !f.fields.is_empty() {
             let type_name = base_type(&f.field_type);
+            let nl = fields_need_lifetime(&f.fields);
             map.insert(
                 type_name.to_string(),
                 Resolution {
                     kind: StructKind::Nested,
                     rust_path: type_name.to_string(),
+                    needs_lifetime: nl,
                 },
             );
             walk(&f.fields, map);
@@ -72,19 +92,61 @@ fn check(
     Ok(())
 }
 
+/// Compute whether a common struct needs a `<'a>` lifetime, considering that
+/// its fields may themselves reference other common structs (by name, with empty
+/// `f.fields`). We do a simple fixpoint over the set of common struct names.
+fn common_struct_needs_lifetime(
+    cs_fields: &[FieldSpec],
+    common_names_needing_lifetime: &std::collections::HashSet<String>,
+) -> bool {
+    cs_fields.iter().any(|f| {
+        let base = base_type(&f.field_type);
+        matches!(base, "string" | "bytes" | "records")
+            || (!f.fields.is_empty()
+                && common_struct_needs_lifetime(&f.fields, common_names_needing_lifetime))
+            || (is_struct_type(base)
+                && f.fields.is_empty()
+                && common_names_needing_lifetime.contains(base))
+    })
+}
+
 /// Build a resolution map for one message. Maps each `PascalCase` type name
 /// referenced anywhere in the field tree to its kind + Rust path.
 pub fn resolve_message(spec: &MessageSpec) -> Result<HashMap<String, Resolution>, ResolveError> {
     let mut map = HashMap::new();
 
+    // ── Pass 1: compute which common structs need '<'a>' via fixpoint ─────────
+    // Start with those that directly have string/bytes/records fields, then
+    // expand transitively (a common struct that references a lifetime-bearing
+    // common struct also needs '<'a>').
+    let mut cs_needing_lt: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for cs in &spec.common_structs {
+            if cs_needing_lt.contains(&cs.name) {
+                continue; // already known
+            }
+            if common_struct_needs_lifetime(&cs.fields, &cs_needing_lt) {
+                cs_needing_lt.insert(cs.name.clone());
+                changed = true;
+            }
+        }
+    }
+
+    // ── Pass 2: insert common struct resolutions with correct needs_lifetime ──
     // Common structs first — they win if there's a name collision with a nested
     // (in practice this doesn't happen but we don't need to enforce it).
     for cs in &spec.common_structs {
+        // The common struct wrapper lives at src/{flavor}/common/<snake>.rs, so the
+        // path from a message file is super::common::<snake>::TypeName.
+        let snake = crate::name_conv::module_name(&cs.name);
         map.insert(
             cs.name.clone(),
             Resolution {
                 kind: StructKind::Common,
-                rust_path: format!("super::common::{}", cs.name),
+                rust_path: format!("super::common::{snake}::{}", cs.name),
+                needs_lifetime: cs_needing_lt.contains(&cs.name),
             },
         );
     }

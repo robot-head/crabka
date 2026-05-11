@@ -94,8 +94,9 @@ fn write_common_wrapper(
         Flavor::Owned => "owned",
         Flavor::Borrowed => "borrowed",
     };
+    let allow = emit::wrappers::allow_header();
     let body = format!(
-        "{}include!(concat!(\n    env!(\"CARGO_MANIFEST_DIR\"),\n    \"/generated/common/{flavor_dir}/{cs_name}.{suffix}.rs\"\n));\n",
+        "{}{allow}\n\ninclude!(concat!(\n    env!(\"CARGO_MANIFEST_DIR\"),\n    \"/generated/common/{flavor_dir}/{cs_name}.{suffix}.rs\"\n));\n",
         emit::common::banner(schemas_version),
         flavor_dir = flavor.dir(),
     );
@@ -103,6 +104,7 @@ fn write_common_wrapper(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 fn run(schemas: &std::path::Path, out: &std::path::Path) -> Result<usize, RunError> {
     let schemas_sha = read_schemas_sha(schemas)?;
     let specs = ir::load_dir(schemas)?;
@@ -116,8 +118,8 @@ fn run(schemas: &std::path::Path, out: &std::path::Path) -> Result<usize, RunErr
     let protocol_src = protocol_src_from_out(out);
 
     // Track all unique common-struct names emitted (for the common/mod.rs).
-    let mut all_common_owned: std::collections::BTreeSet<String> = Default::default();
-    let mut all_common_borrowed: std::collections::BTreeSet<String> = Default::default();
+    let mut all_common_owned = std::collections::BTreeSet::<String>::new();
+    let mut all_common_borrowed = std::collections::BTreeSet::<String>::new();
 
     let mut count = 0;
     for s in &specs {
@@ -197,7 +199,8 @@ fn run(schemas: &std::path::Path, out: &std::path::Path) -> Result<usize, RunErr
         let src_common_borrowed = protocol_src.join("borrowed").join("common");
         std::fs::create_dir_all(&src_common_borrowed)?;
         let mut mod_body = emit::common::banner(&schemas_sha);
-        mod_body.push_str("//! Borrowed common structs shared across multiple message schemas.\n\n");
+        mod_body
+            .push_str("//! Borrowed common structs shared across multiple message schemas.\n\n");
         for cs_name in &all_common_borrowed {
             let snake = name_conv::module_name(cs_name);
             write_common_wrapper(

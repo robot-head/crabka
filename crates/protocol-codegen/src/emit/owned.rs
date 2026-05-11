@@ -60,12 +60,18 @@ pub fn emit(spec: &MessageSpec, schemas_version: &str) -> Result<EmittedMessage,
                     Resolution {
                         kind: v.kind.clone(),
                         rust_path: new_path,
+                        needs_lifetime: v.needs_lifetime,
                     },
                 )
             })
             .collect();
-        let body =
-            emit_common_struct_file(&cs.name, &cs.fields, cs_flex_min, &common_res_map, schemas_version);
+        let body = emit_common_struct_file(
+            &cs.name,
+            &cs.fields,
+            cs_flex_min,
+            &common_res_map,
+            schemas_version,
+        );
         commons.push((cs.name.clone(), body));
     }
 
@@ -88,6 +94,7 @@ fn emit_common_struct_file(
     let use_string = uses_string(&types);
     let use_bytes = uses_bytes(&types);
 
+    let use_nullable_struct = uses_nullable_struct_recursive(fields);
     let mut out = banner(schemas_version);
 
     writeln!(out, "\nuse bytes::{{Buf, BufMut}};").unwrap();
@@ -108,9 +115,14 @@ fn emit_common_struct_file(
                 puts.push(p);
             }
         }
+        if use_nullable_struct && !gets.contains(&"get_i8") {
+            // get_i8 needed for nullable struct decode prefix even when no int8 fields.
+            gets.push("get_i8");
+        }
         if !gets.is_empty() {
             let mut combined: Vec<&str> = gets.into_iter().chain(puts).collect();
             combined.sort_unstable();
+            combined.dedup();
             writeln!(
                 out,
                 "\nuse crate::primitives::fixed::{{{}}};",
@@ -294,6 +306,17 @@ fn uses_nullable_string_recursive(fields: &[FieldSpec]) -> bool {
     })
 }
 
+/// Returns true if any field has a non-array struct type with nullableVersions set.
+/// Such fields require `get_i8` for the nullable prefix byte in decode.
+fn uses_nullable_struct_recursive(fields: &[FieldSpec]) -> bool {
+    fields.iter().any(|f| {
+        let t = &f.field_type;
+        let base = base_type(t);
+        let here = is_struct_type(base) && !t.starts_with("[]") && f.nullable_versions.is_some();
+        here || uses_nullable_struct_recursive(&f.fields)
+    })
+}
+
 fn has_any_flex(spec: &MessageSpec) -> bool {
     matches!(spec.flexible_versions, FlexibleVersions::Range(_))
 }
@@ -315,6 +338,8 @@ fn emit_imports(out: &mut String, spec: &MessageSpec) {
 
     writeln!(out, "\nuse bytes::{{Buf, BufMut}};").unwrap();
 
+    let use_nullable_struct = uses_nullable_struct_recursive(&spec.fields);
+
     // Emit only the specific fixed-type imports actually used, to avoid unused-import warnings.
     {
         let mut gets: Vec<&str> = Vec::new();
@@ -322,6 +347,9 @@ fn emit_imports(out: &mut String, spec: &MessageSpec) {
         if uses_fixed_type(&types, "int8") {
             gets.push("get_i8");
             puts.push("put_i8");
+        } else if use_nullable_struct {
+            // get_i8 is needed for nullable struct decode (1-byte signed null prefix).
+            gets.push("get_i8");
         }
         if uses_fixed_type(&types, "int16") {
             gets.push("get_i16");
@@ -594,7 +622,11 @@ fn emit_struct(out: &mut String, spec: &MessageSpec, res_map: &HashMap<String, R
     let type_name = name_conv::type_name(&spec.name);
     let manual_default = needs_manual_default(&spec.fields);
     let derive_default = if manual_default { "" } else { ", Default" };
-    let eq_derive = if has_float64_recursive(&spec.fields) { "" } else { ", Eq" };
+    let eq_derive = if has_float64_recursive(&spec.fields) {
+        ""
+    } else {
+        ", Eq"
+    };
     writeln!(
         out,
         "
@@ -886,7 +918,11 @@ fn emit_nested_struct(
 ) {
     let manual_default = needs_manual_default(fields);
     let derive_default = if manual_default { "" } else { ", Default" };
-    let eq_derive = if has_float64_recursive(fields) { "" } else { ", Eq" };
+    let eq_derive = if has_float64_recursive(fields) {
+        ""
+    } else {
+        ", Eq"
+    };
     // Struct definition
     writeln!(
         out,
@@ -1386,9 +1422,15 @@ fn encode_call(
     }
 
     if is_struct_type(schema_type) {
-        // Non-array struct
+        // Non-array struct. Nullable structs use a 1-byte signed prefix: -1 = null, 1 = non-null.
+        // This matches the Kafka Java generator's nullable-struct wire encoding.
         if nullable {
-            return format!("if let Some(v) = &{expr} {{ v.encode(buf, version)?; }}");
+            return format!(
+                "match &{expr} {{ \
+                 None => {{ buf.put_i8(-1); }}, \
+                 Some(v) => {{ buf.put_i8(1); v.encode(buf, version)?; }} \
+                 }}"
+            );
         }
         return format!("{expr}.encode(buf, version)?");
     }
@@ -1483,7 +1525,8 @@ fn encoded_len_expr(
 
     if is_struct_type(schema_type) {
         if nullable {
-            return format!("{expr}.as_ref().map_or(0, |v| v.encoded_len(version))");
+            // 1 byte for the signed null-marker prefix (–1 or 1) + body when present.
+            return format!("1 + {expr}.as_ref().map_or(0, |v| v.encoded_len(version))");
         }
         return format!("{expr}.encoded_len(version)");
     }
@@ -1531,8 +1574,7 @@ fn decode_call(schema_type: &str, nullable: bool, res_map: &HashMap<String, Reso
             // Array of structs: use the resolved path so common-struct files compile correctly.
             let type_path = res_map
                 .get(elem_base)
-                .map(|r| r.rust_path.as_str())
-                .unwrap_or(elem_base);
+                .map_or(elem_base, |r| r.rust_path.as_str());
             if nullable {
                 return format!(
                     "{{ let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?; \
@@ -1564,11 +1606,13 @@ fn decode_call(schema_type: &str, nullable: bool, res_map: &HashMap<String, Reso
     if is_struct_type(schema_type) {
         let type_path = res_map
             .get(schema_type)
-            .map(|r| r.rust_path.as_str())
-            .unwrap_or(schema_type);
+            .map_or(schema_type, |r| r.rust_path.as_str());
         if nullable {
-            // For nullable non-array structs: a simple decode — schemas rarely use this
-            return format!("Some({type_path}::decode(buf, version)?)");
+            // Nullable non-array structs use a 1-byte signed prefix: < 0 = null, else non-null.
+            // Matches the Kafka Java generator's nullable-struct wire encoding.
+            return format!(
+                "if get_i8(buf)? < 0 {{ None }} else {{ Some({type_path}::decode(buf, version)?) }}"
+            );
         }
         return format!("{type_path}::decode(buf, version)?");
     }

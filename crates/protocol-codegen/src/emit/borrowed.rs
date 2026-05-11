@@ -23,7 +23,7 @@ pub fn emit(spec: &MessageSpec, schemas_version: &str) -> Result<EmittedMessage,
     let parent_module = name_conv::module_name(&spec.name);
 
     let mut primary = banner(schemas_version);
-    emit_imports(&mut primary, spec);
+    emit_imports(&mut primary, spec, &res_map);
     emit_constants(&mut primary, spec);
     emit_struct(&mut primary, spec, &res_map, &parent_module);
     emit_to_owned_impl(&mut primary, spec, &res_map);
@@ -55,6 +55,7 @@ pub fn emit(spec: &MessageSpec, schemas_version: &str) -> Result<EmittedMessage,
                     Resolution {
                         kind: v.kind.clone(),
                         rust_path: new_path,
+                        needs_lifetime: v.needs_lifetime,
                     },
                 )
             })
@@ -77,6 +78,7 @@ pub fn emit(spec: &MessageSpec, schemas_version: &str) -> Result<EmittedMessage,
 }
 
 /// Emit a standalone `.rs` file body for a top-level `commonStruct` in the borrowed flavor.
+#[allow(clippy::too_many_lines)]
 fn emit_common_struct_file_borrowed(
     struct_name: &str,
     fields: &[FieldSpec],
@@ -99,6 +101,7 @@ fn emit_common_struct_file_borrowed(
         writeln!(out, "\nuse bytes::BufMut;").unwrap();
     }
 
+    let use_nullable_struct = uses_nullable_struct_recursive(fields);
     {
         let mut gets: Vec<&str> = Vec::new();
         let mut puts: Vec<&str> = Vec::new();
@@ -116,9 +119,14 @@ fn emit_common_struct_file_borrowed(
                 puts.push(p);
             }
         }
+        if use_nullable_struct && !gets.contains(&"get_i8") {
+            // get_i8 needed for nullable struct decode prefix even when no int8 fields.
+            gets.push("get_i8");
+        }
         if !gets.is_empty() {
             let mut combined: Vec<&str> = gets.into_iter().chain(puts).collect();
             combined.sort_unstable();
+            combined.dedup();
             writeln!(
                 out,
                 "\nuse crate::primitives::fixed::{{{}}};",
@@ -209,14 +217,18 @@ fn is_struct_type(t: &str) -> bool {
 /// Returns true if ANY field in the list (recursively) would carry a borrowed
 /// lifetime in the generated Rust type — i.e., string, bytes, records, or a
 /// nested struct that itself has borrowed fields.
-fn needs_lifetime(fields: &[crate::ir::FieldSpec]) -> bool {
+///
+/// `res_map` is consulted for common-struct references (`PascalCase` where `f.fields.is_empty()`)
+/// to check whether that common struct was generated with `<'a>`.
+fn needs_lifetime(fields: &[crate::ir::FieldSpec], res_map: &HashMap<String, Resolution>) -> bool {
     fields.iter().any(|f| {
         let base = base_type(&f.field_type);
         matches!(base, "string" | "bytes" | "records")  // records borrows via RecordBatchBorrowed<'a>
             // Inline nested struct with borrowed fields.
-            || (is_struct_type(base) && !f.fields.is_empty() && needs_lifetime(&f.fields))
-            // Common-struct reference (empty f.fields) — conservatively assume it carries 'a.
-            || (is_struct_type(base) && f.fields.is_empty())
+            || (is_struct_type(base) && !f.fields.is_empty() && needs_lifetime(&f.fields, res_map))
+            // Common-struct reference: consult the resolution to see if it has '<'a>'.
+            || (is_struct_type(base) && f.fields.is_empty()
+                && res_map.get(base).is_some_and(|r| r.needs_lifetime))
     })
 }
 
@@ -227,21 +239,22 @@ fn is_tagged(f: &FieldSpec) -> bool {
 /// Returns true if the top-level struct needs a `'a` lifetime parameter.
 /// Only non-tagged fields contribute borrowed lifetimes; tagged fields that have
 /// string/struct content use owned types to avoid escape from the payload closure.
-fn spec_needs_lifetime(spec: &MessageSpec) -> bool {
+fn spec_needs_lifetime(spec: &MessageSpec, res_map: &HashMap<String, Resolution>) -> bool {
     let non_tagged: Vec<&FieldSpec> = spec.fields.iter().filter(|f| !is_tagged(f)).collect();
     non_tagged.iter().any(|f| {
         let base = base_type(&f.field_type);
         matches!(base, "string" | "bytes" | "records")
-            || (is_struct_type(base) && !f.fields.is_empty() && needs_lifetime(&f.fields))
-            // Common-struct reference — conservatively assume it carries 'a.
-            || (is_struct_type(base) && f.fields.is_empty())
+            || (is_struct_type(base) && !f.fields.is_empty() && needs_lifetime(&f.fields, res_map))
+            // Common-struct reference: consult the resolution to see if it has '<'a>'.
+            || (is_struct_type(base) && f.fields.is_empty()
+                && res_map.get(base).is_some_and(|r| r.needs_lifetime))
     })
 }
 
 /// Returns true if a tagged field's content cannot be zero-copy decoded
 /// (because string/bytes data in its payload would escape the closure).
 /// In that case the field must use the owned type.
-fn tagged_field_needs_owned(f: &FieldSpec) -> bool {
+fn tagged_field_needs_owned(f: &FieldSpec, res_map: &HashMap<String, Resolution>) -> bool {
     if !is_tagged(f) {
         return false;
     }
@@ -251,9 +264,12 @@ fn tagged_field_needs_owned(f: &FieldSpec) -> bool {
         return false;
     }
     // Struct tagged fields: fine only if the nested struct has no borrowed fields.
-    // Common-struct references (f.fields.is_empty()) are conservatively treated as needing owned.
     if is_struct_type(base) {
-        return f.fields.is_empty() || needs_lifetime(&f.fields);
+        if f.fields.is_empty() {
+            // Common-struct reference: needs owned only if the common struct has '<'a>'.
+            return res_map.get(base).is_some_and(|r| r.needs_lifetime);
+        }
+        return needs_lifetime(&f.fields, res_map);
     }
     // String/bytes tagged fields also need owned (lifetime escape).
     true
@@ -279,10 +295,13 @@ fn has_any_tagged_in_spec(spec: &MessageSpec) -> bool {
 
 /// Returns true if any tagged field in this spec (at top level) needs to be decoded
 /// using the owned `Decode` trait rather than `DecodeBorrow`.
-fn has_tagged_fields_needing_owned(spec: &MessageSpec) -> bool {
+fn has_tagged_fields_needing_owned(
+    spec: &MessageSpec,
+    res_map: &HashMap<String, Resolution>,
+) -> bool {
     spec.fields
         .iter()
-        .any(|f| is_tagged(f) && tagged_field_needs_owned(f))
+        .any(|f| is_tagged(f) && tagged_field_needs_owned(f, res_map))
 }
 
 fn used_field_types_recursive(fields: &[FieldSpec]) -> Vec<String> {
@@ -364,6 +383,17 @@ fn uses_non_nullable_records_recursive(fields: &[FieldSpec]) -> bool {
     })
 }
 
+/// Returns true if any field has a non-array struct type with nullableVersions set.
+/// Such fields require `get_i8` for the nullable prefix byte in decode.
+fn uses_nullable_struct_recursive(fields: &[FieldSpec]) -> bool {
+    fields.iter().any(|f| {
+        let t = &f.field_type;
+        let base = base_type(t);
+        let here = is_struct_type(base) && !t.starts_with("[]") && f.nullable_versions.is_some();
+        here || uses_nullable_struct_recursive(&f.fields)
+    })
+}
+
 /// Returns the Rust type path for a struct-typed field in borrowed flavor.
 /// Includes `<'a>` only when the nested struct actually has borrowed fields.
 /// `type_map::borrowed_type` will use the path verbatim (no automatic `<'a>` addition).
@@ -371,11 +401,12 @@ fn struct_path_for(f: &FieldSpec, res_map: &HashMap<String, Resolution>) -> Opti
     let base = base_type(&f.field_type);
     if is_struct_type(base) {
         res_map.get(base).map(|r| {
+            // For inline nested structs, check field contents; for common-struct refs, use
+            // the pre-computed needs_lifetime flag on the Resolution.
             let needs_lt = if f.fields.is_empty() {
-                // Common-struct reference — conservatively assume it has a lifetime.
-                true
+                r.needs_lifetime
             } else {
-                needs_lifetime(&f.fields)
+                needs_lifetime(&f.fields, res_map)
             };
             if needs_lt {
                 format!("{}<'a>", r.rust_path)
@@ -398,18 +429,22 @@ fn owned_struct_path_for(
 ) -> Option<String> {
     let base = base_type(&f.field_type);
     if is_struct_type(base) {
-        res_map.get(base).map(|_| resolved_to_owned_path(base, parent_module, res_map))
+        res_map
+            .get(base)
+            .map(|_| resolved_to_owned_path(base, parent_module, res_map))
     } else {
         None
     }
 }
 
-/// Convert a borrowed-flavor resolved rust_path to its owned-flavor equivalent.
+/// Convert a borrowed-flavor resolved `rust_path` to its owned-flavor equivalent.
 ///
-/// - Inline nested structs have a bare rust_path like `"TypeName"` →
+/// - Inline nested structs have a bare `rust_path` like `"TypeName"` →
 ///   `"crate::owned::{parent_module}::TypeName"`.
-/// - Common structs (from the modified res_map) have a rust_path like
-///   `"super::<snake>::TypeName"` → `"crate::owned::common::<snake>::TypeName"`.
+/// - Common structs from a message-level context have `rust_path` like
+///   `"super::common::<snake>::TypeName"` → `"crate::owned::common::<snake>::TypeName"`.
+/// - Common structs from a common-struct-level context (`parent_module` = `"common::<x>"`)
+///   have `rust_path` like `"super::<snake>::TypeName"` → `"crate::owned::common::<snake>::TypeName"`.
 fn resolved_to_owned_path(
     type_name: &str,
     parent_module: &str,
@@ -417,10 +452,17 @@ fn resolved_to_owned_path(
 ) -> String {
     match res_map.get(type_name) {
         Some(r) if r.kind == StructKind::Common => {
-            // rust_path looks like "super::<snake>::TypeName" — convert to owned path.
-            // Strip "super::" and prepend "crate::owned::".
-            let without_super = r.rust_path.strip_prefix("super::").unwrap_or(&r.rust_path);
-            format!("crate::owned::{without_super}")
+            // Determine the owned path from the rust_path stored in the res_map.
+            if let Some(without_super) = r.rust_path.strip_prefix("super::common::") {
+                // Message-level context: rust_path = "super::common::<snake>::TypeName"
+                format!("crate::owned::common::{without_super}")
+            } else if let Some(without_super) = r.rust_path.strip_prefix("super::") {
+                // Common-struct-level context: rust_path = "super::<snake>::TypeName"
+                format!("crate::owned::common::{without_super}")
+            } else {
+                // Fallback: use parent_module
+                format!("crate::owned::{parent_module}::{type_name}")
+            }
         }
         _ => {
             // Inline nested struct — lives in the parent message's owned module.
@@ -440,7 +482,7 @@ fn version_cond(r: VersionRange, version_var: &str) -> String {
 // ── imports ────────────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_lines)]
-fn emit_imports(out: &mut String, spec: &MessageSpec) {
+fn emit_imports(out: &mut String, spec: &MessageSpec, res_map: &HashMap<String, Resolution>) {
     let types = used_field_types_recursive(&spec.fields);
     let tagged = has_any_tagged_in_spec(spec);
     let flex = has_any_flex(spec);
@@ -453,6 +495,7 @@ fn emit_imports(out: &mut String, spec: &MessageSpec) {
     let use_nullable_records = uses_nullable_records_recursive(&spec.fields);
     let use_non_nullable_records = uses_non_nullable_records_recursive(&spec.fields);
     let use_records = use_nullable_records || use_non_nullable_records;
+    let use_nullable_struct = uses_nullable_struct_recursive(&spec.fields);
     // `Bytes` is needed for to_owned() on bytes fields.
     // Records fields use `bytes::BytesMut::new()` inline (fully qualified), so no extra import.
     if use_bytes {
@@ -468,6 +511,9 @@ fn emit_imports(out: &mut String, spec: &MessageSpec) {
         if uses_fixed_type(&types, "int8") {
             gets.push("get_i8");
             puts.push("put_i8");
+        } else if use_nullable_struct {
+            // get_i8 is needed for nullable struct decode (1-byte signed null prefix).
+            gets.push("get_i8");
         }
         if uses_fixed_type(&types, "int16") {
             gets.push("get_i16");
@@ -613,7 +659,7 @@ use crate::primitives::string_bytes_borrowed::{{
     }
 
     // `Decode` is needed when any tagged field uses owned decode (to call the trait method).
-    let needs_owned_decode = has_tagged_fields_needing_owned(spec);
+    let needs_owned_decode = has_tagged_fields_needing_owned(spec, res_map);
     if needs_owned_decode {
         writeln!(
             out,
@@ -668,12 +714,16 @@ fn emit_struct(
     parent_module: &str,
 ) {
     let type_name = name_conv::type_name(&spec.name);
-    let lt = if spec_needs_lifetime(spec) {
+    let lt = if spec_needs_lifetime(spec, res_map) {
         "<'a>"
     } else {
         ""
     };
-    let eq_derive = if has_float64_recursive(&spec.fields) { "" } else { ", Eq" };
+    let eq_derive = if has_float64_recursive(&spec.fields) {
+        ""
+    } else {
+        ", Eq"
+    };
     writeln!(
         out,
         "
@@ -692,7 +742,7 @@ pub struct {type_name}{lt} {{"
     for f in spec.fields.iter().filter(|f| is_tagged(f)) {
         let field = name_conv::field_name(&f.name);
         let nullable = is_nullable(f) || matches!(&f.default, Some(serde_json::Value::Null));
-        let rust_type = if tagged_field_needs_owned(f) {
+        let rust_type = if tagged_field_needs_owned(f, res_map) {
             // Tagged struct/string fields must store owned data because the payload buffer
             // is ephemeral and strings decoded from it cannot escape the read_tagged_fields closure.
             let owned_path = owned_struct_path_for(f, parent_module, res_map);
@@ -717,7 +767,7 @@ fn emit_default_impl(
     _parent_module: &str,
 ) {
     let type_name = name_conv::type_name(&spec.name);
-    let lt = if spec_needs_lifetime(spec) {
+    let lt = if spec_needs_lifetime(spec, res_map) {
         "<'a>"
     } else {
         ""
@@ -822,12 +872,12 @@ fn borrowed_zero(base: &str) -> String {
 fn emit_to_owned_impl(out: &mut String, spec: &MessageSpec, res_map: &HashMap<String, Resolution>) {
     let type_name = name_conv::type_name(&spec.name);
     let module_name = name_conv::module_name(&spec.name);
-    let lt = if spec_needs_lifetime(spec) {
+    let lt = if spec_needs_lifetime(spec, res_map) {
         "<'a>"
     } else {
         ""
     };
-    let impl_lt = if spec_needs_lifetime(spec) {
+    let impl_lt = if spec_needs_lifetime(spec, res_map) {
         "<'a>"
     } else {
         ""
@@ -854,7 +904,7 @@ impl{impl_lt} {type_name}{lt} {{
     for f in spec.fields.iter().filter(|f| is_tagged(f)) {
         let field = name_conv::field_name(&f.name);
         let nullable = is_nullable(f) || matches!(&f.default, Some(serde_json::Value::Null));
-        let expr = if tagged_field_needs_owned(f) {
+        let expr = if tagged_field_needs_owned(f, res_map) {
             // Field is already the owned type — just clone it.
             format!("self.{field}.clone()")
         } else {
@@ -953,7 +1003,7 @@ fn to_owned_field_expr(
 fn emit_encode_impl(out: &mut String, spec: &MessageSpec, res_map: &HashMap<String, Resolution>) {
     let type_name = name_conv::type_name(&spec.name);
     let has_flex = has_any_flex(spec);
-    let lt = if spec_needs_lifetime(spec) {
+    let lt = if spec_needs_lifetime(spec, res_map) {
         "<'a>"
     } else {
         ""
@@ -1268,9 +1318,9 @@ fn owned_encoded_len_expr(
     res_map: &HashMap<String, Resolution>,
 ) -> String {
     match (schema_type, nullable) {
-        ("string", false) => format!(
-            "if flex {{ compact_string_len(&{expr}) }} else {{ string_len(&{expr}) }}"
-        ),
+        ("string", false) => {
+            format!("if flex {{ compact_string_len(&{expr}) }} else {{ string_len(&{expr}) }}")
+        }
         ("string", true) => format!(
             "if flex {{ compact_nullable_string_len({expr}.as_deref()) }} else {{ nullable_string_len({expr}.as_deref()) }}"
         ),
@@ -1328,7 +1378,8 @@ fn emit_encode_tagged(
     // For tagged fields stored as owned types (strings with Option<String>), the encode
     // call must use `.as_deref()` to convert to the expected &str / Option<&str>.
     let base = base_type(&f.field_type);
-    let encode_body = if tagged_field_needs_owned(f) && matches!(base, "string" | "bytes") {
+    let encode_body = if tagged_field_needs_owned(f, res_map) && matches!(base, "string" | "bytes")
+    {
         // Use owned-flavor encode which adds .as_deref() for nullable strings/bytes.
         owned_encode_call(&f.field_type, &format!("self.{field}"), nullable, res_map)
     } else {
@@ -1337,7 +1388,7 @@ fn emit_encode_tagged(
     .replace("buf", "b");
     let is_default_cond = tagged_is_default_cond(f);
     // Use owned_encoded_len_expr for tagged string/bytes fields to match the .as_deref() convention.
-    let len_expr = if tagged_field_needs_owned(f) && matches!(base, "string" | "bytes") {
+    let len_expr = if tagged_field_needs_owned(f, res_map) && matches!(base, "string" | "bytes") {
         owned_encoded_len_expr(&f.field_type, &format!("self.{field}"), nullable, res_map)
     } else {
         encoded_len_expr(&f.field_type, &format!("self.{field}"), nullable, res_map)
@@ -1347,9 +1398,7 @@ fn emit_encode_tagged(
         "{indent}    if !({is_default_cond}) {{
 {indent}        let payload = encode_to_bytes({len_expr}, |b| {{ {encode_body}; Ok(()) }});
 {indent}        tagged.add({tag}, payload);
-{indent}    }}",
-        len_expr = len_expr,
-        tag = tag,
+{indent}    }}"
     )
     .unwrap();
 }
@@ -1365,7 +1414,7 @@ fn emit_encoded_len_tagged(
     let nullable = is_nullable(f) || matches!(&f.default, Some(serde_json::Value::Null));
     // For tagged fields stored as owned strings, the len expression must use .as_deref().
     let base = base_type(&f.field_type);
-    let len = if tagged_field_needs_owned(f) && matches!(base, "string" | "bytes") {
+    let len = if tagged_field_needs_owned(f, res_map) && matches!(base, "string" | "bytes") {
         owned_encoded_len_expr(&f.field_type, &format!("self.{field}"), nullable, res_map)
     } else {
         encoded_len_expr(&f.field_type, &format!("self.{field}"), nullable, res_map)
@@ -1391,7 +1440,7 @@ fn emit_decode_borrow_impl(
     let type_name = name_conv::type_name(&spec.name);
     let has_flex = has_any_flex(spec);
     // Use 'de as the lifetime param if the struct has borrowed data; otherwise no lifetime needed.
-    let lt = if spec_needs_lifetime(spec) {
+    let lt = if spec_needs_lifetime(spec, res_map) {
         "<'de>"
     } else {
         ""
@@ -1543,7 +1592,7 @@ fn emit_decode_borrow_tagged_arm(
     let tag = f.tag.expect("tagged field must have tag");
     let nullable = is_nullable(f) || matches!(&f.default, Some(serde_json::Value::Null));
 
-    if tagged_field_needs_owned(f) {
+    if tagged_field_needs_owned(f, res_map) {
         // The field's type is stored as owned to avoid borrow-escape from payload.
         // Use the owned Decode impl (which takes B: Buf, not &mut &'de [u8]).
         let call =
@@ -1590,10 +1639,14 @@ fn emit_nested_struct(
     parent_module: &str,
 ) {
     // Only add <'a> lifetime if the struct actually has string/bytes/borrowed-struct fields.
-    let has_lifetime = needs_lifetime(fields);
+    let has_lifetime = needs_lifetime(fields, res_map);
     let lt = if has_lifetime { "<'a>" } else { "" };
     let lt_de = if has_lifetime { "<'de>" } else { "" };
-    let eq_derive = if has_float64_recursive(fields) { "" } else { ", Eq" };
+    let eq_derive = if has_float64_recursive(fields) {
+        ""
+    } else {
+        ", Eq"
+    };
 
     // Struct definition
     writeln!(
@@ -1770,8 +1823,14 @@ fn encode_call(
     }
 
     if is_struct_type(schema_type) {
+        // Non-array struct. Nullable structs use a 1-byte signed prefix: -1 = null, 1 = non-null.
         if nullable {
-            return format!("if let Some(v) = &{expr} {{ v.encode(buf, version)?; }}");
+            return format!(
+                "match &{expr} {{ \
+                 None => {{ buf.put_i8(-1); }}, \
+                 Some(v) => {{ buf.put_i8(1); v.encode(buf, version)?; }} \
+                 }}"
+            );
         }
         return format!("{expr}.encode(buf, version)?");
     }
@@ -1864,7 +1923,8 @@ fn encoded_len_expr(
 
     if is_struct_type(schema_type) {
         if nullable {
-            return format!("{expr}.as_ref().map_or(0, |v| v.encoded_len(version))");
+            // 1 byte for the signed null-marker prefix (–1 or 1) + body when present.
+            return format!("1 + {expr}.as_ref().map_or(0, |v| v.encoded_len(version))");
         }
         return format!("{expr}.encoded_len(version)");
     }
@@ -1920,8 +1980,7 @@ fn decode_borrow_call(
         if is_struct_type(elem_base) {
             let type_path = res_map
                 .get(elem_base)
-                .map(|r| r.rust_path.as_str())
-                .unwrap_or(elem_base);
+                .map_or(elem_base, |r| r.rust_path.as_str());
             if nullable {
                 return format!(
                     "{{ let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?; \
@@ -1953,10 +2012,12 @@ fn decode_borrow_call(
     if is_struct_type(schema_type) {
         let type_path = res_map
             .get(schema_type)
-            .map(|r| r.rust_path.as_str())
-            .unwrap_or(schema_type);
+            .map_or(schema_type, |r| r.rust_path.as_str());
         if nullable {
-            return format!("Some({type_path}::decode_borrow(buf, version)?)");
+            // Nullable non-array structs: 1-byte signed prefix < 0 = null, else non-null.
+            return format!(
+                "if get_i8(buf)? < 0 {{ None }} else {{ Some({type_path}::decode_borrow(buf, version)?) }}"
+            );
         }
         return format!("{type_path}::decode_borrow(buf, version)?");
     }

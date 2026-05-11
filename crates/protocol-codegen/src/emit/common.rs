@@ -23,26 +23,28 @@ pub fn format_int_literal(s: &str, suffix: &str) -> String {
     let s = s.trim();
     // Try to parse as hex; on failure fall through and treat as decimal string.
     let decimal_string: String;
-    let (negative, digits): (bool, &str) = if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-        // Parse the hex digits as u64 then convert to signed decimal.
-        if let Ok(v) = u64::from_str_radix(hex, 16) {
-            let signed = v as i64;
-            if negative_in || signed < 0 {
-                decimal_string = format!("{}", signed.unsigned_abs());
-                (true, &decimal_string)
+    let (negative, digits): (bool, &str) =
+        if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+            // Parse the hex digits as u64 then convert to signed decimal.
+            if let Ok(v) = u64::from_str_radix(hex, 16) {
+                #[allow(clippy::cast_possible_wrap)]
+                let signed = v as i64;
+                if negative_in || signed < 0 {
+                    decimal_string = format!("{}", signed.unsigned_abs());
+                    (true, &decimal_string)
+                } else {
+                    decimal_string = format!("{signed}");
+                    (false, &decimal_string)
+                }
             } else {
-                decimal_string = format!("{signed}");
-                (false, &decimal_string)
+                // Fallback: keep the hex string as-is (should not happen with valid schemas).
+                decimal_string = s.to_string();
+                (negative_in, &decimal_string)
             }
         } else {
-            // Fallback: keep the hex string as-is (should not happen with valid schemas).
             decimal_string = s.to_string();
             (negative_in, &decimal_string)
-        }
-    } else {
-        decimal_string = s.to_string();
-        (negative_in, &decimal_string)
-    };
+        };
     #[allow(clippy::manual_is_multiple_of)]
     let underscored: String = {
         let chars: Vec<char> = digits.chars().collect();
