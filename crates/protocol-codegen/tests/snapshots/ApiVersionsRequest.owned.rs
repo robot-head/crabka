@@ -2,11 +2,23 @@
 
 use bytes::{Buf, BufMut};
 
+use crate::primitives::fixed::{get_bool, get_f64, get_i16, get_i32, get_i64, get_i8, put_bool, put_f64, put_i16, put_i32, put_i64, put_i8};
 use crate::primitives::string_bytes::{
-    compact_string_len, get_compact_string_owned, put_compact_string,
+    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned,
+    get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len,
+    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string,
+    string_len,
 };
-use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::tagged_fields::{encode_to_bytes, read_tagged_fields, tagged_fields_len, WriteTaggedFields};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
+
+pub const API_KEY: i16 = 18;
+pub const MIN_VERSION: i16 = 0;
+pub const MAX_VERSION: i16 = 4;
+pub const FLEXIBLE_MIN: i16 = 3;
+
+#[inline]
+fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ApiVersionsRequest {
@@ -15,32 +27,30 @@ pub struct ApiVersionsRequest {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 
-pub const API_KEY: i16 = 18;
-pub const MIN_VERSION: i16 = 0;
-pub const MAX_VERSION: i16 = 4;
-pub const FLEXIBLE_MIN: i16 = 3;
-
-fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
-
 impl Encode for ApiVersionsRequest {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
         }
-        if version >= 3 {
-            put_compact_string(buf, &self.client_software_name);
-            put_compact_string(buf, &self.client_software_version);
-            WriteTaggedFields::new().write(buf, &self.unknown_tagged_fields);
+        let _flex = is_flexible(version);
+        if version >= 3 { if _flex { put_compact_string(buf, &self.client_software_name) } else { put_string(buf, &self.client_software_name) }; }
+        if version >= 3 { if _flex { put_compact_string(buf, &self.client_software_version) } else { put_string(buf, &self.client_software_version) }; }
+        if _flex {
+            let mut tagged = WriteTaggedFields::new();
+            tagged.write(buf, &self.unknown_tagged_fields);
         }
         Ok(())
     }
-
     fn encoded_len(&self, version: i16) -> usize {
-        if !is_flexible(version) { return 0; }
-        let known: &[(u32, usize)] = &[];
-        compact_string_len(&self.client_software_name)
-            + compact_string_len(&self.client_software_version)
-            + tagged_fields_len(known, &self.unknown_tagged_fields)
+        let _flex = is_flexible(version);
+        let mut _n: usize = 0;
+        if version >= 3 { _n += if _flex { compact_string_len(&self.client_software_name) } else { string_len(&self.client_software_name) }; }
+        if version >= 3 { _n += if _flex { compact_string_len(&self.client_software_version) } else { string_len(&self.client_software_version) }; }
+        if _flex {
+            let mut _known_pairs: Vec<(u32, usize)> = Vec::new();
+            _n += tagged_fields_len(&_known_pairs, &self.unknown_tagged_fields);
+        }
+        _n
     }
 }
 
@@ -49,16 +59,23 @@ impl<'de> Decode<'de> for ApiVersionsRequest {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
         }
-        if !is_flexible(version) {
-            return Ok(Self::default());
+        let _flex = is_flexible(version);
+        let mut out = Self::default();
+        if version >= 3 { out.client_software_name = if _flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? }; }
+        if version >= 3 { out.client_software_version = if _flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? }; }
+        if _flex {
+            // Pre-declare typed slots for known tagged fields.
+            out.unknown_tagged_fields = read_tagged_fields(buf, |tag, payload| {
+                match tag {
+                    _ => Ok(false),
+                }
+            })?;
         }
-        let client_software_name = get_compact_string_owned(buf)?;
-        let client_software_version = get_compact_string_owned(buf)?;
-        let unknown = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
-        Ok(Self {
-            client_software_name,
-            client_software_version,
-            unknown_tagged_fields: unknown,
-        })
+        Ok(out)
     }
+}
+
+#[inline]
+fn is_default<T: Default + PartialEq>(v: &T) -> bool {
+    v == &T::default()
 }
