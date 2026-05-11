@@ -34,6 +34,7 @@ pub mod codegen_helpers;
 mod error;
 pub mod owned;
 pub mod primitives;
+pub mod records;
 pub mod tagged_fields;
 
 pub use codec::{Decode, DecodeBorrow, Encode};
