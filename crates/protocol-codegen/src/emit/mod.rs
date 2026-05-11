@@ -2,6 +2,7 @@ pub mod api_key_enum;
 pub mod borrowed;
 pub mod common;
 pub mod default_json;
+pub mod differential_table;
 pub mod mod_rs;
 pub mod owned;
 pub mod wrappers;
