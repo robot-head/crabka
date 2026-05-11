@@ -58,10 +58,9 @@ impl<'a> Default for RecordBatch<'a> {
     /// Intended for use in generated `Default` impls and round-trip tests; not
     /// suitable for constructing a real Kafka record batch.
     fn default() -> Self {
-        // Safety: RecordBatchHeader is repr(C) and composed entirely of integer
-        // (zerocopy) fields; zeroing all bytes is a valid bit pattern.
-        let header: &'a RecordBatchHeader =
-            Box::leak(Box::new(unsafe { std::mem::zeroed::<RecordBatchHeader>() }));
+        use zerocopy::FromZeros as _;
+        // RecordBatchHeader derives zerocopy::FromZeros (via FromBytes), so zeroing is safe.
+        let header: &'a RecordBatchHeader = Box::leak(Box::new(RecordBatchHeader::new_zeroed()));
         Self {
             header,
             body: RecordBody::Owned(bytes::Bytes::new()),
