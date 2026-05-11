@@ -5,12 +5,20 @@
 //! Both tests are gated `#[ignore = "requires Docker"]` so `cargo test`
 //! doesn't pull Docker by default. Run with `--ignored`.
 //!
-//! Networking: we use ad-hoc `docker run --rm --network host` per command
-//! rather than a long-lived testcontainers Kafka. With host networking
-//! the container shares the host's network namespace, so `127.0.0.1:9092`
-//! inside the container points at our broker. This avoids the testcontainers
-//! per-test bridge network problem where the host's Docker bridge gateway
-//! IP isn't reachable.
+//! Networking: the Rust broker listens on `0.0.0.0:9092` of the host. The
+//! Kafka CLI containers use Docker's default bridge network plus
+//! `--add-host=host.docker.internal:host-gateway`, which on both Docker
+//! Desktop and Linux Docker 20.10+ maps `host.docker.internal` to the
+//! bridge gateway IP that the host's `0.0.0.0:9092` is bound on. The
+//! broker's advertised listener is `host.docker.internal:9092` so the
+//! `AdminClient`'s *second* connect (post-Metadata) targets a hostname the
+//! container can resolve.
+//!
+//! We deliberately do NOT use `--network host`: on hosted GitHub Actions
+//! ubuntu-24.04 runners, that mode silently fails to share the host's
+//! loopback (the container can `nc -zv 127.0.0.1 9092` but a Java NIO
+//! `SocketChannel.connect()` to the same address times out), and we have
+//! no good way to debug that from a Rust integration test.
 
 #![cfg(not(target_os = "windows"))]
 
@@ -21,19 +29,18 @@ use crabka_broker::{Broker, BrokerConfig};
 use crabka_log::LogConfig;
 
 const HOST_PORT: u16 = 9092;
-const BOOTSTRAP: &str = "127.0.0.1:9092";
-/// Bind the broker on all interfaces. With Docker `--network host` on Linux
-/// CI runners, the cp-kafka container's Java AdminClient was unable to TCP
-/// connect to a strictly-127.0.0.1-bound broker even though `nc -zv 127.0.0.1
-/// 9092` from inside the same container succeeded — strongly suggesting the
-/// Java NIO socket is routing through a non-loopback path under
-/// `--network host` on this runner. Bind 0.0.0.0 so any client-side route works.
+/// Address the Kafka CLI containers use for bootstrap AND that the broker
+/// advertises in `Metadata`. Resolved via `--add-host=host.docker.internal:
+/// host-gateway` in [`docker_run_kafka_tool`].
+const BOOTSTRAP: &str = "host.docker.internal:9092";
+/// Bind to all interfaces so the Docker bridge can reach us via the host
+/// gateway IP.
 const LISTEN: &str = "0.0.0.0:9092";
 const KAFKA_IMAGE: &str = "confluentinc/cp-kafka:6.1.1";
 
-/// Spawn the broker, listening on `127.0.0.1:HOST_PORT`. With
-/// `docker run --network host`, the container reaches us via the host's
-/// loopback, so the advertised listener can simply be `BOOTSTRAP`.
+/// Spawn the broker, listening on `LISTEN`. The advertised listener is
+/// `host.docker.internal:9092`; inside the cp-kafka containers we add a
+/// hosts entry pointing that name at the bridge gateway.
 async fn start_host_broker() -> (crabka_broker::BrokerHandle, tempfile::TempDir) {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
@@ -52,23 +59,23 @@ async fn start_host_broker() -> (crabka_broker::BrokerHandle, tempfile::TempDir)
         log_config: LogConfig::default(),
     };
     let handle = Broker::start(config).await.expect("start broker");
-    eprintln!("CRABKA[test] broker started listen={BOOTSTRAP}");
-    tracing::info!(listen = %BOOTSTRAP, "broker started for jvm acceptance");
+    eprintln!("CRABKA[test] broker started listen={LISTEN} advertised={BOOTSTRAP}");
+    tracing::info!(listen = %LISTEN, advertised = %BOOTSTRAP, "broker started for jvm acceptance");
     (handle, dir)
 }
 
-/// Verify TCP connectivity from inside a `--network host` container.
+/// Verify TCP connectivity from inside a bridge-network container with
+/// `--add-host=host.docker.internal:host-gateway`.
 fn nc_check_connectivity() {
     let out = Command::new("docker")
         .args([
             "run",
             "--rm",
-            "--network",
-            "host",
+            "--add-host=host.docker.internal:host-gateway",
             "alpine",
             "sh",
             "-c",
-            "apk add --no-cache netcat-openbsd >/dev/null 2>&1 && nc -zv 127.0.0.1 9092",
+            "apk add --no-cache netcat-openbsd >/dev/null 2>&1 && nc -zv host.docker.internal 9092",
         ])
         .output()
         .expect("spawn nc check");
@@ -80,15 +87,13 @@ fn nc_check_connectivity() {
     );
 }
 
-/// Run `docker run --rm --network host <image> <args...>`, asserting success.
+/// Run `docker run --rm --add-host=host.docker.internal:host-gateway
+/// <image> <args...>`, asserting success.
 fn docker_run_kafka_tool(args: &[&str]) -> std::process::Output {
     let out = Command::new("docker")
         .arg("run")
         .arg("--rm")
-        .arg("--network")
-        .arg("host")
-        .arg("-e")
-        .arg("KAFKA_TOOLS_LOG4J_LOGLEVEL=DEBUG")
+        .arg("--add-host=host.docker.internal:host-gateway")
         .arg(KAFKA_IMAGE)
         .args(args)
         .stderr(Stdio::piped())
@@ -96,15 +101,9 @@ fn docker_run_kafka_tool(args: &[&str]) -> std::process::Output {
         .output()
         .expect("spawn docker run");
     eprintln!(
-        "CRABKA[test] docker_run {args:?} status={} stderr_len={} stderr_tail={}",
+        "CRABKA[test] docker_run {args:?} status={} stderr_len={}",
         out.status,
         out.stderr.len(),
-        // print the tail (last 4KB) of stderr so we see Java's debug logs even on success
-        String::from_utf8_lossy(if out.stderr.len() > 4096 {
-            &out.stderr[out.stderr.len() - 4096..]
-        } else {
-            &out.stderr[..]
-        }),
     );
     assert!(
         out.status.success(),
@@ -115,7 +114,14 @@ fn docker_run_kafka_tool(args: &[&str]) -> std::process::Output {
     out
 }
 
-#[tokio::test]
+// `flavor = "multi_thread"` is essential here. The test bodies make
+// synchronous blocking `Command::output()` calls for each `docker run`.
+// On a single-threaded runtime those calls block the only worker — which
+// is also driving the broker's accept loop. Incoming TCP connections then
+// complete the kernel-level handshake but the broker never reads them,
+// and the Java AdminClient times out. A multi-thread runtime puts the
+// broker on a separate worker so the test's blocking calls don't starve it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker"]
 async fn console_producer_round_trip() {
     const TOPIC: &str = "crabka-broker-itest";
@@ -144,8 +150,7 @@ async fn console_producer_round_trip() {
             "run",
             "--rm",
             "-i",
-            "--network",
-            "host",
+            "--add-host=host.docker.internal:host-gateway",
             KAFKA_IMAGE,
             "kafka-console-producer",
             "--bootstrap-server",
@@ -195,7 +200,14 @@ async fn console_producer_round_trip() {
     broker.shutdown().await;
 }
 
-#[tokio::test]
+// `flavor = "multi_thread"` is essential here. The test bodies make
+// synchronous blocking `Command::output()` calls for each `docker run`.
+// On a single-threaded runtime those calls block the only worker — which
+// is also driving the broker's accept loop. Incoming TCP connections then
+// complete the kernel-level handshake but the broker never reads them,
+// and the Java AdminClient times out. A multi-thread runtime puts the
+// broker on a separate worker so the test's blocking calls don't starve it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker"]
 async fn kafka_topics_describe_smokes_metadata() {
     let (broker, _dir) = start_host_broker().await;
