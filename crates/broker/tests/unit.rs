@@ -443,3 +443,154 @@ async fn join_group_single_member_completes_after_deadline() {
     assert!(!r2.members.is_empty(), "leader sees member list");
     p.broker.shutdown().await;
 }
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn full_group_flow_join_sync_heartbeat_commit_fetch_leave() {
+    use crabka_protocol::owned::heartbeat_request::HeartbeatRequest;
+    use crabka_protocol::owned::join_group_request::{JoinGroupRequest, JoinGroupRequestProtocol};
+    use crabka_protocol::owned::leave_group_request::LeaveGroupRequest;
+    use crabka_protocol::owned::offset_commit_request::{
+        OffsetCommitRequest, OffsetCommitRequestPartition, OffsetCommitRequestTopic,
+    };
+    use crabka_protocol::owned::offset_fetch_request::{
+        OffsetFetchRequest, OffsetFetchRequestTopic,
+    };
+    use crabka_protocol::owned::sync_group_request::{
+        SyncGroupRequest, SyncGroupRequestAssignment,
+    };
+
+    let p = support::start().await;
+
+    // Step 1: empty member_id → broker returns one.
+    let r1 = p
+        .client
+        .send(JoinGroupRequest {
+            group_id: "g".into(),
+            protocol_type: "consumer".into(),
+            member_id: String::new(),
+            session_timeout_ms: 30_000,
+            rebalance_timeout_ms: 1_500,
+            protocols: vec![JoinGroupRequestProtocol {
+                name: "range".into(),
+                metadata: bytes::Bytes::new(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(r1.error_code, 79);
+    let mid = r1.member_id.clone();
+    assert!(!mid.is_empty());
+
+    // Step 2: re-join with assigned member_id → wait for rebalance, become leader.
+    let r2 = p
+        .client
+        .send(JoinGroupRequest {
+            group_id: "g".into(),
+            protocol_type: "consumer".into(),
+            member_id: mid.clone(),
+            session_timeout_ms: 30_000,
+            rebalance_timeout_ms: 1_500,
+            protocols: vec![JoinGroupRequestProtocol {
+                name: "range".into(),
+                metadata: bytes::Bytes::new(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(r2.error_code, 0);
+    assert_eq!(r2.leader, mid);
+    let generation = r2.generation_id;
+
+    // Step 3: leader SyncGroup with a single-member assignment.
+    let r3 = p
+        .client
+        .send(SyncGroupRequest {
+            group_id: "g".into(),
+            generation_id: generation,
+            member_id: mid.clone(),
+            protocol_type: Some("consumer".into()),
+            protocol_name: Some("range".into()),
+            assignments: vec![SyncGroupRequestAssignment {
+                member_id: mid.clone(),
+                assignment: bytes::Bytes::from_static(b"asgn"),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(r3.error_code, 0);
+    assert_eq!(r3.assignment.as_ref(), b"asgn");
+
+    // Step 4: Heartbeat → 0.
+    let r4 = p
+        .client
+        .send(HeartbeatRequest {
+            group_id: "g".into(),
+            generation_id: generation,
+            member_id: mid.clone(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(r4.error_code, 0);
+
+    // Step 5: OffsetCommit → 0.
+    let r5 = p
+        .client
+        .send(OffsetCommitRequest {
+            group_id: "g".into(),
+            generation_id_or_member_epoch: generation,
+            member_id: mid.clone(),
+            topics: vec![OffsetCommitRequestTopic {
+                name: "t".into(),
+                partitions: vec![OffsetCommitRequestPartition {
+                    partition_index: 0,
+                    committed_offset: 42,
+                    committed_leader_epoch: 0,
+                    committed_metadata: Some(String::new()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(r5.topics[0].partitions[0].error_code, 0);
+
+    // Step 6: OffsetFetch → returns 42.
+    let r6 = p
+        .client
+        .send(OffsetFetchRequest {
+            group_id: "g".into(),
+            topics: Some(vec![OffsetFetchRequestTopic {
+                name: "t".into(),
+                partition_indexes: vec![0],
+                ..Default::default()
+            }]),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(r6.topics[0].partitions[0].committed_offset, 42);
+
+    // Step 7: LeaveGroup.
+    let r7 = p
+        .client
+        .send(LeaveGroupRequest {
+            group_id: "g".into(),
+            member_id: mid.clone(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(r7.error_code, 0);
+
+    p.broker.shutdown().await;
+}

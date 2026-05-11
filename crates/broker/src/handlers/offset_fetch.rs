@@ -43,24 +43,26 @@ pub(crate) fn handle(
                 let partitions = t
                     .partition_indexes
                     .iter()
-                    .map(|&pid| match g.committed_offsets.get(&(t.name.clone(), pid)) {
-                        Some(entry) => OffsetFetchResponsePartition {
-                            partition_index: pid,
-                            committed_offset: entry.offset,
-                            committed_leader_epoch: entry.leader_epoch,
-                            metadata: Some(entry.metadata.clone()),
-                            error_code: codes::NONE,
-                            ..Default::default()
+                    .map(
+                        |&pid| match g.committed_offsets.get(&(t.name.clone(), pid)) {
+                            Some(entry) => OffsetFetchResponsePartition {
+                                partition_index: pid,
+                                committed_offset: entry.offset,
+                                committed_leader_epoch: entry.leader_epoch,
+                                metadata: Some(entry.metadata.clone()),
+                                error_code: codes::NONE,
+                                ..Default::default()
+                            },
+                            None => OffsetFetchResponsePartition {
+                                partition_index: pid,
+                                committed_offset: -1,
+                                committed_leader_epoch: -1,
+                                metadata: None,
+                                error_code: codes::NONE,
+                                ..Default::default()
+                            },
                         },
-                        None => OffsetFetchResponsePartition {
-                            partition_index: pid,
-                            committed_offset: -1,
-                            committed_leader_epoch: -1,
-                            metadata: None,
-                            error_code: codes::NONE,
-                            ..Default::default()
-                        },
-                    })
+                    )
                     .collect();
                 OffsetFetchResponseTopic {
                     name: t.name.clone(),
