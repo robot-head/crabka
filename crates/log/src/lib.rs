@@ -7,6 +7,7 @@
 
 mod config;
 mod error;
+mod name;
 
 pub use config::LogConfig;
 pub use error::LogError;
