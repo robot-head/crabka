@@ -44,10 +44,7 @@ fn record_batch_with_values(values: &[&str]) -> RecordBatch {
 
 /// Resolve the topic UUID via Metadata. Produce / Fetch at v ≥ 13 carry
 /// only `topic_id` on the wire.
-async fn topic_id_for(
-    client: &Client,
-    name: &str,
-) -> crabka_protocol::primitives::uuid::Uuid {
+async fn topic_id_for(client: &Client, name: &str) -> crabka_protocol::primitives::uuid::Uuid {
     let resp = client
         .send(MetadataRequest {
             topics: Some(vec![MetadataRequestTopic {
@@ -183,7 +180,11 @@ async fn offsets_survive_broker_restart() {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         let mut seen = 0;
         while std::time::Instant::now() < deadline && seen < 3 {
-            seen += consumer.poll(Duration::from_millis(500)).await.unwrap().len();
+            seen += consumer
+                .poll(Duration::from_millis(500))
+                .await
+                .unwrap()
+                .len();
         }
         assert_eq!(seen, 3);
         consumer.commit_sync().await.unwrap();
