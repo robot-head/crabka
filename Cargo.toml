@@ -37,3 +37,9 @@ lz4_flex = { version = "0.13", default-features = false, features = ["frame"] }
 zstd = "0.13"
 zerocopy = { version = "0.8", features = ["derive"] }
 crc32c = "0.6"
+tokio = { version = "1", default-features = false }
+tokio-util = { version = "0.7", default-features = false }
+dashmap = "6"
+tracing = "0.1"
+testcontainers = "0.20"
+testcontainers-modules = { version = "0.10", features = ["kafka"] }
