@@ -70,10 +70,10 @@ pub(crate) fn handle(
 }
 
 fn parse_host_port(addr: &str) -> (String, u16) {
-    if let Some((h, p)) = addr.rsplit_once(':') {
-        if let Ok(port) = p.parse::<u16>() {
-            return (h.to_string(), port);
-        }
+    if let Some((h, p)) = addr.rsplit_once(':')
+        && let Ok(port) = p.parse::<u16>()
+    {
+        return (h.to_string(), port);
     }
     tracing::warn!(
         addr,

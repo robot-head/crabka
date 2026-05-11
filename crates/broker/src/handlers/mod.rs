@@ -49,6 +49,7 @@ pub(crate) mod delete_topics;
 pub(crate) mod describe_configs;
 pub(crate) mod fetch;
 pub(crate) mod find_coordinator;
+pub(crate) mod join_group;
 pub(crate) mod list_offsets;
 pub(crate) mod metadata;
 pub(crate) mod produce;
@@ -63,6 +64,7 @@ pub(crate) fn build_table() -> HandlerTable {
     t.register(2, list_offsets::handle);
     t.register(3, metadata::handle);
     t.register(10, find_coordinator::handle);
+    t.register(11, join_group::handle);
     t.register(18, api_versions::handle);
     t.register(19, create_topics::handle);
     t.register(20, delete_topics::handle);

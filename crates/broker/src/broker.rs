@@ -117,10 +117,10 @@ impl Broker {
         //    return a useful host:port instead of `:0`.
         let listener = TcpListener::bind(config.listen_addr).await?;
         let listen_addr = listener.local_addr()?;
-        if config.advertised_listener.ends_with(":0") {
-            if let Some((host, _)) = config.advertised_listener.rsplit_once(':') {
-                config.advertised_listener = format!("{host}:{}", listen_addr.port());
-            }
+        if config.advertised_listener.ends_with(":0")
+            && let Some((host, _)) = config.advertised_listener.rsplit_once(':')
+        {
+            config.advertised_listener = format!("{host}:{}", listen_addr.port());
         }
         let broker = Arc::new(Self {
             config,

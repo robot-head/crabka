@@ -382,7 +382,7 @@ async fn join_group_with_empty_member_returns_member_id_required() {
     let req = JoinGroupRequest {
         group_id: "g".into(),
         protocol_type: "consumer".into(),
-        member_id: "".into(),
+        member_id: String::new(),
         session_timeout_ms: 30_000,
         rebalance_timeout_ms: 2_000,
         protocols: vec![JoinGroupRequestProtocol {
@@ -410,7 +410,7 @@ async fn join_group_single_member_completes_after_deadline() {
         .send(JoinGroupRequest {
             group_id: "g".into(),
             protocol_type: "consumer".into(),
-            member_id: "".into(),
+            member_id: String::new(),
             session_timeout_ms: 30_000,
             rebalance_timeout_ms: 1_500,
             protocols: vec![JoinGroupRequestProtocol {
