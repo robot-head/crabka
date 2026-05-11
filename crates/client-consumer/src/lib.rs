@@ -5,6 +5,7 @@
 
 #![doc(html_root_url = "https://docs.rs/crabka-client-consumer/0.0.0")]
 
+mod assignor;
 mod error;
 
 pub use error::ConsumerError;
