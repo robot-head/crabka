@@ -7,6 +7,7 @@
 
 mod assignor;
 mod builder;
+mod commit;
 mod consumer;
 mod error;
 mod heartbeat;

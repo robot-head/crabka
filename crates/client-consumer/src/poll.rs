@@ -17,10 +17,7 @@ impl Consumer {
     /// or an empty vec on timeout. If the heartbeat task signalled a
     /// rebalance, this returns `Err(CommitInvalid)`; the caller should drop
     /// any in-flight commits and rebuild the consumer.
-    pub async fn poll(
-        &mut self,
-        timeout: Duration,
-    ) -> Result<Vec<ConsumerRecord>, ConsumerError> {
+    pub async fn poll(&mut self, timeout: Duration) -> Result<Vec<ConsumerRecord>, ConsumerError> {
         // 1. Drain any rebalance notices first.
         {
             let mut rebalance_rx = self.rebalance_rx.lock().await;
@@ -101,10 +98,7 @@ impl Consumer {
                         key: r.key.clone(),
                         value: r.value.clone(),
                     });
-                    offsets.insert(
-                        (topic.topic.clone(), part.partition_index),
-                        offset + 1,
-                    );
+                    offsets.insert((topic.topic.clone(), part.partition_index), offset + 1);
                 }
             }
         }

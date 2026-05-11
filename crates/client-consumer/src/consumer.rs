@@ -18,8 +18,8 @@ use crate::heartbeat::RebalanceNotice;
 
 /// Subscribe-style consumer handle. Construct via [`crate::ConsumerBuilder`].
 #[allow(dead_code)] // `session_timeout` / `heartbeat_interval` are kept for
-                    // future re-join / re-handshake support (slice 5 MVP
-                    // only spawns one heartbeat task at build time).
+// future re-join / re-handshake support (slice 5 MVP
+// only spawns one heartbeat task at build time).
 pub struct Consumer {
     pub(crate) client: Client,
     pub(crate) group_id: String,

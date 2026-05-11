@@ -428,11 +428,7 @@ mod tests {
 
     #[test]
     fn assignment_round_trip() {
-        let s = encode_assignment(&[
-            ("t".into(), 0),
-            ("t".into(), 1),
-            ("u".into(), 0),
-        ]);
+        let s = encode_assignment(&[("t".into(), 0), ("t".into(), 1), ("u".into(), 0)]);
         let decoded = decode_assignment(&s);
         assert!(decoded.contains(&("t".into(), 0)));
         assert!(decoded.contains(&("t".into(), 1)));
