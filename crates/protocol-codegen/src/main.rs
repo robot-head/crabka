@@ -57,6 +57,8 @@ const CURATED: &[&str] = &[
     "ApiVersionsResponse",
     "MetadataRequest",
     "MetadataResponse",
+    "ProduceRequest",
+    "ProduceResponse",
 ];
 
 fn run(schemas: &std::path::Path, out: &std::path::Path) -> Result<usize, RunError> {

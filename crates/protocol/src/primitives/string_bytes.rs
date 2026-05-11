@@ -151,6 +151,15 @@ pub fn get_nullable_bytes_owned<B: Buf>(buf: &mut B) -> Result<Option<Bytes>, Pr
     Ok(Some(Bytes::from(v)))
 }
 
+#[must_use]
+pub fn bytes_len(b: &[u8]) -> usize {
+    4 + b.len()
+}
+#[must_use]
+pub fn nullable_bytes_len(b: Option<&[u8]>) -> usize {
+    4 + b.map_or(0, <[u8]>::len)
+}
+
 pub fn put_compact_bytes<B: BufMut>(buf: &mut B, b: &[u8]) {
     let len = u32::try_from(b.len() + 1).expect("bytes length too large");
     put_uvarint(buf, len);
@@ -161,6 +170,18 @@ pub fn put_compact_nullable_bytes<B: BufMut>(buf: &mut B, b: Option<&[u8]>) {
     match b {
         None => put_uvarint(buf, 0),
         Some(b) => put_compact_bytes(buf, b),
+    }
+}
+
+#[must_use]
+pub fn compact_bytes_len(b: &[u8]) -> usize {
+    uvarint_len(u32::try_from(b.len() + 1).unwrap()) + b.len()
+}
+#[must_use]
+pub fn compact_nullable_bytes_len(b: Option<&[u8]>) -> usize {
+    match b {
+        None => uvarint_len(0),
+        Some(b) => compact_bytes_len(b),
     }
 }
 

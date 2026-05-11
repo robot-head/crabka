@@ -117,6 +117,28 @@ fn uses_string(types: &[String]) -> bool {
     types.iter().any(|t| t == "string")
 }
 
+fn uses_bytes(types: &[String]) -> bool {
+    types
+        .iter()
+        .any(|t| matches!(t.as_str(), "bytes" | "records"))
+}
+
+fn uses_nullable_bytes_recursive(fields: &[FieldSpec]) -> bool {
+    fields.iter().any(|f| {
+        let base = base_type(&f.field_type);
+        let here = matches!(base, "bytes" | "records") && f.nullable_versions.is_some();
+        here || uses_nullable_bytes_recursive(&f.fields)
+    })
+}
+
+fn uses_non_nullable_bytes_recursive(fields: &[FieldSpec]) -> bool {
+    fields.iter().any(|f| {
+        let base = base_type(&f.field_type);
+        let here = matches!(base, "bytes" | "records") && f.nullable_versions.is_none();
+        here || uses_non_nullable_bytes_recursive(&f.fields)
+    })
+}
+
 /// Returns true if any field (recursively) has a string type that is also nullable.
 fn uses_nullable_string_recursive(fields: &[FieldSpec]) -> bool {
     fields.iter().any(|f| {
@@ -134,12 +156,16 @@ fn has_any_tagged_in_spec(spec: &MessageSpec) -> bool {
     has_tagged_fields_recursive(&spec.fields)
 }
 
+#[allow(clippy::too_many_lines)]
 fn emit_imports(out: &mut String, spec: &MessageSpec) {
     let types = used_field_types_recursive(&spec.fields);
     let tagged = has_any_tagged_in_spec(spec);
     let flex = has_any_flex(spec);
     let use_string = uses_string(&types);
+    let use_bytes = uses_bytes(&types);
     let use_nullable_string = uses_nullable_string_recursive(&spec.fields);
+    let use_nullable_bytes = uses_nullable_bytes_recursive(&spec.fields);
+    let use_non_nullable_bytes = uses_non_nullable_bytes_recursive(&spec.fields);
 
     writeln!(out, "\nuse bytes::{{Buf, BufMut}};").unwrap();
 
@@ -211,6 +237,37 @@ fn emit_imports(out: &mut String, spec: &MessageSpec) {
             )
             .unwrap();
         }
+    }
+
+    if use_bytes {
+        let mut items: Vec<&str> = Vec::new();
+        if use_non_nullable_bytes {
+            items.extend([
+                "bytes_len",
+                "compact_bytes_len",
+                "get_bytes_owned",
+                "get_compact_bytes_owned",
+                "put_bytes",
+                "put_compact_bytes",
+            ]);
+        }
+        if use_nullable_bytes {
+            items.extend([
+                "compact_nullable_bytes_len",
+                "get_compact_nullable_bytes_owned",
+                "get_nullable_bytes_owned",
+                "nullable_bytes_len",
+                "put_compact_nullable_bytes",
+                "put_nullable_bytes",
+            ]);
+        }
+        items.sort_unstable();
+        writeln!(
+            out,
+            "use crate::primitives::string_bytes::{{{}}};",
+            items.join(", ")
+        )
+        .unwrap();
     }
 
     // Tagged-fields support: encode_to_bytes only when there are known tagged fields to encode.
@@ -1092,6 +1149,12 @@ fn encode_call(
         ("string", true) => format!(
             "if flex {{ put_compact_nullable_string(buf, {expr}.as_deref()) }} else {{ put_nullable_string(buf, {expr}.as_deref()) }}"
         ),
+        ("bytes" | "records", false) => format!(
+            "if flex {{ put_compact_bytes(buf, &{expr}) }} else {{ put_bytes(buf, &{expr}) }}"
+        ),
+        ("bytes" | "records", true) => format!(
+            "if flex {{ put_compact_nullable_bytes(buf, {expr}.as_deref()) }} else {{ put_nullable_bytes(buf, {expr}.as_deref()) }}"
+        ),
         (t, _) => format!("compile_error!(\"unhandled type in encode_call: {t}\")"),
     }
 }
@@ -1161,6 +1224,12 @@ fn encoded_len_expr(
         ("string", true) => format!(
             "if flex {{ compact_nullable_string_len({expr}.as_deref()) }} else {{ nullable_string_len({expr}.as_deref()) }}"
         ),
+        ("bytes" | "records", false) => {
+            format!("if flex {{ compact_bytes_len(&{expr}) }} else {{ bytes_len(&{expr}) }}")
+        }
+        ("bytes" | "records", true) => format!(
+            "if flex {{ compact_nullable_bytes_len({expr}.as_deref()) }} else {{ nullable_bytes_len({expr}.as_deref()) }}"
+        ),
         (t, _) => format!("compile_error!(\"unhandled type in encoded_len_expr: {t}\")"),
     }
 }
@@ -1217,6 +1286,8 @@ fn decode_call(schema_type: &str, nullable: bool, res_map: &HashMap<String, Reso
         ("uuid",   _)     => "crate::primitives::uuid::get_uuid(buf)?".into(),
         ("string", false) => "if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? }".into(),
         ("string", true)  => "if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? }".into(),
+        ("bytes" | "records", false) => "if flex { get_compact_bytes_owned(buf)? } else { get_bytes_owned(buf)? }".into(),
+        ("bytes" | "records", true)  => "if flex { get_compact_nullable_bytes_owned(buf)? } else { get_nullable_bytes_owned(buf)? }".into(),
         (t, _) => format!("compile_error!(\"unhandled type in decode_call: {t}\")"),
     }
 }
