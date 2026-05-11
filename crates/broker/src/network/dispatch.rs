@@ -178,6 +178,7 @@ fn handler_body_flexible(api_key: i16, version: i16) -> bool {
         10 => version >= owned::find_coordinator_request::FLEXIBLE_MIN,
         11 => version >= owned::join_group_request::FLEXIBLE_MIN,
         12 => version >= owned::heartbeat_request::FLEXIBLE_MIN,
+        13 => version >= owned::leave_group_request::FLEXIBLE_MIN,
         14 => version >= owned::sync_group_request::FLEXIBLE_MIN,
         18 => version >= owned::api_versions_request::FLEXIBLE_MIN,
         19 => version >= owned::create_topics_request::FLEXIBLE_MIN,
