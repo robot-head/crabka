@@ -7,6 +7,8 @@ const CURATED: &[&str] = &[
     "ApiVersionsResponse",
     "MetadataRequest",
     "MetadataResponse",
+    "ProduceRequest",
+    "ProduceResponse",
 ];
 
 fn schemas_dir() -> PathBuf {

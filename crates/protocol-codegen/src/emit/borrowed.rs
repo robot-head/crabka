@@ -188,6 +188,14 @@ fn uses_nullable_bytes_recursive(fields: &[FieldSpec]) -> bool {
     })
 }
 
+fn uses_non_nullable_bytes_recursive(fields: &[FieldSpec]) -> bool {
+    fields.iter().any(|f| {
+        let base = base_type(&f.field_type);
+        let here = matches!(base, "bytes" | "records") && f.nullable_versions.is_none();
+        here || uses_non_nullable_bytes_recursive(&f.fields)
+    })
+}
+
 /// Returns the Rust type path for a struct-typed field in borrowed flavor.
 /// Includes `<'a>` only when the nested struct actually has borrowed fields.
 /// `type_map::borrowed_type` will use the path verbatim (no automatic `<'a>` addition).
@@ -250,6 +258,7 @@ fn emit_imports(out: &mut String, spec: &MessageSpec) {
     let use_bytes = uses_bytes(&types);
     let use_nullable_string = uses_nullable_string_recursive(&spec.fields);
     let use_nullable_bytes = uses_nullable_bytes_recursive(&spec.fields);
+    let use_non_nullable_bytes = uses_non_nullable_bytes_recursive(&spec.fields);
 
     // `Bytes` is needed for to_owned() on bytes/records fields
     if use_bytes {
@@ -332,26 +341,28 @@ use crate::primitives::string_bytes_borrowed::{{
     }
 
     if use_bytes {
-        if use_nullable_bytes {
-            writeln!(
-                out,
-                "use crate::primitives::string_bytes::{{
-    put_bytes, put_compact_bytes, put_compact_nullable_bytes, put_nullable_bytes,
-}};
-use crate::primitives::string_bytes_borrowed::{{
-    get_bytes_borrowed, get_compact_bytes_borrowed,
-    get_compact_nullable_bytes_borrowed, get_nullable_bytes_borrowed,
-}};"
-            )
-            .unwrap();
-        } else {
-            writeln!(
-                out,
-                "use crate::primitives::string_bytes::{{put_bytes, put_compact_bytes}};
-use crate::primitives::string_bytes_borrowed::{{get_bytes_borrowed, get_compact_bytes_borrowed}};"
-            )
-            .unwrap();
+        let mut put_items: Vec<&str> = Vec::new();
+        let mut get_borrowed_items: Vec<&str> = Vec::new();
+        if use_non_nullable_bytes {
+            put_items.extend(["put_bytes", "put_compact_bytes"]);
+            get_borrowed_items.extend(["get_bytes_borrowed", "get_compact_bytes_borrowed"]);
         }
+        if use_nullable_bytes {
+            put_items.extend(["put_compact_nullable_bytes", "put_nullable_bytes"]);
+            get_borrowed_items.extend([
+                "get_compact_nullable_bytes_borrowed",
+                "get_nullable_bytes_borrowed",
+            ]);
+        }
+        put_items.sort_unstable();
+        get_borrowed_items.sort_unstable();
+        writeln!(
+            out,
+            "use crate::primitives::string_bytes::{{{}}};\nuse crate::primitives::string_bytes_borrowed::{{{}}};",
+            put_items.join(", "),
+            get_borrowed_items.join(", "),
+        )
+        .unwrap();
     }
 
     if flex && tagged {

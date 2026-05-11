@@ -4,3 +4,5 @@ pub mod api_versions_request;
 pub mod api_versions_response;
 pub mod metadata_request;
 pub mod metadata_response;
+pub mod produce_request;
+pub mod produce_response;
