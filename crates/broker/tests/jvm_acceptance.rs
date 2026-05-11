@@ -14,6 +14,7 @@
 
 #![cfg(not(target_os = "windows"))]
 
+use std::io::Write;
 use std::process::{Command, Stdio};
 
 use crabka_broker::{Broker, BrokerConfig};
@@ -134,7 +135,6 @@ async fn console_producer_round_trip() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn producer");
-    use std::io::Write;
     child
         .stdin
         .as_mut()
