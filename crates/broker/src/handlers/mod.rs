@@ -43,9 +43,13 @@ impl HandlerTable {
     }
 }
 
+pub(crate) mod api_versions;
+
 /// Build the dispatch table. Phase E registers concrete handlers; for
 /// now this is an empty table so the dispatch loop can still look up.
 #[must_use]
 pub(crate) fn build_table() -> HandlerTable {
-    HandlerTable::new()
+    let mut t = HandlerTable::new();
+    t.register(18, api_versions::handle);
+    t
 }
