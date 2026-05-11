@@ -3,6 +3,7 @@
 //! See `docs/superpowers/specs/2026-05-11-crabka-records-1c-design.md`.
 //! v0/v1 record batches are deferred to `crabka-log`.
 
+mod crc;
 mod error;
 
 pub use error::RecordsError;
