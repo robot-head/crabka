@@ -247,3 +247,87 @@ async fn kafka_topics_describe_smokes_metadata() {
     broker.shutdown().await;
     let _ = HOST_PORT; // silence dead_code on Windows builds
 }
+
+// Same multi-thread runtime caveat as `console_producer_round_trip`:
+// the test body makes blocking `Command::output()` calls; a
+// single-threaded runtime would starve the broker's accept loop.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Docker"]
+async fn console_consumer_with_group_round_trip() {
+    const TOPIC: &str = "crabka-broker-grp-itest";
+
+    let (broker, _dir) = start_host_broker().await;
+    nc_check_connectivity();
+
+    // 1. Create the topic.
+    docker_run_kafka_tool(&[
+        "kafka-topics",
+        "--create",
+        "--if-not-exists",
+        "--topic",
+        TOPIC,
+        "--partitions",
+        "1",
+        "--replication-factor",
+        "1",
+        "--bootstrap-server",
+        BOOTSTRAP,
+    ]);
+
+    // 2. Produce records via kafka-console-producer over stdin.
+    let mut child = Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "-i",
+            "--add-host=host.docker.internal:host-gateway",
+            KAFKA_IMAGE,
+            "kafka-console-producer",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--topic",
+            TOPIC,
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn producer");
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(b"x\ny\nz\n")
+        .expect("write stdin");
+    drop(child.stdin.take());
+    let producer_out = child.wait_with_output().expect("wait producer");
+    assert!(
+        producer_out.status.success(),
+        "producer failed: {}",
+        String::from_utf8_lossy(&producer_out.stderr)
+    );
+
+    // 3. Consume WITHOUT --partition. The default `console-consumer`
+    //    group will JoinGroup → SyncGroup → Heartbeat → Fetch through
+    //    our coordinator.
+    let consumer_out = docker_run_kafka_tool(&[
+        "kafka-console-consumer",
+        "--bootstrap-server",
+        BOOTSTRAP,
+        "--topic",
+        TOPIC,
+        "--from-beginning",
+        "--group",
+        "crabka-acceptance-group",
+        "--max-messages",
+        "3",
+        "--timeout-ms",
+        "20000",
+    ]);
+    let s = String::from_utf8_lossy(&consumer_out.stdout);
+    for needle in ["x", "y", "z"] {
+        assert!(s.contains(needle), "consumer didn't emit {needle}: {s:?}");
+    }
+
+    broker.shutdown().await;
+}
