@@ -69,6 +69,7 @@ impl<'de> Decode<'de> for HeartbeatResponse {
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
 /// Only includes fields valid for the given version.
 #[must_use]
+#[allow(unused_comparisons)]
 pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     if version >= 1 {

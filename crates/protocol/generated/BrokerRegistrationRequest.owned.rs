@@ -224,11 +224,12 @@ impl<'de> Decode<'de> for Feature {
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
 /// Only includes fields valid for the given version.
 #[must_use]
+#[allow(unused_comparisons)]
 pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert("brokerId".to_string(), ::serde_json::json!(0));
     obj.insert("clusterId".to_string(), ::serde_json::Value::String(String::new()));
-    obj.insert("incarnationId".to_string(), ::serde_json::Value::String("00000000-0000-0000-0000-000000000000".to_string()));
+    obj.insert("incarnationId".to_string(), ::serde_json::Value::String("AAAAAAAAAAAAAAAAAAAAAA".to_string()));
     obj.insert("listeners".to_string(), ::serde_json::Value::Array(vec![]));
     obj.insert("features".to_string(), ::serde_json::Value::Array(vec![]));
     obj.insert("rack".to_string(), ::serde_json::Value::Null);

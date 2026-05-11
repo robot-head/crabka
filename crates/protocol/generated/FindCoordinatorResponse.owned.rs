@@ -157,24 +157,25 @@ impl<'de> Decode<'de> for Coordinator {
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
 /// Only includes fields valid for the given version.
 #[must_use]
+#[allow(unused_comparisons)]
 pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     if version >= 1 {
         obj.insert("throttleTimeMs".to_string(), ::serde_json::json!(0));
     }
-    if version >= 0 && version <= 3 {
+    if version <= 3 {
         obj.insert("errorCode".to_string(), ::serde_json::json!(0));
     }
     if version >= 1 && version <= 3 {
         obj.insert("errorMessage".to_string(), ::serde_json::Value::Null);
     }
-    if version >= 0 && version <= 3 {
+    if version <= 3 {
         obj.insert("nodeId".to_string(), ::serde_json::json!(0));
     }
-    if version >= 0 && version <= 3 {
+    if version <= 3 {
         obj.insert("host".to_string(), ::serde_json::Value::String(String::new()));
     }
-    if version >= 0 && version <= 3 {
+    if version <= 3 {
         obj.insert("port".to_string(), ::serde_json::json!(0));
     }
     if version >= 4 {

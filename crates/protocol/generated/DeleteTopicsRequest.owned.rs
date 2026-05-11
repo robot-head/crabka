@@ -125,12 +125,13 @@ impl<'de> Decode<'de> for DeleteTopicState {
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
 /// Only includes fields valid for the given version.
 #[must_use]
+#[allow(unused_comparisons)]
 pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     if version >= 6 {
         obj.insert("topics".to_string(), ::serde_json::Value::Array(vec![]));
     }
-    if version >= 0 && version <= 5 {
+    if version <= 5 {
         obj.insert("topicNames".to_string(), ::serde_json::Value::Array(vec![]));
     }
     obj.insert("timeoutMs".to_string(), ::serde_json::json!(0));

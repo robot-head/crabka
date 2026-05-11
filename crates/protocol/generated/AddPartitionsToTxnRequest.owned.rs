@@ -143,21 +143,22 @@ impl<'de> Decode<'de> for AddPartitionsToTxnTransaction {
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
 /// Only includes fields valid for the given version.
 #[must_use]
+#[allow(unused_comparisons)]
 pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     if version >= 4 {
         obj.insert("transactions".to_string(), ::serde_json::Value::Array(vec![]));
     }
-    if version >= 0 && version <= 3 {
+    if version <= 3 {
         obj.insert("v3AndBelowTransactionalId".to_string(), ::serde_json::Value::String(String::new()));
     }
-    if version >= 0 && version <= 3 {
+    if version <= 3 {
         obj.insert("v3AndBelowProducerId".to_string(), ::serde_json::json!(0));
     }
-    if version >= 0 && version <= 3 {
+    if version <= 3 {
         obj.insert("v3AndBelowProducerEpoch".to_string(), ::serde_json::json!(0));
     }
-    if version >= 0 && version <= 3 {
+    if version <= 3 {
         obj.insert("v3AndBelowTopics".to_string(), ::serde_json::Value::Array(vec![]));
     }
     ::serde_json::Value::Object(obj)

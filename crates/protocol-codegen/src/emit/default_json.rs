@@ -6,12 +6,12 @@
 //! to yield the same bytes as `MessageName::default()` after encoding.
 //!
 //! The function is version-aware: it only includes fields that are valid for
-//! the requested version, preventing the JVM converter from rejecting unknown
-//! fields on older versions.
+//! the requested version, and emits null only for versions where the field is
+//! actually nullable, preventing the JVM converter from rejecting bad input.
 
 use std::fmt::Write;
 
-use crate::ir::{FieldSpec, MessageSpec};
+use crate::ir::{FieldSpec, MessageSpec, VersionRange};
 
 /// Emit the `default_json(version: i16)` function body for the given message.
 /// The output is plain Rust source intended to be appended to the
@@ -27,6 +27,7 @@ pub fn emit_default_json(spec: &MessageSpec) -> String {
     .unwrap();
     writeln!(out, "/// Only includes fields valid for the given version.").unwrap();
     writeln!(out, "#[must_use]").unwrap();
+    writeln!(out, "#[allow(unused_comparisons)]").unwrap();
     writeln!(
         out,
         "pub fn default_json(version: i16) -> ::serde_json::Value {{"
@@ -42,21 +43,24 @@ pub fn emit_default_json(spec: &MessageSpec) -> String {
 /// Emit `obj.insert(...)` statements for each field, guarded by version range checks.
 fn emit_fields_stmts(out: &mut String, fields: &[FieldSpec], indent: &str) {
     for f in fields {
-        let ver_min = f.versions.min;
-        let ver_max = f.versions.max;
         let key = json_field_name(&f.name);
-        let val_expr = json_value_expr(f);
-        if ver_max == i16::MAX {
-            // Open-ended: "vN+"
-            if ver_min == 0 {
+        // Determine the field's version condition.
+        let field_cond = version_cond(f.versions);
+        // Compute the value expression, which may itself be version-conditional
+        // (e.g. null only for nullable versions, non-null otherwise).
+        let val_expr = json_value_expr_versioned(f);
+
+        match field_cond.as_deref() {
+            None => {
                 // Always valid.
                 writeln!(
                     out,
                     "{indent}obj.insert(\"{key}\".to_string(), {val_expr});"
                 )
                 .unwrap();
-            } else {
-                writeln!(out, "{indent}if version >= {ver_min} {{").unwrap();
+            }
+            Some(cond) => {
+                writeln!(out, "{indent}if {cond} {{").unwrap();
                 writeln!(
                     out,
                     "{indent}    obj.insert(\"{key}\".to_string(), {val_expr});"
@@ -64,33 +68,75 @@ fn emit_fields_stmts(out: &mut String, fields: &[FieldSpec], indent: &str) {
                 .unwrap();
                 writeln!(out, "{indent}}}").unwrap();
             }
-        } else {
-            writeln!(
-                out,
-                "{indent}if version >= {ver_min} && version <= {ver_max} {{"
-            )
-            .unwrap();
-            writeln!(
-                out,
-                "{indent}    obj.insert(\"{key}\".to_string(), {val_expr});"
-            )
-            .unwrap();
-            writeln!(out, "{indent}}}").unwrap();
         }
     }
 }
 
-/// Generate a Rust expression that produces the default `serde_json::Value` for this field.
-fn json_value_expr(f: &FieldSpec) -> String {
-    let is_array = f.field_type.starts_with("[]");
-    let is_nullable = f.nullable_versions.is_some();
+/// Return the condition string for a version range, or None if always valid.
+fn version_cond(vr: VersionRange) -> Option<String> {
+    if vr.min == 0 && vr.max == i16::MAX {
+        None // always valid
+    } else if vr.max == i16::MAX {
+        Some(format!("version >= {}", vr.min))
+    } else if vr.min == 0 {
+        Some(format!("version <= {}", vr.max))
+    } else {
+        Some(format!("version >= {} && version <= {}", vr.min, vr.max))
+    }
+}
 
-    // Check if the default annotation indicates null.
+/// Generate a version-aware Rust expression for the default `serde_json::Value`.
+///
+/// The goal is to match what `MessageName::default()` encodes so that the
+/// oracle produces the same bytes as the Rust implementation.
+///
+/// Key rules:
+/// - Nullable non-array fields with no default: Rust `Default` produces `None`
+///   (encodes as null), so emit `null` for nullable versions.
+/// - Nullable array fields with no default: Rust `Default` produces `None`
+///   (encodes as null array, i.e. -1), so emit `null` for nullable versions.
+///   For non-nullable versions, emit `[]` (empty array).
+/// - Non-nullable array fields: always `[]`.
+/// - Fields with explicit null default: emit `null` (version-aware for split
+///   nullability ranges).
+fn json_value_expr_versioned(f: &FieldSpec) -> String {
+    let is_array = f.field_type.starts_with("[]");
     let default_is_null = matches!(&f.default, Some(serde_json::Value::Null))
         || matches!(&f.default, Some(serde_json::Value::String(s)) if s == "null");
 
-    if is_nullable && (default_is_null || f.default.is_none()) {
-        return "::serde_json::Value::Null".into();
+    // Fields where Rust Default produces None:
+    // - explicit null default
+    // - nullable non-array fields with no default (None is the zero)
+    // - nullable array fields with no default (None is the zero)
+    let rust_default_is_none = default_is_null
+        || (f.nullable_versions.is_some() && f.default.is_none());
+
+    if rust_default_is_none {
+        if let Some(nv) = f.nullable_versions {
+            // Check if nullable for ALL valid versions (trivial case: no branching needed).
+            let always_nullable = nv.min <= f.versions.min
+                && (nv.max == i16::MAX || nv.max >= f.versions.max);
+            if always_nullable {
+                return "::serde_json::Value::Null".into();
+            }
+            // Split: nullable in some versions, not in others.
+            // Emit: if <nullable_cond> { Null } else { type_zero }
+            let zero = if is_array {
+                "::serde_json::Value::Array(vec![])".to_string()
+            } else {
+                type_zero_expr(&f.field_type, f)
+            };
+            if let Some(cond) = version_cond(nv) {
+                return format!("(if {cond} {{ ::serde_json::Value::Null }} else {{ {zero} }})");
+            } else {
+                return "::serde_json::Value::Null".into();
+            }
+        }
+        // No nullable_versions but default_is_null — emit type zero.
+        if is_array {
+            return "::serde_json::Value::Array(vec![])".into();
+        }
+        return type_zero_expr(&f.field_type, f);
     }
 
     if is_array {
@@ -153,7 +199,7 @@ fn scalar_value_expr(field_type: &str, val: &serde_json::Value, f: &FieldSpec) -
     }
 }
 
-/// The "zero" `serde_json::Value` expression for a type.
+/// The "zero" `serde_json::Value` expression for a type (when no default specified).
 fn type_zero_expr(field_type: &str, f: &FieldSpec) -> String {
     let base = base_type(field_type);
     match base {
@@ -166,15 +212,15 @@ fn type_zero_expr(field_type: &str, f: &FieldSpec) -> String {
             "::serde_json::Value::String(String::new())".into()
         }
         "uuid" => {
-            "::serde_json::Value::String(\"00000000-0000-0000-0000-000000000000\".to_string())"
-                .into()
+            // Kafka's *DataJsonConverter encodes Uuid as base64 (22 chars),
+            // not the standard hyphen UUID format. The zero UUID in base64 is
+            // "AAAAAAAAAAAAAAAAAAAAAA" (16 zero bytes, no padding needed).
+            "::serde_json::Value::String(\"AAAAAAAAAAAAAAAAAAAAAA\".to_string())".into()
         }
         _ => {
             if f.fields.is_empty() {
                 "::serde_json::Value::Object(::serde_json::Map::new())".into()
             } else {
-                // Nested struct: build an object with its sub-fields.
-                // We emit a block that creates the sub-map at runtime.
                 emit_nested_struct_expr(&f.fields)
             }
         }
@@ -182,12 +228,15 @@ fn type_zero_expr(field_type: &str, f: &FieldSpec) -> String {
 }
 
 /// Emit a Rust expression that builds a `serde_json::Value::Object` for a nested struct.
+/// Note: sub-field version guards are NOT applied here (nested struct defaults are
+/// version-independent relative to their parent field's guard). If this causes issues
+/// for specific complex schemas, fix at the per-field level.
 fn emit_nested_struct_expr(fields: &[FieldSpec]) -> String {
     let mut s = String::new();
     s.push_str("{ let mut _m = ::serde_json::Map::new(); ");
     for f in fields {
         let key = json_field_name(&f.name);
-        let val = json_value_expr(f);
+        let val = json_value_expr_versioned(f);
         write!(s, "_m.insert(\"{key}\".to_string(), {val}); ").unwrap();
     }
     s.push_str("::serde_json::Value::Object(_m) }");
@@ -197,7 +246,7 @@ fn emit_nested_struct_expr(fields: &[FieldSpec]) -> String {
 /// Convert a Kafka schema field name (PascalCase like "TransactionalId") to
 /// the JSON key used by the JVM's *DataJsonConverter (camelCase like
 /// "transactionalId" — lowercase the first character).
-fn json_field_name(name: &str) -> String {
+pub fn json_field_name(name: &str) -> String {
     let mut chars = name.chars();
     match chars.next() {
         None => String::new(),

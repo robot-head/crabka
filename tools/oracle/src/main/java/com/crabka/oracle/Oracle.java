@@ -44,7 +44,13 @@ public final class Oracle {
                 } catch (Throwable t) {
                     ObjectNode err = M.createObjectNode();
                     err.put("ok", false);
-                    err.put("error", t.getClass().getSimpleName() + ": " + t.getMessage());
+                    // Include the cause chain so callers can diagnose root exceptions.
+                    String msg = t.getClass().getSimpleName() + ": " + t.getMessage();
+                    if (t.getCause() != null) {
+                        msg += " [caused by: " + t.getCause().getClass().getSimpleName()
+                            + ": " + t.getCause().getMessage() + "]";
+                    }
+                    err.put("error", msg);
                     out.println(M.writeValueAsString(err));
                 }
             }
@@ -90,18 +96,31 @@ public final class Oracle {
             resp.set("value", value);
 
         } else {
-            // encode / decode ops need apiKey, version, isRequest
-            int apiKey = req.get("apiKey").asInt();
+            // encode / decode ops need apiKey (or messageName), version, isRequest
             short version = (short) req.get("version").asInt();
             boolean isRequest = req.get("isRequest").asBoolean();
 
-            ApiMessage msg = isRequest
-                    ? ApiKeys.forId(apiKey).messageType.newRequest()
-                    : ApiKeys.forId(apiKey).messageType.newResponse();
+            // Support two lookup modes:
+            //   1. messageName: directly use the *Data class name (bypasses ApiKeys)
+            //   2. apiKey: go through ApiKeys.forId() (standard path)
+            ApiMessage msg;
+            String msgClassName;
+            if (req.has("messageName") && !req.get("messageName").isNull()) {
+                // Direct class lookup by name — no ApiKeys enum needed.
+                String dataClassName = req.get("messageName").asText() + "Data";
+                Class<?> dataClass = Class.forName(MSG_PKG + dataClassName);
+                msg = (ApiMessage) dataClass.getDeclaredConstructor().newInstance();
+                msgClassName = dataClassName;
+            } else {
+                int apiKey = req.get("apiKey").asInt();
+                msg = isRequest
+                        ? ApiKeys.forId(apiKey).messageType.newRequest()
+                        : ApiKeys.forId(apiKey).messageType.newResponse();
+                msgClassName = msg.getClass().getSimpleName();
+            }
 
             // Resolve the generated JsonConverter class, e.g.
             // org.apache.kafka.common.message.ApiVersionsRequestDataJsonConverter
-            String msgClassName = msg.getClass().getSimpleName();         // e.g. ApiVersionsRequestData
             String converterName = MSG_PKG + msgClassName + "JsonConverter";
             Class<?> converterClass = Class.forName(converterName);
 

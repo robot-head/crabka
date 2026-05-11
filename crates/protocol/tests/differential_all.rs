@@ -27,6 +27,7 @@ fn every_pair_byte_equal() {
             Kind::Request => json!({
                 "op": "encode",
                 "apiKey": case.api_key,
+                "messageName": case.name,
                 "version": case.version,
                 "isRequest": true,
                 "value": jval,
@@ -34,6 +35,7 @@ fn every_pair_byte_equal() {
             Kind::Response => json!({
                 "op": "encode",
                 "apiKey": case.api_key,
+                "messageName": case.name,
                 "version": case.version,
                 "isRequest": false,
                 "value": jval,

@@ -171,6 +171,7 @@ impl<'de> Decode<'de> for JoinGroupResponseMember {
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
 /// Only includes fields valid for the given version.
 #[must_use]
+#[allow(unused_comparisons)]
 pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     if version >= 2 {
@@ -181,7 +182,7 @@ pub fn default_json(version: i16) -> ::serde_json::Value {
     if version >= 7 {
         obj.insert("protocolType".to_string(), ::serde_json::Value::Null);
     }
-    obj.insert("protocolName".to_string(), ::serde_json::Value::Null);
+    obj.insert("protocolName".to_string(), (if version >= 7 { ::serde_json::Value::Null } else { ::serde_json::Value::String(String::new()) }));
     obj.insert("leader".to_string(), ::serde_json::Value::String(String::new()));
     if version >= 9 {
         obj.insert("skipAssignment".to_string(), ::serde_json::Value::Bool(false));
