@@ -42,6 +42,6 @@ tokio-util = { version = "0.7", default-features = false }
 dashmap = "6"
 tracing = "0.1"
 memmap2 = "0.9"
-testcontainers = "0.22"
-testcontainers-modules = { version = "0.10", features = ["kafka"] }
+testcontainers = "0.27"
+testcontainers-modules = { version = "0.15", features = ["kafka"] }
 futures-util = { version = "0.3", features = ["sink"] }
