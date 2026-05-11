@@ -89,11 +89,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.95.0"
-      - name: Compute Docker bridge IP
-        run: |
-          BRIDGE_IP=$(docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}')
-          echo "CRABKA_HOST_BOOTSTRAP=${BRIDGE_IP}:9092" >> $GITHUB_ENV
-      # --test-threads=1: both tests bind a Rust broker to a fixed host
-      # port (so the in-container JVM tools have a known bootstrap target).
-      # Parallel execution would hit `AddrInUse`.
+      # --test-threads=1: both tests bind the Rust broker to a fixed host
+      # port (so the `docker run --network host` Kafka tools have a known
+      # bootstrap target). Parallel execution would hit `AddrInUse`.
       - run: cargo test -p crabka-broker --test jvm_acceptance -- --ignored --nocapture --test-threads=1

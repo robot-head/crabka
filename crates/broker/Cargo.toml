@@ -35,5 +35,3 @@ futures-util = { workspace = true }
 crabka-client-core = { version = "0.1", path = "../client-core" }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }
-testcontainers = { workspace = true }
-testcontainers-modules = { workspace = true }
