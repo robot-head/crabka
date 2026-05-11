@@ -25,6 +25,13 @@ pub const INVALID_REPLICATION_FACTOR: i16 = 38;
 pub const NOT_CONTROLLER: i16 = 41;
 pub const INVALID_REQUEST: i16 = 42;
 
+// Phase 5 additions — group coordinator codes.
+pub const ILLEGAL_GENERATION: i16 = 22;
+pub const INCONSISTENT_GROUP_PROTOCOL: i16 = 23;
+pub const UNKNOWN_MEMBER_ID: i16 = 25;
+pub const REBALANCE_IN_PROGRESS: i16 = 27;
+pub const MEMBER_ID_REQUIRED: i16 = 79;
+
 /// Map an internal [`crate::error::BrokerError`] to a wire-level code.
 /// Most internal errors map to `UNKNOWN_SERVER_ERROR`; specific variants
 /// pick more meaningful codes.
@@ -34,6 +41,9 @@ pub fn from_broker_error(err: &crate::error::BrokerError) -> i16 {
     match err {
         BrokerError::UnsupportedApi { .. } => UNSUPPORTED_VERSION,
         BrokerError::PartitionWriterDied { .. } => NOT_LEADER_OR_FOLLOWER,
+        BrokerError::GroupInvalidState { .. } => REBALANCE_IN_PROGRESS,
+        BrokerError::UnknownMember { .. } => UNKNOWN_MEMBER_ID,
+        BrokerError::GenerationMismatch { .. } => ILLEGAL_GENERATION,
         BrokerError::Shutdown
         | BrokerError::Io(_)
         | BrokerError::Log(_)
@@ -62,5 +72,33 @@ mod tests {
             partition: 0,
         };
         assert_eq!(from_broker_error(&e), NOT_LEADER_OR_FOLLOWER);
+    }
+
+    #[test]
+    fn maps_group_invalid_state_to_27() {
+        let e = BrokerError::GroupInvalidState {
+            group_id: "g".into(),
+            state: "PreparingRebalance".into(),
+        };
+        assert_eq!(from_broker_error(&e), REBALANCE_IN_PROGRESS);
+    }
+
+    #[test]
+    fn maps_unknown_member_to_25() {
+        let e = BrokerError::UnknownMember {
+            group_id: "g".into(),
+            member_id: "m".into(),
+        };
+        assert_eq!(from_broker_error(&e), UNKNOWN_MEMBER_ID);
+    }
+
+    #[test]
+    fn maps_generation_mismatch_to_22() {
+        let e = BrokerError::GenerationMismatch {
+            group_id: "g".into(),
+            current: 5,
+            requested: 4,
+        };
+        assert_eq!(from_broker_error(&e), ILLEGAL_GENERATION);
     }
 }
