@@ -2,11 +2,6 @@
 //! the image from the `<log_dir>/<topic>-<partition>/` directory layout
 //! at startup.
 
-// Some fields / methods (e.g. `TopicMeta::topic_id`, `MetadataImage::topics`)
-// are only consumed by handlers landing in the same batch as the Metadata
-// handler. Keep this allow until those handlers exist.
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 
 use uuid::Uuid;
@@ -81,6 +76,9 @@ impl MetadataImage {
         self.topics.keys().cloned().collect()
     }
 
+    // `topics()` is currently unused by handlers (Metadata uses `topic_names`
+    // + `get`); kept for upcoming admin-style handlers.
+    #[allow(dead_code)]
     pub fn topics(&self) -> impl Iterator<Item = (&str, &TopicMeta)> + '_ {
         self.topics.iter().map(|(k, v)| (k.as_str(), v))
     }

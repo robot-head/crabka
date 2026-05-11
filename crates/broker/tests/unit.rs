@@ -3,6 +3,7 @@ mod support;
 use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
 use crabka_protocol::owned::delete_topics_request::{DeleteTopicState, DeleteTopicsRequest};
+use crabka_protocol::owned::metadata_request::MetadataRequest;
 
 #[tokio::test]
 async fn api_versions_round_trip() {
@@ -92,5 +93,41 @@ async fn duplicate_create_returns_topic_already_exists() {
     assert_eq!(r1.topics[0].error_code, 0);
     let r2 = p.client.send(req()).await.expect("CreateTopics 2");
     assert_eq!(r2.topics[0].error_code, 36); // TOPIC_ALREADY_EXISTS
+    p.broker.shutdown().await;
+}
+
+#[tokio::test]
+async fn metadata_returns_this_broker_and_listed_topics() {
+    let p = support::start().await;
+    // Create a topic first.
+    let create = CreateTopicsRequest {
+        topics: vec![CreatableTopic {
+            name: "beta".into(),
+            num_partitions: 3,
+            replication_factor: 1,
+            ..Default::default()
+        }],
+        timeout_ms: 5_000,
+        ..Default::default()
+    };
+    let _ = p.client.send(create).await.unwrap();
+
+    let resp = p
+        .client
+        .send(MetadataRequest::default())
+        .await
+        .expect("Metadata");
+    assert_eq!(resp.brokers.len(), 1);
+    let topic = resp
+        .topics
+        .iter()
+        .find(|t| t.name.as_deref() == Some("beta"))
+        .unwrap();
+    assert_eq!(topic.partitions.len(), 3);
+    for (i, part) in topic.partitions.iter().enumerate() {
+        assert_eq!(part.error_code, 0);
+        assert_eq!(part.partition_index, i32::try_from(i).unwrap());
+        assert_eq!(part.leader_id, 1);
+    }
     p.broker.shutdown().await;
 }
