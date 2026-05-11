@@ -1920,18 +1920,18 @@ git commit -m "test(codegen): every vendored schema emits without error"
 
 Verification gate. Mark complete only when every item below passes.
 
-- [ ] `cargo fmt --check` clean.
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings` clean.
-- [ ] `cargo test --workspace` green.
-- [ ] `cargo test --workspace -- --include-ignored` green (JVM oracle in use).
-- [ ] `./tools/regenerate.sh && git diff --quiet crates/protocol/generated` — no drift.
-- [ ] Curated set generated and exercised: ApiVersionsRequest/Response, MetadataRequest/Response, ProduceRequest/Response, OffsetCommitRequest/Response, RequestHeader/ResponseHeader, DescribeGroupsRequest/Response.
-- [ ] Snapshot tests pass for every curated message in both flavors.
-- [ ] Differential tests pass for every curated request/response pair across the schema's full version range.
-- [ ] `ApiKey` enum exists, lists every (request, response) pair from the 4.2 schemas, round-trips via `from_i16`.
-- [ ] `every_vendored_schema_emits_clean` passes (i.e., emitter handles all 197 schemas without `Unsupported`).
-- [ ] CI green on Linux/macOS/Windows.
-- [ ] No `TODO(1d)` markers left in code; any deferred items recorded in `KNOWN_ISSUES.md`.
+- [x] `cargo fmt --check` clean.
+- [x] `cargo clippy --workspace --all-targets -- -D warnings` clean.
+- [x] `cargo test --workspace` green.
+- [x] `cargo test --workspace -- --include-ignored` green (JVM oracle in use).
+- [x] `./tools/regenerate.sh && git diff --quiet crates/protocol/generated` — no drift.
+- [x] Curated set generated and exercised: ApiVersionsRequest/Response, MetadataRequest/Response, ProduceRequest/Response, OffsetCommitRequest/Response, RequestHeader/ResponseHeader, DescribeGroupsRequest/Response.
+- [x] Snapshot tests pass for every curated message in both flavors.
+- [x] Differential tests pass for every curated request/response pair across the schema's full version range.
+- [x] `ApiKey` enum exists, lists every (request, response) pair from the 4.2 schemas, round-trips via `from_i16`.
+- [x] `every_vendored_schema_emits_clean` passes (i.e., emitter handles all 197 schemas without `Unsupported`).
+- [ ] CI green on Linux/macOS/Windows. <!-- verifiable via PR CI run -->
+- [x] No `TODO(1d)` markers left in code; any deferred items recorded in `KNOWN_ISSUES.md`.
 
 When this all passes, sub-plan 1a is done. The follow-up sub-plan `1b crabka-compression` picks up next, brainstormed separately when its turn comes.
 
