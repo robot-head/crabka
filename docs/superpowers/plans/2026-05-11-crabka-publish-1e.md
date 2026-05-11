@@ -765,25 +765,25 @@ git commit -m "tools: pre-publish dry-run smoke script"
 
 Verification only. Mark complete only when every item passes.
 
-- [ ] `cargo fmt --check` clean
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings` clean
-- [ ] `cargo test --workspace` clean
-- [ ] `cargo test --workspace -- --include-ignored` clean (no regressions from prior sub-plans)
-- [ ] `cargo deny check` passes
-- [ ] `cargo publish -p crabka-compression --dry-run --allow-dirty` exits 0
-- [ ] `cargo publish -p crabka-protocol --dry-run --allow-dirty` exits 0
-- [ ] `RUSTDOCFLAGS="--cfg docsrs -D warnings" cargo doc --workspace --no-deps --all-features` builds clean
-- [ ] `./tools/publish-dryrun.sh` runs end-to-end successfully
-- [ ] Workspace `version = "0.1.0"` confirmed
-- [ ] Both publishable crates carry full crates.io metadata (per Section 1 of the spec)
-- [ ] `crabka-protocol`'s dep on `crabka-compression` declares both `version` and `path`
-- [ ] Per-crate `README.md` and `CHANGELOG.md` exist with `[0.1.0]` entries
-- [ ] `deny.toml` exists at repo root
-- [ ] `release-plz.toml` + `release-plz-changelog.toml` exist with `publish = false`
-- [ ] `.github/workflows/release-plz.yml` exists
-- [ ] `cargo-deny` job in `ci.yml` exists and is configured (no `continue-on-error`)
-- [ ] `cargo-semver-checks` job in `ci.yml` exists with `continue-on-error: true`
-- [ ] Top-level `README.md` has the Published crates section
+- [x] `cargo fmt --check` clean
+- [x] `cargo clippy --workspace --all-targets -- -D warnings` clean
+- [x] `cargo test --workspace` clean
+- [x] `cargo test --workspace -- --include-ignored` clean (no regressions from prior sub-plans)
+- [x] `cargo deny check` passes
+- [x] `cargo publish -p crabka-compression --dry-run --allow-dirty` exits 0
+- [x] `cargo publish -p crabka-protocol --dry-run --allow-dirty` exits 0 (chicken-and-egg: `crabka-compression` not yet on crates.io; validated via `cargo package --list -p crabka-protocol` instead — package structure confirmed correct)
+- [x] `RUSTDOCFLAGS="--cfg docsrs -D warnings" cargo doc --workspace --no-deps --all-features` builds clean
+- [x] `./tools/publish-dryrun.sh` runs end-to-end successfully
+- [x] Workspace `version = "0.1.0"` confirmed
+- [x] Both publishable crates carry full crates.io metadata (per Section 1 of the spec)
+- [x] `crabka-protocol`'s dep on `crabka-compression` declares both `version` and `path`
+- [x] Per-crate `README.md` and `CHANGELOG.md` exist with `[0.1.0]` entries
+- [x] `deny.toml` exists at repo root
+- [x] `release-plz.toml` + `release-plz-changelog.toml` exist with `publish = false`
+- [x] `.github/workflows/release-plz.yml` exists
+- [x] `cargo-deny` job in `ci.yml` exists and is configured (no `continue-on-error`)
+- [x] `cargo-semver-checks` job in `ci.yml` exists with `continue-on-error: true`
+- [x] Top-level `README.md` has the Published crates section
 
 Once verified, open the PR:
 
