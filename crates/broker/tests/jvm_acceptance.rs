@@ -45,6 +45,7 @@ async fn start_host_broker() -> (crabka_broker::BrokerHandle, tempfile::TempDir)
         log_config: LogConfig::default(),
     };
     let handle = Broker::start(config).await.expect("start broker");
+    eprintln!("CRABKA[test] broker started listen={BOOTSTRAP}");
     tracing::info!(listen = %BOOTSTRAP, "broker started for jvm acceptance");
     (handle, dir)
 }
@@ -79,12 +80,25 @@ fn docker_run_kafka_tool(args: &[&str]) -> std::process::Output {
         .arg("--rm")
         .arg("--network")
         .arg("host")
+        .arg("-e")
+        .arg("KAFKA_TOOLS_LOG4J_LOGLEVEL=DEBUG")
         .arg(KAFKA_IMAGE)
         .args(args)
         .stderr(Stdio::piped())
         .stdout(Stdio::piped())
         .output()
         .expect("spawn docker run");
+    eprintln!(
+        "CRABKA[test] docker_run {args:?} status={} stderr_len={} stderr_tail={}",
+        out.status,
+        out.stderr.len(),
+        // print the tail (last 4KB) of stderr so we see Java's debug logs even on success
+        String::from_utf8_lossy(if out.stderr.len() > 4096 {
+            &out.stderr[out.stderr.len() - 4096..]
+        } else {
+            &out.stderr[..]
+        }),
+    );
     assert!(
         out.status.success(),
         "docker run {args:?} failed: stdout={}, stderr={}",

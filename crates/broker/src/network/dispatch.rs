@@ -32,12 +32,14 @@ pub async fn serve_connection(broker: std::sync::Arc<Broker>, stream: TcpStream)
         .peer_addr()
         .map_or_else(|_| "<unknown>".to_string(), |a| a.to_string());
     let mut framed: Framed<TcpStream, _> = codec::frame(stream);
+    eprintln!("CRABKA[conn] opened peer={peer}");
     tracing::info!(%peer, "connection opened");
 
     while let Some(frame) = framed.next().await {
         let frame = match frame {
             Ok(b) => b,
             Err(e) => {
+                eprintln!("CRABKA[conn] frame_decode_err peer={peer} err={e}");
                 tracing::warn!(%peer, error = %e, "frame decode error, closing");
                 break;
             }
@@ -45,15 +47,18 @@ pub async fn serve_connection(broker: std::sync::Arc<Broker>, stream: TcpStream)
         let response_bytes = match dispatch_one(&broker, &frame).await {
             Ok(b) => b,
             Err(e) => {
+                eprintln!("CRABKA[conn] dispatch_err peer={peer} err={e}");
                 tracing::warn!(%peer, error = %e, "dispatch error, closing connection");
                 break;
             }
         };
         if let Err(e) = framed.send(response_bytes).await {
+            eprintln!("CRABKA[conn] send_err peer={peer} err={e}");
             tracing::warn!(%peer, error = %e, "framed.send error, closing");
             break;
         }
     }
+    eprintln!("CRABKA[conn] closed peer={peer}");
     tracing::info!(%peer, "connection closed");
 }
 
@@ -65,6 +70,10 @@ pub async fn serve_connection(broker: std::sync::Arc<Broker>, stream: TcpStream)
 async fn dispatch_one(broker: &Broker, frame: &[u8]) -> Result<Bytes, BrokerError> {
     let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
     let body_flexible = handler_body_flexible(api_key, api_version);
+    eprintln!(
+        "CRABKA[dispatch] api_key={api_key} api_version={api_version} corr={correlation_id} flex={body_flexible} body_len={}",
+        body.len()
+    );
     tracing::info!(
         api_key,
         api_version,
@@ -96,6 +105,10 @@ async fn dispatch_one(broker: &Broker, frame: &[u8]) -> Result<Bytes, BrokerErro
     };
 
     let out = encode_response(api_key, correlation_id, body_flexible, &resp_body);
+    eprintln!(
+        "CRABKA[dispatch] response_built api_key={api_key} corr={correlation_id} resp_len={}",
+        out.len()
+    );
     tracing::info!(
         api_key,
         api_version,
