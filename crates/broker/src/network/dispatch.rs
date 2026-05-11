@@ -32,7 +32,7 @@ pub async fn serve_connection(broker: std::sync::Arc<Broker>, stream: TcpStream)
         .peer_addr()
         .map_or_else(|_| "<unknown>".to_string(), |a| a.to_string());
     let mut framed: Framed<TcpStream, _> = codec::frame(stream);
-    tracing::debug!(%peer, "connection opened");
+    tracing::info!(%peer, "connection opened");
 
     while let Some(frame) = framed.next().await {
         let frame = match frame {
@@ -54,7 +54,7 @@ pub async fn serve_connection(broker: std::sync::Arc<Broker>, stream: TcpStream)
             break;
         }
     }
-    tracing::debug!(%peer, "connection closed");
+    tracing::info!(%peer, "connection closed");
 }
 
 /// Decode one request from the framed bytes, call the handler, build a
@@ -65,6 +65,14 @@ pub async fn serve_connection(broker: std::sync::Arc<Broker>, stream: TcpStream)
 async fn dispatch_one(broker: &Broker, frame: &[u8]) -> Result<Bytes, BrokerError> {
     let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
     let body_flexible = handler_body_flexible(api_key, api_version);
+    tracing::info!(
+        api_key,
+        api_version,
+        correlation_id,
+        body_flexible,
+        body_len = body.len(),
+        "dispatching request"
+    );
 
     let handler = broker
         .handlers()
@@ -77,6 +85,7 @@ async fn dispatch_one(broker: &Broker, frame: &[u8]) -> Result<Bytes, BrokerErro
     let resp_body: Bytes = if let Ok(h) = handler {
         h(broker, api_version, correlation_id, body).await?
     } else {
+        tracing::warn!(api_key, api_version, "unsupported api, returning error");
         // Build a synthetic UNSUPPORTED_VERSION response: just a 2-byte
         // error code + an empty body. Most Kafka responses begin with
         // `error_code: i16` at offset 0; clients that don't expect
@@ -86,12 +95,15 @@ async fn dispatch_one(broker: &Broker, frame: &[u8]) -> Result<Bytes, BrokerErro
         buf.freeze()
     };
 
-    Ok(encode_response(
+    let out = encode_response(api_key, correlation_id, body_flexible, &resp_body);
+    tracing::info!(
         api_key,
+        api_version,
         correlation_id,
-        body_flexible,
-        &resp_body,
-    ))
+        resp_len = out.len(),
+        "response built"
+    );
+    Ok(out)
 }
 
 /// Parse `RequestHeader` and return `(api_key, version, corr_id, &body)`.

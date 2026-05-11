@@ -91,6 +91,15 @@ pub(crate) fn handle(
             topics: topics_out,
             ..Default::default()
         };
+        tracing::info!(
+            version,
+            req_topics = ?req.topics.as_ref().map(|ts| ts.iter().filter_map(|t| t.name.clone()).collect::<Vec<_>>()),
+            resp_brokers = ?resp.brokers.iter().map(|b| format!("{}@{}:{}", b.node_id, b.host, b.port)).collect::<Vec<_>>(),
+            resp_controller_id = resp.controller_id,
+            resp_cluster_id = ?resp.cluster_id,
+            resp_topics = ?resp.topics.iter().map(|t| format!("{}={:?}/p{}", t.name.as_deref().unwrap_or("?"), t.error_code, t.partitions.len())).collect::<Vec<_>>(),
+            "metadata response"
+        );
         let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
         resp.encode(&mut buf, version)?;
         Ok(buf.freeze())

@@ -28,6 +28,13 @@ const KAFKA_IMAGE: &str = "confluentinc/cp-kafka:6.1.1";
 /// `docker run --network host`, the container reaches us via the host's
 /// loopback, so the advertised listener can simply be `BOOTSTRAP`.
 async fn start_host_broker() -> (crabka_broker::BrokerHandle, tempfile::TempDir) {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("crabka_broker=debug,info")),
+        )
+        .with_test_writer()
+        .try_init();
     let dir = tempfile::tempdir().expect("tempdir");
     let listen_addr = BOOTSTRAP.parse().expect("static addr");
     let config = BrokerConfig {
@@ -38,7 +45,25 @@ async fn start_host_broker() -> (crabka_broker::BrokerHandle, tempfile::TempDir)
         log_config: LogConfig::default(),
     };
     let handle = Broker::start(config).await.expect("start broker");
+    tracing::info!(listen = %BOOTSTRAP, "broker started for jvm acceptance");
     (handle, dir)
+}
+
+/// Verify TCP connectivity from inside a `--network host` container.
+fn nc_check_connectivity() {
+    let out = Command::new("docker")
+        .args([
+            "run", "--rm", "--network", "host", "alpine", "sh", "-c",
+            "apk add --no-cache netcat-openbsd >/dev/null 2>&1 && nc -zv 127.0.0.1 9092",
+        ])
+        .output()
+        .expect("spawn nc check");
+    eprintln!(
+        "NC CHECK status={} stdout={} stderr={}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
 }
 
 /// Run `docker run --rm --network host <image> <args...>`, asserting success.
@@ -69,6 +94,7 @@ async fn console_producer_round_trip() {
     const TOPIC: &str = "crabka-broker-itest";
 
     let (broker, _dir) = start_host_broker().await;
+    nc_check_connectivity();
 
     // 1. Create the topic via the JVM client.
     docker_run_kafka_tool(&[
@@ -146,6 +172,7 @@ async fn console_producer_round_trip() {
 #[ignore = "requires Docker"]
 async fn kafka_topics_describe_smokes_metadata() {
     let (broker, _dir) = start_host_broker().await;
+    nc_check_connectivity();
 
     docker_run_kafka_tool(&[
         "kafka-topics",
