@@ -54,9 +54,21 @@ pub(crate) fn handle(
                 .iter()
                 .map(|a| (a.member_id.clone(), a.assignment.clone()))
                 .collect();
+            tracing::info!(
+                req_assignments_count = req.assignments.len(),
+                assignment_keys = ?assignments.keys().collect::<Vec<_>>(),
+                assignment_lens = ?assignments.values().map(bytes::Bytes::len).collect::<Vec<_>>(),
+                self_member_id = %req.member_id,
+                "SyncGroup leader installing assignments"
+            );
             {
                 let mut g = handle.state.lock().await;
                 g.install_assignments(assignments);
+                tracing::info!(
+                    member_keys = ?g.members.keys().collect::<Vec<_>>(),
+                    member_has_assignment = ?g.members.iter().map(|(id, m)| (id.clone(), m.assignment.is_some())).collect::<Vec<_>>(),
+                    "SyncGroup post-install member state"
+                );
             }
             handle.sync_complete.notify_waiters();
         } else {
