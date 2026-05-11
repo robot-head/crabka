@@ -79,6 +79,7 @@ impl Oracle {
         v
     }
 
+    #[allow(dead_code)]
     pub fn encode(
         &mut self,
         api_key: i16,
@@ -108,6 +109,7 @@ impl Oracle {
         r["value"].clone()
     }
 
+    #[allow(dead_code)]
     pub fn record_batch_encode(&mut self, value: &Value) -> Vec<u8> {
         let r = self.call(&json!({
             "op": "record_batch_encode",
@@ -116,6 +118,7 @@ impl Oracle {
         hex::decode(r["hex"].as_str().unwrap()).unwrap()
     }
 
+    #[allow(dead_code)]
     pub fn record_batch_decode(&mut self, bytes: &[u8]) -> Value {
         let r = self.call(&json!({
             "op": "record_batch_decode",

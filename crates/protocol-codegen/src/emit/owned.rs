@@ -519,7 +519,6 @@ fn owned_zero(base: &str) -> String {
     match base {
         "string" => "String::new()".into(),
         "bytes" => "bytes::Bytes::new()".into(),
-        "records" => "Default::default()".into(),
         "bool" => "false".into(),
         "int8" => "0i8".into(),
         "int16" => "0i16".into(),

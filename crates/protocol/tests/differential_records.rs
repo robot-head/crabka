@@ -12,21 +12,20 @@ fn record_to_json(r: &Record) -> Value {
     for h in &r.headers {
         headers.push(json!({
             "key": h.key,
-            "value": h.value.as_ref().map(|b| hex::encode(b)),
+            "value": h.value.as_ref().map(hex::encode),
         }));
     }
     json!({
         "offset_delta": r.offset_delta,
         "timestamp_delta": r.timestamp_delta,
-        "key": r.key.as_ref().map(|b| hex::encode(b)),
-        "value": r.value.as_ref().map(|b| hex::encode(b)),
+        "key": r.key.as_ref().map(hex::encode),
+        "value": r.value.as_ref().map(hex::encode),
         "headers": headers,
     })
 }
 
 fn batch_to_json(b: &RecordBatch) -> Value {
     let codec_name = match b.attributes.compression() {
-        CompressionType::None => "NONE",
         CompressionType::Gzip => "GZIP",
         CompressionType::Snappy => "SNAPPY",
         CompressionType::Lz4 => "LZ4",
@@ -81,7 +80,9 @@ fn arb_batch(codec: CompressionType) -> impl Strategy<Value = RecordBatch> {
                 .into_iter()
                 .enumerate()
                 .map(|(i, (key, value))| Record {
-                    offset_delta: i as i32, // 0, 1, 2, ... — strictly increasing
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+                    offset_delta: i as i32, // 0, 1, 2, ... — strictly increasing; max 5
+                    #[allow(clippy::cast_possible_wrap)]
                     timestamp_delta: ts_delta * i as i64,
                     key,
                     value,

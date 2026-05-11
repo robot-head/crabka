@@ -521,19 +521,19 @@ use crate::primitives::string_bytes_borrowed::{{
         put_items.dedup();
         get_borrowed_items.sort_unstable();
         get_borrowed_items.dedup();
-        if !get_borrowed_items.is_empty() {
+        if get_borrowed_items.is_empty() {
             writeln!(
                 out,
-                "use crate::primitives::string_bytes::{{{}}};\nuse crate::primitives::string_bytes_borrowed::{{{}}};",
+                "use crate::primitives::string_bytes::{{{}}};",
                 put_items.join(", "),
-                get_borrowed_items.join(", "),
             )
             .unwrap();
         } else {
             writeln!(
                 out,
-                "use crate::primitives::string_bytes::{{{}}};",
+                "use crate::primitives::string_bytes::{{{}}};\nuse crate::primitives::string_bytes_borrowed::{{{}}};",
                 put_items.join(", "),
+                get_borrowed_items.join(", "),
             )
             .unwrap();
         }
@@ -737,7 +737,6 @@ fn borrowed_zero(base: &str) -> String {
     match base {
         "string" => "\"\"".into(),
         "bytes" => "&[]".into(),
-        "records" => "Default::default()".into(),
         "bool" => "false".into(),
         "int8" => "0i8".into(),
         "int16" => "0i16".into(),
