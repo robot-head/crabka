@@ -28,6 +28,7 @@ pub struct Broker {
     /// Wrapped in `Arc` so handlers cloning the field share the same
     /// underlying map. `DashMap::clone` is a deep copy by default.
     pub(crate) partitions: Arc<DashMap<(String, i32), Arc<Partition>>>,
+    pub(crate) group_manager: Arc<crate::coordinator::GroupManager>,
     handlers: HandlerTable,
 }
 
@@ -97,6 +98,16 @@ impl Broker {
             }
         }
 
+        // Group coordinator bootstrap (slice 5).
+        let group_manager = Arc::new(crate::coordinator::GroupManager::new());
+        crate::coordinator::bootstrap::bootstrap(
+            &config,
+            &metadata,
+            &partitions,
+            group_manager.as_ref(),
+        )
+        .await?;
+
         // 2. Build handler table.
         let handlers = crate::handlers::build_table();
 
@@ -105,6 +116,7 @@ impl Broker {
             config,
             metadata,
             partitions,
+            group_manager: group_manager.clone(),
             handlers,
         });
 
