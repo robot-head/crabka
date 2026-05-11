@@ -10,7 +10,7 @@ use std::fmt::Write;
 
 use crate::emit::common::{banner, format_int_literal};
 use crate::emit::owned::EmitError;
-use crate::ir::{FieldSpec, FlexibleVersions, MessageSpec, VersionRange};
+use crate::ir::{FieldSpec, FlexibleVersions, MessageSpec, MessageType, VersionRange};
 use crate::name_conv;
 use crate::resolve::{self, Resolution, StructKind};
 use crate::type_map;
@@ -391,15 +391,24 @@ use crate::primitives::string_bytes_borrowed::{{
 // ── constants ──────────────────────────────────────────────────────────────
 
 fn emit_constants(out: &mut String, spec: &MessageSpec) {
-    let api_key = spec.api_key.unwrap_or(0);
     let min_version = spec.valid_versions.min;
     let max_version = spec.valid_versions.max;
     let flex = flex_min(spec);
+    // Request/Response schemas have an API key; Header/Data schemas do not.
+    match spec.message_type {
+        MessageType::Request | MessageType::Response => {
+            let api_key = spec
+                .api_key
+                .expect("Request/Response must have apiKey in schema");
+            writeln!(out, "\npub const API_KEY: i16 = {api_key};").unwrap();
+        }
+        MessageType::Header | MessageType::Data => {
+            // No API_KEY const for framing/data types.
+        }
+    }
     writeln!(
         out,
-        "
-pub const API_KEY: i16 = {api_key};
-pub const MIN_VERSION: i16 = {min_version};
+        "pub const MIN_VERSION: i16 = {min_version};
 pub const MAX_VERSION: i16 = {max_version};
 pub const FLEXIBLE_MIN: i16 = {flex};
 
@@ -695,13 +704,23 @@ fn emit_encode_impl(out: &mut String, spec: &MessageSpec, res_map: &HashMap<Stri
     } else {
         ""
     };
+    let version_err = match spec.message_type {
+        MessageType::Request | MessageType::Response => {
+            "return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });"
+                .to_owned()
+        }
+        MessageType::Header | MessageType::Data => {
+            let name = &spec.name;
+            format!("return Err(ProtocolError::SchemaMismatch(\"{name} version out of range\"));")
+        }
+    };
     writeln!(
         out,
         "
 impl{lt} Encode for {type_name}{lt} {{
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {{
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {{
-            return Err(ProtocolError::UnsupportedVersion {{ api_key: API_KEY, version }});
+            {version_err}
         }}
         let flex = is_flexible(version);"
     )
@@ -788,6 +807,12 @@ fn encoded_len_struct_body(
     }
 }
 
+/// Returns `true` if this field has `"flexibleVersions": "none"` (per-field override),
+/// meaning it must always use the legacy (non-compact) codec even in flex message versions.
+fn field_forces_non_flex(f: &FieldSpec) -> bool {
+    matches!(f.flexible_versions, Some(FlexibleVersions::None))
+}
+
 fn emit_encode_one(
     out: &mut String,
     f: &FieldSpec,
@@ -796,6 +821,14 @@ fn emit_encode_one(
 ) {
     let field = name_conv::field_name(&f.name);
     let cond = version_cond(f.versions, "version");
+    // Per-field `flexibleVersions: "none"` forces legacy encoding for this field.
+    let force_non_flex = field_forces_non_flex(f);
+    let flex_prefix = if force_non_flex {
+        "{ let flex = false; ".to_owned()
+    } else {
+        String::new()
+    };
+    let flex_suffix = if force_non_flex { " }" } else { "" };
     let nullable_min = f.nullable_versions.map(|r| r.min);
     let needs_version_split = nullable_min.is_some_and(|nmin| nmin > f.versions.min);
     if needs_version_split {
@@ -805,7 +838,7 @@ fn emit_encode_one(
             encode_call_option_as_non_nullable(&f.field_type, &format!("self.{field}"), res_map);
         writeln!(
             out,
-            "{indent}if {cond} {{ if version >= {nmin} {{ {nullable_body} }} else {{ {non_nullable_body} }} }}"
+            "{indent}if {cond} {{ {flex_prefix}if version >= {nmin} {{ {nullable_body} }} else {{ {non_nullable_body} }}{flex_suffix} }}"
         ).unwrap();
     } else {
         let body = encode_call(
@@ -814,7 +847,11 @@ fn emit_encode_one(
             is_nullable(f),
             res_map,
         );
-        writeln!(out, "{indent}if {cond} {{ {body} }}").unwrap();
+        writeln!(
+            out,
+            "{indent}if {cond} {{ {flex_prefix}{body}{flex_suffix} }}"
+        )
+        .unwrap();
     }
 }
 
@@ -826,6 +863,13 @@ fn emit_encoded_len_one(
 ) {
     let field = name_conv::field_name(&f.name);
     let cond = version_cond(f.versions, "version");
+    let force_non_flex = field_forces_non_flex(f);
+    let flex_prefix = if force_non_flex {
+        "{ let flex = false; ".to_owned()
+    } else {
+        String::new()
+    };
+    let flex_suffix = if force_non_flex { " }" } else { "" };
     let nullable_min = f.nullable_versions.map(|r| r.min);
     let needs_version_split = nullable_min.is_some_and(|nmin| nmin > f.versions.min);
     if needs_version_split {
@@ -839,7 +883,7 @@ fn emit_encoded_len_one(
         );
         writeln!(
             out,
-            "{indent}if {cond} {{ n += if version >= {nmin} {{ {nullable_body} }} else {{ {non_nullable_body} }}; }}"
+            "{indent}if {cond} {{ n += {flex_prefix}if version >= {nmin} {{ {nullable_body} }} else {{ {non_nullable_body} }}{flex_suffix}; }}"
         ).unwrap();
     } else {
         let body = encoded_len_expr(
@@ -848,7 +892,11 @@ fn emit_encoded_len_one(
             is_nullable(f),
             res_map,
         );
-        writeln!(out, "{indent}if {cond} {{ n += {body}; }}").unwrap();
+        writeln!(
+            out,
+            "{indent}if {cond} {{ n += {flex_prefix}{body}{flex_suffix}; }}"
+        )
+        .unwrap();
     }
 }
 
@@ -1018,13 +1066,23 @@ fn emit_decode_borrow_impl(
     } else {
         ""
     };
+    let version_err = match spec.message_type {
+        MessageType::Request | MessageType::Response => {
+            "return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });"
+                .to_owned()
+        }
+        MessageType::Header | MessageType::Data => {
+            let name = &spec.name;
+            format!("return Err(ProtocolError::SchemaMismatch(\"{name} version out of range\"));")
+        }
+    };
     writeln!(
         out,
         "
 impl<'de> DecodeBorrow<'de> for {type_name}{lt} {{
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {{
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {{
-            return Err(ProtocolError::UnsupportedVersion {{ api_key: API_KEY, version }});
+            {version_err}
         }}
         let flex = is_flexible(version);
         let mut out = Self::default();"
@@ -1116,6 +1174,14 @@ fn emit_decode_borrow_one(
 ) {
     let field = name_conv::field_name(&f.name);
     let cond = version_cond(f.versions, "version");
+    // Per-field `flexibleVersions: "none"` forces legacy encoding for this field.
+    let force_non_flex = field_forces_non_flex(f);
+    let flex_prefix = if force_non_flex {
+        "{ let flex = false; ".to_owned()
+    } else {
+        String::new()
+    };
+    let flex_suffix = if force_non_flex { " }" } else { "" };
     let nullable_min = f.nullable_versions.map(|r| r.min);
     let needs_version_split = nullable_min.is_some_and(|nmin| nmin > f.versions.min);
     if needs_version_split {
@@ -1124,11 +1190,15 @@ fn emit_decode_borrow_one(
         let non_nullable_call = decode_borrow_call(&f.field_type, false, res_map);
         writeln!(
             out,
-            "{indent}if {cond} {{ out.{field} = if version >= {nmin} {{ {nullable_call} }} else {{ Some({non_nullable_call}) }}; }}"
+            "{indent}if {cond} {{ out.{field} = {flex_prefix}if version >= {nmin} {{ {nullable_call} }} else {{ Some({non_nullable_call}) }}{flex_suffix}; }}"
         ).unwrap();
     } else {
         let call = decode_borrow_call(&f.field_type, is_nullable(f), res_map);
-        writeln!(out, "{indent}if {cond} {{ out.{field} = {call}; }}").unwrap();
+        writeln!(
+            out,
+            "{indent}if {cond} {{ out.{field} = {flex_prefix}{call}{flex_suffix}; }}"
+        )
+        .unwrap();
     }
 }
 

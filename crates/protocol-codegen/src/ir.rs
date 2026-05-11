@@ -53,6 +53,11 @@ pub struct FieldSpec {
     pub map_key: bool,
     #[serde(default)]
     pub about: String,
+    /// Per-field flexible-version override. `Some(FlexibleVersions::None)` means this
+    /// field always uses legacy (non-compact) encoding even in a flexible-version message.
+    /// `None` means "inherit from the message-level `flexible_versions`" (the common case).
+    #[serde(default)]
+    pub flexible_versions: Option<FlexibleVersions>,
 }
 
 fn default_entity_type() -> String {
