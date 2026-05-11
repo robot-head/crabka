@@ -10,6 +10,7 @@ mod builder;
 mod consumer;
 mod error;
 mod heartbeat;
+mod poll;
 
 pub use builder::{AutoOffsetReset, ConsumerBuilder};
 pub use consumer::{Consumer, ConsumerRecord};
