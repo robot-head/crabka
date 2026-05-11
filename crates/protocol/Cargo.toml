@@ -27,3 +27,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 toml = { workspace = true }
+criterion = { version = "4.6.0", package = "codspeed-criterion-compat" }
+
+[[bench]]
+name = "codec"
+harness = false
