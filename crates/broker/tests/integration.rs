@@ -20,14 +20,16 @@ use crabka_protocol::records::{Record, RecordBatch};
 /// `PartitionProduceData.records` is `Option<RecordBatch>` (NOT raw bytes
 /// — that was the plan's first draft), so callers pass the batch by value.
 fn record_batch_with_values(values: &[&str]) -> RecordBatch {
+    let len_i32 = i32::try_from(values.len()).expect("test fixture small enough for i32");
+    let len_i64 = i64::try_from(values.len()).expect("test fixture small enough for i64");
     let mut batch = RecordBatch {
-        last_offset_delta: (values.len() as i32 - 1).max(0),
-        max_timestamp: values.len() as i64,
+        last_offset_delta: (len_i32 - 1).max(0),
+        max_timestamp: len_i64,
         ..RecordBatch::default()
     };
     for (i, v) in values.iter().enumerate() {
         batch.records.push(Record {
-            offset_delta: i as i32,
+            offset_delta: i32::try_from(i).expect("test fixture small enough for i32"),
             value: Some(Bytes::from(v.to_string())),
             ..Default::default()
         });

@@ -6,6 +6,10 @@ use std::path::PathBuf;
 
 use crabka_log::LogConfig;
 
+/// Construction-time configuration for [`crate::Broker::start`].
+///
+/// Build directly when embedding the broker as a library, or via the
+/// `crabka-broker` binary's clap CLI in production.
 #[derive(Debug, Clone)]
 pub struct BrokerConfig {
     /// Broker id reported in `Metadata` responses. Default: 1.

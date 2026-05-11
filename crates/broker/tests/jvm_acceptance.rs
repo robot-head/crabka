@@ -53,11 +53,7 @@ fn resolve_host_bootstrap() -> (String, u16) {
 /// `advertised_listener` is set to the same `host:port` the JVM client
 /// uses in `--bootstrap-server` — Metadata responses tell the JVM client
 /// where to go, so this must be reachable from inside the container.
-async fn start_host_broker() -> (
-    crabka_broker::BrokerHandle,
-    String,
-    tempfile::TempDir,
-) {
+async fn start_host_broker() -> (crabka_broker::BrokerHandle, String, tempfile::TempDir) {
     let (advertised, port) = resolve_host_bootstrap();
     let dir = tempfile::tempdir().unwrap();
     let listen_addr = format!("0.0.0.0:{port}").parse().unwrap();
