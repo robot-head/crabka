@@ -27,7 +27,7 @@ fn rust_decode<T: for<'a> Decode<'a>>(bytes: &[u8], version: i16) -> T {
 /// The key challenges:
 /// - v0: topics must be an empty array (not null); default means "all topics".
 /// - v1-3: topics=null (all topics), no other variable fields.
-/// - v4-7: allowAutoTopicCreation present (default false).
+/// - v4-7: allowAutoTopicCreation present (schema default: true).
 /// - v8-10: includeClusterAuthorizedOperations + includeTopicAuthorizedOperations.
 /// - v9-10: same fields but flexible encoding.
 /// - v11-13: includeClusterAuthorizedOperations removed; includeTopicAuthorizedOperations stays.
@@ -35,16 +35,16 @@ fn request_oracle_value(version: i16) -> serde_json::Value {
     match version {
         0 => json!({"topics": []}),
         1..=3 => json!({"topics": null}),
-        4..=7 => json!({"topics": null, "allowAutoTopicCreation": false}),
+        4..=7 => json!({"topics": null, "allowAutoTopicCreation": true}),
         8..=10 => json!({
             "topics": null,
-            "allowAutoTopicCreation": false,
+            "allowAutoTopicCreation": true,
             "includeClusterAuthorizedOperations": false,
             "includeTopicAuthorizedOperations": false
         }),
         11..=i16::MAX => json!({
             "topics": null,
-            "allowAutoTopicCreation": false,
+            "allowAutoTopicCreation": true,
             "includeTopicAuthorizedOperations": false
         }),
         _ => json!({}),
@@ -55,7 +55,8 @@ fn request_oracle_value(version: i16) -> serde_json::Value {
 fn response_oracle_value(version: i16) -> serde_json::Value {
     match version {
         0 => json!({"brokers": [], "topics": []}),
-        1..=2 => json!({"brokers": [], "topics": [], "controllerId": -1}),
+        1 => json!({"brokers": [], "topics": [], "controllerId": -1}),
+        2 => json!({"brokers": [], "topics": [], "clusterId": null, "controllerId": -1}),
         3..=7 | 11..=12 => json!({
             "brokers": [],
             "topics": [],

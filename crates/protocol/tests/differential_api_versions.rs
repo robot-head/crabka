@@ -80,7 +80,7 @@ fn apiversions_response_v3_byte_equal() {
         ],
         throttle_time_ms: 5,
         supported_features: vec![],
-        finalized_features_epoch: 0,
+        finalized_features_epoch: -1,
         finalized_features: vec![],
         zk_migration_ready: false,
         unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
