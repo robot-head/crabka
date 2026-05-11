@@ -32,7 +32,11 @@ jobs:
           distribution: temurin
           java-version: 17
       - run: (cd tools/oracle && ./gradlew installDist --no-daemon)
-      - run: cargo test --workspace -- --include-ignored
+      # `--exclude crabka-client-core` skips the testcontainers-based integration
+      # tests (which need Docker). client-core's unit tests run under the
+      # `rust` matrix job; its docker-gated tests run under
+      # `client-core-integration`. We only want JVM oracle tests here.
+      - run: cargo test --workspace --exclude crabka-client-core -- --include-ignored
 
   cargo-deny:
     runs-on: ubuntu-latest
@@ -42,12 +46,18 @@ jobs:
         with:
           command: check advisories bans sources licenses
 
-  cargo-semver-checks:
+  # cargo-semver-checks is intentionally disabled until Crabka publishes its
+  # first crate to crates.io (tracked under the slice 1e publishing workflow).
+  # Until then, the tool has no baseline to compare against and errors out with
+  # "crate not found in registry". Re-enable once at least one crate is on
+  # crates.io.
+
+  # Real-broker integration smoke test against testcontainers-spawned Kafka.
+  client-core-integration:
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-      - uses: obi1kenobi/cargo-semver-checks-action@v2
         with:
-          rust-toolchain: stable
+          toolchain: "1.95.0"
+      - run: cargo test -p crabka-client-core --test integration -- --ignored --nocapture

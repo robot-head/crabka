@@ -37,6 +37,6 @@ pub mod primitives;
 pub mod records;
 pub mod tagged_fields;
 
-pub use codec::{Decode, DecodeBorrow, Encode};
+pub use codec::{Decode, DecodeBorrow, Encode, ProtocolRequest};
 pub use error::ProtocolError;
 pub use tagged_fields::{UnknownTaggedField, UnknownTaggedFields};

@@ -9,7 +9,14 @@ feature-depth = 1
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "deny"
-ignore = []
+ignore = [
+    # rustls-pemfile is unmaintained; pulled in transitively as a dev-only dep
+    # via testcontainers -> bollard. No safe upgrade exists (the replacement
+    # `rustls-pki-types::pem` requires a major version bump in bollard). The
+    # crate is not part of any shipping Crabka binary or library — only the
+    # Docker-based integration test target compiles against it.
+    "RUSTSEC-2025-0134",
+]
 
 [licenses]
 allow = [

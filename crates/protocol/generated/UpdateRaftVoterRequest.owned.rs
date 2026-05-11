@@ -198,3 +198,11 @@ pub fn default_json(version: i16) -> ::serde_json::Value {
     obj.insert("kRaftVersionFeature".to_string(), { let mut m = ::serde_json::Map::new(); m.insert("minSupportedVersion".to_string(), ::serde_json::json!(0)); m.insert("maxSupportedVersion".to_string(), ::serde_json::json!(0)); ::serde_json::Value::Object(m) });
     ::serde_json::Value::Object(obj)
 }
+
+impl crate::ProtocolRequest for UpdateRaftVoterRequest {
+    const API_KEY: i16 = API_KEY;
+    const MIN_VERSION: i16 = MIN_VERSION;
+    const MAX_VERSION: i16 = MAX_VERSION;
+    const FLEXIBLE_MIN: i16 = FLEXIBLE_MIN;
+    type Response = super::update_raft_voter_response::UpdateRaftVoterResponse;
+}

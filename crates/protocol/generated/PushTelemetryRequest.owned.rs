@@ -92,3 +92,11 @@ pub fn default_json(version: i16) -> ::serde_json::Value {
     obj.insert("metrics".to_string(), ::serde_json::Value::String(String::new()));
     ::serde_json::Value::Object(obj)
 }
+
+impl crate::ProtocolRequest for PushTelemetryRequest {
+    const API_KEY: i16 = API_KEY;
+    const MIN_VERSION: i16 = MIN_VERSION;
+    const MAX_VERSION: i16 = MAX_VERSION;
+    const FLEXIBLE_MIN: i16 = FLEXIBLE_MIN;
+    type Response = super::push_telemetry_response::PushTelemetryResponse;
+}

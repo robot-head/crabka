@@ -10,6 +10,7 @@ use std::fmt::Write;
 use crate::emit::EmittedMessage;
 use crate::emit::common::{banner, format_int_literal};
 use crate::emit::default_json;
+use crate::emit::protocol_request;
 use crate::ir::{FieldSpec, FlexibleVersions, MessageSpec, MessageType, VersionRange};
 use crate::name_conv;
 use crate::resolve::{self, Resolution, StructKind};
@@ -42,6 +43,11 @@ pub fn emit(spec: &MessageSpec, schemas_version: &str) -> Result<EmittedMessage,
 
     // Emit the default_json() helper for differential testing against the JVM oracle.
     primary.push_str(&default_json::emit_default_json(spec));
+
+    // Emit `impl crate::ProtocolRequest` for Request-typed messages.
+    if let Some(impl_block) = protocol_request::emit_protocol_request(spec) {
+        primary.push_str(&impl_block);
+    }
 
     // Emit common structs into separate file bodies.
     let mut commons: Vec<(String, String)> = Vec::new();
