@@ -49,12 +49,12 @@ impl Log {
         let mut segments: Vec<Arc<Segment>> = Vec::with_capacity(base_offsets.len());
         let mut active: Option<Segment> = None;
         for (i, base) in base_offsets.iter().enumerate() {
-            let mut seg = Segment::open(&dir, *base)?;
             if i + 1 < base_offsets.len() {
+                let mut seg = Segment::open(&dir, *base)?;
                 seg.seal();
                 segments.push(Arc::new(seg));
             } else {
-                active = Some(seg);
+                active = Some(Segment::open_active(&dir, *base, config.validate_on_open)?);
             }
         }
 
@@ -371,6 +371,29 @@ mod tests {
         let before = log.log_end_offset();
         log.truncate_to(before + 100).unwrap();
         assert_eq!(log.log_end_offset(), before);
+    }
+
+    #[test]
+    fn open_recovers_partial_trailing_batch() {
+        let dir = tempdir().unwrap();
+        {
+            let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
+            let mut b1 = sample_batch(3);
+            let mut b2 = sample_batch(2);
+            log.append(&mut b1).unwrap();
+            log.append(&mut b2).unwrap();
+        }
+        // Append 10 bytes of garbage to the .log file.
+        let log_path = dir.path().join("00000000000000000000.log");
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&log_path)
+            .unwrap();
+        std::io::Write::write_all(&mut f, &[0xAB; 10]).unwrap();
+        f.sync_data().unwrap();
+        drop(f);
+        let log = Log::open(dir.path(), LogConfig::default()).unwrap();
+        assert_eq!(log.log_end_offset(), 5);
     }
 
     #[test]

@@ -54,6 +54,59 @@ impl Segment {
         })
     }
 
+    /// Open as the active segment, scanning from the last-indexed position
+    /// to EOF when `validate` is true. A partial trailing batch (or one
+    /// that fails to decode) is truncated; cleanly decoded batches update
+    /// `last_offset` and `max_timestamp`.
+    pub fn open_active(dir: &Path, base_offset: i64, validate: bool) -> Result<Self, LogError> {
+        let mut seg = Self::open(dir, base_offset)?;
+        if validate {
+            seg.recover_active_tail()?;
+        }
+        Ok(seg)
+    }
+
+    fn recover_active_tail(&mut self) -> Result<(), LogError> {
+        let scan_start = self
+            .offset_index
+            .last_entry()
+            .map_or(0u64, |(_, pos)| u64::from(pos));
+        if scan_start >= self.log_size {
+            return Ok(());
+        }
+
+        let mut f = self.log_file.try_clone()?;
+        f.seek(SeekFrom::Start(scan_start))?;
+        let mut buf =
+            Vec::with_capacity(usize::try_from(self.log_size - scan_start).unwrap_or(0));
+        f.read_to_end(&mut buf)?;
+
+        let mut cur: &[u8] = &buf;
+        let mut consumed: u64 = 0;
+        let mut last_offset = self.last_offset;
+        let mut max_ts = self.max_timestamp;
+        while !cur.is_empty() {
+            let before = cur.len();
+            let Ok(batch) = RecordBatch::decode(&mut cur) else {
+                break;
+            };
+            consumed += (before - cur.len()) as u64;
+            last_offset = batch.base_offset + i64::from(batch.last_offset_delta);
+            if batch.max_timestamp > max_ts {
+                max_ts = batch.max_timestamp;
+            }
+        }
+
+        let valid_end = scan_start + consumed;
+        if valid_end < self.log_size {
+            self.log_file.set_len(valid_end)?;
+            self.log_size = valid_end;
+        }
+        self.last_offset = last_offset;
+        self.max_timestamp = max_ts;
+        Ok(())
+    }
+
     /// Open an existing segment for reading. Lightweight — no full scan.
     pub fn open(dir: &Path, base_offset: i64) -> Result<Self, LogError> {
         let log_path = name::log_path(dir, base_offset);

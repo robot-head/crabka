@@ -10,6 +10,7 @@ mod error;
 mod index;
 mod log;
 mod name;
+mod recovery;
 mod segment;
 
 pub use config::LogConfig;
