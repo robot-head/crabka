@@ -3,6 +3,7 @@ mod support;
 use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
 use crabka_protocol::owned::delete_topics_request::{DeleteTopicState, DeleteTopicsRequest};
+use crabka_protocol::owned::fetch_request::{FetchPartition, FetchRequest, FetchTopic};
 use crabka_protocol::owned::metadata_request::MetadataRequest;
 use crabka_protocol::owned::produce_request::{
     PartitionProduceData, ProduceRequest, TopicProduceData,
@@ -266,5 +267,58 @@ async fn produce_to_unknown_topic_returns_3() {
     };
     let resp = p.client.send(req).await.expect("Produce unknown");
     assert_eq!(resp.responses[0].partition_responses[0].error_code, 3);
+    p.broker.shutdown().await;
+}
+
+#[tokio::test]
+async fn produce_then_fetch_round_trip() {
+    let p = support::start().await;
+    create_topic(&p, "round", 1).await;
+    let topic_id = topic_id_for(&p, "round").await;
+
+    let prod = ProduceRequest {
+        acks: 1,
+        timeout_ms: 5_000,
+        topic_data: vec![TopicProduceData {
+            name: "round".into(),
+            topic_id,
+            partition_data: vec![PartitionProduceData {
+                index: 0,
+                records: Some(one_record_batch(3)),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let presp = p.client.send(prod).await.expect("Produce");
+    assert_eq!(presp.responses[0].partition_responses[0].error_code, 0);
+
+    let fetch = FetchRequest {
+        max_wait_ms: 100,
+        min_bytes: 1,
+        topics: vec![FetchTopic {
+            topic: "round".into(),
+            topic_id,
+            partitions: vec![FetchPartition {
+                partition: 0,
+                fetch_offset: 0,
+                partition_max_bytes: 1_048_576,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let fresp = p.client.send(fetch).await.expect("Fetch");
+    assert_eq!(fresp.responses.len(), 1);
+    let part = &fresp.responses[0].partitions[0];
+    assert_eq!(part.error_code, 0);
+    let batch = part
+        .records
+        .as_ref()
+        .expect("records must be present after produce");
+    assert_eq!(batch.records.len(), 3);
+
     p.broker.shutdown().await;
 }

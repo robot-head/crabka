@@ -46,6 +46,7 @@ impl HandlerTable {
 pub(crate) mod api_versions;
 pub(crate) mod create_topics;
 pub(crate) mod delete_topics;
+pub(crate) mod fetch;
 pub(crate) mod metadata;
 pub(crate) mod produce;
 
@@ -55,6 +56,7 @@ pub(crate) mod produce;
 pub(crate) fn build_table() -> HandlerTable {
     let mut t = HandlerTable::new();
     t.register(0, produce::handle);
+    t.register(1, fetch::handle);
     t.register(3, metadata::handle);
     t.register(18, api_versions::handle);
     t.register(19, create_topics::handle);
