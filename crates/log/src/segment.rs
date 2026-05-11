@@ -77,8 +77,7 @@ impl Segment {
 
         let mut f = self.log_file.try_clone()?;
         f.seek(SeekFrom::Start(scan_start))?;
-        let mut buf =
-            Vec::with_capacity(usize::try_from(self.log_size - scan_start).unwrap_or(0));
+        let mut buf = Vec::with_capacity(usize::try_from(self.log_size - scan_start).unwrap_or(0));
         f.read_to_end(&mut buf)?;
 
         let mut cur: &[u8] = &buf;

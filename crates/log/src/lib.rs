@@ -11,6 +11,7 @@ mod index;
 mod log;
 mod name;
 mod recovery;
+mod retention;
 mod segment;
 
 pub use config::LogConfig;

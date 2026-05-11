@@ -3,12 +3,14 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use crabka_protocol::records::RecordBatch;
 
 use crate::config::LogConfig;
 use crate::error::LogError;
 use crate::name;
+use crate::retention;
 use crate::segment::Segment;
 
 #[derive(Debug)]
@@ -257,6 +259,39 @@ impl Log {
         }
         Ok(())
     }
+
+    /// Periodic maintenance: apply time- and size-based retention to the
+    /// sealed segments. The active segment is never deleted, and if every
+    /// segment would otherwise be evicted we retain at least one.
+    /// (Active-roll-on-age is a placeholder per the plan; skip it.)
+    pub fn tick(&mut self, now: SystemTime) -> Result<(), LogError> {
+        let sealed_refs: Vec<&Segment> = self.segments.iter().map(AsRef::as_ref).collect();
+        let active_size = self.active.as_ref().map_or(0, Segment::size_bytes);
+
+        let time_evict = retention::time_based_evict(&sealed_refs, &self.config, now);
+        let size_evict = retention::size_based_evict(&sealed_refs, active_size, &self.config);
+
+        // Union preserving order: time first (oldest first), then size.
+        let mut to_evict: Vec<i64> = time_evict;
+        for base in size_evict {
+            if !to_evict.contains(&base) {
+                to_evict.push(base);
+            }
+        }
+
+        // Guard: never drop the only remaining segment. `total_segments`
+        // includes the active one.
+        let total_segments = self.segments.len() + usize::from(self.active.is_some());
+        if to_evict.len() >= total_segments {
+            to_evict.truncate(total_segments.saturating_sub(1));
+        }
+
+        for base in to_evict {
+            self.segments.retain(|s| s.base_offset() != base);
+            let _ = retention::delete_segment_files(&self.dir, base);
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -394,6 +429,37 @@ mod tests {
         drop(f);
         let log = Log::open(dir.path(), LogConfig::default()).unwrap();
         assert_eq!(log.log_end_offset(), 5);
+    }
+
+    #[test]
+    fn tick_with_no_retention_is_noop() {
+        let dir = tempdir().unwrap();
+        let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
+        let mut b1 = sample_batch(2);
+        let mut b2 = sample_batch(3);
+        log.append(&mut b1).unwrap();
+        log.append(&mut b2).unwrap();
+        let before = log.log_end_offset();
+        log.tick(SystemTime::now()).unwrap();
+        assert_eq!(log.log_end_offset(), before);
+    }
+
+    #[test]
+    fn tick_never_deletes_only_segment() {
+        use std::time::Duration;
+        let dir = tempdir().unwrap();
+        let config = LogConfig {
+            retention_ms: Some(Duration::from_secs(1)),
+            retention_bytes: Some(0),
+            ..LogConfig::default()
+        };
+        let mut log = Log::open(dir.path(), config).unwrap();
+        let mut b1 = sample_batch(2);
+        log.append(&mut b1).unwrap();
+        // Advance "now" 30 days into the future.
+        let now = SystemTime::now() + Duration::from_hours(30 * 24);
+        log.tick(now).unwrap();
+        assert_eq!(log.log_end_offset(), 2);
     }
 
     #[test]
