@@ -157,6 +157,22 @@ pub fn put_compact_bytes<B: BufMut>(buf: &mut B, b: &[u8]) {
     buf.put_slice(b);
 }
 
+pub fn put_compact_nullable_bytes<B: BufMut>(buf: &mut B, b: Option<&[u8]>) {
+    match b {
+        None => put_uvarint(buf, 0),
+        Some(b) => put_compact_bytes(buf, b),
+    }
+}
+
+pub fn get_compact_bytes_owned<B: Buf>(buf: &mut B) -> Result<Bytes, ProtocolError> {
+    match get_compact_nullable_bytes_owned(buf)? {
+        Some(b) => Ok(b),
+        None => Err(ProtocolError::InvalidValue(
+            "non-nullable COMPACT_BYTES was null",
+        )),
+    }
+}
+
 pub fn get_compact_nullable_bytes_owned<B: Buf>(
     buf: &mut B,
 ) -> Result<Option<Bytes>, ProtocolError> {
