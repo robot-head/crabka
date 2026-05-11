@@ -47,20 +47,25 @@ impl Consumer {
             }
         }
 
+        let topic_ids = self.topic_ids.lock().await.clone();
         let topics: Vec<FetchTopic> = by_topic
             .into_iter()
-            .map(|(name, plist)| FetchTopic {
-                topic: name,
-                partitions: plist
-                    .into_iter()
-                    .map(|(p, off)| FetchPartition {
-                        partition: p,
-                        fetch_offset: off,
-                        partition_max_bytes: 1 << 20,
-                        ..Default::default()
-                    })
-                    .collect(),
-                ..Default::default()
+            .map(|(name, plist)| {
+                let topic_id = topic_ids.get(&name).copied().unwrap_or_default();
+                FetchTopic {
+                    topic: name,
+                    topic_id,
+                    partitions: plist
+                        .into_iter()
+                        .map(|(p, off)| FetchPartition {
+                            partition: p,
+                            fetch_offset: off,
+                            partition_max_bytes: 1 << 20,
+                            ..Default::default()
+                        })
+                        .collect(),
+                    ..Default::default()
+                }
             })
             .collect();
 
@@ -83,22 +88,34 @@ impl Consumer {
         // single RecordBatch out of the bytes — which is good enough for
         // the MVP. We emit one ConsumerRecord per Record and bump
         // next_offsets to the highest seen offset + 1.
+        // Reverse-map topic_id → name. At Fetch v ≥ 13 the response carries
+        // only `topic_id`; `topic.topic` is empty.
+        let id_to_name: HashMap<_, _> = topic_ids
+            .iter()
+            .map(|(name, id)| (*id, name.clone()))
+            .collect();
+
         let mut out: Vec<ConsumerRecord> = Vec::new();
         let mut offsets = self.next_offsets.lock().await;
         for topic in &resp.responses {
+            let topic_name = if topic.topic.is_empty() {
+                id_to_name.get(&topic.topic_id).cloned().unwrap_or_default()
+            } else {
+                topic.topic.clone()
+            };
             for part in &topic.partitions {
                 let Some(batch) = &part.records else { continue };
                 for r in &batch.records {
                     let offset = batch.base_offset + i64::from(r.offset_delta);
                     out.push(ConsumerRecord {
-                        topic: topic.topic.clone(),
+                        topic: topic_name.clone(),
                         partition: part.partition_index,
                         offset,
                         timestamp: batch.base_timestamp + r.timestamp_delta,
                         key: r.key.clone(),
                         value: r.value.clone(),
                     });
-                    offsets.insert((topic.topic.clone(), part.partition_index), offset + 1);
+                    offsets.insert((topic_name.clone(), part.partition_index), offset + 1);
                 }
             }
         }

@@ -172,19 +172,24 @@ impl ConsumerBuilder {
             return Err(ConsumerError::Server(r2.error_code));
         }
 
-        // 3. If we are the leader, compute the assignment via the range
-        //    assignor. Otherwise SyncGroup with an empty assignments list.
+        // 3. Always issue a Metadata to resolve topic_ids (needed for
+        //    Fetch v ≥ 13). If we are the leader, also use the partition
+        //    counts to compute the range assignment.
+        let md = client.send(MetadataRequest::default()).await?;
+        let mut topic_ids: HashMap<String, crabka_protocol::primitives::uuid::Uuid> =
+            HashMap::new();
+        let mut topic_partitions: HashMap<String, i32> = HashMap::new();
+        for t in &md.topics {
+            let Some(name) = &t.name else { continue };
+            if self.topics.iter().any(|s| s == name) {
+                let count = i32::try_from(t.partitions.len()).unwrap_or(i32::MAX);
+                topic_partitions.insert(name.clone(), count);
+                topic_ids.insert(name.clone(), t.topic_id);
+            }
+        }
+
         let is_leader = r2.leader == member_id;
         let assignments_for_sync: Vec<SyncGroupRequestAssignment> = if is_leader {
-            let md = client.send(MetadataRequest::default()).await?;
-            let mut topic_partitions: HashMap<String, i32> = HashMap::new();
-            for t in &md.topics {
-                let Some(name) = &t.name else { continue };
-                if self.topics.iter().any(|s| s == name) {
-                    let count = i32::try_from(t.partitions.len()).unwrap_or(i32::MAX);
-                    topic_partitions.insert(name.clone(), count);
-                }
-            }
             let members: Vec<(String, Vec<String>)> = r2
                 .members
                 .iter()
@@ -281,6 +286,7 @@ impl ConsumerBuilder {
             subscribed_topics: self.topics,
             assigned: Arc::new(Mutex::new(assigned_partitions)),
             next_offsets: Arc::new(Mutex::new(next_offsets)),
+            topic_ids: Arc::new(Mutex::new(topic_ids)),
             session_timeout: self.session_timeout,
             heartbeat_interval: self.heartbeat_interval,
             rebalance_rx: Mutex::new(notice_rx),

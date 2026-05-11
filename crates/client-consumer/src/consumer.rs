@@ -12,6 +12,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crabka_client_core::Client;
+use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 
 use crate::error::ConsumerError;
 use crate::heartbeat::RebalanceNotice;
@@ -30,6 +31,9 @@ pub struct Consumer {
     pub(crate) assigned: Arc<Mutex<Vec<(String, i32)>>>,
     /// Next offset to fetch per partition.
     pub(crate) next_offsets: Arc<Mutex<HashMap<(String, i32), i64>>>,
+    /// Topic UUIDs resolved at build time. Required by Fetch v ≥ 13
+    /// (which carries `topic_id` instead of the topic name).
+    pub(crate) topic_ids: Arc<Mutex<HashMap<String, WireUuid>>>,
     pub(crate) session_timeout: Duration,
     pub(crate) heartbeat_interval: Duration,
     pub(crate) rebalance_rx: Mutex<mpsc::Receiver<RebalanceNotice>>,
