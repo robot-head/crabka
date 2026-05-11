@@ -53,13 +53,6 @@ jobs:
   # crates.io.
 
   # Real-broker integration smoke test against testcontainers-spawned Kafka.
-  # The `cargo test` step is marked `continue-on-error: true` (step-level, not
-  # job-level — step-level keeps the JOB green even when the step fails) until
-  # we understand why the broker accepts TCP but disconnects on our
-  # ApiVersions roundtrip in CI's Docker environment. Byte-level protocol
-  # correctness is already proven by `jvm-differential` (604 (api_key,
-  # version) pairs); this job provides end-to-end smoke value only and must
-  # not block merges. Tracked as follow-up.
   client-core-integration:
     runs-on: ubuntu-latest
     steps:
@@ -67,5 +60,4 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.95.0"
-      - continue-on-error: true
-        run: cargo test -p crabka-client-core --test integration -- --ignored --nocapture
+      - run: cargo test -p crabka-client-core --test integration -- --ignored --nocapture

@@ -134,8 +134,15 @@ async fn api_versions_against_real_broker() {
     let (kafka, bootstrap) = start_kafka().await;
     let client = bootstrap_client(&bootstrap).await;
 
+    // KIP-511: at v3+, brokers reject empty `client_software_name`/`version`
+    // with `INVALID_REQUEST` (error 42). The regex `^[a-zA-Z0-9.\-]+$` must
+    // match each field.
     let resp = client
-        .send(ApiVersionsRequest::default())
+        .send(ApiVersionsRequest {
+            client_software_name: "crabka".into(),
+            client_software_version: env!("CARGO_PKG_VERSION").into(),
+            ..Default::default()
+        })
         .await
         .expect("ApiVersions failed");
 
@@ -202,11 +209,15 @@ async fn create_then_delete_topic() {
         "CreateTopics error: {topic_result:?}"
     );
 
+    // The schema's split between v0-5 (`topic_names: []string`) and v6+
+    // (`topics: []DeleteTopicState`) is settled by the encoder per the
+    // negotiated version. Populate both so the test works against any broker.
     let delete = DeleteTopicsRequest {
         topics: vec![DeleteTopicState {
             name: Some("crabka-test-topic".into()),
             ..Default::default()
         }],
+        topic_names: vec!["crabka-test-topic".into()],
         timeout_ms: 5_000,
         ..Default::default()
     };

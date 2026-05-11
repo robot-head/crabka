@@ -127,13 +127,17 @@ impl Connection {
         let corr_id = self.inner.next_corr_id.fetch_add(1, Ordering::Relaxed);
 
         // 3. Build request header + encoded body into one frame.
-        let flexible = version >= R::FLEXIBLE_MIN;
+        //
+        // The header has a trailing tagged-fields byte (header v2) iff the
+        // body is flexible. The `client_id` field is always i16 NULLABLE_STRING
+        // per the upstream `RequestHeader.json` schema.
+        let body_flexible = version >= R::FLEXIBLE_MIN;
         let mut frame = build_request_header(
             R::API_KEY,
             version,
             corr_id,
             &self.inner.options.client_id,
-            flexible,
+            body_flexible,
         );
         req.encode(&mut frame, version)?;
 
@@ -175,7 +179,7 @@ impl Connection {
         //     v1 adds 1 byte for the tagged-fields count (0x00 when empty).
         //   - Non-flexible messages: ResponseHeader v0 (no bytes after corr_id).
         let mut cursor: &[u8] = &body_bytes;
-        let uses_flexible_resp_header = flexible && R::API_KEY != API_VERSIONS_KEY;
+        let uses_flexible_resp_header = body_flexible && R::API_KEY != API_VERSIONS_KEY;
         if uses_flexible_resp_header && !cursor.is_empty() {
             // Consume the tagged-fields byte (always 0x00 in practice).
             cursor = &cursor[1..];
@@ -251,31 +255,37 @@ fn spawn_io_tasks(
 
 /// Build an encoded `RequestHeader` into a `BytesMut`.
 ///
-/// - `flexible = false` → `RequestHeader v1`: `client_id` as `NULLABLE_STRING` (i16 length).
-/// - `flexible = true`  → `RequestHeader v2`: `client_id` as `COMPACT_NULLABLE_STRING`
-///   (UVARINT length = `len + 1`) followed by an empty tagged-fields byte.
+/// Kafka has only two `RequestHeader` formats:
+///
+/// - **v1** (non-flexible): `api_key` + `version` + `corr_id` + i16
+///   `client_id` length + `client_id` bytes.
+/// - **v2** (flexible): same fields *plus* a trailing `tagged_fields` byte
+///   (`0x00` when empty).
+///
+/// Note that `client_id` is `NULLABLE_STRING` (i16 length) in **both**
+/// versions — the upstream `RequestHeader.json` schema marks the field as
+/// `"flexibleVersions": "none"`, so even a v2 header keeps the i16-length
+/// encoding. Using UVARINT here causes the broker to misread the length and
+/// throw `InvalidRequestException` during header parsing.
+///
+/// Pass `with_tagged_fields = true` iff the request body is flexible
+/// (`version >= R::FLEXIBLE_MIN`).
 fn build_request_header(
     api_key: i16,
     version: i16,
     corr_id: i32,
     client_id: &str,
-    flexible: bool,
+    with_tagged_fields: bool,
 ) -> BytesMut {
     let mut buf = BytesMut::with_capacity(32);
     buf.put_i16(api_key);
     buf.put_i16(version);
     buf.put_i32(corr_id);
-    if flexible {
-        // COMPACT_NULLABLE_STRING: length = byte_len + 1 as UVARINT.
-        let bytes = client_id.as_bytes();
-        let n = u32::try_from(bytes.len() + 1).expect("client_id fits in u32");
-        crate::transport::put_uvarint(&mut buf, n);
-        buf.put_slice(bytes);
+    let n = i16::try_from(client_id.len()).expect("client_id fits in i16");
+    buf.put_i16(n);
+    buf.put_slice(client_id.as_bytes());
+    if with_tagged_fields {
         buf.put_u8(0); // empty tagged fields
-    } else {
-        let n = i16::try_from(client_id.len()).expect("client_id fits in i16");
-        buf.put_i16(n);
-        buf.put_slice(client_id.as_bytes());
     }
     buf
 }
@@ -293,7 +303,7 @@ async fn fetch_api_versions(conn: &Connection) -> Result<ApiVersionTable, Client
     let req = ApiVersionsRequest::default();
     let corr_id = conn.inner.next_corr_id.fetch_add(1, Ordering::Relaxed);
 
-    // v0 is non-flexible; ResponseHeader is also v0 (just corr_id, already stripped).
+    // v0 is non-flexible: header v1, no tagged-fields byte.
     let mut frame = build_request_header(
         ApiVersionsRequest::API_KEY,
         0,
