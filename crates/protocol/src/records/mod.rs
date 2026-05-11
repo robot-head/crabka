@@ -8,4 +8,5 @@ mod error;
 pub mod header;
 
 pub use error::RecordsError;
-pub use header::{Attributes, TimestampType};
+pub use header::HEADER_LEN;
+pub use header::{Attributes, RecordBatchHeader, TimestampType};

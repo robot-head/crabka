@@ -48,22 +48,38 @@ mod tests {
     #[test]
     fn display_messages() {
         let cases: &[(RecordsError, &str)] = &[
-            (RecordsError::HeaderTooShort { needed: 4 }, "buffer too short for batch header"),
-            (RecordsError::UnsupportedMagic { found: 1 }, "batch magic byte 1 unsupported"),
             (
-                RecordsError::CrcMismatch { expected: 0xDEADBEEF, computed: 0x12345678 },
+                RecordsError::HeaderTooShort { needed: 4 },
+                "buffer too short for batch header",
+            ),
+            (
+                RecordsError::UnsupportedMagic { found: 1 },
+                "batch magic byte 1 unsupported",
+            ),
+            (
+                RecordsError::CrcMismatch {
+                    expected: 0xDEAD_BEEF,
+                    computed: 0x1234_5678,
+                },
                 "CRC mismatch: expected 0xdeadbeef",
             ),
-            (RecordsError::BodyTooShort { needed: 17 }, "batch body truncated"),
-            (RecordsError::RecordParse("bad varint".into()), "record parse failed"),
-            (RecordsError::ZerocopyFailure, "zerocopy reinterpretation failed"),
+            (
+                RecordsError::BodyTooShort { needed: 17 },
+                "batch body truncated",
+            ),
+            (
+                RecordsError::RecordParse("bad varint".into()),
+                "record parse failed",
+            ),
+            (
+                RecordsError::ZerocopyFailure,
+                "zerocopy reinterpretation failed",
+            ),
         ];
         for (err, contains) in cases {
             assert!(
                 err.to_string().contains(contains),
-                "{} did not contain {:?}",
-                err,
-                contains
+                "{err} did not contain {contains:?}",
             );
         }
     }
