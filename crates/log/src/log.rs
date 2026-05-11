@@ -137,6 +137,61 @@ impl Log {
         self.active = Some(Segment::create(&self.dir, new_base)?);
         Ok(())
     }
+
+    /// Read batches starting at `offset`, returning up to roughly
+    /// `max_bytes` of `.log` data. Walks sealed segments first, then the
+    /// active segment, so reads can span segment boundaries.
+    pub fn read(&self, offset: i64, max_bytes: usize) -> Result<ReadOutput, LogError> {
+        let log_start = self.log_start_offset();
+        let log_end = self.log_end_offset();
+        if offset < log_start {
+            return Err(LogError::OffsetTooLow {
+                requested: offset,
+                log_start,
+            });
+        }
+        if offset >= log_end {
+            return Ok(ReadOutput {
+                start_offset: log_end,
+                batches: Vec::new(),
+            });
+        }
+
+        let mut batches: Vec<RecordBatch> = Vec::new();
+        let mut current_offset = offset;
+        let mut remaining = max_bytes;
+
+        for seg in &self.segments {
+            if seg.last_offset() < current_offset {
+                continue;
+            }
+            let bs = seg.read(current_offset, remaining)?;
+            if !bs.is_empty() {
+                let consumed: usize = bs.iter().map(RecordBatch::encoded_len).sum();
+                remaining = remaining.saturating_sub(consumed);
+                let last = bs.last().expect("non-empty by branch");
+                current_offset = last.base_offset + i64::from(last.last_offset_delta) + 1;
+                batches.extend(bs);
+                if remaining == 0 {
+                    break;
+                }
+            }
+        }
+
+        if (remaining > 0 || batches.is_empty())
+            && let Some(active) = &self.active
+            && current_offset <= active.last_offset()
+        {
+            let bs = active.read(current_offset, remaining.max(1))?;
+            batches.extend(bs);
+        }
+
+        let start_offset = batches.first().map_or(offset, |b| b.base_offset);
+        Ok(ReadOutput {
+            start_offset,
+            batches,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -191,6 +246,41 @@ mod tests {
         assert_eq!(log.append(&mut b1).unwrap(), 0);
         assert_eq!(log.append(&mut b2).unwrap(), 3);
         assert_eq!(log.log_end_offset(), 5);
+    }
+
+    #[test]
+    fn append_then_read_back_in_order() {
+        let dir = tempdir().unwrap();
+        let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
+        for _ in 0..3 {
+            let mut b = sample_batch(2);
+            log.append(&mut b).unwrap();
+        }
+        let out = log.read(0, usize::MAX).unwrap();
+        assert_eq!(out.batches.len(), 3);
+        assert_eq!(out.start_offset, 0);
+    }
+
+    #[test]
+    fn read_offset_too_low_errors() {
+        let dir = tempdir().unwrap();
+        let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
+        let mut b = sample_batch(2);
+        log.append(&mut b).unwrap();
+        assert!(matches!(
+            log.read(-1, 1024),
+            Err(LogError::OffsetTooLow { .. })
+        ));
+    }
+
+    #[test]
+    fn read_at_log_end_returns_empty() {
+        let dir = tempdir().unwrap();
+        let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
+        let mut b = sample_batch(2);
+        log.append(&mut b).unwrap();
+        let out = log.read(log.log_end_offset(), 1024).unwrap();
+        assert!(out.batches.is_empty());
     }
 
     #[test]
