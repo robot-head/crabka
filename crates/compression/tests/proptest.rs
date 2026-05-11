@@ -1,4 +1,4 @@
-use crabka_compression::{compress, decompress, CompressionType};
+use crabka_compression::{CompressionType, compress, decompress};
 use proptest::prelude::*;
 
 fn arb_payload() -> impl Strategy<Value = Vec<u8>> {
@@ -23,8 +23,8 @@ macro_rules! roundtrip_for {
     };
 }
 
-roundtrip_for!(none_roundtrip,   CompressionType::None);
-roundtrip_for!(gzip_roundtrip,   CompressionType::Gzip);
+roundtrip_for!(none_roundtrip, CompressionType::None);
+roundtrip_for!(gzip_roundtrip, CompressionType::Gzip);
 roundtrip_for!(snappy_roundtrip, CompressionType::Snappy);
-roundtrip_for!(lz4_roundtrip,    CompressionType::Lz4);
-roundtrip_for!(zstd_roundtrip,   CompressionType::Zstd);
+roundtrip_for!(lz4_roundtrip, CompressionType::Lz4);
+roundtrip_for!(zstd_roundtrip, CompressionType::Zstd);
