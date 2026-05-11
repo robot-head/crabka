@@ -36,7 +36,9 @@ jobs:
       # tests (which need Docker). client-core's unit tests run under the
       # `rust` matrix job; its docker-gated tests run under
       # `client-core-integration`. We only want JVM oracle tests here.
-      - run: cargo test --workspace --exclude crabka-client-core -- --include-ignored
+      # `--exclude crabka-log` skips its testcontainers-based integration
+      # test (Docker-only); it runs under the `log-integration` job below.
+      - run: cargo test --workspace --exclude crabka-client-core --exclude crabka-log -- --include-ignored
 
   cargo-deny:
     runs-on: ubuntu-latest
@@ -61,3 +63,14 @@ jobs:
         with:
           toolchain: "1.95.0"
       - run: cargo test -p crabka-client-core --test integration -- --ignored --nocapture
+
+  # crabka-log integration: docker cp a JVM-produced partition dir out of
+  # a Kafka container and re-read it with crabka-log.
+  log-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.95.0"
+      - run: cargo test -p crabka-log --test integration -- --ignored --nocapture
