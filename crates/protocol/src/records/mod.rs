@@ -5,5 +5,7 @@
 
 mod crc;
 mod error;
+pub mod header;
 
 pub use error::RecordsError;
+pub use header::{Attributes, TimestampType};
