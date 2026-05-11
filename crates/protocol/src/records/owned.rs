@@ -655,4 +655,26 @@ mod batch_tests {
             Err(RecordsError::CrcMismatch { .. })
         ));
     }
+
+    macro_rules! roundtrip_compressed {
+        ($name:ident, $codec:expr) => {
+            #[test]
+            fn $name() {
+                let mut b = fixture_multi_record_batch();
+                b.attributes = b.attributes.with_compression($codec);
+
+                let mut buf = BytesMut::new();
+                b.encode(&mut buf).unwrap();
+                let mut cur: &[u8] = &buf[..];
+                let decoded = RecordBatch::decode(&mut cur).unwrap();
+                assert_eq!(decoded, b);
+                assert!(cur.is_empty());
+            }
+        };
+    }
+
+    roundtrip_compressed!(compressed_gzip, CompressionType::Gzip);
+    roundtrip_compressed!(compressed_snappy, CompressionType::Snappy);
+    roundtrip_compressed!(compressed_lz4, CompressionType::Lz4);
+    roundtrip_compressed!(compressed_zstd, CompressionType::Zstd);
 }
