@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use crabka_protocol_codegen::{emit_borrowed, emit_owned, ir, validate};
+use crabka_protocol_codegen::{emit, ir, validate};
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
@@ -35,7 +35,7 @@ enum RunError {
     #[error(transparent)]
     Validate(#[from] validate::ValidateError),
     #[error(transparent)]
-    Emit(#[from] emit_owned::EmitError),
+    Emit(#[from] emit::EmitError),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error("schemas/VERSION must contain a `sha:` line")]
@@ -62,8 +62,8 @@ fn run(schemas: &std::path::Path, out: &std::path::Path) -> Result<usize, RunErr
         if s.name != "ApiVersionsRequest" {
             continue;
         }
-        let owned_body = emit_owned::emit(s, &schemas_sha)?;
-        let borrowed_body = emit_borrowed::emit(s, &schemas_sha)?;
+        let owned_body = emit::owned::emit(s, &schemas_sha)?;
+        let borrowed_body = emit::borrowed::emit(s, &schemas_sha)?;
         std::fs::write(out.join(format!("{}.owned.rs", s.name)), owned_body)?;
         std::fs::write(out.join(format!("{}.borrowed.rs", s.name)), borrowed_body)?;
         count += 2;
