@@ -1,4 +1,4 @@
-//! Classify PascalCase type references in a `MessageSpec` as nested,
+//! Classify `PascalCase` type references in a `MessageSpec` as nested,
 //! common, or unknown. Used by the emitter to compute the Rust type path.
 
 use std::collections::HashMap;
@@ -28,7 +28,51 @@ pub enum ResolveError {
     Unknown { message: String, type_name: String },
 }
 
-/// Build a resolution map for one message. Maps each PascalCase type name
+fn base_type(t: &str) -> &str {
+    t.strip_prefix("[]").unwrap_or(t)
+}
+
+fn is_struct_type(t: &str) -> bool {
+    t.chars().next().is_some_and(char::is_uppercase)
+}
+
+/// Walk fields to find inline-defined nested structs (those with `fields:`).
+fn walk(fields: &[FieldSpec], map: &mut HashMap<String, Resolution>) {
+    for f in fields {
+        if !f.fields.is_empty() {
+            let type_name = base_type(&f.field_type);
+            map.insert(
+                type_name.to_string(),
+                Resolution {
+                    kind: StructKind::Nested,
+                    rust_path: type_name.to_string(),
+                },
+            );
+            walk(&f.fields, map);
+        }
+    }
+}
+
+/// Walk fields again to verify every struct-typed reference resolves.
+fn check(
+    fields: &[FieldSpec],
+    map: &HashMap<String, Resolution>,
+    message: &str,
+) -> Result<(), ResolveError> {
+    for f in fields {
+        let base = base_type(&f.field_type);
+        if is_struct_type(base) && !map.contains_key(base) {
+            return Err(ResolveError::Unknown {
+                message: message.to_string(),
+                type_name: base.to_string(),
+            });
+        }
+        check(&f.fields, map, message)?;
+    }
+    Ok(())
+}
+
+/// Build a resolution map for one message. Maps each `PascalCase` type name
 /// referenced anywhere in the field tree to its kind + Rust path.
 pub fn resolve_message(spec: &MessageSpec) -> Result<HashMap<String, Resolution>, ResolveError> {
     let mut map = HashMap::new();
@@ -45,53 +89,10 @@ pub fn resolve_message(spec: &MessageSpec) -> Result<HashMap<String, Resolution>
         );
     }
 
-    // Walk fields to find inline-defined nested structs (those with `fields:`).
-    fn walk(fields: &[FieldSpec], map: &mut HashMap<String, Resolution>) {
-        for f in fields {
-            if !f.fields.is_empty() {
-                let type_name = base_type(&f.field_type);
-                map.insert(
-                    type_name.to_string(),
-                    Resolution {
-                        kind: StructKind::Nested,
-                        rust_path: type_name.to_string(),
-                    },
-                );
-                walk(&f.fields, map);
-            }
-        }
-    }
     walk(&spec.fields, &mut map);
-
-    // Walk fields again to verify every struct-typed reference resolves.
-    fn check<'a>(
-        fields: &'a [FieldSpec],
-        map: &HashMap<String, Resolution>,
-        message: &str,
-    ) -> Result<(), ResolveError> {
-        for f in fields {
-            let base = base_type(&f.field_type);
-            if is_struct_type(base) && !map.contains_key(base) {
-                return Err(ResolveError::Unknown {
-                    message: message.to_string(),
-                    type_name: base.to_string(),
-                });
-            }
-            check(&f.fields, map, message)?;
-        }
-        Ok(())
-    }
     check(&spec.fields, &map, &spec.name)?;
 
     Ok(map)
-}
-
-fn base_type(t: &str) -> &str {
-    t.strip_prefix("[]").unwrap_or(t)
-}
-
-fn is_struct_type(t: &str) -> bool {
-    t.chars().next().map_or(false, char::is_uppercase)
 }
 
 #[cfg(test)]
