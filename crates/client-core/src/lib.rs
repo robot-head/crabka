@@ -2,6 +2,7 @@
 
 mod connection;
 mod error;
+mod pool;
 mod request;
 mod transport;
 mod version;
@@ -11,6 +12,7 @@ mod mock;
 
 pub use connection::{Connection, ConnectionOptions};
 pub use error::ClientError;
+pub use pool::{BrokerInfo, BrokerPool};
 pub use request::ProtocolRequest;
 pub use version::ApiVersionTable;
 
