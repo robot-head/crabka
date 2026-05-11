@@ -6,7 +6,9 @@
 mod crc;
 mod error;
 pub mod header;
+mod owned;
 
 pub use error::RecordsError;
 pub use header::HEADER_LEN;
 pub use header::{Attributes, RecordBatchHeader, TimestampType};
+pub use owned::{Record, RecordBatch, RecordHeader};
