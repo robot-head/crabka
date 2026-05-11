@@ -52,20 +52,10 @@ fn read_schemas_sha(schemas: &std::path::Path) -> Result<String, RunError> {
     Ok(sha)
 }
 
-const CURATED: &[&str] = &[
-    "ApiVersionsRequest",
-    "ApiVersionsResponse",
-    "MetadataRequest",
-    "MetadataResponse",
-    "ProduceRequest",
-    "ProduceResponse",
-    "OffsetCommitRequest",
-    "OffsetCommitResponse",
-    "RequestHeader",
-    "ResponseHeader",
-    "DescribeGroupsRequest",
-    "DescribeGroupsResponse",
-];
+/// Returns true if the schema should be emitted (has at least one valid version).
+fn should_emit(spec: &ir::MessageSpec) -> bool {
+    !spec.valid_versions.is_empty()
+}
 
 /// Derive the `crates/protocol/src` directory from the generated-output dir.
 /// Convention: generated output is `crates/protocol/generated`; src is the sibling `src`.
@@ -105,7 +95,7 @@ fn run(schemas: &std::path::Path, out: &std::path::Path) -> Result<usize, RunErr
 
     let mut count = 0;
     for s in &specs {
-        if !CURATED.contains(&s.name.as_str()) {
+        if !should_emit(s) {
             continue;
         }
         let owned_em = emit::owned::emit(s, &schemas_sha)?;
@@ -153,14 +143,11 @@ fn run(schemas: &std::path::Path, out: &std::path::Path) -> Result<usize, RunErr
         }
     }
 
-    // Emit owned/mod.rs and borrowed/mod.rs for the curated set.
-    let curated_specs: Vec<&ir::MessageSpec> = specs
-        .iter()
-        .filter(|s| CURATED.contains(&s.name.as_str()))
-        .collect();
-    let owned_mod = emit::mod_rs::emit(&curated_specs, emit::wrappers::Flavor::Owned, &schemas_sha);
+    // Emit owned/mod.rs and borrowed/mod.rs for all active schemas.
+    let active_specs: Vec<&ir::MessageSpec> = specs.iter().filter(|s| should_emit(s)).collect();
+    let owned_mod = emit::mod_rs::emit(&active_specs, emit::wrappers::Flavor::Owned, &schemas_sha);
     let borrowed_mod = emit::mod_rs::emit(
-        &curated_specs,
+        &active_specs,
         emit::wrappers::Flavor::Borrowed,
         &schemas_sha,
     );
