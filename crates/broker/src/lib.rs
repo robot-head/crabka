@@ -7,6 +7,7 @@ mod config;
 mod error;
 mod log_dir;
 mod metadata;
+mod network;
 mod partition;
 mod partition_writer;
 
