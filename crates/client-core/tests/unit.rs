@@ -1,0 +1,170 @@
+//! MockBroker-based unit tests for `Connection`.
+//!
+//! These tests spin up an in-process mock Kafka broker and verify that
+//! `Connection::connect`, `Connection::send`, and the timeout path all
+//! behave correctly without any JVM dependency.
+//!
+//! Run with: `cargo test -p crabka-client-core --features mock --test unit`
+
+use std::time::Duration;
+
+use bytes::BytesMut;
+use crabka_client_core::{ClientError, Connection, ConnectionOptions, MockBroker};
+use crabka_protocol::owned::api_versions_response::{ApiVersion, ApiVersionsResponse};
+use crabka_protocol::owned::metadata_request::MetadataRequest;
+use crabka_protocol::owned::metadata_response::MetadataResponse;
+use crabka_protocol::Encode;
+
+// Use the raw constants so we don't need `ProtocolRequest` in scope.
+use crabka_protocol::owned::api_versions_request;
+use crabka_protocol::owned::metadata_request as metadata_request_mod;
+
+// ── helpers ──────────────────────────────────────────────────────────────────
+
+/// Encode an `ApiVersionsResponse` at version 0 that advertises:
+/// - api_key 18 (ApiVersions): min 0, max 3
+/// - api_key  3 (Metadata):    min 0, max 12
+///
+/// The mock returns this as the response body (after the correlation-id,
+/// which `MockBroker` prepends automatically).
+fn api_versions_response_v0() -> Vec<u8> {
+    let resp = ApiVersionsResponse {
+        error_code: 0,
+        api_keys: vec![
+            ApiVersion {
+                api_key: api_versions_request::API_KEY,
+                min_version: 0,
+                max_version: 3,
+                ..Default::default()
+            },
+            ApiVersion {
+                api_key: metadata_request_mod::API_KEY,
+                min_version: 0,
+                max_version: 12,
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    let mut buf = BytesMut::new();
+    resp.encode(&mut buf, 0).unwrap();
+    buf.to_vec()
+}
+
+/// Encode a response body at the given version, with the correct
+/// `ResponseHeader` prefix.
+///
+/// Kafka's `ResponseHeader`:
+/// - v0 (non-flexible): only `correlation_id` (already prepended by MockBroker).
+///   No additional bytes.
+/// - v1 (flexible, i.e., version >= FLEXIBLE_MIN): one additional byte,
+///   the UVARINT-encoded empty tagged-fields count (0x00).
+///
+/// Exception: `ApiVersionsResponse` always uses ResponseHeader v0 even when
+/// the request version is flexible — but the tests here handle MetadataResponse
+/// which follows the normal rule.
+fn metadata_response_at(version: i16) -> Vec<u8> {
+    use crabka_protocol::owned::metadata_response::FLEXIBLE_MIN;
+    let resp = MetadataResponse::default();
+    let mut buf = BytesMut::new();
+    // Prepend ResponseHeader v1 tagged-fields byte for flexible versions.
+    if version >= FLEXIBLE_MIN {
+        buf.extend_from_slice(&[0x00u8]); // empty tagged fields
+    }
+    resp.encode(&mut buf, version).unwrap();
+    buf.to_vec()
+}
+
+// ── tests ────────────────────────────────────────────────────────────────────
+
+/// `Connection::connect` successfully negotiates API versions via the mock.
+#[tokio::test]
+async fn connect_negotiates_api_versions() {
+    let mock = MockBroker::start(|api_key, _version, _corr_id, _body| {
+        // Only the bootstrap ApiVersions call is expected here.
+        assert_eq!(api_key, api_versions_request::API_KEY);
+        Some(api_versions_response_v0())
+    })
+    .await;
+
+    let conn = Connection::connect(mock.addr, ConnectionOptions::default())
+        .await
+        .unwrap();
+
+    assert!(!conn.versions().is_empty());
+    // The mock advertised api_key 18 min=0 max=3.
+    assert_eq!(
+        conn.versions().broker_range(api_versions_request::API_KEY),
+        Some((0, 3))
+    );
+    // The mock advertised api_key 3 min=0 max=12.
+    assert_eq!(
+        conn.versions().broker_range(metadata_request_mod::API_KEY),
+        Some((0, 12))
+    );
+
+    conn.close();
+    mock.stop().await;
+}
+
+/// When the mock never responds to ApiVersions, `Connection::connect` returns
+/// `ClientError::Timeout` once `connect_timeout` elapses.
+///
+/// Design note: the handler returns `None` (the `Option<Vec<u8>>` sentinel in
+/// `MockBroker`'s API) so the broker silently drops the request instead of
+/// sending even an empty frame. An empty length-delimited frame would still
+/// be a valid frame with 0 body bytes that the client would attempt to decode,
+/// producing a codec error rather than a timeout. `None` correctly simulates
+/// a hung or unreachable broker.
+#[tokio::test]
+async fn timeout_when_handler_silent() {
+    let mock = MockBroker::start(|_api_key, _version, _corr_id, _body| {
+        // Return None to drop the request; the client's connect_timeout fires.
+        None
+    })
+    .await;
+
+    let opts = ConnectionOptions {
+        connect_timeout: Duration::from_millis(200),
+        request_timeout: Duration::from_secs(30),
+        ..ConnectionOptions::default()
+    };
+
+    match Connection::connect(mock.addr, opts).await {
+        Err(ClientError::Timeout(_)) => { /* expected */ }
+        Err(other) => panic!("expected Timeout, got: {other:?}"),
+        Ok(_conn) => panic!("connect should have timed out but succeeded"),
+    };
+
+    mock.stop().await;
+}
+
+/// A full round-trip: connect (ApiVersions handshake) then send a
+/// `MetadataRequest` and receive a `MetadataResponse`.
+///
+/// The mock encodes the `MetadataResponse` at the same version as the
+/// request, which is the version negotiated by the client.
+#[tokio::test]
+async fn round_trip_metadata_request() {
+    let mock = MockBroker::start(|api_key, version, _corr_id, _body| {
+        if api_key == api_versions_request::API_KEY {
+            return Some(api_versions_response_v0());
+        }
+        if api_key == metadata_request_mod::API_KEY {
+            // Encode at the negotiated version so flexible framing matches.
+            return Some(metadata_response_at(version));
+        }
+        None
+    })
+    .await;
+
+    let conn = Connection::connect(mock.addr, ConnectionOptions::default())
+        .await
+        .unwrap();
+
+    // send() should succeed; smoke-test passes on no error.
+    let _resp = conn.send(MetadataRequest::default()).await.unwrap();
+
+    conn.close();
+    mock.stop().await;
+}
