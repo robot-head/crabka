@@ -1,0 +1,27 @@
+# Force LF line endings for text files so Windows checkouts don't break
+# snapshot-based tests and other byte-sensitive content.
+* text=auto eol=lf
+
+# Explicit rules for files where line endings genuinely matter:
+*.rs       text eol=lf
+*.toml     text eol=lf
+*.json     text eol=lf
+*.yml      text eol=lf
+*.yaml     text eol=lf
+*.sh       text eol=lf
+gradlew    text eol=lf
+
+# Shell-script wrappers and scripts must be executable on POSIX runners.
+gradlew                    text eol=lf
+tools/sync-schemas.sh      text eol=lf
+tools/regenerate.sh        text eol=lf
+
+# Generated codegen output and snapshots are byte-sensitive.
+crates/protocol/generated/**           text eol=lf
+crates/protocol-codegen/tests/snapshots/**  text eol=lf
+crates/protocol/tests/corpus/*.hex     text eol=lf
+
+# Binary files we shouldn't touch.
+*.jar      binary
+*.png      binary
+*.ico      binary
