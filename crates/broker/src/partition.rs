@@ -7,8 +7,8 @@
 //! - a [`Notify`] that fires after every successful append, used by
 //!   long-poll Fetch to wake when new data arrives.
 
-// Wired into the partition registry / Produce + Fetch handlers in later
-// batches. Suppress the temporary dead-code warning until then.
+// Fields (`log`, `writer_tx`, `append_notify`) are consumed by the Produce
+// + Fetch handlers landing in Tasks 15-16; keep this allow until then.
 #![allow(dead_code)]
 
 use std::sync::{Arc, Mutex};

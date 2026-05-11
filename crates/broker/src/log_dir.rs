@@ -2,9 +2,6 @@
 //! Mirrors the Apache Kafka convention so `crabka-log` can open existing
 //! Kafka log directories byte-compatibly.
 
-// Helpers are wired into `Broker::start` in a later batch.
-#![allow(dead_code)]
-
 use std::path::{Path, PathBuf};
 
 use crate::error::BrokerError;

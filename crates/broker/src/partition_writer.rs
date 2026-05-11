@@ -5,9 +5,6 @@
 //! contribution is: ordered acks back to producers + waking long-poll
 //! Fetch consumers via a shared `Notify` after every successful append.
 
-// `run` is spawned from `Broker::start` in a later batch.
-#![allow(dead_code)]
-
 use std::sync::{Arc, Mutex};
 
 use crabka_log::Log;

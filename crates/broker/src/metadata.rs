@@ -2,9 +2,9 @@
 //! the image from the `<log_dir>/<topic>-<partition>/` directory layout
 //! at startup.
 
-// Fields and accessor methods are populated in later batches when the
-// Metadata / CreateTopics handlers and partition registry land. Suppress
-// the temporary dead-code warning until then.
+// Some fields / methods (e.g. `TopicMeta::topic_id`, `MetadataImage::topics`)
+// are only consumed by handlers landing in the same batch as the Metadata
+// handler. Keep this allow until those handlers exist.
 #![allow(dead_code)]
 
 use std::collections::HashMap;

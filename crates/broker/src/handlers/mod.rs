@@ -46,6 +46,6 @@ impl HandlerTable {
 /// Build the dispatch table. Phase E registers concrete handlers; for
 /// now this is an empty table so the dispatch loop can still look up.
 #[must_use]
-pub fn build_table() -> HandlerTable {
+pub(crate) fn build_table() -> HandlerTable {
     HandlerTable::new()
 }
