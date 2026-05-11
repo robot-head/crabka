@@ -2,7 +2,10 @@
 // Clippy lints that fire on generated code patterns are suppressed here so
 // that regenerating the file does not require manual allow annotations.
 #![allow(
+    clippy::absurd_extreme_comparisons,
+    clippy::double_comparisons,
     clippy::elidable_lifetime_names,
+    clippy::manual_string_new,
     clippy::must_use_candidate,
     clippy::unnecessary_wraps,
     clippy::cast_sign_loss,
@@ -22,7 +25,8 @@
     clippy::borrow_deref_ref,
     clippy::explicit_auto_deref,
     clippy::unnecessary_semicolon,
-    unused_imports
+    unused_imports,
+    unused_variables
 )]
 
 include!(concat!(
