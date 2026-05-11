@@ -25,6 +25,7 @@ arbitrary = { workspace = true, optional = true }
 zerocopy = { workspace = true }
 crc32c = { workspace = true }
 crabka-compression = { path = "../compression", default-features = false }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

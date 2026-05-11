@@ -285,3 +285,29 @@ impl<'de> Decode<'de> for FinalizedFeatureKey {
         Ok(out)
     }
 }
+
+/// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+/// Only includes fields valid for the given version.
+#[must_use]
+#[allow(unused_comparisons)]
+pub fn default_json(version: i16) -> ::serde_json::Value {
+    let mut obj = ::serde_json::Map::new();
+    obj.insert("errorCode".to_string(), ::serde_json::json!(0));
+    obj.insert("apiKeys".to_string(), ::serde_json::Value::Array(vec![]));
+    if version >= 1 {
+        obj.insert("throttleTimeMs".to_string(), ::serde_json::json!(0));
+    }
+    if version >= 3 {
+        obj.insert("supportedFeatures".to_string(), ::serde_json::Value::Array(vec![]));
+    }
+    if version >= 3 {
+        obj.insert("finalizedFeaturesEpoch".to_string(), ::serde_json::json!(-1));
+    }
+    if version >= 3 {
+        obj.insert("finalizedFeatures".to_string(), ::serde_json::Value::Array(vec![]));
+    }
+    if version >= 3 {
+        obj.insert("zkMigrationReady".to_string(), ::serde_json::Value::Bool(false));
+    }
+    ::serde_json::Value::Object(obj)
+}

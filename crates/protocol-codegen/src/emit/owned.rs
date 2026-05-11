@@ -9,9 +9,10 @@ use std::fmt::Write;
 
 use crate::emit::EmittedMessage;
 use crate::emit::common::{banner, format_int_literal};
+use crate::emit::default_json;
 use crate::ir::{FieldSpec, FlexibleVersions, MessageSpec, MessageType, VersionRange};
 use crate::name_conv;
-use crate::resolve::{self, Resolution};
+use crate::resolve::{self, Resolution, StructKind};
 use crate::type_map;
 
 #[derive(Debug, thiserror::Error)]
@@ -39,15 +40,42 @@ pub fn emit(spec: &MessageSpec, schemas_version: &str) -> Result<EmittedMessage,
     let fm = flex_min(spec);
     emit_nested_structs_for_fields(&mut primary, &spec.fields, fm, &res_map);
 
+    // Emit the default_json() helper for differential testing against the JVM oracle.
+    primary.push_str(&default_json::emit_default_json(spec));
+
     // Emit common structs into separate file bodies.
     let mut commons: Vec<(String, String)> = Vec::new();
     for cs in &spec.common_structs {
-        // Only emit common structs that are actually referenced (they're in res_map).
-        // Re-use the same resolution map — the common struct's fields may themselves
-        // reference other common structs or nested inline structs within the spec.
         let cs_flex_min = flex_min(spec); // common structs inherit message flex threshold
-        let body =
-            emit_common_struct_file(&cs.name, &cs.fields, cs_flex_min, &res_map, schemas_version);
+        // Build a modified res_map for the common-struct context:
+        // Common-struct references use sibling paths `super::<snake>::TypeName`
+        // (since the file lands in `src/{flavor}/common/<snake>.rs`).
+        let common_res_map: HashMap<String, Resolution> = res_map
+            .iter()
+            .map(|(k, v)| {
+                let new_path = if v.kind == StructKind::Common {
+                    let snake = name_conv::module_name(k);
+                    format!("super::{snake}::{k}")
+                } else {
+                    v.rust_path.clone()
+                };
+                (
+                    k.clone(),
+                    Resolution {
+                        kind: v.kind.clone(),
+                        rust_path: new_path,
+                        needs_lifetime: v.needs_lifetime,
+                    },
+                )
+            })
+            .collect();
+        let body = emit_common_struct_file(
+            &cs.name,
+            &cs.fields,
+            cs_flex_min,
+            &common_res_map,
+            schemas_version,
+        );
         commons.push((cs.name.clone(), body));
     }
 
@@ -70,6 +98,7 @@ fn emit_common_struct_file(
     let use_string = uses_string(&types);
     let use_bytes = uses_bytes(&types);
 
+    let use_nullable_struct = uses_nullable_struct_recursive(fields);
     let mut out = banner(schemas_version);
 
     writeln!(out, "\nuse bytes::{{Buf, BufMut}};").unwrap();
@@ -79,6 +108,7 @@ fn emit_common_struct_file(
         for (t, g, p) in &[
             ("int8", "get_i8", "put_i8"),
             ("int16", "get_i16", "put_i16"),
+            ("uint16", "get_u16", "put_u16"),
             ("int32", "get_i32", "put_i32"),
             ("int64", "get_i64", "put_i64"),
             ("bool", "get_bool", "put_bool"),
@@ -89,9 +119,14 @@ fn emit_common_struct_file(
                 puts.push(p);
             }
         }
+        if use_nullable_struct && !gets.contains(&"get_i8") {
+            // get_i8 needed for nullable struct decode prefix even when no int8 fields.
+            gets.push("get_i8");
+        }
         if !gets.is_empty() {
             let mut combined: Vec<&str> = gets.into_iter().chain(puts).collect();
             combined.sort_unstable();
+            combined.dedup();
             writeln!(
                 out,
                 "\nuse crate::primitives::fixed::{{{}}};",
@@ -213,6 +248,15 @@ fn has_tagged_fields_recursive(fields: &[FieldSpec]) -> bool {
         .any(|f| f.tag.is_some() || has_tagged_fields_recursive(&f.fields))
 }
 
+/// Returns true if any field (recursively) is `float64`.
+/// `f64` does not implement `Eq`, so structs with `float64` fields must not derive `Eq`.
+fn has_float64_recursive(fields: &[FieldSpec]) -> bool {
+    fields.iter().any(|f| {
+        let base = base_type(&f.field_type);
+        base == "float64" || has_float64_recursive(&f.fields)
+    })
+}
+
 fn uses_fixed_type(types: &[String], t: &str) -> bool {
     types.iter().any(|s| s == t)
 }
@@ -266,6 +310,17 @@ fn uses_nullable_string_recursive(fields: &[FieldSpec]) -> bool {
     })
 }
 
+/// Returns true if any field has a non-array struct type with nullableVersions set.
+/// Such fields require `get_i8` for the nullable prefix byte in decode.
+fn uses_nullable_struct_recursive(fields: &[FieldSpec]) -> bool {
+    fields.iter().any(|f| {
+        let t = &f.field_type;
+        let base = base_type(t);
+        let here = is_struct_type(base) && !t.starts_with("[]") && f.nullable_versions.is_some();
+        here || uses_nullable_struct_recursive(&f.fields)
+    })
+}
+
 fn has_any_flex(spec: &MessageSpec) -> bool {
     matches!(spec.flexible_versions, FlexibleVersions::Range(_))
 }
@@ -287,6 +342,8 @@ fn emit_imports(out: &mut String, spec: &MessageSpec) {
 
     writeln!(out, "\nuse bytes::{{Buf, BufMut}};").unwrap();
 
+    let use_nullable_struct = uses_nullable_struct_recursive(&spec.fields);
+
     // Emit only the specific fixed-type imports actually used, to avoid unused-import warnings.
     {
         let mut gets: Vec<&str> = Vec::new();
@@ -294,10 +351,17 @@ fn emit_imports(out: &mut String, spec: &MessageSpec) {
         if uses_fixed_type(&types, "int8") {
             gets.push("get_i8");
             puts.push("put_i8");
+        } else if use_nullable_struct {
+            // get_i8 is needed for nullable struct decode (1-byte signed null prefix).
+            gets.push("get_i8");
         }
         if uses_fixed_type(&types, "int16") {
             gets.push("get_i16");
             puts.push("put_i16");
+        }
+        if uses_fixed_type(&types, "uint16") {
+            gets.push("get_u16");
+            puts.push("put_u16");
         }
         if uses_fixed_type(&types, "int32") {
             gets.push("get_i32");
@@ -562,10 +626,15 @@ fn emit_struct(out: &mut String, spec: &MessageSpec, res_map: &HashMap<String, R
     let type_name = name_conv::type_name(&spec.name);
     let manual_default = needs_manual_default(&spec.fields);
     let derive_default = if manual_default { "" } else { ", Default" };
+    let eq_derive = if has_float64_recursive(&spec.fields) {
+        ""
+    } else {
+        ", Eq"
+    };
     writeln!(
         out,
         "
-#[derive(Debug, Clone, PartialEq, Eq{derive_default})]
+#[derive(Debug, Clone, PartialEq{eq_derive}{derive_default})]
 pub struct {type_name} {{"
     )
     .unwrap();
@@ -853,11 +922,16 @@ fn emit_nested_struct(
 ) {
     let manual_default = needs_manual_default(fields);
     let derive_default = if manual_default { "" } else { ", Default" };
+    let eq_derive = if has_float64_recursive(fields) {
+        ""
+    } else {
+        ", Eq"
+    };
     // Struct definition
     writeln!(
         out,
         "
-#[derive(Debug, Clone, PartialEq, Eq{derive_default})]
+#[derive(Debug, Clone, PartialEq{eq_derive}{derive_default})]
 pub struct {struct_name} {{"
     )
     .unwrap();
@@ -1352,9 +1426,15 @@ fn encode_call(
     }
 
     if is_struct_type(schema_type) {
-        // Non-array struct
+        // Non-array struct. Nullable structs use a 1-byte signed prefix: -1 = null, 1 = non-null.
+        // This matches the Kafka Java generator's nullable-struct wire encoding.
         if nullable {
-            return format!("if let Some(v) = &{expr} {{ v.encode(buf, version)?; }}");
+            return format!(
+                "match &{expr} {{ \
+                 None => {{ buf.put_i8(-1); }}, \
+                 Some(v) => {{ buf.put_i8(1); v.encode(buf, version)?; }} \
+                 }}"
+            );
         }
         return format!("{expr}.encode(buf, version)?");
     }
@@ -1362,6 +1442,7 @@ fn encode_call(
     match (schema_type, nullable) {
         ("int8", _) => format!("put_i8(buf, {expr})"),
         ("int16", _) => format!("put_i16(buf, {expr})"),
+        ("uint16", _) => format!("put_u16(buf, {expr})"),
         ("int32", _) => format!("put_i32(buf, {expr})"),
         ("int64", _) => format!("put_i64(buf, {expr})"),
         ("bool", _) => format!("put_bool(buf, {expr})"),
@@ -1448,14 +1529,15 @@ fn encoded_len_expr(
 
     if is_struct_type(schema_type) {
         if nullable {
-            return format!("{expr}.as_ref().map_or(0, |v| v.encoded_len(version))");
+            // 1 byte for the signed null-marker prefix (–1 or 1) + body when present.
+            return format!("1 + {expr}.as_ref().map_or(0, |v| v.encoded_len(version))");
         }
         return format!("{expr}.encoded_len(version)");
     }
 
     match (schema_type, nullable) {
         ("int8" | "bool", _) => "1".into(),
-        ("int16", _) => "2".into(),
+        ("int16" | "uint16", _) => "2".into(),
         ("int32", _) => "4".into(),
         ("int64" | "float64", _) => "8".into(),
         ("uuid", _) => "16".into(),
@@ -1493,18 +1575,21 @@ fn decode_call(schema_type: &str, nullable: bool, res_map: &HashMap<String, Reso
     if let Some(elem) = schema_type.strip_prefix("[]") {
         let elem_base = base_type(elem);
         if is_struct_type(elem_base) {
-            // Array of structs
+            // Array of structs: use the resolved path so common-struct files compile correctly.
+            let type_path = res_map
+                .get(elem_base)
+                .map_or(elem_base, |r| r.rust_path.as_str());
             if nullable {
                 return format!(
                     "{{ let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?; \
                      match opt {{ None => None, Some(n) => {{ let mut v = Vec::with_capacity(n); \
-                     for _ in 0..n {{ v.push({elem_base}::decode(buf, version)?); }} Some(v) }} }} }}",
+                     for _ in 0..n {{ v.push({type_path}::decode(buf, version)?); }} Some(v) }} }} }}",
                 );
             }
             return format!(
                 "{{ let n = crate::primitives::array::get_array_len(buf, flex)?; \
                  let mut v = Vec::with_capacity(n); \
-                 for _ in 0..n {{ v.push({elem_base}::decode(buf, version)?); }} v }}",
+                 for _ in 0..n {{ v.push({type_path}::decode(buf, version)?); }} v }}",
             );
         }
         if nullable {
@@ -1523,16 +1608,23 @@ fn decode_call(schema_type: &str, nullable: bool, res_map: &HashMap<String, Reso
     }
 
     if is_struct_type(schema_type) {
+        let type_path = res_map
+            .get(schema_type)
+            .map_or(schema_type, |r| r.rust_path.as_str());
         if nullable {
-            // For nullable non-array structs: a simple decode — schemas rarely use this
-            return format!("Some({schema_type}::decode(buf, version)?)");
+            // Nullable non-array structs use a 1-byte signed prefix: < 0 = null, else non-null.
+            // Matches the Kafka Java generator's nullable-struct wire encoding.
+            return format!(
+                "if get_i8(buf)? < 0 {{ None }} else {{ Some({type_path}::decode(buf, version)?) }}"
+            );
         }
-        return format!("{schema_type}::decode(buf, version)?");
+        return format!("{type_path}::decode(buf, version)?");
     }
 
     match (schema_type, nullable) {
         ("int8",   _)     => "get_i8(buf)?".into(),
         ("int16",  _)     => "get_i16(buf)?".into(),
+        ("uint16", _)     => "get_u16(buf)?".into(),
         ("int32",  _)     => "get_i32(buf)?".into(),
         ("int64",  _)     => "get_i64(buf)?".into(),
         ("bool",   _)     => "get_bool(buf)?".into(),

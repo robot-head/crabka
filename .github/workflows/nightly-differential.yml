@@ -1,0 +1,41 @@
+name: nightly-differential
+on:
+  schedule:
+    - cron: '0 3 * * *'   # 03:00 UTC daily
+  workflow_dispatch:
+
+# PROPTEST_CASES is reserved for a future extension that adds a proptest-driven
+# variant to differential_all. The current implementation sweeps every active
+# (api_key, version) pair using the default fixture (no proptest), so this env
+# var is a no-op today. The nightly run on --release is still valuable as a
+# regression check on the optimised build against the JVM oracle.
+
+jobs:
+  nightly:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      PROPTEST_CASES: "256"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Build JVM oracle
+        run: (cd tools/oracle && ./gradlew installDist --no-daemon)
+      - name: Run parameterised differential sweep (release profile)
+        run: cargo test --workspace --test differential_all --release -- --ignored
+      - name: Create issue on failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `nightly-differential failed on ${context.sha.slice(0,7)}`,
+              body: `See workflow run: https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              labels: ['nightly-fail'],
+            });

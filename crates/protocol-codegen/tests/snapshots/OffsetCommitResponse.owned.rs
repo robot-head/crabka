@@ -165,3 +165,16 @@ impl<'de> Decode<'de> for OffsetCommitResponsePartition {
         Ok(out)
     }
 }
+
+/// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+/// Only includes fields valid for the given version.
+#[must_use]
+#[allow(unused_comparisons)]
+pub fn default_json(version: i16) -> ::serde_json::Value {
+    let mut obj = ::serde_json::Map::new();
+    if version >= 3 {
+        obj.insert("throttleTimeMs".to_string(), ::serde_json::json!(0));
+    }
+    obj.insert("topics".to_string(), ::serde_json::Value::Array(vec![]));
+    ::serde_json::Value::Object(obj)
+}
