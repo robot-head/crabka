@@ -2,8 +2,6 @@
 //! join+sync. Signals the foreground via an `mpsc::Sender<RebalanceNotice>`
 //! whenever the broker tells us to rejoin.
 
-#![allow(dead_code)] // Wired up by `ConsumerBuilder::build` in Task 17.
-
 use std::time::Duration;
 
 use tokio::sync::mpsc;
