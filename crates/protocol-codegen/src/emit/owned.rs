@@ -11,7 +11,7 @@ use crate::emit::EmittedMessage;
 use crate::emit::common::{banner, format_int_literal};
 use crate::ir::{FieldSpec, FlexibleVersions, MessageSpec, MessageType, VersionRange};
 use crate::name_conv;
-use crate::resolve::{self, Resolution};
+use crate::resolve::{self, Resolution, StructKind};
 use crate::type_map;
 
 #[derive(Debug, thiserror::Error)]
@@ -42,12 +42,30 @@ pub fn emit(spec: &MessageSpec, schemas_version: &str) -> Result<EmittedMessage,
     // Emit common structs into separate file bodies.
     let mut commons: Vec<(String, String)> = Vec::new();
     for cs in &spec.common_structs {
-        // Only emit common structs that are actually referenced (they're in res_map).
-        // Re-use the same resolution map — the common struct's fields may themselves
-        // reference other common structs or nested inline structs within the spec.
         let cs_flex_min = flex_min(spec); // common structs inherit message flex threshold
+        // Build a modified res_map for the common-struct context:
+        // Common-struct references use sibling paths `super::<snake>::TypeName`
+        // (since the file lands in `src/{flavor}/common/<snake>.rs`).
+        let common_res_map: HashMap<String, Resolution> = res_map
+            .iter()
+            .map(|(k, v)| {
+                let new_path = if v.kind == StructKind::Common {
+                    let snake = name_conv::module_name(k);
+                    format!("super::{snake}::{k}")
+                } else {
+                    v.rust_path.clone()
+                };
+                (
+                    k.clone(),
+                    Resolution {
+                        kind: v.kind.clone(),
+                        rust_path: new_path,
+                    },
+                )
+            })
+            .collect();
         let body =
-            emit_common_struct_file(&cs.name, &cs.fields, cs_flex_min, &res_map, schemas_version);
+            emit_common_struct_file(&cs.name, &cs.fields, cs_flex_min, &common_res_map, schemas_version);
         commons.push((cs.name.clone(), body));
     }
 
@@ -79,6 +97,7 @@ fn emit_common_struct_file(
         for (t, g, p) in &[
             ("int8", "get_i8", "put_i8"),
             ("int16", "get_i16", "put_i16"),
+            ("uint16", "get_u16", "put_u16"),
             ("int32", "get_i32", "put_i32"),
             ("int64", "get_i64", "put_i64"),
             ("bool", "get_bool", "put_bool"),
@@ -213,6 +232,15 @@ fn has_tagged_fields_recursive(fields: &[FieldSpec]) -> bool {
         .any(|f| f.tag.is_some() || has_tagged_fields_recursive(&f.fields))
 }
 
+/// Returns true if any field (recursively) is `float64`.
+/// `f64` does not implement `Eq`, so structs with `float64` fields must not derive `Eq`.
+fn has_float64_recursive(fields: &[FieldSpec]) -> bool {
+    fields.iter().any(|f| {
+        let base = base_type(&f.field_type);
+        base == "float64" || has_float64_recursive(&f.fields)
+    })
+}
+
 fn uses_fixed_type(types: &[String], t: &str) -> bool {
     types.iter().any(|s| s == t)
 }
@@ -298,6 +326,10 @@ fn emit_imports(out: &mut String, spec: &MessageSpec) {
         if uses_fixed_type(&types, "int16") {
             gets.push("get_i16");
             puts.push("put_i16");
+        }
+        if uses_fixed_type(&types, "uint16") {
+            gets.push("get_u16");
+            puts.push("put_u16");
         }
         if uses_fixed_type(&types, "int32") {
             gets.push("get_i32");
@@ -562,10 +594,11 @@ fn emit_struct(out: &mut String, spec: &MessageSpec, res_map: &HashMap<String, R
     let type_name = name_conv::type_name(&spec.name);
     let manual_default = needs_manual_default(&spec.fields);
     let derive_default = if manual_default { "" } else { ", Default" };
+    let eq_derive = if has_float64_recursive(&spec.fields) { "" } else { ", Eq" };
     writeln!(
         out,
         "
-#[derive(Debug, Clone, PartialEq, Eq{derive_default})]
+#[derive(Debug, Clone, PartialEq{eq_derive}{derive_default})]
 pub struct {type_name} {{"
     )
     .unwrap();
@@ -853,11 +886,12 @@ fn emit_nested_struct(
 ) {
     let manual_default = needs_manual_default(fields);
     let derive_default = if manual_default { "" } else { ", Default" };
+    let eq_derive = if has_float64_recursive(fields) { "" } else { ", Eq" };
     // Struct definition
     writeln!(
         out,
         "
-#[derive(Debug, Clone, PartialEq, Eq{derive_default})]
+#[derive(Debug, Clone, PartialEq{eq_derive}{derive_default})]
 pub struct {struct_name} {{"
     )
     .unwrap();
@@ -1362,6 +1396,7 @@ fn encode_call(
     match (schema_type, nullable) {
         ("int8", _) => format!("put_i8(buf, {expr})"),
         ("int16", _) => format!("put_i16(buf, {expr})"),
+        ("uint16", _) => format!("put_u16(buf, {expr})"),
         ("int32", _) => format!("put_i32(buf, {expr})"),
         ("int64", _) => format!("put_i64(buf, {expr})"),
         ("bool", _) => format!("put_bool(buf, {expr})"),
@@ -1455,7 +1490,7 @@ fn encoded_len_expr(
 
     match (schema_type, nullable) {
         ("int8" | "bool", _) => "1".into(),
-        ("int16", _) => "2".into(),
+        ("int16" | "uint16", _) => "2".into(),
         ("int32", _) => "4".into(),
         ("int64" | "float64", _) => "8".into(),
         ("uuid", _) => "16".into(),
@@ -1493,18 +1528,22 @@ fn decode_call(schema_type: &str, nullable: bool, res_map: &HashMap<String, Reso
     if let Some(elem) = schema_type.strip_prefix("[]") {
         let elem_base = base_type(elem);
         if is_struct_type(elem_base) {
-            // Array of structs
+            // Array of structs: use the resolved path so common-struct files compile correctly.
+            let type_path = res_map
+                .get(elem_base)
+                .map(|r| r.rust_path.as_str())
+                .unwrap_or(elem_base);
             if nullable {
                 return format!(
                     "{{ let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?; \
                      match opt {{ None => None, Some(n) => {{ let mut v = Vec::with_capacity(n); \
-                     for _ in 0..n {{ v.push({elem_base}::decode(buf, version)?); }} Some(v) }} }} }}",
+                     for _ in 0..n {{ v.push({type_path}::decode(buf, version)?); }} Some(v) }} }} }}",
                 );
             }
             return format!(
                 "{{ let n = crate::primitives::array::get_array_len(buf, flex)?; \
                  let mut v = Vec::with_capacity(n); \
-                 for _ in 0..n {{ v.push({elem_base}::decode(buf, version)?); }} v }}",
+                 for _ in 0..n {{ v.push({type_path}::decode(buf, version)?); }} v }}",
             );
         }
         if nullable {
@@ -1523,16 +1562,21 @@ fn decode_call(schema_type: &str, nullable: bool, res_map: &HashMap<String, Reso
     }
 
     if is_struct_type(schema_type) {
+        let type_path = res_map
+            .get(schema_type)
+            .map(|r| r.rust_path.as_str())
+            .unwrap_or(schema_type);
         if nullable {
             // For nullable non-array structs: a simple decode — schemas rarely use this
-            return format!("Some({schema_type}::decode(buf, version)?)");
+            return format!("Some({type_path}::decode(buf, version)?)");
         }
-        return format!("{schema_type}::decode(buf, version)?");
+        return format!("{type_path}::decode(buf, version)?");
     }
 
     match (schema_type, nullable) {
         ("int8",   _)     => "get_i8(buf)?".into(),
         ("int16",  _)     => "get_i16(buf)?".into(),
+        ("uint16", _)     => "get_u16(buf)?".into(),
         ("int32",  _)     => "get_i32(buf)?".into(),
         ("int64",  _)     => "get_i64(buf)?".into(),
         ("bool",   _)     => "get_bool(buf)?".into(),

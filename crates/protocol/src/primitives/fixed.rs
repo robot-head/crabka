@@ -29,6 +29,14 @@ pub fn get_i16<B: Buf>(buf: &mut B) -> Result<i16, ProtocolError> {
     Ok(buf.get_i16())
 }
 
+pub fn put_u16<B: BufMut>(buf: &mut B, v: u16) {
+    buf.put_u16(v);
+}
+pub fn get_u16<B: Buf>(buf: &mut B) -> Result<u16, ProtocolError> {
+    need(buf, 2)?;
+    Ok(buf.get_u16())
+}
+
 pub fn put_i32<B: BufMut>(buf: &mut B, v: i32) {
     buf.put_i32(v);
 }

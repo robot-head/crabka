@@ -13,7 +13,7 @@ use crate::emit::common::{banner, format_int_literal};
 use crate::emit::owned::EmitError;
 use crate::ir::{FieldSpec, FlexibleVersions, MessageSpec, MessageType, VersionRange};
 use crate::name_conv;
-use crate::resolve::{self, Resolution};
+use crate::resolve::{self, Resolution, StructKind};
 use crate::type_map;
 
 pub fn emit(spec: &MessageSpec, schemas_version: &str) -> Result<EmittedMessage, EmitError> {
@@ -37,12 +37,37 @@ pub fn emit(spec: &MessageSpec, schemas_version: &str) -> Result<EmittedMessage,
     let mut commons: Vec<(String, String)> = Vec::new();
     for cs in &spec.common_structs {
         let cs_flex_min = fm; // common structs inherit message flex threshold
+        // Build a modified res_map for the common-struct context:
+        // - Common-struct references use sibling paths `super::<snake>::TypeName`
+        //   (since the file is included under `src/{flavor}/common/<snake>.rs`).
+        // - Nested struct references remain unchanged (bare type name, same file).
+        let common_res_map: HashMap<String, Resolution> = res_map
+            .iter()
+            .map(|(k, v)| {
+                let new_path = if v.kind == StructKind::Common {
+                    let snake = name_conv::module_name(k);
+                    format!("super::{snake}::{k}")
+                } else {
+                    v.rust_path.clone()
+                };
+                (
+                    k.clone(),
+                    Resolution {
+                        kind: v.kind.clone(),
+                        rust_path: new_path,
+                    },
+                )
+            })
+            .collect();
+        // Use `common::<snake>` as the parent_module so `to_owned()` emits the correct path
+        // `crate::owned::common::<snake>::TypeName`.
+        let cs_parent_module = format!("common::{}", name_conv::module_name(&cs.name));
         let body = emit_common_struct_file_borrowed(
             &cs.name,
             &cs.fields,
             cs_flex_min,
-            &res_map,
-            &parent_module,
+            &common_res_map,
+            &cs_parent_module,
             schemas_version,
         );
         commons.push((cs.name.clone(), body));
@@ -80,6 +105,7 @@ fn emit_common_struct_file_borrowed(
         for (t, g, p) in &[
             ("int8", "get_i8", "put_i8"),
             ("int16", "get_i16", "put_i16"),
+            ("uint16", "get_u16", "put_u16"),
             ("int32", "get_i32", "put_i32"),
             ("int64", "get_i64", "put_i64"),
             ("bool", "get_bool", "put_bool"),
@@ -187,7 +213,10 @@ fn needs_lifetime(fields: &[crate::ir::FieldSpec]) -> bool {
     fields.iter().any(|f| {
         let base = base_type(&f.field_type);
         matches!(base, "string" | "bytes" | "records")  // records borrows via RecordBatchBorrowed<'a>
+            // Inline nested struct with borrowed fields.
             || (is_struct_type(base) && !f.fields.is_empty() && needs_lifetime(&f.fields))
+            // Common-struct reference (empty f.fields) — conservatively assume it carries 'a.
+            || (is_struct_type(base) && f.fields.is_empty())
     })
 }
 
@@ -204,6 +233,8 @@ fn spec_needs_lifetime(spec: &MessageSpec) -> bool {
         let base = base_type(&f.field_type);
         matches!(base, "string" | "bytes" | "records")
             || (is_struct_type(base) && !f.fields.is_empty() && needs_lifetime(&f.fields))
+            // Common-struct reference — conservatively assume it carries 'a.
+            || (is_struct_type(base) && f.fields.is_empty())
     })
 }
 
@@ -220,6 +251,7 @@ fn tagged_field_needs_owned(f: &FieldSpec) -> bool {
         return false;
     }
     // Struct tagged fields: fine only if the nested struct has no borrowed fields.
+    // Common-struct references (f.fields.is_empty()) are conservatively treated as needing owned.
     if is_struct_type(base) {
         return f.fields.is_empty() || needs_lifetime(&f.fields);
     }
@@ -273,6 +305,15 @@ fn used_field_types_recursive(fields: &[FieldSpec]) -> Vec<String> {
 
 fn uses_fixed_type(types: &[String], t: &str) -> bool {
     types.iter().any(|s| s == t)
+}
+
+/// Returns true if any field (recursively) is `float64`.
+/// Used to suppress the `Eq` derive since `f64` does not implement `Eq`.
+fn has_float64_recursive(fields: &[FieldSpec]) -> bool {
+    fields.iter().any(|f| {
+        let base = base_type(&f.field_type);
+        base == "float64" || has_float64_recursive(&f.fields)
+    })
 }
 
 fn uses_string(types: &[String]) -> bool {
@@ -357,12 +398,34 @@ fn owned_struct_path_for(
 ) -> Option<String> {
     let base = base_type(&f.field_type);
     if is_struct_type(base) {
-        res_map.get(base).map(|_| {
-            // Inline nested structs live in the parent message's owned module.
-            format!("crate::owned::{parent_module}::{base}")
-        })
+        res_map.get(base).map(|_| resolved_to_owned_path(base, parent_module, res_map))
     } else {
         None
+    }
+}
+
+/// Convert a borrowed-flavor resolved rust_path to its owned-flavor equivalent.
+///
+/// - Inline nested structs have a bare rust_path like `"TypeName"` →
+///   `"crate::owned::{parent_module}::TypeName"`.
+/// - Common structs (from the modified res_map) have a rust_path like
+///   `"super::<snake>::TypeName"` → `"crate::owned::common::<snake>::TypeName"`.
+fn resolved_to_owned_path(
+    type_name: &str,
+    parent_module: &str,
+    res_map: &HashMap<String, Resolution>,
+) -> String {
+    match res_map.get(type_name) {
+        Some(r) if r.kind == StructKind::Common => {
+            // rust_path looks like "super::<snake>::TypeName" — convert to owned path.
+            // Strip "super::" and prepend "crate::owned::".
+            let without_super = r.rust_path.strip_prefix("super::").unwrap_or(&r.rust_path);
+            format!("crate::owned::{without_super}")
+        }
+        _ => {
+            // Inline nested struct — lives in the parent message's owned module.
+            format!("crate::owned::{parent_module}::{type_name}")
+        }
     }
 }
 
@@ -409,6 +472,10 @@ fn emit_imports(out: &mut String, spec: &MessageSpec) {
         if uses_fixed_type(&types, "int16") {
             gets.push("get_i16");
             puts.push("put_i16");
+        }
+        if uses_fixed_type(&types, "uint16") {
+            gets.push("get_u16");
+            puts.push("put_u16");
         }
         if uses_fixed_type(&types, "int32") {
             gets.push("get_i32");
@@ -606,10 +673,11 @@ fn emit_struct(
     } else {
         ""
     };
+    let eq_derive = if has_float64_recursive(&spec.fields) { "" } else { ", Eq" };
     writeln!(
         out,
         "
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq{eq_derive})]
 pub struct {type_name}{lt} {{"
     )
     .unwrap();
@@ -1191,6 +1259,62 @@ fn tagged_is_default_cond(f: &FieldSpec) -> String {
     format!("crate::codegen_helpers::is_default(&self.{field})")
 }
 
+/// Like `encoded_len_expr` but uses owned-type conventions (`.as_deref()`).
+/// Used for tagged fields stored as `String`/`Bytes` (owned) in borrowed structs.
+fn owned_encoded_len_expr(
+    schema_type: &str,
+    expr: &str,
+    nullable: bool,
+    res_map: &HashMap<String, Resolution>,
+) -> String {
+    match (schema_type, nullable) {
+        ("string", false) => format!(
+            "if flex {{ compact_string_len(&{expr}) }} else {{ string_len(&{expr}) }}"
+        ),
+        ("string", true) => format!(
+            "if flex {{ compact_nullable_string_len({expr}.as_deref()) }} else {{ nullable_string_len({expr}.as_deref()) }}"
+        ),
+        ("bytes", false) => format!(
+            "if flex {{ crate::primitives::varint::uvarint_len(u32::try_from(({expr}).len() + 1).unwrap()) + ({expr}).len() }} \
+             else {{ 4 + ({expr}).len() }}"
+        ),
+        ("bytes", true) => format!(
+            "match {expr}.as_deref() {{ \
+             None => if flex {{ 1 }} else {{ 4 }}, \
+             Some(b) => if flex {{ crate::primitives::varint::uvarint_len(u32::try_from(b.len() + 1).unwrap()) + b.len() }} \
+             else {{ 4 + b.len() }} }}"
+        ),
+        _ => encoded_len_expr(schema_type, expr, nullable, res_map),
+    }
+}
+
+/// Like `encode_call` but uses owned-type conventions (`.as_deref()`, `&expr`).
+/// Used for tagged fields that are stored as `String`/`Bytes` (owned) in the
+/// borrowed struct because their data can't borrow from the input buffer.
+fn owned_encode_call(
+    schema_type: &str,
+    expr: &str,
+    nullable: bool,
+    res_map: &HashMap<String, Resolution>,
+) -> String {
+    match (schema_type, nullable) {
+        ("string", false) => format!(
+            "if flex {{ put_compact_string(buf, &{expr}) }} else {{ put_string(buf, &{expr}) }}"
+        ),
+        ("string", true) => format!(
+            "if flex {{ put_compact_nullable_string(buf, {expr}.as_deref()) }} else {{ put_nullable_string(buf, {expr}.as_deref()) }}"
+        ),
+        ("bytes", false) => format!(
+            "if flex {{ put_compact_bytes(buf, &{expr}) }} else {{ put_bytes(buf, &{expr}) }}"
+        ),
+        ("bytes", true) => format!(
+            "if flex {{ put_compact_nullable_bytes(buf, {expr}.as_deref()) }} else {{ put_nullable_bytes(buf, {expr}.as_deref()) }}"
+        ),
+        // For non-string/bytes types, fall back to the borrowed encode call.
+        _ => encode_call(schema_type, expr, nullable, res_map),
+    }
+}
+
 fn emit_encode_tagged(
     out: &mut String,
     f: &FieldSpec,
@@ -1201,16 +1325,30 @@ fn emit_encode_tagged(
     let tag = f.tag.expect("tagged field must have tag");
     let nullable = is_nullable(f) || matches!(&f.default, Some(serde_json::Value::Null));
     // Use `b` (the closure buffer param) not `buf` (the outer message buffer).
-    let encode_body =
-        encode_call(&f.field_type, &format!("self.{field}"), nullable, res_map).replace("buf", "b");
+    // For tagged fields stored as owned types (strings with Option<String>), the encode
+    // call must use `.as_deref()` to convert to the expected &str / Option<&str>.
+    let base = base_type(&f.field_type);
+    let encode_body = if tagged_field_needs_owned(f) && matches!(base, "string" | "bytes") {
+        // Use owned-flavor encode which adds .as_deref() for nullable strings/bytes.
+        owned_encode_call(&f.field_type, &format!("self.{field}"), nullable, res_map)
+    } else {
+        encode_call(&f.field_type, &format!("self.{field}"), nullable, res_map)
+    }
+    .replace("buf", "b");
     let is_default_cond = tagged_is_default_cond(f);
+    // Use owned_encoded_len_expr for tagged string/bytes fields to match the .as_deref() convention.
+    let len_expr = if tagged_field_needs_owned(f) && matches!(base, "string" | "bytes") {
+        owned_encoded_len_expr(&f.field_type, &format!("self.{field}"), nullable, res_map)
+    } else {
+        encoded_len_expr(&f.field_type, &format!("self.{field}"), nullable, res_map)
+    };
     writeln!(
         out,
         "{indent}    if !({is_default_cond}) {{
 {indent}        let payload = encode_to_bytes({len_expr}, |b| {{ {encode_body}; Ok(()) }});
 {indent}        tagged.add({tag}, payload);
 {indent}    }}",
-        len_expr = encoded_len_expr(&f.field_type, &format!("self.{field}"), nullable, res_map),
+        len_expr = len_expr,
         tag = tag,
     )
     .unwrap();
@@ -1225,7 +1363,13 @@ fn emit_encoded_len_tagged(
     let field = name_conv::field_name(&f.name);
     let tag = f.tag.expect("tagged field must have tag");
     let nullable = is_nullable(f) || matches!(&f.default, Some(serde_json::Value::Null));
-    let len = encoded_len_expr(&f.field_type, &format!("self.{field}"), nullable, res_map);
+    // For tagged fields stored as owned strings, the len expression must use .as_deref().
+    let base = base_type(&f.field_type);
+    let len = if tagged_field_needs_owned(f) && matches!(base, "string" | "bytes") {
+        owned_encoded_len_expr(&f.field_type, &format!("self.{field}"), nullable, res_map)
+    } else {
+        encoded_len_expr(&f.field_type, &format!("self.{field}"), nullable, res_map)
+    };
     let is_default_cond = tagged_is_default_cond(f);
     writeln!(
         out,
@@ -1449,12 +1593,13 @@ fn emit_nested_struct(
     let has_lifetime = needs_lifetime(fields);
     let lt = if has_lifetime { "<'a>" } else { "" };
     let lt_de = if has_lifetime { "<'de>" } else { "" };
+    let eq_derive = if has_float64_recursive(fields) { "" } else { ", Eq" };
 
     // Struct definition
     writeln!(
         out,
         "
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq{eq_derive})]
 pub struct {struct_name}{lt} {{"
     )
     .unwrap();
@@ -1635,6 +1780,7 @@ fn encode_call(
     match (schema_type, nullable) {
         ("int8", _) => format!("put_i8(buf, {expr})"),
         ("int16", _) => format!("put_i16(buf, {expr})"),
+        ("uint16", _) => format!("put_u16(buf, {expr})"),
         ("int32", _) => format!("put_i32(buf, {expr})"),
         ("int64", _) => format!("put_i64(buf, {expr})"),
         ("bool", _) => format!("put_bool(buf, {expr})"),
@@ -1726,7 +1872,7 @@ fn encoded_len_expr(
     // Borrowed strings/bytes: `expr` is `&str` or `&[u8]`.
     match (schema_type, nullable) {
         ("int8" | "bool", _) => "1".into(),
-        ("int16", _) => "2".into(),
+        ("int16" | "uint16", _) => "2".into(),
         ("int32", _) => "4".into(),
         ("int64" | "float64", _) => "8".into(),
         ("uuid", _) => "16".into(),
@@ -1772,17 +1918,21 @@ fn decode_borrow_call(
     if let Some(elem) = schema_type.strip_prefix("[]") {
         let elem_base = base_type(elem);
         if is_struct_type(elem_base) {
+            let type_path = res_map
+                .get(elem_base)
+                .map(|r| r.rust_path.as_str())
+                .unwrap_or(elem_base);
             if nullable {
                 return format!(
                     "{{ let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?; \
                      match opt {{ None => None, Some(n) => {{ let mut v = Vec::with_capacity(n); \
-                     for _ in 0..n {{ v.push({elem_base}::decode_borrow(buf, version)?); }} Some(v) }} }} }}",
+                     for _ in 0..n {{ v.push({type_path}::decode_borrow(buf, version)?); }} Some(v) }} }} }}",
                 );
             }
             return format!(
                 "{{ let n = crate::primitives::array::get_array_len(buf, flex)?; \
                  let mut v = Vec::with_capacity(n); \
-                 for _ in 0..n {{ v.push({elem_base}::decode_borrow(buf, version)?); }} v }}",
+                 for _ in 0..n {{ v.push({type_path}::decode_borrow(buf, version)?); }} v }}",
             );
         }
         if nullable {
@@ -1801,15 +1951,20 @@ fn decode_borrow_call(
     }
 
     if is_struct_type(schema_type) {
+        let type_path = res_map
+            .get(schema_type)
+            .map(|r| r.rust_path.as_str())
+            .unwrap_or(schema_type);
         if nullable {
-            return format!("Some({schema_type}::decode_borrow(buf, version)?)");
+            return format!("Some({type_path}::decode_borrow(buf, version)?)");
         }
-        return format!("{schema_type}::decode_borrow(buf, version)?");
+        return format!("{type_path}::decode_borrow(buf, version)?");
     }
 
     match (schema_type, nullable) {
         ("int8",    _) => "get_i8(buf)?".into(),
         ("int16",   _) => "get_i16(buf)?".into(),
+        ("uint16",  _) => "get_u16(buf)?".into(),
         ("int32",   _) => "get_i32(buf)?".into(),
         ("int64",   _) => "get_i64(buf)?".into(),
         ("bool",    _) => "get_bool(buf)?".into(),
@@ -1858,7 +2013,10 @@ fn decode_owned_call(
     if let Some(elem) = schema_type.strip_prefix("[]") {
         let elem_base = base_type(elem);
         if is_struct_type(elem_base) {
-            let owned_path = format!("crate::owned::{parent_module}::{elem_base}");
+            // Use the resolved rust_path but rewrite it to the owned crate path.
+            // For inline nested structs: rust_path = "TypeName" → "crate::owned::{parent_module}::TypeName"
+            // For common structs: rust_path = "super::<snake>::TypeName" → "crate::owned::common::<snake>::TypeName"
+            let owned_path = resolved_to_owned_path(elem_base, parent_module, res_map);
             if nullable {
                 return format!(
                     "{{ let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?; \
@@ -1889,7 +2047,7 @@ fn decode_owned_call(
     }
 
     if is_struct_type(schema_type) {
-        let owned_path = format!("crate::owned::{parent_module}::{schema_type}");
+        let owned_path = resolved_to_owned_path(schema_type, parent_module, res_map);
         if nullable {
             return format!("Some({owned_path}::decode(buf, version)?)");
         }
@@ -1900,6 +2058,7 @@ fn decode_owned_call(
     match (schema_type, nullable) {
         ("int8", _) => "get_i8(buf)?".into(),
         ("int16", _) => "get_i16(buf)?".into(),
+        ("uint16", _) => "get_u16(buf)?".into(),
         ("int32", _) => "get_i32(buf)?".into(),
         ("int64", _) => "get_i64(buf)?".into(),
         ("bool", _) => "get_bool(buf)?".into(),

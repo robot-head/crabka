@@ -53,6 +53,22 @@ impl RecordBatch<'_> {
     }
 }
 
+impl<'a> Default for RecordBatch<'a> {
+    /// Returns an empty record batch with a zeroed header and no records body.
+    /// Intended for use in generated `Default` impls and round-trip tests; not
+    /// suitable for constructing a real Kafka record batch.
+    fn default() -> Self {
+        // Safety: RecordBatchHeader is repr(C) and composed entirely of integer
+        // (zerocopy) fields; zeroing all bytes is a valid bit pattern.
+        let header: &'a RecordBatchHeader =
+            Box::leak(Box::new(unsafe { std::mem::zeroed::<RecordBatchHeader>() }));
+        Self {
+            header,
+            body: RecordBody::Owned(bytes::Bytes::new()),
+        }
+    }
+}
+
 // ── Decode ────────────────────────────────────────────────────────────────────
 
 impl<'de> crate::DecodeBorrow<'de> for RecordBatch<'de> {
