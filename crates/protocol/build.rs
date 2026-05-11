@@ -7,8 +7,8 @@ fn main() {
     println!("cargo:rerun-if-changed=schemas/VERSION");
     println!("cargo:rerun-if-changed=generated");
 
-    let schemas_version = fs::read_to_string(root.join("schemas/VERSION"))
-        .expect("schemas/VERSION must exist");
+    let schemas_version =
+        fs::read_to_string(root.join("schemas/VERSION")).expect("schemas/VERSION must exist");
     let sha = schemas_version
         .lines()
         .find_map(|l| l.strip_prefix("sha: "))

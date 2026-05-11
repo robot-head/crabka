@@ -2,9 +2,9 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 
+use crate::UnknownTaggedFields;
 use crate::owned::api_versions_request::ApiVersionsRequest;
 use crate::owned::api_versions_response::{ApiVersion, ApiVersionsResponse};
-use crate::UnknownTaggedFields;
 
 fn ascii(u: &mut Unstructured, min: usize, max: usize) -> arbitrary::Result<String> {
     let len = u.int_in_range(min..=max)?;

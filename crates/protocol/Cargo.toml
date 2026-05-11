@@ -27,4 +27,3 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 toml = { workspace = true }
-once_cell = { workspace = true }

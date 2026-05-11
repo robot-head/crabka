@@ -1,10 +1,8 @@
+use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::{Mutex, MutexGuard};
-
-use once_cell::sync::Lazy;
-use serde_json::{json, Value};
+use std::sync::{LazyLock, Mutex, MutexGuard};
 
 pub struct Oracle {
     child: Child,
@@ -27,10 +25,9 @@ impl Oracle {
             bin.exists(),
             "oracle not built; run `(cd tools/oracle && ./gradlew installDist)`"
         );
-        let java_home = std::env::var("JAVA_HOME")
-            .unwrap_or_else(|_| {
-                r"C:\Program Files\Eclipse Adoptium\jdk-17.0.19.10-hotspot".to_string()
-            });
+        let java_home = std::env::var("JAVA_HOME").unwrap_or_else(|_| {
+            r"C:\Program Files\Eclipse Adoptium\jdk-17.0.19.10-hotspot".to_string()
+        });
         let mut child = Command::new(&bin)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -40,7 +37,11 @@ impl Oracle {
             .expect("spawn oracle");
         let stdin = child.stdin.take().unwrap();
         let stdout = BufReader::new(child.stdout.take().unwrap());
-        Self { child, stdin, stdout }
+        Self {
+            child,
+            stdin,
+            stdout,
+        }
     }
 
     pub fn call(&mut self, req: &Value) -> Value {
@@ -77,13 +78,7 @@ impl Oracle {
     }
 
     #[allow(dead_code)]
-    pub fn decode(
-        &mut self,
-        api_key: i16,
-        version: i16,
-        is_request: bool,
-        bytes: &[u8],
-    ) -> Value {
+    pub fn decode(&mut self, api_key: i16, version: i16, is_request: bool, bytes: &[u8]) -> Value {
         let r = self.call(&json!({
             "op": "decode",
             "apiKey": api_key,
@@ -102,7 +97,7 @@ impl Drop for Oracle {
     }
 }
 
-static SHARED: Lazy<Mutex<Oracle>> = Lazy::new(|| Mutex::new(Oracle::spawn()));
+static SHARED: LazyLock<Mutex<Oracle>> = LazyLock::new(|| Mutex::new(Oracle::spawn()));
 
 /// Borrow the shared oracle. Tests serialize through the mutex so a single
 /// JVM is reused across all differential cases.

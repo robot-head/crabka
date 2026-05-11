@@ -1,32 +1,44 @@
-use crate::primitives::varint::get_uvarint;
 use crate::ProtocolError;
+use crate::primitives::varint::get_uvarint;
 
 /// Decode a `COMPACT_STRING` borrowing from the input buffer.
 /// Requires a contiguous buffer (i.e. `&[u8]`).
 pub fn get_compact_string_borrowed<'de>(buf: &mut &'de [u8]) -> Result<&'de str, ProtocolError> {
     let raw = get_uvarint(buf)?;
     if raw == 0 {
-        return Err(ProtocolError::InvalidValue("non-nullable COMPACT_STRING was null"));
+        return Err(ProtocolError::InvalidValue(
+            "non-nullable COMPACT_STRING was null",
+        ));
     }
     let n = (raw - 1) as usize;
     if buf.len() < n {
-        return Err(ProtocolError::UnexpectedEof { needed: n - buf.len() });
+        return Err(ProtocolError::UnexpectedEof {
+            needed: n - buf.len(),
+        });
     }
     let (head, tail) = buf.split_at(n);
     *buf = tail;
     std::str::from_utf8(head).map_err(ProtocolError::InvalidUtf8)
 }
 
-pub fn get_compact_nullable_string_borrowed<'de>(buf: &mut &'de [u8]) -> Result<Option<&'de str>, ProtocolError> {
+pub fn get_compact_nullable_string_borrowed<'de>(
+    buf: &mut &'de [u8],
+) -> Result<Option<&'de str>, ProtocolError> {
     let raw = get_uvarint(buf)?;
-    if raw == 0 { return Ok(None); }
+    if raw == 0 {
+        return Ok(None);
+    }
     let n = (raw - 1) as usize;
     if buf.len() < n {
-        return Err(ProtocolError::UnexpectedEof { needed: n - buf.len() });
+        return Err(ProtocolError::UnexpectedEof {
+            needed: n - buf.len(),
+        });
     }
     let (head, tail) = buf.split_at(n);
     *buf = tail;
-    Ok(Some(std::str::from_utf8(head).map_err(ProtocolError::InvalidUtf8)?))
+    Ok(Some(
+        std::str::from_utf8(head).map_err(ProtocolError::InvalidUtf8)?,
+    ))
 }
 
 #[cfg(test)]

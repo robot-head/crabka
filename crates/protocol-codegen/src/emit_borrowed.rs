@@ -6,7 +6,8 @@ use crate::ir::{FlexibleVersions, MessageSpec};
 pub fn emit(spec: &MessageSpec, schemas_version: &str) -> Result<String, EmitError> {
     if spec.name != "ApiVersionsRequest" {
         return Err(EmitError::Unsupported(format!(
-            "borrowed emitter does not yet support {}", spec.name
+            "borrowed emitter does not yet support {}",
+            spec.name
         )));
     }
     let api_key = spec.api_key.expect("validated earlier");
@@ -66,7 +67,7 @@ impl<'a> ApiVersionsRequest<'a> {
 
 "#;
 
-const IMPLS: &str = r#"
+const IMPLS: &str = r"
 fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
 
 impl<'a> Encode for ApiVersionsRequest<'a> {
@@ -107,4 +108,4 @@ impl<'de> DecodeBorrow<'de> for ApiVersionsRequest<'de> {
         Ok(Self { client_software_name, client_software_version, unknown_tagged_fields })
     }
 }
-"#;
+";

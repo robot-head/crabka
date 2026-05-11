@@ -18,26 +18,28 @@ pub enum ValidateError {
 /// `uint32` and `float32` are listed here for completeness (appear in older/future
 /// schemas) but are not present in the 4.2.0 corpus.
 const KNOWN_PRIMITIVE_TYPES: &[&str] = &[
-    "bool", "int8", "int16", "int32", "int64", "uint16", "uint32", "float64",
-    "string", "bytes", "uuid", "records",
+    "bool", "int8", "int16", "int32", "int64", "uint16", "uint32", "float64", "string", "bytes",
+    "uuid", "records",
 ];
 
 pub fn validate(specs: &[MessageSpec]) -> Result<(), ValidateError> {
     for spec in specs {
         let ctx = spec.name.clone();
-        if matches!(spec.message_type, MessageType::Request | MessageType::Response)
-            && spec.api_key.is_none()
+        if matches!(
+            spec.message_type,
+            MessageType::Request | MessageType::Response
+        ) && spec.api_key.is_none()
         {
             return Err(ValidateError::Unsupported {
                 message: "request/response missing apiKey",
                 context: ctx,
             });
         }
-        validate_fields(&spec.fields, &spec.flexible_versions, &ctx)?;
+        validate_fields(&spec.fields, spec.flexible_versions, &ctx)?;
         for cs in &spec.common_structs {
             validate_fields(
                 &cs.fields,
-                &spec.flexible_versions,
+                spec.flexible_versions,
                 &format!("{ctx}.{}", cs.name),
             )?;
         }
@@ -47,7 +49,7 @@ pub fn validate(specs: &[MessageSpec]) -> Result<(), ValidateError> {
 
 fn validate_fields(
     fields: &[FieldSpec],
-    flexible: &FlexibleVersions,
+    flexible: FlexibleVersions,
     ctx: &str,
 ) -> Result<(), ValidateError> {
     for f in fields {
@@ -56,7 +58,7 @@ fn validate_fields(
 
         let known = KNOWN_PRIMITIVE_TYPES.contains(&base)
             || base.starts_with("[]")   // arrays (nested [] not stripped by base_type)
-            || is_struct_type(base);    // struct reference like `MetadataRequestTopic`
+            || is_struct_type(base); // struct reference like `MetadataRequestTopic`
 
         if !known {
             return Err(ValidateError::Unsupported {
@@ -73,13 +75,13 @@ fn validate_fields(
         }
 
         if !f.fields.is_empty() {
-            validate_fields(&f.fields, flexible, &context)?;
+            validate_fields(&f.fields, flexible, &context)?; // flexible is Copy
         }
     }
     Ok(())
 }
 
-fn is_some_flexible(f: &FlexibleVersions) -> bool {
+fn is_some_flexible(f: FlexibleVersions) -> bool {
     matches!(f, FlexibleVersions::Range(_))
 }
 
@@ -89,7 +91,7 @@ fn base_type(t: &str) -> &str {
 
 fn is_struct_type(t: &str) -> bool {
     // Kafka schema convention: struct types are PascalCase identifiers.
-    t.chars().next().map_or(false, char::is_uppercase)
+    t.chars().next().is_some_and(char::is_uppercase)
 }
 
 #[cfg(test)]

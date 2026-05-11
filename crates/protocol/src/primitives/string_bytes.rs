@@ -1,8 +1,8 @@
 use bytes::{Buf, BufMut, Bytes};
 
+use crate::ProtocolError;
 use crate::primitives::fixed::{get_i16, get_i32, put_i16, put_i32};
 use crate::primitives::varint::{get_uvarint, put_uvarint, uvarint_len};
-use crate::ProtocolError;
 
 // ---- STRING (non-flexible) ----
 // Wire: INT16 length (>=0), then `length` bytes UTF-8. -1 = null.
@@ -29,10 +29,15 @@ pub fn get_string_owned<B: Buf>(buf: &mut B) -> Result<String, ProtocolError> {
 
 pub fn get_nullable_string_owned<B: Buf>(buf: &mut B) -> Result<Option<String>, ProtocolError> {
     let len = get_i16(buf)?;
-    if len < 0 { return Ok(None); }
+    if len < 0 {
+        return Ok(None);
+    }
+    #[allow(clippy::cast_sign_loss)]
     let n = len as usize;
     if buf.remaining() < n {
-        return Err(ProtocolError::UnexpectedEof { needed: n - buf.remaining() });
+        return Err(ProtocolError::UnexpectedEof {
+            needed: n - buf.remaining(),
+        });
     }
     let mut v = vec![0u8; n];
     buf.copy_to_slice(&mut v);
@@ -40,7 +45,11 @@ pub fn get_nullable_string_owned<B: Buf>(buf: &mut B) -> Result<Option<String>, 
     Ok(Some(s))
 }
 
-pub fn string_len(s: &str) -> usize { 2 + s.len() }
+#[must_use]
+pub fn string_len(s: &str) -> usize {
+    2 + s.len()
+}
+#[must_use]
 pub fn nullable_string_len(s: Option<&str>) -> usize {
     2 + s.map_or(0, str::len)
 }
@@ -64,16 +73,24 @@ pub fn put_compact_nullable_string<B: BufMut>(buf: &mut B, s: Option<&str>) {
 pub fn get_compact_string_owned<B: Buf>(buf: &mut B) -> Result<String, ProtocolError> {
     match get_compact_nullable_string_owned(buf)? {
         Some(s) => Ok(s),
-        None => Err(ProtocolError::InvalidValue("non-nullable COMPACT_STRING was null")),
+        None => Err(ProtocolError::InvalidValue(
+            "non-nullable COMPACT_STRING was null",
+        )),
     }
 }
 
-pub fn get_compact_nullable_string_owned<B: Buf>(buf: &mut B) -> Result<Option<String>, ProtocolError> {
+pub fn get_compact_nullable_string_owned<B: Buf>(
+    buf: &mut B,
+) -> Result<Option<String>, ProtocolError> {
     let raw = get_uvarint(buf)?;
-    if raw == 0 { return Ok(None); }
+    if raw == 0 {
+        return Ok(None);
+    }
     let n = (raw - 1) as usize;
     if buf.remaining() < n {
-        return Err(ProtocolError::UnexpectedEof { needed: n - buf.remaining() });
+        return Err(ProtocolError::UnexpectedEof {
+            needed: n - buf.remaining(),
+        });
     }
     let mut v = vec![0u8; n];
     buf.copy_to_slice(&mut v);
@@ -81,9 +98,11 @@ pub fn get_compact_nullable_string_owned<B: Buf>(buf: &mut B) -> Result<Option<S
     Ok(Some(s))
 }
 
+#[must_use]
 pub fn compact_string_len(s: &str) -> usize {
     uvarint_len(u32::try_from(s.len() + 1).unwrap()) + s.len()
 }
+#[must_use]
 pub fn compact_nullable_string_len(s: Option<&str>) -> usize {
     match s {
         None => uvarint_len(0),
@@ -117,10 +136,15 @@ pub fn get_bytes_owned<B: Buf>(buf: &mut B) -> Result<Bytes, ProtocolError> {
 
 pub fn get_nullable_bytes_owned<B: Buf>(buf: &mut B) -> Result<Option<Bytes>, ProtocolError> {
     let len = get_i32(buf)?;
-    if len < 0 { return Ok(None); }
+    if len < 0 {
+        return Ok(None);
+    }
+    #[allow(clippy::cast_sign_loss)]
     let n = len as usize;
     if buf.remaining() < n {
-        return Err(ProtocolError::UnexpectedEof { needed: n - buf.remaining() });
+        return Err(ProtocolError::UnexpectedEof {
+            needed: n - buf.remaining(),
+        });
     }
     let mut v = vec![0u8; n];
     buf.copy_to_slice(&mut v);
@@ -133,12 +157,18 @@ pub fn put_compact_bytes<B: BufMut>(buf: &mut B, b: &[u8]) {
     buf.put_slice(b);
 }
 
-pub fn get_compact_nullable_bytes_owned<B: Buf>(buf: &mut B) -> Result<Option<Bytes>, ProtocolError> {
+pub fn get_compact_nullable_bytes_owned<B: Buf>(
+    buf: &mut B,
+) -> Result<Option<Bytes>, ProtocolError> {
     let raw = get_uvarint(buf)?;
-    if raw == 0 { return Ok(None); }
+    if raw == 0 {
+        return Ok(None);
+    }
     let n = (raw - 1) as usize;
     if buf.remaining() < n {
-        return Err(ProtocolError::UnexpectedEof { needed: n - buf.remaining() });
+        return Err(ProtocolError::UnexpectedEof {
+            needed: n - buf.remaining(),
+        });
     }
     let mut v = vec![0u8; n];
     buf.copy_to_slice(&mut v);
@@ -211,6 +241,9 @@ mod tests {
         // INT16(2) + invalid UTF-8 byte sequence
         let bytes = [0x00, 0x02, 0xC3, 0x28];
         let mut cur = &bytes[..];
-        assert!(matches!(get_string_owned(&mut cur), Err(ProtocolError::InvalidUtf8(_))));
+        assert!(matches!(
+            get_string_owned(&mut cur),
+            Err(ProtocolError::InvalidUtf8(_))
+        ));
     }
 }

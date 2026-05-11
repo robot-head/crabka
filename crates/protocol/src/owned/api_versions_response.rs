@@ -2,7 +2,7 @@ use bytes::{Buf, BufMut};
 
 use crate::primitives::fixed::{get_i16, get_i32, put_i16, put_i32};
 use crate::primitives::varint::{get_uvarint, put_uvarint, uvarint_len};
-use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
 
 /// `ApiVersionsResponse`, owned flavor.
@@ -55,6 +55,7 @@ pub struct ApiVersionsResponse {
 // ── ApiVersion helpers ──────────────────────────────────────────────────────
 
 impl ApiVersion {
+    #[allow(clippy::unnecessary_wraps)]
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         put_i16(buf, self.api_key);
         put_i16(buf, self.min_version);
@@ -87,7 +88,12 @@ impl ApiVersion {
         } else {
             UnknownTaggedFields::default()
         };
-        Ok(Self { api_key, min_version, max_version, unknown_tagged_fields })
+        Ok(Self {
+            api_key,
+            min_version,
+            max_version,
+            unknown_tagged_fields,
+        })
     }
 }
 
@@ -103,7 +109,11 @@ fn put_array_len<B: BufMut>(buf: &mut B, n: usize, flexible: bool) {
 }
 
 fn array_len_len(n: usize, flexible: bool) -> usize {
-    if flexible { uvarint_len(u32::try_from(n + 1).unwrap()) } else { 4 }
+    if flexible {
+        uvarint_len(u32::try_from(n + 1).unwrap())
+    } else {
+        4
+    }
 }
 
 fn get_array_len<B: Buf>(buf: &mut B, flexible: bool) -> Result<usize, ProtocolError> {
@@ -116,8 +126,11 @@ fn get_array_len<B: Buf>(buf: &mut B, flexible: bool) -> Result<usize, ProtocolE
     } else {
         let n = get_i32(buf)?;
         if n < 0 {
-            return Err(ProtocolError::InvalidValue("non-nullable array had negative length"));
+            return Err(ProtocolError::InvalidValue(
+                "non-nullable array had negative length",
+            ));
         }
+        #[allow(clippy::cast_sign_loss)]
         Ok(n as usize)
     }
 }
@@ -127,7 +140,10 @@ fn get_array_len<B: Buf>(buf: &mut B, flexible: bool) -> Result<usize, ProtocolE
 impl Encode for ApiVersionsResponse {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         put_i16(buf, self.error_code);
@@ -164,10 +180,13 @@ impl Encode for ApiVersionsResponse {
     }
 }
 
-impl<'de> Decode<'de> for ApiVersionsResponse {
+impl Decode<'_> for ApiVersionsResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let error_code = get_i16(buf)?;
@@ -184,7 +203,12 @@ impl<'de> Decode<'de> for ApiVersionsResponse {
         } else {
             UnknownTaggedFields::default()
         };
-        Ok(Self { error_code, api_keys, throttle_time_ms, unknown_tagged_fields })
+        Ok(Self {
+            error_code,
+            api_keys,
+            throttle_time_ms,
+            unknown_tagged_fields,
+        })
     }
 }
 
@@ -197,11 +221,21 @@ mod tests {
         ApiVersionsResponse {
             error_code: 0,
             api_keys: vec![
-                ApiVersion { api_key: 0, min_version: 0, max_version: 10, ..Default::default() },
-                ApiVersion { api_key: 1, min_version: 0, max_version: 17, ..Default::default() },
+                ApiVersion {
+                    api_key: 0,
+                    min_version: 0,
+                    max_version: 10,
+                    ..Default::default()
+                },
+                ApiVersion {
+                    api_key: 1,
+                    min_version: 0,
+                    max_version: 17,
+                    ..Default::default()
+                },
             ],
             throttle_time_ms: if version >= 1 { 5 } else { 0 },
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 

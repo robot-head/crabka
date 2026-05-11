@@ -2,8 +2,8 @@
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
-use crate::primitives::varint::{get_uvarint, put_uvarint, uvarint_len};
 use crate::ProtocolError;
+use crate::primitives::varint::{get_uvarint, put_uvarint, uvarint_len};
 
 /// An unknown tagged field that was preserved verbatim during decode.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,8 +19,14 @@ pub struct UnknownTaggedField {
 pub struct UnknownTaggedFields(pub Vec<UnknownTaggedField>);
 
 impl UnknownTaggedFields {
-    pub fn is_empty(&self) -> bool { self.0.is_empty() }
-    pub fn len(&self) -> usize { self.0.len() }
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
 }
 
 /// Read the tagged-fields trailer at the current position of `buf`. `known`
@@ -28,7 +34,10 @@ impl UnknownTaggedFields {
 /// field's payload (a `size`-byte slice) and return Ok if it recognised the
 /// tag. Anything `known` returns `Ok(false)` for is captured into the unknown
 /// vec instead.
-pub fn read_tagged_fields<B, F>(buf: &mut B, mut known: F) -> Result<UnknownTaggedFields, ProtocolError>
+pub fn read_tagged_fields<B, F>(
+    buf: &mut B,
+    mut known: F,
+) -> Result<UnknownTaggedFields, ProtocolError>
 where
     B: Buf,
     F: FnMut(u32, &mut &[u8]) -> Result<bool, ProtocolError>,
@@ -38,24 +47,33 @@ where
     let mut last_tag: Option<u32> = None;
     for _ in 0..count {
         let tag = get_uvarint(buf)?;
-        if let Some(prev) = last_tag {
-            if tag <= prev {
-                return Err(ProtocolError::InvalidValue("tagged fields not strictly ascending"));
-            }
+        if let Some(prev) = last_tag
+            && tag <= prev
+        {
+            return Err(ProtocolError::InvalidValue(
+                "tagged fields not strictly ascending",
+            ));
         }
         last_tag = Some(tag);
         let size = get_uvarint(buf)? as usize;
         if buf.remaining() < size {
-            return Err(ProtocolError::UnexpectedEof { needed: size - buf.remaining() });
+            return Err(ProtocolError::UnexpectedEof {
+                needed: size - buf.remaining(),
+            });
         }
         // Copy the payload so we can hand a slice to the closure or store it.
         let mut payload = vec![0u8; size];
         buf.copy_to_slice(&mut payload);
         let mut slice = &payload[..];
         if !known(tag, &mut slice)? {
-            unknown.push(UnknownTaggedField { tag, bytes: Bytes::from(payload) });
+            unknown.push(UnknownTaggedField {
+                tag,
+                bytes: Bytes::from(payload),
+            });
         } else if !slice.is_empty() {
-            return Err(ProtocolError::InvalidValue("tagged field decoder did not consume all bytes"));
+            return Err(ProtocolError::InvalidValue(
+                "tagged field decoder did not consume all bytes",
+            ));
         }
     }
     Ok(UnknownTaggedFields(unknown))
@@ -68,8 +86,19 @@ pub struct WriteTaggedFields {
     entries: Vec<(u32, Bytes)>,
 }
 
+impl Default for WriteTaggedFields {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl WriteTaggedFields {
-    pub fn new() -> Self { Self { entries: Vec::new() } }
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
 
     pub fn add(&mut self, tag: u32, payload: Bytes) {
         self.entries.push((tag, payload));
@@ -80,16 +109,23 @@ impl WriteTaggedFields {
             self.entries.push((u.tag, u.bytes.clone()));
         }
         self.entries.sort_by_key(|(t, _)| *t);
-        put_uvarint(buf, u32::try_from(self.entries.len()).expect("too many tagged fields"));
+        put_uvarint(
+            buf,
+            u32::try_from(self.entries.len()).expect("too many tagged fields"),
+        );
         for (tag, payload) in self.entries {
             put_uvarint(buf, tag);
-            put_uvarint(buf, u32::try_from(payload.len()).expect("tagged field too large"));
+            put_uvarint(
+                buf,
+                u32::try_from(payload.len()).expect("tagged field too large"),
+            );
             buf.put_slice(&payload);
         }
     }
 }
 
 /// Predicted length of the tagged-fields trailer.
+#[must_use]
 pub fn tagged_fields_len(known: &[(u32, usize)], unknown: &UnknownTaggedFields) -> usize {
     let total = known.len() + unknown.0.len();
     let mut n = uvarint_len(u32::try_from(total).unwrap());
@@ -97,7 +133,8 @@ pub fn tagged_fields_len(known: &[(u32, usize)], unknown: &UnknownTaggedFields) 
         n += uvarint_len(*tag) + uvarint_len(u32::try_from(*len).unwrap()) + *len;
     }
     for u in &unknown.0 {
-        n += uvarint_len(u.tag) + uvarint_len(u32::try_from(u.bytes.len()).unwrap()) + u.bytes.len();
+        n +=
+            uvarint_len(u.tag) + uvarint_len(u32::try_from(u.bytes.len()).unwrap()) + u.bytes.len();
     }
     n
 }
@@ -150,9 +187,10 @@ mod tests {
     fn write_merges_known_and_unknown_sorted() {
         let mut w = WriteTaggedFields::new();
         w.add(10, Bytes::from_static(&[0xAA]));
-        let unknown = UnknownTaggedFields(vec![
-            UnknownTaggedField { tag: 5, bytes: Bytes::from_static(&[0xBB]) },
-        ]);
+        let unknown = UnknownTaggedFields(vec![UnknownTaggedField {
+            tag: 5,
+            bytes: Bytes::from_static(&[0xBB]),
+        }]);
         let mut out = BytesMut::new();
         w.write(&mut out, &unknown);
         // Expect: count=2, tag=5,len=1,0xBB, tag=10,len=1,0xAA

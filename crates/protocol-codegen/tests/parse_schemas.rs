@@ -10,7 +10,11 @@ fn every_vendored_schema_parses() {
 
     let specs = crabka_protocol_codegen::ir::load_dir(&dir).expect("schemas must parse");
 
-    assert!(specs.len() > 50, "expected many schemas, got {}", specs.len());
+    assert!(
+        specs.len() > 50,
+        "expected many schemas, got {}",
+        specs.len()
+    );
 
     // Sanity: ApiVersionsRequest is present.
     let api_versions = specs

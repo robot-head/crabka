@@ -25,9 +25,9 @@
 //! `crates/protocol/schemas/VERSION`.
 
 mod arbitrary_impls;
+pub mod borrowed;
 mod codec;
 mod error;
-pub mod borrowed;
 pub mod owned;
 pub mod primitives;
 pub mod tagged_fields;

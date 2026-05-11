@@ -78,7 +78,10 @@ impl<'de> Deserialize<'de> for VersionRange {
         let s = String::deserialize(d)?;
         // "none" means the version range is empty (e.g. removed messages).
         if s == "none" {
-            return Ok(VersionRange { min: i16::MAX, max: i16::MIN });
+            return Ok(VersionRange {
+                min: i16::MAX,
+                max: i16::MIN,
+            });
         }
         parse_version_range(&s).map_err(serde::de::Error::custom)
     }
@@ -86,7 +89,9 @@ impl<'de> Deserialize<'de> for VersionRange {
 
 fn parse_version_range(s: &str) -> Result<VersionRange, String> {
     if let Some(rest) = s.strip_suffix('+') {
-        let min: i16 = rest.parse().map_err(|e| format!("bad version `{s}`: {e}"))?;
+        let min: i16 = rest
+            .parse()
+            .map_err(|e| format!("bad version `{s}`: {e}"))?;
         return Ok(VersionRange { min, max: i16::MAX });
     }
     if let Some((lo, hi)) = s.split_once('-') {
@@ -95,13 +100,18 @@ fn parse_version_range(s: &str) -> Result<VersionRange, String> {
         return Ok(VersionRange { min, max });
     }
     let single: i16 = s.parse().map_err(|e| format!("bad version `{s}`: {e}"))?;
-    Ok(VersionRange { min: single, max: single })
+    Ok(VersionRange {
+        min: single,
+        max: single,
+    })
 }
 
 impl VersionRange {
+    #[must_use]
     pub fn contains(&self, v: i16) -> bool {
         v >= self.min && v <= self.max
     }
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.min > self.max
     }
@@ -127,6 +137,7 @@ impl<'de> Deserialize<'de> for FlexibleVersions {
 }
 
 impl FlexibleVersions {
+    #[must_use]
     pub fn is_flexible(&self, v: i16) -> bool {
         match self {
             FlexibleVersions::None => false,
@@ -191,11 +202,17 @@ mod tests {
     fn version_range_parsing() {
         assert_eq!(
             parse_version_range("0+").unwrap(),
-            VersionRange { min: 0, max: i16::MAX }
+            VersionRange {
+                min: 0,
+                max: i16::MAX
+            }
         );
         assert_eq!(
             parse_version_range("3+").unwrap(),
-            VersionRange { min: 3, max: i16::MAX }
+            VersionRange {
+                min: 3,
+                max: i16::MAX
+            }
         );
         assert_eq!(
             parse_version_range("0-2").unwrap(),

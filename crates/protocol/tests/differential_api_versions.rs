@@ -28,11 +28,8 @@ fn apiversions_request_v0_byte_equal() {
     let rust = rust_encode(&req, 0);
     let java = o.encode(18, 0, true, &json!({}));
     assert_eq!(
-        rust,
-        java,
-        "v0 byte mismatch\n  rust: {:?}\n  java: {:?}",
-        rust,
-        java
+        rust, java,
+        "v0 byte mismatch\n  rust: {rust:?}\n  java: {java:?}",
     );
 }
 
@@ -43,7 +40,7 @@ fn apiversions_request_v3_byte_equal() {
     let req = ApiVersionsRequest {
         client_software_name: "crabka".into(),
         client_software_version: "0.0.0".into(),
-        unknown_tagged_fields: Default::default(),
+        unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
     };
     let rust = rust_encode(&req, 3);
     let java = o.encode(
@@ -56,11 +53,8 @@ fn apiversions_request_v3_byte_equal() {
         }),
     );
     assert_eq!(
-        rust,
-        java,
-        "v3 byte mismatch\n  rust: {:?}\n  java: {:?}",
-        rust,
-        java
+        rust, java,
+        "v3 byte mismatch\n  rust: {rust:?}\n  java: {java:?}",
     );
 }
 
@@ -85,7 +79,7 @@ fn apiversions_response_v3_byte_equal() {
             },
         ],
         throttle_time_ms: 5,
-        unknown_tagged_fields: Default::default(),
+        unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
     };
     let rust = rust_encode(&resp, 3);
     let java = o.encode(
