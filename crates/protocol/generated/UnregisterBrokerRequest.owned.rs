@@ -71,3 +71,11 @@ pub fn default_json(version: i16) -> ::serde_json::Value {
     obj.insert("brokerId".to_string(), ::serde_json::json!(0));
     ::serde_json::Value::Object(obj)
 }
+
+impl crate::ProtocolRequest for UnregisterBrokerRequest {
+    const API_KEY: i16 = API_KEY;
+    const MIN_VERSION: i16 = MIN_VERSION;
+    const MAX_VERSION: i16 = MAX_VERSION;
+    const FLEXIBLE_MIN: i16 = FLEXIBLE_MIN;
+    type Response = super::unregister_broker_response::UnregisterBrokerResponse;
+}

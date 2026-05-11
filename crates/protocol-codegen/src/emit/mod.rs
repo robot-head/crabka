@@ -5,6 +5,7 @@ pub mod default_json;
 pub mod differential_table;
 pub mod mod_rs;
 pub mod owned;
+pub mod protocol_request;
 pub mod wrappers;
 pub use crate::emit::owned::EmitError;
 

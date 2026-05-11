@@ -226,3 +226,11 @@ pub fn default_json(version: i16) -> ::serde_json::Value {
     obj.insert("directories".to_string(), ::serde_json::Value::Array(vec![]));
     ::serde_json::Value::Object(obj)
 }
+
+impl crate::ProtocolRequest for AssignReplicasToDirsRequest {
+    const API_KEY: i16 = API_KEY;
+    const MIN_VERSION: i16 = MIN_VERSION;
+    const MAX_VERSION: i16 = MAX_VERSION;
+    const FLEXIBLE_MIN: i16 = FLEXIBLE_MIN;
+    type Response = super::assign_replicas_to_dirs_response::AssignReplicasToDirsResponse;
+}

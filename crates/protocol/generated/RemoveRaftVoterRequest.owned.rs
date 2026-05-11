@@ -87,3 +87,11 @@ pub fn default_json(version: i16) -> ::serde_json::Value {
     obj.insert("voterDirectoryId".to_string(), ::serde_json::Value::String("AAAAAAAAAAAAAAAAAAAAAA".to_string()));
     ::serde_json::Value::Object(obj)
 }
+
+impl crate::ProtocolRequest for RemoveRaftVoterRequest {
+    const API_KEY: i16 = API_KEY;
+    const MIN_VERSION: i16 = MIN_VERSION;
+    const MAX_VERSION: i16 = MAX_VERSION;
+    const FLEXIBLE_MIN: i16 = FLEXIBLE_MIN;
+    type Response = super::remove_raft_voter_response::RemoveRaftVoterResponse;
+}
