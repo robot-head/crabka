@@ -8,12 +8,8 @@
   "automergeStrategy": "squash",
   "packageRules": [
     {
-      "matchUpdateTypes": ["minor", "patch"],
+      "matchUpdateTypes": ["major", "minor", "patch"],
       "automerge": true
-    },
-    {
-      "matchUpdateTypes": ["major"],
-      "automerge": false
     }
   ]
 }
