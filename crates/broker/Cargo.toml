@@ -1,0 +1,39 @@
+[package]
+name = "crabka-broker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version = "1.95.0"
+description = "Single-node Apache Kafka-compatible broker (MVP)"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+
+[[bin]]
+name = "crabka-broker"
+path = "src/bin/broker.rs"
+
+[dependencies]
+crabka-protocol = { version = "0.1", path = "../protocol", default-features = false }
+crabka-log = { version = "0.1", path = "../log" }
+bytes = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["net", "rt", "rt-multi-thread", "io-util", "macros", "sync", "time"] }
+tokio-util = { workspace = true, features = ["codec", "rt"] }
+dashmap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+uuid = { workspace = true }
+futures-util = { workspace = true }
+
+[dev-dependencies]
+crabka-client-core = { path = "../client-core" }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util", "macros"] }
+testcontainers = { workspace = true }
+testcontainers-modules = { workspace = true }
