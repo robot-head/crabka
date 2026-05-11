@@ -9,9 +9,14 @@ description = "Kafka wire protocol codec for Rust"
 [lints]
 workspace = true
 
+[features]
+default = ["arbitrary"]
+arbitrary = ["dep:arbitrary"]
+
 [dependencies]
 bytes = { workspace = true }
 thiserror = { workspace = true }
+arbitrary = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

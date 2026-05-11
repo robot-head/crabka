@@ -1,5 +1,6 @@
 //! Kafka wire protocol codec.
 
+mod arbitrary_impls;
 mod codec;
 mod error;
 pub mod owned;
