@@ -157,7 +157,6 @@ async fn accept_loop(broker: Arc<Broker>, listener: TcpListener, shutdown: Cance
             accept = listener.accept() => {
                 match accept {
                     Ok((stream, peer)) => {
-                        eprintln!("CRABKA[accept] new_conn peer={peer}");
                         tracing::debug!(%peer, "accepted connection");
                         let b = broker.clone();
                         tokio::spawn(async move {
@@ -165,7 +164,6 @@ async fn accept_loop(broker: Arc<Broker>, listener: TcpListener, shutdown: Cance
                         });
                     }
                     Err(e) => {
-                        eprintln!("CRABKA[accept] err={e}");
                         tracing::warn!(error = %e, "accept failed");
                     }
                 }
