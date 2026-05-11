@@ -7,6 +7,7 @@ mod config;
 mod error;
 mod log_dir;
 mod metadata;
+mod partition;
 
 pub use config::BrokerConfig;
 pub use error::BrokerError;
