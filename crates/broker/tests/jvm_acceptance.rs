@@ -53,7 +53,13 @@ async fn start_host_broker() -> (crabka_broker::BrokerHandle, tempfile::TempDir)
 fn nc_check_connectivity() {
     let out = Command::new("docker")
         .args([
-            "run", "--rm", "--network", "host", "alpine", "sh", "-c",
+            "run",
+            "--rm",
+            "--network",
+            "host",
+            "alpine",
+            "sh",
+            "-c",
             "apk add --no-cache netcat-openbsd >/dev/null 2>&1 && nc -zv 127.0.0.1 9092",
         ])
         .output()
