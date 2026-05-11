@@ -29,17 +29,46 @@
 //! which gives us a fully-warm broker with correct advertised listeners on
 //! return from `start().await`. It is the battle-tested image used by the
 //! upstream `testcontainers-modules` Kafka examples.
+//!
+//! ## Why a retry helper on the first request?
+//!
+//! Even with the Confluent module's `WaitFor` strategy, the "Creating new log
+//! file" log line fires while the broker is still finishing controller
+//! election / `ApiVersions` table construction. On slow CI runners the first
+//! `ApiVersions` RPC sometimes lands mid-bringup and the broker resets the
+//! TCP stream — Crabka surfaces this as `ClientError::Disconnected`. To make
+//! the suite robust without taking a dependency on broker internals, every
+//! test now bootstraps via [`bootstrap_client`], which retries the initial
+//! `ApiVersions` send for up to ~15s before giving up.
 
 // Skip compilation on Windows runners where testcontainers + Docker reliability
 // is poor. On Linux CI the tests run via the `client-core-integration` job.
 #![cfg(not(target_os = "windows"))]
+
+use std::time::Duration;
 
 use testcontainers::runners::AsyncRunner;
 // `testcontainers_modules::kafka` re-exports `confluent::*`, so the bare
 // `Kafka` here is the Confluent module's container type.
 use testcontainers_modules::kafka::{KAFKA_PORT, Kafka};
 
-use crabka_client_core::Client;
+use crabka_client_core::{Client, ClientError};
+use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
+
+/// Maximum attempts for the initial `ApiVersions` round-trip while the broker
+/// is still warming up. With a 1s pause between attempts this gives ~15s of
+/// tolerance, which empirically covers slow CI runners.
+const BOOTSTRAP_MAX_ATTEMPTS: u32 = 15;
+const BOOTSTRAP_RETRY_DELAY: Duration = Duration::from_secs(1);
+
+/// Initialise a per-test tracing subscriber so `--nocapture` runs surface
+/// client-side connection / dispatch logs. Safe to call multiple times.
+fn init_tracing() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("crabka_client_core=debug,info")
+        .with_test_writer()
+        .try_init();
+}
 
 /// Start a Kafka container and return the container handle + bootstrap address.
 async fn start_kafka() -> (testcontainers::ContainerAsync<Kafka>, String) {
@@ -54,19 +83,56 @@ async fn start_kafka() -> (testcontainers::ContainerAsync<Kafka>, String) {
     (kafka, format!("127.0.0.1:{port}"))
 }
 
+/// Build a `Client` and drive the bootstrap `ApiVersions` round-trip with
+/// retry on `ClientError::Disconnected`. Returns a primed `Client` whose
+/// internal version map has already been negotiated against the broker.
+///
+/// `Client::builder().build()` is lazy: it does not open a TCP connection.
+/// The first `send` is what actually negotiates `ApiVersions`, so retrying
+/// `send` is sufficient — we don't need to rebuild the client. However, on a
+/// hard `Disconnected` the underlying reader task has exited, so we rebuild
+/// the `Client` on each retry to get a fresh writer/reader pair.
+async fn bootstrap_client(bootstrap: &str) -> Client {
+    let mut last_err: Option<ClientError> = None;
+    for attempt in 1..=BOOTSTRAP_MAX_ATTEMPTS {
+        let client = Client::builder(bootstrap)
+            .client_id("crabka-integration")
+            .build()
+            .await
+            .expect("client build failed");
+
+        match client.send(ApiVersionsRequest::default()).await {
+            Ok(_) => {
+                tracing::info!(attempt, "broker ready, bootstrap ApiVersions succeeded");
+                return client;
+            }
+            Err(ClientError::Disconnected) => {
+                tracing::warn!(
+                    attempt,
+                    max = BOOTSTRAP_MAX_ATTEMPTS,
+                    "bootstrap ApiVersions returned Disconnected; broker likely still warming up"
+                );
+                client.close();
+                last_err = Some(ClientError::Disconnected);
+                tokio::time::sleep(BOOTSTRAP_RETRY_DELAY).await;
+            }
+            Err(e) => panic!("bootstrap ApiVersions failed with non-retryable error: {e}"),
+        }
+    }
+    panic!(
+        "broker never accepted ApiVersions after {BOOTSTRAP_MAX_ATTEMPTS} attempts; \
+         last error: {last_err:?}"
+    );
+}
+
 // ── tests ────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn api_versions_against_real_broker() {
-    use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
-
+    init_tracing();
     let (kafka, bootstrap) = start_kafka().await;
-    let client = Client::builder(&bootstrap)
-        .client_id("crabka-integration")
-        .build()
-        .await
-        .expect("client build failed");
+    let client = bootstrap_client(&bootstrap).await;
 
     let resp = client
         .send(ApiVersionsRequest::default())
@@ -92,11 +158,9 @@ async fn api_versions_against_real_broker() {
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn metadata_against_real_broker() {
+    init_tracing();
     let (kafka, bootstrap) = start_kafka().await;
-    let client = Client::builder(&bootstrap)
-        .build()
-        .await
-        .expect("client build failed");
+    let client = bootstrap_client(&bootstrap).await;
 
     let resp = client
         .refresh_metadata()
@@ -117,11 +181,9 @@ async fn create_then_delete_topic() {
     use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
     use crabka_protocol::owned::delete_topics_request::{DeleteTopicState, DeleteTopicsRequest};
 
+    init_tracing();
     let (kafka, bootstrap) = start_kafka().await;
-    let client = Client::builder(&bootstrap)
-        .build()
-        .await
-        .expect("client build failed");
+    let client = bootstrap_client(&bootstrap).await;
 
     let create = CreateTopicsRequest {
         topics: vec![CreatableTopic {
@@ -164,11 +226,9 @@ async fn create_then_delete_topic() {
 async fn list_topics() {
     use crabka_protocol::owned::metadata_request::MetadataRequest;
 
+    init_tracing();
     let (kafka, bootstrap) = start_kafka().await;
-    let client = Client::builder(&bootstrap)
-        .build()
-        .await
-        .expect("client build failed");
+    let client = bootstrap_client(&bootstrap).await;
 
     // `MetadataRequest::default()` has `topics = None`, which lists all topics.
     let resp = client

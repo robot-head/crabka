@@ -32,6 +32,7 @@ serde_json = { workspace = true }
 testcontainers = { workspace = true }
 testcontainers-modules = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 futures-util = { workspace = true }
 
 [[test]]
