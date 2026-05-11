@@ -192,6 +192,71 @@ impl Log {
             batches,
         })
     }
+
+    /// Truncate the log so no records at offset `>= offset` remain. Used
+    /// by replication / leader election.
+    pub fn truncate_to(&mut self, offset: i64) -> Result<(), LogError> {
+        let log_start = self.log_start_offset();
+        let log_end = self.log_end_offset();
+        if offset >= log_end {
+            return Ok(()); // nothing to truncate
+        }
+        if offset < log_start {
+            return Err(LogError::OffsetTooLow {
+                requested: offset,
+                log_start,
+            });
+        }
+
+        // Drop sealed segments whose base_offset >= offset.
+        while let Some(last_sealed) = self.segments.last() {
+            if last_sealed.base_offset() >= offset {
+                let popped = self.segments.pop().expect("non-empty by while-let");
+                let base = popped.base_offset();
+                drop(popped);
+                let _ = fs::remove_file(name::log_path(&self.dir, base));
+                let _ = fs::remove_file(name::index_path(&self.dir, base));
+                let _ = fs::remove_file(name::timeindex_path(&self.dir, base));
+            } else {
+                break;
+            }
+        }
+
+        // Drop the active segment if its base_offset >= offset.
+        if let Some(active) = &self.active
+            && active.base_offset() >= offset
+        {
+            let base = active.base_offset();
+            self.active = None;
+            let _ = fs::remove_file(name::log_path(&self.dir, base));
+            let _ = fs::remove_file(name::index_path(&self.dir, base));
+            let _ = fs::remove_file(name::timeindex_path(&self.dir, base));
+        }
+
+        // If no active segment, promote the last sealed one (if any) and
+        // truncate it in place. Otherwise, create a fresh one at `offset`.
+        if self.active.is_none() {
+            if let Some(last) = self.segments.pop() {
+                let mut seg =
+                    Arc::try_unwrap(last).expect("no outstanding readers during truncate");
+                let rel = u32::try_from(offset - seg.base_offset())
+                    .map_err(|_| LogError::BadSegmentName("offset overflow".into()))?;
+                seg.truncate_to_relative(rel)?;
+                self.active = Some(seg);
+            } else {
+                self.active = Some(Segment::create(&self.dir, offset)?);
+            }
+        } else if let Some(active) = self.active.as_mut()
+            && active.last_offset() >= offset
+        {
+            // The surviving active segment contains records at or past
+            // `offset`; truncate them in place.
+            let rel = u32::try_from(offset - active.base_offset())
+                .map_err(|_| LogError::BadSegmentName("offset overflow".into()))?;
+            active.truncate_to_relative(rel)?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -281,6 +346,31 @@ mod tests {
         log.append(&mut b).unwrap();
         let out = log.read(log.log_end_offset(), 1024).unwrap();
         assert!(out.batches.is_empty());
+    }
+
+    #[test]
+    fn truncate_to_drops_later_records() {
+        let dir = tempdir().unwrap();
+        let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
+        let mut b1 = sample_batch(3);
+        let mut b2 = sample_batch(2);
+        log.append(&mut b1).unwrap();
+        log.append(&mut b2).unwrap();
+        assert_eq!(log.log_end_offset(), 5);
+        log.truncate_to(3).unwrap();
+        // First batch (offsets 0..=2) survives; last_offset == 2, end == 3.
+        assert_eq!(log.log_end_offset(), 3);
+    }
+
+    #[test]
+    fn truncate_to_log_end_is_noop() {
+        let dir = tempdir().unwrap();
+        let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
+        let mut b = sample_batch(2);
+        log.append(&mut b).unwrap();
+        let before = log.log_end_offset();
+        log.truncate_to(before + 100).unwrap();
+        assert_eq!(log.log_end_offset(), before);
     }
 
     #[test]

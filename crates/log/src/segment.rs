@@ -213,6 +213,48 @@ impl Segment {
         self.time_index.flush()?;
         Ok(())
     }
+
+    /// Truncate `.log` and indexes so no batches at `relative_offset` `>= rel`
+    /// remain. Used by `Log::truncate_to`. Leaves the segment unsealed.
+    pub fn truncate_to_relative(&mut self, rel: u32) -> Result<(), LogError> {
+        let mut f = self.log_file.try_clone()?;
+        f.seek(SeekFrom::Start(0))?;
+        let mut buf = Vec::new();
+        f.read_to_end(&mut buf)?;
+
+        let target_abs = self.base_offset + i64::from(rel);
+        let mut cur: &[u8] = &buf;
+        let mut pos: u64 = 0;
+        let mut last_kept_offset = self.base_offset - 1;
+        let mut last_kept_ts = i64::MIN;
+        while !cur.is_empty() {
+            let before = cur.len();
+            let Ok(batch) = RecordBatch::decode(&mut cur) else {
+                break;
+            };
+            let batch_last_offset = batch.base_offset + i64::from(batch.last_offset_delta);
+            if batch_last_offset >= target_abs {
+                break;
+            }
+            pos += (before - cur.len()) as u64;
+            last_kept_offset = batch_last_offset;
+            if batch.max_timestamp > last_kept_ts {
+                last_kept_ts = batch.max_timestamp;
+            }
+        }
+
+        self.log_file.set_len(pos)?;
+        self.log_size = pos;
+        self.last_offset = last_kept_offset;
+        self.max_timestamp = last_kept_ts;
+
+        let pos_u32 =
+            u32::try_from(pos).map_err(|_| LogError::BadSegmentName("position overflow".into()))?;
+        self.offset_index.truncate_by_position(pos_u32)?;
+        self.time_index.truncate_by_relative_offset(rel)?;
+        self.sealed = false;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
