@@ -13,6 +13,10 @@ use crate::request::ProtocolRequest;
 /// A Kafka client backed by a [`BrokerPool`].
 ///
 /// Construct via [`Client::builder`].
+///
+/// Cloning a `Client` is cheap — it shares the underlying [`BrokerPool`] via
+/// an `Arc` and the connection options via a value clone.
+#[derive(Clone)]
 pub struct Client {
     pool: Arc<BrokerPool>,
     #[allow(dead_code)]
