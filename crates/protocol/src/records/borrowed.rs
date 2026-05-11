@@ -1,8 +1,19 @@
 //! Borrowed `RecordBatch<'a>`, `Record<'a>`, and `RecordHeader<'a>`.
 
 use bytes::Bytes;
+use zerocopy::FromBytes as _;
 
-use crate::records::header::{Attributes, RecordBatchHeader};
+use crate::primitives::varint::{get_varint, get_varlong};
+use crate::records::RecordsError;
+use crate::records::crc::{crc32c, crc32c_append};
+use crate::records::header::{Attributes, HEADER_LEN, RecordBatchHeader};
+
+// batch_length field semantics: bytes after itself.
+// Header tail = partition_leader_epoch(4) + magic(1) + crc(4) +
+//   attributes(2) + last_offset_delta(4) + base_timestamp(8) +
+//   max_timestamp(8) + producer_id(8) + producer_epoch(2) +
+//   base_sequence(4) + records_count(4) = 49 bytes.
+const HEADER_TAIL_LEN: i32 = 49;
 
 pub struct RecordBatch<'a> {
     pub(crate) header: &'a RecordBatchHeader,
@@ -30,7 +41,7 @@ pub struct RecordHeader<'a> {
     pub value: Option<&'a [u8]>,
 }
 
-impl<'a> RecordBatch<'a> {
+impl RecordBatch<'_> {
     #[must_use]
     pub fn header(&self) -> &RecordBatchHeader {
         self.header
@@ -43,12 +54,6 @@ impl<'a> RecordBatch<'a> {
 }
 
 // ── Decode ────────────────────────────────────────────────────────────────────
-
-use crate::primitives::varint::{get_varint, get_varlong};
-use crate::records::crc::{crc32c, crc32c_append};
-use crate::records::header::HEADER_LEN;
-use crate::records::RecordsError;
-use zerocopy::FromBytes as _;
 
 impl<'de> crate::DecodeBorrow<'de> for RecordBatch<'de> {
     fn decode_borrow(buf: &mut &'de [u8], _version: i16) -> Result<Self, crate::ProtocolError> {
@@ -64,13 +69,12 @@ fn decode_borrow_impl<'de>(buf: &mut &'de [u8]) -> Result<RecordBatch<'de>, Reco
     }
     // Split off the header slice — both slices remain tied to 'de.
     let (hdr_slice, rest) = buf.split_at(HEADER_LEN);
-    let hdr: &'de RecordBatchHeader = RecordBatchHeader::ref_from_bytes(hdr_slice)
-        .map_err(|_| RecordsError::ZerocopyFailure)?;
+    let hdr: &'de RecordBatchHeader =
+        RecordBatchHeader::ref_from_bytes(hdr_slice).map_err(|_| RecordsError::ZerocopyFailure)?;
     if hdr.magic != 2 {
         return Err(RecordsError::UnsupportedMagic { found: hdr.magic });
     }
 
-    const HEADER_TAIL_LEN: i32 = 49;
     let body_len = i32::checked_sub(hdr.batch_length.get(), HEADER_TAIL_LEN)
         .and_then(|n| usize::try_from(n).ok())
         .ok_or_else(|| RecordsError::RecordParse("negative or oversized batch_length".into()))?;
@@ -106,23 +110,34 @@ fn decode_borrow_impl<'de>(buf: &mut &'de [u8]) -> Result<RecordBatch<'de>, Reco
 
 // ── Iteration ─────────────────────────────────────────────────────────────────
 
-impl<'a> RecordBatch<'a> {
+impl RecordBatch<'_> {
     /// Iterate over records, parsing each lazily.
     ///
     /// The returned `Record<'b>` items borrow from `self` (lifetime `'b`),
     /// not from the original input buffer. For uncompressed batches the
     /// backing memory is the input buffer; for compressed batches it is the
     /// batch's internal decompressed `Bytes`.
-    pub fn iter<'b>(&'b self) -> RecordIter<'b> {
-        let body: &'b [u8] = match &self.body {
+    pub fn iter(&self) -> RecordIter<'_> {
+        let body: &[u8] = match &self.body {
             RecordBody::Borrowed(s) => s,
             RecordBody::Owned(b) => b.as_ref(),
         };
+        #[allow(clippy::cast_sign_loss)] // guarded by .max(0) above
+        let count = self.header.records_count.get().max(0) as usize;
         RecordIter {
             remaining: body,
-            count: self.header.records_count.get().max(0) as usize,
+            count,
             index: 0,
         }
+    }
+}
+
+impl<'a> IntoIterator for &'a RecordBatch<'_> {
+    type Item = Result<Record<'a>, RecordsError>;
+    type IntoIter = RecordIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
     }
 }
 
@@ -145,8 +160,8 @@ impl<'a> Iterator for RecordIter<'a> {
 }
 
 fn parse_one_record<'a>(buf: &mut &'a [u8]) -> Result<Record<'a>, RecordsError> {
-    let body_len = get_varlong(buf)
-        .map_err(|e| RecordsError::RecordParse(format!("record length: {e}")))?;
+    let body_len =
+        get_varlong(buf).map_err(|e| RecordsError::RecordParse(format!("record length: {e}")))?;
     let body_len = usize::try_from(body_len).map_err(|_| {
         RecordsError::RecordParse(format!("record length negative or too large: {body_len}"))
     })?;
@@ -172,23 +187,25 @@ fn parse_body<'a>(buf: &mut &'a [u8]) -> Result<Record<'a>, RecordsError> {
     if buf.is_empty() {
         return Err(RecordsError::RecordParse("record body empty".into()));
     }
+    #[allow(clippy::cast_possible_wrap)] // intentional: Kafka attributes are i8 on the wire
     let attributes = buf[0] as i8;
     *buf = &buf[1..];
-    let timestamp_delta = get_varlong(buf)
-        .map_err(|e| RecordsError::RecordParse(format!("timestamp_delta: {e}")))?;
-    let offset_delta = get_varint(buf)
-        .map_err(|e| RecordsError::RecordParse(format!("offset_delta: {e}")))?;
+    let timestamp_delta =
+        get_varlong(buf).map_err(|e| RecordsError::RecordParse(format!("timestamp_delta: {e}")))?;
+    let offset_delta =
+        get_varint(buf).map_err(|e| RecordsError::RecordParse(format!("offset_delta: {e}")))?;
 
     let key = read_nullable_slice(buf, "key")?;
     let value = read_nullable_slice(buf, "value")?;
 
-    let header_count = get_varint(buf)
-        .map_err(|e| RecordsError::RecordParse(format!("header_count: {e}")))?;
+    let header_count =
+        get_varint(buf).map_err(|e| RecordsError::RecordParse(format!("header_count: {e}")))?;
     if header_count < 0 {
         return Err(RecordsError::RecordParse(format!(
             "negative header count {header_count}"
         )));
     }
+    #[allow(clippy::cast_sign_loss)] // guarded by < 0 check above
     let mut headers = Vec::with_capacity(header_count as usize);
     for i in 0..header_count {
         let key_len = get_varint(buf)
@@ -198,9 +215,12 @@ fn parse_body<'a>(buf: &mut &'a [u8]) -> Result<Record<'a>, RecordsError> {
                 "header[{i}] negative key length"
             )));
         }
+        #[allow(clippy::cast_sign_loss)] // guarded by < 0 check above
         let n = key_len as usize;
         if buf.len() < n {
-            return Err(RecordsError::BodyTooShort { needed: n - buf.len() });
+            return Err(RecordsError::BodyTooShort {
+                needed: n - buf.len(),
+            });
         }
         let (key_bytes, rest) = buf.split_at(n);
         *buf = rest;
@@ -208,7 +228,10 @@ fn parse_body<'a>(buf: &mut &'a [u8]) -> Result<Record<'a>, RecordsError> {
             .map_err(|e| RecordsError::RecordParse(format!("header[{i}] key utf-8: {e}")))?;
 
         let value = read_nullable_slice(buf, &format!("header[{i}] value"))?;
-        headers.push(RecordHeader { key: key_str, value });
+        headers.push(RecordHeader {
+            key: key_str,
+            value,
+        });
     }
 
     Ok(Record {
@@ -221,15 +244,21 @@ fn parse_body<'a>(buf: &mut &'a [u8]) -> Result<Record<'a>, RecordsError> {
     })
 }
 
-fn read_nullable_slice<'a>(buf: &mut &'a [u8], label: &str) -> Result<Option<&'a [u8]>, RecordsError> {
-    let len = get_varint(buf)
-        .map_err(|e| RecordsError::RecordParse(format!("{label} length: {e}")))?;
+fn read_nullable_slice<'a>(
+    buf: &mut &'a [u8],
+    label: &str,
+) -> Result<Option<&'a [u8]>, RecordsError> {
+    let len =
+        get_varint(buf).map_err(|e| RecordsError::RecordParse(format!("{label} length: {e}")))?;
     if len < 0 {
         Ok(None)
     } else {
+        #[allow(clippy::cast_sign_loss)] // guarded by < 0 check above
         let n = len as usize;
         if buf.len() < n {
-            return Err(RecordsError::BodyTooShort { needed: n - buf.len() });
+            return Err(RecordsError::BodyTooShort {
+                needed: n - buf.len(),
+            });
         }
         let (head, rest) = buf.split_at(n);
         *buf = rest;
@@ -239,12 +268,12 @@ fn read_nullable_slice<'a>(buf: &mut &'a [u8], label: &str) -> Result<Option<&'a
 
 // ── to_owned bridge ───────────────────────────────────────────────────────────
 
-impl<'a> RecordBatch<'a> {
+impl RecordBatch<'_> {
     /// Materialise an owned `RecordBatch` by copying every byte slice into
     /// `Bytes` / `String`.
     pub fn to_owned(&self) -> Result<super::owned::RecordBatch, RecordsError> {
         let mut records = Vec::new();
-        for r in self.iter() {
+        for r in self {
             let r = r?;
             records.push(super::owned::Record {
                 attributes: r.attributes,
@@ -274,6 +303,26 @@ impl<'a> RecordBatch<'a> {
             base_sequence: self.header.base_sequence.get(),
             records,
         })
+    }
+}
+
+// ── Encode trait impl ─────────────────────────────────────────────────────────
+
+impl crate::Encode for RecordBatch<'_> {
+    fn encode<B: bytes::BufMut>(
+        &self,
+        buf: &mut B,
+        version: i16,
+    ) -> Result<(), crate::ProtocolError> {
+        let owned = self.to_owned().map_err(crate::ProtocolError::from)?;
+        crate::Encode::encode(&owned, buf, version)
+    }
+
+    fn encoded_len(&self, version: i16) -> usize {
+        match self.to_owned() {
+            Ok(o) => crate::Encode::encoded_len(&o, version),
+            Err(_) => 0,
+        }
     }
 }
 
@@ -351,5 +400,25 @@ mod tests {
             "value slice does not point into the input buffer: \
              input range [{encoded_start:#x}, {encoded_end:#x}), value ptr {v_ptr:#x}",
         );
+    }
+
+    #[test]
+    fn borrowed_encode_via_trait_roundtrips() {
+        use crate::Encode as _;
+        let owned_in = super::super::owned::RecordBatch {
+            records: vec![super::super::owned::Record {
+                key: Some(Bytes::from_static(b"x")),
+                value: Some(Bytes::from_static(b"y")),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let bytes_in = encode_owned_then_borrow(&owned_in);
+        let mut cur: &[u8] = &bytes_in[..];
+        let borrowed = RecordBatch::decode_borrow(&mut cur, 0).unwrap();
+
+        let mut out = BytesMut::new();
+        borrowed.encode(&mut out, 0).unwrap();
+        assert_eq!(&out[..], &bytes_in[..]);
     }
 }
