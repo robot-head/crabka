@@ -563,8 +563,6 @@ dependencies = [
  "dashmap",
  "futures-util",
  "tempfile",
- "testcontainers",
- "testcontainers-modules",
  "thiserror",
  "tokio",
  "tokio-util",

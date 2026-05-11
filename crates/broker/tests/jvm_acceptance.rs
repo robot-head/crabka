@@ -22,6 +22,13 @@ use crabka_log::LogConfig;
 
 const HOST_PORT: u16 = 9092;
 const BOOTSTRAP: &str = "127.0.0.1:9092";
+/// Bind the broker on all interfaces. With Docker `--network host` on Linux
+/// CI runners, the cp-kafka container's Java AdminClient was unable to TCP
+/// connect to a strictly-127.0.0.1-bound broker even though `nc -zv 127.0.0.1
+/// 9092` from inside the same container succeeded — strongly suggesting the
+/// Java NIO socket is routing through a non-loopback path under
+/// `--network host` on this runner. Bind 0.0.0.0 so any client-side route works.
+const LISTEN: &str = "0.0.0.0:9092";
 const KAFKA_IMAGE: &str = "confluentinc/cp-kafka:6.1.1";
 
 /// Spawn the broker, listening on `127.0.0.1:HOST_PORT`. With
@@ -36,7 +43,7 @@ async fn start_host_broker() -> (crabka_broker::BrokerHandle, tempfile::TempDir)
         .with_test_writer()
         .try_init();
     let dir = tempfile::tempdir().expect("tempdir");
-    let listen_addr = BOOTSTRAP.parse().expect("static addr");
+    let listen_addr = LISTEN.parse().expect("static addr");
     let config = BrokerConfig {
         broker_id: 1,
         listen_addr,
