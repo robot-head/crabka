@@ -70,7 +70,7 @@ impl Broker {
     /// Build a `Broker`, scan the log dir, spawn partition writers for
     /// every existing `<topic>-<partition>/`, bind the TCP listener, and
     /// return the handle.
-    pub async fn start(config: BrokerConfig) -> Result<BrokerHandle, BrokerError> {
+    pub async fn start(mut config: BrokerConfig) -> Result<BrokerHandle, BrokerError> {
         let metadata = Arc::new(RwLock::new(MetadataImage::new()));
         let partitions: Arc<DashMap<(String, i32), Arc<Partition>>> = Arc::new(DashMap::new());
 
@@ -111,7 +111,17 @@ impl Broker {
         // 2. Build handler table.
         let handlers = crate::handlers::build_table();
 
-        let listen_addr_cfg = config.listen_addr;
+        // 3. Bind first so the actual port is known. If
+        //    `advertised_listener` points at port 0 (tests typically),
+        //    rewrite it to the bound port so FindCoordinator/Metadata
+        //    return a useful host:port instead of `:0`.
+        let listener = TcpListener::bind(config.listen_addr).await?;
+        let listen_addr = listener.local_addr()?;
+        if config.advertised_listener.ends_with(":0") {
+            if let Some((host, _)) = config.advertised_listener.rsplit_once(':') {
+                config.advertised_listener = format!("{host}:{}", listen_addr.port());
+            }
+        }
         let broker = Arc::new(Self {
             config,
             metadata,
@@ -120,9 +130,6 @@ impl Broker {
             handlers,
         });
 
-        // 3. Bind + start the accept loop.
-        let listener = TcpListener::bind(listen_addr_cfg).await?;
-        let listen_addr = listener.local_addr()?;
         let shutdown = CancellationToken::new();
         let listener_task = tokio::spawn(accept_loop(broker.clone(), listener, shutdown.clone()));
 

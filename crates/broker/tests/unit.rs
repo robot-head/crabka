@@ -357,20 +357,93 @@ async fn list_offsets_earliest_and_latest() {
 }
 
 #[tokio::test]
-async fn find_coordinator_always_unavailable() {
+async fn find_coordinator_returns_self() {
     let p = support::start().await;
     let req = FindCoordinatorRequest {
-        key: "legacy".into(),
-        coordinator_keys: vec!["grp-a".into(), "grp-b".into()],
+        coordinator_keys: vec!["any-group".into()],
         ..Default::default()
     };
-    let resp = p.client.send(req).await.expect("FindCoordinator");
-    // Negotiated version is v6 (max in both client and broker): the
-    // top-level error_code field is not on the wire at v ≥ 4 — only the
-    // per-coordinator array is. Assert on the per-key field.
-    assert_eq!(resp.coordinators.len(), 2);
-    for c in &resp.coordinators {
-        assert_eq!(c.error_code, 15);
+    let r = p.client.send(req).await.expect("FindCoordinator");
+    for c in &r.coordinators {
+        assert_eq!(c.error_code, 0);
+        assert_eq!(c.node_id, 1);
+        assert!(!c.host.is_empty());
+        assert!(c.port > 0);
     }
+    p.broker.shutdown().await;
+}
+
+#[tokio::test]
+async fn join_group_with_empty_member_returns_member_id_required() {
+    use crabka_protocol::owned::join_group_request::{
+        JoinGroupRequest, JoinGroupRequestProtocol,
+    };
+    let p = support::start().await;
+    let req = JoinGroupRequest {
+        group_id: "g".into(),
+        protocol_type: "consumer".into(),
+        member_id: "".into(),
+        session_timeout_ms: 30_000,
+        rebalance_timeout_ms: 2_000,
+        protocols: vec![JoinGroupRequestProtocol {
+            name: "range".into(),
+            metadata: bytes::Bytes::from_static(b""),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let r = p.client.send(req).await.expect("JoinGroup");
+    assert_eq!(r.error_code, 79); // MEMBER_ID_REQUIRED
+    assert!(!r.member_id.is_empty());
+    p.broker.shutdown().await;
+}
+
+#[tokio::test]
+async fn join_group_single_member_completes_after_deadline() {
+    use crabka_protocol::owned::join_group_request::{
+        JoinGroupRequest, JoinGroupRequestProtocol,
+    };
+    let p = support::start().await;
+    // First call to obtain a server-assigned member_id.
+    let r1 = p
+        .client
+        .send(JoinGroupRequest {
+            group_id: "g".into(),
+            protocol_type: "consumer".into(),
+            member_id: "".into(),
+            session_timeout_ms: 30_000,
+            rebalance_timeout_ms: 1_500,
+            protocols: vec![JoinGroupRequestProtocol {
+                name: "range".into(),
+                metadata: bytes::Bytes::new(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("JoinGroup1");
+    // Retry with the assigned member_id. The handler will block ~1.5s
+    // waiting for the rebalance deadline.
+    let r2 = p
+        .client
+        .send(JoinGroupRequest {
+            group_id: "g".into(),
+            protocol_type: "consumer".into(),
+            member_id: r1.member_id.clone(),
+            session_timeout_ms: 30_000,
+            rebalance_timeout_ms: 1_500,
+            protocols: vec![JoinGroupRequestProtocol {
+                name: "range".into(),
+                metadata: bytes::Bytes::new(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("JoinGroup2");
+    assert_eq!(r2.error_code, 0);
+    assert_eq!(r2.leader, r1.member_id);
+    assert_eq!(r2.member_id, r1.member_id);
+    assert!(!r2.members.is_empty(), "leader sees member list");
     p.broker.shutdown().await;
 }
