@@ -1,4 +1,4 @@
-//! Integration tests against a real Apache Kafka via testcontainers.
+//! Integration tests against a real Kafka via testcontainers.
 //!
 //! All tests are gated with `#[ignore]` so `cargo test --workspace` doesn't
 //! pull Docker by default. Run with:
@@ -7,15 +7,37 @@
 //! cargo test -p crabka-client-core --test integration -- --ignored --nocapture
 //! ```
 //!
-//! Each test spins up a fresh `apache/kafka-native:3.8.0` container in `KRaft`
-//! mode (no `ZooKeeper`) and tears it down when the test exits.
+//! Each test spins up a fresh `confluentinc/cp-kafka:6.1.1` container and
+//! tears it down when the test exits.
+//!
+//! ## Why the Confluent image (and not `apache/kafka-native`)?
+//!
+//! `testcontainers-modules` v0.10 ships two Kafka modules: `apache` (using the
+//! `apache/kafka-native:3.8.0` `KRaft` image) and `confluent` (using
+//! `confluentinc/cp-kafka:6.1.1`). The `apache` module wires up advertised
+//! listeners through a clever chicken-and-egg trick: the container's `cmd`
+//! polls for a `testcontainers_start.sh` file that `exec_after_start` writes
+//! once the mapped host port is known. In CI this races: the broker's TCP
+//! listener on `0.0.0.0:9092` is bound (and Docker's userland proxy is happy
+//! to accept connections on the mapped port) before `KRaft` initialization
+//! finishes, so the first client request lands on a half-initialized broker
+//! that resets the connection mid-RPC. That surfaces in Crabka as
+//! `ClientError::Disconnected` on the bootstrap `ApiVersions` roundtrip.
+//!
+//! The Confluent module uses the standard `kafka-configs --alter` pattern in
+//! `exec_after_start` and waits for "Creating new log file" before returning,
+//! which gives us a fully-warm broker with correct advertised listeners on
+//! return from `start().await`. It is the battle-tested image used by the
+//! upstream `testcontainers-modules` Kafka examples.
 
 // Skip compilation on Windows runners where testcontainers + Docker reliability
 // is poor. On Linux CI the tests run via the `client-core-integration` job.
 #![cfg(not(target_os = "windows"))]
 
 use testcontainers::runners::AsyncRunner;
-use testcontainers_modules::kafka::apache::{KAFKA_PORT, Kafka};
+// `testcontainers_modules::kafka` re-exports `confluent::*`, so the bare
+// `Kafka` here is the Confluent module's container type.
+use testcontainers_modules::kafka::{KAFKA_PORT, Kafka};
 
 use crabka_client_core::Client;
 
