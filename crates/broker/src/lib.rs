@@ -5,6 +5,7 @@
 mod codes;
 mod config;
 mod error;
+mod log_dir;
 mod metadata;
 
 pub use config::BrokerConfig;
