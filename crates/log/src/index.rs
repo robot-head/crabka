@@ -153,3 +153,123 @@ mod tests {
         assert_eq!(idx.last_entry(), Some((100, 4096)));
     }
 }
+
+// ===== TimeIndex =====
+
+/// 12 bytes per entry: timestamp (i64 BE) + `relative_offset` (u32 BE).
+pub const TIME_ENTRY_SIZE: usize = 12;
+
+#[derive(Debug)]
+pub struct TimeIndex {
+    file: File,
+    entries: Vec<(i64, u32)>,
+}
+
+impl TimeIndex {
+    pub fn open(path: &Path) -> Result<Self, LogError> {
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)?;
+        let mut buf = Vec::new();
+        file.read_to_end(&mut buf)?;
+        let mut entries = Vec::with_capacity(buf.len() / TIME_ENTRY_SIZE);
+        for chunk in buf.chunks_exact(TIME_ENTRY_SIZE) {
+            let ts = i64::from_be_bytes([
+                chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
+            ]);
+            let rel = u32::from_be_bytes([chunk[8], chunk[9], chunk[10], chunk[11]]);
+            entries.push((ts, rel));
+        }
+        Ok(Self { file, entries })
+    }
+
+    /// Append. Caller ensures monotonicity.
+    pub fn append(&mut self, timestamp: i64, relative_offset: u32) -> Result<(), LogError> {
+        let mut buf = [0u8; TIME_ENTRY_SIZE];
+        buf[0..8].copy_from_slice(&timestamp.to_be_bytes());
+        buf[8..12].copy_from_slice(&relative_offset.to_be_bytes());
+        self.file.seek(SeekFrom::End(0))?;
+        self.file.write_all(&buf)?;
+        self.entries.push((timestamp, relative_offset));
+        Ok(())
+    }
+
+    /// Find the relative offset at or after the given timestamp.
+    /// Returns the relative offset of the largest entry with
+    /// `timestamp <= target`, or 0 if no entries.
+    #[must_use]
+    pub fn lookup(&self, target_timestamp: i64) -> u32 {
+        match self
+            .entries
+            .binary_search_by_key(&target_timestamp, |&(ts, _)| ts)
+        {
+            Ok(i) => self.entries[i].1,
+            Err(0) => 0,
+            Err(i) => self.entries[i - 1].1,
+        }
+    }
+
+    pub fn truncate_by_relative_offset(&mut self, max_rel_exclusive: u32) -> Result<(), LogError> {
+        let new_len = self
+            .entries
+            .iter()
+            .take_while(|(_, rel)| *rel < max_rel_exclusive)
+            .count();
+        self.entries.truncate(new_len);
+        self.file.set_len((new_len * TIME_ENTRY_SIZE) as u64)?;
+        self.file.seek(SeekFrom::End(0))?;
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn last_entry(&self) -> Option<(i64, u32)> {
+        self.entries.last().copied()
+    }
+
+    #[must_use]
+    pub fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn flush(&mut self) -> Result<(), LogError> {
+        self.file.sync_data().map_err(LogError::Io)
+    }
+}
+
+#[cfg(test)]
+mod time_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn append_and_lookup_time() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("00000000000000000000.timeindex");
+        let mut idx = TimeIndex::open(&path).unwrap();
+        idx.append(1_000_000, 0).unwrap();
+        idx.append(2_000_000, 100).unwrap();
+        idx.append(3_000_000, 200).unwrap();
+        assert_eq!(idx.lookup(0), 0);
+        assert_eq!(idx.lookup(1_500_000), 0);
+        assert_eq!(idx.lookup(2_000_000), 100);
+        assert_eq!(idx.lookup(2_500_000), 100);
+        assert_eq!(idx.lookup(5_000_000), 200);
+    }
+
+    #[test]
+    fn persists_across_reopen() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("00000000000000000000.timeindex");
+        {
+            let mut idx = TimeIndex::open(&path).unwrap();
+            idx.append(1, 0).unwrap();
+            idx.append(2, 50).unwrap();
+            idx.flush().unwrap();
+        }
+        let idx = TimeIndex::open(&path).unwrap();
+        assert_eq!(idx.entry_count(), 2);
+    }
+}
