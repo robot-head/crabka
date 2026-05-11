@@ -3,10 +3,12 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use zerocopy::FromBytes as _;
 
-use crate::primitives::varint::{get_varint, get_varlong, put_varint, put_varlong, varint_len, varlong_len};
+use crate::primitives::varint::{
+    get_varint, get_varlong, put_varint, put_varlong, varint_len, varlong_len,
+};
+use crate::records::RecordsError;
 use crate::records::crc::{crc32c, crc32c_append};
 use crate::records::header::{Attributes, HEADER_LEN};
-use crate::records::RecordsError;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RecordHeader {
@@ -47,7 +49,7 @@ impl Default for RecordBatch {
             last_offset_delta: 0,
             base_timestamp: 0,
             max_timestamp: 0,
-            producer_id: -1,    // sentinel: non-idempotent
+            producer_id: -1, // sentinel: non-idempotent
             producer_epoch: -1,
             base_sequence: -1,
             records: Vec::new(),
@@ -61,9 +63,8 @@ impl Record {
         let body_len = self.body_len();
         put_varlong(
             buf,
-            i64::try_from(body_len).map_err(|_| {
-                RecordsError::RecordParse("record body length overflow".into())
-            })?,
+            i64::try_from(body_len)
+                .map_err(|_| RecordsError::RecordParse("record body length overflow".into()))?,
         );
         self.encode_body(buf)
     }
@@ -71,7 +72,9 @@ impl Record {
     /// Predicted total length of this record on the wire (length-prefix + body).
     pub fn encoded_len(&self) -> usize {
         let body = self.body_len();
-        varlong_len(body as i64) + body
+        #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+        let body_i64 = body as i64;
+        varlong_len(body_i64) + body
     }
 
     fn body_len(&self) -> usize {
@@ -128,17 +131,15 @@ impl Record {
         }
         put_varint(
             buf,
-            i32::try_from(self.headers.len()).map_err(|_| {
-                RecordsError::RecordParse("record header count overflow".into())
-            })?,
+            i32::try_from(self.headers.len())
+                .map_err(|_| RecordsError::RecordParse("record header count overflow".into()))?,
         );
         for h in &self.headers {
             let key_bytes = h.key.as_bytes();
             put_varint(
                 buf,
-                i32::try_from(key_bytes.len()).map_err(|_| {
-                    RecordsError::RecordParse("header key length overflow".into())
-                })?,
+                i32::try_from(key_bytes.len())
+                    .map_err(|_| RecordsError::RecordParse("header key length overflow".into()))?,
             );
             buf.put_slice(key_bytes);
             match &h.value {
@@ -163,9 +164,7 @@ impl Record {
         let body_len = get_varlong(buf)
             .map_err(|e| RecordsError::RecordParse(format!("record length: {e}")))?;
         let body_len = usize::try_from(body_len).map_err(|_| {
-            RecordsError::RecordParse(format!(
-                "record length negative or too large: {body_len}"
-            ))
+            RecordsError::RecordParse(format!("record length negative or too large: {body_len}"))
         })?;
         if buf.remaining() < body_len {
             return Err(RecordsError::BodyTooShort {
@@ -193,20 +192,22 @@ impl Record {
         let attributes = buf.get_i8();
         let timestamp_delta = get_varlong(buf)
             .map_err(|e| RecordsError::RecordParse(format!("timestamp_delta: {e}")))?;
-        let offset_delta = get_varint(buf)
-            .map_err(|e| RecordsError::RecordParse(format!("offset_delta: {e}")))?;
+        let offset_delta =
+            get_varint(buf).map_err(|e| RecordsError::RecordParse(format!("offset_delta: {e}")))?;
 
         let key = decode_nullable_bytes(buf, "key")?;
         let value = decode_nullable_bytes(buf, "value")?;
 
-        let header_count = get_varint(buf)
-            .map_err(|e| RecordsError::RecordParse(format!("header_count: {e}")))?;
+        let header_count =
+            get_varint(buf).map_err(|e| RecordsError::RecordParse(format!("header_count: {e}")))?;
         if header_count < 0 {
             return Err(RecordsError::RecordParse(format!(
                 "negative header count {header_count}"
             )));
         }
-        let mut headers = Vec::with_capacity(header_count as usize);
+        #[allow(clippy::cast_sign_loss)] // checked < 0 above
+        let header_count_usize = header_count as usize;
+        let mut headers = Vec::with_capacity(header_count_usize);
         for i in 0..header_count {
             headers.push(
                 decode_record_header(buf)
@@ -225,15 +226,13 @@ impl Record {
     }
 }
 
-fn decode_nullable_bytes<B: Buf>(
-    buf: &mut B,
-    label: &str,
-) -> Result<Option<Bytes>, RecordsError> {
-    let len = get_varint(buf)
-        .map_err(|e| RecordsError::RecordParse(format!("{label} length: {e}")))?;
+fn decode_nullable_bytes<B: Buf>(buf: &mut B, label: &str) -> Result<Option<Bytes>, RecordsError> {
+    let len =
+        get_varint(buf).map_err(|e| RecordsError::RecordParse(format!("{label} length: {e}")))?;
     if len < 0 {
         Ok(None)
     } else {
+        #[allow(clippy::cast_sign_loss)] // checked < 0 above
         let n = len as usize;
         if buf.remaining() < n {
             return Err(RecordsError::BodyTooShort {
@@ -249,16 +248,12 @@ fn decode_nullable_bytes<B: Buf>(
 fn decode_record_header<B: Buf>(buf: &mut B) -> Result<RecordHeader, String> {
     let key_len = get_varint(buf).map_err(|e| format!("key length: {e}"))?;
     if key_len < 0 {
-        return Err(format!(
-            "non-nullable key has negative length {key_len}"
-        ));
+        return Err(format!("non-nullable key has negative length {key_len}"));
     }
+    #[allow(clippy::cast_sign_loss)] // checked < 0 above
     let n = key_len as usize;
     if buf.remaining() < n {
-        return Err(format!(
-            "key truncated (need {} more)",
-            n - buf.remaining()
-        ));
+        return Err(format!("key truncated (need {} more)", n - buf.remaining()));
     }
     let mut kv = vec![0u8; n];
     buf.copy_to_slice(&mut kv);
@@ -268,6 +263,7 @@ fn decode_record_header<B: Buf>(buf: &mut B) -> Result<RecordHeader, String> {
     let value = if value_len < 0 {
         None
     } else {
+        #[allow(clippy::cast_sign_loss)] // checked < 0 above
         let n = value_len as usize;
         if buf.remaining() < n {
             return Err(format!(
@@ -378,6 +374,13 @@ impl RecordBatch {
     /// Decode a complete v2 record batch from `buf`. Reads from the start of
     /// the header.
     pub fn decode<B: Buf>(buf: &mut B) -> Result<Self, RecordsError> {
+        // batch_length field semantics: bytes after itself.
+        // Header tail = partition_leader_epoch(4) + magic(1) + crc(4) +
+        //   attributes(2) + last_offset_delta(4) + base_timestamp(8) +
+        //   max_timestamp(8) + producer_id(8) + producer_epoch(2) +
+        //   base_sequence(4) + records_count(4) = 49 bytes.
+        const HEADER_TAIL_LEN: i32 = 49;
+
         // Need the full header before doing anything.
         if buf.remaining() < HEADER_LEN {
             return Err(RecordsError::HeaderTooShort {
@@ -395,13 +398,7 @@ impl RecordBatch {
             return Err(RecordsError::UnsupportedMagic { found: hdr.magic });
         }
 
-        // batch_length: bytes after itself.
-        // Wire: base_offset(8) + batch_length(4) + [partition_leader_epoch(4) +
-        //        magic(1) + crc(4) + attributes(2) + last_offset_delta(4) +
-        //        base_timestamp(8) + max_timestamp(8) + producer_id(8) +
-        //        producer_epoch(2) + base_sequence(4) + records_count(4)] = 49
-        // So body_len = batch_length - 49.
-        const HEADER_TAIL_LEN: i32 = 49;
+        // body_len = batch_length - HEADER_TAIL_LEN
         let body_len = i32::checked_sub(hdr.batch_length.get(), HEADER_TAIL_LEN)
             .and_then(|n| usize::try_from(n).ok())
             .ok_or_else(|| {
@@ -448,11 +445,13 @@ impl RecordBatch {
             )));
         }
         let mut body_cur: &[u8] = &body_for_records[..];
+        #[allow(clippy::cast_sign_loss)] // checked < 0 above
         let mut records = Vec::with_capacity(count as usize);
         for i in 0..count {
-            records.push(Record::decode(&mut body_cur).map_err(|e| {
-                RecordsError::RecordParse(format!("record[{i}]: {e}"))
-            })?);
+            records.push(
+                Record::decode(&mut body_cur)
+                    .map_err(|e| RecordsError::RecordParse(format!("record[{i}]: {e}")))?,
+            );
         }
         if !body_cur.is_empty() {
             return Err(RecordsError::RecordParse(format!(
@@ -477,10 +476,11 @@ impl RecordBatch {
 
     /// Encode this batch into `buf`.
     pub fn encode<B: BufMut>(&self, buf: &mut B) -> Result<(), RecordsError> {
+        const HEADER_TAIL_LEN: i32 = 49;
+
         // 1. Encode records into a temporary buffer.
-        let mut raw_body = BytesMut::with_capacity(
-            self.records.iter().map(Record::encoded_len).sum(),
-        );
+        let mut raw_body =
+            BytesMut::with_capacity(self.records.iter().map(Record::encoded_len).sum());
         for r in &self.records {
             r.encode(&mut raw_body)?;
         }
@@ -495,11 +495,9 @@ impl RecordBatch {
         };
 
         // 3. batch_length = HEADER_TAIL_LEN + body_len
-        const HEADER_TAIL_LEN: i32 = 49;
         let batch_length = HEADER_TAIL_LEN
-            + i32::try_from(body.len()).map_err(|_| {
-                RecordsError::RecordParse("body length exceeds i32".into())
-            })?;
+            + i32::try_from(body.len())
+                .map_err(|_| RecordsError::RecordParse("body length exceeds i32".into()))?;
 
         // 4. Build the CRC-covered header portion (attributes through records_count = 40 bytes).
         let mut covered = BytesMut::with_capacity(40);
@@ -511,9 +509,8 @@ impl RecordBatch {
         covered.put_i16(self.producer_epoch);
         covered.put_i32(self.base_sequence);
         covered.put_i32(
-            i32::try_from(self.records.len()).map_err(|_| {
-                RecordsError::RecordParse("records_count exceeds i32".into())
-            })?,
+            i32::try_from(self.records.len())
+                .map_err(|_| RecordsError::RecordParse("records_count exceeds i32".into()))?,
         );
         let covered_head = covered.freeze();
 
@@ -677,4 +674,20 @@ mod batch_tests {
     roundtrip_compressed!(compressed_snappy, CompressionType::Snappy);
     roundtrip_compressed!(compressed_lz4, CompressionType::Lz4);
     roundtrip_compressed!(compressed_zstd, CompressionType::Zstd);
+}
+
+impl crate::Encode for RecordBatch {
+    fn encode<B: BufMut>(&self, buf: &mut B, _version: i16) -> Result<(), crate::ProtocolError> {
+        RecordBatch::encode(self, buf).map_err(Into::into)
+    }
+
+    fn encoded_len(&self, _version: i16) -> usize {
+        RecordBatch::encoded_len(self)
+    }
+}
+
+impl crate::Decode<'_> for RecordBatch {
+    fn decode<B: Buf>(buf: &mut B, _version: i16) -> Result<Self, crate::ProtocolError> {
+        RecordBatch::decode(buf).map_err(Into::into)
+    }
 }

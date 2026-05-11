@@ -114,7 +114,7 @@ pub fn uvarlong_len(v: u64) -> usize {
         return 1;
     }
     let bits = 64 - v.leading_zeros() as usize;
-    (bits + 6) / 7
+    bits.div_ceil(7)
 }
 
 #[must_use]
@@ -203,7 +203,7 @@ mod tests {
             (1, 1),
             (127, 1),
             (128, 2),
-            (u32::MAX as u64, 5),
+            (u64::from(u32::MAX), 5),
             (u64::MAX, 10),
         ];
         for (v, expected) in cases {
