@@ -132,7 +132,14 @@ impl<'de> Decode<'de> for TopicPartitions {
 }
 
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+/// Only includes fields valid for the given version.
 #[must_use]
-pub fn default_json() -> ::serde_json::Value {
-    ::serde_json::json!({"ElectionType": 0, "TopicPartitions": null, "TimeoutMs": 60000})
+pub fn default_json(version: i16) -> ::serde_json::Value {
+    let mut obj = ::serde_json::Map::new();
+    if version >= 1 {
+        obj.insert("electionType".to_string(), ::serde_json::json!(0));
+    }
+    obj.insert("topicPartitions".to_string(), ::serde_json::Value::Null);
+    obj.insert("timeoutMs".to_string(), ::serde_json::json!(60000));
+    ::serde_json::Value::Object(obj)
 }

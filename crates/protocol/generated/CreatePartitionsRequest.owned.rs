@@ -167,7 +167,12 @@ impl<'de> Decode<'de> for CreatePartitionsAssignment {
 }
 
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+/// Only includes fields valid for the given version.
 #[must_use]
-pub fn default_json() -> ::serde_json::Value {
-    ::serde_json::json!({"Topics": [], "TimeoutMs": 0, "ValidateOnly": false})
+pub fn default_json(version: i16) -> ::serde_json::Value {
+    let mut obj = ::serde_json::Map::new();
+    obj.insert("topics".to_string(), ::serde_json::Value::Array(vec![]));
+    obj.insert("timeoutMs".to_string(), ::serde_json::json!(0));
+    obj.insert("validateOnly".to_string(), ::serde_json::Value::Bool(false));
+    ::serde_json::Value::Object(obj)
 }

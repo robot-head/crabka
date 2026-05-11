@@ -79,7 +79,15 @@ impl<'de> Decode<'de> for RequestHeader {
 }
 
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+/// Only includes fields valid for the given version.
 #[must_use]
-pub fn default_json() -> ::serde_json::Value {
-    ::serde_json::json!({"RequestApiKey": 0, "RequestApiVersion": 0, "CorrelationId": 0, "ClientId": null})
+pub fn default_json(version: i16) -> ::serde_json::Value {
+    let mut obj = ::serde_json::Map::new();
+    obj.insert("requestApiKey".to_string(), ::serde_json::json!(0));
+    obj.insert("requestApiVersion".to_string(), ::serde_json::json!(0));
+    obj.insert("correlationId".to_string(), ::serde_json::json!(0));
+    if version >= 1 {
+        obj.insert("clientId".to_string(), ::serde_json::Value::Null);
+    }
+    ::serde_json::Value::Object(obj)
 }

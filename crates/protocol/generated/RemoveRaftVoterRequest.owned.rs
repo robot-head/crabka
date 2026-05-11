@@ -77,7 +77,12 @@ impl<'de> Decode<'de> for RemoveRaftVoterRequest {
 }
 
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+/// Only includes fields valid for the given version.
 #[must_use]
-pub fn default_json() -> ::serde_json::Value {
-    ::serde_json::json!({"ClusterId": null, "VoterId": 0, "VoterDirectoryId": "00000000-0000-0000-0000-000000000000"})
+pub fn default_json(version: i16) -> ::serde_json::Value {
+    let mut obj = ::serde_json::Map::new();
+    obj.insert("clusterId".to_string(), ::serde_json::Value::Null);
+    obj.insert("voterId".to_string(), ::serde_json::json!(0));
+    obj.insert("voterDirectoryId".to_string(), ::serde_json::Value::String("00000000-0000-0000-0000-000000000000".to_string()));
+    ::serde_json::Value::Object(obj)
 }

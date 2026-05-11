@@ -7,6 +7,7 @@
 
 mod support;
 use support::oracle;
+use serde_json::json;
 
 include!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -20,30 +21,64 @@ fn every_pair_byte_equal() {
     let mut failures: Vec<String> = Vec::new();
     for case in CASES {
         let rust_bytes = encode_default(case.name, case.version);
-        let json = default_json_for(case.name);
-        let jvm_bytes = match case.kind {
-            Kind::Request => o.encode(case.api_key, case.version, true, &json),
-            Kind::Response => o.encode(case.api_key, case.version, false, &json),
-            Kind::RequestHeader => o.header_encode("request", case.version, &json),
-            Kind::ResponseHeader => o.header_encode("response", case.version, &json),
+        let jval = default_json_for(case.name, case.version);
+
+        let req = match case.kind {
+            Kind::Request => json!({
+                "op": "encode",
+                "apiKey": case.api_key,
+                "version": case.version,
+                "isRequest": true,
+                "value": jval,
+            }),
+            Kind::Response => json!({
+                "op": "encode",
+                "apiKey": case.api_key,
+                "version": case.version,
+                "isRequest": false,
+                "value": jval,
+            }),
+            Kind::RequestHeader => json!({
+                "op": "header_encode",
+                "kind": "request",
+                "version": case.version,
+                "value": jval,
+            }),
+            Kind::ResponseHeader => json!({
+                "op": "header_encode",
+                "kind": "response",
+                "version": case.version,
+                "value": jval,
+            }),
         };
-        if rust_bytes != jvm_bytes {
-            failures.push(format!(
-                "{}[{}] v{}: rust={} ({} bytes), jvm={} ({} bytes), first_diff_at={}",
-                case.name,
-                match case.kind {
-                    Kind::Request => "req",
-                    Kind::Response => "resp",
-                    Kind::RequestHeader => "rhdr",
-                    Kind::ResponseHeader => "shdr",
-                },
-                case.version,
-                hex::encode(&rust_bytes),
-                rust_bytes.len(),
-                hex::encode(&jvm_bytes),
-                jvm_bytes.len(),
-                first_diff(&rust_bytes, &jvm_bytes),
-            ));
+
+        let result = o.try_call(&req);
+        match result {
+            Err(e) => {
+                failures.push(format!(
+                    "{}[{}] v{}: ORACLE_ERROR: {}",
+                    case.name,
+                    kind_str(case.kind),
+                    case.version,
+                    e,
+                ));
+            }
+            Ok(resp) => {
+                let jvm_bytes = hex::decode(resp["hex"].as_str().unwrap()).unwrap();
+                if rust_bytes != jvm_bytes {
+                    failures.push(format!(
+                        "{}[{}] v{}: rust={} ({} bytes), jvm={} ({} bytes), first_diff_at={}",
+                        case.name,
+                        kind_str(case.kind),
+                        case.version,
+                        hex::encode(&rust_bytes),
+                        rust_bytes.len(),
+                        hex::encode(&jvm_bytes),
+                        jvm_bytes.len(),
+                        first_diff(&rust_bytes, &jvm_bytes),
+                    ));
+                }
+            }
         }
     }
     if !failures.is_empty() {
@@ -52,6 +87,15 @@ fn every_pair_byte_equal() {
             failures.len(),
             failures.join("\n")
         );
+    }
+}
+
+fn kind_str(k: Kind) -> &'static str {
+    match k {
+        Kind::Request => "req",
+        Kind::Response => "resp",
+        Kind::RequestHeader => "rhdr",
+        Kind::ResponseHeader => "shdr",
     }
 }
 

@@ -148,7 +148,10 @@ impl<'de> Decode<'de> for AclCreation {
 }
 
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+/// Only includes fields valid for the given version.
 #[must_use]
-pub fn default_json() -> ::serde_json::Value {
-    ::serde_json::json!({"Creations": []})
+pub fn default_json(version: i16) -> ::serde_json::Value {
+    let mut obj = ::serde_json::Map::new();
+    obj.insert("creations".to_string(), ::serde_json::Value::Array(vec![]));
+    ::serde_json::Value::Object(obj)
 }

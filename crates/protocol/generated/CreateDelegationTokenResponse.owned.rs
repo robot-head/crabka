@@ -108,7 +108,24 @@ impl<'de> Decode<'de> for CreateDelegationTokenResponse {
 }
 
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+/// Only includes fields valid for the given version.
 #[must_use]
-pub fn default_json() -> ::serde_json::Value {
-    ::serde_json::json!({"ErrorCode": 0, "PrincipalType": "", "PrincipalName": "", "TokenRequesterPrincipalType": "", "TokenRequesterPrincipalName": "", "IssueTimestampMs": 0, "ExpiryTimestampMs": 0, "MaxTimestampMs": 0, "TokenId": "", "Hmac": "", "ThrottleTimeMs": 0})
+pub fn default_json(version: i16) -> ::serde_json::Value {
+    let mut obj = ::serde_json::Map::new();
+    obj.insert("errorCode".to_string(), ::serde_json::json!(0));
+    obj.insert("principalType".to_string(), ::serde_json::Value::String(String::new()));
+    obj.insert("principalName".to_string(), ::serde_json::Value::String(String::new()));
+    if version >= 3 {
+        obj.insert("tokenRequesterPrincipalType".to_string(), ::serde_json::Value::String(String::new()));
+    }
+    if version >= 3 {
+        obj.insert("tokenRequesterPrincipalName".to_string(), ::serde_json::Value::String(String::new()));
+    }
+    obj.insert("issueTimestampMs".to_string(), ::serde_json::json!(0));
+    obj.insert("expiryTimestampMs".to_string(), ::serde_json::json!(0));
+    obj.insert("maxTimestampMs".to_string(), ::serde_json::json!(0));
+    obj.insert("tokenId".to_string(), ::serde_json::Value::String(String::new()));
+    obj.insert("hmac".to_string(), ::serde_json::Value::String(String::new()));
+    obj.insert("throttleTimeMs".to_string(), ::serde_json::json!(0));
+    ::serde_json::Value::Object(obj)
 }

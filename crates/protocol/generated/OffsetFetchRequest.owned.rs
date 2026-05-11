@@ -243,7 +243,21 @@ impl<'de> Decode<'de> for OffsetFetchRequestTopics {
 }
 
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+/// Only includes fields valid for the given version.
 #[must_use]
-pub fn default_json() -> ::serde_json::Value {
-    ::serde_json::json!({"GroupId": "", "Topics": null, "Groups": [], "RequireStable": false})
+pub fn default_json(version: i16) -> ::serde_json::Value {
+    let mut obj = ::serde_json::Map::new();
+    if version >= 0 && version <= 7 {
+        obj.insert("groupId".to_string(), ::serde_json::Value::String(String::new()));
+    }
+    if version >= 0 && version <= 7 {
+        obj.insert("topics".to_string(), ::serde_json::Value::Null);
+    }
+    if version >= 8 {
+        obj.insert("groups".to_string(), ::serde_json::Value::Array(vec![]));
+    }
+    if version >= 7 {
+        obj.insert("requireStable".to_string(), ::serde_json::Value::Bool(false));
+    }
+    ::serde_json::Value::Object(obj)
 }

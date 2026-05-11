@@ -325,7 +325,29 @@ impl<'de> Decode<'de> for ForgottenTopic {
 }
 
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+/// Only includes fields valid for the given version.
 #[must_use]
-pub fn default_json() -> ::serde_json::Value {
-    ::serde_json::json!({"GroupId": null, "MemberId": null, "ShareSessionEpoch": 0, "MaxWaitMs": 0, "MinBytes": 0, "MaxBytes": 0x7fffffff, "MaxRecords": 0, "BatchSize": 0, "ShareAcquireMode": 0, "IsRenewAck": false, "Topics": [], "ForgottenTopicsData": []})
+pub fn default_json(version: i16) -> ::serde_json::Value {
+    let mut obj = ::serde_json::Map::new();
+    obj.insert("groupId".to_string(), ::serde_json::Value::Null);
+    obj.insert("memberId".to_string(), ::serde_json::Value::Null);
+    obj.insert("shareSessionEpoch".to_string(), ::serde_json::json!(0));
+    obj.insert("maxWaitMs".to_string(), ::serde_json::json!(0));
+    obj.insert("minBytes".to_string(), ::serde_json::json!(0));
+    obj.insert("maxBytes".to_string(), ::serde_json::json!(2147483647));
+    if version >= 1 {
+        obj.insert("maxRecords".to_string(), ::serde_json::json!(0));
+    }
+    if version >= 1 {
+        obj.insert("batchSize".to_string(), ::serde_json::json!(0));
+    }
+    if version >= 2 {
+        obj.insert("shareAcquireMode".to_string(), ::serde_json::json!(0));
+    }
+    if version >= 2 {
+        obj.insert("isRenewAck".to_string(), ::serde_json::Value::Bool(false));
+    }
+    obj.insert("topics".to_string(), ::serde_json::Value::Array(vec![]));
+    obj.insert("forgottenTopicsData".to_string(), ::serde_json::Value::Array(vec![]));
+    ::serde_json::Value::Object(obj)
 }

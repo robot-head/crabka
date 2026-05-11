@@ -82,7 +82,16 @@ impl<'de> Decode<'de> for DescribeClusterRequest {
 }
 
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+/// Only includes fields valid for the given version.
 #[must_use]
-pub fn default_json() -> ::serde_json::Value {
-    ::serde_json::json!({"IncludeClusterAuthorizedOperations": false, "EndpointType": 1, "IncludeFencedBrokers": false})
+pub fn default_json(version: i16) -> ::serde_json::Value {
+    let mut obj = ::serde_json::Map::new();
+    obj.insert("includeClusterAuthorizedOperations".to_string(), ::serde_json::Value::Bool(false));
+    if version >= 1 {
+        obj.insert("endpointType".to_string(), ::serde_json::json!(1));
+    }
+    if version >= 2 {
+        obj.insert("includeFencedBrokers".to_string(), ::serde_json::Value::Bool(false));
+    }
+    ::serde_json::Value::Object(obj)
 }

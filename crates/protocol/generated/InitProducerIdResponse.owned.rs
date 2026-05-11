@@ -97,7 +97,19 @@ impl<'de> Decode<'de> for InitProducerIdResponse {
 }
 
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+/// Only includes fields valid for the given version.
 #[must_use]
-pub fn default_json() -> ::serde_json::Value {
-    ::serde_json::json!({"ThrottleTimeMs": 0, "ErrorCode": 0, "ProducerId": -1, "ProducerEpoch": 0, "OngoingTxnProducerId": -1, "OngoingTxnProducerEpoch": -1})
+pub fn default_json(version: i16) -> ::serde_json::Value {
+    let mut obj = ::serde_json::Map::new();
+    obj.insert("throttleTimeMs".to_string(), ::serde_json::json!(0));
+    obj.insert("errorCode".to_string(), ::serde_json::json!(0));
+    obj.insert("producerId".to_string(), ::serde_json::json!(-1));
+    obj.insert("producerEpoch".to_string(), ::serde_json::json!(0));
+    if version >= 6 {
+        obj.insert("ongoingTxnProducerId".to_string(), ::serde_json::json!(-1));
+    }
+    if version >= 6 {
+        obj.insert("ongoingTxnProducerEpoch".to_string(), ::serde_json::json!(-1));
+    }
+    ::serde_json::Value::Object(obj)
 }

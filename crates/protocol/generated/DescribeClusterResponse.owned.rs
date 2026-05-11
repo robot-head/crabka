@@ -171,7 +171,19 @@ impl<'de> Decode<'de> for DescribeClusterBroker {
 }
 
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+/// Only includes fields valid for the given version.
 #[must_use]
-pub fn default_json() -> ::serde_json::Value {
-    ::serde_json::json!({"ThrottleTimeMs": 0, "ErrorCode": 0, "ErrorMessage": null, "EndpointType": 1, "ClusterId": "", "ControllerId": -1, "Brokers": [], "ClusterAuthorizedOperations": -2147483648})
+pub fn default_json(version: i16) -> ::serde_json::Value {
+    let mut obj = ::serde_json::Map::new();
+    obj.insert("throttleTimeMs".to_string(), ::serde_json::json!(0));
+    obj.insert("errorCode".to_string(), ::serde_json::json!(0));
+    obj.insert("errorMessage".to_string(), ::serde_json::Value::Null);
+    if version >= 1 {
+        obj.insert("endpointType".to_string(), ::serde_json::json!(1));
+    }
+    obj.insert("clusterId".to_string(), ::serde_json::Value::String(String::new()));
+    obj.insert("controllerId".to_string(), ::serde_json::json!(-1));
+    obj.insert("brokers".to_string(), ::serde_json::Value::Array(vec![]));
+    obj.insert("clusterAuthorizedOperations".to_string(), ::serde_json::json!(-2147483648));
+    ::serde_json::Value::Object(obj)
 }

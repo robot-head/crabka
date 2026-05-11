@@ -293,7 +293,17 @@ impl<'de> Decode<'de> for Listener {
 }
 
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+/// Only includes fields valid for the given version.
 #[must_use]
-pub fn default_json() -> ::serde_json::Value {
-    ::serde_json::json!({"ErrorCode": 0, "ErrorMessage": null, "Topics": [], "Nodes": []})
+pub fn default_json(version: i16) -> ::serde_json::Value {
+    let mut obj = ::serde_json::Map::new();
+    obj.insert("errorCode".to_string(), ::serde_json::json!(0));
+    if version >= 2 {
+        obj.insert("errorMessage".to_string(), ::serde_json::Value::Null);
+    }
+    obj.insert("topics".to_string(), ::serde_json::Value::Array(vec![]));
+    if version >= 2 {
+        obj.insert("nodes".to_string(), ::serde_json::Value::Array(vec![]));
+    }
+    ::serde_json::Value::Object(obj)
 }

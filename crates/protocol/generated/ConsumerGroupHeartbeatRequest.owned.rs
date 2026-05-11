@@ -169,7 +169,21 @@ impl<'de> Decode<'de> for TopicPartitions {
 }
 
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+/// Only includes fields valid for the given version.
 #[must_use]
-pub fn default_json() -> ::serde_json::Value {
-    ::serde_json::json!({"GroupId": "", "MemberId": "", "MemberEpoch": 0, "InstanceId": null, "RackId": null, "RebalanceTimeoutMs": -1, "SubscribedTopicNames": null, "SubscribedTopicRegex": null, "ServerAssignor": null, "TopicPartitions": null})
+pub fn default_json(version: i16) -> ::serde_json::Value {
+    let mut obj = ::serde_json::Map::new();
+    obj.insert("groupId".to_string(), ::serde_json::Value::String(String::new()));
+    obj.insert("memberId".to_string(), ::serde_json::Value::String(String::new()));
+    obj.insert("memberEpoch".to_string(), ::serde_json::json!(0));
+    obj.insert("instanceId".to_string(), ::serde_json::Value::Null);
+    obj.insert("rackId".to_string(), ::serde_json::Value::Null);
+    obj.insert("rebalanceTimeoutMs".to_string(), ::serde_json::json!(-1));
+    obj.insert("subscribedTopicNames".to_string(), ::serde_json::Value::Null);
+    if version >= 1 {
+        obj.insert("subscribedTopicRegex".to_string(), ::serde_json::Value::Null);
+    }
+    obj.insert("serverAssignor".to_string(), ::serde_json::Value::Null);
+    obj.insert("topicPartitions".to_string(), ::serde_json::Value::Null);
+    ::serde_json::Value::Object(obj)
 }

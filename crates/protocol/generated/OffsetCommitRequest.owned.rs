@@ -219,7 +219,23 @@ impl<'de> Decode<'de> for OffsetCommitRequestPartition {
 }
 
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+/// Only includes fields valid for the given version.
 #[must_use]
-pub fn default_json() -> ::serde_json::Value {
-    ::serde_json::json!({"GroupId": "", "GenerationIdOrMemberEpoch": -1, "MemberId": "", "GroupInstanceId": null, "RetentionTimeMs": -1, "Topics": []})
+pub fn default_json(version: i16) -> ::serde_json::Value {
+    let mut obj = ::serde_json::Map::new();
+    obj.insert("groupId".to_string(), ::serde_json::Value::String(String::new()));
+    if version >= 1 {
+        obj.insert("generationIdOrMemberEpoch".to_string(), ::serde_json::json!(-1));
+    }
+    if version >= 1 {
+        obj.insert("memberId".to_string(), ::serde_json::Value::String(String::new()));
+    }
+    if version >= 7 {
+        obj.insert("groupInstanceId".to_string(), ::serde_json::Value::Null);
+    }
+    if version >= 2 && version <= 4 {
+        obj.insert("retentionTimeMs".to_string(), ::serde_json::json!(-1));
+    }
+    obj.insert("topics".to_string(), ::serde_json::Value::Array(vec![]));
+    ::serde_json::Value::Object(obj)
 }

@@ -409,7 +409,39 @@ impl<'de> Decode<'de> for ForgottenTopic {
 }
 
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+/// Only includes fields valid for the given version.
 #[must_use]
-pub fn default_json() -> ::serde_json::Value {
-    ::serde_json::json!({"ClusterId": null, "ReplicaId": -1, "ReplicaState": {"ReplicaId": -1, "ReplicaEpoch": -1}, "MaxWaitMs": 0, "MinBytes": 0, "MaxBytes": 0x7fffffff, "IsolationLevel": 0, "SessionId": 0, "SessionEpoch": -1, "Topics": [], "ForgottenTopicsData": [], "RackId": ""})
+pub fn default_json(version: i16) -> ::serde_json::Value {
+    let mut obj = ::serde_json::Map::new();
+    if version >= 12 {
+        obj.insert("clusterId".to_string(), ::serde_json::Value::Null);
+    }
+    if version >= 0 && version <= 14 {
+        obj.insert("replicaId".to_string(), ::serde_json::json!(-1));
+    }
+    if version >= 15 {
+        obj.insert("replicaState".to_string(), { let mut _m = ::serde_json::Map::new(); _m.insert("replicaId".to_string(), ::serde_json::json!(-1)); _m.insert("replicaEpoch".to_string(), ::serde_json::json!(-1)); ::serde_json::Value::Object(_m) });
+    }
+    obj.insert("maxWaitMs".to_string(), ::serde_json::json!(0));
+    obj.insert("minBytes".to_string(), ::serde_json::json!(0));
+    if version >= 3 {
+        obj.insert("maxBytes".to_string(), ::serde_json::json!(2147483647));
+    }
+    if version >= 4 {
+        obj.insert("isolationLevel".to_string(), ::serde_json::json!(0));
+    }
+    if version >= 7 {
+        obj.insert("sessionId".to_string(), ::serde_json::json!(0));
+    }
+    if version >= 7 {
+        obj.insert("sessionEpoch".to_string(), ::serde_json::json!(-1));
+    }
+    obj.insert("topics".to_string(), ::serde_json::Value::Array(vec![]));
+    if version >= 7 {
+        obj.insert("forgottenTopicsData".to_string(), ::serde_json::Value::Array(vec![]));
+    }
+    if version >= 11 {
+        obj.insert("rackId".to_string(), ::serde_json::Value::String("".to_string()));
+    }
+    ::serde_json::Value::Object(obj)
 }

@@ -92,7 +92,14 @@ impl<'de> Decode<'de> for BrokerHeartbeatResponse {
 }
 
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+/// Only includes fields valid for the given version.
 #[must_use]
-pub fn default_json() -> ::serde_json::Value {
-    ::serde_json::json!({"ThrottleTimeMs": 0, "ErrorCode": 0, "IsCaughtUp": false, "IsFenced": true, "ShouldShutDown": false})
+pub fn default_json(version: i16) -> ::serde_json::Value {
+    let mut obj = ::serde_json::Map::new();
+    obj.insert("throttleTimeMs".to_string(), ::serde_json::json!(0));
+    obj.insert("errorCode".to_string(), ::serde_json::json!(0));
+    obj.insert("isCaughtUp".to_string(), ::serde_json::Value::Bool(false));
+    obj.insert("isFenced".to_string(), ::serde_json::Value::Bool(true));
+    obj.insert("shouldShutDown".to_string(), ::serde_json::Value::Bool(false));
+    ::serde_json::Value::Object(obj)
 }

@@ -79,6 +79,23 @@ impl Oracle {
         v
     }
 
+    /// Like `call` but returns Err with the oracle error message instead of panicking.
+    #[allow(dead_code)]
+    pub fn try_call(&mut self, req: &Value) -> Result<Value, String> {
+        let line = serde_json::to_string(req).unwrap();
+        self.stdin.write_all(line.as_bytes()).unwrap();
+        self.stdin.write_all(b"\n").unwrap();
+        self.stdin.flush().unwrap();
+        let mut resp = String::new();
+        self.stdout.read_line(&mut resp).unwrap();
+        let v: Value = serde_json::from_str(&resp).unwrap();
+        if v["ok"].as_bool().unwrap_or(false) {
+            Ok(v)
+        } else {
+            Err(v["error"].as_str().unwrap_or("?").to_string())
+        }
+    }
+
     #[allow(dead_code)]
     pub fn encode(
         &mut self,

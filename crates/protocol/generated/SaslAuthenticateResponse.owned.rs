@@ -82,7 +82,15 @@ impl<'de> Decode<'de> for SaslAuthenticateResponse {
 }
 
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+/// Only includes fields valid for the given version.
 #[must_use]
-pub fn default_json() -> ::serde_json::Value {
-    ::serde_json::json!({"ErrorCode": 0, "ErrorMessage": null, "AuthBytes": "", "SessionLifetimeMs": 0})
+pub fn default_json(version: i16) -> ::serde_json::Value {
+    let mut obj = ::serde_json::Map::new();
+    obj.insert("errorCode".to_string(), ::serde_json::json!(0));
+    obj.insert("errorMessage".to_string(), ::serde_json::Value::Null);
+    obj.insert("authBytes".to_string(), ::serde_json::Value::String(String::new()));
+    if version >= 1 {
+        obj.insert("sessionLifetimeMs".to_string(), ::serde_json::json!(0));
+    }
+    ::serde_json::Value::Object(obj)
 }

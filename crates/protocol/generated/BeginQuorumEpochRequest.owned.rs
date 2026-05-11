@@ -243,7 +243,17 @@ impl<'de> Decode<'de> for LeaderEndpoint {
 }
 
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+/// Only includes fields valid for the given version.
 #[must_use]
-pub fn default_json() -> ::serde_json::Value {
-    ::serde_json::json!({"ClusterId": null, "VoterId": -1, "Topics": [], "LeaderEndpoints": []})
+pub fn default_json(version: i16) -> ::serde_json::Value {
+    let mut obj = ::serde_json::Map::new();
+    obj.insert("clusterId".to_string(), ::serde_json::Value::Null);
+    if version >= 1 {
+        obj.insert("voterId".to_string(), ::serde_json::json!(-1));
+    }
+    obj.insert("topics".to_string(), ::serde_json::Value::Array(vec![]));
+    if version >= 1 {
+        obj.insert("leaderEndpoints".to_string(), ::serde_json::Value::Array(vec![]));
+    }
+    ::serde_json::Value::Object(obj)
 }

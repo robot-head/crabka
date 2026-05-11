@@ -153,7 +153,17 @@ impl<'de> Decode<'de> for Listener {
 }
 
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+/// Only includes fields valid for the given version.
 #[must_use]
-pub fn default_json() -> ::serde_json::Value {
-    ::serde_json::json!({"ClusterId": null, "TimeoutMs": 0, "VoterId": 0, "VoterDirectoryId": "00000000-0000-0000-0000-000000000000", "Listeners": [], "AckWhenCommitted": true})
+pub fn default_json(version: i16) -> ::serde_json::Value {
+    let mut obj = ::serde_json::Map::new();
+    obj.insert("clusterId".to_string(), ::serde_json::Value::Null);
+    obj.insert("timeoutMs".to_string(), ::serde_json::json!(0));
+    obj.insert("voterId".to_string(), ::serde_json::json!(0));
+    obj.insert("voterDirectoryId".to_string(), ::serde_json::Value::String("00000000-0000-0000-0000-000000000000".to_string()));
+    obj.insert("listeners".to_string(), ::serde_json::Value::Array(vec![]));
+    if version >= 1 {
+        obj.insert("ackWhenCommitted".to_string(), ::serde_json::Value::Bool(true));
+    }
+    ::serde_json::Value::Object(obj)
 }

@@ -320,7 +320,26 @@ impl<'de> Decode<'de> for CopartitionGroup {
 }
 
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+/// Only includes fields valid for the given version.
 #[must_use]
-pub fn default_json() -> ::serde_json::Value {
-    ::serde_json::json!({"GroupId": "", "MemberId": "", "MemberEpoch": 0, "EndpointInformationEpoch": 0, "InstanceId": null, "RackId": null, "RebalanceTimeoutMs": -1, "Topology": null, "ActiveTasks": null, "StandbyTasks": null, "WarmupTasks": null, "ProcessId": null, "UserEndpoint": null, "ClientTags": null, "TaskOffsets": null, "TaskEndOffsets": null, "ShutdownApplication": false})
+pub fn default_json(version: i16) -> ::serde_json::Value {
+    let mut obj = ::serde_json::Map::new();
+    obj.insert("groupId".to_string(), ::serde_json::Value::String(String::new()));
+    obj.insert("memberId".to_string(), ::serde_json::Value::String(String::new()));
+    obj.insert("memberEpoch".to_string(), ::serde_json::json!(0));
+    obj.insert("endpointInformationEpoch".to_string(), ::serde_json::json!(0));
+    obj.insert("instanceId".to_string(), ::serde_json::Value::Null);
+    obj.insert("rackId".to_string(), ::serde_json::Value::Null);
+    obj.insert("rebalanceTimeoutMs".to_string(), ::serde_json::json!(-1));
+    obj.insert("topology".to_string(), ::serde_json::Value::Null);
+    obj.insert("activeTasks".to_string(), ::serde_json::Value::Null);
+    obj.insert("standbyTasks".to_string(), ::serde_json::Value::Null);
+    obj.insert("warmupTasks".to_string(), ::serde_json::Value::Null);
+    obj.insert("processId".to_string(), ::serde_json::Value::Null);
+    obj.insert("userEndpoint".to_string(), ::serde_json::Value::Null);
+    obj.insert("clientTags".to_string(), ::serde_json::Value::Null);
+    obj.insert("taskOffsets".to_string(), ::serde_json::Value::Null);
+    obj.insert("taskEndOffsets".to_string(), ::serde_json::Value::Null);
+    obj.insert("shutdownApplication".to_string(), ::serde_json::Value::Bool(false));
+    ::serde_json::Value::Object(obj)
 }

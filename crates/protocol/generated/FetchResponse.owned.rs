@@ -539,7 +539,22 @@ impl<'de> Decode<'de> for NodeEndpoint {
 }
 
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+/// Only includes fields valid for the given version.
 #[must_use]
-pub fn default_json() -> ::serde_json::Value {
-    ::serde_json::json!({"ThrottleTimeMs": 0, "ErrorCode": 0, "SessionId": 0, "Responses": [], "NodeEndpoints": []})
+pub fn default_json(version: i16) -> ::serde_json::Value {
+    let mut obj = ::serde_json::Map::new();
+    if version >= 1 {
+        obj.insert("throttleTimeMs".to_string(), ::serde_json::json!(0));
+    }
+    if version >= 7 {
+        obj.insert("errorCode".to_string(), ::serde_json::json!(0));
+    }
+    if version >= 7 {
+        obj.insert("sessionId".to_string(), ::serde_json::json!(0));
+    }
+    obj.insert("responses".to_string(), ::serde_json::Value::Array(vec![]));
+    if version >= 16 {
+        obj.insert("nodeEndpoints".to_string(), ::serde_json::Value::Array(vec![]));
+    }
+    ::serde_json::Value::Object(obj)
 }

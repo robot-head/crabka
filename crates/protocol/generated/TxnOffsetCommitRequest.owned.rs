@@ -225,7 +225,23 @@ impl<'de> Decode<'de> for TxnOffsetCommitRequestPartition {
 }
 
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+/// Only includes fields valid for the given version.
 #[must_use]
-pub fn default_json() -> ::serde_json::Value {
-    ::serde_json::json!({"TransactionalId": "", "GroupId": "", "ProducerId": 0, "ProducerEpoch": 0, "GenerationId": -1, "MemberId": "", "GroupInstanceId": null, "Topics": []})
+pub fn default_json(version: i16) -> ::serde_json::Value {
+    let mut obj = ::serde_json::Map::new();
+    obj.insert("transactionalId".to_string(), ::serde_json::Value::String(String::new()));
+    obj.insert("groupId".to_string(), ::serde_json::Value::String(String::new()));
+    obj.insert("producerId".to_string(), ::serde_json::json!(0));
+    obj.insert("producerEpoch".to_string(), ::serde_json::json!(0));
+    if version >= 3 {
+        obj.insert("generationId".to_string(), ::serde_json::json!(-1));
+    }
+    if version >= 3 {
+        obj.insert("memberId".to_string(), ::serde_json::Value::String("".to_string()));
+    }
+    if version >= 3 {
+        obj.insert("groupInstanceId".to_string(), ::serde_json::Value::Null);
+    }
+    obj.insert("topics".to_string(), ::serde_json::Value::Array(vec![]));
+    ::serde_json::Value::Object(obj)
 }

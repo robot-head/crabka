@@ -185,7 +185,15 @@ impl<'de> Decode<'de> for KRaftVersionFeature {
 }
 
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+/// Only includes fields valid for the given version.
 #[must_use]
-pub fn default_json() -> ::serde_json::Value {
-    ::serde_json::json!({"ClusterId": null, "CurrentLeaderEpoch": 0, "VoterId": 0, "VoterDirectoryId": "00000000-0000-0000-0000-000000000000", "Listeners": [], "KRaftVersionFeature": {"MinSupportedVersion": 0, "MaxSupportedVersion": 0}})
+pub fn default_json(version: i16) -> ::serde_json::Value {
+    let mut obj = ::serde_json::Map::new();
+    obj.insert("clusterId".to_string(), ::serde_json::Value::Null);
+    obj.insert("currentLeaderEpoch".to_string(), ::serde_json::json!(0));
+    obj.insert("voterId".to_string(), ::serde_json::json!(0));
+    obj.insert("voterDirectoryId".to_string(), ::serde_json::Value::String("00000000-0000-0000-0000-000000000000".to_string()));
+    obj.insert("listeners".to_string(), ::serde_json::Value::Array(vec![]));
+    obj.insert("kRaftVersionFeature".to_string(), { let mut _m = ::serde_json::Map::new(); _m.insert("minSupportedVersion".to_string(), ::serde_json::json!(0)); _m.insert("maxSupportedVersion".to_string(), ::serde_json::json!(0)); ::serde_json::Value::Object(_m) });
+    ::serde_json::Value::Object(obj)
 }

@@ -135,7 +135,16 @@ impl<'de> Decode<'de> for Assignment {
 }
 
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+/// Only includes fields valid for the given version.
 #[must_use]
-pub fn default_json() -> ::serde_json::Value {
-    ::serde_json::json!({"ThrottleTimeMs": 0, "ErrorCode": 0, "ErrorMessage": null, "MemberId": null, "MemberEpoch": 0, "HeartbeatIntervalMs": 0, "Assignment": null})
+pub fn default_json(version: i16) -> ::serde_json::Value {
+    let mut obj = ::serde_json::Map::new();
+    obj.insert("throttleTimeMs".to_string(), ::serde_json::json!(0));
+    obj.insert("errorCode".to_string(), ::serde_json::json!(0));
+    obj.insert("errorMessage".to_string(), ::serde_json::Value::Null);
+    obj.insert("memberId".to_string(), ::serde_json::Value::Null);
+    obj.insert("memberEpoch".to_string(), ::serde_json::json!(0));
+    obj.insert("heartbeatIntervalMs".to_string(), ::serde_json::json!(0));
+    obj.insert("assignment".to_string(), ::serde_json::Value::Null);
+    ::serde_json::Value::Object(obj)
 }

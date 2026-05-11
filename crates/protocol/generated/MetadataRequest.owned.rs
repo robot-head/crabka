@@ -139,7 +139,19 @@ impl<'de> Decode<'de> for MetadataRequestTopic {
 }
 
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+/// Only includes fields valid for the given version.
 #[must_use]
-pub fn default_json() -> ::serde_json::Value {
-    ::serde_json::json!({"Topics": null, "AllowAutoTopicCreation": true, "IncludeClusterAuthorizedOperations": false, "IncludeTopicAuthorizedOperations": false})
+pub fn default_json(version: i16) -> ::serde_json::Value {
+    let mut obj = ::serde_json::Map::new();
+    obj.insert("topics".to_string(), ::serde_json::Value::Null);
+    if version >= 4 {
+        obj.insert("allowAutoTopicCreation".to_string(), ::serde_json::Value::Bool(true));
+    }
+    if version >= 8 && version <= 10 {
+        obj.insert("includeClusterAuthorizedOperations".to_string(), ::serde_json::Value::Bool(false));
+    }
+    if version >= 8 {
+        obj.insert("includeTopicAuthorizedOperations".to_string(), ::serde_json::Value::Bool(false));
+    }
+    ::serde_json::Value::Object(obj)
 }

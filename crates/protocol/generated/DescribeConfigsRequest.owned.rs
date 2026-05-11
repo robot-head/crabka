@@ -127,7 +127,16 @@ impl<'de> Decode<'de> for DescribeConfigsResource {
 }
 
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+/// Only includes fields valid for the given version.
 #[must_use]
-pub fn default_json() -> ::serde_json::Value {
-    ::serde_json::json!({"Resources": [], "IncludeSynonyms": false, "IncludeDocumentation": false})
+pub fn default_json(version: i16) -> ::serde_json::Value {
+    let mut obj = ::serde_json::Map::new();
+    obj.insert("resources".to_string(), ::serde_json::Value::Array(vec![]));
+    if version >= 1 {
+        obj.insert("includeSynonyms".to_string(), ::serde_json::Value::Bool(false));
+    }
+    if version >= 3 {
+        obj.insert("includeDocumentation".to_string(), ::serde_json::Value::Bool(false));
+    }
+    ::serde_json::Value::Object(obj)
 }

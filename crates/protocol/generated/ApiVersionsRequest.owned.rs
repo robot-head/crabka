@@ -69,7 +69,15 @@ impl<'de> Decode<'de> for ApiVersionsRequest {
 }
 
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+/// Only includes fields valid for the given version.
 #[must_use]
-pub fn default_json() -> ::serde_json::Value {
-    ::serde_json::json!({"ClientSoftwareName": "", "ClientSoftwareVersion": ""})
+pub fn default_json(version: i16) -> ::serde_json::Value {
+    let mut obj = ::serde_json::Map::new();
+    if version >= 3 {
+        obj.insert("clientSoftwareName".to_string(), ::serde_json::Value::String(String::new()));
+    }
+    if version >= 3 {
+        obj.insert("clientSoftwareVersion".to_string(), ::serde_json::Value::String(String::new()));
+    }
+    ::serde_json::Value::Object(obj)
 }

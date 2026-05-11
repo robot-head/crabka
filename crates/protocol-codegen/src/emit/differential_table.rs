@@ -116,12 +116,13 @@ pub fn emit(specs: &[MessageSpec], schemas_version: &str) -> String {
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
 
-    // default_json_for dispatch: returns the per-message default_json() value.
-    // Note: default_json() is a module-level free function, not an associated
-    // function on the struct — so call it as `module::default_json()`.
+    // default_json_for dispatch: returns the per-message, per-version default JSON.
+    // Note: default_json(version) is a module-level free function — call as
+    // `module::default_json(version)`. The function only includes fields valid
+    // for the requested version so the JVM converter doesn't reject unknown fields.
     writeln!(
         out,
-        "pub fn default_json_for(name: &str) -> ::serde_json::Value {{"
+        "pub fn default_json_for(name: &str, version: i16) -> ::serde_json::Value {{"
     )
     .unwrap();
     writeln!(out, "    match name {{").unwrap();
@@ -136,7 +137,7 @@ pub fn emit(specs: &[MessageSpec], schemas_version: &str) -> String {
         let snake = name_conv::module_name(&s.name);
         writeln!(
             out,
-            "        \"{}\" => crabka_protocol::owned::{snake}::default_json(),",
+            "        \"{}\" => crabka_protocol::owned::{snake}::default_json(version),",
             s.name
         )
         .unwrap();

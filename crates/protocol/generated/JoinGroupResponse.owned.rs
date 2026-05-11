@@ -169,7 +169,24 @@ impl<'de> Decode<'de> for JoinGroupResponseMember {
 }
 
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+/// Only includes fields valid for the given version.
 #[must_use]
-pub fn default_json() -> ::serde_json::Value {
-    ::serde_json::json!({"ThrottleTimeMs": 0, "ErrorCode": 0, "GenerationId": -1, "ProtocolType": null, "ProtocolName": null, "Leader": "", "SkipAssignment": false, "MemberId": "", "Members": []})
+pub fn default_json(version: i16) -> ::serde_json::Value {
+    let mut obj = ::serde_json::Map::new();
+    if version >= 2 {
+        obj.insert("throttleTimeMs".to_string(), ::serde_json::json!(0));
+    }
+    obj.insert("errorCode".to_string(), ::serde_json::json!(0));
+    obj.insert("generationId".to_string(), ::serde_json::json!(-1));
+    if version >= 7 {
+        obj.insert("protocolType".to_string(), ::serde_json::Value::Null);
+    }
+    obj.insert("protocolName".to_string(), ::serde_json::Value::Null);
+    obj.insert("leader".to_string(), ::serde_json::Value::String(String::new()));
+    if version >= 9 {
+        obj.insert("skipAssignment".to_string(), ::serde_json::Value::Bool(false));
+    }
+    obj.insert("memberId".to_string(), ::serde_json::Value::String(String::new()));
+    obj.insert("members".to_string(), ::serde_json::Value::Array(vec![]));
+    ::serde_json::Value::Object(obj)
 }

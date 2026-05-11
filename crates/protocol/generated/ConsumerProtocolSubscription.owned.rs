@@ -116,7 +116,20 @@ impl<'de> Decode<'de> for TopicPartition {
 }
 
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+/// Only includes fields valid for the given version.
 #[must_use]
-pub fn default_json() -> ::serde_json::Value {
-    ::serde_json::json!({"Topics": [], "UserData": null, "OwnedPartitions": [], "GenerationId": -1, "RackId": null})
+pub fn default_json(version: i16) -> ::serde_json::Value {
+    let mut obj = ::serde_json::Map::new();
+    obj.insert("topics".to_string(), ::serde_json::Value::Array(vec![]));
+    obj.insert("userData".to_string(), ::serde_json::Value::Null);
+    if version >= 1 {
+        obj.insert("ownedPartitions".to_string(), ::serde_json::Value::Array(vec![]));
+    }
+    if version >= 2 {
+        obj.insert("generationId".to_string(), ::serde_json::json!(-1));
+    }
+    if version >= 3 {
+        obj.insert("rackId".to_string(), ::serde_json::Value::Null);
+    }
+    ::serde_json::Value::Object(obj)
 }

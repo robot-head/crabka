@@ -171,7 +171,23 @@ impl<'de> Decode<'de> for EndpointToPartitions {
 }
 
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+/// Only includes fields valid for the given version.
 #[must_use]
-pub fn default_json() -> ::serde_json::Value {
-    ::serde_json::json!({"ThrottleTimeMs": 0, "ErrorCode": 0, "ErrorMessage": null, "MemberId": "", "MemberEpoch": 0, "HeartbeatIntervalMs": 0, "AcceptableRecoveryLag": 0, "TaskOffsetIntervalMs": 0, "Status": null, "ActiveTasks": null, "StandbyTasks": null, "WarmupTasks": null, "EndpointInformationEpoch": 0, "PartitionsByUserEndpoint": null})
+pub fn default_json(version: i16) -> ::serde_json::Value {
+    let mut obj = ::serde_json::Map::new();
+    obj.insert("throttleTimeMs".to_string(), ::serde_json::json!(0));
+    obj.insert("errorCode".to_string(), ::serde_json::json!(0));
+    obj.insert("errorMessage".to_string(), ::serde_json::Value::Null);
+    obj.insert("memberId".to_string(), ::serde_json::Value::String(String::new()));
+    obj.insert("memberEpoch".to_string(), ::serde_json::json!(0));
+    obj.insert("heartbeatIntervalMs".to_string(), ::serde_json::json!(0));
+    obj.insert("acceptableRecoveryLag".to_string(), ::serde_json::json!(0));
+    obj.insert("taskOffsetIntervalMs".to_string(), ::serde_json::json!(0));
+    obj.insert("status".to_string(), ::serde_json::Value::Null);
+    obj.insert("activeTasks".to_string(), ::serde_json::Value::Null);
+    obj.insert("standbyTasks".to_string(), ::serde_json::Value::Null);
+    obj.insert("warmupTasks".to_string(), ::serde_json::Value::Null);
+    obj.insert("endpointInformationEpoch".to_string(), ::serde_json::json!(0));
+    obj.insert("partitionsByUserEndpoint".to_string(), ::serde_json::Value::Null);
+    ::serde_json::Value::Object(obj)
 }

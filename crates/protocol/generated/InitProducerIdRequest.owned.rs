@@ -103,7 +103,23 @@ impl<'de> Decode<'de> for InitProducerIdRequest {
 }
 
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+/// Only includes fields valid for the given version.
 #[must_use]
-pub fn default_json() -> ::serde_json::Value {
-    ::serde_json::json!({"TransactionalId": null, "TransactionTimeoutMs": 0, "ProducerId": -1, "ProducerEpoch": -1, "Enable2Pc": false, "KeepPreparedTxn": false})
+pub fn default_json(version: i16) -> ::serde_json::Value {
+    let mut obj = ::serde_json::Map::new();
+    obj.insert("transactionalId".to_string(), ::serde_json::Value::Null);
+    obj.insert("transactionTimeoutMs".to_string(), ::serde_json::json!(0));
+    if version >= 3 {
+        obj.insert("producerId".to_string(), ::serde_json::json!(-1));
+    }
+    if version >= 3 {
+        obj.insert("producerEpoch".to_string(), ::serde_json::json!(-1));
+    }
+    if version >= 6 {
+        obj.insert("enable2Pc".to_string(), ::serde_json::Value::Bool(false));
+    }
+    if version >= 6 {
+        obj.insert("keepPreparedTxn".to_string(), ::serde_json::Value::Bool(false));
+    }
+    ::serde_json::Value::Object(obj)
 }

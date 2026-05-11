@@ -108,7 +108,18 @@ impl<'de> Decode<'de> for DescribeAclsRequest {
 }
 
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+/// Only includes fields valid for the given version.
 #[must_use]
-pub fn default_json() -> ::serde_json::Value {
-    ::serde_json::json!({"ResourceTypeFilter": 0, "ResourceNameFilter": null, "PatternTypeFilter": 3, "PrincipalFilter": null, "HostFilter": null, "Operation": 0, "PermissionType": 0})
+pub fn default_json(version: i16) -> ::serde_json::Value {
+    let mut obj = ::serde_json::Map::new();
+    obj.insert("resourceTypeFilter".to_string(), ::serde_json::json!(0));
+    obj.insert("resourceNameFilter".to_string(), ::serde_json::Value::Null);
+    if version >= 1 {
+        obj.insert("patternTypeFilter".to_string(), ::serde_json::json!(3));
+    }
+    obj.insert("principalFilter".to_string(), ::serde_json::Value::Null);
+    obj.insert("hostFilter".to_string(), ::serde_json::Value::Null);
+    obj.insert("operation".to_string(), ::serde_json::json!(0));
+    obj.insert("permissionType".to_string(), ::serde_json::json!(0));
+    ::serde_json::Value::Object(obj)
 }

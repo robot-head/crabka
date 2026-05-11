@@ -93,7 +93,17 @@ impl<'de> Decode<'de> for ListTransactionsRequest {
 }
 
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+/// Only includes fields valid for the given version.
 #[must_use]
-pub fn default_json() -> ::serde_json::Value {
-    ::serde_json::json!({"StateFilters": [], "ProducerIdFilters": [], "DurationFilter": -1, "TransactionalIdPattern": null})
+pub fn default_json(version: i16) -> ::serde_json::Value {
+    let mut obj = ::serde_json::Map::new();
+    obj.insert("stateFilters".to_string(), ::serde_json::Value::Array(vec![]));
+    obj.insert("producerIdFilters".to_string(), ::serde_json::Value::Array(vec![]));
+    if version >= 1 {
+        obj.insert("durationFilter".to_string(), ::serde_json::json!(-1));
+    }
+    if version >= 2 {
+        obj.insert("transactionalIdPattern".to_string(), ::serde_json::Value::Null);
+    }
+    ::serde_json::Value::Object(obj)
 }

@@ -151,7 +151,12 @@ impl<'de> Decode<'de> for CurrentLeader {
 }
 
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+/// Only includes fields valid for the given version.
 #[must_use]
-pub fn default_json() -> ::serde_json::Value {
-    ::serde_json::json!({"ThrottleTimeMs": 0, "ErrorCode": 0, "CurrentLeader": {"LeaderId": -1, "LeaderEpoch": -1, "Host": "", "Port": 0}})
+pub fn default_json(version: i16) -> ::serde_json::Value {
+    let mut obj = ::serde_json::Map::new();
+    obj.insert("throttleTimeMs".to_string(), ::serde_json::json!(0));
+    obj.insert("errorCode".to_string(), ::serde_json::json!(0));
+    obj.insert("currentLeader".to_string(), { let mut _m = ::serde_json::Map::new(); _m.insert("leaderId".to_string(), ::serde_json::json!(-1)); _m.insert("leaderEpoch".to_string(), ::serde_json::json!(-1)); _m.insert("host".to_string(), ::serde_json::Value::String(String::new())); _m.insert("port".to_string(), ::serde_json::json!(0)); ::serde_json::Value::Object(_m) });
+    ::serde_json::Value::Object(obj)
 }

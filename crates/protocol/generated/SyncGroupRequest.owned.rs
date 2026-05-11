@@ -140,7 +140,22 @@ impl<'de> Decode<'de> for SyncGroupRequestAssignment {
 }
 
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+/// Only includes fields valid for the given version.
 #[must_use]
-pub fn default_json() -> ::serde_json::Value {
-    ::serde_json::json!({"GroupId": "", "GenerationId": 0, "MemberId": "", "GroupInstanceId": null, "ProtocolType": null, "ProtocolName": null, "Assignments": []})
+pub fn default_json(version: i16) -> ::serde_json::Value {
+    let mut obj = ::serde_json::Map::new();
+    obj.insert("groupId".to_string(), ::serde_json::Value::String(String::new()));
+    obj.insert("generationId".to_string(), ::serde_json::json!(0));
+    obj.insert("memberId".to_string(), ::serde_json::Value::String(String::new()));
+    if version >= 3 {
+        obj.insert("groupInstanceId".to_string(), ::serde_json::Value::Null);
+    }
+    if version >= 5 {
+        obj.insert("protocolType".to_string(), ::serde_json::Value::Null);
+    }
+    if version >= 5 {
+        obj.insert("protocolName".to_string(), ::serde_json::Value::Null);
+    }
+    obj.insert("assignments".to_string(), ::serde_json::Value::Array(vec![]));
+    ::serde_json::Value::Object(obj)
 }

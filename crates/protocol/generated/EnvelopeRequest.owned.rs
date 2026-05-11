@@ -70,7 +70,12 @@ impl<'de> Decode<'de> for EnvelopeRequest {
 }
 
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+/// Only includes fields valid for the given version.
 #[must_use]
-pub fn default_json() -> ::serde_json::Value {
-    ::serde_json::json!({"RequestData": "", "RequestPrincipal": null, "ClientHostAddress": ""})
+pub fn default_json(version: i16) -> ::serde_json::Value {
+    let mut obj = ::serde_json::Map::new();
+    obj.insert("requestData".to_string(), ::serde_json::Value::String(String::new()));
+    obj.insert("requestPrincipal".to_string(), ::serde_json::Value::Null);
+    obj.insert("clientHostAddress".to_string(), ::serde_json::Value::String(String::new()));
+    ::serde_json::Value::Object(obj)
 }

@@ -71,7 +71,13 @@ impl<'de> Decode<'de> for DescribeGroupsRequest {
 }
 
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+/// Only includes fields valid for the given version.
 #[must_use]
-pub fn default_json() -> ::serde_json::Value {
-    ::serde_json::json!({"Groups": [], "IncludeAuthorizedOperations": false})
+pub fn default_json(version: i16) -> ::serde_json::Value {
+    let mut obj = ::serde_json::Map::new();
+    obj.insert("groups".to_string(), ::serde_json::Value::Array(vec![]));
+    if version >= 3 {
+        obj.insert("includeAuthorizedOperations".to_string(), ::serde_json::Value::Bool(false));
+    }
+    ::serde_json::Value::Object(obj)
 }

@@ -160,7 +160,23 @@ impl<'de> Decode<'de> for JoinGroupRequestProtocol {
 }
 
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+/// Only includes fields valid for the given version.
 #[must_use]
-pub fn default_json() -> ::serde_json::Value {
-    ::serde_json::json!({"GroupId": "", "SessionTimeoutMs": 0, "RebalanceTimeoutMs": -1, "MemberId": "", "GroupInstanceId": null, "ProtocolType": "", "Protocols": [], "Reason": null})
+pub fn default_json(version: i16) -> ::serde_json::Value {
+    let mut obj = ::serde_json::Map::new();
+    obj.insert("groupId".to_string(), ::serde_json::Value::String(String::new()));
+    obj.insert("sessionTimeoutMs".to_string(), ::serde_json::json!(0));
+    if version >= 1 {
+        obj.insert("rebalanceTimeoutMs".to_string(), ::serde_json::json!(-1));
+    }
+    obj.insert("memberId".to_string(), ::serde_json::Value::String(String::new()));
+    if version >= 5 {
+        obj.insert("groupInstanceId".to_string(), ::serde_json::Value::Null);
+    }
+    obj.insert("protocolType".to_string(), ::serde_json::Value::String(String::new()));
+    obj.insert("protocols".to_string(), ::serde_json::Value::Array(vec![]));
+    if version >= 8 {
+        obj.insert("reason".to_string(), ::serde_json::Value::Null);
+    }
+    ::serde_json::Value::Object(obj)
 }

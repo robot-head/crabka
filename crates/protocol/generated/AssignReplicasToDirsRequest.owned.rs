@@ -216,7 +216,12 @@ impl<'de> Decode<'de> for PartitionData {
 }
 
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+/// Only includes fields valid for the given version.
 #[must_use]
-pub fn default_json() -> ::serde_json::Value {
-    ::serde_json::json!({"BrokerId": 0, "BrokerEpoch": -1, "Directories": []})
+pub fn default_json(version: i16) -> ::serde_json::Value {
+    let mut obj = ::serde_json::Map::new();
+    obj.insert("brokerId".to_string(), ::serde_json::json!(0));
+    obj.insert("brokerEpoch".to_string(), ::serde_json::json!(-1));
+    obj.insert("directories".to_string(), ::serde_json::Value::Array(vec![]));
+    ::serde_json::Value::Object(obj)
 }
