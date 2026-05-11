@@ -1,7 +1,7 @@
 use bytes::Bytes;
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
-use crabka_compression::{compress, decompress, CompressionType};
+use crabka_compression::{CompressionType, compress, decompress};
 
 fn payload(size: usize) -> Bytes {
     // A mildly compressible payload: alternating runs of two bytes.

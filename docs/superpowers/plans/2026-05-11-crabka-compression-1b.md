@@ -1382,19 +1382,19 @@ git commit -m "bench(compression): per-codec criterion benches at 1KiB/64KiB/1Mi
 
 Verification only. Mark complete only when every item passes.
 
-- [ ] `cargo fmt --check` clean.
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings` clean.
-- [ ] `cargo build -p crabka-compression --no-default-features` succeeds.
-- [ ] `cargo build -p crabka-compression --no-default-features --features gzip` succeeds.
-- [ ] `cargo build -p crabka-compression --no-default-features --features snappy` succeeds.
-- [ ] `cargo build -p crabka-compression --no-default-features --features lz4` succeeds.
-- [ ] `cargo build -p crabka-compression --no-default-features --features zstd` succeeds.
-- [ ] `cargo build -p crabka-compression` (default features) succeeds.
-- [ ] `cargo test --workspace` clean (all non-ignored tests pass).
-- [ ] `cargo test --workspace -- --include-ignored` clean (JVM oracle in use; 4 differential tests pass).
-- [ ] CodSpeed bench file exists and `cargo bench -p crabka-compression -- --quick` runs without crashing.
-- [ ] Public API matches the spec exactly: `CompressionType` with 5 variants, `compress` and `decompress` returning `Result<Bytes, CompressionError>`, disabled-codec calls return `Err(FeatureDisabled(_))`.
-- [ ] Rustdoc on `CompressionType`, `CompressionError`, `compress`, `decompress`. Crate-level doc mentions xerial-snappy framing and LZ4 frame format with independent blocks.
+- [x] `cargo fmt --check` clean.
+- [x] `cargo clippy --workspace --all-targets -- -D warnings` clean.
+- [x] `cargo build -p crabka-compression --no-default-features` succeeds.
+- [x] `cargo build -p crabka-compression --no-default-features --features gzip` succeeds.
+- [x] `cargo build -p crabka-compression --no-default-features --features snappy` succeeds.
+- [x] `cargo build -p crabka-compression --no-default-features --features lz4` succeeds.
+- [x] `cargo build -p crabka-compression --no-default-features --features zstd` succeeds.
+- [x] `cargo build -p crabka-compression` (default features) succeeds.
+- [x] `cargo test --workspace` clean (all non-ignored tests pass).
+- [x] `cargo test --workspace -- --include-ignored` clean (JVM oracle in use; 4 differential tests pass).
+- [x] CodSpeed bench file exists and `cargo bench -p crabka-compression -- --quick` runs without crashing.
+- [x] Public API matches the spec exactly: `CompressionType` with 5 variants, `compress` and `decompress` returning `Result<Bytes, CompressionError>`, disabled-codec calls return `Err(FeatureDisabled(_))`.
+- [x] Rustdoc on `CompressionType`, `CompressionError`, `compress`, `decompress`. Crate-level doc mentions xerial-snappy framing and LZ4 frame format with independent blocks.
 
 When all items pass, the sub-plan is done. Push the feature branch and open a PR to main.
 

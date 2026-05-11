@@ -1,4 +1,21 @@
 //! Kafka wire-protocol compression codecs.
+//!
+//! Kafka uses four codecs on the wire — gzip, snappy, lz4, zstd — each with
+//! specific framing conventions:
+//!
+//! - **gzip**: standard RFC-1952 gzip via `flate2` (pure-Rust `miniz_oxide`
+//!   backend).
+//! - **snappy**: xerial-snappy framing over `snap` raw blocks. Kafka does not
+//!   use the standard Google Snappy stream format; it uses the xerial framing
+//!   (8-byte magic header, two 4-byte version fields, then a sequence of
+//!   `u32-BE` length-prefixed raw snappy chunks).
+//! - **lz4**: LZ4 frame format (magic `0x04 22 4D 18`) with independent blocks
+//!   and 64 KiB block size, matching `KafkaLZ4BlockOutputStream`'s defaults.
+//! - **zstd**: plain zstd at compression level 3 (Kafka's default).
+//!
+//! Each codec is behind a Cargo feature (`gzip`, `snappy`, `lz4`, `zstd`), all
+//! enabled by default. Disabling a feature leaves the API stable but returns
+//! `Err(`[`CompressionError::FeatureDisabled`]`)` at runtime.
 
 mod codec_type;
 mod error;
