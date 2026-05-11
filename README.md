@@ -1,5 +1,7 @@
 # Crabka
 
+[![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://codspeed.io/robot-head/crabka?utm_source=badge)
+
 A Rust reimplementation of [Apache Kafka](https://kafka.apache.org), distributed under the
 Apache License 2.0 as a derivative work.
 
