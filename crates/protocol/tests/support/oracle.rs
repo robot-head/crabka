@@ -34,7 +34,20 @@ impl Oracle {
         let java_home = std::env::var("JAVA_HOME").unwrap_or_else(|_| {
             r"C:\Program Files\Eclipse Adoptium\jdk-17.0.19.10-hotspot".to_string()
         });
-        let mut child = Command::new(&bin)
+        // Invoke the POSIX wrapper through `sh` rather than execve'ing it
+        // directly. Gradle's `installDist` does not always preserve the
+        // executable bit on the generated start script across CI runners,
+        // and a non-executable script gets ENOEXEC from the kernel even
+        // though the shebang is valid. Going through `sh` makes the spawn
+        // independent of file mode bits.
+        let mut cmd = if cfg!(windows) {
+            Command::new(&bin)
+        } else {
+            let mut c = Command::new("sh");
+            c.arg(&bin);
+            c
+        };
+        let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
