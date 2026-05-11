@@ -32,7 +32,7 @@ uuid = { workspace = true }
 futures-util = { workspace = true }
 
 [dev-dependencies]
-crabka-client-core = { path = "../client-core" }
+crabka-client-core = { version = "0.1", path = "../client-core" }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 testcontainers = { workspace = true }
