@@ -22,3 +22,9 @@ pub trait Encode {
 pub trait Decode<'de>: Sized {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError>;
 }
+
+/// Like `Decode`, but for borrowed (zero-copy) flavors. Requires a contiguous
+/// buffer because borrowed values reference slices of it.
+pub trait DecodeBorrow<'de>: Sized + 'de {
+    fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError>;
+}
