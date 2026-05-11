@@ -19,7 +19,7 @@ crabka-protocol = { version = "0.1", path = "../protocol", default-features = fa
 bytes = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["net", "rt", "rt-multi-thread", "io-util", "macros", "sync", "time"] }
-tokio-util = { workspace = true, features = ["codec"] }
+tokio-util = { workspace = true, features = ["codec", "rt"] }
 dashmap = { workspace = true }
 tracing = { workspace = true }
 
