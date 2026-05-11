@@ -107,5 +107,9 @@ fn run(schemas: &std::path::Path, out: &std::path::Path) -> Result<usize, RunErr
             count += 1;
         }
     }
+    // Always emit the ApiKey enum regardless of CURATED — it reflects ALL schemas.
+    let api_key_src = emit::api_key_enum::emit(&specs, &schemas_sha);
+    std::fs::write(out.join("api_key.rs"), &api_key_src)?;
+    count += 1;
     Ok(count)
 }

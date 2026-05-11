@@ -24,6 +24,8 @@
 //! allowed; see CHANGELOG.md. The wire-protocol pin is recorded in
 //! `crates/protocol/schemas/VERSION`.
 
+pub mod api_key;
+pub use api_key::ApiKey;
 mod arbitrary_impls;
 pub mod borrowed;
 mod codec;
