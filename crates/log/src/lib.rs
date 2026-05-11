@@ -8,9 +8,11 @@
 mod config;
 mod error;
 mod index;
+mod log;
 mod name;
 mod segment;
 
 pub use config::LogConfig;
 pub use error::LogError;
+pub use log::{Log, ReadOutput};
 pub use segment::Segment;

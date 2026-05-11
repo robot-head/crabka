@@ -1,10 +1,6 @@
 //! Segment filename parsing. Kafka names segments by 20-digit
 //! zero-padded base offset, with `.log`, `.index`, `.timeindex` extensions.
 
-// `FILENAME_DIGITS` and `parse_log_filename` are consumed only by `Log`
-// (Phase D); keep allowed until that lands.
-#![allow(dead_code)]
-
 use std::path::Path;
 
 use crate::error::LogError;
