@@ -1,0 +1,26 @@
+[workspace]
+changelog_update = true
+git_release_enable = true
+git_tag_enable = true
+publish = false
+release = true
+changelog_config = "release-plz-changelog.toml"
+git_release_type = "auto"
+semver_check = false
+pr_branch_prefix = "release-plz-"
+pr_labels = ["release"]
+
+[[package]]
+name = "crabka-protocol-codegen"
+publish = false
+release = false
+
+[[package]]
+name = "crabka-compression"
+publish = false
+release = true
+
+[[package]]
+name = "crabka-protocol"
+publish = false
+release = true
