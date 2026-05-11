@@ -18,9 +18,15 @@ impl Oracle {
             .parent()
             .unwrap()
             .join("tools/oracle/build/install/crabka-oracle");
-        let bin_unix = base.join("bin/crabka-oracle");
-        let bin_win = base.join("bin/crabka-oracle.bat");
-        let bin = if bin_win.exists() { bin_win } else { bin_unix };
+        // Gradle's `installDist` produces BOTH wrappers on every platform
+        // (the POSIX shell script and the .bat). Pick by host OS, not by
+        // existence — picking by existence on Linux selects the .bat and
+        // fails with ENOEXEC.
+        let bin = if cfg!(windows) {
+            base.join("bin/crabka-oracle.bat")
+        } else {
+            base.join("bin/crabka-oracle")
+        };
         assert!(
             bin.exists(),
             "oracle not built; run `(cd tools/oracle && ./gradlew installDist)`"
