@@ -2,6 +2,13 @@
 
 use std::time::Duration;
 
+/// Tunables for [`Log`](crate::Log) behavior.
+///
+/// Defaults match Apache Kafka 4.2 (`segment.bytes`, `segment.ms`,
+/// `retention.ms`, `index.interval.bytes`, etc.). The
+/// [`Default`](Self::default) impl is the recommended starting point;
+/// most production deployments will only override `retention_ms` and
+/// `retention_bytes`.
 #[derive(Debug, Clone)]
 pub struct LogConfig {
     /// Roll the active segment when it exceeds this many bytes. Kafka default: 1 GiB.

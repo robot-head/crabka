@@ -13,6 +13,12 @@ use crate::name;
 use crate::retention;
 use crate::segment::Segment;
 
+/// A Kafka-format log: a sorted collection of [`Segment`]s plus a single
+/// active segment that accepts appends.
+///
+/// `Log` is single-writer (`&mut self` for mutation) and supports
+/// concurrent readers (`&self` for `read`/`log_start_offset`/etc.).
+/// Construct one with [`Log::open`].
 #[derive(Debug)]
 pub struct Log {
     dir: PathBuf,
@@ -21,9 +27,19 @@ pub struct Log {
     active: Option<Segment>,
 }
 
+/// Result of [`Log::read`]: the absolute offset of the first batch
+/// returned and the batches themselves.
+///
+/// `start_offset` falls back to the requested offset when no batches are
+/// returned (e.g., reading at the log end), so callers can resume from
+/// the value without special-casing emptiness.
 #[derive(Debug)]
 pub struct ReadOutput {
+    /// Absolute offset of the first record in [`Self::batches`], or the
+    /// requested offset when no batches were returned.
     pub start_offset: i64,
+    /// Decoded batches in offset order. May be empty if the log has no
+    /// data at or after the requested offset.
     pub batches: Vec<RecordBatch>,
 }
 

@@ -11,6 +11,15 @@ use crate::error::LogError;
 use crate::index::{OffsetIndex, TimeIndex};
 use crate::name;
 
+/// A single log segment: the `.log` data file paired with its sparse
+/// `.index` (offset → byte position) and `.timeindex` (timestamp →
+/// relative offset) sidecars.
+///
+/// A segment is identified by its `base_offset`: the absolute offset of
+/// its first record, encoded into the segment's 20-digit zero-padded
+/// filename. Segments are created via [`Segment::create`] (new active
+/// segment) or opened via [`Segment::open`] (read-only sealed segment)
+/// or [`Segment::open_active`] (active segment with tail recovery).
 #[derive(Debug)]
 pub struct Segment {
     #[allow(dead_code)] // used by later phases (Log retention, recovery).
@@ -107,6 +116,10 @@ impl Segment {
     }
 
     /// Open an existing segment for reading. Lightweight — no full scan.
+    /// Open an existing segment for reading. The log and index files
+    /// must already exist on disk; the segment is initialized with
+    /// `last_offset = base_offset - 1` and `max_timestamp = i64::MIN`
+    /// until tail recovery (via [`Segment::open_active`]) populates them.
     pub fn open(dir: &Path, base_offset: i64) -> Result<Self, LogError> {
         let log_path = name::log_path(dir, base_offset);
         let log_file = OpenOptions::new().read(true).write(true).open(&log_path)?;
@@ -126,26 +139,34 @@ impl Segment {
         })
     }
 
+    /// Absolute offset of the first record this segment can hold.
     #[must_use]
     pub fn base_offset(&self) -> i64 {
         self.base_offset
     }
 
+    /// Highest absolute offset (inclusive) of any batch appended to this
+    /// segment. Returns `base_offset - 1` for an empty segment.
     #[must_use]
     pub fn last_offset(&self) -> i64 {
         self.last_offset
     }
 
+    /// Current `.log` file size in bytes.
     #[must_use]
     pub fn size_bytes(&self) -> u64 {
         self.log_size
     }
 
+    /// Highest timestamp observed across all batches in this segment.
+    /// Returns `i64::MIN` for an empty segment.
     #[must_use]
     pub fn max_timestamp(&self) -> i64 {
         self.max_timestamp
     }
 
+    /// `true` once the segment has been sealed via [`Segment::seal`];
+    /// sealed segments reject appends.
     #[must_use]
     pub fn is_sealed(&self) -> bool {
         self.sealed

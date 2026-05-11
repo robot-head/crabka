@@ -2,35 +2,67 @@
 
 use thiserror::Error;
 
+/// Errors returned by [`Log`](crate::Log) and [`Segment`](crate::Segment).
+///
+/// `#[non_exhaustive]` so additional variants can be added in patch
+/// releases without breaking downstream `match` arms.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum LogError {
+    /// An I/O operation against the filesystem failed.
     #[error("I/O: {0}")]
     Io(#[from] std::io::Error),
 
+    /// A partial batch was found at the tail of a `.log` file during
+    /// recovery — the trailing bytes will be truncated to the last
+    /// cleanly decoded batch.
     #[error("partial batch at offset {file_offset} in segment {segment}: truncating")]
-    PartialBatch { segment: i64, file_offset: u64 },
+    PartialBatch {
+        /// Absolute base offset of the segment containing the partial batch.
+        segment: i64,
+        /// Byte position within the `.log` file where the partial batch starts.
+        file_offset: u64,
+    },
 
+    /// A batch's stored CRC did not match the one computed over its bytes.
     #[error(
         "CRC mismatch at offset {file_offset} in segment {segment}: \
          expected {expected:#x}, computed {computed:#x}"
     )]
     CrcMismatch {
+        /// Absolute base offset of the segment.
         segment: i64,
+        /// Byte position within the `.log` file where the corrupt batch starts.
         file_offset: u64,
+        /// CRC value embedded in the batch header.
         expected: u32,
+        /// CRC value re-computed by the reader.
         computed: u32,
     },
 
+    /// A caller requested an offset below [`Log::log_start_offset`](crate::Log::log_start_offset).
     #[error("offset {requested} below log start {log_start}")]
-    OffsetTooLow { requested: i64, log_start: i64 },
+    OffsetTooLow {
+        /// Offset the caller asked for.
+        requested: i64,
+        /// Current log start.
+        log_start: i64,
+    },
 
+    /// A caller requested an offset at or past [`Log::log_end_offset`](crate::Log::log_end_offset).
     #[error("offset {requested} >= log end {log_end}")]
-    OffsetTooHigh { requested: i64, log_end: i64 },
+    OffsetTooHigh {
+        /// Offset the caller asked for.
+        requested: i64,
+        /// Current log end.
+        log_end: i64,
+    },
 
+    /// Encoding/decoding of a `RecordBatch` failed.
     #[error("records: {0}")]
     Records(#[from] crabka_protocol::records::RecordsError),
 
+    /// A segment filename couldn't be parsed (e.g., wrong length, not all digits).
     #[error("invalid segment filename: {0}")]
     BadSegmentName(String),
 }
