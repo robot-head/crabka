@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 description = "Kafka wire protocol codec for Rust"
+build = "build.rs"
 
 [lints]
 workspace = true

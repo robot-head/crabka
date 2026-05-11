@@ -24,12 +24,12 @@ fn check(snap_name: &str, generated: &str) {
 fn api_versions_request_owned_snapshot() {
     let specs = ir::load_dir(&schemas_dir()).unwrap();
     let spec = specs.iter().find(|s| s.name == "ApiVersionsRequest").unwrap();
-    check("ApiVersionsRequest.owned.rs", &emit_owned::emit(spec).unwrap());
+    check("ApiVersionsRequest.owned.rs", &emit_owned::emit(spec, "test").unwrap());
 }
 
 #[test]
 fn api_versions_request_borrowed_snapshot() {
     let specs = ir::load_dir(&schemas_dir()).unwrap();
     let spec = specs.iter().find(|s| s.name == "ApiVersionsRequest").unwrap();
-    check("ApiVersionsRequest.borrowed.rs", &emit_borrowed::emit(spec).unwrap());
+    check("ApiVersionsRequest.borrowed.rs", &emit_borrowed::emit(spec, "test").unwrap());
 }
