@@ -125,3 +125,9 @@ impl<'de> Decode<'de> for ListPartitionReassignmentsTopics {
         Ok(out)
     }
 }
+
+/// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+#[must_use]
+pub fn default_json() -> ::serde_json::Value {
+    ::serde_json::json!({"TimeoutMs": 60000, "Topics": null})
+}

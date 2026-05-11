@@ -95,3 +95,9 @@ impl<'de> Decode<'de> for InitProducerIdResponse {
         Ok(out)
     }
 }
+
+/// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+#[must_use]
+pub fn default_json() -> ::serde_json::Value {
+    ::serde_json::json!({"ThrottleTimeMs": 0, "ErrorCode": 0, "ProducerId": -1, "ProducerEpoch": 0, "OngoingTxnProducerId": -1, "OngoingTxnProducerEpoch": -1})
+}

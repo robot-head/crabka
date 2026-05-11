@@ -97,3 +97,9 @@ impl<'de> Decode<'de> for GetTelemetrySubscriptionsResponse {
         Ok(out)
     }
 }
+
+/// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+#[must_use]
+pub fn default_json() -> ::serde_json::Value {
+    ::serde_json::json!({"ThrottleTimeMs": 0, "ErrorCode": 0, "ClientInstanceId": "00000000-0000-0000-0000-000000000000", "SubscriptionId": 0, "AcceptedCompressionTypes": [], "PushIntervalMs": 0, "TelemetryMaxBytes": 0, "DeltaTemporality": false, "RequestedMetrics": []})
+}

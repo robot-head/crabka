@@ -105,3 +105,9 @@ impl<'de> Decode<'de> for BrokerHeartbeatRequest {
         Ok(out)
     }
 }
+
+/// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+#[must_use]
+pub fn default_json() -> ::serde_json::Value {
+    ::serde_json::json!({"BrokerId": 0, "BrokerEpoch": -1, "CurrentMetadataOffset": 0, "WantFence": false, "WantShutDown": false, "OfflineLogDirs": []})
+}

@@ -176,3 +176,9 @@ impl<'de> Decode<'de> for PartitionProduceData {
         Ok(out)
     }
 }
+
+/// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+#[must_use]
+pub fn default_json() -> ::serde_json::Value {
+    ::serde_json::json!({"TransactionalId": null, "Acks": 0, "TimeoutMs": 0, "TopicData": []})
+}

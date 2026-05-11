@@ -318,3 +318,9 @@ impl<'de> Decode<'de> for CopartitionGroup {
         Ok(out)
     }
 }
+
+/// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+#[must_use]
+pub fn default_json() -> ::serde_json::Value {
+    ::serde_json::json!({"GroupId": "", "MemberId": "", "MemberEpoch": 0, "EndpointInformationEpoch": 0, "InstanceId": null, "RackId": null, "RebalanceTimeoutMs": -1, "Topology": null, "ActiveTasks": null, "StandbyTasks": null, "WarmupTasks": null, "ProcessId": null, "UserEndpoint": null, "ClientTags": null, "TaskOffsets": null, "TaskEndOffsets": null, "ShutdownApplication": false})
+}

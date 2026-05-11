@@ -354,3 +354,9 @@ impl<'de> Decode<'de> for NodeEndpoint {
         Ok(out)
     }
 }
+
+/// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+#[must_use]
+pub fn default_json() -> ::serde_json::Value {
+    ::serde_json::json!({"ThrottleTimeMs": 0, "ErrorCode": 0, "ErrorMessage": null, "AcquisitionLockTimeoutMs": 0, "Responses": [], "NodeEndpoints": []})
+}

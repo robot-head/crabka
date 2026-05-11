@@ -77,3 +77,9 @@ impl<'de> Decode<'de> for EndTxnRequest {
         Ok(out)
     }
 }
+
+/// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+#[must_use]
+pub fn default_json() -> ::serde_json::Value {
+    ::serde_json::json!({"TransactionalId": "", "ProducerId": 0, "ProducerEpoch": 0, "Committed": false})
+}

@@ -161,3 +161,9 @@ impl<'de> Decode<'de> for DeleteRecordsPartition {
         Ok(out)
     }
 }
+
+/// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+#[must_use]
+pub fn default_json() -> ::serde_json::Value {
+    ::serde_json::json!({"Topics": [], "TimeoutMs": 0})
+}

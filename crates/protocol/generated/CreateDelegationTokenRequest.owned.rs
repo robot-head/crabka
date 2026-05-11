@@ -125,3 +125,9 @@ impl<'de> Decode<'de> for CreatableRenewers {
         Ok(out)
     }
 }
+
+/// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+#[must_use]
+pub fn default_json() -> ::serde_json::Value {
+    ::serde_json::json!({"OwnerPrincipalType": null, "OwnerPrincipalName": null, "Renewers": [], "MaxLifetimeMs": 0})
+}

@@ -169,3 +169,9 @@ impl<'de> Decode<'de> for EndpointToPartitions {
         Ok(out)
     }
 }
+
+/// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+#[must_use]
+pub fn default_json() -> ::serde_json::Value {
+    ::serde_json::json!({"ThrottleTimeMs": 0, "ErrorCode": 0, "ErrorMessage": null, "MemberId": "", "MemberEpoch": 0, "HeartbeatIntervalMs": 0, "AcceptableRecoveryLag": 0, "TaskOffsetIntervalMs": 0, "Status": null, "ActiveTasks": null, "StandbyTasks": null, "WarmupTasks": null, "EndpointInformationEpoch": 0, "PartitionsByUserEndpoint": null})
+}

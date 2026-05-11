@@ -225,3 +225,9 @@ impl<'de> Decode<'de> for AcknowledgementBatch {
         Ok(out)
     }
 }
+
+/// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+#[must_use]
+pub fn default_json() -> ::serde_json::Value {
+    ::serde_json::json!({"GroupId": null, "MemberId": null, "ShareSessionEpoch": 0, "IsRenewAck": false, "Topics": []})
+}

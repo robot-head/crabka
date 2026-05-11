@@ -83,3 +83,9 @@ impl<'de> Decode<'de> for ShareGroupHeartbeatRequest {
         Ok(out)
     }
 }
+
+/// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+#[must_use]
+pub fn default_json() -> ::serde_json::Value {
+    ::serde_json::json!({"GroupId": "", "MemberId": "", "MemberEpoch": 0, "RackId": null, "SubscribedTopicNames": null})
+}

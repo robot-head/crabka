@@ -9,6 +9,7 @@ use std::fmt::Write;
 
 use crate::emit::EmittedMessage;
 use crate::emit::common::{banner, format_int_literal};
+use crate::emit::default_json;
 use crate::ir::{FieldSpec, FlexibleVersions, MessageSpec, MessageType, VersionRange};
 use crate::name_conv;
 use crate::resolve::{self, Resolution, StructKind};
@@ -38,6 +39,9 @@ pub fn emit(spec: &MessageSpec, schemas_version: &str) -> Result<EmittedMessage,
     // Rust, but reading top-down is nicer).
     let fm = flex_min(spec);
     emit_nested_structs_for_fields(&mut primary, &spec.fields, fm, &res_map);
+
+    // Emit the default_json() helper for differential testing against the JVM oracle.
+    primary.push_str(&default_json::emit_default_json(spec));
 
     // Emit common structs into separate file bodies.
     let mut commons: Vec<(String, String)> = Vec::new();

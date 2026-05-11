@@ -220,3 +220,9 @@ impl<'de> Decode<'de> for Feature {
         Ok(out)
     }
 }
+
+/// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+#[must_use]
+pub fn default_json() -> ::serde_json::Value {
+    ::serde_json::json!({"BrokerId": 0, "ClusterId": "", "IncarnationId": "00000000-0000-0000-0000-000000000000", "Listeners": [], "Features": [], "Rack": null, "IsMigratingZkBroker": false, "LogDirs": [], "PreviousBrokerEpoch": -1})
+}

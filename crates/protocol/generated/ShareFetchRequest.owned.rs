@@ -323,3 +323,9 @@ impl<'de> Decode<'de> for ForgottenTopic {
         Ok(out)
     }
 }
+
+/// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+#[must_use]
+pub fn default_json() -> ::serde_json::Value {
+    ::serde_json::json!({"GroupId": null, "MemberId": null, "ShareSessionEpoch": 0, "MaxWaitMs": 0, "MinBytes": 0, "MaxBytes": 0x7fffffff, "MaxRecords": 0, "BatchSize": 0, "ShareAcquireMode": 0, "IsRenewAck": false, "Topics": [], "ForgottenTopicsData": []})
+}

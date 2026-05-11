@@ -241,3 +241,9 @@ impl<'de> Decode<'de> for LeaderEndpoint {
         Ok(out)
     }
 }
+
+/// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+#[must_use]
+pub fn default_json() -> ::serde_json::Value {
+    ::serde_json::json!({"ClusterId": null, "VoterId": -1, "Topics": [], "LeaderEndpoints": []})
+}

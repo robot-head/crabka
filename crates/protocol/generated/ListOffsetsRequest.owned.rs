@@ -184,3 +184,9 @@ impl<'de> Decode<'de> for ListOffsetsPartition {
         Ok(out)
     }
 }
+
+/// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+#[must_use]
+pub fn default_json() -> ::serde_json::Value {
+    ::serde_json::json!({"ReplicaId": 0, "IsolationLevel": 0, "Topics": [], "TimeoutMs": 0})
+}

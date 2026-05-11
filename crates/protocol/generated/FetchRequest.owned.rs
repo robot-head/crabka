@@ -407,3 +407,9 @@ impl<'de> Decode<'de> for ForgottenTopic {
         Ok(out)
     }
 }
+
+/// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+#[must_use]
+pub fn default_json() -> ::serde_json::Value {
+    ::serde_json::json!({"ClusterId": null, "ReplicaId": -1, "ReplicaState": {"ReplicaId": -1, "ReplicaEpoch": -1}, "MaxWaitMs": 0, "MinBytes": 0, "MaxBytes": 0x7fffffff, "IsolationLevel": 0, "SessionId": 0, "SessionEpoch": -1, "Topics": [], "ForgottenTopicsData": [], "RackId": ""})
+}

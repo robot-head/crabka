@@ -106,3 +106,9 @@ impl<'de> Decode<'de> for CreateDelegationTokenResponse {
         Ok(out)
     }
 }
+
+/// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+#[must_use]
+pub fn default_json() -> ::serde_json::Value {
+    ::serde_json::json!({"ErrorCode": 0, "PrincipalType": "", "PrincipalName": "", "TokenRequesterPrincipalType": "", "TokenRequesterPrincipalName": "", "IssueTimestampMs": 0, "ExpiryTimestampMs": 0, "MaxTimestampMs": 0, "TokenId": "", "Hmac": "", "ThrottleTimeMs": 0})
+}

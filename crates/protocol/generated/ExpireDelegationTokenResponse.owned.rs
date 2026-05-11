@@ -69,3 +69,9 @@ impl<'de> Decode<'de> for ExpireDelegationTokenResponse {
         Ok(out)
     }
 }
+
+/// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+#[must_use]
+pub fn default_json() -> ::serde_json::Value {
+    ::serde_json::json!({"ErrorCode": 0, "ExpiryTimestampMs": 0, "ThrottleTimeMs": 0})
+}

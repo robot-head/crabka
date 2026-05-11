@@ -151,3 +151,9 @@ impl<'de> Decode<'de> for Listener {
         Ok(out)
     }
 }
+
+/// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+#[must_use]
+pub fn default_json() -> ::serde_json::Value {
+    ::serde_json::json!({"ClusterId": null, "TimeoutMs": 0, "VoterId": 0, "VoterDirectoryId": "00000000-0000-0000-0000-000000000000", "Listeners": [], "AckWhenCommitted": true})
+}

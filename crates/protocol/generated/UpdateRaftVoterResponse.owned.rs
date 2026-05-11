@@ -149,3 +149,9 @@ impl<'de> Decode<'de> for CurrentLeader {
         Ok(out)
     }
 }
+
+/// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+#[must_use]
+pub fn default_json() -> ::serde_json::Value {
+    ::serde_json::json!({"ThrottleTimeMs": 0, "ErrorCode": 0, "CurrentLeader": {"LeaderId": -1, "LeaderEpoch": -1, "Host": "", "Port": 0}})
+}

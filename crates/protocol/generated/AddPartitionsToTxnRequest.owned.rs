@@ -139,3 +139,9 @@ impl<'de> Decode<'de> for AddPartitionsToTxnTransaction {
         Ok(out)
     }
 }
+
+/// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+#[must_use]
+pub fn default_json() -> ::serde_json::Value {
+    ::serde_json::json!({"Transactions": [], "V3AndBelowTransactionalId": "", "V3AndBelowProducerId": 0, "V3AndBelowProducerEpoch": 0, "V3AndBelowTopics": []})
+}

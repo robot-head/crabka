@@ -106,3 +106,9 @@ impl<'de> Decode<'de> for DescribeAclsRequest {
         Ok(out)
     }
 }
+
+/// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+#[must_use]
+pub fn default_json() -> ::serde_json::Value {
+    ::serde_json::json!({"ResourceTypeFilter": 0, "ResourceNameFilter": null, "PatternTypeFilter": 3, "PrincipalFilter": null, "HostFilter": null, "Operation": 0, "PermissionType": 0})
+}

@@ -169,3 +169,9 @@ impl<'de> Decode<'de> for DescribeClusterBroker {
         Ok(out)
     }
 }
+
+/// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+#[must_use]
+pub fn default_json() -> ::serde_json::Value {
+    ::serde_json::json!({"ThrottleTimeMs": 0, "ErrorCode": 0, "ErrorMessage": null, "EndpointType": 1, "ClusterId": "", "ControllerId": -1, "Brokers": [], "ClusterAuthorizedOperations": -2147483648})
+}

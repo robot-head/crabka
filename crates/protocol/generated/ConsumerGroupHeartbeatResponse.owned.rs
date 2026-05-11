@@ -133,3 +133,9 @@ impl<'de> Decode<'de> for Assignment {
         Ok(out)
     }
 }
+
+/// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+#[must_use]
+pub fn default_json() -> ::serde_json::Value {
+    ::serde_json::json!({"ThrottleTimeMs": 0, "ErrorCode": 0, "ErrorMessage": null, "MemberId": null, "MemberEpoch": 0, "HeartbeatIntervalMs": 0, "Assignment": null})
+}

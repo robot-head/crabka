@@ -63,3 +63,9 @@ impl<'de> Decode<'de> for SnapshotHeaderRecord {
         Ok(out)
     }
 }
+
+/// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+#[must_use]
+pub fn default_json() -> ::serde_json::Value {
+    ::serde_json::json!({"Version": 0, "LastContainedLogTimestamp": 0})
+}

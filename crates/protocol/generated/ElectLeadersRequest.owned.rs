@@ -130,3 +130,9 @@ impl<'de> Decode<'de> for TopicPartitions {
         Ok(out)
     }
 }
+
+/// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+#[must_use]
+pub fn default_json() -> ::serde_json::Value {
+    ::serde_json::json!({"ElectionType": 0, "TopicPartitions": null, "TimeoutMs": 60000})
+}

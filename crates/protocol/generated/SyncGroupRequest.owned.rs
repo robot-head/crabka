@@ -138,3 +138,9 @@ impl<'de> Decode<'de> for SyncGroupRequestAssignment {
         Ok(out)
     }
 }
+
+/// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+#[must_use]
+pub fn default_json() -> ::serde_json::Value {
+    ::serde_json::json!({"GroupId": "", "GenerationId": 0, "MemberId": "", "GroupInstanceId": null, "ProtocolType": null, "ProtocolName": null, "Assignments": []})
+}

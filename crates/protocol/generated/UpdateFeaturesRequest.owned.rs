@@ -150,3 +150,9 @@ impl<'de> Decode<'de> for FeatureUpdateKey {
         Ok(out)
     }
 }
+
+/// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+#[must_use]
+pub fn default_json() -> ::serde_json::Value {
+    ::serde_json::json!({"timeoutMs": 60000, "FeatureUpdates": [], "ValidateOnly": false})
+}

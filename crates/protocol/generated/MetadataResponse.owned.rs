@@ -317,3 +317,9 @@ impl<'de> Decode<'de> for MetadataResponsePartition {
         Ok(out)
     }
 }
+
+/// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+#[must_use]
+pub fn default_json() -> ::serde_json::Value {
+    ::serde_json::json!({"ThrottleTimeMs": 0, "Brokers": [], "ClusterId": null, "ControllerId": -1, "Topics": [], "ClusterAuthorizedOperations": -2147483648, "ErrorCode": 0})
+}

@@ -77,3 +77,9 @@ impl<'de> Decode<'de> for RequestHeader {
         Ok(out)
     }
 }
+
+/// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+#[must_use]
+pub fn default_json() -> ::serde_json::Value {
+    ::serde_json::json!({"RequestApiKey": 0, "RequestApiVersion": 0, "CorrelationId": 0, "ClientId": null})
+}

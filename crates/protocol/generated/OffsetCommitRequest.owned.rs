@@ -217,3 +217,9 @@ impl<'de> Decode<'de> for OffsetCommitRequestPartition {
         Ok(out)
     }
 }
+
+/// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+#[must_use]
+pub fn default_json() -> ::serde_json::Value {
+    ::serde_json::json!({"GroupId": "", "GenerationIdOrMemberEpoch": -1, "MemberId": "", "GroupInstanceId": null, "RetentionTimeMs": -1, "Topics": []})
+}

@@ -185,3 +185,9 @@ impl<'de> Decode<'de> for Feature {
         Ok(out)
     }
 }
+
+/// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+#[must_use]
+pub fn default_json() -> ::serde_json::Value {
+    ::serde_json::json!({"ControllerId": 0, "IncarnationId": "00000000-0000-0000-0000-000000000000", "ZkMigrationReady": false, "Listeners": [], "Features": []})
+}

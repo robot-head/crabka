@@ -158,3 +158,9 @@ impl<'de> Decode<'de> for JoinGroupRequestProtocol {
         Ok(out)
     }
 }
+
+/// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+#[must_use]
+pub fn default_json() -> ::serde_json::Value {
+    ::serde_json::json!({"GroupId": "", "SessionTimeoutMs": 0, "RebalanceTimeoutMs": -1, "MemberId": "", "GroupInstanceId": null, "ProtocolType": "", "Protocols": [], "Reason": null})
+}
