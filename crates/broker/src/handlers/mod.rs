@@ -46,7 +46,10 @@ impl HandlerTable {
 pub(crate) mod api_versions;
 pub(crate) mod create_topics;
 pub(crate) mod delete_topics;
+pub(crate) mod describe_configs;
 pub(crate) mod fetch;
+pub(crate) mod find_coordinator;
+pub(crate) mod list_offsets;
 pub(crate) mod metadata;
 pub(crate) mod produce;
 
@@ -57,9 +60,12 @@ pub(crate) fn build_table() -> HandlerTable {
     let mut t = HandlerTable::new();
     t.register(0, produce::handle);
     t.register(1, fetch::handle);
+    t.register(2, list_offsets::handle);
     t.register(3, metadata::handle);
+    t.register(10, find_coordinator::handle);
     t.register(18, api_versions::handle);
     t.register(19, create_topics::handle);
     t.register(20, delete_topics::handle);
+    t.register(32, describe_configs::handle);
     t
 }

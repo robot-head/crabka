@@ -4,6 +4,10 @@ use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
 use crabka_protocol::owned::delete_topics_request::{DeleteTopicState, DeleteTopicsRequest};
 use crabka_protocol::owned::fetch_request::{FetchPartition, FetchRequest, FetchTopic};
+use crabka_protocol::owned::find_coordinator_request::FindCoordinatorRequest;
+use crabka_protocol::owned::list_offsets_request::{
+    ListOffsetsPartition, ListOffsetsRequest, ListOffsetsTopic,
+};
 use crabka_protocol::owned::metadata_request::MetadataRequest;
 use crabka_protocol::owned::produce_request::{
     PartitionProduceData, ProduceRequest, TopicProduceData,
@@ -320,5 +324,53 @@ async fn produce_then_fetch_round_trip() {
         .expect("records must be present after produce");
     assert_eq!(batch.records.len(), 3);
 
+    p.broker.shutdown().await;
+}
+
+#[tokio::test]
+async fn list_offsets_earliest_and_latest() {
+    let p = support::start().await;
+    create_topic(&p, "empty", 1).await;
+
+    let mk = |ts: i64| ListOffsetsRequest {
+        replica_id: -1,
+        topics: vec![ListOffsetsTopic {
+            name: "empty".into(),
+            partitions: vec![ListOffsetsPartition {
+                partition_index: 0,
+                timestamp: ts,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let earliest = p.client.send(mk(-2)).await.expect("ListOffsets earliest");
+    let latest = p.client.send(mk(-1)).await.expect("ListOffsets latest");
+    assert_eq!(earliest.topics[0].partitions[0].error_code, 0);
+    assert_eq!(latest.topics[0].partitions[0].error_code, 0);
+    assert_eq!(earliest.topics[0].partitions[0].offset, 0);
+    assert_eq!(latest.topics[0].partitions[0].offset, 0);
+
+    p.broker.shutdown().await;
+}
+
+#[tokio::test]
+async fn find_coordinator_always_unavailable() {
+    let p = support::start().await;
+    let req = FindCoordinatorRequest {
+        key: "legacy".into(),
+        coordinator_keys: vec!["grp-a".into(), "grp-b".into()],
+        ..Default::default()
+    };
+    let resp = p.client.send(req).await.expect("FindCoordinator");
+    // Negotiated version is v6 (max in both client and broker): the
+    // top-level error_code field is not on the wire at v ≥ 4 — only the
+    // per-coordinator array is. Assert on the per-key field.
+    assert_eq!(resp.coordinators.len(), 2);
+    for c in &resp.coordinators {
+        assert_eq!(c.error_code, 15);
+    }
     p.broker.shutdown().await;
 }
