@@ -32,16 +32,30 @@ pub(crate) fn handle(
         let req = SyncGroupRequest::decode(&mut cur, version)?;
 
         let Some(handle) = group_manager.find(&req.group_id) else {
+            tracing::warn!(group_id = %req.group_id, "SyncGroup: group not found");
             return encode_err(version, codes::UNKNOWN_MEMBER_ID);
         };
 
         // 1. Validate (member, generation) and check whether we're the leader.
         let is_leader = {
             let g = handle.state.lock().await;
+            tracing::info!(
+                group_id = %req.group_id,
+                req_member_id = %req.member_id,
+                req_generation_id = req.generation_id,
+                req_assignments_count = req.assignments.len(),
+                g_state = ?g.state,
+                g_generation_id = g.generation_id,
+                g_leader_id = ?g.leader_id,
+                g_members = ?g.members.keys().collect::<Vec<_>>(),
+                "SyncGroup: received"
+            );
             if !g.members.contains_key(&req.member_id) {
+                tracing::warn!(req_member_id = %req.member_id, "SyncGroup: UNKNOWN_MEMBER_ID");
                 return encode_err(version, codes::UNKNOWN_MEMBER_ID);
             }
             if g.generation_id != req.generation_id {
+                tracing::warn!(g_gen = g.generation_id, req_gen = req.generation_id, "SyncGroup: ILLEGAL_GENERATION");
                 return encode_err(version, codes::ILLEGAL_GENERATION);
             }
             g.leader_id.as_deref() == Some(&req.member_id)
