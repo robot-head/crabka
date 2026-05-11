@@ -54,6 +54,7 @@ pub(crate) mod join_group;
 pub(crate) mod leave_group;
 pub(crate) mod list_offsets;
 pub(crate) mod metadata;
+pub(crate) mod offset_commit;
 pub(crate) mod produce;
 pub(crate) mod sync_group;
 
@@ -66,6 +67,7 @@ pub(crate) fn build_table() -> HandlerTable {
     t.register(1, fetch::handle);
     t.register(2, list_offsets::handle);
     t.register(3, metadata::handle);
+    t.register(8, offset_commit::handle);
     t.register(10, find_coordinator::handle);
     t.register(11, join_group::handle);
     t.register(12, heartbeat::handle);
