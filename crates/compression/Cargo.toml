@@ -1,0 +1,37 @@
+[package]
+name = "crabka-compression"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Kafka wire-protocol compression codecs for Rust"
+
+[lints]
+workspace = true
+
+[features]
+default = ["gzip", "snappy", "lz4", "zstd"]
+gzip   = ["dep:flate2"]
+snappy = ["dep:snap"]
+lz4    = ["dep:lz4_flex"]
+zstd   = ["dep:zstd"]
+
+[dependencies]
+bytes = { workspace = true }
+thiserror = { workspace = true }
+flate2   = { workspace = true, optional = true }
+snap     = { workspace = true, optional = true }
+lz4_flex = { workspace = true, optional = true }
+zstd     = { workspace = true, optional = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+hex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+once_cell = { workspace = true }
+criterion = { version = "4.6.0", package = "codspeed-criterion-compat" }
+
+[[bench]]
+name = "codec"
+harness = false
