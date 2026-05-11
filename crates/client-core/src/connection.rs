@@ -118,14 +118,55 @@ impl Connection {
     }
 }
 
-// Forward declarations — bodies arrive in Tasks 9 and 10.
+/// Spawn the combined I/O task on a single `Framed` socket.
+///
+/// One task owns the entire `Framed` and `select!`s between incoming
+/// frames (from the broker) and outgoing dispatch items (from callers).
+/// A no-op second handle preserves the `(reader, writer)` API shape
+/// expected by `ConnectionInner`.
 fn spawn_io_tasks(
-    _stream: TcpStream,
-    _writer_rx: mpsc::Receiver<DispatchItem>,
-    _shutdown: CancellationToken,
-    _pending: Pending,
+    stream: TcpStream,
+    mut writer_rx: mpsc::Receiver<DispatchItem>,
+    shutdown: CancellationToken,
+    pending: Pending,
 ) -> (JoinHandle<()>, JoinHandle<()>) {
-    unimplemented!("Task 9: reader/writer tasks")
+    use futures_util::{SinkExt, StreamExt};
+
+    let mut framed = crate::transport::frame(stream);
+    let pending_for_drain = Arc::clone(&pending);
+
+    let combined = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                () = shutdown.cancelled() => break,
+                Some(item) = writer_rx.recv() => {
+                    if framed.send(item.bytes).await.is_err() {
+                        break;
+                    }
+                }
+                maybe_frame = framed.next() => {
+                    let Some(frame) = maybe_frame else { break; };
+                    let Ok(frame) = frame else { break; };
+                    if frame.len() < 4 { continue; }
+                    let corr_id = i32::from_be_bytes([frame[0], frame[1], frame[2], frame[3]]);
+                    if let Some((_, tx)) = pending.remove(&corr_id) {
+                        let body = Bytes::copy_from_slice(&frame[4..]);
+                        let _ = tx.send(Ok(body));
+                    }
+                }
+            }
+        }
+        // Drain pending: every outstanding request fails with Disconnected.
+        let keys: Vec<i32> = pending_for_drain.iter().map(|e| *e.key()).collect();
+        for k in keys {
+            if let Some((_, tx)) = pending_for_drain.remove(&k) {
+                let _ = tx.send(Err(ClientError::Disconnected));
+            }
+        }
+    });
+
+    let noop = tokio::spawn(async {});
+    (combined, noop)
 }
 
 async fn fetch_api_versions(_conn: &Connection) -> Result<ApiVersionTable, ClientError> {

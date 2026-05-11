@@ -43,4 +43,4 @@ dashmap = "6"
 tracing = "0.1"
 testcontainers = "0.22"
 testcontainers-modules = { version = "0.10", features = ["kafka"] }
-futures-util = "0.3"
+futures-util = { version = "0.3", features = ["sink"] }
