@@ -7,10 +7,11 @@
 use std::collections::HashMap;
 use std::fmt::Write;
 
+use crate::emit::EmittedMessage;
 use crate::emit::common::{banner, format_int_literal};
 use crate::ir::{FieldSpec, FlexibleVersions, MessageSpec, MessageType, VersionRange};
 use crate::name_conv;
-use crate::resolve::{self, Resolution, StructKind};
+use crate::resolve::{self, Resolution};
 use crate::type_map;
 
 #[derive(Debug, thiserror::Error)]
@@ -21,39 +22,142 @@ pub enum EmitError {
     Resolve(#[from] resolve::ResolveError),
 }
 
-pub fn emit(spec: &MessageSpec, schemas_version: &str) -> Result<String, EmitError> {
-    if !spec.common_structs.is_empty() {
-        return Err(EmitError::Unsupported(format!(
-            "{}: commonStructs not yet supported by owned emitter",
-            spec.name
-        )));
-    }
-
-    // Build resolution map — reject any common-struct references.
+pub fn emit(spec: &MessageSpec, schemas_version: &str) -> Result<EmittedMessage, EmitError> {
+    // Build resolution map — validates that all struct references resolve.
     let res_map = resolve::resolve_message(spec)?;
-    for (name, res) in &res_map {
-        if res.kind == StructKind::Common {
-            return Err(EmitError::Unsupported(format!(
-                "{}: common struct `{name}` not yet supported by owned emitter",
-                spec.name
-            )));
-        }
-    }
 
-    let mut out = banner(schemas_version);
-    emit_imports(&mut out, spec);
-    emit_constants(&mut out, spec);
-    emit_struct(&mut out, spec, &res_map);
-    emit_encode_impl(&mut out, spec, &res_map);
-    emit_decode_impl(&mut out, spec, &res_map);
+    let mut primary = banner(schemas_version);
+    emit_imports(&mut primary, spec);
+    emit_constants(&mut primary, spec);
+    emit_struct(&mut primary, spec, &res_map);
+    emit_encode_impl(&mut primary, spec, &res_map);
+    emit_decode_impl(&mut primary, spec, &res_map);
 
     // Emit sibling types for nested structs (depth-first, post-order so parent
     // types appear before their children's children — order doesn't matter for
     // Rust, but reading top-down is nicer).
     let fm = flex_min(spec);
-    emit_nested_structs_for_fields(&mut out, &spec.fields, fm, &res_map);
+    emit_nested_structs_for_fields(&mut primary, &spec.fields, fm, &res_map);
 
-    Ok(out)
+    // Emit common structs into separate file bodies.
+    let mut commons: Vec<(String, String)> = Vec::new();
+    for cs in &spec.common_structs {
+        // Only emit common structs that are actually referenced (they're in res_map).
+        // Re-use the same resolution map — the common struct's fields may themselves
+        // reference other common structs or nested inline structs within the spec.
+        let cs_flex_min = flex_min(spec); // common structs inherit message flex threshold
+        let body =
+            emit_common_struct_file(&cs.name, &cs.fields, cs_flex_min, &res_map, schemas_version);
+        commons.push((cs.name.clone(), body));
+    }
+
+    Ok(EmittedMessage { primary, commons })
+}
+
+/// Emit a standalone `.rs` file body for a top-level `commonStruct` entry.
+/// The file has the same imports as a primary message file but contains ONLY
+/// the struct definition + Encode/Decode impls for that single struct.
+fn emit_common_struct_file(
+    struct_name: &str,
+    fields: &[FieldSpec],
+    flex_min_val: i16,
+    res_map: &HashMap<String, Resolution>,
+    schemas_version: &str,
+) -> String {
+    let types = used_field_types_recursive(fields);
+    let has_flex = flex_min_val < i16::MAX;
+    let tagged = fields.iter().any(|f| f.tag.is_some());
+    let use_string = uses_string(&types);
+    let use_bytes = uses_bytes(&types);
+
+    let mut out = banner(schemas_version);
+
+    writeln!(out, "\nuse bytes::{{Buf, BufMut}};").unwrap();
+    {
+        let mut gets: Vec<&str> = Vec::new();
+        let mut puts: Vec<&str> = Vec::new();
+        for (t, g, p) in &[
+            ("int8", "get_i8", "put_i8"),
+            ("int16", "get_i16", "put_i16"),
+            ("int32", "get_i32", "put_i32"),
+            ("int64", "get_i64", "put_i64"),
+            ("bool", "get_bool", "put_bool"),
+            ("float64", "get_f64", "put_f64"),
+        ] {
+            if uses_fixed_type(&types, t) {
+                gets.push(g);
+                puts.push(p);
+            }
+        }
+        if !gets.is_empty() {
+            let mut combined: Vec<&str> = gets.into_iter().chain(puts).collect();
+            combined.sort_unstable();
+            writeln!(
+                out,
+                "\nuse crate::primitives::fixed::{{{}}};",
+                combined.join(", ")
+            )
+            .unwrap();
+        }
+    }
+    if use_string {
+        if uses_nullable_string_recursive(fields) {
+            writeln!(
+                out,
+                "use crate::primitives::string_bytes::{{\n    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned,\n    get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len,\n    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string,\n    string_len,\n}};"
+            ).unwrap();
+        } else {
+            writeln!(
+                out,
+                "use crate::primitives::string_bytes::{{\n    compact_string_len, get_compact_string_owned, get_string_owned,\n    put_compact_string, put_string, string_len,\n}};"
+            ).unwrap();
+        }
+    }
+    if use_bytes {
+        let mut items: Vec<&str> = Vec::new();
+        if uses_non_nullable_bytes_recursive(fields) {
+            items.extend([
+                "bytes_len",
+                "compact_bytes_len",
+                "get_bytes_owned",
+                "get_compact_bytes_owned",
+                "put_bytes",
+                "put_compact_bytes",
+            ]);
+        }
+        if uses_nullable_bytes_recursive(fields) {
+            items.extend([
+                "compact_nullable_bytes_len",
+                "get_compact_nullable_bytes_owned",
+                "get_nullable_bytes_owned",
+                "nullable_bytes_len",
+                "put_compact_nullable_bytes",
+                "put_nullable_bytes",
+            ]);
+        }
+        items.sort_unstable();
+        writeln!(
+            out,
+            "use crate::primitives::string_bytes::{{{}}};",
+            items.join(", ")
+        )
+        .unwrap();
+    }
+    if has_flex && tagged {
+        writeln!(out, "use crate::tagged_fields::{{encode_to_bytes, read_tagged_fields, tagged_fields_len, WriteTaggedFields}};").unwrap();
+    } else if has_flex {
+        writeln!(out, "use crate::tagged_fields::{{read_tagged_fields, tagged_fields_len, WriteTaggedFields}};").unwrap();
+    }
+    writeln!(
+        out,
+        "use crate::{{Decode, Encode, ProtocolError, UnknownTaggedFields}};"
+    )
+    .unwrap();
+
+    // Reuse the existing nested-struct emitter (struct + Encode + Decode impls).
+    emit_nested_struct(&mut out, struct_name, fields, flex_min_val, res_map);
+
+    out
 }
 
 /// Walk fields and emit a nested struct for each field that has its own

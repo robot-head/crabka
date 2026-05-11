@@ -63,6 +63,8 @@ const CURATED: &[&str] = &[
     "OffsetCommitResponse",
     "RequestHeader",
     "ResponseHeader",
+    "DescribeGroupsRequest",
+    "DescribeGroupsResponse",
 ];
 
 fn run(schemas: &std::path::Path, out: &std::path::Path) -> Result<usize, RunError> {
@@ -70,16 +72,40 @@ fn run(schemas: &std::path::Path, out: &std::path::Path) -> Result<usize, RunErr
     let specs = ir::load_dir(schemas)?;
     validate::validate(&specs)?;
     std::fs::create_dir_all(out)?;
+    // Common-struct output directory (owned flavor).
+    let common_owned_dir = out.join("common").join("owned");
+    let common_borrowed_dir = out.join("common").join("borrowed");
     let mut count = 0;
     for s in &specs {
         if !CURATED.contains(&s.name.as_str()) {
             continue;
         }
-        let owned_body = emit::owned::emit(s, &schemas_sha)?;
-        let borrowed_body = emit::borrowed::emit(s, &schemas_sha)?;
-        std::fs::write(out.join(format!("{}.owned.rs", s.name)), owned_body)?;
-        std::fs::write(out.join(format!("{}.borrowed.rs", s.name)), borrowed_body)?;
+        let owned_em = emit::owned::emit(s, &schemas_sha)?;
+        let borrowed_em = emit::borrowed::emit(s, &schemas_sha)?;
+        std::fs::write(out.join(format!("{}.owned.rs", s.name)), &owned_em.primary)?;
+        std::fs::write(
+            out.join(format!("{}.borrowed.rs", s.name)),
+            &borrowed_em.primary,
+        )?;
         count += 2;
+        // Write common-struct files.
+        if !owned_em.commons.is_empty() {
+            std::fs::create_dir_all(&common_owned_dir)?;
+        }
+        for (cs_name, body) in &owned_em.commons {
+            std::fs::write(common_owned_dir.join(format!("{cs_name}.owned.rs")), body)?;
+            count += 1;
+        }
+        if !borrowed_em.commons.is_empty() {
+            std::fs::create_dir_all(&common_borrowed_dir)?;
+        }
+        for (cs_name, body) in &borrowed_em.commons {
+            std::fs::write(
+                common_borrowed_dir.join(format!("{cs_name}.borrowed.rs")),
+                body,
+            )?;
+            count += 1;
+        }
     }
     Ok(count)
 }
