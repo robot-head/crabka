@@ -7,5 +7,6 @@
 
 mod assignor;
 mod error;
+mod heartbeat;
 
 pub use error::ConsumerError;
