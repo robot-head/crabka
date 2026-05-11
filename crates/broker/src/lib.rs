@@ -2,9 +2,11 @@
 
 #![doc(html_root_url = "https://docs.rs/crabka-broker/0.0.0")]
 
+mod broker;
 mod codes;
 mod config;
 mod error;
+mod handlers;
 mod log_dir;
 mod metadata;
 mod network;
