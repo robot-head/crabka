@@ -110,6 +110,28 @@ impl Oracle {
     }
 
     #[allow(dead_code)]
+    pub fn header_encode(&mut self, kind: &str, version: i16, value: &Value) -> Vec<u8> {
+        let r = self.call(&json!({
+            "op": "header_encode",
+            "kind": kind,
+            "version": version,
+            "value": value,
+        }));
+        hex::decode(r["hex"].as_str().unwrap()).unwrap()
+    }
+
+    #[allow(dead_code)]
+    pub fn header_decode(&mut self, kind: &str, version: i16, bytes: &[u8]) -> Value {
+        let r = self.call(&json!({
+            "op": "header_decode",
+            "kind": kind,
+            "version": version,
+            "hex": hex::encode(bytes),
+        }));
+        r["value"].clone()
+    }
+
+    #[allow(dead_code)]
     pub fn record_batch_encode(&mut self, value: &Value) -> Vec<u8> {
         let r = self.call(&json!({
             "op": "record_batch_encode",
