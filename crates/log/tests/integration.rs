@@ -75,7 +75,8 @@ fn docker_cp(container_id: &str, src: &str, dst: &Path) {
         .expect("spawn docker cp");
     assert!(
         out.status.success(),
-        "docker cp {src} -> {dst:?} failed: stdout={}, stderr={}",
+        "docker cp {src} -> {} failed: stdout={}, stderr={}",
+        dst.display(),
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),
     );
@@ -90,14 +91,18 @@ async fn read_jvm_produced_log_dir() {
         .expect("start kafka container");
     let container_id = kafka.id().to_string();
 
-    // The Confluent image's in-container PLAINTEXT listener is on 9093.
-    // Host-mapped port lets us double-check the container is healthy
-    // (we don't actually need to talk to it from the host for this test).
+    // testcontainers-modules' Confluent Kafka module advertises
+    //   PLAINTEXT://localhost:<host-mapped-port>,BROKER://localhost:9092
+    // The PLAINTEXT listener (KAFKA_PORT = 9093 inside the container) is
+    // advertised on the host-mapped port — that address is unreachable
+    // from inside the container. The BROKER listener at localhost:9092 is
+    // advertised with an in-container-resolvable address, so for
+    // `docker exec`-ed clients we must use BROKER's 9092, not KAFKA_PORT.
     let _host_port = kafka
         .get_host_port_ipv4(KAFKA_PORT)
         .await
         .expect("get host port");
-    let bootstrap = format!("localhost:{}", KAFKA_PORT.as_u16());
+    let bootstrap = "localhost:9092";
 
     // 1. Create the topic.
     docker_exec(
@@ -113,7 +118,7 @@ async fn read_jvm_produced_log_dir() {
             "--replication-factor",
             "1",
             "--bootstrap-server",
-            &bootstrap,
+            bootstrap,
         ],
     );
 
@@ -124,7 +129,7 @@ async fn read_jvm_produced_log_dir() {
         &[
             "kafka-console-producer",
             "--bootstrap-server",
-            &bootstrap,
+            bootstrap,
             "--topic",
             TOPIC,
             "--property",
@@ -148,7 +153,8 @@ async fn read_jvm_produced_log_dir() {
     docker_cp(&container_id, &partition_dir, host_tmp.path());
     assert!(
         host_target.exists(),
-        "expected docker cp to produce {host_target:?}"
+        "expected docker cp to produce {}",
+        host_target.display()
     );
 
     // 5. Open with crabka-log and read everything back.
