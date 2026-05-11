@@ -141,12 +141,16 @@ pub fn tagged_fields_len(known: &[(u32, usize)], unknown: &UnknownTaggedFields) 
 
 /// Encode a value into a freshly-allocated `Bytes` (used to materialize a
 /// tagged-field payload before sizing the outer trailer).
+///
+/// The write closure may return an error (e.g. from nested struct encode);
+/// the error propagates as a panic since tagged-field encoding failures indicate
+/// a bug in the emitter's `encoded_len` prediction.
 pub fn encode_to_bytes<F>(predicted_len: usize, write: F) -> Bytes
 where
-    F: FnOnce(&mut BytesMut),
+    F: FnOnce(&mut BytesMut) -> Result<(), crate::ProtocolError>,
 {
     let mut buf = BytesMut::with_capacity(predicted_len);
-    write(&mut buf);
+    write(&mut buf).expect("tagged-field encode failed: emitter bug");
     debug_assert_eq!(buf.len(), predicted_len, "encoded_len lied");
     buf.freeze()
 }

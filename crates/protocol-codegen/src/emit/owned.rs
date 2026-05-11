@@ -4,10 +4,10 @@
 //! struct fields. Nested anonymous structs become sibling types in the same
 //! generated file. `commonStructs` support is added in Task 14.
 
-use std::fmt::Write;
 use std::collections::HashMap;
+use std::fmt::Write;
 
-use crate::emit::common::banner;
+use crate::emit::common::{banner, format_int_literal};
 use crate::ir::{FieldSpec, FlexibleVersions, MessageSpec, VersionRange};
 use crate::name_conv;
 use crate::resolve::{self, Resolution, StructKind};
@@ -104,18 +104,13 @@ fn used_field_types_recursive(fields: &[FieldSpec]) -> Vec<String> {
 }
 
 fn has_tagged_fields_recursive(fields: &[FieldSpec]) -> bool {
-    fields.iter().any(|f| {
-        f.tag.is_some() || has_tagged_fields_recursive(&f.fields)
-    })
+    fields
+        .iter()
+        .any(|f| f.tag.is_some() || has_tagged_fields_recursive(&f.fields))
 }
 
-fn uses_fixed_primitives(types: &[String]) -> bool {
-    types.iter().any(|t| {
-        matches!(
-            t.as_str(),
-            "int8" | "int16" | "int32" | "int64" | "bool" | "float64"
-        )
-    })
+fn uses_fixed_type(types: &[String], t: &str) -> bool {
+    types.iter().any(|s| s == t)
 }
 
 fn uses_string(types: &[String]) -> bool {
@@ -143,14 +138,53 @@ fn emit_imports(out: &mut String, spec: &MessageSpec) {
     let types = used_field_types_recursive(&spec.fields);
     let tagged = has_any_tagged_in_spec(spec);
     let flex = has_any_flex(spec);
-    let use_fixed = uses_fixed_primitives(&types);
     let use_string = uses_string(&types);
     let use_nullable_string = uses_nullable_string_recursive(&spec.fields);
 
     writeln!(out, "\nuse bytes::{{Buf, BufMut}};").unwrap();
 
-    if use_fixed {
-        writeln!(out, "\nuse crate::primitives::fixed::{{get_bool, get_f64, get_i16, get_i32, get_i64, get_i8, put_bool, put_f64, put_i16, put_i32, put_i64, put_i8}};").unwrap();
+    // Emit only the specific fixed-type imports actually used, to avoid unused-import warnings.
+    {
+        let mut gets: Vec<&str> = Vec::new();
+        let mut puts: Vec<&str> = Vec::new();
+        if uses_fixed_type(&types, "int8") {
+            gets.push("get_i8");
+            puts.push("put_i8");
+        }
+        if uses_fixed_type(&types, "int16") {
+            gets.push("get_i16");
+            puts.push("put_i16");
+        }
+        if uses_fixed_type(&types, "int32") {
+            gets.push("get_i32");
+            puts.push("put_i32");
+        }
+        if uses_fixed_type(&types, "int64") {
+            gets.push("get_i64");
+            puts.push("put_i64");
+        }
+        if uses_fixed_type(&types, "bool") {
+            gets.push("get_bool");
+            puts.push("put_bool");
+        }
+        if uses_fixed_type(&types, "float64") {
+            gets.push("get_f64");
+            puts.push("put_f64");
+        }
+        if !gets.is_empty() {
+            let combined: Vec<&str> = gets.into_iter().chain(puts).collect();
+            let sorted = {
+                let mut v = combined;
+                v.sort_unstable();
+                v
+            };
+            writeln!(
+                out,
+                "\nuse crate::primitives::fixed::{{{}}};",
+                sorted.join(", ")
+            )
+            .unwrap();
+        }
     }
 
     if use_string {
@@ -212,12 +246,106 @@ fn is_flexible(version: i16) -> bool {{ version >= FLEXIBLE_MIN }}"
     .unwrap();
 }
 
+/// Returns a Rust expression for the default value of an owned field, respecting the
+/// schema-level `default` attribute (e.g. `"-1"` for `ControllerId`).
+fn owned_default_expr(f: &FieldSpec) -> String {
+    let base = base_type(&f.field_type);
+    let is_array = f.field_type.starts_with("[]");
+    let nullable = is_nullable(f) || matches!(&f.default, Some(serde_json::Value::Null));
+    // Kafka schemas use "null" (string) to mean the default is null for nullable fields.
+    let default_is_null = matches!(&f.default, Some(serde_json::Value::Null))
+        || matches!(&f.default, Some(serde_json::Value::String(s)) if s == "null");
+    if nullable {
+        if default_is_null || f.default.is_none() {
+            return "None".into();
+        }
+        if let Some(v) = &f.default {
+            return format!("Some({})", scalar_owned_default(base, v));
+        }
+    }
+    if is_array {
+        return "Vec::new()".into();
+    }
+    match &f.default {
+        Some(v) => scalar_owned_default(base, v),
+        None => owned_zero(base),
+    }
+}
+
+fn scalar_owned_default(base_type: &str, val: &serde_json::Value) -> String {
+    // Kafka schema defaults are always stored as JSON strings (e.g., "-1", "null", "true").
+    // We parse the string value to extract the actual default.
+    match (base_type, val) {
+        // String-encoded "null" for a nullable field means None — handled by caller.
+        (_, serde_json::Value::String(s)) if s == "null" => "None".into(),
+        ("string", serde_json::Value::String(s)) => format!("{s:?}.to_string()"),
+        ("bool", serde_json::Value::String(s)) if s == "true" => "true".into(),
+        ("bool", serde_json::Value::String(_)) => "false".into(),
+        ("bool", serde_json::Value::Bool(b)) => b.to_string(),
+        ("int8", serde_json::Value::String(s)) => format!("{}i8", s.trim()),
+        ("int16", serde_json::Value::String(s)) => format!("{}i16", s.trim()),
+        // Format as underscored literal to satisfy clippy::unreadable_literal.
+        ("int32", serde_json::Value::String(s)) => format_int_literal(s.trim(), "i32"),
+        ("int64", serde_json::Value::String(s)) => format_int_literal(s.trim(), "i64"),
+        ("int8", serde_json::Value::Number(n)) => format!("{n}i8"),
+        ("int16", serde_json::Value::Number(n)) => format!("{n}i16"),
+        ("int32", serde_json::Value::Number(n)) => format_int_literal(&n.to_string(), "i32"),
+        ("int64", serde_json::Value::Number(n)) => format_int_literal(&n.to_string(), "i64"),
+        _ => owned_zero(base_type),
+    }
+}
+
+fn owned_zero(base: &str) -> String {
+    match base {
+        "string" => "String::new()".into(),
+        "bytes" | "records" => "bytes::Bytes::new()".into(),
+        "bool" => "false".into(),
+        "int8" => "0i8".into(),
+        "int16" => "0i16".into(),
+        "int32" => "0i32".into(),
+        "int64" => "0i64".into(),
+        "uint16" => "0u16".into(),
+        "uint32" => "0u32".into(),
+        "float64" => "0.0f64".into(),
+        _ => "Default::default()".into(),
+    }
+}
+
+/// Parse a string schema default as an integer for comparison with zero.
+fn parse_string_default_as_i64(s: &str) -> Option<i64> {
+    s.trim().parse::<i64>().ok()
+}
+
+/// Returns true if any field in `fields` has a non-trivial schema default
+/// (one that differs from the Rust type's natural Default).
+fn needs_manual_default(fields: &[FieldSpec]) -> bool {
+    fields.iter().any(|f| {
+        let nullable = is_nullable(f) || matches!(&f.default, Some(serde_json::Value::Null));
+        match &f.default {
+            None | Some(serde_json::Value::Null) => false, // null/None → None, same as derive
+            Some(serde_json::Value::String(s)) if s == "null" => false, // "null" string → None
+            Some(serde_json::Value::Bool(false)) if !nullable => false, // false == Default for bool
+            Some(serde_json::Value::String(s)) if s == "false" && !nullable => false,
+            Some(serde_json::Value::String(s)) if s.is_empty() && !nullable => false,
+            Some(serde_json::Value::Number(n)) if n.as_i64() == Some(0) && !nullable => false,
+            Some(serde_json::Value::String(s))
+                if parse_string_default_as_i64(s) == Some(0) && !nullable =>
+            {
+                false
+            }
+            Some(_) => true,
+        }
+    })
+}
+
 fn emit_struct(out: &mut String, spec: &MessageSpec, res_map: &HashMap<String, Resolution>) {
     let type_name = name_conv::type_name(&spec.name);
+    let manual_default = needs_manual_default(&spec.fields);
+    let derive_default = if manual_default { "" } else { ", Default" };
     writeln!(
         out,
         "
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq{derive_default})]
 pub struct {type_name} {{"
     )
     .unwrap();
@@ -238,6 +366,33 @@ pub struct {type_name} {{"
     }
     writeln!(out, "    pub unknown_tagged_fields: UnknownTaggedFields,").unwrap();
     writeln!(out, "}}").unwrap();
+
+    if manual_default {
+        writeln!(
+            out,
+            "
+impl Default for {type_name} {{
+    fn default() -> Self {{
+        Self {{"
+        )
+        .unwrap();
+        for f in spec.fields.iter().filter(|f| !is_tagged(f)) {
+            let field = name_conv::field_name(&f.name);
+            let default_expr = owned_default_expr(f);
+            writeln!(out, "            {field}: {default_expr},").unwrap();
+        }
+        for f in spec.fields.iter().filter(|f| is_tagged(f)) {
+            let field = name_conv::field_name(&f.name);
+            let default_expr = owned_default_expr(f);
+            writeln!(out, "            {field}: {default_expr},").unwrap();
+        }
+        writeln!(
+            out,
+            "            unknown_tagged_fields: Default::default(),"
+        )
+        .unwrap();
+        writeln!(out, "        }}\n    }}\n}}").unwrap();
+    }
 }
 
 /// Returns the resolved Rust path for a struct-typed field, or `None` for primitives.
@@ -456,11 +611,13 @@ fn emit_nested_struct(
     flex_min_val: i16,
     res_map: &HashMap<String, Resolution>,
 ) {
+    let manual_default = needs_manual_default(fields);
+    let derive_default = if manual_default { "" } else { ", Default" };
     // Struct definition
     writeln!(
         out,
         "
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq{derive_default})]
 pub struct {struct_name} {{"
     )
     .unwrap();
@@ -481,6 +638,33 @@ pub struct {struct_name} {{"
     }
     writeln!(out, "    pub unknown_tagged_fields: UnknownTaggedFields,").unwrap();
     writeln!(out, "}}").unwrap();
+
+    if manual_default {
+        writeln!(
+            out,
+            "
+impl Default for {struct_name} {{
+    fn default() -> Self {{
+        Self {{"
+        )
+        .unwrap();
+        for f in fields.iter().filter(|f| !is_tagged(f)) {
+            let field = name_conv::field_name(&f.name);
+            let default_expr = owned_default_expr(f);
+            writeln!(out, "            {field}: {default_expr},").unwrap();
+        }
+        for f in fields.iter().filter(|f| is_tagged(f)) {
+            let field = name_conv::field_name(&f.name);
+            let default_expr = owned_default_expr(f);
+            writeln!(out, "            {field}: {default_expr},").unwrap();
+        }
+        writeln!(
+            out,
+            "            unknown_tagged_fields: Default::default(),"
+        )
+        .unwrap();
+        writeln!(out, "        }}\n    }}\n}}").unwrap();
+    }
 
     let has_flex = flex_min_val < i16::MAX;
 
@@ -539,8 +723,29 @@ fn emit_encode_one(
 ) {
     let field = name_conv::field_name(&f.name);
     let cond = version_cond(f.versions, "version");
-    let body = encode_call(&f.field_type, &format!("self.{field}"), is_nullable(f), res_map);
-    writeln!(out, "{indent}if {cond} {{ {body} }}").unwrap();
+    // Version-conditional nullability: field is nullable only starting at nullable_versions.min.
+    // If that minimum is later than the field's own first version, we need to switch codec.
+    let nullable_min = f.nullable_versions.map(|r| r.min);
+    let needs_version_split = nullable_min.is_some_and(|nmin| nmin > f.versions.min);
+    if needs_version_split {
+        let nmin = nullable_min.unwrap();
+        let nullable_body = encode_call(&f.field_type, &format!("self.{field}"), true, res_map);
+        // For the non-nullable path, the Rust type is still Option<T> so we must unwrap.
+        let non_nullable_body =
+            encode_call_option_as_non_nullable(&f.field_type, &format!("self.{field}"), res_map);
+        writeln!(
+            out,
+            "{indent}if {cond} {{ if version >= {nmin} {{ {nullable_body} }} else {{ {non_nullable_body} }} }}"
+        ).unwrap();
+    } else {
+        let body = encode_call(
+            &f.field_type,
+            &format!("self.{field}"),
+            is_nullable(f),
+            res_map,
+        );
+        writeln!(out, "{indent}if {cond} {{ {body} }}").unwrap();
+    }
 }
 
 fn emit_encoded_len_one(
@@ -551,8 +756,31 @@ fn emit_encoded_len_one(
 ) {
     let field = name_conv::field_name(&f.name);
     let cond = version_cond(f.versions, "version");
-    let body = encoded_len_expr(&f.field_type, &format!("self.{field}"), is_nullable(f), res_map);
-    writeln!(out, "{indent}if {cond} {{ n += {body}; }}").unwrap();
+    let nullable_min = f.nullable_versions.map(|r| r.min);
+    let needs_version_split = nullable_min.is_some_and(|nmin| nmin > f.versions.min);
+    if needs_version_split {
+        let nmin = nullable_min.unwrap();
+        let nullable_body =
+            encoded_len_expr(&f.field_type, &format!("self.{field}"), true, res_map);
+        // For the non-nullable path, the Rust type is still Option<T> so unwrap.
+        let non_nullable_body = encoded_len_expr_option_as_non_nullable(
+            &f.field_type,
+            &format!("self.{field}"),
+            res_map,
+        );
+        writeln!(
+            out,
+            "{indent}if {cond} {{ n += if version >= {nmin} {{ {nullable_body} }} else {{ {non_nullable_body} }}; }}"
+        ).unwrap();
+    } else {
+        let body = encoded_len_expr(
+            &f.field_type,
+            &format!("self.{field}"),
+            is_nullable(f),
+            res_map,
+        );
+        writeln!(out, "{indent}if {cond} {{ n += {body}; }}").unwrap();
+    }
 }
 
 fn emit_decode_one(
@@ -563,8 +791,69 @@ fn emit_decode_one(
 ) {
     let field = name_conv::field_name(&f.name);
     let cond = version_cond(f.versions, "version");
-    let call = decode_call(&f.field_type, is_nullable(f), res_map);
-    writeln!(out, "{indent}if {cond} {{ out.{field} = {call}; }}").unwrap();
+    let nullable_min = f.nullable_versions.map(|r| r.min);
+    let needs_version_split = nullable_min.is_some_and(|nmin| nmin > f.versions.min);
+    if needs_version_split {
+        let nmin = nullable_min.unwrap();
+        let nullable_call = decode_call(&f.field_type, true, res_map);
+        let non_nullable_call = decode_call(&f.field_type, false, res_map);
+        // Non-nullable decode returns a bare value; we must wrap it to match the Option type.
+        let non_nullable_wrapped =
+            wrap_non_nullable_for_option(&f.field_type, &non_nullable_call, res_map);
+        writeln!(
+            out,
+            "{indent}if {cond} {{ out.{field} = if version >= {nmin} {{ {nullable_call} }} else {{ {non_nullable_wrapped} }}; }}"
+        ).unwrap();
+    } else {
+        let call = decode_call(&f.field_type, is_nullable(f), res_map);
+        writeln!(out, "{indent}if {cond} {{ out.{field} = {call}; }}").unwrap();
+    }
+}
+
+/// When a non-nullable decode is used but the field type is `Option<T>`, wrap the
+/// result in `Some`. For array-of-struct this wraps the whole block.
+fn wrap_non_nullable_for_option(
+    _schema_type: &str,
+    non_nullable_call: &str,
+    _res_map: &HashMap<String, Resolution>,
+) -> String {
+    // The field is typed as Option<T> (because nullable_versions exists).
+    // A non-nullable decode produces T, so we must wrap in Some.
+    format!("Some({non_nullable_call})")
+}
+
+/// Returns a Rust boolean expression that is `true` when the tagged field
+/// equals its schema-specified default. This is used to suppress tagged field
+/// serialization (JVM Kafka also omits tagged fields that equal their defaults).
+fn tagged_is_default_cond(f: &FieldSpec) -> String {
+    let field = name_conv::field_name(&f.name);
+    let base = base_type(&f.field_type);
+    let nullable = is_nullable(f) || matches!(&f.default, Some(serde_json::Value::Null));
+    let default_is_null = matches!(&f.default, Some(serde_json::Value::Null))
+        || matches!(&f.default, Some(serde_json::Value::String(s)) if s == "null");
+
+    if nullable && (default_is_null || f.default.is_none()) {
+        // Default is None; the field is an Option<T>.
+        return format!("self.{field}.is_none()");
+    }
+    if let Some(v) = &f.default {
+        // Compare against the explicit schema default.
+        let cmp_val = scalar_owned_default(base, v);
+        if cmp_val == "None" {
+            return format!("self.{field}.is_none()");
+        }
+        // For Option<T> with a non-null default, compare Some(default) to self.field.
+        if nullable {
+            return format!("self.{field} == Some({cmp_val})");
+        }
+        // For Vec/array fields, check empty.
+        if f.field_type.starts_with("[]") {
+            return format!("self.{field}.is_empty()");
+        }
+        return format!("self.{field} == {cmp_val}");
+    }
+    // No schema default; fall back to Rust's Default.
+    format!("crate::codegen_helpers::is_default(&self.{field})")
 }
 
 fn emit_encode_tagged(
@@ -576,14 +865,22 @@ fn emit_encode_tagged(
     let field = name_conv::field_name(&f.name);
     let tag = f.tag.expect("tagged field must have tag");
     let nullable = is_nullable(f) || matches!(&f.default, Some(serde_json::Value::Null));
+    // Generate encode call using `b` (the closure's buffer parameter, not the outer `buf`).
+    let encode_body = encode_call_with_buf(
+        &f.field_type,
+        &format!("self.{field}"),
+        nullable,
+        res_map,
+        "b",
+    );
+    let is_default_cond = tagged_is_default_cond(f);
     writeln!(
         out,
-        "{indent}    if !crate::codegen_helpers::is_default(&self.{field}) {{
-{indent}        let payload = encode_to_bytes({len_expr}, |b| {{ {encode}; }});
+        "{indent}    if !({is_default_cond}) {{
+{indent}        let payload = encode_to_bytes({len_expr}, |b| {{ {encode_body}; Ok(()) }});
 {indent}        tagged.add({tag}, payload);
 {indent}    }}",
         len_expr = encoded_len_expr(&f.field_type, &format!("self.{field}"), nullable, res_map),
-        encode = encode_call(&f.field_type, &format!("self.{field}"), nullable, res_map),
         tag = tag,
     )
     .unwrap();
@@ -599,9 +896,10 @@ fn emit_encoded_len_tagged(
     let tag = f.tag.expect("tagged field must have tag");
     let nullable = is_nullable(f) || matches!(&f.default, Some(serde_json::Value::Null));
     let len = encoded_len_expr(&f.field_type, &format!("self.{field}"), nullable, res_map);
+    let is_default_cond = tagged_is_default_cond(f);
     writeln!(
         out,
-        "{indent}    if !crate::codegen_helpers::is_default(&self.{field}) {{
+        "{indent}    if !({is_default_cond}) {{
 {indent}        known_pairs.push(({tag}, {len}));
 {indent}    }}"
     )
@@ -617,11 +915,119 @@ fn emit_decode_tagged_arm(
     let field = name_conv::field_name(&f.name);
     let tag = f.tag.expect("tagged field must have tag");
     let nullable = is_nullable(f) || matches!(&f.default, Some(serde_json::Value::Null));
-    let call = decode_call(&f.field_type, nullable, res_map);
+    // Bind `b` to the payload slice so generated decode calls use the right buffer.
+    let call = decode_call_with_buf(&f.field_type, nullable, res_map, "b");
     writeln!(out, "{indent}        {tag} => {{ tag_{field} = Some({{ let b: &mut &[u8] = payload; {call} }}); Ok(true) }}").unwrap();
 }
 
 // --- primitive encode/decode call generators ------------------------------
+
+/// Encode a field whose Rust type is `Option<T>` but the wire format is non-nullable
+/// (because `nullable_versions.min > field.versions.min`).
+/// Treats `None` as the empty/default value for the underlying type.
+fn encode_call_option_as_non_nullable(
+    schema_type: &str,
+    expr: &str,
+    res_map: &HashMap<String, Resolution>,
+) -> String {
+    if let Some(elem) = schema_type.strip_prefix("[]") {
+        let elem_base = base_type(elem);
+        if is_struct_type(elem_base) {
+            // Option<Vec<Struct>> → encode the inner vec (treating None as empty).
+            return format!(
+                "{{ let v = ({expr}).as_ref().map(Vec::as_slice).unwrap_or(&[]); \
+                 crate::primitives::array::put_array_len(buf, v.len(), flex); \
+                 for it in v {{ it.encode(buf, version)?; }} }}",
+            );
+        }
+        // Option<Vec<Prim>>
+        return format!(
+            "{{ let v = ({expr}).as_ref().map(Vec::as_slice).unwrap_or(&[]); \
+             crate::primitives::array::put_array_len(buf, v.len(), flex); \
+             for it in v {{ {inner}; }} }}",
+            inner = encode_call(elem, "it", false, res_map),
+        );
+    }
+    // Option<String> → treat None as ""
+    match schema_type {
+        "string" => format!(
+            "if flex {{ put_compact_string(buf, ({expr}).as_deref().unwrap_or(\"\")) }} \
+             else {{ put_string(buf, ({expr}).as_deref().unwrap_or(\"\")) }}"
+        ),
+        "uuid" => format!("crate::primitives::uuid::put_uuid(buf, ({expr}).unwrap_or_default())"),
+        _ => encode_call(
+            schema_type,
+            &format!("({expr}).unwrap_or_default()"),
+            false,
+            res_map,
+        ),
+    }
+}
+
+/// Compute the `encoded_len` of a field whose Rust type is `Option<T>` but wire is non-nullable.
+fn encoded_len_expr_option_as_non_nullable(
+    schema_type: &str,
+    expr: &str,
+    res_map: &HashMap<String, Resolution>,
+) -> String {
+    if let Some(elem) = schema_type.strip_prefix("[]") {
+        let elem_base = base_type(elem);
+        if is_struct_type(elem_base) {
+            return format!(
+                "{{ let v = ({expr}).as_ref().map(Vec::as_slice).unwrap_or(&[]); \
+                 let prefix = crate::primitives::array::array_len_prefix_len(v.len(), flex); \
+                 let body: usize = v.iter().map(|it| it.encoded_len(version)).sum(); \
+                 prefix + body }}",
+            );
+        }
+        return format!(
+            "{{ let v = ({expr}).as_ref().map(Vec::as_slice).unwrap_or(&[]); \
+             let prefix = crate::primitives::array::array_len_prefix_len(v.len(), flex); \
+             let body: usize = v.iter().map(|it| {inner}).sum(); \
+             prefix + body }}",
+            inner = encoded_len_expr(elem, "*it", false, res_map),
+        );
+    }
+    match schema_type {
+        "string" => format!(
+            "if flex {{ compact_string_len(({expr}).as_deref().unwrap_or(\"\")) }} \
+             else {{ string_len(({expr}).as_deref().unwrap_or(\"\")) }}"
+        ),
+        "uuid" => "16".into(),
+        _ => encoded_len_expr(
+            schema_type,
+            &format!("({expr}).unwrap_or_default()"),
+            false,
+            res_map,
+        ),
+    }
+}
+
+/// Generate an encode call expression using a specific buffer variable name.
+/// This is used for tagged-field closures where the buffer is `b` not `buf`.
+fn encode_call_with_buf(
+    schema_type: &str,
+    expr: &str,
+    nullable: bool,
+    res_map: &HashMap<String, Resolution>,
+    buf_var: &str,
+) -> String {
+    // Replace all instances of `buf` in the generated expression with `buf_var`.
+    let base = encode_call(schema_type, expr, nullable, res_map);
+    // The expressions use `buf` as the buffer name; substitute with the actual var.
+    base.replace("buf", buf_var)
+}
+
+/// Generate a decode call expression using a specific buffer variable name.
+fn decode_call_with_buf(
+    schema_type: &str,
+    nullable: bool,
+    res_map: &HashMap<String, Resolution>,
+    buf_var: &str,
+) -> String {
+    let base = decode_call(schema_type, nullable, res_map);
+    base.replace("buf", buf_var)
+}
 
 // `res_map` is threaded through for array-element recursion even though the
 // primitives branch doesn't use it directly.
@@ -653,22 +1059,21 @@ fn encode_call(
                 "{{ let len = ({expr}).as_ref().map(Vec::len); \
                  crate::primitives::array::put_nullable_array_len(buf, len, flex); \
                  if let Some(v) = &{expr} {{ for it in v {{ {inner}; }} }} }}",
-                inner = encode_call(elem, "it", false, res_map),
+                // `it` is `&T` from iteration; for Copy primitives we dereference with `*it`.
+                inner = encode_call(elem, "*it", false, res_map),
             );
         }
         return format!(
             "{{ crate::primitives::array::put_array_len(buf, ({expr}).len(), flex); \
              for it in &{expr} {{ {inner}; }} }}",
-            inner = encode_call(elem, "it", false, res_map),
+            inner = encode_call(elem, "*it", false, res_map),
         );
     }
 
     if is_struct_type(schema_type) {
         // Non-array struct
         if nullable {
-            return format!(
-                "if let Some(v) = &{expr} {{ v.encode(buf, version)?; }}"
-            );
+            return format!("if let Some(v) = &{expr} {{ v.encode(buf, version)?; }}");
         }
         return format!("{expr}.encode(buf, version)?");
     }
@@ -680,6 +1085,7 @@ fn encode_call(
         ("int64", _) => format!("put_i64(buf, {expr})"),
         ("bool", _) => format!("put_bool(buf, {expr})"),
         ("float64", _) => format!("put_f64(buf, {expr})"),
+        ("uuid", _) => format!("crate::primitives::uuid::put_uuid(buf, {expr})"),
         ("string", false) => format!(
             "if flex {{ put_compact_string(buf, &{expr}) }} else {{ put_string(buf, &{expr}) }}"
         ),
@@ -715,28 +1121,30 @@ fn encoded_len_expr(
                  prefix + body }}",
             );
         }
-        if nullable {
+        {
+            let inner = encoded_len_expr(elem, "*it", false, res_map);
+            // Use `|_|` when the inner expression is constant (doesn't reference `*it`),
+            // to avoid an unused-variable warning.
+            let closure_arg = if inner.contains("*it") { "it" } else { "_" };
+            if nullable {
+                return format!(
+                    "{{ let opt: Option<&Vec<_>> = ({expr}).as_ref(); \
+                     let prefix = crate::primitives::array::nullable_array_len_prefix_len(opt.map(|v| v.len()), flex); \
+                     let body: usize = opt.map_or(0, |v| v.iter().map(|{closure_arg}| {inner}).sum()); \
+                     prefix + body }}",
+                );
+            }
             return format!(
-                "{{ let opt: Option<&Vec<_>> = ({expr}).as_ref(); \
-                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(opt.map(|v| v.len()), flex); \
-                 let body: usize = opt.map_or(0, |v| v.iter().map(|it| {inner}).sum()); \
+                "{{ let prefix = crate::primitives::array::array_len_prefix_len(({expr}).len(), flex); \
+                 let body: usize = ({expr}).iter().map(|{closure_arg}| {inner}).sum(); \
                  prefix + body }}",
-                inner = encoded_len_expr(elem, "*it", false, res_map),
             );
         }
-        return format!(
-            "{{ let prefix = crate::primitives::array::array_len_prefix_len(({expr}).len(), flex); \
-             let body: usize = ({expr}).iter().map(|it| {inner}).sum(); \
-             prefix + body }}",
-            inner = encoded_len_expr(elem, "*it", false, res_map),
-        );
     }
 
     if is_struct_type(schema_type) {
         if nullable {
-            return format!(
-                "{expr}.as_ref().map_or(0, |v| v.encoded_len(version))"
-            );
+            return format!("{expr}.as_ref().map_or(0, |v| v.encoded_len(version))");
         }
         return format!("{expr}.encoded_len(version)");
     }
@@ -746,6 +1154,7 @@ fn encoded_len_expr(
         ("int16", _) => "2".into(),
         ("int32", _) => "4".into(),
         ("int64" | "float64", _) => "8".into(),
+        ("uuid", _) => "16".into(),
         ("string", false) => {
             format!("if flex {{ compact_string_len(&{expr}) }} else {{ string_len(&{expr}) }}")
         }
@@ -757,11 +1166,7 @@ fn encoded_len_expr(
 }
 
 #[allow(clippy::only_used_in_recursion)]
-fn decode_call(
-    schema_type: &str,
-    nullable: bool,
-    res_map: &HashMap<String, Resolution>,
-) -> String {
+fn decode_call(schema_type: &str, nullable: bool, res_map: &HashMap<String, Resolution>) -> String {
     if let Some(elem) = schema_type.strip_prefix("[]") {
         let elem_base = base_type(elem);
         if is_struct_type(elem_base) {
@@ -809,6 +1214,7 @@ fn decode_call(
         ("int64",  _)     => "get_i64(buf)?".into(),
         ("bool",   _)     => "get_bool(buf)?".into(),
         ("float64",_)     => "get_f64(buf)?".into(),
+        ("uuid",   _)     => "crate::primitives::uuid::get_uuid(buf)?".into(),
         ("string", false) => "if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? }".into(),
         ("string", true)  => "if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? }".into(),
         (t, _) => format!("compile_error!(\"unhandled type in decode_call: {t}\")"),
@@ -828,7 +1234,6 @@ fn version_cond(r: VersionRange, version_var: &str) -> String {
     if r.max == i16::MAX {
         format!("{version_var} >= {}", r.min)
     } else {
-        format!("({version_var} >= {} && {version_var} <= {})", r.min, r.max)
+        format!("{version_var} >= {} && {version_var} <= {}", r.min, r.max)
     }
 }
-

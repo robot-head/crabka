@@ -10,7 +10,14 @@
     clippy::default_trait_access,
     clippy::derivable_impls,
     clippy::collapsible_if,
-    clippy::new_without_default
+    clippy::new_without_default,
+    clippy::unreadable_literal,
+    clippy::redundant_closure_for_method_calls,
+    clippy::nonminimal_bool,
+    clippy::bool_comparison,
+    clippy::map_unwrap_or,
+    clippy::option_as_ref_deref,
+    clippy::manual_range_contains
 )]
 
 include!(concat!(

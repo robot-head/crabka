@@ -48,6 +48,10 @@ impl<'a> Arbitrary<'a> for ApiVersionsResponse {
             error_code: u.arbitrary()?,
             api_keys,
             throttle_time_ms: u.arbitrary()?,
+            supported_features: Vec::new(),
+            finalized_features_epoch: 0,
+            finalized_features: Vec::new(),
+            zk_migration_ready: false,
             unknown_tagged_fields: UnknownTaggedFields::default(),
         })
     }

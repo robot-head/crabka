@@ -52,6 +52,13 @@ fn read_schemas_sha(schemas: &std::path::Path) -> Result<String, RunError> {
     Ok(sha)
 }
 
+const CURATED: &[&str] = &[
+    "ApiVersionsRequest",
+    "ApiVersionsResponse",
+    "MetadataRequest",
+    "MetadataResponse",
+];
+
 fn run(schemas: &std::path::Path, out: &std::path::Path) -> Result<usize, RunError> {
     let schemas_sha = read_schemas_sha(schemas)?;
     let specs = ir::load_dir(schemas)?;
@@ -59,7 +66,7 @@ fn run(schemas: &std::path::Path, out: &std::path::Path) -> Result<usize, RunErr
     std::fs::create_dir_all(out)?;
     let mut count = 0;
     for s in &specs {
-        if s.name != "ApiVersionsRequest" {
+        if !CURATED.contains(&s.name.as_str()) {
             continue;
         }
         let owned_body = emit::owned::emit(s, &schemas_sha)?;

@@ -12,7 +12,9 @@ pub fn get_string_borrowed<'de>(buf: &mut &'de [u8]) -> Result<&'de str, Protoco
     #[allow(clippy::cast_sign_loss)]
     let n = len as usize;
     if buf.len() < n {
-        return Err(ProtocolError::UnexpectedEof { needed: n - buf.len() });
+        return Err(ProtocolError::UnexpectedEof {
+            needed: n - buf.len(),
+        });
     }
     let (head, tail) = buf.split_at(n);
     *buf = tail;
@@ -30,11 +32,15 @@ pub fn get_nullable_string_borrowed<'de>(
     #[allow(clippy::cast_sign_loss)]
     let n = len as usize;
     if buf.len() < n {
-        return Err(ProtocolError::UnexpectedEof { needed: n - buf.len() });
+        return Err(ProtocolError::UnexpectedEof {
+            needed: n - buf.len(),
+        });
     }
     let (head, tail) = buf.split_at(n);
     *buf = tail;
-    Ok(Some(std::str::from_utf8(head).map_err(ProtocolError::InvalidUtf8)?))
+    Ok(Some(
+        std::str::from_utf8(head).map_err(ProtocolError::InvalidUtf8)?,
+    ))
 }
 
 /// Decode a `COMPACT_STRING` borrowing from the input buffer.
@@ -87,7 +93,9 @@ pub fn get_bytes_borrowed<'de>(buf: &mut &'de [u8]) -> Result<&'de [u8], Protoco
     #[allow(clippy::cast_sign_loss)]
     let n = len as usize;
     if buf.len() < n {
-        return Err(ProtocolError::UnexpectedEof { needed: n - buf.len() });
+        return Err(ProtocolError::UnexpectedEof {
+            needed: n - buf.len(),
+        });
     }
     let (head, tail) = buf.split_at(n);
     *buf = tail;
@@ -105,7 +113,9 @@ pub fn get_nullable_bytes_borrowed<'de>(
     #[allow(clippy::cast_sign_loss)]
     let n = len as usize;
     if buf.len() < n {
-        return Err(ProtocolError::UnexpectedEof { needed: n - buf.len() });
+        return Err(ProtocolError::UnexpectedEof {
+            needed: n - buf.len(),
+        });
     }
     let (head, tail) = buf.split_at(n);
     *buf = tail;
@@ -122,7 +132,9 @@ pub fn get_compact_bytes_borrowed<'de>(buf: &mut &'de [u8]) -> Result<&'de [u8],
     }
     let n = (raw - 1) as usize;
     if buf.len() < n {
-        return Err(ProtocolError::UnexpectedEof { needed: n - buf.len() });
+        return Err(ProtocolError::UnexpectedEof {
+            needed: n - buf.len(),
+        });
     }
     let (head, tail) = buf.split_at(n);
     *buf = tail;
@@ -139,7 +151,9 @@ pub fn get_compact_nullable_bytes_borrowed<'de>(
     }
     let n = (raw - 1) as usize;
     if buf.len() < n {
-        return Err(ProtocolError::UnexpectedEof { needed: n - buf.len() });
+        return Err(ProtocolError::UnexpectedEof {
+            needed: n - buf.len(),
+        });
     }
     let (head, tail) = buf.split_at(n);
     *buf = tail;
