@@ -1,9 +1,10 @@
 //! Sparse offset index. 8 bytes per entry: `relative_offset` (u32 BE)
 //! + position (u32 BE). Entries are monotonically increasing.
 
-// Several methods on `OffsetIndex` / `TimeIndex` are consumed by `Segment`
-// (Task 8) and later by `Log` (Phase D/E). Keep the module-wide allow until
-// those land.
+// `truncate_by_position`, `truncate_by_relative_offset`, `entry_count`,
+// and `TimeIndex::{lookup, last_entry}` are consumed by Phase D/E (Log
+// truncation + recovery + lookup-by-time). Suppress dead-code until they
+// land.
 #![allow(dead_code)]
 
 use std::fs::{File, OpenOptions};

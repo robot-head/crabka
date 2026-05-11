@@ -1,8 +1,8 @@
 //! Segment filename parsing. Kafka names segments by 20-digit
 //! zero-padded base offset, with `.log`, `.index`, `.timeindex` extensions.
 
-// Several helpers are consumed only by `Segment::create` (Task 8) and `Log`
-// (Phase D). Keep the module-wide allow until those land.
+// `FILENAME_DIGITS` and `parse_log_filename` are consumed only by `Log`
+// (Phase D); keep allowed until that lands.
 #![allow(dead_code)]
 
 use std::path::Path;

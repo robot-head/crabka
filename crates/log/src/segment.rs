@@ -19,7 +19,6 @@ pub struct Segment {
     log_file: File,
     log_size: u64,
     offset_index: OffsetIndex,
-    #[allow(dead_code)] // written by `append` (Task 8); not read until Task 9+.
     time_index: TimeIndex,
     /// `true` once a new segment has been started after this one. Sealed
     /// segments don't accept appends.
@@ -31,6 +30,30 @@ pub struct Segment {
 }
 
 impl Segment {
+    /// Create a fresh active segment at the given base offset. Fails if
+    /// the `.log` file already exists.
+    pub fn create(dir: &Path, base_offset: i64) -> Result<Self, LogError> {
+        let log_path = name::log_path(dir, base_offset);
+        let log_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&log_path)?;
+        let offset_index = OffsetIndex::open(&name::index_path(dir, base_offset))?;
+        let time_index = TimeIndex::open(&name::timeindex_path(dir, base_offset))?;
+        Ok(Self {
+            dir: dir.to_path_buf(),
+            base_offset,
+            log_file,
+            log_size: 0,
+            offset_index,
+            time_index,
+            sealed: false,
+            max_timestamp: i64::MIN,
+            last_offset: base_offset - 1,
+        })
+    }
+
     /// Open an existing segment for reading. Lightweight — no full scan.
     pub fn open(dir: &Path, base_offset: i64) -> Result<Self, LogError> {
         let log_path = name::log_path(dir, base_offset);
@@ -125,5 +148,151 @@ impl Segment {
         let mut bounded = f.take(to_read);
         bounded.read_to_end(buf)?;
         Ok(())
+    }
+
+    /// Append a record batch. Returns the byte position where the batch
+    /// starts.
+    ///
+    /// Side effects:
+    /// - Updates `log_size`, `max_timestamp`, `last_offset`.
+    /// - Adds sparse index entries when bytes-since-last-entry exceeds
+    ///   `index_interval_bytes` (or for the first batch).
+    pub fn append(
+        &mut self,
+        batch: &RecordBatch,
+        index_interval_bytes: u32,
+    ) -> Result<u64, LogError> {
+        use std::io::Write;
+
+        if self.sealed {
+            return Err(LogError::Io(std::io::Error::other("segment is sealed")));
+        }
+
+        let mut buf = bytes::BytesMut::with_capacity(batch.encoded_len());
+        batch.encode(&mut buf)?;
+        let bytes = buf.freeze();
+
+        let position = self.log_size;
+        self.log_file.seek(SeekFrom::End(0))?;
+        self.log_file.write_all(&bytes)?;
+        self.log_size += bytes.len() as u64;
+
+        let last_offset = batch.base_offset + i64::from(batch.last_offset_delta);
+        self.last_offset = last_offset;
+        if batch.max_timestamp > self.max_timestamp {
+            self.max_timestamp = batch.max_timestamp;
+        }
+
+        let should_index = match self.offset_index.last_entry() {
+            None => true,
+            Some((_, last_pos)) => {
+                position.saturating_sub(u64::from(last_pos)) >= u64::from(index_interval_bytes)
+            }
+        };
+        if should_index {
+            let rel = u32::try_from(batch.base_offset - self.base_offset)
+                .map_err(|_| LogError::BadSegmentName("offset overflow in segment".into()))?;
+            let pos_u32 = u32::try_from(position)
+                .map_err(|_| LogError::BadSegmentName("position overflow in segment".into()))?;
+            self.offset_index.append(rel, pos_u32)?;
+            self.time_index.append(self.max_timestamp, rel)?;
+        }
+
+        Ok(position)
+    }
+
+    /// Mark this segment as sealed. No more appends.
+    pub fn seal(&mut self) {
+        self.sealed = true;
+    }
+
+    /// Force-sync everything to disk.
+    pub fn flush(&mut self) -> Result<(), LogError> {
+        self.log_file.sync_data()?;
+        self.offset_index.flush()?;
+        self.time_index.flush()?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+    use crabka_protocol::records::{Record, RecordBatch};
+    use tempfile::tempdir;
+
+    fn sample_batch(base_offset: i64, n: i32, ts_base: i64) -> RecordBatch {
+        let mut b = RecordBatch {
+            base_offset,
+            base_timestamp: ts_base,
+            max_timestamp: ts_base + i64::from(n),
+            last_offset_delta: n - 1,
+            ..RecordBatch::default()
+        };
+        for i in 0..n {
+            b.records.push(Record {
+                offset_delta: i,
+                timestamp_delta: i64::from(i),
+                key: Some(Bytes::from(format!("k{i}"))),
+                value: Some(Bytes::from(format!("v{i}"))),
+                ..Default::default()
+            });
+        }
+        b
+    }
+
+    #[test]
+    fn append_then_read_back() {
+        let dir = tempdir().unwrap();
+        let mut seg = Segment::create(dir.path(), 0).unwrap();
+        let b1 = sample_batch(0, 3, 1_000_000);
+        let b2 = sample_batch(3, 2, 2_000_000);
+        seg.append(&b1, 4096).unwrap();
+        seg.append(&b2, 4096).unwrap();
+        assert_eq!(seg.last_offset(), 4);
+        let read = seg.read(0, usize::MAX).unwrap();
+        assert_eq!(read.len(), 2);
+        assert_eq!(read[0].records.len(), 3);
+        assert_eq!(read[1].records.len(), 2);
+    }
+
+    #[test]
+    fn read_at_higher_offset_skips_earlier_batches() {
+        let dir = tempdir().unwrap();
+        let mut seg = Segment::create(dir.path(), 0).unwrap();
+        seg.append(&sample_batch(0, 3, 1_000_000), 4096).unwrap();
+        seg.append(&sample_batch(3, 2, 2_000_000), 4096).unwrap();
+        let read = seg.read(4, usize::MAX).unwrap();
+        // Offset 4 falls inside the second batch (offsets 3..=4).
+        assert_eq!(read.len(), 1);
+        assert_eq!(read[0].base_offset, 3);
+    }
+
+    #[test]
+    fn append_to_sealed_segment_errors() {
+        let dir = tempdir().unwrap();
+        let mut seg = Segment::create(dir.path(), 0).unwrap();
+        seg.seal();
+        assert!(seg.is_sealed());
+        let err = seg.append(&sample_batch(0, 1, 0), 4096).unwrap_err();
+        assert!(matches!(err, LogError::Io(_)));
+    }
+
+    #[test]
+    fn read_past_last_offset_returns_empty() {
+        let dir = tempdir().unwrap();
+        let mut seg = Segment::create(dir.path(), 0).unwrap();
+        seg.append(&sample_batch(0, 2, 1_000), 4096).unwrap();
+        let read = seg.read(100, usize::MAX).unwrap();
+        assert!(read.is_empty());
+    }
+
+    #[test]
+    fn flush_succeeds() {
+        let dir = tempdir().unwrap();
+        let mut seg = Segment::create(dir.path(), 0).unwrap();
+        seg.append(&sample_batch(0, 1, 42), 4096).unwrap();
+        seg.flush().unwrap();
     }
 }
