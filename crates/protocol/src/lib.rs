@@ -27,6 +27,8 @@
 mod arbitrary_impls;
 pub mod borrowed;
 mod codec;
+#[doc(hidden)]
+pub mod codegen_helpers;
 mod error;
 pub mod owned;
 pub mod primitives;
