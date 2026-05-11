@@ -8,46 +8,159 @@
 use std::collections::HashMap;
 use std::fmt::Write;
 
+use crate::emit::EmittedMessage;
 use crate::emit::common::{banner, format_int_literal};
 use crate::emit::owned::EmitError;
 use crate::ir::{FieldSpec, FlexibleVersions, MessageSpec, MessageType, VersionRange};
 use crate::name_conv;
-use crate::resolve::{self, Resolution, StructKind};
+use crate::resolve::{self, Resolution};
 use crate::type_map;
 
-pub fn emit(spec: &MessageSpec, schemas_version: &str) -> Result<String, EmitError> {
-    if !spec.common_structs.is_empty() {
-        return Err(EmitError::Unsupported(format!(
-            "{}: commonStructs not yet supported by borrowed emitter",
-            spec.name
-        )));
-    }
-
-    // Build resolution map — reject any common-struct references.
+pub fn emit(spec: &MessageSpec, schemas_version: &str) -> Result<EmittedMessage, EmitError> {
+    // Build resolution map — validates that all struct references resolve.
     let res_map = resolve::resolve_message(spec)?;
-    for (name, res) in &res_map {
-        if res.kind == StructKind::Common {
-            return Err(EmitError::Unsupported(format!(
-                "{}: common struct `{name}` not yet supported by borrowed emitter",
-                spec.name
-            )));
-        }
-    }
 
     let parent_module = name_conv::module_name(&spec.name);
 
-    let mut out = banner(schemas_version);
-    emit_imports(&mut out, spec);
-    emit_constants(&mut out, spec);
-    emit_struct(&mut out, spec, &res_map, &parent_module);
-    emit_to_owned_impl(&mut out, spec, &res_map);
-    emit_encode_impl(&mut out, spec, &res_map);
-    emit_decode_borrow_impl(&mut out, spec, &res_map, &parent_module);
+    let mut primary = banner(schemas_version);
+    emit_imports(&mut primary, spec);
+    emit_constants(&mut primary, spec);
+    emit_struct(&mut primary, spec, &res_map, &parent_module);
+    emit_to_owned_impl(&mut primary, spec, &res_map);
+    emit_encode_impl(&mut primary, spec, &res_map);
+    emit_decode_borrow_impl(&mut primary, spec, &res_map, &parent_module);
 
     let fm = flex_min(spec);
-    emit_nested_structs_for_fields(&mut out, &spec.fields, fm, &res_map, &parent_module);
+    emit_nested_structs_for_fields(&mut primary, &spec.fields, fm, &res_map, &parent_module);
 
-    Ok(out)
+    // Emit common structs into separate file bodies.
+    let mut commons: Vec<(String, String)> = Vec::new();
+    for cs in &spec.common_structs {
+        let cs_flex_min = fm; // common structs inherit message flex threshold
+        let body = emit_common_struct_file_borrowed(
+            &cs.name,
+            &cs.fields,
+            cs_flex_min,
+            &res_map,
+            &parent_module,
+            schemas_version,
+        );
+        commons.push((cs.name.clone(), body));
+    }
+
+    Ok(EmittedMessage { primary, commons })
+}
+
+/// Emit a standalone `.rs` file body for a top-level `commonStruct` in the borrowed flavor.
+fn emit_common_struct_file_borrowed(
+    struct_name: &str,
+    fields: &[FieldSpec],
+    flex_min_val: i16,
+    res_map: &HashMap<String, Resolution>,
+    parent_module: &str,
+    schemas_version: &str,
+) -> String {
+    let types = used_field_types_recursive(fields);
+    let has_flex = flex_min_val < i16::MAX;
+    let tagged = fields.iter().any(|f| f.tag.is_some());
+    let use_string = uses_string(&types);
+    let use_bytes = uses_bytes(&types);
+
+    let mut out = banner(schemas_version);
+
+    if use_bytes {
+        writeln!(out, "\nuse bytes::{{Bytes, BufMut}};").unwrap();
+    } else {
+        writeln!(out, "\nuse bytes::BufMut;").unwrap();
+    }
+
+    {
+        let mut gets: Vec<&str> = Vec::new();
+        let mut puts: Vec<&str> = Vec::new();
+        for (t, g, p) in &[
+            ("int8", "get_i8", "put_i8"),
+            ("int16", "get_i16", "put_i16"),
+            ("int32", "get_i32", "put_i32"),
+            ("int64", "get_i64", "put_i64"),
+            ("bool", "get_bool", "put_bool"),
+            ("float64", "get_f64", "put_f64"),
+        ] {
+            if uses_fixed_type(&types, t) {
+                gets.push(g);
+                puts.push(p);
+            }
+        }
+        if !gets.is_empty() {
+            let mut combined: Vec<&str> = gets.into_iter().chain(puts).collect();
+            combined.sort_unstable();
+            writeln!(
+                out,
+                "\nuse crate::primitives::fixed::{{{}}};",
+                combined.join(", ")
+            )
+            .unwrap();
+        }
+    }
+    if use_string {
+        if uses_nullable_string_recursive(fields) {
+            writeln!(
+                out,
+                "use crate::primitives::string_bytes::{{\n    compact_nullable_string_len, compact_string_len, nullable_string_len,\n    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string,\n    string_len,\n}};\nuse crate::primitives::string_bytes_borrowed::{{\n    get_compact_nullable_string_borrowed, get_compact_string_borrowed,\n    get_nullable_string_borrowed, get_string_borrowed,\n}};"
+            ).unwrap();
+        } else {
+            writeln!(
+                out,
+                "use crate::primitives::string_bytes::{{\n    compact_string_len, put_compact_string, put_string, string_len,\n}};\nuse crate::primitives::string_bytes_borrowed::{{\n    get_compact_string_borrowed, get_string_borrowed,\n}};"
+            ).unwrap();
+        }
+    }
+    if use_bytes {
+        let use_non_nullable_bytes = uses_non_nullable_bytes_recursive(fields);
+        let use_nullable_bytes = uses_nullable_bytes_recursive(fields);
+        let mut put_items: Vec<&str> = Vec::new();
+        let mut get_borrowed_items: Vec<&str> = Vec::new();
+        if use_non_nullable_bytes {
+            put_items.extend(["put_bytes", "put_compact_bytes"]);
+            get_borrowed_items.extend(["get_bytes_borrowed", "get_compact_bytes_borrowed"]);
+        }
+        if use_nullable_bytes {
+            put_items.extend(["put_compact_nullable_bytes", "put_nullable_bytes"]);
+            get_borrowed_items.extend([
+                "get_compact_nullable_bytes_borrowed",
+                "get_nullable_bytes_borrowed",
+            ]);
+        }
+        put_items.sort_unstable();
+        get_borrowed_items.sort_unstable();
+        writeln!(
+            out,
+            "use crate::primitives::string_bytes::{{{}}};\nuse crate::primitives::string_bytes_borrowed::{{{}}};",
+            put_items.join(", "),
+            get_borrowed_items.join(", "),
+        ).unwrap();
+    }
+    if has_flex && tagged {
+        writeln!(out, "use crate::tagged_fields::{{encode_to_bytes, read_tagged_fields, tagged_fields_len, WriteTaggedFields}};").unwrap();
+    } else if has_flex {
+        writeln!(out, "use crate::tagged_fields::{{read_tagged_fields, tagged_fields_len, WriteTaggedFields}};").unwrap();
+    }
+    writeln!(
+        out,
+        "use crate::{{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields}};"
+    )
+    .unwrap();
+
+    // Reuse the existing nested-struct emitter.
+    emit_nested_struct(
+        &mut out,
+        struct_name,
+        fields,
+        flex_min_val,
+        res_map,
+        parent_module,
+    );
+
+    out
 }
 
 // ── helpers shared with owned ──────────────────────────────────────────────
