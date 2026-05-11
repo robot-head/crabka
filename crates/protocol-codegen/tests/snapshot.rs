@@ -9,6 +9,8 @@ const CURATED: &[&str] = &[
     "MetadataResponse",
     "ProduceRequest",
     "ProduceResponse",
+    "OffsetCommitRequest",
+    "OffsetCommitResponse",
 ];
 
 fn schemas_dir() -> PathBuf {

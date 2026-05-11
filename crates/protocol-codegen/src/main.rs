@@ -59,6 +59,8 @@ const CURATED: &[&str] = &[
     "MetadataResponse",
     "ProduceRequest",
     "ProduceResponse",
+    "OffsetCommitRequest",
+    "OffsetCommitResponse",
 ];
 
 fn run(schemas: &std::path::Path, out: &std::path::Path) -> Result<usize, RunError> {
