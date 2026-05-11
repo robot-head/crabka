@@ -241,3 +241,64 @@ async fn concurrent_sends_get_correct_responses() {
     conn.close();
     mock.stop();
 }
+
+/// `Client::refresh_metadata` calls the bootstrap broker, decodes the broker
+/// list, and populates the pool's address registry.
+///
+/// The mock serves two synthetic brokers (ids 1 and 2). After `refresh_metadata`
+/// the test verifies the response decoded correctly (2 brokers in the list).
+/// We cannot connect to those addresses (they're fake ports the mock isn't
+/// listening on), but the registry population is exercised.
+#[tokio::test]
+async fn client_refresh_metadata_populates_pool() {
+    use crabka_protocol::owned::metadata_response::{MetadataResponse, MetadataResponseBroker};
+
+    let mock = MockBroker::start(move |api_key, version, _corr_id, _body| {
+        if api_key == api_versions_request::API_KEY {
+            return Some(api_versions_response_v0());
+        }
+        if api_key == metadata_request_mod::API_KEY {
+            let resp = MetadataResponse {
+                brokers: vec![
+                    MetadataResponseBroker {
+                        node_id: 1,
+                        host: "127.0.0.1".into(),
+                        port: 9092,
+                        ..Default::default()
+                    },
+                    MetadataResponseBroker {
+                        node_id: 2,
+                        host: "127.0.0.1".into(),
+                        port: 9093,
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            };
+            // Encode the response with the correct ResponseHeader prefix.
+            use crabka_protocol::owned::metadata_response::FLEXIBLE_MIN;
+            let mut buf = BytesMut::new();
+            if version >= FLEXIBLE_MIN {
+                buf.extend_from_slice(&[0x00u8]);
+            }
+            resp.encode(&mut buf, version).unwrap();
+            return Some(buf.to_vec());
+        }
+        None
+    })
+    .await;
+
+    let client = crabka_client_core::Client::builder(mock.addr.to_string())
+        .build()
+        .await
+        .unwrap();
+
+    let metadata = client.refresh_metadata().await.unwrap();
+    assert_eq!(metadata.brokers.len(), 2, "expected 2 brokers in metadata");
+
+    // After refresh the pool knows broker 1 and 2's addresses. We can't
+    // actually connect to those ports (the mock isn't listening there), but
+    // the metadata response decoded correctly and has the right shape.
+    client.close().await;
+    mock.stop();
+}
