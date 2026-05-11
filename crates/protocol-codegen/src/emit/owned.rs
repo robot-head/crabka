@@ -26,12 +26,6 @@ pub fn emit(spec: &MessageSpec, schemas_version: &str) -> Result<String, EmitErr
             spec.name
         )));
     }
-    if spec.fields.iter().any(|f| f.field_type.starts_with("[]")) {
-        return Err(EmitError::Unsupported(format!(
-            "{}: array fields not yet supported by owned emitter",
-            spec.name
-        )));
-    }
     if !spec.common_structs.is_empty() {
         return Err(EmitError::Unsupported(format!(
             "{}: commonStructs not yet supported by owned emitter",
@@ -249,6 +243,22 @@ fn emit_decode_tagged_arm(out: &mut String, f: &FieldSpec) {
 // --- primitive encode/decode call generators ------------------------------
 
 fn encode_call(schema_type: &str, expr: &str, nullable: bool) -> String {
+    if let Some(elem) = schema_type.strip_prefix("[]") {
+        assert_is_primitive(elem, "encode_call");
+        if nullable {
+            return format!(
+                "{{ let _len = ({expr}).as_ref().map(Vec::len); \
+                 crate::primitives::array::put_nullable_array_len(buf, _len, _flex); \
+                 if let Some(_v) = &{expr} {{ for _it in _v {{ {inner}; }} }} }}",
+                inner = encode_call(elem, "_it", false),
+            );
+        }
+        return format!(
+            "{{ crate::primitives::array::put_array_len(buf, ({expr}).len(), _flex); \
+             for _it in &{expr} {{ {inner}; }} }}",
+            inner = encode_call(elem, "_it", false),
+        );
+    }
     match (schema_type, nullable) {
         ("int8",   _)     => format!("put_i8(buf, {expr})"),
         ("int16",  _)     => format!("put_i16(buf, {expr})"),
@@ -263,6 +273,24 @@ fn encode_call(schema_type: &str, expr: &str, nullable: bool) -> String {
 }
 
 fn encoded_len_expr(schema_type: &str, expr: &str, nullable: bool) -> String {
+    if let Some(elem) = schema_type.strip_prefix("[]") {
+        assert_is_primitive(elem, "encoded_len_expr");
+        if nullable {
+            return format!(
+                "{{ let _opt: Option<&Vec<_>> = ({expr}).as_ref(); \
+                 let _prefix = crate::primitives::array::nullable_array_len_prefix_len(_opt.map(|v| v.len()), _flex); \
+                 let _body: usize = _opt.map_or(0, |v| v.iter().map(|_it| {inner}).sum()); \
+                 _prefix + _body }}",
+                inner = encoded_len_expr(elem, "*_it", false),
+            );
+        }
+        return format!(
+            "{{ let _prefix = crate::primitives::array::array_len_prefix_len(({expr}).len(), _flex); \
+             let _body: usize = ({expr}).iter().map(|_it| {inner}).sum(); \
+             _prefix + _body }}",
+            inner = encoded_len_expr(elem, "*_it", false),
+        );
+    }
     match (schema_type, nullable) {
         ("int8",   _)     => "1".into(),
         ("int16",  _)     => "2".into(),
@@ -277,6 +305,22 @@ fn encoded_len_expr(schema_type: &str, expr: &str, nullable: bool) -> String {
 }
 
 fn decode_call(schema_type: &str, nullable: bool) -> String {
+    if let Some(elem) = schema_type.strip_prefix("[]") {
+        assert_is_primitive(elem, "decode_call");
+        if nullable {
+            return format!(
+                "{{ let _opt = crate::primitives::array::get_nullable_array_len(buf, _flex)?; \
+                 match _opt {{ None => None, Some(_n) => {{ let mut _v = Vec::with_capacity(_n); \
+                 for _ in 0.._n {{ _v.push({inner}); }} Some(_v) }} }} }}",
+                inner = decode_call(elem, false),
+            );
+        }
+        return format!(
+            "{{ let _n = crate::primitives::array::get_array_len(buf, _flex)?; \
+             let mut _v = Vec::with_capacity(_n); for _ in 0.._n {{ _v.push({inner}); }} _v }}",
+            inner = decode_call(elem, false),
+        );
+    }
     match (schema_type, nullable) {
         ("int8",   _)     => "get_i8(buf)?".into(),
         ("int16",  _)     => "get_i16(buf)?".into(),
@@ -291,6 +335,17 @@ fn decode_call(schema_type: &str, nullable: bool) -> String {
 }
 
 // --- helpers --------------------------------------------------------------
+
+/// Panic if `elem` looks like a struct type (PascalCase).  Array-of-struct
+/// support is added in Task 7; for now we hard-fail so callers get a clear
+/// message rather than a `compile_error!` in generated code.
+fn assert_is_primitive(elem: &str, caller: &str) {
+    assert!(
+        !elem.chars().next().is_some_and(char::is_uppercase),
+        "{caller}: array element type `{elem}` is a struct; \
+         arrays of structs are not yet supported (Task 7)"
+    );
+}
 
 fn is_tagged(f: &FieldSpec) -> bool { f.tag.is_some() }
 fn is_nullable(f: &FieldSpec) -> bool { f.nullable_versions.is_some() }
