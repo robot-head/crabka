@@ -1,0 +1,67 @@
+//! Internal errors produced by the broker's handlers and lifecycle.
+//!
+//! These are NOT Kafka wire-level error codes (those live in
+//! [`crate::codes`]). Conversion from `BrokerError` to a wire code
+//! happens at the handler boundary.
+
+use thiserror::Error;
+
+/// Errors produced by the broker's lifecycle and handlers.
+///
+/// Returned from [`crate::Broker::start`] and propagated up from
+/// per-connection serve loops. The `#[non_exhaustive]` attribute lets
+/// future variants be added without a breaking change.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum BrokerError {
+    /// Filesystem I/O failure (binding the listener, opening log dirs).
+    #[error("I/O: {0}")]
+    Io(#[from] std::io::Error),
+
+    /// Storage-layer error bubbling up from [`crabka_log`].
+    #[error("log: {0}")]
+    Log(#[from] crabka_log::LogError),
+
+    /// Wire-protocol decoding or encoding error.
+    #[error("protocol: {0}")]
+    Protocol(#[from] crabka_protocol::ProtocolError),
+
+    /// The peer sent a `(api_key, version)` the handler table doesn't
+    /// know how to serve.
+    #[error("unsupported api_key={api_key} version={version}")]
+    UnsupportedApi {
+        /// The unsupported Kafka API key.
+        api_key: i16,
+        /// The unsupported version negotiated by the peer.
+        version: i16,
+    },
+
+    /// A produce request landed on a partition whose writer actor has
+    /// exited — typically only seen at shutdown.
+    #[error("partition writer for {topic}-{partition} died")]
+    PartitionWriterDied {
+        /// Topic name of the dead writer.
+        topic: String,
+        /// Partition index of the dead writer.
+        partition: i32,
+    },
+
+    /// The broker is shutting down and refuses new work.
+    #[error("shutting down")]
+    Shutdown,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_unsupported_api() {
+        let e = BrokerError::UnsupportedApi {
+            api_key: 7,
+            version: 9,
+        };
+        assert!(e.to_string().contains("api_key=7"));
+        assert!(e.to_string().contains("version=9"));
+    }
+}

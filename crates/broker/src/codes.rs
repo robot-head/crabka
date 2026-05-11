@@ -1,0 +1,66 @@
+//! Kafka wire-level error codes used in this MVP.
+//!
+//! Per-(topic, partition) response fields use these `i16` values.
+//! JVM clients react to specific codes, so substituting them changes
+//! client behavior — values here mirror the canonical Apache Kafka
+//! table.
+
+#![allow(dead_code)] // codes are consumed by handlers in Phase E.
+
+pub const NONE: i16 = 0;
+pub const UNKNOWN_SERVER_ERROR: i16 = 1;
+pub const OFFSET_OUT_OF_RANGE: i16 = 2;
+pub const UNKNOWN_TOPIC_OR_PARTITION: i16 = 3;
+pub const INVALID_FETCH_SIZE: i16 = 4;
+pub const LEADER_NOT_AVAILABLE: i16 = 5;
+pub const NOT_LEADER_OR_FOLLOWER: i16 = 6;
+pub const REQUEST_TIMED_OUT: i16 = 7;
+pub const COORDINATOR_NOT_AVAILABLE: i16 = 15;
+pub const NOT_COORDINATOR: i16 = 16;
+pub const INVALID_TOPIC_EXCEPTION: i16 = 17;
+pub const UNSUPPORTED_VERSION: i16 = 35;
+pub const TOPIC_ALREADY_EXISTS: i16 = 36;
+pub const INVALID_PARTITIONS: i16 = 37;
+pub const INVALID_REPLICATION_FACTOR: i16 = 38;
+pub const NOT_CONTROLLER: i16 = 41;
+pub const INVALID_REQUEST: i16 = 42;
+
+/// Map an internal [`crate::error::BrokerError`] to a wire-level code.
+/// Most internal errors map to `UNKNOWN_SERVER_ERROR`; specific variants
+/// pick more meaningful codes.
+#[must_use]
+pub fn from_broker_error(err: &crate::error::BrokerError) -> i16 {
+    use crate::error::BrokerError;
+    match err {
+        BrokerError::UnsupportedApi { .. } => UNSUPPORTED_VERSION,
+        BrokerError::PartitionWriterDied { .. } => NOT_LEADER_OR_FOLLOWER,
+        BrokerError::Shutdown
+        | BrokerError::Io(_)
+        | BrokerError::Log(_)
+        | BrokerError::Protocol(_) => UNKNOWN_SERVER_ERROR,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::BrokerError;
+
+    #[test]
+    fn maps_unsupported_to_35() {
+        let e = BrokerError::UnsupportedApi {
+            api_key: 0,
+            version: 99,
+        };
+        assert_eq!(from_broker_error(&e), UNSUPPORTED_VERSION);
+    }
+
+    #[test]
+    fn maps_writer_death_to_6() {
+        let e = BrokerError::PartitionWriterDied {
+            topic: "t".into(),
+            partition: 0,
+        };
+        assert_eq!(from_broker_error(&e), NOT_LEADER_OR_FOLLOWER);
+    }
+}

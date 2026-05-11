@@ -1,0 +1,260 @@
+//! `Fetch` (`api_key=1`) with long-poll support via per-partition
+//! `Notify::notified()` futures.
+//!
+//! MVP scope: returns at most the *first* `RecordBatch` covering the
+//! requested offset for each partition. The generated
+//! `PartitionData.records` field is `Option<RecordBatch>` (the codegen
+//! models it as a single batch wrapped in nullable bytes), so emitting a
+//! concatenated stream of batches would require bypassing the codegen.
+//! Clients pulling small batches one at a time and re-fetching from
+//! `last.base_offset + last.last_offset_delta + 1` see correct data.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use bytes::{Bytes, BytesMut};
+use futures_util::future::BoxFuture;
+use tokio::sync::Notify;
+
+use crabka_protocol::owned::fetch_request::FetchRequest;
+use crabka_protocol::owned::fetch_response::{
+    FetchResponse, FetchableTopicResponse, PartitionData,
+};
+use crabka_protocol::primitives::uuid::Uuid as WireUuid;
+use crabka_protocol::records::RecordBatch;
+use crabka_protocol::{Decode, Encode};
+
+use crate::broker::Broker;
+use crate::codes;
+use crate::error::BrokerError;
+use crate::partition::Partition;
+
+type WaitFut = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+
+/// Resolved read for a single requested (topic, partition) tuple, kept
+/// around so we can re-read after a long-poll wake.
+struct PendingRead {
+    topic_name: String,
+    topic_id: WireUuid,
+    partition_index: i32,
+    fetch_offset: i64,
+    max_bytes: i32,
+    /// `None` for unknown topic/partition or out-of-range — final response is
+    /// already filled out and won't be re-read on wake.
+    partition: Option<Arc<Partition>>,
+    /// Per-partition output, mutated in place by `do_read`.
+    out: PartitionData,
+}
+
+pub(crate) fn handle(
+    broker: &Broker,
+    version: i16,
+    _correlation_id: i32,
+    req_bytes: &[u8],
+) -> BoxFuture<'static, Result<Bytes, BrokerError>> {
+    let req_bytes = req_bytes.to_vec();
+    let partitions = broker.partitions.clone();
+    let metadata = broker.metadata.clone();
+    Box::pin(async move {
+        let mut cur: &[u8] = &req_bytes;
+        let req = FetchRequest::decode(&mut cur, version)?;
+
+        // Resolve every requested partition up front. We collect pending
+        // reads (rather than just doing them inline) so we can re-read once
+        // after a long-poll wake without re-decoding the request.
+        let mut pending: Vec<PendingRead> = Vec::new();
+        for topic in &req.topics {
+            // v ≤ 12 sends the topic name; v ≥ 13 sends only topic_id and
+            // we look it up. The client populates whichever the negotiated
+            // version requires.
+            let topic_name = if topic.topic.is_empty() {
+                let meta = metadata.read().expect("metadata poisoned");
+                meta.topics()
+                    .find(|(_, t)| t.topic_id.into_bytes() == topic.topic_id.0)
+                    .map_or_else(String::new, |(name, _)| name.to_string())
+            } else {
+                topic.topic.clone()
+            };
+            let topic_id = if topic.topic_id == WireUuid::ZERO {
+                let meta = metadata.read().expect("metadata poisoned");
+                meta.get(&topic_name)
+                    .map_or(WireUuid::ZERO, |t| WireUuid(t.topic_id.into_bytes()))
+            } else {
+                topic.topic_id
+            };
+
+            for fp in &topic.partitions {
+                let idx = fp.partition;
+                let fetch_offset = fp.fetch_offset;
+                let max_bytes = fp.partition_max_bytes;
+
+                let mut out = PartitionData {
+                    partition_index: idx,
+                    ..Default::default()
+                };
+
+                let part_opt = partitions
+                    .get(&(topic_name.clone(), idx))
+                    .map(|p| p.clone());
+                if part_opt.is_none() || topic_name.is_empty() {
+                    out.error_code = codes::UNKNOWN_TOPIC_OR_PARTITION;
+                    pending.push(PendingRead {
+                        topic_name: topic_name.clone(),
+                        topic_id,
+                        partition_index: idx,
+                        fetch_offset,
+                        max_bytes,
+                        partition: None,
+                        out,
+                    });
+                    continue;
+                }
+
+                pending.push(PendingRead {
+                    topic_name: topic_name.clone(),
+                    topic_id,
+                    partition_index: idx,
+                    fetch_offset,
+                    max_bytes,
+                    partition: part_opt,
+                    out,
+                });
+            }
+        }
+
+        // First read pass.
+        let mut total_bytes = 0_usize;
+        for p in &mut pending {
+            if let Some(part) = &p.partition {
+                total_bytes += do_read(part, p.fetch_offset, p.max_bytes, &mut p.out)?;
+            }
+        }
+
+        // Long-poll: if we didn't satisfy min_bytes, wait on each readable
+        // partition's append_notify with a single timeout, then re-read.
+        let want_more = total_bytes < usize::try_from(req.min_bytes.max(0)).unwrap_or(0);
+        if want_more && req.max_wait_ms > 0 {
+            long_poll_then_reread(&mut pending, req.max_wait_ms).await?;
+        }
+
+        let responses = group_into_topic_responses(pending);
+
+        let resp = FetchResponse {
+            throttle_time_ms: 0,
+            error_code: 0,
+            session_id: 0,
+            responses,
+            ..Default::default()
+        };
+        let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
+        resp.encode(&mut buf, version)?;
+        Ok(buf.freeze())
+    })
+}
+
+/// Hold the partition's log mutex briefly to read offsets + (optionally) a
+/// batch. Populates `out` in place and returns the encoded-size estimate of
+/// the records placed in `out` (0 if none).
+fn do_read(
+    part: &Partition,
+    fetch_offset: i64,
+    max_bytes: i32,
+    out: &mut PartitionData,
+) -> Result<usize, BrokerError> {
+    let (log_start, log_end, batch_opt): (i64, i64, Option<RecordBatch>) = {
+        let log = part.log.lock().expect("log mutex poisoned");
+        let log_start = log.log_start_offset();
+        let log_end = log.log_end_offset();
+        if fetch_offset < log_start {
+            out.error_code = codes::OFFSET_OUT_OF_RANGE;
+            out.log_start_offset = log_start;
+            out.high_watermark = log_end;
+            out.last_stable_offset = log_end;
+            return Ok(0);
+        }
+        if fetch_offset >= log_end {
+            (log_start, log_end, None)
+        } else {
+            let read_max = usize::try_from(max_bytes.max(0)).unwrap_or(0);
+            let read = log.read(fetch_offset, read_max)?;
+            // MVP: only the first batch is wrapped into the response.
+            (log_start, log_end, read.batches.into_iter().next())
+        }
+    };
+
+    out.error_code = codes::NONE;
+    out.high_watermark = log_end;
+    out.log_start_offset = log_start;
+    out.last_stable_offset = log_end;
+    let bytes_est = batch_opt
+        .as_ref()
+        .map_or(0, |b| <RecordBatch as Encode>::encoded_len(b, 0));
+    out.records = batch_opt;
+    Ok(bytes_est)
+}
+
+/// Wait for any readable partition's `append_notify` to fire (with timeout),
+/// then re-read every partition once. Resets each partition's accumulated
+/// records before re-reading so the new read replaces the old one.
+async fn long_poll_then_reread(
+    pending: &mut [PendingRead],
+    max_wait_ms: i32,
+) -> Result<(), BrokerError> {
+    let notifies: Vec<Arc<Notify>> = pending
+        .iter()
+        .filter_map(|p| p.partition.as_ref().map(|part| part.append_notify.clone()))
+        .collect();
+    if notifies.is_empty() {
+        return Ok(());
+    }
+    // `Notify::notified()` returns a non-Send `Notified<'_>` that borrows
+    // from its `Arc<Notify>`. Move the Arc into an `async move` block so
+    // the future owns its Arc and is `'static + Send` (see `WaitFut` type
+    // alias above).
+    let waits: Vec<WaitFut> = notifies
+        .into_iter()
+        .map(|n| Box::pin(async move { n.notified().await }) as WaitFut)
+        .collect();
+    let max_wait = Duration::from_millis(u64::from(u32::try_from(max_wait_ms).unwrap_or(0)));
+    let _ = tokio::time::timeout(max_wait, futures_util::future::select_all(waits)).await;
+
+    for p in pending.iter_mut() {
+        if let Some(part) = &p.partition {
+            p.out = PartitionData {
+                partition_index: p.partition_index,
+                ..Default::default()
+            };
+            do_read(part, p.fetch_offset, p.max_bytes, &mut p.out)?;
+        }
+    }
+    Ok(())
+}
+
+/// Group resolved `PendingRead`s back into per-topic response entries,
+/// preserving the order topics first appeared in the request.
+fn group_into_topic_responses(pending: Vec<PendingRead>) -> Vec<FetchableTopicResponse> {
+    let mut topic_order: Vec<String> = Vec::new();
+    let mut by_topic: std::collections::HashMap<String, (WireUuid, Vec<PartitionData>)> =
+        std::collections::HashMap::new();
+    for p in pending {
+        let entry = by_topic
+            .entry(p.topic_name.clone())
+            .or_insert_with(|| (p.topic_id, Vec::new()));
+        entry.1.push(p.out);
+        if !topic_order.iter().any(|t| t == &p.topic_name) {
+            topic_order.push(p.topic_name);
+        }
+    }
+    topic_order
+        .into_iter()
+        .map(|name| {
+            let (topic_id, parts) = by_topic.remove(&name).expect("topic order populated");
+            FetchableTopicResponse {
+                topic: name,
+                topic_id,
+                partitions: parts,
+                ..Default::default()
+            }
+        })
+        .collect()
+}
