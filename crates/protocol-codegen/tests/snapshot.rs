@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crabka_protocol_codegen::{emit_borrowed, emit_owned, ir};
+use crabka_protocol_codegen::{emit, ir};
 
 fn schemas_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -34,7 +34,7 @@ fn api_versions_request_owned_snapshot() {
         .unwrap();
     check(
         "ApiVersionsRequest.owned.rs",
-        &emit_owned::emit(spec, "test").unwrap(),
+        &emit::owned::emit(spec, "test").unwrap(),
     );
 }
 
@@ -47,6 +47,6 @@ fn api_versions_request_borrowed_snapshot() {
         .unwrap();
     check(
         "ApiVersionsRequest.borrowed.rs",
-        &emit_borrowed::emit(spec, "test").unwrap(),
+        &emit::borrowed::emit(spec, "test").unwrap(),
     );
 }
