@@ -38,7 +38,10 @@ jobs:
       # `client-core-integration`. We only want JVM oracle tests here.
       # `--exclude crabka-log` skips its testcontainers-based integration
       # test (Docker-only); it runs under the `log-integration` job below.
-      - run: cargo test --workspace --exclude crabka-client-core --exclude crabka-log -- --include-ignored
+      # `--exclude crabka-broker` skips the testcontainers-based JVM
+      # acceptance tests (Docker-only); they run under the
+      # `broker-jvm-acceptance` job below.
+      - run: cargo test --workspace --exclude crabka-client-core --exclude crabka-log --exclude crabka-broker -- --include-ignored
 
   cargo-deny:
     runs-on: ubuntu-latest
@@ -74,3 +77,20 @@ jobs:
         with:
           toolchain: "1.95.0"
       - run: cargo test -p crabka-log --test integration -- --ignored --nocapture
+
+  # JVM kafka-console-{producer,consumer,topics} driving a Rust crabka-broker.
+  # The broker binds 0.0.0.0:9092 on the runner; the in-container JVM tools
+  # reach back via the Docker bridge gateway (typically 172.17.0.1). See
+  # crates/broker/tests/KNOWN_ISSUES.md.
+  broker-jvm-acceptance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.95.0"
+      - name: Compute Docker bridge IP
+        run: |
+          BRIDGE_IP=$(docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}')
+          echo "CRABKA_HOST_BOOTSTRAP=${BRIDGE_IP}:9092" >> $GITHUB_ENV
+      - run: cargo test -p crabka-broker --test jvm_acceptance -- --ignored --nocapture
