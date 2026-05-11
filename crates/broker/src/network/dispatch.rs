@@ -176,6 +176,7 @@ fn handler_body_flexible(api_key: i16, version: i16) -> bool {
         2 => version >= owned::list_offsets_request::FLEXIBLE_MIN,
         3 => version >= owned::metadata_request::FLEXIBLE_MIN,
         8 => version >= owned::offset_commit_request::FLEXIBLE_MIN,
+        9 => version >= owned::offset_fetch_request::FLEXIBLE_MIN,
         10 => version >= owned::find_coordinator_request::FLEXIBLE_MIN,
         11 => version >= owned::join_group_request::FLEXIBLE_MIN,
         12 => version >= owned::heartbeat_request::FLEXIBLE_MIN,

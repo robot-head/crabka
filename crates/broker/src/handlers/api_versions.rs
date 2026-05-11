@@ -39,6 +39,7 @@ fn supported_apis() -> Vec<ApiVersion> {
         v!(heartbeat_request),
         v!(leave_group_request),
         v!(offset_commit_request),
+        v!(offset_fetch_request),
         v!(create_topics_request),
         v!(delete_topics_request),
         v!(describe_configs_request),
