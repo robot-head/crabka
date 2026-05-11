@@ -3,7 +3,7 @@ use bytes::{Buf, BufMut};
 use crate::ProtocolError;
 
 /// 16-byte Kafka UUID. Big-endian on the wire.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Uuid(pub [u8; 16]);
 
 impl Uuid {

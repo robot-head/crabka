@@ -2,6 +2,13 @@ use std::path::PathBuf;
 
 use crabka_protocol_codegen::{emit, ir};
 
+const CURATED: &[&str] = &[
+    "ApiVersionsRequest",
+    "ApiVersionsResponse",
+    "MetadataRequest",
+    "MetadataResponse",
+];
+
 fn schemas_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -26,27 +33,25 @@ fn check(snap_name: &str, generated: &str) {
 }
 
 #[test]
-fn api_versions_request_owned_snapshot() {
+fn curated_owned_snapshots() {
     let specs = ir::load_dir(&schemas_dir()).unwrap();
-    let spec = specs
-        .iter()
-        .find(|s| s.name == "ApiVersionsRequest")
-        .unwrap();
-    check(
-        "ApiVersionsRequest.owned.rs",
-        &emit::owned::emit(spec, "test").unwrap(),
-    );
+    for name in CURATED {
+        let spec = specs.iter().find(|s| s.name == *name).unwrap();
+        check(
+            &format!("{name}.owned.rs"),
+            &emit::owned::emit(spec, "test").unwrap(),
+        );
+    }
 }
 
 #[test]
-fn api_versions_request_borrowed_snapshot() {
+fn curated_borrowed_snapshots() {
     let specs = ir::load_dir(&schemas_dir()).unwrap();
-    let spec = specs
-        .iter()
-        .find(|s| s.name == "ApiVersionsRequest")
-        .unwrap();
-    check(
-        "ApiVersionsRequest.borrowed.rs",
-        &emit::borrowed::emit(spec, "test").unwrap(),
-    );
+    for name in CURATED {
+        let spec = specs.iter().find(|s| s.name == *name).unwrap();
+        check(
+            &format!("{name}.borrowed.rs"),
+            &emit::borrowed::emit(spec, "test").unwrap(),
+        );
+    }
 }

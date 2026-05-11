@@ -49,9 +49,15 @@ proptest! {
         prop_assert_eq!(v.encoded_len(0), buf.len());
         let mut cur = &buf[..];
         let decoded = ApiVersionsResponse::decode(&mut cur, 0).unwrap();
-        // v0 doesn't include throttle_time_ms — normalize for comparison.
+        // v0 doesn't include throttle_time_ms or any flexible/tagged fields — normalize.
+        let default = ApiVersionsResponse::default();
         let mut expected = v.clone();
         expected.throttle_time_ms = 0;
+        // Tagged fields don't exist at v0; after decode they will be their schema defaults.
+        expected.supported_features = default.supported_features.clone();
+        expected.finalized_features_epoch = default.finalized_features_epoch;
+        expected.finalized_features = default.finalized_features.clone();
+        expected.zk_migration_ready = default.zk_migration_ready;
         prop_assert_eq!(decoded, expected);
     }
 }

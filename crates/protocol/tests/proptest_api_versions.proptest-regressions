@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 993660429af9aed917a890b1c30d5723b4fad44188301527a9bcb9add0de7c0c # shrinks to v = ApiVersionsResponse { error_code: 0, api_keys: [], throttle_time_ms: 0, supported_features: [], finalized_features_epoch: 0, finalized_features: [], zk_migration_ready: false, unknown_tagged_fields: UnknownTaggedFields([]) }
+cc f9089609047690d940aa244132b10ab2b6ad1df13b95288be633267efdc3b282 # shrinks to v = ApiVersionsResponse { error_code: 0, api_keys: [], throttle_time_ms: 0, supported_features: [], finalized_features_epoch: 0, finalized_features: [], zk_migration_ready: false, unknown_tagged_fields: UnknownTaggedFields([]) }

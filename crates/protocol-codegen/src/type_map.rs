@@ -65,14 +65,9 @@ fn inner_borrowed(t: &str, struct_path: Option<&str>) -> String {
         "uuid" => "crate::primitives::uuid::Uuid".into(),
         other => struct_path.map_or_else(
             || panic!("unmapped borrowed type: {other}"),
-            |p| {
-                // Add <'a> to struct references in borrowed flavor.
-                if p.ends_with('>') {
-                    p.to_owned()
-                } else {
-                    format!("{p}<'a>")
-                }
-            },
+            // The caller is responsible for including `<'a>` in the path when needed.
+            // Pass the path verbatim.
+            str::to_owned,
         ),
     }
 }
@@ -115,17 +110,26 @@ mod tests {
             owned_type("ProduceTopic", false, Some("ProduceTopic")),
             "ProduceTopic"
         );
+        // Caller is responsible for including <'a> in struct_path when needed.
+        assert_eq!(
+            borrowed_type("ProduceTopic", false, Some("ProduceTopic<'a>")),
+            "ProduceTopic<'a>"
+        );
         assert_eq!(
             borrowed_type("ProduceTopic", false, Some("ProduceTopic")),
-            "ProduceTopic<'a>"
+            "ProduceTopic"
         );
         assert_eq!(
             owned_type("[]ProduceTopic", false, Some("ProduceTopic")),
             "Vec<ProduceTopic>"
         );
         assert_eq!(
-            borrowed_type("[]ProduceTopic", false, Some("ProduceTopic")),
+            borrowed_type("[]ProduceTopic", false, Some("ProduceTopic<'a>")),
             "Vec<ProduceTopic<'a>>"
+        );
+        assert_eq!(
+            borrowed_type("[]ProduceTopic", false, Some("ProduceTopic")),
+            "Vec<ProduceTopic>"
         );
     }
 }
