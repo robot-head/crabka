@@ -375,9 +375,7 @@ async fn find_coordinator_returns_self() {
 
 #[tokio::test]
 async fn join_group_with_empty_member_returns_member_id_required() {
-    use crabka_protocol::owned::join_group_request::{
-        JoinGroupRequest, JoinGroupRequestProtocol,
-    };
+    use crabka_protocol::owned::join_group_request::{JoinGroupRequest, JoinGroupRequestProtocol};
     let p = support::start().await;
     let req = JoinGroupRequest {
         group_id: "g".into(),
@@ -400,9 +398,7 @@ async fn join_group_with_empty_member_returns_member_id_required() {
 
 #[tokio::test]
 async fn join_group_single_member_completes_after_deadline() {
-    use crabka_protocol::owned::join_group_request::{
-        JoinGroupRequest, JoinGroupRequestProtocol,
-    };
+    use crabka_protocol::owned::join_group_request::{JoinGroupRequest, JoinGroupRequestProtocol};
     let p = support::start().await;
     // First call to obtain a server-assigned member_id.
     let r1 = p
