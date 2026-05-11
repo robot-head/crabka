@@ -52,9 +52,6 @@ fn arb_record() -> impl Strategy<Value = Record> {
 }
 
 /// A vector of arbitrary batches, each containing 1..=4 records.
-pub fn arb_batches(
-    count_min: usize,
-    count_max: usize,
-) -> impl Strategy<Value = Vec<RecordBatch>> {
+pub fn arb_batches(count_min: usize, count_max: usize) -> impl Strategy<Value = Vec<RecordBatch>> {
     proptest::collection::vec(arb_batch(1, 4), count_min..=count_max)
 }

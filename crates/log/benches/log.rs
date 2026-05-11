@@ -1,9 +1,9 @@
-//! CodSpeed benchmarks for `crabka-log`: append, read, and open.
+//! `CodSpeed` benchmarks for `crabka-log`: append, read, and open.
 
 use bytes::Bytes;
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use crabka_log::{Log, LogConfig};
 use crabka_protocol::records::{Record, RecordBatch};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use tempfile::tempdir;
 
 fn make_batch(n: i32, payload_size: usize) -> RecordBatch {

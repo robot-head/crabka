@@ -14,7 +14,7 @@ use std::process::{Command, Stdio};
 use crabka_log::{Log, LogConfig};
 use tempfile::tempdir;
 use testcontainers::runners::AsyncRunner;
-use testcontainers_modules::kafka::{Kafka, KAFKA_PORT};
+use testcontainers_modules::kafka::{KAFKA_PORT, Kafka};
 
 const TOPIC: &str = "crabka-log-itest";
 

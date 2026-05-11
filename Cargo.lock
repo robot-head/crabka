@@ -405,6 +405,7 @@ name = "crabka-log"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "codspeed-criterion-compat",
  "crabka-protocol",
  "hex",
  "memmap2",
