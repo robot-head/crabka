@@ -13,6 +13,11 @@ spec for the full roadmap.
 
 Pre-1.0, pre-alpha. No production use.
 
+## Published crates
+
+- [`crabka-compression`](https://crates.io/crates/crabka-compression) — Kafka wire-protocol compression codecs ([docs](https://docs.rs/crabka-compression)).
+- [`crabka-protocol`](https://crates.io/crates/crabka-protocol) — Apache Kafka wire-protocol codec ([docs](https://docs.rs/crabka-protocol)).
+
 ## License
 
 Apache 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).

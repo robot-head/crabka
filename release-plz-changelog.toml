@@ -1,0 +1,25 @@
+[changelog]
+body = """
+## [{{ version }}] — {{ timestamp | date(format="%Y-%m-%d") }}
+
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | upper_first }}
+
+{% for commit in commits %}
+- {{ commit.message | upper_first }}{% if commit.breaking %} (**breaking**){% endif %}
+{% endfor %}
+{% endfor %}
+"""
+commit_parsers = [
+    { message = "^feat", group = "Added" },
+    { message = "^fix", group = "Fixed" },
+    { message = "^perf", group = "Performance" },
+    { message = "^docs", group = "Documentation" },
+    { message = "^test", group = "Tests" },
+    { message = "^refactor", group = "Refactored" },
+    { message = "^chore\\(deps\\)", group = "Dependencies" },
+    { message = "^chore", group = "Maintenance" },
+    { message = "^ci", group = "CI" },
+    { message = "^build", group = "Build" },
+]
+filter_unconventional = false

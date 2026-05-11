@@ -2,10 +2,31 @@
 name = "crabka-protocol"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
-authors.workspace = true
-description = "Kafka wire protocol codec for Rust"
+rust-version = "1.95.0"
+license = "Apache-2.0"
+authors = ["The Crabka Authors"]
+description = "Apache Kafka wire-protocol codec (4.2.0), with typed RecordBatch and zero-copy borrowed decode"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-protocol"
+readme = "README.md"
+keywords = ["kafka", "wire-protocol", "codec", "serialization", "decoder"]
+categories = ["encoding", "parser-implementations"]
+include = [
+    "src/**/*",
+    "generated/**/*",
+    "schemas/**/*",
+    "build.rs",
+    "Cargo.toml",
+    "README.md",
+    "LICENSE",
+    "NOTICE",
+]
 build = "build.rs"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [lints]
 workspace = true
@@ -24,7 +45,7 @@ thiserror = { workspace = true }
 arbitrary = { workspace = true, optional = true }
 zerocopy = { workspace = true }
 crc32c = { workspace = true }
-crabka-compression = { path = "../compression", default-features = false }
+crabka-compression = { version = "0.1", path = "../compression", default-features = false }
 serde_json = { workspace = true }
 
 [dev-dependencies]
