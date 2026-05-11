@@ -41,7 +41,8 @@ fn inner_owned(t: &str, struct_path: Option<&str>) -> String {
         "uint32" => "u32".into(),
         "float64" => "f64".into(),
         "string" => "String".into(),
-        "bytes" | "records" => "::bytes::Bytes".into(),
+        "bytes" => "::bytes::Bytes".into(),
+        "records" => "crate::records::RecordBatch".into(),
         "uuid" => "crate::primitives::uuid::Uuid".into(),
         other => struct_path.map_or_else(|| panic!("unmapped owned type: {other}"), str::to_owned),
     }
@@ -61,7 +62,8 @@ fn inner_borrowed(t: &str, struct_path: Option<&str>) -> String {
         "uint32" => "u32".into(),
         "float64" => "f64".into(),
         "string" => "&'a str".into(),
-        "bytes" | "records" => "&'a [u8]".into(),
+        "bytes" => "&'a [u8]".into(),
+        "records" => "crate::records::RecordBatchBorrowed<'a>".into(),
         "uuid" => "crate::primitives::uuid::Uuid".into(),
         other => struct_path.map_or_else(
             || panic!("unmapped borrowed type: {other}"),
@@ -87,14 +89,20 @@ mod tests {
             owned_type("uuid", false, None),
             "crate::primitives::uuid::Uuid"
         );
-        assert_eq!(owned_type("records", false, None), "::bytes::Bytes");
+        assert_eq!(
+            owned_type("records", false, None),
+            "crate::records::RecordBatch"
+        );
     }
 
     #[test]
     fn primitives_borrowed() {
         assert_eq!(borrowed_type("string", false, None), "&'a str");
         assert_eq!(borrowed_type("bytes", true, None), "Option<&'a [u8]>");
-        assert_eq!(borrowed_type("records", false, None), "&'a [u8]");
+        assert_eq!(
+            borrowed_type("records", false, None),
+            "crate::records::RecordBatchBorrowed<'a>"
+        );
     }
 
     #[test]

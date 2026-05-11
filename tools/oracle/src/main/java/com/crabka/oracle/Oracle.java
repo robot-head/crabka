@@ -56,7 +56,12 @@ public final class Oracle {
 
         ObjectNode resp = M.createObjectNode();
 
-        if (op.equals("compress") || op.equals("decompress")) {
+        if (op.equals("record_batch_encode")) {
+            return encodeRecordBatch(req.get("value"));
+        } else if (op.equals("record_batch_decode")) {
+            byte[] bytes = HexFormat.of().parseHex(req.get("hex").asText());
+            return decodeRecordBatch(bytes);
+        } else if (op.equals("compress") || op.equals("decompress")) {
             String codec = req.get("codec").asText();
             byte[] input = HexFormat.of().parseHex(req.get("data").asText());
             byte[] result;
@@ -122,6 +127,147 @@ public final class Oracle {
                 throw new IllegalArgumentException("unknown op: " + op);
             }
         }
+        return resp;
+    }
+
+    private static ObjectNode encodeRecordBatch(JsonNode value) throws Exception {
+        long baseOffset = value.get("base_offset").asLong();
+        short producerEpoch = (short) value.get("producer_epoch").asInt();
+        int baseSequence = value.get("base_sequence").asInt();
+        long producerId = value.get("producer_id").asLong();
+        int partitionLeaderEpoch = value.get("partition_leader_epoch").asInt();
+        long baseTimestamp = value.get("base_timestamp").asLong();
+        boolean isTransactional = value.get("is_transactional").asBoolean();
+        boolean isControl = value.get("is_control_batch").asBoolean();
+        String tsType = value.get("timestamp_type").asText(); // "CreateTime" or "LogAppendTime"
+        String codecName = value.get("compression").asText(); // "NONE" / "GZIP" / "SNAPPY" / "LZ4" / "ZSTD"
+
+        org.apache.kafka.common.record.CompressionType compressionType =
+            org.apache.kafka.common.record.CompressionType.valueOf(codecName);
+        org.apache.kafka.common.compress.Compression compression =
+            org.apache.kafka.common.compress.Compression.of(compressionType).build();
+
+        // Map "CreateTime" -> CREATE_TIME, "LogAppendTime" -> LOG_APPEND_TIME
+        String tsName = tsType.equals("LogAppendTime") ? "LOG_APPEND_TIME" : "CREATE_TIME";
+        org.apache.kafka.common.record.TimestampType timestampType =
+            org.apache.kafka.common.record.TimestampType.valueOf(tsName);
+
+        java.nio.ByteBuffer buffer = java.nio.ByteBuffer.allocate(1024 * 1024);
+        org.apache.kafka.common.record.MemoryRecordsBuilder mrb =
+            org.apache.kafka.common.record.MemoryRecords.builder(
+                buffer,
+                org.apache.kafka.common.record.RecordBatch.CURRENT_MAGIC_VALUE,
+                compression,
+                timestampType,
+                baseOffset,
+                baseTimestamp,
+                producerId,
+                producerEpoch,
+                baseSequence,
+                isTransactional,
+                isControl,
+                partitionLeaderEpoch);
+
+        com.fasterxml.jackson.databind.node.ArrayNode records =
+            (com.fasterxml.jackson.databind.node.ArrayNode) value.get("records");
+        for (JsonNode r : records) {
+            long ts = baseTimestamp + r.get("timestamp_delta").asLong();
+            long offset = baseOffset + r.get("offset_delta").asLong();
+            byte[] key = r.has("key") && !r.get("key").isNull()
+                ? HexFormat.of().parseHex(r.get("key").asText()) : null;
+            byte[] val = r.has("value") && !r.get("value").isNull()
+                ? HexFormat.of().parseHex(r.get("value").asText()) : null;
+
+            java.util.List<org.apache.kafka.common.header.Header> headers = new java.util.ArrayList<>();
+            if (r.has("headers")) {
+                for (JsonNode h : r.get("headers")) {
+                    String hk = h.get("key").asText();
+                    byte[] hv = h.has("value") && !h.get("value").isNull()
+                        ? HexFormat.of().parseHex(h.get("value").asText()) : null;
+                    headers.add(new org.apache.kafka.common.header.internals.RecordHeader(hk, hv));
+                }
+            }
+            mrb.appendWithOffset(offset, ts, key, val,
+                headers.toArray(new org.apache.kafka.common.header.Header[0]));
+        }
+
+        org.apache.kafka.common.record.MemoryRecords mr = mrb.build();
+        java.nio.ByteBuffer out = mr.buffer();
+        byte[] bytes = new byte[out.remaining()];
+        out.duplicate().get(bytes);
+
+        ObjectNode resp = M.createObjectNode();
+        resp.put("ok", true);
+        resp.put("hex", HexFormat.of().formatHex(bytes));
+        return resp;
+    }
+
+    private static ObjectNode decodeRecordBatch(byte[] bytes) throws Exception {
+        org.apache.kafka.common.record.MemoryRecords mr =
+            org.apache.kafka.common.record.MemoryRecords.readableRecords(
+                java.nio.ByteBuffer.wrap(bytes));
+        java.util.Iterator<org.apache.kafka.common.record.MutableRecordBatch> it =
+            mr.batches().iterator();
+        if (!it.hasNext()) {
+            ObjectNode err = M.createObjectNode();
+            err.put("ok", false);
+            err.put("error", "no batch in input");
+            return err;
+        }
+        org.apache.kafka.common.record.MutableRecordBatch b = it.next();
+        // DefaultRecordBatch exposes baseTimestamp(); cast to access it.
+        org.apache.kafka.common.record.DefaultRecordBatch db =
+            (org.apache.kafka.common.record.DefaultRecordBatch) b;
+
+        ObjectNode value = M.createObjectNode();
+        value.put("base_offset", b.baseOffset());
+        value.put("partition_leader_epoch", b.partitionLeaderEpoch());
+        value.put("compression", b.compressionType().name());
+        value.put("timestamp_type",
+            b.timestampType() == org.apache.kafka.common.record.TimestampType.LOG_APPEND_TIME
+                ? "LogAppendTime" : "CreateTime");
+        value.put("is_transactional", b.isTransactional());
+        value.put("is_control_batch", b.isControlBatch());
+        value.put("base_timestamp", db.baseTimestamp());
+        value.put("max_timestamp", b.maxTimestamp());
+        value.put("producer_id", b.producerId());
+        value.put("producer_epoch", (int) b.producerEpoch());
+        value.put("base_sequence", b.baseSequence());
+
+        com.fasterxml.jackson.databind.node.ArrayNode recordsArr = value.putArray("records");
+        for (org.apache.kafka.common.record.Record r : b) {
+            ObjectNode rj = recordsArr.addObject();
+            rj.put("offset_delta", (int)(r.offset() - b.baseOffset()));
+            rj.put("timestamp_delta", r.timestamp() - db.baseTimestamp());
+            if (r.hasKey()) {
+                byte[] k = new byte[r.keySize()];
+                r.key().duplicate().get(k);
+                rj.put("key", HexFormat.of().formatHex(k));
+            } else {
+                rj.putNull("key");
+            }
+            if (r.hasValue()) {
+                byte[] v = new byte[r.valueSize()];
+                r.value().duplicate().get(v);
+                rj.put("value", HexFormat.of().formatHex(v));
+            } else {
+                rj.putNull("value");
+            }
+            com.fasterxml.jackson.databind.node.ArrayNode hs = rj.putArray("headers");
+            for (org.apache.kafka.common.header.Header h : r.headers()) {
+                ObjectNode hj = hs.addObject();
+                hj.put("key", h.key());
+                if (h.value() != null) {
+                    hj.put("value", HexFormat.of().formatHex(h.value()));
+                } else {
+                    hj.putNull("value");
+                }
+            }
+        }
+
+        ObjectNode resp = M.createObjectNode();
+        resp.put("ok", true);
+        resp.set("value", value);
         return resp;
     }
 

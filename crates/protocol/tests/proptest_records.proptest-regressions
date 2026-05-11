@@ -1,0 +1,10 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc f4de3045aace03308baa78b1c4519b6002b7a40145eeaecb957f62c722f1605a # shrinks to b = RecordBatch { base_offset: 0, partition_leader_epoch: 0, attributes: Attributes(2), last_offset_delta: 0, base_timestamp: 0, max_timestamp: 0, producer_id: -1, producer_epoch: -1, base_sequence: -1, records: [] }
+cc 735e92d9d545d1738c2780fb024a65019f37b03ce10f473a51dc261d2e0132c2 # shrinks to b = RecordBatch { base_offset: 0, partition_leader_epoch: 0, attributes: Attributes(3), last_offset_delta: 0, base_timestamp: 0, max_timestamp: 0, producer_id: -1, producer_epoch: -1, base_sequence: -1, records: [] }
+cc 76cc8b796204f1afabbaae6d539e111fd8f48afbea74847b03aad0f72238c976 # shrinks to b = RecordBatch { base_offset: 0, partition_leader_epoch: 0, attributes: Attributes(4), last_offset_delta: 0, base_timestamp: 0, max_timestamp: 0, producer_id: -1, producer_epoch: -1, base_sequence: -1, records: [] }
+cc dfd55e44339fdb915d474dea054e8948c495fdcc04f2db3c5ea649744c903162 # shrinks to b = RecordBatch { base_offset: 0, partition_leader_epoch: 0, attributes: Attributes(1), last_offset_delta: 0, base_timestamp: 0, max_timestamp: 0, producer_id: -1, producer_epoch: -1, base_sequence: -1, records: [] }

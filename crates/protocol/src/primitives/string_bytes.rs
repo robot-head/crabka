@@ -177,6 +177,13 @@ pub fn put_compact_nullable_bytes<B: BufMut>(buf: &mut B, b: Option<&[u8]>) {
 pub fn compact_bytes_len(b: &[u8]) -> usize {
     uvarint_len(u32::try_from(b.len() + 1).unwrap()) + b.len()
 }
+
+/// Like `compact_bytes_len` but takes the byte-count directly rather than a slice.
+/// Useful when the content size is known without materialising the buffer.
+#[must_use]
+pub fn compact_bytes_len_from_size(n: usize) -> usize {
+    uvarint_len(u32::try_from(n + 1).unwrap()) + n
+}
 #[must_use]
 pub fn compact_nullable_bytes_len(b: Option<&[u8]>) -> usize {
     match b {

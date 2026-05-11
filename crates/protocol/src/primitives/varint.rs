@@ -108,6 +108,23 @@ pub fn get_varlong<B: Buf>(buf: &mut B) -> Result<i64, ProtocolError> {
     Ok(((zz >> 1) as i64) ^ -((zz & 1) as i64))
 }
 
+#[must_use]
+pub fn uvarlong_len(v: u64) -> usize {
+    if v == 0 {
+        return 1;
+    }
+    let bits = 64 - v.leading_zeros() as usize;
+    bits.div_ceil(7)
+}
+
+#[must_use]
+pub fn varlong_len(v: i64) -> usize {
+    // Zigzag encoding: intentional sign-reinterpreting cast.
+    #[allow(clippy::cast_sign_loss)]
+    let zz = ((v << 1) ^ (v >> 63)) as u64;
+    uvarlong_len(zz)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -176,5 +193,40 @@ mod tests {
             get_uvarint(&mut cur),
             Err(ProtocolError::UnexpectedEof { .. })
         ));
+    }
+
+    #[test]
+    fn uvarlong_len_known_values() {
+        // (value, expected byte length on wire)
+        let cases: &[(u64, usize)] = &[
+            (0, 1),
+            (1, 1),
+            (127, 1),
+            (128, 2),
+            (u64::from(u32::MAX), 5),
+            (u64::MAX, 10),
+        ];
+        for (v, expected) in cases {
+            assert_eq!(uvarlong_len(*v), *expected, "uvarlong_len({v})");
+        }
+    }
+
+    #[test]
+    fn varlong_len_known_values() {
+        // Zigzag: 0->0, -1->1, 1->2, i64::MIN has max bits
+        let cases: &[(i64, usize)] = &[
+            (0, 1),
+            (-1, 1),
+            (1, 1),
+            (63, 1),
+            (64, 2),
+            (-64, 1),
+            (-65, 2),
+            (i64::MAX, 10),
+            (i64::MIN, 10),
+        ];
+        for (v, expected) in cases {
+            assert_eq!(varlong_len(*v), *expected, "varlong_len({v})");
+        }
     }
 }

@@ -2694,21 +2694,21 @@ git commit -m "bench(records): per-codec encode/decode CodSpeed benches"
 
 Verification only. Mark complete only when every item passes.
 
-- [ ] `cargo fmt --check` clean.
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings` clean.
-- [ ] `cargo build -p crabka-protocol --no-default-features` succeeds.
-- [ ] Each single-feature build succeeds: `--features gzip`, `--features snappy`, `--features lz4`, `--features zstd`.
-- [ ] `cargo build -p crabka-protocol` (default features) succeeds.
-- [ ] `cargo test --workspace` clean.
-- [ ] `cargo test --workspace -- --include-ignored` clean (JVM differential records pass for all 5 codecs).
-- [ ] `cargo test -p crabka-protocol --test differential_produce -- --ignored` continues to pass (regression check).
-- [ ] `cargo bench -p crabka-protocol --bench records -- --quick` runs without crashing.
-- [ ] `RecordBatchHeader` is `#[repr(C)]`, derives `FromBytes + KnownLayout + Immutable + Unaligned`, is exactly 61 bytes.
-- [ ] CRC mismatches and unsupported magic produce typed errors (no panics).
-- [ ] Borrowed flavor passes the pointer-identity test for uncompressed batches.
-- [ ] `to_owned()` on borrowed materialises an equal owned batch.
-- [ ] Codegen mapping for `records` emits `RecordBatch` / `RecordBatchBorrowed<'a>`.
-- [ ] All tests in this plan follow the parameterized + shared-fixture pattern (table-driven / `macro_rules!` / factored proptest `Strategy`s).
+- [x] `cargo fmt --check` clean.
+- [x] `cargo clippy --workspace --all-targets -- -D warnings` clean.
+- [x] `cargo build -p crabka-protocol --no-default-features` succeeds.
+- [x] Each single-feature build succeeds: `--features gzip`, `--features snappy`, `--features lz4`, `--features zstd`.
+- [x] `cargo build -p crabka-protocol` (default features) succeeds.
+- [x] `cargo test --workspace` clean.
+- [x] `cargo test --workspace -- --include-ignored` clean (JVM differential records pass for all 5 codecs).
+- [x] `cargo test -p crabka-protocol --test differential_produce -- --ignored` continues to pass (regression check).
+- [x] `cargo bench -p crabka-protocol --bench records -- --quick` runs without crashing.
+- [x] `RecordBatchHeader` is `#[repr(C)]`, derives `FromBytes + KnownLayout + Immutable + Unaligned`, is exactly 61 bytes.
+- [x] CRC mismatches and unsupported magic produce typed errors (no panics).
+- [x] Borrowed flavor passes the pointer-identity test for uncompressed batches.
+- [x] `to_owned()` on borrowed materialises an equal owned batch.
+- [x] Codegen mapping for `records` emits `RecordBatch` / `RecordBatchBorrowed<'a>`.
+- [x] All tests in this plan follow the parameterized + shared-fixture pattern (table-driven / `macro_rules!` / factored proptest `Strategy`s).
 
 When all items pass, push the feature branch and open a PR to `main`.
 

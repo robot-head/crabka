@@ -11,13 +11,20 @@ build = "build.rs"
 workspace = true
 
 [features]
-default = ["arbitrary"]
+default = ["arbitrary", "gzip", "snappy", "lz4", "zstd"]
 arbitrary = ["dep:arbitrary"]
+gzip   = ["crabka-compression/gzip"]
+snappy = ["crabka-compression/snappy"]
+lz4    = ["crabka-compression/lz4"]
+zstd   = ["crabka-compression/zstd"]
 
 [dependencies]
 bytes = { workspace = true }
 thiserror = { workspace = true }
 arbitrary = { workspace = true, optional = true }
+zerocopy = { workspace = true }
+crc32c = { workspace = true }
+crabka-compression = { path = "../compression", default-features = false }
 
 [dev-dependencies]
 proptest = { workspace = true }
@@ -31,4 +38,8 @@ criterion = { version = "4.6.0", package = "codspeed-criterion-compat" }
 
 [[bench]]
 name = "codec"
+harness = false
+
+[[bench]]
+name = "records"
 harness = false

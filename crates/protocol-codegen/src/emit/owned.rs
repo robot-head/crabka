@@ -222,15 +222,13 @@ fn uses_string(types: &[String]) -> bool {
 }
 
 fn uses_bytes(types: &[String]) -> bool {
-    types
-        .iter()
-        .any(|t| matches!(t.as_str(), "bytes" | "records"))
+    types.iter().any(|t| t.as_str() == "bytes")
 }
 
 fn uses_nullable_bytes_recursive(fields: &[FieldSpec]) -> bool {
     fields.iter().any(|f| {
         let base = base_type(&f.field_type);
-        let here = matches!(base, "bytes" | "records") && f.nullable_versions.is_some();
+        let here = base == "bytes" && f.nullable_versions.is_some();
         here || uses_nullable_bytes_recursive(&f.fields)
     })
 }
@@ -238,8 +236,24 @@ fn uses_nullable_bytes_recursive(fields: &[FieldSpec]) -> bool {
 fn uses_non_nullable_bytes_recursive(fields: &[FieldSpec]) -> bool {
     fields.iter().any(|f| {
         let base = base_type(&f.field_type);
-        let here = matches!(base, "bytes" | "records") && f.nullable_versions.is_none();
+        let here = base == "bytes" && f.nullable_versions.is_none();
         here || uses_non_nullable_bytes_recursive(&f.fields)
+    })
+}
+
+fn uses_nullable_records_recursive(fields: &[FieldSpec]) -> bool {
+    fields.iter().any(|f| {
+        let base = base_type(&f.field_type);
+        let here = base == "records" && f.nullable_versions.is_some();
+        here || uses_nullable_records_recursive(&f.fields)
+    })
+}
+
+fn uses_non_nullable_records_recursive(fields: &[FieldSpec]) -> bool {
+    fields.iter().any(|f| {
+        let base = base_type(&f.field_type);
+        let here = base == "records" && f.nullable_versions.is_none();
+        here || uses_non_nullable_records_recursive(&f.fields)
     })
 }
 
@@ -374,6 +388,42 @@ fn emit_imports(out: &mut String, spec: &MessageSpec) {
         .unwrap();
     }
 
+    // Records fields: import the byte-primitive helpers used in the generated wrapper code.
+    {
+        let use_nullable_records = uses_nullable_records_recursive(&spec.fields);
+        let use_non_nullable_records = uses_non_nullable_records_recursive(&spec.fields);
+        if use_nullable_records || use_non_nullable_records {
+            // Note: compact_bytes_len_from_size is used via fully-qualified path in generated code.
+            let mut items: Vec<&str> = Vec::new();
+            if use_non_nullable_records {
+                items.extend([
+                    "get_bytes_owned",
+                    "get_compact_bytes_owned",
+                    "put_bytes",
+                    "put_compact_bytes",
+                ]);
+            }
+            if use_nullable_records {
+                items.extend([
+                    "get_compact_nullable_bytes_owned",
+                    "get_nullable_bytes_owned",
+                    "put_compact_bytes",
+                    "put_compact_nullable_bytes",
+                    "put_bytes",
+                    "put_nullable_bytes",
+                ]);
+            }
+            items.sort_unstable();
+            items.dedup();
+            writeln!(
+                out,
+                "use crate::primitives::string_bytes::{{{}}};",
+                items.join(", ")
+            )
+            .unwrap();
+        }
+    }
+
     // Tagged-fields support: encode_to_bytes only when there are known tagged fields to encode.
     if flex && tagged {
         writeln!(out, "use crate::tagged_fields::{{encode_to_bytes, read_tagged_fields, tagged_fields_len, WriteTaggedFields}};").unwrap();
@@ -468,7 +518,7 @@ fn scalar_owned_default(base_type: &str, val: &serde_json::Value) -> String {
 fn owned_zero(base: &str) -> String {
     match base {
         "string" => "String::new()".into(),
-        "bytes" | "records" => "bytes::Bytes::new()".into(),
+        "bytes" => "bytes::Bytes::new()".into(),
         "bool" => "false".into(),
         "int8" => "0i8".into(),
         "int16" => "0i16".into(),
@@ -1323,11 +1373,28 @@ fn encode_call(
         ("string", true) => format!(
             "if flex {{ put_compact_nullable_string(buf, {expr}.as_deref()) }} else {{ put_nullable_string(buf, {expr}.as_deref()) }}"
         ),
-        ("bytes" | "records", false) => format!(
+        ("bytes", false) => format!(
             "if flex {{ put_compact_bytes(buf, &{expr}) }} else {{ put_bytes(buf, &{expr}) }}"
         ),
-        ("bytes" | "records", true) => format!(
+        ("bytes", true) => format!(
             "if flex {{ put_compact_nullable_bytes(buf, {expr}.as_deref()) }} else {{ put_nullable_bytes(buf, {expr}.as_deref()) }}"
+        ),
+        ("records", false) => format!(
+            "{{ \
+                let mut __rb_buf = bytes::BytesMut::new(); \
+                <crate::records::RecordBatch as crate::Encode>::encode(&{expr}, &mut __rb_buf, version)?; \
+                if flex {{ put_compact_bytes(buf, &__rb_buf) }} else {{ put_bytes(buf, &__rb_buf) }} \
+            }}"
+        ),
+        ("records", true) => format!(
+            "match &{expr} {{ \
+                None => if flex {{ put_compact_nullable_bytes(buf, None) }} else {{ put_nullable_bytes(buf, None) }}, \
+                Some(__rb) => {{ \
+                    let mut __rb_buf = bytes::BytesMut::new(); \
+                    <crate::records::RecordBatch as crate::Encode>::encode(__rb, &mut __rb_buf, version)?; \
+                    if flex {{ put_compact_bytes(buf, &__rb_buf) }} else {{ put_bytes(buf, &__rb_buf) }} \
+                }} \
+            }}"
         ),
         (t, _) => format!("compile_error!(\"unhandled type in encode_call: {t}\")"),
     }
@@ -1398,11 +1465,24 @@ fn encoded_len_expr(
         ("string", true) => format!(
             "if flex {{ compact_nullable_string_len({expr}.as_deref()) }} else {{ nullable_string_len({expr}.as_deref()) }}"
         ),
-        ("bytes" | "records", false) => {
+        ("bytes", false) => {
             format!("if flex {{ compact_bytes_len(&{expr}) }} else {{ bytes_len(&{expr}) }}")
         }
-        ("bytes" | "records", true) => format!(
+        ("bytes", true) => format!(
             "if flex {{ compact_nullable_bytes_len({expr}.as_deref()) }} else {{ nullable_bytes_len({expr}.as_deref()) }}"
+        ),
+        ("records", false) => format!(
+            "{{ let __rb_len = <crate::records::RecordBatch as crate::Encode>::encoded_len(&{expr}, version); \
+               if flex {{ crate::primitives::string_bytes::compact_bytes_len_from_size(__rb_len) }} \
+               else {{ 4 + __rb_len }} }}"
+        ),
+        ("records", true) => format!(
+            "match &{expr} {{ \
+                None => if flex {{ crate::primitives::varint::uvarint_len(0) }} else {{ 4 }}, \
+                Some(__rb) => {{ let __rb_len = <crate::records::RecordBatch as crate::Encode>::encoded_len(__rb, version); \
+                    if flex {{ crate::primitives::string_bytes::compact_bytes_len_from_size(__rb_len) }} \
+                    else {{ 4 + __rb_len }} }} \
+            }}"
         ),
         (t, _) => format!("compile_error!(\"unhandled type in encoded_len_expr: {t}\")"),
     }
@@ -1460,8 +1540,23 @@ fn decode_call(schema_type: &str, nullable: bool, res_map: &HashMap<String, Reso
         ("uuid",   _)     => "crate::primitives::uuid::get_uuid(buf)?".into(),
         ("string", false) => "if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? }".into(),
         ("string", true)  => "if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? }".into(),
-        ("bytes" | "records", false) => "if flex { get_compact_bytes_owned(buf)? } else { get_bytes_owned(buf)? }".into(),
-        ("bytes" | "records", true)  => "if flex { get_compact_nullable_bytes_owned(buf)? } else { get_nullable_bytes_owned(buf)? }".into(),
+        ("bytes", false) => "if flex { get_compact_bytes_owned(buf)? } else { get_bytes_owned(buf)? }".into(),
+        ("bytes", true)  => "if flex { get_compact_nullable_bytes_owned(buf)? } else { get_nullable_bytes_owned(buf)? }".into(),
+        ("records", false) => "{ \
+            let __rb_bytes = if flex { get_compact_bytes_owned(buf)? } else { get_bytes_owned(buf)? }; \
+            let mut __rb_cur: &[u8] = &__rb_bytes; \
+            <crate::records::RecordBatch as crate::Decode>::decode(&mut __rb_cur, version)? \
+        }".into(),
+        ("records", true) => "{ \
+            let __rb_opt = if flex { get_compact_nullable_bytes_owned(buf)? } else { get_nullable_bytes_owned(buf)? }; \
+            match __rb_opt { \
+                None => None, \
+                Some(__rb_bytes) => { \
+                    let mut __rb_cur: &[u8] = &__rb_bytes; \
+                    Some(<crate::records::RecordBatch as crate::Decode>::decode(&mut __rb_cur, version)?) \
+                } \
+            } \
+        }".into(),
         (t, _) => format!("compile_error!(\"unhandled type in decode_call: {t}\")"),
     }
 }

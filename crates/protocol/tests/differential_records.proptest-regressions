@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 0a4e688fea1538bbcc4ef83be65fef2ff710e86b8193f14969d05fb681d33f4d # shrinks to b = RecordBatch { base_offset: 0, partition_leader_epoch: 0, attributes: Attributes(2), last_offset_delta: 0, base_timestamp: 0, max_timestamp: 0, producer_id: -1, producer_epoch: -1, base_sequence: -1, records: [] }
+cc f7306f1795dfbcbd6a993825810a98d6b0d22477abfac4c6b61bb507a0af5e8c # shrinks to b = RecordBatch { base_offset: 0, partition_leader_epoch: 0, attributes: Attributes(4), last_offset_delta: 0, base_timestamp: 0, max_timestamp: 0, producer_id: -1, producer_epoch: -1, base_sequence: -1, records: [Record { attributes: 0, timestamp_delta: -2, offset_delta: 0, key: None, value: None, headers: [] }] }
