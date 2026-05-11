@@ -53,9 +53,6 @@ pub fn emit(spec: &MessageSpec, schemas_version: &str) -> Result<String, EmitErr
     let fm = flex_min(spec);
     emit_nested_structs_for_fields(&mut out, &spec.fields, fm, &res_map);
 
-    if has_tagged_fields(spec) {
-        out.push_str(FOOTER_IS_DEFAULT);
-    }
     Ok(out)
 }
 
@@ -104,10 +101,6 @@ fn used_field_types_recursive(fields: &[FieldSpec]) -> Vec<String> {
         }
     }
     types
-}
-
-fn has_tagged_fields(spec: &MessageSpec) -> bool {
-    spec.fields.iter().any(|f| f.tag.is_some())
 }
 
 fn has_tagged_fields_recursive(fields: &[FieldSpec]) -> bool {
@@ -585,7 +578,7 @@ fn emit_encode_tagged(
     let nullable = is_nullable(f) || matches!(&f.default, Some(serde_json::Value::Null));
     writeln!(
         out,
-        "{indent}    if !is_default(&self.{field}) {{
+        "{indent}    if !crate::codegen_helpers::is_default(&self.{field}) {{
 {indent}        let payload = encode_to_bytes({len_expr}, |b| {{ {encode}; }});
 {indent}        tagged.add({tag}, payload);
 {indent}    }}",
@@ -608,7 +601,7 @@ fn emit_encoded_len_tagged(
     let len = encoded_len_expr(&f.field_type, &format!("self.{field}"), nullable, res_map);
     writeln!(
         out,
-        "{indent}    if !is_default(&self.{field}) {{
+        "{indent}    if !crate::codegen_helpers::is_default(&self.{field}) {{
 {indent}        known_pairs.push(({tag}, {len}));
 {indent}    }}"
     )
@@ -839,14 +832,3 @@ fn version_cond(r: VersionRange, version_var: &str) -> String {
     }
 }
 
-// `is_default` is generated into the produced module rather than read from a
-// helper crate so the produced files have no extra crate dependency. We
-// inject this short helper only when there are tagged fields that need it.
-// In Task 8 we move it to a shared location.
-
-const FOOTER_IS_DEFAULT: &str = r"
-#[inline]
-fn is_default<T: Default + PartialEq>(v: &T) -> bool {
-    v == &T::default()
-}
-";
