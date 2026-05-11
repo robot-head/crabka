@@ -1,0 +1,33 @@
+[package]
+name = "crabka-client-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version = "1.95.0"
+description = "Connection management and request dispatch for Apache Kafka in Rust"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+mock = []
+
+[dependencies]
+crabka-protocol = { version = "0.1", path = "../protocol", default-features = false }
+bytes = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["net", "rt", "rt-multi-thread", "io-util", "macros", "sync", "time"] }
+tokio-util = { workspace = true, features = ["codec"] }
+dashmap = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+hex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+testcontainers = { workspace = true }
+testcontainers-modules = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
