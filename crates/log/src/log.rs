@@ -13,12 +13,7 @@ use crate::segment::Segment;
 
 #[derive(Debug)]
 pub struct Log {
-    // `dir` and `config` are read by `append`/`truncate_to` in subsequent
-    // tasks of this batch; the discovery-only `Log::open` doesn't yet
-    // re-read them.
-    #[allow(dead_code)]
     dir: PathBuf,
-    #[allow(dead_code)]
     config: LogConfig,
     segments: Vec<Arc<Segment>>,
     active: Option<Segment>,
@@ -102,12 +97,72 @@ impl Log {
     pub fn close(self) {
         drop(self);
     }
+
+    /// Append a `RecordBatch`. The batch's `base_offset` is overwritten
+    /// by the log to be the next assigned offset; `last_offset_delta`
+    /// determines how many absolute offsets this batch consumes.
+    /// Returns the assigned `base_offset`.
+    pub fn append(&mut self, batch: &mut RecordBatch) -> Result<i64, LogError> {
+        let should_roll = match &self.active {
+            Some(seg) => seg.size_bytes() >= self.config.segment_bytes,
+            None => false,
+        };
+        if should_roll {
+            self.roll_active_segment()?;
+        }
+
+        let assigned_base = self.log_end_offset();
+        batch.base_offset = assigned_base;
+
+        let active = self
+            .active
+            .as_mut()
+            .expect("active segment must exist after Log::open");
+        active.append(batch, self.config.index_interval_bytes)?;
+
+        if self.config.flush_on_append {
+            active.flush()?;
+        }
+        Ok(assigned_base)
+    }
+
+    fn roll_active_segment(&mut self) -> Result<(), LogError> {
+        let new_base = self.log_end_offset();
+        let mut old = self
+            .active
+            .take()
+            .expect("active segment must exist before rolling");
+        old.seal();
+        self.segments.push(Arc::new(old));
+        self.active = Some(Segment::create(&self.dir, new_base)?);
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
+    use crabka_protocol::records::Record;
     use tempfile::tempdir;
+
+    fn sample_batch(n: i32) -> RecordBatch {
+        let mut b = RecordBatch {
+            base_offset: 0, // overwritten by Log::append
+            max_timestamp: 0,
+            last_offset_delta: n - 1,
+            ..RecordBatch::default()
+        };
+        for i in 0..n {
+            b.records.push(Record {
+                offset_delta: i,
+                key: Some(Bytes::from(format!("k{i}"))),
+                value: Some(Bytes::from(format!("v{i}"))),
+                ..Default::default()
+            });
+        }
+        b
+    }
 
     #[test]
     fn open_empty_dir_creates_first_segment() {
@@ -125,5 +180,41 @@ mod tests {
         drop(log);
         let log_path = dir.path().join("00000000000000000000.log");
         assert!(log_path.exists());
+    }
+
+    #[test]
+    fn append_assigns_monotonic_offsets() {
+        let dir = tempdir().unwrap();
+        let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
+        let mut b1 = sample_batch(3);
+        let mut b2 = sample_batch(2);
+        assert_eq!(log.append(&mut b1).unwrap(), 0);
+        assert_eq!(log.append(&mut b2).unwrap(), 3);
+        assert_eq!(log.log_end_offset(), 5);
+    }
+
+    #[test]
+    fn segment_rolls_when_bytes_exceeded() {
+        let dir = tempdir().unwrap();
+        let config = LogConfig {
+            segment_bytes: 200, // tiny so we roll fast
+            ..LogConfig::default()
+        };
+        let mut log = Log::open(dir.path(), config).unwrap();
+        for _ in 0..5 {
+            let mut b = sample_batch(2);
+            log.append(&mut b).unwrap();
+        }
+        // Multiple .log files should exist now.
+        let log_files: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("log"))
+            .collect();
+        assert!(
+            log_files.len() >= 2,
+            "expected segment roll; got {} .log files",
+            log_files.len()
+        );
     }
 }
