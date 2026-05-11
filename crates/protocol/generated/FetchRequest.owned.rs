@@ -421,7 +421,7 @@ pub fn default_json(version: i16) -> ::serde_json::Value {
         obj.insert("replicaId".to_string(), ::serde_json::json!(-1));
     }
     if version >= 15 {
-        obj.insert("replicaState".to_string(), { let mut _m = ::serde_json::Map::new(); _m.insert("replicaId".to_string(), ::serde_json::json!(-1)); _m.insert("replicaEpoch".to_string(), ::serde_json::json!(-1)); ::serde_json::Value::Object(_m) });
+        obj.insert("replicaState".to_string(), { let mut m = ::serde_json::Map::new(); m.insert("replicaId".to_string(), ::serde_json::json!(-1)); m.insert("replicaEpoch".to_string(), ::serde_json::json!(-1)); ::serde_json::Value::Object(m) });
     }
     obj.insert("maxWaitMs".to_string(), ::serde_json::json!(0));
     obj.insert("minBytes".to_string(), ::serde_json::json!(0));

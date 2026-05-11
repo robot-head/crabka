@@ -622,6 +622,8 @@ pub const CASES: &[Case] = &[
     Case { name: "WriteTxnMarkersResponse", api_key: 27, version: 2, kind: Kind::Response },
 ];
 
+#[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn encode_default(name: &str, version: i16) -> Vec<u8> {
     match name {
         "AddOffsetsToTxnRequest" => {
@@ -1708,6 +1710,8 @@ pub fn encode_default(name: &str, version: i16) -> Vec<u8> {
     }
 }
 
+#[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn default_json_for(name: &str, version: i16) -> ::serde_json::Value {
     match name {
         "AddOffsetsToTxnRequest" => crabka_protocol::owned::add_offsets_to_txn_request::default_json(version),

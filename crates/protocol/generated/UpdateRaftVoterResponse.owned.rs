@@ -158,6 +158,6 @@ pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert("throttleTimeMs".to_string(), ::serde_json::json!(0));
     obj.insert("errorCode".to_string(), ::serde_json::json!(0));
-    obj.insert("currentLeader".to_string(), { let mut _m = ::serde_json::Map::new(); _m.insert("leaderId".to_string(), ::serde_json::json!(-1)); _m.insert("leaderEpoch".to_string(), ::serde_json::json!(-1)); _m.insert("host".to_string(), ::serde_json::Value::String(String::new())); _m.insert("port".to_string(), ::serde_json::json!(0)); ::serde_json::Value::Object(_m) });
+    obj.insert("currentLeader".to_string(), { let mut m = ::serde_json::Map::new(); m.insert("leaderId".to_string(), ::serde_json::json!(-1)); m.insert("leaderEpoch".to_string(), ::serde_json::json!(-1)); m.insert("host".to_string(), ::serde_json::Value::String(String::new())); m.insert("port".to_string(), ::serde_json::json!(0)); ::serde_json::Value::Object(m) });
     ::serde_json::Value::Object(obj)
 }

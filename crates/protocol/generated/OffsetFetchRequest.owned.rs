@@ -252,7 +252,7 @@ pub fn default_json(version: i16) -> ::serde_json::Value {
         obj.insert("groupId".to_string(), ::serde_json::Value::String(String::new()));
     }
     if version <= 7 {
-        obj.insert("topics".to_string(), (if version >= 2 && version <= 7 { ::serde_json::Value::Null } else { ::serde_json::Value::Array(vec![]) }));
+        obj.insert("topics".to_string(), if version >= 2 && version <= 7 { ::serde_json::Value::Null } else { ::serde_json::Value::Array(vec![]) });
     }
     if version >= 8 {
         obj.insert("groups".to_string(), ::serde_json::Value::Array(vec![]));

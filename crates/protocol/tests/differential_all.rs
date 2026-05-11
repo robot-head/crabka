@@ -1,4 +1,4 @@
-//! Parameterised differential sweep over every active (api_key, version) pair.
+//! Parameterised differential sweep over every active `(api_key, version)` pair.
 //!
 //! For each case in the generated CASES table, encodes the Rust default fixture,
 //! sends the equivalent JSON to the JVM oracle, and asserts byte equality.
@@ -6,8 +6,8 @@
 //! every divergence (not just the first).
 
 mod support;
-use support::oracle;
 use serde_json::json;
+use support::oracle;
 
 include!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -83,13 +83,12 @@ fn every_pair_byte_equal() {
             }
         }
     }
-    if !failures.is_empty() {
-        panic!(
-            "{} pair(s) failed differential:\n{}",
-            failures.len(),
-            failures.join("\n")
-        );
-    }
+    assert!(
+        failures.is_empty(),
+        "{} pair(s) failed differential:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
 }
 
 fn kind_str(k: Kind) -> &'static str {

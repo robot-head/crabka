@@ -195,6 +195,6 @@ pub fn default_json(version: i16) -> ::serde_json::Value {
     obj.insert("voterId".to_string(), ::serde_json::json!(0));
     obj.insert("voterDirectoryId".to_string(), ::serde_json::Value::String("AAAAAAAAAAAAAAAAAAAAAA".to_string()));
     obj.insert("listeners".to_string(), ::serde_json::Value::Array(vec![]));
-    obj.insert("kRaftVersionFeature".to_string(), { let mut _m = ::serde_json::Map::new(); _m.insert("minSupportedVersion".to_string(), ::serde_json::json!(0)); _m.insert("maxSupportedVersion".to_string(), ::serde_json::json!(0)); ::serde_json::Value::Object(_m) });
+    obj.insert("kRaftVersionFeature".to_string(), { let mut m = ::serde_json::Map::new(); m.insert("minSupportedVersion".to_string(), ::serde_json::json!(0)); m.insert("maxSupportedVersion".to_string(), ::serde_json::json!(0)); ::serde_json::Value::Object(m) });
     ::serde_json::Value::Object(obj)
 }

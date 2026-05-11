@@ -144,7 +144,7 @@ impl<'de> Decode<'de> for MetadataRequestTopic {
 #[allow(unused_comparisons)]
 pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
-    obj.insert("topics".to_string(), (if version >= 1 { ::serde_json::Value::Null } else { ::serde_json::Value::Array(vec![]) }));
+    obj.insert("topics".to_string(), if version >= 1 { ::serde_json::Value::Null } else { ::serde_json::Value::Array(vec![]) });
     if version >= 4 {
         obj.insert("allowAutoTopicCreation".to_string(), ::serde_json::Value::Bool(true));
     }

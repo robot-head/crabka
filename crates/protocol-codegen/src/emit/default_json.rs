@@ -108,14 +108,14 @@ fn json_value_expr_versioned(f: &FieldSpec) -> String {
     // - explicit null default
     // - nullable non-array fields with no default (None is the zero)
     // - nullable array fields with no default (None is the zero)
-    let rust_default_is_none = default_is_null
-        || (f.nullable_versions.is_some() && f.default.is_none());
+    let rust_default_is_none =
+        default_is_null || (f.nullable_versions.is_some() && f.default.is_none());
 
     if rust_default_is_none {
         if let Some(nv) = f.nullable_versions {
             // Check if nullable for ALL valid versions (trivial case: no branching needed).
-            let always_nullable = nv.min <= f.versions.min
-                && (nv.max == i16::MAX || nv.max >= f.versions.max);
+            let always_nullable =
+                nv.min <= f.versions.min && (nv.max == i16::MAX || nv.max >= f.versions.max);
             if always_nullable {
                 return "::serde_json::Value::Null".into();
             }
@@ -127,10 +127,9 @@ fn json_value_expr_versioned(f: &FieldSpec) -> String {
                 type_zero_expr(&f.field_type, f)
             };
             if let Some(cond) = version_cond(nv) {
-                return format!("(if {cond} {{ ::serde_json::Value::Null }} else {{ {zero} }})");
-            } else {
-                return "::serde_json::Value::Null".into();
+                return format!("if {cond} {{ ::serde_json::Value::Null }} else {{ {zero} }}");
             }
+            return "::serde_json::Value::Null".into();
         }
         // No nullable_versions but default_is_null — emit type zero.
         if is_array {
@@ -159,8 +158,9 @@ fn scalar_value_expr(field_type: &str, val: &serde_json::Value, f: &FieldSpec) -
         serde_json::Value::String(s) if is_numeric_type(base) => {
             // Convert hex string defaults (e.g. "0x7fffffff") to decimal.
             let trimmed = s.trim();
-            let decimal = if let Some(hex_str) =
-                trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X"))
+            let decimal = if let Some(hex_str) = trimmed
+                .strip_prefix("0x")
+                .or_else(|| trimmed.strip_prefix("0X"))
             {
                 match i64::from_str_radix(hex_str, 16) {
                     Ok(n) => n.to_string(),
@@ -208,9 +208,7 @@ fn type_zero_expr(field_type: &str, f: &FieldSpec) -> String {
             "::serde_json::json!(0)".into()
         }
         "float64" => "::serde_json::json!(0.0)".into(),
-        "string" | "bytes" | "records" => {
-            "::serde_json::Value::String(String::new())".into()
-        }
+        "string" | "bytes" | "records" => "::serde_json::Value::String(String::new())".into(),
         "uuid" => {
             // Kafka's *DataJsonConverter encodes Uuid as base64 (22 chars),
             // not the standard hyphen UUID format. The zero UUID in base64 is
@@ -233,19 +231,20 @@ fn type_zero_expr(field_type: &str, f: &FieldSpec) -> String {
 /// for specific complex schemas, fix at the per-field level.
 fn emit_nested_struct_expr(fields: &[FieldSpec]) -> String {
     let mut s = String::new();
-    s.push_str("{ let mut _m = ::serde_json::Map::new(); ");
+    s.push_str("{ let mut m = ::serde_json::Map::new(); ");
     for f in fields {
         let key = json_field_name(&f.name);
         let val = json_value_expr_versioned(f);
-        write!(s, "_m.insert(\"{key}\".to_string(), {val}); ").unwrap();
+        write!(s, "m.insert(\"{key}\".to_string(), {val}); ").unwrap();
     }
-    s.push_str("::serde_json::Value::Object(_m) }");
+    s.push_str("::serde_json::Value::Object(m) }");
     s
 }
 
-/// Convert a Kafka schema field name (PascalCase like "TransactionalId") to
-/// the JSON key used by the JVM's *DataJsonConverter (camelCase like
-/// "transactionalId" — lowercase the first character).
+/// Convert a Kafka schema field name (`PascalCase` like `TransactionalId`) to
+/// the JSON key used by the JVM's `*DataJsonConverter` (`camelCase` like
+/// `transactionalId` — lowercase the first character).
+#[must_use]
 pub fn json_field_name(name: &str) -> String {
     let mut chars = name.chars();
     match chars.next() {

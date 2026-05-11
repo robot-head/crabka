@@ -1,9 +1,9 @@
 //! Emit a Rust source file that provides:
-//!   - `CASES: &[Case]` — a static table of (message, api_key, version, kind) cases
+//!   - `CASES: &[Case]` — a static table of `(message, api_key, version, kind)` cases
 //!   - `default_json_for(name)` — JSON the oracle should accept for default fixture
-//!   - `encode_default(name, version)` — Rust-encoded bytes via Default::default()
+//!   - `encode_default(name, version)` — Rust-encoded bytes via `Default::default()`
 //!
-//! Consumed by `crates/protocol/tests/differential_all.rs` via include!.
+//! Consumed by `crates/protocol/tests/differential_all.rs` via `include!`.
 
 use std::fmt::Write;
 
@@ -11,7 +11,7 @@ use crate::ir::{MessageSpec, MessageType};
 use crate::name_conv;
 
 /// Maximum version we will ever iterate to. Schemas with open-ended
-/// `validVersions` (e.g. "0+") would produce i16::MAX iterations, which is
+/// `validVersions` (e.g. `0+`) would produce `i16::MAX` iterations, which is
 /// wrong. In practice all active Kafka 4.2 schemas have bounded ranges, but
 /// cap defensively to avoid catastrophic output.
 const MAX_VERSION_CAP: i16 = 127;
@@ -25,7 +25,14 @@ pub fn emit(specs: &[MessageSpec], schemas_version: &str) -> String {
     )
     .unwrap();
     writeln!(out).unwrap();
+    emit_preamble(&mut out);
+    emit_cases_table(&mut out, specs);
+    emit_encode_default(&mut out, specs);
+    emit_default_json_for(&mut out, specs);
+    out
+}
 
+fn emit_preamble(out: &mut String) {
     // Imports needed inside the include! context.
     writeln!(out, "use bytes::BytesMut;").unwrap();
     writeln!(out, "#[allow(unused_imports)]").unwrap();
@@ -48,8 +55,9 @@ pub fn emit(specs: &[MessageSpec], schemas_version: &str) -> String {
     )
     .unwrap();
     writeln!(out).unwrap();
+}
 
-    // CASES static array.
+fn emit_cases_table(out: &mut String, specs: &[MessageSpec]) {
     writeln!(out, "pub const CASES: &[Case] = &[").unwrap();
     for s in specs {
         if s.valid_versions.is_empty() {
@@ -78,8 +86,11 @@ pub fn emit(specs: &[MessageSpec], schemas_version: &str) -> String {
     }
     writeln!(out, "];").unwrap();
     writeln!(out).unwrap();
+}
 
-    // encode_default dispatch: constructs the Rust default, encodes it, returns bytes.
+fn emit_encode_default(out: &mut String, specs: &[MessageSpec]) {
+    writeln!(out, "#[must_use]").unwrap();
+    writeln!(out, "#[allow(clippy::too_many_lines)]").unwrap();
     writeln!(
         out,
         "pub fn encode_default(name: &str, version: i16) -> Vec<u8> {{"
@@ -115,11 +126,16 @@ pub fn emit(specs: &[MessageSpec], schemas_version: &str) -> String {
     writeln!(out, "    }}").unwrap();
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
+}
 
-    // default_json_for dispatch: returns the per-message, per-version default JSON.
-    // Note: default_json(version) is a module-level free function — call as
-    // `module::default_json(version)`. The function only includes fields valid
-    // for the requested version so the JVM converter doesn't reject unknown fields.
+/// Emit `default_json_for` dispatch.
+///
+/// `default_json(version)` is a module-level free function — call as
+/// `module::default_json(version)`. The function only includes fields valid
+/// for the requested version so the JVM converter doesn't reject unknown fields.
+fn emit_default_json_for(out: &mut String, specs: &[MessageSpec]) {
+    writeln!(out, "#[must_use]").unwrap();
+    writeln!(out, "#[allow(clippy::too_many_lines)]").unwrap();
     writeln!(
         out,
         "pub fn default_json_for(name: &str, version: i16) -> ::serde_json::Value {{"
@@ -149,6 +165,4 @@ pub fn emit(specs: &[MessageSpec], schemas_version: &str) -> String {
     .unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out, "}}").unwrap();
-
-    out
 }
