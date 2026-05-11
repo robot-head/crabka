@@ -31,3 +31,4 @@ serde_json = { workspace = true }
 testcontainers = { workspace = true }
 testcontainers-modules = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
+futures-util = { workspace = true }

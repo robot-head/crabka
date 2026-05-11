@@ -33,11 +33,7 @@ pub fn emit_protocol_request(spec: &MessageSpec) -> Option<String> {
 
     let mut out = String::new();
     writeln!(out).unwrap();
-    writeln!(
-        out,
-        "impl crate::ProtocolRequest for {type_name} {{"
-    )
-    .unwrap();
+    writeln!(out, "impl crate::ProtocolRequest for {type_name} {{").unwrap();
     writeln!(out, "    const API_KEY: i16 = API_KEY;").unwrap();
     writeln!(out, "    const MIN_VERSION: i16 = MIN_VERSION;").unwrap();
     writeln!(out, "    const MAX_VERSION: i16 = MAX_VERSION;").unwrap();
