@@ -1,16 +1,12 @@
 //! Single-broker `Connection`: TCP socket + reader/writer tasks +
 //! correlation-ID multiplexing.
 
-// Fields on `ConnectionInner` and `DispatchItem` are used in Tasks 9 and 10.
-// `Ordering` and `ProtocolRequest` are needed in Task 10's `send` method.
-#![allow(dead_code, unused_imports)]
-
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::Duration;
 
-use bytes::Bytes;
+use bytes::{BufMut, Bytes, BytesMut};
 use dashmap::DashMap;
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
@@ -22,6 +18,13 @@ use crate::request::ProtocolRequest;
 use crate::version::ApiVersionTable;
 
 type Pending = Arc<DashMap<i32, oneshot::Sender<Result<Bytes, ClientError>>>>;
+
+/// Kafka API key for `ApiVersionsRequest` / `ApiVersionsResponse`.
+///
+/// Used to apply the response-header quirk: `ApiVersionsResponse` always
+/// uses `ResponseHeader v0` (no tagged-fields byte) even when the request
+/// version is flexible (v3+).
+const API_VERSIONS_KEY: i16 = 18;
 
 /// Connect-time + per-request configuration knobs.
 #[derive(Debug, Clone)]
@@ -105,6 +108,83 @@ impl Connection {
         Ok(conn)
     }
 
+    /// Send a typed request and await the typed response.
+    ///
+    /// The version is negotiated from the broker-advertised table populated
+    /// during `connect`. The request and response headers are encoded and
+    /// decoded automatically.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ClientError::IncompatibleVersion` if there is no mutually
+    /// supported version, `ClientError::Disconnected` if the I/O loop has
+    /// exited, or `ClientError::Timeout` if no response arrives in time.
+    pub async fn send<R: ProtocolRequest>(&self, req: R) -> Result<R::Response, ClientError> {
+        // 1. Negotiate version.
+        let version = self.inner.versions.negotiate::<R>()?;
+
+        // 2. Allocate correlation ID.
+        let corr_id = self.inner.next_corr_id.fetch_add(1, Ordering::Relaxed);
+
+        // 3. Build request header + encoded body into one frame.
+        let flexible = version >= R::FLEXIBLE_MIN;
+        let mut frame = build_request_header(
+            R::API_KEY,
+            version,
+            corr_id,
+            &self.inner.options.client_id,
+            flexible,
+        );
+        req.encode(&mut frame, version)?;
+
+        // 4. Register the oneshot before dispatching (avoids a race).
+        let (tx, rx) = oneshot::channel::<Result<Bytes, ClientError>>();
+        self.inner.pending.insert(corr_id, tx);
+
+        // 5. Dispatch to writer.
+        self.inner
+            .writer_tx
+            .send(DispatchItem {
+                bytes: frame.freeze(),
+            })
+            .await
+            .map_err(|_| ClientError::Disconnected)?;
+
+        // 6. Await response with timeout.
+        let body_bytes = match tokio::time::timeout(self.inner.options.request_timeout, rx).await {
+            Ok(Ok(Ok(b))) => b,
+            Ok(Ok(Err(e))) => return Err(e),
+            Ok(Err(_recv_closed)) => return Err(ClientError::Disconnected),
+            Err(_timeout) => {
+                // Evict the pending entry so the reader won't try to fulfil it.
+                self.inner.pending.remove(&corr_id);
+                return Err(ClientError::Timeout(self.inner.options.request_timeout));
+            }
+        };
+
+        // 7. Decode the response.
+        //
+        // The reader has already stripped the 4-byte correlation_id prefix.
+        // What remains is: [ResponseHeader fields after corr_id] + [response body].
+        //
+        // ResponseHeader version rules:
+        //   - ApiVersionsResponse (api_key=18): always ResponseHeader v0, which
+        //     has NO fields after the correlation_id. This is a long-standing
+        //     Kafka asymmetry — even flexible ApiVersions responses use v0 header.
+        //   - All other flexible messages (version >= FLEXIBLE_MIN): ResponseHeader
+        //     v1 adds 1 byte for the tagged-fields count (0x00 when empty).
+        //   - Non-flexible messages: ResponseHeader v0 (no bytes after corr_id).
+        let mut cursor: &[u8] = &body_bytes;
+        let uses_flexible_resp_header = flexible && R::API_KEY != API_VERSIONS_KEY;
+        if uses_flexible_resp_header && !cursor.is_empty() {
+            // Consume the tagged-fields byte (always 0x00 in practice).
+            cursor = &cursor[1..];
+        }
+
+        let resp = <R::Response as crabka_protocol::Decode>::decode(&mut cursor, version)?;
+        Ok(resp)
+    }
+
     /// Negotiated API versions known to this connection.
     #[must_use]
     pub fn versions(&self) -> &ApiVersionTable {
@@ -169,9 +249,89 @@ fn spawn_io_tasks(
     (combined, noop)
 }
 
-async fn fetch_api_versions(_conn: &Connection) -> Result<ApiVersionTable, ClientError> {
-    // Task 10 will add await points; for now yield once so the function is
-    // validly async without the `unused_async` lint firing.
-    tokio::task::yield_now().await;
-    unimplemented!("Task 10: bootstrap api-versions fetch")
+/// Build an encoded `RequestHeader` into a `BytesMut`.
+///
+/// - `flexible = false` → `RequestHeader v1`: `client_id` as `NULLABLE_STRING` (i16 length).
+/// - `flexible = true`  → `RequestHeader v2`: `client_id` as `COMPACT_NULLABLE_STRING`
+///   (UVARINT length = `len + 1`) followed by an empty tagged-fields byte.
+fn build_request_header(
+    api_key: i16,
+    version: i16,
+    corr_id: i32,
+    client_id: &str,
+    flexible: bool,
+) -> BytesMut {
+    let mut buf = BytesMut::with_capacity(32);
+    buf.put_i16(api_key);
+    buf.put_i16(version);
+    buf.put_i32(corr_id);
+    if flexible {
+        // COMPACT_NULLABLE_STRING: length = byte_len + 1 as UVARINT.
+        let bytes = client_id.as_bytes();
+        let n = u32::try_from(bytes.len() + 1).expect("client_id fits in u32");
+        crate::transport::put_uvarint(&mut buf, n);
+        buf.put_slice(bytes);
+        buf.put_u8(0); // empty tagged fields
+    } else {
+        let n = i16::try_from(client_id.len()).expect("client_id fits in i16");
+        buf.put_i16(n);
+        buf.put_slice(client_id.as_bytes());
+    }
+    buf
+}
+
+/// Send an `ApiVersionsRequest` at version 0 and return the negotiated table.
+///
+/// This is the bootstrap step inside `connect`: no version table exists yet,
+/// so we cannot use `Connection::send`. Version 0 is guaranteed to be
+/// supported by every broker.
+async fn fetch_api_versions(conn: &Connection) -> Result<ApiVersionTable, ClientError> {
+    use crabka_protocol::Encode;
+    use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
+    use crabka_protocol::owned::api_versions_response::ApiVersionsResponse;
+
+    let req = ApiVersionsRequest::default();
+    let corr_id = conn.inner.next_corr_id.fetch_add(1, Ordering::Relaxed);
+
+    // v0 is non-flexible; ResponseHeader is also v0 (just corr_id, already stripped).
+    let mut frame = build_request_header(
+        ApiVersionsRequest::API_KEY,
+        0,
+        corr_id,
+        &conn.inner.options.client_id,
+        false,
+    );
+    req.encode(&mut frame, 0)?;
+
+    let (tx, rx) = oneshot::channel::<Result<Bytes, ClientError>>();
+    conn.inner.pending.insert(corr_id, tx);
+    conn.inner
+        .writer_tx
+        .send(DispatchItem {
+            bytes: frame.freeze(),
+        })
+        .await
+        .map_err(|_| ClientError::Disconnected)?;
+
+    let body_bytes = tokio::time::timeout(conn.inner.options.connect_timeout, rx)
+        .await
+        .map_err(|_| ClientError::Timeout(conn.inner.options.connect_timeout))?
+        .map_err(|_| ClientError::Disconnected)??;
+
+    // ResponseHeader v0: only correlation_id (already stripped by the reader).
+    // No tagged-fields byte — this holds for all ApiVersionsResponse versions,
+    // including flexible ones (the Kafka asymmetry documented in `send`).
+    let mut cursor: &[u8] = &body_bytes;
+    let resp = <ApiVersionsResponse as crabka_protocol::Decode>::decode(&mut cursor, 0)?;
+    if resp.error_code != 0 {
+        return Err(ClientError::Server {
+            error_code: resp.error_code,
+        });
+    }
+
+    let entries = resp
+        .api_keys
+        .iter()
+        .map(|k| (k.api_key, k.min_version, k.max_version));
+    Ok(ApiVersionTable::from_entries(entries))
 }
