@@ -320,7 +320,7 @@ impl std::fmt::Debug for RecordBatch<'_> {
     }
 }
 
-impl<'a> Clone for RecordBatch<'a> {
+impl Clone for RecordBatch<'_> {
     /// Shallow clone: both `header` and `body` share the same underlying
     /// data as `self`.  For a `Borrowed` body this is a reference copy;
     /// for an `Owned` body, `Bytes::clone` is a cheap reference-count bump.

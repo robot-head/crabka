@@ -8,10 +8,7 @@ fn arb_bytes(max: usize) -> impl Strategy<Value = Bytes> {
 }
 
 fn arb_header() -> impl Strategy<Value = RecordHeader> {
-    (
-        "[a-z0-9_-]{1,32}",
-        proptest::option::of(arb_bytes(256)),
-    )
+    ("[a-z0-9_-]{1,32}", proptest::option::of(arb_bytes(256)))
         .prop_map(|(key, value)| RecordHeader { key, value })
 }
 
@@ -77,8 +74,8 @@ macro_rules! proptest_codec {
     };
 }
 
-proptest_codec!(none,   CompressionType::None);
-proptest_codec!(gzip,   CompressionType::Gzip);
+proptest_codec!(none, CompressionType::None);
+proptest_codec!(gzip, CompressionType::Gzip);
 proptest_codec!(snappy, CompressionType::Snappy);
-proptest_codec!(lz4,    CompressionType::Lz4);
-proptest_codec!(zstd,   CompressionType::Zstd);
+proptest_codec!(lz4, CompressionType::Lz4);
+proptest_codec!(zstd, CompressionType::Zstd);

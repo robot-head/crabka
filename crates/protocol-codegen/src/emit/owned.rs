@@ -222,9 +222,7 @@ fn uses_string(types: &[String]) -> bool {
 }
 
 fn uses_bytes(types: &[String]) -> bool {
-    types
-        .iter()
-        .any(|t| t.as_str() == "bytes")
+    types.iter().any(|t| t.as_str() == "bytes")
 }
 
 fn uses_nullable_bytes_recursive(fields: &[FieldSpec]) -> bool {
@@ -398,13 +396,21 @@ fn emit_imports(out: &mut String, spec: &MessageSpec) {
             // Note: compact_bytes_len_from_size is used via fully-qualified path in generated code.
             let mut items: Vec<&str> = Vec::new();
             if use_non_nullable_records {
-                items.extend(["get_bytes_owned", "get_compact_bytes_owned", "put_bytes", "put_compact_bytes"]);
+                items.extend([
+                    "get_bytes_owned",
+                    "get_compact_bytes_owned",
+                    "put_bytes",
+                    "put_compact_bytes",
+                ]);
             }
             if use_nullable_records {
                 items.extend([
-                    "get_compact_nullable_bytes_owned", "get_nullable_bytes_owned",
-                    "put_compact_bytes", "put_compact_nullable_bytes",
-                    "put_bytes", "put_nullable_bytes",
+                    "get_compact_nullable_bytes_owned",
+                    "get_nullable_bytes_owned",
+                    "put_compact_bytes",
+                    "put_compact_nullable_bytes",
+                    "put_bytes",
+                    "put_nullable_bytes",
                 ]);
             }
             items.sort_unstable();

@@ -89,14 +89,20 @@ mod tests {
             owned_type("uuid", false, None),
             "crate::primitives::uuid::Uuid"
         );
-        assert_eq!(owned_type("records", false, None), "crate::records::RecordBatch");
+        assert_eq!(
+            owned_type("records", false, None),
+            "crate::records::RecordBatch"
+        );
     }
 
     #[test]
     fn primitives_borrowed() {
         assert_eq!(borrowed_type("string", false, None), "&'a str");
         assert_eq!(borrowed_type("bytes", true, None), "Option<&'a [u8]>");
-        assert_eq!(borrowed_type("records", false, None), "crate::records::RecordBatchBorrowed<'a>");
+        assert_eq!(
+            borrowed_type("records", false, None),
+            "crate::records::RecordBatchBorrowed<'a>"
+        );
     }
 
     #[test]

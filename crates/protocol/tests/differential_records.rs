@@ -5,7 +5,7 @@ use bytes::BytesMut;
 use crabka_compression::CompressionType;
 use crabka_protocol::records::{Record, RecordBatch, TimestampType};
 use proptest::prelude::*;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 fn record_to_json(r: &Record) -> Value {
     let mut headers = Vec::new();
@@ -81,7 +81,7 @@ fn arb_batch(codec: CompressionType) -> impl Strategy<Value = RecordBatch> {
                 .into_iter()
                 .enumerate()
                 .map(|(i, (key, value))| Record {
-                    offset_delta: i as i32,     // 0, 1, 2, ... — strictly increasing
+                    offset_delta: i as i32, // 0, 1, 2, ... — strictly increasing
                     timestamp_delta: ts_delta * i as i64,
                     key,
                     value,

@@ -280,9 +280,7 @@ fn uses_string(types: &[String]) -> bool {
 }
 
 fn uses_bytes(types: &[String]) -> bool {
-    types
-        .iter()
-        .any(|t| t.as_str() == "bytes")
+    types.iter().any(|t| t.as_str() == "bytes")
 }
 
 fn uses_nullable_string_recursive(fields: &[FieldSpec]) -> bool {
@@ -508,8 +506,16 @@ use crate::primitives::string_bytes_borrowed::{{
             get_borrowed_items.extend(["get_bytes_borrowed", "get_compact_bytes_borrowed"]);
         }
         if use_nullable_records {
-            put_items.extend(["put_bytes", "put_compact_bytes", "put_compact_nullable_bytes", "put_nullable_bytes"]);
-            get_borrowed_items.extend(["get_compact_nullable_bytes_borrowed", "get_nullable_bytes_borrowed"]);
+            put_items.extend([
+                "put_bytes",
+                "put_compact_bytes",
+                "put_compact_nullable_bytes",
+                "put_nullable_bytes",
+            ]);
+            get_borrowed_items.extend([
+                "get_compact_nullable_bytes_borrowed",
+                "get_nullable_bytes_borrowed",
+            ]);
         }
         put_items.sort_unstable();
         put_items.dedup();
@@ -865,7 +871,9 @@ fn to_owned_field_expr(
         ("bytes", false) => format!("Bytes::copy_from_slice({expr})"),
         ("bytes", true) => format!("({expr}).map(Bytes::copy_from_slice)"),
         ("records", false) => format!("({expr}).to_owned().expect(\"records to_owned\")"),
-        ("records", true) => format!("({expr}).as_ref().map(|rb| rb.to_owned().expect(\"records to_owned\"))"),
+        ("records", true) => {
+            format!("({expr}).as_ref().map(|rb| rb.to_owned().expect(\"records to_owned\"))")
+        }
         _ => {
             // Copy types (int*, bool, float64, uuid) — owned is the same; just copy
             format!("({expr})")
