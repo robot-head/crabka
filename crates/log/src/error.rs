@@ -41,7 +41,10 @@ mod tests {
 
     #[test]
     fn display_partial_batch() {
-        let e = LogError::PartialBatch { segment: 0, file_offset: 1024 };
+        let e = LogError::PartialBatch {
+            segment: 0,
+            file_offset: 1024,
+        };
         assert!(e.to_string().contains("offset 1024"));
         assert!(e.to_string().contains("segment 0"));
     }

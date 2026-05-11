@@ -5,6 +5,8 @@
 
 #![doc(html_root_url = "https://docs.rs/crabka-log/0.0.0")]
 
+mod config;
 mod error;
 
+pub use config::LogConfig;
 pub use error::LogError;
