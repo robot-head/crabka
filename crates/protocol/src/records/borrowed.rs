@@ -306,6 +306,46 @@ impl RecordBatch<'_> {
     }
 }
 
+// ── Debug / Clone / PartialEq / Eq ────────────────────────────────────────────
+//
+// RecordBatch<'a> holds a header reference and a body slice/bytes, so we can't
+// #[derive] these. We provide hand-rolled impls that delegate to the owned type.
+
+impl std::fmt::Debug for RecordBatch<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.to_owned() {
+            Ok(o) => o.fmt(f),
+            Err(e) => write!(f, "RecordBatch(<decode error: {e}>)"),
+        }
+    }
+}
+
+impl<'a> Clone for RecordBatch<'a> {
+    /// Shallow clone: both `header` and `body` share the same underlying
+    /// data as `self`.  For a `Borrowed` body this is a reference copy;
+    /// for an `Owned` body, `Bytes::clone` is a cheap reference-count bump.
+    fn clone(&self) -> Self {
+        RecordBatch {
+            header: self.header,
+            body: match &self.body {
+                RecordBody::Borrowed(s) => RecordBody::Borrowed(s),
+                RecordBody::Owned(b) => RecordBody::Owned(b.clone()),
+            },
+        }
+    }
+}
+
+impl PartialEq for RecordBatch<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self.to_owned(), other.to_owned()) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for RecordBatch<'_> {}
+
 // ── Encode trait impl ─────────────────────────────────────────────────────────
 
 impl crate::Encode for RecordBatch<'_> {

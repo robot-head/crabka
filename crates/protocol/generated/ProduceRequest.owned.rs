@@ -9,7 +9,7 @@ use crate::primitives::string_bytes::{
     put_compact_nullable_string, put_compact_string, put_nullable_string, put_string,
     string_len,
 };
-use crate::primitives::string_bytes::{compact_nullable_bytes_len, get_compact_nullable_bytes_owned, get_nullable_bytes_owned, nullable_bytes_len, put_compact_nullable_bytes, put_nullable_bytes};
+use crate::primitives::string_bytes::{get_compact_nullable_bytes_owned, get_nullable_bytes_owned, put_bytes, put_compact_bytes, put_compact_nullable_bytes, put_nullable_bytes};
 use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
 
@@ -134,7 +134,7 @@ impl<'de> Decode<'de> for TopicProduceData {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PartitionProduceData {
     pub index: i32,
-    pub records: Option<::bytes::Bytes>,
+    pub records: Option<crate::records::RecordBatch>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 
@@ -142,7 +142,7 @@ impl Encode for PartitionProduceData {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 9;
         if version >= 0 { put_i32(buf, self.index) }
-        if version >= 0 { if flex { put_compact_nullable_bytes(buf, self.records.as_deref()) } else { put_nullable_bytes(buf, self.records.as_deref()) } }
+        if version >= 0 { match &self.records { None => if flex { put_compact_nullable_bytes(buf, None) } else { put_nullable_bytes(buf, None) }, Some(__rb) => { let mut __rb_buf = bytes::BytesMut::new(); <crate::records::RecordBatch as crate::Encode>::encode(__rb, &mut __rb_buf, version)?; if flex { put_compact_bytes(buf, &__rb_buf) } else { put_bytes(buf, &__rb_buf) } } } }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -153,7 +153,7 @@ impl Encode for PartitionProduceData {
         let flex = version >= 9;
         let mut n: usize = 0;
         if version >= 0 { n += 4; }
-        if version >= 0 { n += if flex { compact_nullable_bytes_len(self.records.as_deref()) } else { nullable_bytes_len(self.records.as_deref()) }; }
+        if version >= 0 { n += match &self.records { None => if flex { crate::primitives::varint::uvarint_len(0) } else { 4 }, Some(__rb) => { let __rb_len = <crate::records::RecordBatch as crate::Encode>::encoded_len(__rb, version); if flex { crate::primitives::string_bytes::compact_bytes_len_from_size(__rb_len) } else { 4 + __rb_len } } }; }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -167,7 +167,7 @@ impl<'de> Decode<'de> for PartitionProduceData {
         let flex = version >= 9;
         let mut out = Self::default();
         if version >= 0 { out.index = get_i32(buf)?; }
-        if version >= 0 { out.records = if flex { get_compact_nullable_bytes_owned(buf)? } else { get_nullable_bytes_owned(buf)? }; }
+        if version >= 0 { out.records = { let __rb_opt = if flex { get_compact_nullable_bytes_owned(buf)? } else { get_nullable_bytes_owned(buf)? }; match __rb_opt { None => None, Some(__rb_bytes) => { let mut __rb_cur: &[u8] = &__rb_bytes; Some(<crate::records::RecordBatch as crate::Decode>::decode(&mut __rb_cur, version)?) } } }; }
         if flex {
             out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
                 Ok(false)

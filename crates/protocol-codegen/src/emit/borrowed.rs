@@ -186,7 +186,7 @@ fn is_struct_type(t: &str) -> bool {
 fn needs_lifetime(fields: &[crate::ir::FieldSpec]) -> bool {
     fields.iter().any(|f| {
         let base = base_type(&f.field_type);
-        matches!(base, "string" | "bytes" | "records")
+        matches!(base, "string" | "bytes" | "records")  // records borrows via RecordBatchBorrowed<'a>
             || (is_struct_type(base) && !f.fields.is_empty() && needs_lifetime(&f.fields))
     })
 }
@@ -282,7 +282,7 @@ fn uses_string(types: &[String]) -> bool {
 fn uses_bytes(types: &[String]) -> bool {
     types
         .iter()
-        .any(|t| matches!(t.as_str(), "bytes" | "records"))
+        .any(|t| t.as_str() == "bytes")
 }
 
 fn uses_nullable_string_recursive(fields: &[FieldSpec]) -> bool {
@@ -296,7 +296,7 @@ fn uses_nullable_string_recursive(fields: &[FieldSpec]) -> bool {
 fn uses_nullable_bytes_recursive(fields: &[FieldSpec]) -> bool {
     fields.iter().any(|f| {
         let base = base_type(&f.field_type);
-        let here = matches!(base, "bytes" | "records") && f.nullable_versions.is_some();
+        let here = base == "bytes" && f.nullable_versions.is_some();
         here || uses_nullable_bytes_recursive(&f.fields)
     })
 }
@@ -304,8 +304,24 @@ fn uses_nullable_bytes_recursive(fields: &[FieldSpec]) -> bool {
 fn uses_non_nullable_bytes_recursive(fields: &[FieldSpec]) -> bool {
     fields.iter().any(|f| {
         let base = base_type(&f.field_type);
-        let here = matches!(base, "bytes" | "records") && f.nullable_versions.is_none();
+        let here = base == "bytes" && f.nullable_versions.is_none();
         here || uses_non_nullable_bytes_recursive(&f.fields)
+    })
+}
+
+fn uses_nullable_records_recursive(fields: &[FieldSpec]) -> bool {
+    fields.iter().any(|f| {
+        let base = base_type(&f.field_type);
+        let here = base == "records" && f.nullable_versions.is_some();
+        here || uses_nullable_records_recursive(&f.fields)
+    })
+}
+
+fn uses_non_nullable_records_recursive(fields: &[FieldSpec]) -> bool {
+    fields.iter().any(|f| {
+        let base = base_type(&f.field_type);
+        let here = base == "records" && f.nullable_versions.is_none();
+        here || uses_non_nullable_records_recursive(&f.fields)
     })
 }
 
@@ -373,7 +389,11 @@ fn emit_imports(out: &mut String, spec: &MessageSpec) {
     let use_nullable_bytes = uses_nullable_bytes_recursive(&spec.fields);
     let use_non_nullable_bytes = uses_non_nullable_bytes_recursive(&spec.fields);
 
-    // `Bytes` is needed for to_owned() on bytes/records fields
+    let use_nullable_records = uses_nullable_records_recursive(&spec.fields);
+    let use_non_nullable_records = uses_non_nullable_records_recursive(&spec.fields);
+    let use_records = use_nullable_records || use_non_nullable_records;
+    // `Bytes` is needed for to_owned() on bytes fields.
+    // Records fields use `bytes::BytesMut::new()` inline (fully qualified), so no extra import.
     if use_bytes {
         writeln!(out, "\nuse bytes::{{Bytes, BufMut}};").unwrap();
     } else {
@@ -476,6 +496,41 @@ use crate::primitives::string_bytes_borrowed::{{
             get_borrowed_items.join(", "),
         )
         .unwrap();
+    }
+
+    // Records fields: import the byte-primitive helpers used in the generated wrapper code.
+    // Note: compact_bytes_len_from_size is used via fully-qualified path in generated code.
+    if use_records {
+        let mut put_items: Vec<&str> = Vec::new();
+        let mut get_borrowed_items: Vec<&str> = Vec::new();
+        if use_non_nullable_records {
+            put_items.extend(["put_bytes", "put_compact_bytes"]);
+            get_borrowed_items.extend(["get_bytes_borrowed", "get_compact_bytes_borrowed"]);
+        }
+        if use_nullable_records {
+            put_items.extend(["put_bytes", "put_compact_bytes", "put_compact_nullable_bytes", "put_nullable_bytes"]);
+            get_borrowed_items.extend(["get_compact_nullable_bytes_borrowed", "get_nullable_bytes_borrowed"]);
+        }
+        put_items.sort_unstable();
+        put_items.dedup();
+        get_borrowed_items.sort_unstable();
+        get_borrowed_items.dedup();
+        if !get_borrowed_items.is_empty() {
+            writeln!(
+                out,
+                "use crate::primitives::string_bytes::{{{}}};\nuse crate::primitives::string_bytes_borrowed::{{{}}};",
+                put_items.join(", "),
+                get_borrowed_items.join(", "),
+            )
+            .unwrap();
+        } else {
+            writeln!(
+                out,
+                "use crate::primitives::string_bytes::{{{}}};",
+                put_items.join(", "),
+            )
+            .unwrap();
+        }
     }
 
     if flex && tagged {
@@ -675,7 +730,8 @@ fn scalar_borrowed_default(base_type: &str, val: &serde_json::Value) -> String {
 fn borrowed_zero(base: &str) -> String {
     match base {
         "string" => "\"\"".into(),
-        "bytes" | "records" => "&[]".into(),
+        "bytes" => "&[]".into(),
+        "records" => "Default::default()".into(),
         "bool" => "false".into(),
         "int8" => "0i8".into(),
         "int16" => "0i16".into(),
@@ -770,13 +826,21 @@ fn to_owned_field_expr(
             "string" => {
                 return format!("({expr}).iter().map(|s| s.to_string()).collect()");
             }
-            "bytes" | "records" if nullable => {
+            "bytes" if nullable => {
                 return format!(
                     "({expr}).as_ref().map(|v| v.iter().map(|b| Bytes::copy_from_slice(b)).collect())"
                 );
             }
-            "bytes" | "records" => {
+            "bytes" => {
                 return format!("({expr}).iter().map(|b| Bytes::copy_from_slice(b)).collect()");
+            }
+            "records" if nullable => {
+                return format!(
+                    "({expr}).as_ref().map(|v| v.iter().map(|rb| rb.to_owned()).collect())"
+                );
+            }
+            "records" => {
+                return format!("({expr}).iter().map(|rb| rb.to_owned()).collect()");
             }
             _ => {
                 // Copy types (int*, bool, float64, uuid) — owned Vec<T> is the same
@@ -798,8 +862,10 @@ fn to_owned_field_expr(
     match (schema_type, nullable) {
         ("string", false) => format!("({expr}).to_string()"),
         ("string", true) => format!("({expr}).map(|s| s.to_string())"),
-        ("bytes" | "records", false) => format!("Bytes::copy_from_slice({expr})"),
-        ("bytes" | "records", true) => format!("({expr}).map(Bytes::copy_from_slice)"),
+        ("bytes", false) => format!("Bytes::copy_from_slice({expr})"),
+        ("bytes", true) => format!("({expr}).map(Bytes::copy_from_slice)"),
+        ("records", false) => format!("({expr}).to_owned().expect(\"records to_owned\")"),
+        ("records", true) => format!("({expr}).as_ref().map(|rb| rb.to_owned().expect(\"records to_owned\"))"),
         _ => {
             // Copy types (int*, bool, float64, uuid) — owned is the same; just copy
             format!("({expr})")
@@ -1573,11 +1639,28 @@ fn encode_call(
         ("string", true) => format!(
             "if flex {{ put_compact_nullable_string(buf, {expr}) }} else {{ put_nullable_string(buf, {expr}) }}"
         ),
-        ("bytes" | "records", false) => format!(
+        ("bytes", false) => format!(
             "if flex {{ put_compact_bytes(buf, {expr}) }} else {{ put_bytes(buf, {expr}) }}"
         ),
-        ("bytes" | "records", true) => format!(
+        ("bytes", true) => format!(
             "if flex {{ put_compact_nullable_bytes(buf, {expr}) }} else {{ put_nullable_bytes(buf, {expr}) }}"
+        ),
+        ("records", false) => format!(
+            "{{ \
+                let mut __rb_buf = bytes::BytesMut::new(); \
+                <crate::records::RecordBatchBorrowed as crate::Encode>::encode(&{expr}, &mut __rb_buf, version)?; \
+                if flex {{ put_compact_bytes(buf, &__rb_buf) }} else {{ put_bytes(buf, &__rb_buf) }} \
+            }}"
+        ),
+        ("records", true) => format!(
+            "match &{expr} {{ \
+                None => if flex {{ put_compact_nullable_bytes(buf, None) }} else {{ put_nullable_bytes(buf, None) }}, \
+                Some(__rb) => {{ \
+                    let mut __rb_buf = bytes::BytesMut::new(); \
+                    <crate::records::RecordBatchBorrowed as crate::Encode>::encode(__rb, &mut __rb_buf, version)?; \
+                    if flex {{ put_compact_bytes(buf, &__rb_buf) }} else {{ put_bytes(buf, &__rb_buf) }} \
+                }} \
+            }}"
         ),
         (t, _) => format!("compile_error!(\"unhandled type in encode_call (borrowed): {t}\")"),
     }
@@ -1646,15 +1729,28 @@ fn encoded_len_expr(
         ("string", true) => format!(
             "if flex {{ compact_nullable_string_len({expr}) }} else {{ nullable_string_len({expr}) }}"
         ),
-        ("bytes" | "records", false) => format!(
+        ("bytes", false) => format!(
             "if flex {{ crate::primitives::varint::uvarint_len(u32::try_from(({expr}).len() + 1).unwrap()) + ({expr}).len() }} \
              else {{ 4 + ({expr}).len() }}"
         ),
-        ("bytes" | "records", true) => format!(
+        ("bytes", true) => format!(
             "match {expr} {{ \
              None => if flex {{ 1 }} else {{ 4 }}, \
              Some(b) => if flex {{ crate::primitives::varint::uvarint_len(u32::try_from(b.len() + 1).unwrap()) + b.len() }} \
              else {{ 4 + b.len() }} }}"
+        ),
+        ("records", false) => format!(
+            "{{ let __rb_len = <crate::records::RecordBatchBorrowed as crate::Encode>::encoded_len(&({expr}), version); \
+               if flex {{ crate::primitives::string_bytes::compact_bytes_len_from_size(__rb_len) }} \
+               else {{ 4 + __rb_len }} }}"
+        ),
+        ("records", true) => format!(
+            "match &{expr} {{ \
+                None => if flex {{ crate::primitives::varint::uvarint_len(0) }} else {{ 4 }}, \
+                Some(__rb) => {{ let __rb_len = <crate::records::RecordBatchBorrowed as crate::Encode>::encoded_len(__rb, version); \
+                    if flex {{ crate::primitives::string_bytes::compact_bytes_len_from_size(__rb_len) }} \
+                    else {{ 4 + __rb_len }} }} \
+            }}"
         ),
         (t, _) => format!("compile_error!(\"unhandled type in encoded_len_expr (borrowed): {t}\")"),
     }
@@ -1718,12 +1814,27 @@ fn decode_borrow_call(
         ("string", true) => {
             "if flex { get_compact_nullable_string_borrowed(buf)? } else { get_nullable_string_borrowed(buf)? }".into()
         }
-        ("bytes" | "records", false) => {
+        ("bytes", false) => {
             "if flex { get_compact_bytes_borrowed(buf)? } else { get_bytes_borrowed(buf)? }".into()
         }
-        ("bytes" | "records", true) => {
+        ("bytes", true) => {
             "if flex { get_compact_nullable_bytes_borrowed(buf)? } else { get_nullable_bytes_borrowed(buf)? }".into()
         }
+        ("records", false) => "{ \
+            let __rb_slice = if flex { get_compact_bytes_borrowed(buf)? } else { get_bytes_borrowed(buf)? }; \
+            let mut __rb_cur = __rb_slice; \
+            <crate::records::RecordBatchBorrowed as crate::DecodeBorrow>::decode_borrow(&mut __rb_cur, version)? \
+        }".into(),
+        ("records", true) => "{ \
+            let __rb_opt = if flex { get_compact_nullable_bytes_borrowed(buf)? } else { get_nullable_bytes_borrowed(buf)? }; \
+            match __rb_opt { \
+                None => None, \
+                Some(__rb_slice) => { \
+                    let mut __rb_cur = __rb_slice; \
+                    Some(<crate::records::RecordBatchBorrowed as crate::DecodeBorrow>::decode_borrow(&mut __rb_cur, version)?) \
+                } \
+            } \
+        }".into(),
         (t, _) => format!("compile_error!(\"unhandled type in decode_borrow_call: {t}\")"),
     }
 }
