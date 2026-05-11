@@ -30,7 +30,9 @@ impl CompressionType {
 
     /// Encode this codec into the lowest three bits of an attribute byte.
     #[must_use]
-    pub fn as_attribute_bits(self) -> u8 { self as u8 }
+    pub fn as_attribute_bits(self) -> u8 {
+        self as u8
+    }
 }
 
 #[cfg(test)]
@@ -46,7 +48,10 @@ mod tests {
             CompressionType::Lz4,
             CompressionType::Zstd,
         ] {
-            assert_eq!(CompressionType::from_attribute_bits(ct.as_attribute_bits()), Some(ct));
+            assert_eq!(
+                CompressionType::from_attribute_bits(ct.as_attribute_bits()),
+                Some(ct)
+            );
         }
     }
 
