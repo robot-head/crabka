@@ -33,6 +33,7 @@ fn make_api_versions_response() -> ApiVersionsResponse {
         api_keys,
         throttle_time_ms: 0,
         unknown_tagged_fields: UnknownTaggedFields::default(),
+        ..Default::default()
     }
 }
 
