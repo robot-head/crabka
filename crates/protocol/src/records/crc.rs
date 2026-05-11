@@ -3,9 +3,14 @@
 
 /// CRC-32C of the input.
 #[must_use]
-#[allow(dead_code)] // used in later phases (owned/borrowed decode)
 pub(crate) fn crc32c(data: &[u8]) -> u32 {
     crc32c::crc32c(data)
+}
+
+/// Continue a CRC-32C computation over additional `data`, starting from `seed`.
+#[must_use]
+pub(crate) fn crc32c_append(seed: u32, data: &[u8]) -> u32 {
+    crc32c::crc32c_append(seed, data)
 }
 
 #[cfg(test)]

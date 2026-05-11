@@ -1,9 +1,11 @@
 //! Owned `RecordBatch`, `Record`, and `RecordHeader` types.
 
-use bytes::{Buf, BufMut, Bytes};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
+use zerocopy::FromBytes as _;
 
 use crate::primitives::varint::{get_varint, get_varlong, put_varint, put_varlong, varint_len, varlong_len};
-use crate::records::header::Attributes;
+use crate::records::crc::{crc32c, crc32c_append};
+use crate::records::header::{Attributes, HEADER_LEN};
 use crate::records::RecordsError;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -369,5 +371,288 @@ mod record_tests {
             }
             other => panic!("expected RecordParse, got {other:?}"),
         }
+    }
+}
+
+impl RecordBatch {
+    /// Decode a complete v2 record batch from `buf`. Reads from the start of
+    /// the header.
+    pub fn decode<B: Buf>(buf: &mut B) -> Result<Self, RecordsError> {
+        // Need the full header before doing anything.
+        if buf.remaining() < HEADER_LEN {
+            return Err(RecordsError::HeaderTooShort {
+                needed: HEADER_LEN - buf.remaining(),
+            });
+        }
+        // Copy out the header to a stack buffer so we can use zerocopy.
+        let mut hdr_bytes = [0u8; HEADER_LEN];
+        buf.copy_to_slice(&mut hdr_bytes);
+
+        let hdr = crate::records::header::RecordBatchHeader::ref_from_bytes(&hdr_bytes[..])
+            .map_err(|_| RecordsError::ZerocopyFailure)?;
+
+        if hdr.magic != 2 {
+            return Err(RecordsError::UnsupportedMagic { found: hdr.magic });
+        }
+
+        // batch_length: bytes after itself.
+        // Wire: base_offset(8) + batch_length(4) + [partition_leader_epoch(4) +
+        //        magic(1) + crc(4) + attributes(2) + last_offset_delta(4) +
+        //        base_timestamp(8) + max_timestamp(8) + producer_id(8) +
+        //        producer_epoch(2) + base_sequence(4) + records_count(4)] = 49
+        // So body_len = batch_length - 49.
+        const HEADER_TAIL_LEN: i32 = 49;
+        let body_len = i32::checked_sub(hdr.batch_length.get(), HEADER_TAIL_LEN)
+            .and_then(|n| usize::try_from(n).ok())
+            .ok_or_else(|| {
+                RecordsError::RecordParse("negative or oversized batch_length".into())
+            })?;
+
+        if buf.remaining() < body_len {
+            return Err(RecordsError::BodyTooShort {
+                needed: body_len - buf.remaining(),
+            });
+        }
+
+        // Read the (possibly compressed) body.
+        let mut body = vec![0u8; body_len];
+        buf.copy_to_slice(&mut body);
+
+        // CRC is computed over: header bytes 21..HEADER_LEN (attributes through
+        // records_count), then the body bytes.
+        let expected_crc = hdr.crc.get();
+        let mut computed = crc32c(&hdr_bytes[21..HEADER_LEN]);
+        computed = crc32c_append(computed, &body);
+        if computed != expected_crc {
+            return Err(RecordsError::CrcMismatch {
+                expected: expected_crc,
+                computed,
+            });
+        }
+
+        let attributes = Attributes(hdr.attributes.get());
+        let codec = attributes.compression();
+
+        // Decompress body if needed.
+        let body_for_records: Bytes = if codec == crabka_compression::CompressionType::None {
+            Bytes::from(body)
+        } else {
+            crabka_compression::decompress(codec, &body)?
+        };
+
+        // Parse records.
+        let count = hdr.records_count.get();
+        if count < 0 {
+            return Err(RecordsError::RecordParse(format!(
+                "negative records_count {count}"
+            )));
+        }
+        let mut body_cur: &[u8] = &body_for_records[..];
+        let mut records = Vec::with_capacity(count as usize);
+        for i in 0..count {
+            records.push(Record::decode(&mut body_cur).map_err(|e| {
+                RecordsError::RecordParse(format!("record[{i}]: {e}"))
+            })?);
+        }
+        if !body_cur.is_empty() {
+            return Err(RecordsError::RecordParse(format!(
+                "trailing bytes after records (left={})",
+                body_cur.len()
+            )));
+        }
+
+        Ok(Self {
+            base_offset: hdr.base_offset.get(),
+            partition_leader_epoch: hdr.partition_leader_epoch.get(),
+            attributes,
+            last_offset_delta: hdr.last_offset_delta.get(),
+            base_timestamp: hdr.base_timestamp.get(),
+            max_timestamp: hdr.max_timestamp.get(),
+            producer_id: hdr.producer_id.get(),
+            producer_epoch: hdr.producer_epoch.get(),
+            base_sequence: hdr.base_sequence.get(),
+            records,
+        })
+    }
+
+    /// Encode this batch into `buf`.
+    pub fn encode<B: BufMut>(&self, buf: &mut B) -> Result<(), RecordsError> {
+        // 1. Encode records into a temporary buffer.
+        let mut raw_body = BytesMut::with_capacity(
+            self.records.iter().map(Record::encoded_len).sum(),
+        );
+        for r in &self.records {
+            r.encode(&mut raw_body)?;
+        }
+        let raw_body = raw_body.freeze();
+
+        // 2. Compress if needed.
+        let codec = self.attributes.compression();
+        let body: Bytes = if codec == crabka_compression::CompressionType::None {
+            raw_body
+        } else {
+            crabka_compression::compress(codec, &raw_body)?
+        };
+
+        // 3. batch_length = HEADER_TAIL_LEN + body_len
+        const HEADER_TAIL_LEN: i32 = 49;
+        let batch_length = HEADER_TAIL_LEN
+            + i32::try_from(body.len()).map_err(|_| {
+                RecordsError::RecordParse("body length exceeds i32".into())
+            })?;
+
+        // 4. Build the CRC-covered header portion (attributes through records_count = 40 bytes).
+        let mut covered = BytesMut::with_capacity(40);
+        covered.put_i16(self.attributes.0);
+        covered.put_i32(self.last_offset_delta);
+        covered.put_i64(self.base_timestamp);
+        covered.put_i64(self.max_timestamp);
+        covered.put_i64(self.producer_id);
+        covered.put_i16(self.producer_epoch);
+        covered.put_i32(self.base_sequence);
+        covered.put_i32(
+            i32::try_from(self.records.len()).map_err(|_| {
+                RecordsError::RecordParse("records_count exceeds i32".into())
+            })?,
+        );
+        let covered_head = covered.freeze();
+
+        // 5. Compute CRC over covered_head then body.
+        let mut crc = crc32c(&covered_head);
+        crc = crc32c_append(crc, &body);
+
+        // 6. Emit the full header then body.
+        buf.put_i64(self.base_offset);
+        buf.put_i32(batch_length);
+        buf.put_i32(self.partition_leader_epoch);
+        buf.put_i8(2); // magic v2
+        buf.put_u32(crc);
+        buf.put_slice(&covered_head);
+        buf.put_slice(&body);
+        Ok(())
+    }
+
+    /// Predicted total bytes that `encode` will write (uncompressed; for
+    /// compressed batches the actual size will differ).
+    pub fn encoded_len(&self) -> usize {
+        let body: usize = self.records.iter().map(Record::encoded_len).sum();
+        HEADER_LEN + body
+    }
+}
+
+#[cfg(test)]
+mod batch_tests {
+    use super::*;
+    use crabka_compression::CompressionType;
+
+    fn fixture_empty_batch() -> RecordBatch {
+        RecordBatch::default()
+    }
+
+    fn fixture_single_record_batch() -> RecordBatch {
+        RecordBatch {
+            records: vec![Record {
+                key: Some(Bytes::from_static(b"k1")),
+                value: Some(Bytes::from_static(b"v1")),
+                ..Default::default()
+            }],
+            ..RecordBatch::default()
+        }
+    }
+
+    fn fixture_multi_record_batch() -> RecordBatch {
+        RecordBatch {
+            base_offset: 42,
+            partition_leader_epoch: 5,
+            last_offset_delta: 2,
+            base_timestamp: 1_700_000_000,
+            max_timestamp: 1_700_000_500,
+            producer_id: 100,
+            producer_epoch: 3,
+            base_sequence: 7,
+            records: vec![
+                Record {
+                    offset_delta: 0,
+                    timestamp_delta: 0,
+                    key: Some(Bytes::from_static(b"a")),
+                    value: Some(Bytes::from_static(b"1")),
+                    ..Default::default()
+                },
+                Record {
+                    offset_delta: 1,
+                    timestamp_delta: 100,
+                    key: Some(Bytes::from_static(b"b")),
+                    value: Some(Bytes::from_static(b"2")),
+                    ..Default::default()
+                },
+                Record {
+                    offset_delta: 2,
+                    timestamp_delta: 500,
+                    key: None,
+                    value: Some(Bytes::from_static(b"3")),
+                    headers: vec![RecordHeader {
+                        key: "h".to_string(),
+                        value: Some(Bytes::from_static(b"hv")),
+                    }],
+                    ..Default::default()
+                },
+            ],
+            ..RecordBatch::default()
+        }
+    }
+
+    macro_rules! roundtrip_uncompressed {
+        ($name:ident, $fixture:ident) => {
+            #[test]
+            fn $name() {
+                let mut b = $fixture();
+                b.attributes = b.attributes.with_compression(CompressionType::None);
+
+                let mut buf = BytesMut::new();
+                b.encode(&mut buf).unwrap();
+                assert_eq!(buf.len(), b.encoded_len());
+
+                let mut cur: &[u8] = &buf[..];
+                let decoded = RecordBatch::decode(&mut cur).unwrap();
+                assert_eq!(decoded, b);
+                assert!(cur.is_empty());
+            }
+        };
+    }
+
+    roundtrip_uncompressed!(uncompressed_empty, fixture_empty_batch);
+    roundtrip_uncompressed!(uncompressed_single, fixture_single_record_batch);
+    roundtrip_uncompressed!(uncompressed_multi, fixture_multi_record_batch);
+
+    #[test]
+    fn rejects_pre_v2_magic() {
+        let mut buf = BytesMut::new();
+        buf.put_i64(0); // base_offset
+        buf.put_i32(49); // batch_length
+        buf.put_i32(0); // partition_leader_epoch
+        buf.put_i8(1); // magic = 1 (v1, deprecated)
+        buf.put_u32(0); // crc (irrelevant; we reject on magic first)
+        for _ in 21..HEADER_LEN {
+            buf.put_u8(0);
+        }
+        let mut cur: &[u8] = &buf[..];
+        assert!(matches!(
+            RecordBatch::decode(&mut cur),
+            Err(RecordsError::UnsupportedMagic { found: 1 })
+        ));
+    }
+
+    #[test]
+    fn rejects_bad_crc() {
+        let b = fixture_single_record_batch();
+        let mut buf = BytesMut::new();
+        b.encode(&mut buf).unwrap();
+        // Corrupt the CRC bytes (offsets 17..21).
+        buf[17] ^= 0xFF;
+        let mut cur: &[u8] = &buf[..];
+        assert!(matches!(
+            RecordBatch::decode(&mut cur),
+            Err(RecordsError::CrcMismatch { .. })
+        ));
     }
 }
