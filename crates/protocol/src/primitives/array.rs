@@ -6,9 +6,9 @@
 
 use bytes::{Buf, BufMut};
 
+use crate::ProtocolError;
 use crate::primitives::fixed::{get_i32, put_i32};
 use crate::primitives::varint::{get_uvarint, put_uvarint, uvarint_len};
-use crate::ProtocolError;
 
 /// Write a non-nullable array-length prefix.
 pub fn put_array_len<B: BufMut>(buf: &mut B, n: usize, flexible: bool) {
