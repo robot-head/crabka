@@ -34,7 +34,10 @@ mod tests {
 
     #[test]
     fn display_unsupported_api() {
-        let e = BrokerError::UnsupportedApi { api_key: 7, version: 9 };
+        let e = BrokerError::UnsupportedApi {
+            api_key: 7,
+            version: 9,
+        };
         assert!(e.to_string().contains("api_key=7"));
         assert!(e.to_string().contains("version=9"));
     }

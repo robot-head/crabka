@@ -48,7 +48,10 @@ mod tests {
 
     #[test]
     fn maps_unsupported_to_35() {
-        let e = BrokerError::UnsupportedApi { api_key: 0, version: 99 };
+        let e = BrokerError::UnsupportedApi {
+            api_key: 0,
+            version: 99,
+        };
         assert_eq!(from_broker_error(&e), UNSUPPORTED_VERSION);
     }
 
