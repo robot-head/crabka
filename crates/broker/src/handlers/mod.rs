@@ -47,15 +47,17 @@ pub(crate) mod api_versions;
 pub(crate) mod create_topics;
 pub(crate) mod delete_topics;
 pub(crate) mod metadata;
+pub(crate) mod produce;
 
 /// Build the dispatch table. Phase E registers concrete handlers; for
 /// now this is an empty table so the dispatch loop can still look up.
 #[must_use]
 pub(crate) fn build_table() -> HandlerTable {
     let mut t = HandlerTable::new();
+    t.register(0, produce::handle);
+    t.register(3, metadata::handle);
     t.register(18, api_versions::handle);
     t.register(19, create_topics::handle);
     t.register(20, delete_topics::handle);
-    t.register(3, metadata::handle);
     t
 }

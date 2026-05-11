@@ -4,6 +4,70 @@ use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
 use crabka_protocol::owned::delete_topics_request::{DeleteTopicState, DeleteTopicsRequest};
 use crabka_protocol::owned::metadata_request::MetadataRequest;
+use crabka_protocol::owned::produce_request::{
+    PartitionProduceData, ProduceRequest, TopicProduceData,
+};
+use crabka_protocol::records::{Record, RecordBatch};
+
+/// Build a single `RecordBatch` carrying `n` empty records with sequential
+/// offset deltas.
+fn one_record_batch(n: i32) -> RecordBatch {
+    let mut b = RecordBatch {
+        last_offset_delta: (n - 1).max(0),
+        ..RecordBatch::default()
+    };
+    for i in 0..n {
+        b.records.push(Record {
+            offset_delta: i,
+            ..Default::default()
+        });
+    }
+    b
+}
+
+async fn create_topic(p: &support::InProcess, name: &str, num_partitions: i32) {
+    let resp = p
+        .client
+        .send(CreateTopicsRequest {
+            topics: vec![CreatableTopic {
+                name: name.into(),
+                num_partitions,
+                replication_factor: 1,
+                ..Default::default()
+            }],
+            timeout_ms: 5_000,
+            ..Default::default()
+        })
+        .await
+        .expect("CreateTopics");
+    assert_eq!(resp.topics[0].error_code, 0, "CreateTopics for {name}");
+}
+
+/// Resolve a topic's UUID via a Metadata round trip. Produce v ≥ 13 sends
+/// only `topic_id` on the wire, so tests need this to drive the broker
+/// with a non-zero UUID.
+async fn topic_id_for(
+    p: &support::InProcess,
+    name: &str,
+) -> crabka_protocol::primitives::uuid::Uuid {
+    use crabka_protocol::owned::metadata_request::MetadataRequestTopic;
+    let resp = p
+        .client
+        .send(MetadataRequest {
+            topics: Some(vec![MetadataRequestTopic {
+                name: Some(name.into()),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        })
+        .await
+        .expect("Metadata for topic_id");
+    resp.topics
+        .iter()
+        .find(|t| t.name.as_deref() == Some(name))
+        .map(|t| t.topic_id)
+        .unwrap_or_default()
+}
 
 #[tokio::test]
 async fn api_versions_round_trip() {
@@ -129,5 +193,78 @@ async fn metadata_returns_this_broker_and_listed_topics() {
         assert_eq!(part.partition_index, i32::try_from(i).unwrap());
         assert_eq!(part.leader_id, 1);
     }
+    p.broker.shutdown().await;
+}
+
+#[tokio::test]
+async fn produce_assigns_base_offsets() {
+    let p = support::start().await;
+    create_topic(&p, "prod", 1).await;
+    let topic_id = topic_id_for(&p, "prod").await;
+
+    // First produce: 3 records → base 0.
+    let req = ProduceRequest {
+        acks: 1,
+        timeout_ms: 5_000,
+        topic_data: vec![TopicProduceData {
+            name: "prod".into(),
+            topic_id,
+            partition_data: vec![PartitionProduceData {
+                index: 0,
+                records: Some(one_record_batch(3)),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let resp = p.client.send(req).await.expect("Produce 1");
+    assert_eq!(resp.responses.len(), 1);
+    assert_eq!(resp.responses[0].partition_responses.len(), 1);
+    assert_eq!(resp.responses[0].partition_responses[0].error_code, 0);
+    assert_eq!(resp.responses[0].partition_responses[0].base_offset, 0);
+
+    // Second produce: 2 records → base 3.
+    let req2 = ProduceRequest {
+        acks: 1,
+        timeout_ms: 5_000,
+        topic_data: vec![TopicProduceData {
+            name: "prod".into(),
+            topic_id,
+            partition_data: vec![PartitionProduceData {
+                index: 0,
+                records: Some(one_record_batch(2)),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let resp2 = p.client.send(req2).await.expect("Produce 2");
+    assert_eq!(resp2.responses[0].partition_responses[0].error_code, 0);
+    assert_eq!(resp2.responses[0].partition_responses[0].base_offset, 3);
+
+    p.broker.shutdown().await;
+}
+
+#[tokio::test]
+async fn produce_to_unknown_topic_returns_3() {
+    let p = support::start().await;
+    let req = ProduceRequest {
+        acks: 1,
+        timeout_ms: 5_000,
+        topic_data: vec![TopicProduceData {
+            name: "nope".into(),
+            partition_data: vec![PartitionProduceData {
+                index: 0,
+                records: Some(one_record_batch(1)),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let resp = p.client.send(req).await.expect("Produce unknown");
+    assert_eq!(resp.responses[0].partition_responses[0].error_code, 3);
     p.broker.shutdown().await;
 }

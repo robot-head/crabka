@@ -25,7 +25,9 @@ use crate::partition::{Partition, ProduceJob};
 pub struct Broker {
     pub(crate) config: BrokerConfig,
     pub(crate) metadata: Arc<RwLock<MetadataImage>>,
-    pub(crate) partitions: DashMap<(String, i32), Arc<Partition>>,
+    /// Wrapped in `Arc` so handlers cloning the field share the same
+    /// underlying map. `DashMap::clone` is a deep copy by default.
+    pub(crate) partitions: Arc<DashMap<(String, i32), Arc<Partition>>>,
     handlers: HandlerTable,
 }
 
@@ -69,7 +71,7 @@ impl Broker {
     /// return the handle.
     pub async fn start(config: BrokerConfig) -> Result<BrokerHandle, BrokerError> {
         let metadata = Arc::new(RwLock::new(MetadataImage::new()));
-        let partitions = DashMap::<(String, i32), Arc<Partition>>::new();
+        let partitions: Arc<DashMap<(String, i32), Arc<Partition>>> = Arc::new(DashMap::new());
 
         // 1. Scan + recover.
         for (topic, partition_id) in log_dir::scan(&config.log_dir)? {
@@ -83,7 +85,7 @@ impl Broker {
             let mut meta = metadata.write().expect("metadata poisoned");
             let mut by_topic: std::collections::BTreeMap<String, i32> =
                 std::collections::BTreeMap::default();
-            for entry in &partitions {
+            for entry in partitions.iter() {
                 let (topic, partition_id) = entry.key();
                 let cur = by_topic.entry(topic.clone()).or_insert(0);
                 if *partition_id + 1 > *cur {
