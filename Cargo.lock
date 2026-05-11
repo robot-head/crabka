@@ -368,6 +368,7 @@ dependencies = [
  "bytes",
  "crabka-protocol",
  "dashmap",
+ "futures-util",
  "hex",
  "proptest",
  "serde",
@@ -2270,6 +2271,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]

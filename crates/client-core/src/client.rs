@@ -41,6 +41,7 @@ impl Client {
     /// The broker must have been registered via [`refresh_metadata`] first.
     ///
     /// [`refresh_metadata`]: Client::refresh_metadata
+    #[must_use]
     pub fn broker(&self, broker_id: i32) -> BrokerHandle<'_> {
         BrokerHandle {
             pool: &self.pool,
@@ -70,9 +71,9 @@ impl Client {
     }
 
     /// Close the client and all pooled connections.
-    pub async fn close(self) {
+    pub fn close(self) {
         if let Some(pool) = Arc::into_inner(self.pool) {
-            pool.close_all().await;
+            pool.close_all();
         }
     }
 }
@@ -85,7 +86,7 @@ pub struct BrokerHandle<'a> {
     broker_id: i32,
 }
 
-impl<'a> BrokerHandle<'a> {
+impl BrokerHandle<'_> {
     /// Send a request to this specific broker.
     pub async fn send<R: ProtocolRequest>(&self, req: R) -> Result<R::Response, ClientError> {
         let conn = self.pool.get(self.broker_id).await?;

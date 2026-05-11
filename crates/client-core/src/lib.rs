@@ -25,7 +25,7 @@
 //! let resp = client.send(ApiVersionsRequest::default()).await?;
 //! println!("broker supports {} APIs", resp.api_keys.len());
 //!
-//! client.close().await;
+//! client.close();
 //! # Ok(())
 //! # }
 //! ```

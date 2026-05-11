@@ -299,6 +299,6 @@ async fn client_refresh_metadata_populates_pool() {
     // After refresh the pool knows broker 1 and 2's addresses. We can't
     // actually connect to those ports (the mock isn't listening there), but
     // the metadata response decoded correctly and has the right shape.
-    client.close().await;
+    client.close();
     mock.stop();
 }

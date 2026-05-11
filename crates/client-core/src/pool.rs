@@ -90,7 +90,7 @@ impl BrokerPool {
     }
 
     /// Close every open connection in the pool. Consumes the pool.
-    pub async fn close_all(self) {
+    pub fn close_all(self) {
         let conns: Vec<_> = self.by_id.iter().map(|e| e.value().clone()).collect();
         drop(self.by_id);
         // Drop each Arc; when the last reference goes away the background tasks
@@ -122,7 +122,13 @@ mod tests {
         ]);
         assert!(pool.by_addr.contains_key(&1));
         assert!(pool.by_addr.contains_key(&2));
-        assert_eq!(*pool.by_addr.get(&1).unwrap(), "127.0.0.1:9092".parse().unwrap());
-        assert_eq!(*pool.by_addr.get(&2).unwrap(), "127.0.0.1:9093".parse().unwrap());
+        assert_eq!(
+            *pool.by_addr.get(&1).unwrap(),
+            "127.0.0.1:9092".parse().unwrap()
+        );
+        assert_eq!(
+            *pool.by_addr.get(&2).unwrap(),
+            "127.0.0.1:9093".parse().unwrap()
+        );
     }
 }
