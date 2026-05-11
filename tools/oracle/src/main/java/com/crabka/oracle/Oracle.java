@@ -73,6 +73,22 @@ public final class Oracle {
             resp.put("ok", true);
             resp.put("hex", HexFormat.of().formatHex(result));
 
+        } else if (op.equals("header_encode")) {
+            String kind = req.get("kind").asText();
+            short version = (short) req.get("version").asInt();
+            JsonNode value = req.get("value");
+            byte[] bytes = headerEncode(kind, version, value);
+            resp.put("ok", true);
+            resp.put("hex", HexFormat.of().formatHex(bytes));
+
+        } else if (op.equals("header_decode")) {
+            String kind = req.get("kind").asText();
+            short version = (short) req.get("version").asInt();
+            byte[] bytes = HexFormat.of().parseHex(req.get("hex").asText());
+            JsonNode value = headerDecode(kind, version, bytes);
+            resp.put("ok", true);
+            resp.set("value", value);
+
         } else {
             // encode / decode ops need apiKey, version, isRequest
             int apiKey = req.get("apiKey").asInt();
@@ -128,6 +144,53 @@ public final class Oracle {
             }
         }
         return resp;
+    }
+
+    private static byte[] headerEncode(String kind, short version, JsonNode value) throws Exception {
+        org.apache.kafka.common.protocol.ObjectSerializationCache cache =
+            new org.apache.kafka.common.protocol.ObjectSerializationCache();
+        if (kind.equals("request")) {
+            org.apache.kafka.common.message.RequestHeaderData data =
+                org.apache.kafka.common.message.RequestHeaderDataJsonConverter
+                    .read(value, version);
+            int size = data.size(cache, version);
+            java.nio.ByteBuffer buf = java.nio.ByteBuffer.allocate(size);
+            data.write(new org.apache.kafka.common.protocol.ByteBufferAccessor(buf), cache, version);
+            buf.flip();
+            byte[] out = new byte[buf.remaining()];
+            buf.get(out);
+            return out;
+        } else if (kind.equals("response")) {
+            org.apache.kafka.common.message.ResponseHeaderData data =
+                org.apache.kafka.common.message.ResponseHeaderDataJsonConverter
+                    .read(value, version);
+            int size = data.size(cache, version);
+            java.nio.ByteBuffer buf = java.nio.ByteBuffer.allocate(size);
+            data.write(new org.apache.kafka.common.protocol.ByteBufferAccessor(buf), cache, version);
+            buf.flip();
+            byte[] out = new byte[buf.remaining()];
+            buf.get(out);
+            return out;
+        }
+        throw new IllegalArgumentException("unknown header kind: " + kind);
+    }
+
+    private static JsonNode headerDecode(String kind, short version, byte[] bytes) throws Exception {
+        java.nio.ByteBuffer buf = java.nio.ByteBuffer.wrap(bytes);
+        if (kind.equals("request")) {
+            org.apache.kafka.common.message.RequestHeaderData data =
+                new org.apache.kafka.common.message.RequestHeaderData();
+            data.read(new org.apache.kafka.common.protocol.ByteBufferAccessor(buf), version);
+            return org.apache.kafka.common.message.RequestHeaderDataJsonConverter
+                .write(data, version);
+        } else if (kind.equals("response")) {
+            org.apache.kafka.common.message.ResponseHeaderData data =
+                new org.apache.kafka.common.message.ResponseHeaderData();
+            data.read(new org.apache.kafka.common.protocol.ByteBufferAccessor(buf), version);
+            return org.apache.kafka.common.message.ResponseHeaderDataJsonConverter
+                .write(data, version);
+        }
+        throw new IllegalArgumentException("unknown header kind: " + kind);
     }
 
     private static ObjectNode encodeRecordBatch(JsonNode value) throws Exception {
