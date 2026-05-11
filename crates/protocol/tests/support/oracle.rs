@@ -107,6 +107,22 @@ impl Oracle {
         }));
         r["value"].clone()
     }
+
+    pub fn record_batch_encode(&mut self, value: &Value) -> Vec<u8> {
+        let r = self.call(&json!({
+            "op": "record_batch_encode",
+            "value": value,
+        }));
+        hex::decode(r["hex"].as_str().unwrap()).unwrap()
+    }
+
+    pub fn record_batch_decode(&mut self, bytes: &[u8]) -> Value {
+        let r = self.call(&json!({
+            "op": "record_batch_decode",
+            "hex": hex::encode(bytes),
+        }));
+        r["value"].clone()
+    }
 }
 
 impl Drop for Oracle {
