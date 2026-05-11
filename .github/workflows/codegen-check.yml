@@ -1,0 +1,19 @@
+name: codegen-check
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: ./tools/regenerate.sh
+      - name: Fail on drift
+        run: |
+          if ! git diff --quiet crates/protocol/generated; then
+            echo "::error::Generated files are out of sync. Run tools/regenerate.sh and commit."
+            git --no-pager diff crates/protocol/generated
+            exit 1
+          fi
