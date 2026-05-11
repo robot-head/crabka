@@ -6,9 +6,9 @@
 //! The handler receives `(api_key, version, correlation_id, request_body)` and
 //! returns `Option<Vec<u8>>`:
 //!
-//! - `Some(bytes)` — MockBroker prepends the correlation-id and sends the
+//! - `Some(bytes)` — `MockBroker` prepends the correlation-id and sends the
 //!   frame back to the client.
-//! - `None` — MockBroker silently drops the request. The client will
+//! - `None` — `MockBroker` silently drops the request. The client will
 //!   eventually hit its `request_timeout`.
 //!
 //! The correlation-id header is prepended automatically; the handler only
@@ -46,7 +46,7 @@ impl MockBroker {
     /// and returns `Some(body)` to send a response or `None` to stay silent
     /// (causing the client to time out on that request).
     ///
-    /// The MockBroker prepends the correlation-id to the returned body
+    /// The `MockBroker` prepends the correlation-id to the returned body
     /// automatically; the handler only supplies the response body bytes.
     pub async fn start<F>(handler: F) -> Self
     where
@@ -82,7 +82,7 @@ impl MockBroker {
     }
 
     /// Stop the broker, cancelling all connection tasks.
-    pub async fn stop(self) {
+    pub fn stop(self) {
         self.shutdown.cancel();
     }
 }

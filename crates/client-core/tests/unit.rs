@@ -6,14 +6,18 @@
 //!
 //! Run with: `cargo test -p crabka-client-core --features mock --test unit`
 
+// Doc-comment prose uses Kafka term names that clippy wants backtick-escaped.
+// Suppressing here keeps comments readable without cluttering them.
+#![allow(clippy::doc_markdown)]
+
 use std::time::Duration;
 
 use bytes::BytesMut;
 use crabka_client_core::{ClientError, Connection, ConnectionOptions, MockBroker};
+use crabka_protocol::Encode;
 use crabka_protocol::owned::api_versions_response::{ApiVersion, ApiVersionsResponse};
 use crabka_protocol::owned::metadata_request::MetadataRequest;
 use crabka_protocol::owned::metadata_response::MetadataResponse;
-use crabka_protocol::Encode;
 
 // Use the raw constants so we don't need `ProtocolRequest` in scope.
 use crabka_protocol::owned::api_versions_request;
@@ -64,8 +68,17 @@ fn api_versions_response_v0() -> Vec<u8> {
 /// the request version is flexible — but the tests here handle MetadataResponse
 /// which follows the normal rule.
 fn metadata_response_at(version: i16) -> Vec<u8> {
+    metadata_response_with_throttle(version, 0)
+}
+
+/// Encode a `MetadataResponse` at the given version with a custom
+/// `throttle_time_ms`, preceded by the correct `ResponseHeader` prefix.
+fn metadata_response_with_throttle(version: i16, throttle_time_ms: i32) -> Vec<u8> {
     use crabka_protocol::owned::metadata_response::FLEXIBLE_MIN;
-    let resp = MetadataResponse::default();
+    let resp = MetadataResponse {
+        throttle_time_ms,
+        ..Default::default()
+    };
     let mut buf = BytesMut::new();
     // Prepend ResponseHeader v1 tagged-fields byte for flexible versions.
     if version >= FLEXIBLE_MIN {
@@ -104,7 +117,7 @@ async fn connect_negotiates_api_versions() {
     );
 
     conn.close();
-    mock.stop().await;
+    mock.stop();
 }
 
 /// When the mock never responds to ApiVersions, `Connection::connect` returns
@@ -134,9 +147,9 @@ async fn timeout_when_handler_silent() {
         Err(ClientError::Timeout(_)) => { /* expected */ }
         Err(other) => panic!("expected Timeout, got: {other:?}"),
         Ok(_conn) => panic!("connect should have timed out but succeeded"),
-    };
+    }
 
-    mock.stop().await;
+    mock.stop();
 }
 
 /// A full round-trip: connect (ApiVersions handshake) then send a
@@ -166,5 +179,65 @@ async fn round_trip_metadata_request() {
     let _resp = conn.send(MetadataRequest::default()).await.unwrap();
 
     conn.close();
-    mock.stop().await;
+    mock.stop();
+}
+
+/// Three concurrent `send` calls on the same connection are all dispatched and
+/// routed back to the correct caller via correlation IDs.
+///
+/// The mock increments an atomic counter per Metadata request and stamps the
+/// `throttle_time_ms` field with the counter value. After `tokio::join!` all
+/// three futures, the three `throttle_time_ms` values should be 0, 1, 2 in
+/// some order.
+#[tokio::test]
+async fn concurrent_sends_get_correct_responses() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicI32, Ordering};
+
+    let counter = Arc::new(AtomicI32::new(0));
+    let counter_for_mock = Arc::clone(&counter);
+
+    let mock = MockBroker::start(move |api_key, version, _corr_id, _body| {
+        if api_key == api_versions_request::API_KEY {
+            return Some(api_versions_response_v0());
+        }
+        if api_key == metadata_request_mod::API_KEY {
+            let n = counter_for_mock.fetch_add(1, Ordering::Relaxed);
+            return Some(metadata_response_with_throttle(version, n));
+        }
+        None
+    })
+    .await;
+
+    let conn = Connection::connect(mock.addr, ConnectionOptions::default())
+        .await
+        .unwrap();
+
+    // Send three requests concurrently; the connection multiplexes them via
+    // correlation IDs and routes each response back to its caller.
+    let (r1, r2, r3) = tokio::join!(
+        conn.send(MetadataRequest::default()),
+        conn.send(MetadataRequest::default()),
+        conn.send(MetadataRequest::default()),
+    );
+
+    let r1 = r1.unwrap();
+    let r2 = r2.unwrap();
+    let r3 = r3.unwrap();
+
+    // All three requests received distinct responses stamped 0, 1, 2.
+    let mut seen = [
+        r1.throttle_time_ms,
+        r2.throttle_time_ms,
+        r3.throttle_time_ms,
+    ];
+    seen.sort_unstable();
+    assert_eq!(
+        seen,
+        [0, 1, 2],
+        "each concurrent send must get a distinct response"
+    );
+
+    conn.close();
+    mock.stop();
 }
