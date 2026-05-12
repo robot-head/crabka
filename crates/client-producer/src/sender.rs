@@ -177,10 +177,15 @@ async fn send_one(cfg: &SenderConfig, topic: &str, partition: i32, batch: InProg
     };
 
     // 6. Resolve the per-(topic, partition) entry in the response.
+    //    Produce v13+ omits the topic name on the wire and carries only
+    //    `topic_id`, so we match either field. With a single topic per
+    //    request, falling back to "first entry" is also safe — but
+    //    keeping the structural match is more honest about intent.
     let part_resp = resp
         .responses
         .iter()
-        .find(|t| t.name == topic)
+        .find(|t| t.name == topic || (topic_id != Uuid::ZERO && t.topic_id == topic_id))
+        .or_else(|| resp.responses.first())
         .and_then(|t| t.partition_responses.iter().find(|p| p.index == partition));
     let Some(part_resp) = part_resp else {
         fail_batch(batch.records, ProducerError::Closed);
