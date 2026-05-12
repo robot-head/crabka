@@ -66,7 +66,20 @@ impl CrabkaStateMachine {
     ) -> AppDataResponse {
         let current = self.image.borrow().clone();
         let mut next: MetadataImage = (*current).clone();
+        let mut rejected: Vec<String> = Vec::new();
         for rec in &data.records {
+            // `submit_change` already pre-validates each record against
+            // the local image, but with concurrent submitters in a
+            // 3-node cluster a follower can pass pre-validation and
+            // still race a leader's earlier apply for the same record.
+            // The deterministic per-leader apply order is the only
+            // authoritative checkpoint, so we re-validate here. Failures
+            // are accumulated into `rejected` rather than fatally
+            // aborted: openraft requires `apply` to be infallible.
+            if let Err(e) = next.validate(rec) {
+                rejected.push(e.to_string());
+                continue;
+            }
             next.apply(rec);
         }
         // Use `send_replace` so the new image is stored even when no
@@ -77,6 +90,7 @@ impl CrabkaStateMachine {
         *self.last_applied.lock().await = Some(log_id);
         AppDataResponse {
             applied_index: log_id.index,
+            rejected,
         }
     }
 }
@@ -115,6 +129,7 @@ impl RaftStateMachine<TypeConfig> for Arc<CrabkaStateMachine> {
                     *self.last_applied.lock().await = Some(entry.log_id);
                     AppDataResponse {
                         applied_index: entry.log_id.index,
+                        rejected: Vec::new(),
                     }
                 }
                 EntryPayload::Normal(data) => self.apply_entry(entry.log_id, data).await,
@@ -124,6 +139,7 @@ impl RaftStateMachine<TypeConfig> for Arc<CrabkaStateMachine> {
                         StoredMembership::new(Some(entry.log_id), m.clone());
                     AppDataResponse {
                         applied_index: entry.log_id.index,
+                        rejected: Vec::new(),
                     }
                 }
             };

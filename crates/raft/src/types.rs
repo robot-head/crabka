@@ -24,6 +24,13 @@ pub struct AppDataResponse {
     /// Filled in by the state machine on apply; carries the new log
     /// index so callers can correlate.
     pub applied_index: u64,
+    /// Records that failed `MetadataImage::validate` at apply-time and
+    /// were skipped. Carries the validation error message in order of
+    /// rejection. `submit_change` translates a non-empty list into
+    /// `RaftError::Metadata` so a concurrent `CreateTopics` race ends
+    /// with one winner + one `TopicExists` per loser, rather than
+    /// silently committing every duplicate.
+    pub rejected: Vec<String>,
 }
 
 openraft::declare_raft_types!(

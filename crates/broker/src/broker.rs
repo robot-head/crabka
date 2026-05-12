@@ -60,6 +60,20 @@ impl BrokerHandle {
         self.listen_addr
     }
 
+    /// Current Raft leader id as observed by this broker's controller.
+    /// Returns `None` before the first leader is elected. Trivial
+    /// passthrough to [`crabka_raft::ControllerHandle::watch_leader`].
+    ///
+    /// `async fn` even though the underlying `watch::Receiver::borrow` is
+    /// synchronous — the slice-7 test plan and broker public API expect
+    /// `controller_leader_id().await`, and keeping the signature async
+    /// preserves room for a future implementation that waits for the
+    /// first non-`None` value via `watch::Receiver::changed`.
+    #[allow(clippy::unused_async, clippy::used_underscore_binding)]
+    pub async fn controller_leader_id(&self) -> Option<crabka_raft::NodeId> {
+        *self._broker.controller.watch_leader().borrow()
+    }
+
     /// Cancel the listener + drain in-flight connections. Awaiting the
     /// returned future blocks until the listener task exits.
     pub async fn shutdown(mut self) {

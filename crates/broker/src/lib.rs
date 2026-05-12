@@ -66,4 +66,5 @@ mod producer_state;
 
 pub use broker::{Broker, BrokerHandle};
 pub use config::BrokerConfig;
+pub use crabka_raft::NodeId;
 pub use error::BrokerError;

@@ -10,6 +10,7 @@
 //! it.
 
 use std::collections::BTreeMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -41,6 +42,13 @@ pub struct ControllerHandle {
     shutdown: CancellationToken,
     listener_task: Mutex<Option<JoinHandle<()>>>,
     leader_pump_task: Mutex<Option<JoinHandle<()>>>,
+    /// Static voter map cloned from `ControllerConfig::voters`. Used by
+    /// `submit_change` to forward writes to the current leader when the
+    /// local node is a follower — the local openraft instance returns
+    /// `ForwardToLeader` and we dial the leader's controller listener
+    /// directly via the slice-7 `API_KEY_SUBMIT_CHANGE` RPC.
+    voters: Vec<(NodeId, SocketAddr)>,
+    client_id: String,
 }
 
 impl ControllerHandle {
@@ -85,11 +93,42 @@ impl ControllerHandle {
         let mut last_known_leader: Option<NodeId> = None;
         for attempt in 1u32..=3 {
             match self.raft.client_write(data.clone()).await {
-                Ok(_) => return Ok(()),
+                Ok(resp) => {
+                    // The leader's state machine re-validates each record
+                    // at apply time; the first rejection is the canonical
+                    // error for the caller. `MetadataError` doesn't
+                    // derive `serde`, so we carry the rendered string
+                    // through `AppDataResponse` and reconstruct here.
+                    // The "topic '<name>' already exists" prefix is the
+                    // only signal we need for slice 7's
+                    // `TopicExists`-vs-`InvalidRecord` discrimination.
+                    if let Some(msg) = resp.data.rejected.into_iter().next() {
+                        let err = if let Some(rest) = msg.strip_prefix("topic '")
+                            && let Some(name) = rest.strip_suffix("' already exists")
+                        {
+                            crabka_metadata::MetadataError::TopicExists(name.to_string())
+                        } else {
+                            crabka_metadata::MetadataError::InvalidRecord("validation failed")
+                        };
+                        return Err(RaftError::Metadata(err));
+                    }
+                    return Ok(());
+                }
                 Err(openraft::error::RaftError::APIError(
                     openraft::error::ClientWriteError::ForwardToLeader(f),
                 )) => {
                     last_known_leader = f.leader_id;
+                    // If openraft tells us who the leader is and it isn't
+                    // us, forward the change directly to the leader's
+                    // controller listener via the slice-7
+                    // `API_KEY_SUBMIT_CHANGE` RPC. Otherwise (transient
+                    // `leader_id: None` during election) fall through to
+                    // the retry loop.
+                    if let Some(leader) = last_known_leader
+                        && let Some(addr) = self.voter_addr(leader)
+                    {
+                        return self.forward_submit_to(leader, addr, &data.records).await;
+                    }
                     if attempt == 3 {
                         return Err(RaftError::NotLeader {
                             current_leader: last_known_leader,
@@ -104,6 +143,106 @@ impl ControllerHandle {
         Err(RaftError::NotLeader {
             current_leader: last_known_leader,
         })
+    }
+
+    fn voter_addr(&self, node_id: NodeId) -> Option<SocketAddr> {
+        self.voters
+            .iter()
+            .find_map(|(id, addr)| (*id == node_id).then_some(*addr))
+    }
+
+    /// Open a one-shot TCP connection to the leader's controller listener,
+    /// send a bincode-encoded `Vec<MetadataRecord>` as
+    /// `API_KEY_SUBMIT_CHANGE`, and translate the response back into a
+    /// `RaftError`.
+    ///
+    /// We deliberately do NOT reuse `crabka_client_core::Connection` here
+    /// because that path forces an `ApiVersions` handshake on connect,
+    /// and the controller listener treats `ApiVersions` as a bootstrap
+    /// no-op only — it doesn't propagate request/response framing the way
+    /// `Connection::send` expects for typed messages. The submit RPC is
+    /// rare enough (one round trip per follower-side `submit_change`)
+    /// that an ad-hoc TCP path is simpler than extending `Connection`.
+    async fn forward_submit_to(
+        &self,
+        leader: NodeId,
+        addr: SocketAddr,
+        records: &[crabka_metadata::MetadataRecord],
+    ) -> Result<(), RaftError> {
+        use bytes::{BufMut, BytesMut};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let body_bytes = bincode::serde::encode_to_vec(records, bincode::config::standard())
+            .map_err(crate::error::RaftError::from)?;
+        let payload = crate::wire::CrabkaSubmitChangeRequest {
+            records: bytes::Bytes::from(body_bytes),
+        };
+        let mut body = Vec::with_capacity(payload.records.len() + 4);
+        payload.encode_v0(&mut body)?;
+
+        // RequestHeader v2 (flexible).
+        let mut frame = BytesMut::with_capacity(32 + body.len());
+        frame.put_i16(crate::wire::API_KEY_SUBMIT_CHANGE);
+        frame.put_i16(0);
+        frame.put_i32(0);
+        let cid = i16::try_from(self.client_id.len()).unwrap_or(i16::MAX);
+        frame.put_i16(cid);
+        frame.put_slice(self.client_id.as_bytes());
+        frame.put_u8(0); // tagged_fields=0
+        frame.put_slice(&body);
+
+        let mut stream = tokio::net::TcpStream::connect(addr)
+            .await
+            .map_err(|e| RaftError::Network(crabka_client_core::ClientError::Io(e)))?;
+        let mut len_prefix = [0u8; 4];
+        len_prefix.copy_from_slice(&i32::try_from(frame.len()).unwrap_or(i32::MAX).to_be_bytes());
+        stream
+            .write_all(&len_prefix)
+            .await
+            .map_err(|e| RaftError::Network(crabka_client_core::ClientError::Io(e)))?;
+        stream
+            .write_all(&frame)
+            .await
+            .map_err(|e| RaftError::Network(crabka_client_core::ClientError::Io(e)))?;
+        stream
+            .flush()
+            .await
+            .map_err(|e| RaftError::Network(crabka_client_core::ClientError::Io(e)))?;
+
+        let mut resp_len_buf = [0u8; 4];
+        stream
+            .read_exact(&mut resp_len_buf)
+            .await
+            .map_err(|e| RaftError::Network(crabka_client_core::ClientError::Io(e)))?;
+        let resp_len = usize::try_from(i32::from_be_bytes(resp_len_buf).max(0)).unwrap_or(0);
+        let mut resp_buf = vec![0u8; resp_len];
+        stream
+            .read_exact(&mut resp_buf)
+            .await
+            .map_err(|e| RaftError::Network(crabka_client_core::ClientError::Io(e)))?;
+        // ResponseHeader v1: corr_id(4) + tagged_fields(1).
+        if resp_buf.len() < 5 {
+            return Err(RaftError::Openraft("truncated submit response".into()));
+        }
+        let mut cur: &[u8] = &resp_buf[5..];
+        let resp = crate::wire::CrabkaSubmitChangeResponse::decode_v0(&mut cur)?;
+        match resp.error_code {
+            0 => Ok(()),
+            // `error_code = 2` => leader rejected at apply-time. Slice 7
+            // collapses the typed `MetadataError` into a generic
+            // `TopicExists` here since the wire only carries an error
+            // code; the topic name is what the caller had in hand.
+            2 => Err(RaftError::Metadata(
+                crabka_metadata::MetadataError::TopicExists(String::new()),
+            )),
+            // `error_code = 1` (not leader) and `3` (other) collapse to
+            // `NotLeader` — the test of record (CreateTopics) maps that
+            // to `NOT_CONTROLLER`, which the client treats as retryable.
+            _ => Err(RaftError::NotLeader {
+                current_leader: (resp.leader_hint >= 0)
+                    .then(|| u64::try_from(resp.leader_hint).unwrap_or(leader)),
+            }),
+        }
     }
 
     /// Drain all background tasks and shut down the inner openraft node.
@@ -250,6 +389,8 @@ impl Controller {
             shutdown,
             listener_task: Mutex::new(Some(listener_task)),
             leader_pump_task: Mutex::new(Some(leader_pump_task)),
+            voters: config.voters.clone(),
+            client_id: config.client_id.clone(),
         })
     }
 }

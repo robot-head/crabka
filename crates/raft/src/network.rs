@@ -219,6 +219,7 @@ fn encode_append_entries(rpc: &AppendEntriesRequest<TypeConfig>) -> Result<Bytes
         entries.push(CrabkaLogEntry {
             log_index: i64::try_from(e.log_id.index).unwrap_or(i64::MAX),
             log_term: i64::try_from(e.log_id.leader_id.term).unwrap_or(i64::MAX),
+            log_node_id: i64::try_from(e.log_id.leader_id.node_id).unwrap_or(i64::MAX),
             payload_kind,
             payload: Bytes::from(payload),
         });
@@ -238,9 +239,18 @@ fn encode_append_entries(rpc: &AppendEntriesRequest<TypeConfig>) -> Result<Bytes
         prev_log_term: rpc
             .prev_log_id
             .map_or(-1, |l| i64::try_from(l.leader_id.term).unwrap_or(i64::MAX)),
+        prev_log_node_id: rpc.prev_log_id.map_or(-1, |l| {
+            i64::try_from(l.leader_id.node_id).unwrap_or(i64::MAX)
+        }),
         leader_commit: rpc
             .leader_commit
             .map_or(-1, |l| i64::try_from(l.index).unwrap_or(i64::MAX)),
+        leader_commit_term: rpc
+            .leader_commit
+            .map_or(-1, |l| i64::try_from(l.leader_id.term).unwrap_or(i64::MAX)),
+        leader_commit_node_id: rpc.leader_commit.map_or(-1, |l| {
+            i64::try_from(l.leader_id.node_id).unwrap_or(i64::MAX)
+        }),
         entries,
     };
     let mut out = Vec::with_capacity(64);
@@ -292,6 +302,9 @@ fn encode_vote(rpc: &VoteRequest<NodeId>) -> Result<Bytes, CrabkaRaftError> {
         last_log_term: rpc
             .last_log_id
             .map_or(-1, |l| i64::try_from(l.leader_id.term).unwrap_or(i64::MAX)),
+        last_log_node_id: rpc.last_log_id.map_or(-1, |l| {
+            i64::try_from(l.leader_id.node_id).unwrap_or(i64::MAX)
+        }),
     };
     let mut out = Vec::with_capacity(32);
     req.encode_v0(&mut out)?;
