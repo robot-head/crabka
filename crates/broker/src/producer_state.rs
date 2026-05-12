@@ -1,0 +1,181 @@
+//! Per-(topic, partition) producer-sequence tracking. Drives the
+//! idempotent-producer dedup / out-of-order / epoch-fence checks in
+//! `handlers::produce`.
+
+// Task 6 wires ProducerState into Broker; until then the items are
+// intentionally unused from the crate's perspective.
+#![allow(dead_code)]
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use dashmap::DashMap;
+use tokio::sync::Mutex;
+
+#[derive(Debug, Clone, Copy)]
+pub struct ProducerEntry {
+    pub epoch: i16,
+    pub last_sequence: i32,
+    pub last_offset: i64,
+    pub last_timestamp: i64,
+}
+
+#[derive(Debug, Default)]
+pub struct PartitionProducerState {
+    pub entries: HashMap<i64, ProducerEntry>,
+}
+
+/// Outcome of a dedup check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Decision {
+    /// Producer is fresh or the sequence is one past the last commit. Caller
+    /// should append, then call `commit` with the assigned base offset.
+    Append,
+    /// Previously-committed sequence range. Caller should respond with
+    /// `error_code = NONE` and `base_offset = last_offset`.
+    Duplicate { last_offset: i64 },
+    /// `base_sequence != last_sequence + 1`. Caller responds with
+    /// `OUT_OF_ORDER_SEQUENCE_NUMBER (45)`.
+    OutOfOrder,
+    /// `epoch < entry.epoch`. Caller responds with
+    /// `INVALID_PRODUCER_EPOCH (53)`.
+    Fenced,
+}
+
+#[derive(Debug, Default)]
+pub struct ProducerState {
+    #[allow(clippy::type_complexity)]
+    by_partition: Arc<DashMap<(String, i32), Arc<Mutex<PartitionProducerState>>>>,
+}
+
+impl ProducerState {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            by_partition: Arc::new(DashMap::new()),
+        }
+    }
+
+    /// Decide whether to append the incoming batch.
+    ///
+    /// `base_sequence` is the wire `base_sequence`; `last_offset_delta` is
+    /// the batch's `last_offset_delta` field. Together they imply the
+    /// batch's `last_sequence = base_sequence + last_offset_delta`.
+    pub async fn check(
+        &self,
+        topic: &str,
+        partition: i32,
+        producer_id: i64,
+        producer_epoch: i16,
+        base_sequence: i32,
+        last_offset_delta: i32,
+    ) -> Decision {
+        let handle = self.handle(topic, partition);
+        let s = handle.lock().await;
+        match s.entries.get(&producer_id) {
+            None => Decision::Append,
+            Some(entry) => {
+                if producer_epoch < entry.epoch {
+                    return Decision::Fenced;
+                }
+                if base_sequence <= entry.last_sequence {
+                    // Anywhere within (or before) the committed range counts
+                    // as duplicate. We echo the previously-committed offset.
+                    return Decision::Duplicate {
+                        last_offset: entry.last_offset,
+                    };
+                }
+                if base_sequence == entry.last_sequence + 1 {
+                    let _ = last_offset_delta; // used by caller to compute last_sequence
+                    Decision::Append
+                } else {
+                    Decision::OutOfOrder
+                }
+            }
+        }
+    }
+
+    /// Commit a successful append into the tracker.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn commit(
+        &self,
+        topic: &str,
+        partition: i32,
+        producer_id: i64,
+        producer_epoch: i16,
+        base_sequence: i32,
+        last_offset_delta: i32,
+        base_offset: i64,
+        last_timestamp: i64,
+    ) {
+        let handle = self.handle(topic, partition);
+        let mut s = handle.lock().await;
+        let last_sequence = base_sequence + last_offset_delta;
+        let last_offset = base_offset + i64::from(last_offset_delta);
+        s.entries.insert(
+            producer_id,
+            ProducerEntry {
+                epoch: producer_epoch,
+                last_sequence,
+                last_offset,
+                last_timestamp,
+            },
+        );
+    }
+
+    fn handle(&self, topic: &str, partition: i32) -> Arc<Mutex<PartitionProducerState>> {
+        self.by_partition
+            .entry((topic.to_string(), partition))
+            .or_insert_with(|| Arc::new(Mutex::new(PartitionProducerState::default())))
+            .value()
+            .clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn first_batch_appends() {
+        let s = ProducerState::new();
+        let d = s.check("t", 0, 1000, 0, 0, 4).await;
+        assert_eq!(d, Decision::Append);
+    }
+
+    #[tokio::test]
+    async fn next_sequence_appends() {
+        let s = ProducerState::new();
+        s.commit(
+            "t", 0, 1000, 0, 0, 4, /* base_offset */ 0, /* ts */ 1,
+        )
+        .await;
+        let d = s.check("t", 0, 1000, 0, 5, 2).await;
+        assert_eq!(d, Decision::Append);
+    }
+
+    #[tokio::test]
+    async fn duplicate_returns_cached_offset() {
+        let s = ProducerState::new();
+        s.commit("t", 0, 1000, 0, 0, 4, 0, 1).await;
+        let d = s.check("t", 0, 1000, 0, 0, 4).await;
+        assert_eq!(d, Decision::Duplicate { last_offset: 4 });
+    }
+
+    #[tokio::test]
+    async fn out_of_order_when_gap() {
+        let s = ProducerState::new();
+        s.commit("t", 0, 1000, 0, 0, 4, 0, 1).await;
+        // Last seq is 4; next valid base_seq is 5. Sending 10 → OutOfOrder.
+        let d = s.check("t", 0, 1000, 0, 10, 2).await;
+        assert_eq!(d, Decision::OutOfOrder);
+    }
+
+    #[tokio::test]
+    async fn lower_epoch_is_fenced() {
+        let s = ProducerState::new();
+        s.commit("t", 0, 1000, 5, 0, 4, 0, 1).await;
+        let d = s.check("t", 0, 1000, 4, 5, 2).await;
+        assert_eq!(d, Decision::Fenced);
+    }
+}
