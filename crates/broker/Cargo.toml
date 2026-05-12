@@ -33,5 +33,6 @@ futures-util = { workspace = true }
 
 [dev-dependencies]
 crabka-client-core = { version = "0.1", path = "../client-core" }
+crabka-client-producer = { version = "0.1", path = "../client-producer" }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }

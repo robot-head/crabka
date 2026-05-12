@@ -253,6 +253,79 @@ async fn kafka_topics_describe_smokes_metadata() {
 // single-threaded runtime would starve the broker's accept loop.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker"]
+async fn rust_producer_to_console_consumer() {
+    use crabka_client_producer::{Acks, Compression, Producer, ProducerRecord};
+
+    const TOPIC: &str = "crabka-rust-producer-itest";
+
+    let (broker, _dir) = start_host_broker().await;
+
+    // 1. Create the topic.
+    docker_run_kafka_tool(&[
+        "kafka-topics",
+        "--create",
+        "--if-not-exists",
+        "--topic",
+        TOPIC,
+        "--partitions",
+        "1",
+        "--replication-factor",
+        "1",
+        "--bootstrap-server",
+        BOOTSTRAP,
+    ]);
+
+    // 2. Build a Rust producer pointed at the host broker and produce 3 records.
+    let producer = Producer::builder()
+        .bootstrap(BOOTSTRAP.to_string())
+        .enable_idempotence(true)
+        .acks(Acks::All)
+        .compression(Compression::Lz4)
+        .build()
+        .await
+        .expect("producer");
+    for v in ["x", "y", "z"] {
+        let fut = producer
+            .send(ProducerRecord {
+                topic: TOPIC.into(),
+                value: Some(bytes::Bytes::from(v)),
+                ..Default::default()
+            })
+            .await;
+        let m = fut.await.expect("oneshot").expect("ack");
+        assert_eq!(m.partition, 0);
+    }
+    producer.flush().await.expect("flush");
+    producer.close().await.expect("close");
+
+    // 3. Consume via kafka-console-consumer --partition 0.
+    let consumer_out = docker_run_kafka_tool(&[
+        "kafka-console-consumer",
+        "--bootstrap-server",
+        BOOTSTRAP,
+        "--topic",
+        TOPIC,
+        "--partition",
+        "0",
+        "--from-beginning",
+        "--max-messages",
+        "3",
+        "--timeout-ms",
+        "20000",
+    ]);
+    let s = String::from_utf8_lossy(&consumer_out.stdout);
+    for needle in ["x", "y", "z"] {
+        assert!(s.contains(needle), "missing {needle}: {s:?}");
+    }
+
+    broker.shutdown().await;
+}
+
+// Same multi-thread runtime caveat as `console_producer_round_trip`:
+// the test body makes blocking `Command::output()` calls; a
+// single-threaded runtime would starve the broker's accept loop.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Docker"]
 async fn console_consumer_with_group_round_trip() {
     const TOPIC: &str = "crabka-broker-grp-itest";
 
