@@ -689,6 +689,8 @@ dependencies = [
  "crabka-raft",
  "dashmap",
  "futures-util",
+ "serde",
+ "serde-wincode",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -696,6 +698,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "wincode",
 ]
 
 [[package]]

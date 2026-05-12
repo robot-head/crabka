@@ -80,6 +80,7 @@ mod producer_id_manager;
 mod producer_state;
 mod replicator;
 mod replicator_supervisor;
+mod txn;
 
 pub use broker::{Broker, BrokerHandle};
 pub use config::BrokerConfig;
