@@ -1,5 +1,7 @@
-//! `Metadata` (`api_key=3`). Returns this broker (always one entry) and
-//! the requested topics' (or all topics, if `topics: None`) partitions.
+//! `Metadata` (`api_key=3`). Returns all registered brokers and the
+//! requested topics' (or all topics, if `topics: None`) partitions.
+//! Metadata is sourced from `controller.current_image()` — the
+//! quorum-replicated snapshot — rather than a local in-memory struct.
 
 use bytes::{Bytes, BytesMut};
 use futures_util::future::BoxFuture;
@@ -22,34 +24,35 @@ pub(crate) fn handle(
     req_bytes: &[u8],
 ) -> BoxFuture<'static, Result<Bytes, BrokerError>> {
     let req_bytes = req_bytes.to_vec();
-    let broker_id = broker.config.broker_id;
-    let advertised = broker.config.advertised_listener.clone();
-    let metadata = broker.metadata.clone();
+    let controller = broker.controller.clone();
+
     Box::pin(async move {
         let mut cur: &[u8] = &req_bytes;
         let req = MetadataRequest::decode(&mut cur, version)?;
 
-        // Parse "host:port" → (host, port). If parse fails, fall back to
-        // ("localhost", 9092) and log.
-        let (host, port) = parse_host_port(&advertised);
+        let image = controller.current_image();
 
-        let brokers = vec![MetadataResponseBroker {
-            node_id: broker_id,
-            host,
-            port,
-            rack: None,
-            ..Default::default()
-        }];
+        // Brokers: enumerate all registered nodes from the metadata image.
+        let brokers: Vec<MetadataResponseBroker> = image
+            .brokers()
+            .map(|b| MetadataResponseBroker {
+                node_id: b.node_id as i32,
+                host: b.host.clone(),
+                port: i32::from(b.port),
+                rack: b.rack.clone(),
+                ..Default::default()
+            })
+            .collect();
 
-        let meta = metadata.read().expect("metadata poisoned");
+        // Topic names to include: all (None) or the explicitly requested set.
         let topic_names: Vec<String> = match &req.topics {
-            None => meta.topic_names(),
+            None => image.topics().map(|t| t.name.clone()).collect(),
             Some(topics) => topics.iter().filter_map(|t| t.name.clone()).collect(),
         };
 
         let mut topics_out: Vec<MetadataResponseTopic> = Vec::with_capacity(topic_names.len());
         for name in topic_names {
-            match meta.get(&name) {
+            match image.topic(&name) {
                 None => {
                     topics_out.push(MetadataResponseTopic {
                         error_code: codes::UNKNOWN_TOPIC_OR_PARTITION,
@@ -59,15 +62,14 @@ pub(crate) fn handle(
                     });
                 }
                 Some(t) => {
-                    let partitions = t
-                        .partitions
-                        .iter()
+                    let partitions: Vec<MetadataResponsePartition> = image
+                        .partitions_of(&name)
                         .map(|p| MetadataResponsePartition {
                             error_code: codes::NONE,
-                            partition_index: p.partition_id,
-                            leader_id: p.leader_broker_id,
-                            replica_nodes: p.replicas.clone(),
-                            isr_nodes: p.isr.clone(),
+                            partition_index: p.partition,
+                            leader_id: p.leader as i32,
+                            replica_nodes: p.replicas.iter().map(|&r| r as i32).collect(),
+                            isr_nodes: p.isr.iter().map(|&r| r as i32).collect(),
                             ..Default::default()
                         })
                         .collect();
@@ -83,11 +85,18 @@ pub(crate) fn handle(
             }
         }
 
+        // controller_id: the current Raft leader, or -1 when unknown.
+        let controller_id: i32 = controller
+            .watch_leader()
+            .borrow()
+            .map(|id| id as i32)
+            .unwrap_or(-1);
+
         let resp = MetadataResponse {
             throttle_time_ms: 0,
             brokers,
-            cluster_id: Some(format!("crabka-{broker_id}")),
-            controller_id: broker_id,
+            cluster_id: Some(image.cluster_id().to_string()),
+            controller_id,
             topics: topics_out,
             ..Default::default()
         };
