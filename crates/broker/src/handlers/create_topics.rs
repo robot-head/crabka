@@ -43,7 +43,8 @@ pub(crate) fn handle(
             let topic_id = Uuid::new_v4();
 
             // Build the batch: one TopicRecord + N PartitionRecords.
-            let mut records = Vec::with_capacity(1 + partition_count.max(0) as usize);
+            let part_count_usize = usize::try_from(partition_count.max(0)).unwrap_or(0);
+            let mut records = Vec::with_capacity(1 + part_count_usize);
             records.push(MetadataRecord::V1Topic(TopicRecord {
                 name: name.clone(),
                 topic_id,
@@ -92,7 +93,11 @@ pub(crate) fn handle(
                 Err(RaftError::Metadata(crabka_metadata::MetadataError::TopicExists(_))) => {
                     codes::TOPIC_ALREADY_EXISTS
                 }
-                Err(RaftError::NotLeader { .. }) | Err(RaftError::LeaderUnknown) => {
+                Err(RaftError::Metadata(crabka_metadata::MetadataError::InvalidRecord(_))) => {
+                    // E.g., `partitions <= 0` rejected by image::validate.
+                    codes::INVALID_PARTITIONS
+                }
+                Err(RaftError::NotLeader { .. } | RaftError::LeaderUnknown) => {
                     codes::NOT_CONTROLLER
                 }
                 Err(e) => {

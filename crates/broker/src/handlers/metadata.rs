@@ -33,10 +33,13 @@ pub(crate) fn handle(
         let image = controller.current_image();
 
         // Brokers: enumerate all registered nodes from the metadata image.
+        // NodeId is `u64` for openraft compatibility but the Kafka wire
+        // protocol uses `i32`; clamp to `i32::MAX` if it ever overflows
+        // (won't happen in practice — broker ids are tiny).
         let brokers: Vec<MetadataResponseBroker> = image
             .brokers()
             .map(|b| MetadataResponseBroker {
-                node_id: b.node_id as i32,
+                node_id: i32::try_from(b.node_id).unwrap_or(i32::MAX),
                 host: b.host.clone(),
                 port: i32::from(b.port),
                 rack: b.rack.clone(),
@@ -62,14 +65,26 @@ pub(crate) fn handle(
                     });
                 }
                 Some(t) => {
-                    let partitions: Vec<MetadataResponsePartition> = image
-                        .partitions_of(&name)
+                    // Partitions are stored in a `HashMap`; sort by index so
+                    // clients (and tests) see a deterministic ordering.
+                    let mut sorted: Vec<_> = image.partitions_of(&name).collect();
+                    sorted.sort_by_key(|p| p.partition);
+                    let partitions: Vec<MetadataResponsePartition> = sorted
+                        .into_iter()
                         .map(|p| MetadataResponsePartition {
                             error_code: codes::NONE,
                             partition_index: p.partition,
-                            leader_id: p.leader as i32,
-                            replica_nodes: p.replicas.iter().map(|&r| r as i32).collect(),
-                            isr_nodes: p.isr.iter().map(|&r| r as i32).collect(),
+                            leader_id: i32::try_from(p.leader).unwrap_or(i32::MAX),
+                            replica_nodes: p
+                                .replicas
+                                .iter()
+                                .map(|&r| i32::try_from(r).unwrap_or(i32::MAX))
+                                .collect(),
+                            isr_nodes: p
+                                .isr
+                                .iter()
+                                .map(|&r| i32::try_from(r).unwrap_or(i32::MAX))
+                                .collect(),
                             ..Default::default()
                         })
                         .collect();
@@ -89,7 +104,7 @@ pub(crate) fn handle(
         let controller_id: i32 = controller
             .watch_leader()
             .borrow()
-            .map(|id| id as i32)
+            .and_then(|id| i32::try_from(id).ok())
             .unwrap_or(-1);
 
         let resp = MetadataResponse {

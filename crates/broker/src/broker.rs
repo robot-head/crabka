@@ -84,7 +84,7 @@ impl Broker {
             voters: config.controller_quorum_voters.clone(),
             controller_listen_addr: config.controller_listen_addr,
             log_dir: config.log_dir.join("__cluster_metadata"),
-            election_timeout: std::time::Duration::from_millis(1_000),
+            election_timeout: std::time::Duration::from_secs(1),
             heartbeat_interval: std::time::Duration::from_millis(200),
             client_id: format!("crabka-broker-{}-controller", config.broker_id),
         };
@@ -116,9 +116,7 @@ impl Broker {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
             while leader_rx.borrow().is_none() {
                 if std::time::Instant::now() > deadline {
-                    return Err(BrokerError::Startup(
-                        "no leader elected within 10s".into(),
-                    ));
+                    return Err(BrokerError::Startup("no leader elected within 10s".into()));
                 }
                 let _ = tokio::time::timeout(
                     std::time::Duration::from_millis(100),

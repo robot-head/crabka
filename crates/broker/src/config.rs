@@ -33,7 +33,7 @@ pub struct BrokerConfig {
     /// Raft node id. Conventionally equal to `broker_id as NodeId`.
     pub node_id: NodeId,
 
-    /// Address the controller listener binds on. KRaft convention: same
+    /// Address the controller listener binds on. `KRaft` convention: same
     /// host as `listen_addr`, port 9093. Test default: `127.0.0.1:0`.
     pub controller_listen_addr: SocketAddr,
 

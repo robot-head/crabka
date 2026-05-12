@@ -54,7 +54,7 @@ pub(crate) fn handle(
 ) -> BoxFuture<'static, Result<Bytes, BrokerError>> {
     let req_bytes = req_bytes.to_vec();
     let partitions = broker.partitions.clone();
-    let metadata = broker.metadata.clone();
+    let controller = broker.controller.clone();
     Box::pin(async move {
         let mut cur: &[u8] = &req_bytes;
         let req = FetchRequest::decode(&mut cur, version)?;
@@ -68,16 +68,18 @@ pub(crate) fn handle(
             // we look it up. The client populates whichever the negotiated
             // version requires.
             let topic_name = if topic.topic.is_empty() {
-                let meta = metadata.read().expect("metadata poisoned");
-                meta.topics()
-                    .find(|(_, t)| t.topic_id.into_bytes() == topic.topic_id.0)
-                    .map_or_else(String::new, |(name, _)| name.to_string())
+                let image = controller.current_image();
+                image
+                    .topics()
+                    .find(|t| t.topic_id.into_bytes() == topic.topic_id.0)
+                    .map_or_else(String::new, |t| t.name.clone())
             } else {
                 topic.topic.clone()
             };
             let topic_id = if topic.topic_id == WireUuid::ZERO {
-                let meta = metadata.read().expect("metadata poisoned");
-                meta.get(&topic_name)
+                let image = controller.current_image();
+                image
+                    .topic(&topic_name)
                     .map_or(WireUuid::ZERO, |t| WireUuid(t.topic_id.into_bytes()))
             } else {
                 topic.topic_id

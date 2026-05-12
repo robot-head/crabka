@@ -70,10 +70,15 @@ impl ControllerHandle {
     /// should treat it as a transient cluster fault).
     pub async fn submit_change(&self, records: Vec<MetadataRecord>) -> Result<(), RaftError> {
         // Pre-validation: cheap, local, and avoids waking openraft when
-        // the change is doomed (e.g., duplicate topic).
-        let image = self.state_machine.current_image();
+        // the change is doomed (e.g., duplicate topic). Validate against a
+        // local clone that we apply records into as we go — otherwise a
+        // batch containing `V1Topic(t)` followed by `V1Partition{topic: t}`
+        // would reject the partition because the topic isn't yet in the
+        // committed image.
+        let mut scratch: MetadataImage = (*self.state_machine.current_image()).clone();
         for r in &records {
-            image.validate(r)?;
+            scratch.validate(r)?;
+            scratch.apply(r);
         }
         let data = AppData { records };
 

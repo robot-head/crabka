@@ -50,7 +50,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         a.set_port(9093);
         a
     };
-    let node_id = args.broker_id as u64;
+    let node_id = u64::try_from(args.broker_id).unwrap_or_else(|_| {
+        eprintln!("broker_id must be non-negative");
+        std::process::exit(1);
+    });
     let config = BrokerConfig {
         broker_id: args.broker_id,
         listen_addr: args.listen_addr,

@@ -37,11 +37,7 @@ pub(crate) fn handle(
         // Collect (name, topic_id_bytes) pairs. If the client sent only a
         // topic_id (name is None), resolve the name from the current image.
         let mut name_list: Vec<Option<String>> = Vec::new();
-        if !req.topic_names.is_empty() {
-            for n in &req.topic_names {
-                name_list.push(Some(n.clone()));
-            }
-        } else {
+        if req.topic_names.is_empty() {
             let image = controller.current_image();
             for state in &req.topics {
                 if let Some(ref n) = state.name {
@@ -54,6 +50,10 @@ pub(crate) fn handle(
                         .map(|t| t.name.clone());
                     name_list.push(found);
                 }
+            }
+        } else {
+            for n in &req.topic_names {
+                name_list.push(Some(n.clone()));
             }
         }
 
@@ -93,7 +93,7 @@ pub(crate) fn handle(
                 Err(RaftError::Metadata(crabka_metadata::MetadataError::UnknownTopic(_))) => {
                     codes::UNKNOWN_TOPIC_OR_PARTITION
                 }
-                Err(RaftError::NotLeader { .. }) | Err(RaftError::LeaderUnknown) => {
+                Err(RaftError::NotLeader { .. } | RaftError::LeaderUnknown) => {
                     codes::NOT_CONTROLLER
                 }
                 Err(e) => {
