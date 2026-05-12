@@ -26,6 +26,7 @@ use crate::codes;
 use crate::error::BrokerError;
 use crate::partition::ProduceJob;
 
+#[allow(clippy::too_many_lines)]
 pub(crate) fn handle(
     broker: &Broker,
     version: i16,
@@ -35,6 +36,7 @@ pub(crate) fn handle(
     let req_bytes = req_bytes.to_vec();
     let partitions = broker.partitions.clone();
     let metadata = broker.metadata.clone();
+    let producer_state = broker.producer_state.clone();
     Box::pin(async move {
         let mut cur: &[u8] = &req_bytes;
         let req = ProduceRequest::decode(&mut cur, version)?;
@@ -88,6 +90,45 @@ pub(crate) fn handle(
                     continue;
                 };
 
+                // ── idempotent-producer dedup gate ───────────────────────
+                let pid = batch.producer_id;
+                let epoch = batch.producer_epoch;
+                let base_seq = batch.base_sequence;
+                let last_offset_delta = batch.last_offset_delta;
+                let max_timestamp = batch.max_timestamp;
+
+                let dedup_outcome = if pid >= 0 {
+                    Some(
+                        producer_state
+                            .check(&topic_name, idx, pid, epoch, base_seq, last_offset_delta)
+                            .await,
+                    )
+                } else {
+                    None
+                };
+
+                match dedup_outcome {
+                    Some(crate::producer_state::Decision::Duplicate { last_offset }) => {
+                        out.error_code = codes::NONE;
+                        out.base_offset = last_offset - i64::from(last_offset_delta);
+                        partition_results.push(out);
+                        continue;
+                    }
+                    Some(crate::producer_state::Decision::OutOfOrder) => {
+                        out.error_code = codes::OUT_OF_ORDER_SEQUENCE_NUMBER;
+                        partition_results.push(out);
+                        continue;
+                    }
+                    Some(crate::producer_state::Decision::Fenced) => {
+                        out.error_code = codes::INVALID_PRODUCER_EPOCH;
+                        partition_results.push(out);
+                        continue;
+                    }
+                    Some(crate::producer_state::Decision::Append) | None => {
+                        // fall through to writer dispatch
+                    }
+                }
+
                 let (ack_tx, ack_rx) = oneshot::channel();
                 let job = ProduceJob { batch, ack: ack_tx };
 
@@ -101,6 +142,21 @@ pub(crate) fn handle(
                     Ok(Ok(Ok(base_offset))) => {
                         out.error_code = codes::NONE;
                         out.base_offset = base_offset;
+
+                        if pid >= 0 {
+                            producer_state
+                                .commit(
+                                    &topic_name,
+                                    idx,
+                                    pid,
+                                    epoch,
+                                    base_seq,
+                                    last_offset_delta,
+                                    base_offset,
+                                    max_timestamp,
+                                )
+                                .await;
+                        }
                     }
                     Ok(Ok(Err(e))) => {
                         out.error_code = codes::from_broker_error(&e);
