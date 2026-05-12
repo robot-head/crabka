@@ -13,7 +13,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use crabka_log::{Log, ReadOutput};
+use crabka_log::{AbortedTxn, Log, ReadOutput};
 use crabka_protocol::records::RecordBatch;
 use tokio::sync::{Notify, mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -186,6 +186,19 @@ impl Partition {
         match self.log.lock() {
             Ok(g) => g.log_start_offset(),
             Err(_) => 0,
+        }
+    }
+
+    /// Return aborted transactions from the active segment's `.txnindex`
+    /// whose offset range overlaps `[start, end)`.
+    ///
+    /// Locks the `Arc<Mutex<Log>>` briefly. Returns an empty `Vec` if
+    /// the mutex is poisoned.
+    #[must_use]
+    pub fn aborted_in_range(&self, start: i64, end: i64) -> Vec<AbortedTxn> {
+        match self.log.lock() {
+            Ok(g) => g.aborted_in_range(start, end),
+            Err(_) => Vec::new(),
         }
     }
 

@@ -235,6 +235,23 @@ impl Log {
         drop(self);
     }
 
+    /// Return all aborted transactions from the active segment's
+    /// `.txnindex` whose offset range overlaps `[start, end)`.
+    ///
+    /// For the slice-9 MVP only the active segment's index is consulted
+    /// (older sealed segments' `.txnindex` files are not loaded into
+    /// memory). The window `[fetch_offset, lso)` always falls within
+    /// the active segment in practice because LSO can only advance past
+    /// a committed/aborted marker, which lands in the same segment as
+    /// the corresponding transactional batches.
+    #[must_use]
+    pub fn aborted_in_range(&self, start: i64, end: i64) -> Vec<crate::txn_index::AbortedTxn> {
+        self.active_txn_index
+            .aborted_in_range(start, end)
+            .copied()
+            .collect()
+    }
+
     /// Append a `RecordBatch`. The batch's `base_offset` is overwritten
     /// by the log to be the next assigned offset; `last_offset_delta`
     /// determines how many absolute offsets this batch consumes.
