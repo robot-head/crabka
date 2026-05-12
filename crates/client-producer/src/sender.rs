@@ -39,7 +39,8 @@ mod codes {
     pub const NONE: i16 = 0;
     pub const OUT_OF_ORDER_SEQUENCE_NUMBER: i16 = 45;
     pub const DUPLICATE_SEQUENCE_NUMBER: i16 = 46;
-    pub const INVALID_PRODUCER_EPOCH: i16 = 53;
+    /// `INVALID_PRODUCER_EPOCH` per the canonical Apache Kafka table (code 47).
+    pub const INVALID_PRODUCER_EPOCH: i16 = 47;
 }
 
 /// All the bits of state the sender task needs. The builder constructs

@@ -123,7 +123,18 @@ pub(crate) fn handle(
                                 topic: topic_name.clone(),
                                 partition: idx,
                             };
-                            if !entry.partitions.contains(&tp) {
+                            // Consider the partition "needs registering" if it
+                            // isn't in the current partition set OR if the
+                            // current state is CompleteCommit/CompleteAbort
+                            // (indicating a new transaction after a completed
+                            // one — the partition set is stale).
+                            let needs_register = !entry.partitions.contains(&tp)
+                                || matches!(
+                                    entry.state,
+                                    crate::txn::state::TxnState::CompleteCommit
+                                        | crate::txn::state::TxnState::CompleteAbort
+                                );
+                            if needs_register {
                                 // v2 auto-AddPartitionsToTxn: register the
                                 // partition inline if the state allows it.
                                 if !entry
@@ -134,6 +145,16 @@ pub(crate) fn handle(
                                     partition_results.push(out);
                                     continue;
                                 }
+                                // If starting a new txn after a completed one,
+                                // clear the stale partition set.
+                                if matches!(
+                                    entry.state,
+                                    crate::txn::state::TxnState::CompleteCommit
+                                        | crate::txn::state::TxnState::CompleteAbort
+                                ) {
+                                    entry.partitions.clear();
+                                    entry.offset_commit_groups.clear();
+                                }
                                 entry.state = crate::txn::state::TxnState::Ongoing;
                                 entry.partitions.insert(tp);
                                 entry.last_update_ms = crate::txn::util::now_millis();
@@ -142,7 +163,7 @@ pub(crate) fn handle(
                                 drop(entry);
                                 txn_coordinator.put(snap).await?;
                             }
-                            // else: partition already registered — fall through.
+                            // else: partition already registered in an active txn — fall through.
                         }
                         // else: not the coordinator for this tid (slice-9 MVP).
                         // Trust the producer to have called AddPartitionsToTxn

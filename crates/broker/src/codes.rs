@@ -35,9 +35,17 @@ pub const MEMBER_ID_REQUIRED: i16 = 79;
 // Phase 6 additions — idempotent-producer codes.
 pub const OUT_OF_ORDER_SEQUENCE_NUMBER: i16 = 45;
 pub const DUPLICATE_SEQUENCE_NUMBER: i16 = 46;
-pub const INVALID_PRODUCER_ID_MAPPING: i16 = 47;
-pub const INVALID_PRODUCER_EPOCH: i16 = 53;
-pub const TRANSACTIONAL_ID_AUTHORIZATION_FAILED: i16 = 67;
+/// `INVALID_PRODUCER_EPOCH` (47) — per the canonical Apache Kafka error table.
+/// Returned when the producer's epoch does not match the coordinator's current
+/// epoch, OR when no transaction state exists for the given
+/// (`transactional_id`, `producer_id`) pair. The Rust producer client maps
+/// this code to `ProducerError::FencedProducer`.
+pub const INVALID_PRODUCER_EPOCH: i16 = 47;
+/// Alias used in handlers that check for an unknown (tid, pid) mapping.
+/// Both cases produce error code 47 on the wire, matching Apache Kafka's
+/// behavior (it uses `INVALID_PRODUCER_EPOCH` for all epoch/pid mismatches).
+pub const INVALID_PRODUCER_ID_MAPPING: i16 = INVALID_PRODUCER_EPOCH;
+pub const TRANSACTIONAL_ID_AUTHORIZATION_FAILED: i16 = 51;
 
 // Phase 9 additions — transactional protocol codes.
 pub const INVALID_TXN_STATE: i16 = 24;
@@ -121,13 +129,14 @@ mod tests {
     }
 
     #[test]
-    fn maps_producer_epoch_fenced_to_53() {
+    fn maps_producer_epoch_fenced_to_47() {
         let e = BrokerError::ProducerEpochFenced {
             producer_id: 1000,
             current: 2,
             requested: 1,
         };
         assert_eq!(from_broker_error(&e), INVALID_PRODUCER_EPOCH);
+        assert_eq!(from_broker_error(&e), 47);
     }
 
     #[test]

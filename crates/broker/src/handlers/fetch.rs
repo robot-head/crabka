@@ -218,17 +218,17 @@ fn do_read(
             let read = log.read(fetch_offset, read_max)?;
 
             if read_committed {
-                // Batch-level LSO filtering: drop entire batches at or past LSO,
-                // and drop control batches (Apache Kafka clients never see them).
-                let visible_batch = read
-                    .batches
-                    .into_iter()
-                    .filter(|b| b.base_offset < lso)
-                    .find(|b| !b.attributes.is_control_batch());
-
                 // Aborted-txn list for the window [fetch_offset, lso).
-                let aborted = log
-                    .aborted_in_range(fetch_offset, lso)
+                // Must be computed before batch filtering so we know which
+                // producer_ids had aborted transactions in this range.
+                let aborted_raw = log.aborted_in_range(fetch_offset, lso);
+                // Collect into a set of (producer_id, start_offset, last_offset)
+                // tuples for efficient batch-level lookup.
+                let aborted_pids: std::collections::HashSet<(i64, i64, i64)> = aborted_raw
+                    .iter()
+                    .map(|e| (e.producer_id, e.start_offset, e.last_offset))
+                    .collect();
+                let aborted = aborted_raw
                     .into_iter()
                     .map(|e| AbortedTransaction {
                         producer_id: e.producer_id,
@@ -236,6 +236,31 @@ fn do_read(
                         ..Default::default()
                     })
                     .collect();
+
+                // Batch-level LSO filtering: drop entire batches at or past LSO,
+                // drop control batches (Apache Kafka clients never see them),
+                // and drop transactional data batches that belong to an aborted
+                // transaction (i.e. whose producer_id + offset range is fully
+                // covered by an AbortedTxn entry).
+                let visible_batch = read
+                    .batches
+                    .into_iter()
+                    .filter(|b| b.base_offset < lso)
+                    .filter(|b| !b.attributes.is_control_batch())
+                    .find(|b| {
+                        if !b.attributes.is_transactional() {
+                            return true; // non-transactional batch: always visible
+                        }
+                        let pid = b.producer_id;
+                        let batch_last = b.base_offset + i64::from(b.last_offset_delta);
+                        // A transactional batch is hidden iff it is fully
+                        // contained within an aborted txn range for this pid.
+                        !aborted_pids.iter().any(|&(apid, astart, alast)| {
+                            apid == pid
+                                && b.base_offset >= astart
+                                && batch_last <= alast
+                        })
+                    });
 
                 (log_start, log_end, lso, visible_batch, aborted)
             } else {

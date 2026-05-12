@@ -135,10 +135,24 @@ async fn process_one_txn(
     }
 
     // 3. State machine: Empty/Ongoing → Ongoing.
+    //    CompleteCommit/CompleteAbort → Ongoing is also allowed to support
+    //    re-use of a transactional_id without an intervening InitProducerId.
+    //    In that case we clear the stale partition set so EndTxn only fans out
+    //    markers to the new transaction's partitions.
     if !entry.state.can_transition_to(TxnState::Ongoing) {
         return topic_error(topics, codes::INVALID_TXN_STATE);
     }
+    let was_complete = matches!(
+        entry.state,
+        TxnState::CompleteCommit | TxnState::CompleteAbort
+    );
     entry.state = TxnState::Ongoing;
+    if was_complete {
+        // Starting a new transaction after a completed one: discard the stale
+        // partition set so the new transaction starts clean.
+        entry.partitions.clear();
+        entry.offset_commit_groups.clear();
+    }
 
     // 4. Register partitions.
     for t in topics {

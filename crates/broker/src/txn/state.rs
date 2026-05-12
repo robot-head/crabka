@@ -27,8 +27,10 @@ impl TxnState {
             (self, other),
             // re-init: empty → empty, or after a completed txn
             (Empty | CompleteCommit | CompleteAbort, Empty)
-            // add partitions: first or subsequent
-            | (Empty | Ongoing, Ongoing)
+            // add partitions: first or subsequent, or starting a new txn after
+            // a completed one (CompleteCommit/CompleteAbort → Ongoing is the
+            // implicit "re-use without init" path that Apache Kafka supports)
+            | (Empty | Ongoing | CompleteCommit | CompleteAbort, Ongoing)
             // begin end-of-txn
             | (Ongoing, PrepareCommit | PrepareAbort)
             // finalise

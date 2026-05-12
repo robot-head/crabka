@@ -681,6 +681,7 @@ dependencies = [
  "bytes",
  "clap",
  "crabka-broker",
+ "crabka-client-consumer",
  "crabka-client-core",
  "crabka-client-producer",
  "crabka-log",
