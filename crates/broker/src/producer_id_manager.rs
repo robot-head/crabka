@@ -11,7 +11,6 @@ use dashmap::DashMap;
 const PID_BASE: i64 = 1000;
 
 #[derive(Debug)]
-#[allow(dead_code)] // fields used via methods; handler wiring lands in Tasks 7-8
 pub struct ProducerIdManager {
     next_pid: AtomicI64,
     epochs: DashMap<i64, AtomicI16>,
@@ -23,7 +22,6 @@ impl Default for ProducerIdManager {
     }
 }
 
-#[allow(dead_code)] // allocate + bump_epoch wired in Tasks 7-8
 impl ProducerIdManager {
     #[must_use]
     pub fn new() -> Self {
@@ -43,6 +41,9 @@ impl ProducerIdManager {
     /// Bump the epoch for an existing pid. Used by transactional producers
     /// re-initialising under the same `transactional_id`. Returns the new
     /// epoch.
+    ///
+    /// Slice 9: transactional producers will use this on `InitProducerId` re-init.
+    #[allow(dead_code)]
     pub fn bump_epoch(&self, pid: i64) -> Option<i16> {
         self.epochs
             .get(&pid)

@@ -249,7 +249,7 @@ impl Producer {
             let _ =
                 tokio::time::timeout(Duration::from_millis(50), self.flush_notify.notified()).await;
         }
-        Err(ProducerError::Closed)
+        Err(ProducerError::FlushTimeout)
     }
 
     async fn all_empty(&self) -> bool {

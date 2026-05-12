@@ -284,15 +284,41 @@ fn build_record_batch(
     }
 }
 
-/// Resolve every record in `records` with an error. `ClientError` is not
-/// `Clone`, so we hand the real error to the first record and a generic
-/// `Closed` to the rest.
+/// Resolve every record in `records` with an error.
+///
+/// `ClientError`, `Protocol`, and `Compression` are not `Clone`, so only
+/// the first record receives the real error for those variants. Trivially
+/// cloneable variants (`Server`, `FencedProducer`, `Closed`, etc.) are
+/// propagated to every record so callers see the true error code.
 fn fail_batch(records: Vec<PendingRecord>, err: ProducerError) {
+    fn clone_if_possible(e: &ProducerError) -> Option<ProducerError> {
+        match e {
+            ProducerError::Server(c) => Some(ProducerError::Server(*c)),
+            ProducerError::FencedProducer => Some(ProducerError::FencedProducer),
+            ProducerError::Closed => Some(ProducerError::Closed),
+            ProducerError::FlushTimeout => Some(ProducerError::FlushTimeout),
+            ProducerError::BufferFull => Some(ProducerError::BufferFull),
+            ProducerError::BatchTooLarge { batch_size } => Some(ProducerError::BatchTooLarge {
+                batch_size: *batch_size,
+            }),
+            ProducerError::RecordTooLarge { record_size } => Some(ProducerError::RecordTooLarge {
+                record_size: *record_size,
+            }),
+            ProducerError::InvalidConfig(s) => Some(ProducerError::InvalidConfig(s)),
+            _ => None, // Client, Protocol, Compression — not Clone.
+        }
+    }
+
+    let clone = clone_if_possible(&err);
     let mut iter = records.into_iter();
     if let Some(first) = iter.next() {
         let _ = first.ack.send(Err(err));
     }
     for r in iter {
-        let _ = r.ack.send(Err(ProducerError::Closed));
+        let e = clone
+            .as_ref()
+            .and_then(clone_if_possible)
+            .unwrap_or(ProducerError::Closed);
+        let _ = r.ack.send(Err(e));
     }
 }

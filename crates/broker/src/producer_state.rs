@@ -9,30 +9,32 @@ use dashmap::DashMap;
 use tokio::sync::Mutex;
 
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)] // fields read by handler logic landing in Tasks 7-8
 pub struct ProducerEntry {
     pub epoch: i16,
     pub last_sequence: i32,
+    /// Retained for future slice work (log metrics / WAL replay).
+    #[allow(dead_code)]
     pub last_offset: i64,
+    pub base_offset: i64,
+    /// Retained for future slice work (metrics / compaction).
+    #[allow(dead_code)]
     pub last_timestamp: i64,
 }
 
 #[derive(Debug, Default)]
-#[allow(dead_code)] // entries read by ProducerState methods; handler wiring in Tasks 7-8
 pub struct PartitionProducerState {
     pub entries: HashMap<i64, ProducerEntry>,
 }
 
 /// Outcome of a dedup check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // variants used in handler wiring in Tasks 7-8
 pub enum Decision {
     /// Producer is fresh or the sequence is one past the last commit. Caller
     /// should append, then call `commit` with the assigned base offset.
     Append,
     /// Previously-committed sequence range. Caller should respond with
-    /// `error_code = NONE` and `base_offset = last_offset`.
-    Duplicate { last_offset: i64 },
+    /// `error_code = NONE` and `base_offset = base_offset`.
+    Duplicate { base_offset: i64 },
     /// `base_sequence != last_sequence + 1`. Caller responds with
     /// `OUT_OF_ORDER_SEQUENCE_NUMBER (45)`.
     OutOfOrder,
@@ -42,13 +44,11 @@ pub enum Decision {
 }
 
 #[derive(Debug, Default)]
-#[allow(dead_code)] // by_partition read via methods; handler wiring in Tasks 7-8
 pub struct ProducerState {
     #[allow(clippy::type_complexity)]
     by_partition: Arc<DashMap<(String, i32), Arc<Mutex<PartitionProducerState>>>>,
 }
 
-#[allow(dead_code)] // check/commit/handle wired in Tasks 7-8
 impl ProducerState {
     #[must_use]
     pub fn new() -> Self {
@@ -81,9 +81,9 @@ impl ProducerState {
                 }
                 if base_sequence <= entry.last_sequence {
                     // Anywhere within (or before) the committed range counts
-                    // as duplicate. We echo the previously-committed offset.
+                    // as duplicate. We echo the previously-committed base offset.
                     return Decision::Duplicate {
-                        last_offset: entry.last_offset,
+                        base_offset: entry.base_offset,
                     };
                 }
                 if base_sequence == entry.last_sequence + 1 {
@@ -119,6 +119,7 @@ impl ProducerState {
                 epoch: producer_epoch,
                 last_sequence,
                 last_offset,
+                base_offset,
                 last_timestamp,
             },
         );
@@ -160,7 +161,7 @@ mod tests {
         let s = ProducerState::new();
         s.commit("t", 0, 1000, 0, 0, 4, 0, 1).await;
         let d = s.check("t", 0, 1000, 0, 0, 4).await;
-        assert_eq!(d, Decision::Duplicate { last_offset: 4 });
+        assert_eq!(d, Decision::Duplicate { base_offset: 0 });
     }
 
     #[tokio::test]

@@ -108,9 +108,9 @@ pub(crate) fn handle(
                 };
 
                 match dedup_outcome {
-                    Some(crate::producer_state::Decision::Duplicate { last_offset }) => {
+                    Some(crate::producer_state::Decision::Duplicate { base_offset }) => {
                         out.error_code = codes::NONE;
-                        out.base_offset = last_offset - i64::from(last_offset_delta);
+                        out.base_offset = base_offset;
                         partition_results.push(out);
                         continue;
                     }

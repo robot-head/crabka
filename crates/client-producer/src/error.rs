@@ -30,6 +30,9 @@ pub enum ProducerError {
     #[error("producer closed")]
     Closed,
 
+    #[error("flush timed out")]
+    FlushTimeout,
+
     #[error("compression: {0}")]
     Compression(#[from] crabka_compression::CompressionError),
 }
