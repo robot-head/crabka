@@ -12,9 +12,13 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crabka_client_core::Client;
+use crabka_protocol::owned::add_offsets_to_txn_request::AddOffsetsToTxnRequest;
 use crabka_protocol::owned::end_txn_request::EndTxnRequest;
 use crabka_protocol::owned::find_coordinator_request::FindCoordinatorRequest;
 use crabka_protocol::owned::init_producer_id_request::InitProducerIdRequest;
+use crabka_protocol::owned::txn_offset_commit_request::{
+    TxnOffsetCommitRequest, TxnOffsetCommitRequestPartition, TxnOffsetCommitRequestTopic,
+};
 
 use crate::accumulator::{Accumulator, AppendResult};
 use crate::compression::Compression;
@@ -340,6 +344,127 @@ impl Producer {
         Ok(format!("{}:{}", resp.host, resp.port))
     }
 
+    /// Enroll a consumer group's offsets in the current transaction.
+    ///
+    /// Performs two broker round-trips:
+    ///
+    /// 1. `AddOffsetsToTxn` → transaction coordinator (registers the group
+    ///    offset commit as part of the ongoing transaction).
+    /// 2. `TxnOffsetCommit` → group coordinator (commits the actual offsets
+    ///    transactionally).
+    ///
+    /// # Errors
+    ///
+    /// - [`ProducerError::NotTransactional`] — `transactional_id` was not set.
+    /// - [`ProducerError::InvalidTransactionState`] — no cached transaction
+    ///   coordinator (call [`init_transactions`] first).
+    /// - [`ProducerError::Server`] — any broker error code (checked at the
+    ///   `AddOffsetsToTxn` level and per-partition for `TxnOffsetCommit`).
+    /// - [`ProducerError::Client`] — transport-level failure.
+    ///
+    /// [`init_transactions`]: Self::init_transactions
+    pub async fn send_offsets_to_transaction(
+        &self,
+        offsets: impl IntoIterator<Item = ((String, i32), i64)>,
+        group_id: &str,
+    ) -> Result<(), ProducerError> {
+        let tid = self
+            .transactional_id
+            .as_deref()
+            .ok_or(ProducerError::NotTransactional)?
+            .to_string();
+        let offsets_vec: Vec<_> = offsets.into_iter().collect();
+
+        let (pid, epoch) = *self.txn_pid_epoch.lock().await;
+
+        // 1. AddOffsetsToTxn → transaction coordinator.
+        let coord_guard = self.txn_coord_client.lock().await;
+        let coord = coord_guard
+            .as_ref()
+            .ok_or(ProducerError::InvalidTransactionState(
+                "no txn coordinator cached — did init_transactions succeed?",
+            ))?
+            .clone();
+        drop(coord_guard);
+
+        let r1 = coord
+            .send(AddOffsetsToTxnRequest {
+                transactional_id: tid.clone(),
+                producer_id: pid,
+                producer_epoch: epoch,
+                group_id: group_id.to_owned(),
+                ..Default::default()
+            })
+            .await?;
+        if r1.error_code != 0 {
+            return Err(ProducerError::Server(r1.error_code));
+        }
+
+        // 2. FindCoordinator(group_id, key_type=0 GROUP) for the group coordinator.
+        let group_addr = self.find_group_coordinator(group_id).await?;
+        let group_client = Client::builder()
+            .bootstrap(group_addr)
+            .client_id(self.client_id.clone())
+            .build()
+            .await?;
+
+        // 3. TxnOffsetCommit → group coordinator.
+        let r2 = group_client
+            .send(TxnOffsetCommitRequest {
+                transactional_id: tid,
+                producer_id: pid,
+                producer_epoch: epoch,
+                group_id: group_id.to_owned(),
+                topics: build_topics_payload(&offsets_vec),
+                ..Default::default()
+            })
+            .await?;
+
+        // Check per-partition error codes.
+        for topic in &r2.topics {
+            for p in &topic.partitions {
+                if p.error_code != 0 {
+                    return Err(ProducerError::Server(p.error_code));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Discover the group coordinator for `group_id` via `FindCoordinator`
+    /// with `key_type = 0` (GROUP).
+    ///
+    /// Mirrors [`find_txn_coordinator`] but uses `key_type = 0` and looks up
+    /// the group coordinator rather than the transaction coordinator.
+    ///
+    /// [`find_txn_coordinator`]: Self::find_txn_coordinator
+    async fn find_group_coordinator(&self, group_id: &str) -> Result<String, ProducerError> {
+        let resp = self
+            .client
+            .send(FindCoordinatorRequest {
+                key: group_id.to_owned(),
+                // key_type = 0 → GROUP
+                key_type: 0,
+                coordinator_keys: vec![group_id.to_owned()],
+                ..Default::default()
+            })
+            .await?;
+
+        // v4+ returns a `coordinators` array; prefer it when present.
+        if let Some(coord) = resp.coordinators.first() {
+            if coord.error_code != 0 {
+                return Err(ProducerError::Server(coord.error_code));
+            }
+            return Ok(format!("{}:{}", coord.host, coord.port));
+        }
+
+        // Fallback: legacy top-level host/port (versions 0–3).
+        if resp.error_code != 0 {
+            return Err(ProducerError::Server(resp.error_code));
+        }
+        Ok(format!("{}:{}", resp.host, resp.port))
+    }
+
     // ── Internal lifecycle ───────────────────────────────────────────────────
 
     pub(crate) fn is_active(&self) -> Result<(), ProducerError> {
@@ -526,4 +651,31 @@ fn current_millis() -> i64 {
             .map_or(0, |d| d.as_millis()),
     )
     .unwrap_or(0)
+}
+
+/// Group `((topic, partition), offset)` pairs by topic name into the nested
+/// structure required by [`TxnOffsetCommitRequest`].
+fn build_topics_payload(
+    offsets: &[((String, i32), i64)],
+) -> Vec<TxnOffsetCommitRequestTopic> {
+    let mut by_topic: std::collections::HashMap<&str, Vec<TxnOffsetCommitRequestPartition>> =
+        std::collections::HashMap::new();
+    for ((topic, partition), offset) in offsets {
+        by_topic
+            .entry(topic.as_str())
+            .or_default()
+            .push(TxnOffsetCommitRequestPartition {
+                partition_index: *partition,
+                committed_offset: *offset,
+                ..Default::default()
+            });
+    }
+    by_topic
+        .into_iter()
+        .map(|(name, partitions)| TxnOffsetCommitRequestTopic {
+            name: name.to_owned(),
+            partitions,
+            ..Default::default()
+        })
+        .collect()
 }
