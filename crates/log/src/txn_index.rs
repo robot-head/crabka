@@ -108,14 +108,35 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("00.txnindex");
         let mut idx = TxnIndex::open(path.clone()).unwrap();
-        idx.append(AbortedTxn { start_offset: 5, last_offset: 7, producer_id: 1000 }).unwrap();
-        idx.append(AbortedTxn { start_offset: 10, last_offset: 12, producer_id: 1000 }).unwrap();
+        idx.append(AbortedTxn {
+            start_offset: 5,
+            last_offset: 7,
+            producer_id: 1000,
+        })
+        .unwrap();
+        idx.append(AbortedTxn {
+            start_offset: 10,
+            last_offset: 12,
+            producer_id: 1000,
+        })
+        .unwrap();
 
         let idx2 = TxnIndex::open(path).unwrap();
-        assert_eq!(idx2.entries(), &[
-            AbortedTxn { start_offset: 5, last_offset: 7, producer_id: 1000 },
-            AbortedTxn { start_offset: 10, last_offset: 12, producer_id: 1000 },
-        ]);
+        assert_eq!(
+            idx2.entries(),
+            &[
+                AbortedTxn {
+                    start_offset: 5,
+                    last_offset: 7,
+                    producer_id: 1000
+                },
+                AbortedTxn {
+                    start_offset: 10,
+                    last_offset: 12,
+                    producer_id: 1000
+                },
+            ]
+        );
     }
 
     #[test]
@@ -123,8 +144,18 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("00.txnindex");
         let mut idx = TxnIndex::open(path).unwrap();
-        idx.append(AbortedTxn { start_offset: 0, last_offset: 4, producer_id: 1 }).unwrap();
-        idx.append(AbortedTxn { start_offset: 10, last_offset: 14, producer_id: 2 }).unwrap();
+        idx.append(AbortedTxn {
+            start_offset: 0,
+            last_offset: 4,
+            producer_id: 1,
+        })
+        .unwrap();
+        idx.append(AbortedTxn {
+            start_offset: 10,
+            last_offset: 14,
+            producer_id: 2,
+        })
+        .unwrap();
 
         let in_3_to_12: Vec<_> = idx.aborted_in_range(3, 12).collect();
         assert_eq!(in_3_to_12.len(), 2);

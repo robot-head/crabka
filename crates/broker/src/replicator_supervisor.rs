@@ -29,6 +29,7 @@ use crabka_raft::{ControllerHandle, NodeId};
 use crate::broker::spawn_partition;
 use crate::partition::Partition;
 use crate::replicator;
+use crate::txn::coordinator::TxnCoordinator;
 
 /// `(topic, partition)` pairs where `node_id` is in `replicas` AND
 /// `leader != node_id` — i.e., the broker should run a follower
@@ -73,6 +74,7 @@ pub(crate) struct ReplicatorSupervisor {
     client_id: String,
     tasks: DashMap<(String, i32), CancellationToken>,
     shutdown: CancellationToken,
+    txn_coordinator: Option<Arc<TxnCoordinator>>,
 }
 
 impl ReplicatorSupervisor {
@@ -85,6 +87,7 @@ impl ReplicatorSupervisor {
         log_config: LogConfig,
         client_id: String,
         shutdown: CancellationToken,
+        txn_coordinator: Option<Arc<TxnCoordinator>>,
     ) -> Self {
         Self {
             node_id,
@@ -95,6 +98,7 @@ impl ReplicatorSupervisor {
             client_id,
             tasks: DashMap::new(),
             shutdown,
+            txn_coordinator,
         }
     }
 
@@ -167,6 +171,12 @@ impl ReplicatorSupervisor {
                 client_id: self.client_id.clone(),
                 shutdown: token,
             }));
+        }
+
+        // 3. Refresh the txn coordinator's view of locally-led
+        //    __transaction_state partitions. Cheap (Arc clone + lock).
+        if let Some(coord) = &self.txn_coordinator {
+            coord.refresh_leader_partitions(image).await;
         }
     }
 

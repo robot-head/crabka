@@ -33,6 +33,7 @@ pub struct Broker {
     pub(crate) group_manager: Arc<crate::coordinator::GroupManager>,
     pub(crate) producer_ids: Arc<crate::producer_id_manager::ProducerIdManager>,
     pub(crate) producer_state: Arc<crate::producer_state::ProducerState>,
+    pub(crate) txn_coordinator: Arc<crate::txn::coordinator::TxnCoordinator>,
     pub(crate) supervisor_shutdown: tokio_util::sync::CancellationToken,
     pub(crate) supervisor_handle: tokio::sync::Mutex<Option<JoinHandle<()>>>,
     handlers: HandlerTable,
@@ -285,7 +286,21 @@ impl Broker {
         )
         .await?;
 
-        // 4. Spawn the replicator supervisor. Started AFTER the controller
+        // 4a. Construct the transaction coordinator. All dependencies
+        //     (controller, partitions, producer_ids) are ready at this point.
+        //     Replay any existing __transaction_state records; errors are
+        //     warnings because a brand-new broker has nothing to replay.
+        let txn_coordinator = Arc::new(crate::txn::coordinator::TxnCoordinator::new(
+            config.node_id,
+            partitions.clone(),
+            producer_ids.clone(),
+        ));
+        let _ = txn_coordinator
+            .recover(&controller.current_image())
+            .await
+            .map_err(|e| tracing::warn!(error = %e, "txn coordinator recovery error"));
+
+        // 4b. Spawn the replicator supervisor. Started AFTER the controller
         //    is up and self-registration succeeded so the supervisor's
         //    initial reconcile already sees this broker in the brokers()
         //    set. With replication_factor=1 the desired follower set is
@@ -299,6 +314,7 @@ impl Broker {
             config.log_config.clone(),
             format!("crabka-broker-{}-replicator", config.broker_id),
             supervisor_shutdown.clone(),
+            Some(txn_coordinator.clone()),
         );
         let supervisor_handle = supervisor.spawn();
 
@@ -323,6 +339,7 @@ impl Broker {
             group_manager: group_manager.clone(),
             producer_ids,
             producer_state,
+            txn_coordinator,
             supervisor_shutdown,
             supervisor_handle: tokio::sync::Mutex::new(Some(supervisor_handle)),
             handlers,

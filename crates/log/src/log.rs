@@ -305,7 +305,9 @@ impl Log {
                 .and_then(parse_control_marker_type);
             if let Some(start) = self.pending.remove(&pid) {
                 let last = batch.base_offset + i64::from(batch.last_offset_delta);
-                if marker_type == Some(0) /* ABORT */ {
+                if marker_type == Some(0)
+                /* ABORT */
+                {
                     self.active_txn_index.append(AbortedTxn {
                         start_offset: start,
                         last_offset: last,
@@ -831,7 +833,11 @@ mod tests {
         let mut b1 = transactional_batch(1000, 0, &["a", "b"]); // pid=1000 epoch=0
         let old_lso = log.lso();
         log.append(&mut b1).unwrap();
-        assert_eq!(log.lso(), old_lso, "LSO must not advance while txn in flight");
+        assert_eq!(
+            log.lso(),
+            old_lso,
+            "LSO must not advance while txn in flight"
+        );
 
         // Commit marker — LSO catches up.
         let mut commit = commit_marker(1000, 0);

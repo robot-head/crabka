@@ -102,9 +102,7 @@ impl TxnCoordinator {
         let part = self
             .partitions
             .get(&(bootstrap::TOPIC.to_string(), p))
-            .ok_or_else(|| {
-                BrokerError::Txn(format!("__transaction_state-{p} not local"))
-            })?
+            .ok_or_else(|| BrokerError::Txn(format!("__transaction_state-{p} not local")))?
             .value()
             .clone();
 
@@ -124,8 +122,7 @@ impl TxnCoordinator {
 
         part.produce_batch(batch).await?;
 
-        self.state
-            .insert(tid, Arc::new(Mutex::new(entry)));
+        self.state.insert(tid, Arc::new(Mutex::new(entry)));
         Ok(())
     }
 
@@ -196,11 +193,9 @@ impl TxnCoordinator {
                             continue;
                         };
                         let tid = String::from_utf8_lossy(tid_bytes).into_owned();
-                        self.state
-                            .insert(tid, Arc::new(Mutex::new(entry)));
+                        self.state.insert(tid, Arc::new(Mutex::new(entry)));
                     }
-                    offset =
-                        batch.base_offset + i64::from(batch.last_offset_delta) + 1;
+                    offset = batch.base_offset + i64::from(batch.last_offset_delta) + 1;
                 }
             }
         }

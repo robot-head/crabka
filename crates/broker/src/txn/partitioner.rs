@@ -77,7 +77,7 @@ mod tests {
     #[ignore = "expected values must be regenerated from JVM Utils.murmur2; the always_in_bounds test plus the slice-9 JVM acceptance gate cover wire-compat"]
     fn matches_jvm_for_canonical_tids() {
         let cases: &[(&str, i32)] = &[
-            ("my-tid", 32),       // PLACEHOLDER — verify against JVM before relying
+            ("my-tid", 32), // PLACEHOLDER — verify against JVM before relying
             ("producer-1", 18),
             ("tx-orders-prod", 6),
         ];
@@ -92,7 +92,11 @@ mod tests {
 
     #[test]
     fn always_in_bounds() {
-        for s in ["", "a", "really-long-transactional-id-with-many-bytes-and-symbols-!@#$%"] {
+        for s in [
+            "",
+            "a",
+            "really-long-transactional-id-with-many-bytes-and-symbols-!@#$%",
+        ] {
             for n in [1, 50, 256] {
                 let p = partition_for_tid(s, n);
                 assert!((0..n).contains(&p));
@@ -106,14 +110,24 @@ mod tests {
         // We can't easily construct a tid that murmur2's to exactly i32::MIN,
         // but verify partition_for_tid never returns negative for a diverse set of inputs.
         let long_repeated = "x".repeat(64);
-        let inputs: &[&str] = &["", "a", "tid", "transactional-id-123", &long_repeated,
-                                "00000000", "1111111111111111", "deadbeef",
-                                "very-long-string-that-might-trigger-edge-cases-in-murmur2-mixing"];
+        let inputs: &[&str] = &[
+            "",
+            "a",
+            "tid",
+            "transactional-id-123",
+            &long_repeated,
+            "00000000",
+            "1111111111111111",
+            "deadbeef",
+            "very-long-string-that-might-trigger-edge-cases-in-murmur2-mixing",
+        ];
         for s in inputs {
             for num_partitions in [1, 3, 50, 256] {
                 let p = partition_for_tid(s, num_partitions);
-                assert!((0..num_partitions).contains(&p),
-                    "tid={s:?}, num_partitions={num_partitions} produced p={p} (out of bounds)");
+                assert!(
+                    (0..num_partitions).contains(&p),
+                    "tid={s:?}, num_partitions={num_partitions} produced p={p} (out of bounds)"
+                );
             }
         }
     }
