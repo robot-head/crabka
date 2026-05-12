@@ -12,6 +12,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crabka_client_core::Client;
+use crabka_protocol::owned::end_txn_request::EndTxnRequest;
 use crabka_protocol::owned::find_coordinator_request::FindCoordinatorRequest;
 use crabka_protocol::owned::init_producer_id_request::InitProducerIdRequest;
 
@@ -146,6 +147,98 @@ impl Producer {
             _ => Err(ProducerError::InvalidTransactionState(
                 "begin_transaction must be called after init_transactions and not while another txn is in flight",
             )),
+        }
+    }
+
+    /// Commit the current transaction.
+    ///
+    /// Flushes all in-flight records, then sends `EndTxn(committed=true)` to
+    /// the transaction coordinator. Transitions the producer from
+    /// `InTransaction` → `Ready` on success.
+    ///
+    /// # Errors
+    ///
+    /// - [`ProducerError::NotTransactional`] — `transactional_id` was not set.
+    /// - [`ProducerError::InvalidTransactionState`] — not currently in a transaction.
+    /// - [`ProducerError::FencedProducer`] — broker returned `INVALID_PRODUCER_EPOCH (47)`.
+    /// - [`ProducerError::ConcurrentTransactions`] — broker returned `CONCURRENT_TRANSACTIONS (49)`; caller may retry.
+    /// - [`ProducerError::Server`] — any other broker error code.
+    pub async fn commit_transaction(&self) -> Result<(), ProducerError> {
+        self.end_transaction(true).await
+    }
+
+    /// Abort the current transaction.
+    ///
+    /// Flushes all in-flight records, then sends `EndTxn(committed=false)` to
+    /// the transaction coordinator. Transitions the producer from
+    /// `InTransaction` → `Ready` on success.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`commit_transaction`](Self::commit_transaction).
+    pub async fn abort_transaction(&self) -> Result<(), ProducerError> {
+        self.end_transaction(false).await
+    }
+
+    async fn end_transaction(&self, committed: bool) -> Result<(), ProducerError> {
+        let tid = self
+            .transactional_id
+            .clone()
+            .ok_or(ProducerError::NotTransactional)?;
+
+        // 1. Flush all in-flight records (block until acks).
+        self.flush().await?;
+
+        let mut state = self.txn_state.lock().await;
+        if !matches!(*state, TxnState::InTransaction) {
+            return Err(ProducerError::InvalidTransactionState(
+                "commit/abort_transaction must follow begin_transaction",
+            ));
+        }
+        *state = TxnState::CommittingOrAborting;
+        drop(state);
+
+        // 2. Retrieve the cached coordinator connection.
+        let coord_guard = self.txn_coord_client.lock().await;
+        let coord = coord_guard
+            .as_ref()
+            .ok_or(ProducerError::InvalidTransactionState(
+                "no txn coordinator cached — did init_transactions succeed?",
+            ))?
+            .clone();
+        drop(coord_guard);
+
+        let (pid, epoch) = *self.txn_pid_epoch.lock().await;
+
+        // 3. Send EndTxn to the coordinator.
+        let resp = coord
+            .send(EndTxnRequest {
+                transactional_id: tid,
+                producer_id: pid,
+                producer_epoch: epoch,
+                committed,
+                ..Default::default()
+            })
+            .await?;
+
+        let mut state = self.txn_state.lock().await;
+        match resp.error_code {
+            0 => {
+                *state = TxnState::Ready;
+                Ok(())
+            }
+            47 /* INVALID_PRODUCER_EPOCH */ => {
+                *state = TxnState::Fenced;
+                Err(ProducerError::FencedProducer)
+            }
+            49 /* CONCURRENT_TRANSACTIONS */ => {
+                *state = TxnState::InTransaction; // Caller can retry.
+                Err(ProducerError::ConcurrentTransactions)
+            }
+            other => {
+                *state = TxnState::Ready;
+                Err(ProducerError::Server(other))
+            }
         }
     }
 
