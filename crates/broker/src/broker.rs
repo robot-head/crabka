@@ -2,7 +2,7 @@
 //! metadata image, network listener, and handler table.
 
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 
 use dashmap::DashMap;
 use tokio::net::TcpListener;
@@ -13,7 +13,6 @@ use crate::config::BrokerConfig;
 use crate::error::BrokerError;
 use crate::handlers::HandlerTable;
 use crate::log_dir;
-use crate::metadata::MetadataImage;
 use crate::partition::{Partition, ProduceJob};
 
 /// The running broker. Library callers get a [`BrokerHandle`] from
@@ -24,7 +23,10 @@ use crate::partition::{Partition, ProduceJob};
 #[allow(dead_code)]
 pub struct Broker {
     pub(crate) config: BrokerConfig,
-    pub(crate) metadata: Arc<RwLock<MetadataImage>>,
+    /// Quorum-backed metadata controller. Replaces the slice-4 in-memory
+    /// `MetadataImage`; every metadata read goes through
+    /// [`crabka_raft::ControllerHandle::current_image`].
+    pub(crate) controller: Arc<crabka_raft::ControllerHandle>,
     /// Wrapped in `Arc` so handlers cloning the field share the same
     /// underlying map. `DashMap::clone` is a deep copy by default.
     pub(crate) partitions: Arc<DashMap<(String, i32), Arc<Partition>>>,
@@ -73,31 +75,71 @@ impl Broker {
     /// every existing `<topic>-<partition>/`, bind the TCP listener, and
     /// return the handle.
     pub async fn start(mut config: BrokerConfig) -> Result<BrokerHandle, BrokerError> {
-        let metadata = Arc::new(RwLock::new(MetadataImage::new()));
-        let partitions: Arc<DashMap<(String, i32), Arc<Partition>>> = Arc::new(DashMap::new());
+        // 1. Bring up the metadata quorum BEFORE the client listener so
+        //    handlers can read from it the moment they accept their first
+        //    connection. The controller owns its own listener bound to
+        //    `controller_listen_addr`.
+        let controller_cfg = crabka_raft::ControllerConfig {
+            node_id: config.node_id,
+            voters: config.controller_quorum_voters.clone(),
+            controller_listen_addr: config.controller_listen_addr,
+            log_dir: config.log_dir.join("__cluster_metadata"),
+            election_timeout: std::time::Duration::from_millis(1_000),
+            heartbeat_interval: std::time::Duration::from_millis(200),
+            client_id: format!("crabka-broker-{}-controller", config.broker_id),
+        };
+        let controller = Arc::new(
+            crabka_raft::Controller::start(controller_cfg)
+                .await
+                .map_err(|e| BrokerError::Startup(e.to_string()))?,
+        );
 
-        // 1. Scan + recover.
+        // 2. Wait for a leader, then submit a self-registration record so
+        //    other brokers can discover us. Best-effort: if the submit
+        //    fails the next caller's request will surface the error and
+        //    membership reconciliation can retry later.
+        {
+            let self_reg = crabka_metadata::MetadataRecord::V1BrokerRegistration(
+                crabka_metadata::BrokerRegistrationRecord {
+                    node_id: config.node_id,
+                    host: config
+                        .advertised_listener
+                        .split(':')
+                        .next()
+                        .unwrap_or("127.0.0.1")
+                        .to_string(),
+                    port: config.listen_addr.port(),
+                    rack: None,
+                },
+            );
+            let mut leader_rx = controller.watch_leader();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while leader_rx.borrow().is_none() {
+                if std::time::Instant::now() > deadline {
+                    return Err(BrokerError::Startup(
+                        "no leader elected within 10s".into(),
+                    ));
+                }
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_millis(100),
+                    leader_rx.changed(),
+                )
+                .await;
+            }
+            if let Err(e) = controller.submit_change(vec![self_reg]).await {
+                tracing::warn!(error = %e, "self-registration failed; continuing");
+            }
+        }
+
+        // 3. Scan + recover partitions on disk. Partition state is still
+        //    a local-disk concern; the metadata image is sourced from
+        //    `controller.current_image()` whenever a handler needs it.
+        let partitions: Arc<DashMap<(String, i32), Arc<Partition>>> = Arc::new(DashMap::new());
         for (topic, partition_id) in log_dir::scan(&config.log_dir)? {
             let dir = log_dir::partition_dir(&config.log_dir, &topic, partition_id);
             let log = crabka_log::Log::open(&dir, config.log_config.clone())?;
             let part = spawn_partition(topic.clone(), partition_id, log);
             partitions.insert((topic.clone(), partition_id), part);
-        }
-        // Now derive partition_count per topic and seed the metadata image.
-        {
-            let mut meta = metadata.write().expect("metadata poisoned");
-            let mut by_topic: std::collections::BTreeMap<String, i32> =
-                std::collections::BTreeMap::default();
-            for entry in partitions.iter() {
-                let (topic, partition_id) = entry.key();
-                let cur = by_topic.entry(topic.clone()).or_insert(0);
-                if *partition_id + 1 > *cur {
-                    *cur = *partition_id + 1;
-                }
-            }
-            for (topic, count) in by_topic {
-                meta.insert_topic(&topic, count, config.broker_id);
-            }
         }
 
         // Group coordinator bootstrap (slice 5).
@@ -106,16 +148,16 @@ impl Broker {
         let producer_state = Arc::new(crate::producer_state::ProducerState::new());
         crate::coordinator::bootstrap::bootstrap(
             &config,
-            &metadata,
+            &controller,
             &partitions,
             group_manager.as_ref(),
         )
         .await?;
 
-        // 2. Build handler table.
+        // 4. Build handler table.
         let handlers = crate::handlers::build_table();
 
-        // 3. Bind first so the actual port is known. If
+        // 5. Bind first so the actual port is known. If
         //    `advertised_listener` points at port 0 (tests typically),
         //    rewrite it to the bound port so FindCoordinator/Metadata
         //    return a useful host:port instead of `:0`.
@@ -128,7 +170,7 @@ impl Broker {
         }
         let broker = Arc::new(Self {
             config,
-            metadata,
+            controller,
             partitions,
             group_manager: group_manager.clone(),
             producer_ids,

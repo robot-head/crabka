@@ -58,7 +58,6 @@ mod coordinator;
 mod error;
 mod handlers;
 mod log_dir;
-mod metadata;
 mod network;
 mod partition;
 mod partition_writer;
