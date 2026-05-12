@@ -4,6 +4,7 @@
 
 mod compression;
 mod error;
+mod partitioner;
 mod record;
 
 pub use compression::Compression;
