@@ -54,7 +54,7 @@ impl Producer {
         // 1. Build inner client.
         let client = Client::builder()
             .bootstrap(bootstrap)
-            .client_id(client_id)
+            .client_id(client_id.clone())
             .request_timeout(request_timeout)
             .build()
             .await?;
@@ -107,6 +107,7 @@ impl Producer {
 
         Ok(Producer {
             client,
+            client_id,
             producer_id,
             producer_epoch,
             acks,
@@ -129,6 +130,8 @@ impl Producer {
             transactional_id,
             transaction_timeout,
             txn_state: Mutex::new(crate::transactional::TxnState::Uninitialized),
+            txn_coord_client: Mutex::new(None),
+            txn_pid_epoch: Mutex::new((-1, -1)),
         })
     }
 }

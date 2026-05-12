@@ -12,12 +12,15 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crabka_client_core::Client;
+use crabka_protocol::owned::find_coordinator_request::FindCoordinatorRequest;
+use crabka_protocol::owned::init_producer_id_request::InitProducerIdRequest;
 
 use crate::accumulator::{Accumulator, AppendResult};
 use crate::compression::Compression;
 use crate::error::ProducerError;
 use crate::partitioner::UniformStickyPartitioner;
 use crate::record::{ProducerRecord, RecordMetadata};
+use crate::transactional::TxnState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Acks {
@@ -56,6 +59,7 @@ pub(crate) struct TopicMetadata {
 #[allow(clippy::type_complexity)] // accumulators map is inherently complex
 pub struct Producer {
     pub(crate) client: Client,
+    pub(crate) client_id: String,
     pub(crate) producer_id: i64,
     pub(crate) producer_epoch: i16,
     // The following config knobs are also copied into `SenderConfig` at
@@ -87,12 +91,16 @@ pub struct Producer {
     pub(crate) flush_notify: Arc<Notify>,
     pub(crate) sender_shutdown: CancellationToken,
     pub(crate) sender_handle: Option<JoinHandle<()>>,
-    #[allow(dead_code)]
     pub(crate) transactional_id: Option<String>,
-    #[allow(dead_code)]
     pub(crate) transaction_timeout: Duration,
-    #[allow(dead_code)]
-    pub(crate) txn_state: Mutex<crate::transactional::TxnState>,
+    pub(crate) txn_state: Mutex<TxnState>,
+    /// Cached connection to the transaction coordinator broker.
+    /// Populated by `init_transactions`; reused by begin/commit/abort.
+    pub(crate) txn_coord_client: Mutex<Option<Client>>,
+    /// Authoritative `(producer_id, producer_epoch)` for the transactional
+    /// flow. Set by `init_transactions`; read by Tasks 23+ when building
+    /// transactional `ProduceRequest`s.
+    pub(crate) txn_pid_epoch: Mutex<(i64, i16)>,
 }
 
 impl Producer {
@@ -105,6 +113,108 @@ impl Producer {
     pub fn producer_epoch(&self) -> i16 {
         self.producer_epoch
     }
+
+    // ── Transactional API ────────────────────────────────────────────────────
+
+    /// Initialize the transactional producer.
+    ///
+    /// Must be called before any transactional operations. Discovers the
+    /// transaction coordinator via `FindCoordinator`, opens a dedicated
+    /// connection to it, and calls `InitProducerId` to obtain a fenced
+    /// `(producer_id, producer_epoch)` pair.
+    ///
+    /// # Errors
+    ///
+    /// - [`ProducerError::NotTransactional`] — `transactional_id` was not set.
+    /// - [`ProducerError::InvalidTransactionState`] — called while a
+    ///   transaction is in flight.
+    /// - [`ProducerError::FencedProducer`] — the broker returned
+    ///   `INVALID_PRODUCER_EPOCH (47)`.
+    /// - [`ProducerError::Server`] — any other broker error code.
+    /// - [`ProducerError::Client`] — transport-level failure.
+    pub async fn init_transactions(&self) -> Result<(), ProducerError> {
+        let Some(tid) = self.transactional_id.as_deref() else {
+            return Err(ProducerError::NotTransactional);
+        };
+
+        let mut state = self.txn_state.lock().await;
+        if !matches!(
+            *state,
+            TxnState::Uninitialized | TxnState::Ready | TxnState::Fenced
+        ) {
+            return Err(ProducerError::InvalidTransactionState(
+                "init_transactions called while a transaction is in flight",
+            ));
+        }
+
+        let coord_addr = self.find_txn_coordinator(tid).await?;
+
+        let coord = Client::builder()
+            .bootstrap(coord_addr)
+            .client_id(self.client_id.clone())
+            .build()
+            .await?;
+
+        let timeout_ms = i32::try_from(self.transaction_timeout.as_millis())
+            .unwrap_or(60_000);
+
+        let resp = coord
+            .send(InitProducerIdRequest {
+                transactional_id: Some(tid.to_owned()),
+                transaction_timeout_ms: timeout_ms,
+                ..Default::default()
+            })
+            .await?;
+
+        match resp.error_code {
+            0 => {
+                *self.txn_pid_epoch.lock().await = (resp.producer_id, resp.producer_epoch);
+                *self.txn_coord_client.lock().await = Some(coord);
+                *state = TxnState::Ready;
+                Ok(())
+            }
+            47 /* INVALID_PRODUCER_EPOCH */ => {
+                *state = TxnState::Fenced;
+                Err(ProducerError::FencedProducer)
+            }
+            other => Err(ProducerError::Server(other)),
+        }
+    }
+
+    /// Discover the transaction coordinator for `tid` via `FindCoordinator`.
+    ///
+    /// Handles both the legacy top-level response (versions 0–3) and the
+    /// `coordinators` array introduced in version 4.
+    async fn find_txn_coordinator(&self, tid: &str) -> Result<String, ProducerError> {
+        let resp = self
+            .client
+            .send(FindCoordinatorRequest {
+                // v0-3: the `key` field carries the lookup key
+                key: tid.to_owned(),
+                // key_type = 1 → TRANSACTION (vs 0 = GROUP)
+                key_type: 1,
+                // v4+: repeated coordinator_keys list
+                coordinator_keys: vec![tid.to_owned()],
+                ..Default::default()
+            })
+            .await?;
+
+        // v4+ returns a `coordinators` array; prefer it when present.
+        if let Some(coord) = resp.coordinators.first() {
+            if coord.error_code != 0 {
+                return Err(ProducerError::Server(coord.error_code));
+            }
+            return Ok(format!("{}:{}", coord.host, coord.port));
+        }
+
+        // Fallback: legacy top-level host/port (versions 0–3).
+        if resp.error_code != 0 {
+            return Err(ProducerError::Server(resp.error_code));
+        }
+        Ok(format!("{}:{}", resp.host, resp.port))
+    }
+
+    // ── Internal lifecycle ───────────────────────────────────────────────────
 
     pub(crate) fn is_active(&self) -> Result<(), ProducerError> {
         match self.state.load(Ordering::Acquire) {
@@ -277,6 +387,7 @@ impl std::fmt::Debug for Producer {
         f.debug_struct("Producer")
             .field("producer_id", &self.producer_id)
             .field("producer_epoch", &self.producer_epoch)
+            .field("transactional_id", &self.transactional_id)
             .field("compression", &self.compression)
             .finish_non_exhaustive()
     }
