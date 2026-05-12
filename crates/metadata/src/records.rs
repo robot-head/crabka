@@ -49,27 +49,27 @@ pub enum MetadataRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_wincode::SerdeCompat;
+    use wincode::{Deserialize as _, Serialize as _};
 
-    fn bc() -> bincode::config::Configuration {
-        bincode::config::standard()
+    fn round_trip(r: &MetadataRecord) -> MetadataRecord {
+        let bytes = <SerdeCompat<MetadataRecord>>::serialize(r).unwrap();
+        <SerdeCompat<MetadataRecord>>::deserialize(&bytes).unwrap()
     }
 
     #[test]
-    fn topic_record_bincode_round_trip() {
+    fn topic_record_round_trip() {
         let r = MetadataRecord::V1Topic(TopicRecord {
             name: "t".into(),
             topic_id: Uuid::new_v4(),
             partitions: 3,
             replication_factor: 1,
         });
-        let bytes = bincode::serde::encode_to_vec(&r, bc()).unwrap();
-        let (decoded, _): (MetadataRecord, _) =
-            bincode::serde::decode_from_slice(&bytes, bc()).unwrap();
-        assert_eq!(decoded, r);
+        assert_eq!(round_trip(&r), r);
     }
 
     #[test]
-    fn partition_record_bincode_round_trip() {
+    fn partition_record_round_trip() {
         let r = MetadataRecord::V1Partition(PartitionRecord {
             topic: "t".into(),
             partition: 0,
@@ -77,34 +77,25 @@ mod tests {
             replicas: vec![1, 2, 3],
             isr: vec![1, 2],
         });
-        let bytes = bincode::serde::encode_to_vec(&r, bc()).unwrap();
-        let (decoded, _): (MetadataRecord, _) =
-            bincode::serde::decode_from_slice(&bytes, bc()).unwrap();
-        assert_eq!(decoded, r);
+        assert_eq!(round_trip(&r), r);
     }
 
     #[test]
-    fn broker_registration_bincode_round_trip() {
+    fn broker_registration_round_trip() {
         let r = MetadataRecord::V1BrokerRegistration(BrokerRegistrationRecord {
             node_id: 7,
             host: "192.168.1.10".into(),
             port: 9092,
             rack: Some("us-east-1a".into()),
         });
-        let bytes = bincode::serde::encode_to_vec(&r, bc()).unwrap();
-        let (decoded, _): (MetadataRecord, _) =
-            bincode::serde::decode_from_slice(&bytes, bc()).unwrap();
-        assert_eq!(decoded, r);
+        assert_eq!(round_trip(&r), r);
     }
 
     #[test]
-    fn delete_topic_bincode_round_trip() {
+    fn delete_topic_round_trip() {
         let r = MetadataRecord::V1DeleteTopic(DeleteTopicRecord {
             name: "doomed".into(),
         });
-        let bytes = bincode::serde::encode_to_vec(&r, bc()).unwrap();
-        let (decoded, _): (MetadataRecord, _) =
-            bincode::serde::decode_from_slice(&bytes, bc()).unwrap();
-        assert_eq!(decoded, r);
+        assert_eq!(round_trip(&r), r);
     }
 }

@@ -205,8 +205,9 @@ fn map_encode_err(e: &CrabkaRaftError) -> RPCError<NodeId, Node, RaftError<NodeI
 }
 
 fn encode_append_entries(rpc: &AppendEntriesRequest<TypeConfig>) -> Result<Bytes, CrabkaRaftError> {
-    use bincode::config::standard;
     use openraft::EntryPayload;
+    use serde_wincode::SerdeCompat;
+    use wincode::Serialize as _;
 
     let mut entries = Vec::with_capacity(rpc.entries.len());
     for e in &rpc.entries {
@@ -215,7 +216,7 @@ fn encode_append_entries(rpc: &AppendEntriesRequest<TypeConfig>) -> Result<Bytes
             EntryPayload::Normal(_) => 1,
             EntryPayload::Membership(_) => 2,
         };
-        let payload = bincode::serde::encode_to_vec(&e.payload, standard())?;
+        let payload = <SerdeCompat<EntryPayload<TypeConfig>>>::serialize(&e.payload)?;
         entries.push(CrabkaLogEntry {
             log_index: i64::try_from(e.log_id.index).unwrap_or(i64::MAX),
             log_term: i64::try_from(e.log_id.leader_id.term).unwrap_or(i64::MAX),

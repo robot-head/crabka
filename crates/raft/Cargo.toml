@@ -17,7 +17,8 @@ crabka-protocol = { version = "0.1", path = "../protocol", default-features = fa
 crabka-client-core = { version = "0.1", path = "../client-core" }
 openraft = { workspace = true }
 async-trait = { workspace = true }
-bincode = { workspace = true }
+wincode = { workspace = true }
+serde-wincode = { workspace = true }
 bytes = { workspace = true }
 dashmap = { workspace = true }
 futures-util = { workspace = true }

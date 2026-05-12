@@ -3,12 +3,13 @@
 //! re-encode v1 round-trips for the fields v1 understands." We seed
 //! that contract by asserting v1 ↔ v1 round-trips here.
 
-use bincode::config::standard;
 use crabka_metadata::{
     BrokerRegistrationRecord, DeleteTopicRecord, MetadataRecord, PartitionRecord, TopicRecord,
 };
 use proptest::prelude::*;
+use serde_wincode::SerdeCompat;
 use uuid::Uuid;
+use wincode::{Deserialize as _, Serialize as _};
 
 prop_compose! {
     fn arb_topic()(
@@ -60,18 +61,18 @@ fn arb_record() -> impl Strategy<Value = MetadataRecord> {
 
 proptest! {
     #[test]
-    fn record_round_trips_bincode(r in arb_record()) {
-        let bytes = bincode::serde::encode_to_vec(&r, standard()).unwrap();
-        let (decoded, _): (MetadataRecord, _) =
-            bincode::serde::decode_from_slice(&bytes, standard()).unwrap();
+    fn record_round_trips_wincode(r in arb_record()) {
+        let bytes = <SerdeCompat<MetadataRecord>>::serialize(&r).unwrap();
+        let decoded: MetadataRecord =
+            <SerdeCompat<MetadataRecord>>::deserialize(&bytes).unwrap();
         prop_assert_eq!(decoded, r);
     }
 
     #[test]
-    fn batch_round_trips_bincode(records in prop::collection::vec(arb_record(), 0..32)) {
-        let bytes = bincode::serde::encode_to_vec(&records, standard()).unwrap();
-        let (decoded, _): (Vec<MetadataRecord>, _) =
-            bincode::serde::decode_from_slice(&bytes, standard()).unwrap();
+    fn batch_round_trips_wincode(records in prop::collection::vec(arb_record(), 0..32)) {
+        let bytes = <SerdeCompat<Vec<MetadataRecord>>>::serialize(&records).unwrap();
+        let decoded: Vec<MetadataRecord> =
+            <SerdeCompat<Vec<MetadataRecord>>>::deserialize(&bytes).unwrap();
         prop_assert_eq!(decoded, records);
     }
 }

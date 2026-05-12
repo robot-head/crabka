@@ -314,20 +314,23 @@ async fn dispatch(api_key: i16, body: &[u8], raft: &Raft) -> Result<Bytes, RaftE
 async fn dispatch_submit_change(body: &[u8], raft: &Raft) -> Result<Bytes, RaftError> {
     let mut cur = body;
     let req = CrabkaSubmitChangeRequest::decode_v0(&mut cur)?;
-    let records: Vec<crabka_metadata::MetadataRecord> =
-        match bincode::serde::decode_from_slice(&req.records, bincode::config::standard()) {
-            Ok((v, _)) => v,
-            Err(e) => {
-                tracing::warn!(error = %e, "submit-change body decode failed");
-                let resp = CrabkaSubmitChangeResponse {
-                    error_code: 2,
-                    leader_hint: -1,
-                };
-                let mut out = Vec::with_capacity(16);
-                resp.encode_v0(&mut out);
-                return Ok(Bytes::from(out));
-            }
-        };
+    let records: Vec<crabka_metadata::MetadataRecord> = match <serde_wincode::SerdeCompat<
+        Vec<crabka_metadata::MetadataRecord>,
+    > as wincode::Deserialize>::deserialize(
+        &req.records
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(error = %e, "submit-change body decode failed");
+            let resp = CrabkaSubmitChangeResponse {
+                error_code: 2,
+                leader_hint: -1,
+            };
+            let mut out = Vec::with_capacity(16);
+            resp.encode_v0(&mut out);
+            return Ok(Bytes::from(out));
+        }
+    };
     let data = AppData { records };
     let resp = match raft.client_write(data).await {
         Ok(r) if r.data.rejected.is_empty() => CrabkaSubmitChangeResponse {
@@ -360,15 +363,16 @@ async fn dispatch_submit_change(body: &[u8], raft: &Raft) -> Result<Bytes, RaftE
 fn convert_append_entries(
     req: CrabkaAppendEntriesRequest,
 ) -> openraft::raft::AppendEntriesRequest<TypeConfig> {
-    use bincode::config::standard;
+    use serde_wincode::SerdeCompat;
+    use wincode::Deserialize as _;
     let leader_node = u64::try_from(req.leader_id.max(0)).unwrap_or(0);
     let entries = req
         .entries
         .into_iter()
         .map(|e| {
             let payload: openraft::EntryPayload<TypeConfig> =
-                bincode::serde::decode_from_slice(&e.payload, standard())
-                    .map_or(openraft::EntryPayload::Blank, |(v, _)| v);
+                <SerdeCompat<openraft::EntryPayload<TypeConfig>>>::deserialize(&e.payload)
+                    .unwrap_or(openraft::EntryPayload::Blank);
             openraft::Entry {
                 log_id: openraft::LogId {
                     leader_id: openraft::LeaderId::new(

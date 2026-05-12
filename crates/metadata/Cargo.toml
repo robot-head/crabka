@@ -11,7 +11,8 @@ description = "Versioned metadata record types + immutable image for Crabka"
 workspace = true
 
 [dependencies]
-bincode = { workspace = true }
+wincode = { workspace = true }
+serde-wincode = { workspace = true }
 bytes = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
