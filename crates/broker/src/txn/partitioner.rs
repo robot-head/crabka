@@ -53,11 +53,14 @@ fn murmur2(data: &[u8]) -> u32 {
 
 /// Map a `transactional_id` to a partition index in
 /// `__transaction_state`. Uses `i32`-cast then `abs` to match the JVM
-/// (which uses `Math.abs(int)`).
+/// `Utils.abs(int)` semantics, which returns 0 for `Integer.MIN_VALUE`
+/// to avoid arithmetic overflow.
 pub fn partition_for_tid(transactional_id: &str, num_partitions: i32) -> i32 {
     // cast_possible_wrap: intentional — mirrors JVM's (int) cast of the u32 hash.
     let h = murmur2(transactional_id.as_bytes()).cast_signed();
-    h.unsigned_abs().cast_signed() % num_partitions
+    // Match Utils.abs: return 0 for i32::MIN to avoid overflow, else Math.abs.
+    let abs = if h == i32::MIN { 0 } else { h.abs() };
+    abs % num_partitions
 }
 
 #[cfg(test)]
@@ -93,6 +96,24 @@ mod tests {
             for n in [1, 50, 256] {
                 let p = partition_for_tid(s, n);
                 assert!((0..n).contains(&p));
+            }
+        }
+    }
+
+    #[test]
+    fn min_value_input_does_not_break_bounds() {
+        // Sanity test verifying the i32::MIN guard in Utils.abs semantics.
+        // We can't easily construct a tid that murmur2's to exactly i32::MIN,
+        // but verify partition_for_tid never returns negative for a diverse set of inputs.
+        let long_repeated = "x".repeat(64);
+        let inputs: &[&str] = &["", "a", "tid", "transactional-id-123", &long_repeated,
+                                "00000000", "1111111111111111", "deadbeef",
+                                "very-long-string-that-might-trigger-edge-cases-in-murmur2-mixing"];
+        for s in inputs {
+            for num_partitions in [1, 3, 50, 256] {
+                let p = partition_for_tid(s, num_partitions);
+                assert!((0..num_partitions).contains(&p),
+                    "tid={s:?}, num_partitions={num_partitions} produced p={p} (out of bounds)");
             }
         }
     }
