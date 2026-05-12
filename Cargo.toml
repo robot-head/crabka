@@ -31,6 +31,7 @@ tempfile = "3"
 hex = "0.4"
 toml = "1.0"
 once_cell = "1"
+openraft = { version = "0.9", features = ["serde", "type-alias"] }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 snap = "1"
 lz4_flex = { version = "0.13", default-features = false, features = ["frame"] }
@@ -46,6 +47,7 @@ testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["kafka"] }
 futures-util = { version = "0.3", features = ["sink"] }
 clap = { version = "4", features = ["derive"] }
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "serde"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 bon = "3"
+bincode = "2"
