@@ -17,6 +17,7 @@ use crate::error::ProducerError;
 use crate::partitioner::UniformStickyPartitioner;
 use crate::producer::{Acks, Producer};
 use crate::sender;
+use crate::transactional::TxnState;
 
 #[bon::bon]
 impl Producer {
@@ -86,6 +87,9 @@ impl Producer {
         let partitioner = Arc::new(UniformStickyPartitioner::new());
         let flush_notify = Arc::new(Notify::new());
 
+        let txn_state = Arc::new(Mutex::new(TxnState::Uninitialized));
+        let txn_pid_epoch = Arc::new(Mutex::new((-1i64, -1i16)));
+
         let sender_handle = tokio::spawn(sender::run(sender::SenderConfig {
             client: client.clone(),
             producer_id,
@@ -103,6 +107,9 @@ impl Producer {
             wake_rx,
             flush_notify: flush_notify.clone(),
             shutdown: shutdown.clone(),
+            transactional_id: transactional_id.clone(),
+            txn_state: txn_state.clone(),
+            txn_pid_epoch: txn_pid_epoch.clone(),
         }));
 
         Ok(Producer {
@@ -129,9 +136,9 @@ impl Producer {
             sender_handle: Some(sender_handle),
             transactional_id,
             transaction_timeout,
-            txn_state: Mutex::new(crate::transactional::TxnState::Uninitialized),
+            txn_state,
             txn_coord_client: Mutex::new(None),
-            txn_pid_epoch: Mutex::new((-1, -1)),
+            txn_pid_epoch,
         })
     }
 }

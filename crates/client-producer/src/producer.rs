@@ -93,14 +93,16 @@ pub struct Producer {
     pub(crate) sender_handle: Option<JoinHandle<()>>,
     pub(crate) transactional_id: Option<String>,
     pub(crate) transaction_timeout: Duration,
-    pub(crate) txn_state: Mutex<TxnState>,
+    /// Arc-wrapped so the sender task can share the same state without
+    /// additional synchronization structures.
+    pub(crate) txn_state: Arc<Mutex<TxnState>>,
     /// Cached connection to the transaction coordinator broker.
     /// Populated by `init_transactions`; reused by begin/commit/abort.
     pub(crate) txn_coord_client: Mutex<Option<Client>>,
     /// Authoritative `(producer_id, producer_epoch)` for the transactional
-    /// flow. Set by `init_transactions`; read by Tasks 23+ when building
+    /// flow. Set by `init_transactions`; read by the sender when building
     /// transactional `ProduceRequest`s.
-    pub(crate) txn_pid_epoch: Mutex<(i64, i16)>,
+    pub(crate) txn_pid_epoch: Arc<Mutex<(i64, i16)>>,
 }
 
 impl Producer {
@@ -115,6 +117,37 @@ impl Producer {
     }
 
     // ── Transactional API ────────────────────────────────────────────────────
+
+    /// Begin a new transaction.
+    ///
+    /// Must be called after [`init_transactions`] has completed and before
+    /// any transactional [`send`] calls. Transitions the producer from
+    /// `Ready` → `InTransaction`.
+    ///
+    /// # Errors
+    ///
+    /// - [`ProducerError::NotTransactional`] — `transactional_id` was not set.
+    /// - [`ProducerError::InvalidTransactionState`] — producer is not in the
+    ///   `Ready` state (e.g. `init_transactions` not yet called, or a
+    ///   transaction is already in flight).
+    ///
+    /// [`init_transactions`]: Self::init_transactions
+    /// [`send`]: Self::send
+    pub async fn begin_transaction(&self) -> Result<(), ProducerError> {
+        if self.transactional_id.is_none() {
+            return Err(ProducerError::NotTransactional);
+        }
+        let mut state = self.txn_state.lock().await;
+        match *state {
+            TxnState::Ready => {
+                *state = TxnState::InTransaction;
+                Ok(())
+            }
+            _ => Err(ProducerError::InvalidTransactionState(
+                "begin_transaction must be called after init_transactions and not while another txn is in flight",
+            )),
+        }
+    }
 
     /// Initialize the transactional producer.
     ///
