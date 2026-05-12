@@ -129,12 +129,16 @@ pub(crate) fn handle(
 
             let error_code = match result {
                 Ok(()) => {
-                    // Committed to quorum — materialize on-disk partitions only
-                    // where this broker is the leader. Followers materialize
-                    // lazily inside their replicator task.
+                    // Committed to quorum — materialize on-disk partitions for
+                    // every assignment where THIS broker is in `replicas`,
+                    // whether as leader or follower. The replicator supervisor
+                    // materializes the same partitions on the OTHER brokers
+                    // lazily via the metadata-watch; this handler-side path is
+                    // an optimization so producers that immediately follow the
+                    // CreateTopics ack don't race the supervisor.
                     for (p, replicas) in assignments.iter().enumerate() {
                         let p_i32 = i32::try_from(p).unwrap_or(0);
-                        if replicas[0] == node_id {
+                        if replicas.contains(&node_id) {
                             let dir = log_dir::partition_dir(&log_dir, &name, p_i32);
                             match std::fs::create_dir_all(&dir)
                                 .map_err(BrokerError::from)

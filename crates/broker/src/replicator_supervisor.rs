@@ -1,7 +1,17 @@
 //! Subscribes to the controller's metadata-image watch channel and
-//! diffs the desired follower-replication assignments on each apply.
-//! Spawns a `replicator::run` task per new (topic, partition); cancels
-//! tasks for partitions removed from the image.
+//! on each apply:
+//!
+//! 1. **Materializes the local on-disk partition** for any
+//!    `(topic, partition)` where this broker is in `replicas`,
+//!    regardless of leader/follower role. The `CreateTopics` handler
+//!    used to do this itself, but with slice-8 round-robin placement
+//!    the broker that handles the request usually isn't the partition
+//!    leader — so the lazy supervisor-driven path is the only one
+//!    that materializes the partition on the leader broker reliably.
+//!
+//! 2. **Spawns a `replicator::run` task** per `(topic, partition)`
+//!    where this broker is in `replicas` but is NOT the leader, and
+//!    cancels tasks for partitions removed from the image.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -12,14 +22,17 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
-use crabka_log::LogConfig;
+use crabka_log::{Log, LogConfig};
 use crabka_metadata::MetadataImage;
 use crabka_raft::{ControllerHandle, NodeId};
 
+use crate::broker::spawn_partition;
 use crate::partition::Partition;
 use crate::replicator;
 
-/// Free-function shape used both inside the supervisor and by tests.
+/// `(topic, partition)` pairs where `node_id` is in `replicas` AND
+/// `leader != node_id` — i.e., the broker should run a follower
+/// replicator task.
 pub(crate) fn desired_follower_set(
     node_id: NodeId,
     image: &MetadataImage,
@@ -28,6 +41,22 @@ pub(crate) fn desired_follower_set(
     for t in image.topics() {
         for p in image.partitions_of(&t.name) {
             if p.replicas.contains(&node_id) && p.leader != node_id {
+                out.insert((p.topic.clone(), p.partition));
+            }
+        }
+    }
+    out
+}
+
+/// `(topic, partition)` pairs where `node_id` is in `replicas`,
+/// regardless of leader/follower role — every entry here means this
+/// broker hosts partition data on disk and must materialize the
+/// on-disk `Partition` locally.
+pub(crate) fn desired_local_set(node_id: NodeId, image: &MetadataImage) -> HashSet<(String, i32)> {
+    let mut out = HashSet::new();
+    for t in image.topics() {
+        for p in image.partitions_of(&t.name) {
+            if p.replicas.contains(&node_id) {
                 out.insert((p.topic.clone(), p.partition));
             }
         }
@@ -71,6 +100,20 @@ impl ReplicatorSupervisor {
 
     #[allow(clippy::unused_async)] // tokio::spawn inside; async needed for Task 9 test harness
     pub(crate) async fn reconcile(&self, image: &MetadataImage) {
+        // 0. Materialize the on-disk partition for every assignment
+        //    where self is in `replicas`, regardless of leader/follower
+        //    role. Idempotent — `materialize_local_partition` is a no-op
+        //    when the partition is already in the broker's `partitions`
+        //    map.
+        for key in desired_local_set(self.node_id, image) {
+            if let Err(e) = self.materialize_local_partition(&key.0, key.1) {
+                warn!(
+                    topic = %key.0, partition = key.1, error = %e,
+                    "failed to materialize local partition"
+                );
+            }
+        }
+
         let desired = desired_follower_set(self.node_id, image);
 
         // 1. Cancel removed.
@@ -83,7 +126,7 @@ impl ReplicatorSupervisor {
             }
         }
 
-        // 2. Spawn new.
+        // 2. Spawn new follower replicators.
         for k in desired {
             if self.tasks.contains_key(&k) {
                 continue;
@@ -125,6 +168,25 @@ impl ReplicatorSupervisor {
                 shutdown: token,
             }));
         }
+    }
+
+    /// Open (or recover) the on-disk `Partition` for `(topic, partition)`
+    /// and insert it into the broker's shared `partitions` map.
+    /// Idempotent: a no-op if the partition is already present.
+    fn materialize_local_partition(&self, topic: &str, partition: i32) -> Result<(), String> {
+        if self
+            .partitions
+            .contains_key(&(topic.to_string(), partition))
+        {
+            return Ok(());
+        }
+        let dir = self.log_dir.join(format!("{topic}-{partition}"));
+        std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
+        let log =
+            Log::open(&dir, self.log_config.clone()).map_err(|e| format!("Log::open: {e}"))?;
+        let part = spawn_partition(topic.to_string(), partition, log);
+        self.partitions.insert((topic.to_string(), partition), part);
+        Ok(())
     }
 
     pub(crate) async fn run(self) {
