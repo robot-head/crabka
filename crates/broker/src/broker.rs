@@ -33,6 +33,8 @@ pub struct Broker {
     pub(crate) group_manager: Arc<crate::coordinator::GroupManager>,
     pub(crate) producer_ids: Arc<crate::producer_id_manager::ProducerIdManager>,
     pub(crate) producer_state: Arc<crate::producer_state::ProducerState>,
+    pub(crate) supervisor_shutdown: tokio_util::sync::CancellationToken,
+    pub(crate) supervisor_handle: tokio::sync::Mutex<Option<JoinHandle<()>>>,
     handlers: HandlerTable,
 }
 
@@ -76,7 +78,15 @@ impl BrokerHandle {
 
     /// Cancel the listener + drain in-flight connections. Awaiting the
     /// returned future blocks until the listener task exits.
+    #[allow(clippy::used_underscore_binding)] // `_broker` carries shared state we must reach into during shutdown
     pub async fn shutdown(mut self) {
+        // Cancel the replicator supervisor BEFORE the controller drops:
+        // in-flight replication tasks must observe a clean cancellation
+        // rather than a torn-down metadata-watch channel.
+        self._broker.supervisor_shutdown.cancel();
+        if let Some(h) = self._broker.supervisor_handle.lock().await.take() {
+            let _ = h.await;
+        }
         self.shutdown.cancel();
         if let Some(t) = self.listener_task.take() {
             let _ = t.await;
@@ -88,6 +98,7 @@ impl Broker {
     /// Build a `Broker`, scan the log dir, spawn partition writers for
     /// every existing `<topic>-<partition>/`, bind the TCP listener, and
     /// return the handle.
+    #[allow(clippy::too_many_lines)] // sequential bring-up; splitting hurts readability more than it helps
     pub async fn start(mut config: BrokerConfig) -> Result<BrokerHandle, BrokerError> {
         // 1. Bring up the metadata quorum BEFORE the client listener so
         //    handlers can read from it the moment they accept their first
@@ -173,10 +184,27 @@ impl Broker {
         )
         .await?;
 
-        // 4. Build handler table.
+        // 4. Spawn the replicator supervisor. Started AFTER the controller
+        //    is up and self-registration succeeded so the supervisor's
+        //    initial reconcile already sees this broker in the brokers()
+        //    set. With replication_factor=1 the desired follower set is
+        //    always empty, so this is a no-op for single-broker setups.
+        let supervisor_shutdown = CancellationToken::new();
+        let supervisor = crate::replicator_supervisor::ReplicatorSupervisor::new(
+            config.node_id,
+            controller.clone(),
+            partitions.clone(),
+            config.log_dir.clone(),
+            config.log_config.clone(),
+            format!("crabka-broker-{}-replicator", config.broker_id),
+            supervisor_shutdown.clone(),
+        );
+        let supervisor_handle = supervisor.spawn();
+
+        // 5. Build handler table.
         let handlers = crate::handlers::build_table();
 
-        // 5. Bind first so the actual port is known. If
+        // 6. Bind first so the actual port is known. If
         //    `advertised_listener` points at port 0 (tests typically),
         //    rewrite it to the bound port so FindCoordinator/Metadata
         //    return a useful host:port instead of `:0`.
@@ -194,6 +222,8 @@ impl Broker {
             group_manager: group_manager.clone(),
             producer_ids,
             producer_state,
+            supervisor_shutdown,
+            supervisor_handle: tokio::sync::Mutex::new(Some(supervisor_handle)),
             handlers,
         });
 

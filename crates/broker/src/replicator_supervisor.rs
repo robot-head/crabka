@@ -2,11 +2,6 @@
 //! diffs the desired follower-replication assignments on each apply.
 //! Spawns a `replicator::run` task per new (topic, partition); cancels
 //! tasks for partitions removed from the image.
-//!
-//! Dead-code allowed here: the supervisor is wired into `Broker::start`
-//! in Task 10. Until then, all items in this module are transitionally
-//! unused from the binary's perspective.
-#![allow(dead_code)]
 
 use std::collections::HashSet;
 use std::path::PathBuf;

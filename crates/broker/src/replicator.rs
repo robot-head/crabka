@@ -5,9 +5,6 @@
 //! 0 and restarting; `NOT_LEADER_FOR_PARTITION` by returning so the
 //! supervisor's next reconcile re-evaluates.
 
-// `node_id` and `client_id` on `Config` are consumed by the supervisor in
-// Task 8 / Broker::start in Task 10; keep the allow until then.
-#![allow(dead_code)]
 // `log_config` is a conventional field name; the "ends with struct name" lint
 // is a false positive here.
 #![allow(clippy::struct_field_names)]
