@@ -27,6 +27,7 @@ use crate::broker::Broker;
 use crate::codes;
 use crate::error::BrokerError;
 use crate::txn::state::{TopicPartition, TxnState};
+use crate::txn::util::now_millis;
 
 pub(crate) fn handle(
     broker: &Broker,
@@ -198,9 +199,3 @@ fn encode_response(resp: &AddPartitionsToTxnResponse, version: i16) -> Result<By
     Ok(buf.freeze())
 }
 
-fn now_millis() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(0))
-}

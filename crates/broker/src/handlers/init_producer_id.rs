@@ -19,6 +19,7 @@ use crate::error::BrokerError;
 use crate::replicator_supervisor::materialize_partition;
 use crate::txn::coordinator::TxnCoordinator;
 use crate::txn::state::{TxnEntry, TxnState};
+use crate::txn::util::now_millis;
 
 pub(crate) fn handle(
     broker: &Broker,
@@ -164,13 +165,6 @@ async fn handle_transactional(
             })
         }
     }
-}
-
-fn now_millis() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(0))
 }
 
 async fn dispatch_abort_markers(
