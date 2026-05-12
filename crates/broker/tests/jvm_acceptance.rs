@@ -503,8 +503,32 @@ async fn three_node_jvm_round_trip() {
         &bootstrap_1,
     ]);
 
-    // 2. Give propagation a moment.
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    // 2. Wait for the topic to propagate from node 1 (where kafka-topics
+    //    created it) to node 2 (where we'll produce). A flat sleep races
+    //    on CI's slower kernel; poll Metadata against node 2 until we
+    //    actually see the topic listed.
+    {
+        use crabka_protocol::owned::metadata_request::MetadataRequest;
+        let probe = crabka_client_core::Client::builder()
+            .bootstrap(format!("host.docker.internal:{}", client_ports[1]))
+            .build()
+            .await
+            .expect("metadata probe client");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let m = probe
+                .send(MetadataRequest::default())
+                .await
+                .expect("metadata");
+            if m.topics.iter().any(|t| t.name.as_deref() == Some(TOPIC)) {
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                panic!("topic not propagated to node 2 within 10s");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
 
     // 3. Produce via node 2.
     let producer = crabka_client_producer::Producer::builder()
