@@ -486,6 +486,7 @@ async fn three_node_jvm_round_trip() {
     }
 
     let bootstrap_1 = format!("host.docker.internal:{}", client_ports[0]);
+    let bootstrap_2 = format!("host.docker.internal:{}", client_ports[1]);
     let bootstrap_3 = format!("host.docker.internal:{}", client_ports[2]);
 
     // 1. Create topic via node 1.
@@ -531,31 +532,45 @@ async fn three_node_jvm_round_trip() {
         }
     }
 
-    // 3. Produce via the partition's leader (node 1). With slice-7
-    //    replication_factor=1 only the CreateTopics-handling broker
-    //    hosts partition data; other brokers' Metadata correctly
-    //    reports node 1 as leader, but the slice-6 Rust producer
-    //    doesn't yet follow NOT_LEADER_FOR_PARTITION redirects across
-    //    brokers. Cross-broker producer routing is a slice-8 follow-up.
-    let producer = crabka_client_producer::Producer::builder()
-        .bootstrap(format!("host.docker.internal:{}", client_ports[0]))
-        .enable_idempotence(true)
-        .acks(crabka_client_producer::Acks::All)
-        .build()
-        .await
-        .expect("producer");
-    for v in ["a", "b", "c"] {
-        let fut = producer
-            .send(crabka_client_producer::ProducerRecord {
-                topic: TOPIC.into(),
-                value: Some(bytes::Bytes::from(v)),
-                ..Default::default()
-            })
-            .await;
-        let _ = fut.await.expect("oneshot").expect("ack");
-    }
-    producer.flush().await.expect("flush");
-    producer.close().await.expect("close");
+    // 3. Produce via kafka-console-producer (JVM). The JVM AdminClient
+    //    transparently follows the partition leader: it asks any node's
+    //    Metadata for the leader of partition 0 and opens a fresh
+    //    connection to that broker's advertised address. The slice-6
+    //    Rust producer doesn't yet route across brokers per partition,
+    //    so we use the JVM tool here; cross-broker producer routing is
+    //    a slice-8 follow-up that the Rust client will pick up.
+    let mut producer_child = Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "-i",
+            "--add-host=host.docker.internal:host-gateway",
+            KAFKA_IMAGE,
+            "kafka-console-producer",
+            "--bootstrap-server",
+            &bootstrap_2,
+            "--topic",
+            TOPIC,
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn JVM producer");
+    producer_child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(b"a\nb\nc\n")
+        .expect("write stdin");
+    drop(producer_child.stdin.take());
+    let producer_out = producer_child.wait_with_output().expect("wait producer");
+    assert!(
+        producer_out.status.success(),
+        "JVM producer failed: stdout={}, stderr={}",
+        String::from_utf8_lossy(&producer_out.stdout),
+        String::from_utf8_lossy(&producer_out.stderr),
+    );
 
     // 4. Consume via node 3.
     let out = docker_run_kafka_tool(&[
