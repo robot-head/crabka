@@ -37,6 +37,10 @@ const BOOTSTRAP: &str = "host.docker.internal:9092";
 /// gateway IP.
 const LISTEN: &str = "0.0.0.0:9092";
 const KAFKA_IMAGE: &str = "confluentinc/cp-kafka:6.1.1";
+/// Newer Kafka image needed for transactional verifiable-producer support
+/// (--transactional-id flag added in Kafka 3.x). Used only by the slice-9
+/// transactional acceptance test.
+const KAFKA_IMAGE_TXN: &str = "confluentinc/cp-kafka:7.5.0";
 
 /// Spawn the broker, listening on `LISTEN`. The advertised listener is
 /// `host.docker.internal:9092`; inside the cp-kafka containers we add a
@@ -933,15 +937,15 @@ async fn transactional_console_producer_eos() {
     ]);
 
     // 2. Produce 6 records transactionally.
-    //    `kafka-verifiable-producer` ships in cp-kafka 6.1.1 and supports
-    //    `--transactional-id` / `--transaction-duration-ms` (added in Apache
-    //    Kafka 0.11). It commits a new transaction at each duration interval.
+    //    `kafka-verifiable-producer` requires cp-kafka 7.x (Kafka 3.x) for
+    //    `--transactional-id` support; the global KAFKA_IMAGE (6.1.1) predates
+    //    that flag. Use KAFKA_IMAGE_TXN for this command only.
     let producer_out = std::process::Command::new("docker")
         .args([
             "run",
             "--rm",
             "--add-host=host.docker.internal:host-gateway",
-            KAFKA_IMAGE,
+            KAFKA_IMAGE_TXN,
             "kafka-verifiable-producer",
             "--bootstrap-server",
             &bootstrap_1,
