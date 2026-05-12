@@ -127,10 +127,12 @@ impl Broker {
                 },
             );
             let mut leader_rx = controller.watch_leader();
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_mins(2);
             while leader_rx.borrow().is_none() {
                 if std::time::Instant::now() > deadline {
-                    return Err(BrokerError::Startup("no leader elected within 30s".into()));
+                    return Err(BrokerError::Startup(
+                        "no leader elected within 2 min".into(),
+                    ));
                 }
                 let _ = tokio::time::timeout(
                     std::time::Duration::from_millis(100),

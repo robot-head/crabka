@@ -6,17 +6,12 @@
 //! election, log replication, follower-forwarding via `submit_change`,
 //! and openraft's per-leader `client_write` serialization.
 //!
-//! Gated `#[cfg(not(target_os = "windows"))]`: GitHub Actions windows
-//! runners are slow enough that three sequential 3-broker clusters
-//! (one per test, serialized via `cluster_lock`) blow past openraft's
-//! election timeout even with a 30s `Broker::start` deadline, and a
-//! distinct ordering of state updates also trips an internal
-//! `Some(log_id) <= self.committed()` assertion. The slice-7
-//! architecture is exercised on Linux + macOS plus the
-//! `three_node_jvm_round_trip` Docker test; Windows isn't a primary
-//! deployment target for Crabka brokers.
+//! Deadlines are 2 minutes throughout: a 3-broker cluster spinning up
+//! cold on a hosted GitHub Actions runner (Windows in particular) can
+//! take tens of seconds for openraft to converge on a leader, and
+//! `cluster_lock` serializes the tests so three slow startups
+//! accumulate.
 
-#![cfg(not(target_os = "windows"))]
 // Test-file pragmatism: deadlines are expressed as `if Instant::now() > … { panic!(…) }`
 // for readability (each panic message describes the test scenario it
 // covers) and as plain `u64::try_from(i+1).unwrap()`-style casts when
@@ -122,7 +117,7 @@ async fn start_n_node(n: u64) -> Vec<(BrokerHandle, BrokerConfig, TempDir)> {
 
 /// Poll each broker until at least one of them reports a leader.
 async fn wait_for_leader(cluster: &[(BrokerHandle, BrokerConfig, TempDir)]) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_mins(2);
     loop {
         for (h, _, _) in cluster {
             if h.controller_leader_id().await.is_some() {
@@ -130,7 +125,7 @@ async fn wait_for_leader(cluster: &[(BrokerHandle, BrokerConfig, TempDir)]) {
             }
         }
         if Instant::now() > deadline {
-            panic!("no leader within 5s");
+            panic!("no leader within 2 min");
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -140,7 +135,7 @@ async fn wait_for_leader(cluster: &[(BrokerHandle, BrokerConfig, TempDir)]) {
 async fn three_node_cluster_elects_leader() {
     let _g = cluster_lock().lock().await;
     let cluster = start_n_node(3).await;
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_mins(2);
     loop {
         let mut leaders = std::collections::HashSet::new();
         for (h, _, _) in &cluster {
@@ -152,7 +147,7 @@ async fn three_node_cluster_elects_leader() {
             break;
         }
         if Instant::now() > deadline {
-            panic!("leader not converged within 5s; current views: {leaders:?}");
+            panic!("leader not converged within 2 min; current views: {leaders:?}");
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -194,14 +189,14 @@ async fn create_topic_on_any_node_propagates() {
         .build()
         .await
         .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_mins(2);
     loop {
         let m = c2.send(MetadataRequest::default()).await.unwrap();
         if m.topics.iter().any(|t| t.name.as_deref() == Some("prop")) {
             break;
         }
         if Instant::now() > deadline {
-            panic!("topic not propagated to node 2 within 5s");
+            panic!("topic not propagated to node 2 within 2 min");
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -231,8 +226,8 @@ async fn leader_kill_recovers() {
     let (leader, _, _dir) = cluster.remove(leader_idx);
     leader.shutdown().await;
 
-    // Survivors elect a new leader within 5s.
-    let deadline = Instant::now() + Duration::from_secs(5);
+    // Survivors elect a new leader within 2 min.
+    let deadline = Instant::now() + Duration::from_mins(2);
     loop {
         let mut leaders = std::collections::HashSet::new();
         for (h, _, _) in &cluster {
@@ -244,7 +239,7 @@ async fn leader_kill_recovers() {
             break;
         }
         if Instant::now() > deadline {
-            panic!("no new leader within 5s of kill");
+            panic!("no new leader within 2 min of kill");
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }

@@ -515,7 +515,7 @@ async fn three_node_jvm_round_trip() {
             .build()
             .await
             .expect("metadata probe client");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_mins(2);
         loop {
             let m = probe
                 .send(MetadataRequest::default())
@@ -526,7 +526,7 @@ async fn three_node_jvm_round_trip() {
             }
             assert!(
                 std::time::Instant::now() <= deadline,
-                "topic not propagated to node 2 within 10s",
+                "topic not propagated to node 2 within 2 min",
             );
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }

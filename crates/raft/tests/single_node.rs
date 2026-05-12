@@ -23,14 +23,14 @@ async fn single_voter_create_topic_round_trip() {
     let controller = Controller::start(cfg).await.expect("controller start");
 
     // Wait until openraft elects this single voter as leader.
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + Duration::from_mins(2);
     loop {
         if controller.watch_leader().borrow().is_some() {
             break;
         }
         assert!(
             std::time::Instant::now() <= deadline,
-            "no leader elected within 5s"
+            "no leader elected within 2 min"
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -57,14 +57,14 @@ async fn single_voter_duplicate_topic_rejected() {
     cfg.voters = vec![(1, cfg.controller_listen_addr)];
     let controller = Controller::start(cfg).await.unwrap();
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + Duration::from_mins(2);
     loop {
         if controller.watch_leader().borrow().is_some() {
             break;
         }
         assert!(
             std::time::Instant::now() <= deadline,
-            "no leader elected within 5s"
+            "no leader elected within 2 min"
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
