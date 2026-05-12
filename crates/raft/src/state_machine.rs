@@ -69,9 +69,11 @@ impl CrabkaStateMachine {
         for rec in &data.records {
             next.apply(rec);
         }
-        // `send` only errors when there are no receivers; that's fine — readers
-        // pull via `current_image()` which always reads the latest borrowed value.
-        let _ = self.image.send(Arc::new(next));
+        // Use `send_replace` so the new image is stored even when no
+        // `watch::Receiver` has been subscribed yet — `current_image()`
+        // reads via `borrow()` on the sender and must always see the
+        // latest applied state.
+        let _ = self.image.send_replace(Arc::new(next));
         *self.last_applied.lock().await = Some(log_id);
         AppDataResponse {
             applied_index: log_id.index,
