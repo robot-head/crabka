@@ -65,6 +65,18 @@ pub enum LogError {
     /// A segment filename couldn't be parsed (e.g., wrong length, not all digits).
     #[error("invalid segment filename: {0}")]
     BadSegmentName(String),
+
+    /// A caller supplied an explicit offset to [`Log::append_at`](crate::Log::append_at)
+    /// that did not match the log's current end offset. Replication paths use
+    /// this to detect divergence between leader-assigned offsets and the local
+    /// log's expected next offset.
+    #[error("offset mismatch: expected {expected}, got {actual}")]
+    OffsetMismatch {
+        /// The offset the log expected — i.e. its current end offset.
+        expected: i64,
+        /// The offset the caller actually supplied.
+        actual: i64,
+    },
 }
 
 #[cfg(test)]

@@ -24,7 +24,7 @@ use tokio::sync::oneshot;
 use crate::broker::Broker;
 use crate::codes;
 use crate::error::BrokerError;
-use crate::partition::ProduceJob;
+use crate::partition::{ProduceJob, WriterMessage};
 
 #[allow(clippy::too_many_lines)]
 pub(crate) fn handle(
@@ -131,7 +131,7 @@ pub(crate) fn handle(
                 }
 
                 let (ack_tx, ack_rx) = oneshot::channel();
-                let job = ProduceJob { batch, ack: ack_tx };
+                let job = WriterMessage::Produce(ProduceJob { batch, ack: ack_tx });
 
                 if part.writer_tx.send(job).await.is_err() {
                     out.error_code = codes::NOT_LEADER_OR_FOLLOWER;

@@ -10,6 +10,11 @@
     {
       "matchUpdateTypes": ["major", "minor", "patch"],
       "automerge": true
+    },
+    {
+      "description": "wincode 0.5 is incompatible with serde-wincode 0.1.0 which still depends on wincode ^0.4. Hold the auto-bump until serde-wincode publishes a 0.5-compatible release.",
+      "matchPackageNames": ["wincode"],
+      "enabled": false
     }
   ]
 }

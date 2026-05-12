@@ -13,7 +13,7 @@ use crate::config::BrokerConfig;
 use crate::error::BrokerError;
 use crate::handlers::HandlerTable;
 use crate::log_dir;
-use crate::partition::{Partition, ProduceJob};
+use crate::partition::{Partition, WriterMessage};
 
 /// The running broker. Library callers get a [`BrokerHandle`] from
 /// [`Broker::start`]; this struct is the shared internal state.
@@ -33,6 +33,8 @@ pub struct Broker {
     pub(crate) group_manager: Arc<crate::coordinator::GroupManager>,
     pub(crate) producer_ids: Arc<crate::producer_id_manager::ProducerIdManager>,
     pub(crate) producer_state: Arc<crate::producer_state::ProducerState>,
+    pub(crate) supervisor_shutdown: tokio_util::sync::CancellationToken,
+    pub(crate) supervisor_handle: tokio::sync::Mutex<Option<JoinHandle<()>>>,
     handlers: HandlerTable,
 }
 
@@ -74,9 +76,118 @@ impl BrokerHandle {
         *self._broker.controller.watch_leader().borrow()
     }
 
+    /// Number of brokers currently registered in this broker's
+    /// `MetadataImage`. Used by replication integration tests to wait
+    /// for all peers to come up before issuing `CreateTopics`.
+    ///
+    /// `async fn` for the same reason as
+    /// [`controller_leader_id`](Self::controller_leader_id): keeps the
+    /// public test surface uniform and leaves room for a future
+    /// implementation that blocks until convergence.
+    #[allow(clippy::unused_async, clippy::used_underscore_binding)]
+    pub async fn broker_count(&self) -> usize {
+        self._broker.controller.current_image().brokers().count()
+    }
+
+    /// Is `(topic, partition)` present in this broker's `MetadataImage`?
+    /// Used by replication integration tests to wait for topic
+    /// propagation.
+    #[allow(clippy::unused_async, clippy::used_underscore_binding)]
+    pub async fn has_partition(&self, topic: &str, partition: i32) -> bool {
+        self._broker
+            .controller
+            .current_image()
+            .partition(topic, partition)
+            .is_some()
+    }
+
+    /// Local `log_end_offset` for `(topic, partition)`, if this broker
+    /// hosts the partition. Used by replication integration tests to
+    /// assert all followers caught up.
+    #[allow(clippy::unused_async, clippy::used_underscore_binding)]
+    pub async fn local_log_end_offset(&self, topic: &str, partition: i32) -> Option<i64> {
+        let part = self
+            ._broker
+            .partitions
+            .get(&(topic.to_string(), partition))?
+            .value()
+            .clone();
+        Some(part.log_end_offset())
+    }
+
+    /// Test-only: truncate this broker's local partition log so no
+    /// records at offset `>= offset` remain. Simulates "fell behind
+    /// past retention" in the out-of-range replication integration
+    /// test.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BrokerError::Replication`] if the partition is not
+    /// hosted on this broker.
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[allow(clippy::used_underscore_binding)]
+    pub async fn test_truncate_local_log(
+        &self,
+        topic: &str,
+        partition: i32,
+        offset: i64,
+    ) -> Result<(), crate::error::BrokerError> {
+        let part = self
+            ._broker
+            .partitions
+            .get(&(topic.to_string(), partition))
+            .ok_or_else(|| {
+                crate::error::BrokerError::Replication(format!(
+                    "partition {topic}-{partition} not local"
+                ))
+            })?
+            .value()
+            .clone();
+        part.truncate_to(offset).await
+    }
+
+    /// Test-only: advance this broker's local partition `log_start_offset`
+    /// to `new_start` without physically deleting on-disk segments.
+    /// Simulates retention-driven truncation on a leader for the
+    /// out-of-range replication integration test.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BrokerError::Replication`] if the partition is not
+    /// hosted on this broker.
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[allow(clippy::used_underscore_binding)]
+    pub async fn test_advance_log_start(
+        &self,
+        topic: &str,
+        partition: i32,
+        new_start: i64,
+    ) -> Result<(), crate::error::BrokerError> {
+        let part = self
+            ._broker
+            .partitions
+            .get(&(topic.to_string(), partition))
+            .ok_or_else(|| {
+                crate::error::BrokerError::Replication(format!(
+                    "partition {topic}-{partition} not local"
+                ))
+            })?
+            .value()
+            .clone();
+        part.test_set_log_start(new_start).await
+    }
+
     /// Cancel the listener + drain in-flight connections. Awaiting the
     /// returned future blocks until the listener task exits.
+    #[allow(clippy::used_underscore_binding)] // `_broker` carries shared state we must reach into during shutdown
     pub async fn shutdown(mut self) {
+        // Cancel the replicator supervisor BEFORE the controller drops:
+        // in-flight replication tasks must observe a clean cancellation
+        // rather than a torn-down metadata-watch channel.
+        self._broker.supervisor_shutdown.cancel();
+        if let Some(h) = self._broker.supervisor_handle.lock().await.take() {
+            let _ = h.await;
+        }
         self.shutdown.cancel();
         if let Some(t) = self.listener_task.take() {
             let _ = t.await;
@@ -88,6 +199,7 @@ impl Broker {
     /// Build a `Broker`, scan the log dir, spawn partition writers for
     /// every existing `<topic>-<partition>/`, bind the TCP listener, and
     /// return the handle.
+    #[allow(clippy::too_many_lines)] // sequential bring-up; splitting hurts readability more than it helps
     pub async fn start(mut config: BrokerConfig) -> Result<BrokerHandle, BrokerError> {
         // 1. Bring up the metadata quorum BEFORE the client listener so
         //    handlers can read from it the moment they accept their first
@@ -173,10 +285,27 @@ impl Broker {
         )
         .await?;
 
-        // 4. Build handler table.
+        // 4. Spawn the replicator supervisor. Started AFTER the controller
+        //    is up and self-registration succeeded so the supervisor's
+        //    initial reconcile already sees this broker in the brokers()
+        //    set. With replication_factor=1 the desired follower set is
+        //    always empty, so this is a no-op for single-broker setups.
+        let supervisor_shutdown = CancellationToken::new();
+        let supervisor = crate::replicator_supervisor::ReplicatorSupervisor::new(
+            config.node_id,
+            controller.clone(),
+            partitions.clone(),
+            config.log_dir.clone(),
+            config.log_config.clone(),
+            format!("crabka-broker-{}-replicator", config.broker_id),
+            supervisor_shutdown.clone(),
+        );
+        let supervisor_handle = supervisor.spawn();
+
+        // 5. Build handler table.
         let handlers = crate::handlers::build_table();
 
-        // 5. Bind first so the actual port is known. If
+        // 6. Bind first so the actual port is known. If
         //    `advertised_listener` points at port 0 (tests typically),
         //    rewrite it to the bound port so FindCoordinator/Metadata
         //    return a useful host:port instead of `:0`.
@@ -194,6 +323,8 @@ impl Broker {
             group_manager: group_manager.clone(),
             producer_ids,
             producer_state,
+            supervisor_shutdown,
+            supervisor_handle: tokio::sync::Mutex::new(Some(supervisor_handle)),
             handlers,
         });
 
@@ -216,7 +347,7 @@ pub(crate) fn spawn_partition(
     log: crabka_log::Log,
 ) -> Arc<Partition> {
     let log = Arc::new(Mutex::new(log));
-    let (tx, rx) = tokio::sync::mpsc::channel::<ProduceJob>(64);
+    let (tx, rx) = tokio::sync::mpsc::channel::<WriterMessage>(64);
     let notify = Arc::new(tokio::sync::Notify::new());
     let writer = tokio::spawn(crate::partition_writer::run(
         log.clone(),

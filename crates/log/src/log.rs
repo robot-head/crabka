@@ -20,11 +20,21 @@ use crate::segment::Segment;
 /// concurrent readers (`&self` for `read`/`log_start_offset`/etc.).
 /// Construct one with [`Log::open`].
 #[derive(Debug)]
+// `log_start_override` mirrors Kafka's `log_start_offset` terminology;
+// renaming to drop the `log_` prefix would obscure the field's role.
+#[allow(clippy::struct_field_names)]
 pub struct Log {
     dir: PathBuf,
     config: LogConfig,
     segments: Vec<Arc<Segment>>,
     active: Option<Segment>,
+    /// Test-only override for `log_start_offset()`. When `Some(n)`, the
+    /// effective `log_start` is `max(derived_from_segments, n)`. Used
+    /// by the broker's replicator integration tests to simulate
+    /// retention-driven truncation on a leader without physically
+    /// deleting segments. Real retention is a future slice.
+    #[cfg(any(test, feature = "test-helpers"))]
+    log_start_override: Option<i64>,
 }
 
 /// Result of [`Log::read`]: the absolute offset of the first batch
@@ -86,19 +96,93 @@ impl Log {
             config,
             segments,
             active: Some(active),
+            #[cfg(any(test, feature = "test-helpers"))]
+            log_start_override: None,
         })
     }
 
     /// First absolute offset still in the log.
     #[must_use]
     pub fn log_start_offset(&self) -> i64 {
-        if let Some(first) = self.segments.first() {
-            return first.base_offset();
+        let derived = if let Some(first) = self.segments.first() {
+            first.base_offset()
+        } else if let Some(active) = &self.active {
+            active.base_offset()
+        } else {
+            0
+        };
+        #[cfg(any(test, feature = "test-helpers"))]
+        {
+            if let Some(o) = self.log_start_override {
+                return derived.max(o);
+            }
         }
-        if let Some(active) = &self.active {
-            return active.base_offset();
+        derived
+    }
+
+    /// Test-only: advance the effective `log_start_offset` to `new_start`.
+    /// Used by the broker's replicator out-of-range integration test to
+    /// simulate retention-driven truncation. Does NOT physically truncate
+    /// on-disk segments — only shifts the in-memory pointer. Real
+    /// retention is a future slice.
+    ///
+    /// `new_start` must be non-negative.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LogError::OffsetMismatch`] if `new_start` is negative.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn test_set_log_start_offset(&mut self, new_start: i64) -> Result<(), LogError> {
+        if new_start < 0 {
+            return Err(LogError::OffsetMismatch {
+                expected: 0,
+                actual: new_start,
+            });
         }
-        0
+        self.log_start_override = Some(new_start);
+        Ok(())
+    }
+
+    /// Reset the log to be empty starting at `new_base`. Drops every
+    /// segment + on-disk file and creates a fresh active segment at
+    /// `new_base`. Used by the replicator's `OFFSET_OUT_OF_RANGE`
+    /// recovery path when the follower has fallen behind the leader's
+    /// `log_start` — `truncate_to` can't help here because we need to
+    /// move `log_start` *forward* past where there is no local data.
+    pub fn reset_to(&mut self, new_base: i64) -> Result<(), LogError> {
+        if new_base < 0 {
+            return Err(LogError::OffsetMismatch {
+                expected: 0,
+                actual: new_base,
+            });
+        }
+
+        // Drop every sealed segment + its on-disk files.
+        while let Some(popped) = self.segments.pop() {
+            let base = popped.base_offset();
+            drop(popped);
+            let _ = fs::remove_file(name::log_path(&self.dir, base));
+            let _ = fs::remove_file(name::index_path(&self.dir, base));
+            let _ = fs::remove_file(name::timeindex_path(&self.dir, base));
+        }
+
+        // Drop the active segment + its on-disk files.
+        if let Some(active) = self.active.take() {
+            let base = active.base_offset();
+            drop(active);
+            let _ = fs::remove_file(name::log_path(&self.dir, base));
+            let _ = fs::remove_file(name::index_path(&self.dir, base));
+            let _ = fs::remove_file(name::timeindex_path(&self.dir, base));
+        }
+
+        // Clear any test-only override so the derived value takes over.
+        #[cfg(any(test, feature = "test-helpers"))]
+        {
+            self.log_start_override = None;
+        }
+
+        self.active = Some(Segment::create(&self.dir, new_base)?);
+        Ok(())
     }
 
     /// Next offset that `append` will assign.
@@ -121,6 +205,40 @@ impl Log {
     /// determines how many absolute offsets this batch consumes.
     /// Returns the assigned `base_offset`.
     pub fn append(&mut self, batch: &mut RecordBatch) -> Result<i64, LogError> {
+        let assigned_base = self.log_end_offset();
+        batch.base_offset = assigned_base;
+        self.append_preserving_offset(batch)?;
+        Ok(assigned_base)
+    }
+
+    /// Append a `RecordBatch` whose `base_offset` is set by the caller.
+    ///
+    /// Unlike [`Log::append`], this does NOT overwrite `batch.base_offset`
+    /// — it is used by the broker's replicator to preserve the
+    /// leader-assigned offset on the follower's local log.
+    ///
+    /// `offset` must equal the log's current [`Log::log_end_offset`];
+    /// otherwise this returns
+    /// [`LogError::OffsetMismatch`]. On success, `batch.base_offset` is
+    /// set to `offset` (it should already match) before the batch is
+    /// written.
+    pub fn append_at(&mut self, batch: &mut RecordBatch, offset: i64) -> Result<(), LogError> {
+        let expected = self.log_end_offset();
+        if offset != expected {
+            return Err(LogError::OffsetMismatch {
+                expected,
+                actual: offset,
+            });
+        }
+        batch.base_offset = offset;
+        self.append_preserving_offset(batch)
+    }
+
+    /// Internal helper shared by [`Log::append`] and [`Log::append_at`].
+    /// Performs segment-roll-if-needed, appends to the active segment, and
+    /// honors `config.flush_on_append` — but does NOT reassign
+    /// `batch.base_offset`. Callers are responsible for setting it first.
+    fn append_preserving_offset(&mut self, batch: &mut RecordBatch) -> Result<(), LogError> {
         let should_roll = match &self.active {
             Some(seg) => seg.size_bytes() >= self.config.segment_bytes,
             None => false,
@@ -128,9 +246,6 @@ impl Log {
         if should_roll {
             self.roll_active_segment()?;
         }
-
-        let assigned_base = self.log_end_offset();
-        batch.base_offset = assigned_base;
 
         let active = self
             .active
@@ -141,7 +256,7 @@ impl Log {
         if self.config.flush_on_append {
             active.flush()?;
         }
-        Ok(assigned_base)
+        Ok(())
     }
 
     fn roll_active_segment(&mut self) -> Result<(), LogError> {
@@ -362,6 +477,40 @@ mod tests {
         assert_eq!(log.append(&mut b1).unwrap(), 0);
         assert_eq!(log.append(&mut b2).unwrap(), 3);
         assert_eq!(log.log_end_offset(), 5);
+    }
+
+    #[test]
+    fn append_at_matching_offset_preserves_caller_offset() {
+        let dir = tempdir().unwrap();
+        let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
+        let mut b = sample_batch(3);
+        // Pretend the caller (a replicator) already knows the leader's
+        // assigned offset for this batch is 0.
+        log.append_at(&mut b, 0).unwrap();
+        assert_eq!(b.base_offset, 0);
+        assert_eq!(log.log_end_offset(), 3);
+
+        let mut b2 = sample_batch(2);
+        log.append_at(&mut b2, 3).unwrap();
+        assert_eq!(b2.base_offset, 3);
+        assert_eq!(log.log_end_offset(), 5);
+    }
+
+    #[test]
+    fn append_at_with_mismatched_offset_errors() {
+        let dir = tempdir().unwrap();
+        let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
+        let mut b = sample_batch(2);
+        let err = log.append_at(&mut b, 7).unwrap_err();
+        assert!(matches!(
+            err,
+            LogError::OffsetMismatch {
+                expected: 0,
+                actual: 7
+            }
+        ));
+        // Failure must not advance the log.
+        assert_eq!(log.log_end_offset(), 0);
     }
 
     #[test]

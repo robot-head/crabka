@@ -12,6 +12,10 @@ workspace = true
 
 [features]
 default = []
+# Exposes test-only `BrokerHandle::test_truncate_local_log` /
+# `test_advance_log_start` for slice-8 replication integration tests.
+# Pulls in `crabka-log/test-helpers` to reach `Log::test_set_log_start_offset`.
+test-helpers = ["crabka-log/test-helpers"]
 
 [[bin]]
 name = "crabka-broker"
@@ -22,6 +26,7 @@ crabka-protocol = { version = "0.1", path = "../protocol", default-features = fa
 crabka-log = { version = "0.1", path = "../log" }
 crabka-raft = { version = "0.1", path = "../raft" }
 crabka-metadata = { version = "0.1", path = "../metadata" }
+crabka-client-core = { version = "0.1", path = "../client-core" }
 bytes = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["net", "rt", "rt-multi-thread", "io-util", "macros", "sync", "time", "signal"] }
@@ -34,7 +39,7 @@ uuid = { workspace = true }
 futures-util = { workspace = true }
 
 [dev-dependencies]
-crabka-client-core = { version = "0.1", path = "../client-core" }
+crabka-broker = { version = "0.1", path = ".", features = ["test-helpers"] }
 crabka-client-producer = { version = "0.1", path = "../client-producer" }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }

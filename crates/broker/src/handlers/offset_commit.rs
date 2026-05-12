@@ -23,7 +23,7 @@ use crate::coordinator::bootstrap::{OFFSETS_PARTITION, OFFSETS_TOPIC};
 use crate::coordinator::group::OffsetEntry;
 use crate::coordinator::persistence::OffsetCommitValue;
 use crate::error::BrokerError;
-use crate::partition::{Partition, ProduceJob};
+use crate::partition::{Partition, ProduceJob, WriterMessage};
 
 pub(crate) fn handle(
     broker: &Broker,
@@ -134,7 +134,7 @@ async fn append_batch(
     let (ack_tx, ack_rx) = oneshot::channel();
     if part_handle
         .writer_tx
-        .send(ProduceJob { batch, ack: ack_tx })
+        .send(WriterMessage::Produce(ProduceJob { batch, ack: ack_tx }))
         .await
         .is_err()
     {

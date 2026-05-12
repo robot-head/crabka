@@ -728,3 +728,27 @@ async fn out_of_order_returns_45() {
 
     p.broker.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn create_topics_rf_too_high_returns_invalid_replication_factor() {
+    let p = support::start().await; // single-voter broker
+    let resp = p
+        .client
+        .send(CreateTopicsRequest {
+            topics: vec![CreatableTopic {
+                name: "boom".into(),
+                num_partitions: 1,
+                replication_factor: 5, // single broker → RF=5 is invalid
+                ..Default::default()
+            }],
+            timeout_ms: 5_000,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.topics[0].error_code,
+        38 /* INVALID_REPLICATION_FACTOR */
+    );
+    p.broker.shutdown().await;
+}

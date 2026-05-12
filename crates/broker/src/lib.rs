@@ -48,6 +48,21 @@
 //! - [`BrokerConfig`] — listen address, advertised listener, log dir,
 //!   broker id, per-log [`LogConfig`](crabka_log::LogConfig).
 //! - [`BrokerError`] — error returned by [`Broker::start`].
+//!
+//! ## Replication (slice 8)
+//!
+//! `CreateTopics` with `replication_factor > 1` assigns N replicas per
+//! partition via round-robin over `MetadataImage::brokers()`. The
+//! `replicator_supervisor` subscribes to controller metadata changes
+//! and spawns a `replicator` task per partition where this broker is
+//! a non-leader replica. Each replicator opens a
+//! `crabka_client_core::Client` to its partition's leader and loops
+//! on `Fetch` with `replica_id` set, appending every returned
+//! `RecordBatch` to the local log.
+//!
+//! ISR shrink/expand, high-watermark tracking, `acks=all` blocking,
+//! `AlterPartition` RPC, leader-election-on-failure, and cross-broker
+//! producer routing are deferred — see the slice 8 design spec.
 
 #![doc(html_root_url = "https://docs.rs/crabka-broker/0.0.0")]
 
@@ -63,6 +78,8 @@ mod partition;
 mod partition_writer;
 mod producer_id_manager;
 mod producer_state;
+mod replicator;
+mod replicator_supervisor;
 
 pub use broker::{Broker, BrokerHandle};
 pub use config::BrokerConfig;

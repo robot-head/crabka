@@ -680,6 +680,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "clap",
+ "crabka-broker",
  "crabka-client-core",
  "crabka-client-producer",
  "crabka-log",
@@ -804,7 +805,7 @@ dependencies = [
  "serde-wincode",
  "thiserror 2.0.18",
  "uuid",
- "wincode 0.5.3",
+ "wincode",
 ]
 
 [[package]]
@@ -856,7 +857,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
- "wincode 0.5.3",
+ "wincode",
 ]
 
 [[package]]
@@ -2707,7 +2708,7 @@ checksum = "4a62dfa6ae65cb073dfe001fb076eaf827fd4267fcba7eb3be2fee4f1e69ccb5"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
- "wincode 0.4.9",
+ "wincode",
 ]
 
 [[package]]
@@ -3711,18 +3712,6 @@ name = "wincode"
 version = "0.4.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "657690780ce23e6f66576a782ffd88eb353512381817029cc1d7a99154bb6d1f"
-dependencies = [
- "pastey",
- "proc-macro2",
- "quote",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "wincode"
-version = "0.5.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4c754f1fc41250f2f742a27ba0fcc9f73df1dec23f6878490770855d43c322d"
 dependencies = [
  "pastey",
  "proc-macro2",
