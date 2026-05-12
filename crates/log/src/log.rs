@@ -203,7 +203,11 @@ impl Log {
             self.log_start_override = None;
         }
 
-        self.active = Some(Segment::create(&self.dir, new_base)?);
+        let new_active = Segment::create(&self.dir, new_base)?;
+        self.active_txn_index = TxnIndex::open(new_active.txn_index_path())?;
+        self.pending.clear(); // reset_to is a hard reset (after divergence)
+        self.lso = new_active.last_offset() + 1; // = new_base (empty segment)
+        self.active = Some(new_active);
         Ok(())
     }
 
@@ -445,9 +449,12 @@ impl Log {
                 let rel = u32::try_from(offset - seg.base_offset())
                     .map_err(|_| LogError::BadSegmentName("offset overflow".into()))?;
                 seg.truncate_to_relative(rel)?;
+                self.active_txn_index = TxnIndex::open(seg.txn_index_path())?;
                 self.active = Some(seg);
             } else {
-                self.active = Some(Segment::create(&self.dir, offset)?);
+                let new_seg = Segment::create(&self.dir, offset)?;
+                self.active_txn_index = TxnIndex::open(new_seg.txn_index_path())?;
+                self.active = Some(new_seg);
             }
         } else if let Some(active) = self.active.as_mut()
             && active.last_offset() >= offset
@@ -457,7 +464,10 @@ impl Log {
             let rel = u32::try_from(offset - active.base_offset())
                 .map_err(|_| LogError::BadSegmentName("offset overflow".into()))?;
             active.truncate_to_relative(rel)?;
+            self.active_txn_index = TxnIndex::open(active.txn_index_path())?;
         }
+        // After truncation, LSO can't exceed log_end_offset.
+        self.lso = self.lso.min(self.log_end_offset());
         Ok(())
     }
 
@@ -736,8 +746,8 @@ mod tests {
 
     // ---- helpers for transactional tests ----
 
-    /// A transactional (non-control) batch with `n` records and given pid/epoch.
-    fn transactional_batch(_n: i32, pid: i64, epoch: i16, values: &[&str]) -> RecordBatch {
+    /// A transactional (non-control) batch for the given pid/epoch containing `values`.
+    fn transactional_batch(pid: i64, epoch: i16, values: &[&str]) -> RecordBatch {
         let last_offset_delta = i32::try_from(values.len()).unwrap() - 1;
         let mut records = Vec::new();
         for (i, v) in values.iter().enumerate() {
@@ -767,10 +777,8 @@ mod tests {
     }
 
     /// A commit control batch (`marker_type=1`) for the given pid/epoch.
-    /// `base_offset` and `last_offset_delta` reflect the span of the txn.
-    fn commit_marker(pid: i64, epoch: i16, txn_base: i64, txn_last: i64) -> RecordBatch {
-        let _ = txn_base;
-        let _ = txn_last;
+    /// Offsets are rewritten by `Log::append`.
+    fn commit_marker(pid: i64, epoch: i16) -> RecordBatch {
         RecordBatch {
             base_offset: 0,
             last_offset_delta: 0,
@@ -789,9 +797,8 @@ mod tests {
     }
 
     /// An abort control batch (`marker_type=0`) for the given pid/epoch.
-    fn abort_marker(pid: i64, epoch: i16, txn_base: i64, txn_last: i64) -> RecordBatch {
-        let _ = txn_base;
-        let _ = txn_last;
+    /// Offsets are rewritten by `Log::append`.
+    fn abort_marker(pid: i64, epoch: i16) -> RecordBatch {
         RecordBatch {
             base_offset: 0,
             last_offset_delta: 0,
@@ -821,13 +828,13 @@ mod tests {
         assert_eq!(log.lso(), log.log_end_offset());
 
         // Now an in-flight txn batch — LSO stays.
-        let mut b1 = transactional_batch(2, 1000, 0, &["a", "b"]); // pid=1000 epoch=0
+        let mut b1 = transactional_batch(1000, 0, &["a", "b"]); // pid=1000 epoch=0
         let old_lso = log.lso();
         log.append(&mut b1).unwrap();
         assert_eq!(log.lso(), old_lso, "LSO must not advance while txn in flight");
 
         // Commit marker — LSO catches up.
-        let mut commit = commit_marker(1000, 0, b1.base_offset, b1.base_offset + 1);
+        let mut commit = commit_marker(1000, 0);
         log.append(&mut commit).unwrap();
         assert_eq!(log.lso(), log.log_end_offset());
     }
@@ -836,14 +843,44 @@ mod tests {
     fn abort_marker_writes_txnindex_entry() {
         let dir = tempdir().unwrap();
         let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
-        let mut t = transactional_batch(3, 1000, 0, &["a", "b", "c"]);
+        let mut t = transactional_batch(1000, 0, &["a", "b", "c"]);
         log.append(&mut t).unwrap();
 
-        let mut a = abort_marker(1000, 0, t.base_offset, t.base_offset + 2);
+        let mut a = abort_marker(1000, 0);
         log.append(&mut a).unwrap();
 
         let idx = TxnIndex::open(dir.path().join("00000000000000000000.txnindex")).unwrap();
-        assert_eq!(idx.entries().len(), 1);
-        assert_eq!(idx.entries()[0].producer_id, 1000);
+        let entries = idx.entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].producer_id, 1000);
+        // Txn batch was the first append: start_offset = 0.
+        assert_eq!(entries[0].start_offset, 0);
+        // last_offset = abort marker's base_offset + last_offset_delta = 3 + 0 = 3.
+        // (The 3-record txn batch occupies offsets 0-2; the marker lands at offset 3.)
+        assert_eq!(entries[0].last_offset, 3);
+    }
+
+    #[test]
+    fn lso_held_by_remaining_producer_after_partial_commit() {
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
+
+        // Open two producers' transactions in parallel.
+        let mut t1 = transactional_batch(1000, 0, &["a", "b"]);
+        log.append(&mut t1).unwrap();
+        let mut t2 = transactional_batch(2000, 0, &["c"]);
+        log.append(&mut t2).unwrap();
+        let lso_after_open = log.lso();
+
+        // Commit producer 1000. LSO must still be held back by 2000.
+        let mut c1 = commit_marker(1000, 0);
+        log.append(&mut c1).unwrap();
+        assert_eq!(log.lso(), lso_after_open, "LSO held by producer 2000");
+
+        // Commit producer 2000. LSO advances to log_end_offset.
+        let mut c2 = commit_marker(2000, 0);
+        log.append(&mut c2).unwrap();
+        assert_eq!(log.lso(), log.log_end_offset());
     }
 }
