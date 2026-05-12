@@ -9,7 +9,6 @@ use std::sync::Arc;
 use bytes::{Bytes, BytesMut};
 use futures_util::future::BoxFuture;
 
-use crabka_log::LogConfig;
 use crabka_protocol::owned::init_producer_id_request::InitProducerIdRequest;
 use crabka_protocol::owned::init_producer_id_response::InitProducerIdResponse;
 use crabka_protocol::{Decode, Encode};
@@ -17,6 +16,7 @@ use crabka_protocol::{Decode, Encode};
 use crate::broker::Broker;
 use crate::codes;
 use crate::error::BrokerError;
+use crate::replicator_supervisor::materialize_partition;
 use crate::txn::coordinator::TxnCoordinator;
 use crate::txn::state::{TxnEntry, TxnState};
 
@@ -65,16 +65,19 @@ pub(crate) fn handle(
                     // is materialized on disk. The replicator-supervisor
                     // handles this asynchronously, but we may race with it
                     // when FindCoordinator just bootstrapped the topic in
-                    // the same request round-trip. Materializing here is
-                    // idempotent: if the supervisor already did it, the
-                    // `DashMap` insert is skipped.
+                    // the same request round-trip. `materialize_partition`
+                    // uses `DashMap::entry()` to atomically check-and-insert,
+                    // so two concurrent InitProducerId calls for the same
+                    // partition cannot both spawn independent writer tasks.
                     let txn_partition = coord.partition_for(tid);
-                    ensure_txn_partition_local(
-                        &coord,
+                    materialize_partition(
+                        &coord.partitions,
+                        crate::txn::bootstrap::TOPIC,
                         txn_partition,
                         &log_dir,
                         &log_config,
-                    )?;
+                    )
+                    .map_err(BrokerError::Txn)?;
                     handle_transactional(&coord, tid, &req).await?
                 } else {
                     InitProducerIdResponse {
@@ -168,35 +171,6 @@ fn now_millis() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(0))
-}
-
-/// Materialize the `__transaction_state-<partition>` log on disk if the
-/// partition is not yet present in `coord.partitions`. This can happen when
-/// `FindCoordinator(TRANSACTION)` just triggered topic bootstrap via
-/// `submit_change` but the replicator-supervisor hasn't yet run its reconcile
-/// loop to call `materialize_local_partition`. The operation is idempotent:
-/// if the partition is already present the `DashMap` insert is skipped.
-fn ensure_txn_partition_local(
-    coord: &TxnCoordinator,
-    partition: i32,
-    log_dir: &std::path::Path,
-    log_config: &LogConfig,
-) -> Result<(), BrokerError> {
-    use crate::txn::bootstrap::TOPIC;
-
-    let key = (TOPIC.to_string(), partition);
-    if coord.partitions.contains_key(&key) {
-        return Ok(());
-    }
-
-    let dir = log_dir.join(format!("{TOPIC}-{partition}"));
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| BrokerError::Txn(format!("mkdir {}: {e}", dir.display())))?;
-    let log = crabka_log::Log::open(&dir, log_config.clone())
-        .map_err(|e| BrokerError::Txn(format!("Log::open {}: {e}", dir.display())))?;
-    let part = crate::broker::spawn_partition(TOPIC.to_string(), partition, log);
-    coord.partitions.insert(key, part);
-    Ok(())
 }
 
 async fn dispatch_abort_markers(

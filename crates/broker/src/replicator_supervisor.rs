@@ -65,6 +65,44 @@ pub(crate) fn desired_local_set(node_id: NodeId, image: &MetadataImage) -> HashS
     out
 }
 
+/// Open (or recover) the on-disk `Partition` for `(topic, partition)` and
+/// insert it into `partitions` using `DashMap::entry().or_insert_with()`.
+///
+/// This is the canonical, race-free materialization helper. Both the
+/// `ReplicatorSupervisor` reconcile loop and the `InitProducerId` handler
+/// (first-touch path) call this function — the `DashMap` entry API ensures
+/// that two concurrent callers for the same key can never both spawn
+/// independent writer tasks.
+///
+/// Returns `Ok(())` if the partition is already present (no-op) or was
+/// successfully opened. Returns `Err(String)` on I/O failure.
+pub(crate) fn materialize_partition(
+    partitions: &DashMap<(String, i32), Arc<Partition>>,
+    topic: &str,
+    partition: i32,
+    log_dir: &std::path::Path,
+    log_config: &LogConfig,
+) -> Result<(), String> {
+    use dashmap::mapref::entry::Entry;
+
+    // `entry()` takes a write-lock on the shard for this key for the
+    // duration of the closure — only one thread can be inside
+    // `or_try_insert_with` for a given key at a time, eliminating the
+    // TOCTOU race that existed with the old `contains_key` + `insert`
+    // pattern.
+    match partitions.entry((topic.to_string(), partition)) {
+        Entry::Occupied(_) => Ok(()),
+        Entry::Vacant(slot) => {
+            let dir = log_dir.join(format!("{topic}-{partition}"));
+            std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
+            let log = Log::open(&dir, log_config.clone()).map_err(|e| format!("Log::open: {e}"))?;
+            let part = spawn_partition(topic.to_string(), partition, log);
+            slot.insert(part);
+            Ok(())
+        }
+    }
+}
+
 pub(crate) struct ReplicatorSupervisor {
     node_id: NodeId,
     controller: Arc<ControllerHandle>,
@@ -184,19 +222,7 @@ impl ReplicatorSupervisor {
     /// and insert it into the broker's shared `partitions` map.
     /// Idempotent: a no-op if the partition is already present.
     fn materialize_local_partition(&self, topic: &str, partition: i32) -> Result<(), String> {
-        if self
-            .partitions
-            .contains_key(&(topic.to_string(), partition))
-        {
-            return Ok(());
-        }
-        let dir = self.log_dir.join(format!("{topic}-{partition}"));
-        std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
-        let log =
-            Log::open(&dir, self.log_config.clone()).map_err(|e| format!("Log::open: {e}"))?;
-        let part = spawn_partition(topic.to_string(), partition, log);
-        self.partitions.insert((topic.to_string(), partition), part);
-        Ok(())
+        materialize_partition(&self.partitions, topic, partition, &self.log_dir, &self.log_config)
     }
 
     pub(crate) async fn run(self) {
