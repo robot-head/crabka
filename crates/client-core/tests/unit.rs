@@ -288,7 +288,8 @@ async fn client_refresh_metadata_populates_pool() {
     })
     .await;
 
-    let client = crabka_client_core::Client::builder(mock.addr.to_string())
+    let client = crabka_client_core::Client::builder()
+        .bootstrap(mock.addr.to_string())
         .build()
         .await
         .unwrap();

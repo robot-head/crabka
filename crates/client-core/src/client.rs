@@ -1,8 +1,7 @@
-//! Top-level [`Client`] + [`ClientBuilder`]. Wraps a [`BrokerPool`] and
+//! Top-level [`Client`]. Wraps a [`BrokerPool`] and
 //! exposes a typed-request `send` API.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use crate::bootstrap;
 use crate::connection::ConnectionOptions;
@@ -23,15 +22,36 @@ pub struct Client {
     options: ConnectionOptions,
 }
 
+#[bon::bon]
 impl Client {
-    /// Create a [`ClientBuilder`] for the given bootstrap address string.
+    /// Build a [`Client`] pointed at the given bootstrap address.
     ///
-    /// `bootstrap` is a comma-separated list of `host:port` pairs.
-    pub fn builder(bootstrap: impl Into<String>) -> ClientBuilder {
-        ClientBuilder {
-            bootstrap: bootstrap.into(),
-            options: ConnectionOptions::default(),
-        }
+    /// All builder methods map 1:1 to `ConnectionOptions` fields except
+    /// `bootstrap`, which becomes a setter on the builder.
+    #[builder(start_fn = builder, finish_fn = build)]
+    pub async fn start(
+        #[builder(into)] bootstrap: String,
+        #[builder(into, default = "crabka".to_string())] client_id: String,
+        #[builder(default = std::time::Duration::from_secs(30))] connect_timeout: std::time::Duration,
+        #[builder(default = std::time::Duration::from_secs(30))] request_timeout: std::time::Duration,
+    ) -> Result<Self, ClientError> {
+        let options = ConnectionOptions {
+            client_id,
+            connect_timeout,
+            request_timeout,
+        };
+        Self::start_with_options(bootstrap, options).await
+    }
+}
+
+impl Client {
+    async fn start_with_options(
+        bootstrap: String,
+        options: ConnectionOptions,
+    ) -> Result<Self, ClientError> {
+        let addrs = bootstrap::resolve(&bootstrap).await?;
+        let pool = Arc::new(BrokerPool::new(addrs, options.clone()));
+        Ok(Client { pool, options })
     }
 
     /// Send a request to the bootstrap broker (or any cached open connection).
@@ -98,43 +118,3 @@ impl BrokerHandle<'_> {
     }
 }
 
-/// Builder for [`Client`].
-///
-/// Created via [`Client::builder`].
-pub struct ClientBuilder {
-    bootstrap: String,
-    options: ConnectionOptions,
-}
-
-impl ClientBuilder {
-    /// Override the client id sent in request headers (default: `"crabka"`).
-    #[must_use]
-    pub fn client_id(mut self, id: impl Into<String>) -> Self {
-        self.options.client_id = id.into();
-        self
-    }
-
-    /// Override the per-request timeout (default: 30 s).
-    #[must_use]
-    pub fn request_timeout(mut self, t: Duration) -> Self {
-        self.options.request_timeout = t;
-        self
-    }
-
-    /// Override the TCP connect timeout (default: 30 s).
-    #[must_use]
-    pub fn connect_timeout(mut self, t: Duration) -> Self {
-        self.options.connect_timeout = t;
-        self
-    }
-
-    /// Resolve the bootstrap addresses and build the [`Client`].
-    pub async fn build(self) -> Result<Client, ClientError> {
-        let addrs = bootstrap::resolve(&self.bootstrap).await?;
-        let pool = Arc::new(BrokerPool::new(addrs, self.options.clone()));
-        Ok(Client {
-            pool,
-            options: self.options,
-        })
-    }
-}

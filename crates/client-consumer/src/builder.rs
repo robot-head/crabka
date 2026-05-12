@@ -114,7 +114,8 @@ impl ConsumerBuilder {
             return Err(ConsumerError::RebalanceFailed("group_id required".into()));
         }
 
-        let client = Client::builder(&self.bootstrap)
+        let client = Client::builder()
+            .bootstrap(&self.bootstrap)
             .client_id(self.client_id.clone())
             .build()
             .await?;

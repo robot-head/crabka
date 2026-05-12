@@ -16,7 +16,8 @@ pub async fn start() -> InProcess {
     let config = BrokerConfig::for_tests(tempdir.path().to_path_buf());
     let broker = Broker::start(config).await.expect("broker start");
     let bootstrap = broker.listen_addr().to_string();
-    let client = Client::builder(&bootstrap)
+    let client = Client::builder()
+        .bootstrap(&bootstrap)
         .client_id("crabka-broker-test")
         .build()
         .await

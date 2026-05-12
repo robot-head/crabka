@@ -182,7 +182,8 @@ async fn second_open_recovers_partitions_from_disk() {
         let config = crabka_broker::BrokerConfig::for_tests(dir.path().to_path_buf());
         let handle = crabka_broker::Broker::start(config).await.unwrap();
         let bootstrap = handle.listen_addr().to_string();
-        let client = crabka_client_core::Client::builder(&bootstrap)
+        let client = crabka_client_core::Client::builder()
+            .bootstrap(&bootstrap)
             .client_id("recovery-test")
             .build()
             .await
@@ -207,7 +208,8 @@ async fn second_open_recovers_partitions_from_disk() {
     let config = crabka_broker::BrokerConfig::for_tests(dir.path().to_path_buf());
     let handle = crabka_broker::Broker::start(config).await.unwrap();
     let bootstrap = handle.listen_addr().to_string();
-    let client = crabka_client_core::Client::builder(&bootstrap)
+    let client = crabka_client_core::Client::builder()
+        .bootstrap(&bootstrap)
         .client_id("recovery-test")
         .build()
         .await

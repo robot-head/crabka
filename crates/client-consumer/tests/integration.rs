@@ -113,7 +113,8 @@ async fn rust_producer_to_rust_consumer_through_group() {
         .unwrap();
     let bootstrap = broker.listen_addr().to_string();
 
-    let producer = Client::builder(&bootstrap)
+    let producer = Client::builder()
+        .bootstrap(&bootstrap)
         .client_id("rust-producer")
         .build()
         .await
@@ -159,7 +160,8 @@ async fn offsets_survive_broker_restart() {
             .await
             .unwrap();
         let bootstrap = broker.listen_addr().to_string();
-        let producer = Client::builder(&bootstrap)
+        let producer = Client::builder()
+            .bootstrap(&bootstrap)
             .client_id("p")
             .build()
             .await
