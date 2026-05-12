@@ -222,7 +222,13 @@ impl ReplicatorSupervisor {
     /// and insert it into the broker's shared `partitions` map.
     /// Idempotent: a no-op if the partition is already present.
     fn materialize_local_partition(&self, topic: &str, partition: i32) -> Result<(), String> {
-        materialize_partition(&self.partitions, topic, partition, &self.log_dir, &self.log_config)
+        materialize_partition(
+            &self.partitions,
+            topic,
+            partition,
+            &self.log_dir,
+            &self.log_config,
+        )
     }
 
     pub(crate) async fn run(self) {

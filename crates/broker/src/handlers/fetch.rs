@@ -145,8 +145,13 @@ pub(crate) fn handle(
         let mut total_bytes = 0_usize;
         for p in &mut pending {
             if let Some(part) = &p.partition {
-                total_bytes +=
-                    do_read(part, p.fetch_offset, p.max_bytes, p.read_committed, &mut p.out)?;
+                total_bytes += do_read(
+                    part,
+                    p.fetch_offset,
+                    p.max_bytes,
+                    p.read_committed,
+                    &mut p.out,
+                )?;
             }
         }
 
@@ -256,9 +261,7 @@ fn do_read(
                         // A transactional batch is hidden iff it is fully
                         // contained within an aborted txn range for this pid.
                         !aborted_pids.iter().any(|&(apid, astart, alast)| {
-                            apid == pid
-                                && b.base_offset >= astart
-                                && batch_last <= alast
+                            apid == pid && b.base_offset >= astart && batch_last <= alast
                         })
                     });
 
@@ -321,7 +324,13 @@ async fn long_poll_then_reread(
                 partition_index: p.partition_index,
                 ..Default::default()
             };
-            do_read(part, p.fetch_offset, p.max_bytes, p.read_committed, &mut p.out)?;
+            do_read(
+                part,
+                p.fetch_offset,
+                p.max_bytes,
+                p.read_committed,
+                &mut p.out,
+            )?;
         }
     }
     Ok(())

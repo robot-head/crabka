@@ -28,7 +28,7 @@ use crabka_protocol::Encode;
 use crabka_protocol::owned::end_txn_request::EndTxnRequest;
 use crabka_protocol::owned::end_txn_response::EndTxnResponse;
 use crabka_protocol::owned::write_txn_markers_request::{
-    WriteTxnMarkersRequest, WritableTxnMarker, WritableTxnMarkerTopic,
+    WritableTxnMarker, WritableTxnMarkerTopic, WriteTxnMarkersRequest,
 };
 
 use crate::broker::Broker;
@@ -124,14 +124,8 @@ pub(crate) fn handle(
 
         // ── Phase 2: Fan out WriteTxnMarkers ──────────────────────────────
 
-        if let Err(e) = dispatch_markers(
-            node_id,
-            &partitions,
-            &prepare_snap,
-            marker_type,
-            &image,
-        )
-        .await
+        if let Err(e) =
+            dispatch_markers(node_id, &partitions, &prepare_snap, marker_type, &image).await
         {
             tracing::error!(
                 tid,
@@ -180,7 +174,9 @@ pub(crate) fn handle(
 /// `entry.offset_commit_groups`.
 async fn dispatch_markers(
     node_id: NodeId,
-    partitions: &std::sync::Arc<dashmap::DashMap<(String, i32), std::sync::Arc<crate::partition::Partition>>>,
+    partitions: &std::sync::Arc<
+        dashmap::DashMap<(String, i32), std::sync::Arc<crate::partition::Partition>>,
+    >,
     entry: &TxnEntry,
     marker_type: MarkerType,
     image: &MetadataImage,

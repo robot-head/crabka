@@ -99,9 +99,7 @@ async fn commit_then_read_committed_sees_records() {
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while seen.len() < 3 && std::time::Instant::now() < deadline {
         for r in consumer.poll(Duration::from_millis(200)).await.unwrap() {
-            seen.push(
-                String::from_utf8_lossy(r.value.as_deref().unwrap_or(b"")).into_owned(),
-            );
+            seen.push(String::from_utf8_lossy(r.value.as_deref().unwrap_or(b"")).into_owned());
         }
     }
     assert_eq!(seen, vec!["a", "b", "c"]);
@@ -168,9 +166,7 @@ async fn abort_then_read_committed_skips_records() {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while seen2.len() < 3 && std::time::Instant::now() < deadline {
         for r in consumer_uc.poll(Duration::from_millis(200)).await.unwrap() {
-            seen2.push(
-                String::from_utf8_lossy(r.value.as_deref().unwrap_or(b"")).into_owned(),
-            );
+            seen2.push(String::from_utf8_lossy(r.value.as_deref().unwrap_or(b"")).into_owned());
         }
     }
     assert_eq!(seen2.len(), 3, "read_uncommitted must see aborted records");
@@ -232,9 +228,7 @@ async fn interleaved_commit_and_abort() {
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while seen.len() < 7 && std::time::Instant::now() < deadline {
         for r in consumer.poll(Duration::from_millis(200)).await.unwrap() {
-            seen.push(
-                String::from_utf8_lossy(r.value.as_deref().unwrap_or(b"")).into_owned(),
-            );
+            seen.push(String::from_utf8_lossy(r.value.as_deref().unwrap_or(b"")).into_owned());
         }
     }
     assert_eq!(seen, vec!["a", "b", "c", "d", "e", "f", "g"]);

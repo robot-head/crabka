@@ -287,7 +287,8 @@ fn build_record_batch(
 
     // Use the txn pid/epoch when inside a transaction; fall back to the
     // idempotence pid/epoch for non-transactional batches.
-    let (producer_id, producer_epoch) = txn_snapshot.unwrap_or((cfg.producer_id, cfg.producer_epoch));
+    let (producer_id, producer_epoch) =
+        txn_snapshot.unwrap_or((cfg.producer_id, cfg.producer_epoch));
 
     let base_timestamp = batch.records.first().map_or(0, |r| r.timestamp_ms);
     let max_timestamp = batch

@@ -21,8 +21,8 @@ use crabka_protocol::Decode;
 use crabka_protocol::Encode;
 use crabka_protocol::owned::write_txn_markers_request::WriteTxnMarkersRequest;
 use crabka_protocol::owned::write_txn_markers_response::{
-    WriteTxnMarkersResponse, WritableTxnMarkerResult, WritableTxnMarkerTopicResult,
-    WritableTxnMarkerPartitionResult,
+    WritableTxnMarkerPartitionResult, WritableTxnMarkerResult, WritableTxnMarkerTopicResult,
+    WriteTxnMarkersResponse,
 };
 
 use crate::broker::Broker;
@@ -73,8 +73,7 @@ pub(crate) fn handle(
                         }
                         Some(part) => {
                             let base_offset = part.log_end_offset();
-                            let marker =
-                                build_marker_batch(pid, epoch, base_offset, marker_type);
+                            let marker = build_marker_batch(pid, epoch, base_offset, marker_type);
                             match part.produce_batch(marker).await {
                                 Ok(_) => codes::NONE,
                                 Err(e) => {

@@ -285,8 +285,7 @@ impl Producer {
             .build()
             .await?;
 
-        let timeout_ms = i32::try_from(self.transaction_timeout.as_millis())
-            .unwrap_or(60_000);
+        let timeout_ms = i32::try_from(self.transaction_timeout.as_millis()).unwrap_or(60_000);
 
         let resp = coord
             .send(InitProducerIdRequest {
@@ -655,9 +654,7 @@ fn current_millis() -> i64 {
 
 /// Group `((topic, partition), offset)` pairs by topic name into the nested
 /// structure required by [`TxnOffsetCommitRequest`].
-fn build_topics_payload(
-    offsets: &[((String, i32), i64)],
-) -> Vec<TxnOffsetCommitRequestTopic> {
+fn build_topics_payload(offsets: &[((String, i32), i64)]) -> Vec<TxnOffsetCommitRequestTopic> {
     let mut by_topic: std::collections::HashMap<&str, Vec<TxnOffsetCommitRequestPartition>> =
         std::collections::HashMap::new();
     for ((topic, partition), offset) in offsets {

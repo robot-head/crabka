@@ -63,6 +63,24 @@
 //! ISR shrink/expand, high-watermark tracking, `acks=all` blocking,
 //! `AlterPartition` RPC, leader-election-on-failure, and cross-broker
 //! producer routing are deferred — see the slice 8 design spec.
+//!
+//! ## Transactions (slice 9)
+//!
+//! Kafka transactions (KIP-98 + full KIP-1319 v2) via a per-broker
+//! `txn::coordinator::TxnCoordinator` backed by the `__transaction_state`
+//! internal topic (50 partitions, lazily bootstrapped on first
+//! `FindCoordinator(TRANSACTION)`). Producers call `init_transactions`
+//! / `begin_transaction` / `commit_transaction` / `abort_transaction` /
+//! `send_offsets_to_transaction`; consumers set
+//! `isolation_level=read_committed` to filter aborted records via the
+//! per-segment `.txnindex` and partition-level LSO.
+//!
+//! Soft-EOS caveat: slice-8 deferrals (HW + acks=all blocking,
+//! leader-election-on-failure, KIP-101 leader-epoch) remain deferred.
+//! The transactional control plane is correct; a partition-leader
+//! crash mid-transaction can lose records the producer believed
+//! durably committed. Bulletproof EOS lands when those slice-8
+//! follow-ups ship.
 
 #![doc(html_root_url = "https://docs.rs/crabka-broker/0.0.0")]
 

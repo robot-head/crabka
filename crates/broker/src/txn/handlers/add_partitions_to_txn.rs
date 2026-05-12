@@ -18,9 +18,9 @@ use crabka_protocol::owned::add_partitions_to_txn_request::AddPartitionsToTxnReq
 use crabka_protocol::owned::add_partitions_to_txn_response::{
     AddPartitionsToTxnResponse, AddPartitionsToTxnResult,
 };
+use crabka_protocol::owned::common::add_partitions_to_txn_partition_result::AddPartitionsToTxnPartitionResult;
 use crabka_protocol::owned::common::add_partitions_to_txn_topic::AddPartitionsToTxnTopic;
 use crabka_protocol::owned::common::add_partitions_to_txn_topic_result::AddPartitionsToTxnTopicResult;
-use crabka_protocol::owned::common::add_partitions_to_txn_partition_result::AddPartitionsToTxnPartitionResult;
 use crabka_protocol::{Decode, Encode};
 
 use crate::broker::Broker;
@@ -67,7 +67,14 @@ async fn handle_v4(
         Vec::with_capacity(req.transactions.len());
 
     for txn in &req.transactions {
-        let topic_results = process_one_txn(coord, txn.transactional_id.as_str(), txn.producer_id, txn.producer_epoch, &txn.topics).await;
+        let topic_results = process_one_txn(
+            coord,
+            txn.transactional_id.as_str(),
+            txn.producer_id,
+            txn.producer_epoch,
+            &txn.topics,
+        )
+        .await;
         results_by_transaction.push(AddPartitionsToTxnResult {
             transactional_id: txn.transactional_id.clone(),
             topic_results,
@@ -182,7 +189,10 @@ async fn process_one_txn(
 
 /// Build a per-topic/per-partition result list with every partition carrying
 /// `error_code`.
-fn topic_error(topics: &[AddPartitionsToTxnTopic], code: i16) -> Vec<AddPartitionsToTxnTopicResult> {
+fn topic_error(
+    topics: &[AddPartitionsToTxnTopic],
+    code: i16,
+) -> Vec<AddPartitionsToTxnTopicResult> {
     topics
         .iter()
         .map(|t| AddPartitionsToTxnTopicResult {
@@ -212,4 +222,3 @@ fn encode_response(resp: &AddPartitionsToTxnResponse, version: i16) -> Result<By
     resp.encode(&mut buf, version)?;
     Ok(buf.freeze())
 }
-

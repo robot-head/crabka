@@ -171,7 +171,7 @@ async fn dispatch_abort_markers(
     coord: &TxnCoordinator,
     entry: &TxnEntry,
 ) -> Result<(), BrokerError> {
-    use crate::txn::marker::{build_marker_batch, MarkerType};
+    use crate::txn::marker::{MarkerType, build_marker_batch};
     for tp in &entry.partitions {
         let Some(part) = coord
             .partitions

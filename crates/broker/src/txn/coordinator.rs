@@ -132,7 +132,8 @@ impl TxnCoordinator {
 
         part.produce_batch(batch).await?;
 
-        self.pid_to_tid.insert(entry.producer_id, entry.transactional_id.clone());
+        self.pid_to_tid
+            .insert(entry.producer_id, entry.transactional_id.clone());
         self.state.insert(tid, Arc::new(Mutex::new(entry)));
         Ok(())
     }

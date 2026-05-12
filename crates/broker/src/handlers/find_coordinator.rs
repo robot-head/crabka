@@ -69,9 +69,7 @@ pub(crate) fn handle(
             KEY_TYPE_TRANSACTION => {
                 // Ensure __transaction_state topic exists before we try to
                 // look up partitions in it.
-                if let Err(e) =
-                    crate::txn::bootstrap::ensure_topic(&controller).await
-                {
+                if let Err(e) = crate::txn::bootstrap::ensure_topic(&controller).await {
                     tracing::warn!(
                         error = %e,
                         "txn bootstrap failed; replying COORDINATOR_NOT_AVAILABLE"
@@ -92,8 +90,7 @@ pub(crate) fn handle(
                         crate::txn::bootstrap::NUM_PARTITIONS,
                     );
                     let image = controller.current_image();
-                    let Some(pr) = image.partition(crate::txn::bootstrap::TOPIC, p)
-                    else {
+                    let Some(pr) = image.partition(crate::txn::bootstrap::TOPIC, p) else {
                         result.push(Coordinator {
                             key: k,
                             node_id: -1,
@@ -160,18 +157,18 @@ pub(crate) fn handle(
 
         // Derive the legacy top-level fields from the first coordinator in
         // the list (matches Apache Kafka v0-v3 behaviour).
-        let (top_node_id, top_host, top_port, top_error) =
-            if let Some(first) = coordinators.first() {
-                (
-                    first.node_id,
-                    first.host.clone(),
-                    first.port,
-                    first.error_code,
-                )
-            } else {
-                let (host, port) = parse_host_port(&advertised);
-                (broker_id, host, i32::from(port), codes::NONE)
-            };
+        let (top_node_id, top_host, top_port, top_error) = if let Some(first) = coordinators.first()
+        {
+            (
+                first.node_id,
+                first.host.clone(),
+                first.port,
+                first.error_code,
+            )
+        } else {
+            let (host, port) = parse_host_port(&advertised);
+            (broker_id, host, i32::from(port), codes::NONE)
+        };
 
         let resp = FindCoordinatorResponse {
             throttle_time_ms: 0,

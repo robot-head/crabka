@@ -82,7 +82,9 @@ pub(crate) fn handle(
 
 async fn append_txn_batch(
     req: &TxnOffsetCommitRequest,
-    partitions: &std::sync::Arc<dashmap::DashMap<(String, i32), std::sync::Arc<crate::partition::Partition>>>,
+    partitions: &std::sync::Arc<
+        dashmap::DashMap<(String, i32), std::sync::Arc<crate::partition::Partition>>,
+    >,
     now_ms: i64,
 ) -> Result<(), i16> {
     let mut batch = RecordBatch {
