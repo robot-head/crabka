@@ -25,15 +25,14 @@ pub struct Client {
 #[bon::bon]
 impl Client {
     /// Build a [`Client`] pointed at the given bootstrap address.
-    ///
-    /// All builder methods map 1:1 to `ConnectionOptions` fields except
-    /// `bootstrap`, which becomes a setter on the builder.
     #[builder(start_fn = builder, finish_fn = build)]
     pub async fn start(
         #[builder(into)] bootstrap: String,
         #[builder(into, default = "crabka".to_string())] client_id: String,
-        #[builder(default = std::time::Duration::from_secs(30))] connect_timeout: std::time::Duration,
-        #[builder(default = std::time::Duration::from_secs(30))] request_timeout: std::time::Duration,
+        #[builder(default = std::time::Duration::from_secs(30))]
+        connect_timeout: std::time::Duration,
+        #[builder(default = std::time::Duration::from_secs(30))]
+        request_timeout: std::time::Duration,
     ) -> Result<Self, ClientError> {
         let options = ConnectionOptions {
             client_id,
@@ -117,4 +116,3 @@ impl BrokerHandle<'_> {
         conn.send(req).await
     }
 }
-
