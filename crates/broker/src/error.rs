@@ -102,6 +102,11 @@ pub enum BrokerError {
     /// error, etc.). Maps to `UNKNOWN_SERVER_ERROR` on the wire.
     #[error("replication: {0}")]
     Replication(String),
+
+    /// A transactional operation failed. Maps to `UNKNOWN_SERVER_ERROR` on
+    /// the wire; specific wire codes are chosen by handlers.
+    #[error("transaction: {0}")]
+    Txn(String),
 }
 
 #[cfg(test)]

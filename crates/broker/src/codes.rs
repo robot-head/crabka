@@ -39,6 +39,13 @@ pub const INVALID_PRODUCER_ID_MAPPING: i16 = 47;
 pub const INVALID_PRODUCER_EPOCH: i16 = 53;
 pub const TRANSACTIONAL_ID_AUTHORIZATION_FAILED: i16 = 67;
 
+// Phase 9 additions — transactional protocol codes.
+pub const INVALID_TXN_STATE: i16 = 24;
+pub const INVALID_TXN_TIMEOUT: i16 = 48;
+pub const CONCURRENT_TRANSACTIONS: i16 = 49;
+pub const TRANSACTION_COORDINATOR_FENCED: i16 = 50;
+pub const STALE_MEMBER_EPOCH: i16 = 82;
+
 /// Map an internal [`crate::error::BrokerError`] to a wire-level code.
 /// Most internal errors map to `UNKNOWN_SERVER_ERROR`; specific variants
 /// pick more meaningful codes.
@@ -57,7 +64,8 @@ pub fn from_broker_error(err: &crate::error::BrokerError) -> i16 {
         | BrokerError::Io(_)
         | BrokerError::Log(_)
         | BrokerError::Protocol(_)
-        | BrokerError::Startup(_) => UNKNOWN_SERVER_ERROR,
+        | BrokerError::Startup(_)
+        | BrokerError::Txn(_) => UNKNOWN_SERVER_ERROR,
     }
 }
 
@@ -120,5 +128,11 @@ mod tests {
             requested: 1,
         };
         assert_eq!(from_broker_error(&e), INVALID_PRODUCER_EPOCH);
+    }
+
+    #[test]
+    fn txn_variant_maps_to_unknown_server_error() {
+        let e = BrokerError::Txn("test".into());
+        assert_eq!(from_broker_error(&e), UNKNOWN_SERVER_ERROR);
     }
 }
