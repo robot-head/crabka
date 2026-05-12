@@ -143,3 +143,124 @@ impl ReplicatorSupervisor {
         tokio::spawn(self.run())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crabka_metadata::{MetadataImage, MetadataRecord, PartitionRecord, TopicRecord};
+    use uuid::Uuid;
+
+    fn image_with(records: &[MetadataRecord]) -> MetadataImage {
+        let mut img = MetadataImage::new(Uuid::nil());
+        for r in records {
+            img.apply(r);
+        }
+        img
+    }
+
+    #[test]
+    fn includes_partition_where_self_is_follower() {
+        let img = image_with(&[
+            MetadataRecord::V1Topic(TopicRecord {
+                name: "t".into(),
+                topic_id: Uuid::new_v4(),
+                partitions: 1,
+                replication_factor: 3,
+            }),
+            MetadataRecord::V1Partition(PartitionRecord {
+                topic: "t".into(),
+                partition: 0,
+                leader: 1,
+                replicas: vec![1, 2, 3],
+                isr: vec![1, 2, 3],
+            }),
+        ]);
+        let d = desired_follower_set(2, &img);
+        assert!(d.contains(&("t".into(), 0)));
+        assert_eq!(d.len(), 1);
+    }
+
+    #[test]
+    fn excludes_partition_where_self_is_leader() {
+        let img = image_with(&[
+            MetadataRecord::V1Topic(TopicRecord {
+                name: "t".into(),
+                topic_id: Uuid::new_v4(),
+                partitions: 1,
+                replication_factor: 3,
+            }),
+            MetadataRecord::V1Partition(PartitionRecord {
+                topic: "t".into(),
+                partition: 0,
+                leader: 1,
+                replicas: vec![1, 2, 3],
+                isr: vec![1, 2, 3],
+            }),
+        ]);
+        assert!(desired_follower_set(1, &img).is_empty());
+    }
+
+    #[test]
+    fn excludes_partition_where_self_is_not_a_replica() {
+        let img = image_with(&[
+            MetadataRecord::V1Topic(TopicRecord {
+                name: "t".into(),
+                topic_id: Uuid::new_v4(),
+                partitions: 1,
+                replication_factor: 3,
+            }),
+            MetadataRecord::V1Partition(PartitionRecord {
+                topic: "t".into(),
+                partition: 0,
+                leader: 1,
+                replicas: vec![1, 2, 3],
+                isr: vec![1, 2, 3],
+            }),
+        ]);
+        assert!(desired_follower_set(99, &img).is_empty());
+    }
+
+    #[test]
+    fn multiple_topics_aggregated() {
+        let img = image_with(&[
+            MetadataRecord::V1Topic(TopicRecord {
+                name: "a".into(),
+                topic_id: Uuid::new_v4(),
+                partitions: 1,
+                replication_factor: 3,
+            }),
+            MetadataRecord::V1Partition(PartitionRecord {
+                topic: "a".into(),
+                partition: 0,
+                leader: 1,
+                replicas: vec![1, 2, 3],
+                isr: vec![1, 2, 3],
+            }),
+            MetadataRecord::V1Topic(TopicRecord {
+                name: "b".into(),
+                topic_id: Uuid::new_v4(),
+                partitions: 2,
+                replication_factor: 3,
+            }),
+            MetadataRecord::V1Partition(PartitionRecord {
+                topic: "b".into(),
+                partition: 0,
+                leader: 3,
+                replicas: vec![1, 2, 3],
+                isr: vec![1, 2, 3],
+            }),
+            MetadataRecord::V1Partition(PartitionRecord {
+                topic: "b".into(),
+                partition: 1,
+                leader: 2,
+                replicas: vec![1, 2, 3],
+                isr: vec![1, 2, 3],
+            }),
+        ]);
+        let d = desired_follower_set(2, &img);
+        assert!(d.contains(&("a".into(), 0)));
+        assert!(d.contains(&("b".into(), 0)));
+        assert!(!d.contains(&("b".into(), 1))); // self is leader for b/1
+        assert_eq!(d.len(), 2);
+    }
+}
