@@ -2,10 +2,6 @@
 //! the id space is a single monotonic counter. Slice 9 (transactions)
 //! will revisit when transactional ids enter the picture.
 
-// Task 6 wires ProducerIdManager into Broker; until then the items are
-// intentionally unused from the crate's perspective.
-#![allow(dead_code)]
-
 use std::sync::atomic::{AtomicI16, AtomicI64, Ordering};
 
 use dashmap::DashMap;
@@ -15,6 +11,7 @@ use dashmap::DashMap;
 const PID_BASE: i64 = 1000;
 
 #[derive(Debug)]
+#[allow(dead_code)] // fields used via methods; handler wiring lands in Tasks 7-8
 pub struct ProducerIdManager {
     next_pid: AtomicI64,
     epochs: DashMap<i64, AtomicI16>,
@@ -26,6 +23,7 @@ impl Default for ProducerIdManager {
     }
 }
 
+#[allow(dead_code)] // allocate + bump_epoch wired in Tasks 7-8
 impl ProducerIdManager {
     #[must_use]
     pub fn new() -> Self {

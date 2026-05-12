@@ -2,10 +2,6 @@
 //! idempotent-producer dedup / out-of-order / epoch-fence checks in
 //! `handlers::produce`.
 
-// Task 6 wires ProducerState into Broker; until then the items are
-// intentionally unused from the crate's perspective.
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -13,6 +9,7 @@ use dashmap::DashMap;
 use tokio::sync::Mutex;
 
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)] // fields read by handler logic landing in Tasks 7-8
 pub struct ProducerEntry {
     pub epoch: i16,
     pub last_sequence: i32,
@@ -21,12 +18,14 @@ pub struct ProducerEntry {
 }
 
 #[derive(Debug, Default)]
+#[allow(dead_code)] // entries read by ProducerState methods; handler wiring in Tasks 7-8
 pub struct PartitionProducerState {
     pub entries: HashMap<i64, ProducerEntry>,
 }
 
 /// Outcome of a dedup check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // variants used in handler wiring in Tasks 7-8
 pub enum Decision {
     /// Producer is fresh or the sequence is one past the last commit. Caller
     /// should append, then call `commit` with the assigned base offset.
@@ -43,11 +42,13 @@ pub enum Decision {
 }
 
 #[derive(Debug, Default)]
+#[allow(dead_code)] // by_partition read via methods; handler wiring in Tasks 7-8
 pub struct ProducerState {
     #[allow(clippy::type_complexity)]
     by_partition: Arc<DashMap<(String, i32), Arc<Mutex<PartitionProducerState>>>>,
 }
 
+#[allow(dead_code)] // check/commit/handle wired in Tasks 7-8
 impl ProducerState {
     #[must_use]
     pub fn new() -> Self {

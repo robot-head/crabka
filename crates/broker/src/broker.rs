@@ -29,6 +29,8 @@ pub struct Broker {
     /// underlying map. `DashMap::clone` is a deep copy by default.
     pub(crate) partitions: Arc<DashMap<(String, i32), Arc<Partition>>>,
     pub(crate) group_manager: Arc<crate::coordinator::GroupManager>,
+    pub(crate) producer_ids: Arc<crate::producer_id_manager::ProducerIdManager>,
+    pub(crate) producer_state: Arc<crate::producer_state::ProducerState>,
     handlers: HandlerTable,
 }
 
@@ -100,6 +102,8 @@ impl Broker {
 
         // Group coordinator bootstrap (slice 5).
         let group_manager = Arc::new(crate::coordinator::GroupManager::new());
+        let producer_ids = Arc::new(crate::producer_id_manager::ProducerIdManager::new());
+        let producer_state = Arc::new(crate::producer_state::ProducerState::new());
         crate::coordinator::bootstrap::bootstrap(
             &config,
             &metadata,
@@ -127,6 +131,8 @@ impl Broker {
             metadata,
             partitions,
             group_manager: group_manager.clone(),
+            producer_ids,
+            producer_state,
             handlers,
         });
 
