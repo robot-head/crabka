@@ -50,13 +50,17 @@ async fn start_host_broker() -> (crabka_broker::BrokerHandle, tempfile::TempDir)
         .with_test_writer()
         .try_init();
     let dir = tempfile::tempdir().expect("tempdir");
-    let listen_addr = LISTEN.parse().expect("static addr");
+    let listen_addr: std::net::SocketAddr = LISTEN.parse().expect("static addr");
+    let controller_addr: std::net::SocketAddr = "0.0.0.0:9093".parse().expect("static addr");
     let config = BrokerConfig {
         broker_id: 1,
         listen_addr,
         advertised_listener: BOOTSTRAP.into(),
         log_dir: dir.path().to_path_buf(),
         log_config: LogConfig::default(),
+        node_id: 1,
+        controller_listen_addr: controller_addr,
+        controller_quorum_voters: vec![(1, controller_addr)],
     };
     let handle = Broker::start(config).await.expect("start broker");
     eprintln!("CRABKA[test] broker started listen={LISTEN} advertised={BOOTSTRAP}");

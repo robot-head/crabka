@@ -45,12 +45,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let advertised = args
         .advertised_listener
         .unwrap_or_else(|| args.listen_addr.to_string());
+    let controller_addr: std::net::SocketAddr = {
+        let mut a = args.listen_addr;
+        a.set_port(9093);
+        a
+    };
+    let node_id = args.broker_id as u64;
     let config = BrokerConfig {
         broker_id: args.broker_id,
         listen_addr: args.listen_addr,
         advertised_listener: advertised,
         log_dir: args.log_dir,
         log_config: LogConfig::default(),
+        node_id,
+        controller_listen_addr: controller_addr,
+        controller_quorum_voters: vec![(node_id, controller_addr)],
     };
 
     let handle = Broker::start(config).await?;
