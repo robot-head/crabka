@@ -55,7 +55,8 @@ pub fn from_broker_error(err: &crate::error::BrokerError) -> i16 {
         BrokerError::Shutdown
         | BrokerError::Io(_)
         | BrokerError::Log(_)
-        | BrokerError::Protocol(_) => UNKNOWN_SERVER_ERROR,
+        | BrokerError::Protocol(_)
+        | BrokerError::Startup(_) => UNKNOWN_SERVER_ERROR,
     }
 }
 

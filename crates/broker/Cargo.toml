@@ -20,6 +20,8 @@ path = "src/bin/broker.rs"
 [dependencies]
 crabka-protocol = { version = "0.1", path = "../protocol", default-features = false }
 crabka-log = { version = "0.1", path = "../log" }
+crabka-raft = { version = "0.1", path = "../raft" }
+crabka-metadata = { version = "0.1", path = "../metadata" }
 bytes = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["net", "rt", "rt-multi-thread", "io-util", "macros", "sync", "time", "signal"] }

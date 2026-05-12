@@ -41,7 +41,7 @@
 //!
 //! ## Cargo features
 //!
-//! - `mock` — exposes [`MockBroker`] beyond `#[cfg(test)]` for downstream
+//! - `mock` — exposes `MockBroker` beyond `#[cfg(test)]` for downstream
 //!   testing.
 
 mod bootstrap;

@@ -35,7 +35,7 @@ pub(crate) fn handle(
 ) -> BoxFuture<'static, Result<Bytes, BrokerError>> {
     let req_bytes = req_bytes.to_vec();
     let partitions = broker.partitions.clone();
-    let metadata = broker.metadata.clone();
+    let controller = broker.controller.clone();
     let producer_state = broker.producer_state.clone();
     Box::pin(async move {
         let mut cur: &[u8] = &req_bytes;
@@ -50,10 +50,11 @@ pub(crate) fn handle(
             let topic_name = if !topic.name.is_empty() {
                 topic.name.clone()
             } else if topic.topic_id != WireUuid::ZERO {
-                let meta = metadata.read().expect("metadata poisoned");
-                meta.topics()
-                    .find(|(_, t)| t.topic_id.into_bytes() == topic.topic_id.0)
-                    .map(|(name, _)| name.to_string())
+                let image = controller.current_image();
+                image
+                    .topics()
+                    .find(|t| t.topic_id.into_bytes() == topic.topic_id.0)
+                    .map(|t| t.name.clone())
                     .unwrap_or_default()
             } else {
                 String::new()

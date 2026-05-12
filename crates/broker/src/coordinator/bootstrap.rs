@@ -4,7 +4,9 @@
 
 use std::sync::Arc;
 
+use crabka_metadata::{MetadataRecord, PartitionRecord, TopicRecord};
 use crabka_protocol::records::RecordBatch;
+use crabka_raft::{ControllerHandle, RaftError};
 
 use crate::broker::spawn_partition;
 use crate::config::BrokerConfig;
@@ -13,7 +15,6 @@ use crate::coordinator::group::{Group, Member, OffsetEntry};
 use crate::coordinator::persistence::{self, GroupMetadataValue, Key, OffsetCommitValue};
 use crate::error::BrokerError;
 use crate::log_dir;
-use crate::metadata::MetadataImage;
 use crate::partition::Partition;
 
 pub const OFFSETS_TOPIC: &str = "__consumer_offsets";
@@ -21,13 +22,16 @@ pub const OFFSETS_PARTITION: i32 = 0;
 
 /// Ensure the `__consumer_offsets-0` partition exists on disk, open its
 /// `Log`, spawn a writer task, and replay every record into the supplied
-/// `GroupManager`. Adds the topic to the metadata image as a 1-partition
-/// internal topic.
+/// `GroupManager`. Registers the topic via the metadata quorum
+/// (`controller.submit_change(...)`) as a 1-partition internal topic;
+/// `TopicExists` is treated as success so a restart that finds the topic
+/// already in the log is a no-op.
 ///
-/// Called exactly once from `Broker::start`, BEFORE the TCP listener binds.
+/// Called exactly once from `Broker::start`, BEFORE the TCP listener binds
+/// and AFTER the controller has elected a leader (see `Broker::start`).
 pub async fn bootstrap(
     config: &BrokerConfig,
-    metadata: &Arc<std::sync::RwLock<MetadataImage>>,
+    controller: &Arc<ControllerHandle>,
     partitions: &Arc<dashmap::DashMap<(String, i32), Arc<Partition>>>,
     group_manager: &GroupManager,
 ) -> Result<(), BrokerError> {
@@ -35,12 +39,29 @@ pub async fn bootstrap(
     std::fs::create_dir_all(&topic_dir)?;
     let log = crabka_log::Log::open(&topic_dir, config.log_config.clone())?;
 
-    // Register the topic in metadata.
-    {
-        let mut meta = metadata.write().expect("metadata poisoned");
-        if meta.get(OFFSETS_TOPIC).is_none() {
-            // 1 partition, leader = this broker.
-            meta.insert_topic(OFFSETS_TOPIC, 1, config.broker_id);
+    // Register the topic via the metadata quorum. Tolerate `TopicExists`
+    // because on broker restart the record is already in the replicated log.
+    if controller.current_image().topic(OFFSETS_TOPIC).is_none() {
+        let records = vec![
+            MetadataRecord::V1Topic(TopicRecord {
+                name: OFFSETS_TOPIC.to_string(),
+                topic_id: uuid::Uuid::new_v4(),
+                partitions: 1,
+                replication_factor: 1,
+            }),
+            MetadataRecord::V1Partition(PartitionRecord {
+                topic: OFFSETS_TOPIC.to_string(),
+                partition: OFFSETS_PARTITION,
+                leader: config.node_id,
+                replicas: vec![config.node_id],
+                isr: vec![config.node_id],
+            }),
+        ];
+        match controller.submit_change(records).await {
+            // Another broker (or an earlier boot of ours) already registered
+            // it — fine, treat as success.
+            Ok(()) | Err(RaftError::Metadata(crabka_metadata::MetadataError::TopicExists(_))) => {}
+            Err(e) => return Err(BrokerError::Startup(e.to_string())),
         }
     }
 
@@ -162,22 +183,45 @@ mod tests {
     use super::*;
     use crate::config::BrokerConfig;
     use std::sync::Arc;
+    use std::time::{Duration, Instant};
     use tempfile::tempdir;
+
+    /// Spin up a controller, wait until it reports a leader, return the handle.
+    async fn controller_with_leader(log_dir: std::path::PathBuf) -> Arc<ControllerHandle> {
+        let addr: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let cfg = crabka_raft::ControllerConfig {
+            node_id: 1,
+            voters: vec![(1, addr)],
+            controller_listen_addr: addr,
+            log_dir,
+            election_timeout: Duration::from_millis(200),
+            heartbeat_interval: Duration::from_millis(50),
+            client_id: "test".into(),
+        };
+        let handle = Arc::new(crabka_raft::Controller::start(cfg).await.unwrap());
+        let mut rx = handle.watch_leader();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while rx.borrow().is_none() {
+            assert!(Instant::now() < deadline, "no leader elected in 5s");
+            let _ = tokio::time::timeout(Duration::from_millis(100), rx.changed()).await;
+        }
+        handle
+    }
 
     #[tokio::test]
     async fn bootstrap_creates_topic_dir() {
         let dir = tempdir().unwrap();
         let config = BrokerConfig::for_tests(dir.path().to_path_buf());
-        let metadata = Arc::new(std::sync::RwLock::new(MetadataImage::new()));
+        let controller = controller_with_leader(dir.path().join("__cluster_metadata_test")).await;
         let partitions: Arc<dashmap::DashMap<(String, i32), Arc<Partition>>> =
             Arc::new(dashmap::DashMap::new());
         let gm = GroupManager::new();
-        bootstrap(&config, &metadata, &partitions, &gm)
+        bootstrap(&config, &controller, &partitions, &gm)
             .await
             .unwrap();
         let topic_dir = log_dir::partition_dir(&config.log_dir, OFFSETS_TOPIC, OFFSETS_PARTITION);
         assert!(topic_dir.exists());
         assert!(partitions.contains_key(&(OFFSETS_TOPIC.into(), OFFSETS_PARTITION)));
-        assert!(metadata.read().unwrap().get(OFFSETS_TOPIC).is_some());
+        assert!(controller.current_image().topic(OFFSETS_TOPIC).is_some());
     }
 }

@@ -189,6 +189,77 @@ impl Connection {
         Ok(resp)
     }
 
+    /// Send a hand-framed request and await the raw response body.
+    ///
+    /// This bypasses the typed [`ProtocolRequest`] codegen path so callers
+    /// can speak Crabka-private APIs (e.g., the controller's Raft RPCs at
+    /// api keys 1000+) whose wire types live outside `crabka-protocol`.
+    ///
+    /// The header is always written as `RequestHeader v2` (flexible) with
+    /// an empty trailing tagged-fields byte. The response is assumed to
+    /// use `ResponseHeader v1` (flexible): the I/O loop strips the 4-byte
+    /// correlation id, and this method strips the leading tagged-fields
+    /// byte before returning. Callers receive the raw body bytes only.
+    ///
+    /// `body` is the encoded request body (everything after the request
+    /// header), exactly as it should appear on the wire.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError::Disconnected`] if the I/O loop has exited
+    /// or [`ClientError::Timeout`] if no response arrives within the
+    /// configured request timeout.
+    pub async fn raw_request(
+        &self,
+        api_key: i16,
+        api_version: i16,
+        body: Bytes,
+    ) -> Result<Bytes, ClientError> {
+        let corr_id = self.inner.next_corr_id.fetch_add(1, Ordering::Relaxed);
+
+        // RequestHeader v2 (flexible). Crabka-private api keys are always
+        // declared flexible so the header shape is predictable.
+        let mut frame = build_request_header(
+            api_key,
+            api_version,
+            corr_id,
+            &self.inner.options.client_id,
+            true,
+        );
+        frame.put_slice(&body);
+
+        let (tx, rx) = oneshot::channel::<Result<Bytes, ClientError>>();
+        self.inner.pending.insert(corr_id, tx);
+
+        self.inner
+            .writer_tx
+            .send(DispatchItem {
+                bytes: frame.freeze(),
+            })
+            .await
+            .map_err(|_| ClientError::Disconnected)?;
+
+        let body_bytes = match tokio::time::timeout(self.inner.options.request_timeout, rx).await {
+            Ok(Ok(Ok(b))) => b,
+            Ok(Ok(Err(e))) => return Err(e),
+            Ok(Err(_recv_closed)) => return Err(ClientError::Disconnected),
+            Err(_timeout) => {
+                self.inner.pending.remove(&corr_id);
+                return Err(ClientError::Timeout(self.inner.options.request_timeout));
+            }
+        };
+
+        // ResponseHeader v1: 1-byte empty-tagged-fields marker after the
+        // already-stripped correlation id. Drop it if present.
+        let slice: &[u8] = &body_bytes;
+        let out = if slice.is_empty() {
+            Bytes::new()
+        } else {
+            body_bytes.slice(1..)
+        };
+        Ok(out)
+    }
+
     /// Negotiated API versions known to this connection.
     #[must_use]
     pub fn versions(&self) -> &ApiVersionTable {

@@ -1,0 +1,33 @@
+[package]
+name = "crabka-raft"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version = "1.95.0"
+description = "Metadata Raft quorum (openraft adapters + Controller) for Crabka"
+
+[lints]
+workspace = true
+
+[dependencies]
+crabka-metadata = { version = "0.1", path = "../metadata" }
+crabka-log = { version = "0.1", path = "../log" }
+crabka-protocol = { version = "0.1", path = "../protocol", default-features = false }
+crabka-client-core = { version = "0.1", path = "../client-core" }
+openraft = { workspace = true }
+async-trait = { workspace = true }
+bincode = { workspace = true }
+bytes = { workspace = true }
+dashmap = { workspace = true }
+futures-util = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time", "macros", "net", "fs"] }
+tokio-util = { workspace = true, features = ["rt"] }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util", "macros"] }

@@ -50,6 +50,11 @@ pub enum BrokerError {
     #[error("shutting down")]
     Shutdown,
 
+    /// A failure that occurred during [`crate::Broker::start`] — controller
+    /// bring-up, leader election timeout, etc.
+    #[error("startup failed: {0}")]
+    Startup(String),
+
     /// A group-coordinator request arrived while the group is in a state
     /// that doesn't allow it (e.g. heartbeat during `PreparingRebalance`).
     #[error("group {group_id} is in state {state:?}, request not allowed")]

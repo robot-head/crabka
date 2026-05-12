@@ -1,0 +1,61 @@
+use thiserror::Error;
+
+use crate::types::NodeId;
+
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum RaftError {
+    #[error("storage: {0}")]
+    Storage(#[from] crabka_log::LogError),
+
+    #[error("network: {0}")]
+    Network(#[from] crabka_client_core::ClientError),
+
+    #[error("protocol: {0}")]
+    Protocol(#[from] crabka_protocol::ProtocolError),
+
+    #[error("metadata: {0}")]
+    Metadata(#[from] crabka_metadata::MetadataError),
+
+    #[error("openraft fatal: {0}")]
+    Openraft(String),
+
+    #[error("not leader; current leader: {current_leader:?}")]
+    NotLeader { current_leader: Option<NodeId> },
+
+    #[error("leader unknown (election in progress)")]
+    LeaderUnknown,
+
+    #[error("change rejected: {0}")]
+    ChangeRejected(String),
+
+    #[error("bincode encode: {0}")]
+    SerdeFailed(#[from] bincode::error::EncodeError),
+
+    #[error("bincode decode: {0}")]
+    SerdeFailedDecode(#[from] bincode::error::DecodeError),
+
+    #[error("controller shut down")]
+    Shutdown,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_not_leader_with_id() {
+        let e = RaftError::NotLeader {
+            current_leader: Some(7),
+        };
+        assert!(e.to_string().contains("Some(7)"));
+    }
+
+    #[test]
+    fn display_not_leader_without_id() {
+        let e = RaftError::NotLeader {
+            current_leader: None,
+        };
+        assert!(e.to_string().contains("None"));
+    }
+}
