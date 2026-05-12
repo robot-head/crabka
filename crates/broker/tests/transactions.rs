@@ -6,7 +6,7 @@
 //!
 //! Windows-gated like slice-7/8 multi-node tests: openraft + tokio
 //! scheduling on Windows runners causes intermittent
-//! `INVALID_TXN_STATE` errors during InitProducerId. The transactional
+//! `INVALID_TXN_STATE` errors during `InitProducerId`. The transactional
 //! control plane is platform-correct; the gate avoids a flaky CI
 //! signal until the slice-7 Windows scheduling work is addressed.
 
