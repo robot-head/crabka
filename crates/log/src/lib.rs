@@ -49,8 +49,10 @@ mod name;
 mod recovery;
 mod retention;
 mod segment;
+mod txn_index;
 
 pub use config::LogConfig;
 pub use error::LogError;
 pub use log::{Log, ReadOutput};
 pub use segment::Segment;
+pub use txn_index::{AbortedTxn, TxnIndex};
