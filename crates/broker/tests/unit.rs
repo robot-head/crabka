@@ -752,3 +752,29 @@ async fn create_topics_rf_too_high_returns_invalid_replication_factor() {
     );
     p.broker.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn find_coordinator_txn_creates_topic_and_returns_local_broker() {
+    let p = support::start().await; // single-voter broker
+    // Use coordinator_keys (v4+ style) so the transaction-id reaches the
+    // broker on the wire. key_type=1 selects the TRANSACTION branch.
+    let r = p
+        .client
+        .send(FindCoordinatorRequest {
+            coordinator_keys: vec!["my-tid".into()],
+            key_type: 1, // TRANSACTION
+            ..Default::default()
+        })
+        .await
+        .expect("FindCoordinator(TRANSACTION)");
+    // The broker bootstraps __transaction_state on demand, resolves the
+    // partition leader, and returns itself (the only broker in the cluster).
+    assert_eq!(r.error_code, 0, "top-level error_code");
+    assert_eq!(r.coordinators.len(), 1, "one coordinator entry");
+    let c = &r.coordinators[0];
+    assert_eq!(c.error_code, 0, "coordinator error_code");
+    assert_eq!(c.node_id, 1, "node_id should be this single broker");
+    assert!(!c.host.is_empty(), "host should be non-empty");
+    assert!(c.port > 0, "port should be positive");
+    p.broker.shutdown().await;
+}
