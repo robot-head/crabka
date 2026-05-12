@@ -871,6 +871,8 @@ async fn three_node_replication_byte_compare() {
 #[ignore = "requires Docker and CRABKA_RUN_TXN_JVM_TEST=1"]
 #[allow(clippy::too_many_lines)]
 async fn transactional_console_producer_eos() {
+    const TOPIC: &str = "crabka-txn-itest";
+
     // Gated behind an env var because `cp-kafka:7.5.0`'s bundled
     // `kafka-verifiable-producer` does not support `--transactional-id`
     // despite shipping Kafka 3.5. A custom Java snippet harness is needed
@@ -885,8 +887,6 @@ async fn transactional_console_producer_eos() {
         );
         return;
     }
-
-    const TOPIC: &str = "crabka-txn-itest";
 
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
