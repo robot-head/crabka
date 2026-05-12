@@ -1,0 +1,21 @@
+[package]
+name = "crabka-metadata"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version = "1.95.0"
+description = "Versioned metadata record types + immutable image for Crabka"
+
+[lints]
+workspace = true
+
+[dependencies]
+bincode = { workspace = true }
+bytes = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
