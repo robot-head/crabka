@@ -80,6 +80,7 @@ pub(crate) fn build_table() -> HandlerTable {
     t.register(19, create_topics::handle);
     t.register(20, delete_topics::handle);
     t.register(22, init_producer_id::handle);
+    t.register(24, crate::txn::handlers::add_partitions_to_txn::handle);
     t.register(32, describe_configs::handle);
     t
 }
