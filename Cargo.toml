@@ -50,5 +50,5 @@ clap = { version = "4", features = ["derive"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 bon = "3"
-bincode = { version = "2", features = ["serde"] }
+bincode = { version = "3", features = ["serde"] }
 async-trait = "0.1"
