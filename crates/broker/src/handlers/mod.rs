@@ -82,6 +82,7 @@ pub(crate) fn build_table() -> HandlerTable {
     t.register(22, init_producer_id::handle);
     t.register(24, crate::txn::handlers::add_partitions_to_txn::handle);
     t.register(25, crate::txn::handlers::add_offset_commits_to_txn::handle);
+    t.register(26, crate::txn::handlers::end_txn::handle);
     t.register(32, describe_configs::handle);
     t
 }

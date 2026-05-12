@@ -61,6 +61,7 @@ fn supported_apis() -> Vec<ApiVersion> {
         v!(init_producer_id_request),
         v!(add_partitions_to_txn_request),
         v!(add_offsets_to_txn_request),
+        v!(end_txn_request),
         v!(describe_configs_request),
     ]
 }
