@@ -21,6 +21,7 @@ use crabka_client_core::{Client, ClientError};
 use crabka_log::{Log, LogConfig};
 use crabka_protocol::owned::fetch_request::{FetchPartition, FetchRequest, FetchTopic};
 use crabka_protocol::owned::fetch_response::FetchResponse;
+use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 use crabka_raft::NodeId;
 
 use crate::broker::spawn_partition;
@@ -35,6 +36,13 @@ const FETCH_MIN_BYTES: i32 = 1;
 pub(crate) struct Config {
     pub node_id: NodeId,
     pub topic: String,
+    /// Wire-format `topic_id` for the partition. Required so the
+    /// `Fetch` request can populate the v13+ wire field — at v ≥ 13
+    /// Kafka drops `FetchTopic.topic` in favour of `topic_id` (KIP-516),
+    /// and the leader's handler resolves topic-name purely via
+    /// `topic_id`. If we send `WireUuid::ZERO` here the leader returns
+    /// `UNKNOWN_TOPIC_OR_PARTITION` for every fetch.
+    pub topic_id: WireUuid,
     pub partition: i32,
     pub leader_node_id: NodeId,
     pub leader_addr: String,
@@ -155,6 +163,7 @@ fn build_fetch_request(cfg: &Config, fetch_offset: i64) -> FetchRequest {
         max_bytes: FETCH_MAX_BYTES,
         topics: vec![FetchTopic {
             topic: cfg.topic.clone(),
+            topic_id: cfg.topic_id,
             partitions: vec![FetchPartition {
                 partition: cfg.partition,
                 fetch_offset,
@@ -175,10 +184,16 @@ enum LoopAction {
 
 async fn handle_response(resp: &FetchResponse, cfg: &Config) -> LoopAction {
     // Slice 8 only ever requests one (topic, partition) per Fetch.
+    // Match by either `topic` (v ≤ 12) or `topic_id` (v ≥ 13) so that
+    // when the negotiated wire format drops the topic-name field
+    // (KIP-516) we still find our partition. Without this fallback
+    // every fetch silently no-ops at v ≥ 13 because `t.topic == ""`.
     let Some(part_resp) = resp
         .responses
         .iter()
-        .find(|t| t.topic == cfg.topic)
+        .find(|t| {
+            t.topic == cfg.topic || (cfg.topic_id != WireUuid::ZERO && t.topic_id == cfg.topic_id)
+        })
         .and_then(|t| {
             t.partitions
                 .iter()

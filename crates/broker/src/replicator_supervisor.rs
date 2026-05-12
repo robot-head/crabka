@@ -98,11 +98,23 @@ impl ReplicatorSupervisor {
                 );
                 continue;
             };
+            // Resolve the topic's `topic_id` from the same image we're
+            // reconciling against. The replicator needs it for the v13+
+            // Fetch wire format; without it the leader's handler can't
+            // resolve the topic name and returns UNKNOWN_TOPIC_OR_PARTITION.
+            let Some(topic_rec) = image.topic(&k.0).cloned() else {
+                warn!(
+                    topic = %k.0, partition = k.1,
+                    "topic record missing from MetadataImage; deferring"
+                );
+                continue;
+            };
             let token = CancellationToken::new();
             self.tasks.insert(k.clone(), token.clone());
             tokio::spawn(replicator::run(replicator::Config {
                 node_id: self.node_id,
                 topic: k.0,
+                topic_id: crabka_protocol::primitives::uuid::Uuid(topic_rec.topic_id.into_bytes()),
                 partition: k.1,
                 leader_node_id: leader,
                 leader_addr: format!("{}:{}", broker.host, broker.port),

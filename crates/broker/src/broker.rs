@@ -76,6 +76,45 @@ impl BrokerHandle {
         *self._broker.controller.watch_leader().borrow()
     }
 
+    /// Number of brokers currently registered in this broker's
+    /// `MetadataImage`. Used by replication integration tests to wait
+    /// for all peers to come up before issuing `CreateTopics`.
+    ///
+    /// `async fn` for the same reason as
+    /// [`controller_leader_id`](Self::controller_leader_id): keeps the
+    /// public test surface uniform and leaves room for a future
+    /// implementation that blocks until convergence.
+    #[allow(clippy::unused_async, clippy::used_underscore_binding)]
+    pub async fn broker_count(&self) -> usize {
+        self._broker.controller.current_image().brokers().count()
+    }
+
+    /// Is `(topic, partition)` present in this broker's `MetadataImage`?
+    /// Used by replication integration tests to wait for topic
+    /// propagation.
+    #[allow(clippy::unused_async, clippy::used_underscore_binding)]
+    pub async fn has_partition(&self, topic: &str, partition: i32) -> bool {
+        self._broker
+            .controller
+            .current_image()
+            .partition(topic, partition)
+            .is_some()
+    }
+
+    /// Local `log_end_offset` for `(topic, partition)`, if this broker
+    /// hosts the partition. Used by replication integration tests to
+    /// assert all followers caught up.
+    #[allow(clippy::unused_async, clippy::used_underscore_binding)]
+    pub async fn local_log_end_offset(&self, topic: &str, partition: i32) -> Option<i64> {
+        let part = self
+            ._broker
+            .partitions
+            .get(&(topic.to_string(), partition))?
+            .value()
+            .clone();
+        Some(part.log_end_offset())
+    }
+
     /// Cancel the listener + drain in-flight connections. Awaiting the
     /// returned future blocks until the listener task exits.
     #[allow(clippy::used_underscore_binding)] // `_broker` carries shared state we must reach into during shutdown
