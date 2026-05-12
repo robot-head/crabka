@@ -271,3 +271,170 @@ async fn replication_factor_three_propagates_to_all_followers() {
         h.shutdown().await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn out_of_range_truncates_and_recovers() {
+    let _g = cluster_lock().lock().await;
+    let cluster = start_n_node_with_retry(3).await;
+
+    // Same broker-discovery wait as the propagation test.
+    let deadline = Instant::now() + Duration::from_mins(2);
+    loop {
+        let mut all_see_three = true;
+        for (h, _, _) in &cluster {
+            if h.broker_count().await < 3 {
+                all_see_three = false;
+                break;
+            }
+        }
+        if all_see_three {
+            break;
+        }
+        if Instant::now() > deadline {
+            panic!("brokers didn't converge on 3-broker view within 2 min");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // CreateTopics("oor", num_partitions=1, replication_factor=3) against
+    // cluster[0] (= node 1 = round-robin leader for partition 0).
+    let leader_addr = cluster[0].1.listen_addr.to_string();
+    let admin = Client::builder()
+        .bootstrap(leader_addr.clone())
+        .build()
+        .await
+        .unwrap();
+    let resp = admin
+        .send(CreateTopicsRequest {
+            topics: vec![CreatableTopic {
+                name: "oor".into(),
+                num_partitions: 1,
+                replication_factor: 3,
+                ..Default::default()
+            }],
+            timeout_ms: 5_000,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(resp.topics[0].error_code, 0);
+    let topic_id = resp.topics[0].topic_id;
+
+    // Wait for the topic to propagate to every broker's MetadataImage.
+    let deadline = Instant::now() + Duration::from_mins(2);
+    loop {
+        let mut all_have = true;
+        for (h, _, _) in &cluster {
+            if !h.has_partition("oor", 0).await {
+                all_have = false;
+                break;
+            }
+        }
+        if all_have {
+            break;
+        }
+        if Instant::now() > deadline {
+            panic!("topic 'oor' didn't propagate to all 3 brokers within 2 min");
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // Produce 50 records in 50 separate single-record batches so the
+    // leader's log holds them as discrete batches. The plan called for
+    // one 50-record batch, but `Fetch` returns the whole batch as the
+    // smallest unit, so after advancing leader's `log_start` to 25 the
+    // follower would still pull a batch with `base_offset=0` and reject
+    // it with `OffsetMismatch`. Per-record batches let
+    // `Segment::read(25, ...)` filter out the prefix cleanly.
+    let producer = Client::builder()
+        .bootstrap(leader_addr)
+        .build()
+        .await
+        .unwrap();
+    for i in 0..50i32 {
+        let batch = RecordBatch {
+            base_offset: 0,
+            last_offset_delta: 0,
+            records: vec![Record {
+                offset_delta: 0,
+                value: Some(bytes::Bytes::from(format!("v{i}"))),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let prod = producer
+            .send(ProduceRequest {
+                acks: -1,
+                timeout_ms: 5_000,
+                topic_data: vec![TopicProduceData {
+                    name: "oor".into(),
+                    topic_id,
+                    partition_data: vec![PartitionProduceData {
+                        index: 0,
+                        records: Some(batch),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(prod.responses[0].partition_responses[0].error_code, 0);
+    }
+
+    // Wait for every broker's local log to catch up to 50.
+    let deadline = Instant::now() + Duration::from_mins(2);
+    loop {
+        let mut offsets = Vec::with_capacity(cluster.len());
+        for (h, _, _) in &cluster {
+            offsets.push(h.local_log_end_offset("oor", 0).await.unwrap_or(0));
+        }
+        if offsets.iter().all(|&n| n >= 50) {
+            break;
+        }
+        if Instant::now() > deadline {
+            panic!("initial replication didn't reach 50 in 2 min: {offsets:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // Simulate broker 3 "falling behind past retention": truncate its
+    // local log to 0 AND advance the leader's `log_start` to 25. After
+    // this, broker 3's replicator will fetch at offset 0, leader will
+    // return OFFSET_OUT_OF_RANGE with `log_start_offset=25`, and the
+    // replicator's recovery path must `reset_to(25)` and re-fetch from
+    // 25 to converge again.
+    cluster[2]
+        .0
+        .test_truncate_local_log("oor", 0, 0)
+        .await
+        .expect("truncate broker 3");
+    cluster[0]
+        .0
+        .test_advance_log_start("oor", 0, 25)
+        .await
+        .expect("advance leader log_start");
+
+    // Wait for broker 3 to converge again — log_end_offset should reach
+    // 50 once it has fetched records 25..50 from the leader.
+    let deadline = Instant::now() + Duration::from_mins(2);
+    loop {
+        let lag = cluster[2]
+            .0
+            .local_log_end_offset("oor", 0)
+            .await
+            .unwrap_or(0);
+        if lag >= 50 {
+            break;
+        }
+        if Instant::now() > deadline {
+            panic!("broker 3 didn't recover from OFFSET_OUT_OF_RANGE in 2 min; saw log_end={lag}");
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    for (h, _, _) in cluster {
+        h.shutdown().await;
+    }
+}

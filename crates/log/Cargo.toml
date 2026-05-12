@@ -12,6 +12,11 @@ workspace = true
 
 [features]
 default = []
+# Exposes `Log::test_set_log_start_offset` (and other test-only mutators)
+# to dependent crates' integration tests. Not enabled by default — the
+# broker crate's `dev-dependencies` enables it for the slice-8
+# replication tests.
+test-helpers = []
 
 [dependencies]
 crabka-protocol = { version = "0.1", path = "../protocol", default-features = false }

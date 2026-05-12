@@ -63,6 +63,25 @@ pub async fn run(
                 let _ = ack.send(result);
                 // No `append_notify` — truncate doesn't deliver new data.
             }
+            WriterMessage::ResetTo { new_base, ack } => {
+                let result = {
+                    let mut log = log.lock().expect("log mutex poisoned");
+                    log.reset_to(new_base)
+                        .map_err(crate::error::BrokerError::from)
+                };
+                let _ = ack.send(result);
+                // No `append_notify` — reset_to drops data rather than
+                // delivering it.
+            }
+            #[cfg(any(test, feature = "test-helpers"))]
+            WriterMessage::TestSetLogStart { new_start, ack } => {
+                let result = {
+                    let mut log = log.lock().expect("log mutex poisoned");
+                    log.test_set_log_start_offset(new_start)
+                        .map_err(crate::error::BrokerError::from)
+                };
+                let _ = ack.send(result);
+            }
         }
     }
 }

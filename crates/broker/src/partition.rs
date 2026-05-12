@@ -54,6 +54,24 @@ pub enum WriterMessage {
         offset: i64,
         ack: oneshot::Sender<Result<(), BrokerError>>,
     },
+    /// Drop every segment and recreate the active segment at `new_base`.
+    /// Used by the replicator's `OFFSET_OUT_OF_RANGE` recovery path when
+    /// the follower has fallen behind the leader's `log_start` — the
+    /// follower must move its own `log_start` *forward* past records it
+    /// never saw, which `Truncate` can't do.
+    ResetTo {
+        new_base: i64,
+        ack: oneshot::Sender<Result<(), BrokerError>>,
+    },
+    /// Test-only: shift the in-memory `log_start_offset` without
+    /// physically truncating segments. Simulates retention-driven
+    /// truncation for the `out_of_range_truncates_and_recovers`
+    /// replication integration test.
+    #[cfg(any(test, feature = "test-helpers"))]
+    TestSetLogStart {
+        new_start: i64,
+        ack: oneshot::Sender<Result<(), BrokerError>>,
+    },
 }
 
 /// Runtime handle for a single partition.
@@ -118,6 +136,40 @@ impl Partition {
         self.writer_tx
             .send(WriterMessage::Truncate {
                 offset,
+                ack: ack_tx,
+            })
+            .await
+            .map_err(|_| BrokerError::Replication("partition writer dead".into()))?;
+        ack_rx
+            .await
+            .map_err(|_| BrokerError::Replication("ack dropped".into()))?
+    }
+
+    /// Drop every segment and recreate the active segment at `new_base`.
+    /// Goes through the writer task so it stays ordered with appends.
+    pub async fn reset_to(&self, new_base: i64) -> Result<(), BrokerError> {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        self.writer_tx
+            .send(WriterMessage::ResetTo {
+                new_base,
+                ack: ack_tx,
+            })
+            .await
+            .map_err(|_| BrokerError::Replication("partition writer dead".into()))?;
+        ack_rx
+            .await
+            .map_err(|_| BrokerError::Replication("ack dropped".into()))?
+    }
+
+    /// Test-only: shift the partition's in-memory `log_start_offset` to
+    /// `new_start`. Goes through the writer task to maintain the
+    /// single-writer invariant on the underlying `Log`.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub async fn test_set_log_start(&self, new_start: i64) -> Result<(), BrokerError> {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        self.writer_tx
+            .send(WriterMessage::TestSetLogStart {
+                new_start,
                 ack: ack_tx,
             })
             .await

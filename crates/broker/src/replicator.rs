@@ -219,12 +219,27 @@ async fn handle_response(resp: &FetchResponse, cfg: &Config) -> LoopAction {
             LoopAction::Continue
         }
         codes::OFFSET_OUT_OF_RANGE => {
-            warn!(topic = %cfg.topic, partition = cfg.partition,
-                "replicator.out_of_range; truncating local log to 0");
+            // The leader reports its current `log_start_offset` in the
+            // partition response. We MUST reset our local log to that
+            // value, not to 0: the leader may have moved its log_start
+            // forward past records this follower never saw (retention
+            // happened, etc.), and re-fetching from 0 would just bounce
+            // off the same `OFFSET_OUT_OF_RANGE` forever. `reset_to`
+            // drops every existing segment and creates a fresh active
+            // segment at `leader_log_start`, after which the next loop
+            // iteration's `log_end_offset()` equals `leader_log_start`
+            // and the fetch lands inside the leader's retained range.
+            let leader_log_start = part_resp.log_start_offset;
+            warn!(
+                topic = %cfg.topic,
+                partition = cfg.partition,
+                leader_log_start,
+                "replicator.out_of_range; resetting local log to leader log_start"
+            );
             if let Some(entry) = cfg.partitions.get(&(cfg.topic.clone(), cfg.partition))
-                && let Err(e) = entry.value().truncate_to(0).await
+                && let Err(e) = entry.value().reset_to(leader_log_start).await
             {
-                warn!(error = %e, "replicator: truncate_to(0) failed");
+                warn!(error = %e, "replicator: reset_to(leader_log_start) failed");
             }
             LoopAction::Continue
         }

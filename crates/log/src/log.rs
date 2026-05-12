@@ -20,11 +20,21 @@ use crate::segment::Segment;
 /// concurrent readers (`&self` for `read`/`log_start_offset`/etc.).
 /// Construct one with [`Log::open`].
 #[derive(Debug)]
+// `log_start_override` mirrors Kafka's `log_start_offset` terminology;
+// renaming to drop the `log_` prefix would obscure the field's role.
+#[allow(clippy::struct_field_names)]
 pub struct Log {
     dir: PathBuf,
     config: LogConfig,
     segments: Vec<Arc<Segment>>,
     active: Option<Segment>,
+    /// Test-only override for `log_start_offset()`. When `Some(n)`, the
+    /// effective `log_start` is `max(derived_from_segments, n)`. Used
+    /// by the broker's replicator integration tests to simulate
+    /// retention-driven truncation on a leader without physically
+    /// deleting segments. Real retention is a future slice.
+    #[cfg(any(test, feature = "test-helpers"))]
+    log_start_override: Option<i64>,
 }
 
 /// Result of [`Log::read`]: the absolute offset of the first batch
@@ -86,19 +96,93 @@ impl Log {
             config,
             segments,
             active: Some(active),
+            #[cfg(any(test, feature = "test-helpers"))]
+            log_start_override: None,
         })
     }
 
     /// First absolute offset still in the log.
     #[must_use]
     pub fn log_start_offset(&self) -> i64 {
-        if let Some(first) = self.segments.first() {
-            return first.base_offset();
+        let derived = if let Some(first) = self.segments.first() {
+            first.base_offset()
+        } else if let Some(active) = &self.active {
+            active.base_offset()
+        } else {
+            0
+        };
+        #[cfg(any(test, feature = "test-helpers"))]
+        {
+            if let Some(o) = self.log_start_override {
+                return derived.max(o);
+            }
         }
-        if let Some(active) = &self.active {
-            return active.base_offset();
+        derived
+    }
+
+    /// Test-only: advance the effective `log_start_offset` to `new_start`.
+    /// Used by the broker's replicator out-of-range integration test to
+    /// simulate retention-driven truncation. Does NOT physically truncate
+    /// on-disk segments — only shifts the in-memory pointer. Real
+    /// retention is a future slice.
+    ///
+    /// `new_start` must be non-negative.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LogError::OffsetMismatch`] if `new_start` is negative.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn test_set_log_start_offset(&mut self, new_start: i64) -> Result<(), LogError> {
+        if new_start < 0 {
+            return Err(LogError::OffsetMismatch {
+                expected: 0,
+                actual: new_start,
+            });
         }
-        0
+        self.log_start_override = Some(new_start);
+        Ok(())
+    }
+
+    /// Reset the log to be empty starting at `new_base`. Drops every
+    /// segment + on-disk file and creates a fresh active segment at
+    /// `new_base`. Used by the replicator's `OFFSET_OUT_OF_RANGE`
+    /// recovery path when the follower has fallen behind the leader's
+    /// `log_start` — `truncate_to` can't help here because we need to
+    /// move `log_start` *forward* past where there is no local data.
+    pub fn reset_to(&mut self, new_base: i64) -> Result<(), LogError> {
+        if new_base < 0 {
+            return Err(LogError::OffsetMismatch {
+                expected: 0,
+                actual: new_base,
+            });
+        }
+
+        // Drop every sealed segment + its on-disk files.
+        while let Some(popped) = self.segments.pop() {
+            let base = popped.base_offset();
+            drop(popped);
+            let _ = fs::remove_file(name::log_path(&self.dir, base));
+            let _ = fs::remove_file(name::index_path(&self.dir, base));
+            let _ = fs::remove_file(name::timeindex_path(&self.dir, base));
+        }
+
+        // Drop the active segment + its on-disk files.
+        if let Some(active) = self.active.take() {
+            let base = active.base_offset();
+            drop(active);
+            let _ = fs::remove_file(name::log_path(&self.dir, base));
+            let _ = fs::remove_file(name::index_path(&self.dir, base));
+            let _ = fs::remove_file(name::timeindex_path(&self.dir, base));
+        }
+
+        // Clear any test-only override so the derived value takes over.
+        #[cfg(any(test, feature = "test-helpers"))]
+        {
+            self.log_start_override = None;
+        }
+
+        self.active = Some(Segment::create(&self.dir, new_base)?);
+        Ok(())
     }
 
     /// Next offset that `append` will assign.

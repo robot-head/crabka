@@ -680,6 +680,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "clap",
+ "crabka-broker",
  "crabka-client-core",
  "crabka-client-producer",
  "crabka-log",

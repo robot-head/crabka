@@ -115,6 +115,68 @@ impl BrokerHandle {
         Some(part.log_end_offset())
     }
 
+    /// Test-only: truncate this broker's local partition log so no
+    /// records at offset `>= offset` remain. Simulates "fell behind
+    /// past retention" in the out-of-range replication integration
+    /// test.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BrokerError::Replication`] if the partition is not
+    /// hosted on this broker.
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[allow(clippy::used_underscore_binding)]
+    pub async fn test_truncate_local_log(
+        &self,
+        topic: &str,
+        partition: i32,
+        offset: i64,
+    ) -> Result<(), crate::error::BrokerError> {
+        let part = self
+            ._broker
+            .partitions
+            .get(&(topic.to_string(), partition))
+            .ok_or_else(|| {
+                crate::error::BrokerError::Replication(format!(
+                    "partition {topic}-{partition} not local"
+                ))
+            })?
+            .value()
+            .clone();
+        part.truncate_to(offset).await
+    }
+
+    /// Test-only: advance this broker's local partition `log_start_offset`
+    /// to `new_start` without physically deleting on-disk segments.
+    /// Simulates retention-driven truncation on a leader for the
+    /// out-of-range replication integration test.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BrokerError::Replication`] if the partition is not
+    /// hosted on this broker.
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[allow(clippy::used_underscore_binding)]
+    pub async fn test_advance_log_start(
+        &self,
+        topic: &str,
+        partition: i32,
+        new_start: i64,
+    ) -> Result<(), crate::error::BrokerError> {
+        let part = self
+            ._broker
+            .partitions
+            .get(&(topic.to_string(), partition))
+            .ok_or_else(|| {
+                crate::error::BrokerError::Replication(format!(
+                    "partition {topic}-{partition} not local"
+                ))
+            })?
+            .value()
+            .clone();
+        part.test_set_log_start(new_start).await
+    }
+
     /// Cancel the listener + drain in-flight connections. Awaiting the
     /// returned future blocks until the listener task exits.
     #[allow(clippy::used_underscore_binding)] // `_broker` carries shared state we must reach into during shutdown
