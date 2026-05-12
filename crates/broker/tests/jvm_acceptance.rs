@@ -408,3 +408,165 @@ async fn console_consumer_with_group_round_trip() {
 
     broker.shutdown().await;
 }
+
+// Three-node quorum: produce on one node, consume on another, then kill
+// the controller leader and assert the surviving brokers still answer
+// Metadata. Same multi-thread runtime caveat as the other tests; we ask
+// for 4 workers because we have three brokers + the test driver all
+// making blocking docker calls.
+//
+// Fixed ports per node because docker containers must be able to reach
+// the brokers via `host.docker.internal:<client-port>`. The advertised
+// listener uses the same hostname so the AdminClient's post-Metadata
+// reconnect resolves correctly. Controller ports use `127.0.0.1` for
+// inter-broker traffic — all three Crabka brokers live on the host's
+// loopback, so docker reachability is not required for the controller
+// listener.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires Docker"]
+#[allow(clippy::too_many_lines)]
+async fn three_node_jvm_round_trip() {
+    const TOPIC: &str = "crabka-quorum-itest";
+
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("crabka_broker=debug,info")),
+        )
+        .with_test_writer()
+        .try_init();
+
+    let client_ports = [9192u16, 9292, 9392];
+    let controller_ports = [9193u16, 9293, 9393];
+
+    // Voters for inter-broker (controller) traffic: host loopback works.
+    let voters: Vec<(u64, std::net::SocketAddr)> = (0..3)
+        .map(|i| {
+            (
+                u64::try_from(i + 1).unwrap(),
+                format!("127.0.0.1:{}", controller_ports[i])
+                    .parse()
+                    .unwrap(),
+            )
+        })
+        .collect();
+
+    let mut cluster = Vec::new();
+    for i in 0..3 {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg = BrokerConfig {
+            broker_id: i32::try_from(i + 1).unwrap(),
+            // bind on 0.0.0.0 so Docker-side containers can reach us.
+            listen_addr: format!("0.0.0.0:{}", client_ports[i])
+                .parse()
+                .expect("static addr"),
+            advertised_listener: format!("host.docker.internal:{}", client_ports[i]),
+            log_dir: dir.path().to_path_buf(),
+            log_config: LogConfig::default(),
+            node_id: u64::try_from(i + 1).unwrap(),
+            controller_listen_addr: format!("0.0.0.0:{}", controller_ports[i])
+                .parse()
+                .expect("static addr"),
+            controller_quorum_voters: voters.clone(),
+        };
+        let handle = Broker::start(cfg).await.expect("broker start");
+        cluster.push((handle, dir));
+    }
+
+    let bootstrap_1 = format!("host.docker.internal:{}", client_ports[0]);
+    let bootstrap_3 = format!("host.docker.internal:{}", client_ports[2]);
+
+    // 1. Create topic via node 1.
+    docker_run_kafka_tool(&[
+        "kafka-topics",
+        "--create",
+        "--if-not-exists",
+        "--topic",
+        TOPIC,
+        "--partitions",
+        "1",
+        "--replication-factor",
+        "1",
+        "--bootstrap-server",
+        &bootstrap_1,
+    ]);
+
+    // 2. Give propagation a moment.
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+    // 3. Produce via node 2.
+    let producer = crabka_client_producer::Producer::builder()
+        .bootstrap(format!("host.docker.internal:{}", client_ports[1]))
+        .enable_idempotence(true)
+        .acks(crabka_client_producer::Acks::All)
+        .build()
+        .await
+        .expect("producer");
+    for v in ["a", "b", "c"] {
+        let fut = producer
+            .send(crabka_client_producer::ProducerRecord {
+                topic: TOPIC.into(),
+                value: Some(bytes::Bytes::from(v)),
+                ..Default::default()
+            })
+            .await;
+        let _ = fut.await.expect("oneshot").expect("ack");
+    }
+    producer.flush().await.expect("flush");
+    producer.close().await.expect("close");
+
+    // 4. Consume via node 3.
+    let out = docker_run_kafka_tool(&[
+        "kafka-console-consumer",
+        "--bootstrap-server",
+        &bootstrap_3,
+        "--topic",
+        TOPIC,
+        "--partition",
+        "0",
+        "--from-beginning",
+        "--max-messages",
+        "3",
+        "--timeout-ms",
+        "20000",
+    ]);
+    let s = String::from_utf8_lossy(&out.stdout);
+    for needle in ["a", "b", "c"] {
+        assert!(s.contains(needle), "missing {needle} in {s:?}");
+    }
+
+    // 5. Find the controller leader, kill it.
+    let mut leader_idx = None;
+    for (i, (h, _)) in cluster.iter().enumerate() {
+        let want = u64::try_from(i + 1).unwrap();
+        if h.controller_leader_id().await == Some(want) {
+            leader_idx = Some(i);
+            break;
+        }
+    }
+    let leader_idx = leader_idx.expect("a leader exists");
+    let (leader, _dir) = cluster.remove(leader_idx);
+    leader.shutdown().await;
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+    // 6. Survivor still answers Metadata via kafka-topics --list.
+    let survivor_idx = (0..client_ports.len())
+        .find(|i| *i != leader_idx)
+        .expect("at least one survivor");
+    let survivor_bootstrap = format!("host.docker.internal:{}", client_ports[survivor_idx]);
+    let list_out = docker_run_kafka_tool(&[
+        "kafka-topics",
+        "--list",
+        "--bootstrap-server",
+        &survivor_bootstrap,
+    ]);
+    let list_s = String::from_utf8_lossy(&list_out.stdout);
+    assert!(
+        list_s.contains(TOPIC),
+        "topic missing after leader kill: {list_s:?}"
+    );
+
+    for (h, _) in cluster {
+        h.shutdown().await;
+    }
+}
