@@ -5,13 +5,11 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-#[allow(dead_code)] // used by the sender task (Task 16)
 #[derive(Debug, Default)]
 pub struct UniformStickyPartitioner {
     sticky: Mutex<HashMap<String, i32>>,
 }
 
-#[allow(dead_code)] // used by the sender task (Task 16)
 impl UniformStickyPartitioner {
     #[must_use]
     pub fn new() -> Self {
@@ -37,7 +35,10 @@ impl UniformStickyPartitioner {
     }
 
     /// Rotate the sticky partition for `topic` to a new one (called by the
-    /// sender after a batch flushes).
+    /// sender after a batch flushes). Not yet wired in — the sender will
+    /// invoke this on linger expiry in a follow-up; documented and
+    /// tested already.
+    #[allow(dead_code)]
     pub fn rotate(&self, topic: &str, num_partitions: i32) {
         if num_partitions <= 0 {
             return;

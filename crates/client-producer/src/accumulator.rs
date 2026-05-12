@@ -12,7 +12,6 @@ use crate::error::ProducerError;
 use crate::record::{Header, RecordMetadata};
 
 /// A record waiting inside an in-progress batch.
-#[allow(dead_code)] // Task 14+ will construct PendingRecord via try_append
 #[derive(Debug)]
 pub(crate) struct PendingRecord {
     pub offset_delta: i32,
@@ -25,18 +24,19 @@ pub(crate) struct PendingRecord {
 
 /// One in-progress `RecordBatch`. The sender wraps this into a Kafka
 /// `RecordBatch` at flush time and assigns `base_sequence`.
-#[allow(dead_code)] // Task 15 sender will drain InProgressBatch from ready queue
 #[derive(Debug)]
 pub(crate) struct InProgressBatch {
     /// Wall-clock time when this batch's first record was appended.
-    /// Used by the sender to decide `linger.ms` expiry.
+    /// Used by the sender to decide `linger.ms` expiry (the sender
+    /// currently relies on the linger ticker rather than reading this
+    /// field, but it's still useful for diagnostics).
+    #[allow(dead_code)]
     pub first_append_at: Instant,
     /// Approximate uncompressed body size.
     pub size_bytes: usize,
     pub records: Vec<PendingRecord>,
 }
 
-#[allow(dead_code)] // Task 14+ will construct InProgressBatch via Accumulator::try_append
 impl InProgressBatch {
     fn new() -> Self {
         Self {
@@ -52,7 +52,6 @@ impl InProgressBatch {
 }
 
 /// One accumulator per (topic, partition).
-#[allow(dead_code)] // Task 14+ wires Accumulator into the Producer
 #[derive(Debug)]
 pub(crate) struct Accumulator {
     /// `None` until the first append. Sender pops the in-progress batch
@@ -67,7 +66,7 @@ pub(crate) struct Accumulator {
 }
 
 /// Result of [`Accumulator::try_append`].
-#[allow(dead_code)] // Task 15 sender will match on AppendResult variants
+#[allow(dead_code)] // `BatchFull` is reserved for future backpressure paths.
 pub(crate) enum AppendResult {
     Appended(oneshot::Receiver<Result<RecordMetadata, ProducerError>>),
     /// The accumulator's `batch.size` is full but a new batch could be
@@ -75,7 +74,6 @@ pub(crate) enum AppendResult {
     BatchFull,
 }
 
-#[allow(dead_code)] // Task 14+ wires Accumulator methods into Producer
 impl Accumulator {
     pub fn new(batch_size: usize) -> Self {
         Self {
@@ -137,7 +135,6 @@ impl Accumulator {
     }
 }
 
-#[allow(dead_code)] // used transitively via try_append; called from test context too
 fn approx_record_size(key: Option<&[u8]>, value: Option<&[u8]>, headers: &[Header]) -> usize {
     let mut n = 8usize; // varint overhead estimate
     n += key.map_or(0, <[u8]>::len) + 4;

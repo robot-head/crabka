@@ -10,8 +10,6 @@
 //! resolves each record's `oneshot::Sender` from the per-partition
 //! response.
 
-#![allow(dead_code)] // Task 16 wires the sender into the builder.
-
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
