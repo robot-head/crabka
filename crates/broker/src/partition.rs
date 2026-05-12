@@ -110,6 +110,21 @@ impl Partition {
         }
     }
 
+    /// Last Stable Offset: the highest offset at or before which all records
+    /// in all in-flight transactions have been resolved (committed or aborted).
+    /// Cheap: takes the `Arc<Mutex<Log>>` briefly.
+    ///
+    /// Returns 0 if the log mutex is poisoned (i.e. the writer task
+    /// panicked). The caller treats that as "not making progress" and the
+    /// writer-died path eventually surfaces a clearer error.
+    #[must_use]
+    pub fn lso(&self) -> i64 {
+        match self.log.lock() {
+            Ok(g) => g.lso(),
+            Err(_) => 0,
+        }
+    }
+
     /// Append a leader-assigned batch to the local log, preserving its
     /// `base_offset`. Used by the per-partition replicator on a follower
     /// broker. Sends the batch through the writer task so it stays
