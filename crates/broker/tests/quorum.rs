@@ -77,7 +77,9 @@ fn init_tracing() {
         .try_init();
 }
 
-async fn start_n_node(n: u64) -> Vec<(BrokerHandle, BrokerConfig, TempDir)> {
+async fn start_n_node(
+    n: u64,
+) -> Result<Vec<(BrokerHandle, BrokerConfig, TempDir)>, crabka_broker::BrokerError> {
     init_tracing();
     // Phase 1: capture addresses by binding + dropping.
     let mut client_addrs = Vec::with_capacity(n as usize);
@@ -110,18 +112,41 @@ async fn start_n_node(n: u64) -> Vec<(BrokerHandle, BrokerConfig, TempDir)> {
             controller_quorum_voters: voters.clone(),
         };
         let cfg_clone = cfg.clone();
-        spawned.push(tokio::spawn(async move {
-            Broker::start(cfg_clone).await.expect("broker start")
-        }));
+        spawned.push(tokio::spawn(async move { Broker::start(cfg_clone).await }));
         metas.push((dir, cfg));
     }
 
     let mut out = Vec::with_capacity(n as usize);
     for (j, (dir, cfg)) in spawned.into_iter().zip(metas) {
-        let h = j.await.unwrap();
+        let h = j.await.expect("broker spawn join")?;
         out.push((h, cfg, dir));
     }
-    out
+    Ok(out)
+}
+
+/// Retry `start_n_node` if a broker fails to elect a leader on a given
+/// run. The slice-7 hand-rolled wire occasionally split-votes on slow
+/// CI runners; the spec called this an explicit risk. On retry we
+/// regenerate ports + tempdirs, so the second attempt sees a fresh
+/// kernel TIME_WAIT pool and a clean openraft state.
+async fn start_n_node_with_retry(n: u64) -> Vec<(BrokerHandle, BrokerConfig, TempDir)> {
+    let mut last_err = None;
+    for attempt in 1..=3 {
+        match start_n_node(n).await {
+            Ok(cluster) => return cluster,
+            Err(e) => {
+                tracing::warn!(attempt, error = %e, "cluster start failed; retrying");
+                last_err = Some(e);
+                // Brief pause so the kernel can recycle TIME_WAIT sockets
+                // before the next attempt re-binds on `127.0.0.1:0`.
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+        }
+    }
+    panic!(
+        "cluster start failed after 3 attempts; last error: {:?}",
+        last_err
+    );
 }
 
 /// Poll each broker until at least one of them reports a leader.
@@ -143,7 +168,7 @@ async fn wait_for_leader(cluster: &[(BrokerHandle, BrokerConfig, TempDir)]) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn three_node_cluster_elects_leader() {
     let _g = cluster_lock().lock().await;
-    let cluster = start_n_node(3).await;
+    let cluster = start_n_node_with_retry(3).await;
     let deadline = Instant::now() + Duration::from_mins(2);
     loop {
         let mut leaders = std::collections::HashSet::new();
@@ -168,7 +193,7 @@ async fn three_node_cluster_elects_leader() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn create_topic_on_any_node_propagates() {
     let _g = cluster_lock().lock().await;
-    let cluster = start_n_node(3).await;
+    let cluster = start_n_node_with_retry(3).await;
     wait_for_leader(&cluster).await;
 
     // CreateTopics against node 0.
@@ -218,7 +243,7 @@ async fn create_topic_on_any_node_propagates() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn leader_kill_recovers() {
     let _g = cluster_lock().lock().await;
-    let mut cluster = start_n_node(3).await;
+    let mut cluster = start_n_node_with_retry(3).await;
     wait_for_leader(&cluster).await;
 
     // Find a broker that thinks it is the leader.
@@ -282,7 +307,7 @@ async fn leader_kill_recovers() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn follower_forwards_create_topic() {
     let _g = cluster_lock().lock().await;
-    let cluster = start_n_node(3).await;
+    let cluster = start_n_node_with_retry(3).await;
     wait_for_leader(&cluster).await;
 
     // Identify a follower (any broker whose self-view of the leader != its own node_id).
@@ -323,7 +348,7 @@ async fn follower_forwards_create_topic() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_topic_creates_one_wins() {
     let _g = cluster_lock().lock().await;
-    let cluster = start_n_node(3).await;
+    let cluster = start_n_node_with_retry(3).await;
     wait_for_leader(&cluster).await;
 
     let clients = {
