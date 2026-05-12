@@ -523,16 +523,22 @@ async fn three_node_jvm_round_trip() {
             if m.topics.iter().any(|t| t.name.as_deref() == Some(TOPIC)) {
                 break;
             }
-            if std::time::Instant::now() > deadline {
-                panic!("topic not propagated to node 2 within 10s");
-            }
+            assert!(
+                std::time::Instant::now() <= deadline,
+                "topic not propagated to node 2 within 10s",
+            );
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
     }
 
-    // 3. Produce via node 2.
+    // 3. Produce via the partition's leader (node 1). With slice-7
+    //    replication_factor=1 only the CreateTopics-handling broker
+    //    hosts partition data; other brokers' Metadata correctly
+    //    reports node 1 as leader, but the slice-6 Rust producer
+    //    doesn't yet follow NOT_LEADER_FOR_PARTITION redirects across
+    //    brokers. Cross-broker producer routing is a slice-8 follow-up.
     let producer = crabka_client_producer::Producer::builder()
-        .bootstrap(format!("host.docker.internal:{}", client_ports[1]))
+        .bootstrap(format!("host.docker.internal:{}", client_ports[0]))
         .enable_idempotence(true)
         .acks(crabka_client_producer::Acks::All)
         .build()
