@@ -13,7 +13,7 @@ use crate::config::BrokerConfig;
 use crate::error::BrokerError;
 use crate::handlers::HandlerTable;
 use crate::log_dir;
-use crate::partition::{Partition, ProduceJob};
+use crate::partition::{Partition, WriterMessage};
 
 /// The running broker. Library callers get a [`BrokerHandle`] from
 /// [`Broker::start`]; this struct is the shared internal state.
@@ -216,7 +216,7 @@ pub(crate) fn spawn_partition(
     log: crabka_log::Log,
 ) -> Arc<Partition> {
     let log = Arc::new(Mutex::new(log));
-    let (tx, rx) = tokio::sync::mpsc::channel::<ProduceJob>(64);
+    let (tx, rx) = tokio::sync::mpsc::channel::<WriterMessage>(64);
     let notify = Arc::new(tokio::sync::Notify::new());
     let writer = tokio::spawn(crate::partition_writer::run(
         log.clone(),

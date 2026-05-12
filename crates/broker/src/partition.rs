@@ -2,7 +2,7 @@
 //! inside `Broker`. The handle gives any task:
 //!
 //! - read access to the partition's [`Log`] via `Arc<Mutex<Log>>`
-//! - write access via a `mpsc::Sender<ProduceJob>` (a single writer task
+//! - write access via a `mpsc::Sender<WriterMessage>` (a single writer task
 //!   drains the channel; see `partition_writer.rs`)
 //! - a [`Notify`] that fires after every successful append, used by
 //!   long-poll Fetch to wake when new data arrives.
@@ -20,7 +20,9 @@ use tokio::task::JoinHandle;
 
 use crate::error::BrokerError;
 
-/// Message sent from a Produce handler to the partition's writer task.
+/// Produce-path message sent from the Produce handler to the partition's
+/// writer task. The writer assigns `base_offset` (overwriting whatever the
+/// handler put there) and replies with the assigned value.
 #[derive(Debug)]
 pub struct ProduceJob {
     /// The batch to append. The writer mutates `base_offset` before append.
@@ -28,6 +30,30 @@ pub struct ProduceJob {
     /// Oneshot for the writer to report success (base offset assigned)
     /// or failure back to the handler.
     pub ack: oneshot::Sender<Result<i64, BrokerError>>,
+}
+
+/// All message kinds the partition's writer task accepts.
+///
+/// The writer task is single-consumer over a single `mpsc::Sender`; using
+/// an enum here keeps replication appends ordered with produce appends.
+#[derive(Debug)]
+pub enum WriterMessage {
+    /// Append a batch, assigning `base_offset` from the log. Used by the
+    /// `Produce` handler.
+    Produce(ProduceJob),
+    /// Append a batch at the caller-supplied offset (already assigned by
+    /// the partition's leader). Used by the per-(topic, partition)
+    /// replicator on a follower broker.
+    Replicate {
+        batch: RecordBatch,
+        ack: oneshot::Sender<Result<(), BrokerError>>,
+    },
+    /// Truncate the log so no records at offset `>= offset` remain. Used
+    /// by the replicator's `OFFSET_OUT_OF_RANGE` recovery path.
+    Truncate {
+        offset: i64,
+        ack: oneshot::Sender<Result<(), BrokerError>>,
+    },
 }
 
 /// Runtime handle for a single partition.
@@ -43,11 +69,63 @@ pub struct Partition {
     pub topic: String,
     pub partition_id: i32,
     pub log: Arc<Mutex<Log>>,
-    pub writer_tx: mpsc::Sender<ProduceJob>,
+    pub writer_tx: mpsc::Sender<WriterMessage>,
     pub append_notify: Arc<Notify>,
     /// Held so the writer task is reaped when every Partition handle is
     /// dropped. Not used directly.
     pub _writer_handle: Arc<JoinHandle<()>>,
+}
+
+impl Partition {
+    /// Next offset the underlying [`Log`] will assign. Cheap: takes the
+    /// `Arc<Mutex<Log>>` briefly. Replicators call this before each Fetch
+    /// to compute `fetch_offset`.
+    ///
+    /// Returns 0 if the log mutex is poisoned (i.e. the writer task
+    /// panicked). The caller treats that as "not making progress" and the
+    /// writer-died path eventually surfaces a clearer error.
+    #[must_use]
+    pub fn log_end_offset(&self) -> i64 {
+        match self.log.lock() {
+            Ok(g) => g.log_end_offset(),
+            Err(_) => 0,
+        }
+    }
+
+    /// Append a leader-assigned batch to the local log, preserving its
+    /// `base_offset`. Used by the per-partition replicator on a follower
+    /// broker. Sends the batch through the writer task so it stays
+    /// ordered with produce appends (which, on a follower, will be
+    /// rejected by the produce handler anyway, but the channel ordering
+    /// is still part of the invariant).
+    pub async fn replicate_batch(&self, batch: RecordBatch) -> Result<(), BrokerError> {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        self.writer_tx
+            .send(WriterMessage::Replicate { batch, ack: ack_tx })
+            .await
+            .map_err(|_| BrokerError::Replication("partition writer dead".into()))?;
+        ack_rx
+            .await
+            .map_err(|_| BrokerError::Replication("ack dropped".into()))?
+    }
+
+    /// Truncate the log to `offset`, dropping all records at offsets
+    /// `>= offset`. Used by the replicator's `OFFSET_OUT_OF_RANGE`
+    /// recovery path; on slice 8 we always call this with `offset == 0`
+    /// (truncate everything).
+    pub async fn truncate_to(&self, offset: i64) -> Result<(), BrokerError> {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        self.writer_tx
+            .send(WriterMessage::Truncate {
+                offset,
+                ack: ack_tx,
+            })
+            .await
+            .map_err(|_| BrokerError::Replication("partition writer dead".into()))?;
+        ack_rx
+            .await
+            .map_err(|_| BrokerError::Replication("ack dropped".into()))?
+    }
 }
 
 impl std::fmt::Debug for Partition {
@@ -81,7 +159,7 @@ mod tests {
     async fn debug_does_not_dump_log() {
         let dir = tempdir().expect("tempdir");
         let log = Log::open(dir.path(), LogConfig::default()).expect("open log");
-        let (tx, _rx) = mpsc::channel::<ProduceJob>(1);
+        let (tx, _rx) = mpsc::channel::<WriterMessage>(1);
         let writer = tokio::spawn(async {});
         let p = Partition {
             topic: "t".into(),

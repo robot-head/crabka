@@ -121,6 +121,40 @@ impl Log {
     /// determines how many absolute offsets this batch consumes.
     /// Returns the assigned `base_offset`.
     pub fn append(&mut self, batch: &mut RecordBatch) -> Result<i64, LogError> {
+        let assigned_base = self.log_end_offset();
+        batch.base_offset = assigned_base;
+        self.append_preserving_offset(batch)?;
+        Ok(assigned_base)
+    }
+
+    /// Append a `RecordBatch` whose `base_offset` is set by the caller.
+    ///
+    /// Unlike [`Log::append`], this does NOT overwrite `batch.base_offset`
+    /// — it is used by the broker's replicator to preserve the
+    /// leader-assigned offset on the follower's local log.
+    ///
+    /// `offset` must equal the log's current [`Log::log_end_offset`];
+    /// otherwise this returns
+    /// [`LogError::OffsetMismatch`]. On success, `batch.base_offset` is
+    /// set to `offset` (it should already match) before the batch is
+    /// written.
+    pub fn append_at(&mut self, batch: &mut RecordBatch, offset: i64) -> Result<(), LogError> {
+        let expected = self.log_end_offset();
+        if offset != expected {
+            return Err(LogError::OffsetMismatch {
+                expected,
+                actual: offset,
+            });
+        }
+        batch.base_offset = offset;
+        self.append_preserving_offset(batch)
+    }
+
+    /// Internal helper shared by [`Log::append`] and [`Log::append_at`].
+    /// Performs segment-roll-if-needed, appends to the active segment, and
+    /// honors `config.flush_on_append` — but does NOT reassign
+    /// `batch.base_offset`. Callers are responsible for setting it first.
+    fn append_preserving_offset(&mut self, batch: &mut RecordBatch) -> Result<(), LogError> {
         let should_roll = match &self.active {
             Some(seg) => seg.size_bytes() >= self.config.segment_bytes,
             None => false,
@@ -128,9 +162,6 @@ impl Log {
         if should_roll {
             self.roll_active_segment()?;
         }
-
-        let assigned_base = self.log_end_offset();
-        batch.base_offset = assigned_base;
 
         let active = self
             .active
@@ -141,7 +172,7 @@ impl Log {
         if self.config.flush_on_append {
             active.flush()?;
         }
-        Ok(assigned_base)
+        Ok(())
     }
 
     fn roll_active_segment(&mut self) -> Result<(), LogError> {
@@ -362,6 +393,40 @@ mod tests {
         assert_eq!(log.append(&mut b1).unwrap(), 0);
         assert_eq!(log.append(&mut b2).unwrap(), 3);
         assert_eq!(log.log_end_offset(), 5);
+    }
+
+    #[test]
+    fn append_at_matching_offset_preserves_caller_offset() {
+        let dir = tempdir().unwrap();
+        let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
+        let mut b = sample_batch(3);
+        // Pretend the caller (a replicator) already knows the leader's
+        // assigned offset for this batch is 0.
+        log.append_at(&mut b, 0).unwrap();
+        assert_eq!(b.base_offset, 0);
+        assert_eq!(log.log_end_offset(), 3);
+
+        let mut b2 = sample_batch(2);
+        log.append_at(&mut b2, 3).unwrap();
+        assert_eq!(b2.base_offset, 3);
+        assert_eq!(log.log_end_offset(), 5);
+    }
+
+    #[test]
+    fn append_at_with_mismatched_offset_errors() {
+        let dir = tempdir().unwrap();
+        let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
+        let mut b = sample_batch(2);
+        let err = log.append_at(&mut b, 7).unwrap_err();
+        assert!(matches!(
+            err,
+            LogError::OffsetMismatch {
+                expected: 0,
+                actual: 7
+            }
+        ));
+        // Failure must not advance the log.
+        assert_eq!(log.log_end_offset(), 0);
     }
 
     #[test]

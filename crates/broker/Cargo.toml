@@ -22,6 +22,7 @@ crabka-protocol = { version = "0.1", path = "../protocol", default-features = fa
 crabka-log = { version = "0.1", path = "../log" }
 crabka-raft = { version = "0.1", path = "../raft" }
 crabka-metadata = { version = "0.1", path = "../metadata" }
+crabka-client-core = { version = "0.1", path = "../client-core" }
 bytes = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["net", "rt", "rt-multi-thread", "io-util", "macros", "sync", "time", "signal"] }
@@ -34,7 +35,6 @@ uuid = { workspace = true }
 futures-util = { workspace = true }
 
 [dev-dependencies]
-crabka-client-core = { version = "0.1", path = "../client-core" }
 crabka-client-producer = { version = "0.1", path = "../client-producer" }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }
