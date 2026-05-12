@@ -128,7 +128,7 @@ async fn start_n_node(
 /// run. The slice-7 hand-rolled wire occasionally split-votes on slow
 /// CI runners; the spec called this an explicit risk. On retry we
 /// regenerate ports + tempdirs, so the second attempt sees a fresh
-/// kernel TIME_WAIT pool and a clean openraft state.
+/// kernel `TIME_WAIT` pool and a clean openraft state.
 async fn start_n_node_with_retry(n: u64) -> Vec<(BrokerHandle, BrokerConfig, TempDir)> {
     let mut last_err = None;
     for attempt in 1..=3 {
@@ -137,16 +137,13 @@ async fn start_n_node_with_retry(n: u64) -> Vec<(BrokerHandle, BrokerConfig, Tem
             Err(e) => {
                 tracing::warn!(attempt, error = %e, "cluster start failed; retrying");
                 last_err = Some(e);
-                // Brief pause so the kernel can recycle TIME_WAIT sockets
+                // Brief pause so the kernel can recycle `TIME_WAIT` sockets
                 // before the next attempt re-binds on `127.0.0.1:0`.
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
         }
     }
-    panic!(
-        "cluster start failed after 3 attempts; last error: {:?}",
-        last_err
-    );
+    panic!("cluster start failed after 3 attempts; last error: {last_err:?}");
 }
 
 /// Poll each broker until at least one of them reports a leader.
