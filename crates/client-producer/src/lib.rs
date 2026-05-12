@@ -2,6 +2,7 @@
 
 #![doc(html_root_url = "https://docs.rs/crabka-client-producer/0.0.0")]
 
+mod accumulator;
 mod compression;
 mod error;
 mod partitioner;
