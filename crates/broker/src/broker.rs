@@ -98,8 +98,13 @@ impl Broker {
             voters: config.controller_quorum_voters.clone(),
             controller_listen_addr: config.controller_listen_addr,
             log_dir: config.log_dir.join("__cluster_metadata"),
-            election_timeout: std::time::Duration::from_secs(1),
-            heartbeat_interval: std::time::Duration::from_millis(200),
+            // Aggressive defaults (1s / 200ms) split-vote on slow CI runners
+            // when our hand-rolled wire's RPC round-trip exceeds the
+            // election-timeout window. 5s/500ms keeps elections deterministic
+            // for multi-node startups without making the single-node path
+            // perceptibly slower.
+            election_timeout: std::time::Duration::from_secs(5),
+            heartbeat_interval: std::time::Duration::from_millis(500),
             client_id: format!("crabka-broker-{}-controller", config.broker_id),
         };
         let controller = Arc::new(
