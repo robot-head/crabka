@@ -65,6 +65,14 @@ impl ControllerHandle {
         self.leader.clone()
     }
 
+    /// Subscribe to metadata-image changes. The receiver holds the
+    /// current image immediately; callers use
+    /// `rx.borrow()` + `rx.changed().await` to track updates.
+    #[must_use]
+    pub fn watch_image(&self) -> watch::Receiver<Arc<MetadataImage>> {
+        self.state_machine.watch_image()
+    }
+
     /// Submit a batch of metadata records.
     ///
     /// Returns `Ok(())` once the records are committed AND applied on
