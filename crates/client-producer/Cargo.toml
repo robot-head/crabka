@@ -20,7 +20,10 @@ crabka-compression = { version = "0.1", path = "../compression" }
 bon = { workspace = true }
 bytes = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["sync"] }
+dashmap = { workspace = true }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time", "macros"] }
+tokio-util = { workspace = true, features = ["rt"] }
+tracing = { workspace = true }
 
 [dev-dependencies]
 crabka-broker = { version = "0.1", path = "../broker" }

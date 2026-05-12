@@ -6,8 +6,10 @@ mod accumulator;
 mod compression;
 mod error;
 mod partitioner;
+mod producer;
 mod record;
 
 pub use compression::Compression;
 pub use error::ProducerError;
+pub use producer::{Acks, Producer};
 pub use record::{Header, ProducerRecord, RecordMetadata};
