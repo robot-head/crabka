@@ -45,9 +45,14 @@ pub(crate) const STATE_FENCED: u8 = 1;
 pub(crate) const STATE_CLOSED: u8 = 2;
 
 #[allow(dead_code)] // Tasks 15-16 wire these up
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct TopicMetadata {
     pub num_partitions: i32,
+    /// Topic UUID. Needed for Produce v13+, which encodes only the
+    /// `topic_id` on the wire. Zero (`Uuid::ZERO`) is a valid sentinel
+    /// meaning "not yet known" — the broker falls back to the `name`
+    /// field for older wire versions.
+    pub topic_id: crabka_protocol::primitives::uuid::Uuid,
 }
 
 // Tasks 15-16 wire these up
@@ -118,10 +123,30 @@ impl Producer {
         Ok(())
     }
 
-    #[allow(clippy::unused_async)] // Task 15 adds await points; stub must be async for call sites
     pub async fn flush(&self) -> Result<(), ProducerError> {
-        // The flush implementation lands in Task 15 once the sender is wired.
-        Ok(())
+        self.is_active()?;
+        let _ = self.wake_tx.send(()).await;
+        for _ in 0..1000 {
+            if self.all_empty().await {
+                return Ok(());
+            }
+            let _ =
+                tokio::time::timeout(Duration::from_millis(50), self.flush_notify.notified()).await;
+        }
+        Err(ProducerError::Closed)
+    }
+
+    async fn all_empty(&self) -> bool {
+        for entry in self.accumulators.iter() {
+            let a = entry.value().lock().await;
+            if a.current.as_ref().is_some_and(|b| !b.is_empty()) {
+                return false;
+            }
+            if !a.ready.is_empty() {
+                return false;
+            }
+        }
+        true
     }
 }
 

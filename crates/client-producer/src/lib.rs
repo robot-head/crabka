@@ -8,6 +8,7 @@ mod error;
 mod partitioner;
 mod producer;
 mod record;
+mod sender;
 
 pub use compression::Compression;
 pub use error::ProducerError;

@@ -649,9 +649,12 @@ dependencies = [
  "crabka-compression",
  "crabka-log",
  "crabka-protocol",
+ "dashmap",
  "tempfile",
  "thiserror",
  "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]
