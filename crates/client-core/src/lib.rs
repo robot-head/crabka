@@ -17,7 +17,8 @@
 //! use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
 //!
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
-//! let client = Client::builder("localhost:9092")
+//! let client = Client::builder()
+//!     .bootstrap("localhost:9092")
 //!     .client_id("my-app")
 //!     .build()
 //!     .await?;
@@ -55,7 +56,7 @@ mod version;
 #[cfg(any(test, feature = "mock"))]
 mod mock;
 
-pub use client::{BrokerHandle, Client, ClientBuilder};
+pub use client::{BrokerHandle, Client};
 pub use connection::{Connection, ConnectionOptions};
 pub use error::ClientError;
 pub use pool::{BrokerInfo, BrokerPool};

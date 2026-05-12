@@ -1,11 +1,11 @@
 [package]
-name = "crabka-client-consumer"
+name = "crabka-client-producer"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
 rust-version = "1.95.0"
-description = "Subscribe-style consumer client for Apache Kafka in Rust"
+description = "Idempotent producer client for Apache Kafka in Rust"
 
 [lints]
 workspace = true
@@ -14,19 +14,20 @@ workspace = true
 default = []
 
 [dependencies]
-bon = { workspace = true }
 crabka-protocol = { version = "0.1", path = "../protocol", default-features = false }
 crabka-client-core = { version = "0.1", path = "../client-core" }
+crabka-compression = { version = "0.1", path = "../compression" }
+bon = { workspace = true }
 bytes = { workspace = true }
 thiserror = { workspace = true }
+dashmap = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time", "macros"] }
-tracing = { workspace = true }
 tokio-util = { workspace = true, features = ["rt"] }
-futures-util = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 crabka-broker = { version = "0.1", path = "../broker" }
 crabka-log = { version = "0.1", path = "../log" }
+crabka-client-consumer = { version = "0.1", path = "../client-consumer" }
 tempfile = { workspace = true }
-tokio = { workspace = true, features = ["test-util", "macros"] }
-proptest = { workspace = true }
+tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }

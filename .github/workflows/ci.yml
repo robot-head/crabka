@@ -89,7 +89,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.95.0"
-      # --test-threads=1: both tests bind the Rust broker to a fixed host
-      # port (so the `docker run --network host` Kafka tools have a known
-      # bootstrap target). Parallel execution would hit `AddrInUse`.
+      # The Rust producer in `rust_producer_to_console_consumer` runs on
+      # the host (not inside a container) and dials `host.docker.internal`
+      # because that's the broker's advertised listener (cp-kafka tools
+      # inside containers resolve the same name via `--add-host`). The
+      # host itself has no such resolution on Linux runners, so add it.
+      - run: echo "127.0.0.1 host.docker.internal" | sudo tee -a /etc/hosts
+      # --test-threads=1: tests bind the Rust broker to a fixed host port
+      # (so the `docker run --add-host` Kafka tools have a known bootstrap
+      # target). Parallel execution would hit `AddrInUse`.
       - run: cargo test -p crabka-broker --test jvm_acceptance -- --ignored --nocapture --test-threads=1

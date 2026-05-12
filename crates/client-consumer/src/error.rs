@@ -2,7 +2,7 @@
 
 use thiserror::Error;
 
-/// Errors returned by `Consumer` and `ConsumerBuilder`.
+/// Errors returned by [`Consumer`](crate::Consumer).
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum ConsumerError {

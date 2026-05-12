@@ -58,6 +58,7 @@ fn supported_apis() -> Vec<ApiVersion> {
         },
         v!(create_topics_request),
         v!(delete_topics_request),
+        v!(init_producer_id_request),
         v!(describe_configs_request),
     ]
 }

@@ -32,6 +32,13 @@ pub const UNKNOWN_MEMBER_ID: i16 = 25;
 pub const REBALANCE_IN_PROGRESS: i16 = 27;
 pub const MEMBER_ID_REQUIRED: i16 = 79;
 
+// Phase 6 additions — idempotent-producer codes.
+pub const OUT_OF_ORDER_SEQUENCE_NUMBER: i16 = 45;
+pub const DUPLICATE_SEQUENCE_NUMBER: i16 = 46;
+pub const INVALID_PRODUCER_ID_MAPPING: i16 = 47;
+pub const INVALID_PRODUCER_EPOCH: i16 = 53;
+pub const TRANSACTIONAL_ID_AUTHORIZATION_FAILED: i16 = 67;
+
 /// Map an internal [`crate::error::BrokerError`] to a wire-level code.
 /// Most internal errors map to `UNKNOWN_SERVER_ERROR`; specific variants
 /// pick more meaningful codes.
@@ -44,6 +51,7 @@ pub fn from_broker_error(err: &crate::error::BrokerError) -> i16 {
         BrokerError::GroupInvalidState { .. } => REBALANCE_IN_PROGRESS,
         BrokerError::UnknownMember { .. } => UNKNOWN_MEMBER_ID,
         BrokerError::GenerationMismatch { .. } => ILLEGAL_GENERATION,
+        BrokerError::ProducerEpochFenced { .. } => INVALID_PRODUCER_EPOCH,
         BrokerError::Shutdown
         | BrokerError::Io(_)
         | BrokerError::Log(_)
@@ -100,5 +108,15 @@ mod tests {
             requested: 4,
         };
         assert_eq!(from_broker_error(&e), ILLEGAL_GENERATION);
+    }
+
+    #[test]
+    fn maps_producer_epoch_fenced_to_53() {
+        let e = BrokerError::ProducerEpochFenced {
+            producer_id: 1000,
+            current: 2,
+            requested: 1,
+        };
+        assert_eq!(from_broker_error(&e), INVALID_PRODUCER_EPOCH);
     }
 }

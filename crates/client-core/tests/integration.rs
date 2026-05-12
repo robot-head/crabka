@@ -95,7 +95,8 @@ async fn start_kafka() -> (testcontainers::ContainerAsync<Kafka>, String) {
 async fn bootstrap_client(bootstrap: &str) -> Client {
     let mut last_err: Option<ClientError> = None;
     for attempt in 1..=BOOTSTRAP_MAX_ATTEMPTS {
-        let client = Client::builder(bootstrap)
+        let client = Client::builder()
+            .bootstrap(bootstrap)
             .client_id("crabka-integration")
             .build()
             .await

@@ -13,7 +13,7 @@ use bytes::Bytes;
 use tempfile::TempDir;
 
 use crabka_broker::{Broker, BrokerConfig};
-use crabka_client_consumer::{AutoOffsetReset, ConsumerBuilder};
+use crabka_client_consumer::{AutoOffsetReset, Consumer};
 use crabka_client_core::Client;
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
 use crabka_protocol::owned::metadata_request::{MetadataRequest, MetadataRequestTopic};
@@ -113,7 +113,8 @@ async fn rust_producer_to_rust_consumer_through_group() {
         .unwrap();
     let bootstrap = broker.listen_addr().to_string();
 
-    let producer = Client::builder(&bootstrap)
+    let producer = Client::builder()
+        .bootstrap(&bootstrap)
         .client_id("rust-producer")
         .build()
         .await
@@ -121,14 +122,15 @@ async fn rust_producer_to_rust_consumer_through_group() {
     create_topic(&producer, "rrtopic").await;
     produce(&producer, "rrtopic", &["a", "b", "c"]).await;
 
-    let mut consumer = ConsumerBuilder::new(&bootstrap)
+    let mut consumer = Consumer::builder()
+        .bootstrap(&bootstrap)
         .client_id("rust-consumer")
         .group_id("g1")
         .session_timeout(Duration::from_secs(30))
         .rebalance_timeout(Duration::from_secs(2))
         .heartbeat_interval(Duration::from_secs(1))
         .auto_offset_reset(AutoOffsetReset::Earliest)
-        .subscribe(&["rrtopic"])
+        .subscribe(["rrtopic".to_string()])
         .build()
         .await
         .unwrap();
@@ -159,7 +161,8 @@ async fn offsets_survive_broker_restart() {
             .await
             .unwrap();
         let bootstrap = broker.listen_addr().to_string();
-        let producer = Client::builder(&bootstrap)
+        let producer = Client::builder()
+            .bootstrap(&bootstrap)
             .client_id("p")
             .build()
             .await
@@ -167,13 +170,14 @@ async fn offsets_survive_broker_restart() {
         create_topic(&producer, "persist").await;
         produce(&producer, "persist", &["x", "y", "z"]).await;
 
-        let mut consumer = ConsumerBuilder::new(&bootstrap)
+        let mut consumer = Consumer::builder()
+            .bootstrap(&bootstrap)
             .client_id("c")
             .group_id("persist-grp")
             .auto_offset_reset(AutoOffsetReset::Earliest)
             .rebalance_timeout(Duration::from_secs(2))
             .heartbeat_interval(Duration::from_secs(1))
-            .subscribe(&["persist"])
+            .subscribe(["persist".to_string()])
             .build()
             .await
             .unwrap();
@@ -198,13 +202,14 @@ async fn offsets_survive_broker_restart() {
             .await
             .unwrap();
         let bootstrap = broker.listen_addr().to_string();
-        let mut consumer = ConsumerBuilder::new(&bootstrap)
+        let mut consumer = Consumer::builder()
+            .bootstrap(&bootstrap)
             .client_id("c2")
             .group_id("persist-grp")
             .rebalance_timeout(Duration::from_secs(2))
             .heartbeat_interval(Duration::from_secs(1))
             .auto_offset_reset(AutoOffsetReset::Earliest)
-            .subscribe(&["persist"])
+            .subscribe(["persist".to_string()])
             .build()
             .await
             .unwrap();

@@ -80,6 +80,18 @@ pub enum BrokerError {
         /// The generation the client supplied.
         requested: i32,
     },
+
+    /// The client's producer epoch is older than the current one registered
+    /// for this producer id.
+    #[error("producer epoch fenced: pid={producer_id} got {requested}, current {current}")]
+    ProducerEpochFenced {
+        /// The producer id that was fenced.
+        producer_id: i64,
+        /// The epoch currently registered for this producer id.
+        current: i16,
+        /// The epoch the client supplied.
+        requested: i16,
+    },
 }
 
 #[cfg(test)]

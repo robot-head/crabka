@@ -12,14 +12,15 @@
 //!
 //! ```no_run
 //! use std::time::Duration;
-//! use crabka_client_consumer::{ConsumerBuilder, AutoOffsetReset};
+//! use crabka_client_consumer::{Consumer, AutoOffsetReset};
 //!
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
-//! let mut consumer = ConsumerBuilder::new("localhost:9092")
+//! let mut consumer = Consumer::builder()
+//!     .bootstrap("localhost:9092")
 //!     .group_id("my-group")
 //!     .client_id("my-app")
 //!     .auto_offset_reset(AutoOffsetReset::Earliest)
-//!     .subscribe(&["my-topic"])
+//!     .subscribe(["my-topic".to_string()])
 //!     .build()
 //!     .await?;
 //!
@@ -55,6 +56,6 @@ mod error;
 mod heartbeat;
 mod poll;
 
-pub use builder::{AutoOffsetReset, ConsumerBuilder};
+pub use builder::AutoOffsetReset;
 pub use consumer::{Consumer, ConsumerRecord};
 pub use error::ConsumerError;
