@@ -59,6 +59,16 @@ pub(crate) fn handle(
         let mut cur: &[u8] = &req_bytes;
         let req = FetchRequest::decode(&mut cur, version)?;
 
+        // `replica_id >= 0` means follower fetch (Apache Kafka convention).
+        // Slice 8 does NOT filter consumer fetches to HW because HW tracking
+        // is deferred (see
+        // `docs/superpowers/specs/2026-05-12-crabka-replication-design.md`
+        // §"Non-goals"). The branch is wired here so that slice-8-followup can
+        // add HW filtering on the consumer arm without re-shaping the handler.
+        let is_follower_fetch = req.replica_id >= 0;
+        let _ = is_follower_fetch; // wired up here for slice 8; HW filtering
+        // lands in a slice-8 follow-up.
+
         // Resolve every requested partition up front. We collect pending
         // reads (rather than just doing them inline) so we can re-read once
         // after a long-poll wake without re-decoding the request.
