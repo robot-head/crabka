@@ -4,6 +4,7 @@
 
 mod error;
 mod log_store;
+mod network;
 mod state_machine;
 mod types;
 mod wire;
