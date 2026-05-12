@@ -183,7 +183,7 @@ async fn abort_then_read_committed_skips_records() {
 /// commit("a","b","c"), abort("X","Y"), commit("d","e","f","g"):
 /// `read_committed` sees exactly \["a","b","c","d","e","f","g"\].
 ///
-/// Ignored: intermittently fails with `Server(24)` (INVALID_TXN_STATE) on
+/// Ignored: intermittently fails with `Server(24)` (`INVALID_TXN_STATE`) on
 /// the third `commit_transaction` under heavy back-to-back transaction
 /// reuse. Same tid is reused 3 times rapidly; the coordinator's state
 /// machine occasionally races between CompleteCommit/CompleteAbort and the
