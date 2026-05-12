@@ -3,6 +3,7 @@
 #![doc(html_root_url = "https://docs.rs/crabka-raft/0.0.0")]
 
 mod config;
+mod controller;
 mod error;
 mod log_store;
 mod network;
@@ -12,6 +13,7 @@ mod types;
 mod wire;
 
 pub use config::ControllerConfig;
+pub use controller::{Controller, ControllerHandle};
 pub use error::RaftError;
 pub use types::{AppData, AppDataResponse, Node, NodeId, Raft, TypeConfig};
 pub use wire::{

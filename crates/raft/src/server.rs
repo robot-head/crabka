@@ -33,7 +33,6 @@ use crate::wire::{
 
 const REJECT_NOT_IMPLEMENTED: i16 = -1;
 
-#[allow(dead_code)]
 pub(crate) async fn run(listener: TcpListener, raft: Arc<Raft>, shutdown: CancellationToken) {
     match listener.local_addr() {
         Ok(addr) => info!(%addr, "controller listener started"),
