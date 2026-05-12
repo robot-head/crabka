@@ -161,6 +161,17 @@ impl Group {
     /// `PreparingRebalance` if any were dropped and the group still has
     /// members; to `Empty` if it became empty.
     pub fn expire_dead_members(&mut self, now: Instant) -> Vec<String> {
+        // Real Kafka only expires members once the group is `Stable` — i.e.,
+        // after SyncGroup has completed and the consumers are heartbeating.
+        // Before then, the member's `last_heartbeat` is just the time
+        // `add_member` was called, which can race with the JoinGroup wait
+        // when `session_timeout` is small (kafka-console-consumer defaults
+        // to 10s — same length as our rebalance wait). The result was that
+        // a single-member group would self-evict its only member at the
+        // exact moment the rebalance completed.
+        if !matches!(self.state, GroupState::Stable) {
+            return Vec::new();
+        }
         let dropped: Vec<String> = self
             .members
             .iter()
@@ -246,6 +257,10 @@ mod tests {
         m.session_timeout = Duration::from_millis(1);
         m.last_heartbeat = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
         g.add_member(m);
+        // Bring the group to Stable so expiration is active (the production
+        // path: members only expire once they are heartbeating, post-Sync).
+        g.complete_rebalance("range");
+        g.state = GroupState::Stable;
         let dropped = g.expire_dead_members(Instant::now());
         assert_eq!(dropped, vec!["m1".to_string()]);
         assert_eq!(g.state, GroupState::Empty);
