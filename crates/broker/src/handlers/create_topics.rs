@@ -18,6 +18,34 @@ use crate::codes;
 use crate::error::BrokerError;
 use crate::log_dir;
 
+/// Round-robin replica placement.
+///
+/// Given a sorted broker set `bs = [b0, b1, …, bk-1]` and a partition
+/// count `P`, returns a `Vec<Vec<NodeId>>` of length `P`, where each
+/// inner vec is `R = replication_factor` long. Partition `p`'s leader
+/// is `bs[(p) % k]`; the remaining replicas are `bs[(p + i) % k]` for
+/// `i in 1..R`. Caller must guarantee `R <= k` (else returns an empty
+/// outer vec and the caller surfaces `INVALID_REPLICATION_FACTOR`).
+fn round_robin_replicas(
+    sorted_brokers: &[crabka_raft::NodeId],
+    num_partitions: i32,
+    replication_factor: i16,
+) -> Vec<Vec<crabka_raft::NodeId>> {
+    let k = sorted_brokers.len();
+    let r = usize::try_from(replication_factor).unwrap_or(0);
+    if r == 0 || r > k {
+        return Vec::new();
+    }
+    let p_count = usize::try_from(num_partitions).unwrap_or(0);
+    (0..p_count)
+        .map(|p| {
+            (0..r)
+                .map(|i| sorted_brokers[(p + i) % k])
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 pub(crate) fn handle(
     broker: &Broker,
     version: i16,
@@ -136,4 +164,49 @@ pub(crate) fn handle(
         resp.encode(&mut buf, version)?;
         Ok(buf.freeze())
     })
+}
+
+#[cfg(test)]
+mod replica_assignment_tests {
+    use super::round_robin_replicas;
+
+    #[test]
+    fn three_brokers_three_partitions_rf_three() {
+        let bs = vec![1u64, 2, 3];
+        let out = round_robin_replicas(&bs, 3, 3);
+        // Every broker should lead exactly one partition.
+        let leaders: Vec<_> = out.iter().map(|r| r[0]).collect();
+        let mut sorted = leaders.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, vec![1, 2, 3]);
+        // Each partition has all three brokers as replicas.
+        for replicas in &out {
+            let mut s = replicas.clone();
+            s.sort_unstable();
+            assert_eq!(s, vec![1, 2, 3]);
+        }
+    }
+
+    #[test]
+    fn offset_per_partition_means_distinct_leaders() {
+        let bs = vec![1u64, 2, 3];
+        let out = round_robin_replicas(&bs, 3, 1);
+        assert_eq!(out[0], vec![1]);
+        assert_eq!(out[1], vec![2]);
+        assert_eq!(out[2], vec![3]);
+    }
+
+    #[test]
+    fn rf_too_high_returns_empty() {
+        let bs = vec![1u64, 2, 3];
+        let out = round_robin_replicas(&bs, 1, 5);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn rf_one_single_broker_preserves_slice7_shape() {
+        let bs = vec![1u64];
+        let out = round_robin_replicas(&bs, 2, 1);
+        assert_eq!(out, vec![vec![1u64], vec![1u64]]);
+    }
 }
