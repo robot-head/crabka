@@ -54,6 +54,7 @@ mod partitioner;
 mod producer;
 mod record;
 mod sender;
+mod transactional;
 
 pub use compression::Compression;
 pub use error::ProducerError;

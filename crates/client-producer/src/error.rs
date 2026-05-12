@@ -35,6 +35,18 @@ pub enum ProducerError {
 
     #[error("compression: {0}")]
     Compression(#[from] crabka_compression::CompressionError),
+
+    #[error("producer is not transactional (no transactional_id configured)")]
+    NotTransactional,
+
+    #[error("invalid transaction state: {0}")]
+    InvalidTransactionState(&'static str),
+
+    #[error("transaction was aborted by the broker (timeout or fence)")]
+    TransactionAborted,
+
+    #[error("concurrent transactions on the same transactional_id")]
+    ConcurrentTransactions,
 }
 
 #[cfg(test)]

@@ -12,12 +12,20 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crabka_client_core::Client;
+use crabka_protocol::owned::add_offsets_to_txn_request::AddOffsetsToTxnRequest;
+use crabka_protocol::owned::end_txn_request::EndTxnRequest;
+use crabka_protocol::owned::find_coordinator_request::FindCoordinatorRequest;
+use crabka_protocol::owned::init_producer_id_request::InitProducerIdRequest;
+use crabka_protocol::owned::txn_offset_commit_request::{
+    TxnOffsetCommitRequest, TxnOffsetCommitRequestPartition, TxnOffsetCommitRequestTopic,
+};
 
 use crate::accumulator::{Accumulator, AppendResult};
 use crate::compression::Compression;
 use crate::error::ProducerError;
 use crate::partitioner::UniformStickyPartitioner;
 use crate::record::{ProducerRecord, RecordMetadata};
+use crate::transactional::TxnState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Acks {
@@ -56,6 +64,7 @@ pub(crate) struct TopicMetadata {
 #[allow(clippy::type_complexity)] // accumulators map is inherently complex
 pub struct Producer {
     pub(crate) client: Client,
+    pub(crate) client_id: String,
     pub(crate) producer_id: i64,
     pub(crate) producer_epoch: i16,
     // The following config knobs are also copied into `SenderConfig` at
@@ -87,6 +96,18 @@ pub struct Producer {
     pub(crate) flush_notify: Arc<Notify>,
     pub(crate) sender_shutdown: CancellationToken,
     pub(crate) sender_handle: Option<JoinHandle<()>>,
+    pub(crate) transactional_id: Option<String>,
+    pub(crate) transaction_timeout: Duration,
+    /// Arc-wrapped so the sender task can share the same state without
+    /// additional synchronization structures.
+    pub(crate) txn_state: Arc<Mutex<TxnState>>,
+    /// Cached connection to the transaction coordinator broker.
+    /// Populated by `init_transactions`; reused by begin/commit/abort.
+    pub(crate) txn_coord_client: Mutex<Option<Client>>,
+    /// Authoritative `(producer_id, producer_epoch)` for the transactional
+    /// flow. Set by `init_transactions`; read by the sender when building
+    /// transactional `ProduceRequest`s.
+    pub(crate) txn_pid_epoch: Arc<Mutex<(i64, i16)>>,
 }
 
 impl Producer {
@@ -99,6 +120,351 @@ impl Producer {
     pub fn producer_epoch(&self) -> i16 {
         self.producer_epoch
     }
+
+    // ── Transactional API ────────────────────────────────────────────────────
+
+    /// Begin a new transaction.
+    ///
+    /// Must be called after [`init_transactions`] has completed and before
+    /// any transactional [`send`] calls. Transitions the producer from
+    /// `Ready` → `InTransaction`.
+    ///
+    /// # Errors
+    ///
+    /// - [`ProducerError::NotTransactional`] — `transactional_id` was not set.
+    /// - [`ProducerError::InvalidTransactionState`] — producer is not in the
+    ///   `Ready` state (e.g. `init_transactions` not yet called, or a
+    ///   transaction is already in flight).
+    ///
+    /// [`init_transactions`]: Self::init_transactions
+    /// [`send`]: Self::send
+    pub async fn begin_transaction(&self) -> Result<(), ProducerError> {
+        if self.transactional_id.is_none() {
+            return Err(ProducerError::NotTransactional);
+        }
+        let mut state = self.txn_state.lock().await;
+        match *state {
+            TxnState::Ready => {
+                *state = TxnState::InTransaction;
+                Ok(())
+            }
+            _ => Err(ProducerError::InvalidTransactionState(
+                "begin_transaction must be called after init_transactions and not while another txn is in flight",
+            )),
+        }
+    }
+
+    /// Commit the current transaction.
+    ///
+    /// Flushes all in-flight records, then sends `EndTxn(committed=true)` to
+    /// the transaction coordinator. Transitions the producer from
+    /// `InTransaction` → `Ready` on success.
+    ///
+    /// # Errors
+    ///
+    /// - [`ProducerError::NotTransactional`] — `transactional_id` was not set.
+    /// - [`ProducerError::InvalidTransactionState`] — not currently in a transaction.
+    /// - [`ProducerError::FencedProducer`] — broker returned `INVALID_PRODUCER_EPOCH (47)`.
+    /// - [`ProducerError::ConcurrentTransactions`] — broker returned `CONCURRENT_TRANSACTIONS (49)`; caller may retry.
+    /// - [`ProducerError::Server`] — any other broker error code.
+    pub async fn commit_transaction(&self) -> Result<(), ProducerError> {
+        self.end_transaction(true).await
+    }
+
+    /// Abort the current transaction.
+    ///
+    /// Flushes all in-flight records, then sends `EndTxn(committed=false)` to
+    /// the transaction coordinator. Transitions the producer from
+    /// `InTransaction` → `Ready` on success.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`commit_transaction`](Self::commit_transaction).
+    pub async fn abort_transaction(&self) -> Result<(), ProducerError> {
+        self.end_transaction(false).await
+    }
+
+    async fn end_transaction(&self, committed: bool) -> Result<(), ProducerError> {
+        let tid = self
+            .transactional_id
+            .clone()
+            .ok_or(ProducerError::NotTransactional)?;
+
+        // 1. Flush all in-flight records (block until acks).
+        self.flush().await?;
+
+        let mut state = self.txn_state.lock().await;
+        if !matches!(*state, TxnState::InTransaction) {
+            return Err(ProducerError::InvalidTransactionState(
+                "commit/abort_transaction must follow begin_transaction",
+            ));
+        }
+        *state = TxnState::CommittingOrAborting;
+        drop(state);
+
+        // 2. Retrieve the cached coordinator connection.
+        let coord_guard = self.txn_coord_client.lock().await;
+        let coord = coord_guard
+            .as_ref()
+            .ok_or(ProducerError::InvalidTransactionState(
+                "no txn coordinator cached — did init_transactions succeed?",
+            ))?
+            .clone();
+        drop(coord_guard);
+
+        let (pid, epoch) = *self.txn_pid_epoch.lock().await;
+
+        // 3. Send EndTxn to the coordinator.
+        let resp = coord
+            .send(EndTxnRequest {
+                transactional_id: tid,
+                producer_id: pid,
+                producer_epoch: epoch,
+                committed,
+                ..Default::default()
+            })
+            .await?;
+
+        let mut state = self.txn_state.lock().await;
+        match resp.error_code {
+            0 => {
+                *state = TxnState::Ready;
+                Ok(())
+            }
+            47 /* INVALID_PRODUCER_EPOCH */ => {
+                *state = TxnState::Fenced;
+                Err(ProducerError::FencedProducer)
+            }
+            49 /* CONCURRENT_TRANSACTIONS */ => {
+                *state = TxnState::InTransaction; // Caller can retry.
+                Err(ProducerError::ConcurrentTransactions)
+            }
+            other => {
+                *state = TxnState::Ready;
+                Err(ProducerError::Server(other))
+            }
+        }
+    }
+
+    /// Initialize the transactional producer.
+    ///
+    /// Must be called before any transactional operations. Discovers the
+    /// transaction coordinator via `FindCoordinator`, opens a dedicated
+    /// connection to it, and calls `InitProducerId` to obtain a fenced
+    /// `(producer_id, producer_epoch)` pair.
+    ///
+    /// # Errors
+    ///
+    /// - [`ProducerError::NotTransactional`] — `transactional_id` was not set.
+    /// - [`ProducerError::InvalidTransactionState`] — called while a
+    ///   transaction is in flight.
+    /// - [`ProducerError::FencedProducer`] — the broker returned
+    ///   `INVALID_PRODUCER_EPOCH (47)`.
+    /// - [`ProducerError::Server`] — any other broker error code.
+    /// - [`ProducerError::Client`] — transport-level failure.
+    pub async fn init_transactions(&self) -> Result<(), ProducerError> {
+        let Some(tid) = self.transactional_id.as_deref() else {
+            return Err(ProducerError::NotTransactional);
+        };
+
+        let mut state = self.txn_state.lock().await;
+        if !matches!(
+            *state,
+            TxnState::Uninitialized | TxnState::Ready | TxnState::Fenced
+        ) {
+            return Err(ProducerError::InvalidTransactionState(
+                "init_transactions called while a transaction is in flight",
+            ));
+        }
+
+        let coord_addr = self.find_txn_coordinator(tid).await?;
+
+        let coord = Client::builder()
+            .bootstrap(coord_addr)
+            .client_id(self.client_id.clone())
+            .build()
+            .await?;
+
+        let timeout_ms = i32::try_from(self.transaction_timeout.as_millis()).unwrap_or(60_000);
+
+        let resp = coord
+            .send(InitProducerIdRequest {
+                transactional_id: Some(tid.to_owned()),
+                transaction_timeout_ms: timeout_ms,
+                ..Default::default()
+            })
+            .await?;
+
+        match resp.error_code {
+            0 => {
+                *self.txn_pid_epoch.lock().await = (resp.producer_id, resp.producer_epoch);
+                *self.txn_coord_client.lock().await = Some(coord);
+                *state = TxnState::Ready;
+                Ok(())
+            }
+            47 /* INVALID_PRODUCER_EPOCH */ => {
+                *state = TxnState::Fenced;
+                Err(ProducerError::FencedProducer)
+            }
+            other => Err(ProducerError::Server(other)),
+        }
+    }
+
+    /// Discover the transaction coordinator for `tid` via `FindCoordinator`.
+    ///
+    /// Handles both the legacy top-level response (versions 0–3) and the
+    /// `coordinators` array introduced in version 4.
+    async fn find_txn_coordinator(&self, tid: &str) -> Result<String, ProducerError> {
+        let resp = self
+            .client
+            .send(FindCoordinatorRequest {
+                // v0-3: the `key` field carries the lookup key
+                key: tid.to_owned(),
+                // key_type = 1 → TRANSACTION (vs 0 = GROUP)
+                key_type: 1,
+                // v4+: repeated coordinator_keys list
+                coordinator_keys: vec![tid.to_owned()],
+                ..Default::default()
+            })
+            .await?;
+
+        // v4+ returns a `coordinators` array; prefer it when present.
+        if let Some(coord) = resp.coordinators.first() {
+            if coord.error_code != 0 {
+                return Err(ProducerError::Server(coord.error_code));
+            }
+            return Ok(format!("{}:{}", coord.host, coord.port));
+        }
+
+        // Fallback: legacy top-level host/port (versions 0–3).
+        if resp.error_code != 0 {
+            return Err(ProducerError::Server(resp.error_code));
+        }
+        Ok(format!("{}:{}", resp.host, resp.port))
+    }
+
+    /// Enroll a consumer group's offsets in the current transaction.
+    ///
+    /// Performs two broker round-trips:
+    ///
+    /// 1. `AddOffsetsToTxn` → transaction coordinator (registers the group
+    ///    offset commit as part of the ongoing transaction).
+    /// 2. `TxnOffsetCommit` → group coordinator (commits the actual offsets
+    ///    transactionally).
+    ///
+    /// # Errors
+    ///
+    /// - [`ProducerError::NotTransactional`] — `transactional_id` was not set.
+    /// - [`ProducerError::InvalidTransactionState`] — no cached transaction
+    ///   coordinator (call [`init_transactions`] first).
+    /// - [`ProducerError::Server`] — any broker error code (checked at the
+    ///   `AddOffsetsToTxn` level and per-partition for `TxnOffsetCommit`).
+    /// - [`ProducerError::Client`] — transport-level failure.
+    ///
+    /// [`init_transactions`]: Self::init_transactions
+    pub async fn send_offsets_to_transaction(
+        &self,
+        offsets: impl IntoIterator<Item = ((String, i32), i64)>,
+        group_id: &str,
+    ) -> Result<(), ProducerError> {
+        let tid = self
+            .transactional_id
+            .as_deref()
+            .ok_or(ProducerError::NotTransactional)?
+            .to_string();
+        let offsets_vec: Vec<_> = offsets.into_iter().collect();
+
+        let (pid, epoch) = *self.txn_pid_epoch.lock().await;
+
+        // 1. AddOffsetsToTxn → transaction coordinator.
+        let coord_guard = self.txn_coord_client.lock().await;
+        let coord = coord_guard
+            .as_ref()
+            .ok_or(ProducerError::InvalidTransactionState(
+                "no txn coordinator cached — did init_transactions succeed?",
+            ))?
+            .clone();
+        drop(coord_guard);
+
+        let r1 = coord
+            .send(AddOffsetsToTxnRequest {
+                transactional_id: tid.clone(),
+                producer_id: pid,
+                producer_epoch: epoch,
+                group_id: group_id.to_owned(),
+                ..Default::default()
+            })
+            .await?;
+        if r1.error_code != 0 {
+            return Err(ProducerError::Server(r1.error_code));
+        }
+
+        // 2. FindCoordinator(group_id, key_type=0 GROUP) for the group coordinator.
+        let group_addr = self.find_group_coordinator(group_id).await?;
+        let group_client = Client::builder()
+            .bootstrap(group_addr)
+            .client_id(self.client_id.clone())
+            .build()
+            .await?;
+
+        // 3. TxnOffsetCommit → group coordinator.
+        let r2 = group_client
+            .send(TxnOffsetCommitRequest {
+                transactional_id: tid,
+                producer_id: pid,
+                producer_epoch: epoch,
+                group_id: group_id.to_owned(),
+                topics: build_topics_payload(&offsets_vec),
+                ..Default::default()
+            })
+            .await?;
+
+        // Check per-partition error codes.
+        for topic in &r2.topics {
+            for p in &topic.partitions {
+                if p.error_code != 0 {
+                    return Err(ProducerError::Server(p.error_code));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Discover the group coordinator for `group_id` via `FindCoordinator`
+    /// with `key_type = 0` (GROUP).
+    ///
+    /// Mirrors [`find_txn_coordinator`] but uses `key_type = 0` and looks up
+    /// the group coordinator rather than the transaction coordinator.
+    ///
+    /// [`find_txn_coordinator`]: Self::find_txn_coordinator
+    async fn find_group_coordinator(&self, group_id: &str) -> Result<String, ProducerError> {
+        let resp = self
+            .client
+            .send(FindCoordinatorRequest {
+                key: group_id.to_owned(),
+                // key_type = 0 → GROUP
+                key_type: 0,
+                coordinator_keys: vec![group_id.to_owned()],
+                ..Default::default()
+            })
+            .await?;
+
+        // v4+ returns a `coordinators` array; prefer it when present.
+        if let Some(coord) = resp.coordinators.first() {
+            if coord.error_code != 0 {
+                return Err(ProducerError::Server(coord.error_code));
+            }
+            return Ok(format!("{}:{}", coord.host, coord.port));
+        }
+
+        // Fallback: legacy top-level host/port (versions 0–3).
+        if resp.error_code != 0 {
+            return Err(ProducerError::Server(resp.error_code));
+        }
+        Ok(format!("{}:{}", resp.host, resp.port))
+    }
+
+    // ── Internal lifecycle ───────────────────────────────────────────────────
 
     pub(crate) fn is_active(&self) -> Result<(), ProducerError> {
         match self.state.load(Ordering::Acquire) {
@@ -271,6 +637,7 @@ impl std::fmt::Debug for Producer {
         f.debug_struct("Producer")
             .field("producer_id", &self.producer_id)
             .field("producer_epoch", &self.producer_epoch)
+            .field("transactional_id", &self.transactional_id)
             .field("compression", &self.compression)
             .finish_non_exhaustive()
     }
@@ -283,4 +650,29 @@ fn current_millis() -> i64 {
             .map_or(0, |d| d.as_millis()),
     )
     .unwrap_or(0)
+}
+
+/// Group `((topic, partition), offset)` pairs by topic name into the nested
+/// structure required by [`TxnOffsetCommitRequest`].
+fn build_topics_payload(offsets: &[((String, i32), i64)]) -> Vec<TxnOffsetCommitRequestTopic> {
+    let mut by_topic: std::collections::HashMap<&str, Vec<TxnOffsetCommitRequestPartition>> =
+        std::collections::HashMap::new();
+    for ((topic, partition), offset) in offsets {
+        by_topic
+            .entry(topic.as_str())
+            .or_default()
+            .push(TxnOffsetCommitRequestPartition {
+                partition_index: *partition,
+                committed_offset: *offset,
+                ..Default::default()
+            });
+    }
+    by_topic
+        .into_iter()
+        .map(|(name, partitions)| TxnOffsetCommitRequestTopic {
+            name: name.to_owned(),
+            partitions,
+            ..Default::default()
+        })
+        .collect()
 }

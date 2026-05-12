@@ -13,7 +13,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use crabka_log::Log;
+use crabka_log::{AbortedTxn, Log, ReadOutput};
 use crabka_protocol::records::RecordBatch;
 use tokio::sync::{Notify, mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -110,6 +110,21 @@ impl Partition {
         }
     }
 
+    /// Last Stable Offset: the highest offset at or before which all records
+    /// in all in-flight transactions have been resolved (committed or aborted).
+    /// Cheap: takes the `Arc<Mutex<Log>>` briefly.
+    ///
+    /// Returns 0 if the log mutex is poisoned (i.e. the writer task
+    /// panicked). The caller treats that as "not making progress" and the
+    /// writer-died path eventually surfaces a clearer error.
+    #[must_use]
+    pub fn lso(&self) -> i64 {
+        match self.log.lock() {
+            Ok(g) => g.lso(),
+            Err(_) => 0,
+        }
+    }
+
     /// Append a leader-assigned batch to the local log, preserving its
     /// `base_offset`. Used by the per-partition replicator on a follower
     /// broker. Sends the batch through the writer task so it stays
@@ -159,6 +174,75 @@ impl Partition {
         ack_rx
             .await
             .map_err(|_| BrokerError::Replication("ack dropped".into()))?
+    }
+
+    /// First absolute offset still present in the underlying [`Log`].
+    /// Cheap: takes the `Arc<Mutex<Log>>` briefly.
+    ///
+    /// Returns 0 if the log mutex is poisoned (i.e. the writer task panicked).
+    /// Used by `TxnCoordinator::recover` to seed the replay scan offset.
+    #[must_use]
+    pub(crate) fn log_start_offset(&self) -> i64 {
+        match self.log.lock() {
+            Ok(g) => g.log_start_offset(),
+            Err(_) => 0,
+        }
+    }
+
+    /// Return aborted transactions from the active segment's `.txnindex`
+    /// whose offset range overlaps `[start, end)`.
+    ///
+    /// Locks the `Arc<Mutex<Log>>` briefly. Returns an empty `Vec` if
+    /// the mutex is poisoned.
+    #[must_use]
+    pub fn aborted_in_range(&self, start: i64, end: i64) -> Vec<AbortedTxn> {
+        match self.log.lock() {
+            Ok(g) => g.aborted_in_range(start, end),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// Read batches from the underlying [`Log`] starting at `offset`,
+    /// returning up to `max_bytes` of data.
+    ///
+    /// Locks the `Arc<Mutex<Log>>` for the duration of the read. Used by
+    /// `TxnCoordinator::recover` to replay `__transaction_state` records.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BrokerError::Log`] if the underlying [`Log::read`] fails
+    /// (e.g. `offset < log_start_offset()`).
+    pub(crate) fn read_log(
+        &self,
+        offset: i64,
+        max_bytes: usize,
+    ) -> Result<ReadOutput, BrokerError> {
+        self.log
+            .lock()
+            .map_err(|_| BrokerError::Txn("log mutex poisoned".into()))?
+            .read(offset, max_bytes)
+            .map_err(BrokerError::from)
+    }
+
+    /// Append `batch` to the local log at the next assigned offset, going
+    /// through the partition's writer task so the append is ordered with
+    /// all other produce appends. Returns the assigned `base_offset`.
+    ///
+    /// Used by `TxnCoordinator::put` to persist `__transaction_state` records.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BrokerError::Txn`] if the writer task is dead or the ack
+    /// channel closes before the writer replies.
+    pub(crate) async fn produce_batch(&self, batch: RecordBatch) -> Result<i64, BrokerError> {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        self.writer_tx
+            .send(WriterMessage::Produce(ProduceJob { batch, ack: ack_tx }))
+            .await
+            .map_err(|_| BrokerError::Txn("partition writer dead".into()))?;
+        ack_rx
+            .await
+            .map_err(|_| BrokerError::Txn("ack dropped".into()))?
     }
 
     /// Test-only: shift the partition's in-memory `log_start_offset` to

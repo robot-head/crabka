@@ -18,7 +18,7 @@ use tokio::sync::Notify;
 
 use crabka_protocol::owned::fetch_request::FetchRequest;
 use crabka_protocol::owned::fetch_response::{
-    FetchResponse, FetchableTopicResponse, PartitionData,
+    AbortedTransaction, FetchResponse, FetchableTopicResponse, PartitionData,
 };
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 use crabka_protocol::records::RecordBatch;
@@ -39,6 +39,10 @@ struct PendingRead {
     partition_index: i32,
     fetch_offset: i64,
     max_bytes: i32,
+    /// `true` when `isolation_level == 1` on a consumer fetch (not a
+    /// follower fetch). Causes batch-level LSO filtering and populates
+    /// `aborted_transactions` in the response.
+    read_committed: bool,
     /// `None` for unknown topic/partition or out-of-range — final response is
     /// already filled out and won't be re-read on wake.
     partition: Option<Arc<Partition>>,
@@ -66,8 +70,9 @@ pub(crate) fn handle(
         // §"Non-goals"). The branch is wired here so that slice-8-followup can
         // add HW filtering on the consumer arm without re-shaping the handler.
         let is_follower_fetch = req.replica_id >= 0;
-        let _ = is_follower_fetch; // wired up here for slice 8; HW filtering
-        // lands in a slice-8 follow-up.
+        // isolation_level=1 (read_committed) only applies to consumer fetches.
+        // Follower fetches always see all records regardless of isolation.
+        let read_committed = !is_follower_fetch && req.isolation_level == 1;
 
         // Resolve every requested partition up front. We collect pending
         // reads (rather than just doing them inline) so we can re-read once
@@ -116,6 +121,7 @@ pub(crate) fn handle(
                         partition_index: idx,
                         fetch_offset,
                         max_bytes,
+                        read_committed,
                         partition: None,
                         out,
                     });
@@ -128,6 +134,7 @@ pub(crate) fn handle(
                     partition_index: idx,
                     fetch_offset,
                     max_bytes,
+                    read_committed,
                     partition: part_opt,
                     out,
                 });
@@ -138,7 +145,13 @@ pub(crate) fn handle(
         let mut total_bytes = 0_usize;
         for p in &mut pending {
             if let Some(part) = &p.partition {
-                total_bytes += do_read(part, p.fetch_offset, p.max_bytes, &mut p.out)?;
+                total_bytes += do_read(
+                    part,
+                    p.fetch_offset,
+                    p.max_bytes,
+                    p.read_committed,
+                    &mut p.out,
+                )?;
             }
         }
 
@@ -167,37 +180,112 @@ pub(crate) fn handle(
 /// Hold the partition's log mutex briefly to read offsets + (optionally) a
 /// batch. Populates `out` in place and returns the encoded-size estimate of
 /// the records placed in `out` (0 if none).
+///
+/// When `read_committed` is `true` (consumer fetch with `isolation_level=1`):
+/// - batches with `base_offset >= lso` are dropped (batch-level LSO truncation)
+/// - control batches are hidden from consumers (Apache Kafka behavior)
+/// - `out.last_stable_offset` is set to `lso`
+/// - `out.aborted_transactions` is populated from the partition's `.txnindex`
+///
+/// When `read_committed` is `false` (`read_uncommitted` or follower fetch):
+/// - all batches are returned as-is
+/// - `out.last_stable_offset` equals `log_end_offset`
+/// - `out.aborted_transactions` is `None`
 fn do_read(
     part: &Partition,
     fetch_offset: i64,
     max_bytes: i32,
+    read_committed: bool,
     out: &mut PartitionData,
 ) -> Result<usize, BrokerError> {
-    let (log_start, log_end, batch_opt): (i64, i64, Option<RecordBatch>) = {
+    let (log_start, log_end, lso, batch_opt, aborted_txns): (
+        i64,
+        i64,
+        i64,
+        Option<RecordBatch>,
+        Vec<AbortedTransaction>,
+    ) = {
         let log = part.log.lock().expect("log mutex poisoned");
         let log_start = log.log_start_offset();
         let log_end = log.log_end_offset();
+        let lso = log.lso();
         if fetch_offset < log_start {
             out.error_code = codes::OFFSET_OUT_OF_RANGE;
             out.log_start_offset = log_start;
             out.high_watermark = log_end;
-            out.last_stable_offset = log_end;
+            out.last_stable_offset = if read_committed { lso } else { log_end };
             return Ok(0);
         }
         if fetch_offset >= log_end {
-            (log_start, log_end, None)
+            (log_start, log_end, lso, None, Vec::new())
         } else {
             let read_max = usize::try_from(max_bytes.max(0)).unwrap_or(0);
             let read = log.read(fetch_offset, read_max)?;
-            // MVP: only the first batch is wrapped into the response.
-            (log_start, log_end, read.batches.into_iter().next())
+
+            if read_committed {
+                // Aborted-txn list for the window [fetch_offset, lso).
+                // Must be computed before batch filtering so we know which
+                // producer_ids had aborted transactions in this range.
+                let aborted_raw = log.aborted_in_range(fetch_offset, lso);
+                // Collect into a set of (producer_id, start_offset, last_offset)
+                // tuples for efficient batch-level lookup.
+                let aborted_pids: std::collections::HashSet<(i64, i64, i64)> = aborted_raw
+                    .iter()
+                    .map(|e| (e.producer_id, e.start_offset, e.last_offset))
+                    .collect();
+                let aborted = aborted_raw
+                    .into_iter()
+                    .map(|e| AbortedTransaction {
+                        producer_id: e.producer_id,
+                        first_offset: e.start_offset,
+                        ..Default::default()
+                    })
+                    .collect();
+
+                // Batch-level LSO filtering: drop entire batches at or past LSO,
+                // drop control batches (Apache Kafka clients never see them),
+                // and drop transactional data batches that belong to an aborted
+                // transaction (i.e. whose producer_id + offset range is fully
+                // covered by an AbortedTxn entry).
+                let visible_batch = read
+                    .batches
+                    .into_iter()
+                    .filter(|b| b.base_offset < lso)
+                    .filter(|b| !b.attributes.is_control_batch())
+                    .find(|b| {
+                        if !b.attributes.is_transactional() {
+                            return true; // non-transactional batch: always visible
+                        }
+                        let pid = b.producer_id;
+                        let batch_last = b.base_offset + i64::from(b.last_offset_delta);
+                        // A transactional batch is hidden iff it is fully
+                        // contained within an aborted txn range for this pid.
+                        !aborted_pids.iter().any(|&(apid, astart, alast)| {
+                            apid == pid && b.base_offset >= astart && batch_last <= alast
+                        })
+                    });
+
+                (log_start, log_end, lso, visible_batch, aborted)
+            } else {
+                // MVP: only the first batch is wrapped into the response.
+                let batch_opt = read.batches.into_iter().next();
+                (log_start, log_end, lso, batch_opt, Vec::new())
+            }
         }
     };
 
     out.error_code = codes::NONE;
     out.high_watermark = log_end;
     out.log_start_offset = log_start;
-    out.last_stable_offset = log_end;
+    out.last_stable_offset = if read_committed { lso } else { log_end };
+
+    if read_committed {
+        // Populate aborted_transactions: None means "no list" (same as not
+        // providing it); Some(empty) means "committed window with no aborts".
+        // Apache Kafka sends Some(empty) when in read_committed mode.
+        out.aborted_transactions = Some(aborted_txns);
+    }
+
     let bytes_est = batch_opt
         .as_ref()
         .map_or(0, |b| <RecordBatch as Encode>::encoded_len(b, 0));
@@ -236,7 +324,13 @@ async fn long_poll_then_reread(
                 partition_index: p.partition_index,
                 ..Default::default()
             };
-            do_read(part, p.fetch_offset, p.max_bytes, &mut p.out)?;
+            do_read(
+                part,
+                p.fetch_offset,
+                p.max_bytes,
+                p.read_committed,
+                &mut p.out,
+            )?;
         }
     }
     Ok(())

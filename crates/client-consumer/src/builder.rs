@@ -1,5 +1,6 @@
 //! Codec helpers for `ConsumerProtocol` subscription / assignment payloads,
-//! and the [`AutoOffsetReset`] enum used by [`Consumer::builder`].
+//! and the [`AutoOffsetReset`] / [`IsolationLevel`] enums used by
+//! [`Consumer::builder`].
 
 use bytes::{Bytes, BytesMut};
 
@@ -11,6 +12,33 @@ pub enum AutoOffsetReset {
     /// Start from the log-end offset. Resolved lazily by `Consumer::poll`
     /// using `ListOffsets(timestamp=-1)`.
     Latest,
+}
+
+/// Controls which records are visible to this consumer.
+///
+/// Maps to Kafka's `isolation.level` configuration and the `isolation_level`
+/// field in the `Fetch` request (wire value: `i8`).
+///
+/// The default is [`ReadUncommitted`](IsolationLevel::ReadUncommitted) for
+/// backward compatibility.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IsolationLevel {
+    /// All records are visible, including those from open or aborted
+    /// transactions. Equivalent to `isolation.level=read_uncommitted`.
+    ReadUncommitted,
+    /// Only records from committed transactions (and non-transactional
+    /// records) are visible. Equivalent to `isolation.level=read_committed`.
+    ReadCommitted,
+}
+
+impl IsolationLevel {
+    /// Returns the wire encoding used in the `Fetch` request (`i8`).
+    pub(crate) fn wire(self) -> i8 {
+        match self {
+            IsolationLevel::ReadUncommitted => 0,
+            IsolationLevel::ReadCommitted => 1,
+        }
+    }
 }
 
 // ── subscription / assignment codec (ConsumerProtocol v1) ─────────────────

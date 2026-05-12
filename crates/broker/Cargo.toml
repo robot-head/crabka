@@ -28,6 +28,9 @@ crabka-raft = { version = "0.1", path = "../raft" }
 crabka-metadata = { version = "0.1", path = "../metadata" }
 crabka-client-core = { version = "0.1", path = "../client-core" }
 bytes = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde-wincode = { workspace = true }
+wincode = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["net", "rt", "rt-multi-thread", "io-util", "macros", "sync", "time", "signal"] }
 tokio-util = { workspace = true, features = ["codec", "rt"] }
@@ -40,6 +43,7 @@ futures-util = { workspace = true }
 
 [dev-dependencies]
 crabka-broker = { version = "0.1", path = ".", features = ["test-helpers"] }
+crabka-client-consumer = { version = "0.1", path = "../client-consumer" }
 crabka-client-producer = { version = "0.1", path = "../client-producer" }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }

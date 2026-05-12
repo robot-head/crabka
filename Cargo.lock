@@ -681,6 +681,7 @@ dependencies = [
  "bytes",
  "clap",
  "crabka-broker",
+ "crabka-client-consumer",
  "crabka-client-core",
  "crabka-client-producer",
  "crabka-log",
@@ -689,6 +690,8 @@ dependencies = [
  "crabka-raft",
  "dashmap",
  "futures-util",
+ "serde",
+ "serde-wincode",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -696,6 +699,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "wincode",
 ]
 
 [[package]]

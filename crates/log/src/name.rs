@@ -38,6 +38,10 @@ pub fn timeindex_path(dir: &Path, base_offset: i64) -> std::path::PathBuf {
     dir.join(format!("{}.timeindex", format_base_offset(base_offset)))
 }
 
+pub fn txnindex_path(dir: &Path, base_offset: i64) -> std::path::PathBuf {
+    dir.join(format!("{}.txnindex", format_base_offset(base_offset)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

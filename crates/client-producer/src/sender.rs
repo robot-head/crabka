@@ -32,13 +32,15 @@ use crate::compression::Compression;
 use crate::error::ProducerError;
 use crate::producer::{Acks, STATE_ACTIVE, STATE_FENCED, TopicMetadata};
 use crate::record::RecordMetadata;
+use crate::transactional::TxnState;
 
 /// Wire error codes referenced when interpreting `PartitionProduceResponse`.
 mod codes {
     pub const NONE: i16 = 0;
     pub const OUT_OF_ORDER_SEQUENCE_NUMBER: i16 = 45;
     pub const DUPLICATE_SEQUENCE_NUMBER: i16 = 46;
-    pub const INVALID_PRODUCER_EPOCH: i16 = 53;
+    /// `INVALID_PRODUCER_EPOCH` per the canonical Apache Kafka table (code 47).
+    pub const INVALID_PRODUCER_EPOCH: i16 = 47;
 }
 
 /// All the bits of state the sender task needs. The builder constructs
@@ -61,6 +63,15 @@ pub(crate) struct SenderConfig {
     pub wake_rx: tokio::sync::mpsc::Receiver<()>,
     pub flush_notify: Arc<Notify>,
     pub shutdown: CancellationToken,
+    /// `transactional_id` from the producer config; `None` for non-transactional producers.
+    pub transactional_id: Option<String>,
+    /// Shared with `Producer`; the sender snapshots this at send time to decide
+    /// whether to stamp batches as transactional.
+    pub txn_state: Arc<Mutex<TxnState>>,
+    /// Shared with `Producer`; holds the `(producer_id, producer_epoch)` assigned
+    /// by the transaction coordinator via `InitProducerId`. The sender reads this
+    /// when stamping transactional batches.
+    pub txn_pid_epoch: Arc<Mutex<(i64, i16)>>,
 }
 
 pub(crate) async fn run(mut cfg: SenderConfig) {
@@ -108,6 +119,21 @@ async fn drain_once(cfg: &mut SenderConfig) {
     }
 }
 
+/// Snapshot the transactional `(producer_id, producer_epoch)` if and only if
+/// the producer is currently inside an active transaction.
+///
+/// Returns `Some((pid, epoch))` when a transactional batch should be emitted,
+/// `None` for non-transactional or out-of-transaction sends.
+async fn txn_pid_snapshot(cfg: &SenderConfig) -> Option<(i64, i16)> {
+    cfg.transactional_id.as_ref()?;
+    let state = *cfg.txn_state.lock().await;
+    if state == TxnState::InTransaction {
+        Some(*cfg.txn_pid_epoch.lock().await)
+    } else {
+        None
+    }
+}
+
 /// Send a single (topic, partition) batch and resolve its records'
 /// oneshot acks from the response.
 async fn send_one(cfg: &SenderConfig, topic: &str, partition: i32, batch: InProgressBatch) {
@@ -132,12 +158,21 @@ async fn send_one(cfg: &SenderConfig, topic: &str, partition: i32, batch: InProg
         .get(topic)
         .map_or(Uuid::ZERO, |m| m.topic_id);
 
-    // 3. Build the v2 RecordBatch (compression handled by RecordBatch::encode).
-    let record_batch = build_record_batch(cfg, &batch, base_sequence);
+    // 3. Snapshot the transactional pid/epoch once per batch.
+    //    Per-batch snapshot: if the caller races begin_transaction() and
+    //    send() the result is unspecified — that is a user bug and we don't
+    //    add extra synchronisation to paper over it.
+    let txn_snapshot = txn_pid_snapshot(cfg).await;
 
-    // 4. Frame the ProduceRequest.
+    // 4. Build the v2 RecordBatch (compression handled by RecordBatch::encode).
+    let record_batch = build_record_batch(cfg, &batch, base_sequence, txn_snapshot);
+
+    // 5. Frame the ProduceRequest.
+    //    Pass the transactional_id when we are inside a transaction so the
+    //    broker can associate the batch with the ongoing txn.
+    let req_txn_id = txn_snapshot.and(cfg.transactional_id.clone());
     let req = ProduceRequest {
-        transactional_id: None,
+        transactional_id: req_txn_id,
         acks: cfg.acks.wire(),
         timeout_ms: i32::try_from(cfg.request_timeout.as_millis()).unwrap_or(i32::MAX),
         topic_data: vec![TopicProduceData {
@@ -226,10 +261,16 @@ async fn send_one(cfg: &SenderConfig, topic: &str, partition: i32, batch: InProg
 /// Build a v2 `RecordBatch` from a sealed `InProgressBatch`. Compression
 /// is encoded into the batch attributes; the actual compress step runs
 /// inside `RecordBatch::encode`.
+///
+/// `txn_snapshot` is `Some((pid, epoch))` when the batch is being sent
+/// inside an active transaction. In that case the `is_transactional`
+/// attribute bit is set and the txn-coordinator-assigned pid/epoch are
+/// used instead of the idempotence pid/epoch.
 fn build_record_batch(
     cfg: &SenderConfig,
     batch: &InProgressBatch,
     base_sequence: i32,
+    txn_snapshot: Option<(i64, i16)>,
 ) -> RecordBatch {
     let codec = match cfg.compression {
         Compression::None => CompressionType::None,
@@ -238,7 +279,16 @@ fn build_record_batch(
         Compression::Lz4 => CompressionType::Lz4,
         Compression::Zstd => CompressionType::Zstd,
     };
-    let attributes = Attributes::default().with_compression(codec);
+
+    let is_transactional = txn_snapshot.is_some();
+    let attributes = Attributes::default()
+        .with_compression(codec)
+        .with_transactional(is_transactional);
+
+    // Use the txn pid/epoch when inside a transaction; fall back to the
+    // idempotence pid/epoch for non-transactional batches.
+    let (producer_id, producer_epoch) =
+        txn_snapshot.unwrap_or((cfg.producer_id, cfg.producer_epoch));
 
     let base_timestamp = batch.records.first().map_or(0, |r| r.timestamp_ms);
     let max_timestamp = batch
@@ -277,8 +327,8 @@ fn build_record_batch(
         last_offset_delta,
         base_timestamp,
         max_timestamp,
-        producer_id: cfg.producer_id,
-        producer_epoch: cfg.producer_epoch,
+        producer_id,
+        producer_epoch,
         base_sequence,
         records,
     }

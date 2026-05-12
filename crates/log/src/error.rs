@@ -77,6 +77,10 @@ pub enum LogError {
         /// The offset the caller actually supplied.
         actual: i64,
     },
+
+    /// A log file (e.g., `.txnindex`) is corrupt: wrong size, bad checksum, etc.
+    #[error("corrupt log: {0}")]
+    Corrupt(String),
 }
 
 #[cfg(test)]

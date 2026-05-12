@@ -17,6 +17,7 @@ use crate::error::ProducerError;
 use crate::partitioner::UniformStickyPartitioner;
 use crate::producer::{Acks, Producer};
 use crate::sender;
+use crate::transactional::TxnState;
 
 #[bon::bon]
 impl Producer {
@@ -39,6 +40,8 @@ impl Producer {
         #[builder(default = i32::MAX)] retries: i32,
         #[builder(default = Duration::from_millis(100))] retry_backoff: Duration,
         #[builder(default = 5)] max_in_flight_per_connection: usize,
+        #[builder(into)] transactional_id: Option<String>,
+        #[builder(default = std::time::Duration::new(60, 0))] transaction_timeout: Duration,
     ) -> Result<Self, ProducerError> {
         // Validate config: idempotence forces acks=All, and acks=Zero is
         // incompatible with idempotence.
@@ -52,7 +55,7 @@ impl Producer {
         // 1. Build inner client.
         let client = Client::builder()
             .bootstrap(bootstrap)
-            .client_id(client_id)
+            .client_id(client_id.clone())
             .request_timeout(request_timeout)
             .build()
             .await?;
@@ -84,6 +87,9 @@ impl Producer {
         let partitioner = Arc::new(UniformStickyPartitioner::new());
         let flush_notify = Arc::new(Notify::new());
 
+        let txn_state = Arc::new(Mutex::new(TxnState::Uninitialized));
+        let txn_pid_epoch = Arc::new(Mutex::new((-1i64, -1i16)));
+
         let sender_handle = tokio::spawn(sender::run(sender::SenderConfig {
             client: client.clone(),
             producer_id,
@@ -101,10 +107,14 @@ impl Producer {
             wake_rx,
             flush_notify: flush_notify.clone(),
             shutdown: shutdown.clone(),
+            transactional_id: transactional_id.clone(),
+            txn_state: txn_state.clone(),
+            txn_pid_epoch: txn_pid_epoch.clone(),
         }));
 
         Ok(Producer {
             client,
+            client_id,
             producer_id,
             producer_epoch,
             acks,
@@ -124,6 +134,11 @@ impl Producer {
             flush_notify,
             sender_shutdown: shutdown,
             sender_handle: Some(sender_handle),
+            transactional_id,
+            transaction_timeout,
+            txn_state,
+            txn_coord_client: Mutex::new(None),
+            txn_pid_epoch,
         })
     }
 }
