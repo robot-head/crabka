@@ -19,6 +19,10 @@ use crate::error::BrokerError;
 const SUPPORTED_PROTOCOL: &str = "range";
 const DEFAULT_SESSION_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_REBALANCE_TIMEOUT_MS: u64 = 60_000;
+/// Mirror of Apache Kafka's `group.initial.rebalance.delay.ms` default.
+/// Used as the `JoinGroup` wait so a single-member group completes quickly
+/// instead of holding the full client-supplied `rebalance_timeout_ms`.
+const INITIAL_REBALANCE_DELAY: Duration = Duration::from_secs(3);
 
 pub(crate) fn handle(
     broker: &Broker,
@@ -91,8 +95,16 @@ pub(crate) fn handle(
             }
         }
 
-        // 4. Wait on the per-group join-complete notify, with a deadline.
-        let _ = tokio::time::timeout(rebalance_timeout, handle.join_complete.notified()).await;
+        // 4. Wait on the per-group join-complete notify.
+        //
+        // Real Kafka uses `group.initial.rebalance.delay.ms` (default 3 s)
+        // for the WAIT, not `rebalance_timeout_ms` (which is the cap on
+        // total rebalance time; the JVM consumer sends 5 minutes there).
+        // Use the SHORTER of `rebalance_timeout` and the initial-rebalance
+        // delay so multi-member rebalances still batch new joins but a
+        // single member completes quickly.
+        let wait = rebalance_timeout.min(INITIAL_REBALANCE_DELAY);
+        let _ = tokio::time::timeout(wait, handle.join_complete.notified()).await;
 
         // 5. Complete the rebalance if we're the one who fell out of the
         //    wait first. (Multiple JoinGroup handlers race; whoever wins
