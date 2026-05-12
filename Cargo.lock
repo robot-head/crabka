@@ -600,6 +600,7 @@ dependencies = [
 name = "crabka-client-consumer"
 version = "0.1.0"
 dependencies = [
+ "bon",
  "bytes",
  "crabka-broker",
  "crabka-client-core",
@@ -634,6 +635,23 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "crabka-client-producer"
+version = "0.1.0"
+dependencies = [
+ "bon",
+ "bytes",
+ "crabka-broker",
+ "crabka-client-consumer",
+ "crabka-client-core",
+ "crabka-compression",
+ "crabka-log",
+ "crabka-protocol",
+ "tempfile",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]
