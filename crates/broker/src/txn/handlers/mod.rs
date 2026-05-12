@@ -7,4 +7,5 @@
 pub(crate) mod add_offset_commits_to_txn;
 pub(crate) mod add_partitions_to_txn;
 pub(crate) mod end_txn;
+pub(crate) mod txn_offset_commit;
 pub(crate) mod write_txn_markers;
