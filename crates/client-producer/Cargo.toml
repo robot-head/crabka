@@ -1,0 +1,29 @@
+[package]
+name = "crabka-client-producer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version = "1.95.0"
+description = "Idempotent producer client for Apache Kafka in Rust"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+
+[dependencies]
+crabka-protocol = { version = "0.1", path = "../protocol", default-features = false }
+crabka-client-core = { version = "0.1", path = "../client-core" }
+crabka-compression = { version = "0.1", path = "../compression" }
+bon = { workspace = true }
+bytes = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+crabka-broker = { version = "0.1", path = "../broker" }
+crabka-log = { version = "0.1", path = "../log" }
+crabka-client-consumer = { version = "0.1", path = "../client-consumer" }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util", "macros"] }
