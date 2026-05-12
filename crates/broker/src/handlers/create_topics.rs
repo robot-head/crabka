@@ -46,6 +46,7 @@ fn round_robin_replicas(
         .collect()
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) fn handle(
     broker: &Broker,
     version: i16,
@@ -68,51 +69,93 @@ pub(crate) fn handle(
             let name = topic_req.name.clone();
             let partition_count = topic_req.num_partitions;
             let replication_factor = topic_req.replication_factor;
+
+            // Reject invalid partition counts before attempting placement.
+            if partition_count <= 0 {
+                results.push(CreatableTopicResult {
+                    name,
+                    topic_id: ProtoUuid([0u8; 16]),
+                    error_code: codes::INVALID_PARTITIONS,
+                    error_message: None,
+                    ..Default::default()
+                });
+                continue;
+            }
+
+            // Read the current broker set from the controller's image; sort by
+            // node_id for determinism.
+            let image = controller.current_image();
+            let mut sorted_brokers: Vec<crabka_raft::NodeId> =
+                image.brokers().map(|b| b.node_id).collect();
+            sorted_brokers.sort_unstable();
+
+            let assignments =
+                round_robin_replicas(&sorted_brokers, partition_count, replication_factor);
+
+            if assignments.is_empty() {
+                // RF > broker count. Surface INVALID_REPLICATION_FACTOR per Apache
+                // Kafka semantics.
+                results.push(CreatableTopicResult {
+                    name,
+                    topic_id: ProtoUuid([0u8; 16]),
+                    error_code: codes::INVALID_REPLICATION_FACTOR,
+                    error_message: None,
+                    ..Default::default()
+                });
+                continue;
+            }
+
             let topic_id = Uuid::new_v4();
 
             // Build the batch: one TopicRecord + N PartitionRecords.
-            let part_count_usize = usize::try_from(partition_count.max(0)).unwrap_or(0);
-            let mut records = Vec::with_capacity(1 + part_count_usize);
-            records.push(MetadataRecord::V1Topic(TopicRecord {
+            let mut records = vec![MetadataRecord::V1Topic(TopicRecord {
                 name: name.clone(),
                 topic_id,
                 partitions: partition_count,
                 replication_factor,
-            }));
-            for p in 0..partition_count.max(0) {
+            })];
+            for (p, replicas) in assignments.iter().enumerate() {
+                let p_i32 = i32::try_from(p).unwrap_or(0);
                 records.push(MetadataRecord::V1Partition(PartitionRecord {
                     topic: name.clone(),
-                    partition: p,
-                    leader: node_id,
-                    replicas: vec![node_id],
-                    isr: vec![node_id],
+                    partition: p_i32,
+                    leader: replicas[0],
+                    replicas: replicas.clone(),
+                    isr: replicas.clone(),
                 }));
             }
 
-            let error_code = match controller.submit_change(records).await {
+            let result = controller.submit_change(records).await;
+
+            let error_code = match result {
                 Ok(()) => {
-                    // Committed to quorum — materialize on-disk partitions.
-                    for p in 0..partition_count.max(0) {
-                        let dir = log_dir::partition_dir(&log_dir, &name, p);
-                        match std::fs::create_dir_all(&dir)
-                            .map_err(BrokerError::from)
-                            .and_then(|()| {
-                                crabka_log::Log::open(&dir, log_config.clone())
-                                    .map_err(BrokerError::from)
-                            }) {
-                            Ok(log) => {
-                                let part = spawn_partition(name.clone(), p, log);
-                                partitions_map.insert((name.clone(), p), part);
-                            }
-                            Err(e) => {
-                                tracing::error!(
-                                    topic = %name,
-                                    partition = p,
-                                    error = %e,
-                                    "CreateTopics: disk failure after quorum commit"
-                                );
-                                // Quorum already committed — we cannot roll back.
-                                // Partition will be recovered on next broker restart.
+                    // Committed to quorum — materialize on-disk partitions only
+                    // where this broker is the leader. Followers materialize
+                    // lazily inside their replicator task.
+                    for (p, replicas) in assignments.iter().enumerate() {
+                        let p_i32 = i32::try_from(p).unwrap_or(0);
+                        if replicas[0] == node_id {
+                            let dir = log_dir::partition_dir(&log_dir, &name, p_i32);
+                            match std::fs::create_dir_all(&dir)
+                                .map_err(BrokerError::from)
+                                .and_then(|()| {
+                                    crabka_log::Log::open(&dir, log_config.clone())
+                                        .map_err(BrokerError::from)
+                                }) {
+                                Ok(log) => {
+                                    let part = spawn_partition(name.clone(), p_i32, log);
+                                    partitions_map.insert((name.clone(), p_i32), part);
+                                }
+                                Err(e) => {
+                                    tracing::error!(
+                                        topic = %name,
+                                        partition = p_i32,
+                                        error = %e,
+                                        "CreateTopics: disk failure after quorum commit"
+                                    );
+                                    // Quorum already committed — we cannot roll back.
+                                    // Partition will be recovered on next broker restart.
+                                }
                             }
                         }
                     }
