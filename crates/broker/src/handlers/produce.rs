@@ -37,6 +37,7 @@ pub(crate) fn handle(
     let partitions = broker.partitions.clone();
     let controller = broker.controller.clone();
     let producer_state = broker.producer_state.clone();
+    let txn_coordinator = broker.txn_coordinator.clone();
     Box::pin(async move {
         let mut cur: &[u8] = &req_bytes;
         let req = ProduceRequest::decode(&mut cur, version)?;
@@ -90,6 +91,65 @@ pub(crate) fn handle(
                     partition_results.push(out);
                     continue;
                 };
+
+                // ── transactional produce verify (KIP-1319 v2) ──────────
+                // This check is more authoritative than idempotent dedup,
+                // so it runs first. Non-transactional batches (pid < 0 or
+                // is_transactional=false) skip directly to the dedup gate.
+                let is_transactional = batch.attributes.is_transactional();
+                {
+                    let pid_txn = batch.producer_id;
+                    let epoch_txn = batch.producer_epoch;
+                    if is_transactional && pid_txn >= 0 {
+                        let Some(tid) = txn_coordinator.tid_for_pid(pid_txn) else {
+                            // Unknown producer_id — reject.
+                            out.error_code = codes::INVALID_PRODUCER_ID_MAPPING;
+                            partition_results.push(out);
+                            continue;
+                        };
+                        if txn_coordinator.is_coordinator_for(&tid).await {
+                            let Some(entry_mutex) = txn_coordinator.get(&tid) else {
+                                out.error_code = codes::INVALID_PRODUCER_ID_MAPPING;
+                                partition_results.push(out);
+                                continue;
+                            };
+                            let mut entry = entry_mutex.lock().await;
+                            if entry.producer_epoch != epoch_txn {
+                                out.error_code = codes::INVALID_PRODUCER_EPOCH;
+                                partition_results.push(out);
+                                continue;
+                            }
+                            let tp = crate::txn::state::TopicPartition {
+                                topic: topic_name.clone(),
+                                partition: idx,
+                            };
+                            if !entry.partitions.contains(&tp) {
+                                // v2 auto-AddPartitionsToTxn: register the
+                                // partition inline if the state allows it.
+                                if !entry
+                                    .state
+                                    .can_transition_to(crate::txn::state::TxnState::Ongoing)
+                                {
+                                    out.error_code = codes::INVALID_TXN_STATE;
+                                    partition_results.push(out);
+                                    continue;
+                                }
+                                entry.state = crate::txn::state::TxnState::Ongoing;
+                                entry.partitions.insert(tp);
+                                entry.last_update_ms = crate::txn::util::now_millis();
+                                let snap = entry.clone();
+                                // Lock must be dropped before the async put.
+                                drop(entry);
+                                txn_coordinator.put(snap).await?;
+                            }
+                            // else: partition already registered — fall through.
+                        }
+                        // else: not the coordinator for this tid (slice-9 MVP).
+                        // Trust the producer to have called AddPartitionsToTxn
+                        // through the correct coordinator. Inter-broker v2
+                        // auto-add is deferred (slice 10+).
+                    }
+                }
 
                 // ── idempotent-producer dedup gate ───────────────────────
                 let pid = batch.producer_id;

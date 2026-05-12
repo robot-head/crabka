@@ -38,6 +38,9 @@ pub(crate) struct TxnCoordinator {
     state: DashMap<String, Arc<Mutex<TxnEntry>>>,
     /// Set of `__transaction_state` partition indices this broker leads.
     leader_partitions: RwLock<HashSet<i32>>,
+    /// Reverse lookup: `producer_id` → `transactional_id`. Used by the
+    /// Produce handler to verify transactional batches (KIP-1319 v2).
+    pid_to_tid: DashMap<i64, String>,
 }
 
 impl TxnCoordinator {
@@ -52,6 +55,7 @@ impl TxnCoordinator {
             producer_ids,
             state: DashMap::new(),
             leader_partitions: RwLock::new(HashSet::new()),
+            pid_to_tid: DashMap::new(),
         }
     }
 
@@ -88,6 +92,12 @@ impl TxnCoordinator {
         self.state.get(tid).map(|e| e.value().clone())
     }
 
+    /// Reverse lookup: given a `producer_id`, return the `transactional_id`
+    /// it was registered under, or `None` if the pid is unknown.
+    pub(crate) fn tid_for_pid(&self, pid: i64) -> Option<String> {
+        self.pid_to_tid.get(&pid).map(|e| e.value().clone())
+    }
+
     /// Persist `entry` to the corresponding `__transaction_state` partition
     /// log, then update the in-memory map. The batch is appended via the
     /// partition's writer task (ordered with all other produce appends).
@@ -122,6 +132,7 @@ impl TxnCoordinator {
 
         part.produce_batch(batch).await?;
 
+        self.pid_to_tid.insert(entry.producer_id, entry.transactional_id.clone());
         self.state.insert(tid, Arc::new(Mutex::new(entry)));
         Ok(())
     }
@@ -193,6 +204,7 @@ impl TxnCoordinator {
                             continue;
                         };
                         let tid = String::from_utf8_lossy(tid_bytes).into_owned();
+                        self.pid_to_tid.insert(entry.producer_id, tid.clone());
                         self.state.insert(tid, Arc::new(Mutex::new(entry)));
                     }
                     offset = batch.base_offset + i64::from(batch.last_offset_delta) + 1;
