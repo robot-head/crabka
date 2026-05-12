@@ -627,3 +627,216 @@ async fn three_node_jvm_round_trip() {
         h.shutdown().await;
     }
 }
+
+// Replication byte-compare: stand up a 3-broker Crabka cluster, create a
+// `replication-factor=3` topic, produce 100 records via the JVM
+// `kafka-console-producer`, then run `kafka-dump-log` against each
+// broker's local partition file and assert the three dumps are
+// byte-identical.
+//
+// Why fixed ports + `host.docker.internal`: the JVM client opens a
+// per-broker connection per partition leader, so every broker's
+// advertised listener must be reachable from inside the Kafka tool
+// container. Slice-6 CI workflow already wires `host.docker.internal` on
+// the host's `/etc/hosts` to the bridge gateway IP. Controller traffic
+// uses host loopback (`127.0.0.1`) — Docker reachability is irrelevant
+// for inter-broker.
+//
+// `kafka-dump-log` ships on the `confluentinc/cp-kafka:6.1.1` image
+// alongside `kafka-topics` / `kafka-console-producer` — it's a standard
+// Apache Kafka tool. We mount each broker's partition dir into a fresh
+// container as `-v <host>:/data:ro` and dump the first segment file.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires Docker"]
+#[allow(clippy::too_many_lines)]
+async fn three_node_replication_byte_compare() {
+    const TOPIC: &str = "crabka-replication-itest";
+
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("crabka_broker=debug,info")),
+        )
+        .with_test_writer()
+        .try_init();
+
+    let client_ports = [9192u16, 9292, 9392];
+    let controller_ports = [9193u16, 9293, 9393];
+
+    let voters: Vec<(u64, std::net::SocketAddr)> = (0..3)
+        .map(|i| {
+            (
+                u64::try_from(i + 1).unwrap(),
+                format!("127.0.0.1:{}", controller_ports[i])
+                    .parse()
+                    .unwrap(),
+            )
+        })
+        .collect();
+
+    // Parallel spawn — sequential startup deadlocks: broker 1's
+    // `Broker::start` blocks waiting for a leader, but a 3-voter quorum
+    // can't elect one until brokers 2 and 3 are also up.
+    let mut tempdirs = Vec::with_capacity(3);
+    let mut spawns = Vec::with_capacity(3);
+    for i in 0..3 {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg = BrokerConfig {
+            broker_id: i32::try_from(i + 1).unwrap(),
+            listen_addr: format!("0.0.0.0:{}", client_ports[i])
+                .parse()
+                .expect("static addr"),
+            advertised_listener: format!("host.docker.internal:{}", client_ports[i]),
+            log_dir: dir.path().to_path_buf(),
+            log_config: LogConfig::default(),
+            node_id: u64::try_from(i + 1).unwrap(),
+            controller_listen_addr: format!("0.0.0.0:{}", controller_ports[i])
+                .parse()
+                .expect("static addr"),
+            controller_quorum_voters: voters.clone(),
+        };
+        tempdirs.push(dir);
+        spawns.push(tokio::spawn(async move {
+            Broker::start(cfg).await.expect("broker start")
+        }));
+    }
+    let mut cluster = Vec::with_capacity(3);
+    for (sp, dir) in spawns.into_iter().zip(tempdirs) {
+        cluster.push((sp.await.expect("spawn"), dir));
+    }
+
+    let bootstrap_1 = format!("host.docker.internal:{}", client_ports[0]);
+
+    // 1. CreateTopics(repl=3, partitions=1).
+    docker_run_kafka_tool(&[
+        "kafka-topics",
+        "--create",
+        "--if-not-exists",
+        "--topic",
+        TOPIC,
+        "--partitions",
+        "1",
+        "--replication-factor",
+        "3",
+        "--bootstrap-server",
+        &bootstrap_1,
+    ]);
+
+    // 2. Wait for the ISR to include all three brokers. Slice 8 makes ISR
+    //    == replicas always, so this is "did the metadata propagate".
+    //    Poll `kafka-topics --describe` until the Isr line lists 1, 2, 3
+    //    in any permutation. 2-minute deadline matches the other JVM
+    //    test's CI tolerance.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_mins(2);
+    loop {
+        let desc = docker_run_kafka_tool(&[
+            "kafka-topics",
+            "--describe",
+            "--topic",
+            TOPIC,
+            "--bootstrap-server",
+            &bootstrap_1,
+        ]);
+        let s = String::from_utf8_lossy(&desc.stdout);
+        let has_isr_3 = s.contains("Isr: 1,2,3")
+            || s.contains("Isr: 1,3,2")
+            || s.contains("Isr: 2,1,3")
+            || s.contains("Isr: 2,3,1")
+            || s.contains("Isr: 3,1,2")
+            || s.contains("Isr: 3,2,1");
+        if has_isr_3 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() <= deadline,
+            "topic metadata not fully propagated within 2 min: {s}",
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+
+    // 3. Produce 100 records via kafka-console-producer.
+    let mut producer_child = Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "-i",
+            "--add-host=host.docker.internal:host-gateway",
+            KAFKA_IMAGE,
+            "kafka-console-producer",
+            "--bootstrap-server",
+            &bootstrap_1,
+            "--topic",
+            TOPIC,
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn JVM producer");
+    {
+        let stdin = producer_child.stdin.as_mut().expect("stdin");
+        for i in 0..100 {
+            writeln!(stdin, "msg-{i}").expect("write");
+        }
+    }
+    drop(producer_child.stdin.take());
+    let prod_out = producer_child.wait_with_output().expect("wait producer");
+    assert!(
+        prod_out.status.success(),
+        "producer failed: stdout={}, stderr={}",
+        String::from_utf8_lossy(&prod_out.stdout),
+        String::from_utf8_lossy(&prod_out.stderr),
+    );
+
+    // 4. Wait for replication lag to drain. `kafka-topics --describe`
+    //    doesn't expose `log_end_offset`, so we can't poll for
+    //    convergence directly; a 5-second sleep is the standard CI
+    //    tolerance after a 100-record produce burst.
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+    // 5. For each broker, dump the local partition file via
+    //    `kafka-dump-log`. The `-v <host>:/data:ro` mount makes the
+    //    broker's on-disk partition directory visible to the tool
+    //    container.
+    let mut dumps = Vec::with_capacity(3);
+    for (i, (_, dir)) in cluster.iter().enumerate() {
+        let partition_dir = dir.path().join(format!("{TOPIC}-0"));
+        let log_file = partition_dir.join("00000000000000000000.log");
+        assert!(
+            log_file.exists(),
+            "broker {} missing log file: {log_file:?}",
+            i + 1,
+        );
+        let mount = format!("{}:/data:ro", partition_dir.display());
+        let out = Command::new("docker")
+            .args([
+                "run",
+                "--rm",
+                "-v",
+                &mount,
+                KAFKA_IMAGE,
+                "kafka-dump-log",
+                "--files",
+                "/data/00000000000000000000.log",
+                "--print-data-log",
+            ])
+            .output()
+            .expect("spawn dump-log");
+        assert!(
+            out.status.success(),
+            "dump-log failed for broker {}: stdout={}, stderr={}",
+            i + 1,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
+        dumps.push(String::from_utf8_lossy(&out.stdout).to_string());
+    }
+
+    // 6. All three dumps should be byte-identical.
+    assert_eq!(dumps[0], dumps[1], "broker 1 vs broker 2 dump differ");
+    assert_eq!(dumps[1], dumps[2], "broker 2 vs broker 3 dump differ");
+
+    for (h, _) in cluster {
+        h.shutdown().await;
+    }
+}
