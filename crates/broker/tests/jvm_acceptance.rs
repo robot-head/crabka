@@ -660,8 +660,14 @@ async fn three_node_replication_byte_compare() {
         .with_test_writer()
         .try_init();
 
-    let client_ports = [9192u16, 9292, 9392];
-    let controller_ports = [9193u16, 9293, 9393];
+    // Distinct ports from slice-7's `three_node_jvm_round_trip` (which uses
+    // 9192/9292/9392 + 9193/9293/9393). Linux's TIME_WAIT keeps the prior
+    // test's sockets bound for ~60s after teardown; running this test
+    // back-to-back on the same ports causes `Broker::start` to either fail
+    // to bind or to inherit half-closed peer state, which surfaces as
+    // "no leader elected within 2 min" on the openraft side.
+    let client_ports = [9492u16, 9592, 9692];
+    let controller_ports = [9493u16, 9593, 9693];
 
     let voters: Vec<(u64, std::net::SocketAddr)> = (0..3)
         .map(|i| {

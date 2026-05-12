@@ -63,29 +63,41 @@ async fn topic_id_for(client: &Client, name: &str) -> crabka_protocol::primitive
 }
 
 async fn produce(client: &Client, topic: &str, values: &[&str]) {
+    // Retry on UNKNOWN_TOPIC_OR_PARTITION (3) up to 5 times: slice-7's
+    // openraft state-machine apply has occasionally-visible-late timing
+    // on slow CI runners (especially Windows), and producers immediately
+    // following CreateTopics can race the metadata propagation.
     let topic_id = topic_id_for(client, topic).await;
-    let resp = client
-        .send(ProduceRequest {
-            acks: 1,
-            timeout_ms: 5_000,
-            topic_data: vec![TopicProduceData {
-                name: topic.into(),
-                topic_id,
-                partition_data: vec![PartitionProduceData {
-                    index: 0,
-                    records: Some(record_batch_with_values(values)),
+    for attempt in 1..=5 {
+        let resp = client
+            .send(ProduceRequest {
+                acks: 1,
+                timeout_ms: 5_000,
+                topic_data: vec![TopicProduceData {
+                    name: topic.into(),
+                    topic_id,
+                    partition_data: vec![PartitionProduceData {
+                        index: 0,
+                        records: Some(record_batch_with_values(values)),
+                        ..Default::default()
+                    }],
                     ..Default::default()
                 }],
                 ..Default::default()
-            }],
-            ..Default::default()
-        })
-        .await
-        .expect("produce");
-    assert_eq!(
-        resp.responses[0].partition_responses[0].error_code, 0,
-        "produce failed: {resp:?}"
-    );
+            })
+            .await
+            .expect("produce");
+        let err = resp.responses[0].partition_responses[0].error_code;
+        if err == 0 {
+            return;
+        }
+        if err == 3 && attempt < 5 {
+            // UNKNOWN_TOPIC_OR_PARTITION — metadata-apply race; retry.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            continue;
+        }
+        panic!("produce failed after {attempt} attempt(s): {resp:?}");
+    }
 }
 
 async fn create_topic(client: &Client, name: &str) {
