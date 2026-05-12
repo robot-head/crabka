@@ -451,7 +451,12 @@ async fn three_node_jvm_round_trip() {
         })
         .collect();
 
-    let mut cluster = Vec::new();
+    // Spawn brokers concurrently so each one's leader-wait sees its peers
+    // come up. Sequential startup deadlocks: broker 1's `Broker::start`
+    // blocks waiting for a leader, but a 3-voter quorum can't elect one
+    // until brokers 2 and 3 are also up.
+    let mut tempdirs = Vec::with_capacity(3);
+    let mut spawns = Vec::with_capacity(3);
     for i in 0..3 {
         let dir = tempfile::tempdir().expect("tempdir");
         let cfg = BrokerConfig {
@@ -469,7 +474,14 @@ async fn three_node_jvm_round_trip() {
                 .expect("static addr"),
             controller_quorum_voters: voters.clone(),
         };
-        let handle = Broker::start(cfg).await.expect("broker start");
+        tempdirs.push(dir);
+        spawns.push(tokio::spawn(async move {
+            Broker::start(cfg).await.expect("broker start")
+        }));
+    }
+    let mut cluster = Vec::with_capacity(3);
+    for (spawn, dir) in spawns.into_iter().zip(tempdirs) {
+        let handle = spawn.await.expect("spawn");
         cluster.push((handle, dir));
     }
 

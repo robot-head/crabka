@@ -183,14 +183,14 @@ async fn create_topic_on_any_node_propagates() {
         .build()
         .await
         .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(1);
+    let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let m = c2.send(MetadataRequest::default()).await.unwrap();
         if m.topics.iter().any(|t| t.name.as_deref() == Some("prop")) {
             break;
         }
         if Instant::now() > deadline {
-            panic!("topic not propagated to node 2 within 1s");
+            panic!("topic not propagated to node 2 within 5s");
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }

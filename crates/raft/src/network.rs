@@ -286,6 +286,13 @@ fn decode_append_entries_resp(
         Ok(AppendEntriesResponse::HigherVote(Vote::new(
             resp_term, voter,
         )))
+    } else if req.prev_log_id.is_none() {
+        // openraft's `Conflict` variant assumes `prev_log_id.is_some()`
+        // — returning it for an empty-prev request trips the
+        // "prev_log_id=None never conflict" debug-assert on the leader
+        // (openraft 0.9.24 src/replication/mod.rs:486). An empty-prev
+        // AppendEntries cannot meaningfully conflict on log entries.
+        Ok(AppendEntriesResponse::Success)
     } else {
         Ok(AppendEntriesResponse::Conflict)
     }

@@ -219,15 +219,30 @@ async fn dispatch(api_key: i16, body: &[u8], raft: &Raft) -> Result<Bytes, RaftE
         API_KEY_APPEND_ENTRIES => {
             let mut cur = body;
             let req = CrabkaAppendEntriesRequest::decode_v0(&mut cur)?;
+            let req_term = req.term;
             let openraft_req = convert_append_entries(req);
             let res = raft
                 .append_entries(openraft_req)
                 .await
                 .map_err(|e| RaftError::Openraft(format!("{e:?}")))?;
+            // Map openraft's response variants onto the v0 wire shape so
+            // the leader's decoder can distinguish HigherVote (back off
+            // and rediscover) from Conflict (walk back prev_log_id) from
+            // Success. Returning a flat success=false with term=0 makes
+            // the leader interpret every failure as a Conflict, which
+            // panics openraft when prev_log_id was None.
+            let (success, term) = match &res {
+                openraft::raft::AppendEntriesResponse::Success
+                | openraft::raft::AppendEntriesResponse::PartialSuccess(_) => (true, 0i64),
+                openraft::raft::AppendEntriesResponse::HigherVote(v) => {
+                    (false, i64::try_from(v.leader_id.term).unwrap_or(i64::MAX))
+                }
+                openraft::raft::AppendEntriesResponse::Conflict => (false, req_term),
+            };
             let mut out = Vec::with_capacity(32);
             CrabkaAppendEntriesResponse {
-                success: matches!(res, openraft::raft::AppendEntriesResponse::Success),
-                term: 0,
+                success,
+                term,
                 last_log_index: 0,
             }
             .encode_v0(&mut out)?;
