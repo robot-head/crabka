@@ -3,6 +3,7 @@
 #![doc(html_root_url = "https://docs.rs/crabka-raft/0.0.0")]
 
 mod error;
+mod log_store;
 mod types;
 mod wire;
 
