@@ -34,6 +34,28 @@ fn supported_apis() -> Vec<ApiVersion> {
         v!(list_offsets_request),
         v!(metadata_request),
         v!(find_coordinator_request),
+        v!(join_group_request),
+        v!(sync_group_request),
+        v!(heartbeat_request),
+        v!(leave_group_request),
+        // OffsetCommit and OffsetFetch: MVP only handles the legacy
+        // single-group / name-keyed shape. v8+ (OffsetFetch) and v10+
+        // (OffsetCommit) switch to topic_id / per-group arrays which
+        // require a topic-id index this slice doesn't wire up. Cap the
+        // advertised max so clients negotiate down to a version we can
+        // serve cleanly.
+        ApiVersion {
+            api_key: owned::offset_commit_request::API_KEY,
+            min_version: owned::offset_commit_request::MIN_VERSION,
+            max_version: 9,
+            ..Default::default()
+        },
+        ApiVersion {
+            api_key: owned::offset_fetch_request::API_KEY,
+            min_version: owned::offset_fetch_request::MIN_VERSION,
+            max_version: 7,
+            ..Default::default()
+        },
         v!(create_topics_request),
         v!(delete_topics_request),
         v!(describe_configs_request),

@@ -54,6 +54,7 @@
 mod broker;
 mod codes;
 mod config;
+mod coordinator;
 mod error;
 mod handlers;
 mod log_dir;

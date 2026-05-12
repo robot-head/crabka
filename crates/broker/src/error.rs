@@ -49,6 +49,37 @@ pub enum BrokerError {
     /// The broker is shutting down and refuses new work.
     #[error("shutting down")]
     Shutdown,
+
+    /// A group-coordinator request arrived while the group is in a state
+    /// that doesn't allow it (e.g. heartbeat during `PreparingRebalance`).
+    #[error("group {group_id} is in state {state:?}, request not allowed")]
+    GroupInvalidState {
+        /// The affected group id.
+        group_id: String,
+        /// The current `GroupState` rendered via `Debug`.
+        state: String,
+    },
+
+    /// The client referenced a `member_id` the coordinator doesn't track
+    /// for this group.
+    #[error("unknown member {member_id} in group {group_id}")]
+    UnknownMember {
+        /// The affected group id.
+        group_id: String,
+        /// The unrecognized member id.
+        member_id: String,
+    },
+
+    /// The client sent a request bound to a stale generation.
+    #[error("group {group_id} generation mismatch: have {current}, got {requested}")]
+    GenerationMismatch {
+        /// The affected group id.
+        group_id: String,
+        /// The coordinator's current generation.
+        current: i32,
+        /// The generation the client supplied.
+        requested: i32,
+    },
 }
 
 #[cfg(test)]

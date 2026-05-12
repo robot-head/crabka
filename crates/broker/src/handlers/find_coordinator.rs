@@ -1,9 +1,7 @@
-//! `FindCoordinator` (`api_key=10`). MVP has no group/transaction
-//! coordinator runtime, so every lookup returns
-//! `COORDINATOR_NOT_AVAILABLE` (15). Both the legacy single-coordinator
-//! fields (v0-v3) and the `coordinators: Vec<Coordinator>` array (v4+)
-//! are populated so clients on either side of the version split see the
-//! same answer.
+//! `FindCoordinator` (`api_key=10`). Single-broker MVP: we are the
+//! coordinator for every key. Returns this broker's
+//! `(node_id, host, port)` in both the legacy single-coordinator fields
+//! (v0-v3) and the per-key `coordinators` array (v4+).
 
 use bytes::{Bytes, BytesMut};
 use futures_util::future::BoxFuture;
@@ -17,20 +15,25 @@ use crate::codes;
 use crate::error::BrokerError;
 
 pub(crate) fn handle(
-    _broker: &Broker,
+    broker: &Broker,
     version: i16,
     _correlation_id: i32,
     req_bytes: &[u8],
 ) -> BoxFuture<'static, Result<Bytes, BrokerError>> {
     let req_bytes = req_bytes.to_vec();
+    let broker_id = broker.config.broker_id;
+    let advertised = broker.config.advertised_listener.clone();
     Box::pin(async move {
         let mut cur: &[u8] = &req_bytes;
         let req = FindCoordinatorRequest::decode(&mut cur, version)?;
 
-        // For v4+, requests carry coordinator_keys. For v0-v3, the single
+        let (host, port) = parse_host_port(&advertised);
+        let port_i32 = i32::from(port);
+
+        // For v4+, requests carry `coordinator_keys`. For v0-v3 the single
         // `key` field is what the client cares about — populate the legacy
-        // top-level error fields and also emit a single Coordinator entry
-        // for that key so the encode path is uniform.
+        // top-level fields and also emit a single `Coordinator` entry for
+        // that key so the encode path is uniform.
         let keys: Vec<String> = if req.coordinator_keys.is_empty() {
             vec![req.key.clone()]
         } else {
@@ -41,10 +44,10 @@ pub(crate) fn handle(
             .into_iter()
             .map(|k| Coordinator {
                 key: k,
-                node_id: -1,
-                host: String::new(),
-                port: -1,
-                error_code: codes::COORDINATOR_NOT_AVAILABLE,
+                node_id: broker_id,
+                host: host.clone(),
+                port: port_i32,
+                error_code: codes::NONE,
                 error_message: None,
                 ..Default::default()
             })
@@ -52,11 +55,11 @@ pub(crate) fn handle(
 
         let resp = FindCoordinatorResponse {
             throttle_time_ms: 0,
-            error_code: codes::COORDINATOR_NOT_AVAILABLE,
+            error_code: codes::NONE,
             error_message: None,
-            node_id: -1,
-            host: String::new(),
-            port: -1,
+            node_id: broker_id,
+            host,
+            port: port_i32,
             coordinators,
             ..Default::default()
         };
@@ -64,4 +67,17 @@ pub(crate) fn handle(
         resp.encode(&mut buf, version)?;
         Ok(buf.freeze())
     })
+}
+
+fn parse_host_port(addr: &str) -> (String, u16) {
+    if let Some((h, p)) = addr.rsplit_once(':')
+        && let Ok(port) = p.parse::<u16>()
+    {
+        return (h.to_string(), port);
+    }
+    tracing::warn!(
+        addr,
+        "advertised_listener not host:port; falling back to localhost:9092"
+    );
+    ("localhost".into(), 9092)
 }

@@ -49,9 +49,15 @@ pub(crate) mod delete_topics;
 pub(crate) mod describe_configs;
 pub(crate) mod fetch;
 pub(crate) mod find_coordinator;
+pub(crate) mod heartbeat;
+pub(crate) mod join_group;
+pub(crate) mod leave_group;
 pub(crate) mod list_offsets;
 pub(crate) mod metadata;
+pub(crate) mod offset_commit;
+pub(crate) mod offset_fetch;
 pub(crate) mod produce;
+pub(crate) mod sync_group;
 
 /// Build the dispatch table. Phase E registers concrete handlers; for
 /// now this is an empty table so the dispatch loop can still look up.
@@ -62,7 +68,13 @@ pub(crate) fn build_table() -> HandlerTable {
     t.register(1, fetch::handle);
     t.register(2, list_offsets::handle);
     t.register(3, metadata::handle);
+    t.register(8, offset_commit::handle);
+    t.register(9, offset_fetch::handle);
     t.register(10, find_coordinator::handle);
+    t.register(11, join_group::handle);
+    t.register(12, heartbeat::handle);
+    t.register(13, leave_group::handle);
+    t.register(14, sync_group::handle);
     t.register(18, api_versions::handle);
     t.register(19, create_topics::handle);
     t.register(20, delete_topics::handle);

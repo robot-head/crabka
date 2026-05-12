@@ -1,0 +1,31 @@
+[package]
+name = "crabka-client-consumer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version = "1.95.0"
+description = "Subscribe-style consumer client for Apache Kafka in Rust"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+
+[dependencies]
+crabka-protocol = { version = "0.1", path = "../protocol", default-features = false }
+crabka-client-core = { version = "0.1", path = "../client-core" }
+bytes = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time", "macros"] }
+tracing = { workspace = true }
+tokio-util = { workspace = true, features = ["rt"] }
+futures-util = { workspace = true }
+
+[dev-dependencies]
+crabka-broker = { version = "0.1", path = "../broker" }
+crabka-log = { version = "0.1", path = "../log" }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util", "macros"] }
+proptest = { workspace = true }
