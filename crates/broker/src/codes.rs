@@ -52,7 +52,8 @@ pub fn from_broker_error(err: &crate::error::BrokerError) -> i16 {
         BrokerError::UnknownMember { .. } => UNKNOWN_MEMBER_ID,
         BrokerError::GenerationMismatch { .. } => ILLEGAL_GENERATION,
         BrokerError::ProducerEpochFenced { .. } => INVALID_PRODUCER_EPOCH,
-        BrokerError::Shutdown
+        BrokerError::Replication(_)
+        | BrokerError::Shutdown
         | BrokerError::Io(_)
         | BrokerError::Log(_)
         | BrokerError::Protocol(_)

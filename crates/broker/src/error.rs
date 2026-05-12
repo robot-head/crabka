@@ -97,6 +97,11 @@ pub enum BrokerError {
         /// The epoch the client supplied.
         requested: i16,
     },
+
+    /// A replication-layer failure (fetch from leader failed, truncation
+    /// error, etc.). Maps to `UNKNOWN_SERVER_ERROR` on the wire.
+    #[error("replication: {0}")]
+    Replication(String),
 }
 
 #[cfg(test)]
