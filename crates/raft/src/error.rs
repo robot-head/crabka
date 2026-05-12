@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-pub type NodeId = u64;
+use crate::types::NodeId;
 
 #[derive(Debug, Error)]
 #[non_exhaustive]
