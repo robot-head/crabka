@@ -87,6 +87,12 @@ pub struct Producer {
     pub(crate) flush_notify: Arc<Notify>,
     pub(crate) sender_shutdown: CancellationToken,
     pub(crate) sender_handle: Option<JoinHandle<()>>,
+    #[allow(dead_code)]
+    pub(crate) transactional_id: Option<String>,
+    #[allow(dead_code)]
+    pub(crate) transaction_timeout: Duration,
+    #[allow(dead_code)]
+    pub(crate) txn_state: Mutex<crate::transactional::TxnState>,
 }
 
 impl Producer {

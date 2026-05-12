@@ -39,6 +39,8 @@ impl Producer {
         #[builder(default = i32::MAX)] retries: i32,
         #[builder(default = Duration::from_millis(100))] retry_backoff: Duration,
         #[builder(default = 5)] max_in_flight_per_connection: usize,
+        #[builder(into)] transactional_id: Option<String>,
+        #[builder(default = std::time::Duration::new(60, 0))] transaction_timeout: Duration,
     ) -> Result<Self, ProducerError> {
         // Validate config: idempotence forces acks=All, and acks=Zero is
         // incompatible with idempotence.
@@ -124,6 +126,9 @@ impl Producer {
             flush_notify,
             sender_shutdown: shutdown,
             sender_handle: Some(sender_handle),
+            transactional_id,
+            transaction_timeout,
+            txn_state: Mutex::new(crate::transactional::TxnState::Uninitialized),
         })
     }
 }
