@@ -62,6 +62,7 @@ mod metadata;
 mod network;
 mod partition;
 mod partition_writer;
+mod producer_id_manager;
 
 pub use broker::{Broker, BrokerHandle};
 pub use config::BrokerConfig;
