@@ -50,5 +50,9 @@ clap = { version = "4", features = ["derive"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 bon = "3"
-bincode = { version = "3", features = ["serde"] }
+# Pinned to 2.x: bincode 3.0 dropped the in-crate `serde` feature in favor
+# of a separate `bincode_serde` crate, breaking our `bincode::serde::*`
+# call sites. RUSTSEC-2025-0141 (bincode v2 unmaintained) is ignored in
+# `deny.toml` until a future slice migrates to the new API.
+bincode = { version = "2", features = ["serde"] }
 async-trait = "0.1"
