@@ -5,6 +5,7 @@ use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopics
 use crabka_protocol::owned::delete_topics_request::{DeleteTopicState, DeleteTopicsRequest};
 use crabka_protocol::owned::fetch_request::{FetchPartition, FetchRequest, FetchTopic};
 use crabka_protocol::owned::find_coordinator_request::FindCoordinatorRequest;
+use crabka_protocol::owned::init_producer_id_request::InitProducerIdRequest;
 use crabka_protocol::owned::list_offsets_request::{
     ListOffsetsPartition, ListOffsetsRequest, ListOffsetsTopic,
 };
@@ -592,5 +593,34 @@ async fn full_group_flow_join_sync_heartbeat_commit_fetch_leave() {
         .unwrap();
     assert_eq!(r7.error_code, 0);
 
+    p.broker.shutdown().await;
+}
+
+#[tokio::test]
+async fn init_producer_id_returns_fresh_pid() {
+    let p = support::start().await;
+    let r = p
+        .client
+        .send(InitProducerIdRequest::default())
+        .await
+        .expect("InitProducerId");
+    assert_eq!(r.error_code, 0);
+    assert!(r.producer_id >= 1000);
+    assert_eq!(r.producer_epoch, 0);
+    p.broker.shutdown().await;
+}
+
+#[tokio::test]
+async fn init_producer_id_rejects_transactional() {
+    let p = support::start().await;
+    let r = p
+        .client
+        .send(InitProducerIdRequest {
+            transactional_id: Some("tx-1".into()),
+            ..Default::default()
+        })
+        .await
+        .expect("InitProducerId");
+    assert_eq!(r.error_code, 67); // TRANSACTIONAL_ID_AUTHORIZATION_FAILED
     p.broker.shutdown().await;
 }

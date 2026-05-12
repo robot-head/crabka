@@ -50,6 +50,7 @@ pub(crate) mod describe_configs;
 pub(crate) mod fetch;
 pub(crate) mod find_coordinator;
 pub(crate) mod heartbeat;
+pub(crate) mod init_producer_id;
 pub(crate) mod join_group;
 pub(crate) mod leave_group;
 pub(crate) mod list_offsets;
@@ -78,6 +79,7 @@ pub(crate) fn build_table() -> HandlerTable {
     t.register(18, api_versions::handle);
     t.register(19, create_topics::handle);
     t.register(20, delete_topics::handle);
+    t.register(22, init_producer_id::handle);
     t.register(32, describe_configs::handle);
     t
 }

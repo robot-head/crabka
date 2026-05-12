@@ -185,6 +185,7 @@ fn handler_body_flexible(api_key: i16, version: i16) -> bool {
         18 => version >= owned::api_versions_request::FLEXIBLE_MIN,
         19 => version >= owned::create_topics_request::FLEXIBLE_MIN,
         20 => version >= owned::delete_topics_request::FLEXIBLE_MIN,
+        22 => version >= owned::init_producer_id_request::FLEXIBLE_MIN,
         32 => version >= owned::describe_configs_request::FLEXIBLE_MIN,
         _ => false,
     }
