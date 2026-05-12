@@ -19,7 +19,8 @@ use crabka_protocol::owned::sync_group_request::{SyncGroupRequest, SyncGroupRequ
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 
 use crate::builder::{
-    AutoOffsetReset, decode_assignment, decode_subscription, encode_assignment, encode_subscription,
+    AutoOffsetReset, IsolationLevel, decode_assignment, decode_subscription, encode_assignment,
+    encode_subscription,
 };
 use crate::error::ConsumerError;
 use crate::heartbeat::RebalanceNotice;
@@ -46,6 +47,8 @@ pub struct Consumer {
     pub(crate) rebalance_rx: Mutex<mpsc::Receiver<RebalanceNotice>>,
     pub(crate) heartbeat_shutdown: CancellationToken,
     pub(crate) heartbeat_handle: Option<JoinHandle<()>>,
+    /// Controls which records are returned by `poll`.
+    pub(crate) isolation_level: IsolationLevel,
 }
 
 /// One record returned by `Consumer::poll`.
@@ -78,6 +81,7 @@ impl Consumer {
         heartbeat_interval: std::time::Duration,
         #[builder(into)] subscribe: Vec<String>,
         #[builder(default = AutoOffsetReset::Latest)] auto_offset_reset: AutoOffsetReset,
+        #[builder(default = IsolationLevel::ReadUncommitted)] isolation_level: IsolationLevel,
     ) -> Result<Self, ConsumerError> {
         if subscribe.is_empty() {
             return Err(ConsumerError::NotSubscribed);
@@ -262,6 +266,7 @@ impl Consumer {
             rebalance_rx: Mutex::new(notice_rx),
             heartbeat_shutdown: shutdown,
             heartbeat_handle: Some(hb_handle),
+            isolation_level,
         })
     }
 }

@@ -76,6 +76,7 @@ impl Consumer {
                 max_wait_ms: timeout_ms,
                 min_bytes: 1,
                 max_bytes: 50 * 1024 * 1024,
+                isolation_level: self.isolation_level.wire(),
                 topics,
                 ..Default::default()
             })

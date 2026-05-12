@@ -40,7 +40,7 @@
 //!   directly.
 //! - Admin RPCs (`DescribeGroups`, `ListGroups`) — slice 10.
 //! - KIP-848 / cooperative-sticky rebalance — slice 5b.
-//! - Transactional consumers (`isolation.level=read_committed`) — slice 9.
+//! - Full EOS transactional consumer guarantees — slice 9 integration tests.
 //!
 //! ## Cargo features
 //!
@@ -56,6 +56,6 @@ mod error;
 mod heartbeat;
 mod poll;
 
-pub use builder::AutoOffsetReset;
+pub use builder::{AutoOffsetReset, IsolationLevel};
 pub use consumer::{Consumer, ConsumerRecord};
 pub use error::ConsumerError;
