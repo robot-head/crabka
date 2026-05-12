@@ -145,6 +145,12 @@ impl Segment {
         self.base_offset
     }
 
+    /// Path to this segment's `.txnindex` file (may not exist yet).
+    #[must_use]
+    pub fn txn_index_path(&self) -> std::path::PathBuf {
+        crate::name::txnindex_path(&self.dir, self.base_offset)
+    }
+
     /// Highest absolute offset (inclusive) of any batch appended to this
     /// segment. Returns `base_offset - 1` for an empty segment.
     #[must_use]

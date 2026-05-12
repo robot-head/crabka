@@ -1,5 +1,6 @@
 //! `Log` — a sorted collection of `Segment`s with append/read/truncate.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -12,6 +13,7 @@ use crate::error::LogError;
 use crate::name;
 use crate::retention;
 use crate::segment::Segment;
+use crate::txn_index::{AbortedTxn, TxnIndex};
 
 /// A Kafka-format log: a sorted collection of [`Segment`]s plus a single
 /// active segment that accepts appends.
@@ -35,6 +37,19 @@ pub struct Log {
     /// deleting segments. Real retention is a future slice.
     #[cfg(any(test, feature = "test-helpers"))]
     log_start_override: Option<i64>,
+
+    /// Last-Stable-Offset: the offset before the first record of any
+    /// in-flight transaction. Defaults to `log_end_offset()` when no
+    /// transactions are in flight.
+    lso: i64,
+
+    /// In-flight transactions: `producer_id` → first offset of this
+    /// producer's currently-open txn. Cleared when a commit/abort
+    /// marker for that `producer_id` is applied.
+    pending: HashMap<i64, i64>,
+
+    /// Active segment's `TxnIndex`. Reopened on segment roll.
+    active_txn_index: TxnIndex,
 }
 
 /// Result of [`Log::read`]: the absolute offset of the first batch
@@ -91,6 +106,10 @@ impl Log {
             None => Segment::create(&dir, 0)?,
         };
 
+        let active_txn_index = TxnIndex::open(active.txn_index_path())?;
+        // LSO starts at log_end_offset(); computed before moving `active`.
+        let lso = active.last_offset() + 1;
+
         Ok(Self {
             dir,
             config,
@@ -98,6 +117,9 @@ impl Log {
             active: Some(active),
             #[cfg(any(test, feature = "test-helpers"))]
             log_start_override: None,
+            lso,
+            pending: HashMap::new(),
+            active_txn_index,
         })
     }
 
@@ -194,6 +216,15 @@ impl Log {
         0
     }
 
+    /// Last-Stable-Offset: the highest offset that consumers in
+    /// `read_committed` isolation may see. Advances only when no
+    /// transactions are in flight; held back at the first offset of any
+    /// open (uncommitted/unaborted) transactional batch.
+    #[must_use]
+    pub fn lso(&self) -> i64 {
+        self.lso
+    }
+
     /// Close all segments. Drop runs automatically when `self` moves;
     /// this method just names the operation explicitly.
     pub fn close(self) {
@@ -238,6 +269,7 @@ impl Log {
     /// Performs segment-roll-if-needed, appends to the active segment, and
     /// honors `config.flush_on_append` — but does NOT reassign
     /// `batch.base_offset`. Callers are responsible for setting it first.
+    /// Also updates LSO and the active `.txnindex` based on batch attributes.
     fn append_preserving_offset(&mut self, batch: &mut RecordBatch) -> Result<(), LogError> {
         let should_roll = match &self.active {
             Some(seg) => seg.size_bytes() >= self.config.segment_bytes,
@@ -256,6 +288,42 @@ impl Log {
         if self.config.flush_on_append {
             active.flush()?;
         }
+
+        // --- LSO tracking + .txnindex writes ---
+        let pid = batch.producer_id;
+        if batch.attributes.is_control_batch() {
+            // Parse the inner control record: key = (version: i16, type: i16) BE.
+            // type=0 → ABORT; type=1 → COMMIT.
+            let marker_type = batch
+                .records
+                .first()
+                .and_then(|r| r.key.as_deref())
+                .and_then(parse_control_marker_type);
+            if let Some(start) = self.pending.remove(&pid) {
+                let last = batch.base_offset + i64::from(batch.last_offset_delta);
+                if marker_type == Some(0) /* ABORT */ {
+                    self.active_txn_index.append(AbortedTxn {
+                        start_offset: start,
+                        last_offset: last,
+                        producer_id: pid,
+                    })?;
+                }
+            }
+            // LSO can advance only when no pending txns remain.
+            if self.pending.is_empty() {
+                self.lso = self.log_end_offset();
+            }
+        } else if batch.attributes.is_transactional() && pid >= 0 {
+            // Record the first offset of this txn on this partition.
+            self.pending.entry(pid).or_insert(batch.base_offset);
+            // LSO stays where it is until commit/abort.
+        } else {
+            // Non-transactional batch. LSO advances only when no in-flight txns.
+            if self.pending.is_empty() {
+                self.lso = self.log_end_offset();
+            }
+        }
+
         Ok(())
     }
 
@@ -267,7 +335,9 @@ impl Log {
             .expect("active segment must exist before rolling");
         old.seal();
         self.segments.push(Arc::new(old));
-        self.active = Some(Segment::create(&self.dir, new_base)?);
+        let new_seg = Segment::create(&self.dir, new_base)?;
+        self.active_txn_index = TxnIndex::open(new_seg.txn_index_path())?;
+        self.active = Some(new_seg);
         Ok(())
     }
 
@@ -425,11 +495,23 @@ impl Log {
     }
 }
 
+/// Parse the control-marker type from the key of the first record in a
+/// control batch. The key encodes `(version: i16, type: i16)` in
+/// big-endian. Returns `Some(0)` for ABORT and `Some(1)` for COMMIT.
+/// Returns `None` if the key is shorter than 4 bytes.
+fn parse_control_marker_type(key: &[u8]) -> Option<i16> {
+    if key.len() < 4 {
+        return None;
+    }
+    let _version = i16::from_be_bytes([key[0], key[1]]);
+    Some(i16::from_be_bytes([key[2], key[3]]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use crabka_protocol::records::Record;
+    use crabka_protocol::records::{Attributes, Record};
     use tempfile::tempdir;
 
     fn sample_batch(n: i32) -> RecordBatch {
@@ -650,5 +732,118 @@ mod tests {
             "expected segment roll; got {} .log files",
             log_files.len()
         );
+    }
+
+    // ---- helpers for transactional tests ----
+
+    /// A transactional (non-control) batch with `n` records and given pid/epoch.
+    fn transactional_batch(_n: i32, pid: i64, epoch: i16, values: &[&str]) -> RecordBatch {
+        let last_offset_delta = i32::try_from(values.len()).unwrap() - 1;
+        let mut records = Vec::new();
+        for (i, v) in values.iter().enumerate() {
+            records.push(Record {
+                offset_delta: i32::try_from(i).unwrap(),
+                value: Some(Bytes::from(v.to_string())),
+                ..Default::default()
+            });
+        }
+        RecordBatch {
+            base_offset: 0, // overwritten by Log::append
+            last_offset_delta,
+            producer_id: pid,
+            producer_epoch: epoch,
+            attributes: Attributes::default().with_transactional(true),
+            records,
+            ..RecordBatch::default()
+        }
+    }
+
+    /// Build a 4-byte control-marker key: (version=0: i16, `marker_type`: i16) BE.
+    fn control_key(marker_type: i16) -> Bytes {
+        let mut buf = [0u8; 4];
+        buf[0..2].copy_from_slice(&0i16.to_be_bytes()); // version = 0
+        buf[2..4].copy_from_slice(&marker_type.to_be_bytes());
+        Bytes::from(buf.to_vec())
+    }
+
+    /// A commit control batch (`marker_type=1`) for the given pid/epoch.
+    /// `base_offset` and `last_offset_delta` reflect the span of the txn.
+    fn commit_marker(pid: i64, epoch: i16, txn_base: i64, txn_last: i64) -> RecordBatch {
+        let _ = txn_base;
+        let _ = txn_last;
+        RecordBatch {
+            base_offset: 0,
+            last_offset_delta: 0,
+            producer_id: pid,
+            producer_epoch: epoch,
+            attributes: Attributes::default()
+                .with_transactional(true)
+                .with_control(true),
+            records: vec![Record {
+                offset_delta: 0,
+                key: Some(control_key(1 /* COMMIT */)),
+                ..Default::default()
+            }],
+            ..RecordBatch::default()
+        }
+    }
+
+    /// An abort control batch (`marker_type=0`) for the given pid/epoch.
+    fn abort_marker(pid: i64, epoch: i16, txn_base: i64, txn_last: i64) -> RecordBatch {
+        let _ = txn_base;
+        let _ = txn_last;
+        RecordBatch {
+            base_offset: 0,
+            last_offset_delta: 0,
+            producer_id: pid,
+            producer_epoch: epoch,
+            attributes: Attributes::default()
+                .with_transactional(true)
+                .with_control(true),
+            records: vec![Record {
+                offset_delta: 0,
+                key: Some(control_key(0 /* ABORT */)),
+                ..Default::default()
+            }],
+            ..RecordBatch::default()
+        }
+    }
+
+    // ---- transactional LSO / txnindex tests ----
+
+    #[test]
+    fn transactional_batch_holds_lso() {
+        let dir = tempdir().unwrap();
+        let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
+        // First, a non-txn batch — LSO advances past it.
+        let mut b0 = sample_batch(1);
+        log.append(&mut b0).unwrap();
+        assert_eq!(log.lso(), log.log_end_offset());
+
+        // Now an in-flight txn batch — LSO stays.
+        let mut b1 = transactional_batch(2, 1000, 0, &["a", "b"]); // pid=1000 epoch=0
+        let old_lso = log.lso();
+        log.append(&mut b1).unwrap();
+        assert_eq!(log.lso(), old_lso, "LSO must not advance while txn in flight");
+
+        // Commit marker — LSO catches up.
+        let mut commit = commit_marker(1000, 0, b1.base_offset, b1.base_offset + 1);
+        log.append(&mut commit).unwrap();
+        assert_eq!(log.lso(), log.log_end_offset());
+    }
+
+    #[test]
+    fn abort_marker_writes_txnindex_entry() {
+        let dir = tempdir().unwrap();
+        let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
+        let mut t = transactional_batch(3, 1000, 0, &["a", "b", "c"]);
+        log.append(&mut t).unwrap();
+
+        let mut a = abort_marker(1000, 0, t.base_offset, t.base_offset + 2);
+        log.append(&mut a).unwrap();
+
+        let idx = TxnIndex::open(dir.path().join("00000000000000000000.txnindex")).unwrap();
+        assert_eq!(idx.entries().len(), 1);
+        assert_eq!(idx.entries()[0].producer_id, 1000);
     }
 }
