@@ -84,9 +84,21 @@ pub(crate) fn handle(
 
             // Read the current broker set from the controller's image; sort by
             // node_id for determinism.
+            //
+            // Race-tolerance: on a freshly-started cluster, the self-registration
+            // V1BrokerRegistration record may not have made it into the local
+            // MetadataImage yet when this handler runs (the controller's apply is
+            // mostly synchronous on the leader but observable timing has slipped
+            // on slow runners). If `brokers()` is empty, fall back to "this broker
+            // is the only known broker" so the single-broker case (which is by
+            // far the most common) doesn't silently degrade to
+            // INVALID_REPLICATION_FACTOR.
             let image = controller.current_image();
             let mut sorted_brokers: Vec<crabka_raft::NodeId> =
                 image.brokers().map(|b| b.node_id).collect();
+            if sorted_brokers.is_empty() {
+                sorted_brokers.push(node_id);
+            }
             sorted_brokers.sort_unstable();
 
             let assignments =
