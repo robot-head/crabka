@@ -29,11 +29,11 @@ pub enum RaftError {
     #[error("change rejected: {0}")]
     ChangeRejected(String),
 
-    #[error("bincode encode: {0}")]
-    SerdeFailed(#[from] bincode::error::EncodeError),
+    #[error("serialization: {0}")]
+    SerdeFailed(#[from] wincode::error::WriteError),
 
-    #[error("bincode decode: {0}")]
-    SerdeFailedDecode(#[from] bincode::error::DecodeError),
+    #[error("deserialization: {0}")]
+    SerdeFailedDecode(#[from] wincode::error::ReadError),
 
     #[error("controller shut down")]
     Shutdown,

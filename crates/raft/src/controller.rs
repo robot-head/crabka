@@ -172,8 +172,10 @@ impl ControllerHandle {
         use bytes::{BufMut, BytesMut};
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-        let body_bytes = bincode::serde::encode_to_vec(records, bincode::config::standard())
-            .map_err(crate::error::RaftError::from)?;
+        let body_bytes = <serde_wincode::SerdeCompat<Vec<crabka_metadata::MetadataRecord>> as wincode::Serialize>::serialize(
+            &records.to_vec(),
+        )
+        .map_err(crate::error::RaftError::from)?;
         let payload = crate::wire::CrabkaSubmitChangeRequest {
             records: bytes::Bytes::from(body_bytes),
         };

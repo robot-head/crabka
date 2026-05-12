@@ -18,11 +18,12 @@ use std::ops::RangeBounds;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use bincode::config::standard;
 use bytes::Bytes;
 use openraft::storage::{LogFlushed, LogState, RaftLogReader, RaftLogStorage};
 use openraft::{AnyError, Entry, LogId, StorageError, StorageIOError, Vote};
+use serde_wincode::SerdeCompat;
 use tokio::sync::Mutex;
+use wincode::{Deserialize as _, Serialize as _};
 
 use crabka_log::{Log, LogConfig};
 use crabka_protocol::records::{Record, RecordBatch};
@@ -71,8 +72,8 @@ impl RaftLogStore {
                     let Some(value) = rec.value.as_ref() else {
                         continue;
                     };
-                    let (entry, _): (Entry<TypeConfig>, _) =
-                        bincode::serde::decode_from_slice(value, standard())?;
+                    let entry: Entry<TypeConfig> =
+                        <SerdeCompat<Entry<TypeConfig>>>::deserialize(value)?;
                     cache.entries.insert(entry.log_id.index, entry);
                 }
                 offset = batch.base_offset + i64::from(batch.last_offset_delta) + 1;
@@ -111,8 +112,8 @@ impl RaftLogStore {
         let mut log = self.log.lock().await;
         for entry in entries {
             // Serialize entry into a RecordBatch with a single Record whose
-            // value carries the bincode payload. base_offset = entry.log_id.index.
-            let payload = bincode::serde::encode_to_vec(&entry, standard())?;
+            // value carries the wincode payload. base_offset = entry.log_id.index.
+            let payload = <SerdeCompat<Entry<TypeConfig>>>::serialize(&entry)?;
             let mut batch = RecordBatch {
                 base_offset: i64::try_from(entry.log_id.index).unwrap_or(i64::MAX),
                 last_offset_delta: 0,
@@ -138,7 +139,7 @@ impl RaftLogStore {
     }
 
     pub(crate) async fn save_vote(&self, vote: &Vote<NodeId>) -> Result<(), RaftError> {
-        let bytes = bincode::serde::encode_to_vec(vote, standard())?;
+        let bytes = <SerdeCompat<Vote<NodeId>>>::serialize(vote)?;
         tokio::fs::write(&self.vote_path, &bytes)
             .await
             .map_err(crabka_log::LogError::Io)?;
@@ -148,7 +149,7 @@ impl RaftLogStore {
     pub(crate) async fn read_vote(&self) -> Result<Option<Vote<NodeId>>, RaftError> {
         match tokio::fs::read(&self.vote_path).await {
             Ok(bytes) => {
-                let (v, _) = bincode::serde::decode_from_slice(&bytes, standard())?;
+                let v: Vote<NodeId> = <SerdeCompat<Vote<NodeId>>>::deserialize(&bytes)?;
                 Ok(Some(v))
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
