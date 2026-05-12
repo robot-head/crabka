@@ -846,3 +846,159 @@ async fn three_node_replication_byte_compare() {
         h.shutdown().await;
     }
 }
+
+// Transactional EOS smoke: stand up a 3-broker Crabka cluster, run the JVM
+// `kafka-verifiable-producer` with `--transactional-id eos-tid` to send 6
+// committed records, then verify `kafka-console-consumer --isolation-level
+// read_committed` sees at least 6 records.
+//
+// Fixed ports 9792/9892/9992 + 9793/9893/9993 (offset 300 from slice-8's
+// replication test which uses 9492/9592/9692) to dodge TIME_WAIT collisions
+// when running all JVM tests in sequence.
+//
+// Same multi-thread runtime caveat as the other multi-broker tests.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires Docker"]
+#[allow(clippy::too_many_lines)]
+async fn transactional_console_producer_eos() {
+    const TOPIC: &str = "crabka-txn-itest";
+
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("crabka_broker=debug,info")),
+        )
+        .with_test_writer()
+        .try_init();
+
+    let client_ports = [9792u16, 9892, 9992];
+    let controller_ports = [9793u16, 9893, 9993];
+
+    let voters: Vec<(u64, std::net::SocketAddr)> = (0..3)
+        .map(|i| {
+            (
+                u64::try_from(i + 1).unwrap(),
+                format!("127.0.0.1:{}", controller_ports[i])
+                    .parse()
+                    .unwrap(),
+            )
+        })
+        .collect();
+
+    // Parallel spawn — sequential startup deadlocks waiting for quorum.
+    let mut tempdirs = Vec::with_capacity(3);
+    let mut spawns = Vec::with_capacity(3);
+    for i in 0..3 {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg = BrokerConfig {
+            broker_id: i32::try_from(i + 1).unwrap(),
+            listen_addr: format!("0.0.0.0:{}", client_ports[i])
+                .parse()
+                .expect("static addr"),
+            advertised_listener: format!("host.docker.internal:{}", client_ports[i]),
+            log_dir: dir.path().to_path_buf(),
+            log_config: LogConfig::default(),
+            node_id: u64::try_from(i + 1).unwrap(),
+            controller_listen_addr: format!("0.0.0.0:{}", controller_ports[i])
+                .parse()
+                .expect("static addr"),
+            controller_quorum_voters: voters.clone(),
+        };
+        tempdirs.push(dir);
+        spawns.push(tokio::spawn(async move {
+            Broker::start(cfg).await.expect("broker start")
+        }));
+    }
+    let mut cluster = Vec::with_capacity(3);
+    for (sp, dir) in spawns.into_iter().zip(tempdirs) {
+        cluster.push((sp.await.expect("spawn"), dir));
+    }
+
+    let bootstrap_1 = format!("host.docker.internal:{}", client_ports[0]);
+    let bootstrap_3 = format!("host.docker.internal:{}", client_ports[2]);
+
+    // 1. Create the topic via node 1.
+    docker_run_kafka_tool(&[
+        "kafka-topics",
+        "--create",
+        "--if-not-exists",
+        "--topic",
+        TOPIC,
+        "--partitions",
+        "1",
+        "--replication-factor",
+        "1",
+        "--bootstrap-server",
+        &bootstrap_1,
+    ]);
+
+    // 2. Produce 6 records transactionally.
+    //    `kafka-verifiable-producer` ships in cp-kafka 6.1.1 and supports
+    //    `--transactional-id` / `--transaction-duration-ms` (added in Apache
+    //    Kafka 0.11). It commits a new transaction at each duration interval.
+    let producer_out = std::process::Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "--add-host=host.docker.internal:host-gateway",
+            KAFKA_IMAGE,
+            "kafka-verifiable-producer",
+            "--bootstrap-server",
+            &bootstrap_1,
+            "--topic",
+            TOPIC,
+            "--max-messages",
+            "6",
+            "--transactional-id",
+            "eos-tid",
+            "--transaction-duration-ms",
+            "200",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .expect("spawn verifiable-producer");
+    eprintln!(
+        "CRABKA[test] verifiable-producer status={} stdout={} stderr={}",
+        producer_out.status,
+        String::from_utf8_lossy(&producer_out.stdout),
+        String::from_utf8_lossy(&producer_out.stderr),
+    );
+    assert!(
+        producer_out.status.success(),
+        "kafka-verifiable-producer failed: stdout={}, stderr={}",
+        String::from_utf8_lossy(&producer_out.stdout),
+        String::from_utf8_lossy(&producer_out.stderr),
+    );
+
+    // 3. Brief pause to let commit markers propagate through the log.
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+    // 4. Consume with `read_committed` via node 3. The consumer must see at
+    //    least 6 committed records. Aborted records (if any) are filtered out
+    //    by the broker's LSO + per-segment `.txnindex`.
+    let consume_out = docker_run_kafka_tool(&[
+        "kafka-console-consumer",
+        "--bootstrap-server",
+        &bootstrap_3,
+        "--topic",
+        TOPIC,
+        "--isolation-level",
+        "read_committed",
+        "--from-beginning",
+        "--max-messages",
+        "6",
+        "--timeout-ms",
+        "20000",
+    ]);
+    let s = String::from_utf8_lossy(&consume_out.stdout);
+    let line_count = s.lines().filter(|l| !l.trim().is_empty()).count();
+    assert!(
+        line_count >= 6,
+        "read_committed should see at least 6 committed records, got {line_count}: {s}",
+    );
+
+    for (h, _) in cluster {
+        h.shutdown().await;
+    }
+}
