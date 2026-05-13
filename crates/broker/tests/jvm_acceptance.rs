@@ -71,6 +71,9 @@ async fn start_host_broker() -> (crabka_broker::BrokerHandle, tempfile::TempDir)
         node_id: 1,
         controller_listen_addr: controller_addr,
         controller_quorum_voters: vec![(1, controller_addr)],
+        heartbeat_interval_ms: 3_000,
+        heartbeat_timeout_ms: 9_000,
+        replica_lag_time_max_ms: 30_000,
     };
     let handle = Broker::start(config).await.expect("start broker");
     eprintln!("CRABKA[test] broker started listen={LISTEN} advertised={BOOTSTRAP}");
@@ -483,6 +486,9 @@ async fn three_node_jvm_round_trip() {
                 .parse()
                 .expect("static addr"),
             controller_quorum_voters: voters.clone(),
+            heartbeat_interval_ms: 3_000,
+            heartbeat_timeout_ms: 9_000,
+            replica_lag_time_max_ms: 30_000,
         };
         tempdirs.push(dir);
         spawns.push(tokio::spawn(async move {
@@ -710,6 +716,9 @@ async fn three_node_replication_byte_compare() {
                 .parse()
                 .expect("static addr"),
             controller_quorum_voters: voters.clone(),
+            heartbeat_interval_ms: 3_000,
+            heartbeat_timeout_ms: 9_000,
+            replica_lag_time_max_ms: 30_000,
         };
         tempdirs.push(dir);
         spawns.push(tokio::spawn(async move {
@@ -928,6 +937,9 @@ async fn transactional_console_producer_eos() {
                 .parse()
                 .expect("static addr"),
             controller_quorum_voters: voters.clone(),
+            heartbeat_interval_ms: 3_000,
+            heartbeat_timeout_ms: 9_000,
+            replica_lag_time_max_ms: 30_000,
         };
         tempdirs.push(dir);
         spawns.push(tokio::spawn(async move {
@@ -1081,6 +1093,9 @@ async fn acks_all_durability() {
             node_id: u64::try_from(i + 1).unwrap(),
             controller_listen_addr: format!("0.0.0.0:{}", controller_ports[i]).parse().unwrap(),
             controller_quorum_voters: voters.clone(),
+            heartbeat_interval_ms: 3_000,
+            heartbeat_timeout_ms: 9_000,
+            replica_lag_time_max_ms: 30_000,
         };
         tempdirs.push(dir);
         spawns.push(tokio::spawn(async move {
