@@ -282,16 +282,22 @@ impl Partition {
     }
 
     /// Apply a leader change observed via the metadata image. Updates
-    /// the cached `current_leader` + `current_leader_epoch`, clears
-    /// per-follower stats (stale under the new leader's view), and
-    /// fires `hw_advance_notify` so any waiting `acks=-1` Produce
-    /// gates can re-check.
+    /// the cached `current_leader` + `current_leader_epoch`. If the
+    /// leader or epoch actually changed, clears per-follower stats
+    /// (stale under the new leader's view). On idempotent re-installs
+    /// (same leader + epoch) per-follower progress is preserved — the
+    /// supervisor calls this on every reconcile and unconditional
+    /// clearing would reset follower LEOs each time, dropping HW back
+    /// to 0 and blocking acks=-1 producers until followers re-fetch.
+    /// Fires `hw_advance_notify` so waiting Produce gates can re-check.
     pub async fn install_leader_change(&self, new_leader: u64, new_epoch: i32) {
-        self.current_leader.store(new_leader, Ordering::Release);
-        self.current_leader_epoch
-            .store(new_epoch, Ordering::Release);
+        let prev_leader = self.current_leader.swap(new_leader, Ordering::AcqRel);
+        let prev_epoch = self.current_leader_epoch.swap(new_epoch, Ordering::AcqRel);
+        let leader_changed = prev_leader != new_leader || prev_epoch != new_epoch;
         let mut st = self.replica_state.lock().await;
-        st.per_follower.clear();
+        if leader_changed {
+            st.per_follower.clear();
+        }
         st.current_leader_epoch = new_epoch;
         drop(st);
         self.hw_advance_notify.notify_waiters();
