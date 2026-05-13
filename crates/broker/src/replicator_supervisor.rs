@@ -299,6 +299,7 @@ mod tests {
                 leader: 1,
                 replicas: vec![1, 2, 3],
                 isr: vec![1, 2, 3],
+                leader_epoch: 0,
             }),
         ]);
         let d = desired_follower_set(2, &img);
@@ -321,6 +322,7 @@ mod tests {
                 leader: 1,
                 replicas: vec![1, 2, 3],
                 isr: vec![1, 2, 3],
+                leader_epoch: 0,
             }),
         ]);
         assert!(desired_follower_set(1, &img).is_empty());
@@ -341,6 +343,7 @@ mod tests {
                 leader: 1,
                 replicas: vec![1, 2, 3],
                 isr: vec![1, 2, 3],
+                leader_epoch: 0,
             }),
         ]);
         assert!(desired_follower_set(99, &img).is_empty());
@@ -381,6 +384,7 @@ mod tests {
                 leader: 1,
                 replicas: vec![1, 2, 3],
                 isr: vec![1, 2, 3],
+                leader_epoch: 0,
             }),
             MetadataRecord::V1Topic(TopicRecord {
                 name: "b".into(),
@@ -394,6 +398,7 @@ mod tests {
                 leader: 3,
                 replicas: vec![1, 2, 3],
                 isr: vec![1, 2, 3],
+                leader_epoch: 0,
             }),
             MetadataRecord::V1Partition(PartitionRecord {
                 topic: "b".into(),
@@ -401,6 +406,7 @@ mod tests {
                 leader: 2,
                 replicas: vec![1, 2, 3],
                 isr: vec![1, 2, 3],
+                leader_epoch: 0,
             }),
         ]);
         let d = desired_follower_set(2, &img);

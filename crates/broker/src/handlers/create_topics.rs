@@ -134,6 +134,7 @@ pub(crate) fn handle(
                     leader: replicas[0],
                     replicas: replicas.clone(),
                     isr: replicas.clone(),
+                    leader_epoch: 0,
                 }));
             }
 

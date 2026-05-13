@@ -22,6 +22,9 @@ pub struct PartitionRecord {
     pub leader: NodeId,
     pub replicas: Vec<NodeId>,
     pub isr: Vec<NodeId>,
+    /// Per-partition leader epoch. Bumped on every leader change.
+    /// Slice-10b adds this; older on-disk metadata is not migrated.
+    pub leader_epoch: i32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,6 +79,7 @@ mod tests {
             leader: 1,
             replicas: vec![1, 2, 3],
             isr: vec![1, 2],
+            leader_epoch: 0,
         });
         assert_eq!(round_trip(&r), r);
     }
