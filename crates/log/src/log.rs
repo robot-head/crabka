@@ -10,6 +10,7 @@ use crabka_protocol::records::RecordBatch;
 
 use crate::config::LogConfig;
 use crate::error::LogError;
+use crate::leader_epoch_checkpoint::LeaderEpochCheckpoint;
 use crate::name;
 use crate::retention;
 use crate::segment::Segment;
@@ -50,6 +51,10 @@ pub struct Log {
 
     /// Active segment's `TxnIndex`. Reopened on segment roll.
     active_txn_index: TxnIndex,
+
+    /// Per-partition leader-epoch checkpoint. Shared across segments —
+    /// epoch history accumulates over the log's lifetime.
+    epoch_checkpoint: LeaderEpochCheckpoint,
 }
 
 /// Result of [`Log::read`]: the absolute offset of the first batch
@@ -107,6 +112,7 @@ impl Log {
         };
 
         let active_txn_index = TxnIndex::open(active.txn_index_path())?;
+        let epoch_checkpoint = LeaderEpochCheckpoint::open(active.leader_epoch_checkpoint_path())?;
         // LSO starts at log_end_offset(); computed before moving `active`.
         let lso = active.last_offset() + 1;
 
@@ -120,6 +126,7 @@ impl Log {
             lso,
             pending: HashMap::new(),
             active_txn_index,
+            epoch_checkpoint,
         })
     }
 
@@ -257,10 +264,27 @@ impl Log {
     /// determines how many absolute offsets this batch consumes.
     /// Returns the assigned `base_offset`.
     pub fn append(&mut self, batch: &mut RecordBatch) -> Result<i64, LogError> {
+        let leader_epoch = batch.partition_leader_epoch;
         let assigned_base = self.log_end_offset();
         batch.base_offset = assigned_base;
         self.append_preserving_offset(batch)?;
+        // Record epoch transition when the epoch is valid and exceeds the
+        // previously recorded epoch (or no epoch has been recorded yet).
+        if leader_epoch >= 0
+            && self
+                .epoch_checkpoint
+                .latest_epoch()
+                .is_none_or(|e| leader_epoch > e)
+        {
+            self.epoch_checkpoint.append(leader_epoch, assigned_base)?;
+        }
         Ok(assigned_base)
+    }
+
+    /// Access the per-partition leader-epoch checkpoint.
+    #[must_use]
+    pub fn epoch_checkpoint(&self) -> &LeaderEpochCheckpoint {
+        &self.epoch_checkpoint
     }
 
     /// Append a `RecordBatch` whose `base_offset` is set by the caller.
@@ -540,6 +564,7 @@ fn parse_control_marker_type(key: &[u8]) -> Option<i16> {
 mod tests {
     use super::*;
     use bytes::Bytes;
+    use crate::leader_epoch_checkpoint::EpochEntry;
     use crabka_protocol::records::{Attributes, Record};
     use tempfile::tempdir;
 
@@ -905,5 +930,29 @@ mod tests {
         let mut c2 = commit_marker(2000, 0);
         log.append(&mut c2).unwrap();
         assert_eq!(log.lso(), log.log_end_offset());
+    }
+
+    fn sample_batch_with_epoch(n: i32, epoch: i32) -> RecordBatch {
+        let mut b = sample_batch(n);
+        b.partition_leader_epoch = epoch;
+        b
+    }
+
+    #[test]
+    fn append_records_epoch_transition() {
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
+        let mut b = sample_batch_with_epoch(3, 0);
+        log.append(&mut b).unwrap();
+        let mut b2 = sample_batch_with_epoch(2, 1); // 2 records at epoch 1
+        log.append(&mut b2).unwrap();
+        assert_eq!(
+            log.epoch_checkpoint().entries(),
+            &[
+                EpochEntry { epoch: 0, start_offset: 0 },
+                EpochEntry { epoch: 1, start_offset: 3 }
+            ]
+        );
     }
 }
