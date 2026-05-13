@@ -13,6 +13,7 @@ use tempfile::TempDir;
 
 use crabka_broker::Broker;
 use crabka_broker::{BrokerConfig, BrokerHandle};
+use crabka_log::LogConfig;
 use crabka_client_consumer::{AutoOffsetReset, Consumer, IsolationLevel};
 use crabka_client_core::Client;
 use crabka_client_producer::{Producer, ProducerRecord};
@@ -98,15 +99,15 @@ async fn create_topic(broker: &BrokerHandle, bootstrap: &str, name: &str, rf: i1
     );
     // CreateTopics ack means the controller's quorum committed the
     // metadata record, but the supervisor's reconcile loop materializes
-    // the partition locally asynchronously. Wait for that so subsequent
-    // Produce/Fetch don't race the materialization.
-    let materialized = broker
-        .test_wait_for_local_partition(name, 0, Duration::from_secs(10))
-        .await;
-    assert!(
-        materialized,
-        "partition `{name}-0` never materialized locally after CreateTopics"
-    );
+    // the partition locally asynchronously. Poll until it appears so
+    // subsequent Produce/Fetch don't race the materialization.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !broker.has_partition(name, 0).await {
+        if Instant::now() > deadline {
+            panic!("partition `{name}-0` never materialized locally after CreateTopics");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 async fn produce_acks(
@@ -283,29 +284,73 @@ async fn read_committed_under_rf1_unchanged_from_slice9() {
     broker.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn acks_all_times_out_when_no_follower() {
-    let (broker, bootstrap, _dir) = boot_single().await;
-    create_topic(&broker, &bootstrap, "tout", 1).await;
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn acks_all_completes_via_isr_shrink_when_follower_dead() {
+    let (mut cluster, bootstrap_1) = boot_three_node().await;
+    create_topic(&cluster[0].0, &bootstrap_1, "shrink", 3).await;
 
-    // Install a fake ISR with two members; only this broker (node 1)
-    // is actually running, so node 2 can never check in via Fetch.
-    // The leader's HW thus stays pinned at 0.
-    broker.test_install_isr("tout", 0, &[1, 2], 1).await;
+    // Kill broker 3 — its absence will force ISR to shrink within
+    // `replica_lag_time_max_ms` (2s on CI), unblocking the acks=-1
+    // produce.
+    let dead = cluster.pop().expect("3rd broker");
+    dead.0.shutdown().await;
 
     let start = Instant::now();
-    let err = produce_acks(&bootstrap, "tout", &["x"], -1, 200)
+    let offset = produce_acks(&bootstrap_1, "shrink", &["x", "y", "z"], -1, 10_000)
         .await
-        .expect_err("expected timeout");
+        .expect("acks=-1 success after shrink");
     let elapsed = start.elapsed();
-    assert_eq!(err, 20, "expected NOT_ENOUGH_REPLICAS_AFTER_APPEND");
+    assert_eq!(offset, 0);
     assert!(
-        elapsed >= Duration::from_millis(180),
-        "expected to wait ~200ms; took {elapsed:?}"
+        elapsed >= Duration::from_millis(1_500),
+        "expected to wait for ISR shrink (~2s); took {elapsed:?}"
     );
     assert!(
-        elapsed < Duration::from_secs(2),
-        "should not wait significantly past timeout; took {elapsed:?}"
+        elapsed < Duration::from_secs(5),
+        "shrink + completion should be well under 5s; took {elapsed:?}"
     );
-    broker.shutdown().await;
+    for (h, _, _) in cluster {
+        h.shutdown().await;
+    }
+}
+
+async fn boot_three_node() -> (Vec<(BrokerHandle, String, TempDir)>, String) {
+    use std::net::SocketAddr;
+
+    let client_ports = [11_092u16, 11_192, 11_292];
+    let controller_ports = [11_093u16, 11_193, 11_293];
+    let voters: Vec<(u64, SocketAddr)> = (0..3)
+        .map(|i| {
+            (
+                u64::try_from(i + 1).unwrap(),
+                format!("127.0.0.1:{}", controller_ports[i])
+                    .parse()
+                    .unwrap(),
+            )
+        })
+        .collect();
+    let mut cluster = Vec::with_capacity(3);
+    for i in 0..3 {
+        let dir = TempDir::new().unwrap();
+        let cfg = BrokerConfig {
+            broker_id: i32::try_from(i + 1).unwrap(),
+            listen_addr: format!("127.0.0.1:{}", client_ports[i]).parse().unwrap(),
+            advertised_listener: format!("127.0.0.1:{}", client_ports[i]),
+            log_dir: dir.path().to_path_buf(),
+            log_config: LogConfig::default(),
+            node_id: u64::try_from(i + 1).unwrap(),
+            controller_listen_addr: format!("127.0.0.1:{}", controller_ports[i])
+                .parse()
+                .unwrap(),
+            controller_quorum_voters: voters.clone(),
+            heartbeat_interval_ms: 200,
+            heartbeat_timeout_ms: 2_000,
+            replica_lag_time_max_ms: 2_000,
+        };
+        let bootstrap = format!("127.0.0.1:{}", client_ports[i]);
+        let broker = Broker::start(cfg).await.expect("boot");
+        cluster.push((broker, bootstrap, dir));
+    }
+    let bootstrap_1 = cluster[0].1.clone();
+    (cluster, bootstrap_1)
 }
