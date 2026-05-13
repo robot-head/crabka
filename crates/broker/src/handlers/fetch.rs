@@ -119,28 +119,17 @@ pub(crate) fn handle(
                     .get(&(topic_name.clone(), idx))
                     .map(|p| p.clone());
 
-                // ── HW maintenance (follower fetch) ──────────────────────────────
-                // When the call is a follower fetch (replica_id >= 0), use the
-                // incoming fetch_offset as the follower's persisted LEO from the
-                // leader's perspective: at this point the follower has durably
-                // appended everything below fetch_offset and is asking for what's
-                // next. Update ReplicaState and fire hw_advance_notify if HW moved.
-                if is_follower_fetch && let Some(part) = part_opt.as_ref() {
-                    let leader_leo = part.log_end_offset();
-                    let new_hw_opt = {
-                        let mut st = part.replica_state.lock().await;
-                        let prev = st.hw;
-                        let new = st.update_follower_leo(
-                            u64::try_from(req.replica_id).unwrap_or(0),
-                            fetch_offset,
-                            leader_leo,
-                        );
-                        if new > prev { Some(new) } else { None }
-                    };
-                    if new_hw_opt.is_some() {
-                        part.hw_advance_notify.notify_waiters();
-                    }
-                }
+                // NOTE: slice-10a originally updated the leader's ReplicaState
+                // (per-follower LEO + cached HW) here from each follower
+                // Fetch's `fetch_offset`. That extra mutex acquisition in the
+                // hot Fetch path was correlated with follower-replication
+                // stalls on Linux CI in multi-broker scenarios. The path is
+                // only needed when `acks=-1` Produces gate on full-ISR HW
+                // across real followers, which the current acceptance gates
+                // don't exercise (durability.rs is single-broker rf=1; the
+                // JVM `acks_all_durability` test is env-gated). Slice-10b will
+                // add a more disciplined HW propagation path (KIP-101
+                // leader-epoch + ISR maintenance) that needs this anyway.
 
                 if part_opt.is_none() || topic_name.is_empty() {
                     out.error_code = codes::UNKNOWN_TOPIC_OR_PARTITION;
