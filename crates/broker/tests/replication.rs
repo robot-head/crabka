@@ -364,7 +364,11 @@ async fn out_of_range_truncates_and_recovers() {
         };
         let prod = producer
             .send(ProduceRequest {
-                acks: -1,
+                // acks=1 (leader-only). The slice-8 test predates slice-10a's
+                // HW gating; the explicit wait loop below covers replication
+                // verification, so we don't need to also gate the produce
+                // on full-ISR HW advance here.
+                acks: 1,
                 timeout_ms: 5_000,
                 topic_data: vec![TopicProduceData {
                     name: "oor".into(),
