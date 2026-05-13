@@ -657,21 +657,10 @@ async fn three_node_jvm_round_trip() {
 // Apache Kafka tool. We mount each broker's partition dir into a fresh
 // container as `-v <host>:/data:ro` and dump the first segment file.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires Docker and CRABKA_RUN_REPLICATION_JVM_TEST=1 — multi-broker follower replication is intermittently flaky on Linux CI; slice-10b will fix"]
+#[ignore = "requires Docker"]
 #[allow(clippy::too_many_lines)]
 async fn three_node_replication_byte_compare() {
     const TOPIC: &str = "crabka-replication-itest";
-
-    if std::env::var("CRABKA_RUN_REPLICATION_JVM_TEST").is_err() {
-        eprintln!(
-            "Skipping three_node_replication_byte_compare: set \
-             CRABKA_RUN_REPLICATION_JVM_TEST=1 to run. Reason: \
-             multi-broker follower replication intermittently stalls \
-             on Linux CI runners; slice-10b will overhaul ISR + \
-             leader-epoch and address this."
-        );
-        return;
-    }
 
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
@@ -1049,27 +1038,10 @@ async fn transactional_console_producer_eos() {
 // into 10000+ to dodge TIME_WAIT + raft-quorum collisions when JVM
 // tests run sequentially via --test-threads=1.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires Docker and CRABKA_RUN_ACKS_ALL_JVM_TEST=1"]
+#[ignore = "requires Docker"]
 #[allow(clippy::too_many_lines)]
 async fn acks_all_durability() {
     const TOPIC: &str = "crabka-acks-all-itest";
-
-    // Gated behind an env var because the 3-broker setup is timing-sensitive
-    // under CI load: the JVM producer's per-request 10s timeout is tight for
-    // 100 single-record acks=-1 produces with the follower Fetch interval at
-    // 500ms. The slice-10a in-process durability.rs tests cover the same code
-    // paths reliably; this test is a JVM-client smoke check that can be run
-    // locally when investigating wire-compat regressions.
-    if std::env::var("CRABKA_RUN_ACKS_ALL_JVM_TEST").is_err() {
-        eprintln!(
-            "Skipping acks_all_durability: set \
-             CRABKA_RUN_ACKS_ALL_JVM_TEST=1 to run. Reason: the JVM \
-             producer's per-request timeout is tight under CI load \
-             for sequential acks=-1 produces; the slice-10a in-process \
-             durability.rs tests cover the same protocol path."
-        );
-        return;
-    }
 
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
