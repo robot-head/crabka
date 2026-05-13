@@ -89,12 +89,12 @@ async fn produce_acks(
     // supervisor's reconcile loop after CreateTopics ack returns; we
     // need to wait for that materialization before the Produce can
     // resolve the partition.
+    const MAX_ATTEMPTS: usize = 20;
     let client = Client::builder()
         .bootstrap(bootstrap.to_string())
         .build()
         .await
         .unwrap();
-    const MAX_ATTEMPTS: usize = 20;
     for attempt in 1..=MAX_ATTEMPTS {
         let resp = client
             .send(ProduceRequest {
