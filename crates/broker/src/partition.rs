@@ -290,10 +290,8 @@ impl Partition {
         self.current_leader.store(new_leader, Ordering::Release);
         self.current_leader_epoch.store(new_epoch, Ordering::Release);
         let mut st = self.replica_state.lock().await;
-        // per_follower replaces follower_leo in Task 7; for now clear
-        // the follower_leo map. Task 7 will switch to per_follower.
-        st.follower_leo.clear();
-        // Task 7 adds st.current_leader_epoch; updated there.
+        st.per_follower.clear();
+        st.current_leader_epoch = new_epoch;
         drop(st);
         self.hw_advance_notify.notify_waiters();
     }
@@ -458,7 +456,7 @@ mod tests {
         let st = p.replica_state.lock().await;
         assert_eq!(st.isr.len(), 3);
         assert!(st.isr.contains(&1) && st.isr.contains(&2) && st.isr.contains(&3));
-        assert_eq!(st.follower_leo.get(&2), Some(&0));
+        assert_eq!(st.per_follower.get(&2).map(|f| f.leo), Some(0));
     }
 
     #[tokio::test]
