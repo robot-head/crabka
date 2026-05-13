@@ -1058,7 +1058,9 @@ async fn acks_all_durability() {
         .map(|i| {
             (
                 u64::try_from(i + 1).unwrap(),
-                format!("127.0.0.1:{}", controller_ports[i]).parse().unwrap(),
+                format!("127.0.0.1:{}", controller_ports[i])
+                    .parse()
+                    .unwrap(),
             )
         })
         .collect();
@@ -1079,7 +1081,9 @@ async fn acks_all_durability() {
         };
         tempdirs.push(dir);
         spawns.push(tokio::spawn(async move {
-            crabka_broker::Broker::start(cfg).await.expect("broker start")
+            crabka_broker::Broker::start(cfg)
+                .await
+                .expect("broker start")
         }));
     }
     let mut cluster = Vec::with_capacity(3);

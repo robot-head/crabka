@@ -81,6 +81,22 @@
 //! crash mid-transaction can lose records the producer believed
 //! durably committed. Bulletproof EOS lands when those slice-8
 //! follow-ups ship.
+//!
+//! ## Bulletproof EOS — sub-slice 10a (HW + acks=all)
+//!
+//! Per-partition High Watermark tracking via `ReplicaState`
+//! (lives on `Partition`). The leader maintains each follower's LEO from
+//! their Fetch requests and caches HW = `min(LEO over ISR)`. `acks=-1`
+//! Produces gate on `Partition::await_hw_at_least` before responding;
+//! on timeout the producer gets per-partition
+//! `NOT_ENOUGH_REPLICAS_AFTER_APPEND` (code 20). Consumer Fetches
+//! (`replica_id == -1`) clamp visible batches and `last_stable_offset`
+//! at HW; `read_committed` LSO becomes `min(HW, log.lso())`.
+//!
+//! Sub-slice 10b will add KIP-101 leader-epoch fencing,
+//! leader-election-on-failure, and ISR shrink/expand to close the
+//! remaining bulletproof-EOS gap (a leader crash mid-transaction still
+//! loses records as of 10a).
 
 #![doc(html_root_url = "https://docs.rs/crabka-broker/0.0.0")]
 

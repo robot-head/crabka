@@ -125,9 +125,7 @@ pub(crate) fn handle(
                 // leader's perspective: at this point the follower has durably
                 // appended everything below fetch_offset and is asking for what's
                 // next. Update ReplicaState and fire hw_advance_notify if HW moved.
-                if is_follower_fetch
-                    && let Some(part) = part_opt.as_ref()
-                {
+                if is_follower_fetch && let Some(part) = part_opt.as_ref() {
                     let leader_leo = part.log_end_offset();
                     let new_hw_opt = {
                         let mut st = part
@@ -140,11 +138,7 @@ pub(crate) fn handle(
                             fetch_offset,
                             leader_leo,
                         );
-                        if new > prev {
-                            Some(new)
-                        } else {
-                            None
-                        }
+                        if new > prev { Some(new) } else { None }
                     };
                     if new_hw_opt.is_some() {
                         part.hw_advance_notify.notify_waiters();

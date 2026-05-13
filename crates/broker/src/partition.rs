@@ -494,6 +494,8 @@ mod tests {
             hw_advance_notify.notify_waiters();
         });
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        p.await_hw_at_least(50, deadline).await.expect("woke on advance");
+        p.await_hw_at_least(50, deadline)
+            .await
+            .expect("woke on advance");
     }
 }

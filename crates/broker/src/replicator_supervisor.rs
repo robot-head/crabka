@@ -353,14 +353,8 @@ mod tests {
 
         let dir = tempdir().expect("tempdir");
         let partitions = Arc::new(DashMap::new());
-        materialize_partition(
-            &partitions,
-            "t",
-            0,
-            dir.path(),
-            &LogConfig::default(),
-        )
-        .expect("materialize");
+        materialize_partition(&partitions, "t", 0, dir.path(), &LogConfig::default())
+            .expect("materialize");
         let part = partitions
             .get(&("t".to_string(), 0))
             .expect("part")

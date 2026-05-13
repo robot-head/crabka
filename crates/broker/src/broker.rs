@@ -200,11 +200,7 @@ impl BrokerHandle {
         replicas: &[crabka_raft::NodeId],
         leader: crabka_raft::NodeId,
     ) {
-        if let Some(part) = self
-            ._broker
-            .partitions
-            .get(&(topic.to_string(), partition))
-        {
+        if let Some(part) = self._broker.partitions.get(&(topic.to_string(), partition)) {
             part.value().install_isr(replicas, leader);
         }
     }

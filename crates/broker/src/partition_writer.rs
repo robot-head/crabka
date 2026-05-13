@@ -42,11 +42,8 @@ pub async fn run(
                     // Holding both mutexes in sequence is fine — neither
                     // is held across an .await.
                     let advanced = {
-                        let leader_leo =
-                            log.lock().expect("log mutex poisoned").log_end_offset();
-                        let mut st = replica_state
-                            .lock()
-                            .expect("replica_state mutex poisoned");
+                        let leader_leo = log.lock().expect("log mutex poisoned").log_end_offset();
+                        let mut st = replica_state.lock().expect("replica_state mutex poisoned");
                         let prev = st.hw;
                         let new = st.recompute_hw_for_leader_append(leader_leo);
                         new > prev

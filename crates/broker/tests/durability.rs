@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use tempfile::TempDir;
 
-use crabka_broker::{BrokerConfig, BrokerHandle};
 use crabka_broker::Broker;
+use crabka_broker::{BrokerConfig, BrokerHandle};
 use crabka_client_consumer::{AutoOffsetReset, Consumer, IsolationLevel};
 use crabka_client_core::Client;
 use crabka_client_producer::{Producer, ProducerRecord};
@@ -68,7 +68,10 @@ async fn create_topic(bootstrap: &str, name: &str, rf: i16) {
         })
         .await
         .expect("CreateTopics");
-    assert_eq!(resp.topics[0].error_code, 0, "CreateTopics failed: {resp:?}");
+    assert_eq!(
+        resp.topics[0].error_code, 0,
+        "CreateTopics failed: {resp:?}"
+    );
 }
 
 async fn produce_acks(
