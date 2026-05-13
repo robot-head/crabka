@@ -43,6 +43,10 @@ struct PendingRead {
     /// follower fetch). Causes batch-level LSO filtering and populates
     /// `aborted_transactions` in the response.
     read_committed: bool,
+    /// `true` when `replica_id >= 0` — i.e., the request is from a follower
+    /// replicator rather than a consumer. Follower fetches see all records up
+    /// to LEO and report LEO as HW/LSO; consumer fetches are clamped at HW.
+    is_follower_fetch: bool,
     /// `None` for unknown topic/partition or out-of-range — final response is
     /// already filled out and won't be re-read on wake.
     partition: Option<Arc<Partition>>,
@@ -156,6 +160,7 @@ pub(crate) fn handle(
                         fetch_offset,
                         max_bytes,
                         read_committed,
+                        is_follower_fetch,
                         partition: None,
                         out,
                     });
@@ -169,6 +174,7 @@ pub(crate) fn handle(
                     fetch_offset,
                     max_bytes,
                     read_committed,
+                    is_follower_fetch,
                     partition: part_opt,
                     out,
                 });
@@ -184,6 +190,7 @@ pub(crate) fn handle(
                     p.fetch_offset,
                     p.max_bytes,
                     p.read_committed,
+                    p.is_follower_fetch,
                     &mut p.out,
                 )?;
             }
@@ -216,22 +223,30 @@ pub(crate) fn handle(
 /// the records placed in `out` (0 if none).
 ///
 /// When `read_committed` is `true` (consumer fetch with `isolation_level=1`):
-/// - batches with `base_offset >= lso` are dropped (batch-level LSO truncation)
+/// - batches with `base_offset >= min(lso, hw)` are dropped
 /// - control batches are hidden from consumers (Apache Kafka behavior)
-/// - `out.last_stable_offset` is set to `lso`
+/// - `out.last_stable_offset` is set to `min(lso, hw)`
 /// - `out.aborted_transactions` is populated from the partition's `.txnindex`
 ///
-/// When `read_committed` is `false` (`read_uncommitted` or follower fetch):
-/// - all batches are returned as-is
-/// - `out.last_stable_offset` equals `log_end_offset`
+/// When `is_follower_fetch` is `true`:
+/// - all batches up to LEO are returned (no HW clamping)
+/// - `out.high_watermark` and `out.last_stable_offset` are set to `log_end`
+///
+/// When `read_committed` is `false` and `is_follower_fetch` is `false`
+/// (consumer fetch in `read_uncommitted`):
+/// - batches are clamped at HW (`base_offset < hw`)
+/// - `out.high_watermark` and `out.last_stable_offset` are set to `hw`
 /// - `out.aborted_transactions` is `None`
+#[allow(clippy::too_many_lines)]
 fn do_read(
     part: &Partition,
     fetch_offset: i64,
     max_bytes: i32,
     read_committed: bool,
+    is_follower_fetch: bool,
     out: &mut PartitionData,
 ) -> Result<usize, BrokerError> {
+    let hw = part.high_watermark();
     let (log_start, log_end, lso, batch_opt, aborted_txns): (
         i64,
         i64,
@@ -243,26 +258,35 @@ fn do_read(
         let log_start = log.log_start_offset();
         let log_end = log.log_end_offset();
         let lso = log.lso();
+        let upper_bound = if is_follower_fetch { log_end } else { hw };
+        let effective_lso = if read_committed && !is_follower_fetch {
+            lso.min(hw)
+        } else {
+            lso
+        };
+
         if fetch_offset < log_start {
             out.error_code = codes::OFFSET_OUT_OF_RANGE;
             out.log_start_offset = log_start;
-            out.high_watermark = log_end;
-            out.last_stable_offset = if read_committed { lso } else { log_end };
+            out.high_watermark = if is_follower_fetch { log_end } else { hw };
+            out.last_stable_offset = if read_committed && !is_follower_fetch {
+                effective_lso
+            } else if is_follower_fetch {
+                log_end
+            } else {
+                hw
+            };
             return Ok(0);
         }
-        if fetch_offset >= log_end {
+        if fetch_offset >= upper_bound {
             (log_start, log_end, lso, None, Vec::new())
         } else {
             let read_max = usize::try_from(max_bytes.max(0)).unwrap_or(0);
             let read = log.read(fetch_offset, read_max)?;
 
-            if read_committed {
-                // Aborted-txn list for the window [fetch_offset, lso).
-                // Must be computed before batch filtering so we know which
-                // producer_ids had aborted transactions in this range.
-                let aborted_raw = log.aborted_in_range(fetch_offset, lso);
-                // Collect into a set of (producer_id, start_offset, last_offset)
-                // tuples for efficient batch-level lookup.
+            if read_committed && !is_follower_fetch {
+                // Aborted-txn list for the window [fetch_offset, effective_lso).
+                let aborted_raw = log.aborted_in_range(fetch_offset, effective_lso);
                 let aborted_pids: std::collections::HashSet<(i64, i64, i64)> = aborted_raw
                     .iter()
                     .map(|e| (e.producer_id, e.start_offset, e.last_offset))
@@ -276,32 +300,29 @@ fn do_read(
                     })
                     .collect();
 
-                // Batch-level LSO filtering: drop entire batches at or past LSO,
-                // drop control batches (Apache Kafka clients never see them),
-                // and drop transactional data batches that belong to an aborted
-                // transaction (i.e. whose producer_id + offset range is fully
-                // covered by an AbortedTxn entry).
                 let visible_batch = read
                     .batches
                     .into_iter()
-                    .filter(|b| b.base_offset < lso)
+                    .filter(|b| b.base_offset < effective_lso)
                     .filter(|b| !b.attributes.is_control_batch())
                     .find(|b| {
                         if !b.attributes.is_transactional() {
-                            return true; // non-transactional batch: always visible
+                            return true;
                         }
                         let pid = b.producer_id;
                         let batch_last = b.base_offset + i64::from(b.last_offset_delta);
-                        // A transactional batch is hidden iff it is fully
-                        // contained within an aborted txn range for this pid.
                         !aborted_pids.iter().any(|&(apid, astart, alast)| {
                             apid == pid && b.base_offset >= astart && batch_last <= alast
                         })
                     });
 
                 (log_start, log_end, lso, visible_batch, aborted)
+            } else if !is_follower_fetch {
+                // Consumer fetch in read_uncommitted: clamp at HW.
+                let batch_opt = read.batches.into_iter().find(|b| b.base_offset < hw);
+                (log_start, log_end, lso, batch_opt, Vec::new())
             } else {
-                // MVP: only the first batch is wrapped into the response.
+                // Follower fetch: no clamping, no filtering.
                 let batch_opt = read.batches.into_iter().next();
                 (log_start, log_end, lso, batch_opt, Vec::new())
             }
@@ -309,11 +330,17 @@ fn do_read(
     };
 
     out.error_code = codes::NONE;
-    out.high_watermark = log_end;
+    out.high_watermark = if is_follower_fetch { log_end } else { hw };
     out.log_start_offset = log_start;
-    out.last_stable_offset = if read_committed { lso } else { log_end };
+    out.last_stable_offset = if read_committed && !is_follower_fetch {
+        lso.min(hw)
+    } else if is_follower_fetch {
+        log_end
+    } else {
+        hw
+    };
 
-    if read_committed {
+    if read_committed && !is_follower_fetch {
         // Populate aborted_transactions: None means "no list" (same as not
         // providing it); Some(empty) means "committed window with no aborts".
         // Apache Kafka sends Some(empty) when in read_committed mode.
@@ -363,6 +390,7 @@ async fn long_poll_then_reread(
                 p.fetch_offset,
                 p.max_bytes,
                 p.read_committed,
+                p.is_follower_fetch,
                 &mut p.out,
             )?;
         }
