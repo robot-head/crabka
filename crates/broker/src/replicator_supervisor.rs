@@ -175,7 +175,13 @@ impl ReplicatorSupervisor {
             part.install_leader_change(part_record.leader, part_record.leader_epoch)
                 .await;
             if part_record.leader == self.node_id {
-                part.install_isr(&part_record.replicas, part_record.leader)
+                // Install the *current* ISR from the metadata image, not the
+                // full replica set. Using `replicas` would undo any shrink
+                // applied via AlterPartition: every metadata-image change
+                // would reset ISR back to [all replicas], so isr_maintenance's
+                // shrink would never stick (and producers with acks=-1 would
+                // stay blocked indefinitely on lagging followers).
+                part.install_isr(&part_record.isr, part_record.leader)
                     .await;
             }
         }
