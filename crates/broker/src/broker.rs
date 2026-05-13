@@ -181,6 +181,22 @@ impl BrokerHandle {
         part.test_set_log_start(new_start).await
     }
 
+    /// Test-only: directly set `current_leader_epoch` on a locally-hosted
+    /// partition. Used by `tests/leader_epoch.rs` to simulate split-brain
+    /// (force an epoch bump) without going through the supervisor's
+    /// metadata-image-driven path.
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[allow(clippy::used_underscore_binding)]
+    pub fn test_set_leader_epoch(&self, topic: &str, partition: i32, epoch: i32) {
+        if let Some(part) = self
+            ._broker
+            .partitions
+            .get(&(topic.to_string(), partition))
+        {
+            part.value().test_set_leader_epoch(epoch);
+        }
+    }
+
     /// Cancel the listener + drain in-flight connections. Awaiting the
     /// returned future blocks until the listener task exits.
     #[allow(clippy::used_underscore_binding)] // `_broker` carries shared state we must reach into during shutdown

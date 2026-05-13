@@ -328,6 +328,16 @@ impl Partition {
         }
     }
 
+    /// Test-only: directly set the partition's `current_leader_epoch`
+    /// without going through the supervisor's metadata-image-driven path.
+    /// Used by `tests/leader_epoch.rs` to simulate split-brain by forcing
+    /// an epoch bump mid-Produce.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn test_set_leader_epoch(&self, epoch: i32) {
+        self.current_leader_epoch
+            .store(epoch, std::sync::atomic::Ordering::Release);
+    }
+
     /// Test-only: shift the partition's in-memory `log_start_offset` to
     /// `new_start`. Goes through the writer task to maintain the
     /// single-writer invariant on the underlying `Log`.
