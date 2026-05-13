@@ -448,6 +448,23 @@ impl Broker {
             }
         });
 
+        // 4f. ISR maintenance: per-leader-partition shrink/expand tick.
+        //     Proposes AlterPartition changes when follower lag exceeds
+        //     `replica_lag_time_max_ms`. Child token of supervisor_shutdown.
+        let isr_shutdown = supervisor_shutdown.child_token();
+        tokio::spawn(crate::isr_maintenance::run(
+            crate::isr_maintenance::Config {
+                node_id: config.node_id,
+                partitions: partitions.clone(),
+                controller: controller.clone(),
+                replica_lag_time_max: std::time::Duration::from_millis(
+                    config.replica_lag_time_max_ms,
+                ),
+                broker_id: config.broker_id,
+                shutdown: isr_shutdown,
+            },
+        ));
+
         // 5. Build handler table.
         let handlers = crate::handlers::build_table();
 
