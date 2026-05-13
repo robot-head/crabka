@@ -181,8 +181,7 @@ impl ReplicatorSupervisor {
                 // would reset ISR back to [all replicas], so isr_maintenance's
                 // shrink would never stick (and producers with acks=-1 would
                 // stay blocked indefinitely on lagging followers).
-                part.install_isr(&part_record.isr, part_record.leader)
-                    .await;
+                part.install_isr(&part_record.isr, part_record.leader).await;
             }
         }
 
