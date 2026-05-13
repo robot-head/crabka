@@ -109,10 +109,22 @@ fn handle_partition(
     changes: &mut Vec<MetadataRecord>,
 ) -> RespPartitionData {
     let Some(topic_name) = topic_name else {
-        return error_part(partition_index, codes::UNKNOWN_TOPIC_OR_PARTITION, 0, 0, &[]);
+        return error_part(
+            partition_index,
+            codes::UNKNOWN_TOPIC_OR_PARTITION,
+            0,
+            0,
+            &[],
+        );
     };
     let Some(part_rec) = image.partition(topic_name, partition_index) else {
-        return error_part(partition_index, codes::UNKNOWN_TOPIC_OR_PARTITION, 0, 0, &[]);
+        return error_part(
+            partition_index,
+            codes::UNKNOWN_TOPIC_OR_PARTITION,
+            0,
+            0,
+            &[],
+        );
     };
 
     let leader_i32 = i32::try_from(part_rec.leader).unwrap_or(0);
@@ -139,8 +151,7 @@ fn handle_partition(
         .map(|&n| u64::try_from(n).unwrap_or(0))
         .collect();
     let replicas_set: std::collections::HashSet<u64> = part_rec.replicas.iter().copied().collect();
-    let valid =
-        !proposed_isr.is_empty() && proposed_isr.iter().all(|n| replicas_set.contains(n));
+    let valid = !proposed_isr.is_empty() && proposed_isr.iter().all(|n| replicas_set.contains(n));
     if !valid {
         return error_part(
             partition_index,

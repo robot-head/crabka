@@ -13,10 +13,10 @@ use tempfile::TempDir;
 
 use crabka_broker::Broker;
 use crabka_broker::{BrokerConfig, BrokerHandle};
-use crabka_log::LogConfig;
 use crabka_client_consumer::{AutoOffsetReset, Consumer, IsolationLevel};
 use crabka_client_core::Client;
 use crabka_client_producer::{Producer, ProducerRecord};
+use crabka_log::LogConfig;
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
 use crabka_protocol::owned::fetch_request::{FetchPartition, FetchRequest, FetchTopic};
 use crabka_protocol::owned::metadata_request::{MetadataRequest, MetadataRequestTopic};

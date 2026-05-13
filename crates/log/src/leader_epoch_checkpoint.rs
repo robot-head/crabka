@@ -53,13 +53,18 @@ impl LeaderEpochCheckpoint {
         let mut out = Vec::with_capacity(count);
         for line in lines.take(count) {
             let mut parts = line.split_whitespace();
-            let epoch = parts.next().and_then(|t| t.parse().ok()).ok_or_else(|| {
-                LogError::Corrupt(format!("bad checkpoint row: {line:?}"))
-            })?;
-            let start_offset = parts.next().and_then(|t| t.parse().ok()).ok_or_else(|| {
-                LogError::Corrupt(format!("bad checkpoint row: {line:?}"))
-            })?;
-            out.push(EpochEntry { epoch, start_offset });
+            let epoch = parts
+                .next()
+                .and_then(|t| t.parse().ok())
+                .ok_or_else(|| LogError::Corrupt(format!("bad checkpoint row: {line:?}")))?;
+            let start_offset = parts
+                .next()
+                .and_then(|t| t.parse().ok())
+                .ok_or_else(|| LogError::Corrupt(format!("bad checkpoint row: {line:?}")))?;
+            out.push(EpochEntry {
+                epoch,
+                start_offset,
+            });
         }
         Ok(out)
     }
@@ -71,7 +76,10 @@ impl LeaderEpochCheckpoint {
         if self.entries.iter().any(|e| e.epoch == epoch) {
             return Ok(());
         }
-        self.entries.push(EpochEntry { epoch, start_offset });
+        self.entries.push(EpochEntry {
+            epoch,
+            start_offset,
+        });
         self.flush()
     }
 
@@ -160,7 +168,13 @@ mod tests {
         let mut c = LeaderEpochCheckpoint::open(path).unwrap();
         c.append(0, 0).unwrap();
         c.append(0, 999).unwrap(); // ignored; epoch 0 already recorded
-        assert_eq!(c.entries(), &[EpochEntry { epoch: 0, start_offset: 0 }]);
+        assert_eq!(
+            c.entries(),
+            &[EpochEntry {
+                epoch: 0,
+                start_offset: 0
+            }]
+        );
     }
 
     #[test]

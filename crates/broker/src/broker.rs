@@ -188,11 +188,7 @@ impl BrokerHandle {
     #[cfg(any(test, feature = "test-helpers"))]
     #[allow(clippy::used_underscore_binding)]
     pub fn test_set_leader_epoch(&self, topic: &str, partition: i32, epoch: i32) {
-        if let Some(part) = self
-            ._broker
-            .partitions
-            .get(&(topic.to_string(), partition))
-        {
+        if let Some(part) = self._broker.partitions.get(&(topic.to_string(), partition)) {
             part.value().test_set_leader_epoch(epoch);
         }
     }
@@ -372,7 +368,9 @@ impl Broker {
                 }
                 let transitions = liveness_for_ticker.tick().await;
                 for t in transitions {
-                    use crate::heartbeat::controller_state::LivenessTransition::{AliveToDead, DeadToAlive};
+                    use crate::heartbeat::controller_state::LivenessTransition::{
+                        AliveToDead, DeadToAlive,
+                    };
                     match t {
                         AliveToDead(n) => {
                             if let Err(e) = crate::leader_election::on_broker_dead(

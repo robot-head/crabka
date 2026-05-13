@@ -176,7 +176,10 @@ mod tests {
 
     #[test]
     fn fenced_leader_epoch_maps_correctly() {
-        let e = BrokerError::FencedLeaderEpoch { have: 0, current: 1 };
+        let e = BrokerError::FencedLeaderEpoch {
+            have: 0,
+            current: 1,
+        };
         assert_eq!(from_broker_error(&e), FENCED_LEADER_EPOCH);
     }
 

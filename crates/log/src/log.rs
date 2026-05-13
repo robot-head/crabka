@@ -563,8 +563,8 @@ fn parse_control_marker_type(key: &[u8]) -> Option<i16> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
     use crate::leader_epoch_checkpoint::EpochEntry;
+    use bytes::Bytes;
     use crabka_protocol::records::{Attributes, Record};
     use tempfile::tempdir;
 
@@ -950,8 +950,14 @@ mod tests {
         assert_eq!(
             log.epoch_checkpoint().entries(),
             &[
-                EpochEntry { epoch: 0, start_offset: 0 },
-                EpochEntry { epoch: 1, start_offset: 3 }
+                EpochEntry {
+                    epoch: 0,
+                    start_offset: 0
+                },
+                EpochEntry {
+                    epoch: 1,
+                    start_offset: 3
+                }
             ]
         );
     }

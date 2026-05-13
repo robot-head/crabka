@@ -106,7 +106,10 @@ impl ControllerLivenessState {
     /// heartbeat within the timeout window). Returns `false` for unknown
     /// brokers and for brokers whose heartbeat has expired.
     pub(crate) async fn is_alive(&self, broker_id: u64) -> bool {
-        matches!(self.state(broker_id).await, Some(BrokerLivenessState::Alive))
+        matches!(
+            self.state(broker_id).await,
+            Some(BrokerLivenessState::Alive)
+        )
     }
 }
 

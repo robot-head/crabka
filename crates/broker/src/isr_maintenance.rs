@@ -31,16 +31,16 @@ pub(crate) async fn run(cfg: Config) {
             () = cfg.shutdown.cancelled() => return,
         }
         // Snapshot the keys to avoid holding the DashMap iterator across awaits.
-        let keys: Vec<(String, i32)> = cfg
-            .partitions
-            .iter()
-            .map(|e| e.key().clone())
-            .collect();
+        let keys: Vec<(String, i32)> = cfg.partitions.iter().map(|e| e.key().clone()).collect();
         for key in keys {
             let Some(part) = cfg.partitions.get(&key).map(|e| e.value().clone()) else {
                 continue;
             };
-            if part.current_leader.load(std::sync::atomic::Ordering::Acquire) != cfg.node_id {
+            if part
+                .current_leader
+                .load(std::sync::atomic::Ordering::Acquire)
+                != cfg.node_id
+            {
                 continue;
             }
             let Some((new_isr, leader_epoch)) =
@@ -67,10 +67,7 @@ pub(crate) async fn run(cfg: Config) {
 
 /// Returns `Some((new_isr, leader_epoch))` if the ISR should change,
 /// else `None`.
-async fn compute_proposal(
-    part: &Partition,
-    lag_max: Duration,
-) -> Option<(Vec<NodeId>, i32)> {
+async fn compute_proposal(part: &Partition, lag_max: Duration) -> Option<(Vec<NodeId>, i32)> {
     let st = part.replica_state.lock().await;
     let now = Instant::now();
     let mut new_isr: Vec<NodeId> = st.isr.iter().copied().collect();

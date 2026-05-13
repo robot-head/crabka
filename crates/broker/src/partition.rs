@@ -288,7 +288,8 @@ impl Partition {
     /// gates can re-check.
     pub async fn install_leader_change(&self, new_leader: u64, new_epoch: i32) {
         self.current_leader.store(new_leader, Ordering::Release);
-        self.current_leader_epoch.store(new_epoch, Ordering::Release);
+        self.current_leader_epoch
+            .store(new_epoch, Ordering::Release);
         let mut st = self.replica_state.lock().await;
         st.per_follower.clear();
         st.current_leader_epoch = new_epoch;

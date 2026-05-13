@@ -195,15 +195,15 @@ impl ReplicatorSupervisor {
 
         // 1b. Cancel any follower task whose target (leader, leader_epoch) changed.
         for k in &desired {
-            let Some(pr) = image.partition(&k.0, k.1).cloned() else { continue; };
+            let Some(pr) = image.partition(&k.0, k.1).cloned() else {
+                continue;
+            };
             let new_target = (pr.leader, pr.leader_epoch);
             let needs_cancel = self
                 .task_targets
                 .get(k)
                 .is_some_and(|prev| *prev.value() != new_target);
-            if needs_cancel
-                && let Some((_, token)) = self.tasks.remove(k)
-            {
+            if needs_cancel && let Some((_, token)) = self.tasks.remove(k) {
                 self.task_targets.remove(k);
                 token.cancel();
             }
@@ -237,7 +237,8 @@ impl ReplicatorSupervisor {
             };
             let token = CancellationToken::new();
             self.tasks.insert(k.clone(), token.clone());
-            self.task_targets.insert(k.clone(), (leader, part.leader_epoch));
+            self.task_targets
+                .insert(k.clone(), (leader, part.leader_epoch));
             tokio::spawn(replicator::run(replicator::Config {
                 node_id: self.node_id,
                 topic: k.0,

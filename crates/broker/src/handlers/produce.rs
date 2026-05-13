@@ -95,9 +95,9 @@ pub(crate) fn handle(
                 // Stamp the current leader epoch onto the batch — this becomes
                 // the `partition_leader_epoch` carried on the wire and used by
                 // KIP-101 fence validation on the follower's Fetch.
-                batch.partition_leader_epoch =
-                    part.current_leader_epoch
-                        .load(std::sync::atomic::Ordering::Acquire);
+                batch.partition_leader_epoch = part
+                    .current_leader_epoch
+                    .load(std::sync::atomic::Ordering::Acquire);
 
                 // ── transactional produce verify (KIP-1319 v2) ──────────
                 // This check is more authoritative than idempotent dedup,

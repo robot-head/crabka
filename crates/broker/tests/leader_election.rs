@@ -9,7 +9,7 @@
 #![allow(
     clippy::cast_possible_truncation,
     clippy::default_trait_access,
-    clippy::too_many_lines,
+    clippy::too_many_lines
 )]
 
 use std::net::SocketAddr;
@@ -230,7 +230,11 @@ async fn broker_death_elects_new_leader() {
             })
             .await
             .expect("metadata");
-        if let Some(t) = resp.topics.iter().find(|t| t.name.as_deref() == Some("elect")) {
+        if let Some(t) = resp
+            .topics
+            .iter()
+            .find(|t| t.name.as_deref() == Some("elect"))
+        {
             if let Some(p) = t.partitions.first() {
                 if p.leader_id != 1 && p.leader_epoch > 0 {
                     elected = Some((p.leader_id, p.leader_epoch));
@@ -350,7 +354,11 @@ async fn isr_expand_on_catchup() {
             })
             .await
             .expect("metadata");
-        if let Some(t) = resp.topics.iter().find(|t| t.name.as_deref() == Some("expand")) {
+        if let Some(t) = resp
+            .topics
+            .iter()
+            .find(|t| t.name.as_deref() == Some("expand"))
+        {
             if let Some(p) = t.partitions.first() {
                 if p.isr_nodes.len() == 3 {
                     expanded = true;

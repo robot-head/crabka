@@ -1236,8 +1236,7 @@ async fn acks_all_survives_leader_crash() {
                 .expect("broker start")
         }));
     }
-    let mut cluster: Vec<(crabka_broker::BrokerHandle, tempfile::TempDir)> =
-        Vec::with_capacity(3);
+    let mut cluster: Vec<(crabka_broker::BrokerHandle, tempfile::TempDir)> = Vec::with_capacity(3);
     for (spawn, dir) in spawns.into_iter().zip(tempdirs) {
         cluster.push((spawn.await.expect("spawn"), dir));
     }

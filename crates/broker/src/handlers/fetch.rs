@@ -150,9 +150,7 @@ pub(crate) fn handle(
                 // Restore follower-fetch HW maintenance (slice-10a removed this
                 // because of stalls; slice-10b's ISR maintenance prevents stalls
                 // by shrinking lagging followers out of the ISR within 2s on CI).
-                if is_follower_fetch
-                    && let Some(part) = part_opt.as_ref()
-                {
+                if is_follower_fetch && let Some(part) = part_opt.as_ref() {
                     let leader_leo = part.log_end_offset();
                     let advanced = {
                         let mut st = part.replica_state.lock().await;

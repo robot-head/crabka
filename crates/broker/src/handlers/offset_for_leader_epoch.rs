@@ -38,12 +38,10 @@ pub(crate) fn handle(
         let mut cur: &[u8] = &req_bytes;
         let req = OffsetForLeaderEpochRequest::decode(&mut cur, version)?;
 
-        let mut topics_out: Vec<OffsetForLeaderTopicResult> =
-            Vec::with_capacity(req.topics.len());
+        let mut topics_out: Vec<OffsetForLeaderTopicResult> = Vec::with_capacity(req.topics.len());
 
         for topic in req.topics {
-            let mut parts_out: Vec<EpochEndOffset> =
-                Vec::with_capacity(topic.partitions.len());
+            let mut parts_out: Vec<EpochEndOffset> = Vec::with_capacity(topic.partitions.len());
 
             for part in &topic.partitions {
                 let mut out = EpochEndOffset {
@@ -59,8 +57,7 @@ pub(crate) fn handle(
                     continue;
                 };
 
-                let current_epoch =
-                    p.value().current_leader_epoch.load(Ordering::Acquire);
+                let current_epoch = p.value().current_leader_epoch.load(Ordering::Acquire);
 
                 if part.leader_epoch > current_epoch {
                     // Follower is ahead of us — stale metadata on our side.
