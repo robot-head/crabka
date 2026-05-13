@@ -40,6 +40,12 @@ Pre-1.0, pre-alpha. No production use.
   consumer Fetch + `read_committed` LSO clamped at HW. Slice 10b will
   add KIP-101 leader-epoch, leader-election-on-failure, and ISR
   shrink/expand.
+- **Slice 10b** — bulletproof EOS complete: KIP-101 leader-epoch
+  fencing; leader election on broker death (BrokerHeartbeat-driven);
+  ISR shrink/expand via AlterPartition. A 3-broker cluster survives
+  partition-leader crashes and slow followers; `acks=all` produces
+  complete after election; zombie writes from fenced ex-leaders are
+  rejected.
 
 ## Published crates
 

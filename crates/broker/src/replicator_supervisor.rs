@@ -111,6 +111,10 @@ pub(crate) struct ReplicatorSupervisor {
     log_config: LogConfig,
     client_id: String,
     tasks: DashMap<(String, i32), CancellationToken>,
+    /// Per-follower-partition (leader, `leader_epoch`) tuple captured at
+    /// spawn time. On reconcile, if the tuple changes, the task is
+    /// cancelled and respawned pointed at the new leader.
+    task_targets: DashMap<(String, i32), (NodeId, i32)>,
     shutdown: CancellationToken,
     txn_coordinator: Option<Arc<TxnCoordinator>>,
 }
@@ -135,6 +139,7 @@ impl ReplicatorSupervisor {
             log_config,
             client_id,
             tasks: DashMap::new(),
+            task_targets: DashMap::new(),
             shutdown,
             txn_coordinator,
         }
@@ -143,9 +148,9 @@ impl ReplicatorSupervisor {
     pub(crate) async fn reconcile(&self, image: &MetadataImage) {
         // 0. Materialize the on-disk partition for every assignment where
         //    self is in `replicas`, regardless of leader/follower role.
-        //    Additionally: for every partition where self is leader,
-        //    install the static ISR (= replicas) into the partition's
-        //    ReplicaState so the HW computation has the correct membership.
+        //    Additionally: sync the partition's cached leader + epoch
+        //    (idempotent), and for partitions where self is leader,
+        //    install the ISR into ReplicaState for HW computation.
         for key in desired_local_set(self.node_id, image) {
             if let Err(e) = self.materialize_local_partition(&key.0, key.1) {
                 warn!(
@@ -157,9 +162,6 @@ impl ReplicatorSupervisor {
             let Some(part_record) = image.partition(&key.0, key.1).cloned() else {
                 continue;
             };
-            if part_record.leader != self.node_id {
-                continue;
-            }
             let Some(part) = self
                 .partitions
                 .get(&(key.0.clone(), key.1))
@@ -167,8 +169,20 @@ impl ReplicatorSupervisor {
             else {
                 continue;
             };
-            part.install_isr(&part_record.replicas, part_record.leader)
+            // Slice-10b: always sync the partition's cached leader + epoch.
+            // `Partition::install_leader_change` is idempotent (atomic stores
+            // no-op on equal writes).
+            part.install_leader_change(part_record.leader, part_record.leader_epoch)
                 .await;
+            if part_record.leader == self.node_id {
+                // Install the *current* ISR from the metadata image, not the
+                // full replica set. Using `replicas` would undo any shrink
+                // applied via AlterPartition: every metadata-image change
+                // would reset ISR back to [all replicas], so isr_maintenance's
+                // shrink would never stick (and producers with acks=-1 would
+                // stay blocked indefinitely on lagging followers).
+                part.install_isr(&part_record.isr, part_record.leader).await;
+            }
         }
 
         let desired = desired_follower_set(self.node_id, image);
@@ -179,6 +193,23 @@ impl ReplicatorSupervisor {
             if !desired.contains(&k)
                 && let Some((_, token)) = self.tasks.remove(&k)
             {
+                self.task_targets.remove(&k);
+                token.cancel();
+            }
+        }
+
+        // 1b. Cancel any follower task whose target (leader, leader_epoch) changed.
+        for k in &desired {
+            let Some(pr) = image.partition(&k.0, k.1).cloned() else {
+                continue;
+            };
+            let new_target = (pr.leader, pr.leader_epoch);
+            let needs_cancel = self
+                .task_targets
+                .get(k)
+                .is_some_and(|prev| *prev.value() != new_target);
+            if needs_cancel && let Some((_, token)) = self.tasks.remove(k) {
+                self.task_targets.remove(k);
                 token.cancel();
             }
         }
@@ -211,6 +242,8 @@ impl ReplicatorSupervisor {
             };
             let token = CancellationToken::new();
             self.tasks.insert(k.clone(), token.clone());
+            self.task_targets
+                .insert(k.clone(), (leader, part.leader_epoch));
             tokio::spawn(replicator::run(replicator::Config {
                 node_id: self.node_id,
                 topic: k.0,
@@ -299,6 +332,7 @@ mod tests {
                 leader: 1,
                 replicas: vec![1, 2, 3],
                 isr: vec![1, 2, 3],
+                leader_epoch: 0,
             }),
         ]);
         let d = desired_follower_set(2, &img);
@@ -321,6 +355,7 @@ mod tests {
                 leader: 1,
                 replicas: vec![1, 2, 3],
                 isr: vec![1, 2, 3],
+                leader_epoch: 0,
             }),
         ]);
         assert!(desired_follower_set(1, &img).is_empty());
@@ -341,6 +376,7 @@ mod tests {
                 leader: 1,
                 replicas: vec![1, 2, 3],
                 isr: vec![1, 2, 3],
+                leader_epoch: 0,
             }),
         ]);
         assert!(desired_follower_set(99, &img).is_empty());
@@ -381,6 +417,7 @@ mod tests {
                 leader: 1,
                 replicas: vec![1, 2, 3],
                 isr: vec![1, 2, 3],
+                leader_epoch: 0,
             }),
             MetadataRecord::V1Topic(TopicRecord {
                 name: "b".into(),
@@ -394,6 +431,7 @@ mod tests {
                 leader: 3,
                 replicas: vec![1, 2, 3],
                 isr: vec![1, 2, 3],
+                leader_epoch: 0,
             }),
             MetadataRecord::V1Partition(PartitionRecord {
                 topic: "b".into(),
@@ -401,6 +439,7 @@ mod tests {
                 leader: 2,
                 replicas: vec![1, 2, 3],
                 isr: vec![1, 2, 3],
+                leader_epoch: 0,
             }),
         ]);
         let d = desired_follower_set(2, &img);

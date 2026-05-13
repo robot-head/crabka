@@ -66,6 +66,15 @@ pub const NOT_ENOUGH_REPLICAS: i16 = 19;
 /// the leader's log but not yet on every ISR follower.
 pub const NOT_ENOUGH_REPLICAS_AFTER_APPEND: i16 = 20;
 
+/// KIP-101 fence: caller's `current_leader_epoch` is older than the
+/// partition's current `leader_epoch`. Caller should re-fetch metadata
+/// or call `OffsetForLeaderEpoch` to learn the truncation point.
+pub const FENCED_LEADER_EPOCH: i16 = 74;
+
+/// KIP-101: caller's `current_leader_epoch` is newer than the broker's
+/// view. Metadata propagation lag — caller retries after a brief wait.
+pub const UNKNOWN_LEADER_EPOCH: i16 = 75;
+
 /// Map an internal [`crate::error::BrokerError`] to a wire-level code.
 /// Most internal errors map to `UNKNOWN_SERVER_ERROR`; specific variants
 /// pick more meaningful codes.
@@ -79,6 +88,8 @@ pub fn from_broker_error(err: &crate::error::BrokerError) -> i16 {
         BrokerError::UnknownMember { .. } => UNKNOWN_MEMBER_ID,
         BrokerError::GenerationMismatch { .. } => ILLEGAL_GENERATION,
         BrokerError::ProducerEpochFenced { .. } => INVALID_PRODUCER_EPOCH,
+        BrokerError::FencedLeaderEpoch { .. } => FENCED_LEADER_EPOCH,
+        BrokerError::UnknownLeaderEpoch(_) => UNKNOWN_LEADER_EPOCH,
         BrokerError::Replication(_)
         | BrokerError::Shutdown
         | BrokerError::Io(_)
@@ -161,5 +172,20 @@ mod tests {
     fn not_enough_replicas_codes_have_expected_values() {
         assert_eq!(NOT_ENOUGH_REPLICAS, 19);
         assert_eq!(NOT_ENOUGH_REPLICAS_AFTER_APPEND, 20);
+    }
+
+    #[test]
+    fn fenced_leader_epoch_maps_correctly() {
+        let e = BrokerError::FencedLeaderEpoch {
+            have: 0,
+            current: 1,
+        };
+        assert_eq!(from_broker_error(&e), FENCED_LEADER_EPOCH);
+    }
+
+    #[test]
+    fn unknown_leader_epoch_maps_correctly() {
+        let e = BrokerError::UnknownLeaderEpoch(2);
+        assert_eq!(from_broker_error(&e), UNKNOWN_LEADER_EPOCH);
     }
 }

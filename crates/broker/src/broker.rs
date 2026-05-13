@@ -9,6 +9,8 @@ use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use std::sync::atomic::{AtomicI32, AtomicU64};
+
 use crate::config::BrokerConfig;
 use crate::error::BrokerError;
 use crate::handlers::HandlerTable;
@@ -36,6 +38,7 @@ pub struct Broker {
     pub(crate) txn_coordinator: Arc<crate::txn::coordinator::TxnCoordinator>,
     pub(crate) supervisor_shutdown: tokio_util::sync::CancellationToken,
     pub(crate) supervisor_handle: tokio::sync::Mutex<Option<JoinHandle<()>>>,
+    pub(crate) liveness: Arc<crate::heartbeat::controller_state::ControllerLivenessState>,
     handlers: HandlerTable,
 }
 
@@ -178,63 +181,16 @@ impl BrokerHandle {
         part.test_set_log_start(new_start).await
     }
 
-    /// Test-only helper: install a synthetic ISR on `(topic, partition)` so
-    /// integration tests can exercise the HW gate without spinning up
-    /// multiple brokers.
-    ///
-    /// Calls `Partition::install_isr` directly; the supervisor will not
-    /// override it unless the metadata image also changes (which it does
-    /// not in these single-broker tests).
-    ///
-    /// # Panics
-    ///
-    /// Does not panic if the partition is not found — the call is silently
-    /// ignored, matching the semantics expected by the durability test that
-    /// calls this before the topic is fully materialized.
-    #[doc(hidden)]
+    /// Test-only: directly set `current_leader_epoch` on a locally-hosted
+    /// partition. Used by `tests/leader_epoch.rs` to simulate split-brain
+    /// (force an epoch bump) without going through the supervisor's
+    /// metadata-image-driven path.
+    #[cfg(any(test, feature = "test-helpers"))]
     #[allow(clippy::used_underscore_binding)]
-    pub async fn test_install_isr(
-        &self,
-        topic: &str,
-        partition: i32,
-        replicas: &[crabka_raft::NodeId],
-        leader: crabka_raft::NodeId,
-    ) {
+    pub fn test_set_leader_epoch(&self, topic: &str, partition: i32, epoch: i32) {
         if let Some(part) = self._broker.partitions.get(&(topic.to_string(), partition)) {
-            part.value().install_isr(replicas, leader).await;
+            part.value().test_set_leader_epoch(epoch);
         }
-    }
-
-    /// Test-only helper. Do not call from production code. Poll the
-    /// broker's partition map until `(topic, partition)` is materialized
-    /// locally by the supervisor's reconcile loop, or `timeout` elapses.
-    /// Returns `true` on success, `false` on timeout.
-    ///
-    /// Used by `durability.rs` integration tests to remove the
-    /// metadata-apply race between `CreateTopics` ack and partition
-    /// materialization.
-    #[doc(hidden)]
-    #[allow(clippy::used_underscore_binding)]
-    pub async fn test_wait_for_local_partition(
-        &self,
-        topic: &str,
-        partition: i32,
-        timeout: std::time::Duration,
-    ) -> bool {
-        let deadline = std::time::Instant::now() + timeout;
-        while std::time::Instant::now() < deadline {
-            if self
-                ._broker
-                .partitions
-                .contains_key(&(topic.to_string(), partition))
-            {
-                return true;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
-        self._broker
-            .partitions
-            .contains_key(&(topic.to_string(), partition))
     }
 
     /// Cancel the listener + drain in-flight connections. Awaiting the
@@ -377,6 +333,93 @@ impl Broker {
         );
         let supervisor_handle = supervisor.spawn();
 
+        // 4c. Liveness state for KIP-500 BrokerHeartbeat tracking.
+        let liveness = Arc::new(
+            crate::heartbeat::controller_state::ControllerLivenessState::new(
+                std::time::Duration::from_millis(config.heartbeat_timeout_ms),
+            ),
+        );
+
+        // 4d. Broker-side heartbeat client: sends BrokerHeartbeat to the
+        //     controller leader on every tick. Child token of
+        //     supervisor_shutdown so it is cancelled on broker shutdown.
+        let heartbeat_shutdown = supervisor_shutdown.child_token();
+        let _heartbeat_handle = tokio::spawn(crate::heartbeat::client::run(
+            crate::heartbeat::client::Config {
+                broker_id: config.broker_id,
+                interval: std::time::Duration::from_millis(config.heartbeat_interval_ms),
+                controller: controller.clone(),
+                shutdown: heartbeat_shutdown,
+            },
+        ));
+
+        // 4e. Controller-side liveness ticker: scans the heartbeat registry
+        //     every second and fires leader_election callbacks on transitions.
+        let liveness_for_ticker = liveness.clone();
+        let controller_for_ticker = controller.clone();
+        let ticker_node_id = config.node_id;
+        let ticker_shutdown = supervisor_shutdown.child_token();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+            loop {
+                tokio::select! {
+                    _ = tick.tick() => {},
+                    () = ticker_shutdown.cancelled() => return,
+                }
+                let transitions = liveness_for_ticker.tick().await;
+                for t in transitions {
+                    use crate::heartbeat::controller_state::LivenessTransition::{
+                        AliveToDead, DeadToAlive,
+                    };
+                    match t {
+                        AliveToDead(n) => {
+                            if let Err(e) = crate::leader_election::on_broker_dead(
+                                &controller_for_ticker,
+                                ticker_node_id,
+                                n,
+                                &liveness_for_ticker,
+                            )
+                            .await
+                            {
+                                tracing::warn!(broker = n, error = %e,
+                                    "leader_election on_broker_dead failed");
+                            }
+                        }
+                        DeadToAlive(n) => {
+                            if let Err(e) = crate::leader_election::on_broker_alive(
+                                &controller_for_ticker,
+                                ticker_node_id,
+                                n,
+                                &liveness_for_ticker,
+                            )
+                            .await
+                            {
+                                tracing::warn!(broker = n, error = %e,
+                                    "leader_election on_broker_alive failed");
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        // 4f. ISR maintenance: per-leader-partition shrink/expand tick.
+        //     Proposes AlterPartition changes when follower lag exceeds
+        //     `replica_lag_time_max_ms`. Child token of supervisor_shutdown.
+        let isr_shutdown = supervisor_shutdown.child_token();
+        tokio::spawn(crate::isr_maintenance::run(
+            crate::isr_maintenance::Config {
+                node_id: config.node_id,
+                partitions: partitions.clone(),
+                controller: controller.clone(),
+                replica_lag_time_max: std::time::Duration::from_millis(
+                    config.replica_lag_time_max_ms,
+                ),
+                broker_id: config.broker_id,
+                shutdown: isr_shutdown,
+            },
+        ));
+
         // 5. Build handler table.
         let handlers = crate::handlers::build_table();
 
@@ -401,6 +444,7 @@ impl Broker {
             txn_coordinator,
             supervisor_shutdown,
             supervisor_handle: tokio::sync::Mutex::new(Some(supervisor_handle)),
+            liveness: liveness.clone(),
             handlers,
         });
 
@@ -429,6 +473,8 @@ pub(crate) fn spawn_partition(
         crate::replica_state::ReplicaState::new(),
     ));
     let hw_advance_notify = Arc::new(tokio::sync::Notify::new());
+    let current_leader = Arc::new(AtomicU64::new(0));
+    let current_leader_epoch = Arc::new(AtomicI32::new(0));
     let writer = tokio::spawn(crate::partition_writer::run(
         log.clone(),
         rx,
@@ -444,6 +490,8 @@ pub(crate) fn spawn_partition(
         append_notify: notify,
         replica_state,
         hw_advance_notify,
+        current_leader,
+        current_leader_epoch,
         _writer_handle: Arc::new(writer),
     })
 }

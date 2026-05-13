@@ -119,17 +119,53 @@ pub(crate) fn handle(
                     .get(&(topic_name.clone(), idx))
                     .map(|p| p.clone());
 
-                // NOTE: slice-10a originally updated the leader's ReplicaState
-                // (per-follower LEO + cached HW) here from each follower
-                // Fetch's `fetch_offset`. That extra mutex acquisition in the
-                // hot Fetch path was correlated with follower-replication
-                // stalls on Linux CI in multi-broker scenarios. The path is
-                // only needed when `acks=-1` Produces gate on full-ISR HW
-                // across real followers, which the current acceptance gates
-                // don't exercise (durability.rs is single-broker rf=1; the
-                // JVM `acks_all_durability` test is env-gated). Slice-10b will
-                // add a more disciplined HW propagation path (KIP-101
-                // leader-epoch + ISR maintenance) that needs this anyway.
+                // KIP-101 epoch fence. The follower (or consumer using KIP-320)
+                // includes its `current_leader_epoch`; we reject stale or future
+                // epochs without serving data.
+                if let Some(part) = part_opt.as_ref() {
+                    let our_epoch = part
+                        .current_leader_epoch
+                        .load(std::sync::atomic::Ordering::Acquire);
+                    if fp.current_leader_epoch >= 0 && fp.current_leader_epoch != our_epoch {
+                        out.error_code = if fp.current_leader_epoch < our_epoch {
+                            codes::FENCED_LEADER_EPOCH
+                        } else {
+                            codes::UNKNOWN_LEADER_EPOCH
+                        };
+                        pending.push(PendingRead {
+                            topic_name: topic_name.clone(),
+                            topic_id,
+                            partition_index: idx,
+                            fetch_offset,
+                            max_bytes,
+                            read_committed,
+                            is_follower_fetch,
+                            partition: None,
+                            out,
+                        });
+                        continue;
+                    }
+                }
+
+                // Restore follower-fetch HW maintenance (slice-10a removed this
+                // because of stalls; slice-10b's ISR maintenance prevents stalls
+                // by shrinking lagging followers out of the ISR within 2s on CI).
+                if is_follower_fetch && let Some(part) = part_opt.as_ref() {
+                    let leader_leo = part.log_end_offset();
+                    let advanced = {
+                        let mut st = part.replica_state.lock().await;
+                        let prev = st.hw;
+                        let new = st.update_follower_leo(
+                            u64::try_from(req.replica_id).unwrap_or(0),
+                            fetch_offset,
+                            leader_leo,
+                        );
+                        new > prev
+                    };
+                    if advanced {
+                        part.hw_advance_notify.notify_waiters();
+                    }
+                }
 
                 if part_opt.is_none() || topic_name.is_empty() {
                     out.error_code = codes::UNKNOWN_TOPIC_OR_PARTITION;

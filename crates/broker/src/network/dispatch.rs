@@ -186,12 +186,15 @@ fn handler_body_flexible(api_key: i16, version: i16) -> bool {
         19 => version >= owned::create_topics_request::FLEXIBLE_MIN,
         20 => version >= owned::delete_topics_request::FLEXIBLE_MIN,
         22 => version >= owned::init_producer_id_request::FLEXIBLE_MIN,
+        23 => version >= owned::offset_for_leader_epoch_request::FLEXIBLE_MIN,
         24 => version >= owned::add_partitions_to_txn_request::FLEXIBLE_MIN,
         25 => version >= owned::add_offsets_to_txn_request::FLEXIBLE_MIN,
         26 => version >= owned::end_txn_request::FLEXIBLE_MIN,
         27 => version >= owned::write_txn_markers_request::FLEXIBLE_MIN,
         28 => version >= owned::txn_offset_commit_request::FLEXIBLE_MIN,
         32 => version >= owned::describe_configs_request::FLEXIBLE_MIN,
+        56 => version >= owned::alter_partition_request::FLEXIBLE_MIN,
+        63 => version >= owned::broker_heartbeat_request::FLEXIBLE_MIN,
         _ => false,
     }
 }

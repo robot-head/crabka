@@ -11,6 +11,7 @@
 // + Fetch handlers landing in Tasks 15-16; keep this allow until then.
 #![allow(dead_code)]
 
+use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crabka_log::{AbortedTxn, Log, ReadOutput};
@@ -99,6 +100,12 @@ pub struct Partition {
     pub append_notify: Arc<Notify>,
     pub replica_state: Arc<tokio::sync::Mutex<ReplicaState>>,
     pub hw_advance_notify: Arc<Notify>,
+    /// Current leader's `NodeId` from the metadata image. Atomic for
+    /// lock-free reads in the Produce/Fetch hot paths.
+    pub current_leader: Arc<AtomicU64>,
+    /// Current `leader_epoch` from the metadata image. Stamped on every
+    /// appended batch; validated on every follower Fetch.
+    pub current_leader_epoch: Arc<AtomicI32>,
     /// Held so the writer task is reaped when every Partition handle is
     /// dropped. Not used directly.
     pub _writer_handle: Arc<JoinHandle<()>>,
@@ -263,15 +270,49 @@ impl Partition {
     }
 
     /// Install (or reinstall) the ISR membership and seed non-leader
-    /// `follower_leo` entries to 0. Called by the replicator supervisor
+    /// follower entries to 0. Called by the replicator supervisor
     /// when this broker materializes a partition where it's the leader.
     /// Idempotent: re-installing the same `(replicas, leader)` preserves
     /// existing follower progress.
+    ///
+    /// Recomputes HW under the new ISR and fires `hw_advance_notify`
+    /// if HW advanced — necessary because an `AlterPartition` shrink
+    /// may have just dropped a lagging follower, and the surviving
+    /// followers' LEOs (which were already being updated via fetch)
+    /// can now satisfy a previously-blocked acks=-1 produce without
+    /// waiting for the next fetch round.
     pub async fn install_isr(&self, replicas: &[crabka_raft::NodeId], leader: crabka_raft::NodeId) {
-        self.replica_state
-            .lock()
-            .await
-            .install_isr(replicas, leader);
+        let leader_leo = self.log_end_offset();
+        let mut st = self.replica_state.lock().await;
+        let prev_hw = st.hw;
+        st.install_isr(replicas, leader);
+        let new_hw = st.recompute_hw_for_leader_append(leader_leo);
+        drop(st);
+        if new_hw > prev_hw {
+            self.hw_advance_notify.notify_waiters();
+        }
+    }
+
+    /// Apply a leader change observed via the metadata image. Updates
+    /// the cached `current_leader` + `current_leader_epoch`. If the
+    /// leader or epoch actually changed, clears per-follower stats
+    /// (stale under the new leader's view). On idempotent re-installs
+    /// (same leader + epoch) per-follower progress is preserved — the
+    /// supervisor calls this on every reconcile and unconditional
+    /// clearing would reset follower LEOs each time, dropping HW back
+    /// to 0 and blocking acks=-1 producers until followers re-fetch.
+    /// Fires `hw_advance_notify` so waiting Produce gates can re-check.
+    pub async fn install_leader_change(&self, new_leader: u64, new_epoch: i32) {
+        let prev_leader = self.current_leader.swap(new_leader, Ordering::AcqRel);
+        let prev_epoch = self.current_leader_epoch.swap(new_epoch, Ordering::AcqRel);
+        let leader_changed = prev_leader != new_leader || prev_epoch != new_epoch;
+        let mut st = self.replica_state.lock().await;
+        if leader_changed {
+            st.per_follower.clear();
+        }
+        st.current_leader_epoch = new_epoch;
+        drop(st);
+        self.hw_advance_notify.notify_waiters();
     }
 
     /// Wait until `replica_state.hw >= target_offset` or `deadline`
@@ -304,6 +345,16 @@ impl Partition {
                 () = tokio::time::sleep_until(deadline.into()) => return Err(HwTimeout),
             }
         }
+    }
+
+    /// Test-only: directly set the partition's `current_leader_epoch`
+    /// without going through the supervisor's metadata-image-driven path.
+    /// Used by `tests/leader_epoch.rs` to simulate split-brain by forcing
+    /// an epoch bump mid-Produce.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn test_set_leader_epoch(&self, epoch: i32) {
+        self.current_leader_epoch
+            .store(epoch, std::sync::atomic::Ordering::Release);
     }
 
     /// Test-only: shift the partition's in-memory `log_start_offset` to
@@ -339,6 +390,8 @@ impl std::fmt::Debug for Partition {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicI32, AtomicU64};
+
     use super::*;
     use crabka_log::LogConfig;
     use tempfile::tempdir;
@@ -368,6 +421,8 @@ mod tests {
                 crate::replica_state::ReplicaState::new(),
             )),
             hw_advance_notify: Arc::new(Notify::new()),
+            current_leader: Arc::new(AtomicU64::new(0)),
+            current_leader_epoch: Arc::new(AtomicI32::new(0)),
             _writer_handle: Arc::new(writer),
         };
         let s = format!("{p:?}");
@@ -399,6 +454,8 @@ mod tests {
             append_notify: Arc::new(Notify::new()),
             replica_state,
             hw_advance_notify: Arc::new(Notify::new()),
+            current_leader: Arc::new(AtomicU64::new(0)),
+            current_leader_epoch: Arc::new(AtomicI32::new(0)),
             _writer_handle: Arc::new(writer),
         };
         assert_eq!(p.high_watermark().await, 42);
@@ -420,13 +477,15 @@ mod tests {
                 crate::replica_state::ReplicaState::new(),
             )),
             hw_advance_notify: Arc::new(Notify::new()),
+            current_leader: Arc::new(AtomicU64::new(0)),
+            current_leader_epoch: Arc::new(AtomicI32::new(0)),
             _writer_handle: Arc::new(writer),
         };
         p.install_isr(&[1, 2, 3], 1).await;
         let st = p.replica_state.lock().await;
         assert_eq!(st.isr.len(), 3);
         assert!(st.isr.contains(&1) && st.isr.contains(&2) && st.isr.contains(&3));
-        assert_eq!(st.follower_leo.get(&2), Some(&0));
+        assert_eq!(st.per_follower.get(&2).map(|f| f.leo), Some(0));
     }
 
     #[tokio::test]
@@ -450,6 +509,8 @@ mod tests {
             append_notify: Arc::new(Notify::new()),
             replica_state,
             hw_advance_notify: Arc::new(Notify::new()),
+            current_leader: Arc::new(AtomicU64::new(0)),
+            current_leader_epoch: Arc::new(AtomicI32::new(0)),
             _writer_handle: Arc::new(writer),
         };
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -472,6 +533,8 @@ mod tests {
                 crate::replica_state::ReplicaState::new(),
             )),
             hw_advance_notify: Arc::new(Notify::new()),
+            current_leader: Arc::new(AtomicU64::new(0)),
+            current_leader_epoch: Arc::new(AtomicI32::new(0)),
             _writer_handle: Arc::new(writer),
         };
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(50);
@@ -497,6 +560,8 @@ mod tests {
             append_notify: Arc::new(Notify::new()),
             replica_state: replica_state.clone(),
             hw_advance_notify: hw_advance_notify.clone(),
+            current_leader: Arc::new(AtomicU64::new(0)),
+            current_leader_epoch: Arc::new(AtomicI32::new(0)),
             _writer_handle: Arc::new(writer),
         };
         tokio::spawn(async move {

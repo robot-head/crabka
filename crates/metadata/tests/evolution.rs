@@ -31,10 +31,11 @@ prop_compose! {
         topic in "[a-zA-Z][a-zA-Z0-9_-]{0,32}",
         partition in 0..1024i32,
         replicas in prop::collection::vec(0..32u64, 1..6),
+        leader_epoch in 0..i32::MAX,
     ) -> PartitionRecord {
         let leader = replicas[0];
         let isr = replicas.clone();
-        PartitionRecord { topic, partition, leader, replicas, isr }
+        PartitionRecord { topic, partition, leader, replicas, isr, leader_epoch }
     }
 }
 

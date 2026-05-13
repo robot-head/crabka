@@ -61,6 +61,7 @@ pub(crate) async fn ensure_topic(
             leader: replicas[0],
             replicas: replicas.clone(),
             isr: replicas,
+            leader_epoch: 0,
         }));
     }
 

@@ -59,12 +59,15 @@ fn supported_apis() -> Vec<ApiVersion> {
         v!(create_topics_request),
         v!(delete_topics_request),
         v!(init_producer_id_request),
+        v!(offset_for_leader_epoch_request),
         v!(add_partitions_to_txn_request),
         v!(add_offsets_to_txn_request),
         v!(end_txn_request),
         v!(write_txn_markers_request),
         v!(txn_offset_commit_request),
         v!(describe_configs_request),
+        v!(alter_partition_request),
+        v!(broker_heartbeat_request),
     ]
 }
 

@@ -97,6 +97,26 @@
 //! leader-election-on-failure, and ISR shrink/expand to close the
 //! remaining bulletproof-EOS gap (a leader crash mid-transaction still
 //! loses records as of 10a).
+//!
+//! ## Bulletproof EOS — sub-slice 10b (leader-epoch + election + ISR)
+//!
+//! KIP-101 leader-epoch fencing tagged onto every appended batch via
+//! `Partition::current_leader_epoch`. Per-partition
+//! `.leader-epoch-checkpoint` file (Apache Kafka byte-compat) backs the
+//! `OffsetForLeaderEpoch` RPC for follower-side truncation on leader
+//! change. Leader election runs on the controller:
+//! `heartbeat::controller_state::ControllerLivenessState` tracks
+//! per-broker `last_heartbeat`; a 1s ticker times out brokers at
+//! `heartbeat_timeout_ms` and calls `leader_election::on_broker_dead`
+//! which scans partitions of the dead broker, picks the first alive
+//! ISR replica, and bumps `leader_epoch`. ISR shrink/expand is
+//! leader-driven by `isr_maintenance` — proposes `AlterPartition`
+//! whenever a follower's last-fetch time exceeds
+//! `replica_lag_time_max_ms`.
+//!
+//! Together with slice-10a, the bulletproof-EOS promise is complete:
+//! `acks=all` produces survive arbitrary single-broker failures with
+//! no data loss and no zombie writes.
 
 #![doc(html_root_url = "https://docs.rs/crabka-broker/0.0.0")]
 
@@ -106,6 +126,9 @@ mod config;
 mod coordinator;
 mod error;
 mod handlers;
+pub(crate) mod heartbeat;
+pub(crate) mod isr_maintenance;
+pub(crate) mod leader_election;
 mod log_dir;
 mod network;
 mod partition;

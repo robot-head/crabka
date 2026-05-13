@@ -110,6 +110,9 @@ async fn start_n_node(
             node_id: i + 1,
             controller_listen_addr: controller_addrs[i as usize],
             controller_quorum_voters: voters.clone(),
+            heartbeat_interval_ms: 200,
+            heartbeat_timeout_ms: 2_000,
+            replica_lag_time_max_ms: 2_000,
         };
         let cfg_clone = cfg.clone();
         spawned.push(tokio::spawn(async move { Broker::start(cfg_clone).await }));

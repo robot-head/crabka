@@ -41,6 +41,16 @@ pub struct BrokerConfig {
     /// a single-voter cluster of just this broker, so existing
     /// slice-1..6 tests upgrade to quorum-of-1 without config changes.
     pub controller_quorum_voters: Vec<(NodeId, SocketAddr)>,
+
+    /// How often each broker sends `BrokerHeartbeat` to the controller
+    /// leader. Default 3,000ms.
+    pub heartbeat_interval_ms: u64,
+    /// Controller marks a broker dead after this many ms without a
+    /// heartbeat. Default 9,000ms.
+    pub heartbeat_timeout_ms: u64,
+    /// Leader proposes ISR shrink when a follower lags more than this
+    /// many ms. Default 30,000ms.
+    pub replica_lag_time_max_ms: u64,
 }
 
 impl BrokerConfig {
@@ -59,6 +69,9 @@ impl BrokerConfig {
             node_id: 1,
             controller_listen_addr: controller_addr,
             controller_quorum_voters: vec![(1, controller_addr)],
+            heartbeat_interval_ms: 200,
+            heartbeat_timeout_ms: 2_000,
+            replica_lag_time_max_ms: 2_000,
         }
     }
 }
@@ -76,6 +89,9 @@ impl Default for BrokerConfig {
             node_id: 1,
             controller_listen_addr: controller_addr,
             controller_quorum_voters: vec![(1, controller_addr)],
+            heartbeat_interval_ms: 3_000,
+            heartbeat_timeout_ms: 9_000,
+            replica_lag_time_max_ms: 30_000,
         }
     }
 }

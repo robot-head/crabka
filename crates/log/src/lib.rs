@@ -44,6 +44,7 @@
 mod config;
 mod error;
 mod index;
+mod leader_epoch_checkpoint;
 mod log;
 mod name;
 mod recovery;
@@ -53,6 +54,7 @@ mod txn_index;
 
 pub use config::LogConfig;
 pub use error::LogError;
+pub use leader_epoch_checkpoint::{EpochEntry, LeaderEpochCheckpoint};
 pub use log::{Log, ReadOutput};
 pub use segment::Segment;
 pub use txn_index::{AbortedTxn, TxnIndex};

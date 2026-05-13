@@ -98,6 +98,12 @@ pub enum BrokerError {
         requested: i16,
     },
 
+    #[error("fenced leader epoch (have={have}, current={current})")]
+    FencedLeaderEpoch { have: i32, current: i32 },
+
+    #[error("unknown leader epoch ({0})")]
+    UnknownLeaderEpoch(i32),
+
     /// A replication-layer failure (fetch from leader failed, truncation
     /// error, etc.). Maps to `UNKNOWN_SERVER_ERROR` on the wire.
     #[error("replication: {0}")]

@@ -155,6 +155,7 @@ mod tests {
             leader: 1,
             replicas: vec![1],
             isr: vec![1],
+            leader_epoch: 0,
         }));
         m.apply(&MetadataRecord::V1Partition(PartitionRecord {
             topic: "t".into(),
@@ -162,6 +163,7 @@ mod tests {
             leader: 1,
             replicas: vec![1],
             isr: vec![1],
+            leader_epoch: 0,
         }));
         assert_eq!(m.partitions_of("t").count(), 2);
         m.apply(&MetadataRecord::V1DeleteTopic(DeleteTopicRecord {
@@ -199,6 +201,7 @@ mod tests {
             leader: 1,
             replicas: vec![1],
             isr: vec![1],
+            leader_epoch: 0,
         });
         let err = m.validate(&p).unwrap_err();
         assert!(matches!(err, MetadataError::UnknownTopic(_)));

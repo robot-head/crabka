@@ -43,7 +43,9 @@ impl HandlerTable {
     }
 }
 
+pub(crate) mod alter_partition;
 pub(crate) mod api_versions;
+pub(crate) mod broker_heartbeat;
 pub(crate) mod create_topics;
 pub(crate) mod delete_topics;
 pub(crate) mod describe_configs;
@@ -57,6 +59,7 @@ pub(crate) mod list_offsets;
 pub(crate) mod metadata;
 pub(crate) mod offset_commit;
 pub(crate) mod offset_fetch;
+pub(crate) mod offset_for_leader_epoch;
 pub(crate) mod produce;
 pub(crate) mod sync_group;
 
@@ -80,11 +83,14 @@ pub(crate) fn build_table() -> HandlerTable {
     t.register(19, create_topics::handle);
     t.register(20, delete_topics::handle);
     t.register(22, init_producer_id::handle);
+    t.register(23, offset_for_leader_epoch::handle);
     t.register(24, crate::txn::handlers::add_partitions_to_txn::handle);
     t.register(25, crate::txn::handlers::add_offset_commits_to_txn::handle);
     t.register(26, crate::txn::handlers::end_txn::handle);
     t.register(27, crate::txn::handlers::write_txn_markers::handle);
     t.register(28, crate::txn::handlers::txn_offset_commit::handle);
     t.register(32, describe_configs::handle);
+    t.register(56, alter_partition::handle);
+    t.register(63, broker_heartbeat::handle);
     t
 }

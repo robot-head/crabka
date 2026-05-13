@@ -73,7 +73,7 @@ pub(crate) fn handle(
 
                 // Either there's a single decoded RecordBatch to append, or
                 // the field was null / undecodable → INVALID_REQUEST.
-                let Some(batch) = part_data.records else {
+                let Some(mut batch) = part_data.records else {
                     out.error_code = codes::INVALID_REQUEST;
                     partition_results.push(out);
                     continue;
@@ -91,6 +91,13 @@ pub(crate) fn handle(
                     partition_results.push(out);
                     continue;
                 };
+
+                // Stamp the current leader epoch onto the batch — this becomes
+                // the `partition_leader_epoch` carried on the wire and used by
+                // KIP-101 fence validation on the follower's Fetch.
+                batch.partition_leader_epoch = part
+                    .current_leader_epoch
+                    .load(std::sync::atomic::Ordering::Acquire);
 
                 // ── transactional produce verify (KIP-1319 v2) ──────────
                 // This check is more authoritative than idempotent dedup,

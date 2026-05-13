@@ -151,6 +151,14 @@ impl Segment {
         crate::name::txnindex_path(&self.dir, self.base_offset)
     }
 
+    /// Path to the per-partition `.leader-epoch-checkpoint` file in this
+    /// segment's directory. The checkpoint is shared across all segments
+    /// in a partition — epoch history accumulates over the log's lifetime.
+    #[must_use]
+    pub fn leader_epoch_checkpoint_path(&self) -> std::path::PathBuf {
+        crate::name::leader_epoch_checkpoint_path(&self.dir)
+    }
+
     /// Highest absolute offset (inclusive) of any batch appended to this
     /// segment. Returns `base_offset - 1` for an empty segment.
     #[must_use]
