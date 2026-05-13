@@ -18,11 +18,35 @@ use crabka_client_core::Client;
 use crabka_client_producer::{Producer, ProducerRecord};
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
 use crabka_protocol::owned::fetch_request::{FetchPartition, FetchRequest, FetchTopic};
+use crabka_protocol::owned::metadata_request::{MetadataRequest, MetadataRequestTopic};
 use crabka_protocol::owned::produce_request::{
     PartitionProduceData, ProduceRequest, TopicProduceData,
 };
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 use crabka_protocol::records::{Record, RecordBatch};
+
+/// Resolve the topic UUID via Metadata. Produce/Fetch at v ≥ 13 carry
+/// only `topic_id` on the wire (KIP-516); without this the broker
+/// decodes the request with empty name + ZERO topic_id and returns
+/// UNKNOWN_TOPIC_OR_PARTITION. Mirrors the helper in
+/// `crates/client-consumer/tests/integration.rs`.
+async fn topic_id_for(client: &Client, name: &str) -> WireUuid {
+    let resp = client
+        .send(MetadataRequest {
+            topics: Some(vec![MetadataRequestTopic {
+                name: Some(name.into()),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        })
+        .await
+        .expect("Metadata for topic_id");
+    resp.topics
+        .iter()
+        .find(|t| t.name.as_deref() == Some(name))
+        .map(|t| t.topic_id)
+        .unwrap_or_default()
+}
 
 fn record_batch_with_values(values: &[&str]) -> RecordBatch {
     let mut batch = RecordBatch {
@@ -92,49 +116,36 @@ async fn produce_acks(
     acks: i16,
     timeout_ms: i32,
 ) -> Result<i64, i16> {
-    // Retry on UNKNOWN_TOPIC_OR_PARTITION (3) up to 20 times (~4 s
-    // total): slice-7's openraft metadata-apply can take longer than
-    // the 500ms budget used by the client-consumer integration tests
-    // when several `durability.rs` tests run in parallel on a slow
-    // CI runner. The partition is materialized lazily by the
-    // supervisor's reconcile loop after CreateTopics ack returns; we
-    // need to wait for that materialization before the Produce can
-    // resolve the partition.
-    const MAX_ATTEMPTS: usize = 20;
     let client = Client::builder()
         .bootstrap(bootstrap.to_string())
         .build()
         .await
         .unwrap();
-    for attempt in 1..=MAX_ATTEMPTS {
-        let resp = client
-            .send(ProduceRequest {
-                acks,
-                timeout_ms,
-                topic_data: vec![TopicProduceData {
-                    name: topic.into(),
-                    partition_data: vec![PartitionProduceData {
-                        index: 0,
-                        records: Some(record_batch_with_values(values)),
-                        ..Default::default()
-                    }],
+    let topic_id = topic_id_for(&client, topic).await;
+    let resp = client
+        .send(ProduceRequest {
+            acks,
+            timeout_ms,
+            topic_data: vec![TopicProduceData {
+                name: topic.into(),
+                topic_id,
+                partition_data: vec![PartitionProduceData {
+                    index: 0,
+                    records: Some(record_batch_with_values(values)),
                     ..Default::default()
                 }],
                 ..Default::default()
-            })
-            .await
-            .expect("Produce");
-        let pr = &resp.responses[0].partition_responses[0];
-        if pr.error_code == 0 {
-            return Ok(pr.base_offset);
-        }
-        if pr.error_code == 3 && attempt < MAX_ATTEMPTS {
-            tokio::time::sleep(Duration::from_millis(200)).await;
-            continue;
-        }
-        return Err(pr.error_code);
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("Produce");
+    let pr = &resp.responses[0].partition_responses[0];
+    if pr.error_code == 0 {
+        Ok(pr.base_offset)
+    } else {
+        Err(pr.error_code)
     }
-    unreachable!("loop returns on every iteration")
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -186,6 +197,7 @@ async fn consumer_clamps_at_hw_when_followers_lag() {
         .build()
         .await
         .unwrap();
+    let topic_id = topic_id_for(&client, "clamp").await;
     let resp = client
         .send(FetchRequest {
             replica_id: -1,
@@ -194,7 +206,7 @@ async fn consumer_clamps_at_hw_when_followers_lag() {
             max_bytes: 1 << 20,
             topics: vec![FetchTopic {
                 topic: "clamp".into(),
-                topic_id: WireUuid::ZERO,
+                topic_id,
                 partitions: vec![FetchPartition {
                     partition: 0,
                     fetch_offset: 0,
