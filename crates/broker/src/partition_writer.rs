@@ -19,8 +19,8 @@ pub async fn run(
     log: Arc<Mutex<Log>>,
     mut rx: mpsc::Receiver<WriterMessage>,
     append_notify: Arc<Notify>,
-    _replica_state: Arc<Mutex<ReplicaState>>,
-    _hw_advance_notify: Arc<Notify>,
+    replica_state: Arc<Mutex<ReplicaState>>,
+    hw_advance_notify: Arc<Notify>,
 ) {
     while let Some(msg) = rx.recv().await {
         match msg {
@@ -38,6 +38,22 @@ pub async fn run(
                 let _ = ack.send(result);
                 if ok {
                     append_notify.notify_waiters();
+                    // Re-lock log briefly to read LEO, then update HW.
+                    // Holding both mutexes in sequence is fine — neither
+                    // is held across an .await.
+                    let advanced = {
+                        let leader_leo =
+                            log.lock().expect("log mutex poisoned").log_end_offset();
+                        let mut st = replica_state
+                            .lock()
+                            .expect("replica_state mutex poisoned");
+                        let prev = st.hw;
+                        let new = st.recompute_hw_for_leader_append(leader_leo);
+                        new > prev
+                    };
+                    if advanced {
+                        hw_advance_notify.notify_waiters();
+                    }
                 }
             }
             WriterMessage::Replicate { mut batch, ack } => {
@@ -290,6 +306,86 @@ mod tests {
             .expect("send truncate");
         ack_rx.await.expect("ack").expect("truncate ok");
         assert_eq!(log.lock().unwrap().log_end_offset(), 0);
+
+        drop(tx);
+        writer.await.expect("writer join");
+    }
+
+    #[tokio::test]
+    async fn writer_fires_hw_notify_after_produce_when_rf_one() {
+        let dir = tempdir().expect("tempdir");
+        let log = Arc::new(Mutex::new(
+            Log::open(dir.path(), LogConfig::default()).expect("open log"),
+        ));
+        let (tx, rx) = mpsc::channel(1);
+        let append_notify = Arc::new(Notify::new());
+        let replica_state = Arc::new(Mutex::new(crate::replica_state::ReplicaState::new()));
+        {
+            let mut st = replica_state.lock().unwrap();
+            st.install_isr(&[1], 1);
+        }
+        let hw_advance_notify = Arc::new(Notify::new());
+        let writer = tokio::spawn(run(
+            log.clone(),
+            rx,
+            append_notify.clone(),
+            replica_state.clone(),
+            hw_advance_notify.clone(),
+        ));
+
+        let waiter = hw_advance_notify.notified();
+        tokio::pin!(waiter);
+
+        let (ack, _ack_rx) = oneshot::channel();
+        tx.send(WriterMessage::Produce(ProduceJob {
+            batch: sample_batch(2),
+            ack,
+        }))
+        .await
+        .expect("send job");
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+            .await
+            .expect("hw_advance_notify did not fire");
+
+        assert_eq!(replica_state.lock().unwrap().hw, 2);
+
+        drop(tx);
+        writer.await.expect("writer join");
+    }
+
+    #[tokio::test]
+    async fn writer_does_not_advance_hw_when_followers_lagging() {
+        let dir = tempdir().expect("tempdir");
+        let log = Arc::new(Mutex::new(
+            Log::open(dir.path(), LogConfig::default()).expect("open log"),
+        ));
+        let (tx, rx) = mpsc::channel(1);
+        let append_notify = Arc::new(Notify::new());
+        let replica_state = Arc::new(Mutex::new(crate::replica_state::ReplicaState::new()));
+        {
+            let mut st = replica_state.lock().unwrap();
+            st.install_isr(&[1, 2, 3], 1);
+        }
+        let hw_advance_notify = Arc::new(Notify::new());
+        let writer = tokio::spawn(run(
+            log.clone(),
+            rx,
+            append_notify.clone(),
+            replica_state.clone(),
+            hw_advance_notify.clone(),
+        ));
+
+        let (ack, ack_rx) = oneshot::channel();
+        tx.send(WriterMessage::Produce(ProduceJob {
+            batch: sample_batch(3),
+            ack,
+        }))
+        .await
+        .expect("send job");
+        ack_rx.await.expect("ack").expect("append ok");
+
+        assert_eq!(replica_state.lock().unwrap().hw, 0);
 
         drop(tx);
         writer.await.expect("writer join");
