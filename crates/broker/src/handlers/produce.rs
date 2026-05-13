@@ -222,22 +222,64 @@ pub(crate) fn handle(
 
                 match tokio::time::timeout(timeout, ack_rx).await {
                     Ok(Ok(Ok(base_offset))) => {
-                        out.error_code = codes::NONE;
-                        out.base_offset = base_offset;
-
-                        if pid >= 0 {
-                            producer_state
-                                .commit(
-                                    &topic_name,
-                                    idx,
-                                    pid,
-                                    epoch,
-                                    base_seq,
-                                    last_offset_delta,
-                                    base_offset,
-                                    max_timestamp,
-                                )
-                                .await;
+                        if req.acks == -1 {
+                            let target = base_offset + i64::from(last_offset_delta) + 1;
+                            let deadline = std::time::Instant::now() + timeout;
+                            match part.await_hw_at_least(target, deadline).await {
+                                Ok(()) => {
+                                    out.error_code = codes::NONE;
+                                    out.base_offset = base_offset;
+                                    if pid >= 0 {
+                                        producer_state
+                                            .commit(
+                                                &topic_name,
+                                                idx,
+                                                pid,
+                                                epoch,
+                                                base_seq,
+                                                last_offset_delta,
+                                                base_offset,
+                                                max_timestamp,
+                                            )
+                                            .await;
+                                    }
+                                }
+                                Err(_timeout) => {
+                                    out.error_code = codes::NOT_ENOUGH_REPLICAS_AFTER_APPEND;
+                                    out.base_offset = base_offset;
+                                    if pid >= 0 {
+                                        producer_state
+                                            .commit(
+                                                &topic_name,
+                                                idx,
+                                                pid,
+                                                epoch,
+                                                base_seq,
+                                                last_offset_delta,
+                                                base_offset,
+                                                max_timestamp,
+                                            )
+                                            .await;
+                                    }
+                                }
+                            }
+                        } else {
+                            out.error_code = codes::NONE;
+                            out.base_offset = base_offset;
+                            if pid >= 0 {
+                                producer_state
+                                    .commit(
+                                        &topic_name,
+                                        idx,
+                                        pid,
+                                        epoch,
+                                        base_seq,
+                                        last_offset_delta,
+                                        base_offset,
+                                        max_timestamp,
+                                    )
+                                    .await;
+                            }
                         }
                     }
                     Ok(Ok(Err(e))) => {
