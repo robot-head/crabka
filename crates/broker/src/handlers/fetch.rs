@@ -50,6 +50,7 @@ struct PendingRead {
     out: PartitionData,
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) fn handle(
     broker: &Broker,
     version: i16,
@@ -113,6 +114,39 @@ pub(crate) fn handle(
                 let part_opt = partitions
                     .get(&(topic_name.clone(), idx))
                     .map(|p| p.clone());
+
+                // ── HW maintenance (follower fetch) ──────────────────────────────
+                // When the call is a follower fetch (replica_id >= 0), use the
+                // incoming fetch_offset as the follower's persisted LEO from the
+                // leader's perspective: at this point the follower has durably
+                // appended everything below fetch_offset and is asking for what's
+                // next. Update ReplicaState and fire hw_advance_notify if HW moved.
+                if is_follower_fetch
+                    && let Some(part) = part_opt.as_ref()
+                {
+                    let leader_leo = part.log_end_offset();
+                    let new_hw_opt = {
+                        let mut st = part
+                            .replica_state
+                            .lock()
+                            .expect("replica_state mutex poisoned");
+                        let prev = st.hw;
+                        let new = st.update_follower_leo(
+                            u64::try_from(req.replica_id).unwrap_or(0),
+                            fetch_offset,
+                            leader_leo,
+                        );
+                        if new > prev {
+                            Some(new)
+                        } else {
+                            None
+                        }
+                    };
+                    if new_hw_opt.is_some() {
+                        part.hw_advance_notify.notify_waiters();
+                    }
+                }
+
                 if part_opt.is_none() || topic_name.is_empty() {
                     out.error_code = codes::UNKNOWN_TOPIC_OR_PARTITION;
                     pending.push(PendingRead {
