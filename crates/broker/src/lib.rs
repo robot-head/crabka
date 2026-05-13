@@ -105,6 +105,7 @@ mod codes;
 mod config;
 mod coordinator;
 mod error;
+pub(crate) mod heartbeat;
 mod handlers;
 mod log_dir;
 mod network;
