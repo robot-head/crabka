@@ -31,19 +31,19 @@
     clippy::too_many_lines
 )]
 
-use std::net::SocketAddr;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
+use crabka_broker::BrokerHandle;
 use crabka_client_core::Client;
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
 use crabka_protocol::owned::produce_request::{
     PartitionProduceData, ProduceRequest, TopicProduceData,
 };
 use crabka_protocol::records::{Record, RecordBatch};
-use tempfile::TempDir;
 use tokio::sync::Mutex;
+
+mod support;
 
 /// Test-binary-wide serialization. Each test in this file spins up a
 /// 3-broker cluster on loopback; running them concurrently exhausts
@@ -52,92 +52,6 @@ use tokio::sync::Mutex;
 fn cluster_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
-}
-
-fn init_tracing() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
-        )
-        .with_test_writer()
-        .try_init();
-}
-
-/// Copied verbatim from `crates/broker/tests/quorum.rs`. See the
-/// docstring there for the full rationale; the short version is
-/// "bind-and-drop to capture stable loopback ports, then spawn brokers
-/// in parallel". A future refactor can hoist this and
-/// [`start_n_node_with_retry`] into a shared test-support module.
-async fn start_n_node(
-    n: u64,
-) -> Result<Vec<(BrokerHandle, BrokerConfig, TempDir)>, crabka_broker::BrokerError> {
-    init_tracing();
-    // Phase 1: capture addresses by binding + dropping.
-    let mut client_addrs = Vec::with_capacity(n as usize);
-    let mut controller_addrs = Vec::with_capacity(n as usize);
-    for _ in 0..n {
-        let cl = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        client_addrs.push(cl.local_addr().unwrap());
-        let ct = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        controller_addrs.push(ct.local_addr().unwrap());
-        drop((cl, ct));
-    }
-
-    let voters: Vec<(u64, SocketAddr)> = (0..n)
-        .map(|i| (i + 1, controller_addrs[i as usize]))
-        .collect();
-
-    // Phase 2: spawn brokers in parallel so they can converge on a leader.
-    let mut spawned = Vec::with_capacity(n as usize);
-    let mut metas: Vec<(TempDir, BrokerConfig)> = Vec::with_capacity(n as usize);
-    for i in 0..n {
-        let dir = TempDir::new().unwrap();
-        let cfg = BrokerConfig {
-            broker_id: i32::try_from(i + 1).unwrap(),
-            listen_addr: client_addrs[i as usize],
-            advertised_listener: client_addrs[i as usize].to_string(),
-            log_dir: dir.path().to_path_buf(),
-            log_config: Default::default(),
-            node_id: i + 1,
-            controller_listen_addr: controller_addrs[i as usize],
-            controller_quorum_voters: voters.clone(),
-            heartbeat_interval_ms: 200,
-            heartbeat_timeout_ms: 2_000,
-            replica_lag_time_max_ms: 2_000,
-            controller_election_timeout: std::time::Duration::from_millis(500),
-            controller_heartbeat_interval: std::time::Duration::from_millis(100),
-        };
-        let cfg_clone = cfg.clone();
-        spawned.push(tokio::spawn(async move { Broker::start(cfg_clone).await }));
-        metas.push((dir, cfg));
-    }
-
-    let mut out = Vec::with_capacity(n as usize);
-    for (j, (dir, cfg)) in spawned.into_iter().zip(metas) {
-        let h = j.await.expect("broker spawn join")?;
-        out.push((h, cfg, dir));
-    }
-    Ok(out)
-}
-
-/// Retry `start_n_node` up to 3 times. Copied verbatim from
-/// `crates/broker/tests/quorum.rs`; the hand-rolled wire occasionally
-/// split-votes on slow CI runners, and a fresh tempdir / port set on
-/// retry clears the openraft state.
-async fn start_n_node_with_retry(n: u64) -> Vec<(BrokerHandle, BrokerConfig, TempDir)> {
-    let mut last_err = None;
-    for attempt in 1..=3 {
-        match start_n_node(n).await {
-            Ok(cluster) => return cluster,
-            Err(e) => {
-                tracing::warn!(attempt, error = %e, "cluster start failed; retrying");
-                last_err = Some(e);
-                tokio::time::sleep(Duration::from_secs(2)).await;
-            }
-        }
-    }
-    panic!("cluster start failed after 3 attempts; last error: {last_err:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -149,7 +63,7 @@ async fn start_n_node_with_retry(n: u64) -> Vec<(BrokerHandle, BrokerConfig, Tem
 #[ignore = "follower replicators intermittently stall on Linux CI; slice-10b follow-up will fix"]
 async fn replication_factor_three_propagates_to_all_followers() {
     let _g = cluster_lock().lock().await;
-    let cluster = start_n_node_with_retry(3).await;
+    let cluster = support::start_n_node_with_retry(3).await;
 
     // Wait for all 3 brokers to register in each other's MetadataImage.
     // Iterate sequentially with `.await` (no `block_on`).
@@ -290,7 +204,7 @@ async fn replication_factor_three_propagates_to_all_followers() {
 #[ignore = "follower replicators intermittently stall on Linux CI; slice-10b follow-up will fix"]
 async fn out_of_range_truncates_and_recovers() {
     let _g = cluster_lock().lock().await;
-    let cluster = start_n_node_with_retry(3).await;
+    let cluster = support::start_n_node_with_retry(3).await;
 
     // Same broker-discovery wait as the propagation test.
     let deadline = Instant::now() + Duration::from_mins(2);
