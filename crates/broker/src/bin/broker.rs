@@ -63,6 +63,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         node_id,
         controller_listen_addr: controller_addr,
         controller_quorum_voters: vec![(node_id, controller_addr)],
+        heartbeat_interval_ms: 3_000,
+        heartbeat_timeout_ms: 9_000,
+        replica_lag_time_max_ms: 30_000,
     };
 
     let handle = Broker::start(config).await?;
