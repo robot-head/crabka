@@ -328,11 +328,11 @@ async fn acks_all_completes_via_isr_shrink_when_follower_dead() {
 
 /// Poll every broker's controller image until each one sees all three
 /// brokers registered. Required before any multi-broker test that needs
-/// the partition's replica set to include all 3 nodes (CreateTopics
+/// the partition's replica set to include all 3 nodes (`CreateTopics`
 /// reads `image.brokers()` to pick replicas, so a race here silently
 /// degrades to a smaller replica set).
 async fn wait_for_all_three_brokers(cluster: &[(BrokerHandle, String, TempDir)]) {
-    let deadline = Instant::now() + Duration::from_secs(120);
+    let deadline = Instant::now() + Duration::from_mins(2);
     loop {
         let mut all_see_three = true;
         for (h, _, _) in cluster {
