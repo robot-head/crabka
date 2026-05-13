@@ -1040,6 +1040,7 @@ async fn transactional_console_producer_eos() {
 // sequentially.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires Docker"]
+#[allow(clippy::too_many_lines)]
 async fn acks_all_durability() {
     const TOPIC: &str = "crabka-acks-all-itest";
 
