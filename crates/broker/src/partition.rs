@@ -75,6 +75,11 @@ pub enum WriterMessage {
     },
 }
 
+/// Returned by `await_hw_at_least` when the deadline elapses before
+/// the High Watermark reaches the target offset.
+#[derive(Debug)]
+pub struct HwTimeout;
+
 /// Runtime handle for a single partition.
 ///
 /// Cheap to clone — `log`, `writer_tx`, `append_notify` are all `Arc`-ish
@@ -270,6 +275,38 @@ impl Partition {
         }
     }
 
+    /// Wait until `replica_state.hw >= target_offset` or `deadline`
+    /// elapses. Used by the Produce handler for `acks == -1` to gate
+    /// the response on full replication.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(HwTimeout)` if the deadline elapses before the HW
+    /// advances. Returns `Ok(())` on the first re-check that satisfies
+    /// the target.
+    pub async fn await_hw_at_least(
+        &self,
+        target_offset: i64,
+        deadline: std::time::Instant,
+    ) -> Result<(), HwTimeout> {
+        loop {
+            if self.high_watermark() >= target_offset {
+                return Ok(());
+            }
+            // Subscribe to the notify BEFORE re-reading HW so we don't
+            // miss an advance that happens between read and await.
+            let waiter = self.hw_advance_notify.notified();
+            tokio::pin!(waiter);
+            if self.high_watermark() >= target_offset {
+                return Ok(());
+            }
+            tokio::select! {
+                () = &mut waiter => {},
+                () = tokio::time::sleep_until(deadline.into()) => return Err(HwTimeout),
+            }
+        }
+    }
+
     /// Test-only: shift the partition's in-memory `log_start_offset` to
     /// `new_start`. Goes through the writer task to maintain the
     /// single-writer invariant on the underlying `Log`.
@@ -385,5 +422,78 @@ mod tests {
         assert_eq!(st.isr.len(), 3);
         assert!(st.isr.contains(&1) && st.isr.contains(&2) && st.isr.contains(&3));
         assert_eq!(st.follower_leo.get(&2), Some(&0));
+    }
+
+    #[tokio::test]
+    async fn await_hw_returns_immediately_if_already_satisfied() {
+        let dir = tempdir().expect("tempdir");
+        let log = Log::open(dir.path(), LogConfig::default()).expect("open log");
+        let (tx, _rx) = mpsc::channel::<WriterMessage>(1);
+        let writer = tokio::spawn(async {});
+        let replica_state = Arc::new(Mutex::new(crate::replica_state::ReplicaState::new()));
+        {
+            let mut st = replica_state.lock().unwrap();
+            st.hw = 100;
+        }
+        let p = Partition {
+            topic: "t".into(),
+            partition_id: 0,
+            log: Arc::new(Mutex::new(log)),
+            writer_tx: tx,
+            append_notify: Arc::new(Notify::new()),
+            replica_state,
+            hw_advance_notify: Arc::new(Notify::new()),
+            _writer_handle: Arc::new(writer),
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        p.await_hw_at_least(50, deadline).await.expect("immediate");
+    }
+
+    #[tokio::test]
+    async fn await_hw_returns_timeout_when_unreached() {
+        let dir = tempdir().expect("tempdir");
+        let log = Log::open(dir.path(), LogConfig::default()).expect("open log");
+        let (tx, _rx) = mpsc::channel::<WriterMessage>(1);
+        let writer = tokio::spawn(async {});
+        let p = Partition {
+            topic: "t".into(),
+            partition_id: 0,
+            log: Arc::new(Mutex::new(log)),
+            writer_tx: tx,
+            append_notify: Arc::new(Notify::new()),
+            replica_state: Arc::new(Mutex::new(crate::replica_state::ReplicaState::new())),
+            hw_advance_notify: Arc::new(Notify::new()),
+            _writer_handle: Arc::new(writer),
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(50);
+        let result = p.await_hw_at_least(100, deadline).await;
+        assert!(matches!(result, Err(crate::partition::HwTimeout)));
+    }
+
+    #[tokio::test]
+    async fn await_hw_wakes_on_advance() {
+        let dir = tempdir().expect("tempdir");
+        let log = Log::open(dir.path(), LogConfig::default()).expect("open log");
+        let (tx, _rx) = mpsc::channel::<WriterMessage>(1);
+        let writer = tokio::spawn(async {});
+        let replica_state = Arc::new(Mutex::new(crate::replica_state::ReplicaState::new()));
+        let hw_advance_notify = Arc::new(Notify::new());
+        let p = Partition {
+            topic: "t".into(),
+            partition_id: 0,
+            log: Arc::new(Mutex::new(log)),
+            writer_tx: tx,
+            append_notify: Arc::new(Notify::new()),
+            replica_state: replica_state.clone(),
+            hw_advance_notify: hw_advance_notify.clone(),
+            _writer_handle: Arc::new(writer),
+        };
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            replica_state.lock().unwrap().hw = 100;
+            hw_advance_notify.notify_waiters();
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        p.await_hw_at_least(50, deadline).await.expect("woke on advance");
     }
 }
