@@ -161,6 +161,19 @@ pub(crate) fn handle(
                                 }) {
                                 Ok(log) => {
                                     let part = spawn_partition(name.clone(), p_i32, log);
+                                    // Mirror what `ReplicatorSupervisor::reconcile` does
+                                    // for newly-materialized partitions: sync the cached
+                                    // leader + epoch, and (when self is leader) install
+                                    // the ISR for HW computation. Without this, a Produce
+                                    // arriving before the supervisor's metadata-watch
+                                    // fires sees `isr.is_empty()`, falls into
+                                    // `compute_hw == leader_leo`, and acks=-1 returns
+                                    // instantly without waiting for followers.
+                                    let leader = replicas[0];
+                                    part.install_leader_change(leader, 0).await;
+                                    if leader == node_id {
+                                        part.install_isr(replicas, leader).await;
+                                    }
                                     partitions_map.insert((name.clone(), p_i32), part);
                                 }
                                 Err(e) => {
