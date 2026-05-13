@@ -205,6 +205,38 @@ impl BrokerHandle {
         }
     }
 
+    /// Test-only helper. Do not call from production code. Poll the
+    /// broker's partition map until `(topic, partition)` is materialized
+    /// locally by the supervisor's reconcile loop, or `timeout` elapses.
+    /// Returns `true` on success, `false` on timeout.
+    ///
+    /// Used by `durability.rs` integration tests to remove the
+    /// metadata-apply race between `CreateTopics` ack and partition
+    /// materialization.
+    #[doc(hidden)]
+    #[allow(clippy::used_underscore_binding)]
+    pub async fn test_wait_for_local_partition(
+        &self,
+        topic: &str,
+        partition: i32,
+        timeout: std::time::Duration,
+    ) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        while std::time::Instant::now() < deadline {
+            if self
+                ._broker
+                .partitions
+                .contains_key(&(topic.to_string(), partition))
+            {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        self._broker
+            .partitions
+            .contains_key(&(topic.to_string(), partition))
+    }
+
     /// Cancel the listener + drain in-flight connections. Awaiting the
     /// returned future blocks until the listener task exits.
     #[allow(clippy::used_underscore_binding)] // `_broker` carries shared state we must reach into during shutdown

@@ -49,7 +49,7 @@ async fn boot_single() -> (BrokerHandle, String, TempDir) {
     (broker, bootstrap, dir)
 }
 
-async fn create_topic(bootstrap: &str, name: &str, rf: i16) {
+async fn create_topic(broker: &BrokerHandle, bootstrap: &str, name: &str, rf: i16) {
     let client = Client::builder()
         .bootstrap(bootstrap.to_string())
         .build()
@@ -71,6 +71,17 @@ async fn create_topic(bootstrap: &str, name: &str, rf: i16) {
     assert_eq!(
         resp.topics[0].error_code, 0,
         "CreateTopics failed: {resp:?}"
+    );
+    // CreateTopics ack means the controller's quorum committed the
+    // metadata record, but the supervisor's reconcile loop materializes
+    // the partition locally asynchronously. Wait for that so subsequent
+    // Produce/Fetch don't race the materialization.
+    let materialized = broker
+        .test_wait_for_local_partition(name, 0, Duration::from_secs(10))
+        .await;
+    assert!(
+        materialized,
+        "partition `{name}-0` never materialized locally after CreateTopics"
     );
 }
 
@@ -129,7 +140,7 @@ async fn produce_acks(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn acks_one_returns_quickly_on_rf1_broker() {
     let (broker, bootstrap, _dir) = boot_single().await;
-    create_topic(&bootstrap, "ack1", 1).await;
+    create_topic(&broker, &bootstrap, "ack1", 1).await;
     let start = Instant::now();
     let offset = produce_acks(&bootstrap, "ack1", &["a", "b", "c"], 1, 5_000)
         .await
@@ -146,7 +157,7 @@ async fn acks_one_returns_quickly_on_rf1_broker() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn acks_all_returns_quickly_on_rf1_broker() {
     let (broker, bootstrap, _dir) = boot_single().await;
-    create_topic(&bootstrap, "ackall", 1).await;
+    create_topic(&broker, &bootstrap, "ackall", 1).await;
     let start = Instant::now();
     let offset = produce_acks(&bootstrap, "ackall", &["a", "b", "c"], -1, 5_000)
         .await
@@ -163,7 +174,7 @@ async fn acks_all_returns_quickly_on_rf1_broker() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn consumer_clamps_at_hw_when_followers_lag() {
     let (broker, bootstrap, _dir) = boot_single().await;
-    create_topic(&bootstrap, "clamp", 1).await;
+    create_topic(&broker, &bootstrap, "clamp", 1).await;
 
     let offset = produce_acks(&bootstrap, "clamp", &["x", "y", "z"], 1, 5_000)
         .await
@@ -206,7 +217,7 @@ async fn consumer_clamps_at_hw_when_followers_lag() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn read_committed_under_rf1_unchanged_from_slice9() {
     let (broker, bootstrap, _dir) = boot_single().await;
-    create_topic(&bootstrap, "rctxn", 1).await;
+    create_topic(&broker, &bootstrap, "rctxn", 1).await;
 
     let producer = Producer::builder()
         .bootstrap(bootstrap.clone())
@@ -255,7 +266,7 @@ async fn read_committed_under_rf1_unchanged_from_slice9() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn acks_all_times_out_when_no_follower() {
     let (broker, bootstrap, _dir) = boot_single().await;
-    create_topic(&bootstrap, "tout", 1).await;
+    create_topic(&broker, &bootstrap, "tout", 1).await;
 
     // Install a fake ISR with two members; only this broker (node 1)
     // is actually running, so node 2 can never check in via Fetch.
