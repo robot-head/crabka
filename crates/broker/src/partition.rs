@@ -259,6 +259,17 @@ impl Partition {
         }
     }
 
+    /// Install (or reinstall) the ISR membership and seed non-leader
+    /// `follower_leo` entries to 0. Called by the replicator supervisor
+    /// when this broker materializes a partition where it's the leader.
+    /// Idempotent: re-installing the same `(replicas, leader)` preserves
+    /// existing follower progress.
+    pub fn install_isr(&self, replicas: &[crabka_raft::NodeId], leader: crabka_raft::NodeId) {
+        if let Ok(mut st) = self.replica_state.lock() {
+            st.install_isr(replicas, leader);
+        }
+    }
+
     /// Test-only: shift the partition's in-memory `log_start_offset` to
     /// `new_start`. Goes through the writer task to maintain the
     /// single-writer invariant on the underlying `Log`.
@@ -351,5 +362,28 @@ mod tests {
             _writer_handle: Arc::new(writer),
         };
         assert_eq!(p.high_watermark(), 42);
+    }
+
+    #[tokio::test]
+    async fn install_isr_populates_replica_state() {
+        let dir = tempdir().expect("tempdir");
+        let log = Log::open(dir.path(), LogConfig::default()).expect("open log");
+        let (tx, _rx) = mpsc::channel::<WriterMessage>(1);
+        let writer = tokio::spawn(async {});
+        let p = Partition {
+            topic: "t".into(),
+            partition_id: 0,
+            log: Arc::new(Mutex::new(log)),
+            writer_tx: tx,
+            append_notify: Arc::new(Notify::new()),
+            replica_state: Arc::new(Mutex::new(crate::replica_state::ReplicaState::new())),
+            hw_advance_notify: Arc::new(Notify::new()),
+            _writer_handle: Arc::new(writer),
+        };
+        p.install_isr(&[1, 2, 3], 1);
+        let st = p.replica_state.lock().unwrap();
+        assert_eq!(st.isr.len(), 3);
+        assert!(st.isr.contains(&1) && st.isr.contains(&2) && st.isr.contains(&3));
+        assert_eq!(st.follower_leo.get(&2), Some(&0));
     }
 }
