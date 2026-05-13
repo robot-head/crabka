@@ -274,11 +274,23 @@ impl Partition {
     /// when this broker materializes a partition where it's the leader.
     /// Idempotent: re-installing the same `(replicas, leader)` preserves
     /// existing follower progress.
+    ///
+    /// Recomputes HW under the new ISR and fires `hw_advance_notify`
+    /// if HW advanced — necessary because an `AlterPartition` shrink
+    /// may have just dropped a lagging follower, and the surviving
+    /// followers' LEOs (which were already being updated via fetch)
+    /// can now satisfy a previously-blocked acks=-1 produce without
+    /// waiting for the next fetch round.
     pub async fn install_isr(&self, replicas: &[crabka_raft::NodeId], leader: crabka_raft::NodeId) {
-        self.replica_state
-            .lock()
-            .await
-            .install_isr(replicas, leader);
+        let leader_leo = self.log_end_offset();
+        let mut st = self.replica_state.lock().await;
+        let prev_hw = st.hw;
+        st.install_isr(replicas, leader);
+        let new_hw = st.recompute_hw_for_leader_append(leader_leo);
+        drop(st);
+        if new_hw > prev_hw {
+            self.hw_advance_notify.notify_waiters();
+        }
     }
 
     /// Apply a leader change observed via the metadata image. Updates

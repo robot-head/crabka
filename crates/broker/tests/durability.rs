@@ -288,7 +288,18 @@ async fn read_committed_under_rf1_unchanged_from_slice9() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn acks_all_completes_via_isr_shrink_when_follower_dead() {
     let (mut cluster, bootstrap_1) = boot_three_node().await;
+    // All three brokers must be registered with the controller before
+    // CreateTopics; otherwise replica placement may not include all 3
+    // and ISR shrink dynamics observe a different topology than the
+    // test expects. Mirrors `leader_election.rs::wait_for_all_three_brokers`.
+    wait_for_all_three_brokers(&cluster).await;
     create_topic(&cluster[0].0, &bootstrap_1, "shrink", 3).await;
+    // Give follower replicators a moment to spawn and start fetching so
+    // broker 3's `per_follower.last_fetch` is fresh at kill time. Without
+    // this, broker 3 was never tracked as "fetching", isr_maintenance's
+    // expansion bookkeeping treats it as never-caught-up, and shrink
+    // dynamics observed by the test are noisy.
+    tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Kill broker 3 — its absence will force ISR to shrink within
     // `replica_lag_time_max_ms` (2s on CI), unblocking the acks=-1
@@ -312,6 +323,32 @@ async fn acks_all_completes_via_isr_shrink_when_follower_dead() {
     );
     for (h, _, _) in cluster {
         h.shutdown().await;
+    }
+}
+
+/// Poll every broker's controller image until each one sees all three
+/// brokers registered. Required before any multi-broker test that needs
+/// the partition's replica set to include all 3 nodes (CreateTopics
+/// reads `image.brokers()` to pick replicas, so a race here silently
+/// degrades to a smaller replica set).
+async fn wait_for_all_three_brokers(cluster: &[(BrokerHandle, String, TempDir)]) {
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        let mut all_see_three = true;
+        for (h, _, _) in cluster {
+            if h.broker_count().await < 3 {
+                all_see_three = false;
+                break;
+            }
+        }
+        if all_see_three {
+            return;
+        }
+        assert!(
+            Instant::now() <= deadline,
+            "brokers didn't converge on 3-broker view within 2 min"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
