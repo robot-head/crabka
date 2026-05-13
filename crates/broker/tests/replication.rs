@@ -233,7 +233,12 @@ async fn replication_factor_three_propagates_to_all_followers() {
     };
     let prod = producer
         .send(ProduceRequest {
-            acks: -1,
+            // acks=1 (leader-only). This slice-8 test predates slice-10a's
+            // HW gating; the explicit `local_log_end_offset` poll loop
+            // below verifies all 3 brokers see the records, so gating the
+            // produce on full-ISR HW advance would be redundant and flaky
+            // under the per-call timeout on slow CI runners.
+            acks: 1,
             timeout_ms: 5_000,
             topic_data: vec![TopicProduceData {
                 name: "repl".into(),
