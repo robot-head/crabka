@@ -248,6 +248,17 @@ impl Partition {
             .map_err(|_| BrokerError::Txn("ack dropped".into()))?
     }
 
+    /// Cached High Watermark. Reads `replica_state` briefly. Returns 0 if
+    /// the mutex is poisoned (the writer task panicked) — caller treats
+    /// that as "not making progress".
+    #[must_use]
+    pub fn high_watermark(&self) -> i64 {
+        match self.replica_state.lock() {
+            Ok(st) => st.hw,
+            Err(_) => 0,
+        }
+    }
+
     /// Test-only: shift the partition's in-memory `log_start_offset` to
     /// `new_start`. Goes through the writer task to maintain the
     /// single-writer invariant on the underlying `Log`.
@@ -316,5 +327,29 @@ mod tests {
         // The mutex/log internals must NOT appear in Debug output.
         assert!(!s.contains("Mutex"));
         assert!(!s.contains("segments"));
+    }
+
+    #[tokio::test]
+    async fn high_watermark_reads_cached_value() {
+        let dir = tempdir().expect("tempdir");
+        let log = Log::open(dir.path(), LogConfig::default()).expect("open log");
+        let (tx, _rx) = mpsc::channel::<WriterMessage>(1);
+        let writer = tokio::spawn(async {});
+        let replica_state = Arc::new(Mutex::new(crate::replica_state::ReplicaState::new()));
+        {
+            let mut st = replica_state.lock().unwrap();
+            st.hw = 42;
+        }
+        let p = Partition {
+            topic: "t".into(),
+            partition_id: 0,
+            log: Arc::new(Mutex::new(log)),
+            writer_tx: tx,
+            append_notify: Arc::new(Notify::new()),
+            replica_state,
+            hw_advance_notify: Arc::new(Notify::new()),
+            _writer_handle: Arc::new(writer),
+        };
+        assert_eq!(p.high_watermark(), 42);
     }
 }
