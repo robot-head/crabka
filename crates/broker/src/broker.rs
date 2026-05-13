@@ -366,10 +366,14 @@ pub(crate) fn spawn_partition(
     let log = Arc::new(Mutex::new(log));
     let (tx, rx) = tokio::sync::mpsc::channel::<WriterMessage>(64);
     let notify = Arc::new(tokio::sync::Notify::new());
+    let replica_state = Arc::new(Mutex::new(crate::replica_state::ReplicaState::new()));
+    let hw_advance_notify = Arc::new(tokio::sync::Notify::new());
     let writer = tokio::spawn(crate::partition_writer::run(
         log.clone(),
         rx,
         notify.clone(),
+        replica_state.clone(),
+        hw_advance_notify.clone(),
     ));
     Arc::new(Partition {
         topic,
@@ -377,6 +381,8 @@ pub(crate) fn spawn_partition(
         log,
         writer_tx: tx,
         append_notify: notify,
+        replica_state,
+        hw_advance_notify,
         _writer_handle: Arc::new(writer),
     })
 }

@@ -19,6 +19,7 @@ use tokio::sync::{Notify, mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::error::BrokerError;
+use crate::replica_state::ReplicaState;
 
 /// Produce-path message sent from the Produce handler to the partition's
 /// writer task. The writer assigns `base_offset` (overwriting whatever the
@@ -89,6 +90,8 @@ pub struct Partition {
     pub log: Arc<Mutex<Log>>,
     pub writer_tx: mpsc::Sender<WriterMessage>,
     pub append_notify: Arc<Notify>,
+    pub replica_state: Arc<Mutex<ReplicaState>>,
+    pub hw_advance_notify: Arc<Notify>,
     /// Held so the writer task is reaped when every Partition handle is
     /// dropped. Not used directly.
     pub _writer_handle: Arc<JoinHandle<()>>,
@@ -303,6 +306,8 @@ mod tests {
             log: Arc::new(Mutex::new(log)),
             writer_tx: tx,
             append_notify: Arc::new(Notify::new()),
+            replica_state: Arc::new(Mutex::new(crate::replica_state::ReplicaState::new())),
+            hw_advance_notify: Arc::new(Notify::new()),
             _writer_handle: Arc::new(writer),
         };
         let s = format!("{p:?}");
