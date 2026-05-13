@@ -105,6 +105,8 @@ async fn start_n_node(
             heartbeat_interval_ms: 200,
             heartbeat_timeout_ms: 2_000,
             replica_lag_time_max_ms: 2_000,
+            controller_election_timeout: std::time::Duration::from_millis(500),
+            controller_heartbeat_interval: std::time::Duration::from_millis(100),
         };
         let cfg_clone = cfg.clone();
         spawned.push(tokio::spawn(async move { Broker::start(cfg_clone).await }));

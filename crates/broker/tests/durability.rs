@@ -401,6 +401,8 @@ async fn boot_three_node() -> (Vec<(BrokerHandle, String, TempDir)>, String) {
             heartbeat_interval_ms: 200,
             heartbeat_timeout_ms: 2_000,
             replica_lag_time_max_ms: 2_000,
+            controller_election_timeout: std::time::Duration::from_millis(500),
+            controller_heartbeat_interval: std::time::Duration::from_millis(100),
         };
         bootstraps.push(format!("127.0.0.1:{}", client_ports[i]));
         spawned.push(tokio::spawn(async move { Broker::start(cfg).await }));

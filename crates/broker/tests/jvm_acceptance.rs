@@ -74,6 +74,8 @@ async fn start_host_broker() -> (crabka_broker::BrokerHandle, tempfile::TempDir)
         heartbeat_interval_ms: 3_000,
         heartbeat_timeout_ms: 9_000,
         replica_lag_time_max_ms: 30_000,
+        controller_election_timeout: std::time::Duration::from_secs(5),
+        controller_heartbeat_interval: std::time::Duration::from_millis(500),
     };
     let handle = Broker::start(config).await.expect("start broker");
     eprintln!("CRABKA[test] broker started listen={LISTEN} advertised={BOOTSTRAP}");
@@ -489,6 +491,8 @@ async fn three_node_jvm_round_trip() {
             heartbeat_interval_ms: 3_000,
             heartbeat_timeout_ms: 9_000,
             replica_lag_time_max_ms: 30_000,
+            controller_election_timeout: std::time::Duration::from_secs(5),
+            controller_heartbeat_interval: std::time::Duration::from_millis(500),
         };
         tempdirs.push(dir);
         spawns.push(tokio::spawn(async move {
@@ -719,6 +723,8 @@ async fn three_node_replication_byte_compare() {
             heartbeat_interval_ms: 3_000,
             heartbeat_timeout_ms: 9_000,
             replica_lag_time_max_ms: 30_000,
+            controller_election_timeout: std::time::Duration::from_secs(5),
+            controller_heartbeat_interval: std::time::Duration::from_millis(500),
         };
         tempdirs.push(dir);
         spawns.push(tokio::spawn(async move {
@@ -940,6 +946,8 @@ async fn transactional_console_producer_eos() {
             heartbeat_interval_ms: 3_000,
             heartbeat_timeout_ms: 9_000,
             replica_lag_time_max_ms: 30_000,
+            controller_election_timeout: std::time::Duration::from_secs(5),
+            controller_heartbeat_interval: std::time::Duration::from_millis(500),
         };
         tempdirs.push(dir);
         spawns.push(tokio::spawn(async move {
@@ -1096,6 +1104,8 @@ async fn acks_all_durability() {
             heartbeat_interval_ms: 3_000,
             heartbeat_timeout_ms: 9_000,
             replica_lag_time_max_ms: 30_000,
+            controller_election_timeout: std::time::Duration::from_secs(5),
+            controller_heartbeat_interval: std::time::Duration::from_millis(500),
         };
         tempdirs.push(dir);
         spawns.push(tokio::spawn(async move {
@@ -1243,6 +1253,8 @@ async fn acks_all_survives_leader_crash() {
             heartbeat_interval_ms: 200,
             heartbeat_timeout_ms: 2_000,
             replica_lag_time_max_ms: 2_000,
+            controller_election_timeout: std::time::Duration::from_millis(500),
+            controller_heartbeat_interval: std::time::Duration::from_millis(100),
         };
         tempdirs.push(dir);
         spawns.push(tokio::spawn(async move {

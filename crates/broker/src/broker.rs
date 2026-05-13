@@ -226,13 +226,13 @@ impl Broker {
             voters: config.controller_quorum_voters.clone(),
             controller_listen_addr: config.controller_listen_addr,
             log_dir: config.log_dir.join("__cluster_metadata"),
-            // Aggressive defaults (1s / 200ms) split-vote on slow CI runners
-            // when our hand-rolled wire's RPC round-trip exceeds the
-            // election-timeout window. 5s/500ms keeps elections deterministic
-            // for multi-node startups without making the single-node path
-            // perceptibly slower.
-            election_timeout: std::time::Duration::from_secs(5),
-            heartbeat_interval: std::time::Duration::from_millis(500),
+            // Sourced from `BrokerConfig` — see the docstrings there for
+            // the production-vs-test tradeoff. Crucially this also sets
+            // openraft's `leader_lease` to `election_timeout × 2`, which
+            // is the floor on how fast a 3-broker cluster can elect a
+            // replacement when the controller leader dies.
+            election_timeout: config.controller_election_timeout,
+            heartbeat_interval: config.controller_heartbeat_interval,
             client_id: format!("crabka-broker-{}-controller", config.broker_id),
         };
         let controller = Arc::new(

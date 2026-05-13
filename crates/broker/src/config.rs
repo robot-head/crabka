@@ -139,7 +139,10 @@ mod tests {
     #[test]
     fn defaults_use_conservative_raft_timings() {
         let c = BrokerConfig::default();
-        assert_eq!(c.controller_election_timeout, std::time::Duration::from_secs(5));
+        assert_eq!(
+            c.controller_election_timeout,
+            std::time::Duration::from_secs(5)
+        );
         assert_eq!(
             c.controller_heartbeat_interval,
             std::time::Duration::from_millis(500)
