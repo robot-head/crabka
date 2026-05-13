@@ -81,34 +81,45 @@ async fn produce_acks(
     acks: i16,
     timeout_ms: i32,
 ) -> Result<i64, i16> {
+    // Retry on UNKNOWN_TOPIC_OR_PARTITION (3) up to 5 times: slice-7's
+    // openraft metadata-apply has visible-late timing where the
+    // partition handle isn't yet materialized in `broker.partitions`
+    // when the Produce arrives immediately after CreateTopics. Mirrors
+    // the retry helper in `crates/client-consumer/tests/integration.rs`.
     let client = Client::builder()
         .bootstrap(bootstrap.to_string())
         .build()
         .await
         .unwrap();
-    let resp = client
-        .send(ProduceRequest {
-            acks,
-            timeout_ms,
-            topic_data: vec![TopicProduceData {
-                name: topic.into(),
-                partition_data: vec![PartitionProduceData {
-                    index: 0,
-                    records: Some(record_batch_with_values(values)),
+    for attempt in 1..=5 {
+        let resp = client
+            .send(ProduceRequest {
+                acks,
+                timeout_ms,
+                topic_data: vec![TopicProduceData {
+                    name: topic.into(),
+                    partition_data: vec![PartitionProduceData {
+                        index: 0,
+                        records: Some(record_batch_with_values(values)),
+                        ..Default::default()
+                    }],
                     ..Default::default()
                 }],
                 ..Default::default()
-            }],
-            ..Default::default()
-        })
-        .await
-        .expect("Produce");
-    let pr = &resp.responses[0].partition_responses[0];
-    if pr.error_code == 0 {
-        Ok(pr.base_offset)
-    } else {
-        Err(pr.error_code)
+            })
+            .await
+            .expect("Produce");
+        let pr = &resp.responses[0].partition_responses[0];
+        if pr.error_code == 0 {
+            return Ok(pr.base_offset);
+        }
+        if pr.error_code == 3 && attempt < 5 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            continue;
+        }
+        return Err(pr.error_code);
     }
+    unreachable!("loop returns on every iteration")
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
