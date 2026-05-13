@@ -401,10 +401,10 @@ impl Broker {
         ));
 
         // 4e. Controller-side liveness ticker: scans the heartbeat registry
-        //     every second and emits AliveToDead transitions. Task 16 will
-        //     wire those transitions into leader_election::on_broker_dead;
-        //     for now the transitions are dropped (stub).
+        //     every second and fires leader_election callbacks on transitions.
         let liveness_for_ticker = liveness.clone();
+        let controller_for_ticker = controller.clone();
+        let ticker_node_id = config.node_id;
         let ticker_shutdown = supervisor_shutdown.child_token();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
@@ -413,10 +413,38 @@ impl Broker {
                     _ = tick.tick() => {},
                     () = ticker_shutdown.cancelled() => return,
                 }
-                let _transitions = liveness_for_ticker.tick().await;
-                // Task 16 wires up: for each AliveToDead(n) transition, call
-                // leader_election::on_broker_dead. Stub for Task 14 — just
-                // tick the state machine; transitions are dropped.
+                let transitions = liveness_for_ticker.tick().await;
+                for t in transitions {
+                    use crate::heartbeat::controller_state::LivenessTransition::{AliveToDead, DeadToAlive};
+                    match t {
+                        AliveToDead(n) => {
+                            if let Err(e) = crate::leader_election::on_broker_dead(
+                                &controller_for_ticker,
+                                ticker_node_id,
+                                n,
+                                &liveness_for_ticker,
+                            )
+                            .await
+                            {
+                                tracing::warn!(broker = n, error = %e,
+                                    "leader_election on_broker_dead failed");
+                            }
+                        }
+                        DeadToAlive(n) => {
+                            if let Err(e) = crate::leader_election::on_broker_alive(
+                                &controller_for_ticker,
+                                ticker_node_id,
+                                n,
+                                &liveness_for_ticker,
+                            )
+                            .await
+                            {
+                                tracing::warn!(broker = n, error = %e,
+                                    "leader_election on_broker_alive failed");
+                            }
+                        }
+                    }
+                }
             }
         });
 
