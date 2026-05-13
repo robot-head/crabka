@@ -140,20 +140,35 @@ impl ReplicatorSupervisor {
         }
     }
 
-    #[allow(clippy::unused_async)] // tokio::spawn inside; async needed for Task 9 test harness
     pub(crate) async fn reconcile(&self, image: &MetadataImage) {
-        // 0. Materialize the on-disk partition for every assignment
-        //    where self is in `replicas`, regardless of leader/follower
-        //    role. Idempotent — `materialize_local_partition` is a no-op
-        //    when the partition is already in the broker's `partitions`
-        //    map.
+        // 0. Materialize the on-disk partition for every assignment where
+        //    self is in `replicas`, regardless of leader/follower role.
+        //    Additionally: for every partition where self is leader,
+        //    install the static ISR (= replicas) into the partition's
+        //    ReplicaState so the HW computation has the correct membership.
         for key in desired_local_set(self.node_id, image) {
             if let Err(e) = self.materialize_local_partition(&key.0, key.1) {
                 warn!(
                     topic = %key.0, partition = key.1, error = %e,
                     "failed to materialize local partition"
                 );
+                continue;
             }
+            let Some(part_record) = image.partition(&key.0, key.1).cloned() else {
+                continue;
+            };
+            if part_record.leader != self.node_id {
+                continue;
+            }
+            let Some(part) = self
+                .partitions
+                .get(&(key.0.clone(), key.1))
+                .map(|e| e.value().clone())
+            else {
+                continue;
+            };
+            part.install_isr(&part_record.replicas, part_record.leader)
+                .await;
         }
 
         let desired = desired_follower_set(self.node_id, image);
@@ -329,6 +344,26 @@ mod tests {
             }),
         ]);
         assert!(desired_follower_set(99, &img).is_empty());
+    }
+
+    #[tokio::test]
+    async fn materialize_partition_helper_supports_isr_install() {
+        use crabka_log::LogConfig;
+        use tempfile::tempdir;
+
+        let dir = tempdir().expect("tempdir");
+        let partitions = Arc::new(DashMap::new());
+        materialize_partition(&partitions, "t", 0, dir.path(), &LogConfig::default())
+            .expect("materialize");
+        let part = partitions
+            .get(&("t".to_string(), 0))
+            .expect("part")
+            .value()
+            .clone();
+        // Mirror what reconcile does for leader partitions.
+        part.install_isr(&[1, 2, 3], 1).await;
+        let st = part.replica_state.lock().await;
+        assert_eq!(st.isr.len(), 3);
     }
 
     #[test]

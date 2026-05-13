@@ -13,6 +13,34 @@ spec for the full roadmap.
 
 Pre-1.0, pre-alpha. No production use.
 
+### Slices delivered
+
+- **Slice 1** — `crabka-protocol`: wire-protocol codec, JVM-differential
+  tested.
+- **Slice 2** — `crabka-client-core`: connection pool, API-version
+  negotiation, request dispatch.
+- **Slice 3** — `crabka-log`: Apache Kafka byte-compatible segments,
+  indexes, retention.
+- **Slice 4** — single-node broker MVP: Produce/Fetch/Metadata/CreateTopics
+  over TCP. JVM clients connect, produce, and consume.
+- **Slice 5** — consumer groups + coordinator: `__consumer_offsets`,
+  OffsetCommit, OffsetFetch, group rebalance.
+- **Slice 6** — idempotent producer: `InitProducerId`, per-(producer_id,
+  epoch, sequence) dedup.
+- **Slice 7** — KRaft / metadata quorum: openraft-backed controller,
+  metadata image, CreateTopics through quorum.
+- **Slice 8** — replication: multi-broker clusters, follower Fetch loop,
+  rf-aware leader/follower roles. Deferred: HW, acks=all, leader
+  election, KIP-101 (slice 10).
+- **Slice 9** — transactions: KIP-98 + full KIP-1319 v2. TxnCoordinator,
+  `__transaction_state`, per-segment `.txnindex`, LSO, transactional
+  producer + consumer `isolation_level=read_committed`.
+- **Slice 10a** — bulletproof EOS (HW + acks=all): partition-leader HW
+  tracking; `acks=all` Produces block until full-ISR replication;
+  consumer Fetch + `read_committed` LSO clamped at HW. Slice 10b will
+  add KIP-101 leader-epoch, leader-election-on-failure, and ISR
+  shrink/expand.
+
 ## Published crates
 
 - [`crabka-compression`](https://crates.io/crates/crabka-compression) — Kafka wire-protocol compression codecs ([docs](https://docs.rs/crabka-compression)).

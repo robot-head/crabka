@@ -54,6 +54,18 @@ pub const CONCURRENT_TRANSACTIONS: i16 = 49;
 pub const TRANSACTION_COORDINATOR_FENCED: i16 = 50;
 pub const STALE_MEMBER_EPOCH: i16 = 82;
 
+// Slice 10a additions — bulletproof EOS / acks=all codes.
+/// Per-partition error returned by `acks=all` Produce when the request
+/// completes without enough in-sync replicas confirming the write. The
+/// record is durably on the leader's log; the producer should retry.
+pub const NOT_ENOUGH_REPLICAS: i16 = 19;
+
+/// Per-partition error returned by `acks=all` Produce when the request
+/// appended successfully on the leader but the HW timeout elapsed before
+/// enough in-sync replicas confirmed the write. The record is durably on
+/// the leader's log but not yet on every ISR follower.
+pub const NOT_ENOUGH_REPLICAS_AFTER_APPEND: i16 = 20;
+
 /// Map an internal [`crate::error::BrokerError`] to a wire-level code.
 /// Most internal errors map to `UNKNOWN_SERVER_ERROR`; specific variants
 /// pick more meaningful codes.
@@ -143,5 +155,11 @@ mod tests {
     fn txn_variant_maps_to_unknown_server_error() {
         let e = BrokerError::Txn("test".into());
         assert_eq!(from_broker_error(&e), UNKNOWN_SERVER_ERROR);
+    }
+
+    #[test]
+    fn not_enough_replicas_codes_have_expected_values() {
+        assert_eq!(NOT_ENOUGH_REPLICAS, 19);
+        assert_eq!(NOT_ENOUGH_REPLICAS_AFTER_APPEND, 20);
     }
 }

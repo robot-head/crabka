@@ -11,6 +11,7 @@ use crabka_log::Log;
 use tokio::sync::{Notify, mpsc};
 
 use crate::partition::{ProduceJob, WriterMessage};
+use crate::replica_state::ReplicaState;
 
 /// Loop on the receive side of the partition's `WriterMessage` channel.
 /// Exits when the channel closes (every sender dropped).
@@ -18,6 +19,8 @@ pub async fn run(
     log: Arc<Mutex<Log>>,
     mut rx: mpsc::Receiver<WriterMessage>,
     append_notify: Arc<Notify>,
+    replica_state: Arc<tokio::sync::Mutex<ReplicaState>>,
+    hw_advance_notify: Arc<Notify>,
 ) {
     while let Some(msg) = rx.recv().await {
         match msg {
@@ -35,6 +38,20 @@ pub async fn run(
                 let _ = ack.send(result);
                 if ok {
                     append_notify.notify_waiters();
+                    // Re-lock log briefly to read LEO, then update HW.
+                    // The log mutex is std::sync (sync callers), held only
+                    // during the LEO read. The replica_state mutex is
+                    // tokio::sync so we .await it cooperatively.
+                    let leader_leo = log.lock().expect("log mutex poisoned").log_end_offset();
+                    let advanced = {
+                        let mut st = replica_state.lock().await;
+                        let prev = st.hw;
+                        let new = st.recompute_hw_for_leader_append(leader_leo);
+                        new > prev
+                    };
+                    if advanced {
+                        hw_advance_notify.notify_waiters();
+                    }
                 }
             }
             WriterMessage::Replicate { mut batch, ack } => {
@@ -116,7 +133,15 @@ mod tests {
         ));
         let (tx, rx) = mpsc::channel(1);
         let notify = Arc::new(Notify::new());
-        let writer = tokio::spawn(run(log.clone(), rx, notify.clone()));
+        let writer = tokio::spawn(run(
+            log.clone(),
+            rx,
+            notify.clone(),
+            Arc::new(tokio::sync::Mutex::new(
+                crate::replica_state::ReplicaState::new(),
+            )),
+            Arc::new(Notify::new()),
+        ));
 
         let (ack, ack_rx) = oneshot::channel();
         tx.send(WriterMessage::Produce(ProduceJob {
@@ -151,7 +176,15 @@ mod tests {
         ));
         let (tx, rx) = mpsc::channel(1);
         let notify = Arc::new(Notify::new());
-        let writer = tokio::spawn(run(log.clone(), rx, notify.clone()));
+        let writer = tokio::spawn(run(
+            log.clone(),
+            rx,
+            notify.clone(),
+            Arc::new(tokio::sync::Mutex::new(
+                crate::replica_state::ReplicaState::new(),
+            )),
+            Arc::new(Notify::new()),
+        ));
 
         // Subscribe BEFORE sending so we don't miss the notification.
         let waiter = notify.notified();
@@ -182,7 +215,15 @@ mod tests {
         ));
         let (tx, rx) = mpsc::channel(1);
         let notify = Arc::new(Notify::new());
-        let writer = tokio::spawn(run(log.clone(), rx, notify.clone()));
+        let writer = tokio::spawn(run(
+            log.clone(),
+            rx,
+            notify.clone(),
+            Arc::new(tokio::sync::Mutex::new(
+                crate::replica_state::ReplicaState::new(),
+            )),
+            Arc::new(Notify::new()),
+        ));
 
         // First replicate batch must start at offset 0 to match the
         // empty local log's `log_end_offset()`.
@@ -207,7 +248,15 @@ mod tests {
         ));
         let (tx, rx) = mpsc::channel(1);
         let notify = Arc::new(Notify::new());
-        let writer = tokio::spawn(run(log.clone(), rx, notify.clone()));
+        let writer = tokio::spawn(run(
+            log.clone(),
+            rx,
+            notify.clone(),
+            Arc::new(tokio::sync::Mutex::new(
+                crate::replica_state::ReplicaState::new(),
+            )),
+            Arc::new(Notify::new()),
+        ));
 
         // Wrong offset — log_end_offset is 0 but we claim 7.
         let mut batch = sample_batch(1);
@@ -236,7 +285,15 @@ mod tests {
         ));
         let (tx, rx) = mpsc::channel(1);
         let notify = Arc::new(Notify::new());
-        let writer = tokio::spawn(run(log.clone(), rx, notify.clone()));
+        let writer = tokio::spawn(run(
+            log.clone(),
+            rx,
+            notify.clone(),
+            Arc::new(tokio::sync::Mutex::new(
+                crate::replica_state::ReplicaState::new(),
+            )),
+            Arc::new(Notify::new()),
+        ));
 
         // Produce two batches so the log has some data.
         for _ in 0..2 {
@@ -257,6 +314,90 @@ mod tests {
             .expect("send truncate");
         ack_rx.await.expect("ack").expect("truncate ok");
         assert_eq!(log.lock().unwrap().log_end_offset(), 0);
+
+        drop(tx);
+        writer.await.expect("writer join");
+    }
+
+    #[tokio::test]
+    async fn writer_fires_hw_notify_after_produce_when_rf_one() {
+        let dir = tempdir().expect("tempdir");
+        let log = Arc::new(Mutex::new(
+            Log::open(dir.path(), LogConfig::default()).expect("open log"),
+        ));
+        let (tx, rx) = mpsc::channel(1);
+        let append_notify = Arc::new(Notify::new());
+        let replica_state = Arc::new(tokio::sync::Mutex::new(
+            crate::replica_state::ReplicaState::new(),
+        ));
+        {
+            let mut st = replica_state.lock().await;
+            st.install_isr(&[1], 1);
+        }
+        let hw_advance_notify = Arc::new(Notify::new());
+        let writer = tokio::spawn(run(
+            log.clone(),
+            rx,
+            append_notify.clone(),
+            replica_state.clone(),
+            hw_advance_notify.clone(),
+        ));
+
+        let waiter = hw_advance_notify.notified();
+        tokio::pin!(waiter);
+
+        let (ack, _ack_rx) = oneshot::channel();
+        tx.send(WriterMessage::Produce(ProduceJob {
+            batch: sample_batch(2),
+            ack,
+        }))
+        .await
+        .expect("send job");
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+            .await
+            .expect("hw_advance_notify did not fire");
+
+        assert_eq!(replica_state.lock().await.hw, 2);
+
+        drop(tx);
+        writer.await.expect("writer join");
+    }
+
+    #[tokio::test]
+    async fn writer_does_not_advance_hw_when_followers_lagging() {
+        let dir = tempdir().expect("tempdir");
+        let log = Arc::new(Mutex::new(
+            Log::open(dir.path(), LogConfig::default()).expect("open log"),
+        ));
+        let (tx, rx) = mpsc::channel(1);
+        let append_notify = Arc::new(Notify::new());
+        let replica_state = Arc::new(tokio::sync::Mutex::new(
+            crate::replica_state::ReplicaState::new(),
+        ));
+        {
+            let mut st = replica_state.lock().await;
+            st.install_isr(&[1, 2, 3], 1);
+        }
+        let hw_advance_notify = Arc::new(Notify::new());
+        let writer = tokio::spawn(run(
+            log.clone(),
+            rx,
+            append_notify.clone(),
+            replica_state.clone(),
+            hw_advance_notify.clone(),
+        ));
+
+        let (ack, ack_rx) = oneshot::channel();
+        tx.send(WriterMessage::Produce(ProduceJob {
+            batch: sample_batch(3),
+            ack,
+        }))
+        .await
+        .expect("send job");
+        ack_rx.await.expect("ack").expect("append ok");
+
+        assert_eq!(replica_state.lock().await.hw, 0);
 
         drop(tx);
         writer.await.expect("writer join");
