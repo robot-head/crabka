@@ -30,79 +30,10 @@ use crabka_protocol::owned::produce_request::{
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 use crabka_protocol::records::{Record, RecordBatch};
 
+mod support;
+
 const CLIENT_PORTS: [u16; 3] = [12_092, 12_192, 12_292];
 const CONTROLLER_PORTS: [u16; 3] = [12_093, 12_193, 12_293];
-
-async fn boot_three_node() -> (Vec<(BrokerHandle, String, TempDir)>, String) {
-    let voters: Vec<(u64, SocketAddr)> = (0..3)
-        .map(|i| {
-            (
-                u64::try_from(i + 1).unwrap(),
-                format!("127.0.0.1:{}", CONTROLLER_PORTS[i])
-                    .parse()
-                    .unwrap(),
-            )
-        })
-        .collect();
-    // Spawn all three Broker::start futures concurrently — a single
-    // broker blocks waiting for an openraft leader (no quorum from
-    // self alone), so sequential boot deadlocks before brokers 2/3
-    // ever start. Mirrors `tests/quorum.rs::spawn_three`.
-    let mut spawned = Vec::with_capacity(3);
-    let mut dirs = Vec::with_capacity(3);
-    let mut bootstraps = Vec::with_capacity(3);
-    for i in 0..3 {
-        let dir = TempDir::new().unwrap();
-        let cfg = BrokerConfig {
-            broker_id: i32::try_from(i + 1).unwrap(),
-            listen_addr: format!("127.0.0.1:{}", CLIENT_PORTS[i]).parse().unwrap(),
-            advertised_listener: format!("127.0.0.1:{}", CLIENT_PORTS[i]),
-            log_dir: dir.path().to_path_buf(),
-            log_config: LogConfig::default(),
-            node_id: u64::try_from(i + 1).unwrap(),
-            controller_listen_addr: format!("127.0.0.1:{}", CONTROLLER_PORTS[i])
-                .parse()
-                .unwrap(),
-            controller_quorum_voters: voters.clone(),
-            heartbeat_interval_ms: 200,
-            heartbeat_timeout_ms: 2_000,
-            replica_lag_time_max_ms: 2_000,
-            controller_election_timeout: std::time::Duration::from_millis(500),
-            controller_heartbeat_interval: std::time::Duration::from_millis(100),
-        };
-        bootstraps.push(format!("127.0.0.1:{}", CLIENT_PORTS[i]));
-        spawned.push(tokio::spawn(async move { Broker::start(cfg).await }));
-        dirs.push(dir);
-    }
-    let mut cluster = Vec::with_capacity(3);
-    for (handle, (dir, bootstrap)) in spawned.into_iter().zip(dirs.into_iter().zip(bootstraps)) {
-        let broker = handle.await.expect("join").expect("boot");
-        cluster.push((broker, bootstrap, dir));
-    }
-    let bootstrap_1 = cluster[0].1.clone();
-    (cluster, bootstrap_1)
-}
-
-async fn wait_for_all_three_brokers(cluster: &[(BrokerHandle, String, TempDir)]) {
-    let deadline = Instant::now() + Duration::from_mins(2);
-    loop {
-        let mut all_see_three = true;
-        for (h, _, _) in cluster {
-            if h.broker_count().await < 3 {
-                all_see_three = false;
-                break;
-            }
-        }
-        if all_see_three {
-            return;
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "brokers didn't converge on 3-broker view within 2 min"
-        );
-        sleep(Duration::from_millis(50)).await;
-    }
-}
 
 async fn create_topic(broker: &BrokerHandle, bootstrap: &str, name: &str, rf: i16) {
     let client = Client::builder()
@@ -223,8 +154,9 @@ fn cluster_lock() -> &'static tokio::sync::Mutex<()> {
 #[ignore = "flaky on CI; tracked under slice-10b follow-up"]
 async fn broker_death_elects_new_leader() {
     let _g = cluster_lock().lock().await;
-    let (mut cluster, bootstrap_1) = boot_three_node().await;
-    wait_for_all_three_brokers(&cluster).await;
+    let mut cluster = support::start_n_node_with_retry(3).await;
+    support::wait_for_all_brokers_registered(&cluster, 3).await;
+    let bootstrap_1 = cluster[0].1.listen_addr.to_string();
     create_topic(&cluster[0].0, &bootstrap_1, "elect", 3).await;
 
     // Kill broker 1 (the partition leader by round-robin).
@@ -238,7 +170,7 @@ async fn broker_death_elects_new_leader() {
     while Instant::now() < deadline {
         // Read from cluster[0] which is now broker 2.
         let client = Client::builder()
-            .bootstrap(cluster[0].1.clone())
+            .bootstrap(cluster[0].1.listen_addr.to_string())
             .build()
             .await
             .unwrap();
@@ -286,8 +218,9 @@ async fn broker_death_elects_new_leader() {
 #[ignore = "flaky on CI; tracked under slice-10b follow-up"]
 async fn acks_all_completes_after_isr_shrink() {
     let _g = cluster_lock().lock().await;
-    let (mut cluster, bootstrap_1) = boot_three_node().await;
-    wait_for_all_three_brokers(&cluster).await;
+    let mut cluster = support::start_n_node_with_retry(3).await;
+    support::wait_for_all_brokers_registered(&cluster, 3).await;
+    let bootstrap_1 = cluster[0].1.listen_addr.to_string();
     create_topic(&cluster[0].0, &bootstrap_1, "shrink2", 3).await;
 
     // Freeze broker 3 by shutting it down.
@@ -327,8 +260,9 @@ async fn isr_expand_on_catchup() {
     // easily restart a broker mid-test (Broker::start consumes the TempDir).
     // Instead: boot, kill one broker, verify ISR shrinks; then re-boot a
     // fresh broker at the same node_id, verify ISR expands to include it.
-    let (mut cluster, bootstrap_1) = boot_three_node().await;
-    wait_for_all_three_brokers(&cluster).await;
+    let mut cluster = support::start_n_node_with_retry(3).await;
+    support::wait_for_all_brokers_registered(&cluster, 3).await;
+    let bootstrap_1 = cluster[0].1.listen_addr.to_string();
     create_topic(&cluster[0].0, &bootstrap_1, "expand", 3).await;
 
     // Shrink by killing broker 3.
@@ -412,8 +346,9 @@ async fn isr_expand_on_catchup() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn produce_during_leader_failover() {
     let _g = cluster_lock().lock().await;
-    let (mut cluster, bootstrap_1) = boot_three_node().await;
-    wait_for_all_three_brokers(&cluster).await;
+    let mut cluster = support::start_n_node_with_retry(3).await;
+    support::wait_for_all_brokers_registered(&cluster, 3).await;
+    let bootstrap_1 = cluster[0].1.listen_addr.to_string();
     create_topic(&cluster[0].0, &bootstrap_1, "failover", 3).await;
 
     // Produce 5 records with acks=1, kill broker 1 mid-burst, produce 5
@@ -424,7 +359,7 @@ async fn produce_during_leader_failover() {
             .await
             .expect("pre");
     }
-    let bootstrap_2 = cluster[1].1.clone();
+    let bootstrap_2 = cluster[1].1.listen_addr.to_string();
     let dead = cluster.remove(0);
     dead.0.shutdown().await;
 
