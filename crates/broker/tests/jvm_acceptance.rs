@@ -660,6 +660,8 @@ async fn three_node_jvm_round_trip() {
 #[ignore = "requires Docker and CRABKA_RUN_REPLICATION_JVM_TEST=1 — multi-broker follower replication is intermittently flaky on Linux CI; slice-10b will fix"]
 #[allow(clippy::too_many_lines)]
 async fn three_node_replication_byte_compare() {
+    const TOPIC: &str = "crabka-replication-itest";
+
     if std::env::var("CRABKA_RUN_REPLICATION_JVM_TEST").is_err() {
         eprintln!(
             "Skipping three_node_replication_byte_compare: set \
@@ -670,7 +672,6 @@ async fn three_node_replication_byte_compare() {
         );
         return;
     }
-    const TOPIC: &str = "crabka-replication-itest";
 
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
