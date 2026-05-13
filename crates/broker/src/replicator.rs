@@ -21,6 +21,9 @@ use crabka_client_core::{Client, ClientError};
 use crabka_log::{Log, LogConfig};
 use crabka_protocol::owned::fetch_request::{FetchPartition, FetchRequest, FetchTopic};
 use crabka_protocol::owned::fetch_response::FetchResponse;
+use crabka_protocol::owned::offset_for_leader_epoch_request::{
+    OffsetForLeaderEpochRequest, OffsetForLeaderPartition, OffsetForLeaderTopic,
+};
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 use crabka_raft::NodeId;
 
@@ -155,7 +158,20 @@ async fn run_inner(cfg: &Config) -> Result<(), String> {
 /// replicator is responsible for. `replica_id` is set to the local broker
 /// so the leader treats this as a follower fetch rather than a consumer
 /// fetch (Kafka's high-watermark semantics differ between the two).
+///
+/// KIP-101: `current_leader_epoch` is included so the leader can detect
+/// stale or fenced replicas and return `FENCED_LEADER_EPOCH` or
+/// `UNKNOWN_LEADER_EPOCH` when appropriate.
 fn build_fetch_request(cfg: &Config, fetch_offset: i64) -> FetchRequest {
+    let leader_epoch = cfg
+        .partitions
+        .get(&(cfg.topic.clone(), cfg.partition))
+        .map_or(-1, |entry| {
+            entry
+                .value()
+                .current_leader_epoch
+                .load(std::sync::atomic::Ordering::Acquire)
+        });
     FetchRequest {
         replica_id: i32::try_from(cfg.node_id).unwrap_or(-1),
         max_wait_ms: FETCH_MAX_WAIT_MS,
@@ -167,6 +183,7 @@ fn build_fetch_request(cfg: &Config, fetch_offset: i64) -> FetchRequest {
             partitions: vec![FetchPartition {
                 partition: cfg.partition,
                 fetch_offset,
+                current_leader_epoch: leader_epoch,
                 partition_max_bytes: FETCH_MAX_BYTES,
                 ..FetchPartition::default()
             }],
@@ -250,6 +267,16 @@ async fn handle_response(resp: &FetchResponse, cfg: &Config) -> LoopAction {
             LoopAction::Continue
         }
         codes::NOT_LEADER_OR_FOLLOWER => LoopAction::StopNotLeader,
+        codes::FENCED_LEADER_EPOCH | codes::UNKNOWN_LEADER_EPOCH => {
+            warn!(
+                topic = %cfg.topic,
+                partition = cfg.partition,
+                error_code = part_resp.error_code,
+                "replicator: fenced/unknown leader epoch; calling OffsetForLeaderEpoch"
+            );
+            let _ = handle_epoch_fence(cfg).await;
+            LoopAction::Continue
+        }
         other => {
             warn!(
                 error_code = other,
@@ -259,6 +286,108 @@ async fn handle_response(resp: &FetchResponse, cfg: &Config) -> LoopAction {
             LoopAction::Continue
         }
     }
+}
+
+/// On `FENCED_LEADER_EPOCH` or `UNKNOWN_LEADER_EPOCH`, call
+/// `OffsetForLeaderEpoch` against the leader to find the truncation
+/// point, then truncate our local log to align with the leader's epoch
+/// history.
+///
+/// KIP-101: the follower sends our current `leader_epoch`; the leader
+/// replies with `end_offset` = the first offset of the next epoch,
+/// which is the safe truncation point.
+async fn handle_epoch_fence(cfg: &Config) -> Result<(), String> {
+    let Some(entry) = cfg.partitions.get(&(cfg.topic.clone(), cfg.partition)) else {
+        return Ok(());
+    };
+    let our_epoch = entry
+        .value()
+        .current_leader_epoch
+        .load(std::sync::atomic::Ordering::Acquire);
+    drop(entry);
+
+    let client = Client::builder()
+        .bootstrap(cfg.leader_addr.clone())
+        .client_id(cfg.client_id.clone())
+        .build()
+        .await
+        .map_err(|e| format!("handle_epoch_fence: connect: {e}"))?;
+
+    let req = OffsetForLeaderEpochRequest {
+        replica_id: i32::try_from(cfg.node_id).unwrap_or(-1),
+        topics: vec![OffsetForLeaderTopic {
+            topic: cfg.topic.clone(),
+            partitions: vec![OffsetForLeaderPartition {
+                partition: cfg.partition,
+                current_leader_epoch: our_epoch,
+                leader_epoch: our_epoch,
+                ..OffsetForLeaderPartition::default()
+            }],
+            ..OffsetForLeaderTopic::default()
+        }],
+        ..OffsetForLeaderEpochRequest::default()
+    };
+
+    let resp = client
+        .send(req)
+        .await
+        .map_err(|e| format!("handle_epoch_fence: send: {e}"))?;
+
+    // Find our (topic, partition) in the response.
+    let Some(end_offset) = resp
+        .topics
+        .iter()
+        .find(|t| t.topic == cfg.topic)
+        .and_then(|t| t.partitions.iter().find(|p| p.partition == cfg.partition))
+        .map(|p| p.end_offset)
+    else {
+        return Ok(());
+    };
+
+    let Some(part_entry) = cfg.partitions.get(&(cfg.topic.clone(), cfg.partition)) else {
+        return Ok(());
+    };
+    let part = part_entry.value().clone();
+    drop(part_entry);
+
+    if end_offset >= 0 {
+        // Truncate to the epoch boundary.
+        if let Err(e) = part.truncate_to(end_offset).await {
+            warn!(
+                topic = %cfg.topic,
+                partition = cfg.partition,
+                end_offset,
+                error = %e,
+                "handle_epoch_fence: truncate_to failed"
+            );
+        } else {
+            info!(
+                topic = %cfg.topic,
+                partition = cfg.partition,
+                end_offset,
+                "handle_epoch_fence: truncated to epoch boundary"
+            );
+        }
+    } else {
+        // end_offset == -1 (UNDEFINED_OFFSET): no epoch info available;
+        // reset to 0 as a safe fallback.
+        if let Err(e) = part.reset_to(0).await {
+            warn!(
+                topic = %cfg.topic,
+                partition = cfg.partition,
+                error = %e,
+                "handle_epoch_fence: reset_to(0) failed"
+            );
+        } else {
+            info!(
+                topic = %cfg.topic,
+                partition = cfg.partition,
+                "handle_epoch_fence: reset to 0 (undefined epoch boundary)"
+            );
+        }
+    }
+
+    Ok(())
 }
 
 /// Open a [`Client`] against the partition's leader, retrying with
