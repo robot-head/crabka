@@ -387,6 +387,39 @@ impl Broker {
             ),
         );
 
+        // 4d. Broker-side heartbeat client: sends BrokerHeartbeat to the
+        //     controller leader on every tick. Child token of
+        //     supervisor_shutdown so it is cancelled on broker shutdown.
+        let heartbeat_shutdown = supervisor_shutdown.child_token();
+        let _heartbeat_handle = tokio::spawn(crate::heartbeat::client::run(
+            crate::heartbeat::client::Config {
+                broker_id: config.broker_id,
+                interval: std::time::Duration::from_millis(config.heartbeat_interval_ms),
+                controller: controller.clone(),
+                shutdown: heartbeat_shutdown,
+            },
+        ));
+
+        // 4e. Controller-side liveness ticker: scans the heartbeat registry
+        //     every second and emits AliveToDead transitions. Task 16 will
+        //     wire those transitions into leader_election::on_broker_dead;
+        //     for now the transitions are dropped (stub).
+        let liveness_for_ticker = liveness.clone();
+        let ticker_shutdown = supervisor_shutdown.child_token();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+            loop {
+                tokio::select! {
+                    _ = tick.tick() => {},
+                    () = ticker_shutdown.cancelled() => return,
+                }
+                let _transitions = liveness_for_ticker.tick().await;
+                // Task 16 wires up: for each AliveToDead(n) transition, call
+                // leader_election::on_broker_dead. Stub for Task 14 — just
+                // tick the state machine; transitions are dropped.
+            }
+        });
+
         // 5. Build handler table.
         let handlers = crate::handlers::build_table();
 
