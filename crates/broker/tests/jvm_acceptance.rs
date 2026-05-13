@@ -1034,10 +1034,9 @@ async fn transactional_console_producer_eos() {
 // read_committed` reads them all back. Confirms HW+acks=all works
 // against an unmodified JVM client.
 //
-// Fixed ports 9692/9792/9892 + 9693/9793/9893 (offset 600 from
-// slice-8's replication test, 200 from slice-9's transactional
-// test) to dodge TIME_WAIT collisions when running JVM tests
-// sequentially.
+// Fixed ports above 10000 — slice-7/8/9 use 9092-9992; this test steps
+// into 10000+ to dodge TIME_WAIT + raft-quorum collisions when JVM
+// tests run sequentially via --test-threads=1.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires Docker"]
 #[allow(clippy::too_many_lines)]
@@ -1052,8 +1051,11 @@ async fn acks_all_durability() {
         .with_test_writer()
         .try_init();
 
-    let client_ports = [9692u16, 9792, 9892];
-    let controller_ports = [9693u16, 9793, 9893];
+    // Ports 10092/10192/10292 + 10093/10193/10293 — the next free hundred
+    // above slice-9's transactional test (9792-9992). Slice-7/8/9 use the
+    // 9092-9992 range; we step into 10000+ to avoid TIME_WAIT collisions.
+    let client_ports = [10092u16, 10192, 10292];
+    let controller_ports = [10093u16, 10193, 10293];
 
     let voters: Vec<(u64, std::net::SocketAddr)> = (0..3)
         .map(|i| {
