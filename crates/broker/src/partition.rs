@@ -267,12 +267,11 @@ impl Partition {
     /// when this broker materializes a partition where it's the leader.
     /// Idempotent: re-installing the same `(replicas, leader)` preserves
     /// existing follower progress.
-    pub async fn install_isr(
-        &self,
-        replicas: &[crabka_raft::NodeId],
-        leader: crabka_raft::NodeId,
-    ) {
-        self.replica_state.lock().await.install_isr(replicas, leader);
+    pub async fn install_isr(&self, replicas: &[crabka_raft::NodeId], leader: crabka_raft::NodeId) {
+        self.replica_state
+            .lock()
+            .await
+            .install_isr(replicas, leader);
     }
 
     /// Wait until `replica_state.hw >= target_offset` or `deadline`
@@ -385,8 +384,9 @@ mod tests {
         let log = Log::open(dir.path(), LogConfig::default()).expect("open log");
         let (tx, _rx) = mpsc::channel::<WriterMessage>(1);
         let writer = tokio::spawn(async {});
-        let replica_state =
-            Arc::new(tokio::sync::Mutex::new(crate::replica_state::ReplicaState::new()));
+        let replica_state = Arc::new(tokio::sync::Mutex::new(
+            crate::replica_state::ReplicaState::new(),
+        ));
         {
             let mut st = replica_state.lock().await;
             st.hw = 42;
@@ -435,8 +435,9 @@ mod tests {
         let log = Log::open(dir.path(), LogConfig::default()).expect("open log");
         let (tx, _rx) = mpsc::channel::<WriterMessage>(1);
         let writer = tokio::spawn(async {});
-        let replica_state =
-            Arc::new(tokio::sync::Mutex::new(crate::replica_state::ReplicaState::new()));
+        let replica_state = Arc::new(tokio::sync::Mutex::new(
+            crate::replica_state::ReplicaState::new(),
+        ));
         {
             let mut st = replica_state.lock().await;
             st.hw = 100;
@@ -484,8 +485,9 @@ mod tests {
         let log = Log::open(dir.path(), LogConfig::default()).expect("open log");
         let (tx, _rx) = mpsc::channel::<WriterMessage>(1);
         let writer = tokio::spawn(async {});
-        let replica_state =
-            Arc::new(tokio::sync::Mutex::new(crate::replica_state::ReplicaState::new()));
+        let replica_state = Arc::new(tokio::sync::Mutex::new(
+            crate::replica_state::ReplicaState::new(),
+        ));
         let hw_advance_notify = Arc::new(Notify::new());
         let p = Partition {
             topic: "t".into(),

@@ -42,8 +42,7 @@ pub async fn run(
                     // The log mutex is std::sync (sync callers), held only
                     // during the LEO read. The replica_state mutex is
                     // tokio::sync so we .await it cooperatively.
-                    let leader_leo =
-                        log.lock().expect("log mutex poisoned").log_end_offset();
+                    let leader_leo = log.lock().expect("log mutex poisoned").log_end_offset();
                     let advanced = {
                         let mut st = replica_state.lock().await;
                         let prev = st.hw;
@@ -138,7 +137,9 @@ mod tests {
             log.clone(),
             rx,
             notify.clone(),
-            Arc::new(tokio::sync::Mutex::new(crate::replica_state::ReplicaState::new())),
+            Arc::new(tokio::sync::Mutex::new(
+                crate::replica_state::ReplicaState::new(),
+            )),
             Arc::new(Notify::new()),
         ));
 
@@ -179,7 +180,9 @@ mod tests {
             log.clone(),
             rx,
             notify.clone(),
-            Arc::new(tokio::sync::Mutex::new(crate::replica_state::ReplicaState::new())),
+            Arc::new(tokio::sync::Mutex::new(
+                crate::replica_state::ReplicaState::new(),
+            )),
             Arc::new(Notify::new()),
         ));
 
@@ -216,7 +219,9 @@ mod tests {
             log.clone(),
             rx,
             notify.clone(),
-            Arc::new(tokio::sync::Mutex::new(crate::replica_state::ReplicaState::new())),
+            Arc::new(tokio::sync::Mutex::new(
+                crate::replica_state::ReplicaState::new(),
+            )),
             Arc::new(Notify::new()),
         ));
 
@@ -247,7 +252,9 @@ mod tests {
             log.clone(),
             rx,
             notify.clone(),
-            Arc::new(tokio::sync::Mutex::new(crate::replica_state::ReplicaState::new())),
+            Arc::new(tokio::sync::Mutex::new(
+                crate::replica_state::ReplicaState::new(),
+            )),
             Arc::new(Notify::new()),
         ));
 
@@ -282,7 +289,9 @@ mod tests {
             log.clone(),
             rx,
             notify.clone(),
-            Arc::new(tokio::sync::Mutex::new(crate::replica_state::ReplicaState::new())),
+            Arc::new(tokio::sync::Mutex::new(
+                crate::replica_state::ReplicaState::new(),
+            )),
             Arc::new(Notify::new()),
         ));
 
@@ -318,8 +327,9 @@ mod tests {
         ));
         let (tx, rx) = mpsc::channel(1);
         let append_notify = Arc::new(Notify::new());
-        let replica_state =
-            Arc::new(tokio::sync::Mutex::new(crate::replica_state::ReplicaState::new()));
+        let replica_state = Arc::new(tokio::sync::Mutex::new(
+            crate::replica_state::ReplicaState::new(),
+        ));
         {
             let mut st = replica_state.lock().await;
             st.install_isr(&[1], 1);
@@ -362,8 +372,9 @@ mod tests {
         ));
         let (tx, rx) = mpsc::channel(1);
         let append_notify = Arc::new(Notify::new());
-        let replica_state =
-            Arc::new(tokio::sync::Mutex::new(crate::replica_state::ReplicaState::new()));
+        let replica_state = Arc::new(tokio::sync::Mutex::new(
+            crate::replica_state::ReplicaState::new(),
+        ));
         {
             let mut st = replica_state.lock().await;
             st.install_isr(&[1, 2, 3], 1);

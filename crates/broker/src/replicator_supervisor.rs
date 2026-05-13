@@ -167,7 +167,8 @@ impl ReplicatorSupervisor {
             else {
                 continue;
             };
-            part.install_isr(&part_record.replicas, part_record.leader).await;
+            part.install_isr(&part_record.replicas, part_record.leader)
+                .await;
         }
 
         let desired = desired_follower_set(self.node_id, image);
