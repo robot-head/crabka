@@ -140,7 +140,6 @@ impl ReplicatorSupervisor {
         }
     }
 
-    #[allow(clippy::unused_async)] // tokio::spawn inside; async needed for Task 9 test harness
     pub(crate) async fn reconcile(&self, image: &MetadataImage) {
         // 0. Materialize the on-disk partition for every assignment where
         //    self is in `replicas`, regardless of leader/follower role.
@@ -168,7 +167,7 @@ impl ReplicatorSupervisor {
             else {
                 continue;
             };
-            part.install_isr(&part_record.replicas, part_record.leader);
+            part.install_isr(&part_record.replicas, part_record.leader).await;
         }
 
         let desired = desired_follower_set(self.node_id, image);
@@ -361,8 +360,8 @@ mod tests {
             .value()
             .clone();
         // Mirror what reconcile does for leader partitions.
-        part.install_isr(&[1, 2, 3], 1);
-        let st = part.replica_state.lock().expect("lock");
+        part.install_isr(&[1, 2, 3], 1).await;
+        let st = part.replica_state.lock().await;
         assert_eq!(st.isr.len(), 3);
     }
 

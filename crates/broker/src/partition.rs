@@ -17,6 +17,8 @@ use crabka_log::{AbortedTxn, Log, ReadOutput};
 use crabka_protocol::records::RecordBatch;
 use tokio::sync::{Notify, mpsc, oneshot};
 use tokio::task::JoinHandle;
+// `std::sync::Mutex` is kept for `log` (sync hot-path callers);
+// `replica_state` uses `tokio::sync::Mutex` to avoid blocking worker threads.
 
 use crate::error::BrokerError;
 use crate::replica_state::ReplicaState;
@@ -95,7 +97,7 @@ pub struct Partition {
     pub log: Arc<Mutex<Log>>,
     pub writer_tx: mpsc::Sender<WriterMessage>,
     pub append_notify: Arc<Notify>,
-    pub replica_state: Arc<Mutex<ReplicaState>>,
+    pub replica_state: Arc<tokio::sync::Mutex<ReplicaState>>,
     pub hw_advance_notify: Arc<Notify>,
     /// Held so the writer task is reaped when every Partition handle is
     /// dropped. Not used directly.
@@ -253,15 +255,11 @@ impl Partition {
             .map_err(|_| BrokerError::Txn("ack dropped".into()))?
     }
 
-    /// Cached High Watermark. Reads `replica_state` briefly. Returns 0 if
-    /// the mutex is poisoned (the writer task panicked) — caller treats
-    /// that as "not making progress".
+    /// Cached High Watermark. Awaits `replica_state` cooperatively so it
+    /// doesn't block tokio worker threads.
     #[must_use]
-    pub fn high_watermark(&self) -> i64 {
-        match self.replica_state.lock() {
-            Ok(st) => st.hw,
-            Err(_) => 0,
-        }
+    pub async fn high_watermark(&self) -> i64 {
+        self.replica_state.lock().await.hw
     }
 
     /// Install (or reinstall) the ISR membership and seed non-leader
@@ -269,10 +267,12 @@ impl Partition {
     /// when this broker materializes a partition where it's the leader.
     /// Idempotent: re-installing the same `(replicas, leader)` preserves
     /// existing follower progress.
-    pub fn install_isr(&self, replicas: &[crabka_raft::NodeId], leader: crabka_raft::NodeId) {
-        if let Ok(mut st) = self.replica_state.lock() {
-            st.install_isr(replicas, leader);
-        }
+    pub async fn install_isr(
+        &self,
+        replicas: &[crabka_raft::NodeId],
+        leader: crabka_raft::NodeId,
+    ) {
+        self.replica_state.lock().await.install_isr(replicas, leader);
     }
 
     /// Wait until `replica_state.hw >= target_offset` or `deadline`
@@ -290,14 +290,14 @@ impl Partition {
         deadline: std::time::Instant,
     ) -> Result<(), HwTimeout> {
         loop {
-            if self.high_watermark() >= target_offset {
+            if self.high_watermark().await >= target_offset {
                 return Ok(());
             }
             // Subscribe to the notify BEFORE re-reading HW so we don't
             // miss an advance that happens between read and await.
             let waiter = self.hw_advance_notify.notified();
             tokio::pin!(waiter);
-            if self.high_watermark() >= target_offset {
+            if self.high_watermark().await >= target_offset {
                 return Ok(());
             }
             tokio::select! {
@@ -365,7 +365,9 @@ mod tests {
             log: Arc::new(Mutex::new(log)),
             writer_tx: tx,
             append_notify: Arc::new(Notify::new()),
-            replica_state: Arc::new(Mutex::new(crate::replica_state::ReplicaState::new())),
+            replica_state: Arc::new(tokio::sync::Mutex::new(
+                crate::replica_state::ReplicaState::new(),
+            )),
             hw_advance_notify: Arc::new(Notify::new()),
             _writer_handle: Arc::new(writer),
         };
@@ -383,9 +385,10 @@ mod tests {
         let log = Log::open(dir.path(), LogConfig::default()).expect("open log");
         let (tx, _rx) = mpsc::channel::<WriterMessage>(1);
         let writer = tokio::spawn(async {});
-        let replica_state = Arc::new(Mutex::new(crate::replica_state::ReplicaState::new()));
+        let replica_state =
+            Arc::new(tokio::sync::Mutex::new(crate::replica_state::ReplicaState::new()));
         {
-            let mut st = replica_state.lock().unwrap();
+            let mut st = replica_state.lock().await;
             st.hw = 42;
         }
         let p = Partition {
@@ -398,7 +401,7 @@ mod tests {
             hw_advance_notify: Arc::new(Notify::new()),
             _writer_handle: Arc::new(writer),
         };
-        assert_eq!(p.high_watermark(), 42);
+        assert_eq!(p.high_watermark().await, 42);
     }
 
     #[tokio::test]
@@ -413,12 +416,14 @@ mod tests {
             log: Arc::new(Mutex::new(log)),
             writer_tx: tx,
             append_notify: Arc::new(Notify::new()),
-            replica_state: Arc::new(Mutex::new(crate::replica_state::ReplicaState::new())),
+            replica_state: Arc::new(tokio::sync::Mutex::new(
+                crate::replica_state::ReplicaState::new(),
+            )),
             hw_advance_notify: Arc::new(Notify::new()),
             _writer_handle: Arc::new(writer),
         };
-        p.install_isr(&[1, 2, 3], 1);
-        let st = p.replica_state.lock().unwrap();
+        p.install_isr(&[1, 2, 3], 1).await;
+        let st = p.replica_state.lock().await;
         assert_eq!(st.isr.len(), 3);
         assert!(st.isr.contains(&1) && st.isr.contains(&2) && st.isr.contains(&3));
         assert_eq!(st.follower_leo.get(&2), Some(&0));
@@ -430,9 +435,10 @@ mod tests {
         let log = Log::open(dir.path(), LogConfig::default()).expect("open log");
         let (tx, _rx) = mpsc::channel::<WriterMessage>(1);
         let writer = tokio::spawn(async {});
-        let replica_state = Arc::new(Mutex::new(crate::replica_state::ReplicaState::new()));
+        let replica_state =
+            Arc::new(tokio::sync::Mutex::new(crate::replica_state::ReplicaState::new()));
         {
-            let mut st = replica_state.lock().unwrap();
+            let mut st = replica_state.lock().await;
             st.hw = 100;
         }
         let p = Partition {
@@ -461,7 +467,9 @@ mod tests {
             log: Arc::new(Mutex::new(log)),
             writer_tx: tx,
             append_notify: Arc::new(Notify::new()),
-            replica_state: Arc::new(Mutex::new(crate::replica_state::ReplicaState::new())),
+            replica_state: Arc::new(tokio::sync::Mutex::new(
+                crate::replica_state::ReplicaState::new(),
+            )),
             hw_advance_notify: Arc::new(Notify::new()),
             _writer_handle: Arc::new(writer),
         };
@@ -476,7 +484,8 @@ mod tests {
         let log = Log::open(dir.path(), LogConfig::default()).expect("open log");
         let (tx, _rx) = mpsc::channel::<WriterMessage>(1);
         let writer = tokio::spawn(async {});
-        let replica_state = Arc::new(Mutex::new(crate::replica_state::ReplicaState::new()));
+        let replica_state =
+            Arc::new(tokio::sync::Mutex::new(crate::replica_state::ReplicaState::new()));
         let hw_advance_notify = Arc::new(Notify::new());
         let p = Partition {
             topic: "t".into(),
@@ -490,7 +499,7 @@ mod tests {
         };
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            replica_state.lock().unwrap().hw = 100;
+            replica_state.lock().await.hw = 100;
             hw_advance_notify.notify_waiters();
         });
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);

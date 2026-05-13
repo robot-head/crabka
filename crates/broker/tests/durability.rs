@@ -283,7 +283,7 @@ async fn acks_all_times_out_when_no_follower() {
     // Install a fake ISR with two members; only this broker (node 1)
     // is actually running, so node 2 can never check in via Fetch.
     // The leader's HW thus stays pinned at 0.
-    broker.test_install_isr("tout", 0, &[1, 2], 1);
+    broker.test_install_isr("tout", 0, &[1, 2], 1).await;
 
     let start = Instant::now();
     let err = produce_acks(&bootstrap, "tout", &["x"], -1, 200)

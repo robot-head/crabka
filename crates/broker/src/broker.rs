@@ -193,7 +193,7 @@ impl BrokerHandle {
     /// calls this before the topic is fully materialized.
     #[doc(hidden)]
     #[allow(clippy::used_underscore_binding)]
-    pub fn test_install_isr(
+    pub async fn test_install_isr(
         &self,
         topic: &str,
         partition: i32,
@@ -201,7 +201,7 @@ impl BrokerHandle {
         leader: crabka_raft::NodeId,
     ) {
         if let Some(part) = self._broker.partitions.get(&(topic.to_string(), partition)) {
-            part.value().install_isr(replicas, leader);
+            part.value().install_isr(replicas, leader).await;
         }
     }
 
@@ -425,7 +425,7 @@ pub(crate) fn spawn_partition(
     let log = Arc::new(Mutex::new(log));
     let (tx, rx) = tokio::sync::mpsc::channel::<WriterMessage>(64);
     let notify = Arc::new(tokio::sync::Notify::new());
-    let replica_state = Arc::new(Mutex::new(crate::replica_state::ReplicaState::new()));
+    let replica_state = Arc::new(tokio::sync::Mutex::new(crate::replica_state::ReplicaState::new()));
     let hw_advance_notify = Arc::new(tokio::sync::Notify::new());
     let writer = tokio::spawn(crate::partition_writer::run(
         log.clone(),

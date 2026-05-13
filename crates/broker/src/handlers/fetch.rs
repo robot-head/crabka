@@ -128,10 +128,7 @@ pub(crate) fn handle(
                 if is_follower_fetch && let Some(part) = part_opt.as_ref() {
                     let leader_leo = part.log_end_offset();
                     let new_hw_opt = {
-                        let mut st = part
-                            .replica_state
-                            .lock()
-                            .expect("replica_state mutex poisoned");
+                        let mut st = part.replica_state.lock().await;
                         let prev = st.hw;
                         let new = st.update_follower_leo(
                             u64::try_from(req.replica_id).unwrap_or(0),
@@ -186,7 +183,8 @@ pub(crate) fn handle(
                     p.read_committed,
                     p.is_follower_fetch,
                     &mut p.out,
-                )?;
+                )
+                .await?;
             }
         }
 
@@ -232,7 +230,7 @@ pub(crate) fn handle(
 /// - `out.high_watermark` and `out.last_stable_offset` are set to `hw`
 /// - `out.aborted_transactions` is `None`
 #[allow(clippy::too_many_lines)]
-fn do_read(
+async fn do_read(
     part: &Partition,
     fetch_offset: i64,
     max_bytes: i32,
@@ -240,7 +238,7 @@ fn do_read(
     is_follower_fetch: bool,
     out: &mut PartitionData,
 ) -> Result<usize, BrokerError> {
-    let hw = part.high_watermark();
+    let hw = part.high_watermark().await;
     let (log_start, log_end, lso, batch_opt, aborted_txns): (
         i64,
         i64,
@@ -386,7 +384,8 @@ async fn long_poll_then_reread(
                 p.read_committed,
                 p.is_follower_fetch,
                 &mut p.out,
-            )?;
+            )
+            .await?;
         }
     }
     Ok(())

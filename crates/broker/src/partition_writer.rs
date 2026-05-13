@@ -19,7 +19,7 @@ pub async fn run(
     log: Arc<Mutex<Log>>,
     mut rx: mpsc::Receiver<WriterMessage>,
     append_notify: Arc<Notify>,
-    replica_state: Arc<Mutex<ReplicaState>>,
+    replica_state: Arc<tokio::sync::Mutex<ReplicaState>>,
     hw_advance_notify: Arc<Notify>,
 ) {
     while let Some(msg) = rx.recv().await {
@@ -39,11 +39,13 @@ pub async fn run(
                 if ok {
                     append_notify.notify_waiters();
                     // Re-lock log briefly to read LEO, then update HW.
-                    // Holding both mutexes in sequence is fine — neither
-                    // is held across an .await.
+                    // The log mutex is std::sync (sync callers), held only
+                    // during the LEO read. The replica_state mutex is
+                    // tokio::sync so we .await it cooperatively.
+                    let leader_leo =
+                        log.lock().expect("log mutex poisoned").log_end_offset();
                     let advanced = {
-                        let leader_leo = log.lock().expect("log mutex poisoned").log_end_offset();
-                        let mut st = replica_state.lock().expect("replica_state mutex poisoned");
+                        let mut st = replica_state.lock().await;
                         let prev = st.hw;
                         let new = st.recompute_hw_for_leader_append(leader_leo);
                         new > prev
@@ -136,7 +138,7 @@ mod tests {
             log.clone(),
             rx,
             notify.clone(),
-            Arc::new(Mutex::new(crate::replica_state::ReplicaState::new())),
+            Arc::new(tokio::sync::Mutex::new(crate::replica_state::ReplicaState::new())),
             Arc::new(Notify::new()),
         ));
 
@@ -177,7 +179,7 @@ mod tests {
             log.clone(),
             rx,
             notify.clone(),
-            Arc::new(Mutex::new(crate::replica_state::ReplicaState::new())),
+            Arc::new(tokio::sync::Mutex::new(crate::replica_state::ReplicaState::new())),
             Arc::new(Notify::new()),
         ));
 
@@ -214,7 +216,7 @@ mod tests {
             log.clone(),
             rx,
             notify.clone(),
-            Arc::new(Mutex::new(crate::replica_state::ReplicaState::new())),
+            Arc::new(tokio::sync::Mutex::new(crate::replica_state::ReplicaState::new())),
             Arc::new(Notify::new()),
         ));
 
@@ -245,7 +247,7 @@ mod tests {
             log.clone(),
             rx,
             notify.clone(),
-            Arc::new(Mutex::new(crate::replica_state::ReplicaState::new())),
+            Arc::new(tokio::sync::Mutex::new(crate::replica_state::ReplicaState::new())),
             Arc::new(Notify::new()),
         ));
 
@@ -280,7 +282,7 @@ mod tests {
             log.clone(),
             rx,
             notify.clone(),
-            Arc::new(Mutex::new(crate::replica_state::ReplicaState::new())),
+            Arc::new(tokio::sync::Mutex::new(crate::replica_state::ReplicaState::new())),
             Arc::new(Notify::new()),
         ));
 
@@ -316,9 +318,10 @@ mod tests {
         ));
         let (tx, rx) = mpsc::channel(1);
         let append_notify = Arc::new(Notify::new());
-        let replica_state = Arc::new(Mutex::new(crate::replica_state::ReplicaState::new()));
+        let replica_state =
+            Arc::new(tokio::sync::Mutex::new(crate::replica_state::ReplicaState::new()));
         {
-            let mut st = replica_state.lock().unwrap();
+            let mut st = replica_state.lock().await;
             st.install_isr(&[1], 1);
         }
         let hw_advance_notify = Arc::new(Notify::new());
@@ -345,7 +348,7 @@ mod tests {
             .await
             .expect("hw_advance_notify did not fire");
 
-        assert_eq!(replica_state.lock().unwrap().hw, 2);
+        assert_eq!(replica_state.lock().await.hw, 2);
 
         drop(tx);
         writer.await.expect("writer join");
@@ -359,9 +362,10 @@ mod tests {
         ));
         let (tx, rx) = mpsc::channel(1);
         let append_notify = Arc::new(Notify::new());
-        let replica_state = Arc::new(Mutex::new(crate::replica_state::ReplicaState::new()));
+        let replica_state =
+            Arc::new(tokio::sync::Mutex::new(crate::replica_state::ReplicaState::new()));
         {
-            let mut st = replica_state.lock().unwrap();
+            let mut st = replica_state.lock().await;
             st.install_isr(&[1, 2, 3], 1);
         }
         let hw_advance_notify = Arc::new(Notify::new());
@@ -382,7 +386,7 @@ mod tests {
         .expect("send job");
         ack_rx.await.expect("ack").expect("append ok");
 
-        assert_eq!(replica_state.lock().unwrap().hw, 0);
+        assert_eq!(replica_state.lock().await.hw, 0);
 
         drop(tx);
         writer.await.expect("writer join");
