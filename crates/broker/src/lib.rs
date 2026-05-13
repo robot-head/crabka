@@ -107,6 +107,7 @@ mod coordinator;
 mod error;
 pub(crate) mod heartbeat;
 mod handlers;
+pub(crate) mod isr_maintenance;
 pub(crate) mod leader_election;
 mod log_dir;
 mod network;
