@@ -330,7 +330,13 @@ async fn boot_three_node() -> (Vec<(BrokerHandle, String, TempDir)>, String) {
             )
         })
         .collect();
-    let mut cluster = Vec::with_capacity(3);
+    // Spawn all three Broker::start futures concurrently — a single
+    // broker blocks waiting for an openraft leader (no quorum from
+    // self alone), so sequential boot deadlocks before brokers 2/3
+    // ever start. Mirrors `tests/quorum.rs::spawn_three`.
+    let mut spawned = Vec::with_capacity(3);
+    let mut dirs = Vec::with_capacity(3);
+    let mut bootstraps = Vec::with_capacity(3);
     for i in 0..3 {
         let dir = TempDir::new().unwrap();
         let cfg = BrokerConfig {
@@ -348,8 +354,13 @@ async fn boot_three_node() -> (Vec<(BrokerHandle, String, TempDir)>, String) {
             heartbeat_timeout_ms: 2_000,
             replica_lag_time_max_ms: 2_000,
         };
-        let bootstrap = format!("127.0.0.1:{}", client_ports[i]);
-        let broker = Broker::start(cfg).await.expect("boot");
+        bootstraps.push(format!("127.0.0.1:{}", client_ports[i]));
+        spawned.push(tokio::spawn(async move { Broker::start(cfg).await }));
+        dirs.push(dir);
+    }
+    let mut cluster = Vec::with_capacity(3);
+    for (handle, (dir, bootstrap)) in spawned.into_iter().zip(dirs.into_iter().zip(bootstraps)) {
+        let broker = handle.await.expect("join").expect("boot");
         cluster.push((broker, bootstrap, dir));
     }
     let bootstrap_1 = cluster[0].1.clone();
