@@ -13,10 +13,10 @@ use crabka_protocol::{Decode, Encode};
 use crabka_raft::RaftError;
 use uuid::Uuid;
 
-use crate::broker::{Broker, spawn_partition};
+use crate::broker::Broker;
 use crate::codes;
 use crate::error::BrokerError;
-use crate::log_dir;
+use crate::replicator_supervisor::materialize_partition;
 
 /// Round-robin replica placement.
 ///
@@ -151,41 +151,45 @@ pub(crate) fn handle(
                     // CreateTopics ack don't race the supervisor.
                     for (p, replicas) in assignments.iter().enumerate() {
                         let p_i32 = i32::try_from(p).unwrap_or(0);
-                        if replicas.contains(&node_id) {
-                            let dir = log_dir::partition_dir(&log_dir, &name, p_i32);
-                            match std::fs::create_dir_all(&dir)
-                                .map_err(BrokerError::from)
-                                .and_then(|()| {
-                                    crabka_log::Log::open(&dir, log_config.clone())
-                                        .map_err(BrokerError::from)
-                                }) {
-                                Ok(log) => {
-                                    let part = spawn_partition(name.clone(), p_i32, log);
-                                    // Mirror what `ReplicatorSupervisor::reconcile` does
-                                    // for newly-materialized partitions: sync the cached
-                                    // leader + epoch, and (when self is leader) install
-                                    // the ISR for HW computation. Without this, a Produce
-                                    // arriving before the supervisor's metadata-watch
-                                    // fires sees `isr.is_empty()`, falls into
-                                    // `compute_hw == leader_leo`, and acks=-1 returns
-                                    // instantly without waiting for followers.
-                                    let leader = replicas[0];
-                                    part.install_leader_change(leader, 0).await;
-                                    if leader == node_id {
-                                        part.install_isr(replicas, leader).await;
-                                    }
-                                    partitions_map.insert((name.clone(), p_i32), part);
-                                }
-                                Err(e) => {
-                                    tracing::error!(
-                                        topic = %name,
-                                        partition = p_i32,
-                                        error = %e,
-                                        "CreateTopics: disk failure after quorum commit"
-                                    );
-                                    // Quorum already committed — we cannot roll back.
-                                    // Partition will be recovered on next broker restart.
-                                }
+                        if !replicas.contains(&node_id) {
+                            continue;
+                        }
+                        // Use the same `materialize_partition` helper the
+                        // supervisor uses — its Entry::Vacant gate ensures
+                        // we don't spawn a second writer task when the
+                        // supervisor has already reconciled (the metadata
+                        // watch can fire mid-handler).
+                        if let Err(e) = materialize_partition(
+                            &partitions_map,
+                            &name,
+                            p_i32,
+                            &log_dir,
+                            &log_config,
+                        ) {
+                            tracing::error!(
+                                topic = %name, partition = p_i32, error = %e,
+                                "CreateTopics: materialize after quorum commit failed"
+                            );
+                            // Quorum already committed — partition will be
+                            // recovered on next broker restart.
+                            continue;
+                        }
+                        // Mirror what `ReplicatorSupervisor::reconcile` does
+                        // for newly-materialized leader partitions: sync the
+                        // cached leader + epoch, and (when self is leader)
+                        // install the ISR for HW computation. Without this, a
+                        // Produce arriving before the supervisor's
+                        // metadata-watch fires sees `isr.is_empty()`, falls
+                        // into `compute_hw == leader_leo`, and acks=-1 returns
+                        // instantly without waiting for followers.
+                        if let Some(part) = partitions_map
+                            .get(&(name.clone(), p_i32))
+                            .map(|e| e.clone())
+                        {
+                            let leader = replicas[0];
+                            part.install_leader_change(leader, 0).await;
+                            if leader == node_id {
+                                part.install_isr(replicas, leader).await;
                             }
                         }
                     }
