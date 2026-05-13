@@ -44,6 +44,7 @@ impl HandlerTable {
 }
 
 pub(crate) mod api_versions;
+pub(crate) mod broker_heartbeat;
 pub(crate) mod create_topics;
 pub(crate) mod delete_topics;
 pub(crate) mod describe_configs;
@@ -88,5 +89,6 @@ pub(crate) fn build_table() -> HandlerTable {
     t.register(27, crate::txn::handlers::write_txn_markers::handle);
     t.register(28, crate::txn::handlers::txn_offset_commit::handle);
     t.register(32, describe_configs::handle);
+    t.register(63, broker_heartbeat::handle);
     t
 }

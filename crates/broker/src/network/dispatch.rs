@@ -193,6 +193,7 @@ fn handler_body_flexible(api_key: i16, version: i16) -> bool {
         27 => version >= owned::write_txn_markers_request::FLEXIBLE_MIN,
         28 => version >= owned::txn_offset_commit_request::FLEXIBLE_MIN,
         32 => version >= owned::describe_configs_request::FLEXIBLE_MIN,
+        63 => version >= owned::broker_heartbeat_request::FLEXIBLE_MIN,
         _ => false,
     }
 }

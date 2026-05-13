@@ -38,6 +38,7 @@ pub struct Broker {
     pub(crate) txn_coordinator: Arc<crate::txn::coordinator::TxnCoordinator>,
     pub(crate) supervisor_shutdown: tokio_util::sync::CancellationToken,
     pub(crate) supervisor_handle: tokio::sync::Mutex<Option<JoinHandle<()>>>,
+    pub(crate) liveness: Arc<crate::heartbeat::controller_state::ControllerLivenessState>,
     handlers: HandlerTable,
 }
 
@@ -379,6 +380,13 @@ impl Broker {
         );
         let supervisor_handle = supervisor.spawn();
 
+        // 4c. Liveness state for KIP-500 BrokerHeartbeat tracking.
+        let liveness = Arc::new(
+            crate::heartbeat::controller_state::ControllerLivenessState::new(
+                std::time::Duration::from_millis(config.heartbeat_timeout_ms),
+            ),
+        );
+
         // 5. Build handler table.
         let handlers = crate::handlers::build_table();
 
@@ -403,6 +411,7 @@ impl Broker {
             txn_coordinator,
             supervisor_shutdown,
             supervisor_handle: tokio::sync::Mutex::new(Some(supervisor_handle)),
+            liveness: liveness.clone(),
             handlers,
         });
 

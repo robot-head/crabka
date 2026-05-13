@@ -66,6 +66,7 @@ fn supported_apis() -> Vec<ApiVersion> {
         v!(write_txn_markers_request),
         v!(txn_offset_commit_request),
         v!(describe_configs_request),
+        v!(broker_heartbeat_request),
     ]
 }
 
