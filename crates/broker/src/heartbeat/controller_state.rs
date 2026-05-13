@@ -101,6 +101,13 @@ impl ControllerLivenessState {
         let map = self.brokers.lock().await;
         map.get(&broker_id).map(|e| e.state)
     }
+
+    /// Return `true` if `broker_id` is currently `Alive` (has sent a
+    /// heartbeat within the timeout window). Returns `false` for unknown
+    /// brokers and for brokers whose heartbeat has expired.
+    pub(crate) async fn is_alive(&self, broker_id: u64) -> bool {
+        matches!(self.state(broker_id).await, Some(BrokerLivenessState::Alive))
+    }
 }
 
 #[cfg(test)]
