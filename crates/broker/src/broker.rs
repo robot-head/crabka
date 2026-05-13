@@ -9,6 +9,8 @@ use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use std::sync::atomic::{AtomicI32, AtomicU64};
+
 use crate::config::BrokerConfig;
 use crate::error::BrokerError;
 use crate::handlers::HandlerTable;
@@ -429,6 +431,8 @@ pub(crate) fn spawn_partition(
         crate::replica_state::ReplicaState::new(),
     ));
     let hw_advance_notify = Arc::new(tokio::sync::Notify::new());
+    let current_leader = Arc::new(AtomicU64::new(0));
+    let current_leader_epoch = Arc::new(AtomicI32::new(0));
     let writer = tokio::spawn(crate::partition_writer::run(
         log.clone(),
         rx,
@@ -444,6 +448,8 @@ pub(crate) fn spawn_partition(
         append_notify: notify,
         replica_state,
         hw_advance_notify,
+        current_leader,
+        current_leader_epoch,
         _writer_handle: Arc::new(writer),
     })
 }
