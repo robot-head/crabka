@@ -71,7 +71,7 @@ async fn boot_three_node() -> (Vec<(BrokerHandle, String, TempDir)>, String) {
 }
 
 async fn wait_for_all_three_brokers(cluster: &[(BrokerHandle, String, TempDir)]) {
-    let deadline = Instant::now() + Duration::from_secs(120);
+    let deadline = Instant::now() + Duration::from_mins(2);
     loop {
         let mut all_see_three = true;
         for (h, _, _) in cluster {
@@ -83,9 +83,10 @@ async fn wait_for_all_three_brokers(cluster: &[(BrokerHandle, String, TempDir)])
         if all_see_three {
             return;
         }
-        if Instant::now() > deadline {
-            panic!("brokers didn't converge on 3-broker view within 2 min");
-        }
+        assert!(
+            Instant::now() <= deadline,
+            "brokers didn't converge on 3-broker view within 2 min"
+        );
         sleep(Duration::from_millis(50)).await;
     }
 }
@@ -112,9 +113,10 @@ async fn create_topic(broker: &BrokerHandle, bootstrap: &str, name: &str, rf: i1
     assert_eq!(resp.topics[0].error_code, 0, "CreateTopics: {resp:?}");
     let deadline = Instant::now() + Duration::from_secs(10);
     while !broker.has_partition(name, 0).await {
-        if Instant::now() > deadline {
-            panic!("partition `{name}-0` never materialized locally");
-        }
+        assert!(
+            Instant::now() <= deadline,
+            "partition `{name}-0` never materialized locally"
+        );
         sleep(Duration::from_millis(50)).await;
     }
 }
@@ -234,13 +236,12 @@ async fn broker_death_elects_new_leader() {
             .topics
             .iter()
             .find(|t| t.name.as_deref() == Some("elect"))
+            && let Some(p) = t.partitions.first()
+            && p.leader_id != 1
+            && p.leader_epoch > 0
         {
-            if let Some(p) = t.partitions.first() {
-                if p.leader_id != 1 && p.leader_epoch > 0 {
-                    elected = Some((p.leader_id, p.leader_epoch));
-                    break;
-                }
-            }
+            elected = Some((p.leader_id, p.leader_epoch));
+            break;
         }
         sleep(Duration::from_millis(200)).await;
     }
@@ -358,13 +359,11 @@ async fn isr_expand_on_catchup() {
             .topics
             .iter()
             .find(|t| t.name.as_deref() == Some("expand"))
+            && let Some(p) = t.partitions.first()
+            && p.isr_nodes.len() == 3
         {
-            if let Some(p) = t.partitions.first() {
-                if p.isr_nodes.len() == 3 {
-                    expanded = true;
-                    break;
-                }
-            }
+            expanded = true;
+            break;
         }
         sleep(Duration::from_millis(200)).await;
     }

@@ -1324,13 +1324,12 @@ async fn acks_all_survives_leader_crash() {
             .iter()
             .find(|t| t.name.as_deref() == Some(TOPIC))
             .and_then(|t| t.partitions.first())
-            .map(|p| p.leader_id)
-            .unwrap_or(1)
+            .map_or(1, |p| p.leader_id)
     };
 
     // 4. Spawn JVM producer in background (100 records, acks=-1, long timeout
     //    so it retries through the election window).
-    let mut producer_child = Command::new("docker")
+    let producer_child = Command::new("docker")
         .args([
             "run",
             "--rm",

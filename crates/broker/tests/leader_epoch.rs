@@ -70,9 +70,7 @@ async fn create_topic(broker: &BrokerHandle, bootstrap: &str, name: &str) {
         .expect("CreateTopics");
     let deadline = Instant::now() + Duration::from_secs(10);
     while !broker.has_partition(name, 0).await {
-        if Instant::now() > deadline {
-            panic!("materialize timeout");
-        }
+        assert!(Instant::now() <= deadline, "materialize timeout");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }

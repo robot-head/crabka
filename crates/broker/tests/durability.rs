@@ -103,9 +103,10 @@ async fn create_topic(broker: &BrokerHandle, bootstrap: &str, name: &str, rf: i1
     // subsequent Produce/Fetch don't race the materialization.
     let deadline = Instant::now() + Duration::from_secs(10);
     while !broker.has_partition(name, 0).await {
-        if Instant::now() > deadline {
-            panic!("partition `{name}-0` never materialized locally after CreateTopics");
-        }
+        assert!(
+            Instant::now() <= deadline,
+            "partition `{name}-0` never materialized locally after CreateTopics"
+        );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
