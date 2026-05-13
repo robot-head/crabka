@@ -178,6 +178,37 @@ impl BrokerHandle {
         part.test_set_log_start(new_start).await
     }
 
+    /// Test-only helper: install a synthetic ISR on `(topic, partition)` so
+    /// integration tests can exercise the HW gate without spinning up
+    /// multiple brokers.
+    ///
+    /// Calls `Partition::install_isr` directly; the supervisor will not
+    /// override it unless the metadata image also changes (which it does
+    /// not in these single-broker tests).
+    ///
+    /// # Panics
+    ///
+    /// Does not panic if the partition is not found — the call is silently
+    /// ignored, matching the semantics expected by the durability test that
+    /// calls this before the topic is fully materialized.
+    #[doc(hidden)]
+    #[allow(clippy::used_underscore_binding)]
+    pub fn test_install_isr(
+        &self,
+        topic: &str,
+        partition: i32,
+        replicas: &[crabka_raft::NodeId],
+        leader: crabka_raft::NodeId,
+    ) {
+        if let Some(part) = self
+            ._broker
+            .partitions
+            .get(&(topic.to_string(), partition))
+        {
+            part.value().install_isr(replicas, leader);
+        }
+    }
+
     /// Cancel the listener + drain in-flight connections. Awaiting the
     /// returned future blocks until the listener task exits.
     #[allow(clippy::used_underscore_binding)] // `_broker` carries shared state we must reach into during shutdown
