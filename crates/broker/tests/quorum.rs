@@ -183,10 +183,7 @@ async fn leader_kill_recovers() {
                 leaders.insert(l);
             }
         }
-        if leaders.len() == 1
-            && !leaders.contains(&0)
-            && !leaders.contains(&killed_node_id)
-        {
+        if leaders.len() == 1 && !leaders.contains(&0) && !leaders.contains(&killed_node_id) {
             break;
         }
         if Instant::now() > deadline {
