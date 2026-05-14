@@ -334,7 +334,11 @@ impl Log {
     fn append_preserving_offset(&mut self, batch: &mut RecordBatch) -> Result<(), LogError> {
         let (segment_bytes, index_interval_bytes, flush_on_append) = {
             let cfg = self.config.read().unwrap();
-            (cfg.segment_bytes, cfg.index_interval_bytes, cfg.flush_on_append)
+            (
+                cfg.segment_bytes,
+                cfg.index_interval_bytes,
+                cfg.flush_on_append,
+            )
         };
 
         let should_roll = match &self.active {
@@ -565,10 +569,7 @@ impl Log {
         // where `next_base` is the next segment's `base_offset`
         // (or, for the most-recent sealed segment, the active segment's
         // `base_offset`).
-        let active_base = self
-            .active
-            .as_ref()
-            .map_or(leo, Segment::base_offset);
+        let active_base = self.active.as_ref().map_or(leo, Segment::base_offset);
         let next_bases: Vec<i64> = self
             .segments
             .iter()

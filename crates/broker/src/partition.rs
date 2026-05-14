@@ -176,10 +176,8 @@ impl Partition {
         &self,
         overrides: &std::collections::BTreeMap<String, String>,
     ) -> Result<(), BrokerError> {
-        let merged = crate::config_keys::apply_to_log_config(
-            overrides,
-            &crabka_log::LogConfig::default(),
-        );
+        let merged =
+            crate::config_keys::apply_to_log_config(overrides, &crabka_log::LogConfig::default());
         let (ack_tx, ack_rx) = oneshot::channel();
         self.writer_tx
             .send(WriterMessage::SetLogConfig {

@@ -116,12 +116,14 @@ impl MetadataImage {
             MetadataRecord::V1Topic(t) => {
                 if let Some(existing) = self.topics.get(&t.name) {
                     // Updating an existing topic is allowed only if it's a
-                    // partition-count expansion that preserves identity:
-                    // same topic_id, same replication_factor, partitions
-                    // only growing. CreatePartitions emits exactly this.
+                    // strict partition-count expansion that preserves
+                    // identity: same topic_id, same replication_factor,
+                    // partitions strictly growing. CreatePartitions emits
+                    // exactly this. Identical re-submits stay rejected so
+                    // CreateTopics' idempotency contract still holds.
                     if existing.topic_id != t.topic_id
                         || existing.replication_factor != t.replication_factor
-                        || t.partitions < existing.partitions
+                        || t.partitions <= existing.partitions
                     {
                         return Err(MetadataError::TopicExists(t.name.clone()));
                     }

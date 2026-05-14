@@ -37,10 +37,8 @@ pub(crate) fn handle(
         // return every committed offset stored for this group.
         let topics_out: Vec<OffsetFetchResponseTopic> = if req.topics.is_none() {
             // Aggregate all committed offsets grouped by topic name.
-            let mut by_topic: std::collections::HashMap<
-                String,
-                Vec<OffsetFetchResponsePartition>,
-            > = std::collections::HashMap::new();
+            let mut by_topic: std::collections::HashMap<String, Vec<OffsetFetchResponsePartition>> =
+                std::collections::HashMap::new();
             for ((topic, pid), entry) in &g.committed_offsets {
                 by_topic
                     .entry(topic.clone())

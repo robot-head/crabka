@@ -1938,10 +1938,7 @@ async fn kafka_consumer_groups_list_describe() {
         BOOTSTRAP,
     ]);
     let s = String::from_utf8_lossy(&list_out.stdout);
-    assert!(
-        s.contains(GROUP),
-        "list output missing {GROUP}: {s}"
-    );
+    assert!(s.contains(GROUP), "list output missing {GROUP}: {s}");
 
     let desc_out = docker_run_kafka_tool(&[
         "kafka-consumer-groups",
@@ -1970,12 +1967,15 @@ async fn kafka_cluster_describe() {
     let (_broker, _dir) = start_host_broker().await;
     nc_check_connectivity();
 
-    let out = docker_run_kafka_tool_with_image(KAFKA_IMAGE_TXN, &[
-        "kafka-cluster",
-        "cluster-id",
-        "--bootstrap-server",
-        BOOTSTRAP,
-    ]);
+    let out = docker_run_kafka_tool_with_image(
+        KAFKA_IMAGE_TXN,
+        &[
+            "kafka-cluster",
+            "cluster-id",
+            "--bootstrap-server",
+            BOOTSTRAP,
+        ],
+    );
     let s = String::from_utf8_lossy(&out.stdout);
     // `kafka-cluster cluster-id` prints a line like:
     //   "Cluster ID: <uuid>"

@@ -60,8 +60,7 @@ pub(crate) fn handle(
                         None => Vec::new(),
                         Some(map) => {
                             // Honor the per-request key filter when present.
-                            let key_filter: Option<&[String]> =
-                                r.configuration_keys.as_deref();
+                            let key_filter: Option<&[String]> = r.configuration_keys.as_deref();
                             map.iter()
                                 .filter(|(k, _)| {
                                     key_filter.is_none_or(|ks| ks.iter().any(|f| f == *k))

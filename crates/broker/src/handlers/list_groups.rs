@@ -7,7 +7,7 @@ use bytes::{Bytes, BytesMut};
 use futures_util::future::BoxFuture;
 
 use crabka_protocol::owned::list_groups_request::ListGroupsRequest;
-use crabka_protocol::owned::list_groups_response::{ListedGroup, ListGroupsResponse};
+use crabka_protocol::owned::list_groups_response::{ListGroupsResponse, ListedGroup};
 use crabka_protocol::{Decode, Encode};
 
 use crate::broker::Broker;

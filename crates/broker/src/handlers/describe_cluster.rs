@@ -6,10 +6,10 @@
 use bytes::{Bytes, BytesMut};
 use futures_util::future::BoxFuture;
 
+use crabka_protocol::Encode;
 use crabka_protocol::owned::describe_cluster_response::{
     DescribeClusterBroker, DescribeClusterResponse,
 };
-use crabka_protocol::Encode;
 
 use crate::broker::Broker;
 use crate::codes;

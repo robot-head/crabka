@@ -117,11 +117,8 @@ impl GroupManager {
     /// order (matching Apache Kafka's `ListGroups`, which doesn't promise
     /// ordering either).
     pub async fn list_groups(&self) -> Vec<GroupSnapshot> {
-        let handles: Vec<Arc<GroupHandle>> = self
-            .groups
-            .iter()
-            .map(|e| e.value().clone())
-            .collect();
+        let handles: Vec<Arc<GroupHandle>> =
+            self.groups.iter().map(|e| e.value().clone()).collect();
         let mut out = Vec::with_capacity(handles.len());
         for h in handles {
             let g = h.state.lock().await;

@@ -100,9 +100,7 @@ pub async fn run(
                 // No `append_notify` — trim drops data rather than producing it.
             }
             WriterMessage::SetLogConfig { config, ack } => {
-                log.lock()
-                    .expect("log mutex poisoned")
-                    .set_config(config);
+                log.lock().expect("log mutex poisoned").set_config(config);
                 let _ = ack.send(());
             }
             #[cfg(any(test, feature = "test-helpers"))]

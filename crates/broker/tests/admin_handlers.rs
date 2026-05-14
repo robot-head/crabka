@@ -11,10 +11,7 @@
 //! through the same raft bootstrap path.
 
 #![cfg(not(target_os = "windows"))]
-#![allow(
-    clippy::default_trait_access,
-    clippy::manual_assert
-)]
+#![allow(clippy::default_trait_access, clippy::manual_assert)]
 
 mod support;
 
@@ -108,9 +105,7 @@ async fn alter_configs_round_trip() {
     // (typically within a few hundred ms).
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
-        if let Some(Some(retention)) =
-            broker.partition_retention_ms_for_test("t-alter", 0)
-        {
+        if let Some(Some(retention)) = broker.partition_retention_ms_for_test("t-alter", 0) {
             assert_eq!(
                 retention,
                 Duration::from_millis(60_000),
@@ -209,9 +204,7 @@ async fn create_partitions_extends_topic() {
             let present: Vec<i32> = (0..3)
                 .filter(|&p| broker.partition_exists_for_test("t-cp", p))
                 .collect();
-            panic!(
-                "only partitions {present:?} present after 10 s; expected [0, 1, 2]"
-            );
+            panic!("only partitions {present:?} present after 10 s; expected [0, 1, 2]");
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }

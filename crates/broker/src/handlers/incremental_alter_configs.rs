@@ -59,8 +59,10 @@ pub(crate) fn handle(
 
             if resource.resource_type != RESOURCE_TYPE_TOPIC {
                 out.error_code = codes::INVALID_RESOURCE_TYPE;
-                out.error_message =
-                    Some(format!("resource_type={} not supported", resource.resource_type));
+                out.error_message = Some(format!(
+                    "resource_type={} not supported",
+                    resource.resource_type
+                ));
                 responses.push(out);
                 continue;
             }
@@ -83,8 +85,7 @@ pub(crate) fn handle(
                 match cfg.config_operation {
                     OP_SET => {
                         let value = cfg.value.clone().unwrap_or_default();
-                        if let Err(reason) = config_keys::validate_topic_config(&cfg.name, &value)
-                        {
+                        if let Err(reason) = config_keys::validate_topic_config(&cfg.name, &value) {
                             validation_err = Some(reason);
                             break;
                         }

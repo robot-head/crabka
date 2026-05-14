@@ -5,9 +5,7 @@ use bytes::{Bytes, BytesMut};
 use futures_util::future::BoxFuture;
 
 use crabka_protocol::owned::delete_groups_request::DeleteGroupsRequest;
-use crabka_protocol::owned::delete_groups_response::{
-    DeletableGroupResult, DeleteGroupsResponse,
-};
+use crabka_protocol::owned::delete_groups_response::{DeletableGroupResult, DeleteGroupsResponse};
 use crabka_protocol::{Decode, Encode};
 
 use crate::broker::Broker;
@@ -28,8 +26,7 @@ pub(crate) fn handle(
         let mut cur: &[u8] = &req_bytes;
         let req = DeleteGroupsRequest::decode(&mut cur, version)?;
 
-        let mut results: Vec<DeletableGroupResult> =
-            Vec::with_capacity(req.groups_names.len());
+        let mut results: Vec<DeletableGroupResult> = Vec::with_capacity(req.groups_names.len());
         for gid in req.groups_names {
             let error_code = match group_manager.delete_group(&gid).await {
                 Ok(()) => codes::NONE,

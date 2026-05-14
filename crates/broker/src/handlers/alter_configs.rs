@@ -50,8 +50,10 @@ pub(crate) fn handle(
 
             if resource.resource_type != RESOURCE_TYPE_TOPIC {
                 out.error_code = codes::INVALID_RESOURCE_TYPE;
-                out.error_message =
-                    Some(format!("resource_type={} not supported", resource.resource_type));
+                out.error_message = Some(format!(
+                    "resource_type={} not supported",
+                    resource.resource_type
+                ));
                 responses.push(out);
                 continue;
             }

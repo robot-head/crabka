@@ -540,18 +540,13 @@ mod tests {
             .value()
             .clone();
         let snap = part.log.lock().expect("log lock").config_snapshot();
-        assert_eq!(
-            snap.retention_ms,
-            Some(std::time::Duration::from_mins(1))
-        );
+        assert_eq!(snap.retention_ms, Some(std::time::Duration::from_mins(1)));
     }
 
     #[tokio::test]
     async fn push_topic_configs_with_no_overrides_uses_defaults() {
         use crabka_log::LogConfig;
-        use crabka_metadata::{
-            MetadataImage, MetadataRecord, PartitionRecord, TopicRecord,
-        };
+        use crabka_metadata::{MetadataImage, MetadataRecord, PartitionRecord, TopicRecord};
         use tempfile::tempdir;
         use uuid::Uuid;
 

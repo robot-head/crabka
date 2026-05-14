@@ -7,7 +7,7 @@ use futures_util::future::BoxFuture;
 
 use crabka_protocol::owned::describe_groups_request::DescribeGroupsRequest;
 use crabka_protocol::owned::describe_groups_response::{
-    DescribedGroup, DescribedGroupMember, DescribeGroupsResponse,
+    DescribeGroupsResponse, DescribedGroup, DescribedGroupMember,
 };
 use crabka_protocol::{Decode, Encode};
 

@@ -30,8 +30,7 @@ pub(crate) fn handle(
         let mut cur: &[u8] = &req_bytes;
         let req = DeleteRecordsRequest::decode(&mut cur, version)?;
 
-        let mut topic_results: Vec<DeleteRecordsTopicResult> =
-            Vec::with_capacity(req.topics.len());
+        let mut topic_results: Vec<DeleteRecordsTopicResult> = Vec::with_capacity(req.topics.len());
 
         for topic in req.topics {
             let mut part_results: Vec<DeleteRecordsPartitionResult> =
@@ -51,8 +50,9 @@ pub(crate) fn handle(
                     continue;
                 };
 
-                let cur_leader =
-                    part.current_leader.load(std::sync::atomic::Ordering::Acquire);
+                let cur_leader = part
+                    .current_leader
+                    .load(std::sync::atomic::Ordering::Acquire);
                 if cur_leader != node_id {
                     part_results.push(DeleteRecordsPartitionResult {
                         partition_index: fp.partition_index,
