@@ -26,7 +26,7 @@ use crate::replicator_supervisor::materialize_partition;
 /// is `bs[(p) % k]`; the remaining replicas are `bs[(p + i) % k]` for
 /// `i in 1..R`. Caller must guarantee `R <= k` (else returns an empty
 /// outer vec and the caller surfaces `INVALID_REPLICATION_FACTOR`).
-fn round_robin_replicas(
+pub(crate) fn round_robin_replicas(
     sorted_brokers: &[crabka_raft::NodeId],
     num_partitions: i32,
     replication_factor: i16,
