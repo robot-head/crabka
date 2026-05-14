@@ -208,6 +208,12 @@ impl BrokerHandle {
         if let Some(t) = self.listener_task.take() {
             let _ = t.await;
         }
+        // Shut down the raft engine so this broker's openraft instance stops
+        // participating in elections after the broker is logically dead.
+        // Without this, a killed broker's in-process raft engine keeps ticking
+        // and re-elects itself, preventing the surviving nodes from detecting
+        // the leader failure and electing a replacement.
+        self._broker.controller.cancel().await;
     }
 }
 
@@ -226,13 +232,13 @@ impl Broker {
             voters: config.controller_quorum_voters.clone(),
             controller_listen_addr: config.controller_listen_addr,
             log_dir: config.log_dir.join("__cluster_metadata"),
-            // Aggressive defaults (1s / 200ms) split-vote on slow CI runners
-            // when our hand-rolled wire's RPC round-trip exceeds the
-            // election-timeout window. 5s/500ms keeps elections deterministic
-            // for multi-node startups without making the single-node path
-            // perceptibly slower.
-            election_timeout: std::time::Duration::from_secs(5),
-            heartbeat_interval: std::time::Duration::from_millis(500),
+            // Sourced from `BrokerConfig` — see the docstrings there for
+            // the production-vs-test tradeoff. Crucially this also sets
+            // openraft's `leader_lease` to `election_timeout × 2`, which
+            // is the floor on how fast a 3-broker cluster can elect a
+            // replacement when the controller leader dies.
+            election_timeout: config.controller_election_timeout,
+            heartbeat_interval: config.controller_heartbeat_interval,
             client_id: format!("crabka-broker-{}-controller", config.broker_id),
         };
         let controller = Arc::new(
@@ -402,6 +408,41 @@ impl Broker {
                 }
             }
         });
+
+        // 4e-2. Leadership-change watcher: whenever this broker becomes the
+        //       raft leader it seeds the liveness registry with all brokers
+        //       known in the current metadata image.  This ensures that peers
+        //       which were heartbeating to the previous leader (and therefore
+        //       have no entry in *this* broker's liveness map) are detected as
+        //       dead after `heartbeat_timeout_ms` if they stop sending to us.
+        //       Without seeding, `AliveToDead` never fires for a broker that
+        //       dies while a *different* raft node is the leader.
+        {
+            let mut leader_watch = controller.watch_leader();
+            let this_node = config.node_id;
+            let liveness_seed = liveness.clone();
+            let controller_seed = controller.clone();
+            let seed_shutdown = supervisor_shutdown.child_token();
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        _ = leader_watch.changed() => {},
+                        () = seed_shutdown.cancelled() => return,
+                    }
+                    let new_leader = *leader_watch.borrow();
+                    if new_leader == Some(this_node) {
+                        // We just became the raft leader. Seed liveness for
+                        // every broker currently in the metadata image.
+                        let ids: Vec<u64> = controller_seed
+                            .current_image()
+                            .brokers()
+                            .map(|b| b.node_id)
+                            .collect();
+                        liveness_seed.seed_brokers(ids).await;
+                    }
+                }
+            });
+        }
 
         // 4f. ISR maintenance: per-leader-partition shrink/expand tick.
         //     Proposes AlterPartition changes when follower lag exceeds

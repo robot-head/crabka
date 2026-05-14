@@ -111,6 +111,26 @@ impl ControllerLivenessState {
             Some(BrokerLivenessState::Alive)
         )
     }
+
+    /// Seed the liveness registry with the given broker ids. Each id that
+    /// is not already present is inserted as `Alive` with
+    /// `last_heartbeat = now`. This is called when this broker becomes the
+    /// raft leader so that peers which stop heartbeating (because they are
+    /// dead) will be detected by [`tick`](Self::tick) after `timeout` ms
+    /// even if they never sent a heartbeat to this specific node before.
+    ///
+    /// Ids already in the registry are left untouched (their existing
+    /// `last_heartbeat` and `state` are preserved).
+    pub(crate) async fn seed_brokers(&self, broker_ids: impl IntoIterator<Item = u64>) {
+        let mut map = self.brokers.lock().await;
+        let now = Instant::now();
+        for id in broker_ids {
+            map.entry(id).or_insert(BrokerEntry {
+                last_heartbeat: now,
+                state: BrokerLivenessState::Alive,
+            });
+        }
+    }
 }
 
 #[cfg(test)]

@@ -106,16 +106,15 @@ jobs:
       # (so the `docker run --add-host` Kafka tools have a known bootstrap
       # target). Parallel execution would hit `AddrInUse`.
       #
-      # --skip filters out the slice-10b multi-broker acceptance tests that
-      # share root cause with the ignored rust-only tests
-      # (durability::acks_all_completes_via_isr_shrink_when_follower_dead etc):
-      # the acks=-1 produce path stalls until follower replicators catch up,
-      # which doesn't happen reliably within the producer timeout on CI.
-      # These will be re-enabled in the slice-10b follow-up that closes the
-      # ISR/HW race.
+      # --skip filters out 2 acceptance tests that kill a broker mid-run:
+      # the surviving openraft engines keep retrying AppendEntries to the
+      # dead voter indefinitely (millions of log lines), and the JVM
+      # producer retries forever because Apache Kafka clients default to
+      # `retries=Integer.MAX_VALUE`. Both need a proper
+      # `Raft::change_membership` to remove the dead node from the voter
+      # set — same blocker as `leader_election::isr_expand_on_catchup`.
       - run: |
           cargo test -p crabka-broker --test jvm_acceptance -- \
             --ignored --nocapture --test-threads=1 \
-            --skip acks_all_durability \
             --skip acks_all_survives_leader_crash \
             --skip three_node_replication_byte_compare

@@ -109,7 +109,7 @@ async fn send_alter_partition(
     leader_epoch: i32,
 ) -> Result<(), String> {
     use crabka_protocol::owned::alter_partition_request::{
-        AlterPartitionRequest, PartitionData, TopicData,
+        AlterPartitionRequest, BrokerState, PartitionData, TopicData,
     };
 
     // Look up the controller leader's address via metadata image.
@@ -131,11 +131,23 @@ async fn send_alter_partition(
         crabka_protocol::primitives::uuid::Uuid(raw)
     };
 
-    // The wire format uses new_isr: Vec<i32> (versions 2–3 both send it;
-    // version 3 adds new_isr_with_epochs but we send version 2 for simplicity).
+    // `new_isr` is the v2 field (versions 2 only on the wire).
+    // `new_isr_with_epochs` is the v3 field; the client negotiates MAX_VERSION
+    // (= 3), so we must populate both so that whichever version is selected
+    // carries the correct ISR.  The handler side reads `new_isr_with_epochs`
+    // when `new_isr` is empty (i.e. version 3).  Broker epochs are unknown
+    // at this call site so we send -1 (the standard "unknown epoch" sentinel).
     let new_isr_i32: Vec<i32> = new_isr
         .iter()
         .map(|n| i32::try_from(*n).unwrap_or(i32::MAX))
+        .collect();
+    let new_isr_with_epochs: Vec<BrokerState> = new_isr_i32
+        .iter()
+        .map(|&bid| BrokerState {
+            broker_id: bid,
+            broker_epoch: -1,
+            ..Default::default()
+        })
         .collect();
 
     let req = AlterPartitionRequest {
@@ -147,7 +159,7 @@ async fn send_alter_partition(
                 partition_index: partition,
                 leader_epoch,
                 new_isr: new_isr_i32,
-                new_isr_with_epochs: Vec::new(),
+                new_isr_with_epochs,
                 leader_recovery_state: 0,
                 partition_epoch: 0,
                 ..Default::default()
@@ -164,7 +176,28 @@ async fn send_alter_partition(
         .await
         .map_err(|e| format!("connect: {e}"))?;
 
-    let _resp = client.send(req).await.map_err(|e| format!("send: {e}"))?;
+    let resp = client.send(req).await.map_err(|e| format!("send: {e}"))?;
+    // Log the global error code and per-partition error codes so failures
+    // are visible (previously _resp was discarded, hiding non-zero codes).
+    let global_err = resp.error_code;
+    let part_err = resp
+        .topics
+        .first()
+        .and_then(|t| t.partitions.first())
+        .map_or(0, |p| p.error_code);
+    if global_err != 0 || part_err != 0 {
+        warn!(
+            topic = topic,
+            partition = partition,
+            new_isr_len = new_isr.len(),
+            global_error_code = global_err,
+            partition_error_code = part_err,
+            "AlterPartition rejected by controller"
+        );
+        return Err(format!(
+            "AlterPartition rejected: global={global_err} partition={part_err}"
+        ));
+    }
     debug!(
         topic = topic,
         partition = partition,

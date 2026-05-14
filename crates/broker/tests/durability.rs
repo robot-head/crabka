@@ -16,7 +16,6 @@ use crabka_broker::{BrokerConfig, BrokerHandle};
 use crabka_client_consumer::{AutoOffsetReset, Consumer, IsolationLevel};
 use crabka_client_core::Client;
 use crabka_client_producer::{Producer, ProducerRecord};
-use crabka_log::LogConfig;
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
 use crabka_protocol::owned::fetch_request::{FetchPartition, FetchRequest, FetchTopic};
 use crabka_protocol::owned::metadata_request::{MetadataRequest, MetadataRequestTopic};
@@ -25,6 +24,8 @@ use crabka_protocol::owned::produce_request::{
 };
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 use crabka_protocol::records::{Record, RecordBatch};
+
+mod support;
 
 /// Resolve the topic UUID via Metadata. Produce/Fetch at v ≥ 13 carry
 /// only `topic_id` on the wire (KIP-516); without this the broker
@@ -286,35 +287,17 @@ async fn read_committed_under_rf1_unchanged_from_slice9() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-// Slice-10b leaves a race we haven't fully closed: even after eager ISR
-// install in CreateTopics, the AlterPartition-driven supervisor
-// reconcile re-installing only `part_record.isr`, idempotent
-// install_leader_change, and HW recompute inside install_isr, the
-// produce on a freshly-created 3-broker cluster occasionally still
-// observes HW=0 for the full 10s producer timeout. Likely the
-// follower replicators on brokers 2/3 haven't completed their first
-// fetch round before broker 3 is killed, leaving per_follower[3]
-// permanently stuck and shrink semantics ambiguous. Re-enable once
-// slice-10b's bookkeeping is bulletproofed.
-#[ignore = "flaky on Linux/macOS CI; tracked under slice-10b follow-up"]
 async fn acks_all_completes_via_isr_shrink_when_follower_dead() {
-    let (mut cluster, bootstrap_1) = boot_three_node().await;
-    // All three brokers must be registered with the controller before
-    // CreateTopics; otherwise replica placement may not include all 3
-    // and ISR shrink dynamics observe a different topology than the
-    // test expects. Mirrors `leader_election.rs::wait_for_all_three_brokers`.
-    wait_for_all_three_brokers(&cluster).await;
+    support::init_tracing();
+    let mut cluster = support::start_n_node_with_retry(3).await;
+    support::wait_for_all_brokers_registered(&cluster, 3).await;
+    let bootstrap_1 = cluster[0].1.listen_addr.to_string();
     create_topic(&cluster[0].0, &bootstrap_1, "shrink", 3).await;
-    // Give follower replicators a moment to spawn and start fetching so
-    // broker 3's `per_follower.last_fetch` is fresh at kill time. Without
-    // this, broker 3 was never tracked as "fetching", isr_maintenance's
-    // expansion bookkeeping treats it as never-caught-up, and shrink
-    // dynamics observed by the test are noisy.
+    // Give follower replicators a moment to spawn and start fetching.
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    // Kill broker 3 — its absence will force ISR to shrink within
-    // `replica_lag_time_max_ms` (2s on CI), unblocking the acks=-1
-    // produce.
+    // Kill broker 3 — its absence forces ISR to shrink within
+    // replica_lag_time_max_ms (2s on CI), unblocking the acks=-1 produce.
     let dead = cluster.pop().expect("3rd broker");
     dead.0.shutdown().await;
 
@@ -335,82 +318,4 @@ async fn acks_all_completes_via_isr_shrink_when_follower_dead() {
     for (h, _, _) in cluster {
         h.shutdown().await;
     }
-}
-
-/// Poll every broker's controller image until each one sees all three
-/// brokers registered. Required before any multi-broker test that needs
-/// the partition's replica set to include all 3 nodes (`CreateTopics`
-/// reads `image.brokers()` to pick replicas, so a race here silently
-/// degrades to a smaller replica set).
-async fn wait_for_all_three_brokers(cluster: &[(BrokerHandle, String, TempDir)]) {
-    let deadline = Instant::now() + Duration::from_mins(2);
-    loop {
-        let mut all_see_three = true;
-        for (h, _, _) in cluster {
-            if h.broker_count().await < 3 {
-                all_see_three = false;
-                break;
-            }
-        }
-        if all_see_three {
-            return;
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "brokers didn't converge on 3-broker view within 2 min"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-}
-
-async fn boot_three_node() -> (Vec<(BrokerHandle, String, TempDir)>, String) {
-    use std::net::SocketAddr;
-
-    let client_ports = [11_092u16, 11_192, 11_292];
-    let controller_ports = [11_093u16, 11_193, 11_293];
-    let voters: Vec<(u64, SocketAddr)> = (0..3)
-        .map(|i| {
-            (
-                u64::try_from(i + 1).unwrap(),
-                format!("127.0.0.1:{}", controller_ports[i])
-                    .parse()
-                    .unwrap(),
-            )
-        })
-        .collect();
-    // Spawn all three Broker::start futures concurrently — a single
-    // broker blocks waiting for an openraft leader (no quorum from
-    // self alone), so sequential boot deadlocks before brokers 2/3
-    // ever start. Mirrors `tests/quorum.rs::spawn_three`.
-    let mut spawned = Vec::with_capacity(3);
-    let mut dirs = Vec::with_capacity(3);
-    let mut bootstraps = Vec::with_capacity(3);
-    for i in 0..3 {
-        let dir = TempDir::new().unwrap();
-        let cfg = BrokerConfig {
-            broker_id: i32::try_from(i + 1).unwrap(),
-            listen_addr: format!("127.0.0.1:{}", client_ports[i]).parse().unwrap(),
-            advertised_listener: format!("127.0.0.1:{}", client_ports[i]),
-            log_dir: dir.path().to_path_buf(),
-            log_config: LogConfig::default(),
-            node_id: u64::try_from(i + 1).unwrap(),
-            controller_listen_addr: format!("127.0.0.1:{}", controller_ports[i])
-                .parse()
-                .unwrap(),
-            controller_quorum_voters: voters.clone(),
-            heartbeat_interval_ms: 200,
-            heartbeat_timeout_ms: 2_000,
-            replica_lag_time_max_ms: 2_000,
-        };
-        bootstraps.push(format!("127.0.0.1:{}", client_ports[i]));
-        spawned.push(tokio::spawn(async move { Broker::start(cfg).await }));
-        dirs.push(dir);
-    }
-    let mut cluster = Vec::with_capacity(3);
-    for (handle, (dir, bootstrap)) in spawned.into_iter().zip(dirs.into_iter().zip(bootstraps)) {
-        let broker = handle.await.expect("join").expect("boot");
-        cluster.push((broker, bootstrap, dir));
-    }
-    let bootstrap_1 = cluster[0].1.clone();
-    (cluster, bootstrap_1)
 }
