@@ -103,6 +103,33 @@ pub(crate) fn materialize_partition(
     }
 }
 
+/// Push topic-config overrides onto every locally-hosted partition in
+/// `desired`. Idempotent — sending the same `LogConfig` is a cheap noop
+/// write inside `Log::set_config`. Errors on individual partitions are
+/// logged via `warn!` but don't propagate.
+pub(crate) async fn push_topic_configs(
+    desired: &HashSet<(String, i32)>,
+    partitions: &DashMap<(String, i32), Arc<Partition>>,
+    image: &MetadataImage,
+) {
+    let empty: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    for (topic, partition) in desired {
+        let Some(part) = partitions
+            .get(&(topic.clone(), *partition))
+            .map(|e| e.value().clone())
+        else {
+            continue;
+        };
+        let overrides = image.topic_config(topic).unwrap_or(&empty);
+        if let Err(e) = part.apply_log_config_overrides(overrides).await {
+            warn!(
+                topic = %topic, partition = partition, error = %e,
+                "supervisor: apply_log_config_overrides failed"
+            );
+        }
+    }
+}
+
 pub(crate) struct ReplicatorSupervisor {
     node_id: NodeId,
     controller: Arc<ControllerHandle>,
@@ -145,13 +172,16 @@ impl ReplicatorSupervisor {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     pub(crate) async fn reconcile(&self, image: &MetadataImage) {
+        let local_set = desired_local_set(self.node_id, image);
+
         // 0. Materialize the on-disk partition for every assignment where
         //    self is in `replicas`, regardless of leader/follower role.
         //    Additionally: sync the partition's cached leader + epoch
         //    (idempotent), and for partitions where self is leader,
         //    install the ISR into ReplicaState for HW computation.
-        for key in desired_local_set(self.node_id, image) {
+        for key in &local_set {
             if let Err(e) = self.materialize_local_partition(&key.0, key.1) {
                 warn!(
                     topic = %key.0, partition = key.1, error = %e,
@@ -184,6 +214,13 @@ impl ReplicatorSupervisor {
                 part.install_isr(&part_record.isr, part_record.leader).await;
             }
         }
+
+        // Push topic-config overrides onto every locally-hosted partition.
+        // Pushes are idempotent — sending the same `LogConfig` is a cheap
+        // noop write inside `Log::set_config`. The metadata-watch reconcile
+        // loop fires on every image change, so AlterConfigs propagation is
+        // bounded to one reconcile tick.
+        push_topic_configs(&local_set, &self.partitions, image).await;
 
         let desired = desired_follower_set(self.node_id, image);
 
@@ -447,5 +484,111 @@ mod tests {
         assert!(d.contains(&("b".into(), 0)));
         assert!(!d.contains(&("b".into(), 1))); // self is leader for b/1
         assert_eq!(d.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn push_topic_configs_pushes_overrides_to_local_partition() {
+        use crabka_log::LogConfig;
+        use crabka_metadata::{
+            MetadataImage, MetadataRecord, PartitionRecord, TopicConfigRecord, TopicRecord,
+        };
+        use std::collections::BTreeMap;
+        use tempfile::tempdir;
+        use uuid::Uuid;
+
+        // Build an image with a topic + partition record + V1TopicConfig.
+        let mut img = MetadataImage::new(Uuid::nil());
+        img.apply(&MetadataRecord::V1Topic(TopicRecord {
+            name: "t".into(),
+            topic_id: Uuid::new_v4(),
+            partitions: 1,
+            replication_factor: 1,
+        }));
+        img.apply(&MetadataRecord::V1Partition(PartitionRecord {
+            topic: "t".into(),
+            partition: 0,
+            leader: 1,
+            replicas: vec![1],
+            isr: vec![1],
+            leader_epoch: 0,
+        }));
+        let mut overrides = BTreeMap::new();
+        overrides.insert("retention.ms".to_string(), "60000".to_string());
+        img.apply(&MetadataRecord::V1TopicConfig(TopicConfigRecord {
+            topic: "t".into(),
+            overrides,
+        }));
+
+        // Materialize the partition on disk.
+        let dir = tempdir().expect("tempdir");
+        let partitions = Arc::new(DashMap::new());
+        materialize_partition(&partitions, "t", 0, dir.path(), &LogConfig::default())
+            .expect("materialize");
+
+        // Call push_topic_configs directly.
+        let mut desired = HashSet::new();
+        desired.insert(("t".to_string(), 0));
+        push_topic_configs(&desired, &partitions, &img).await;
+
+        // Give the writer actor a moment to apply the SetLogConfig message.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Verify the partition's Log now has retention.ms=60s.
+        let part = partitions
+            .get(&("t".to_string(), 0))
+            .expect("partition materialized")
+            .value()
+            .clone();
+        let snap = part.log.lock().expect("log lock").config_snapshot();
+        assert_eq!(
+            snap.retention_ms,
+            Some(std::time::Duration::from_mins(1))
+        );
+    }
+
+    #[tokio::test]
+    async fn push_topic_configs_with_no_overrides_uses_defaults() {
+        use crabka_log::LogConfig;
+        use crabka_metadata::{
+            MetadataImage, MetadataRecord, PartitionRecord, TopicRecord,
+        };
+        use tempfile::tempdir;
+        use uuid::Uuid;
+
+        let mut img = MetadataImage::new(Uuid::nil());
+        img.apply(&MetadataRecord::V1Topic(TopicRecord {
+            name: "t".into(),
+            topic_id: Uuid::new_v4(),
+            partitions: 1,
+            replication_factor: 1,
+        }));
+        img.apply(&MetadataRecord::V1Partition(PartitionRecord {
+            topic: "t".into(),
+            partition: 0,
+            leader: 1,
+            replicas: vec![1],
+            isr: vec![1],
+            leader_epoch: 0,
+        }));
+
+        let dir = tempdir().expect("tempdir");
+        let partitions = Arc::new(DashMap::new());
+        materialize_partition(&partitions, "t", 0, dir.path(), &LogConfig::default())
+            .expect("materialize");
+
+        let mut desired = HashSet::new();
+        desired.insert(("t".to_string(), 0));
+        push_topic_configs(&desired, &partitions, &img).await;
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // No overrides → default retention applies.
+        let part = partitions
+            .get(&("t".to_string(), 0))
+            .expect("partition")
+            .value()
+            .clone();
+        let snap = part.log.lock().expect("log lock").config_snapshot();
+        assert_eq!(snap.retention_ms, LogConfig::default().retention_ms);
     }
 }
