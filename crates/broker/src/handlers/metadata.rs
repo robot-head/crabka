@@ -75,6 +75,7 @@ pub(crate) fn handle(
                             error_code: codes::NONE,
                             partition_index: p.partition,
                             leader_id: i32::try_from(p.leader).unwrap_or(i32::MAX),
+                            leader_epoch: p.leader_epoch,
                             replica_nodes: p
                                 .replicas
                                 .iter()
