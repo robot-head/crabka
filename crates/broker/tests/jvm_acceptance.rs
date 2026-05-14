@@ -37,15 +37,16 @@ const BOOTSTRAP: &str = "host.docker.internal:9092";
 /// gateway IP.
 const LISTEN: &str = "0.0.0.0:9092";
 const KAFKA_IMAGE: &str = "confluentinc/cp-kafka:6.1.1";
-/// Newer Kafka image needed for transactional verifiable-producer support
-/// (--transactional-id flag added in Kafka 3.x). Used only by the slice-9
-/// transactional acceptance test.
+/// Newer Kafka image used for tests that require tools not bundled in
+/// [`KAFKA_IMAGE`]. Currently referenced by:
+///
+/// - `kafka_cluster_describe`: `kafka-cluster` binary is absent from
+///   `cp-kafka:6.1.1` but present in `cp-kafka:7.5.0`.
 ///
 /// NOTE: `cp-kafka:7.5.0`'s bundled `kafka-verifiable-producer` does NOT
 /// support `--transactional-id` despite shipping Kafka 3.5. The test that
-/// references this image is gated behind `CRABKA_RUN_TXN_JVM_TEST` and
+/// requires that flag is gated behind `CRABKA_RUN_TXN_JVM_TEST` and
 /// deferred to slice 10 pending a custom Java snippet harness.
-#[allow(dead_code)]
 const KAFKA_IMAGE_TXN: &str = "confluentinc/cp-kafka:7.5.0";
 
 /// Spawn the broker, listening on `LISTEN`. The advertised listener is
@@ -110,24 +111,31 @@ fn nc_check_connectivity() {
 /// Run `docker run --rm --add-host=host.docker.internal:host-gateway
 /// <image> <args...>`, asserting success.
 fn docker_run_kafka_tool(args: &[&str]) -> std::process::Output {
+    docker_run_kafka_tool_with_image(KAFKA_IMAGE, args)
+}
+
+/// Like [`docker_run_kafka_tool`] but lets the caller choose the image.
+/// Used when a specific test needs a newer image (e.g. `kafka-cluster`
+/// is only bundled in `cp-kafka:7.5.0`, not `6.1.1`).
+fn docker_run_kafka_tool_with_image(image: &str, args: &[&str]) -> std::process::Output {
     let out = Command::new("docker")
         .arg("run")
         .arg("--rm")
         .arg("--add-host=host.docker.internal:host-gateway")
-        .arg(KAFKA_IMAGE)
+        .arg(image)
         .args(args)
         .stderr(Stdio::piped())
         .stdout(Stdio::piped())
         .output()
         .expect("spawn docker run");
     eprintln!(
-        "CRABKA[test] docker_run {args:?} status={} stderr_len={}",
+        "CRABKA[test] docker_run image={image} {args:?} status={} stderr_len={}",
         out.status,
         out.stderr.len(),
     );
     assert!(
         out.status.success(),
-        "docker run {args:?} failed: stdout={}, stderr={}",
+        "docker run image={image} {args:?} failed: stdout={}, stderr={}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),
     );
@@ -1947,5 +1955,32 @@ async fn kafka_consumer_groups_list_describe() {
     assert!(
         s.contains(TOPIC),
         "describe output missing topic {TOPIC}: {s}"
+    );
+}
+
+/// `kafka-cluster cluster-id` exercises DescribeCluster (api_key 60).
+///
+/// Uses `cp-kafka:7.5.0` (= [`KAFKA_IMAGE_TXN`]) because:
+/// - `cp-kafka:6.1.1` does not ship the `kafka-cluster` binary at all.
+/// - `cp-kafka:7.5.0` ships it but the subcommand is `cluster-id`
+///   (not `describe`; that alias does not exist in this version).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Docker"]
+async fn kafka_cluster_describe() {
+    let (_broker, _dir) = start_host_broker().await;
+    nc_check_connectivity();
+
+    let out = docker_run_kafka_tool_with_image(KAFKA_IMAGE_TXN, &[
+        "kafka-cluster",
+        "cluster-id",
+        "--bootstrap-server",
+        BOOTSTRAP,
+    ]);
+    let s = String::from_utf8_lossy(&out.stdout);
+    // `kafka-cluster cluster-id` prints a line like:
+    //   "Cluster ID: <uuid>"
+    assert!(
+        s.contains("Cluster ID") || s.contains("cluster ID") || s.contains("00000000"),
+        "cluster-id output missing cluster id: {s}"
     );
 }
