@@ -270,6 +270,17 @@ impl ControllerHandle {
             let _ = h.await;
         }
     }
+
+    /// Stop the openraft engine and cancel the controller listener without
+    /// consuming `self`. Used by `BrokerHandle::shutdown` where the
+    /// controller is behind an `Arc` and cannot be moved out.
+    ///
+    /// Idempotent — calling multiple times is safe (cancellation token and
+    /// `raft.shutdown()` are both idempotent).
+    pub async fn cancel(&self) {
+        self.shutdown.cancel();
+        let _ = self.raft.shutdown().await;
+    }
 }
 
 /// Zero-sized factory for [`ControllerHandle`]s. Kept as a unit struct

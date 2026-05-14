@@ -208,6 +208,12 @@ impl BrokerHandle {
         if let Some(t) = self.listener_task.take() {
             let _ = t.await;
         }
+        // Shut down the raft engine so this broker's openraft instance stops
+        // participating in elections after the broker is logically dead.
+        // Without this, a killed broker's in-process raft engine keeps ticking
+        // and re-elects itself, preventing the surviving nodes from detecting
+        // the leader failure and electing a replacement.
+        self._broker.controller.cancel().await;
     }
 }
 
