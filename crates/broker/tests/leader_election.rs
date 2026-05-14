@@ -17,9 +17,10 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use tokio::time::sleep;
 
+use tempfile::TempDir;
+
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_core::Client;
-use crabka_log::LogConfig;
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
 use crabka_protocol::owned::metadata_request::{MetadataRequest, MetadataRequestTopic};
 use crabka_protocol::owned::produce_request::{
@@ -29,6 +30,24 @@ use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 use crabka_protocol::records::{Record, RecordBatch};
 
 mod support;
+
+/// Poll the cluster until exactly one broker reports itself as the openraft
+/// controller leader. Returns the cluster index of that broker (0-based).
+async fn find_controller_leader(cluster: &[(BrokerHandle, BrokerConfig, TempDir)]) -> usize {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        for (i, (h, cfg, _)) in cluster.iter().enumerate() {
+            if h.controller_leader_id().await == Some(cfg.node_id) {
+                return i;
+            }
+        }
+        assert!(
+            Instant::now() <= deadline,
+            "no controller leader found within 10s"
+        );
+        sleep(Duration::from_millis(50)).await;
+    }
+}
 
 async fn create_topic(broker: &BrokerHandle, bootstrap: &str, name: &str, rf: i16) {
     let client = Client::builder()
@@ -230,60 +249,78 @@ async fn acks_all_completes_after_isr_shrink() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-// Hangs on Linux: openraft on the surviving leader spams AppendEntries
-// to the killed broker 3 indefinitely, and the "reborn broker" pattern
-// re-binds the old controller addr but openraft on the survivors
-// already considers node 3 a phantom replica it can't reach. Needs a
-// proper raft membership change (Raft::change_membership) to remove
-// the dead node before reborn, or a different test design.
-#[ignore = "raft thrashes when target=3 stays in voter set after kill; needs membership-change wire"]
 async fn isr_expand_on_catchup() {
     let _g = cluster_lock().lock().await;
-    // This test is challenging to write deterministically because we can't
-    // easily restart a broker mid-test (Broker::start consumes the TempDir).
-    // Instead: boot, kill one broker, verify ISR shrinks; then re-boot a
-    // fresh broker at the same node_id, verify ISR expands to include it.
     let mut cluster = support::start_n_node_with_retry(3).await;
     support::wait_for_all_brokers_registered(&cluster, 3).await;
     let bootstrap_1 = cluster[0].1.listen_addr.to_string();
+
     create_topic(&cluster[0].0, &bootstrap_1, "expand", 3).await;
 
-    // Shrink by killing broker 3.
-    let dead = cluster.pop().expect("3rd broker");
-    let dead_dir_path = dead.2.path().to_path_buf();
-    // Capture the dead broker's raft voter set and listen addresses BEFORE
-    // moving dead.0 into shutdown. The reborn broker must use the same
-    // ephemeral ports so it can rejoin the surviving raft quorum.
-    let dead_voters = dead.1.controller_quorum_voters.clone();
-    let dead_controller_addr = dead.1.controller_listen_addr;
-    let dead_listen_addr = dead.1.listen_addr;
-    dead.0.shutdown().await;
-    // Hold the TempDir alive so its on-disk state persists.
-    let _retained_dir = dead.2;
+    // 1. Find the current openraft leader so we can drive membership changes on it.
+    let leader_idx = find_controller_leader(&cluster).await;
+    let leader_node_id = cluster[leader_idx].1.node_id;
+    eprintln!("CRABKA[test] controller leader is node_id={leader_node_id}");
 
-    sleep(Duration::from_secs(3)).await; // wait for shrink
+    // 2. Remove node 3 from the voter set BEFORE kill. The leader's openraft
+    //    commits a joint config then a uniform config; after the second commit
+    //    survivors stop replicating to node 3.
+    cluster[leader_idx]
+        .0
+        .change_membership([1u64, 2u64].into_iter().collect())
+        .await
+        .expect("remove node 3 from voter set");
 
-    // Re-boot a fresh broker at node_id=3 reusing the original ephemeral
-    // ports so it can rejoin the surviving raft quorum (which still
-    // knows the voter set from the initial boot).
-    let cfg = BrokerConfig {
+    // 3. Capture node 3's addr for the reborn broker, then kill.
+    let dead_listen_addr = cluster[2].1.listen_addr;
+    let dead_controller_addr = cluster[2].1.controller_listen_addr;
+    let (dead_h, _dead_cfg, _dead_dir) = cluster.remove(2);
+    dead_h.shutdown().await;
+
+    // 4. Reboot node 3 with a fresh TempDir + same controller addr.
+    //    Boot as a 1-node cluster (voters = [self]) so node 3 can
+    //    self-elect immediately and Broker::start returns quickly.
+    //    The actual cluster leader will call add_learner below, which
+    //    sends AppendEntries at a higher term and causes node 3 to
+    //    step down and follow the real leader.
+    let reborn_dir = TempDir::new().unwrap();
+    let voters = vec![(3u64, dead_controller_addr)];
+    let reborn_cfg = BrokerConfig {
         broker_id: 3,
         listen_addr: dead_listen_addr,
         advertised_listener: dead_listen_addr.to_string(),
-        log_dir: dead_dir_path,
-        log_config: LogConfig::default(),
+        log_dir: reborn_dir.path().to_path_buf(),
+        log_config: Default::default(),
         node_id: 3,
         controller_listen_addr: dead_controller_addr,
-        controller_quorum_voters: dead_voters,
+        controller_quorum_voters: voters,
         heartbeat_interval_ms: 200,
         heartbeat_timeout_ms: 2_000,
         replica_lag_time_max_ms: 2_000,
-        controller_election_timeout: std::time::Duration::from_millis(500),
-        controller_heartbeat_interval: std::time::Duration::from_millis(100),
+        controller_election_timeout: Duration::from_millis(500),
+        controller_heartbeat_interval: Duration::from_millis(100),
     };
-    let reborn = Broker::start(cfg).await.expect("reborn");
+    let reborn = Broker::start(reborn_cfg).await.expect("reborn node 3");
+    eprintln!("CRABKA[test] reborn node 3 started");
 
-    // Wait for ISR to expand to include node 3 again.
+    // 5. Re-find the controller leader (broker_death_elects_new_leader proves it
+    //    might have changed during the joint-config commit).
+    let leader_idx = find_controller_leader(&cluster).await;
+
+    // 6. Register reborn node 3 as a learner; openraft will replicate the
+    //    committed log to it. Then promote it back to a voter.
+    cluster[leader_idx]
+        .0
+        .add_learner(3, dead_controller_addr)
+        .await
+        .expect("add reborn node 3 as learner");
+    cluster[leader_idx]
+        .0
+        .change_membership([1u64, 2u64, 3u64].into_iter().collect())
+        .await
+        .expect("promote reborn node 3 to voter");
+
+    // 7. Wait for the partition's ISR to expand back to {1, 2, 3}.
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut expanded = false;
     while Instant::now() < deadline {

@@ -153,6 +153,76 @@ impl ControllerHandle {
         })
     }
 
+    /// Mutate the openraft voter set. `new_voters` is the **complete** desired set
+    /// (not a delta). Any voter in the current set but not in `new_voters` is
+    /// removed entirely (`retain=false`). Any voter in `new_voters` that isn't
+    /// already in the cluster must have been registered via [`Self::add_learner`]
+    /// first — openraft refuses to promote unknown ids.
+    ///
+    /// Two-phase joint config: openraft commits a joint membership log entry
+    /// (old ∪ new), then a uniform log entry (new only). If the leader crashes
+    /// between the two, the cluster is left in joint config and a future call
+    /// completes the transition.
+    ///
+    /// # Errors
+    ///
+    /// - `RaftError::NotLeader` if this node isn't the openraft leader.
+    /// - `RaftError::ChangeRejected` if openraft rejects (e.g., the new voter set
+    ///   would leave the cluster without quorum, or a promoted node isn't a learner).
+    /// - `RaftError::Shutdown` if the raft engine has been shut down.
+    pub async fn change_membership(
+        &self,
+        new_voters: std::collections::BTreeSet<NodeId>,
+    ) -> Result<(), RaftError> {
+        use openraft::error::ClientWriteError;
+        use openraft::error::RaftError as ORE;
+        match self.raft.change_membership(new_voters, false).await {
+            Ok(_) => Ok(()),
+            Err(ORE::APIError(ClientWriteError::ForwardToLeader(f))) => Err(RaftError::NotLeader {
+                current_leader: f.leader_id,
+            }),
+            Err(ORE::APIError(ClientWriteError::ChangeMembershipError(e))) => {
+                Err(RaftError::ChangeRejected(format!("{e:?}")))
+            }
+            Err(e) => Err(RaftError::Openraft(format!("{e:?}"))),
+        }
+    }
+
+    /// Register a non-voting raft learner at `addr` with id `node_id`. Blocks
+    /// until the leader has replicated up to its current commit index to the
+    /// new node (so a subsequent [`Self::change_membership`] promotion won't
+    /// stall waiting for catch-up). Pair with [`Self::change_membership`] to
+    /// turn a learner into a voter:
+    ///
+    /// ```ignore
+    /// controller.add_learner(4, "127.0.0.1:9094".parse().unwrap()).await?;
+    /// controller.change_membership([1, 2, 3, 4].into_iter().collect()).await?;
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// - `RaftError::NotLeader` if this node isn't the openraft leader.
+    /// - `RaftError::ChangeRejected` if openraft rejects (e.g., the learner
+    ///   never catches up within openraft's internal deadline).
+    /// - `RaftError::Shutdown` if the raft engine has been shut down.
+    pub async fn add_learner(&self, node_id: NodeId, addr: SocketAddr) -> Result<(), RaftError> {
+        use openraft::error::ClientWriteError;
+        use openraft::error::RaftError as ORE;
+        let node = openraft::BasicNode {
+            addr: addr.to_string(),
+        };
+        match self.raft.add_learner(node_id, node, true).await {
+            Ok(_) => Ok(()),
+            Err(ORE::APIError(ClientWriteError::ForwardToLeader(f))) => Err(RaftError::NotLeader {
+                current_leader: f.leader_id,
+            }),
+            Err(ORE::APIError(ClientWriteError::ChangeMembershipError(e))) => {
+                Err(RaftError::ChangeRejected(format!("{e:?}")))
+            }
+            Err(e) => Err(RaftError::Openraft(format!("{e:?}"))),
+        }
+    }
+
     fn voter_addr(&self, node_id: NodeId) -> Option<SocketAddr> {
         self.voters
             .iter()
