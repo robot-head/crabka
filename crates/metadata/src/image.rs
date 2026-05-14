@@ -86,6 +86,7 @@ impl MetadataImage {
                 self.topics.remove(&d.name);
                 self.partitions.retain(|(t, _), _| t != &d.name);
             }
+            _ => {}
         }
     }
 
@@ -116,6 +117,7 @@ impl MetadataImage {
                 Ok(())
             }
             MetadataRecord::V1BrokerRegistration(_) => Ok(()),
+            _ => Ok(()),
         }
     }
 }
