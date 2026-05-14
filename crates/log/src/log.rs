@@ -28,7 +28,7 @@ use crate::txn_index::{AbortedTxn, TxnIndex};
 #[allow(clippy::struct_field_names)]
 pub struct Log {
     dir: PathBuf,
-    config: LogConfig,
+    config: std::sync::Arc<std::sync::RwLock<LogConfig>>,
     segments: Vec<Arc<Segment>>,
     active: Option<Segment>,
     /// Test-only override for `log_start_offset()`. When `Some(n)`, the
@@ -115,6 +115,8 @@ impl Log {
         let epoch_checkpoint = LeaderEpochCheckpoint::open(active.leader_epoch_checkpoint_path())?;
         // LSO starts at log_end_offset(); computed before moving `active`.
         let lso = active.last_offset() + 1;
+
+        let config = std::sync::Arc::new(std::sync::RwLock::new(config));
 
         Ok(Self {
             dir,
@@ -242,6 +244,23 @@ impl Log {
         drop(self);
     }
 
+    /// Atomically swap the active `LogConfig`. The next retention/roll check
+    /// reads the new value; in-flight `append` calls hold the lock for
+    /// trivially short windows and will not see a half-applied config.
+    ///
+    /// Callable through `&self` (the `Arc<RwLock<…>>` wrapping lets us
+    /// mutate the inner value without an exclusive borrow on the `Log`).
+    pub fn set_config(&self, new: LogConfig) {
+        *self.config.write().unwrap() = new;
+    }
+
+    /// Snapshot the current config. Allocates a clone; cheap because
+    /// `LogConfig` is small and `Clone`.
+    #[must_use]
+    pub fn config_snapshot(&self) -> LogConfig {
+        self.config.read().unwrap().clone()
+    }
+
     /// Return all aborted transactions from the active segment's
     /// `.txnindex` whose offset range overlaps `[start, end)`.
     ///
@@ -316,8 +335,13 @@ impl Log {
     /// `batch.base_offset`. Callers are responsible for setting it first.
     /// Also updates LSO and the active `.txnindex` based on batch attributes.
     fn append_preserving_offset(&mut self, batch: &mut RecordBatch) -> Result<(), LogError> {
+        let (segment_bytes, index_interval_bytes, flush_on_append) = {
+            let cfg = self.config.read().unwrap();
+            (cfg.segment_bytes, cfg.index_interval_bytes, cfg.flush_on_append)
+        };
+
         let should_roll = match &self.active {
-            Some(seg) => seg.size_bytes() >= self.config.segment_bytes,
+            Some(seg) => seg.size_bytes() >= segment_bytes,
             None => false,
         };
         if should_roll {
@@ -328,9 +352,9 @@ impl Log {
             .active
             .as_mut()
             .expect("active segment must exist after Log::open");
-        active.append(batch, self.config.index_interval_bytes)?;
+        active.append(batch, index_interval_bytes)?;
 
-        if self.config.flush_on_append {
+        if flush_on_append {
             active.flush()?;
         }
 
@@ -522,8 +546,10 @@ impl Log {
         let sealed_refs: Vec<&Segment> = self.segments.iter().map(AsRef::as_ref).collect();
         let active_size = self.active.as_ref().map_or(0, Segment::size_bytes);
 
-        let time_evict = retention::time_based_evict(&sealed_refs, &self.config, now);
-        let size_evict = retention::size_based_evict(&sealed_refs, active_size, &self.config);
+        let cfg_guard = self.config.read().unwrap();
+        let time_evict = retention::time_based_evict(&sealed_refs, &cfg_guard, now);
+        let size_evict = retention::size_based_evict(&sealed_refs, active_size, &cfg_guard);
+        drop(cfg_guard);
 
         // Union preserving order: time first (oldest first), then size.
         let mut to_evict: Vec<i64> = time_evict;
@@ -959,6 +985,27 @@ mod tests {
                     start_offset: 3
                 }
             ]
+        );
+    }
+
+    #[test]
+    fn set_config_swaps_active_config() {
+        let dir = tempdir().expect("tempdir");
+        let log = Log::open(
+            dir.path(),
+            LogConfig {
+                retention_ms: Some(std::time::Duration::from_secs(60)),
+                ..LogConfig::default()
+            },
+        )
+        .expect("open");
+        log.set_config(LogConfig {
+            retention_ms: Some(std::time::Duration::from_secs(120)),
+            ..LogConfig::default()
+        });
+        assert_eq!(
+            log.config_snapshot().retention_ms,
+            Some(std::time::Duration::from_secs(120))
         );
     }
 }
