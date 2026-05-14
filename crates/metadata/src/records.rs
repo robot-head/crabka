@@ -43,7 +43,7 @@ pub struct DeleteTopicRecord {
 /// Mutable topic configuration overrides. Authoritative target state:
 /// each `V1TopicConfig` record fully replaces the previous override map
 /// for `topic`. Empty map = clear all overrides. Merging happens at the
-/// AlterConfigs handler before the record is submitted.
+/// `AlterConfigs` handler before the record is submitted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TopicConfigRecord {
     pub topic: String,

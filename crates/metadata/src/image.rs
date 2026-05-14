@@ -101,7 +101,8 @@ impl MetadataImage {
                 if c.overrides.is_empty() {
                     self.topic_configs.remove(&c.topic);
                 } else {
-                    self.topic_configs.insert(c.topic.clone(), c.overrides.clone());
+                    self.topic_configs
+                        .insert(c.topic.clone(), c.overrides.clone());
                 }
             }
         }
