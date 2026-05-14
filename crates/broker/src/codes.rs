@@ -54,6 +54,14 @@ pub const CONCURRENT_TRANSACTIONS: i16 = 49;
 pub const TRANSACTION_COORDINATOR_FENCED: i16 = 50;
 pub const STALE_MEMBER_EPOCH: i16 = 82;
 
+// Slice 11 additions — admin handler codes.
+/// `INVALID_CONFIG` (40) — a config key/value pair is invalid or unknown.
+pub const INVALID_CONFIG: i16 = 40;
+/// `INVALID_RESOURCE_TYPE` — alias for `INVALID_REQUEST` (42); the Kafka
+/// protocol does not assign a distinct wire code for unsupported resource
+/// types; `INVALID_REQUEST` is the correct response.
+pub const INVALID_RESOURCE_TYPE: i16 = INVALID_REQUEST;
+
 // Slice 10a additions — bulletproof EOS / acks=all codes.
 /// Per-partition error returned by `acks=all` Produce when the request
 /// completes without enough in-sync replicas confirming the write. The
