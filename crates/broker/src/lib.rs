@@ -122,6 +122,7 @@
 
 mod broker;
 mod codes;
+pub(crate) mod config_keys;
 mod config;
 mod coordinator;
 mod error;
