@@ -90,6 +90,12 @@ pub async fn run(
                 // No `append_notify` — reset_to drops data rather than
                 // delivering it.
             }
+            WriterMessage::SetLogConfig { config, ack } => {
+                log.lock()
+                    .expect("log mutex poisoned")
+                    .set_config(config);
+                let _ = ack.send(());
+            }
             #[cfg(any(test, feature = "test-helpers"))]
             WriterMessage::TestSetLogStart { new_start, ack } => {
                 let result = {
@@ -359,6 +365,47 @@ mod tests {
             .expect("hw_advance_notify did not fire");
 
         assert_eq!(replica_state.lock().await.hw, 2);
+
+        drop(tx);
+        writer.await.expect("writer join");
+    }
+
+    #[tokio::test]
+    async fn writer_set_log_config_swaps_config() {
+        use crabka_log::LogConfig;
+        let dir = tempdir().expect("tempdir");
+        let log = Arc::new(Mutex::new(
+            Log::open(dir.path(), LogConfig::default()).expect("open log"),
+        ));
+        let (tx, rx) = mpsc::channel(1);
+        let append_notify = Arc::new(Notify::new());
+        let replica_state = Arc::new(tokio::sync::Mutex::new(
+            crate::replica_state::ReplicaState::new(),
+        ));
+        let hw_advance_notify = Arc::new(Notify::new());
+        let writer = tokio::spawn(run(
+            log.clone(),
+            rx,
+            append_notify,
+            replica_state,
+            hw_advance_notify,
+        ));
+
+        let new_cfg = LogConfig {
+            retention_ms: Some(std::time::Duration::from_mins(2)),
+            ..LogConfig::default()
+        };
+        let (ack, ack_rx) = tokio::sync::oneshot::channel();
+        tx.send(WriterMessage::SetLogConfig {
+            config: new_cfg.clone(),
+            ack,
+        })
+        .await
+        .expect("send");
+        ack_rx.await.expect("ack");
+
+        let observed = log.lock().expect("lock").config_snapshot();
+        assert_eq!(observed.retention_ms, new_cfg.retention_ms);
 
         drop(tx);
         writer.await.expect("writer join");
