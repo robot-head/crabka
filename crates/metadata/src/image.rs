@@ -114,8 +114,18 @@ impl MetadataImage {
     pub fn validate(&self, rec: &MetadataRecord) -> Result<(), MetadataError> {
         match rec {
             MetadataRecord::V1Topic(t) => {
-                if self.topics.contains_key(&t.name) {
-                    return Err(MetadataError::TopicExists(t.name.clone()));
+                if let Some(existing) = self.topics.get(&t.name) {
+                    // Updating an existing topic is allowed only if it's a
+                    // partition-count expansion that preserves identity:
+                    // same topic_id, same replication_factor, partitions
+                    // only growing. CreatePartitions emits exactly this.
+                    if existing.topic_id != t.topic_id
+                        || existing.replication_factor != t.replication_factor
+                        || t.partitions < existing.partitions
+                    {
+                        return Err(MetadataError::TopicExists(t.name.clone()));
+                    }
+                    return Ok(());
                 }
                 if t.partitions <= 0 {
                     return Err(MetadataError::InvalidRecord("partitions must be > 0"));
@@ -203,6 +213,35 @@ mod tests {
         let mut m = img();
         m.apply(&topic("t", 1));
         let err = m.validate(&topic("t", 1)).unwrap_err();
+        assert!(matches!(err, MetadataError::TopicExists(_)));
+    }
+
+    #[test]
+    fn validate_topic_partition_count_increase_allowed() {
+        let mut m = img();
+        m.apply(&topic("t", 1));
+        let existing = m.topic("t").unwrap().clone();
+        let updated = MetadataRecord::V1Topic(TopicRecord {
+            name: "t".into(),
+            topic_id: existing.topic_id,
+            partitions: 3,
+            replication_factor: existing.replication_factor,
+        });
+        assert!(m.validate(&updated).is_ok());
+    }
+
+    #[test]
+    fn validate_topic_partition_count_decrease_rejected() {
+        let mut m = img();
+        m.apply(&topic("t", 3));
+        let existing = m.topic("t").unwrap().clone();
+        let updated = MetadataRecord::V1Topic(TopicRecord {
+            name: "t".into(),
+            topic_id: existing.topic_id,
+            partitions: 1,
+            replication_factor: existing.replication_factor,
+        });
+        let err = m.validate(&updated).unwrap_err();
         assert!(matches!(err, MetadataError::TopicExists(_)));
     }
 
