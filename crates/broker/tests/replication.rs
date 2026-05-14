@@ -55,12 +55,6 @@ fn cluster_lock() -> &'static Mutex<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-// Re-ignored: re-enabled in 29d86c7 under the expectation that
-// slice-10b's ISR work would bulletproof acks=-1 multi-broker
-// produce, but the test still observes `NOT_ENOUGH_REPLICAS_AFTER_APPEND`
-// on Linux/macOS CI within the producer timeout. Same root cause as
-// the slice-10b durability + leader_election multi-broker tests.
-#[ignore = "follower replicators intermittently stall on Linux CI; slice-10b follow-up will fix"]
 async fn replication_factor_three_propagates_to_all_followers() {
     let _g = cluster_lock().lock().await;
     let cluster = support::start_n_node_with_retry(3).await;
@@ -198,10 +192,6 @@ async fn replication_factor_three_propagates_to_all_followers() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-// Re-ignored alongside `replication_factor_three_propagates_to_all_followers`:
-// the same multi-broker acks=-1 produce path stalls on Linux/macOS CI
-// pending slice-10b follow-up.
-#[ignore = "follower replicators intermittently stall on Linux CI; slice-10b follow-up will fix"]
 async fn out_of_range_truncates_and_recovers() {
     let _g = cluster_lock().lock().await;
     let cluster = support::start_n_node_with_retry(3).await;
