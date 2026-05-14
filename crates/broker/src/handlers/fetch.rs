@@ -69,12 +69,20 @@ pub(crate) fn handle(
         let req = FetchRequest::decode(&mut cur, version)?;
 
         // `replica_id >= 0` means follower fetch (Apache Kafka convention).
-        // Slice 8 does NOT filter consumer fetches to HW because HW tracking
-        // is deferred (see
-        // `docs/superpowers/specs/2026-05-12-crabka-replication-design.md`
-        // §"Non-goals"). The branch is wired here so that slice-8-followup can
-        // add HW filtering on the consumer arm without re-shaping the handler.
-        let is_follower_fetch = req.replica_id >= 0;
+        // KIP-903 (Kafka 3.5) moved `replica_id` into a tagged `replica_state`
+        // struct on Fetch v15+; on v0-14 the original top-level field is used.
+        // The codegen serializes whichever the negotiated version requires, so
+        // here we accept whichever field is populated. Without this fallback,
+        // every v15+ follower fetch decodes with `replica_id = -1` (the default
+        // for the deprecated top-level field), the handler treats it as a
+        // consumer fetch, clamps records at HW=0, and replication silently
+        // stalls — which is exactly the byte-compare test's failure mode.
+        let effective_replica_id = if req.replica_id >= 0 {
+            req.replica_id
+        } else {
+            req.replica_state.replica_id
+        };
+        let is_follower_fetch = effective_replica_id >= 0;
         // isolation_level=1 (read_committed) only applies to consumer fetches.
         // Follower fetches always see all records regardless of isolation.
         let read_committed = !is_follower_fetch && req.isolation_level == 1;
@@ -156,7 +164,7 @@ pub(crate) fn handle(
                         let mut st = part.replica_state.lock().await;
                         let prev = st.hw;
                         let new = st.update_follower_leo(
-                            u64::try_from(req.replica_id).unwrap_or(0),
+                            u64::try_from(effective_replica_id).unwrap_or(0),
                             fetch_offset,
                             leader_leo,
                         );
