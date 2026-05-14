@@ -35,6 +35,9 @@ pub enum RaftError {
     #[error("deserialization: {0}")]
     SerdeFailedDecode(#[from] wincode::error::ReadError),
 
+    #[error("startup misconfiguration: {0}")]
+    Startup(String),
+
     #[error("controller shut down")]
     Shutdown,
 }
