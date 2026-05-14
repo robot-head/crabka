@@ -57,6 +57,10 @@ pub const STALE_MEMBER_EPOCH: i16 = 82;
 // Slice 11 additions — admin handler codes.
 /// `INVALID_CONFIG` (40) — a config key/value pair is invalid or unknown.
 pub const INVALID_CONFIG: i16 = 40;
+/// `NON_EMPTY_GROUP` (68) — group still has live members; cannot be deleted.
+pub const NON_EMPTY_GROUP: i16 = 68;
+/// `GROUP_ID_NOT_FOUND` (69) — no group with the given id exists.
+pub const GROUP_ID_NOT_FOUND: i16 = 69;
 /// `INVALID_RESOURCE_TYPE` — alias for `INVALID_REQUEST` (42); the Kafka
 /// protocol does not assign a distinct wire code for unsupported resource
 /// types; `INVALID_REQUEST` is the correct response.
