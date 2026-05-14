@@ -93,6 +93,48 @@ impl BrokerHandle {
         self._broker.controller.current_image().brokers().count()
     }
 
+    /// Manually mutate the openraft voter set on this broker's controller.
+    /// `new_voters` is the complete desired set (not a delta). Callers must
+    /// invoke this on the broker that's currently the openraft leader, or
+    /// the call returns [`BrokerError::Replication`] with the underlying
+    /// `RaftError::NotLeader` rendered into the message. See
+    /// [`crabka_raft::ControllerHandle::change_membership`] for full semantics.
+    ///
+    /// # Errors
+    ///
+    /// Forwards the underlying raft errors as [`BrokerError::Replication`].
+    #[allow(clippy::used_underscore_binding)]
+    pub async fn change_membership(
+        &self,
+        new_voters: std::collections::BTreeSet<crabka_raft::NodeId>,
+    ) -> Result<(), BrokerError> {
+        self._broker
+            .controller
+            .change_membership(new_voters)
+            .await
+            .map_err(|e| BrokerError::Replication(format!("change_membership: {e}")))
+    }
+
+    /// Register a non-voting openraft learner at `addr`. Blocks until the
+    /// leader has caught the new node up to the current commit index.
+    /// Subsequent [`Self::change_membership`] promotes the learner to a voter.
+    ///
+    /// # Errors
+    ///
+    /// Forwards the underlying raft errors as [`BrokerError::Replication`].
+    #[allow(clippy::used_underscore_binding)]
+    pub async fn add_learner(
+        &self,
+        node_id: crabka_raft::NodeId,
+        addr: std::net::SocketAddr,
+    ) -> Result<(), BrokerError> {
+        self._broker
+            .controller
+            .add_learner(node_id, addr)
+            .await
+            .map_err(|e| BrokerError::Replication(format!("add_learner: {e}")))
+    }
+
     /// Is `(topic, partition)` present in this broker's `MetadataImage`?
     /// Used by replication integration tests to wait for topic
     /// propagation.
