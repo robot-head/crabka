@@ -430,17 +430,15 @@ impl Controller {
                 };
                 let members: BTreeMap<NodeId, Node> =
                     [(config.node_id, self_node)].into_iter().collect();
-                raft.initialize(members).await.map_err(|e| {
-                    RaftError::Openraft(format!("bootstrap initialize: {e:?}"))
-                })?;
+                raft.initialize(members)
+                    .await
+                    .map_err(|e| RaftError::Openraft(format!("bootstrap initialize: {e:?}")))?;
             }
-            (BootstrapMode::Join, true) => {
-                // Don't initialize. Raft engine sits in Learner state
-                // until the bootstrap broker's add_learner reaches us.
-            }
-            (BootstrapMode::Rejoin, false) => {
-                // Existing log carries membership; openraft replayed it
-                // during Raft::new. Nothing to do.
+            (BootstrapMode::Join, true) | (BootstrapMode::Rejoin, false) => {
+                // Join: don't initialize — engine waits in Learner state
+                //   until the bootstrap broker's add_learner arrives.
+                // Rejoin: existing log carries membership; openraft
+                //   replayed it during Raft::new. Nothing to do.
             }
             (BootstrapMode::Bootstrap, false) => {
                 return Err(RaftError::Startup(
@@ -454,7 +452,8 @@ impl Controller {
             }
             (BootstrapMode::Join, false) => {
                 return Err(RaftError::Startup(
-                    "Join mode requires empty raft log; this broker has on-disk state — use Rejoin".into(),
+                    "Join mode requires empty raft log; this broker has on-disk state — use Rejoin"
+                        .into(),
                 ));
             }
         }
@@ -508,5 +507,73 @@ impl Controller {
             voters: config.voters.clone(),
             client_id: config.client_id.clone(),
         })
+    }
+}
+
+#[cfg(test)]
+mod bootstrap_mode_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn bootstrap_on_non_empty_log_errors() {
+        let dir = TempDir::new().unwrap();
+        // First boot: bootstrap fresh.
+        let cfg = ControllerConfig {
+            bootstrap_mode: BootstrapMode::Bootstrap,
+            ..ControllerConfig::for_tests(1, dir.path().to_path_buf())
+        };
+        let ctrl = Controller::start(cfg).await.expect("first bootstrap ok");
+        ctrl.shutdown().await;
+
+        // Second boot: log is non-empty, Bootstrap must error.
+        let cfg2 = ControllerConfig {
+            bootstrap_mode: BootstrapMode::Bootstrap,
+            ..ControllerConfig::for_tests(1, dir.path().to_path_buf())
+        };
+        match Controller::start(cfg2).await {
+            Err(err) => assert!(
+                matches!(err, RaftError::Startup(_)),
+                "Bootstrap on existing log must return Startup; got: {err:?}"
+            ),
+            Ok(ctrl) => {
+                ctrl.shutdown().await;
+                panic!("Bootstrap on existing log must error but succeeded");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn rejoin_on_empty_log_errors() {
+        let dir = TempDir::new().unwrap();
+        let cfg = ControllerConfig {
+            bootstrap_mode: BootstrapMode::Rejoin,
+            ..ControllerConfig::for_tests(1, dir.path().to_path_buf())
+        };
+        match Controller::start(cfg).await {
+            Err(err) => assert!(
+                matches!(err, RaftError::Startup(_)),
+                "Rejoin on empty log must return Startup; got: {err:?}"
+            ),
+            Ok(ctrl) => {
+                ctrl.shutdown().await;
+                panic!("Rejoin on empty log must error but succeeded");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn join_on_empty_log_starts_in_learner_state() {
+        let dir = TempDir::new().unwrap();
+        let cfg = ControllerConfig {
+            bootstrap_mode: BootstrapMode::Join,
+            ..ControllerConfig::for_tests(1, dir.path().to_path_buf())
+        };
+        let ctrl = Controller::start(cfg)
+            .await
+            .expect("Join on empty log starts ok");
+        // Without an external add_learner the watch_leader stays None.
+        assert!(ctrl.watch_leader().borrow().is_none());
+        ctrl.shutdown().await;
     }
 }
