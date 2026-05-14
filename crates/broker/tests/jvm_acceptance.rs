@@ -1269,6 +1269,13 @@ async fn acks_all_survives_leader_crash() {
     }
 
     let bootstrap_1 = format!("host.docker.internal:{}", client_ports[0]);
+    // Multi-broker bootstrap so the JVM producer can find a survivor when
+    // broker 1 (the partition leader) is killed mid-burst. Without this the
+    // producer hangs on bootstrap because its only known broker is dead.
+    let bootstrap_all = format!(
+        "host.docker.internal:{},host.docker.internal:{},host.docker.internal:{}",
+        client_ports[0], client_ports[1], client_ports[2],
+    );
 
     // 1. Create topic with replication-factor=3.
     docker_run_kafka_tool(&[
@@ -1353,7 +1360,7 @@ async fn acks_all_survives_leader_crash() {
             &format!(
                 "for i in $(seq 1 100); do echo \"crash-msg-$i\"; done | \
                  kafka-console-producer \
-                   --bootstrap-server {bootstrap_1} \
+                   --bootstrap-server {bootstrap_all} \
                    --topic {TOPIC} \
                    --request-required-acks -1 \
                    --request-timeout-ms 30000"
