@@ -12,11 +12,9 @@
     clippy::too_many_lines
 )]
 
-use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use tempfile::TempDir;
 use tokio::time::sleep;
 
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
@@ -31,9 +29,6 @@ use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 use crabka_protocol::records::{Record, RecordBatch};
 
 mod support;
-
-const CLIENT_PORTS: [u16; 3] = [12_092, 12_192, 12_292];
-const CONTROLLER_PORTS: [u16; 3] = [12_093, 12_193, 12_293];
 
 async fn create_topic(broker: &BrokerHandle, bootstrap: &str, name: &str, rf: i16) {
     let client = Client::builder()
@@ -249,34 +244,30 @@ async fn isr_expand_on_catchup() {
     // Shrink by killing broker 3.
     let dead = cluster.pop().expect("3rd broker");
     let dead_dir_path = dead.2.path().to_path_buf();
+    // Capture the dead broker's raft voter set and listen addresses BEFORE
+    // moving dead.0 into shutdown. The reborn broker must use the same
+    // ephemeral ports so it can rejoin the surviving raft quorum.
+    let dead_voters = dead.1.controller_quorum_voters.clone();
+    let dead_controller_addr = dead.1.controller_listen_addr;
+    let dead_listen_addr = dead.1.listen_addr;
     dead.0.shutdown().await;
     // Hold the TempDir alive so its on-disk state persists.
     let _retained_dir = dead.2;
 
     sleep(Duration::from_secs(3)).await; // wait for shrink
 
-    // Re-boot a fresh broker at node_id=3 with the same dir.
-    let voters: Vec<(u64, SocketAddr)> = (0..3)
-        .map(|i| {
-            (
-                u64::try_from(i + 1).unwrap(),
-                format!("127.0.0.1:{}", CONTROLLER_PORTS[i])
-                    .parse()
-                    .unwrap(),
-            )
-        })
-        .collect();
+    // Re-boot a fresh broker at node_id=3 reusing the original ephemeral
+    // ports so it can rejoin the surviving raft quorum (which still
+    // knows the voter set from the initial boot).
     let cfg = BrokerConfig {
         broker_id: 3,
-        listen_addr: format!("127.0.0.1:{}", CLIENT_PORTS[2]).parse().unwrap(),
-        advertised_listener: format!("127.0.0.1:{}", CLIENT_PORTS[2]),
+        listen_addr: dead_listen_addr,
+        advertised_listener: dead_listen_addr.to_string(),
         log_dir: dead_dir_path,
         log_config: LogConfig::default(),
         node_id: 3,
-        controller_listen_addr: format!("127.0.0.1:{}", CONTROLLER_PORTS[2])
-            .parse()
-            .unwrap(),
-        controller_quorum_voters: voters,
+        controller_listen_addr: dead_controller_addr,
+        controller_quorum_voters: dead_voters,
         heartbeat_interval_ms: 200,
         heartbeat_timeout_ms: 2_000,
         replica_lag_time_max_ms: 2_000,

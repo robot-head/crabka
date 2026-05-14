@@ -34,7 +34,6 @@
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use crabka_broker::BrokerHandle;
 use crabka_client_core::Client;
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
 use crabka_protocol::owned::produce_request::{
