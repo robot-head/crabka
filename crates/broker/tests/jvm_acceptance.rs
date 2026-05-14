@@ -789,7 +789,11 @@ async fn three_node_replication_byte_compare() {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
 
-    // 3. Produce 100 records via kafka-console-producer.
+    // 3. Produce 100 records via kafka-console-producer with acks=all so
+    //    each produce response gates on HW = LEO across the full ISR.
+    //    Without this the producer returns after leader ack and we end up
+    //    dumping followers before their replicators have caught up,
+    //    making the byte-compare assert fail spuriously.
     let mut producer_child = Command::new("docker")
         .args([
             "run",
@@ -802,6 +806,8 @@ async fn three_node_replication_byte_compare() {
             &bootstrap_all,
             "--topic",
             TOPIC,
+            "--producer-property",
+            "acks=all",
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
