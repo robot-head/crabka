@@ -18,6 +18,36 @@ use tokio_util::sync::CancellationToken;
 
 use group::Group;
 
+/// Result of [`GroupManager::delete_group`].
+#[derive(Debug, PartialEq, Eq)]
+pub enum DeleteGroupError {
+    /// No group with this id exists.
+    NotFound,
+    /// Group still has at least one live member.
+    NonEmpty,
+}
+
+/// Read-only projection of a `Group` for the `ListGroups` / `DescribeGroups`
+/// handlers. Cheap to build (Strings + small struct).
+#[derive(Debug, Clone)]
+pub struct GroupSnapshot {
+    pub group_id: String,
+    pub state: crate::coordinator::group::GroupState,
+    pub protocol_type: Option<String>,
+    pub generation_id: i32,
+    pub members: Vec<MemberSnapshot>,
+}
+
+/// Read-only projection of a [`group::Member`].
+#[derive(Debug, Clone)]
+pub struct MemberSnapshot {
+    pub member_id: String,
+    pub client_id: String,
+    pub client_host: String,
+    /// Assignment bytes from the last `SyncGroup`, or empty if not yet assigned.
+    pub assignment: Vec<u8>,
+}
+
 /// Runtime handles for one group: the locked `Group` plus per-stage
 /// `Notify`s used by `join_group` and `sync_group` to park waiting members.
 pub(crate) struct GroupHandle {
@@ -82,6 +112,68 @@ impl GroupManager {
     pub fn shutdown(&self) {
         self.shutdown.cancel();
     }
+
+    /// Snapshot every known group. The returned `Vec` is in arbitrary
+    /// order (matching Apache Kafka's `ListGroups`, which doesn't promise
+    /// ordering either).
+    pub async fn list_groups(&self) -> Vec<GroupSnapshot> {
+        let handles: Vec<Arc<GroupHandle>> = self
+            .groups
+            .iter()
+            .map(|e| e.value().clone())
+            .collect();
+        let mut out = Vec::with_capacity(handles.len());
+        for h in handles {
+            let g = h.state.lock().await;
+            out.push(snapshot(&g));
+        }
+        out
+    }
+
+    /// Snapshot a single group, or `None` if unknown.
+    pub async fn describe_group(&self, group_id: &str) -> Option<GroupSnapshot> {
+        let handle = self.find(group_id)?;
+        let g = handle.state.lock().await;
+        Some(snapshot(&g))
+    }
+
+    /// Drop a group from the in-memory registry. Returns
+    /// [`DeleteGroupError::NonEmpty`] if the group still has live members,
+    /// [`DeleteGroupError::NotFound`] if the group doesn't exist.
+    pub async fn delete_group(&self, group_id: &str) -> Result<(), DeleteGroupError> {
+        let handle = self.find(group_id).ok_or(DeleteGroupError::NotFound)?;
+        {
+            let g = handle.state.lock().await;
+            if !g.members.is_empty() {
+                return Err(DeleteGroupError::NonEmpty);
+            }
+        }
+        self.groups.remove(group_id);
+        Ok(())
+    }
+}
+
+fn snapshot(g: &crate::coordinator::group::Group) -> GroupSnapshot {
+    GroupSnapshot {
+        group_id: g.group_id.clone(),
+        state: g.state,
+        protocol_type: g.protocol_type.clone(),
+        generation_id: g.generation_id,
+        members: g
+            .members
+            .values()
+            .map(|m| MemberSnapshot {
+                member_id: m.member_id.clone(),
+                client_id: m.client_id.clone(),
+                client_host: m.host.clone(),
+                assignment: m
+                    .assignment
+                    .as_ref()
+                    .map(|b| b.to_vec())
+                    .unwrap_or_default(),
+            })
+            .collect(),
+    }
 }
 
 impl std::fmt::Debug for GroupManager {
@@ -141,5 +233,41 @@ mod tests {
         let b = m.get_or_create("g");
         // Same Arc.
         assert!(Arc::ptr_eq(&a, &b));
+    }
+
+    #[tokio::test]
+    async fn list_groups_includes_known_groups() {
+        let mgr = GroupManager::new();
+        let _ = mgr.get_or_create("g1");
+        let _ = mgr.get_or_create("g2");
+        let listed = mgr.list_groups().await;
+        let ids: std::collections::HashSet<String> =
+            listed.iter().map(|s| s.group_id.clone()).collect();
+        assert!(ids.contains("g1"));
+        assert!(ids.contains("g2"));
+    }
+
+    #[tokio::test]
+    async fn describe_group_returns_snapshot() {
+        let mgr = GroupManager::new();
+        let _ = mgr.get_or_create("g1");
+        let snap = mgr.describe_group("g1").await.expect("known");
+        assert_eq!(snap.group_id, "g1");
+        assert!(snap.members.is_empty());
+    }
+
+    #[tokio::test]
+    async fn delete_group_removes_empty_group() {
+        let mgr = GroupManager::new();
+        let _ = mgr.get_or_create("g1");
+        mgr.delete_group("g1").await.expect("delete");
+        assert!(mgr.describe_group("g1").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn delete_group_unknown_is_err() {
+        let mgr = GroupManager::new();
+        let err = mgr.delete_group("ghost").await.unwrap_err();
+        assert_eq!(err, DeleteGroupError::NotFound);
     }
 }
