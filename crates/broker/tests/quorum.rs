@@ -167,10 +167,14 @@ async fn leader_kill_recovers() {
     let leader_idx = leader_idx.expect("at least one broker self-identifies as leader");
 
     // Kill the leader.
-    let (leader, _, _dir) = cluster.remove(leader_idx);
+    let (leader, leader_cfg, _dir) = cluster.remove(leader_idx);
+    let killed_node_id = leader_cfg.node_id;
     leader.shutdown().await;
 
-    // Survivors elect a new leader within 2 min.
+    // Survivors elect a *new* leader within 2 min. We must wait for a
+    // leader whose id is different from the one we just killed —
+    // openraft's `current_leader` can briefly continue reporting the
+    // dead leader during the lease window before the election fires.
     let deadline = Instant::now() + Duration::from_mins(2);
     loop {
         let mut leaders = std::collections::HashSet::new();
@@ -179,11 +183,14 @@ async fn leader_kill_recovers() {
                 leaders.insert(l);
             }
         }
-        if leaders.len() == 1 && !leaders.contains(&0) {
+        if leaders.len() == 1
+            && !leaders.contains(&0)
+            && !leaders.contains(&killed_node_id)
+        {
             break;
         }
         if Instant::now() > deadline {
-            panic!("no new leader within 2 min of kill");
+            panic!("no new leader within 2 min of kill; saw leaders={leaders:?}");
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
