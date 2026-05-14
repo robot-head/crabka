@@ -153,7 +153,7 @@ async fn create_topic_on_any_node_propagates() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn leader_kill_recovers() {
     let _g = cluster_lock().lock().await;
-    let mut cluster = start_n_node_with_retry(3).await;
+    let mut cluster = support::start_n_node_with_retry(3).await;
     wait_for_leader(&cluster).await;
 
     // Find a broker that thinks it is the leader.
