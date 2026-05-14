@@ -1707,3 +1707,54 @@ async fn kafka_configs_alter_round_trip() {
         "describe output missing retention.ms=60000: {s}"
     );
 }
+
+/// `kafka-topics --alter --topic t --partitions 3` then `--describe`
+/// shows 3 partitions. Exercises CreatePartitions (api_key 37) +
+/// V1Topic partition-count update.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Docker"]
+async fn kafka_topics_alter_partitions() {
+    const TOPIC: &str = "crabka-alter-parts-itest";
+
+    let (_broker, _dir) = start_host_broker().await;
+    nc_check_connectivity();
+
+    docker_run_kafka_tool(&[
+        "kafka-topics",
+        "--create",
+        "--if-not-exists",
+        "--topic",
+        TOPIC,
+        "--partitions",
+        "1",
+        "--replication-factor",
+        "1",
+        "--bootstrap-server",
+        BOOTSTRAP,
+    ]);
+
+    docker_run_kafka_tool(&[
+        "kafka-topics",
+        "--alter",
+        "--topic",
+        TOPIC,
+        "--partitions",
+        "3",
+        "--bootstrap-server",
+        BOOTSTRAP,
+    ]);
+
+    let out = docker_run_kafka_tool(&[
+        "kafka-topics",
+        "--describe",
+        "--topic",
+        TOPIC,
+        "--bootstrap-server",
+        BOOTSTRAP,
+    ]);
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        s.contains("PartitionCount: 3") || s.contains("Partitions: 3"),
+        "describe missing PartitionCount: 3 — got: {s}"
+    );
+}
