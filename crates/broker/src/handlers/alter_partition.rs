@@ -68,6 +68,7 @@ pub(crate) fn handle(
                     req_part.partition_index,
                     req_part.leader_epoch,
                     &req_part.new_isr,
+                    &req_part.new_isr_with_epochs,
                     &mut changes,
                 );
                 resp_partitions.push(resp_part);
@@ -100,12 +101,19 @@ pub(crate) fn handle(
 
 /// Validate and apply a single partition's ISR proposal. Returns the
 /// per-partition response data and appends to `changes` on success.
+///
+/// `new_isr_i32` carries the v2 `new_isr` field; `new_isr_with_epochs`
+/// carries the v3 field. For v3 requests `new_isr` is empty and
+/// `new_isr_with_epochs` is populated — this function falls back to
+/// extracting broker IDs from `new_isr_with_epochs` when `new_isr`
+/// is empty.
 fn handle_partition(
     image: &crabka_metadata::MetadataImage,
     topic_name: Option<&str>,
     partition_index: i32,
     req_leader_epoch: i32,
     new_isr_i32: &[i32],
+    new_isr_with_epochs: &[crabka_protocol::owned::alter_partition_request::BrokerState],
     changes: &mut Vec<MetadataRecord>,
 ) -> RespPartitionData {
     let Some(topic_name) = topic_name else {
@@ -145,8 +153,21 @@ fn handle_partition(
         );
     }
 
+    // Resolve the effective ISR from the request. Protocol v2 sends
+    // `new_isr: Vec<i32>`; v3 sends `new_isr_with_epochs` instead and
+    // leaves `new_isr` empty. Fall back to extracting broker_ids from
+    // `new_isr_with_epochs` when the v2 field is absent.
+    let effective_isr_i32: &[i32];
+    let fallback_isr_i32: Vec<i32>;
+    if new_isr_i32.is_empty() && !new_isr_with_epochs.is_empty() {
+        fallback_isr_i32 = new_isr_with_epochs.iter().map(|bs| bs.broker_id).collect();
+        effective_isr_i32 = &fallback_isr_i32;
+    } else {
+        effective_isr_i32 = new_isr_i32;
+    }
+
     // Validate proposed ISR: non-empty + subset of replicas.
-    let proposed_isr: Vec<u64> = new_isr_i32
+    let proposed_isr: Vec<u64> = effective_isr_i32
         .iter()
         .map(|&n| u64::try_from(n).unwrap_or(0))
         .collect();
@@ -177,7 +198,7 @@ fn handle_partition(
         error_code: codes::NONE,
         leader_id: leader_i32,
         leader_epoch: part_rec.leader_epoch,
-        isr: new_isr_i32.to_vec(),
+        isr: effective_isr_i32.to_vec(),
         leader_recovery_state: 0,
         partition_epoch: 0,
         ..Default::default()
