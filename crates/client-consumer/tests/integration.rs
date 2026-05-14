@@ -210,9 +210,11 @@ async fn offsets_survive_broker_restart() {
 
     // Second boot: same group reads from the committed offset (= end).
     {
-        let broker = Broker::start(BrokerConfig::for_tests(log_path))
-            .await
-            .unwrap();
+        let mut cfg = BrokerConfig::for_tests(log_path);
+        // The raft log already exists from the first boot; Bootstrap would be
+        // rejected with "requires empty raft log". Rejoin replays on-disk state.
+        cfg.bootstrap_mode = crabka_broker::BootstrapMode::Rejoin;
+        let broker = Broker::start(cfg).await.unwrap();
         let bootstrap = broker.listen_addr().to_string();
         let mut consumer = Consumer::builder()
             .bootstrap(&bootstrap)
