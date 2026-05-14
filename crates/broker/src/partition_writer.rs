@@ -94,7 +94,7 @@ pub async fn run(
             WriterMessage::TestSetLogStart { new_start, ack } => {
                 let result = {
                     let mut log = log.lock().expect("log mutex poisoned");
-                    log.test_set_log_start_offset(new_start)
+                    log.set_log_start_offset(new_start)
                         .map_err(crate::error::BrokerError::from)
                 };
                 let _ = ack.send(result);

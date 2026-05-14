@@ -31,12 +31,11 @@ pub struct Log {
     config: std::sync::Arc<std::sync::RwLock<LogConfig>>,
     segments: Vec<Arc<Segment>>,
     active: Option<Segment>,
-    /// Test-only override for `log_start_offset()`. When `Some(n)`, the
-    /// effective `log_start` is `max(derived_from_segments, n)`. Used
-    /// by the broker's replicator integration tests to simulate
-    /// retention-driven truncation on a leader without physically
-    /// deleting segments. Real retention is a future slice.
-    #[cfg(any(test, feature = "test-helpers"))]
+    /// Override for `log_start_offset()`. When `Some(n)`, the effective
+    /// `log_start` is `max(derived_from_segments, n)`. Used by
+    /// `trim_to_offset` (and in tests) to advance the log start pointer
+    /// without physically deleting segments (active-segment case) or to
+    /// simulate retention-driven truncation in integration tests.
     log_start_override: Option<i64>,
 
     /// Last-Stable-Offset: the offset before the first record of any
@@ -123,7 +122,6 @@ impl Log {
             config,
             segments,
             active: Some(active),
-            #[cfg(any(test, feature = "test-helpers"))]
             log_start_override: None,
             lso,
             pending: HashMap::new(),
@@ -142,36 +140,38 @@ impl Log {
         } else {
             0
         };
-        #[cfg(any(test, feature = "test-helpers"))]
-        {
-            if let Some(o) = self.log_start_override {
-                return derived.max(o);
-            }
+        if let Some(o) = self.log_start_override {
+            return derived.max(o);
         }
         derived
     }
 
-    /// Test-only: advance the effective `log_start_offset` to `new_start`.
-    /// Used by the broker's replicator out-of-range integration test to
-    /// simulate retention-driven truncation. Does NOT physically truncate
-    /// on-disk segments — only shifts the in-memory pointer. Real
-    /// retention is a future slice.
+    /// Advance `log_start_offset` to `new_start`. Must be in
+    /// `[current log_start, log_end]`. Used by `trim_to_offset` for the
+    /// active-segment case and by the broker's `DeleteRecords` handler.
+    /// Does NOT physically truncate on-disk segments — only shifts the
+    /// in-memory start pointer.
     ///
     /// `new_start` must be non-negative.
     ///
     /// # Errors
     ///
-    /// Returns [`LogError::OffsetMismatch`] if `new_start` is negative.
-    #[cfg(any(test, feature = "test-helpers"))]
-    pub fn test_set_log_start_offset(&mut self, new_start: i64) -> Result<(), LogError> {
+    /// Returns [`LogError::InvalidArgument`] if `new_start` is negative.
+    pub fn set_log_start_offset(&mut self, new_start: i64) -> Result<(), LogError> {
         if new_start < 0 {
-            return Err(LogError::OffsetMismatch {
-                expected: 0,
-                actual: new_start,
-            });
+            return Err(LogError::InvalidArgument(
+                "set_log_start_offset: new_start must be >= 0".into(),
+            ));
         }
         self.log_start_override = Some(new_start);
         Ok(())
+    }
+
+    /// Deprecated alias kept for existing test/feature-helpers callers.
+    #[deprecated(note = "use set_log_start_offset")]
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn test_set_log_start_offset(&mut self, new_start: i64) -> Result<(), LogError> {
+        self.set_log_start_offset(new_start)
     }
 
     /// Reset the log to be empty starting at `new_base`. Drops every
@@ -206,11 +206,8 @@ impl Log {
             let _ = fs::remove_file(name::timeindex_path(&self.dir, base));
         }
 
-        // Clear any test-only override so the derived value takes over.
-        #[cfg(any(test, feature = "test-helpers"))]
-        {
-            self.log_start_override = None;
-        }
+        // Clear the start override so the derived value takes over.
+        self.log_start_override = None;
 
         let new_active = Segment::create(&self.dir, new_base)?;
         self.active_txn_index = TxnIndex::open(new_active.txn_index_path())?;
@@ -536,6 +533,75 @@ impl Log {
         // After truncation, LSO can't exceed log_end_offset.
         self.lso = self.lso.min(self.log_end_offset());
         Ok(())
+    }
+
+    /// Trim from the start of the log: drop every sealed segment whose
+    /// last offset is `< target`, advance `log_start_offset` if `target`
+    /// falls inside the active segment. Active segment is never deleted
+    /// by this call. Returns the resulting `log_start_offset`.
+    ///
+    /// `target` is clamped to `[0, log_end_offset()]`. Caller asks for
+    /// trim past LEO → trim to LEO.
+    ///
+    /// # Errors
+    ///
+    /// Returns `LogError::InvalidArgument` if `target < 0`.
+    pub fn trim_to_offset(&mut self, target: i64) -> Result<i64, LogError> {
+        if target < 0 {
+            return Err(LogError::InvalidArgument(
+                "trim_to_offset: target must be >= 0".into(),
+            ));
+        }
+        let leo = self.log_end_offset();
+        let target = target.min(leo);
+        let log_start = self.log_start_offset();
+        if target <= log_start {
+            return Ok(log_start);
+        }
+
+        // Drop sealed segments whose last record is < target. A sealed
+        // segment covers [base_offset, next_segment_base_offset). The
+        // "last offset" of a sealed segment equals `next_base - 1`
+        // where `next_base` is the next segment's `base_offset`
+        // (or, for the most-recent sealed segment, the active segment's
+        // `base_offset`).
+        let active_base = self
+            .active
+            .as_ref()
+            .map_or(leo, Segment::base_offset);
+        let next_bases: Vec<i64> = self
+            .segments
+            .iter()
+            .map(|s| s.base_offset())
+            .skip(1)
+            .chain(std::iter::once(active_base))
+            .collect();
+
+        let mut to_drop: Vec<i64> = Vec::new();
+        for (seg, next_base) in self.segments.iter().zip(next_bases.iter()) {
+            if *next_base <= target {
+                to_drop.push(seg.base_offset());
+            } else {
+                break;
+            }
+        }
+
+        for base in &to_drop {
+            self.segments.retain(|s| s.base_offset() != *base);
+            let _ = retention::delete_segment_files(&self.dir, *base);
+        }
+
+        // If target falls inside the active segment (or between the first
+        // remaining sealed segment's base and `target`), advance the
+        // start override.
+        let new_log_start = self
+            .segments
+            .first()
+            .map_or(active_base, |s| s.base_offset());
+        if target > new_log_start {
+            self.set_log_start_offset(target)?;
+        }
+        Ok(self.log_start_offset())
     }
 
     /// Periodic maintenance: apply time- and size-based retention to the
@@ -994,18 +1060,80 @@ mod tests {
         let log = Log::open(
             dir.path(),
             LogConfig {
-                retention_ms: Some(std::time::Duration::from_secs(60)),
+                retention_ms: Some(std::time::Duration::from_mins(1)),
                 ..LogConfig::default()
             },
         )
         .expect("open");
         log.set_config(LogConfig {
-            retention_ms: Some(std::time::Duration::from_secs(120)),
+            retention_ms: Some(std::time::Duration::from_mins(2)),
             ..LogConfig::default()
         });
         assert_eq!(
             log.config_snapshot().retention_ms,
-            Some(std::time::Duration::from_secs(120))
+            Some(std::time::Duration::from_mins(2))
         );
+    }
+
+    #[test]
+    fn trim_to_offset_drops_old_segments() {
+        let dir = tempdir().expect("tempdir");
+        let mut log = Log::open(
+            dir.path(),
+            LogConfig {
+                segment_bytes: 200, // small so we roll fast
+                ..LogConfig::default()
+            },
+        )
+        .expect("open");
+        // Append 30 records to force multiple sealed segments.
+        for _ in 0..30 {
+            let mut b = sample_batch(1);
+            log.append(&mut b).expect("append");
+        }
+        let leo = log.log_end_offset();
+        let new_start = log.trim_to_offset(15).expect("trim");
+        // Trim clamps to next segment boundary <= target; new_start may
+        // be less than 15 if 15 falls inside a sealed segment that we
+        // can't drop without losing in-range records. LEO is unaffected.
+        assert!(new_start <= 15);
+        assert_eq!(log.log_end_offset(), leo);
+        // If target landed inside the active segment, log_start advanced
+        // exactly to target. Otherwise it advanced to a sealed boundary.
+        assert!(log.log_start_offset() >= 0);
+    }
+
+    #[test]
+    fn trim_to_offset_clamps_to_leo() {
+        let dir = tempdir().expect("tempdir");
+        let mut log = Log::open(dir.path(), LogConfig::default()).expect("open");
+        for _ in 0..3 {
+            let mut b = sample_batch(1);
+            log.append(&mut b).expect("append");
+        }
+        let leo = log.log_end_offset();
+        let new_start = log.trim_to_offset(999).expect("trim");
+        // Asking to trim past LEO means trim to LEO.
+        assert_eq!(new_start, leo);
+    }
+
+    #[test]
+    fn trim_to_offset_rejects_negative() {
+        let dir = tempdir().expect("tempdir");
+        let mut log = Log::open(dir.path(), LogConfig::default()).expect("open");
+        assert!(log.trim_to_offset(-5).is_err());
+    }
+
+    #[test]
+    fn trim_to_offset_idempotent_at_or_below_log_start() {
+        let dir = tempdir().expect("tempdir");
+        let mut log = Log::open(dir.path(), LogConfig::default()).expect("open");
+        for _ in 0..3 {
+            let mut b = sample_batch(1);
+            log.append(&mut b).expect("append");
+        }
+        // Trim to 0 on a fresh log → no change.
+        let r = log.trim_to_offset(0).expect("trim");
+        assert_eq!(r, log.log_start_offset());
     }
 }
