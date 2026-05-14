@@ -7,6 +7,8 @@ use std::path::PathBuf;
 use crabka_log::LogConfig;
 use crabka_raft::NodeId;
 
+pub use crabka_raft::BootstrapMode;
+
 /// Construction-time configuration for [`crate::Broker::start`].
 ///
 /// Build directly when embedding the broker as a library, or via the
@@ -63,6 +65,13 @@ pub struct BrokerConfig {
     /// Openraft heartbeat interval. Default 500ms. Should be ≤
     /// `controller_election_timeout / 3` per raft consensus norms.
     pub controller_heartbeat_interval: std::time::Duration,
+
+    /// How this broker participates in cluster formation. See
+    /// [`crabka_raft::BootstrapMode`] for the trade-offs. The first broker
+    /// of a fresh multi-broker cluster uses `Bootstrap`; subsequent brokers
+    /// use `Join`; a restart of any previously-formatted broker uses
+    /// `Rejoin`. Single-broker setups always use `Bootstrap`.
+    pub bootstrap_mode: BootstrapMode,
 }
 
 impl BrokerConfig {
@@ -93,6 +102,7 @@ impl BrokerConfig {
             // pass within its 5s assertion window.
             controller_election_timeout: std::time::Duration::from_millis(500),
             controller_heartbeat_interval: std::time::Duration::from_millis(100),
+            bootstrap_mode: BootstrapMode::Bootstrap,
         }
     }
 }
@@ -115,6 +125,7 @@ impl Default for BrokerConfig {
             replica_lag_time_max_ms: 30_000,
             controller_election_timeout: std::time::Duration::from_secs(5),
             controller_heartbeat_interval: std::time::Duration::from_millis(500),
+            bootstrap_mode: BootstrapMode::Bootstrap,
         }
     }
 }
@@ -157,5 +168,17 @@ mod tests {
         // need failover well under their 10s producer timeout.
         assert!(c.controller_election_timeout <= std::time::Duration::from_millis(750));
         assert!(c.controller_heartbeat_interval <= std::time::Duration::from_millis(200));
+    }
+
+    #[test]
+    fn defaults_use_bootstrap_mode() {
+        let c = BrokerConfig::default();
+        assert_eq!(c.bootstrap_mode, BootstrapMode::Bootstrap);
+    }
+
+    #[test]
+    fn for_tests_uses_bootstrap_mode() {
+        let c = BrokerConfig::for_tests(std::path::PathBuf::from("/tmp"));
+        assert_eq!(c.bootstrap_mode, BootstrapMode::Bootstrap);
     }
 }

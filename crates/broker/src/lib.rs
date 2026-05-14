@@ -141,6 +141,6 @@ mod replicator_supervisor;
 mod txn;
 
 pub use broker::{Broker, BrokerHandle};
-pub use config::BrokerConfig;
+pub use config::{BootstrapMode, BrokerConfig};
 pub use crabka_raft::NodeId;
 pub use error::BrokerError;

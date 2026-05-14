@@ -2,12 +2,10 @@
 //! state machine watcher, the controller listener task, and the
 //! `submit_change` leader-aware forwarding logic.
 //!
-//! Slice-7 scope: a single static voter set is read from
-//! `ControllerConfig`. Membership changes (adding / removing voters) and
-//! snapshot replay are deferred to a later slice — `Controller::start`
-//! refuses to call `Raft::initialize` if the log already has entries, so
-//! restarting a node re-joins the existing quorum rather than re-seeding
-//! it.
+//! Cluster formation is driven by `BootstrapMode`: one broker boots as
+//! the singleton voter (`Bootstrap`), remaining fresh brokers skip
+//! `initialize` (`Join`), and restarted brokers replay their on-disk log
+//! (`Rejoin`). Snapshot replay is deferred to a later slice.
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -17,12 +15,12 @@ use std::time::Duration;
 use tokio::sync::{Mutex, watch};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::info;
 use uuid::Uuid;
 
 use crabka_metadata::{MetadataImage, MetadataRecord};
 
-use crate::config::ControllerConfig;
+use crate::config::{BootstrapMode, ControllerConfig};
 use crate::error::RaftError;
 use crate::log_store::RaftLogStore;
 use crate::network::CrabkaRaftNetworkFactory;
@@ -371,12 +369,11 @@ impl Controller {
     /// Start an openraft node, open the controller listener, and begin
     /// participating in the quorum.
     ///
-    /// On a fresh log (no prior entries), this node attempts to
-    /// `Raft::initialize` with the static voter set from
-    /// `ControllerConfig::voters`. In a multi-node cluster every node
-    /// races to initialize; the losers see
-    /// `InitializeError::NotAllowed` (or equivalent) and we log + ignore
-    /// it, since the cluster is already seeded.
+    /// Cluster formation is governed by [`ControllerConfig::bootstrap_mode`]:
+    /// `Bootstrap` initializes a singleton-voter cluster on an empty log;
+    /// `Join` skips initialize and waits for an external `add_learner`;
+    /// `Rejoin` skips initialize and relies on the on-disk raft log.
+    /// Mismatches between mode and log state return `RaftError::Startup`.
     pub async fn start(config: ControllerConfig) -> Result<ControllerHandle, RaftError> {
         // 1. Log + state machine. The cluster UUID is `nil` for slice 7;
         //    a later slice will derive it from the first record applied
@@ -419,27 +416,45 @@ impl Controller {
             .map_err(|e| RaftError::Openraft(format!("{e:?}")))?,
         );
 
-        // 5. First-boot bootstrap. Only attempt `initialize` when the log
-        //    is empty — restarting a node that has already participated
-        //    must NOT re-seed the cluster.
-        if log_store.last_log_id().await.is_none() {
-            let members: BTreeMap<NodeId, Node> = config
-                .voters
-                .iter()
-                .map(|(id, addr)| {
-                    (
-                        *id,
-                        openraft::BasicNode {
-                            addr: addr.to_string(),
-                        },
-                    )
-                })
-                .collect();
-            if let Err(e) = raft.initialize(members).await {
-                // Every node tries to initialize; only one wins, and the
-                // rest report some flavor of `NotAllowed` / "already
-                // initialized". That's not a startup failure.
-                warn!(error = ?e, "raft initialize returned error (likely already-initialized); continuing");
+        // 5. First-boot orchestration. The bootstrap_mode tells us which
+        //    role this broker plays in cluster formation. Misuse is fatal —
+        //    a Bootstrap on top of an existing log would re-seed the
+        //    cluster, and a Rejoin on an empty log would never converge.
+        let log_is_empty = log_store.last_log_id().await.is_none();
+        match (config.bootstrap_mode, log_is_empty) {
+            (BootstrapMode::Bootstrap, true) => {
+                // Singleton-voter init. We become leader on our first
+                // election timeout, no contention, no split-vote.
+                let self_node = openraft::BasicNode {
+                    addr: config.controller_listen_addr.to_string(),
+                };
+                let members: BTreeMap<NodeId, Node> =
+                    [(config.node_id, self_node)].into_iter().collect();
+                raft.initialize(members)
+                    .await
+                    .map_err(|e| RaftError::Openraft(format!("bootstrap initialize: {e:?}")))?;
+            }
+            (BootstrapMode::Join, true) | (BootstrapMode::Rejoin, false) => {
+                // Join: don't initialize — engine waits in Learner state
+                //   until the bootstrap broker's add_learner arrives.
+                // Rejoin: existing log carries membership; openraft
+                //   replayed it during Raft::new. Nothing to do.
+            }
+            (BootstrapMode::Bootstrap, false) => {
+                return Err(RaftError::Startup(
+                    "Bootstrap mode requires empty raft log; existing log indicates an already-initialized broker — use Rejoin".into(),
+                ));
+            }
+            (BootstrapMode::Rejoin, true) => {
+                return Err(RaftError::Startup(
+                    "Rejoin mode requires non-empty raft log; this broker has no on-disk state — use Bootstrap or Join".into(),
+                ));
+            }
+            (BootstrapMode::Join, false) => {
+                return Err(RaftError::Startup(
+                    "Join mode requires empty raft log; this broker has on-disk state — use Rejoin"
+                        .into(),
+                ));
             }
         }
 
@@ -492,5 +507,73 @@ impl Controller {
             voters: config.voters.clone(),
             client_id: config.client_id.clone(),
         })
+    }
+}
+
+#[cfg(test)]
+mod bootstrap_mode_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn bootstrap_on_non_empty_log_errors() {
+        let dir = TempDir::new().unwrap();
+        // First boot: bootstrap fresh.
+        let cfg = ControllerConfig {
+            bootstrap_mode: BootstrapMode::Bootstrap,
+            ..ControllerConfig::for_tests(1, dir.path().to_path_buf())
+        };
+        let ctrl = Controller::start(cfg).await.expect("first bootstrap ok");
+        ctrl.shutdown().await;
+
+        // Second boot: log is non-empty, Bootstrap must error.
+        let cfg2 = ControllerConfig {
+            bootstrap_mode: BootstrapMode::Bootstrap,
+            ..ControllerConfig::for_tests(1, dir.path().to_path_buf())
+        };
+        match Controller::start(cfg2).await {
+            Err(err) => assert!(
+                matches!(err, RaftError::Startup(_)),
+                "Bootstrap on existing log must return Startup; got: {err:?}"
+            ),
+            Ok(ctrl) => {
+                ctrl.shutdown().await;
+                panic!("Bootstrap on existing log must error but succeeded");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn rejoin_on_empty_log_errors() {
+        let dir = TempDir::new().unwrap();
+        let cfg = ControllerConfig {
+            bootstrap_mode: BootstrapMode::Rejoin,
+            ..ControllerConfig::for_tests(1, dir.path().to_path_buf())
+        };
+        match Controller::start(cfg).await {
+            Err(err) => assert!(
+                matches!(err, RaftError::Startup(_)),
+                "Rejoin on empty log must return Startup; got: {err:?}"
+            ),
+            Ok(ctrl) => {
+                ctrl.shutdown().await;
+                panic!("Rejoin on empty log must error but succeeded");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn join_on_empty_log_starts_in_learner_state() {
+        let dir = TempDir::new().unwrap();
+        let cfg = ControllerConfig {
+            bootstrap_mode: BootstrapMode::Join,
+            ..ControllerConfig::for_tests(1, dir.path().to_path_buf())
+        };
+        let ctrl = Controller::start(cfg)
+            .await
+            .expect("Join on empty log starts ok");
+        // Without an external add_learner the watch_leader stays None.
+        assert!(ctrl.watch_leader().borrow().is_none());
+        ctrl.shutdown().await;
     }
 }

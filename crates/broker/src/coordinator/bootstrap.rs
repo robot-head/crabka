@@ -198,6 +198,7 @@ mod tests {
             election_timeout: Duration::from_millis(200),
             heartbeat_interval: Duration::from_millis(50),
             client_id: "test".into(),
+            bootstrap_mode: crabka_raft::BootstrapMode::Bootstrap,
         };
         let handle = Arc::new(crabka_raft::Controller::start(cfg).await.unwrap());
         let mut rx = handle.watch_leader();

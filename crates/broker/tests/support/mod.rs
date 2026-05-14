@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use tempfile::TempDir;
 
-use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
+use crabka_broker::{BootstrapMode, Broker, BrokerConfig, BrokerError, BrokerHandle};
 use crabka_client_core::Client;
 
 pub struct InProcess {
@@ -101,6 +101,7 @@ pub fn broker_config(
     controller_addrs: &[SocketAddr],
     voters: &[(u64, SocketAddr)],
     log_dir: &std::path::Path,
+    mode: BootstrapMode,
 ) -> BrokerConfig {
     let listen = client_addrs[i];
     let mut cfg = BrokerConfig::for_tests(log_dir.to_path_buf());
@@ -110,40 +111,91 @@ pub fn broker_config(
     cfg.node_id = u64::try_from(i + 1).unwrap();
     cfg.controller_listen_addr = controller_addrs[i];
     cfg.controller_quorum_voters = voters.to_vec();
+    cfg.bootstrap_mode = mode;
     cfg
 }
 
-/// Boot an `n`-broker cluster with ephemeral ports + short raft timings.
-/// Brokers spawn concurrently because a single broker blocks waiting for
-/// quorum during initial leader election.
+/// Boot an `n`-broker cluster with ephemeral ports + short raft timings
+/// using a deterministic bootstrap-then-join pattern:
+///
+/// * Phase 1: broker 0 boots alone in `Bootstrap` mode — singleton voter,
+///   trivially elects itself with no split-vote risk.
+/// * Phase 2: brokers 1..n start in `Join` mode — their `Broker::start`
+///   blocks waiting for a raft leader to appear.
+/// * Phase 3: the bootstrap broker calls `add_learner` for each joiner,
+///   then promotes them all to voters via a single `change_membership`.
+///   The joiners' `watch_leader` fires and their `Broker::start` returns.
 ///
 /// Returns `(handle, config, tempdir)` triples preserving spawn order;
 /// `cluster[0]` is `broker_id` 1.
 pub async fn start_n_node(
     n: u64,
-) -> Result<Vec<(BrokerHandle, BrokerConfig, TempDir)>, crabka_broker::BrokerError> {
+) -> Result<Vec<(BrokerHandle, BrokerConfig, TempDir)>, BrokerError> {
     init_tracing();
 
     let n_usize = usize::try_from(n).unwrap();
     let (client_addrs, controller_addrs) = bind_and_drop_ports(n_usize).await;
-    let voters: Vec<(u64, SocketAddr)> = (0..n_usize)
-        .map(|i| (u64::try_from(i + 1).unwrap(), controller_addrs[i]))
+    let voters: Vec<(u64, SocketAddr)> = (0..n)
+        .map(|i| (i + 1, controller_addrs[usize::try_from(i).unwrap()]))
         .collect();
 
-    let mut spawned = Vec::with_capacity(n_usize);
-    let mut metas: Vec<(TempDir, BrokerConfig)> = Vec::with_capacity(n_usize);
-    for i in 0..n_usize {
+    // Phase 1: bootstrap broker 0 alone. Initializes as singleton voter,
+    // becomes leader on first election timeout (no contention).
+    let dir0 = TempDir::new().unwrap();
+    let cfg0 = broker_config(
+        0,
+        &client_addrs,
+        &controller_addrs,
+        &voters,
+        dir0.path(),
+        BootstrapMode::Bootstrap,
+    );
+    let broker0 = Broker::start(cfg0.clone()).await?;
+
+    // Phase 2: spawn brokers 1..n in Join mode. Their Broker::start
+    // blocks on watch_leader; we'll add_learner + change_membership below
+    // to make them part of the cluster.
+    let mut join_handles = Vec::with_capacity(n_usize.saturating_sub(1));
+    let mut join_metas: Vec<(TempDir, BrokerConfig)> =
+        Vec::with_capacity(n_usize.saturating_sub(1));
+    for i in 1..n_usize {
         let dir = TempDir::new().unwrap();
-        let cfg = broker_config(i, &client_addrs, &controller_addrs, &voters, dir.path());
+        let cfg = broker_config(
+            i,
+            &client_addrs,
+            &controller_addrs,
+            &voters,
+            dir.path(),
+            BootstrapMode::Join,
+        );
         let cfg_clone = cfg.clone();
-        spawned.push(tokio::spawn(async move { Broker::start(cfg_clone).await }));
-        metas.push((dir, cfg));
+        join_handles.push(tokio::spawn(async move { Broker::start(cfg_clone).await }));
+        join_metas.push((dir, cfg));
     }
 
-    let mut out = Vec::with_capacity(n_usize);
-    for (j, (dir, cfg)) in spawned.into_iter().zip(metas) {
-        let h = j.await.expect("broker spawn join")?;
-        out.push((h, cfg, dir));
+    // Phase 3: add each Join broker as a learner, then promote them all
+    // to voters in a single change_membership. The bootstrap broker
+    // replicates the existing log to each follower as part of add_learner.
+    for (idx, addr) in controller_addrs
+        .iter()
+        .enumerate()
+        .skip(1)
+        .take(n_usize - 1)
+    {
+        broker0
+            .add_learner(u64::try_from(idx + 1).unwrap(), *addr)
+            .await?;
+    }
+    let target_voters: std::collections::BTreeSet<u64> =
+        (1..=u64::try_from(n_usize).unwrap()).collect();
+    broker0.change_membership(target_voters).await?;
+
+    // Now join brokers' watch_leader fires and Broker::start returns.
+    let mut out: Vec<(BrokerHandle, BrokerConfig, TempDir)> = Vec::with_capacity(n_usize);
+    out.push((broker0, cfg0, dir0));
+    for (h, (dir, cfg)) in join_handles.into_iter().zip(join_metas) {
+        let broker = h.await.expect("broker spawn join")?;
+        out.push((broker, cfg, dir));
     }
     Ok(out)
 }

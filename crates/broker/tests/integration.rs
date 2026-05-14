@@ -204,8 +204,10 @@ async fn second_open_recovers_partitions_from_disk() {
         assert_eq!(cr.topics[0].error_code, 0);
         handle.shutdown().await;
     }
-    // Reopen on the same log_dir.
-    let config = crabka_broker::BrokerConfig::for_tests(dir.path().to_path_buf());
+    // Reopen on the same log_dir. Must use Rejoin because the raft log
+    // already exists from the first run; Bootstrap would be rejected.
+    let mut config = crabka_broker::BrokerConfig::for_tests(dir.path().to_path_buf());
+    config.bootstrap_mode = crabka_broker::BootstrapMode::Rejoin;
     let handle = crabka_broker::Broker::start(config).await.unwrap();
     let bootstrap = handle.listen_addr().to_string();
     let client = crabka_client_core::Client::builder()

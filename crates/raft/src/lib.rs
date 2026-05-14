@@ -55,7 +55,7 @@ mod state_machine;
 mod types;
 mod wire;
 
-pub use config::ControllerConfig;
+pub use config::{BootstrapMode, ControllerConfig};
 pub use controller::{Controller, ControllerHandle};
 pub use error::RaftError;
 pub use types::{AppData, AppDataResponse, Node, NodeId, Raft, TypeConfig};
