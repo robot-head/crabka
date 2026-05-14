@@ -75,6 +75,21 @@ fn parse_u64_at_least(min: u64, value: &str) -> Result<u64, String> {
     Ok(parsed)
 }
 
+/// Returns `true` if `key` is one of the six whitelisted topic-config keys.
+/// Useful for `IncrementalAlterConfigs` DELETE-op validation without
+/// requiring a sentinel probe value.
+pub(crate) fn is_recognized(key: &str) -> bool {
+    matches!(
+        key,
+        RETENTION_MS
+            | RETENTION_BYTES
+            | SEGMENT_BYTES
+            | CLEANUP_POLICY
+            | COMPRESSION_TYPE
+            | MIN_INSYNC_REPLICAS
+    )
+}
+
 /// Merge `overrides` over `base` and return a fresh `LogConfig` to push
 /// into `Log::set_config`. Unknown keys are silently dropped because
 /// `validate_topic_config` should have rejected them at `AlterConfigs` time
@@ -177,6 +192,23 @@ mod tests {
     fn validate_unknown_key_rejected() {
         let err = validate_topic_config("flush.ms", "1000").unwrap_err();
         assert!(err.contains("unrecognized"));
+    }
+
+    #[test]
+    fn is_recognized_returns_true_for_whitelisted_keys() {
+        assert!(is_recognized(RETENTION_MS));
+        assert!(is_recognized(RETENTION_BYTES));
+        assert!(is_recognized(SEGMENT_BYTES));
+        assert!(is_recognized(CLEANUP_POLICY));
+        assert!(is_recognized(COMPRESSION_TYPE));
+        assert!(is_recognized(MIN_INSYNC_REPLICAS));
+    }
+
+    #[test]
+    fn is_recognized_returns_false_for_unknown_keys() {
+        assert!(!is_recognized("flush.ms"));
+        assert!(!is_recognized("unclean.leader.election.enable"));
+        assert!(!is_recognized(""));
     }
 
     #[test]

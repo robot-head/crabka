@@ -53,6 +53,7 @@ pub(crate) mod describe_configs;
 pub(crate) mod fetch;
 pub(crate) mod find_coordinator;
 pub(crate) mod heartbeat;
+pub(crate) mod incremental_alter_configs;
 pub(crate) mod init_producer_id;
 pub(crate) mod join_group;
 pub(crate) mod leave_group;
@@ -92,6 +93,7 @@ pub(crate) fn build_table() -> HandlerTable {
     t.register(28, crate::txn::handlers::txn_offset_commit::handle);
     t.register(32, describe_configs::handle);
     t.register(33, alter_configs::handle);
+    t.register(44, incremental_alter_configs::handle);
     t.register(56, alter_partition::handle);
     t.register(63, broker_heartbeat::handle);
     t
