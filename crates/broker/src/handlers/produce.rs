@@ -198,8 +198,34 @@ pub(crate) fn handle(
 
                 match dedup_outcome {
                     Some(crate::producer_state::Decision::Duplicate { base_offset }) => {
-                        out.error_code = codes::NONE;
-                        out.base_offset = base_offset;
+                        // The original Produce's append went through but its
+                        // HW gate may have timed out — that's why the idempotent
+                        // producer is retrying with the same `base_sequence`.
+                        // For `acks=-1`, we MUST still wait for HW to reach
+                        // the duplicate's last offset before claiming success.
+                        // Returning NONE unconditionally would silently bypass
+                        // the full-ISR durability guarantee that acks=all
+                        // promises: the original append is on the leader, but
+                        // followers may not have it yet, and a leader crash
+                        // before they catch up would lose data the producer
+                        // believed acknowledged.
+                        if req.acks == -1 {
+                            let target = base_offset + i64::from(last_offset_delta) + 1;
+                            let deadline = std::time::Instant::now() + timeout;
+                            match part.await_hw_at_least(target, deadline).await {
+                                Ok(()) => {
+                                    out.error_code = codes::NONE;
+                                    out.base_offset = base_offset;
+                                }
+                                Err(_timeout) => {
+                                    out.error_code = codes::NOT_ENOUGH_REPLICAS_AFTER_APPEND;
+                                    out.base_offset = base_offset;
+                                }
+                            }
+                        } else {
+                            out.error_code = codes::NONE;
+                            out.base_offset = base_offset;
+                        }
                         partition_results.push(out);
                         continue;
                     }
