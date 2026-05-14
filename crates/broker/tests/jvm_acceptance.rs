@@ -1654,7 +1654,7 @@ async fn acks_all_survives_leader_crash() {
 }
 
 /// `kafka-configs --alter --add-config retention.ms=60000 --topic t` then
-/// `--describe` round-trips through V1TopicConfig and the supervisor
+/// `--describe` round-trips through `V1TopicConfig` and the supervisor
 /// reconcile push.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker"]
@@ -1709,8 +1709,8 @@ async fn kafka_configs_alter_round_trip() {
 }
 
 /// `kafka-topics --alter --topic t --partitions 3` then `--describe`
-/// shows 3 partitions. Exercises CreatePartitions (api_key 37) +
-/// V1Topic partition-count update.
+/// shows 3 partitions. Exercises `CreatePartitions` (`api_key` 37) +
+/// `V1Topic` partition-count update.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker"]
 async fn kafka_topics_alter_partitions() {
@@ -1760,7 +1760,7 @@ async fn kafka_topics_alter_partitions() {
 }
 
 /// `kafka-delete-records --offset-json-file <(...)`: produce 20
-/// records, trim to offset 10, expect success + low_watermark.
+/// records, trim to offset 10, expect success + `low_watermark`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker"]
 async fn kafka_delete_records_trims_log() {
@@ -1853,5 +1853,99 @@ async fn kafka_delete_records_trims_log() {
     assert!(
         s.contains("low_watermark") || s.contains("10"),
         "delete-records output missing low_watermark: {s}"
+    );
+}
+
+/// `kafka-consumer-groups --list` and `--describe` round-trip after a
+/// real consumer has joined a group.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Docker"]
+async fn kafka_consumer_groups_list_describe() {
+    const TOPIC: &str = "crabka-cg-list-itest";
+    const GROUP: &str = "crabka-cg-list-grp";
+
+    let (_broker, _dir) = start_host_broker().await;
+    nc_check_connectivity();
+
+    docker_run_kafka_tool(&[
+        "kafka-topics",
+        "--create",
+        "--if-not-exists",
+        "--topic",
+        TOPIC,
+        "--partitions",
+        "1",
+        "--replication-factor",
+        "1",
+        "--bootstrap-server",
+        BOOTSTRAP,
+    ]);
+
+    // Produce one record so the consumer has something to settle on.
+    let mut child = std::process::Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "-i",
+            "--add-host=host.docker.internal:host-gateway",
+            KAFKA_IMAGE,
+            "kafka-console-producer",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--topic",
+            TOPIC,
+        ])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn producer");
+    {
+        use std::io::Write;
+        let stdin = child.stdin.as_mut().expect("stdin");
+        writeln!(stdin, "alpha").expect("write");
+    }
+    drop(child.stdin.take());
+    let _ = child.wait_with_output();
+
+    // Consume one record with --group so the group is registered with
+    // the coordinator.
+    docker_run_kafka_tool(&[
+        "kafka-console-consumer",
+        "--bootstrap-server",
+        BOOTSTRAP,
+        "--topic",
+        TOPIC,
+        "--group",
+        GROUP,
+        "--from-beginning",
+        "--max-messages",
+        "1",
+        "--timeout-ms",
+        "10000",
+    ]);
+
+    let list_out = docker_run_kafka_tool(&[
+        "kafka-consumer-groups",
+        "--list",
+        "--bootstrap-server",
+        BOOTSTRAP,
+    ]);
+    let s = String::from_utf8_lossy(&list_out.stdout);
+    assert!(
+        s.contains(GROUP),
+        "list output missing {GROUP}: {s}"
+    );
+
+    let desc_out = docker_run_kafka_tool(&[
+        "kafka-consumer-groups",
+        "--describe",
+        "--group",
+        GROUP,
+        "--bootstrap-server",
+        BOOTSTRAP,
+    ]);
+    let s = String::from_utf8_lossy(&desc_out.stdout);
+    assert!(
+        s.contains(TOPIC),
+        "describe output missing topic {TOPIC}: {s}"
     );
 }
