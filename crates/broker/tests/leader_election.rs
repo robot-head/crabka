@@ -145,13 +145,6 @@ fn cluster_lock() -> &'static tokio::sync::Mutex<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-// Slice-10b leader-election propagation isn't yet reliable within
-// the test's 10s polling window on Linux/macOS CI: the liveness
-// ticker's AliveToDead transition races the openraft controller
-// re-election, and on_broker_dead returns early when the local node
-// isn't yet the controller leader. Re-enable once slice-10b's
-// leadership churn is bulletproofed.
-#[ignore = "flaky on CI; tracked under slice-10b follow-up"]
 async fn broker_death_elects_new_leader() {
     let _g = cluster_lock().lock().await;
     let mut cluster = support::start_n_node_with_retry(3).await;
@@ -211,11 +204,6 @@ async fn broker_death_elects_new_leader() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-// Same root cause as `durability::acks_all_completes_via_isr_shrink_when_follower_dead`:
-// follower replicators race the AlterPartition shrink and HW
-// doesn't advance within the producer timeout. Re-enable once
-// slice-10b's bookkeeping is fully closed.
-#[ignore = "flaky on CI; tracked under slice-10b follow-up"]
 async fn acks_all_completes_after_isr_shrink() {
     let _g = cluster_lock().lock().await;
     let mut cluster = support::start_n_node_with_retry(3).await;
@@ -247,13 +235,6 @@ async fn acks_all_completes_after_isr_shrink() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-// Linux TIME_WAIT keeps the prior test's openraft sockets bound for
-// ~60s after teardown. With fixed ports + cluster_lock serialization,
-// the second 3-broker boot in this file consistently fails with
-// "no leader elected within 2 min" because brokers can't re-bind.
-// Re-enable once the multi-broker tests use ephemeral / non-reused
-// ports (or SO_REUSEADDR).
-#[ignore = "TIME_WAIT port reuse on CI; tracked under slice-10b follow-up"]
 async fn isr_expand_on_catchup() {
     let _g = cluster_lock().lock().await;
     // This test is challenging to write deterministically because we can't
