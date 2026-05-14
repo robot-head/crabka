@@ -19,7 +19,9 @@ use tracing::{info, warn};
 
 use crabka_client_core::{Client, ClientError};
 use crabka_log::{Log, LogConfig};
-use crabka_protocol::owned::fetch_request::{FetchPartition, FetchRequest, FetchTopic};
+use crabka_protocol::owned::fetch_request::{
+    FetchPartition, FetchRequest, FetchTopic, ReplicaState,
+};
 use crabka_protocol::owned::fetch_response::FetchResponse;
 use crabka_protocol::owned::offset_for_leader_epoch_request::{
     OffsetForLeaderEpochRequest, OffsetForLeaderPartition, OffsetForLeaderTopic,
@@ -172,8 +174,17 @@ fn build_fetch_request(cfg: &Config, fetch_offset: i64) -> FetchRequest {
                 .current_leader_epoch
                 .load(std::sync::atomic::Ordering::Acquire)
         });
+    // `replica_id` is the wire field on Fetch v0-14. KIP-903 (Kafka 3.5) moved
+    // it into a tagged `replica_state` struct on v15+; the codegen serializes
+    // whichever the negotiated version requires. Populate BOTH so the request
+    // is correct regardless of which version the leader negotiates.
+    let rid = i32::try_from(cfg.node_id).unwrap_or(-1);
     FetchRequest {
-        replica_id: i32::try_from(cfg.node_id).unwrap_or(-1),
+        replica_id: rid,
+        replica_state: ReplicaState {
+            replica_id: rid,
+            ..ReplicaState::default()
+        },
         max_wait_ms: FETCH_MAX_WAIT_MS,
         min_bytes: FETCH_MIN_BYTES,
         max_bytes: FETCH_MAX_BYTES,
