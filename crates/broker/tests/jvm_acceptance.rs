@@ -737,6 +737,10 @@ async fn three_node_replication_byte_compare() {
     }
 
     let bootstrap_1 = format!("host.docker.internal:{}", client_ports[0]);
+    let bootstrap_all = format!(
+        "host.docker.internal:{},host.docker.internal:{},host.docker.internal:{}",
+        client_ports[0], client_ports[1], client_ports[2],
+    );
 
     // 1. CreateTopics(repl=3, partitions=1).
     docker_run_kafka_tool(&[
@@ -795,7 +799,7 @@ async fn three_node_replication_byte_compare() {
             KAFKA_IMAGE,
             "kafka-console-producer",
             "--bootstrap-server",
-            &bootstrap_1,
+            &bootstrap_all,
             "--topic",
             TOPIC,
         ])
