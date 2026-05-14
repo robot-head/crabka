@@ -277,15 +277,14 @@ async fn isr_expand_on_catchup() {
     let (dead_h, _dead_cfg, _dead_dir) = cluster.remove(2);
     dead_h.shutdown().await;
 
-    // 4. Reboot node 3 with a fresh TempDir + same controller addr. The
-    //    BrokerConfig's voter map still lists all three voters; that's fine
-    //    because we'll re-add node 3 explicitly.
+    // 4. Reboot node 3 with a fresh TempDir + same controller addr.
+    //    Boot as a 1-node cluster (voters = [self]) so node 3 can
+    //    self-elect immediately and Broker::start returns quickly.
+    //    The actual cluster leader will call add_learner below, which
+    //    sends AppendEntries at a higher term and causes node 3 to
+    //    step down and follow the real leader.
     let reborn_dir = TempDir::new().unwrap();
-    let voters = vec![
-        (1u64, cluster[0].1.controller_listen_addr),
-        (2u64, cluster[1].1.controller_listen_addr),
-        (3u64, dead_controller_addr),
-    ];
+    let voters = vec![(3u64, dead_controller_addr)];
     let reborn_cfg = BrokerConfig {
         broker_id: 3,
         listen_addr: dead_listen_addr,
