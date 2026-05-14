@@ -299,6 +299,7 @@ async fn isr_expand_on_catchup() {
         replica_lag_time_max_ms: 2_000,
         controller_election_timeout: Duration::from_millis(500),
         controller_heartbeat_interval: Duration::from_millis(100),
+        bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
     };
     let reborn = Broker::start(reborn_cfg).await.expect("reborn node 3");
     eprintln!("CRABKA[test] reborn node 3 started");

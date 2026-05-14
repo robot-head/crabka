@@ -76,6 +76,7 @@ async fn start_host_broker() -> (crabka_broker::BrokerHandle, tempfile::TempDir)
         replica_lag_time_max_ms: 30_000,
         controller_election_timeout: std::time::Duration::from_secs(5),
         controller_heartbeat_interval: std::time::Duration::from_millis(500),
+        bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
     };
     let handle = Broker::start(config).await.expect("start broker");
     eprintln!("CRABKA[test] broker started listen={LISTEN} advertised={BOOTSTRAP}");
@@ -493,6 +494,11 @@ async fn three_node_jvm_round_trip() {
             replica_lag_time_max_ms: 30_000,
             controller_election_timeout: std::time::Duration::from_secs(5),
             controller_heartbeat_interval: std::time::Duration::from_millis(500),
+            bootstrap_mode: if i == 0 {
+                crabka_broker::BootstrapMode::Bootstrap
+            } else {
+                crabka_broker::BootstrapMode::Join
+            },
         };
         tempdirs.push(dir);
         spawns.push(tokio::spawn(async move {
@@ -725,6 +731,11 @@ async fn three_node_replication_byte_compare() {
             replica_lag_time_max_ms: 30_000,
             controller_election_timeout: std::time::Duration::from_secs(5),
             controller_heartbeat_interval: std::time::Duration::from_millis(500),
+            bootstrap_mode: if i == 0 {
+                crabka_broker::BootstrapMode::Bootstrap
+            } else {
+                crabka_broker::BootstrapMode::Join
+            },
         };
         tempdirs.push(dir);
         spawns.push(tokio::spawn(async move {
@@ -958,6 +969,11 @@ async fn transactional_console_producer_eos() {
             replica_lag_time_max_ms: 30_000,
             controller_election_timeout: std::time::Duration::from_secs(5),
             controller_heartbeat_interval: std::time::Duration::from_millis(500),
+            bootstrap_mode: if i == 0 {
+                crabka_broker::BootstrapMode::Bootstrap
+            } else {
+                crabka_broker::BootstrapMode::Join
+            },
         };
         tempdirs.push(dir);
         spawns.push(tokio::spawn(async move {
@@ -1116,6 +1132,11 @@ async fn acks_all_durability() {
             replica_lag_time_max_ms: 30_000,
             controller_election_timeout: std::time::Duration::from_secs(5),
             controller_heartbeat_interval: std::time::Duration::from_millis(500),
+            bootstrap_mode: if i == 0 {
+                crabka_broker::BootstrapMode::Bootstrap
+            } else {
+                crabka_broker::BootstrapMode::Join
+            },
         };
         tempdirs.push(dir);
         spawns.push(tokio::spawn(async move {
@@ -1265,6 +1286,11 @@ async fn acks_all_survives_leader_crash() {
             replica_lag_time_max_ms: 2_000,
             controller_election_timeout: std::time::Duration::from_millis(500),
             controller_heartbeat_interval: std::time::Duration::from_millis(100),
+            bootstrap_mode: if i == 0 {
+                crabka_broker::BootstrapMode::Bootstrap
+            } else {
+                crabka_broker::BootstrapMode::Join
+            },
         };
         tempdirs.push(dir);
         spawns.push(tokio::spawn(async move {
