@@ -52,6 +52,7 @@ pub(crate) mod create_topics;
 pub(crate) mod delete_groups;
 pub(crate) mod delete_records;
 pub(crate) mod delete_topics;
+pub(crate) mod describe_cluster;
 pub(crate) mod describe_configs;
 pub(crate) mod describe_groups;
 pub(crate) mod fetch;
@@ -105,6 +106,7 @@ pub(crate) fn build_table() -> HandlerTable {
     t.register(42, delete_groups::handle);
     t.register(44, incremental_alter_configs::handle);
     t.register(56, alter_partition::handle);
+    t.register(60, describe_cluster::handle);
     t.register(63, broker_heartbeat::handle);
     t
 }
