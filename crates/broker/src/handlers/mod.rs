@@ -49,6 +49,7 @@ pub(crate) mod api_versions;
 pub(crate) mod broker_heartbeat;
 pub(crate) mod create_partitions;
 pub(crate) mod create_topics;
+pub(crate) mod delete_records;
 pub(crate) mod delete_topics;
 pub(crate) mod describe_configs;
 pub(crate) mod fetch;
@@ -85,6 +86,7 @@ pub(crate) fn build_table() -> HandlerTable {
     t.register(18, api_versions::handle);
     t.register(19, create_topics::handle);
     t.register(20, delete_topics::handle);
+    t.register(21, delete_records::handle);
     t.register(22, init_producer_id::handle);
     t.register(23, offset_for_leader_epoch::handle);
     t.register(24, crate::txn::handlers::add_partitions_to_txn::handle);
