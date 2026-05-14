@@ -467,17 +467,43 @@ async fn three_node_jvm_round_trip() {
         })
         .collect();
 
-    // Spawn brokers concurrently so each one's leader-wait sees its peers
-    // come up. Sequential startup deadlocks: broker 1's `Broker::start`
-    // blocks waiting for a leader, but a 3-voter quorum can't elect one
-    // until brokers 2 and 3 are also up.
-    let mut tempdirs = Vec::with_capacity(3);
-    let mut spawns = Vec::with_capacity(3);
-    for i in 0..3 {
+    // Bootstrap-then-join: start broker 0 alone (it self-elects as a
+    // singleton voter), then start brokers 1, 2 in Join mode and bring
+    // them into the cluster via add_learner + change_membership. Avoids
+    // openraft's cold-boot split-vote risk.
+    let mut tempdirs: Vec<tempfile::TempDir> = Vec::with_capacity(3);
+
+    // Broker 0 (Bootstrap).
+    let dir0 = tempfile::tempdir().expect("tempdir");
+    let cfg0 = BrokerConfig {
+        broker_id: 1,
+        // bind on 0.0.0.0 so Docker-side containers can reach us.
+        listen_addr: format!("0.0.0.0:{}", client_ports[0])
+            .parse()
+            .expect("static addr"),
+        advertised_listener: format!("host.docker.internal:{}", client_ports[0]),
+        log_dir: dir0.path().to_path_buf(),
+        log_config: LogConfig::default(),
+        node_id: 1,
+        controller_listen_addr: format!("0.0.0.0:{}", controller_ports[0])
+            .parse()
+            .expect("static addr"),
+        controller_quorum_voters: voters.clone(),
+        heartbeat_interval_ms: 3_000,
+        heartbeat_timeout_ms: 9_000,
+        replica_lag_time_max_ms: 30_000,
+        controller_election_timeout: std::time::Duration::from_secs(5),
+        controller_heartbeat_interval: std::time::Duration::from_millis(500),
+        bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
+    };
+    let broker0 = Broker::start(cfg0).await.expect("broker start");
+
+    // Brokers 1, 2 (Join).
+    let mut join_spawns = Vec::with_capacity(2);
+    for i in 1..3 {
         let dir = tempfile::tempdir().expect("tempdir");
         let cfg = BrokerConfig {
             broker_id: i32::try_from(i + 1).unwrap(),
-            // bind on 0.0.0.0 so Docker-side containers can reach us.
             listen_addr: format!("0.0.0.0:{}", client_ports[i])
                 .parse()
                 .expect("static addr"),
@@ -494,21 +520,39 @@ async fn three_node_jvm_round_trip() {
             replica_lag_time_max_ms: 30_000,
             controller_election_timeout: std::time::Duration::from_secs(5),
             controller_heartbeat_interval: std::time::Duration::from_millis(500),
-            bootstrap_mode: if i == 0 {
-                crabka_broker::BootstrapMode::Bootstrap
-            } else {
-                crabka_broker::BootstrapMode::Join
-            },
+            bootstrap_mode: crabka_broker::BootstrapMode::Join,
         };
         tempdirs.push(dir);
-        spawns.push(tokio::spawn(async move {
+        join_spawns.push(tokio::spawn(async move {
             Broker::start(cfg).await.expect("broker start")
         }));
     }
+
+    // Bring the join brokers into the cluster: add as learners, then
+    // promote to voters in one change_membership.
+    let voter_addr = |i: usize| -> std::net::SocketAddr {
+        format!("127.0.0.1:{}", controller_ports[i])
+            .parse()
+            .expect("static addr")
+    };
+    broker0
+        .add_learner(2, voter_addr(1))
+        .await
+        .expect("add_learner 2");
+    broker0
+        .add_learner(3, voter_addr(2))
+        .await
+        .expect("add_learner 3");
+    broker0
+        .change_membership([1u64, 2u64, 3u64].into_iter().collect())
+        .await
+        .expect("promote join brokers to voters");
+
+    // Join brokers' watch_leader fires and Broker::start returns.
     let mut cluster = Vec::with_capacity(3);
-    for (spawn, dir) in spawns.into_iter().zip(tempdirs) {
-        let handle = spawn.await.expect("spawn");
-        cluster.push((handle, dir));
+    cluster.push((broker0, dir0));
+    for (spawn, dir) in join_spawns.into_iter().zip(tempdirs) {
+        cluster.push((spawn.await.expect("spawn"), dir));
     }
 
     let bootstrap_1 = format!("host.docker.internal:{}", client_ports[0]);
@@ -706,12 +750,39 @@ async fn three_node_replication_byte_compare() {
         })
         .collect();
 
-    // Parallel spawn — sequential startup deadlocks: broker 1's
-    // `Broker::start` blocks waiting for a leader, but a 3-voter quorum
-    // can't elect one until brokers 2 and 3 are also up.
-    let mut tempdirs = Vec::with_capacity(3);
-    let mut spawns = Vec::with_capacity(3);
-    for i in 0..3 {
+    // Bootstrap-then-join: start broker 0 alone (it self-elects as a
+    // singleton voter), then start brokers 1, 2 in Join mode and bring
+    // them into the cluster via add_learner + change_membership. Avoids
+    // openraft's cold-boot split-vote risk.
+    let mut tempdirs: Vec<tempfile::TempDir> = Vec::with_capacity(3);
+
+    // Broker 0 (Bootstrap).
+    let dir0 = tempfile::tempdir().expect("tempdir");
+    let cfg0 = BrokerConfig {
+        broker_id: 1,
+        listen_addr: format!("0.0.0.0:{}", client_ports[0])
+            .parse()
+            .expect("static addr"),
+        advertised_listener: format!("host.docker.internal:{}", client_ports[0]),
+        log_dir: dir0.path().to_path_buf(),
+        log_config: LogConfig::default(),
+        node_id: 1,
+        controller_listen_addr: format!("0.0.0.0:{}", controller_ports[0])
+            .parse()
+            .expect("static addr"),
+        controller_quorum_voters: voters.clone(),
+        heartbeat_interval_ms: 3_000,
+        heartbeat_timeout_ms: 9_000,
+        replica_lag_time_max_ms: 30_000,
+        controller_election_timeout: std::time::Duration::from_secs(5),
+        controller_heartbeat_interval: std::time::Duration::from_millis(500),
+        bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
+    };
+    let broker0 = Broker::start(cfg0).await.expect("broker start");
+
+    // Brokers 1, 2 (Join).
+    let mut join_spawns = Vec::with_capacity(2);
+    for i in 1..3 {
         let dir = tempfile::tempdir().expect("tempdir");
         let cfg = BrokerConfig {
             broker_id: i32::try_from(i + 1).unwrap(),
@@ -731,20 +802,39 @@ async fn three_node_replication_byte_compare() {
             replica_lag_time_max_ms: 30_000,
             controller_election_timeout: std::time::Duration::from_secs(5),
             controller_heartbeat_interval: std::time::Duration::from_millis(500),
-            bootstrap_mode: if i == 0 {
-                crabka_broker::BootstrapMode::Bootstrap
-            } else {
-                crabka_broker::BootstrapMode::Join
-            },
+            bootstrap_mode: crabka_broker::BootstrapMode::Join,
         };
         tempdirs.push(dir);
-        spawns.push(tokio::spawn(async move {
+        join_spawns.push(tokio::spawn(async move {
             Broker::start(cfg).await.expect("broker start")
         }));
     }
+
+    // Bring the join brokers into the cluster: add as learners, then
+    // promote to voters in one change_membership.
+    let voter_addr = |i: usize| -> std::net::SocketAddr {
+        format!("127.0.0.1:{}", controller_ports[i])
+            .parse()
+            .expect("static addr")
+    };
+    broker0
+        .add_learner(2, voter_addr(1))
+        .await
+        .expect("add_learner 2");
+    broker0
+        .add_learner(3, voter_addr(2))
+        .await
+        .expect("add_learner 3");
+    broker0
+        .change_membership([1u64, 2u64, 3u64].into_iter().collect())
+        .await
+        .expect("promote join brokers to voters");
+
+    // Join brokers' watch_leader fires and Broker::start returns.
     let mut cluster = Vec::with_capacity(3);
-    for (sp, dir) in spawns.into_iter().zip(tempdirs) {
-        cluster.push((sp.await.expect("spawn"), dir));
+    cluster.push((broker0, dir0));
+    for (spawn, dir) in join_spawns.into_iter().zip(tempdirs) {
+        cluster.push((spawn.await.expect("spawn"), dir));
     }
 
     let bootstrap_1 = format!("host.docker.internal:{}", client_ports[0]);
@@ -1114,9 +1204,37 @@ async fn acks_all_durability() {
         })
         .collect();
 
-    let mut tempdirs = Vec::new();
-    let mut spawns = Vec::new();
-    for i in 0..3 {
+    // Bootstrap-then-join: start broker 0 alone (it self-elects as a
+    // singleton voter), then start brokers 1, 2 in Join mode and bring
+    // them into the cluster via add_learner + change_membership. Avoids
+    // openraft's cold-boot split-vote risk.
+    let mut tempdirs: Vec<tempfile::TempDir> = Vec::with_capacity(3);
+
+    // Broker 0 (Bootstrap).
+    let dir0 = tempfile::tempdir().unwrap();
+    let cfg0 = crabka_broker::BrokerConfig {
+        broker_id: 1,
+        listen_addr: format!("0.0.0.0:{}", client_ports[0]).parse().unwrap(),
+        advertised_listener: format!("host.docker.internal:{}", client_ports[0]),
+        log_dir: dir0.path().to_path_buf(),
+        log_config: crabka_log::LogConfig::default(),
+        node_id: 1,
+        controller_listen_addr: format!("0.0.0.0:{}", controller_ports[0]).parse().unwrap(),
+        controller_quorum_voters: voters.clone(),
+        heartbeat_interval_ms: 3_000,
+        heartbeat_timeout_ms: 9_000,
+        replica_lag_time_max_ms: 30_000,
+        controller_election_timeout: std::time::Duration::from_secs(5),
+        controller_heartbeat_interval: std::time::Duration::from_millis(500),
+        bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
+    };
+    let broker0 = crabka_broker::Broker::start(cfg0)
+        .await
+        .expect("broker start");
+
+    // Brokers 1, 2 (Join).
+    let mut join_spawns = Vec::with_capacity(2);
+    for i in 1..3 {
         let dir = tempfile::tempdir().unwrap();
         let cfg = crabka_broker::BrokerConfig {
             broker_id: i32::try_from(i + 1).unwrap(),
@@ -1132,21 +1250,40 @@ async fn acks_all_durability() {
             replica_lag_time_max_ms: 30_000,
             controller_election_timeout: std::time::Duration::from_secs(5),
             controller_heartbeat_interval: std::time::Duration::from_millis(500),
-            bootstrap_mode: if i == 0 {
-                crabka_broker::BootstrapMode::Bootstrap
-            } else {
-                crabka_broker::BootstrapMode::Join
-            },
+            bootstrap_mode: crabka_broker::BootstrapMode::Join,
         };
         tempdirs.push(dir);
-        spawns.push(tokio::spawn(async move {
+        join_spawns.push(tokio::spawn(async move {
             crabka_broker::Broker::start(cfg)
                 .await
                 .expect("broker start")
         }));
     }
+
+    // Bring the join brokers into the cluster: add as learners, then
+    // promote to voters in one change_membership.
+    let voter_addr = |i: usize| -> std::net::SocketAddr {
+        format!("127.0.0.1:{}", controller_ports[i])
+            .parse()
+            .expect("static addr")
+    };
+    broker0
+        .add_learner(2, voter_addr(1))
+        .await
+        .expect("add_learner 2");
+    broker0
+        .add_learner(3, voter_addr(2))
+        .await
+        .expect("add_learner 3");
+    broker0
+        .change_membership([1u64, 2u64, 3u64].into_iter().collect())
+        .await
+        .expect("promote join brokers to voters");
+
+    // Join brokers' watch_leader fires and Broker::start returns.
     let mut cluster = Vec::with_capacity(3);
-    for (spawn, dir) in spawns.into_iter().zip(tempdirs) {
+    cluster.push((broker0, dir0));
+    for (spawn, dir) in join_spawns.into_iter().zip(tempdirs) {
         cluster.push((spawn.await.expect("spawn"), dir));
     }
 
@@ -1268,9 +1405,37 @@ async fn acks_all_survives_leader_crash() {
         })
         .collect();
 
-    let mut tempdirs = Vec::new();
-    let mut spawns = Vec::new();
-    for i in 0..3 {
+    // Bootstrap-then-join: start broker 0 alone (it self-elects as a
+    // singleton voter), then start brokers 1, 2 in Join mode and bring
+    // them into the cluster via add_learner + change_membership. Avoids
+    // openraft's cold-boot split-vote risk.
+    let mut tempdirs: Vec<tempfile::TempDir> = Vec::with_capacity(3);
+
+    // Broker 0 (Bootstrap).
+    let dir0 = tempfile::tempdir().unwrap();
+    let cfg0 = crabka_broker::BrokerConfig {
+        broker_id: 1,
+        listen_addr: format!("0.0.0.0:{}", client_ports[0]).parse().unwrap(),
+        advertised_listener: format!("host.docker.internal:{}", client_ports[0]),
+        log_dir: dir0.path().to_path_buf(),
+        log_config: crabka_log::LogConfig::default(),
+        node_id: 1,
+        controller_listen_addr: format!("0.0.0.0:{}", controller_ports[0]).parse().unwrap(),
+        controller_quorum_voters: voters.clone(),
+        heartbeat_interval_ms: 200,
+        heartbeat_timeout_ms: 2_000,
+        replica_lag_time_max_ms: 2_000,
+        controller_election_timeout: std::time::Duration::from_millis(500),
+        controller_heartbeat_interval: std::time::Duration::from_millis(100),
+        bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
+    };
+    let broker0 = crabka_broker::Broker::start(cfg0)
+        .await
+        .expect("broker start");
+
+    // Brokers 1, 2 (Join).
+    let mut join_spawns = Vec::with_capacity(2);
+    for i in 1..3 {
         let dir = tempfile::tempdir().unwrap();
         let cfg = crabka_broker::BrokerConfig {
             broker_id: i32::try_from(i + 1).unwrap(),
@@ -1286,21 +1451,40 @@ async fn acks_all_survives_leader_crash() {
             replica_lag_time_max_ms: 2_000,
             controller_election_timeout: std::time::Duration::from_millis(500),
             controller_heartbeat_interval: std::time::Duration::from_millis(100),
-            bootstrap_mode: if i == 0 {
-                crabka_broker::BootstrapMode::Bootstrap
-            } else {
-                crabka_broker::BootstrapMode::Join
-            },
+            bootstrap_mode: crabka_broker::BootstrapMode::Join,
         };
         tempdirs.push(dir);
-        spawns.push(tokio::spawn(async move {
+        join_spawns.push(tokio::spawn(async move {
             crabka_broker::Broker::start(cfg)
                 .await
                 .expect("broker start")
         }));
     }
+
+    // Bring the join brokers into the cluster: add as learners, then
+    // promote to voters in one change_membership.
+    let voter_addr = |i: usize| -> std::net::SocketAddr {
+        format!("127.0.0.1:{}", controller_ports[i])
+            .parse()
+            .expect("static addr")
+    };
+    broker0
+        .add_learner(2, voter_addr(1))
+        .await
+        .expect("add_learner 2");
+    broker0
+        .add_learner(3, voter_addr(2))
+        .await
+        .expect("add_learner 3");
+    broker0
+        .change_membership([1u64, 2u64, 3u64].into_iter().collect())
+        .await
+        .expect("promote join brokers to voters");
+
+    // Join brokers' watch_leader fires and Broker::start returns.
     let mut cluster: Vec<(crabka_broker::BrokerHandle, tempfile::TempDir)> = Vec::with_capacity(3);
-    for (spawn, dir) in spawns.into_iter().zip(tempdirs) {
+    cluster.push((broker0, dir0));
+    for (spawn, dir) in join_spawns.into_iter().zip(tempdirs) {
         cluster.push((spawn.await.expect("spawn"), dir));
     }
 
