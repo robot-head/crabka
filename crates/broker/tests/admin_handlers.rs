@@ -1,3 +1,8 @@
+// rustc 1.95 clippy::pedantic ICEs on this file (an upstream bug in
+// clippy's body-analysis pass). Disable pedantic locally; the rest of
+// the workspace still enforces the full pedantic gate.
+#![allow(clippy::pedantic)]
+
 //! Broker-side integration tests for the slice-11 admin handlers.
 //!
 //! Each test spins up a 1-broker cluster via [`support::start_n_node`],

@@ -46,6 +46,11 @@ Pre-1.0, pre-alpha. No production use.
   partition-leader crashes and slow followers; `acks=all` produces
   complete after election; zombie writes from fenced ex-leaders are
   rejected.
+- **Slice 11** — admin handlers: `AlterConfigs` /
+  `IncrementalAlterConfigs` (with live propagation to `Log.config`),
+  `CreatePartitions`, `DeleteRecords`, `ListGroups`, `DescribeGroups`,
+  `DeleteGroups`, `DescribeCluster`. Validated end-to-end against the
+  JVM `kafka-*.sh` operator tooling.
 
 ## Published crates
 

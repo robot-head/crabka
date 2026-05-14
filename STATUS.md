@@ -44,3 +44,20 @@ follow-up `crabka-protocol-coverage` plan.  The protocol-foundation
 infrastructure (codegen pipeline, JVM oracle, differential harness, corpus
 replay, CI matrix) is fully in place and proven correct against a live JVM
 Kafka client for ApiVersions.
+
+## Slice 11 — admin handlers (2026-05-14)
+
+- 8 new handlers: AlterConfigs (33), IncrementalAlterConfigs (44),
+  CreatePartitions (37), DeleteRecords (21), DescribeCluster (60),
+  ListGroups (16), DescribeGroups (15), DeleteGroups (42).
+- 1 new metadata record: V1TopicConfig.
+- Topic-config whitelist with live propagation to `Log.config` via
+  `Arc<RwLock<LogConfig>>` and a supervisor reconcile push.
+- 5 new JVM acceptance tests covering `kafka-configs --alter`,
+  `kafka-topics --alter --partitions`, `kafka-delete-records`,
+  `kafka-consumer-groups --list/--describe`, `kafka-cluster cluster-id`.
+- Side fixes: DescribeConfigs now projects topic_configs (not stub);
+  OffsetFetch honors `topics: None` "fetch all" sentinel; flexible-body
+  dispatch table + ApiVersions response register all slice-11 api_keys.
+- Out of scope: Rust CLI, ACLs, quotas, partition reassignments,
+  ElectLeaders, log compaction, broker-side recompression.

@@ -1955,7 +1955,7 @@ async fn kafka_consumer_groups_list_describe() {
     );
 }
 
-/// `kafka-cluster cluster-id` exercises DescribeCluster (api_key 60).
+/// `kafka-cluster cluster-id` exercises `DescribeCluster` (`api_key` 60).
 ///
 /// Uses `cp-kafka:7.5.0` (= [`KAFKA_IMAGE_TXN`]) because:
 /// - `cp-kafka:6.1.1` does not ship the `kafka-cluster` binary at all.
