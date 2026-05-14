@@ -409,6 +409,41 @@ impl Broker {
             }
         });
 
+        // 4e-2. Leadership-change watcher: whenever this broker becomes the
+        //       raft leader it seeds the liveness registry with all brokers
+        //       known in the current metadata image.  This ensures that peers
+        //       which were heartbeating to the previous leader (and therefore
+        //       have no entry in *this* broker's liveness map) are detected as
+        //       dead after `heartbeat_timeout_ms` if they stop sending to us.
+        //       Without seeding, `AliveToDead` never fires for a broker that
+        //       dies while a *different* raft node is the leader.
+        {
+            let mut leader_watch = controller.watch_leader();
+            let this_node = config.node_id;
+            let liveness_seed = liveness.clone();
+            let controller_seed = controller.clone();
+            let seed_shutdown = supervisor_shutdown.child_token();
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        _ = leader_watch.changed() => {},
+                        () = seed_shutdown.cancelled() => return,
+                    }
+                    let new_leader = *leader_watch.borrow();
+                    if new_leader == Some(this_node) {
+                        // We just became the raft leader. Seed liveness for
+                        // every broker currently in the metadata image.
+                        let ids: Vec<u64> = controller_seed
+                            .current_image()
+                            .brokers()
+                            .map(|b| b.node_id)
+                            .collect();
+                        liveness_seed.seed_brokers(ids).await;
+                    }
+                }
+            });
+        }
+
         // 4f. ISR maintenance: per-leader-partition shrink/expand tick.
         //     Proposes AlterPartition changes when follower lag exceeds
         //     `replica_lag_time_max_ms`. Child token of supervisor_shutdown.
