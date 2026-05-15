@@ -149,25 +149,16 @@ async fn start_two_brokers_with_controller_protocol(
     (broker0, broker1, dir0, dir1)
 }
 
-// IGNORED: exercises the T6 SASL-handshake gap on follower self-registration.
+// Exercises follower → leader `submit_change` forwarding under SASL.
 //
 // With `controller_listener_protocol = SaslPlaintext`, broker 1 elects itself,
 // b1.add_learner + b1.change_membership replicate via the dialer (SASL OK),
-// b2's Broker::start returns when it sees the leader — but b2 then calls
+// b2's Broker::start returns when it sees the leader — and b2 then calls
 // `controller.submit_change(self_reg)` which forwards to the leader via
-// `crabka_raft::controller::forward_submit_to`. That helper opens a raw
-// `TcpStream::connect` and writes `API_KEY_SUBMIT_CHANGE` directly,
-// bypassing the dialer's SASL handshake. b1's inbound `BrokerRaftHandshake`
-// correctly rejects the pre-auth `api_key=1003` and the connection drops.
-// b2's self-reg is logged-and-dropped, so `broker_count()` stays at 1 on
-// both brokers and the test never converges.
-//
-// Fix lives in `crates/raft/src/controller.rs::forward_submit_to`: route
-// through the injected `OutboundDialer` (or a sibling helper that performs
-// the SASL handshake) instead of raw TCP. That change is out of scope for
-// task 9 (test-only); un-`#[ignore]` once it lands.
+// `crabka_raft::controller::forward_submit_to`. T9b routes that helper
+// through the injected `OutboundDialer` so the SASL handshake runs before
+// `API_KEY_SUBMIT_CHANGE` hits the wire, and b1 accepts the registration.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "blocked on forward_submit_to bypass of inter-broker SASL handshake (T6 follow-up)"]
 async fn controller_listener_sasl_plaintext_two_broker_quorum() {
     let (b1, b2, _d1, _d2) = start_two_brokers_with_controller_protocol(
         ListenerProtocol::SaslPlaintext,
