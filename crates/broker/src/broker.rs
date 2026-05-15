@@ -39,6 +39,9 @@ pub struct Broker {
     pub(crate) supervisor_shutdown: tokio_util::sync::CancellationToken,
     pub(crate) supervisor_handle: tokio::sync::Mutex<Option<JoinHandle<()>>>,
     pub(crate) liveness: Arc<crate::heartbeat::controller_state::ControllerLivenessState>,
+    /// `Some` when `BrokerConfig::tls_config` is set. Per-listener accept
+    /// loops clone this and call `accept` for every TLS connection.
+    pub(crate) tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
     handlers: HandlerTable,
 }
 
@@ -374,8 +377,28 @@ impl Broker {
     /// return the handle.
     #[allow(clippy::too_many_lines)] // sequential bring-up; splitting hurts readability more than it helps
     pub async fn start(mut config: BrokerConfig) -> Result<BrokerHandle, BrokerError> {
-        // 0. Validate listener + auth configuration before any side effects.
+        // 0a. Install the rustls crypto provider exactly once per process.
+        //     `rustls 0.23` with `default-features = false` does NOT auto-install
+        //     a provider; without this the `ServerConfig::builder()` call below
+        //     (and any client-side rustls usage) panics at runtime. `.ok()`
+        //     swallows the `AlreadySet` error when a previous broker / test
+        //     in the same process installed it first.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        // 0b. Validate listener + auth configuration before any side effects.
         config.validate()?;
+
+        // 0c. Build the TLS acceptor up front so we can fail fast on bad
+        //     cert / key paths before bringing up any state.
+        let tls_acceptor = match &config.tls_config {
+            Some(tls) => {
+                let server_cfg = tls
+                    .build_server_config()
+                    .map_err(|e| BrokerError::Tls(e.to_string()))?;
+                Some(tokio_rustls::TlsAcceptor::from(server_cfg))
+            }
+            None => None,
+        };
 
         // 1. Bring up the metadata quorum BEFORE the client listener so
         //    handlers can read from it the moment they accept their first
@@ -659,6 +682,7 @@ impl Broker {
             supervisor_shutdown,
             supervisor_handle: tokio::sync::Mutex::new(Some(supervisor_handle)),
             liveness: liveness.clone(),
+            tls_acceptor,
             handlers,
         });
 

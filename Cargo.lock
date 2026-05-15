@@ -715,6 +715,8 @@ dependencies = [
  "crabka-security",
  "dashmap",
  "futures-util",
+ "rustls",
+ "rustls-pemfile",
  "serde",
  "serde-wincode",
  "tempfile",

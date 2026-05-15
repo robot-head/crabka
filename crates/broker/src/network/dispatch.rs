@@ -16,6 +16,7 @@
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use futures_util::{SinkExt, StreamExt};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio_util::codec::Framed;
 
@@ -26,56 +27,79 @@ use crate::network::codec::{self, MAX_FRAME_BYTES};
 
 const API_VERSIONS_KEY: i16 = 18;
 
-/// Per-listener entrypoint. The plaintext path delegates straight to
-/// [`serve_connection_plaintext`]; Task 10 adds the TLS handshake branch
-/// here based on `spec.protocol.requires_tls()`.
+/// Per-listener entrypoint. Branches between TLS termination (when the
+/// listener's protocol requires TLS) and the plaintext path. Both paths
+/// converge on [`serve_connection_stream`] for the per-connection request
+/// loop.
 pub async fn serve_connection_on_listener(
     broker: std::sync::Arc<Broker>,
     stream: TcpStream,
     spec: crate::config::ListenerSpec,
 ) {
-    // Task 10 wraps `stream` in tokio_rustls when spec.protocol.requires_tls().
-    // For now: plaintext path identical to the old `serve_connection`.
-    serve_connection_plaintext(broker, stream, spec).await;
+    if spec.protocol.requires_tls() {
+        let Some(acceptor) = broker.tls_acceptor.clone() else {
+            tracing::error!(
+                listener = %spec.name,
+                "TLS listener configured but broker has no TlsAcceptor"
+            );
+            return;
+        };
+        match acceptor.accept(stream).await {
+            Ok(tls_stream) => serve_connection_stream(broker, tls_stream, spec).await,
+            Err(e) => tracing::debug!(error = %e, "TLS handshake failed"),
+        }
+    } else {
+        serve_connection_plaintext(broker, stream, spec).await;
+    }
 }
 
-/// Run the connection's read/dispatch/write loop until the peer disconnects.
-///
-/// Body is identical to the pre-T9 `serve_connection`; the `_spec` parameter
-/// is unused today and will carry the listener's protocol / name into the
-/// per-connection state added in T12.
+/// Plaintext entry point: keeps the legacy `TcpStream`-typed signature
+/// for call sites (and lets us record the peer's TCP address before we
+/// hand the stream to the generic loop).
 async fn serve_connection_plaintext(
     broker: std::sync::Arc<Broker>,
     stream: TcpStream,
-    _spec: crate::config::ListenerSpec,
+    spec: crate::config::ListenerSpec,
 ) {
-    let peer = stream
-        .peer_addr()
-        .map_or_else(|_| "<unknown>".to_string(), |a| a.to_string());
-    let mut framed: Framed<TcpStream, _> = codec::frame(stream);
-    tracing::info!(%peer, "connection opened");
+    serve_connection_stream(broker, stream, spec).await;
+}
+
+/// Generic per-connection request loop. `S` is the post-handshake byte
+/// stream — `TcpStream` for plaintext listeners, `tokio_rustls::server::TlsStream<TcpStream>`
+/// for TLS listeners. Body is identical to the pre-T9 `serve_connection`;
+/// `_spec` is unused today and will carry the listener's protocol / name
+/// into the per-connection state added in T12.
+async fn serve_connection_stream<S>(
+    broker: std::sync::Arc<Broker>,
+    stream: S,
+    _spec: crate::config::ListenerSpec,
+) where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let mut framed: Framed<S, _> = Framed::new(stream, codec::codec());
+    tracing::info!("connection opened");
 
     while let Some(frame) = framed.next().await {
         let frame = match frame {
             Ok(b) => b,
             Err(e) => {
-                tracing::warn!(%peer, error = %e, "frame decode error, closing");
+                tracing::warn!(error = %e, "frame decode error, closing");
                 break;
             }
         };
         let response_bytes = match dispatch_one(&broker, &frame).await {
             Ok(b) => b,
             Err(e) => {
-                tracing::warn!(%peer, error = %e, "dispatch error, closing connection");
+                tracing::warn!(error = %e, "dispatch error, closing connection");
                 break;
             }
         };
         if let Err(e) = framed.send(response_bytes).await {
-            tracing::warn!(%peer, error = %e, "framed.send error, closing");
+            tracing::warn!(error = %e, "framed.send error, closing");
             break;
         }
     }
-    tracing::info!(%peer, "connection closed");
+    tracing::info!("connection closed");
 }
 
 /// Decode one request from the framed bytes, call the handler, build a

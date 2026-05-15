@@ -28,6 +28,7 @@ crabka-raft = { version = "0.1", path = "../raft" }
 crabka-metadata = { version = "0.1", path = "../metadata" }
 crabka-client-core = { version = "0.1", path = "../client-core" }
 crabka-security.workspace = true
+rustls.workspace = true
 tokio-rustls.workspace = true
 bytes = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
@@ -47,5 +48,8 @@ futures-util = { workspace = true }
 crabka-broker = { version = "0.1", path = ".", features = ["test-helpers"] }
 crabka-client-consumer = { version = "0.1", path = "../client-consumer" }
 crabka-client-producer = { version = "0.1", path = "../client-producer" }
+rustls.workspace = true
+rustls-pemfile.workspace = true
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }
+tokio-rustls.workspace = true
