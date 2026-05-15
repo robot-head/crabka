@@ -231,6 +231,24 @@ async fn serve_connection_stream<S>(
                 }
             }
         }
+        // DeleteAcls (31, slice-13 T9) — same shape as CreateAcls: needs
+        // both the authenticated principal and the peer `SocketAddr` for
+        // host-based ACL matching on the `Alter` cluster gate.
+        if peek_api_key(&frame).ok() == Some(31) {
+            match handle_delete_acls_frame(&broker, &frame, &auth, &peer).await {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during DeleteAcls, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "DeleteAcls dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
         let response_bytes = match dispatch_one(&broker, &frame).await {
             Ok(b) => b,
             Err(e) => {
@@ -478,6 +496,47 @@ async fn handle_create_acls_frame(
 
     let resp_body =
         crate::handlers::create_acls::handle(broker, req, &principal, peer, api_version).await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch a `DeleteAcls` (`api_key` 31) frame. Mirrors
+/// [`handle_create_acls_frame`] — pulls the authenticated principal
+/// off the per-connection `auth` state and the peer `SocketAddr` from
+/// the accept-time capture so the handler can authorize `Alter` on
+/// `Cluster` with host-based ACL matching.
+async fn handle_delete_acls_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    use crabka_protocol::Decode;
+
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 31);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let mut cur: &[u8] = body;
+    let req = crabka_protocol::owned::delete_acls_request::DeleteAclsRequest::decode(
+        &mut cur,
+        api_version,
+    )?;
+
+    let principal = auth
+        .principal()
+        .cloned()
+        .unwrap_or_else(|| crabka_security::Principal {
+            name: "ANONYMOUS".to_string(),
+            mechanism: crabka_security::SaslMechanism::Plain,
+        });
+
+    let resp_body =
+        crate::handlers::delete_acls::handle(broker, req, &principal, peer, api_version).await?;
     Ok(encode_response(
         api_key,
         correlation_id,
