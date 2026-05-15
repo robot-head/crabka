@@ -121,6 +121,11 @@ pub const FENCED_LEADER_EPOCH: i16 = 74;
 /// view. Metadata propagation lag — caller retries after a brief wait.
 pub const UNKNOWN_LEADER_EPOCH: i16 = 75;
 
+// Slice 14 additions — leader election codes.
+pub const PREFERRED_LEADER_NOT_AVAILABLE: i16 = 80;
+pub const ELIGIBLE_LEADERS_NOT_AVAILABLE: i16 = 81;
+pub const ELECTION_NOT_NEEDED: i16 = 84;
+
 /// Map an internal [`crate::error::BrokerError`] to a wire-level code.
 /// Most internal errors map to `UNKNOWN_SERVER_ERROR`; specific variants
 /// pick more meaningful codes.
@@ -147,7 +152,9 @@ pub fn from_broker_error(err: &crate::error::BrokerError) -> i16 {
         | BrokerError::InvalidInterBrokerListener { .. }
         | BrokerError::SaslListenerNoMechanisms { .. }
         | BrokerError::Tls(_)
-        | BrokerError::BootstrapFile { .. } => UNKNOWN_SERVER_ERROR,
+        | BrokerError::BootstrapFile { .. }
+        | BrokerError::InvalidLeaderRebalanceInterval { .. }
+        | BrokerError::InvalidLeaderRebalanceThreshold { .. } => UNKNOWN_SERVER_ERROR,
     }
 }
 
