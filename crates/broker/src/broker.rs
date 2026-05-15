@@ -417,6 +417,35 @@ impl BrokerHandle {
     }
 }
 
+/// Wraps a real [`crabka_raft::ControllerHandle`] so it can satisfy the
+/// [`crate::leader_rebalance::ControllerLike`] trait required by the
+/// auto-rebalance background task.
+struct ControllerAdapter {
+    handle: Arc<crabka_raft::ControllerHandle>,
+    node_id: crabka_raft::NodeId,
+}
+
+#[async_trait::async_trait]
+impl crate::leader_rebalance::ControllerLike for ControllerAdapter {
+    fn is_leader(&self) -> bool {
+        *self.handle.watch_leader().borrow() == Some(self.node_id)
+    }
+
+    fn current_image(&self) -> Arc<crabka_metadata::MetadataImage> {
+        self.handle.current_image()
+    }
+
+    async fn submit_change(
+        &self,
+        records: Vec<crabka_metadata::MetadataRecord>,
+    ) -> Result<(), String> {
+        self.handle
+            .submit_change(records)
+            .await
+            .map_err(|e| e.to_string())
+    }
+}
+
 impl Broker {
     /// Build a `Broker`, scan the log dir, spawn partition writers for
     /// every existing `<topic>-<partition>/`, bind the TCP listener, and
@@ -815,6 +844,32 @@ impl Broker {
                 shutdown: isr_shutdown,
             },
         ));
+
+        // 4g. Auto-rebalance background task (KIP-460). The task itself
+        //     checks is_leader() on every tick so it is safe to run on
+        //     every broker; only the raft leader will actually submit
+        //     partition changes. Child token of supervisor_shutdown.
+        if config.auto_leader_rebalance_enable {
+            let rebalance_cfg = crate::leader_rebalance::AutoRebalanceConfig {
+                check_interval: std::time::Duration::from_secs(
+                    config.leader_imbalance_check_interval_secs,
+                ),
+                imbalance_threshold_pct: config.leader_imbalance_per_broker_percentage,
+            };
+            let adapter: Arc<dyn crate::leader_rebalance::ControllerLike> =
+                Arc::new(ControllerAdapter {
+                    handle: controller.clone(),
+                    node_id: config.node_id,
+                });
+            let rebalance_liveness = liveness.clone();
+            let rebalance_shutdown = supervisor_shutdown.child_token();
+            tokio::spawn(crate::leader_rebalance::run(
+                adapter,
+                rebalance_liveness,
+                rebalance_cfg,
+                rebalance_shutdown,
+            ));
+        }
 
         // 5. Build handler table.
         let handlers = crate::handlers::build_table();
