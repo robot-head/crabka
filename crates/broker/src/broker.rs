@@ -372,6 +372,9 @@ impl Broker {
     /// return the handle.
     #[allow(clippy::too_many_lines)] // sequential bring-up; splitting hurts readability more than it helps
     pub async fn start(mut config: BrokerConfig) -> Result<BrokerHandle, BrokerError> {
+        // 0. Validate listener + auth configuration before any side effects.
+        config.validate()?;
+
         // 1. Bring up the metadata quorum BEFORE the client listener so
         //    handlers can read from it the moment they accept their first
         //    connection. The controller owns its own listener bound to

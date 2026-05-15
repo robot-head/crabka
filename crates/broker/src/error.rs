@@ -113,6 +113,22 @@ pub enum BrokerError {
     /// the wire; specific wire codes are chosen by handlers.
     #[error("transaction: {0}")]
     Txn(String),
+
+    /// Two listeners share the same `bind_addr`.
+    #[error("listener bind conflict: {a} and {b} share bind_addr")]
+    ListenerConflict { a: String, b: String },
+
+    /// `inter_broker_listener_name` does not match any listener name.
+    #[error("inter_broker_listener_name {name} not in listeners list")]
+    InvalidInterBrokerListener { name: String },
+
+    /// A SASL listener is declared but `enabled_sasl_mechanisms` is empty.
+    #[error("SASL listener {name} declared but enabled_sasl_mechanisms is empty")]
+    SaslListenerNoMechanisms { name: String },
+
+    /// TLS configuration error.
+    #[error("tls: {0}")]
+    Tls(String),
 }
 
 #[cfg(test)]
