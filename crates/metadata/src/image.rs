@@ -313,6 +313,7 @@ mod tests {
             host: "h".into(),
             port: 9092,
             rack: None,
+            endpoints: vec![],
         });
         m.apply(&b);
         m.apply(&b);

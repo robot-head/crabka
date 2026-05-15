@@ -27,12 +27,32 @@ pub struct PartitionRecord {
     pub leader_epoch: i32,
 }
 
+/// A single named listener endpoint advertised by a broker. Stored as a
+/// list on [`BrokerRegistrationRecord::endpoints`] so KRaft-style metadata
+/// can advertise per-listener `host:port`/protocol triples to clients on
+/// `Metadata` v9+. Legacy single-listener brokers leave the list empty
+/// and rely on the top-level `host`+`port` fields.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrokerEndpoint {
+    /// Listener name (e.g. `"PLAINTEXT"`, `"SSL"`, `"SASL_SSL"`).
+    pub name: String,
+    pub host: String,
+    pub port: u16,
+    pub protocol: crabka_security::ListenerProtocol,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BrokerRegistrationRecord {
     pub node_id: NodeId,
+    /// Legacy single-listener host, used as inter-broker default and by
+    /// pre-v9 `Metadata` responses. v9+ projects [`Self::endpoints`].
     pub host: String,
     pub port: u16,
     pub rack: Option<String>,
+    /// Per-listener endpoints (slice 12, Task 11). Empty on records
+    /// written before this field was added; populated from
+    /// `BrokerConfig::effective_listeners()` for self-registration.
+    pub endpoints: Vec<BrokerEndpoint>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -120,6 +140,24 @@ mod tests {
             host: "192.168.1.10".into(),
             port: 9092,
             rack: Some("us-east-1a".into()),
+            endpoints: vec![],
+        });
+        assert_eq!(round_trip(&r), r);
+    }
+
+    #[test]
+    fn broker_registration_with_endpoints_round_trip() {
+        let r = MetadataRecord::V1BrokerRegistration(BrokerRegistrationRecord {
+            node_id: 1,
+            host: "h".into(),
+            port: 9092,
+            rack: None,
+            endpoints: vec![BrokerEndpoint {
+                name: "EXTERNAL".into(),
+                host: "ext.example.com".into(),
+                port: 9092,
+                protocol: crabka_security::ListenerProtocol::SaslSsl,
+            }],
         });
         assert_eq!(round_trip(&r), r);
     }

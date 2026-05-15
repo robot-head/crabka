@@ -98,6 +98,23 @@ impl BrokerHandle {
         self._broker.controller.current_image().brokers().count()
     }
 
+    /// This broker's own registration endpoints, as stored in the
+    /// quorum-replicated [`crabka_metadata::MetadataImage`]. Used by
+    /// Task-11 integration tests to verify per-listener endpoints were
+    /// projected from `BrokerConfig::effective_listeners()` onto the
+    /// self-registration record. Returns the cloned endpoint list (or
+    /// empty if the broker has not yet self-registered).
+    #[allow(clippy::unused_async, clippy::used_underscore_binding)]
+    pub async fn self_registration_endpoints(&self) -> Vec<crabka_metadata::BrokerEndpoint> {
+        let node_id = self._broker.config.node_id;
+        self._broker
+            .controller
+            .current_image()
+            .broker(node_id)
+            .map(|b| b.endpoints.clone())
+            .unwrap_or_default()
+    }
+
     /// Manually mutate the openraft voter set on this broker's controller.
     /// `new_voters` is the complete desired set (not a delta). Callers must
     /// invoke this on the broker that's currently the openraft leader, or
@@ -430,6 +447,24 @@ impl Broker {
         //    fails the next caller's request will surface the error and
         //    membership reconciliation can retry later.
         {
+            // Per-listener endpoints (Task 11): every configured listener's
+            // advertised `host:port` + protocol becomes a `BrokerEndpoint`
+            // on the broker's self-registration record. Clients on
+            // `Metadata` v9+ pick the right endpoint for their connection;
+            // legacy callers continue reading the top-level `host`/`port`.
+            let endpoints: Vec<crabka_metadata::BrokerEndpoint> = config
+                .effective_listeners()
+                .iter()
+                .map(|l| {
+                    let (host, port) = parse_advertised_host_port(&l.advertised);
+                    crabka_metadata::BrokerEndpoint {
+                        name: l.name.clone(),
+                        host,
+                        port,
+                        protocol: l.protocol,
+                    }
+                })
+                .collect();
             let self_reg = crabka_metadata::MetadataRecord::V1BrokerRegistration(
                 crabka_metadata::BrokerRegistrationRecord {
                     node_id: config.node_id,
@@ -441,6 +476,7 @@ impl Broker {
                         .to_string(),
                     port: config.listen_addr.port(),
                     rack: None,
+                    endpoints,
                 },
             );
             let mut leader_rx = controller.watch_leader();
@@ -741,6 +777,24 @@ pub(crate) fn spawn_partition(
         current_leader_epoch,
         _writer_handle: Arc::new(writer),
     })
+}
+
+/// Split a `host:port` advertised string. Mirrors the helpers in
+/// `handlers::find_coordinator` / `handlers::metadata` but returns
+/// `(String, u16)` for direct `BrokerEndpoint` use. Splits on the LAST
+/// `:` so IPv6 literals do not break on inner colons (we still expect
+/// IPv6 callers to wrap in `[...]`).
+fn parse_advertised_host_port(addr: &str) -> (String, u16) {
+    if let Some((h, p)) = addr.rsplit_once(':')
+        && let Ok(port) = p.parse::<u16>()
+    {
+        return (h.to_string(), port);
+    }
+    tracing::warn!(
+        addr,
+        "advertised not host:port; falling back to localhost:9092"
+    );
+    ("localhost".into(), 9092)
 }
 
 async fn accept_loop(
