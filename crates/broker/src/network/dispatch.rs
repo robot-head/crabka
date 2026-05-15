@@ -392,6 +392,68 @@ async fn serve_connection_stream<S>(
                 }
             }
         }
+        // DescribeGroups (15, slice-13 T16) needs both the authenticated
+        // principal AND the peer's `SocketAddr` so the handler can
+        // authorize `Describe` per group and emit
+        // GROUP_AUTHORIZATION_FAILED on denied group rows. The
+        // `&Broker`-only handler table signature can't carry that context,
+        // so this api_key intercepts inline.
+        if peek_api_key(&frame).ok() == Some(15) {
+            match handle_describe_groups_frame(&broker, &frame, &auth, &peer).await {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during DescribeGroups, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "DescribeGroups dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
+        // ListGroups (16, slice-13 T16) needs both the authenticated
+        // principal AND the peer's `SocketAddr` so the handler can
+        // silently filter out groups denied `Describe`. The
+        // `&Broker`-only handler table signature can't carry that context,
+        // so this api_key intercepts inline.
+        if peek_api_key(&frame).ok() == Some(16) {
+            match handle_list_groups_frame(&broker, &frame, &auth, &peer).await {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during ListGroups, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "ListGroups dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
+        // DeleteGroups (42, slice-13 T16) needs both the authenticated
+        // principal AND the peer's `SocketAddr` so the handler can
+        // authorize `Delete` per group and emit
+        // GROUP_AUTHORIZATION_FAILED on denied group rows. The
+        // `&Broker`-only handler table signature can't carry that context,
+        // so this api_key intercepts inline.
+        if peek_api_key(&frame).ok() == Some(42) {
+            match handle_delete_groups_frame(&broker, &frame, &auth, &peer).await {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during DeleteGroups, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "DeleteGroups dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
         // DescribeAcls (29, slice-13 T7) needs both the authenticated
         // principal AND the peer's `SocketAddr` for host-based ACL
         // matching; neither is reachable from the `&Broker`-only handler
@@ -1101,6 +1163,126 @@ async fn handle_create_partitions_frame(
         });
 
     let resp_body = crate::handlers::create_partitions::handle(
+        broker,
+        api_version,
+        correlation_id,
+        body,
+        &principal,
+        peer,
+    )
+    .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch a `DescribeGroups` (`api_key` 15) frame. Pulls the
+/// authenticated principal off the per-connection `auth` state and the
+/// peer `SocketAddr` from the accept-time capture so the handler can
+/// authorize `Describe` per group (slice-13 T16). Denied groups receive
+/// `GROUP_AUTHORIZATION_FAILED` on their per-group entry.
+async fn handle_describe_groups_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 15);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let principal = auth
+        .principal()
+        .cloned()
+        .unwrap_or_else(|| crabka_security::Principal {
+            name: "ANONYMOUS".to_string(),
+            mechanism: crabka_security::SaslMechanism::Plain,
+        });
+
+    let resp_body = crate::handlers::describe_groups::handle(
+        broker,
+        api_version,
+        correlation_id,
+        body,
+        &principal,
+        peer,
+    )
+    .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch a `ListGroups` (`api_key` 16) frame. Pulls the
+/// authenticated principal off the per-connection `auth` state and the
+/// peer `SocketAddr` from the accept-time capture so the handler can
+/// silently filter out groups denied `Describe` (slice-13 T16). Denied
+/// groups are omitted from the response without an error code.
+async fn handle_list_groups_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 16);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let principal = auth
+        .principal()
+        .cloned()
+        .unwrap_or_else(|| crabka_security::Principal {
+            name: "ANONYMOUS".to_string(),
+            mechanism: crabka_security::SaslMechanism::Plain,
+        });
+
+    let resp_body = crate::handlers::list_groups::handle(
+        broker,
+        api_version,
+        correlation_id,
+        body,
+        &principal,
+        peer,
+    )
+    .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch a `DeleteGroups` (`api_key` 42) frame. Pulls the
+/// authenticated principal off the per-connection `auth` state and the
+/// peer `SocketAddr` from the accept-time capture so the handler can
+/// authorize `Delete` per group (slice-13 T16). Denied groups receive
+/// `GROUP_AUTHORIZATION_FAILED` on their per-group entry.
+async fn handle_delete_groups_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 42);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let principal = auth
+        .principal()
+        .cloned()
+        .unwrap_or_else(|| crabka_security::Principal {
+            name: "ANONYMOUS".to_string(),
+            mechanism: crabka_security::SaslMechanism::Plain,
+        });
+
+    let resp_body = crate::handlers::delete_groups::handle(
         broker,
         api_version,
         correlation_id,

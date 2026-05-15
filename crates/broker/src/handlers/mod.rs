@@ -108,6 +108,16 @@ pub(crate) fn build_table() -> HandlerTable {
     // CreatePartitions (api_key 37) is intercepted inline in `network::dispatch`
     // (slice-13 T15) so the handler can receive the per-connection
     // principal + peer `SocketAddr` for per-topic Alter ACL enforcement.
+    // DescribeGroups (api_key 15) is intercepted inline in `network::dispatch`
+    // (slice-13 T16) so the handler can receive the per-connection
+    // principal + peer `SocketAddr` for per-group Describe ACL enforcement.
+    // ListGroups (api_key 16) is intercepted inline in `network::dispatch`
+    // (slice-13 T16) so the handler can receive the per-connection
+    // principal + peer `SocketAddr` for per-group Describe ACL enforcement
+    // (silent filter — denied groups are omitted, not error-coded).
+    // DeleteGroups (api_key 42) is intercepted inline in `network::dispatch`
+    // (slice-13 T16) so the handler can receive the per-connection
+    // principal + peer `SocketAddr` for per-group Delete ACL enforcement.
     t.register(2, list_offsets::handle);
     t.register(8, offset_commit::handle);
     t.register(9, offset_fetch::handle);
@@ -116,8 +126,8 @@ pub(crate) fn build_table() -> HandlerTable {
     t.register(12, heartbeat::handle);
     t.register(13, leave_group::handle);
     t.register(14, sync_group::handle);
-    t.register(15, describe_groups::handle);
-    t.register(16, list_groups::handle);
+    // 15 (DescribeGroups) intercepted inline — see comment above.
+    // 16 (ListGroups) intercepted inline — see comment above.
     t.register(18, api_versions::handle);
     // 21 (DeleteRecords) intercepted inline — see comment above.
     t.register(22, init_producer_id::handle);
@@ -130,7 +140,7 @@ pub(crate) fn build_table() -> HandlerTable {
     t.register(32, describe_configs::handle);
     // 33 (AlterConfigs) intercepted inline — see comment above.
     // 37 (CreatePartitions) intercepted inline — see comment above.
-    t.register(42, delete_groups::handle);
+    // 42 (DeleteGroups) intercepted inline — see comment above.
     // 44 (IncrementalAlterConfigs) intercepted inline — see comment above.
     t.register(56, alter_partition::handle);
     t.register(60, describe_cluster::handle);
