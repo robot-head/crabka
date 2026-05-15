@@ -475,6 +475,51 @@ async fn serve_connection_stream<S>(
                 }
             }
         }
+        // OffsetCommit (8, slice-13 T18) needs both the authenticated
+        // principal AND the peer's `SocketAddr` so the handler can
+        // authorize `Read` on `Group(group_id)` (whole-response deny =
+        // GROUP_AUTHORIZATION_FAILED) and then per-topic `Read` (per-partition
+        // deny = TOPIC_AUTHORIZATION_FAILED). The `&Broker`-only handler
+        // table signature can't carry that context, so this api_key
+        // intercepts inline.
+        if peek_api_key(&frame).ok() == Some(8) {
+            match handle_offset_commit_frame(&broker, &frame, &auth, &peer).await {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during OffsetCommit, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "OffsetCommit dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
+        // OffsetFetch (9, slice-13 T18) needs both the authenticated
+        // principal AND the peer's `SocketAddr` so the handler can
+        // authorize `Describe` on `Group(group_id)` (whole-response deny =
+        // GROUP_AUTHORIZATION_FAILED) and then per-topic `Read` (per-topic
+        // deny = TOPIC_AUTHORIZATION_FAILED). The `topics: None` fetch-all
+        // sentinel also applies the per-topic check across committed-offsets
+        // topics. The `&Broker`-only handler table signature can't carry that
+        // context, so this api_key intercepts inline.
+        if peek_api_key(&frame).ok() == Some(9) {
+            match handle_offset_fetch_frame(&broker, &frame, &auth, &peer).await {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during OffsetFetch, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "OffsetFetch dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
         // DescribeAcls (29, slice-13 T7) needs both the authenticated
         // principal AND the peer's `SocketAddr` for host-based ACL
         // matching; neither is reachable from the `&Broker`-only handler
@@ -1344,6 +1389,89 @@ async fn handle_join_group_frame(
         });
 
     let resp_body = crate::handlers::join_group::handle(
+        broker,
+        api_version,
+        correlation_id,
+        body,
+        &principal,
+        peer,
+    )
+    .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch an `OffsetCommit` (`api_key` 8) frame. Pulls the
+/// authenticated principal off the per-connection `auth` state and the
+/// peer `SocketAddr` from the accept-time capture so the handler can
+/// authorize `Read` on `Group(group_id)` (whole-response deny =
+/// `GROUP_AUTHORIZATION_FAILED`) and per-topic `Read` (per-partition deny =
+/// `TOPIC_AUTHORIZATION_FAILED`) (slice-13 T18).
+async fn handle_offset_commit_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 8);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let principal = auth
+        .principal()
+        .cloned()
+        .unwrap_or_else(|| crabka_security::Principal {
+            name: "ANONYMOUS".to_string(),
+            mechanism: crabka_security::SaslMechanism::Plain,
+        });
+
+    let resp_body = crate::handlers::offset_commit::handle(
+        broker,
+        api_version,
+        correlation_id,
+        body,
+        &principal,
+        peer,
+    )
+    .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch an `OffsetFetch` (`api_key` 9) frame. Pulls the
+/// authenticated principal off the per-connection `auth` state and the
+/// peer `SocketAddr` from the accept-time capture so the handler can
+/// authorize `Describe` on `Group(group_id)` (whole-response deny =
+/// `GROUP_AUTHORIZATION_FAILED`) and per-topic `Read` (per-topic deny =
+/// `TOPIC_AUTHORIZATION_FAILED`). The `topics: None` fetch-all sentinel runs
+/// the per-topic check across discovered committed-offsets topics (slice-13 T18).
+async fn handle_offset_fetch_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 9);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let principal = auth
+        .principal()
+        .cloned()
+        .unwrap_or_else(|| crabka_security::Principal {
+            name: "ANONYMOUS".to_string(),
+            mechanism: crabka_security::SaslMechanism::Plain,
+        });
+
+    let resp_body = crate::handlers::offset_fetch::handle(
         broker,
         api_version,
         correlation_id,

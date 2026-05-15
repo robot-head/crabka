@@ -121,9 +121,15 @@ pub(crate) fn build_table() -> HandlerTable {
     // JoinGroup (api_key 11) is intercepted inline in `network::dispatch`
     // (slice-13 T17) so the handler can receive the per-connection
     // principal + peer `SocketAddr` for per-group Read ACL enforcement.
+    // OffsetCommit (api_key 8) is intercepted inline in `network::dispatch`
+    // (slice-13 T18) so the handler can receive the per-connection
+    // principal + peer `SocketAddr` for Group Read + per-topic Read ACL
+    // enforcement.
+    // OffsetFetch (api_key 9) is intercepted inline in `network::dispatch`
+    // (slice-13 T18) so the handler can receive the per-connection
+    // principal + peer `SocketAddr` for Group Describe + per-topic Read ACL
+    // enforcement (including the fetch-all `topics: None` sentinel).
     t.register(2, list_offsets::handle);
-    t.register(8, offset_commit::handle);
-    t.register(9, offset_fetch::handle);
     t.register(10, find_coordinator::handle);
     t.register(12, heartbeat::handle);
     t.register(13, leave_group::handle);
