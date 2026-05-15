@@ -118,10 +118,10 @@ pub(crate) enum ElectionType {
 pub(crate) enum ElectError {
     UnknownTopicOrPartition,
     PreferredAlreadyLeader,
+    ElectionNotNeeded,
     PreferredNotInIsr,
     PreferredNotAlive,
     NoEligibleReplica,
-    NotControllerLeader,
 }
 
 /// Operator-triggered single-partition election. Returns the new
@@ -168,7 +168,7 @@ pub(crate) async fn select_new_leader_for_partition(
             // catastrophic ISR loss, not routine rebalances.
             for &n in &pr.isr {
                 if liveness.is_alive(n).await {
-                    return Err(ElectError::PreferredAlreadyLeader);
+                    return Err(ElectError::ElectionNotNeeded);
                 }
             }
             // Find the first alive replica, in or out of ISR.
@@ -307,7 +307,7 @@ mod tests {
         let err = select_new_leader_for_partition(&img, &l, "foo", 0, ElectionType::Unclean)
             .await
             .unwrap_err();
-        assert_eq!(err, ElectError::PreferredAlreadyLeader);
+        assert_eq!(err, ElectError::ElectionNotNeeded);
     }
 
     #[tokio::test]
