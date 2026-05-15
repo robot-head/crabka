@@ -712,6 +712,7 @@ dependencies = [
  "crabka-metadata",
  "crabka-protocol",
  "crabka-raft",
+ "crabka-security",
  "dashmap",
  "futures-util",
  "serde",
@@ -719,6 +720,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-rustls",
  "tokio-util",
  "tracing",
  "tracing-subscriber",
@@ -828,6 +830,7 @@ name = "crabka-metadata"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "crabka-security",
  "proptest",
  "serde",
  "serde-wincode",

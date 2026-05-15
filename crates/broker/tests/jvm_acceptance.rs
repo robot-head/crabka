@@ -78,6 +78,7 @@ async fn start_host_broker() -> (crabka_broker::BrokerHandle, tempfile::TempDir)
         controller_election_timeout: std::time::Duration::from_secs(5),
         controller_heartbeat_interval: std::time::Duration::from_millis(500),
         bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
+        ..BrokerConfig::default()
     };
     let handle = Broker::start(config).await.expect("start broker");
     eprintln!("CRABKA[test] broker started listen={LISTEN} advertised={BOOTSTRAP}");
@@ -503,6 +504,7 @@ async fn three_node_jvm_round_trip() {
         controller_election_timeout: std::time::Duration::from_secs(5),
         controller_heartbeat_interval: std::time::Duration::from_millis(500),
         bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
+        ..BrokerConfig::default()
     };
     let broker0 = Broker::start(cfg0).await.expect("broker start");
 
@@ -529,6 +531,7 @@ async fn three_node_jvm_round_trip() {
             controller_election_timeout: std::time::Duration::from_secs(5),
             controller_heartbeat_interval: std::time::Duration::from_millis(500),
             bootstrap_mode: crabka_broker::BootstrapMode::Join,
+            ..BrokerConfig::default()
         };
         tempdirs.push(dir);
         join_spawns.push(tokio::spawn(async move {
@@ -785,6 +788,7 @@ async fn three_node_replication_byte_compare() {
         controller_election_timeout: std::time::Duration::from_secs(5),
         controller_heartbeat_interval: std::time::Duration::from_millis(500),
         bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
+        ..BrokerConfig::default()
     };
     let broker0 = Broker::start(cfg0).await.expect("broker start");
 
@@ -811,6 +815,7 @@ async fn three_node_replication_byte_compare() {
             controller_election_timeout: std::time::Duration::from_secs(5),
             controller_heartbeat_interval: std::time::Duration::from_millis(500),
             bootstrap_mode: crabka_broker::BootstrapMode::Join,
+            ..BrokerConfig::default()
         };
         tempdirs.push(dir);
         join_spawns.push(tokio::spawn(async move {
@@ -1072,6 +1077,7 @@ async fn transactional_console_producer_eos() {
             } else {
                 crabka_broker::BootstrapMode::Join
             },
+            ..BrokerConfig::default()
         };
         tempdirs.push(dir);
         spawns.push(tokio::spawn(async move {
@@ -1235,6 +1241,7 @@ async fn acks_all_durability() {
         controller_election_timeout: std::time::Duration::from_secs(5),
         controller_heartbeat_interval: std::time::Duration::from_millis(500),
         bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
+        ..crabka_broker::BrokerConfig::default()
     };
     let broker0 = crabka_broker::Broker::start(cfg0)
         .await
@@ -1259,6 +1266,7 @@ async fn acks_all_durability() {
             controller_election_timeout: std::time::Duration::from_secs(5),
             controller_heartbeat_interval: std::time::Duration::from_millis(500),
             bootstrap_mode: crabka_broker::BootstrapMode::Join,
+            ..crabka_broker::BrokerConfig::default()
         };
         tempdirs.push(dir);
         join_spawns.push(tokio::spawn(async move {
@@ -1436,6 +1444,7 @@ async fn acks_all_survives_leader_crash() {
         controller_election_timeout: std::time::Duration::from_millis(500),
         controller_heartbeat_interval: std::time::Duration::from_millis(100),
         bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
+        ..crabka_broker::BrokerConfig::default()
     };
     let broker0 = crabka_broker::Broker::start(cfg0)
         .await
@@ -1460,6 +1469,7 @@ async fn acks_all_survives_leader_crash() {
             controller_election_timeout: std::time::Duration::from_millis(500),
             controller_heartbeat_interval: std::time::Duration::from_millis(100),
             bootstrap_mode: crabka_broker::BootstrapMode::Join,
+            ..crabka_broker::BrokerConfig::default()
         };
         tempdirs.push(dir);
         join_spawns.push(tokio::spawn(async move {

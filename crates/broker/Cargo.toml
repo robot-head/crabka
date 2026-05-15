@@ -27,6 +27,8 @@ crabka-log = { version = "0.1", path = "../log" }
 crabka-raft = { version = "0.1", path = "../raft" }
 crabka-metadata = { version = "0.1", path = "../metadata" }
 crabka-client-core = { version = "0.1", path = "../client-core" }
+crabka-security.workspace = true
+tokio-rustls.workspace = true
 bytes = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde-wincode = { workspace = true }
