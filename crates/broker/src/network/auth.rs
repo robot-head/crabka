@@ -12,6 +12,13 @@
 // the surface in one place so those tasks add no churn here.
 #![allow(dead_code)]
 
+use std::collections::HashMap;
+use std::hash::BuildHasher;
+
+use crabka_protocol::owned::sasl_authenticate_request::SaslAuthenticateRequest;
+use crabka_protocol::owned::sasl_authenticate_response::SaslAuthenticateResponse;
+use crabka_protocol::owned::sasl_handshake_request::SaslHandshakeRequest;
+use crabka_protocol::owned::sasl_handshake_response::SaslHandshakeResponse;
 use crabka_security::{Principal, SaslMechanism, ScramServerExchange};
 
 /// Per-connection SASL state. Transitions:
@@ -74,6 +81,124 @@ impl ConnectionAuth {
 #[must_use]
 pub fn is_pre_auth_allowed(api_key: i16) -> bool {
     matches!(api_key, 17 | 36 | 18)
+}
+
+/// `UNSUPPORTED_SASL_MECHANISM` (33) — peer requested a mechanism the broker
+/// does not advertise. The connection stays open per Kafka behaviour so the
+/// client can retry with a supported mechanism from the returned list.
+const UNSUPPORTED_SASL_MECHANISM: i16 = 33;
+
+/// `SASL_AUTHENTICATION_FAILED` (58) — credential check rejected by the
+/// broker. The caller closes the connection after writing the response.
+const SASL_AUTHENTICATION_FAILED: i16 = 58;
+
+/// Handles `SaslHandshake` (`api_key` 17).
+///
+/// On a mechanism the broker advertises, transitions `auth` to
+/// `Negotiating` and returns a success response carrying the enabled list.
+/// On any unknown / disabled mechanism returns
+/// [`UNSUPPORTED_SASL_MECHANISM`] (33) with the enabled list; the connection
+/// stays open so the client can retry with a supported mechanism.
+pub fn handle_handshake(
+    req: &SaslHandshakeRequest,
+    auth: &mut ConnectionAuth,
+    enabled: &[SaslMechanism],
+) -> SaslHandshakeResponse {
+    let enabled_names: Vec<String> = enabled.iter().map(|m| m.wire_name().to_string()).collect();
+    let requested = SaslMechanism::from_wire(&req.mechanism);
+    match requested {
+        Some(m) if enabled.contains(&m) => {
+            let exchange = match m {
+                SaslMechanism::Plain => SaslExchange::Plain,
+                // SCRAM exchange is built lazily on the first SaslAuthenticate
+                // round (T14), once the username is known. Until then we sit
+                // in `ScramPending`.
+                SaslMechanism::ScramSha512 => SaslExchange::ScramPending,
+            };
+            *auth = ConnectionAuth::Negotiating {
+                mechanism: m,
+                exchange,
+            };
+            SaslHandshakeResponse {
+                error_code: 0,
+                mechanisms: enabled_names,
+                ..Default::default()
+            }
+        }
+        _ => {
+            tracing::debug!(
+                requested = %req.mechanism,
+                "SaslHandshake: unsupported mechanism"
+            );
+            SaslHandshakeResponse {
+                error_code: UNSUPPORTED_SASL_MECHANISM,
+                mechanisms: enabled_names,
+                ..Default::default()
+            }
+        }
+    }
+}
+
+/// Handles `SaslAuthenticate` (`api_key` 36) for the PLAIN mechanism.
+///
+/// On wire format: `auth_bytes` carries `\0<authzid>\0<authcid>\0<password>`.
+/// `authzid` is ignored (RFC 4616 leaves it free-form and Kafka clients
+/// typically send it empty); the username is `authcid`.
+///
+/// On a credential match this transitions `auth` to
+/// [`ConnectionAuth::Authenticated`]. The caller closes the connection if
+/// the returned `error_code` is non-zero.
+pub fn handle_authenticate_plain<S: BuildHasher>(
+    req: &SaslAuthenticateRequest,
+    auth: &mut ConnectionAuth,
+    plain_credentials: &HashMap<String, String, S>,
+) -> SaslAuthenticateResponse {
+    let parts: Vec<&[u8]> = req.auth_bytes.split(|&b| b == 0).collect();
+    if parts.len() != 3 {
+        return fail_authenticate("malformed PLAIN payload");
+    }
+    let Ok(user) = std::str::from_utf8(parts[1]) else {
+        return fail_authenticate("non-utf8 username");
+    };
+    let password = parts[2];
+    match crabka_security::verify_plain(plain_credentials, user, password) {
+        Ok(p) => {
+            *auth = ConnectionAuth::Authenticated { principal: p };
+            SaslAuthenticateResponse {
+                error_code: 0,
+                error_message: None,
+                auth_bytes: bytes::Bytes::new(),
+                session_lifetime_ms: 0,
+                ..Default::default()
+            }
+        }
+        Err(_) => fail_authenticate("authentication failed"),
+    }
+}
+
+/// SCRAM-SHA-512 stub. The real state machine lands in T14; until then any
+/// SCRAM `SaslAuthenticate` round responds with a failure so the connection
+/// is closed deterministically and the client surfaces an auth error.
+pub fn handle_authenticate_scram(
+    _req: &SaslAuthenticateRequest,
+    _auth: &mut ConnectionAuth,
+    _broker: &crate::broker::Broker,
+) -> SaslAuthenticateResponse {
+    fail_authenticate("SCRAM not yet implemented")
+}
+
+/// Build a [`SASL_AUTHENTICATION_FAILED`] response. `reason` is logged at
+/// `debug` (never returned over the wire — auth failures are intentionally
+/// opaque so attackers can't distinguish "no such user" from "bad password").
+fn fail_authenticate(reason: &str) -> SaslAuthenticateResponse {
+    tracing::debug!(reason, "SASL authenticate failed");
+    SaslAuthenticateResponse {
+        error_code: SASL_AUTHENTICATION_FAILED,
+        error_message: Some("authentication failed".to_string()),
+        auth_bytes: bytes::Bytes::new(),
+        session_lifetime_ms: 0,
+        ..Default::default()
+    }
 }
 
 #[cfg(test)]

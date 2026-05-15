@@ -8,13 +8,26 @@
 //! this file with SASL/PLAIN, SASL/SCRAM, and `AlterUserScramCredentials`
 //! cases.
 
+use std::io;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
+use bytes::{Buf, BufMut, BytesMut};
 use crabka_broker::config::ListenerSpec;
 use crabka_broker::{Broker, BrokerConfig};
 use crabka_client_core::Client;
+use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
+use crabka_protocol::owned::api_versions_response::ApiVersionsResponse;
 use crabka_protocol::owned::metadata_request::MetadataRequest;
-use crabka_security::{ListenerProtocol, TlsConfig};
+use crabka_protocol::owned::metadata_response::MetadataResponse;
+use crabka_protocol::owned::sasl_authenticate_request::SaslAuthenticateRequest;
+use crabka_protocol::owned::sasl_authenticate_response::SaslAuthenticateResponse;
+use crabka_protocol::owned::sasl_handshake_request::SaslHandshakeRequest;
+use crabka_protocol::owned::sasl_handshake_response::SaslHandshakeResponse;
+use crabka_protocol::{Decode, Encode};
+use crabka_security::{ListenerProtocol, SaslMechanism, TlsConfig};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 use tokio_rustls::rustls::client::danger::{
     HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
@@ -273,4 +286,216 @@ async fn metadata_response_carries_listener_endpoints() {
     );
 
     handle.shutdown().await;
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Task 13: SASL/PLAIN end-to-end.
+// ────────────────────────────────────────────────────────────────────────
+
+/// Happy-path drive of a SASL/PLAIN session: `ApiVersions` → `SaslHandshake`
+/// → `SaslAuthenticate` → Metadata. Asserts the connection survives every step
+/// and the final Metadata response carries this broker. The dial-side runs
+/// raw bytes against `TcpStream` rather than `Client` because `Client`
+/// doesn't (yet) speak SASL — that's task 16.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sasl_plain_happy_path() {
+    let log_dir = tempfile::tempdir().unwrap();
+    let mut cfg = BrokerConfig::for_tests(log_dir.path().to_path_buf());
+    cfg.listeners = vec![ListenerSpec {
+        name: "SASL_PLAINTEXT".to_string(),
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        advertised: "127.0.0.1:0".to_string(),
+        protocol: ListenerProtocol::SaslPlaintext,
+    }];
+    cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
+    cfg.enabled_sasl_mechanisms = vec![SaslMechanism::Plain];
+    cfg.plain_credentials
+        .insert("alice".to_string(), "wonderland".to_string());
+
+    let handle = Broker::start(cfg).await.expect("broker must start");
+    let addr = handle.listen_addr();
+    let result = drive_sasl_plain_session(addr, "alice", b"wonderland").await;
+    handle.shutdown().await;
+    result.expect("SASL/PLAIN session must succeed end-to-end");
+}
+
+/// Negative path: wrong password ⇒ `SaslAuthenticate` responds with
+/// `error_code = SASL_AUTHENTICATION_FAILED` (58) and the broker closes
+/// the connection. `drive_sasl_plain_session` surfaces the failure as an
+/// `Err` either when the auth response's `error_code` is non-zero, or when
+/// the subsequent Metadata read returns EOF (connection closed by peer).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sasl_plain_wrong_password_closes_connection() {
+    let log_dir = tempfile::tempdir().unwrap();
+    let mut cfg = BrokerConfig::for_tests(log_dir.path().to_path_buf());
+    cfg.listeners = vec![ListenerSpec {
+        name: "SASL_PLAINTEXT".to_string(),
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        advertised: "127.0.0.1:0".to_string(),
+        protocol: ListenerProtocol::SaslPlaintext,
+    }];
+    cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
+    cfg.enabled_sasl_mechanisms = vec![SaslMechanism::Plain];
+    cfg.plain_credentials
+        .insert("alice".to_string(), "wonderland".to_string());
+
+    let handle = Broker::start(cfg).await.expect("broker must start");
+    let addr = handle.listen_addr();
+    let result = drive_sasl_plain_session(addr, "alice", b"hunter2").await;
+    handle.shutdown().await;
+    assert!(
+        result.is_err(),
+        "wrong password must fail the SASL session: {result:?}"
+    );
+}
+
+/// Drive a complete SASL/PLAIN session against a `SASL_PLAINTEXT` listener.
+///
+/// On success, returns `Ok(())` after a successful post-auth Metadata
+/// round-trip. Returns `Err` when any step (frame I/O, response decode,
+/// non-zero error code on a SASL response, EOF before Metadata) fails.
+///
+/// Wire-protocol mechanics this helper handles inline (no `Client` API):
+/// - Request headers: v1 (non-flexible) for `ApiVersions v0`, `SaslHandshake v1`;
+///   v2 (flexible, trailing `0x00` tagged-fields byte) for `SaslAuthenticate v2`
+///   and `Metadata v12`.
+/// - Response headers: always v0 (just `correlation_id`) for `ApiVersions`
+///   regardless of body flexibility, v1 (`corr_id` + `0x00` tagged byte) for
+///   every other flexible response, v0 for non-flexible.
+/// - Length framing: 4-byte big-endian length prefix on every frame in
+///   both directions, matching `crabka_broker::network::codec`.
+async fn drive_sasl_plain_session(
+    addr: SocketAddr,
+    user: &str,
+    password: &[u8],
+) -> Result<(), io::Error> {
+    let mut stream = TcpStream::connect(addr).await?;
+
+    // ── 1. ApiVersions (v0, non-flexible): proves the pre-auth allowlist
+    //    lets us talk to the broker before authentication. We decode the
+    //    response and ignore the contents — its presence is enough.
+    let av_req = ApiVersionsRequest::default();
+    let mut av_body = BytesMut::new();
+    av_req
+        .encode(&mut av_body, 0)
+        .map_err(|e| io::Error::other(format!("ApiVersions encode: {e}")))?;
+    let av_resp_bytes = round_trip(&mut stream, 18, 0, 1, false, &av_body).await?;
+    let mut cur: &[u8] = &av_resp_bytes;
+    let _av_resp = ApiVersionsResponse::decode(&mut cur, 0)
+        .map_err(|e| io::Error::other(format!("ApiVersions decode: {e}")))?;
+
+    // ── 2. SaslHandshake v1 (non-flexible, mechanism="PLAIN").
+    let mut sh_body = BytesMut::new();
+    let sh_req = SaslHandshakeRequest {
+        mechanism: "PLAIN".to_string(),
+        ..Default::default()
+    };
+    sh_req
+        .encode(&mut sh_body, 1)
+        .map_err(|e| io::Error::other(format!("SaslHandshake encode: {e}")))?;
+    let sh_resp_bytes = round_trip(&mut stream, 17, 1, 2, false, &sh_body).await?;
+    let mut cur: &[u8] = &sh_resp_bytes;
+    let sh_resp = SaslHandshakeResponse::decode(&mut cur, 1)
+        .map_err(|e| io::Error::other(format!("SaslHandshake decode: {e}")))?;
+    if sh_resp.error_code != 0 {
+        return Err(io::Error::other(format!(
+            "SaslHandshake failed: error_code={}",
+            sh_resp.error_code
+        )));
+    }
+
+    // ── 3. SaslAuthenticate v2 (flexible). auth_bytes = \0user\0password.
+    let mut payload = Vec::with_capacity(2 + user.len() + password.len());
+    payload.push(0); // authzid (empty)
+    payload.extend_from_slice(user.as_bytes());
+    payload.push(0);
+    payload.extend_from_slice(password);
+    let auth_req = SaslAuthenticateRequest {
+        auth_bytes: bytes::Bytes::from(payload),
+        ..Default::default()
+    };
+    let mut auth_body = BytesMut::new();
+    auth_req
+        .encode(&mut auth_body, 2)
+        .map_err(|e| io::Error::other(format!("SaslAuthenticate encode: {e}")))?;
+    let auth_resp_bytes = round_trip(&mut stream, 36, 2, 3, true, &auth_body).await?;
+    let mut cur: &[u8] = &auth_resp_bytes;
+    let auth_resp = SaslAuthenticateResponse::decode(&mut cur, 2)
+        .map_err(|e| io::Error::other(format!("SaslAuthenticate decode: {e}")))?;
+    if auth_resp.error_code != 0 {
+        return Err(io::Error::other(format!(
+            "SaslAuthenticate failed: error_code={} error_message={:?}",
+            auth_resp.error_code, auth_resp.error_message
+        )));
+    }
+
+    // ── 4. Post-auth Metadata round-trip proves the connection survived
+    //    and the data plane is reachable.
+    let md_req = MetadataRequest::default();
+    let mut md_body = BytesMut::new();
+    md_req
+        .encode(&mut md_body, 12)
+        .map_err(|e| io::Error::other(format!("Metadata encode: {e}")))?;
+    let md_resp_bytes = round_trip(&mut stream, 3, 12, 4, true, &md_body).await?;
+    let mut cur: &[u8] = &md_resp_bytes;
+    let md_resp = MetadataResponse::decode(&mut cur, 12)
+        .map_err(|e| io::Error::other(format!("Metadata decode: {e}")))?;
+    if md_resp.brokers.is_empty() {
+        return Err(io::Error::other("Metadata response carried no brokers"));
+    }
+
+    Ok(())
+}
+
+/// Encode a `RequestHeader v1` (or v2 when `flexible`), append the body,
+/// write the length-prefixed frame, then read one response frame and
+/// strip the `ResponseHeader` (always v0 for ApiVersions(18), otherwise
+/// v0 if non-flexible / v1 if flexible). Returns the response body bytes.
+async fn round_trip(
+    stream: &mut TcpStream,
+    api_key: i16,
+    api_version: i16,
+    corr_id: i32,
+    flexible: bool,
+    body: &[u8],
+) -> Result<Vec<u8>, io::Error> {
+    let mut frame = BytesMut::with_capacity(16 + body.len());
+    // RequestHeader: api_key + version + corr_id + client_id (i16 NULLABLE_STRING).
+    frame.put_i16(api_key);
+    frame.put_i16(api_version);
+    frame.put_i32(corr_id);
+    let client_id = "crabka-sasl-test";
+    frame.put_i16(i16::try_from(client_id.len()).expect("client_id fits in i16"));
+    frame.put_slice(client_id.as_bytes());
+    if flexible {
+        frame.put_u8(0); // empty header tagged-fields
+    }
+    frame.put_slice(body);
+
+    // Length-prefixed write.
+    stream
+        .write_u32(u32::try_from(frame.len()).expect("frame size fits in u32"))
+        .await?;
+    stream.write_all(&frame).await?;
+    stream.flush().await?;
+
+    // Read length prefix then exactly that many bytes.
+    let resp_len = stream.read_u32().await?;
+    let mut resp = vec![0u8; resp_len as usize];
+    stream.read_exact(&mut resp).await?;
+
+    // Strip ResponseHeader: 4-byte corr_id, plus 1-byte tagged-fields for
+    // v1 (flexible body AND api_key != 18).
+    let mut cur = &resp[..];
+    let _resp_corr_id = cur.get_i32();
+    let uses_v1_header = flexible && api_key != 18;
+    if uses_v1_header {
+        if cur.is_empty() {
+            return Err(io::Error::other(
+                "flexible response missing tagged-fields byte",
+            ));
+        }
+        let _tagged = cur.get_u8();
+    }
+    Ok(cur.to_vec())
 }

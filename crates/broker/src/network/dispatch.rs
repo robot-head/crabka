@@ -134,6 +134,32 @@ async fn serve_connection_stream<S>(
                 }
             }
         }
+        // SASL frames (api_key 17 / 36) mutate the per-connection auth state,
+        // which lives in this loop. They run *before* the regular handler
+        // table because handlers receive only `&Broker` and have no way to
+        // touch `auth`. Returning `Some(SaslFrameOutcome)` short-circuits
+        // the normal dispatch_one() path for that frame.
+        if let Some(outcome) = try_handle_sasl_frame(&broker, &frame, &mut auth) {
+            let SaslFrameOutcome {
+                response_bytes,
+                close_after,
+            } = match outcome {
+                Ok(o) => o,
+                Err(e) => {
+                    tracing::warn!(error = %e, "SASL dispatch error, closing connection");
+                    break;
+                }
+            };
+            if let Err(e) = framed.send(response_bytes).await {
+                tracing::warn!(error = %e, "framed.send error during SASL, closing");
+                break;
+            }
+            if close_after {
+                tracing::info!("closing connection after failed SaslAuthenticate");
+                break;
+            }
+            continue;
+        }
         let response_bytes = match dispatch_one(&broker, &frame).await {
             Ok(b) => b,
             Err(e) => {
@@ -146,11 +172,115 @@ async fn serve_connection_stream<S>(
             break;
         }
     }
-    // Suppress unused-warning on `auth` until T13/T14 mutate it via the
-    // SASL handlers; reading it through the gate above only uses
-    // `is_authenticated`.
-    let _ = &auth;
     tracing::info!("connection closed");
+}
+
+/// Outcome of intercepting a SASL frame: the bytes to write back to the
+/// peer and whether the dispatcher should close the connection after the
+/// send completes (used for `SaslAuthenticate` failures + illegal state).
+struct SaslFrameOutcome {
+    response_bytes: Bytes,
+    close_after: bool,
+}
+
+/// If `frame` is a `SaslHandshake` (17) or `SaslAuthenticate` (36) request,
+/// handle it inline (mutating `auth`) and return a [`SaslFrameOutcome`].
+/// Returns `None` for every other `api_key` — the caller falls through to the
+/// regular handler-table dispatch in [`dispatch_one`].
+///
+/// Errors here close the connection (protocol violations, e.g. an
+/// undecodable header).
+fn try_handle_sasl_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &mut crate::network::auth::ConnectionAuth,
+) -> Option<Result<SaslFrameOutcome, BrokerError>> {
+    let api_key = peek_api_key(frame).ok()?;
+    if api_key != 17 && api_key != 36 {
+        return None;
+    }
+    Some(handle_sasl_frame(broker, frame, auth, api_key))
+}
+
+fn handle_sasl_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &mut crate::network::auth::ConnectionAuth,
+    api_key: i16,
+) -> Result<SaslFrameOutcome, BrokerError> {
+    use crabka_protocol::{Decode, Encode};
+
+    let (parsed_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(parsed_key, api_key);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let (resp_body, close_after) = match api_key {
+        17 => {
+            let mut cur: &[u8] = body;
+            let req = crabka_protocol::owned::sasl_handshake_request::SaslHandshakeRequest::decode(
+                &mut cur,
+                api_version,
+            )?;
+            let resp = crate::network::auth::handle_handshake(
+                &req,
+                auth,
+                &broker.config.enabled_sasl_mechanisms,
+            );
+            let mut buf = BytesMut::with_capacity(resp.encoded_len(api_version));
+            resp.encode(&mut buf, api_version)?;
+            (buf.freeze(), false)
+        }
+        36 => {
+            let mut cur: &[u8] = body;
+            let req =
+                crabka_protocol::owned::sasl_authenticate_request::SaslAuthenticateRequest::decode(
+                    &mut cur,
+                    api_version,
+                )?;
+            // Must be in `Negotiating` state (i.e. SaslHandshake was the
+            // previous frame). Otherwise return ILLEGAL_SASL_STATE (34) and
+            // close.
+            let mech_opt = match auth {
+                crate::network::auth::ConnectionAuth::Negotiating { mechanism, .. } => {
+                    Some(*mechanism)
+                }
+                _ => None,
+            };
+            let resp = if let Some(mech) = mech_opt {
+                match mech {
+                    crabka_security::SaslMechanism::Plain => {
+                        crate::network::auth::handle_authenticate_plain(
+                            &req,
+                            auth,
+                            &broker.config.plain_credentials,
+                        )
+                    }
+                    crabka_security::SaslMechanism::ScramSha512 => {
+                        crate::network::auth::handle_authenticate_scram(&req, auth, broker)
+                    }
+                }
+            } else {
+                crabka_protocol::owned::sasl_authenticate_response::SaslAuthenticateResponse {
+                    error_code: codes::ILLEGAL_SASL_STATE,
+                    error_message: Some("SaslAuthenticate without prior SaslHandshake".into()),
+                    auth_bytes: Bytes::new(),
+                    session_lifetime_ms: 0,
+                    ..Default::default()
+                }
+            };
+            let close = resp.error_code != 0;
+            let mut buf = BytesMut::with_capacity(resp.encoded_len(api_version));
+            resp.encode(&mut buf, api_version)?;
+            (buf.freeze(), close)
+        }
+        _ => unreachable!("filtered by caller to 17 / 36 only"),
+    };
+
+    let response_bytes = encode_response(api_key, correlation_id, body_flexible, &resp_body);
+    Ok(SaslFrameOutcome {
+        response_bytes,
+        close_after,
+    })
 }
 
 /// Read just the `api_key` (first 2 bytes) of a request frame without
@@ -294,6 +424,9 @@ fn handler_body_flexible(api_key: i16, version: i16) -> bool {
         14 => version >= owned::sync_group_request::FLEXIBLE_MIN,
         15 => version >= owned::describe_groups_request::FLEXIBLE_MIN,
         16 => version >= owned::list_groups_request::FLEXIBLE_MIN,
+        // SaslHandshake (17) is permanently non-flexible (its
+        // `FLEXIBLE_MIN` is `i16::MAX` in the upstream schema); covered
+        // by the `_ => false` arm below.
         18 => version >= owned::api_versions_request::FLEXIBLE_MIN,
         19 => version >= owned::create_topics_request::FLEXIBLE_MIN,
         20 => version >= owned::delete_topics_request::FLEXIBLE_MIN,
@@ -307,6 +440,7 @@ fn handler_body_flexible(api_key: i16, version: i16) -> bool {
         28 => version >= owned::txn_offset_commit_request::FLEXIBLE_MIN,
         32 => version >= owned::describe_configs_request::FLEXIBLE_MIN,
         33 => version >= owned::alter_configs_request::FLEXIBLE_MIN,
+        36 => version >= owned::sasl_authenticate_request::FLEXIBLE_MIN,
         37 => version >= owned::create_partitions_request::FLEXIBLE_MIN,
         42 => version >= owned::delete_groups_request::FLEXIBLE_MIN,
         44 => version >= owned::incremental_alter_configs_request::FLEXIBLE_MIN,
