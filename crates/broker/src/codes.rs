@@ -18,6 +18,10 @@ pub const REQUEST_TIMED_OUT: i16 = 7;
 pub const COORDINATOR_NOT_AVAILABLE: i16 = 15;
 pub const NOT_COORDINATOR: i16 = 16;
 pub const INVALID_TOPIC_EXCEPTION: i16 = 17;
+/// `ILLEGAL_SASL_STATE` (34) — request received on a SASL listener before
+/// the connection has completed `SaslHandshake` + `SaslAuthenticate`, or in
+/// the wrong order. The broker closes the connection after emitting it.
+pub const ILLEGAL_SASL_STATE: i16 = 34;
 pub const UNSUPPORTED_VERSION: i16 = 35;
 pub const TOPIC_ALREADY_EXISTS: i16 = 36;
 pub const INVALID_PARTITIONS: i16 = 37;

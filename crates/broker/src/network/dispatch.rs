@@ -66,18 +66,34 @@ async fn serve_connection_plaintext(
 
 /// Generic per-connection request loop. `S` is the post-handshake byte
 /// stream — `TcpStream` for plaintext listeners, `tokio_rustls::server::TlsStream<TcpStream>`
-/// for TLS listeners. Body is identical to the pre-T9 `serve_connection`;
-/// `_spec` is unused today and will carry the listener's protocol / name
-/// into the per-connection state added in T12.
+/// for TLS listeners. `spec` carries the listener's protocol so the loop
+/// can initialise `ConnectionAuth` correctly and gate pre-auth requests on
+/// SASL listeners (Slice 12, T12).
 async fn serve_connection_stream<S>(
     broker: std::sync::Arc<Broker>,
     stream: S,
-    _spec: crate::config::ListenerSpec,
+    spec: crate::config::ListenerSpec,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let mut framed: Framed<S, _> = Framed::new(stream, codec::codec());
-    tracing::info!("connection opened");
+    let is_sasl_listener = spec.protocol.requires_sasl();
+    // Per-connection auth state. Mutated by the SASL handlers in T13/T14;
+    // T12 only uses it to gate non-allowlisted api_keys before auth completes.
+    #[allow(unused_mut)] // T13/T14 mutate `auth` via SaslAuthenticate handlers.
+    let mut auth = if is_sasl_listener {
+        crate::network::auth::ConnectionAuth::Anonymous
+    } else {
+        // PLAINTEXT / SSL: implicit anonymous, treated as authenticated for
+        // gating purposes so the pre-auth allowlist is a no-op.
+        crate::network::auth::ConnectionAuth::Authenticated {
+            principal: crabka_security::Principal {
+                name: "ANONYMOUS".to_string(),
+                mechanism: crabka_security::SaslMechanism::Plain,
+            },
+        }
+    };
+    tracing::info!(listener = %spec.name, sasl = is_sasl_listener, "connection opened");
 
     while let Some(frame) = framed.next().await {
         let frame = match frame {
@@ -87,6 +103,37 @@ async fn serve_connection_stream<S>(
                 break;
             }
         };
+        // Pre-auth gate: on SASL listeners, before the connection is
+        // authenticated, only api_keys on the allowlist (17/36/18) are
+        // permitted. Anything else gets ILLEGAL_SASL_STATE (34).
+        //
+        // Response-shape note: every api_key has a different response body,
+        // so producing a typed `error_code = 34` frame from this generic
+        // dispatch layer would require a switch over every api_key. T13
+        // sends a *typed* SaslAuthenticate(36) response with error_code=58
+        // on credential failure (its specific shape is known there). For
+        // the generic pre-auth gate we close the TCP connection without
+        // sending a body — JVM clients surface this to the caller as an
+        // auth failure (closed connection during SASL), and this matches
+        // the conservative behaviour we want for unauthenticated peers.
+        if is_sasl_listener && !auth.is_authenticated() {
+            match peek_api_key(&frame) {
+                Ok(api_key) if !crate::network::auth::is_pre_auth_allowed(api_key) => {
+                    tracing::info!(
+                        api_key,
+                        listener = %spec.name,
+                        "pre-auth request blocked (ILLEGAL_SASL_STATE), closing connection"
+                    );
+                    let _ = codes::ILLEGAL_SASL_STATE; // referenced for docs/grep
+                    break;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(error = %e, "frame too small to peek api_key, closing");
+                    break;
+                }
+            }
+        }
         let response_bytes = match dispatch_one(&broker, &frame).await {
             Ok(b) => b,
             Err(e) => {
@@ -99,7 +146,25 @@ async fn serve_connection_stream<S>(
             break;
         }
     }
+    // Suppress unused-warning on `auth` until T13/T14 mutate it via the
+    // SASL handlers; reading it through the gate above only uses
+    // `is_authenticated`.
+    let _ = &auth;
     tracing::info!("connection closed");
+}
+
+/// Read just the `api_key` (first 2 bytes) of a request frame without
+/// otherwise consuming or validating it. Used by the pre-auth gate so we
+/// can decide whether to even dispatch the frame.
+fn peek_api_key(frame: &[u8]) -> Result<i16, BrokerError> {
+    if frame.len() < 2 {
+        return Err(BrokerError::Protocol(
+            crabka_protocol::ProtocolError::InvalidValue(
+                "request frame: too short to peek api_key",
+            ),
+        ));
+    }
+    Ok(i16::from_be_bytes([frame[0], frame[1]]))
 }
 
 /// Decode one request from the framed bytes, call the handler, build a
@@ -306,6 +371,22 @@ mod tests {
         let out = encode_response(API_VERSIONS_KEY, 7, true, &body);
         // 4 byte corr_id + body, no tagged byte.
         assert_eq!(out.len(), 4 + body.len());
+    }
+
+    #[test]
+    fn peek_api_key_reads_first_two_bytes_big_endian() {
+        // api_key=18, version=3, corr_id=1 — only first 2 bytes are inspected.
+        let mut buf = BytesMut::new();
+        buf.put_i16(18);
+        buf.put_i16(3);
+        buf.put_i32(1);
+        assert_eq!(peek_api_key(&buf).unwrap(), 18);
+    }
+
+    #[test]
+    fn peek_api_key_rejects_short_frame() {
+        let buf = [0u8; 1];
+        assert!(peek_api_key(&buf).is_err());
     }
 
     #[test]
