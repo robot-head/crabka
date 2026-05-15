@@ -34,7 +34,7 @@
 use std::path::PathBuf;
 
 use clap::Args;
-use crabka_metadata::{MetadataRecord, ScramCredentialRecord};
+use crabka_metadata::{AclEntry, MetadataRecord, ScramCredentialRecord};
 use crabka_security::SaslMechanism;
 use crabka_security::scram::hash_scram_password_with_salt;
 use ring::rand::{SecureRandom, SystemRandom};
@@ -70,6 +70,11 @@ pub struct FormatArgs {
     /// (iterations defaults to 4096 when omitted)
     #[arg(long, value_parser = parse_scram_spec)]
     add_scram: Vec<ScramSpec>,
+    /// Seed an ACL entry. May be repeated.
+    /// Format: `principal=User:<name>,host=<ip|*>,operation=<Op>,permission=<Allow|Deny>,resource=<Type>:<Name>[:<Pattern>]`
+    /// Pattern defaults to `Literal`.
+    #[arg(long, value_parser = parse_acl_spec)]
+    add_acl: Vec<AclEntry>,
 }
 
 #[derive(Debug, Clone)]
@@ -107,6 +112,82 @@ fn parse_scram_spec(s: &str) -> Result<ScramSpec, String> {
         name: name.ok_or("missing name")?,
         password: password.ok_or("missing password")?,
         iterations,
+    })
+}
+
+fn parse_acl_spec(spec: &str) -> Result<AclEntry, String> {
+    use crabka_metadata::{AclOperation, PatternType, PermissionType, ResourceType};
+
+    let mut principal = None;
+    let mut host = None;
+    let mut operation = None;
+    let mut permission = None;
+    let mut resource_type = None;
+    let mut resource_name = None;
+    let mut pattern_type = PatternType::Literal;
+
+    for kv in spec.split(',') {
+        let (k, v) = kv
+            .split_once('=')
+            .ok_or_else(|| format!("malformed pair: {kv}"))?;
+        match k {
+            "principal" => principal = Some(v.to_string()),
+            "host" => host = Some(v.to_string()),
+            "operation" => {
+                operation = Some(match v {
+                    "All" => AclOperation::All,
+                    "Read" => AclOperation::Read,
+                    "Write" => AclOperation::Write,
+                    "Create" => AclOperation::Create,
+                    "Delete" => AclOperation::Delete,
+                    "Alter" => AclOperation::Alter,
+                    "Describe" => AclOperation::Describe,
+                    "ClusterAction" => AclOperation::ClusterAction,
+                    "DescribeConfigs" => AclOperation::DescribeConfigs,
+                    "AlterConfigs" => AclOperation::AlterConfigs,
+                    "IdempotentWrite" => AclOperation::IdempotentWrite,
+                    other => return Err(format!("unknown operation: {other}")),
+                });
+            }
+            "permission" => {
+                permission = Some(match v {
+                    "Allow" => PermissionType::Allow,
+                    "Deny" => PermissionType::Deny,
+                    other => return Err(format!("unknown permission: {other}")),
+                });
+            }
+            "resource" => {
+                let mut parts = v.splitn(3, ':');
+                let rt = parts.next().ok_or("missing resource type")?;
+                let rn = parts.next().ok_or("missing resource name")?;
+                if let Some(pt) = parts.next() {
+                    pattern_type = match pt {
+                        "Literal" => PatternType::Literal,
+                        "Prefixed" => PatternType::Prefixed,
+                        other => return Err(format!("unknown pattern: {other}")),
+                    };
+                }
+                resource_type = Some(match rt {
+                    "Topic" => ResourceType::Topic,
+                    "Group" => ResourceType::Group,
+                    "Cluster" => ResourceType::Cluster,
+                    "TransactionalId" => ResourceType::TransactionalId,
+                    other => return Err(format!("unknown resource type: {other}")),
+                });
+                resource_name = Some(rn.to_string());
+            }
+            other => return Err(format!("unknown key: {other}")),
+        }
+    }
+
+    Ok(AclEntry {
+        resource_type: resource_type.ok_or("resource required")?,
+        resource_name: resource_name.ok_or("resource_name required")?,
+        pattern_type,
+        principal: principal.ok_or("principal required")?,
+        host: host.ok_or("host required")?,
+        operation: operation.ok_or("operation required")?,
+        permission_type: permission.ok_or("permission required")?,
     })
 }
 
@@ -193,6 +274,10 @@ pub async fn run(args: FormatArgs) -> i32 {
             server_key: cred.server_key,
             iterations: cred.iterations,
         }));
+    }
+
+    for acl in args.add_acl {
+        records.push(MetadataRecord::V1AccessControlEntry(acl));
     }
 
     if let Err(e) = write_bootstrap_files(&args.log_dir, cluster_id, &records) {
@@ -321,6 +406,35 @@ mod tests {
     #[test]
     fn parse_scram_spec_rejects_unknown_attr() {
         assert!(parse_scram_spec("SCRAM-SHA-512=[name=a,password=b,foo=bar]").is_err());
+    }
+
+    #[test]
+    fn parse_acl_spec_minimal() {
+        let s = "principal=User:admin,host=*,operation=All,permission=Allow,resource=Cluster:kafka-cluster";
+        let entry = parse_acl_spec(s).unwrap();
+        assert_eq!(entry.resource_type, crabka_metadata::ResourceType::Cluster);
+        assert_eq!(entry.resource_name, "kafka-cluster");
+        assert_eq!(entry.pattern_type, crabka_metadata::PatternType::Literal);
+        assert_eq!(entry.principal, "User:admin");
+        assert_eq!(entry.operation, crabka_metadata::AclOperation::All);
+        assert_eq!(
+            entry.permission_type,
+            crabka_metadata::PermissionType::Allow
+        );
+    }
+
+    #[test]
+    fn parse_acl_spec_with_prefixed_pattern() {
+        let s = "principal=User:alice,host=*,operation=Read,permission=Allow,resource=Topic:team-:Prefixed";
+        let entry = parse_acl_spec(s).unwrap();
+        assert_eq!(entry.pattern_type, crabka_metadata::PatternType::Prefixed);
+        assert_eq!(entry.resource_name, "team-");
+    }
+
+    #[test]
+    fn parse_acl_spec_unknown_key_errors() {
+        let s = "principal=User:admin,host=*,bogus=x";
+        assert!(parse_acl_spec(s).is_err());
     }
 
     #[test]
