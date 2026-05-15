@@ -734,6 +734,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "crabka-cli"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "crabka-metadata",
+ "crabka-security",
+ "ring",
+ "serde",
+ "serde-wincode",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "wincode",
+]
+
+[[package]]
 name = "crabka-client-consumer"
 version = "0.1.0"
 dependencies = [
