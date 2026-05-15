@@ -120,6 +120,7 @@
 
 #![doc(html_root_url = "https://docs.rs/crabka-broker/0.0.0")]
 
+pub mod bootstrap;
 mod broker;
 mod codes;
 pub mod config;
