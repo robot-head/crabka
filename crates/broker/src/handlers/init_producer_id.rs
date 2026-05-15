@@ -3,16 +3,30 @@
 //!
 //! Non-transactional path: slice-6 idempotent-producer support.
 //! Transactional path:     slice-9 coordinator routing (Task 12).
+//!
+//! ## slice-13 ACL preamble
+//!
+//! Two distinct authorize gates branch off `req.transactional_id`:
+//!
+//! * `Some(non-empty)` → `Write` on
+//!   `TransactionalId(transactional_id)`. Deny →
+//!   `error_code = TRANSACTIONAL_ID_AUTHORIZATION_FAILED (53)`.
+//! * `None | Some("")` (idempotent-only producer) →
+//!   `IdempotentWrite` on `Cluster("kafka-cluster")`. Deny →
+//!   `error_code = CLUSTER_AUTHORIZATION_FAILED (31)`.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
-use futures_util::future::BoxFuture;
 
+use crabka_metadata::{AclOperation, ResourceType};
 use crabka_protocol::owned::init_producer_id_request::InitProducerIdRequest;
 use crabka_protocol::owned::init_producer_id_response::InitProducerIdResponse;
 use crabka_protocol::{Decode, Encode};
+use crabka_security::Principal;
 
+use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize};
 use crate::broker::Broker;
 use crate::codes;
 use crate::error::BrokerError;
@@ -21,80 +35,126 @@ use crate::txn::coordinator::TxnCoordinator;
 use crate::txn::state::{TxnEntry, TxnState};
 use crate::txn::util::now_millis;
 
-pub(crate) fn handle(
+pub(crate) async fn handle(
     broker: &Broker,
     version: i16,
     _correlation_id: i32,
     req_bytes: &[u8],
-) -> BoxFuture<'static, Result<Bytes, BrokerError>> {
-    let req_bytes = req_bytes.to_vec();
-    // Clone the Arcs we need; Broker can't cross the async boundary.
+    principal: &Principal,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
     let producer_ids = broker.producer_ids.clone();
     let coord = broker.txn_coordinator.clone();
     let controller = broker.controller.clone();
     let log_dir = broker.config.log_dir.clone();
     let log_config = broker.config.log_config.clone();
-    Box::pin(async move {
-        let mut cur: &[u8] = &req_bytes;
-        let req = InitProducerIdRequest::decode(&mut cur, version)?;
 
-        let resp = match req.transactional_id.as_deref() {
-            None | Some("") => {
-                // Non-transactional path (slice-6 idempotence).
-                let (pid, epoch) = producer_ids.allocate();
+    let mut cur: &[u8] = req_bytes;
+    let req = InitProducerIdRequest::decode(&mut cur, version)?;
+
+    // ── slice-13 ACL preamble ────────────────────────────────────────
+    // Branch on whether this is an idempotent-only or transactional
+    // request and gate on the appropriate resource/operation.
+    {
+        let image = controller.current_image();
+        let super_user = broker.config.super_user_name.as_deref();
+        match req.transactional_id.as_deref() {
+            Some(tid) if !tid.is_empty() => {
+                let acl_req = AuthorizationRequest {
+                    principal,
+                    host: peer,
+                    resource_type: ResourceType::TransactionalId,
+                    resource_name: tid,
+                    operation: AclOperation::Write,
+                };
+                if authorize(&image, super_user, &acl_req) == AuthorizationResult::Deny {
+                    return encode_err(version, codes::TRANSACTIONAL_ID_AUTHORIZATION_FAILED);
+                }
+            }
+            _ => {
+                let acl_req = AuthorizationRequest {
+                    principal,
+                    host: peer,
+                    resource_type: ResourceType::Cluster,
+                    resource_name: "kafka-cluster",
+                    operation: AclOperation::IdempotentWrite,
+                };
+                if authorize(&image, super_user, &acl_req) == AuthorizationResult::Deny {
+                    return encode_err(version, codes::CLUSTER_AUTHORIZATION_FAILED);
+                }
+            }
+        }
+    }
+
+    let resp = match req.transactional_id.as_deref() {
+        None | Some("") => {
+            // Non-transactional path (slice-6 idempotence).
+            let (pid, epoch) = producer_ids.allocate();
+            InitProducerIdResponse {
+                throttle_time_ms: 0,
+                error_code: codes::NONE,
+                producer_id: pid,
+                producer_epoch: epoch,
+                ..Default::default()
+            }
+        }
+        Some(tid) => {
+            // Refresh the coordinator's leader-partition view from the
+            // current metadata image. This is a cheap idempotent read,
+            // and it ensures we don't race with the replicator-supervisor
+            // loop when a `FindCoordinator(TRANSACTION)` call that
+            // triggered `__transaction_state` bootstrap just happened.
+            coord
+                .refresh_leader_partitions(&controller.current_image())
+                .await;
+
+            // Verify we're the coordinator for this tid.
+            if coord.is_coordinator_for(tid).await {
+                // Ensure the __transaction_state partition for this tid
+                // is materialized on disk. The replicator-supervisor
+                // handles this asynchronously, but we may race with it
+                // when FindCoordinator just bootstrapped the topic in
+                // the same request round-trip. `materialize_partition`
+                // uses `DashMap::entry()` to atomically check-and-insert,
+                // so two concurrent InitProducerId calls for the same
+                // partition cannot both spawn independent writer tasks.
+                let txn_partition = coord.partition_for(tid);
+                materialize_partition(
+                    &coord.partitions,
+                    crate::txn::bootstrap::TOPIC,
+                    txn_partition,
+                    &log_dir,
+                    &log_config,
+                )
+                .map_err(BrokerError::Txn)?;
+                handle_transactional(&coord, tid, &req).await?
+            } else {
                 InitProducerIdResponse {
-                    throttle_time_ms: 0,
-                    error_code: codes::NONE,
-                    producer_id: pid,
-                    producer_epoch: epoch,
+                    error_code: codes::NOT_COORDINATOR,
+                    producer_id: -1,
+                    producer_epoch: -1,
                     ..Default::default()
                 }
             }
-            Some(tid) => {
-                // Refresh the coordinator's leader-partition view from the
-                // current metadata image. This is a cheap idempotent read,
-                // and it ensures we don't race with the replicator-supervisor
-                // loop when a `FindCoordinator(TRANSACTION)` call that
-                // triggered `__transaction_state` bootstrap just happened.
-                coord
-                    .refresh_leader_partitions(&controller.current_image())
-                    .await;
+        }
+    };
 
-                // Verify we're the coordinator for this tid.
-                if coord.is_coordinator_for(tid).await {
-                    // Ensure the __transaction_state partition for this tid
-                    // is materialized on disk. The replicator-supervisor
-                    // handles this asynchronously, but we may race with it
-                    // when FindCoordinator just bootstrapped the topic in
-                    // the same request round-trip. `materialize_partition`
-                    // uses `DashMap::entry()` to atomically check-and-insert,
-                    // so two concurrent InitProducerId calls for the same
-                    // partition cannot both spawn independent writer tasks.
-                    let txn_partition = coord.partition_for(tid);
-                    materialize_partition(
-                        &coord.partitions,
-                        crate::txn::bootstrap::TOPIC,
-                        txn_partition,
-                        &log_dir,
-                        &log_config,
-                    )
-                    .map_err(BrokerError::Txn)?;
-                    handle_transactional(&coord, tid, &req).await?
-                } else {
-                    InitProducerIdResponse {
-                        error_code: codes::NOT_COORDINATOR,
-                        producer_id: -1,
-                        producer_epoch: -1,
-                        ..Default::default()
-                    }
-                }
-            }
-        };
+    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
+    resp.encode(&mut buf, version)?;
+    Ok(buf.freeze())
+}
 
-        let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-        resp.encode(&mut buf, version)?;
-        Ok(buf.freeze())
-    })
+fn encode_err(version: i16, error_code: i16) -> Result<Bytes, BrokerError> {
+    let resp = InitProducerIdResponse {
+        throttle_time_ms: 0,
+        error_code,
+        producer_id: -1,
+        producer_epoch: -1,
+        ..Default::default()
+    };
+    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
+    resp.encode(&mut buf, version)?;
+    Ok(buf.freeze())
 }
 
 /// Transactional sub-path: allocate or bump-epoch for `tid`.

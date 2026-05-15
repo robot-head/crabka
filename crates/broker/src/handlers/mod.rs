@@ -136,6 +136,23 @@ pub(crate) fn build_table() -> HandlerTable {
     // `network::dispatch` (slice-13 T19) so the handler can receive the
     // per-connection principal + peer `SocketAddr` for Cluster Alter ACL
     // enforcement (replacing the slice-12 super-user-name equality check).
+    // InitProducerId (api_key 22) is intercepted inline in `network::dispatch`
+    // (slice-13 T20) so the handler can receive the per-connection
+    // principal + peer `SocketAddr` for either `Write` on
+    // `TransactionalId` (transactional path) or `IdempotentWrite` on
+    // `Cluster` (idempotent-only path).
+    // AddPartitionsToTxn (api_key 24) is intercepted inline in `network::dispatch`
+    // (slice-13 T20) so the handler can receive the per-connection
+    // principal + peer `SocketAddr` for `Write` on `TransactionalId` and
+    // per-topic `Write` on `Topic` ACL enforcement.
+    // EndTxn (api_key 26) is intercepted inline in `network::dispatch`
+    // (slice-13 T20) so the handler can receive the per-connection
+    // principal + peer `SocketAddr` for `Write` on `TransactionalId` ACL
+    // enforcement.
+    // TxnOffsetCommit (api_key 28) is intercepted inline in `network::dispatch`
+    // (slice-13 T20) so the handler can receive the per-connection
+    // principal + peer `SocketAddr` for `Write` on `TransactionalId` +
+    // `Read` on `Group` + per-topic `Read` on `Topic` ACL enforcement.
     t.register(2, list_offsets::handle);
     t.register(10, find_coordinator::handle);
     t.register(12, heartbeat::handle);
@@ -145,13 +162,13 @@ pub(crate) fn build_table() -> HandlerTable {
     // 16 (ListGroups) intercepted inline — see comment above.
     t.register(18, api_versions::handle);
     // 21 (DeleteRecords) intercepted inline — see comment above.
-    t.register(22, init_producer_id::handle);
+    // 22 (InitProducerId) intercepted inline — see comment above.
     t.register(23, offset_for_leader_epoch::handle);
-    t.register(24, crate::txn::handlers::add_partitions_to_txn::handle);
+    // 24 (AddPartitionsToTxn) intercepted inline — see comment above.
     t.register(25, crate::txn::handlers::add_offset_commits_to_txn::handle);
-    t.register(26, crate::txn::handlers::end_txn::handle);
+    // 26 (EndTxn) intercepted inline — see comment above.
     t.register(27, crate::txn::handlers::write_txn_markers::handle);
-    t.register(28, crate::txn::handlers::txn_offset_commit::handle);
+    // 28 (TxnOffsetCommit) intercepted inline — see comment above.
     t.register(32, describe_configs::handle);
     // 33 (AlterConfigs) intercepted inline — see comment above.
     // 37 (CreatePartitions) intercepted inline — see comment above.

@@ -17,12 +17,12 @@
 //! Response fields: `throttle_time_ms`, `error_code`.
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
 
 use bytes::{Bytes, BytesMut};
-use futures_util::future::BoxFuture;
 
 use crabka_client_core::Client;
-use crabka_metadata::{MetadataImage, NodeId};
+use crabka_metadata::{AclOperation, MetadataImage, NodeId, ResourceType};
 use crabka_protocol::Decode;
 use crabka_protocol::Encode;
 use crabka_protocol::owned::end_txn_request::EndTxnRequest;
@@ -30,7 +30,9 @@ use crabka_protocol::owned::end_txn_response::EndTxnResponse;
 use crabka_protocol::owned::write_txn_markers_request::{
     WritableTxnMarker, WritableTxnMarkerTopic, WriteTxnMarkersRequest,
 };
+use crabka_security::Principal;
 
+use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize};
 use crate::broker::Broker;
 use crate::codes;
 use crate::coordinator::bootstrap::OFFSETS_TOPIC;
@@ -46,118 +48,129 @@ use crate::txn::util::now_millis;
 /// 50-partition topology once we get there.
 const OFFSETS_NUM_PARTITIONS: i32 = 1;
 
-pub(crate) fn handle(
+pub(crate) async fn handle(
     broker: &Broker,
     version: i16,
     _correlation_id: i32,
     req_bytes: &[u8],
-) -> BoxFuture<'static, Result<Bytes, BrokerError>> {
-    let req_bytes = req_bytes.to_vec();
+    principal: &Principal,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
     let coord = broker.txn_coordinator.clone();
     let controller = broker.controller.clone();
     let partitions = broker.partitions.clone();
     let node_id = broker.config.node_id;
-    Box::pin(async move {
-        let mut cur: &[u8] = &req_bytes;
-        let req = EndTxnRequest::decode(&mut cur, version)?;
+    let super_user = broker.config.super_user_name.clone();
+    let mut cur: &[u8] = req_bytes;
+    let req = EndTxnRequest::decode(&mut cur, version)?;
 
-        // Refresh leader-partition view from the current metadata image
-        // before checking coordinator-ness (mirrors Task 12/13/14 pattern).
-        let image = controller.current_image();
-        coord.refresh_leader_partitions(&image).await;
+    // Refresh leader-partition view from the current metadata image
+    // before checking coordinator-ness (mirrors Task 12/13/14 pattern).
+    let image = controller.current_image();
+    coord.refresh_leader_partitions(&image).await;
 
-        let tid = req.transactional_id.as_str();
+    let tid = req.transactional_id.as_str();
 
-        if !coord.is_coordinator_for(tid).await {
-            return encode_err(version, codes::NOT_COORDINATOR);
+    // ── slice-13 ACL preamble: Write on TransactionalId ─────────────
+    let tid_req = AuthorizationRequest {
+        principal,
+        host: peer,
+        resource_type: ResourceType::TransactionalId,
+        resource_name: tid,
+        operation: AclOperation::Write,
+    };
+    if authorize(&image, super_user.as_deref(), &tid_req) == AuthorizationResult::Deny {
+        return encode_err(version, codes::TRANSACTIONAL_ID_AUTHORIZATION_FAILED);
+    }
+
+    if !coord.is_coordinator_for(tid).await {
+        return encode_err(version, codes::NOT_COORDINATOR);
+    }
+
+    let Some(entry_mutex) = coord.get(tid) else {
+        return encode_err(version, codes::INVALID_PRODUCER_ID_MAPPING);
+    };
+
+    {
+        let entry = entry_mutex.lock().await;
+        if entry.producer_id != req.producer_id || entry.producer_epoch != req.producer_epoch {
+            return encode_err(version, codes::INVALID_PRODUCER_EPOCH);
         }
+    }
 
-        let Some(entry_mutex) = coord.get(tid) else {
-            return encode_err(version, codes::INVALID_PRODUCER_ID_MAPPING);
-        };
+    // ── Phase 1: Ongoing → Prepare{Commit,Abort} ──────────────────────
 
-        {
-            let entry = entry_mutex.lock().await;
-            if entry.producer_id != req.producer_id || entry.producer_epoch != req.producer_epoch {
-                return encode_err(version, codes::INVALID_PRODUCER_EPOCH);
-            }
+    let prepare = if req.committed {
+        TxnState::PrepareCommit
+    } else {
+        TxnState::PrepareAbort
+    };
+    let complete = if req.committed {
+        TxnState::CompleteCommit
+    } else {
+        TxnState::CompleteAbort
+    };
+    let marker_type = if req.committed {
+        MarkerType::Commit
+    } else {
+        MarkerType::Abort
+    };
+
+    let prepare_snap: TxnEntry = {
+        let mut entry = entry_mutex.lock().await;
+        if !entry.state.can_transition_to(prepare) {
+            return encode_err(version, codes::INVALID_TXN_STATE);
         }
+        entry.state = prepare;
+        entry.last_update_ms = now_millis();
+        entry.clone()
+        // Lock dropped here.
+    };
 
-        // ── Phase 1: Ongoing → Prepare{Commit,Abort} ──────────────────────
+    if let Err(e) = coord.put(prepare_snap.clone()).await {
+        tracing::error!(
+            tid,
+            state = ?prepare,
+            error = %e,
+            "EndTxn: failed to persist PrepareCommit/PrepareAbort"
+        );
+        return encode_err(version, codes::UNKNOWN_SERVER_ERROR);
+    }
 
-        let prepare = if req.committed {
-            TxnState::PrepareCommit
-        } else {
-            TxnState::PrepareAbort
-        };
-        let complete = if req.committed {
-            TxnState::CompleteCommit
-        } else {
-            TxnState::CompleteAbort
-        };
-        let marker_type = if req.committed {
-            MarkerType::Commit
-        } else {
-            MarkerType::Abort
-        };
+    // ── Phase 2: Fan out WriteTxnMarkers ──────────────────────────────
 
-        let prepare_snap: TxnEntry = {
-            let mut entry = entry_mutex.lock().await;
-            if !entry.state.can_transition_to(prepare) {
-                return encode_err(version, codes::INVALID_TXN_STATE);
-            }
-            entry.state = prepare;
-            entry.last_update_ms = now_millis();
-            entry.clone()
-            // Lock dropped here.
-        };
+    if let Err(e) = dispatch_markers(node_id, &partitions, &prepare_snap, marker_type, &image).await
+    {
+        tracing::error!(
+            tid,
+            error = %e,
+            "EndTxn: WriteTxnMarkers fan-out failed; returning retriable error"
+        );
+        // Return a retriable error; the producer will retry EndTxn.
+        return encode_err(version, codes::UNKNOWN_SERVER_ERROR);
+    }
 
-        if let Err(e) = coord.put(prepare_snap.clone()).await {
-            tracing::error!(
-                tid,
-                state = ?prepare,
-                error = %e,
-                "EndTxn: failed to persist PrepareCommit/PrepareAbort"
-            );
-            return encode_err(version, codes::UNKNOWN_SERVER_ERROR);
-        }
+    // ── Phase 3: Prepare{Commit,Abort} → Complete{Commit,Abort} ───────
 
-        // ── Phase 2: Fan out WriteTxnMarkers ──────────────────────────────
+    let complete_snap: TxnEntry = {
+        let mut entry = entry_mutex.lock().await;
+        entry.state = complete;
+        entry.last_update_ms = now_millis();
+        entry.clone()
+        // Lock dropped here.
+    };
 
-        if let Err(e) =
-            dispatch_markers(node_id, &partitions, &prepare_snap, marker_type, &image).await
-        {
-            tracing::error!(
-                tid,
-                error = %e,
-                "EndTxn: WriteTxnMarkers fan-out failed; returning retriable error"
-            );
-            // Return a retriable error; the producer will retry EndTxn.
-            return encode_err(version, codes::UNKNOWN_SERVER_ERROR);
-        }
+    if let Err(e) = coord.put(complete_snap).await {
+        tracing::error!(
+            tid,
+            state = ?complete,
+            error = %e,
+            "EndTxn: failed to persist CompleteCommit/CompleteAbort"
+        );
+        return encode_err(version, codes::UNKNOWN_SERVER_ERROR);
+    }
 
-        // ── Phase 3: Prepare{Commit,Abort} → Complete{Commit,Abort} ───────
-
-        let complete_snap: TxnEntry = {
-            let mut entry = entry_mutex.lock().await;
-            entry.state = complete;
-            entry.last_update_ms = now_millis();
-            entry.clone()
-            // Lock dropped here.
-        };
-
-        if let Err(e) = coord.put(complete_snap).await {
-            tracing::error!(
-                tid,
-                state = ?complete,
-                error = %e,
-                "EndTxn: failed to persist CompleteCommit/CompleteAbort"
-            );
-            return encode_err(version, codes::UNKNOWN_SERVER_ERROR);
-        }
-
-        encode_ok(version)
-    })
+    encode_ok(version)
 }
 
 // ── marker fan-out ────────────────────────────────────────────────────────────

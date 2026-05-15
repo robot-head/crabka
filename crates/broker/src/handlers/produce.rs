@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
 
-use crabka_metadata::AclOperation;
+use crabka_metadata::{AclOperation, ResourceType};
 use crabka_protocol::owned::produce_request::ProduceRequest;
 use crabka_protocol::owned::produce_response::{
     PartitionProduceResponse, ProduceResponse, TopicProduceResponse,
@@ -23,7 +23,7 @@ use crabka_protocol::{Decode, Encode};
 use crabka_security::Principal;
 use tokio::sync::oneshot;
 
-use crate::authorizer::{AuthorizationResult, authorize_topics};
+use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize, authorize_topics};
 use crate::broker::Broker;
 use crate::codes;
 use crate::error::BrokerError;
@@ -47,7 +47,13 @@ pub(crate) async fn handle(
     let timeout = Duration::from_millis(u64::try_from(req.timeout_ms.max(0)).unwrap_or(0));
 
     // ── slice-13 ACL preamble ────────────────────────────────────────
-    // Batch-authorize every topic in the request for `Write` (the
+    // For transactional Produce (request carries a non-empty
+    // `transactional_id`), authorize `Write` on
+    // `TransactionalId(transactional_id)` FIRST. On Deny, emit
+    // TRANSACTIONAL_ID_AUTHORIZATION_FAILED (53) per-partition on every
+    // row of the response (matches Kafka's per-partition error mapping).
+    //
+    // Then batch-authorize every topic in the request for `Write` (the
     // operation Produce requires). Topics that come back `Deny` will
     // short-circuit the per-partition append below and emit
     // TOPIC_AUTHORIZATION_FAILED on every partition row of that topic.
@@ -55,6 +61,20 @@ pub(crate) async fn handle(
     // re-done inline below — but the slice-13 plan keys ACLs by topic
     // *name*, so we resolve the names here too for the authorize call.
     let image = controller.current_image();
+    let txn_id_denied = match req.transactional_id.as_deref() {
+        Some(tid) if !tid.is_empty() => {
+            let acl_req = AuthorizationRequest {
+                principal,
+                host: peer,
+                resource_type: ResourceType::TransactionalId,
+                resource_name: tid,
+                operation: AclOperation::Write,
+            };
+            authorize(&image, broker.config.super_user_name.as_deref(), &acl_req)
+                == AuthorizationResult::Deny
+        }
+        _ => false,
+    };
     let topic_names_for_acl: Vec<String> = req
         .topic_data
         .iter()
@@ -129,6 +149,12 @@ pub(crate) async fn handle(
                 index: idx,
                 ..Default::default()
             };
+
+            if txn_id_denied {
+                out.error_code = codes::TRANSACTIONAL_ID_AUTHORIZATION_FAILED;
+                partition_results.push(out);
+                continue;
+            }
 
             if topic_denied {
                 out.error_code = codes::TOPIC_AUTHORIZATION_FAILED;

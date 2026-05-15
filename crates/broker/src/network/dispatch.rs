@@ -598,6 +598,84 @@ async fn serve_connection_stream<S>(
                 }
             }
         }
+        // InitProducerId (22, slice-13 T20) needs both the authenticated
+        // principal AND the peer's `SocketAddr` so the handler can
+        // authorize `Write` on `TransactionalId` (transactional path) or
+        // `IdempotentWrite` on `Cluster` (idempotent-only path). On Deny
+        // the handler returns a whole-response error_code = 53 or 31.
+        if peek_api_key(&frame).ok() == Some(22) {
+            match handle_init_producer_id_frame(&broker, &frame, &auth, &peer).await {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during InitProducerId, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "InitProducerId dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
+        // AddPartitionsToTxn (24, slice-13 T20) needs both the authenticated
+        // principal AND the peer's `SocketAddr` so the handler can
+        // authorize `Write` on `TransactionalId` (whole-txn deny =
+        // TRANSACTIONAL_ID_AUTHORIZATION_FAILED) and per-topic `Write` on
+        // `Topic` (per-row deny = TOPIC_AUTHORIZATION_FAILED).
+        if peek_api_key(&frame).ok() == Some(24) {
+            match handle_add_partitions_to_txn_frame(&broker, &frame, &auth, &peer).await {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during AddPartitionsToTxn, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "AddPartitionsToTxn dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
+        // EndTxn (26, slice-13 T20) needs both the authenticated principal
+        // AND the peer's `SocketAddr` so the handler can authorize
+        // `Write` on `TransactionalId`. On Deny → whole-response
+        // TRANSACTIONAL_ID_AUTHORIZATION_FAILED.
+        if peek_api_key(&frame).ok() == Some(26) {
+            match handle_end_txn_frame(&broker, &frame, &auth, &peer).await {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during EndTxn, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "EndTxn dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
+        // TxnOffsetCommit (28, slice-13 T20) needs both the authenticated
+        // principal AND the peer's `SocketAddr` so the handler can
+        // authorize `Write` on `TransactionalId` + `Read` on `Group` +
+        // per-topic `Read` on `Topic`.
+        if peek_api_key(&frame).ok() == Some(28) {
+            match handle_txn_offset_commit_frame(&broker, &frame, &auth, &peer).await {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during TxnOffsetCommit, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "TxnOffsetCommit dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
         let response_bytes = match dispatch_one(&broker, &frame).await {
             Ok(b) => b,
             Err(e) => {
@@ -1538,6 +1616,166 @@ async fn handle_offset_fetch_frame(
         });
 
     let resp_body = crate::handlers::offset_fetch::handle(
+        broker,
+        api_version,
+        correlation_id,
+        body,
+        &principal,
+        peer,
+    )
+    .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch an `InitProducerId` (`api_key` 22) frame. Pulls the
+/// authenticated principal off the per-connection `auth` state and the
+/// peer `SocketAddr` from the accept-time capture so the handler can
+/// authorize `Write` on `TransactionalId(transactional_id)` (transactional
+/// path) or `IdempotentWrite` on `Cluster("kafka-cluster")` (idempotent-only
+/// path) (slice-13 T20).
+async fn handle_init_producer_id_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 22);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let principal = auth
+        .principal()
+        .cloned()
+        .unwrap_or_else(|| crabka_security::Principal {
+            name: "ANONYMOUS".to_string(),
+            mechanism: crabka_security::SaslMechanism::Plain,
+        });
+
+    let resp_body = crate::handlers::init_producer_id::handle(
+        broker,
+        api_version,
+        correlation_id,
+        body,
+        &principal,
+        peer,
+    )
+    .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch an `AddPartitionsToTxn` (`api_key` 24) frame. Pulls
+/// the authenticated principal off the per-connection `auth` state and
+/// the peer `SocketAddr` from the accept-time capture so the handler can
+/// authorize `Write` on `TransactionalId` AND per-topic `Write` on
+/// `Topic` (slice-13 T20).
+async fn handle_add_partitions_to_txn_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 24);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let principal = auth
+        .principal()
+        .cloned()
+        .unwrap_or_else(|| crabka_security::Principal {
+            name: "ANONYMOUS".to_string(),
+            mechanism: crabka_security::SaslMechanism::Plain,
+        });
+
+    let resp_body = crate::txn::handlers::add_partitions_to_txn::handle(
+        broker,
+        api_version,
+        correlation_id,
+        body,
+        &principal,
+        peer,
+    )
+    .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch an `EndTxn` (`api_key` 26) frame. Pulls the
+/// authenticated principal off the per-connection `auth` state and the
+/// peer `SocketAddr` from the accept-time capture so the handler can
+/// authorize `Write` on `TransactionalId` (slice-13 T20).
+async fn handle_end_txn_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 26);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let principal = auth
+        .principal()
+        .cloned()
+        .unwrap_or_else(|| crabka_security::Principal {
+            name: "ANONYMOUS".to_string(),
+            mechanism: crabka_security::SaslMechanism::Plain,
+        });
+
+    let resp_body = crate::txn::handlers::end_txn::handle(
+        broker,
+        api_version,
+        correlation_id,
+        body,
+        &principal,
+        peer,
+    )
+    .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch a `TxnOffsetCommit` (`api_key` 28) frame. Pulls the
+/// authenticated principal off the per-connection `auth` state and the
+/// peer `SocketAddr` from the accept-time capture so the handler can
+/// authorize `Write` on `TransactionalId` + `Read` on `Group` +
+/// per-topic `Read` on `Topic` (slice-13 T20).
+async fn handle_txn_offset_commit_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 28);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let principal = auth
+        .principal()
+        .cloned()
+        .unwrap_or_else(|| crabka_security::Principal {
+            name: "ANONYMOUS".to_string(),
+            mechanism: crabka_security::SaslMechanism::Plain,
+        });
+
+    let resp_body = crate::txn::handlers::txn_offset_commit::handle(
         broker,
         api_version,
         correlation_id,
