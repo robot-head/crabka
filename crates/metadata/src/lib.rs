@@ -13,10 +13,12 @@
 
 #![doc(html_root_url = "https://docs.rs/crabka-metadata/0.0.0")]
 
+pub mod acl;
 mod error;
 mod image;
 mod records;
 
+pub use acl::{AclEntry, AclEntryFilter, AclOperation, PatternType, PermissionType, ResourceType};
 pub use error::MetadataError;
 pub use image::MetadataImage;
 pub use records::{
