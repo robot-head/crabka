@@ -44,7 +44,7 @@ pub(crate) async fn handle(
     let topic_names: Vec<&str> = req.topics.iter().map(|t| t.name.as_str()).collect();
     let acl_results = authorize_topics(
         &image,
-        broker.config.super_user_name.as_deref(),
+        &broker.config.super_users,
         principal,
         peer,
         AclOperation::Delete,

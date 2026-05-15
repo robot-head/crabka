@@ -38,7 +38,7 @@ pub(crate) async fn handle(
     // CLUSTER_AUTHORIZATION_FAILED on the whole response.
     let allow = authorize(
         &image,
-        broker.config.super_user_name.as_deref(),
+        &broker.config.super_users,
         &AuthorizationRequest {
             principal,
             host: peer,

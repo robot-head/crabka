@@ -60,7 +60,7 @@ pub(crate) async fn handle(
     let controller = broker.controller.clone();
     let partitions = broker.partitions.clone();
     let node_id = broker.config.node_id;
-    let super_user = broker.config.super_user_name.clone();
+    let super_users = &broker.config.super_users;
     let mut cur: &[u8] = req_bytes;
     let req = EndTxnRequest::decode(&mut cur, version)?;
 
@@ -79,7 +79,7 @@ pub(crate) async fn handle(
         resource_name: tid,
         operation: AclOperation::Write,
     };
-    if authorize(&image, super_user.as_deref(), &tid_req) == AuthorizationResult::Deny {
+    if authorize(&image, super_users, &tid_req) == AuthorizationResult::Deny {
         return encode_err(version, codes::TRANSACTIONAL_ID_AUTHORIZATION_FAILED);
     }
 

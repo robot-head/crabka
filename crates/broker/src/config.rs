@@ -124,8 +124,8 @@ pub struct BrokerConfig {
     /// (PLAIN auth disabled until mechanisms are explicitly enabled).
     pub plain_credentials: HashMap<String, String>,
 
-    /// When set, this username bypasses ACL checks (super-user).
-    pub super_user_name: Option<String>,
+    /// Usernames that bypass ACL checks (super-users).
+    pub super_users: std::collections::HashSet<String>,
 
     /// TLS configuration. `None` — no TLS (slice 12 default).
     pub tls_config: Option<TlsConfig>,
@@ -168,7 +168,7 @@ impl BrokerConfig {
             inter_broker_listener_name: "PLAINTEXT".to_string(),
             inter_broker_credentials: None,
             plain_credentials: HashMap::new(),
-            super_user_name: None,
+            super_users: std::collections::HashSet::new(),
             tls_config: None,
             enabled_sasl_mechanisms: vec![],
         }
@@ -279,7 +279,7 @@ impl Default for BrokerConfig {
             inter_broker_listener_name: "PLAINTEXT".to_string(),
             inter_broker_credentials: None,
             plain_credentials: HashMap::new(),
-            super_user_name: None,
+            super_users: std::collections::HashSet::new(),
             tls_config: None,
             enabled_sasl_mechanisms: vec![],
         }

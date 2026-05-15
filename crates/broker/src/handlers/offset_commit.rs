@@ -53,9 +53,7 @@ pub(crate) async fn handle(
             resource_name: req.group_id.as_str(),
             operation: AclOperation::Read,
         };
-        if authorize(&image, broker.config.super_user_name.as_deref(), &acl_req)
-            == AuthorizationResult::Deny
-        {
+        if authorize(&image, &broker.config.super_users, &acl_req) == AuthorizationResult::Deny {
             let resp = build_response_all(&req, codes::GROUP_AUTHORIZATION_FAILED);
             return encode(version, &resp);
         }
@@ -80,7 +78,7 @@ pub(crate) async fn handle(
         let topic_names: Vec<&str> = req.topics.iter().map(|t| t.name.as_str()).collect();
         authorize_topics(
             &image,
-            broker.config.super_user_name.as_deref(),
+            &broker.config.super_users,
             principal,
             peer,
             AclOperation::Read,

@@ -179,3 +179,33 @@ Kafka client for ApiVersions.
   IPv6 host filters, audit log destinations beyond `tracing`,
   `allow.everyone.if.no.acl.found=true` toggle (compat shim
   instead), operation implications (Read/Write → Describe).
+
+## Slice 13b — ACL implications + multi-super-user (2026-05-15)
+
+- `crabka_broker::authorizer::matches_operation` calls new `implies`
+  helper: `Read`/`Write`/`Delete`/`Alter` on any resource imply
+  `Describe`; `AlterConfigs` implies `DescribeConfigs`. One-way table
+  (`Describe` does not imply `Read`). Resource-type independent —
+  works on `Topic`, `Group`, `Cluster`, and `TransactionalId`.
+- `BrokerConfig::super_user_name: Option<String>` renamed to
+  `super_users: HashSet<String>`. Authorizer + 22 handler call sites +
+  4 test fixture files migrated atomically. Semantically a no-op for
+  pre-13b single-/zero-super-user cases. Both `authorize` and
+  `authorize_topics` signatures generic over `BuildHasher` per
+  clippy's `implicit_hasher` convention (matches the slice-12
+  `verify_plain` pattern).
+- Authorizer unit tests: 10 new (6 implication matrix, 3 resource-type
+  independence on Group/Cluster/TransactionalId, 1 multi-super-user
+  bypass).
+- Broker integration tests: 3 new in `tests/acl_handlers.rs`
+  (`implication_metadata_describes_after_read_acl`,
+  `implication_metadata_describes_after_write_acl`,
+  `multi_super_user_both_can_provision`).
+- Workaround removal: redundant Describe ACL seeds dropped from
+  slice-12 SCRAM JVM tests (3 tests, one loop each) and slice-13 ACL
+  JVM tests (5 tests, 6 invocations across Topic + Group resources).
+  Standard `kafka-acls.sh --add --operation Read|Write|...` now works
+  end-to-end without separate Describe grants.
+- Out of scope: ACL audit logging, `User:` prefix in super-user
+  config strings, `ClusterAction` implication, persisted broker
+  config.

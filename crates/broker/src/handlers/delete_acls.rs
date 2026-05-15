@@ -31,7 +31,7 @@ pub(crate) async fn handle(
     // Whole-request cluster-alter gate.
     let allow = authorize(
         &image,
-        broker.config.super_user_name.as_deref(),
+        &broker.config.super_users,
         &AuthorizationRequest {
             principal,
             host: peer,

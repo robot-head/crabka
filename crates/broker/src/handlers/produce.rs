@@ -70,8 +70,7 @@ pub(crate) async fn handle(
                 resource_name: tid,
                 operation: AclOperation::Write,
             };
-            authorize(&image, broker.config.super_user_name.as_deref(), &acl_req)
-                == AuthorizationResult::Deny
+            authorize(&image, &broker.config.super_users, &acl_req) == AuthorizationResult::Deny
         }
         _ => false,
     };
@@ -94,7 +93,7 @@ pub(crate) async fn handle(
         .collect();
     let acl_results = authorize_topics(
         &image,
-        broker.config.super_user_name.as_deref(),
+        &broker.config.super_users,
         principal,
         peer,
         AclOperation::Write,

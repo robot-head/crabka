@@ -35,9 +35,9 @@ pub enum AuthorizationResult {
 /// per-topic enforcement. The returned map's keys are borrowed from
 /// the input iterator so callers can avoid copying topic strings.
 #[must_use]
-pub fn authorize_topics<'a>(
+pub fn authorize_topics<'a, S: std::hash::BuildHasher>(
     image: &MetadataImage,
-    super_user_name: Option<&str>,
+    super_users: &std::collections::HashSet<String, S>,
     principal: &Principal,
     host: &SocketAddr,
     operation: AclOperation,
@@ -53,7 +53,7 @@ pub fn authorize_topics<'a>(
                 resource_name: name,
                 operation,
             };
-            (name, authorize(image, super_user_name, &req))
+            (name, authorize(image, super_users, &req))
         })
         .collect()
 }
@@ -64,23 +64,20 @@ pub fn authorize_topics<'a>(
 ///
 /// See module docs for the algorithm.
 #[must_use]
-pub fn authorize(
+pub fn authorize<S: std::hash::BuildHasher>(
     image: &MetadataImage,
-    super_user_name: Option<&str>,
+    super_users: &std::collections::HashSet<String, S>,
     req: &AuthorizationRequest,
 ) -> AuthorizationResult {
     // Compatibility shim: pre-ACL deployments (no super-user, no ACLs)
     // get the old "allow everything authenticated" behavior. Keeps
     // slice 11/12 tests green.
-    if super_user_name.is_none() && image.all_acls().next().is_none() {
+    if super_users.is_empty() && image.all_acls().next().is_none() {
         return AuthorizationResult::Allow;
     }
 
-    // Super-user bypass. Principal name format is `User:<name>` so we
-    // compare against `User:<super>`.
-    if let Some(name) = super_user_name
-        && req.principal.name == name
-    {
+    // Super-user bypass.
+    if super_users.contains(&req.principal.name) {
         return AuthorizationResult::Allow;
     }
 
@@ -90,7 +87,7 @@ pub fn authorize(
     for entry in image.matching_acls(req.resource_type, req.resource_name) {
         if !matches_principal(entry, &user_pattern)
             || !matches_host(entry, &host_str)
-            || !matches_operation(entry, req.operation)
+            || !matches_operation(entry.operation, req.operation)
         {
             continue;
         }
@@ -114,8 +111,39 @@ fn matches_host(entry: &AclEntry, host: &str) -> bool {
     entry.host == "*" || entry.host == host
 }
 
-fn matches_operation(entry: &AclEntry, op: AclOperation) -> bool {
-    matches!(entry.operation, AclOperation::All) || entry.operation == op
+/// Returns true when an ACL with `stored` operation grants access for
+/// an authorization request with `requested` operation. Beyond exact
+/// match and the `All` wildcard, applies Kafka's operation-implication
+/// table:
+///
+/// | stored          | implies                |
+/// |-----------------|------------------------|
+/// | Read            | Describe               |
+/// | Write           | Describe               |
+/// | Delete          | Describe               |
+/// | Alter           | Describe               |
+/// | `AlterConfigs`  | `DescribeConfigs`      |
+/// | All             | Everything             |
+///
+/// The table is one-way: Describe does NOT imply Read, etc.
+fn matches_operation(stored: AclOperation, requested: AclOperation) -> bool {
+    if stored == requested {
+        return true;
+    }
+    if matches!(stored, AclOperation::All) {
+        return true;
+    }
+    implies(stored, requested)
+}
+
+fn implies(stored: AclOperation, requested: AclOperation) -> bool {
+    matches!(
+        (stored, requested),
+        (
+            AclOperation::Read | AclOperation::Write | AclOperation::Delete | AclOperation::Alter,
+            AclOperation::Describe,
+        ) | (AclOperation::AlterConfigs, AclOperation::DescribeConfigs)
+    )
 }
 
 #[cfg(test)]
@@ -124,6 +152,15 @@ mod tests {
     use crabka_metadata::{MetadataRecord, PatternType};
     use crabka_security::SaslMechanism;
     use uuid::Uuid;
+
+    fn no_super() -> std::collections::HashSet<String> {
+        std::collections::HashSet::new()
+    }
+    fn one_super(name: &str) -> std::collections::HashSet<String> {
+        let mut s = std::collections::HashSet::new();
+        s.insert(name.to_string());
+        s
+    }
 
     fn alice() -> Principal {
         Principal {
@@ -180,7 +217,7 @@ mod tests {
         let a = alice();
         let h = addr();
         assert_eq!(
-            authorize(&img, None, &req(&a, &h, "foo", AclOperation::Read)),
+            authorize(&img, &no_super(), &req(&a, &h, "foo", AclOperation::Read)),
             AuthorizationResult::Allow,
         );
     }
@@ -200,7 +237,11 @@ mod tests {
         let a = alice();
         let h = addr();
         assert_eq!(
-            authorize(&img, Some("alice"), &req(&a, &h, "foo", AclOperation::Read)),
+            authorize(
+                &img,
+                &one_super("alice"),
+                &req(&a, &h, "foo", AclOperation::Read)
+            ),
             AuthorizationResult::Allow,
         );
     }
@@ -220,7 +261,11 @@ mod tests {
         let a = alice();
         let h = addr();
         assert_eq!(
-            authorize(&img, Some("admin"), &req(&a, &h, "foo", AclOperation::Read)),
+            authorize(
+                &img,
+                &one_super("admin"),
+                &req(&a, &h, "foo", AclOperation::Read)
+            ),
             AuthorizationResult::Deny,
         );
     }
@@ -239,11 +284,15 @@ mod tests {
         let a = alice();
         let h = addr();
         assert_eq!(
-            authorize(&img, None, &req(&a, &h, "foo", AclOperation::Read)),
+            authorize(&img, &no_super(), &req(&a, &h, "foo", AclOperation::Read)),
             AuthorizationResult::Allow,
         );
         assert_eq!(
-            authorize(&img, None, &req(&a, &h, "foobar", AclOperation::Read)),
+            authorize(
+                &img,
+                &no_super(),
+                &req(&a, &h, "foobar", AclOperation::Read)
+            ),
             AuthorizationResult::Deny,
         );
     }
@@ -262,11 +311,15 @@ mod tests {
         let a = alice();
         let h = addr();
         assert_eq!(
-            authorize(&img, None, &req(&a, &h, "team-foo", AclOperation::Read)),
+            authorize(
+                &img,
+                &no_super(),
+                &req(&a, &h, "team-foo", AclOperation::Read)
+            ),
             AuthorizationResult::Allow,
         );
         assert_eq!(
-            authorize(&img, None, &req(&a, &h, "other", AclOperation::Read)),
+            authorize(&img, &no_super(), &req(&a, &h, "other", AclOperation::Read)),
             AuthorizationResult::Deny,
         );
     }
@@ -293,7 +346,7 @@ mod tests {
         let a = alice();
         let h = addr();
         assert_eq!(
-            authorize(&img, None, &req(&a, &h, "foo", AclOperation::Read)),
+            authorize(&img, &no_super(), &req(&a, &h, "foo", AclOperation::Read)),
             AuthorizationResult::Deny,
         );
     }
@@ -312,7 +365,7 @@ mod tests {
         let a = alice();
         let h = addr();
         assert_eq!(
-            authorize(&img, None, &req(&a, &h, "foo", AclOperation::Read)),
+            authorize(&img, &no_super(), &req(&a, &h, "foo", AclOperation::Read)),
             AuthorizationResult::Allow,
         );
     }
@@ -332,11 +385,19 @@ mod tests {
         let h_match: SocketAddr = "127.0.0.1:5000".parse().unwrap();
         let h_nomatch: SocketAddr = "127.0.0.2:5000".parse().unwrap();
         assert_eq!(
-            authorize(&img, None, &req(&a, &h_match, "foo", AclOperation::Read)),
+            authorize(
+                &img,
+                &no_super(),
+                &req(&a, &h_match, "foo", AclOperation::Read)
+            ),
             AuthorizationResult::Allow,
         );
         assert_eq!(
-            authorize(&img, None, &req(&a, &h_nomatch, "foo", AclOperation::Read)),
+            authorize(
+                &img,
+                &no_super(),
+                &req(&a, &h_nomatch, "foo", AclOperation::Read)
+            ),
             AuthorizationResult::Deny,
         );
     }
@@ -361,7 +422,7 @@ mod tests {
             AclOperation::Delete,
         ] {
             assert_eq!(
-                authorize(&img, None, &req(&a, &h, "foo", op)),
+                authorize(&img, &no_super(), &req(&a, &h, "foo", op)),
                 AuthorizationResult::Allow,
                 "{op:?} should be allowed under operation::All",
             );
@@ -389,7 +450,14 @@ mod tests {
         )));
         let a = alice();
         let h = addr();
-        let map = authorize_topics(&img, None, &a, &h, AclOperation::Read, ["t1", "t2", "t3"]);
+        let map = authorize_topics(
+            &img,
+            &no_super(),
+            &a,
+            &h,
+            AclOperation::Read,
+            ["t1", "t2", "t3"],
+        );
         assert_eq!(map.get("t1").copied(), Some(AuthorizationResult::Allow));
         assert_eq!(map.get("t2").copied(), Some(AuthorizationResult::Deny));
         // t3: no matching ACL + non-empty image → Deny by default.
@@ -410,11 +478,288 @@ mod tests {
         let a = alice();
         let h = addr();
         assert_eq!(
-            authorize(&img, None, &req(&a, &h, "foo", AclOperation::Read)),
+            authorize(&img, &no_super(), &req(&a, &h, "foo", AclOperation::Read)),
             AuthorizationResult::Allow,
         );
         assert_eq!(
-            authorize(&img, None, &req(&a, &h, "foo", AclOperation::Write)),
+            authorize(&img, &no_super(), &req(&a, &h, "foo", AclOperation::Write)),
+            AuthorizationResult::Deny,
+        );
+    }
+
+    fn topic_acl_op(permission: PermissionType, op: AclOperation, name: &str) -> AclEntry {
+        AclEntry {
+            resource_type: ResourceType::Topic,
+            resource_name: name.into(),
+            pattern_type: PatternType::Literal,
+            principal: "User:alice".into(),
+            host: "*".into(),
+            operation: op,
+            permission_type: permission,
+        }
+    }
+
+    #[test]
+    fn read_implies_describe_on_topic() {
+        let mut img = img();
+        img.apply(&MetadataRecord::V1AccessControlEntry(topic_acl_op(
+            PermissionType::Allow,
+            AclOperation::Read,
+            "foo",
+        )));
+        let a = alice();
+        let h = addr();
+        assert_eq!(
+            authorize(
+                &img,
+                &no_super(),
+                &req(&a, &h, "foo", AclOperation::Describe)
+            ),
+            AuthorizationResult::Allow,
+        );
+    }
+
+    #[test]
+    fn write_implies_describe_on_topic() {
+        let mut img = img();
+        img.apply(&MetadataRecord::V1AccessControlEntry(topic_acl_op(
+            PermissionType::Allow,
+            AclOperation::Write,
+            "foo",
+        )));
+        let a = alice();
+        let h = addr();
+        assert_eq!(
+            authorize(
+                &img,
+                &no_super(),
+                &req(&a, &h, "foo", AclOperation::Describe)
+            ),
+            AuthorizationResult::Allow,
+        );
+    }
+
+    #[test]
+    fn delete_implies_describe() {
+        let mut img = img();
+        img.apply(&MetadataRecord::V1AccessControlEntry(topic_acl_op(
+            PermissionType::Allow,
+            AclOperation::Delete,
+            "foo",
+        )));
+        let a = alice();
+        let h = addr();
+        assert_eq!(
+            authorize(
+                &img,
+                &no_super(),
+                &req(&a, &h, "foo", AclOperation::Describe)
+            ),
+            AuthorizationResult::Allow,
+        );
+    }
+
+    #[test]
+    fn alter_implies_describe() {
+        let mut img = img();
+        img.apply(&MetadataRecord::V1AccessControlEntry(topic_acl_op(
+            PermissionType::Allow,
+            AclOperation::Alter,
+            "foo",
+        )));
+        let a = alice();
+        let h = addr();
+        assert_eq!(
+            authorize(
+                &img,
+                &no_super(),
+                &req(&a, &h, "foo", AclOperation::Describe)
+            ),
+            AuthorizationResult::Allow,
+        );
+    }
+
+    #[test]
+    fn alter_configs_implies_describe_configs() {
+        let mut img = img();
+        img.apply(&MetadataRecord::V1AccessControlEntry(topic_acl_op(
+            PermissionType::Allow,
+            AclOperation::AlterConfigs,
+            "foo",
+        )));
+        let a = alice();
+        let h = addr();
+        assert_eq!(
+            authorize(
+                &img,
+                &no_super(),
+                &req(&a, &h, "foo", AclOperation::DescribeConfigs)
+            ),
+            AuthorizationResult::Allow,
+        );
+    }
+
+    #[test]
+    fn describe_does_not_imply_read() {
+        let mut img = img();
+        img.apply(&MetadataRecord::V1AccessControlEntry(topic_acl_op(
+            PermissionType::Allow,
+            AclOperation::Describe,
+            "foo",
+        )));
+        let a = alice();
+        let h = addr();
+        assert_eq!(
+            authorize(&img, &no_super(), &req(&a, &h, "foo", AclOperation::Read)),
+            AuthorizationResult::Deny,
+        );
+    }
+
+    fn acl_op_on(
+        rt: ResourceType,
+        permission: PermissionType,
+        op: AclOperation,
+        name: &str,
+    ) -> AclEntry {
+        AclEntry {
+            resource_type: rt,
+            resource_name: name.into(),
+            pattern_type: PatternType::Literal,
+            principal: "User:alice".into(),
+            host: "*".into(),
+            operation: op,
+            permission_type: permission,
+        }
+    }
+
+    fn req_on<'a>(
+        p: &'a Principal,
+        host: &'a SocketAddr,
+        rt: ResourceType,
+        name: &'a str,
+        op: AclOperation,
+    ) -> AuthorizationRequest<'a> {
+        AuthorizationRequest {
+            principal: p,
+            host,
+            resource_type: rt,
+            resource_name: name,
+            operation: op,
+        }
+    }
+
+    #[test]
+    fn implication_works_on_group_resource() {
+        let mut img = img();
+        img.apply(&MetadataRecord::V1AccessControlEntry(acl_op_on(
+            ResourceType::Group,
+            PermissionType::Allow,
+            AclOperation::Read,
+            "cg-1",
+        )));
+        let a = alice();
+        let h = addr();
+        assert_eq!(
+            authorize(
+                &img,
+                &no_super(),
+                &req_on(&a, &h, ResourceType::Group, "cg-1", AclOperation::Describe)
+            ),
+            AuthorizationResult::Allow,
+        );
+    }
+
+    #[test]
+    fn implication_works_on_cluster_resource() {
+        let mut img = img();
+        img.apply(&MetadataRecord::V1AccessControlEntry(acl_op_on(
+            ResourceType::Cluster,
+            PermissionType::Allow,
+            AclOperation::Alter,
+            "kafka-cluster",
+        )));
+        let a = alice();
+        let h = addr();
+        assert_eq!(
+            authorize(
+                &img,
+                &no_super(),
+                &req_on(
+                    &a,
+                    &h,
+                    ResourceType::Cluster,
+                    "kafka-cluster",
+                    AclOperation::Describe
+                )
+            ),
+            AuthorizationResult::Allow,
+        );
+    }
+
+    #[test]
+    fn implication_works_on_transactional_id_resource() {
+        let mut img = img();
+        img.apply(&MetadataRecord::V1AccessControlEntry(acl_op_on(
+            ResourceType::TransactionalId,
+            PermissionType::Allow,
+            AclOperation::Write,
+            "tx-1",
+        )));
+        let a = alice();
+        let h = addr();
+        assert_eq!(
+            authorize(
+                &img,
+                &no_super(),
+                &req_on(
+                    &a,
+                    &h,
+                    ResourceType::TransactionalId,
+                    "tx-1",
+                    AclOperation::Describe
+                )
+            ),
+            AuthorizationResult::Allow,
+        );
+    }
+
+    #[test]
+    fn multi_super_user_all_bypass() {
+        let img = img();
+        let h = addr();
+        let supers = {
+            let mut s = std::collections::HashSet::new();
+            s.insert("admin".to_string());
+            s.insert("ops-bot".to_string());
+            s
+        };
+        let admin = Principal {
+            name: "admin".into(),
+            mechanism: SaslMechanism::Plain,
+        };
+        let ops = Principal {
+            name: "ops-bot".into(),
+            mechanism: SaslMechanism::Plain,
+        };
+        let alice = alice();
+        assert_eq!(
+            authorize(&img, &supers, &req(&admin, &h, "foo", AclOperation::Write)),
+            AuthorizationResult::Allow,
+        );
+        assert_eq!(
+            authorize(&img, &supers, &req(&ops, &h, "foo", AclOperation::Write)),
+            AuthorizationResult::Allow,
+        );
+        // alice would hit the compat shim with an empty image; force a
+        // non-empty image by adding an unrelated ACL.
+        let mut img2 = img;
+        img2.apply(&MetadataRecord::V1AccessControlEntry(topic_acl_op(
+            PermissionType::Allow,
+            AclOperation::Read,
+            "_other",
+        )));
+        assert_eq!(
+            authorize(&img2, &supers, &req(&alice, &h, "foo", AclOperation::Write)),
             AuthorizationResult::Deny,
         );
     }

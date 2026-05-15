@@ -56,7 +56,7 @@ pub(crate) async fn handle(
     // ── slice-13 ACL preamble: Write on TransactionalId ────────────────
     {
         let image = broker.controller.current_image();
-        let super_user = broker.config.super_user_name.as_deref();
+        let super_users = &broker.config.super_users;
         let tid_req = AuthorizationRequest {
             principal,
             host: peer,
@@ -64,7 +64,7 @@ pub(crate) async fn handle(
             resource_name: req.transactional_id.as_str(),
             operation: AclOperation::Write,
         };
-        if authorize(&image, super_user, &tid_req) == AuthorizationResult::Deny {
+        if authorize(&image, super_users, &tid_req) == AuthorizationResult::Deny {
             return encode_err_all(version, &req, codes::TRANSACTIONAL_ID_AUTHORIZATION_FAILED);
         }
         // Group Read gate.
@@ -75,7 +75,7 @@ pub(crate) async fn handle(
             resource_name: req.group_id.as_str(),
             operation: AclOperation::Read,
         };
-        if authorize(&image, super_user, &group_req) == AuthorizationResult::Deny {
+        if authorize(&image, super_users, &group_req) == AuthorizationResult::Deny {
             return encode_err_all(version, &req, codes::GROUP_AUTHORIZATION_FAILED);
         }
     }
@@ -86,7 +86,7 @@ pub(crate) async fn handle(
         let topic_names: Vec<&str> = req.topics.iter().map(|t| t.name.as_str()).collect();
         authorize_topics(
             &image,
-            broker.config.super_user_name.as_deref(),
+            &broker.config.super_users,
             principal,
             peer,
             AclOperation::Read,
