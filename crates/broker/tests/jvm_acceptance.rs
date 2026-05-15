@@ -2412,10 +2412,12 @@ async fn jvm_sasl_scram_sha512_produce_consume() {
     ));
     let alice_mount = alice_props.mount_str();
 
-    // 1. Create the topic.
+    // 1. Create the topic. Run as `admin` (super-user) so the slice-13
+    //    `CreateTopics` Cluster-Create authorize check passes via the
+    //    super-user bypass. Alice has no Cluster ACLs.
     docker_run_kafka_tool_with_image_and_mount(
         KAFKA_IMAGE_TXN,
-        &alice_mount,
+        &admin_props.mount_str(),
         &[
             "kafka-topics",
             "--create",
@@ -2432,6 +2434,32 @@ async fn jvm_sasl_scram_sha512_produce_consume() {
             "/client.properties",
         ],
     );
+
+    // 1b. Grant alice the topic ACLs required for produce/consume.
+    //     Slice-13 enforces per-topic Read/Write/Describe with no
+    //     Read-implies-Describe semantics, so each operation is seeded
+    //     explicitly. Consumer uses `--partition 0` (no consumer group)
+    //     so no Group ACL is required.
+    for op in ["Read", "Write", "Describe"] {
+        docker_run_kafka_tool_with_image_and_mount(
+            KAFKA_IMAGE_TXN,
+            &admin_props.mount_str(),
+            &[
+                "kafka-acls",
+                "--add",
+                "--allow-principal",
+                &format!("User:{ALICE}"),
+                "--operation",
+                op,
+                "--topic",
+                TOPIC,
+                "--bootstrap-server",
+                BOOTSTRAP,
+                "--command-config",
+                "/client.properties",
+            ],
+        );
+    }
 
     // 2. Produce 10 records via stdin (kafka-console-producer wants
     //    `--producer.config`, not `--command-config`).
@@ -2919,10 +2947,12 @@ async fn jvm_sasl_ssl_full_stack() {
     ));
     let alice_props_mount = alice_props.mount_str();
 
-    // 1. Create the topic.
+    // 1. Create the topic. Run as `admin` (super-user) so the slice-13
+    //    `CreateTopics` Cluster-Create authorize check passes. Then grant
+    //    alice Read/Write/Describe on the topic (no implication, per T25).
     docker_run_kafka_tool_with_image_and_mounts(
         KAFKA_IMAGE_TXN,
-        &[&alice_props_mount, &ts_mount],
+        &[&admin_props.mount_str(), &ts_mount],
         &[
             "kafka-topics",
             "--create",
@@ -2939,6 +2969,26 @@ async fn jvm_sasl_ssl_full_stack() {
             "/client.properties",
         ],
     );
+    for op in ["Read", "Write", "Describe"] {
+        docker_run_kafka_tool_with_image_and_mounts(
+            KAFKA_IMAGE_TXN,
+            &[&admin_props.mount_str(), &ts_mount],
+            &[
+                "kafka-acls",
+                "--add",
+                "--allow-principal",
+                &format!("User:{ALICE}"),
+                "--operation",
+                op,
+                "--topic",
+                TOPIC,
+                "--bootstrap-server",
+                BOOTSTRAP,
+                "--command-config",
+                "/client.properties",
+            ],
+        );
+    }
 
     // 2. Produce 10 records via stdin.
     let mut child = Command::new("docker")
@@ -3569,10 +3619,12 @@ async fn jvm_inter_broker_sasl_ssl_raft_replication() {
     ));
     let alice_props_mount = alice_props.mount_str();
 
-    // Create topic rf=2 across both brokers.
+    // Create topic rf=2 across both brokers. Run as `admin` (super-user)
+    //  for slice-13's CreateTopics Cluster-Create authorize check, then
+    //  grant alice Read/Write/Describe on the topic.
     docker_run_kafka_tool_with_image_and_mounts(
         KAFKA_IMAGE_TXN,
-        &[&alice_props_mount, &ts_mount],
+        &[&admin_props.mount_str(), &ts_mount],
         &[
             "kafka-topics",
             "--create",
@@ -3589,6 +3641,26 @@ async fn jvm_inter_broker_sasl_ssl_raft_replication() {
             "/client.properties",
         ],
     );
+    for op in ["Read", "Write", "Describe"] {
+        docker_run_kafka_tool_with_image_and_mounts(
+            KAFKA_IMAGE_TXN,
+            &[&admin_props.mount_str(), &ts_mount],
+            &[
+                "kafka-acls",
+                "--add",
+                "--allow-principal",
+                &format!("User:{ALICE}"),
+                "--operation",
+                op,
+                "--topic",
+                TOPIC,
+                "--bootstrap-server",
+                BOOTSTRAP,
+                "--command-config",
+                "/client.properties",
+            ],
+        );
+    }
 
     // Wait for the topic to materialize on both brokers.
     let deadline = std::time::Instant::now() + std::time::Duration::from_mins(1);
