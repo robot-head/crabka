@@ -2135,7 +2135,7 @@ async fn start_dual_mech_broker(
         }],
         inter_broker_listener_name: "SASL_PLAINTEXT".to_string(),
         enabled_sasl_mechanisms: vec![SaslMechanism::Plain, SaslMechanism::ScramSha512],
-        super_user_name: Some(admin.to_string()),
+        super_users: std::collections::HashSet::from([admin.to_string()]),
         ..BrokerConfig::default()
     };
     config
@@ -2870,7 +2870,7 @@ async fn start_sasl_ssl_broker(
             trust_roots_path: None,
         }),
         enabled_sasl_mechanisms: vec![SaslMechanism::Plain, SaslMechanism::ScramSha512],
-        super_user_name: Some(admin.to_string()),
+        super_users: std::collections::HashSet::from([admin.to_string()]),
         ..BrokerConfig::default()
     };
     config
@@ -3150,7 +3150,7 @@ async fn start_two_sasl_brokers(
             }],
             inter_broker_listener_name: "SASL_PLAINTEXT".to_string(),
             enabled_sasl_mechanisms: vec![SaslMechanism::Plain],
-            super_user_name: Some(admin.to_string()),
+            super_users: std::collections::HashSet::from([admin.to_string()]),
             inter_broker_credentials: Some(InterBrokerCredentials {
                 mechanism: SaslMechanism::Plain,
                 username: admin.to_string(),
@@ -3476,7 +3476,7 @@ async fn start_two_sasl_ssl_brokers_with_controller_protocol(
                 trust_roots_path: Some(cert_path.clone()),
             }),
             enabled_sasl_mechanisms: vec![SaslMechanism::Plain, SaslMechanism::ScramSha512],
-            super_user_name: Some(admin.to_string()),
+            super_users: std::collections::HashSet::from([admin.to_string()]),
             inter_broker_credentials: Some(InterBrokerCredentials {
                 mechanism: SaslMechanism::Plain,
                 username: admin.to_string(),
@@ -3804,7 +3804,7 @@ async fn start_sasl_plaintext_broker_with_super_user(
         }],
         inter_broker_listener_name: "SASL_PLAINTEXT".to_string(),
         enabled_sasl_mechanisms: vec![SaslMechanism::Plain],
-        super_user_name: Some(super_user.to_string()),
+        super_users: std::collections::HashSet::from([super_user.to_string()]),
         ..BrokerConfig::default()
     };
     for (u, p) in users {

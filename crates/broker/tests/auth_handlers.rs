@@ -742,7 +742,7 @@ async fn alter_scram_creds_super_user_can_provision() {
     cfg.enabled_sasl_mechanisms = vec![SaslMechanism::Plain, SaslMechanism::ScramSha512];
     cfg.plain_credentials
         .insert("admin".to_string(), "secret".to_string());
-    cfg.super_user_name = Some("admin".to_string());
+    cfg.super_users = std::collections::HashSet::from(["admin".to_string()]);
 
     let handle = Broker::start(cfg).await.expect("broker must start");
     let addr = handle.listen_addr();
@@ -807,7 +807,7 @@ async fn alter_scram_creds_non_super_user_rejected() {
     cfg.enabled_sasl_mechanisms = vec![SaslMechanism::Plain];
     cfg.plain_credentials
         .insert("bob".to_string(), "hunter2".to_string());
-    cfg.super_user_name = Some("admin".to_string());
+    cfg.super_users = std::collections::HashSet::from(["admin".to_string()]);
 
     let handle = Broker::start(cfg).await.expect("broker must start");
     let addr = handle.listen_addr();
@@ -853,7 +853,7 @@ async fn alter_scram_creds_low_iterations_rejected() {
     cfg.enabled_sasl_mechanisms = vec![SaslMechanism::Plain];
     cfg.plain_credentials
         .insert("admin".to_string(), "secret".to_string());
-    cfg.super_user_name = Some("admin".to_string());
+    cfg.super_users = std::collections::HashSet::from(["admin".to_string()]);
 
     let handle = Broker::start(cfg).await.expect("broker must start");
     let addr = handle.listen_addr();
@@ -901,7 +901,7 @@ async fn alter_scram_creds_duplicate_resource_rejected() {
     cfg.enabled_sasl_mechanisms = vec![SaslMechanism::Plain];
     cfg.plain_credentials
         .insert("admin".to_string(), "secret".to_string());
-    cfg.super_user_name = Some("admin".to_string());
+    cfg.super_users = std::collections::HashSet::from(["admin".to_string()]);
 
     let handle = Broker::start(cfg).await.expect("broker must start");
     let addr = handle.listen_addr();

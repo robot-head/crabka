@@ -51,9 +51,7 @@ pub(crate) async fn handle(
             resource_name: req.group_id.as_str(),
             operation: AclOperation::Read,
         };
-        if authorize(&image, broker.config.super_user_name.as_deref(), &acl_req)
-            == AuthorizationResult::Deny
-        {
+        if authorize(&image, &broker.config.super_users, &acl_req) == AuthorizationResult::Deny {
             return encode(
                 version,
                 &JoinGroupResponse {

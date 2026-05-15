@@ -133,7 +133,7 @@ fn sasl_plain_broker_config(
         cfg.plain_credentials
             .insert((*u).to_string(), (*p).to_string());
     }
-    cfg.super_user_name = super_user.map(str::to_string);
+    cfg.super_users = super_user.map(str::to_string).into_iter().collect();
     cfg
 }
 

@@ -36,7 +36,7 @@ pub(crate) async fn handle(
     let image = broker.controller.current_image();
     let allow = authorize(
         &image,
-        broker.config.super_user_name.as_deref(),
+        &broker.config.super_users,
         &AuthorizationRequest {
             principal,
             host: peer,

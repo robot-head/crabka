@@ -46,9 +46,7 @@ pub(crate) async fn handle(
             resource_name: req.group_id.as_str(),
             operation: AclOperation::Describe,
         };
-        if authorize(&image, broker.config.super_user_name.as_deref(), &acl_req)
-            == AuthorizationResult::Deny
-        {
+        if authorize(&image, &broker.config.super_users, &acl_req) == AuthorizationResult::Deny {
             let resp = OffsetFetchResponse {
                 topics: Vec::new(),
                 error_code: codes::GROUP_AUTHORIZATION_FAILED,
@@ -92,7 +90,7 @@ pub(crate) async fn handle(
             let image = broker.controller.current_image();
             authorize_topics(
                 &image,
-                broker.config.super_user_name.as_deref(),
+                &broker.config.super_users,
                 principal,
                 peer,
                 AclOperation::Read,
@@ -144,7 +142,7 @@ pub(crate) async fn handle(
             let image = broker.controller.current_image();
             authorize_topics(
                 &image,
-                broker.config.super_user_name.as_deref(),
+                &broker.config.super_users,
                 principal,
                 peer,
                 AclOperation::Read,

@@ -57,7 +57,7 @@ pub(crate) async fn handle(
     // request and gate on the appropriate resource/operation.
     {
         let image = controller.current_image();
-        let super_user = broker.config.super_user_name.as_deref();
+        let super_users = &broker.config.super_users;
         match req.transactional_id.as_deref() {
             Some(tid) if !tid.is_empty() => {
                 let acl_req = AuthorizationRequest {
@@ -67,7 +67,7 @@ pub(crate) async fn handle(
                     resource_name: tid,
                     operation: AclOperation::Write,
                 };
-                if authorize(&image, super_user, &acl_req) == AuthorizationResult::Deny {
+                if authorize(&image, super_users, &acl_req) == AuthorizationResult::Deny {
                     return encode_err(version, codes::TRANSACTIONAL_ID_AUTHORIZATION_FAILED);
                 }
             }
@@ -79,7 +79,7 @@ pub(crate) async fn handle(
                     resource_name: "kafka-cluster",
                     operation: AclOperation::IdempotentWrite,
                 };
-                if authorize(&image, super_user, &acl_req) == AuthorizationResult::Deny {
+                if authorize(&image, super_users, &acl_req) == AuthorizationResult::Deny {
                     return encode_err(version, codes::CLUSTER_AUTHORIZATION_FAILED);
                 }
             }

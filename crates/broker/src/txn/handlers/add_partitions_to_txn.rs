@@ -52,7 +52,7 @@ pub(crate) async fn handle(
 ) -> Result<Bytes, BrokerError> {
     let coord = broker.txn_coordinator.clone();
     let controller = broker.controller.clone();
-    let super_user = broker.config.super_user_name.clone();
+    let super_users = &broker.config.super_users;
     let mut cur: &[u8] = req_bytes;
     let req = AddPartitionsToTxnRequest::decode(&mut cur, version)?;
 
@@ -62,27 +62,9 @@ pub(crate) async fn handle(
     coord.refresh_leader_partitions(&image).await;
 
     if version >= 4 {
-        handle_v4(
-            &coord,
-            version,
-            &req,
-            &image,
-            super_user.as_deref(),
-            principal,
-            peer,
-        )
-        .await
+        handle_v4(&coord, version, &req, &image, super_users, principal, peer).await
     } else {
-        handle_v3(
-            &coord,
-            version,
-            &req,
-            &image,
-            super_user.as_deref(),
-            principal,
-            peer,
-        )
-        .await
+        handle_v3(&coord, version, &req, &image, super_users, principal, peer).await
     }
 }
 
@@ -93,7 +75,7 @@ async fn handle_v4(
     version: i16,
     req: &AddPartitionsToTxnRequest,
     image: &MetadataImage,
-    super_user: Option<&str>,
+    super_users: &std::collections::HashSet<String>,
     principal: &Principal,
     peer: &SocketAddr,
 ) -> Result<Bytes, BrokerError> {
@@ -109,11 +91,12 @@ async fn handle_v4(
             resource_name: txn.transactional_id.as_str(),
             operation: AclOperation::Write,
         };
-        let topic_results = if authorize(image, super_user, &tid_req) == AuthorizationResult::Deny {
+        let topic_results = if authorize(image, super_users, &tid_req) == AuthorizationResult::Deny
+        {
             topic_error(&txn.topics, codes::TRANSACTIONAL_ID_AUTHORIZATION_FAILED)
         } else {
             // Per-topic Write check.
-            let denied = denied_topics(image, super_user, principal, peer, &txn.topics);
+            let denied = denied_topics(image, super_users, principal, peer, &txn.topics);
             process_one_txn(
                 coord,
                 txn.transactional_id.as_str(),
@@ -146,7 +129,7 @@ async fn handle_v3(
     version: i16,
     req: &AddPartitionsToTxnRequest,
     image: &MetadataImage,
-    super_user: Option<&str>,
+    super_users: &std::collections::HashSet<String>,
     principal: &Principal,
     peer: &SocketAddr,
 ) -> Result<Bytes, BrokerError> {
@@ -158,13 +141,19 @@ async fn handle_v3(
         resource_name: req.v3_and_below_transactional_id.as_str(),
         operation: AclOperation::Write,
     };
-    let topic_results = if authorize(image, super_user, &tid_req) == AuthorizationResult::Deny {
+    let topic_results = if authorize(image, super_users, &tid_req) == AuthorizationResult::Deny {
         topic_error(
             &req.v3_and_below_topics,
             codes::TRANSACTIONAL_ID_AUTHORIZATION_FAILED,
         )
     } else {
-        let denied = denied_topics(image, super_user, principal, peer, &req.v3_and_below_topics);
+        let denied = denied_topics(
+            image,
+            super_users,
+            principal,
+            peer,
+            &req.v3_and_below_topics,
+        );
         process_one_txn(
             coord,
             req.v3_and_below_transactional_id.as_str(),
@@ -191,7 +180,7 @@ async fn handle_v3(
 /// on every partition row of denied topics.
 fn denied_topics(
     image: &MetadataImage,
-    super_user: Option<&str>,
+    super_users: &std::collections::HashSet<String>,
     principal: &Principal,
     peer: &SocketAddr,
     topics: &[AddPartitionsToTxnTopic],
@@ -199,7 +188,7 @@ fn denied_topics(
     let names: Vec<&str> = topics.iter().map(|t| t.name.as_str()).collect();
     let map = authorize_topics(
         image,
-        super_user,
+        super_users,
         principal,
         peer,
         AclOperation::Write,

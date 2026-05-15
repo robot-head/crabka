@@ -67,7 +67,7 @@ pub(crate) async fn handle(
         let acl_result = match resource.resource_type {
             RESOURCE_TYPE_TOPIC => authorize(
                 &image,
-                broker.config.super_user_name.as_deref(),
+                &broker.config.super_users,
                 &AuthorizationRequest {
                     principal,
                     host: peer,
@@ -78,7 +78,7 @@ pub(crate) async fn handle(
             ),
             RESOURCE_TYPE_BROKER => authorize(
                 &image,
-                broker.config.super_user_name.as_deref(),
+                &broker.config.super_users,
                 &AuthorizationRequest {
                     principal,
                     host: peer,

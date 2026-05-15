@@ -16,7 +16,7 @@
 //! Authorization (slice-13): `Alter` on `Cluster("kafka-cluster")`. On Deny,
 //! every per-user result is `CLUSTER_AUTHORIZATION_FAILED` (31). The
 //! authorizer's super-user bypass still handles slice-12 tests (they configure
-//! `super_user_name`, which short-circuits inside `authorize` → ALLOW).
+//! `super_users`, which short-circuits inside `authorize` → ALLOW).
 //!
 //! Duplicate detection: the same `(user, mechanism)` appearing twice in one
 //! request (either two upsertions, two deletions, or one of each) gets
@@ -64,11 +64,11 @@ pub(crate) async fn handle(
     // Whole-request Cluster Alter gate. On Deny, every per-user row
     // reports CLUSTER_AUTHORIZATION_FAILED. The authorizer's super-user
     // bypass still handles slice-12 tests (they configure
-    // `super_user_name`, which short-circuits inside `authorize` → ALLOW).
+    // `super_users`, which short-circuits inside `authorize` → ALLOW).
     let image = broker.controller.current_image();
     let authorized = authorize(
         &image,
-        broker.config.super_user_name.as_deref(),
+        &broker.config.super_users,
         &AuthorizationRequest {
             principal,
             host: peer,
