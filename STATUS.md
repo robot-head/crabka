@@ -128,3 +128,54 @@ Kafka client for ApiVersions.
   (`jvm_inter_broker_sasl_ssl_raft_replication`).
 - Out of scope: mTLS, ACLs, per-listener controller-quorum protocol
   mapping, SCRAM rotation under live raft traffic.
+
+## Slice 13 — ACLs (2026-05-15)
+
+- New `crabka-metadata::AclEntry` + `AclEntryFilter` + 4 enums
+  (`ResourceType`, `PatternType`, `PermissionType`, `AclOperation`).
+  Two new `MetadataRecord` variants: `V1AccessControlEntry`,
+  `V1DeleteAccessControlEntry`. `MetadataImage` indexes ACLs by
+  `(ResourceType, ResourceName)` for LITERAL and by `ResourceType`
+  for PREFIXED.
+- New `crabka_broker::authorizer::authorize` — pure-logic Kafka ACL
+  decision algorithm with a compatibility shim: zero ACLs AND
+  `super_user_name = None` → ALLOW (preserves slice 11/12 test
+  behavior unchanged). Once one ACL or a super-user exists,
+  deny-by-default kicks in.
+- 3 new wire handlers: `DescribeAcls` (29), `CreateAcls` (30),
+  `DeleteAcls` (31). Wire `i8` enum discriminants map to/from
+  metadata enums via `handlers::acl_wire`. `kafka-acls.sh` works
+  end-to-end against cp-kafka:7.5.0.
+- 16 existing handlers migrated off the static `HandlerTable` and
+  gained an authorize-preamble: `Produce`/`Fetch`/`Metadata`
+  (per-topic), `CreateTopics`/`DeleteTopics`/`AlterConfigs`/
+  `IncrementalAlterConfigs`/`CreatePartitions`/`DeleteRecords`
+  (topic admin), `ListGroups`/`DescribeGroups`/`DeleteGroups`/
+  `JoinGroup`/`OffsetCommit`/`OffsetFetch` (group),
+  `DescribeCluster`/`AlterUserScramCredentials` (cluster),
+  `InitProducerId`/`AddPartitionsToTxn`/`EndTxn`/`TxnOffsetCommit`
+  (txn). Slice 12's super-user-name check on
+  `AlterUserScramCredentials` was replaced by the proper Cluster
+  Alter ACL check; the authorizer's super-user bypass keeps
+  slice-12 tests green.
+- `crabka format --add-acl` seeds ACL records alongside SCRAM
+  credentials in `bootstrap.records.bin`. The slice 12b loader
+  reads them on first start.
+- 10 new no-Docker integration tests (`tests/acl_handlers.rs`):
+  ACL flow (Create/Describe/Delete via super-user + non-super-user
+  rejection), Produce/Fetch enforcement, Metadata silent-filter vs
+  explicit-deny, JoinGroup gate, InitProducerId txn gate.
+- 5 new JVM acceptance tests (cp-kafka:7.5.0):
+  `kafka-acls.sh` provision + list + remove; authorized
+  produce/consume; unauthorized produce / consumer / prefixed-ACL.
+- Side fix: `TRANSACTIONAL_ID_AUTHORIZATION_FAILED` constant was
+  declared at value 51 (incorrect); corrected to 53 per Kafka spec.
+- Known limitation: Crabka's authorizer does not implement Kafka's
+  "Read/Write implies Describe" operation implication. Tests work
+  around by seeding explicit Describe ACLs alongside Read/Write —
+  production deployments should do the same until an implication
+  slice lands.
+- Out of scope: delegation tokens, SCRAM-SHA-256 ACL principals,
+  IPv6 host filters, audit log destinations beyond `tracing`,
+  `allow.everyone.if.no.acl.found=true` toggle (compat shim
+  instead), operation implications (Read/Write → Describe).

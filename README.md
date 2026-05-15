@@ -67,6 +67,16 @@ Pre-1.0, pre-alpha. No production use.
   `forward_submit_to`) so raft RPC authenticates inbound and outbound;
   `Broker::start` consumes `crabka format --add-scram` bootstrap
   records on first start.
+- **Slice 13** — ACLs: real Kafka authorizer replaces slice 12's
+  super-user-name stand-in. Production-shape — 4 resource types
+  (`Topic`, `Group`, `Cluster`, `TransactionalId`), `Literal` +
+  `Prefixed` pattern matching, `Allow` + `Deny` (DENY-wins,
+  deny-by-default), IPv4 host filter. New wire handlers:
+  `CreateAcls` (30), `DeleteAcls` (31), `DescribeAcls` (29). 16
+  existing handlers gain an authorize preamble. New
+  `crabka format --add-acl` for bootstrap. Compatibility shim
+  preserves slice 11/12 test behavior when no ACLs AND no super-user
+  are configured.
 
 ## Published crates
 
