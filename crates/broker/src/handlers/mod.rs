@@ -102,6 +102,12 @@ pub(crate) fn build_table() -> HandlerTable {
     // IncrementalAlterConfigs (api_key 44) is intercepted inline in `network::dispatch`
     // (slice-13 T14) so the handler can receive the per-connection
     // principal + peer `SocketAddr` for per-resource AlterConfigs ACL enforcement.
+    // DeleteRecords (api_key 21) is intercepted inline in `network::dispatch`
+    // (slice-13 T15) so the handler can receive the per-connection
+    // principal + peer `SocketAddr` for per-topic Delete ACL enforcement.
+    // CreatePartitions (api_key 37) is intercepted inline in `network::dispatch`
+    // (slice-13 T15) so the handler can receive the per-connection
+    // principal + peer `SocketAddr` for per-topic Alter ACL enforcement.
     t.register(2, list_offsets::handle);
     t.register(8, offset_commit::handle);
     t.register(9, offset_fetch::handle);
@@ -113,7 +119,7 @@ pub(crate) fn build_table() -> HandlerTable {
     t.register(15, describe_groups::handle);
     t.register(16, list_groups::handle);
     t.register(18, api_versions::handle);
-    t.register(21, delete_records::handle);
+    // 21 (DeleteRecords) intercepted inline — see comment above.
     t.register(22, init_producer_id::handle);
     t.register(23, offset_for_leader_epoch::handle);
     t.register(24, crate::txn::handlers::add_partitions_to_txn::handle);
@@ -123,7 +129,7 @@ pub(crate) fn build_table() -> HandlerTable {
     t.register(28, crate::txn::handlers::txn_offset_commit::handle);
     t.register(32, describe_configs::handle);
     // 33 (AlterConfigs) intercepted inline — see comment above.
-    t.register(37, create_partitions::handle);
+    // 37 (CreatePartitions) intercepted inline — see comment above.
     t.register(42, delete_groups::handle);
     // 44 (IncrementalAlterConfigs) intercepted inline — see comment above.
     t.register(56, alter_partition::handle);

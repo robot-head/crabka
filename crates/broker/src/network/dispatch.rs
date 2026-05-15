@@ -349,6 +349,49 @@ async fn serve_connection_stream<S>(
                 }
             }
         }
+        // DeleteRecords (21, slice-13 T15) needs both the authenticated
+        // principal AND the peer's `SocketAddr` so the handler can
+        // batch-authorize every topic in the request for `Delete` and emit
+        // TOPIC_AUTHORIZATION_FAILED on the per-partition rows of any
+        // topic that comes back `Deny`. The `&Broker`-only handler table
+        // signature can't carry that context, so this api_key intercepts
+        // inline.
+        if peek_api_key(&frame).ok() == Some(21) {
+            match handle_delete_records_frame(&broker, &frame, &auth, &peer).await {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during DeleteRecords, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "DeleteRecords dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
+        // CreatePartitions (37, slice-13 T15) needs both the authenticated
+        // principal AND the peer's `SocketAddr` so the handler can
+        // batch-authorize every topic in the request for `Alter` and emit
+        // TOPIC_AUTHORIZATION_FAILED on the topic row of any topic that
+        // comes back `Deny`. The `&Broker`-only handler table signature
+        // can't carry that context, so this api_key intercepts inline.
+        if peek_api_key(&frame).ok() == Some(37) {
+            match handle_create_partitions_frame(&broker, &frame, &auth, &peer).await {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during CreatePartitions, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "CreatePartitions dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
         // DescribeAcls (29, slice-13 T7) needs both the authenticated
         // principal AND the peer's `SocketAddr` for host-based ACL
         // matching; neither is reachable from the `&Broker`-only handler
@@ -976,6 +1019,88 @@ async fn handle_incremental_alter_configs_frame(
         });
 
     let resp_body = crate::handlers::incremental_alter_configs::handle(
+        broker,
+        api_version,
+        correlation_id,
+        body,
+        &principal,
+        peer,
+    )
+    .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch a `DeleteRecords` (`api_key` 21) frame. Pulls the
+/// authenticated principal off the per-connection `auth` state and the
+/// peer `SocketAddr` from the accept-time capture so the handler can
+/// batch-authorize every topic in the request for `Delete` (slice-13 T15).
+/// Topics that come back `Deny` have `TOPIC_AUTHORIZATION_FAILED` set on
+/// every partition row.
+async fn handle_delete_records_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 21);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let principal = auth
+        .principal()
+        .cloned()
+        .unwrap_or_else(|| crabka_security::Principal {
+            name: "ANONYMOUS".to_string(),
+            mechanism: crabka_security::SaslMechanism::Plain,
+        });
+
+    let resp_body = crate::handlers::delete_records::handle(
+        broker,
+        api_version,
+        correlation_id,
+        body,
+        &principal,
+        peer,
+    )
+    .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch a `CreatePartitions` (`api_key` 37) frame. Pulls the
+/// authenticated principal off the per-connection `auth` state and the
+/// peer `SocketAddr` from the accept-time capture so the handler can
+/// batch-authorize every topic in the request for `Alter` (slice-13 T15).
+/// Topics that come back `Deny` receive `TOPIC_AUTHORIZATION_FAILED` on
+/// that topic row.
+async fn handle_create_partitions_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 37);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let principal = auth
+        .principal()
+        .cloned()
+        .unwrap_or_else(|| crabka_security::Principal {
+            name: "ANONYMOUS".to_string(),
+            mechanism: crabka_security::SaslMechanism::Plain,
+        });
+
+    let resp_body = crate::handlers::create_partitions::handle(
         broker,
         api_version,
         correlation_id,
