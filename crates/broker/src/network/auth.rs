@@ -176,15 +176,118 @@ pub fn handle_authenticate_plain<S: BuildHasher>(
     }
 }
 
-/// SCRAM-SHA-512 stub. The real state machine lands in T14; until then any
-/// SCRAM `SaslAuthenticate` round responds with a failure so the connection
-/// is closed deterministically and the client surfaces an auth error.
+/// SCRAM-SHA-512 `SaslAuthenticate` handler. Implements the two-round RFC 5802
+/// dance over Kafka's `SaslAuthenticate` (`api_key` 36) wire envelope.
+///
+/// Round 1 (client-first):
+///   - `auth_bytes` = `n,,n=<user>,r=<client-nonce>` (raw SCRAM client-first
+///     message). We parse the username, look up the credential in the
+///     metadata image, and instantiate a [`ScramServerExchange`]. The
+///     exchange consumes the same client-first bytes and emits the
+///     server-first message (`r=…,s=…,i=…`), which becomes the response
+///     `auth_bytes`. `auth` transitions from
+///     `Negotiating { exchange: ScramPending }` to
+///     `Negotiating { exchange: Scram(server) }` — still unauthenticated.
+///
+/// Round 2 (client-final):
+///   - `auth_bytes` = `c=biws,r=<combined-nonce>,p=<proof>`. The exchange
+///     verifies the client proof and emits the server-final message
+///     (`v=<server-signature>`). On success `auth` transitions to
+///     `Authenticated { principal }`; on any error the response carries
+///     `error_code = 58` and the dispatcher closes the connection.
 pub fn handle_authenticate_scram(
-    _req: &SaslAuthenticateRequest,
-    _auth: &mut ConnectionAuth,
-    _broker: &crate::broker::Broker,
+    req: &SaslAuthenticateRequest,
+    auth: &mut ConnectionAuth,
+    broker: &crate::broker::Broker,
 ) -> SaslAuthenticateResponse {
-    fail_authenticate("SCRAM not yet implemented")
+    // Round-1 case: still in `ScramPending` — build the exchange now that
+    // we have the client-first bytes (and thus the username).
+    if let ConnectionAuth::Negotiating {
+        exchange: SaslExchange::ScramPending,
+        mechanism,
+    } = auth
+    {
+        let mech = *mechanism;
+        let Some(username) = parse_scram_username(&req.auth_bytes) else {
+            return fail_authenticate("malformed SCRAM client-first");
+        };
+        let Some(cred) = broker
+            .controller
+            .current_image()
+            .scram_credential(&username, mech)
+            .cloned()
+        else {
+            return fail_authenticate("unknown user");
+        };
+        let mut server = ScramServerExchange::new(username, cred);
+        // Feed the same client-first bytes; on success the exchange emits
+        // the server-first message and advances its own internal state.
+        match server.step(&req.auth_bytes) {
+            crabka_security::StepResult::Continue(bytes) => {
+                *auth = ConnectionAuth::Negotiating {
+                    mechanism: mech,
+                    exchange: SaslExchange::Scram(server),
+                };
+                SaslAuthenticateResponse {
+                    error_code: 0,
+                    error_message: None,
+                    auth_bytes: bytes::Bytes::from(bytes),
+                    session_lifetime_ms: 0,
+                    ..Default::default()
+                }
+            }
+            // Done on the first round would be a server bug — SCRAM is
+            // always two round trips for SHA-512. Treat as auth failure.
+            crabka_security::StepResult::Done(_, _) => {
+                fail_authenticate("SCRAM server completed in one round")
+            }
+            crabka_security::StepResult::Failed(_) => fail_authenticate("SCRAM step failed"),
+        }
+    } else if let ConnectionAuth::Negotiating {
+        exchange: SaslExchange::Scram(server),
+        ..
+    } = auth
+    {
+        // Round 2: exchange already exists. Step it with the client-final
+        // bytes; on success extract the principal + server-final bytes and
+        // transition to `Authenticated`.
+        match server.step(&req.auth_bytes) {
+            crabka_security::StepResult::Continue(_) => {
+                // Two-round SCRAM-SHA-512: an extra `Continue` here is a bug.
+                fail_authenticate("SCRAM second round expected Done")
+            }
+            crabka_security::StepResult::Done(principal, bytes) => {
+                *auth = ConnectionAuth::Authenticated { principal };
+                SaslAuthenticateResponse {
+                    error_code: 0,
+                    error_message: None,
+                    auth_bytes: bytes::Bytes::from(bytes),
+                    session_lifetime_ms: 0,
+                    ..Default::default()
+                }
+            }
+            crabka_security::StepResult::Failed(_) => fail_authenticate("SCRAM proof failed"),
+        }
+    } else {
+        fail_authenticate("not in SCRAM negotiation")
+    }
+}
+
+/// Parse the username from a SCRAM client-first message.
+///
+/// Format (RFC 5802): `n,,n=<user>,r=<nonce>[,extensions...]`. The leading
+/// `n,,` is the GS2 header (no channel binding, no authzid); the bare body
+/// is a comma-separated attribute list. Returns the first `n=` value, or
+/// `None` on any parse failure.
+fn parse_scram_username(bytes: &[u8]) -> Option<String> {
+    let s = std::str::from_utf8(bytes).ok()?;
+    let bare = s.strip_prefix("n,,")?;
+    for attr in bare.split(',') {
+        if let Some(v) = attr.strip_prefix("n=") {
+            return Some(v.to_string());
+        }
+    }
+    None
 }
 
 /// Build a [`SASL_AUTHENTICATION_FAILED`] response. `reason` is logged at

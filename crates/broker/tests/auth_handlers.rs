@@ -447,6 +447,218 @@ async fn drive_sasl_plain_session(
     Ok(())
 }
 
+// ────────────────────────────────────────────────────────────────────────
+// Task 14: SASL/SCRAM-SHA-512 end-to-end.
+// ────────────────────────────────────────────────────────────────────────
+
+/// Happy-path drive of a SASL/SCRAM-SHA-512 session: provisions a credential
+/// for "alice" with password "wonderland" directly through the controller
+/// (the public `AlterUserScramCredentials` handler lands in Task 15), then
+/// runs the two-round RFC 5802 dance end-to-end and asserts the post-auth
+/// Metadata request succeeds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sasl_scram_sha512_happy_path() {
+    let log_dir = tempfile::tempdir().unwrap();
+    let mut cfg = BrokerConfig::for_tests(log_dir.path().to_path_buf());
+    cfg.listeners = vec![ListenerSpec {
+        name: "SASL_PLAINTEXT".to_string(),
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        advertised: "127.0.0.1:0".to_string(),
+        protocol: ListenerProtocol::SaslPlaintext,
+    }];
+    cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
+    cfg.enabled_sasl_mechanisms = vec![SaslMechanism::ScramSha512];
+
+    let handle = Broker::start(cfg).await.expect("broker must start");
+
+    // Provision alice/wonderland directly via the controller. The public
+    // path (AlterUserScramCredentials, api_key 51) is built in Task 15.
+    let cred =
+        crabka_security::hash_scram_password(b"wonderland", SaslMechanism::ScramSha512, 4096);
+    handle
+        .submit_metadata_record_for_test(crabka_metadata::MetadataRecord::V1ScramCredential(
+            crabka_metadata::ScramCredentialRecord {
+                user: "alice".into(),
+                mechanism: SaslMechanism::ScramSha512,
+                salt: cred.salt,
+                stored_key: cred.stored_key,
+                server_key: cred.server_key,
+                iterations: cred.iterations,
+            },
+        ))
+        .await
+        .expect("submit V1ScramCredential");
+
+    let addr = handle.listen_addr();
+    let result = drive_sasl_scram_session(addr, "alice", "wonderland").await;
+    handle.shutdown().await;
+    result.expect("SASL/SCRAM session must succeed end-to-end");
+}
+
+/// Negative path: wrong password ⇒ `SaslAuthenticate` round 2 responds
+/// with `error_code = 58` (`SASL_AUTHENTICATION_FAILED`) and the broker
+/// closes the connection. `drive_sasl_scram_session` surfaces the failure
+/// either as a non-zero error code on the auth response or as EOF when the
+/// follow-up Metadata read returns no bytes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sasl_scram_sha512_wrong_password_closes_connection() {
+    let log_dir = tempfile::tempdir().unwrap();
+    let mut cfg = BrokerConfig::for_tests(log_dir.path().to_path_buf());
+    cfg.listeners = vec![ListenerSpec {
+        name: "SASL_PLAINTEXT".to_string(),
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        advertised: "127.0.0.1:0".to_string(),
+        protocol: ListenerProtocol::SaslPlaintext,
+    }];
+    cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
+    cfg.enabled_sasl_mechanisms = vec![SaslMechanism::ScramSha512];
+
+    let handle = Broker::start(cfg).await.expect("broker must start");
+
+    let cred =
+        crabka_security::hash_scram_password(b"wonderland", SaslMechanism::ScramSha512, 4096);
+    handle
+        .submit_metadata_record_for_test(crabka_metadata::MetadataRecord::V1ScramCredential(
+            crabka_metadata::ScramCredentialRecord {
+                user: "alice".into(),
+                mechanism: SaslMechanism::ScramSha512,
+                salt: cred.salt,
+                stored_key: cred.stored_key,
+                server_key: cred.server_key,
+                iterations: cred.iterations,
+            },
+        ))
+        .await
+        .expect("submit V1ScramCredential");
+
+    let addr = handle.listen_addr();
+    let result = drive_sasl_scram_session(addr, "alice", "hunter2").await;
+    handle.shutdown().await;
+    assert!(
+        result.is_err(),
+        "wrong password must fail SCRAM session: {result:?}"
+    );
+}
+
+/// Drive a complete SASL/SCRAM-SHA-512 session against a `SASL_PLAINTEXT`
+/// listener.
+///
+/// On success returns `Ok(())` after a successful post-auth Metadata
+/// round-trip. Returns `Err` when any step fails — non-zero error code on
+/// either of the two `SaslAuthenticate` rounds, a server-final signature
+/// mismatch (client-side proof), or EOF before Metadata returns.
+async fn drive_sasl_scram_session(
+    addr: SocketAddr,
+    user: &str,
+    password: &str,
+) -> Result<(), io::Error> {
+    let mut stream = TcpStream::connect(addr).await?;
+
+    // ── 1. ApiVersions (v0, non-flexible). Same as PLAIN: pre-auth allowlist.
+    let av_req = ApiVersionsRequest::default();
+    let mut av_body = BytesMut::new();
+    av_req
+        .encode(&mut av_body, 0)
+        .map_err(|e| io::Error::other(format!("ApiVersions encode: {e}")))?;
+    let av_resp_bytes = round_trip(&mut stream, 18, 0, 1, false, &av_body).await?;
+    let mut cur: &[u8] = &av_resp_bytes;
+    let _av_resp = ApiVersionsResponse::decode(&mut cur, 0)
+        .map_err(|e| io::Error::other(format!("ApiVersions decode: {e}")))?;
+
+    // ── 2. SaslHandshake v1 (non-flexible, mechanism="SCRAM-SHA-512").
+    let mut sh_body = BytesMut::new();
+    let sh_req = SaslHandshakeRequest {
+        mechanism: "SCRAM-SHA-512".to_string(),
+        ..Default::default()
+    };
+    sh_req
+        .encode(&mut sh_body, 1)
+        .map_err(|e| io::Error::other(format!("SaslHandshake encode: {e}")))?;
+    let sh_resp_bytes = round_trip(&mut stream, 17, 1, 2, false, &sh_body).await?;
+    let mut cur: &[u8] = &sh_resp_bytes;
+    let sh_resp = SaslHandshakeResponse::decode(&mut cur, 1)
+        .map_err(|e| io::Error::other(format!("SaslHandshake decode: {e}")))?;
+    if sh_resp.error_code != 0 {
+        return Err(io::Error::other(format!(
+            "SaslHandshake failed: error_code={}",
+            sh_resp.error_code
+        )));
+    }
+
+    // ── 3. SCRAM client-first → server-first.
+    let mut client =
+        crabka_security::ScramClientExchange::new(user.to_string(), password.as_bytes().to_vec());
+    let client_first = client
+        .client_first()
+        .map_err(|e| io::Error::other(format!("scram client_first: {e:?}")))?;
+    let scram_req_first = SaslAuthenticateRequest {
+        auth_bytes: bytes::Bytes::from(client_first),
+        ..Default::default()
+    };
+    let mut scram_body_first = BytesMut::new();
+    scram_req_first
+        .encode(&mut scram_body_first, 2)
+        .map_err(|e| io::Error::other(format!("SaslAuthenticate(1) encode: {e}")))?;
+    let scram_first_response_bytes =
+        round_trip(&mut stream, 36, 2, 3, true, &scram_body_first).await?;
+    let mut cur: &[u8] = &scram_first_response_bytes;
+    let scram_first_response = SaslAuthenticateResponse::decode(&mut cur, 2)
+        .map_err(|e| io::Error::other(format!("SaslAuthenticate(1) decode: {e}")))?;
+    if scram_first_response.error_code != 0 {
+        return Err(io::Error::other(format!(
+            "SaslAuthenticate round 1 failed: error_code={} error_message={:?}",
+            scram_first_response.error_code, scram_first_response.error_message
+        )));
+    }
+    let server_first = scram_first_response.auth_bytes.to_vec();
+
+    // ── 4. SCRAM client-final → server-final.
+    let client_final = client
+        .step(&server_first)
+        .map_err(|e| io::Error::other(format!("scram client step: {e:?}")))?;
+    let scram_req_final = SaslAuthenticateRequest {
+        auth_bytes: bytes::Bytes::from(client_final),
+        ..Default::default()
+    };
+    let mut scram_body_final = BytesMut::new();
+    scram_req_final
+        .encode(&mut scram_body_final, 2)
+        .map_err(|e| io::Error::other(format!("SaslAuthenticate(2) encode: {e}")))?;
+    let scram_final_response_bytes =
+        round_trip(&mut stream, 36, 2, 4, true, &scram_body_final).await?;
+    let mut cur: &[u8] = &scram_final_response_bytes;
+    let scram_final_response = SaslAuthenticateResponse::decode(&mut cur, 2)
+        .map_err(|e| io::Error::other(format!("SaslAuthenticate(2) decode: {e}")))?;
+    if scram_final_response.error_code != 0 {
+        return Err(io::Error::other(format!(
+            "SaslAuthenticate round 2 failed: error_code={} error_message={:?}",
+            scram_final_response.error_code, scram_final_response.error_message
+        )));
+    }
+    // Client verifies server signature — proves the broker holds the
+    // expected `server_key` rather than just any matching `stored_key`.
+    client
+        .verify_server_final(&scram_final_response.auth_bytes)
+        .map_err(|e| io::Error::other(format!("server-final verify: {e:?}")))?;
+
+    // ── 5. Post-auth Metadata round-trip proves the connection survived
+    //    and the data plane is reachable.
+    let md_req = MetadataRequest::default();
+    let mut md_body = BytesMut::new();
+    md_req
+        .encode(&mut md_body, 12)
+        .map_err(|e| io::Error::other(format!("Metadata encode: {e}")))?;
+    let md_resp_bytes = round_trip(&mut stream, 3, 12, 5, true, &md_body).await?;
+    let mut cur: &[u8] = &md_resp_bytes;
+    let md_resp = MetadataResponse::decode(&mut cur, 12)
+        .map_err(|e| io::Error::other(format!("Metadata decode: {e}")))?;
+    if md_resp.brokers.is_empty() {
+        return Err(io::Error::other("Metadata response carried no brokers"));
+    }
+
+    Ok(())
+}
+
 /// Encode a `RequestHeader v1` (or v2 when `flexible`), append the body,
 /// write the length-prefixed frame, then read one response frame and
 /// strip the `ResponseHeader` (always v0 for ApiVersions(18), otherwise

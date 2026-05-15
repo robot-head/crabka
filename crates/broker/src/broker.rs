@@ -354,6 +354,29 @@ impl BrokerHandle {
         Ok(last_offset)
     }
 
+    /// Test-only: submit a [`crabka_metadata::MetadataRecord`] directly to
+    /// this broker's controller, bypassing the public Kafka APIs. Used by
+    /// Task-14 integration tests to provision a SCRAM credential before the
+    /// `AlterUserScramCredentials` handler (Task 15) exists. Returns an
+    /// error if the submit fails (e.g., this broker is not the raft leader
+    /// and forwarding fails).
+    ///
+    /// # Errors
+    ///
+    /// Forwards the underlying raft errors as [`BrokerError::Replication`].
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[allow(clippy::used_underscore_binding)]
+    pub async fn submit_metadata_record_for_test(
+        &self,
+        rec: crabka_metadata::MetadataRecord,
+    ) -> Result<(), crate::error::BrokerError> {
+        self._broker
+            .controller
+            .submit_change(vec![rec])
+            .await
+            .map_err(|e| crate::error::BrokerError::Replication(format!("submit: {e}")))
+    }
+
     /// Test-only: insert a group into this broker's `GroupManager`. Returns
     /// immediately if the group already exists (idempotent). Used by
     /// admin-handler integration tests to seed the group registry without
