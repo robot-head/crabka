@@ -28,7 +28,7 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: |
           mkdir -p coverage
-          cargo llvm-cov --workspace --lcov --output-path coverage/unit.lcov
+          cargo llvm-cov --workspace --lib --bins --lcov --output-path coverage/unit.lcov
       - uses: codecov/codecov-action@v5
         if: matrix.os == 'ubuntu-latest'
         with:
