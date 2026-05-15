@@ -2005,3 +2005,263 @@ async fn kafka_cluster_describe() {
         "cluster-id output missing cluster id: {s}"
     );
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// Task 20+: SASL / TLS JVM acceptance tests.
+// ────────────────────────────────────────────────────────────────────────
+
+/// Build a JAAS config string for the `PlainLoginModule`. The trailing `;`
+/// is mandatory — Kafka's JAAS parser rejects the entry without it.
+fn plain_jaas(user: &str, pass: &str) -> String {
+    format!(
+        "org.apache.kafka.common.security.plain.PlainLoginModule required \
+         username=\"{user}\" password=\"{pass}\";",
+    )
+}
+
+/// Build a JAAS config string for the `ScramLoginModule`. Used by the
+/// SCRAM-SHA-512 acceptance test in task 21.
+#[allow(dead_code)]
+fn scram_jaas(user: &str, pass: &str) -> String {
+    format!(
+        "org.apache.kafka.common.security.scram.ScramLoginModule required \
+         username=\"{user}\" password=\"{pass}\";",
+    )
+}
+
+/// Spawn the broker with a single `SASL_PLAINTEXT` listener on
+/// `0.0.0.0:9092` (advertised as `host.docker.internal:9092`), pre-populated
+/// with the given PLAIN `users`. Mirrors [`start_host_broker`] otherwise.
+async fn start_sasl_plaintext_broker(
+    users: &[(&str, &str)],
+) -> (crabka_broker::BrokerHandle, tempfile::TempDir) {
+    use crabka_broker::config::ListenerSpec;
+    use crabka_security::{ListenerProtocol, SaslMechanism};
+
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("crabka_broker=debug,info")),
+        )
+        .with_test_writer()
+        .try_init();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let listen_addr: std::net::SocketAddr = LISTEN.parse().expect("static addr");
+    let controller_addr: std::net::SocketAddr = "0.0.0.0:9093".parse().expect("static addr");
+    let mut config = BrokerConfig {
+        broker_id: 1,
+        listen_addr,
+        advertised_listener: BOOTSTRAP.into(),
+        log_dir: dir.path().to_path_buf(),
+        log_config: LogConfig::default(),
+        node_id: 1,
+        controller_listen_addr: controller_addr,
+        controller_quorum_voters: vec![(1, controller_addr)],
+        heartbeat_interval_ms: 3_000,
+        heartbeat_timeout_ms: 9_000,
+        replica_lag_time_max_ms: 30_000,
+        controller_election_timeout: std::time::Duration::from_secs(5),
+        controller_heartbeat_interval: std::time::Duration::from_millis(500),
+        bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
+        listeners: vec![ListenerSpec {
+            name: "SASL_PLAINTEXT".to_string(),
+            bind_addr: listen_addr,
+            advertised: BOOTSTRAP.to_string(),
+            protocol: ListenerProtocol::SaslPlaintext,
+        }],
+        inter_broker_listener_name: "SASL_PLAINTEXT".to_string(),
+        enabled_sasl_mechanisms: vec![SaslMechanism::Plain],
+        ..BrokerConfig::default()
+    };
+    for (u, p) in users {
+        config
+            .plain_credentials
+            .insert((*u).to_string(), (*p).to_string());
+    }
+    let handle = Broker::start(config).await.expect("start sasl broker");
+    eprintln!("CRABKA[test] sasl broker started listen={LISTEN} advertised={BOOTSTRAP}");
+    tracing::info!(
+        listen = %LISTEN,
+        advertised = %BOOTSTRAP,
+        "sasl broker started for jvm acceptance"
+    );
+    (handle, dir)
+}
+
+/// Write `props` to a `tempfile::NamedTempFile` and (on unix) chmod it to
+/// `0644` so the cp-kafka container's non-root user can read it once it's
+/// bind-mounted. `tempfile` creates files `0600` by default which causes a
+/// silent `IOException: client.properties (Permission denied)` inside the
+/// JVM tool. Returned object holds the tempfile open; drop it after the
+/// last docker invocation that needs the mount.
+fn write_client_props(props: &str) -> ClientPropsFile {
+    let tmp = tempfile::NamedTempFile::new().expect("tmp");
+    std::fs::write(tmp.path(), props).expect("write props");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o644))
+            .expect("chmod props");
+    }
+    ClientPropsFile { tmp }
+}
+
+/// Owns a `client.properties` tempfile + builds the `-v` mount spec for it.
+struct ClientPropsFile {
+    tmp: tempfile::NamedTempFile,
+}
+
+impl ClientPropsFile {
+    /// `<host_path>:/client.properties:ro` — the second positional arg to
+    /// `docker run -v`. Inside the container the file is always at
+    /// `/client.properties`, so JVM tool flags can use a fixed path.
+    fn mount_str(&self) -> String {
+        format!("{}:/client.properties:ro", self.tmp.path().display())
+    }
+}
+
+/// Run a cp-kafka tool with an extra `-v <mount>` bind. Otherwise identical
+/// to [`docker_run_kafka_tool`]: asserts success, captures stdout+stderr.
+fn docker_run_kafka_tool_with_mount(mount: &str, args: &[&str]) -> std::process::Output {
+    let out = Command::new("docker")
+        .arg("run")
+        .arg("--rm")
+        .arg("-v")
+        .arg(mount)
+        .arg("--add-host=host.docker.internal:host-gateway")
+        .arg(KAFKA_IMAGE)
+        .args(args)
+        .stderr(Stdio::piped())
+        .stdout(Stdio::piped())
+        .output()
+        .expect("spawn docker run");
+    eprintln!(
+        "CRABKA[test] docker_run image={KAFKA_IMAGE} mount={mount} {args:?} status={} stderr_len={}",
+        out.status,
+        out.stderr.len(),
+    );
+    assert!(
+        out.status.success(),
+        "docker run image={KAFKA_IMAGE} mount={mount} {args:?} failed: stdout={}, stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    out
+}
+
+/// End-to-end `SASL_PLAINTEXT` + PLAIN drive of the JVM `kafka-topics`,
+/// `kafka-console-producer`, and `kafka-console-consumer` tools against a
+/// Rust broker with a `SASL_PLAINTEXT` listener and a single provisioned
+/// PLAIN user. Verifies the produce/consume round-trip end-to-end through
+/// the official Kafka client.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Docker"]
+async fn jvm_sasl_plain_produce_consume() {
+    const TOPIC: &str = "crabka-sasl-plain-itest";
+    const USER: &str = "alice";
+    const PASS: &str = "wonderland";
+
+    let (broker, _dir) = start_sasl_plaintext_broker(&[(USER, PASS)]).await;
+    nc_check_connectivity();
+
+    // 1. Write client.properties for the JVM tools.
+    let props = format!(
+        "security.protocol=SASL_PLAINTEXT\n\
+         sasl.mechanism=PLAIN\n\
+         sasl.jaas.config={}\n",
+        plain_jaas(USER, PASS),
+    );
+    let props_file = write_client_props(&props);
+    let mount = props_file.mount_str();
+
+    // 2. Create the topic. `kafka-topics` uses `--command-config`.
+    docker_run_kafka_tool_with_mount(
+        &mount,
+        &[
+            "kafka-topics",
+            "--create",
+            "--if-not-exists",
+            "--topic",
+            TOPIC,
+            "--partitions",
+            "1",
+            "--replication-factor",
+            "1",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--command-config",
+            "/client.properties",
+        ],
+    );
+
+    // 3. Produce 10 records via stdin. `kafka-console-producer` uses
+    //    `--producer.config` (not `--command-config`).
+    let mut child = Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "-i",
+            "-v",
+            &mount,
+            "--add-host=host.docker.internal:host-gateway",
+            KAFKA_IMAGE,
+            "kafka-console-producer",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--topic",
+            TOPIC,
+            "--producer.config",
+            "/client.properties",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn producer");
+    let payload: String = (0..10)
+        .map(|i| format!("msg-{i}\n"))
+        .collect::<Vec<_>>()
+        .concat();
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(payload.as_bytes())
+        .expect("write stdin");
+    drop(child.stdin.take());
+    let producer_out = child.wait_with_output().expect("wait producer");
+    assert!(
+        producer_out.status.success(),
+        "producer failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&producer_out.stdout),
+        String::from_utf8_lossy(&producer_out.stderr)
+    );
+
+    // 4. Consume them back. `kafka-console-consumer` uses `--consumer.config`.
+    let consumer_out = docker_run_kafka_tool_with_mount(
+        &mount,
+        &[
+            "kafka-console-consumer",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--topic",
+            TOPIC,
+            "--partition",
+            "0",
+            "--from-beginning",
+            "--max-messages",
+            "10",
+            "--timeout-ms",
+            "20000",
+            "--consumer.config",
+            "/client.properties",
+        ],
+    );
+    let s = String::from_utf8_lossy(&consumer_out.stdout);
+    for i in 0..10 {
+        let needle = format!("msg-{i}");
+        assert!(s.contains(&needle), "consumer missing {needle}: {s:?}");
+    }
+
+    broker.shutdown().await;
+}
