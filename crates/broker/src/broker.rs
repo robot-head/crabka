@@ -403,11 +403,7 @@ impl BrokerHandle {
     pub fn partition_leader_for_test(&self, topic: &str, partition: i32) -> Option<u64> {
         let img = self._broker.controller.current_image();
         let p = img.partition(topic, partition)?;
-        if p.leader == 0 {
-            None
-        } else {
-            Some(p.leader)
-        }
+        if p.leader == 0 { None } else { Some(p.leader) }
     }
 
     /// Test-only: return the current ISR for `(topic, partition)` as seen

@@ -12,6 +12,8 @@
 // `clippy::unnecessary_unwrap` fires on the `l1.unwrap()` inside `if l1.is_some()`
 // and its span computation ICEs in annotate-snippets on Rust 1.95.
 #![allow(clippy::unnecessary_unwrap)]
+// `clippy::too_many_lines` fires on the auto-rebalance integration test body.
+#![allow(clippy::too_many_lines)]
 
 //! Slice 14. Broker-side integration tests for the operator-triggered
 //! `ElectLeaders` RPC. Drives the wire path end-to-end with a Rust
@@ -40,11 +42,22 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use bytes::{Buf, BufMut, BytesMut};
-use crabka_broker::BrokerHandle;
-use crabka_metadata::{MetadataRecord, PartitionRecord};
+use crabka_broker::config::ListenerSpec;
+use crabka_broker::{Broker, BrokerHandle};
+use crabka_metadata::{
+    AclEntry, AclOperation, MetadataRecord, PartitionRecord, PatternType, PermissionType,
+    ResourceType,
+};
+use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
+use crabka_protocol::owned::api_versions_response::ApiVersionsResponse;
 use crabka_protocol::owned::elect_leaders_request::{ElectLeadersRequest, TopicPartitions};
 use crabka_protocol::owned::elect_leaders_response::ElectLeadersResponse;
+use crabka_protocol::owned::sasl_authenticate_request::SaslAuthenticateRequest;
+use crabka_protocol::owned::sasl_authenticate_response::SaslAuthenticateResponse;
+use crabka_protocol::owned::sasl_handshake_request::SaslHandshakeRequest;
+use crabka_protocol::owned::sasl_handshake_response::SaslHandshakeResponse;
 use crabka_protocol::{Decode, Encode};
+use crabka_security::{ListenerProtocol, SaslMechanism};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
@@ -173,12 +186,7 @@ async fn wait_partition_exists(handle: &BrokerHandle, topic: &str, partition: i3
 }
 
 /// Poll until `handle` reports `leader` as the leader for `(topic, partition)`.
-async fn wait_partition_leader(
-    handle: &BrokerHandle,
-    topic: &str,
-    partition: i32,
-    leader: u64,
-) {
+async fn wait_partition_leader(handle: &BrokerHandle, topic: &str, partition: i32, leader: u64) {
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         if handle.partition_leader_for_test(topic, partition) == Some(leader) {
@@ -273,7 +281,8 @@ async fn preferred_election_via_wire_returns_success() {
     wait_partition_exists(&cluster[0].0, "foo-preferred", 0).await;
     wait_partition_exists(&cluster[1].0, "foo-preferred", 0).await;
 
-    let initial_leader = cluster[0].0
+    let initial_leader = cluster[0]
+        .0
         .partition_leader_for_test("foo-preferred", 0)
         .unwrap_or(1);
     eprintln!("initial partition leader: {initial_leader}");
@@ -332,7 +341,10 @@ async fn preferred_election_via_wire_returns_success() {
             {
                 break cluster[pos].1.listen_addr;
             }
-            assert!(Instant::now() <= deadline, "raft leader not stable within 15s");
+            assert!(
+                Instant::now() <= deadline,
+                "raft leader not stable within 15s"
+            );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     };
@@ -509,4 +521,450 @@ async fn wait_partition_record_known(
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// T9a: non_super_user_without_acl_denied
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Single-broker SASL/PLAIN cluster.
+///
+/// alice is authenticated (PLAIN creds) but has **no** ACLs. A dummy ACL
+/// is seeded to disable the compat shim (the shim allows everything when
+/// `image.acls` is empty). Alice then sends `ElectLeaders Preferred` for
+/// topic "foo-auth-test" partition 0 and must receive
+/// `CLUSTER_AUTHORIZATION_FAILED (31)` per-row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn non_super_user_without_acl_denied() {
+    let log_dir = tempfile::tempdir().unwrap();
+
+    // Build a single-broker SASL_PLAINTEXT config.
+    // admin is the super-user so the compat shim stays off once an ACL
+    // exists; alice has credentials but no ACLs.
+    let mut cfg = crabka_broker::BrokerConfig::for_tests(log_dir.path().to_path_buf());
+    cfg.listeners = vec![ListenerSpec {
+        name: "SASL_PLAINTEXT".to_string(),
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        advertised: "127.0.0.1:0".to_string(),
+        protocol: ListenerProtocol::SaslPlaintext,
+    }];
+    cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
+    cfg.enabled_sasl_mechanisms = vec![SaslMechanism::Plain];
+    cfg.plain_credentials
+        .insert("admin".to_string(), "admin-secret".to_string());
+    cfg.plain_credentials
+        .insert("alice".to_string(), "alice-secret".to_string());
+    cfg.super_users = std::iter::once("admin".to_string()).collect();
+
+    let handle = Broker::start(cfg).await.expect("broker must start");
+    let addr = handle.listen_addr();
+
+    // Create the topic as admin (rf=1 fine for a single-broker cluster).
+    create_topic_sasl_plain(addr, "admin", b"admin-secret", "foo-auth-test", 1, 1).await;
+    wait_partition_exists(&handle, "foo-auth-test", 0).await;
+
+    // Seed a dummy ACL so the compat shim is disabled. The ACL itself
+    // is irrelevant — any non-empty `image.acls` flips the shim off and
+    // forces the authorizer to evaluate every request.
+    handle
+        .submit_metadata_record_for_test(MetadataRecord::V1AccessControlEntry(AclEntry {
+            resource_type: ResourceType::Topic,
+            resource_name: "__compat_shim_disable__".to_string(),
+            pattern_type: PatternType::Literal,
+            principal: "User:admin".to_string(),
+            host: "*".to_string(),
+            operation: AclOperation::Read,
+            permission_type: PermissionType::Allow,
+        }))
+        .await
+        .expect("seed dummy ACL");
+
+    // `submit_metadata_record_for_test` blocks until the raft entry is
+    // committed and the state machine applies it to the image, so the ACL
+    // is guaranteed to be in the image before we proceed. A small extra
+    // wait absorbs any race on very slow CI runners.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Drive ElectLeaders Preferred as alice. Because the compat shim is
+    // now off (image.acls is non-empty) and alice has no Cluster Alter
+    // ACL, the handler must return CLUSTER_AUTHORIZATION_FAILED (31)
+    // for every requested partition.
+    //
+    // If the shim were still active we'd see error_code=0 (allowed).
+    // Retry up to 5s to absorb raft apply latency on slow runners.
+    let deadline_auth = Instant::now() + Duration::from_secs(5);
+    let resp = loop {
+        let r = drive_elect_leaders_sasl_plain(
+            addr,
+            "alice",
+            b"alice-secret",
+            "foo-auth-test",
+            vec![0],
+            0,
+        )
+        .await;
+        // If we see 31, the shim is off and we're done.
+        if r.iter().all(|(_, ec)| *ec == 31) {
+            break r;
+        }
+        assert!(
+            Instant::now() <= deadline_auth,
+            "ACL shim still active or wrong error after 5s; got {r:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+
+    handle.shutdown().await;
+
+    // Per-row error code must be 31 (CLUSTER_AUTHORIZATION_FAILED).
+    assert_eq!(
+        resp,
+        vec![(0, 31)],
+        "expected CLUSTER_AUTHORIZATION_FAILED (31) for alice; got {resp:?}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// T9b: auto_rebalance_restores_preferred_leader
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 3-broker PLAINTEXT cluster with `auto_leader_rebalance_enable = true`,
+/// `leader_imbalance_check_interval_secs = 1`, `leader_imbalance_per_broker_percentage = 0`.
+///
+/// Scenario:
+/// 1. Create rf=2 topic via wire. With 3 registered brokers, round-robin
+///    assigns `replicas = [1, 2]`, so broker 1 is the preferred leader.
+/// 2. Broker 1 is shut down; broker 2 becomes partition leader.
+/// 3. Broker 1 is revived (Rejoin). It catches up into the ISR.
+/// 4. The background rebalance ticker (interval=1s, threshold=0%) fires
+///    within ~2 ticks and submits `ElectLeaders Preferred` internally.
+/// 5. Within 15s, broker 1 must be the partition leader again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn auto_rebalance_restores_preferred_leader() {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    let lock = LOCK.get_or_init(|| tokio::sync::Mutex::new(()));
+    let _g = lock.lock().await;
+
+    support::init_tracing();
+
+    // ── Phase 1: start a 3-broker cluster with rebalance enabled. ─────────
+    // We can't pass rebalance config overrides through `start_n_node`, so we
+    // replicate the bootstrap-then-join pattern from support::start_n_node
+    // and apply the rebalance fields after building each BrokerConfig.
+    let (client_addrs, controller_addrs) = support::bind_and_drop_ports(3).await;
+    let voters: Vec<(u64, std::net::SocketAddr)> = (0u64..3)
+        .map(|i| (i + 1, controller_addrs[usize::try_from(i).unwrap()]))
+        .collect();
+
+    let dir0 = tempfile::TempDir::new().unwrap();
+    let dir1 = tempfile::TempDir::new().unwrap();
+    let dir2 = tempfile::TempDir::new().unwrap();
+
+    let mut cfg0 = support::broker_config(
+        0,
+        &client_addrs,
+        &controller_addrs,
+        &voters,
+        dir0.path(),
+        crabka_broker::BootstrapMode::Bootstrap,
+    );
+    cfg0.auto_leader_rebalance_enable = true;
+    cfg0.leader_imbalance_check_interval_secs = 1;
+    cfg0.leader_imbalance_per_broker_percentage = 0;
+
+    let mut cfg1 = support::broker_config(
+        1,
+        &client_addrs,
+        &controller_addrs,
+        &voters,
+        dir1.path(),
+        crabka_broker::BootstrapMode::Join,
+    );
+    cfg1.auto_leader_rebalance_enable = true;
+    cfg1.leader_imbalance_check_interval_secs = 1;
+    cfg1.leader_imbalance_per_broker_percentage = 0;
+
+    let mut cfg2 = support::broker_config(
+        2,
+        &client_addrs,
+        &controller_addrs,
+        &voters,
+        dir2.path(),
+        crabka_broker::BootstrapMode::Join,
+    );
+    cfg2.auto_leader_rebalance_enable = true;
+    cfg2.leader_imbalance_check_interval_secs = 1;
+    cfg2.leader_imbalance_per_broker_percentage = 0;
+
+    // Phase 1a: bootstrap broker 1 alone.
+    let h0 = Broker::start(cfg0.clone()).await.expect("broker 1 start");
+
+    // Phase 1b: spawn brokers 2 & 3 in Join mode.
+    let cfg1_clone = cfg1.clone();
+    let cfg2_clone = cfg2.clone();
+    let join1 = tokio::spawn(async move { Broker::start(cfg1_clone).await });
+    let join2 = tokio::spawn(async move { Broker::start(cfg2_clone).await });
+
+    // Phase 1c: add learners then promote to voters.
+    h0.add_learner(2, controller_addrs[1])
+        .await
+        .expect("add_learner 2");
+    h0.add_learner(3, controller_addrs[2])
+        .await
+        .expect("add_learner 3");
+    h0.change_membership([1u64, 2, 3].into_iter().collect())
+        .await
+        .expect("change_membership");
+
+    let h1 = join1.await.expect("spawn join1").expect("broker 2 start");
+    let h2 = join2.await.expect("spawn join2").expect("broker 3 start");
+
+    // Wait for all 3 brokers to see each other registered.
+    {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let counts = (
+                h0.broker_count().await,
+                h1.broker_count().await,
+                h2.broker_count().await,
+            );
+            if counts.0 >= 3 && counts.1 >= 3 && counts.2 >= 3 {
+                break;
+            }
+            assert!(
+                Instant::now() <= deadline,
+                "brokers didn't converge on 3-broker view within 30s; counts={counts:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    let addr = h0.listen_addr();
+    let topic = "foo-rebalance";
+
+    // ── Phase 2: create rf=2 topic via PLAINTEXT wire. ────────────────────
+    // With 3 registered brokers sorted [1, 2, 3] and rf=2, the round-robin
+    // assignment for partition 0 is replicas=[1, 2]. Broker 1 is preferred.
+    create_topic_plaintext(addr, topic, 1, 2).await;
+
+    wait_partition_exists(&h0, topic, 0).await;
+    wait_partition_exists(&h1, topic, 0).await;
+    // Wait for broker 1 to be the initial leader (as preferred replica).
+    wait_partition_leader(&h0, topic, 0, 1).await;
+    eprintln!("initial partition leader is broker 1 (preferred)");
+
+    // ── Phase 3: kill broker 1 (preferred leader). ────────────────────────
+    h0.shutdown().await;
+    eprintln!("broker 1 shut down; waiting for failover");
+
+    // Wait for broker 2 or 3 to report a new leader (not broker 1).
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let l = h1.partition_leader_for_test(topic, 0);
+        if l.is_some() && l != Some(1) {
+            eprintln!("new leader after broker 1 death: {l:?}");
+            break;
+        }
+        assert!(
+            Instant::now() <= deadline,
+            "no failover leader within 15s; current={l:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // ── Phase 4: revive broker 1 (Rejoin). ───────────────────────────────
+    let mut rejoin_cfg = cfg0.clone();
+    rejoin_cfg.bootstrap_mode = crabka_broker::BootstrapMode::Rejoin;
+    let h0_new = Broker::start(rejoin_cfg).await.expect("rejoin broker 1");
+    eprintln!("broker 1 rejoined; waiting for ISR expansion");
+
+    // Wait for broker 1 to be back in the ISR (visible from broker 2's image).
+    wait_isr_contains(&h1, topic, 0, 1).await;
+    eprintln!("broker 1 back in ISR; waiting for auto-rebalance tick to fire");
+
+    // ── Phase 5: wait for auto-rebalance to restore broker 1 as leader. ──
+    // The ticker fires every 1s with threshold=0%, so within a few ticks
+    // the preferred leader (broker 1) must be elected.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let leader_from_h1 = h1.partition_leader_for_test(topic, 0);
+        let leader_from_new = h0_new.partition_leader_for_test(topic, 0);
+        if leader_from_h1 == Some(1) || leader_from_new == Some(1) {
+            eprintln!("auto-rebalance restored preferred leader (broker 1)");
+            break;
+        }
+        assert!(
+            Instant::now() <= deadline,
+            "auto-rebalance didn't restore preferred leader within 15s; \
+             h1={leader_from_h1:?} h0_new={leader_from_new:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    // Clean up.
+    h0_new.shutdown().await;
+    h1.shutdown().await;
+    h2.shutdown().await;
+    drop(dir0);
+    drop(dir1);
+    drop(dir2);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// T9 helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Create a topic via SASL/PLAIN (used by the auth-deny test where the
+/// listener is SASL_PLAINTEXT rather than PLAINTEXT).
+async fn create_topic_sasl_plain(
+    addr: SocketAddr,
+    user: &str,
+    password: &[u8],
+    name: &str,
+    partitions: i32,
+    replication_factor: i16,
+) {
+    use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
+    use crabka_protocol::owned::create_topics_response::CreateTopicsResponse;
+
+    let req = CreateTopicsRequest {
+        topics: vec![CreatableTopic {
+            name: name.to_string(),
+            num_partitions: partitions,
+            replication_factor,
+            ..Default::default()
+        }],
+        timeout_ms: 5_000,
+        ..Default::default()
+    };
+    let mut stream = sasl_plain_authenticate(addr, user, password)
+        .await
+        .expect("SASL authenticate for CreateTopics");
+    let mut body = BytesMut::new();
+    req.encode(&mut body, 7).expect("encode CreateTopics");
+    let resp_bytes = round_trip(&mut stream, 19, 7, 1, true, &body)
+        .await
+        .expect("CreateTopics round-trip");
+    let mut cur: &[u8] = &resp_bytes;
+    let resp = CreateTopicsResponse::decode(&mut cur, 7).expect("decode CreateTopicsResponse");
+    assert_eq!(resp.topics.len(), 1);
+    assert_eq!(
+        resp.topics[0].error_code, 0,
+        "CreateTopics({name}) must succeed: {:?}",
+        resp.topics[0].error_message
+    );
+}
+
+/// Drive `ElectLeaders` over a SASL/PLAIN authenticated connection.
+/// Returns per-partition `(partition_id, error_code)` rows for the
+/// given topic. Does **not** assert the top-level `error_code` so the
+/// caller can inspect per-row auth failures.
+async fn drive_elect_leaders_sasl_plain(
+    addr: SocketAddr,
+    user: &str,
+    password: &[u8],
+    topic: &str,
+    partitions: Vec<i32>,
+    election_type: i8,
+) -> Vec<(i32, i16)> {
+    let mut stream = sasl_plain_authenticate(addr, user, password)
+        .await
+        .expect("SASL authenticate for ElectLeaders");
+    let req = ElectLeadersRequest {
+        election_type,
+        topic_partitions: Some(vec![TopicPartitions {
+            topic: topic.to_string(),
+            partitions,
+            ..Default::default()
+        }]),
+        timeout_ms: 30_000,
+        ..Default::default()
+    };
+    let mut body = BytesMut::new();
+    req.encode(&mut body, ELECT_LEADERS_VERSION)
+        .expect("encode ElectLeaders");
+    let resp_bytes = round_trip(&mut stream, 43, ELECT_LEADERS_VERSION, 1, true, &body)
+        .await
+        .expect("ElectLeaders round-trip");
+    let mut cur: &[u8] = &resp_bytes;
+    let resp = ElectLeadersResponse::decode(&mut cur, ELECT_LEADERS_VERSION)
+        .expect("decode ElectLeadersResponse");
+
+    resp.replica_election_results
+        .into_iter()
+        .find(|r| r.topic == topic)
+        .map(|r| {
+            r.partition_result
+                .into_iter()
+                .map(|p| (p.partition_id, p.error_code))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Open a TCP stream to `addr` and drive `ApiVersions` → `SaslHandshake(PLAIN)`
+/// → `SaslAuthenticate(\0user\0password)`. Returns the authenticated stream.
+/// Mirrors the equivalent helper in `tests/acl_handlers.rs`.
+async fn sasl_plain_authenticate(
+    addr: SocketAddr,
+    user: &str,
+    password: &[u8],
+) -> Result<TcpStream, io::Error> {
+    let mut stream = TcpStream::connect(addr).await?;
+
+    // 1. ApiVersions v0 (non-flexible).
+    let av_req = ApiVersionsRequest::default();
+    let mut av_body = BytesMut::new();
+    av_req
+        .encode(&mut av_body, 0)
+        .map_err(|e| io::Error::other(format!("ApiVersions encode: {e}")))?;
+    let av_resp_bytes = round_trip(&mut stream, 18, 0, 1, false, &av_body).await?;
+    let mut cur: &[u8] = &av_resp_bytes;
+    ApiVersionsResponse::decode(&mut cur, 0)
+        .map_err(|e| io::Error::other(format!("ApiVersions decode: {e}")))?;
+
+    // 2. SaslHandshake v1 (non-flexible, mechanism="PLAIN").
+    let mut sh_body = BytesMut::new();
+    SaslHandshakeRequest {
+        mechanism: "PLAIN".to_string(),
+        ..Default::default()
+    }
+    .encode(&mut sh_body, 1)
+    .map_err(|e| io::Error::other(format!("SaslHandshake encode: {e}")))?;
+    let sh_resp_bytes = round_trip(&mut stream, 17, 1, 2, false, &sh_body).await?;
+    let mut cur: &[u8] = &sh_resp_bytes;
+    let sh_resp = SaslHandshakeResponse::decode(&mut cur, 1)
+        .map_err(|e| io::Error::other(format!("SaslHandshake decode: {e}")))?;
+    if sh_resp.error_code != 0 {
+        return Err(io::Error::other(format!(
+            "SaslHandshake failed: error_code={}",
+            sh_resp.error_code
+        )));
+    }
+
+    // 3. SaslAuthenticate v2 (flexible). auth_bytes = \0user\0password.
+    let mut payload = Vec::with_capacity(2 + user.len() + password.len());
+    payload.push(0); // empty authzid
+    payload.extend_from_slice(user.as_bytes());
+    payload.push(0);
+    payload.extend_from_slice(password);
+    let mut auth_body = BytesMut::new();
+    SaslAuthenticateRequest {
+        auth_bytes: bytes::Bytes::from(payload),
+        ..Default::default()
+    }
+    .encode(&mut auth_body, 2)
+    .map_err(|e| io::Error::other(format!("SaslAuthenticate encode: {e}")))?;
+    let auth_resp_bytes = round_trip(&mut stream, 36, 2, 3, true, &auth_body).await?;
+    let mut cur: &[u8] = &auth_resp_bytes;
+    let auth_resp = SaslAuthenticateResponse::decode(&mut cur, 2)
+        .map_err(|e| io::Error::other(format!("SaslAuthenticate decode: {e}")))?;
+    if auth_resp.error_code != 0 {
+        return Err(io::Error::other(format!(
+            "SaslAuthenticate failed: error_code={} message={:?}",
+            auth_resp.error_code, auth_resp.error_message
+        )));
+    }
+
+    Ok(stream)
 }
