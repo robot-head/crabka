@@ -129,6 +129,13 @@ pub(crate) fn build_table() -> HandlerTable {
     // (slice-13 T18) so the handler can receive the per-connection
     // principal + peer `SocketAddr` for Group Describe + per-topic Read ACL
     // enforcement (including the fetch-all `topics: None` sentinel).
+    // DescribeCluster (api_key 60) is intercepted inline in `network::dispatch`
+    // (slice-13 T19) so the handler can receive the per-connection
+    // principal + peer `SocketAddr` for Cluster Describe ACL enforcement.
+    // AlterUserScramCredentials (api_key 51) is intercepted inline in
+    // `network::dispatch` (slice-13 T19) so the handler can receive the
+    // per-connection principal + peer `SocketAddr` for Cluster Alter ACL
+    // enforcement (replacing the slice-12 super-user-name equality check).
     t.register(2, list_offsets::handle);
     t.register(10, find_coordinator::handle);
     t.register(12, heartbeat::handle);
@@ -151,7 +158,7 @@ pub(crate) fn build_table() -> HandlerTable {
     // 42 (DeleteGroups) intercepted inline — see comment above.
     // 44 (IncrementalAlterConfigs) intercepted inline — see comment above.
     t.register(56, alter_partition::handle);
-    t.register(60, describe_cluster::handle);
+    // 60 (DescribeCluster) intercepted inline — see comment above.
     t.register(63, broker_heartbeat::handle);
     t
 }

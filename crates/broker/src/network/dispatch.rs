@@ -175,12 +175,14 @@ async fn serve_connection_stream<S>(
             continue;
         }
         // AlterUserScramCredentials (51) needs the connection's authenticated
-        // principal so it can enforce the super-user gate; the handler table
-        // signature passes only `&Broker`, so this case is intercepted inline
-        // like the SASL frames are. Returning `Some` short-circuits the
-        // normal `dispatch_one()` path for this frame.
+        // principal and the peer `SocketAddr` so it can enforce the Cluster
+        // Alter ACL gate (slice-13 T19, replacing the slice-12 super-user-name
+        // equality check). The handler table signature passes only `&Broker`,
+        // so this case is intercepted inline like the SASL frames are.
+        // Returning `Some` short-circuits the normal `dispatch_one()` path
+        // for this frame.
         if peek_api_key(&frame).ok() == Some(51) {
-            match handle_alter_user_scram_credentials_frame(&broker, &frame, &auth).await {
+            match handle_alter_user_scram_credentials_frame(&broker, &frame, &auth, &peer).await {
                 Ok(bytes) => {
                     if let Err(e) = framed.send(bytes).await {
                         tracing::warn!(error = %e, "framed.send error during AUSCR, closing");
@@ -520,6 +522,27 @@ async fn serve_connection_stream<S>(
                 }
             }
         }
+        // DescribeCluster (60, slice-13 T19) needs both the authenticated
+        // principal AND the peer's `SocketAddr` so the handler can
+        // authorize `Describe` on `Cluster("kafka-cluster")` and emit
+        // CLUSTER_AUTHORIZATION_FAILED on the whole response on Deny. The
+        // `&Broker`-only handler table signature can't carry that context,
+        // so this api_key intercepts inline.
+        if peek_api_key(&frame).ok() == Some(60) {
+            match handle_describe_cluster_frame(&broker, &frame, &auth, &peer).await {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during DescribeCluster, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "DescribeCluster dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
         // DescribeAcls (29, slice-13 T7) needs both the authenticated
         // principal AND the peer's `SocketAddr` for host-based ACL
         // matching; neither is reachable from the `&Broker`-only handler
@@ -703,8 +726,9 @@ fn handle_sasl_frame(
 }
 
 /// Decode + dispatch an `AlterUserScramCredentials` (`api_key` 51) frame.
-/// Pulls the authenticated principal off the per-connection `auth` state so
-/// the handler can enforce its super-user gate. On a SASL listener the
+/// Pulls the authenticated principal off the per-connection `auth` state and
+/// the peer `SocketAddr` from the accept-time capture so the handler can
+/// enforce the Cluster Alter ACL gate (slice-13 T19). On a SASL listener the
 /// pre-auth allowlist already rejects this frame; on PLAINTEXT/SSL listeners
 /// the connection is implicitly `Authenticated { ANONYMOUS / Plain }` (see
 /// the loop init), so `principal()` always returns `Some` here.
@@ -712,6 +736,7 @@ async fn handle_alter_user_scram_credentials_frame(
     broker: &Broker,
     frame: &[u8],
     auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
 ) -> Result<Bytes, BrokerError> {
     use crabka_protocol::{Decode, Encode};
 
@@ -733,10 +758,51 @@ async fn handle_alter_user_scram_credentials_frame(
             mechanism: crabka_security::SaslMechanism::Plain,
         });
 
-    let resp = crate::handlers::alter_user_scram_credentials::handle(broker, req, &principal).await;
+    let resp =
+        crate::handlers::alter_user_scram_credentials::handle(broker, req, &principal, peer).await;
     let mut buf = BytesMut::with_capacity(resp.encoded_len(api_version));
     resp.encode(&mut buf, api_version)?;
     let resp_body = buf.freeze();
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch a `DescribeCluster` (`api_key` 60) frame. Pulls the
+/// authenticated principal off the per-connection `auth` state and the
+/// peer `SocketAddr` from the accept-time capture so the handler can
+/// authorize `Describe` on `Cluster("kafka-cluster")` (slice-13 T19).
+/// On Deny the whole response receives `CLUSTER_AUTHORIZATION_FAILED`.
+async fn handle_describe_cluster_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 60);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let principal = auth
+        .principal()
+        .cloned()
+        .unwrap_or_else(|| crabka_security::Principal {
+            name: "ANONYMOUS".to_string(),
+            mechanism: crabka_security::SaslMechanism::Plain,
+        });
+
+    let resp_body = crate::handlers::describe_cluster::handle(
+        broker,
+        api_version,
+        correlation_id,
+        body,
+        &principal,
+        peer,
+    )
+    .await?;
     Ok(encode_response(
         api_key,
         correlation_id,
