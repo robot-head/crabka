@@ -21,5 +21,5 @@ pub use error::MetadataError;
 pub use image::MetadataImage;
 pub use records::{
     BrokerRegistrationRecord, DeleteTopicRecord, MetadataRecord, NodeId, PartitionRecord,
-    TopicRecord,
+    TopicConfigRecord, TopicRecord,
 };

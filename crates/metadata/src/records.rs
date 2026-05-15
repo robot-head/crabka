@@ -40,6 +40,16 @@ pub struct DeleteTopicRecord {
     pub name: String,
 }
 
+/// Mutable topic configuration overrides. Authoritative target state:
+/// each `V1TopicConfig` record fully replaces the previous override map
+/// for `topic`. Empty map = clear all overrides. Merging happens at the
+/// `AlterConfigs` handler before the record is submitted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TopicConfigRecord {
+    pub topic: String,
+    pub overrides: std::collections::BTreeMap<String, String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum MetadataRecord {
@@ -47,6 +57,7 @@ pub enum MetadataRecord {
     V1Partition(PartitionRecord),
     V1BrokerRegistration(BrokerRegistrationRecord),
     V1DeleteTopic(DeleteTopicRecord),
+    V1TopicConfig(TopicConfigRecord),
 }
 
 #[cfg(test)]
@@ -99,6 +110,18 @@ mod tests {
     fn delete_topic_round_trip() {
         let r = MetadataRecord::V1DeleteTopic(DeleteTopicRecord {
             name: "doomed".into(),
+        });
+        assert_eq!(round_trip(&r), r);
+    }
+
+    #[test]
+    fn topic_config_record_round_trip() {
+        let mut overrides = std::collections::BTreeMap::new();
+        overrides.insert("retention.ms".to_string(), "60000".to_string());
+        overrides.insert("segment.bytes".to_string(), "1048576".to_string());
+        let r = MetadataRecord::V1TopicConfig(TopicConfigRecord {
+            topic: "t".into(),
+            overrides,
         });
         assert_eq!(round_trip(&r), r);
     }

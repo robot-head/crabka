@@ -123,6 +123,7 @@
 mod broker;
 mod codes;
 mod config;
+pub(crate) mod config_keys;
 mod coordinator;
 mod error;
 mod handlers;

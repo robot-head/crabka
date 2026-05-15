@@ -37,15 +37,16 @@ const BOOTSTRAP: &str = "host.docker.internal:9092";
 /// gateway IP.
 const LISTEN: &str = "0.0.0.0:9092";
 const KAFKA_IMAGE: &str = "confluentinc/cp-kafka:6.1.1";
-/// Newer Kafka image needed for transactional verifiable-producer support
-/// (--transactional-id flag added in Kafka 3.x). Used only by the slice-9
-/// transactional acceptance test.
+/// Newer Kafka image used for tests that require tools not bundled in
+/// [`KAFKA_IMAGE`]. Currently referenced by:
+///
+/// - `kafka_cluster_describe`: `kafka-cluster` binary is absent from
+///   `cp-kafka:6.1.1` but present in `cp-kafka:7.5.0`.
 ///
 /// NOTE: `cp-kafka:7.5.0`'s bundled `kafka-verifiable-producer` does NOT
 /// support `--transactional-id` despite shipping Kafka 3.5. The test that
-/// references this image is gated behind `CRABKA_RUN_TXN_JVM_TEST` and
+/// requires that flag is gated behind `CRABKA_RUN_TXN_JVM_TEST` and
 /// deferred to slice 10 pending a custom Java snippet harness.
-#[allow(dead_code)]
 const KAFKA_IMAGE_TXN: &str = "confluentinc/cp-kafka:7.5.0";
 
 /// Spawn the broker, listening on `LISTEN`. The advertised listener is
@@ -110,24 +111,31 @@ fn nc_check_connectivity() {
 /// Run `docker run --rm --add-host=host.docker.internal:host-gateway
 /// <image> <args...>`, asserting success.
 fn docker_run_kafka_tool(args: &[&str]) -> std::process::Output {
+    docker_run_kafka_tool_with_image(KAFKA_IMAGE, args)
+}
+
+/// Like [`docker_run_kafka_tool`] but lets the caller choose the image.
+/// Used when a specific test needs a newer image (e.g. `kafka-cluster`
+/// is only bundled in `cp-kafka:7.5.0`, not `6.1.1`).
+fn docker_run_kafka_tool_with_image(image: &str, args: &[&str]) -> std::process::Output {
     let out = Command::new("docker")
         .arg("run")
         .arg("--rm")
         .arg("--add-host=host.docker.internal:host-gateway")
-        .arg(KAFKA_IMAGE)
+        .arg(image)
         .args(args)
         .stderr(Stdio::piped())
         .stdout(Stdio::piped())
         .output()
         .expect("spawn docker run");
     eprintln!(
-        "CRABKA[test] docker_run {args:?} status={} stderr_len={}",
+        "CRABKA[test] docker_run image={image} {args:?} status={} stderr_len={}",
         out.status,
         out.stderr.len(),
     );
     assert!(
         out.status.success(),
-        "docker run {args:?} failed: stdout={}, stderr={}",
+        "docker run image={image} {args:?} failed: stdout={}, stderr={}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),
     );
@@ -1651,4 +1659,339 @@ async fn acks_all_survives_leader_crash() {
     for (h, _) in cluster {
         h.shutdown().await;
     }
+}
+
+/// `kafka-configs --alter --add-config retention.ms=60000 --topic t` then
+/// `--describe` round-trips through `V1TopicConfig` and the supervisor
+/// reconcile push.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Docker"]
+async fn kafka_configs_alter_round_trip() {
+    const TOPIC: &str = "crabka-cfg-alter-itest";
+
+    let (_broker, _dir) = start_host_broker().await;
+    nc_check_connectivity();
+
+    docker_run_kafka_tool(&[
+        "kafka-topics",
+        "--create",
+        "--if-not-exists",
+        "--topic",
+        TOPIC,
+        "--partitions",
+        "1",
+        "--replication-factor",
+        "1",
+        "--bootstrap-server",
+        BOOTSTRAP,
+    ]);
+
+    docker_run_kafka_tool(&[
+        "kafka-configs",
+        "--alter",
+        "--entity-type",
+        "topics",
+        "--entity-name",
+        TOPIC,
+        "--add-config",
+        "retention.ms=60000",
+        "--bootstrap-server",
+        BOOTSTRAP,
+    ]);
+
+    let out = docker_run_kafka_tool(&[
+        "kafka-configs",
+        "--describe",
+        "--entity-type",
+        "topics",
+        "--entity-name",
+        TOPIC,
+        "--bootstrap-server",
+        BOOTSTRAP,
+    ]);
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        s.contains("retention.ms=60000"),
+        "describe output missing retention.ms=60000: {s}"
+    );
+}
+
+/// `kafka-topics --alter --topic t --partitions 3` then `--describe`
+/// shows 3 partitions. Exercises `CreatePartitions` (`api_key` 37) +
+/// `V1Topic` partition-count update.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Docker"]
+async fn kafka_topics_alter_partitions() {
+    const TOPIC: &str = "crabka-alter-parts-itest";
+
+    let (_broker, _dir) = start_host_broker().await;
+    nc_check_connectivity();
+
+    docker_run_kafka_tool(&[
+        "kafka-topics",
+        "--create",
+        "--if-not-exists",
+        "--topic",
+        TOPIC,
+        "--partitions",
+        "1",
+        "--replication-factor",
+        "1",
+        "--bootstrap-server",
+        BOOTSTRAP,
+    ]);
+
+    docker_run_kafka_tool(&[
+        "kafka-topics",
+        "--alter",
+        "--topic",
+        TOPIC,
+        "--partitions",
+        "3",
+        "--bootstrap-server",
+        BOOTSTRAP,
+    ]);
+
+    let out = docker_run_kafka_tool(&[
+        "kafka-topics",
+        "--describe",
+        "--topic",
+        TOPIC,
+        "--bootstrap-server",
+        BOOTSTRAP,
+    ]);
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        s.contains("PartitionCount: 3") || s.contains("Partitions: 3"),
+        "describe missing PartitionCount: 3 — got: {s}"
+    );
+}
+
+/// `kafka-delete-records --offset-json-file <(...)`: produce 20
+/// records, trim to offset 10, expect success + `low_watermark`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Docker"]
+async fn kafka_delete_records_trims_log() {
+    const TOPIC: &str = "crabka-delete-recs-itest";
+
+    let (_broker, _dir) = start_host_broker().await;
+    nc_check_connectivity();
+
+    docker_run_kafka_tool(&[
+        "kafka-topics",
+        "--create",
+        "--if-not-exists",
+        "--topic",
+        TOPIC,
+        "--partitions",
+        "1",
+        "--replication-factor",
+        "1",
+        "--bootstrap-server",
+        BOOTSTRAP,
+    ]);
+
+    // Produce 20 records via console-producer stdin.
+    let mut child = std::process::Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "-i",
+            "--add-host=host.docker.internal:host-gateway",
+            KAFKA_IMAGE,
+            "kafka-console-producer",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--topic",
+            TOPIC,
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn producer");
+    {
+        use std::io::Write;
+        let stdin = child.stdin.as_mut().expect("stdin");
+        for i in 0..20 {
+            writeln!(stdin, "msg-{i}").expect("write");
+        }
+    }
+    drop(child.stdin.take());
+    let prod_out = child.wait_with_output().expect("wait producer");
+    assert!(
+        prod_out.status.success(),
+        "producer failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&prod_out.stdout),
+        String::from_utf8_lossy(&prod_out.stderr),
+    );
+
+    // Build offset-json on the host so we can pass it into the container.
+    // The cp-kafka container runs as a non-root user; on Linux,
+    // `tempfile::NamedTempFile` creates the file 0600, so the bind-mount is
+    // unreadable inside the container. Relax to 0644 so the container's uid
+    // can read it. WSL/Docker-Desktop ignores this, but native Linux CI
+    // enforces it strictly.
+    let json = format!(
+        r#"{{"partitions":[{{"topic":"{TOPIC}","partition":0,"offset":10}}],"version":1}}"#
+    );
+    let tmp = tempfile::NamedTempFile::new().expect("tmp");
+    std::fs::write(tmp.path(), &json).expect("write json");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o644))
+            .expect("chmod offsets.json");
+    }
+    let host_path = tmp.path().to_path_buf();
+    let mount = format!("{}:/offsets.json:ro", host_path.display());
+
+    let out = std::process::Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "-v",
+            &mount,
+            "--add-host=host.docker.internal:host-gateway",
+            KAFKA_IMAGE,
+            "kafka-delete-records",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--offset-json-file",
+            "/offsets.json",
+        ])
+        .output()
+        .expect("spawn delete-records");
+    assert!(
+        out.status.success(),
+        "delete-records failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        s.contains("low_watermark") || s.contains("10"),
+        "delete-records output missing low_watermark: {s}"
+    );
+}
+
+/// `kafka-consumer-groups --list` and `--describe` round-trip after a
+/// real consumer has joined a group.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Docker"]
+async fn kafka_consumer_groups_list_describe() {
+    const TOPIC: &str = "crabka-cg-list-itest";
+    const GROUP: &str = "crabka-cg-list-grp";
+
+    let (_broker, _dir) = start_host_broker().await;
+    nc_check_connectivity();
+
+    docker_run_kafka_tool(&[
+        "kafka-topics",
+        "--create",
+        "--if-not-exists",
+        "--topic",
+        TOPIC,
+        "--partitions",
+        "1",
+        "--replication-factor",
+        "1",
+        "--bootstrap-server",
+        BOOTSTRAP,
+    ]);
+
+    // Produce one record so the consumer has something to settle on.
+    let mut child = std::process::Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "-i",
+            "--add-host=host.docker.internal:host-gateway",
+            KAFKA_IMAGE,
+            "kafka-console-producer",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--topic",
+            TOPIC,
+        ])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn producer");
+    {
+        use std::io::Write;
+        let stdin = child.stdin.as_mut().expect("stdin");
+        writeln!(stdin, "alpha").expect("write");
+    }
+    drop(child.stdin.take());
+    let _ = child.wait_with_output();
+
+    // Consume one record with --group so the group is registered with
+    // the coordinator.
+    docker_run_kafka_tool(&[
+        "kafka-console-consumer",
+        "--bootstrap-server",
+        BOOTSTRAP,
+        "--topic",
+        TOPIC,
+        "--group",
+        GROUP,
+        "--from-beginning",
+        "--max-messages",
+        "1",
+        "--timeout-ms",
+        "10000",
+    ]);
+
+    let list_out = docker_run_kafka_tool(&[
+        "kafka-consumer-groups",
+        "--list",
+        "--bootstrap-server",
+        BOOTSTRAP,
+    ]);
+    let s = String::from_utf8_lossy(&list_out.stdout);
+    assert!(s.contains(GROUP), "list output missing {GROUP}: {s}");
+
+    let desc_out = docker_run_kafka_tool(&[
+        "kafka-consumer-groups",
+        "--describe",
+        "--group",
+        GROUP,
+        "--bootstrap-server",
+        BOOTSTRAP,
+    ]);
+    let s = String::from_utf8_lossy(&desc_out.stdout);
+    assert!(
+        s.contains(TOPIC),
+        "describe output missing topic {TOPIC}: {s}"
+    );
+}
+
+/// `kafka-cluster cluster-id` exercises `DescribeCluster` (`api_key` 60).
+///
+/// Uses `cp-kafka:7.5.0` (= [`KAFKA_IMAGE_TXN`]) because:
+/// - `cp-kafka:6.1.1` does not ship the `kafka-cluster` binary at all.
+/// - `cp-kafka:7.5.0` ships it but the subcommand is `cluster-id`
+///   (not `describe`; that alias does not exist in this version).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Docker"]
+async fn kafka_cluster_describe() {
+    let (_broker, _dir) = start_host_broker().await;
+    nc_check_connectivity();
+
+    let out = docker_run_kafka_tool_with_image(
+        KAFKA_IMAGE_TXN,
+        &[
+            "kafka-cluster",
+            "cluster-id",
+            "--bootstrap-server",
+            BOOTSTRAP,
+        ],
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    // `kafka-cluster cluster-id` prints a line like:
+    //   "Cluster ID: <uuid>"
+    assert!(
+        s.contains("Cluster ID") || s.contains("cluster ID") || s.contains("00000000"),
+        "cluster-id output missing cluster id: {s}"
+    );
 }

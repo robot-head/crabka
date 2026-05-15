@@ -67,6 +67,25 @@ pub enum WriterMessage {
         new_base: i64,
         ack: oneshot::Sender<Result<(), BrokerError>>,
     },
+    /// Atomically swap the partition's `LogConfig`. The writer task
+    /// serializes this with appends so no in-flight `RecordBatch` sees a
+    /// half-applied config. Sent by
+    /// `ReplicatorSupervisor::reconcile` whenever a `V1TopicConfig`
+    /// record changes the topic's overrides.
+    SetLogConfig {
+        config: crabka_log::LogConfig,
+        ack: tokio::sync::oneshot::Sender<()>,
+    },
+    /// Trim from the start of the log: drop sealed segments whose last
+    /// offset is `< new_start`, advance `log_start_offset` if `new_start`
+    /// falls inside the active segment. Returns the resulting
+    /// `log_start_offset` (which may be less than `new_start` when
+    /// `new_start` falls between segment boundaries — Kafka semantics).
+    /// Used by the `DeleteRecords` handler.
+    TrimToOffset {
+        new_start: i64,
+        ack: tokio::sync::oneshot::Sender<Result<i64, BrokerError>>,
+    },
     /// Test-only: shift the in-memory `log_start_offset` without
     /// physically truncating segments. Simulates retention-driven
     /// truncation for the `out_of_range_truncates_and_recovers`
@@ -142,6 +161,37 @@ impl Partition {
         }
     }
 
+    /// Push `overrides` (already-validated; see `config_keys`) through the
+    /// writer actor so the partition's `Log` picks up the new
+    /// `retention.ms` / `retention.bytes` / `segment.bytes` on the next
+    /// retention/roll tick. Idempotent: pushing the same map twice is a
+    /// cheap noop. Called by `ReplicatorSupervisor::reconcile` every time
+    /// the metadata image changes.
+    ///
+    /// # Errors
+    ///
+    /// Returns `BrokerError::Replication` if the writer is dead or the
+    /// ack is dropped.
+    pub(crate) async fn apply_log_config_overrides(
+        &self,
+        overrides: &std::collections::BTreeMap<String, String>,
+    ) -> Result<(), BrokerError> {
+        let merged =
+            crate::config_keys::apply_to_log_config(overrides, &crabka_log::LogConfig::default());
+        let (ack_tx, ack_rx) = oneshot::channel();
+        self.writer_tx
+            .send(WriterMessage::SetLogConfig {
+                config: merged,
+                ack: ack_tx,
+            })
+            .await
+            .map_err(|_| BrokerError::Replication("partition writer dead".into()))?;
+        ack_rx
+            .await
+            .map_err(|_| BrokerError::Replication("ack dropped".into()))?;
+        Ok(())
+    }
+
     /// Append a leader-assigned batch to the local log, preserving its
     /// `base_offset`. Used by the per-partition replicator on a follower
     /// broker. Sends the batch through the writer task so it stays
@@ -184,6 +234,27 @@ impl Partition {
         self.writer_tx
             .send(WriterMessage::ResetTo {
                 new_base,
+                ack: ack_tx,
+            })
+            .await
+            .map_err(|_| BrokerError::Replication("partition writer dead".into()))?;
+        ack_rx
+            .await
+            .map_err(|_| BrokerError::Replication("ack dropped".into()))?
+    }
+
+    /// Send a trim request through the writer actor. Returns the resulting
+    /// `log_start_offset`. Used by the `DeleteRecords` handler.
+    ///
+    /// # Errors
+    ///
+    /// Returns `BrokerError` if the writer is dead, the ack is dropped,
+    /// or the underlying `Log::trim_to_offset` fails (negative offset).
+    pub async fn trim_to_offset(&self, new_start: i64) -> Result<i64, BrokerError> {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        self.writer_tx
+            .send(WriterMessage::TrimToOffset {
+                new_start,
                 ack: ack_tx,
             })
             .await

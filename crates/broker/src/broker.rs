@@ -235,6 +235,113 @@ impl BrokerHandle {
         }
     }
 
+    /// Test-only: return `true` if `(topic, partition)` is present in this
+    /// broker's in-process partition registry. Used by admin-handler
+    /// integration tests to confirm that `CreatePartitions` materialised a
+    /// new partition dir + writer task.
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[must_use]
+    #[allow(clippy::used_underscore_binding)]
+    pub fn partition_exists_for_test(&self, topic: &str, partition: i32) -> bool {
+        self._broker
+            .partitions
+            .contains_key(&(topic.to_string(), partition))
+    }
+
+    /// Test-only: return the `log_start_offset` of `(topic, partition)` as
+    /// reported by its underlying [`crabka_log::Log`]. Returns `None` if the
+    /// partition is not hosted on this broker.
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[must_use]
+    #[allow(clippy::used_underscore_binding)]
+    pub fn partition_log_start_for_test(&self, topic: &str, partition: i32) -> Option<i64> {
+        let part = self
+            ._broker
+            .partitions
+            .get(&(topic.to_string(), partition))?
+            .value()
+            .clone();
+        Some(part.log_start_offset())
+    }
+
+    /// Test-only: return the `retention.ms` override currently active in
+    /// `(topic, partition)`'s log config. Returns `None` if the partition is
+    /// not hosted on this broker. The inner `Option<Duration>` is `None` when
+    /// no retention override has been applied (topic uses broker default).
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[must_use]
+    #[allow(clippy::used_underscore_binding)]
+    pub fn partition_retention_ms_for_test(
+        &self,
+        topic: &str,
+        partition: i32,
+    ) -> Option<Option<std::time::Duration>> {
+        let part = self
+            ._broker
+            .partitions
+            .get(&(topic.to_string(), partition))?
+            .value()
+            .clone();
+        let snap = part.log.lock().ok()?.config_snapshot();
+        Some(snap.retention_ms)
+    }
+
+    /// Test-only: append `n` single-record batches to `(topic, partition)`
+    /// through the partition's writer task. Used by admin-handler integration
+    /// tests that need a non-empty log without going through the Kafka Produce
+    /// wire protocol. Returns the `base_offset` of the last appended batch, or
+    /// an error if the partition is not hosted on this broker or the writer is
+    /// dead.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BrokerError::Replication`] if the partition is not local.
+    /// Returns [`BrokerError::Txn`] if the writer task is dead.
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[allow(clippy::used_underscore_binding)]
+    pub async fn produce_records_for_test(
+        &self,
+        topic: &str,
+        partition: i32,
+        n: usize,
+    ) -> Result<i64, crate::error::BrokerError> {
+        let part = self
+            ._broker
+            .partitions
+            .get(&(topic.to_string(), partition))
+            .ok_or_else(|| {
+                crate::error::BrokerError::Replication(format!(
+                    "partition {topic}-{partition} not local"
+                ))
+            })?
+            .value()
+            .clone();
+        let mut last_offset = 0i64;
+        for i in 0..n {
+            let batch = crabka_protocol::records::RecordBatch {
+                last_offset_delta: 0,
+                records: vec![crabka_protocol::records::Record {
+                    offset_delta: 0,
+                    value: Some(bytes::Bytes::from(format!("test-record-{i}").into_bytes())),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            last_offset = part.produce_batch(batch).await?;
+        }
+        Ok(last_offset)
+    }
+
+    /// Test-only: insert a group into this broker's `GroupManager`. Returns
+    /// immediately if the group already exists (idempotent). Used by
+    /// admin-handler integration tests to seed the group registry without
+    /// running a full `JoinGroup` / `SyncGroup` protocol exchange.
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[allow(clippy::used_underscore_binding)]
+    pub fn group_create_for_test(&self, group_id: &str) {
+        let _ = self._broker.group_manager.get_or_create(group_id);
+    }
+
     /// Cancel the listener + drain in-flight connections. Awaiting the
     /// returned future blocks until the listener task exits.
     #[allow(clippy::used_underscore_binding)] // `_broker` carries shared state we must reach into during shutdown

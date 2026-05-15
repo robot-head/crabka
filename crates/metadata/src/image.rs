@@ -2,7 +2,7 @@
 //! [`MetadataImage::apply`] (called from the Raft state machine), and
 //! read everywhere else via shared references / `Arc` clones.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use uuid::Uuid;
 
@@ -17,6 +17,7 @@ pub struct MetadataImage {
     topics: HashMap<String, TopicRecord>,
     partitions: HashMap<(String, i32), PartitionRecord>,
     brokers: HashMap<NodeId, BrokerRegistrationRecord>,
+    topic_configs: HashMap<String, BTreeMap<String, String>>,
 }
 
 impl MetadataImage {
@@ -27,6 +28,7 @@ impl MetadataImage {
             topics: HashMap::new(),
             partitions: HashMap::new(),
             brokers: HashMap::new(),
+            topic_configs: HashMap::new(),
         }
     }
 
@@ -54,6 +56,14 @@ impl MetadataImage {
             .iter()
             .filter(move |((t, _), _)| t == topic)
             .map(|(_, v)| v)
+    }
+
+    /// Currently-effective config overrides for `topic`, or `None` if no
+    /// `V1TopicConfig` record has been applied for this topic since the last
+    /// `V1DeleteTopic` (or since image creation).
+    #[must_use]
+    pub fn topic_config(&self, topic: &str) -> Option<&BTreeMap<String, String>> {
+        self.topic_configs.get(topic)
     }
 
     #[must_use]
@@ -85,6 +95,15 @@ impl MetadataImage {
             MetadataRecord::V1DeleteTopic(d) => {
                 self.topics.remove(&d.name);
                 self.partitions.retain(|(t, _), _| t != &d.name);
+                self.topic_configs.remove(&d.name);
+            }
+            MetadataRecord::V1TopicConfig(c) => {
+                if c.overrides.is_empty() {
+                    self.topic_configs.remove(&c.topic);
+                } else {
+                    self.topic_configs
+                        .insert(c.topic.clone(), c.overrides.clone());
+                }
             }
         }
     }
@@ -95,8 +114,20 @@ impl MetadataImage {
     pub fn validate(&self, rec: &MetadataRecord) -> Result<(), MetadataError> {
         match rec {
             MetadataRecord::V1Topic(t) => {
-                if self.topics.contains_key(&t.name) {
-                    return Err(MetadataError::TopicExists(t.name.clone()));
+                if let Some(existing) = self.topics.get(&t.name) {
+                    // Updating an existing topic is allowed only if it's a
+                    // strict partition-count expansion that preserves
+                    // identity: same topic_id, same replication_factor,
+                    // partitions strictly growing. CreatePartitions emits
+                    // exactly this. Identical re-submits stay rejected so
+                    // CreateTopics' idempotency contract still holds.
+                    if existing.topic_id != t.topic_id
+                        || existing.replication_factor != t.replication_factor
+                        || t.partitions <= existing.partitions
+                    {
+                        return Err(MetadataError::TopicExists(t.name.clone()));
+                    }
+                    return Ok(());
                 }
                 if t.partitions <= 0 {
                     return Err(MetadataError::InvalidRecord("partitions must be > 0"));
@@ -112,6 +143,12 @@ impl MetadataImage {
             MetadataRecord::V1DeleteTopic(d) => {
                 if !self.topics.contains_key(&d.name) {
                     return Err(MetadataError::UnknownTopic(d.name.clone()));
+                }
+                Ok(())
+            }
+            MetadataRecord::V1TopicConfig(c) => {
+                if !self.topics.contains_key(&c.topic) {
+                    return Err(MetadataError::UnknownTopic(c.topic.clone()));
                 }
                 Ok(())
             }
@@ -182,6 +219,35 @@ mod tests {
     }
 
     #[test]
+    fn validate_topic_partition_count_increase_allowed() {
+        let mut m = img();
+        m.apply(&topic("t", 1));
+        let existing = m.topic("t").unwrap().clone();
+        let updated = MetadataRecord::V1Topic(TopicRecord {
+            name: "t".into(),
+            topic_id: existing.topic_id,
+            partitions: 3,
+            replication_factor: existing.replication_factor,
+        });
+        assert!(m.validate(&updated).is_ok());
+    }
+
+    #[test]
+    fn validate_topic_partition_count_decrease_rejected() {
+        let mut m = img();
+        m.apply(&topic("t", 3));
+        let existing = m.topic("t").unwrap().clone();
+        let updated = MetadataRecord::V1Topic(TopicRecord {
+            name: "t".into(),
+            topic_id: existing.topic_id,
+            partitions: 1,
+            replication_factor: existing.replication_factor,
+        });
+        let err = m.validate(&updated).unwrap_err();
+        assert!(matches!(err, MetadataError::TopicExists(_)));
+    }
+
+    #[test]
     fn validate_delete_unknown_topic_rejected() {
         let m = img();
         let err = m
@@ -219,5 +285,77 @@ mod tests {
         m.apply(&b);
         m.apply(&b);
         assert_eq!(m.brokers().count(), 1);
+    }
+
+    #[test]
+    fn apply_topic_config_inserts() {
+        let mut m = img();
+        m.apply(&topic("t", 1));
+        let mut overrides = std::collections::BTreeMap::new();
+        overrides.insert("retention.ms".to_string(), "60000".to_string());
+        m.apply(&MetadataRecord::V1TopicConfig(
+            crate::records::TopicConfigRecord {
+                topic: "t".into(),
+                overrides: overrides.clone(),
+            },
+        ));
+        assert_eq!(m.topic_config("t"), Some(&overrides));
+    }
+
+    #[test]
+    fn apply_topic_config_replaces_previous() {
+        let mut m = img();
+        m.apply(&topic("t", 1));
+
+        let mut first = std::collections::BTreeMap::new();
+        first.insert("retention.ms".to_string(), "60000".to_string());
+        first.insert("segment.bytes".to_string(), "1024".to_string());
+        m.apply(&MetadataRecord::V1TopicConfig(
+            crate::records::TopicConfigRecord {
+                topic: "t".into(),
+                overrides: first,
+            },
+        ));
+
+        let mut second = std::collections::BTreeMap::new();
+        second.insert("retention.ms".to_string(), "120000".to_string());
+        m.apply(&MetadataRecord::V1TopicConfig(
+            crate::records::TopicConfigRecord {
+                topic: "t".into(),
+                overrides: second.clone(),
+            },
+        ));
+
+        // segment.bytes is GONE — last-write-wins is authoritative.
+        assert_eq!(m.topic_config("t"), Some(&second));
+    }
+
+    #[test]
+    fn delete_topic_clears_configs() {
+        let mut m = img();
+        m.apply(&topic("t", 1));
+        let mut overrides = std::collections::BTreeMap::new();
+        overrides.insert("retention.ms".to_string(), "60000".to_string());
+        m.apply(&MetadataRecord::V1TopicConfig(
+            crate::records::TopicConfigRecord {
+                topic: "t".into(),
+                overrides,
+            },
+        ));
+        m.apply(&MetadataRecord::V1DeleteTopic(
+            crate::records::DeleteTopicRecord { name: "t".into() },
+        ));
+        assert!(m.topic_config("t").is_none());
+    }
+
+    #[test]
+    fn validate_topic_config_for_unknown_topic_rejected() {
+        let m = img();
+        let r = MetadataRecord::V1TopicConfig(crate::records::TopicConfigRecord {
+            topic: "ghost".into(),
+            overrides: std::collections::BTreeMap::new(),
+        });
+        let err = m.validate(&r).unwrap_err();
+        assert!(matches!(err, MetadataError::UnknownTopic(_)));
     }
 }

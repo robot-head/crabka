@@ -81,6 +81,10 @@ pub enum LogError {
     /// A log file (e.g., `.txnindex`) is corrupt: wrong size, bad checksum, etc.
     #[error("corrupt log: {0}")]
     Corrupt(String),
+
+    /// A caller supplied an invalid argument.
+    #[error("invalid argument: {0}")]
+    InvalidArgument(String),
 }
 
 #[cfg(test)]

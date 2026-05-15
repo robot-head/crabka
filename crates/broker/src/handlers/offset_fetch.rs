@@ -33,44 +33,70 @@ pub(crate) fn handle(
         let handle = group_manager.get_or_create(&req.group_id);
         let g = handle.state.lock().await;
 
-        // A `None` `topics` field (v ≥ 2) is the "fetch all" sentinel.
-        // For the MVP we treat that as "no topics requested" — clients
-        // that need the full list can enumerate explicitly.
-        let req_topics = req.topics.as_deref().unwrap_or(&[]);
-        let topics_out: Vec<OffsetFetchResponseTopic> = req_topics
-            .iter()
-            .map(|t| {
-                let partitions = t
-                    .partition_indexes
-                    .iter()
-                    .map(
-                        |&pid| match g.committed_offsets.get(&(t.name.clone(), pid)) {
-                            Some(entry) => OffsetFetchResponsePartition {
-                                partition_index: pid,
-                                committed_offset: entry.offset,
-                                committed_leader_epoch: entry.leader_epoch,
-                                metadata: Some(entry.metadata.clone()),
-                                error_code: codes::NONE,
-                                ..Default::default()
-                            },
-                            None => OffsetFetchResponsePartition {
-                                partition_index: pid,
-                                committed_offset: -1,
-                                committed_leader_epoch: -1,
-                                metadata: None,
-                                error_code: codes::NONE,
-                                ..Default::default()
-                            },
-                        },
-                    )
-                    .collect();
-                OffsetFetchResponseTopic {
-                    name: t.name.clone(),
+        // A `None` `topics` field (v ≥ 2) is the "fetch all" sentinel:
+        // return every committed offset stored for this group.
+        let topics_out: Vec<OffsetFetchResponseTopic> = if req.topics.is_none() {
+            // Aggregate all committed offsets grouped by topic name.
+            let mut by_topic: std::collections::HashMap<String, Vec<OffsetFetchResponsePartition>> =
+                std::collections::HashMap::new();
+            for ((topic, pid), entry) in &g.committed_offsets {
+                by_topic
+                    .entry(topic.clone())
+                    .or_default()
+                    .push(OffsetFetchResponsePartition {
+                        partition_index: *pid,
+                        committed_offset: entry.offset,
+                        committed_leader_epoch: entry.leader_epoch,
+                        metadata: Some(entry.metadata.clone()),
+                        error_code: codes::NONE,
+                        ..Default::default()
+                    });
+            }
+            by_topic
+                .into_iter()
+                .map(|(name, partitions)| OffsetFetchResponseTopic {
+                    name,
                     partitions,
                     ..Default::default()
-                }
-            })
-            .collect();
+                })
+                .collect()
+        } else {
+            let req_topics = req.topics.as_deref().unwrap_or(&[]);
+            req_topics
+                .iter()
+                .map(|t| {
+                    let partitions = t
+                        .partition_indexes
+                        .iter()
+                        .map(
+                            |&pid| match g.committed_offsets.get(&(t.name.clone(), pid)) {
+                                Some(entry) => OffsetFetchResponsePartition {
+                                    partition_index: pid,
+                                    committed_offset: entry.offset,
+                                    committed_leader_epoch: entry.leader_epoch,
+                                    metadata: Some(entry.metadata.clone()),
+                                    error_code: codes::NONE,
+                                    ..Default::default()
+                                },
+                                None => OffsetFetchResponsePartition {
+                                    partition_index: pid,
+                                    committed_offset: -1,
+                                    committed_leader_epoch: -1,
+                                    metadata: None,
+                                    error_code: codes::NONE,
+                                    ..Default::default()
+                                },
+                            },
+                        )
+                        .collect();
+                    OffsetFetchResponseTopic {
+                        name: t.name.clone(),
+                        partitions,
+                        ..Default::default()
+                    }
+                })
+                .collect()
+        };
 
         let resp = OffsetFetchResponse {
             topics: topics_out,
