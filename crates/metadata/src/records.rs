@@ -51,6 +51,22 @@ pub struct TopicConfigRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScramCredentialRecord {
+    pub user: String,
+    pub mechanism: crabka_security::SaslMechanism,
+    pub salt: Vec<u8>,
+    pub stored_key: Vec<u8>,
+    pub server_key: Vec<u8>,
+    pub iterations: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeleteScramCredentialRecord {
+    pub user: String,
+    pub mechanism: crabka_security::SaslMechanism,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum MetadataRecord {
     V1Topic(TopicRecord),
@@ -58,6 +74,8 @@ pub enum MetadataRecord {
     V1BrokerRegistration(BrokerRegistrationRecord),
     V1DeleteTopic(DeleteTopicRecord),
     V1TopicConfig(TopicConfigRecord),
+    V1ScramCredential(ScramCredentialRecord),
+    V1DeleteScramCredential(DeleteScramCredentialRecord),
 }
 
 #[cfg(test)]
@@ -122,6 +140,28 @@ mod tests {
         let r = MetadataRecord::V1TopicConfig(TopicConfigRecord {
             topic: "t".into(),
             overrides,
+        });
+        assert_eq!(round_trip(&r), r);
+    }
+
+    #[test]
+    fn scram_credential_round_trip() {
+        let r = MetadataRecord::V1ScramCredential(ScramCredentialRecord {
+            user: "alice".into(),
+            mechanism: crabka_security::SaslMechanism::ScramSha512,
+            salt: vec![1u8; 16],
+            stored_key: vec![2u8; 64],
+            server_key: vec![3u8; 64],
+            iterations: 4096,
+        });
+        assert_eq!(round_trip(&r), r);
+    }
+
+    #[test]
+    fn delete_scram_credential_round_trip() {
+        let r = MetadataRecord::V1DeleteScramCredential(DeleteScramCredentialRecord {
+            user: "alice".into(),
+            mechanism: crabka_security::SaslMechanism::ScramSha512,
         });
         assert_eq!(round_trip(&r), r);
     }

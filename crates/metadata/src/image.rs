@@ -105,6 +105,8 @@ impl MetadataImage {
                         .insert(c.topic.clone(), c.overrides.clone());
                 }
             }
+            // T6 will implement full SCRAM credential storage.
+            MetadataRecord::V1ScramCredential(_) | MetadataRecord::V1DeleteScramCredential(_) => {}
         }
     }
 
@@ -153,6 +155,10 @@ impl MetadataImage {
                 Ok(())
             }
             MetadataRecord::V1BrokerRegistration(_) => Ok(()),
+            // T6 will implement SCRAM credential validation.
+            MetadataRecord::V1ScramCredential(_) | MetadataRecord::V1DeleteScramCredential(_) => {
+                Ok(())
+            }
         }
     }
 }
