@@ -1827,11 +1827,22 @@ async fn kafka_delete_records_trims_log() {
     );
 
     // Build offset-json on the host so we can pass it into the container.
+    // The cp-kafka container runs as a non-root user; on Linux,
+    // `tempfile::NamedTempFile` creates the file 0600, so the bind-mount is
+    // unreadable inside the container. Relax to 0644 so the container's uid
+    // can read it. WSL/Docker-Desktop ignores this, but native Linux CI
+    // enforces it strictly.
     let json = format!(
         r#"{{"partitions":[{{"topic":"{TOPIC}","partition":0,"offset":10}}],"version":1}}"#
     );
     let tmp = tempfile::NamedTempFile::new().expect("tmp");
     std::fs::write(tmp.path(), &json).expect("write json");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o644))
+            .expect("chmod offsets.json");
+    }
     let host_path = tmp.path().to_path_buf();
     let mount = format!("{}:/offsets.json:ro", host_path.display());
 
