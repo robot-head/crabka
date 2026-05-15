@@ -200,6 +200,7 @@ mod tests {
             client_id: "test".into(),
             bootstrap_mode: crabka_raft::BootstrapMode::Bootstrap,
             dialer: None,
+            handshake: None,
         };
         let handle = Arc::new(crabka_raft::Controller::start(cfg).await.unwrap());
         let mut rx = handle.watch_leader();

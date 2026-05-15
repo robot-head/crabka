@@ -476,7 +476,12 @@ impl Controller {
             .local_addr()
             .map_err(|e| RaftError::Storage(crabka_log::LogError::Io(e)))?;
         let shutdown = CancellationToken::new();
-        let listener_task = tokio::spawn(server::run(listener, raft.clone(), shutdown.clone()));
+        let listener_task = tokio::spawn(server::run(
+            listener,
+            raft.clone(),
+            shutdown.clone(),
+            config.handshake.clone(),
+        ));
         info!(
             node_id = config.node_id,
             addr = %actual_addr,

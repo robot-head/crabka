@@ -500,6 +500,7 @@ impl Broker {
             client_id: format!("crabka-broker-{}-controller", config.broker_id),
             bootstrap_mode: config.bootstrap_mode,
             dialer: raft_dialer,
+            handshake: None,
         };
         let controller = Arc::new(
             crabka_raft::Controller::start(controller_cfg)
