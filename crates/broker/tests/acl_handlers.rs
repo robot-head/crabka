@@ -30,14 +30,23 @@ use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
 use crabka_protocol::owned::api_versions_response::ApiVersionsResponse;
 use crabka_protocol::owned::create_acls_request::{AclCreation, CreateAclsRequest};
 use crabka_protocol::owned::create_acls_response::CreateAclsResponse;
+use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
+use crabka_protocol::owned::create_topics_response::CreateTopicsResponse;
 use crabka_protocol::owned::delete_acls_request::{DeleteAclsFilter, DeleteAclsRequest};
 use crabka_protocol::owned::delete_acls_response::DeleteAclsResponse;
 use crabka_protocol::owned::describe_acls_request::DescribeAclsRequest;
 use crabka_protocol::owned::describe_acls_response::DescribeAclsResponse;
+use crabka_protocol::owned::fetch_request::{FetchPartition, FetchRequest, FetchTopic};
+use crabka_protocol::owned::fetch_response::FetchResponse;
+use crabka_protocol::owned::produce_request::{
+    PartitionProduceData, ProduceRequest, TopicProduceData,
+};
+use crabka_protocol::owned::produce_response::ProduceResponse;
 use crabka_protocol::owned::sasl_authenticate_request::SaslAuthenticateRequest;
 use crabka_protocol::owned::sasl_authenticate_response::SaslAuthenticateResponse;
 use crabka_protocol::owned::sasl_handshake_request::SaslHandshakeRequest;
 use crabka_protocol::owned::sasl_handshake_response::SaslHandshakeResponse;
+use crabka_protocol::records::{Record, RecordBatch};
 use crabka_protocol::{Decode, Encode};
 use crabka_security::{ListenerProtocol, SaslMechanism};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -62,6 +71,21 @@ const PERMISSION_ALLOW: i8 = 3;
 const CREATE_ACLS_VERSION: i16 = 3;
 const DESCRIBE_ACLS_VERSION: i16 = 3;
 const DELETE_ACLS_VERSION: i16 = 3;
+
+// Versions chosen for the T23 Produce/Fetch integration tests:
+//   * CreateTopics v7 — flexible (FLEXIBLE_MIN=5), topic id round-trips
+//     so the admin path matches what JVM clients send.
+//   * Produce v11 — flexible (FLEXIBLE_MIN=9) and still uses topic
+//     `name` rather than topic_id (the latter is v ≥ 13).
+//   * Fetch v12 — flexible (FLEXIBLE_MIN=12) and still uses topic
+//     `name` rather than topic_id, and predates KIP-903's tagged
+//     `replica_state` (v ≥ 15) so the request stays a simple shape.
+const CREATE_TOPICS_VERSION: i16 = 7;
+const PRODUCE_VERSION: i16 = 11;
+const FETCH_VERSION: i16 = 12;
+
+// Kafka error codes consumed by the T23 assertions.
+const ERR_TOPIC_AUTHORIZATION_FAILED: i16 = 29;
 
 /// Build a `BrokerConfig` with a single `SASL_PLAINTEXT` listener, PLAIN
 /// enabled, and the given super-user. The non-super-user case still
@@ -309,6 +333,349 @@ async fn delete_acls_removes_matching() {
         "the surviving binding must be Write-on-bar, got {:?}",
         surviving[0]
     );
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// T23: Produce / Fetch enforcement.
+//
+// Each test boots a fresh single-broker SASL_PLAINTEXT cluster with admin
+// as the super-user. Admin (over SASL) drives a CreateTopics request to
+// materialise the partition, the test seeds whatever ACL records are
+// needed via the controller-direct test helper, then alice authenticates
+// (a separate connection) and drives a Produce / Fetch. The assertions
+// look at the per-partition `error_code` row of the response and, on the
+// happy path, also check the broker's local log end offset via the
+// existing `BrokerHandle::local_log_end_offset` helper.
+// ────────────────────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn produce_denied_without_topic_acl() {
+    let log_dir = tempfile::tempdir().unwrap();
+    let cfg = sasl_plain_broker_config(
+        log_dir.path(),
+        &[("admin", "admin-secret"), ("alice", "wonderland")],
+        Some("admin"),
+    );
+
+    let handle = Broker::start(cfg).await.expect("broker must start");
+    let addr = handle.listen_addr();
+
+    // Admin creates topic "foo" with one partition (rf=1, single-node).
+    create_topic_as_admin(addr, "foo", 1).await;
+
+    // Seed a meaningless ACL via direct controller write. The super-user
+    // is already set so `authorize()`'s compat shim is off, but the plan
+    // is explicit about populating at least one ACL so the test reads
+    // closer to a "real" cluster post-bootstrap.
+    handle
+        .submit_metadata_record_for_test(crabka_metadata::MetadataRecord::V1AccessControlEntry(
+            crabka_metadata::AclEntry {
+                resource_type: crabka_metadata::ResourceType::Topic,
+                resource_name: "_nothing".into(),
+                pattern_type: crabka_metadata::PatternType::Literal,
+                principal: "User:admin".into(),
+                host: "*".into(),
+                operation: crabka_metadata::AclOperation::Read,
+                permission_type: crabka_metadata::PermissionType::Allow,
+            },
+        ))
+        .await
+        .expect("seed dummy ACL");
+
+    // alice has NO Write-on-foo binding → Produce must return 29.
+    let resp = drive_produce_as_plain(
+        addr,
+        "alice",
+        b"wonderland",
+        single_record_produce_request("foo", 0, b"hello"),
+    )
+    .await
+    .expect("Produce must round-trip");
+    handle.shutdown().await;
+
+    assert_eq!(resp.responses.len(), 1, "one topic in response");
+    assert_eq!(
+        resp.responses[0].partition_responses.len(),
+        1,
+        "one partition row in response"
+    );
+    let p = &resp.responses[0].partition_responses[0];
+    assert_eq!(
+        p.error_code, ERR_TOPIC_AUTHORIZATION_FAILED,
+        "alice has no Write ACL on foo, expected TOPIC_AUTHORIZATION_FAILED (29), got {p:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn produce_allowed_with_topic_write_acl() {
+    let log_dir = tempfile::tempdir().unwrap();
+    let cfg = sasl_plain_broker_config(
+        log_dir.path(),
+        &[("admin", "admin-secret"), ("alice", "wonderland")],
+        Some("admin"),
+    );
+
+    let handle = Broker::start(cfg).await.expect("broker must start");
+    let addr = handle.listen_addr();
+
+    create_topic_as_admin(addr, "foo", 1).await;
+
+    // Provision Allow Write Topic LITERAL "foo" User:alice host=* via a
+    // direct controller write. (CreateAcls as admin would also work,
+    // but `submit_metadata_record_for_test` is one fewer round-trip and
+    // exercises the same authorizer state.)
+    handle
+        .submit_metadata_record_for_test(crabka_metadata::MetadataRecord::V1AccessControlEntry(
+            crabka_metadata::AclEntry {
+                resource_type: crabka_metadata::ResourceType::Topic,
+                resource_name: "foo".into(),
+                pattern_type: crabka_metadata::PatternType::Literal,
+                principal: "User:alice".into(),
+                host: "*".into(),
+                operation: crabka_metadata::AclOperation::Write,
+                permission_type: crabka_metadata::PermissionType::Allow,
+            },
+        ))
+        .await
+        .expect("seed Write-on-foo ACL for alice");
+
+    // The ACL submit above is committed via the controller's raft path
+    // then applied into the in-memory `MetadataImage` asynchronously, so
+    // Produce reads from that image. Retry on Deny for up to 10 s — on
+    // CI the commit-then-apply gap is usually a few ms but can spike.
+    let resp = retry_produce_until_allowed(addr, "alice", b"wonderland", "foo")
+        .await
+        .expect("Produce must round-trip");
+
+    assert_eq!(resp.responses.len(), 1);
+    assert_eq!(resp.responses[0].partition_responses.len(), 1);
+    let p = &resp.responses[0].partition_responses[0];
+    assert_eq!(
+        p.error_code, 0,
+        "alice has Write ACL on foo, expected error_code=0, got {p:?}"
+    );
+
+    // Verify the record actually landed in the local log.
+    let leo = handle
+        .local_log_end_offset("foo", 0)
+        .await
+        .expect("foo-0 must be hosted on this broker");
+    handle.shutdown().await;
+    assert!(
+        leo >= 1,
+        "log_end_offset must advance after a successful Produce, got {leo}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fetch_denied_without_topic_read_acl() {
+    let log_dir = tempfile::tempdir().unwrap();
+    let cfg = sasl_plain_broker_config(
+        log_dir.path(),
+        &[("admin", "admin-secret"), ("alice", "wonderland")],
+        Some("admin"),
+    );
+
+    let handle = Broker::start(cfg).await.expect("broker must start");
+    let addr = handle.listen_addr();
+
+    create_topic_as_admin(addr, "foo", 1).await;
+
+    // Seed a dummy ACL via direct controller write. Same rationale as in
+    // produce_denied_without_topic_acl.
+    handle
+        .submit_metadata_record_for_test(crabka_metadata::MetadataRecord::V1AccessControlEntry(
+            crabka_metadata::AclEntry {
+                resource_type: crabka_metadata::ResourceType::Topic,
+                resource_name: "_nothing".into(),
+                pattern_type: crabka_metadata::PatternType::Literal,
+                principal: "User:admin".into(),
+                host: "*".into(),
+                operation: crabka_metadata::AclOperation::Read,
+                permission_type: crabka_metadata::PermissionType::Allow,
+            },
+        ))
+        .await
+        .expect("seed dummy ACL");
+
+    // alice has NO Read-on-foo binding → Fetch must return 29 on the
+    // partition row.
+    let req = FetchRequest {
+        max_wait_ms: 0,
+        min_bytes: 1,
+        max_bytes: 1_048_576,
+        topics: vec![FetchTopic {
+            topic: "foo".to_string(),
+            partitions: vec![FetchPartition {
+                partition: 0,
+                fetch_offset: 0,
+                partition_max_bytes: 1_048_576,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let resp = drive_fetch_as_plain(addr, "alice", b"wonderland", req)
+        .await
+        .expect("Fetch must round-trip");
+    handle.shutdown().await;
+
+    assert_eq!(resp.responses.len(), 1, "one topic in response");
+    assert_eq!(
+        resp.responses[0].partitions.len(),
+        1,
+        "one partition row in response"
+    );
+    let p = &resp.responses[0].partitions[0];
+    assert_eq!(
+        p.error_code, ERR_TOPIC_AUTHORIZATION_FAILED,
+        "alice has no Read ACL on foo, expected TOPIC_AUTHORIZATION_FAILED (29), got {p:?}"
+    );
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// T23 helpers — CreateTopics-as-admin, Produce/Fetch over SASL, and a
+// tiny poll helper. All three share `sasl_plain_authenticate` + the
+// existing `round_trip` framing primitive defined further down.
+// ────────────────────────────────────────────────────────────────────────
+
+/// Build a `ProduceRequest` carrying a single record (`value`) for
+/// `(topic, partition)`. `acks=-1` (all-ISR) matches the JVM client's
+/// default for durable producers.
+fn single_record_produce_request(topic: &str, partition: i32, value: &[u8]) -> ProduceRequest {
+    ProduceRequest {
+        transactional_id: None,
+        acks: -1,
+        timeout_ms: 5_000,
+        topic_data: vec![TopicProduceData {
+            name: topic.to_string(),
+            partition_data: vec![PartitionProduceData {
+                index: partition,
+                records: Some(RecordBatch {
+                    last_offset_delta: 0,
+                    records: vec![Record {
+                        offset_delta: 0,
+                        value: Some(bytes::Bytes::copy_from_slice(value)),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
+}
+
+/// Drive a single `CreateTopics` against `addr` authenticated as
+/// `admin` / `admin-secret`. Asserts the response has `error_code=0`
+/// for the requested topic. Used by the T23 tests to materialise a
+/// partition before producing / fetching against it.
+async fn create_topic_as_admin(addr: SocketAddr, name: &str, partitions: i32) {
+    let req = CreateTopicsRequest {
+        topics: vec![CreatableTopic {
+            name: name.to_string(),
+            num_partitions: partitions,
+            replication_factor: 1,
+            ..Default::default()
+        }],
+        timeout_ms: 5_000,
+        ..Default::default()
+    };
+    let resp = drive_create_topics_as_plain(addr, "admin", b"admin-secret", req)
+        .await
+        .expect("CreateTopics as super-user must round-trip");
+    assert_eq!(resp.topics.len(), 1, "one topic in response");
+    assert_eq!(
+        resp.topics[0].error_code, 0,
+        "CreateTopics({name}) must succeed: {:?}",
+        resp.topics[0].error_message
+    );
+}
+
+async fn drive_create_topics_as_plain(
+    addr: SocketAddr,
+    user: &str,
+    password: &[u8],
+    req: CreateTopicsRequest,
+) -> Result<CreateTopicsResponse, io::Error> {
+    let mut stream = sasl_plain_authenticate(addr, user, password).await?;
+    let mut body = BytesMut::new();
+    req.encode(&mut body, CREATE_TOPICS_VERSION)
+        .map_err(|e| io::Error::other(format!("CreateTopics encode: {e}")))?;
+    let resp_bytes = round_trip(&mut stream, 19, CREATE_TOPICS_VERSION, 4, true, &body).await?;
+    let mut cur: &[u8] = &resp_bytes;
+    CreateTopicsResponse::decode(&mut cur, CREATE_TOPICS_VERSION)
+        .map_err(|e| io::Error::other(format!("CreateTopics decode: {e}")))
+}
+
+async fn drive_produce_as_plain(
+    addr: SocketAddr,
+    user: &str,
+    password: &[u8],
+    req: ProduceRequest,
+) -> Result<ProduceResponse, io::Error> {
+    let mut stream = sasl_plain_authenticate(addr, user, password).await?;
+    let mut body = BytesMut::new();
+    req.encode(&mut body, PRODUCE_VERSION)
+        .map_err(|e| io::Error::other(format!("Produce encode: {e}")))?;
+    let resp_bytes = round_trip(&mut stream, 0, PRODUCE_VERSION, 4, true, &body).await?;
+    let mut cur: &[u8] = &resp_bytes;
+    ProduceResponse::decode(&mut cur, PRODUCE_VERSION)
+        .map_err(|e| io::Error::other(format!("Produce decode: {e}")))
+}
+
+async fn drive_fetch_as_plain(
+    addr: SocketAddr,
+    user: &str,
+    password: &[u8],
+    req: FetchRequest,
+) -> Result<FetchResponse, io::Error> {
+    let mut stream = sasl_plain_authenticate(addr, user, password).await?;
+    let mut body = BytesMut::new();
+    req.encode(&mut body, FETCH_VERSION)
+        .map_err(|e| io::Error::other(format!("Fetch encode: {e}")))?;
+    let resp_bytes = round_trip(&mut stream, 1, FETCH_VERSION, 4, true, &body).await?;
+    let mut cur: &[u8] = &resp_bytes;
+    FetchResponse::decode(&mut cur, FETCH_VERSION)
+        .map_err(|e| io::Error::other(format!("Fetch decode: {e}")))
+}
+
+/// Retry `drive_produce_as_plain` against `topic`/partition-0 until the
+/// per-partition `error_code` is no longer `TOPIC_AUTHORIZATION_FAILED`
+/// (i.e. the ACL submit has been applied into the metadata image) or a
+/// 10 s deadline elapses. Used by the happy-path Produce test to absorb
+/// the raft commit-then-apply gap. The final response (whichever the
+/// caller gets) is what we return.
+async fn retry_produce_until_allowed(
+    addr: SocketAddr,
+    user: &str,
+    password: &[u8],
+    topic: &str,
+) -> Result<ProduceResponse, io::Error> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let resp = drive_produce_as_plain(
+            addr,
+            user,
+            password,
+            single_record_produce_request(topic, 0, b"hello"),
+        )
+        .await?;
+        let part = resp
+            .responses
+            .first()
+            .and_then(|t| t.partition_responses.first());
+        if part.is_some_and(|p| p.error_code != ERR_TOPIC_AUTHORIZATION_FAILED) {
+            return Ok(resp);
+        }
+        if std::time::Instant::now() > deadline {
+            return Ok(resp);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────────
