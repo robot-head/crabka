@@ -30,6 +30,34 @@ pub enum AuthorizationResult {
     Deny,
 }
 
+/// Batch-authorize a set of topic names against the same principal /
+/// host / operation. Used by `Produce`, `Fetch`, and `Metadata`
+/// per-topic enforcement. The returned map's keys are borrowed from
+/// the input iterator so callers can avoid copying topic strings.
+#[must_use]
+pub fn authorize_topics<'a>(
+    image: &MetadataImage,
+    super_user_name: Option<&str>,
+    principal: &Principal,
+    host: &SocketAddr,
+    operation: AclOperation,
+    topic_names: impl IntoIterator<Item = &'a str>,
+) -> std::collections::HashMap<&'a str, AuthorizationResult> {
+    topic_names
+        .into_iter()
+        .map(|name| {
+            let req = AuthorizationRequest {
+                principal,
+                host,
+                resource_type: ResourceType::Topic,
+                resource_name: name,
+                operation,
+            };
+            (name, authorize(image, super_user_name, &req))
+        })
+        .collect()
+}
+
 /// Decide whether `req.principal` may perform `req.operation` on
 /// `(req.resource_type, req.resource_name)` from `req.host`, given the
 /// current metadata image and optional super-user.
@@ -338,6 +366,34 @@ mod tests {
                 "{op:?} should be allowed under operation::All",
             );
         }
+    }
+
+    #[test]
+    fn authorize_topics_batch_returns_per_topic_decisions() {
+        let mut img = img();
+        img.apply(&MetadataRecord::V1AccessControlEntry(topic_acl(
+            PermissionType::Allow,
+            AclOperation::Read,
+            "User:alice",
+            "*",
+            PatternType::Literal,
+            "t1",
+        )));
+        img.apply(&MetadataRecord::V1AccessControlEntry(topic_acl(
+            PermissionType::Deny,
+            AclOperation::Read,
+            "User:alice",
+            "*",
+            PatternType::Literal,
+            "t2",
+        )));
+        let a = alice();
+        let h = addr();
+        let map = authorize_topics(&img, None, &a, &h, AclOperation::Read, ["t1", "t2", "t3"]);
+        assert_eq!(map.get("t1").copied(), Some(AuthorizationResult::Allow));
+        assert_eq!(map.get("t2").copied(), Some(AuthorizationResult::Deny));
+        // t3: no matching ACL + non-empty image → Deny by default.
+        assert_eq!(map.get("t3").copied(), Some(AuthorizationResult::Deny));
     }
 
     #[test]
