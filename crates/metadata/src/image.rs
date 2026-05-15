@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 use crabka_security::{SaslMechanism, ScramCredential};
 
+use crate::acl::{AclEntry, PatternType, ResourceType};
 use crate::error::MetadataError;
 use crate::records::{
     BrokerRegistrationRecord, MetadataRecord, NodeId, PartitionRecord, TopicRecord,
@@ -21,6 +22,8 @@ pub struct MetadataImage {
     brokers: HashMap<NodeId, BrokerRegistrationRecord>,
     topic_configs: HashMap<String, BTreeMap<String, String>>,
     scram_credentials: HashMap<(String, SaslMechanism), ScramCredential>,
+    acls_literal: HashMap<(ResourceType, String), Vec<AclEntry>>,
+    acls_prefixed: HashMap<ResourceType, Vec<AclEntry>>,
 }
 
 impl MetadataImage {
@@ -33,6 +36,8 @@ impl MetadataImage {
             brokers: HashMap::new(),
             topic_configs: HashMap::new(),
             scram_credentials: HashMap::new(),
+            acls_literal: HashMap::new(),
+            acls_prefixed: HashMap::new(),
         }
     }
 
@@ -88,6 +93,37 @@ impl MetadataImage {
         self.brokers.values()
     }
 
+    /// Iterate every ACL that could possibly match `(rt, rn)`:
+    /// - all literal entries at `(rt, rn)`
+    /// - all prefixed entries whose `resource_name` is a prefix of `rn`
+    pub fn matching_acls<'a>(
+        &'a self,
+        rt: ResourceType,
+        rn: &'a str,
+    ) -> impl Iterator<Item = &'a AclEntry> + 'a {
+        let literal_iter = self
+            .acls_literal
+            .get(&(rt, rn.to_string()))
+            .into_iter()
+            .flatten();
+        let prefixed_iter = self
+            .acls_prefixed
+            .get(&rt)
+            .into_iter()
+            .flatten()
+            .filter(move |e| rn.starts_with(&e.resource_name));
+        literal_iter.chain(prefixed_iter)
+    }
+
+    /// All ACL entries (literal + prefixed across all resource types).
+    /// Used by `DescribeAcls`.
+    pub fn all_acls(&self) -> impl Iterator<Item = &AclEntry> {
+        self.acls_literal
+            .values()
+            .flatten()
+            .chain(self.acls_prefixed.values().flatten())
+    }
+
     /// Apply one record. Returns the previous record (for `V1Topic` /
     /// `V1BrokerRegistration`) so the caller can observe overwrite cases.
     /// Infallible — pre-validation against the current image happens
@@ -133,6 +169,30 @@ impl MetadataImage {
             MetadataRecord::V1DeleteScramCredential(r) => {
                 self.scram_credentials
                     .remove(&(r.user.clone(), r.mechanism));
+            }
+            MetadataRecord::V1AccessControlEntry(entry) => {
+                let bucket = match entry.pattern_type {
+                    PatternType::Literal => self
+                        .acls_literal
+                        .entry((entry.resource_type, entry.resource_name.clone()))
+                        .or_default(),
+                    PatternType::Prefixed => {
+                        self.acls_prefixed.entry(entry.resource_type).or_default()
+                    }
+                };
+                // Last-write-wins on full-tuple equality.
+                bucket.retain(|e| e != entry);
+                bucket.push(entry.clone());
+            }
+            MetadataRecord::V1DeleteAccessControlEntry(filter) => {
+                self.acls_literal.retain(|_, v| {
+                    v.retain(|e| !filter.matches(e));
+                    !v.is_empty()
+                });
+                self.acls_prefixed.retain(|_, v| {
+                    v.retain(|e| !filter.matches(e));
+                    !v.is_empty()
+                });
             }
         }
     }
@@ -181,10 +241,11 @@ impl MetadataImage {
                 }
                 Ok(())
             }
-            MetadataRecord::V1BrokerRegistration(_) => Ok(()),
-            MetadataRecord::V1ScramCredential(_) | MetadataRecord::V1DeleteScramCredential(_) => {
-                Ok(())
-            }
+            MetadataRecord::V1BrokerRegistration(_)
+            | MetadataRecord::V1ScramCredential(_)
+            | MetadataRecord::V1DeleteScramCredential(_)
+            | MetadataRecord::V1AccessControlEntry(_)
+            | MetadataRecord::V1DeleteAccessControlEntry(_) => Ok(()),
         }
     }
 }
@@ -192,6 +253,7 @@ impl MetadataImage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::acl::{AclEntryFilter, AclOperation, PermissionType};
     use crate::records::{DeleteScramCredentialRecord, DeleteTopicRecord, ScramCredentialRecord};
 
     fn img() -> MetadataImage {
@@ -452,5 +514,99 @@ mod tests {
             },
         ));
         assert!(m.scram_credential("alice", mech).is_none());
+    }
+
+    fn topic_read_for_alice() -> AclEntry {
+        AclEntry {
+            resource_type: ResourceType::Topic,
+            resource_name: "foo".into(),
+            pattern_type: PatternType::Literal,
+            principal: "User:alice".into(),
+            host: "*".into(),
+            operation: AclOperation::Read,
+            permission_type: PermissionType::Allow,
+        }
+    }
+
+    fn topic_prefixed_team() -> AclEntry {
+        AclEntry {
+            resource_type: ResourceType::Topic,
+            resource_name: "team-".into(),
+            pattern_type: PatternType::Prefixed,
+            principal: "User:alice".into(),
+            host: "*".into(),
+            operation: AclOperation::Read,
+            permission_type: PermissionType::Allow,
+        }
+    }
+
+    #[test]
+    fn apply_v1_access_control_entry_literal_stores_in_literal_map() {
+        let mut m = img();
+        m.apply(&MetadataRecord::V1AccessControlEntry(topic_read_for_alice()));
+        let mut hits: Vec<_> = m.matching_acls(ResourceType::Topic, "foo").collect();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits.pop().unwrap().resource_name, "foo");
+    }
+
+    #[test]
+    fn apply_v1_access_control_entry_prefixed_stores_in_prefixed_vec() {
+        let mut m = img();
+        m.apply(&MetadataRecord::V1AccessControlEntry(topic_prefixed_team()));
+        let hits: Vec<_> = m.matching_acls(ResourceType::Topic, "team-foo").collect();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].resource_name, "team-");
+        // Non-matching resource: empty.
+        let none: Vec<_> = m.matching_acls(ResourceType::Topic, "other").collect();
+        assert!(none.is_empty());
+    }
+
+    #[test]
+    fn matching_acls_combines_literal_and_prefixed() {
+        let mut m = img();
+        m.apply(&MetadataRecord::V1AccessControlEntry(topic_read_for_alice()));
+        m.apply(&MetadataRecord::V1AccessControlEntry(topic_prefixed_team()));
+        let hits_foo: Vec<_> = m.matching_acls(ResourceType::Topic, "foo").collect();
+        let hits_team: Vec<_> = m.matching_acls(ResourceType::Topic, "team-x").collect();
+        assert_eq!(hits_foo.len(), 1);
+        assert_eq!(hits_team.len(), 1);
+    }
+
+    #[test]
+    fn apply_v1_delete_access_control_entry_removes_matching() {
+        let mut m = img();
+        m.apply(&MetadataRecord::V1AccessControlEntry(topic_read_for_alice()));
+        m.apply(&MetadataRecord::V1AccessControlEntry(topic_prefixed_team()));
+        let filter = AclEntryFilter {
+            resource_type: Some(ResourceType::Topic),
+            pattern_type: Some(PatternType::Literal),
+            ..AclEntryFilter::default()
+        };
+        m.apply(&MetadataRecord::V1DeleteAccessControlEntry(filter));
+        let hits_foo: Vec<_> = m.matching_acls(ResourceType::Topic, "foo").collect();
+        let hits_team: Vec<_> = m.matching_acls(ResourceType::Topic, "team-x").collect();
+        assert_eq!(hits_foo.len(), 0); // literal removed
+        assert_eq!(hits_team.len(), 1); // prefixed survives
+    }
+
+    #[test]
+    fn apply_v1_delete_access_control_entry_no_match_is_noop() {
+        let mut m = img();
+        m.apply(&MetadataRecord::V1AccessControlEntry(topic_read_for_alice()));
+        let filter = AclEntryFilter {
+            resource_type: Some(ResourceType::Group),
+            ..AclEntryFilter::default()
+        };
+        m.apply(&MetadataRecord::V1DeleteAccessControlEntry(filter));
+        let hits: Vec<_> = m.matching_acls(ResourceType::Topic, "foo").collect();
+        assert_eq!(hits.len(), 1);
+    }
+
+    #[test]
+    fn all_acls_returns_every_entry() {
+        let mut m = img();
+        m.apply(&MetadataRecord::V1AccessControlEntry(topic_read_for_alice()));
+        m.apply(&MetadataRecord::V1AccessControlEntry(topic_prefixed_team()));
+        assert_eq!(m.all_acls().count(), 2);
     }
 }

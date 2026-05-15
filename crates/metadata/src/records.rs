@@ -96,6 +96,8 @@ pub enum MetadataRecord {
     V1TopicConfig(TopicConfigRecord),
     V1ScramCredential(ScramCredentialRecord),
     V1DeleteScramCredential(DeleteScramCredentialRecord),
+    V1AccessControlEntry(crate::AclEntry),
+    V1DeleteAccessControlEntry(crate::AclEntryFilter),
 }
 
 #[cfg(test)]
@@ -201,6 +203,36 @@ mod tests {
             user: "alice".into(),
             mechanism: crabka_security::SaslMechanism::ScramSha512,
         });
+        assert_eq!(round_trip(&r), r);
+    }
+
+    #[test]
+    fn v1_access_control_entry_round_trip() {
+        let entry = crate::AclEntry {
+            resource_type: crate::ResourceType::Topic,
+            resource_name: "foo".into(),
+            pattern_type: crate::PatternType::Literal,
+            principal: "User:alice".into(),
+            host: "*".into(),
+            operation: crate::AclOperation::Read,
+            permission_type: crate::PermissionType::Allow,
+        };
+        let r = MetadataRecord::V1AccessControlEntry(entry);
+        assert_eq!(round_trip(&r), r);
+    }
+
+    #[test]
+    fn v1_delete_access_control_entry_round_trip() {
+        let filter = crate::AclEntryFilter {
+            resource_type: Some(crate::ResourceType::Group),
+            resource_name: Some("cg-foo".into()),
+            pattern_type: Some(crate::PatternType::Literal),
+            principal: None,
+            host: None,
+            operation: None,
+            permission_type: None,
+        };
+        let r = MetadataRecord::V1DeleteAccessControlEntry(filter);
         assert_eq!(round_trip(&r), r);
     }
 }

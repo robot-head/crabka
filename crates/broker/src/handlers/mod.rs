@@ -43,16 +43,20 @@ impl HandlerTable {
     }
 }
 
+pub(crate) mod acl_wire;
 pub(crate) mod alter_configs;
 pub(crate) mod alter_partition;
 pub(crate) mod alter_user_scram_credentials;
 pub(crate) mod api_versions;
 pub(crate) mod broker_heartbeat;
+pub(crate) mod create_acls;
 pub(crate) mod create_partitions;
 pub(crate) mod create_topics;
+pub(crate) mod delete_acls;
 pub(crate) mod delete_groups;
 pub(crate) mod delete_records;
 pub(crate) mod delete_topics;
+pub(crate) mod describe_acls;
 pub(crate) mod describe_cluster;
 pub(crate) mod describe_configs;
 pub(crate) mod describe_groups;
@@ -77,37 +81,101 @@ pub(crate) mod sync_group;
 #[must_use]
 pub(crate) fn build_table() -> HandlerTable {
     let mut t = HandlerTable::new();
-    t.register(0, produce::handle);
-    t.register(1, fetch::handle);
+    // Produce (api_key 0) is intercepted inline in `network::dispatch`
+    // (slice-13 T10) so the handler can receive the per-connection
+    // principal + peer `SocketAddr` for per-topic Write ACL enforcement.
+    // Fetch (api_key 1) is intercepted inline in `network::dispatch`
+    // (slice-13 T11) so the handler can receive the per-connection
+    // principal + peer `SocketAddr` for per-topic Read ACL enforcement.
+    // Metadata (api_key 3) is intercepted inline in `network::dispatch`
+    // (slice-13 T12) so the handler can receive the per-connection
+    // principal + peer `SocketAddr` for per-topic Describe ACL enforcement.
+    // CreateTopics (api_key 19) is intercepted inline in `network::dispatch`
+    // (slice-13 T13) so the handler can receive the per-connection
+    // principal + peer `SocketAddr` for Cluster Create ACL enforcement.
+    // DeleteTopics (api_key 20) is intercepted inline in `network::dispatch`
+    // (slice-13 T13) so the handler can receive the per-connection
+    // principal + peer `SocketAddr` for per-topic Delete ACL enforcement.
+    // AlterConfigs (api_key 33) is intercepted inline in `network::dispatch`
+    // (slice-13 T14) so the handler can receive the per-connection
+    // principal + peer `SocketAddr` for per-resource AlterConfigs ACL enforcement.
+    // IncrementalAlterConfigs (api_key 44) is intercepted inline in `network::dispatch`
+    // (slice-13 T14) so the handler can receive the per-connection
+    // principal + peer `SocketAddr` for per-resource AlterConfigs ACL enforcement.
+    // DeleteRecords (api_key 21) is intercepted inline in `network::dispatch`
+    // (slice-13 T15) so the handler can receive the per-connection
+    // principal + peer `SocketAddr` for per-topic Delete ACL enforcement.
+    // CreatePartitions (api_key 37) is intercepted inline in `network::dispatch`
+    // (slice-13 T15) so the handler can receive the per-connection
+    // principal + peer `SocketAddr` for per-topic Alter ACL enforcement.
+    // DescribeGroups (api_key 15) is intercepted inline in `network::dispatch`
+    // (slice-13 T16) so the handler can receive the per-connection
+    // principal + peer `SocketAddr` for per-group Describe ACL enforcement.
+    // ListGroups (api_key 16) is intercepted inline in `network::dispatch`
+    // (slice-13 T16) so the handler can receive the per-connection
+    // principal + peer `SocketAddr` for per-group Describe ACL enforcement
+    // (silent filter — denied groups are omitted, not error-coded).
+    // DeleteGroups (api_key 42) is intercepted inline in `network::dispatch`
+    // (slice-13 T16) so the handler can receive the per-connection
+    // principal + peer `SocketAddr` for per-group Delete ACL enforcement.
+    // JoinGroup (api_key 11) is intercepted inline in `network::dispatch`
+    // (slice-13 T17) so the handler can receive the per-connection
+    // principal + peer `SocketAddr` for per-group Read ACL enforcement.
+    // OffsetCommit (api_key 8) is intercepted inline in `network::dispatch`
+    // (slice-13 T18) so the handler can receive the per-connection
+    // principal + peer `SocketAddr` for Group Read + per-topic Read ACL
+    // enforcement.
+    // OffsetFetch (api_key 9) is intercepted inline in `network::dispatch`
+    // (slice-13 T18) so the handler can receive the per-connection
+    // principal + peer `SocketAddr` for Group Describe + per-topic Read ACL
+    // enforcement (including the fetch-all `topics: None` sentinel).
+    // DescribeCluster (api_key 60) is intercepted inline in `network::dispatch`
+    // (slice-13 T19) so the handler can receive the per-connection
+    // principal + peer `SocketAddr` for Cluster Describe ACL enforcement.
+    // AlterUserScramCredentials (api_key 51) is intercepted inline in
+    // `network::dispatch` (slice-13 T19) so the handler can receive the
+    // per-connection principal + peer `SocketAddr` for Cluster Alter ACL
+    // enforcement (replacing the slice-12 super-user-name equality check).
+    // InitProducerId (api_key 22) is intercepted inline in `network::dispatch`
+    // (slice-13 T20) so the handler can receive the per-connection
+    // principal + peer `SocketAddr` for either `Write` on
+    // `TransactionalId` (transactional path) or `IdempotentWrite` on
+    // `Cluster` (idempotent-only path).
+    // AddPartitionsToTxn (api_key 24) is intercepted inline in `network::dispatch`
+    // (slice-13 T20) so the handler can receive the per-connection
+    // principal + peer `SocketAddr` for `Write` on `TransactionalId` and
+    // per-topic `Write` on `Topic` ACL enforcement.
+    // EndTxn (api_key 26) is intercepted inline in `network::dispatch`
+    // (slice-13 T20) so the handler can receive the per-connection
+    // principal + peer `SocketAddr` for `Write` on `TransactionalId` ACL
+    // enforcement.
+    // TxnOffsetCommit (api_key 28) is intercepted inline in `network::dispatch`
+    // (slice-13 T20) so the handler can receive the per-connection
+    // principal + peer `SocketAddr` for `Write` on `TransactionalId` +
+    // `Read` on `Group` + per-topic `Read` on `Topic` ACL enforcement.
     t.register(2, list_offsets::handle);
-    t.register(3, metadata::handle);
-    t.register(8, offset_commit::handle);
-    t.register(9, offset_fetch::handle);
     t.register(10, find_coordinator::handle);
-    t.register(11, join_group::handle);
     t.register(12, heartbeat::handle);
     t.register(13, leave_group::handle);
     t.register(14, sync_group::handle);
-    t.register(15, describe_groups::handle);
-    t.register(16, list_groups::handle);
+    // 15 (DescribeGroups) intercepted inline — see comment above.
+    // 16 (ListGroups) intercepted inline — see comment above.
     t.register(18, api_versions::handle);
-    t.register(19, create_topics::handle);
-    t.register(20, delete_topics::handle);
-    t.register(21, delete_records::handle);
-    t.register(22, init_producer_id::handle);
+    // 21 (DeleteRecords) intercepted inline — see comment above.
+    // 22 (InitProducerId) intercepted inline — see comment above.
     t.register(23, offset_for_leader_epoch::handle);
-    t.register(24, crate::txn::handlers::add_partitions_to_txn::handle);
+    // 24 (AddPartitionsToTxn) intercepted inline — see comment above.
     t.register(25, crate::txn::handlers::add_offset_commits_to_txn::handle);
-    t.register(26, crate::txn::handlers::end_txn::handle);
+    // 26 (EndTxn) intercepted inline — see comment above.
     t.register(27, crate::txn::handlers::write_txn_markers::handle);
-    t.register(28, crate::txn::handlers::txn_offset_commit::handle);
+    // 28 (TxnOffsetCommit) intercepted inline — see comment above.
     t.register(32, describe_configs::handle);
-    t.register(33, alter_configs::handle);
-    t.register(37, create_partitions::handle);
-    t.register(42, delete_groups::handle);
-    t.register(44, incremental_alter_configs::handle);
+    // 33 (AlterConfigs) intercepted inline — see comment above.
+    // 37 (CreatePartitions) intercepted inline — see comment above.
+    // 42 (DeleteGroups) intercepted inline — see comment above.
+    // 44 (IncrementalAlterConfigs) intercepted inline — see comment above.
     t.register(56, alter_partition::handle);
-    t.register(60, describe_cluster::handle);
+    // 60 (DescribeCluster) intercepted inline — see comment above.
     t.register(63, broker_heartbeat::handle);
     t
 }

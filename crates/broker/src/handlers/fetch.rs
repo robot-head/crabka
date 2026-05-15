@@ -9,13 +9,14 @@
 //! Clients pulling small batches one at a time and re-fetching from
 //! `last.base_offset + last.last_offset_delta + 1` see correct data.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
-use futures_util::future::BoxFuture;
 use tokio::sync::Notify;
 
+use crabka_metadata::AclOperation;
 use crabka_protocol::owned::fetch_request::FetchRequest;
 use crabka_protocol::owned::fetch_response::{
     AbortedTransaction, FetchResponse, FetchableTopicResponse, PartitionData,
@@ -23,7 +24,9 @@ use crabka_protocol::owned::fetch_response::{
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 use crabka_protocol::records::RecordBatch;
 use crabka_protocol::{Decode, Encode};
+use crabka_security::Principal;
 
+use crate::authorizer::{AuthorizationResult, authorize_topics};
 use crate::broker::Broker;
 use crate::codes;
 use crate::error::BrokerError;
@@ -55,128 +58,165 @@ struct PendingRead {
 }
 
 #[allow(clippy::too_many_lines)]
-pub(crate) fn handle(
+pub(crate) async fn handle(
     broker: &Broker,
     version: i16,
     _correlation_id: i32,
     req_bytes: &[u8],
-) -> BoxFuture<'static, Result<Bytes, BrokerError>> {
-    let req_bytes = req_bytes.to_vec();
+    principal: &Principal,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
     let partitions = broker.partitions.clone();
     let controller = broker.controller.clone();
-    Box::pin(async move {
-        let mut cur: &[u8] = &req_bytes;
-        let req = FetchRequest::decode(&mut cur, version)?;
+    let mut cur: &[u8] = req_bytes;
+    let req = FetchRequest::decode(&mut cur, version)?;
 
-        // `replica_id >= 0` means follower fetch (Apache Kafka convention).
-        // KIP-903 (Kafka 3.5) moved `replica_id` into a tagged `replica_state`
-        // struct on Fetch v15+; on v0-14 the original top-level field is used.
-        // The codegen serializes whichever the negotiated version requires, so
-        // here we accept whichever field is populated. Without this fallback,
-        // every v15+ follower fetch decodes with `replica_id = -1` (the default
-        // for the deprecated top-level field), the handler treats it as a
-        // consumer fetch, clamps records at HW=0, and replication silently
-        // stalls — which is exactly the byte-compare test's failure mode.
-        let effective_replica_id = if req.replica_id >= 0 {
-            req.replica_id
-        } else {
-            req.replica_state.replica_id
-        };
-        let is_follower_fetch = effective_replica_id >= 0;
-        // isolation_level=1 (read_committed) only applies to consumer fetches.
-        // Follower fetches always see all records regardless of isolation.
-        let read_committed = !is_follower_fetch && req.isolation_level == 1;
-
-        // Resolve every requested partition up front. We collect pending
-        // reads (rather than just doing them inline) so we can re-read once
-        // after a long-poll wake without re-decoding the request.
-        let mut pending: Vec<PendingRead> = Vec::new();
-        for topic in &req.topics {
-            // v ≤ 12 sends the topic name; v ≥ 13 sends only topic_id and
-            // we look it up. The client populates whichever the negotiated
-            // version requires.
-            let topic_name = if topic.topic.is_empty() {
-                let image = controller.current_image();
+    // ── slice-13 ACL preamble ────────────────────────────────────────
+    // Batch-authorize every topic in the request for `Read` (the
+    // operation Fetch requires). Topics that come back `Deny` will
+    // short-circuit the per-partition log read below and emit
+    // TOPIC_AUTHORIZATION_FAILED on every partition row of that topic
+    // with empty records.
+    //
+    // Fetch v ≥ 13 sends only topic_id on the wire; the slice-13 plan
+    // keys ACLs by topic *name*, so we resolve the names here too for
+    // the authorize call (and re-resolve inline below for log lookup).
+    let image = controller.current_image();
+    let topic_names_for_acl: Vec<String> = req
+        .topics
+        .iter()
+        .map(|t| {
+            if !t.topic.is_empty() {
+                t.topic.clone()
+            } else if t.topic_id != WireUuid::ZERO {
                 image
                     .topics()
-                    .find(|t| t.topic_id.into_bytes() == topic.topic_id.0)
-                    .map_or_else(String::new, |t| t.name.clone())
+                    .find(|tt| tt.topic_id.into_bytes() == t.topic_id.0)
+                    .map(|tt| tt.name.clone())
+                    .unwrap_or_default()
             } else {
-                topic.topic.clone()
-            };
-            let topic_id = if topic.topic_id == WireUuid::ZERO {
-                let image = controller.current_image();
-                image
-                    .topic(&topic_name)
-                    .map_or(WireUuid::ZERO, |t| WireUuid(t.topic_id.into_bytes()))
+                String::new()
+            }
+        })
+        .collect();
+    let acl_results = authorize_topics(
+        &image,
+        broker.config.super_user_name.as_deref(),
+        principal,
+        peer,
+        AclOperation::Read,
+        topic_names_for_acl.iter().map(String::as_str),
+    );
+    let denied_topics: std::collections::HashSet<String> = acl_results
+        .iter()
+        .filter_map(|(name, r)| {
+            if *r == AuthorizationResult::Deny {
+                Some((*name).to_string())
             } else {
-                topic.topic_id
+                None
+            }
+        })
+        .collect();
+
+    // `replica_id >= 0` means follower fetch (Apache Kafka convention).
+    // KIP-903 (Kafka 3.5) moved `replica_id` into a tagged `replica_state`
+    // struct on Fetch v15+; on v0-14 the original top-level field is used.
+    // The codegen serializes whichever the negotiated version requires, so
+    // here we accept whichever field is populated. Without this fallback,
+    // every v15+ follower fetch decodes with `replica_id = -1` (the default
+    // for the deprecated top-level field), the handler treats it as a
+    // consumer fetch, clamps records at HW=0, and replication silently
+    // stalls — which is exactly the byte-compare test's failure mode.
+    let effective_replica_id = if req.replica_id >= 0 {
+        req.replica_id
+    } else {
+        req.replica_state.replica_id
+    };
+    let is_follower_fetch = effective_replica_id >= 0;
+    // isolation_level=1 (read_committed) only applies to consumer fetches.
+    // Follower fetches always see all records regardless of isolation.
+    let read_committed = !is_follower_fetch && req.isolation_level == 1;
+
+    // Resolve every requested partition up front. We collect pending
+    // reads (rather than just doing them inline) so we can re-read once
+    // after a long-poll wake without re-decoding the request.
+    let mut pending: Vec<PendingRead> = Vec::new();
+    for topic in &req.topics {
+        // v ≤ 12 sends the topic name; v ≥ 13 sends only topic_id and
+        // we look it up. The client populates whichever the negotiated
+        // version requires.
+        let topic_name = if topic.topic.is_empty() {
+            let image = controller.current_image();
+            image
+                .topics()
+                .find(|t| t.topic_id.into_bytes() == topic.topic_id.0)
+                .map_or_else(String::new, |t| t.name.clone())
+        } else {
+            topic.topic.clone()
+        };
+        let topic_id = if topic.topic_id == WireUuid::ZERO {
+            let image = controller.current_image();
+            image
+                .topic(&topic_name)
+                .map_or(WireUuid::ZERO, |t| WireUuid(t.topic_id.into_bytes()))
+        } else {
+            topic.topic_id
+        };
+
+        // slice-13: if the topic was denied by the ACL preamble,
+        // every partition row gets TOPIC_AUTHORIZATION_FAILED and
+        // the real log read is skipped. `records` stays `None`
+        // (no batch returned). An empty topic_name (v ≥ 13 with
+        // an unknown topic_id) maps to "" in the denied set iff
+        // its authorize result was Deny; the no-ACL compat shim
+        // returns Allow uniformly, so existing tests are unaffected.
+        let topic_denied = denied_topics.contains(&topic_name);
+
+        for fp in &topic.partitions {
+            let idx = fp.partition;
+            let fetch_offset = fp.fetch_offset;
+            let max_bytes = fp.partition_max_bytes;
+
+            let mut out = PartitionData {
+                partition_index: idx,
+                ..Default::default()
             };
 
-            for fp in &topic.partitions {
-                let idx = fp.partition;
-                let fetch_offset = fp.fetch_offset;
-                let max_bytes = fp.partition_max_bytes;
-
-                let mut out = PartitionData {
+            if topic_denied {
+                out.error_code = codes::TOPIC_AUTHORIZATION_FAILED;
+                // Records stays `None` — the codegen encodes this as
+                // an empty/null record buffer.
+                pending.push(PendingRead {
+                    topic_name: topic_name.clone(),
+                    topic_id,
                     partition_index: idx,
-                    ..Default::default()
-                };
+                    fetch_offset,
+                    max_bytes,
+                    read_committed,
+                    is_follower_fetch,
+                    partition: None,
+                    out,
+                });
+                continue;
+            }
 
-                let part_opt = partitions
-                    .get(&(topic_name.clone(), idx))
-                    .map(|p| p.clone());
+            let part_opt = partitions
+                .get(&(topic_name.clone(), idx))
+                .map(|p| p.clone());
 
-                // KIP-101 epoch fence. The follower (or consumer using KIP-320)
-                // includes its `current_leader_epoch`; we reject stale or future
-                // epochs without serving data.
-                if let Some(part) = part_opt.as_ref() {
-                    let our_epoch = part
-                        .current_leader_epoch
-                        .load(std::sync::atomic::Ordering::Acquire);
-                    if fp.current_leader_epoch >= 0 && fp.current_leader_epoch != our_epoch {
-                        out.error_code = if fp.current_leader_epoch < our_epoch {
-                            codes::FENCED_LEADER_EPOCH
-                        } else {
-                            codes::UNKNOWN_LEADER_EPOCH
-                        };
-                        pending.push(PendingRead {
-                            topic_name: topic_name.clone(),
-                            topic_id,
-                            partition_index: idx,
-                            fetch_offset,
-                            max_bytes,
-                            read_committed,
-                            is_follower_fetch,
-                            partition: None,
-                            out,
-                        });
-                        continue;
-                    }
-                }
-
-                // Restore follower-fetch HW maintenance (slice-10a removed this
-                // because of stalls; slice-10b's ISR maintenance prevents stalls
-                // by shrinking lagging followers out of the ISR within 2s on CI).
-                if is_follower_fetch && let Some(part) = part_opt.as_ref() {
-                    let leader_leo = part.log_end_offset();
-                    let advanced = {
-                        let mut st = part.replica_state.lock().await;
-                        let prev = st.hw;
-                        let new = st.update_follower_leo(
-                            u64::try_from(effective_replica_id).unwrap_or(0),
-                            fetch_offset,
-                            leader_leo,
-                        );
-                        new > prev
+            // KIP-101 epoch fence. The follower (or consumer using KIP-320)
+            // includes its `current_leader_epoch`; we reject stale or future
+            // epochs without serving data.
+            if let Some(part) = part_opt.as_ref() {
+                let our_epoch = part
+                    .current_leader_epoch
+                    .load(std::sync::atomic::Ordering::Acquire);
+                if fp.current_leader_epoch >= 0 && fp.current_leader_epoch != our_epoch {
+                    out.error_code = if fp.current_leader_epoch < our_epoch {
+                        codes::FENCED_LEADER_EPOCH
+                    } else {
+                        codes::UNKNOWN_LEADER_EPOCH
                     };
-                    if advanced {
-                        part.hw_advance_notify.notify_waiters();
-                    }
-                }
-
-                if part_opt.is_none() || topic_name.is_empty() {
-                    out.error_code = codes::UNKNOWN_TOPIC_OR_PARTITION;
                     pending.push(PendingRead {
                         topic_name: topic_name.clone(),
                         topic_id,
@@ -190,7 +230,30 @@ pub(crate) fn handle(
                     });
                     continue;
                 }
+            }
 
+            // Restore follower-fetch HW maintenance (slice-10a removed this
+            // because of stalls; slice-10b's ISR maintenance prevents stalls
+            // by shrinking lagging followers out of the ISR within 2s on CI).
+            if is_follower_fetch && let Some(part) = part_opt.as_ref() {
+                let leader_leo = part.log_end_offset();
+                let advanced = {
+                    let mut st = part.replica_state.lock().await;
+                    let prev = st.hw;
+                    let new = st.update_follower_leo(
+                        u64::try_from(effective_replica_id).unwrap_or(0),
+                        fetch_offset,
+                        leader_leo,
+                    );
+                    new > prev
+                };
+                if advanced {
+                    part.hw_advance_notify.notify_waiters();
+                }
+            }
+
+            if part_opt.is_none() || topic_name.is_empty() {
+                out.error_code = codes::UNKNOWN_TOPIC_OR_PARTITION;
                 pending.push(PendingRead {
                     topic_name: topic_name.clone(),
                     topic_id,
@@ -199,48 +262,61 @@ pub(crate) fn handle(
                     max_bytes,
                     read_committed,
                     is_follower_fetch,
-                    partition: part_opt,
+                    partition: None,
                     out,
                 });
+                continue;
             }
+
+            pending.push(PendingRead {
+                topic_name: topic_name.clone(),
+                topic_id,
+                partition_index: idx,
+                fetch_offset,
+                max_bytes,
+                read_committed,
+                is_follower_fetch,
+                partition: part_opt,
+                out,
+            });
         }
+    }
 
-        // First read pass.
-        let mut total_bytes = 0_usize;
-        for p in &mut pending {
-            if let Some(part) = &p.partition {
-                total_bytes += do_read(
-                    part,
-                    p.fetch_offset,
-                    p.max_bytes,
-                    p.read_committed,
-                    p.is_follower_fetch,
-                    &mut p.out,
-                )
-                .await?;
-            }
+    // First read pass.
+    let mut total_bytes = 0_usize;
+    for p in &mut pending {
+        if let Some(part) = &p.partition {
+            total_bytes += do_read(
+                part,
+                p.fetch_offset,
+                p.max_bytes,
+                p.read_committed,
+                p.is_follower_fetch,
+                &mut p.out,
+            )
+            .await?;
         }
+    }
 
-        // Long-poll: if we didn't satisfy min_bytes, wait on each readable
-        // partition's append_notify with a single timeout, then re-read.
-        let want_more = total_bytes < usize::try_from(req.min_bytes.max(0)).unwrap_or(0);
-        if want_more && req.max_wait_ms > 0 {
-            long_poll_then_reread(&mut pending, req.max_wait_ms).await?;
-        }
+    // Long-poll: if we didn't satisfy min_bytes, wait on each readable
+    // partition's append_notify with a single timeout, then re-read.
+    let want_more = total_bytes < usize::try_from(req.min_bytes.max(0)).unwrap_or(0);
+    if want_more && req.max_wait_ms > 0 {
+        long_poll_then_reread(&mut pending, req.max_wait_ms).await?;
+    }
 
-        let responses = group_into_topic_responses(pending);
+    let responses = group_into_topic_responses(pending);
 
-        let resp = FetchResponse {
-            throttle_time_ms: 0,
-            error_code: 0,
-            session_id: 0,
-            responses,
-            ..Default::default()
-        };
-        let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-        resp.encode(&mut buf, version)?;
-        Ok(buf.freeze())
-    })
+    let resp = FetchResponse {
+        throttle_time_ms: 0,
+        error_code: 0,
+        session_id: 0,
+        responses,
+        ..Default::default()
+    };
+    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
+    resp.encode(&mut buf, version)?;
+    Ok(buf.freeze())
 }
 
 /// Hold the partition's log mutex briefly to read offsets + (optionally) a

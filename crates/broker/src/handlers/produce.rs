@@ -8,344 +8,434 @@
 //! trailing bytes during decode. Clients that send a single batch per
 //! partition (the typical case) are fully supported.
 
+use std::net::SocketAddr;
 use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
-use futures_util::future::BoxFuture;
 
+use crabka_metadata::{AclOperation, ResourceType};
 use crabka_protocol::owned::produce_request::ProduceRequest;
 use crabka_protocol::owned::produce_response::{
     PartitionProduceResponse, ProduceResponse, TopicProduceResponse,
 };
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 use crabka_protocol::{Decode, Encode};
+use crabka_security::Principal;
 use tokio::sync::oneshot;
 
+use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize, authorize_topics};
 use crate::broker::Broker;
 use crate::codes;
 use crate::error::BrokerError;
 use crate::partition::{ProduceJob, WriterMessage};
 
 #[allow(clippy::too_many_lines)]
-pub(crate) fn handle(
+pub(crate) async fn handle(
     broker: &Broker,
     version: i16,
     _correlation_id: i32,
     req_bytes: &[u8],
-) -> BoxFuture<'static, Result<Bytes, BrokerError>> {
-    let req_bytes = req_bytes.to_vec();
+    principal: &Principal,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
     let partitions = broker.partitions.clone();
     let controller = broker.controller.clone();
     let producer_state = broker.producer_state.clone();
     let txn_coordinator = broker.txn_coordinator.clone();
-    Box::pin(async move {
-        let mut cur: &[u8] = &req_bytes;
-        let req = ProduceRequest::decode(&mut cur, version)?;
-        let timeout = Duration::from_millis(u64::try_from(req.timeout_ms.max(0)).unwrap_or(0));
+    let mut cur: &[u8] = req_bytes;
+    let req = ProduceRequest::decode(&mut cur, version)?;
+    let timeout = Duration::from_millis(u64::try_from(req.timeout_ms.max(0)).unwrap_or(0));
 
-        let mut topic_results: Vec<TopicProduceResponse> = Vec::with_capacity(req.topic_data.len());
-
-        for topic in req.topic_data {
-            // v ≤ 12 sends the topic name; v ≥ 13 sends only topic_id and
-            // we look it up in the metadata image.
-            let topic_name = if !topic.name.is_empty() {
-                topic.name.clone()
-            } else if topic.topic_id != WireUuid::ZERO {
-                let image = controller.current_image();
+    // ── slice-13 ACL preamble ────────────────────────────────────────
+    // For transactional Produce (request carries a non-empty
+    // `transactional_id`), authorize `Write` on
+    // `TransactionalId(transactional_id)` FIRST. On Deny, emit
+    // TRANSACTIONAL_ID_AUTHORIZATION_FAILED (53) per-partition on every
+    // row of the response (matches Kafka's per-partition error mapping).
+    //
+    // Then batch-authorize every topic in the request for `Write` (the
+    // operation Produce requires). Topics that come back `Deny` will
+    // short-circuit the per-partition append below and emit
+    // TOPIC_AUTHORIZATION_FAILED on every partition row of that topic.
+    // Topic name resolution for v ≥ 13 (topic_id only on the wire) is
+    // re-done inline below — but the slice-13 plan keys ACLs by topic
+    // *name*, so we resolve the names here too for the authorize call.
+    let image = controller.current_image();
+    let txn_id_denied = match req.transactional_id.as_deref() {
+        Some(tid) if !tid.is_empty() => {
+            let acl_req = AuthorizationRequest {
+                principal,
+                host: peer,
+                resource_type: ResourceType::TransactionalId,
+                resource_name: tid,
+                operation: AclOperation::Write,
+            };
+            authorize(&image, broker.config.super_user_name.as_deref(), &acl_req)
+                == AuthorizationResult::Deny
+        }
+        _ => false,
+    };
+    let topic_names_for_acl: Vec<String> = req
+        .topic_data
+        .iter()
+        .map(|t| {
+            if !t.name.is_empty() {
+                t.name.clone()
+            } else if t.topic_id != WireUuid::ZERO {
                 image
                     .topics()
-                    .find(|t| t.topic_id.into_bytes() == topic.topic_id.0)
-                    .map(|t| t.name.clone())
+                    .find(|tt| tt.topic_id.into_bytes() == t.topic_id.0)
+                    .map(|tt| tt.name.clone())
                     .unwrap_or_default()
             } else {
                 String::new()
+            }
+        })
+        .collect();
+    let acl_results = authorize_topics(
+        &image,
+        broker.config.super_user_name.as_deref(),
+        principal,
+        peer,
+        AclOperation::Write,
+        topic_names_for_acl.iter().map(String::as_str),
+    );
+    // Snapshot which topics are denied (by name) so the per-topic loop
+    // can check without holding a borrow on `acl_results` (the loop
+    // moves out of `req.topic_data`).
+    let denied_topics: std::collections::HashSet<String> = acl_results
+        .iter()
+        .filter_map(|(name, r)| {
+            if *r == AuthorizationResult::Deny {
+                Some((*name).to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let mut topic_results: Vec<TopicProduceResponse> = Vec::with_capacity(req.topic_data.len());
+
+    for topic in req.topic_data {
+        // v ≤ 12 sends the topic name; v ≥ 13 sends only topic_id and
+        // we look it up in the metadata image.
+        let topic_name = if !topic.name.is_empty() {
+            topic.name.clone()
+        } else if topic.topic_id != WireUuid::ZERO {
+            let image = controller.current_image();
+            image
+                .topics()
+                .find(|t| t.topic_id.into_bytes() == topic.topic_id.0)
+                .map(|t| t.name.clone())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+
+        let mut partition_results: Vec<PartitionProduceResponse> =
+            Vec::with_capacity(topic.partition_data.len());
+
+        // slice-13: if the topic was denied by the ACL preamble, every
+        // partition row for it gets TOPIC_AUTHORIZATION_FAILED and the
+        // real append is skipped. An empty topic_name (v ≥ 13 with an
+        // unknown topic_id) maps to "" in the denied set if and only if
+        // its authorize result was Deny; the no-ACL compat shim returns
+        // Allow uniformly, so existing tests are unaffected.
+        let topic_denied = denied_topics.contains(&topic_name);
+
+        for part_data in topic.partition_data {
+            let idx = part_data.index;
+            let mut out = PartitionProduceResponse {
+                index: idx,
+                ..Default::default()
             };
 
-            let mut partition_results: Vec<PartitionProduceResponse> =
-                Vec::with_capacity(topic.partition_data.len());
+            if txn_id_denied {
+                out.error_code = codes::TRANSACTIONAL_ID_AUTHORIZATION_FAILED;
+                partition_results.push(out);
+                continue;
+            }
 
-            for part_data in topic.partition_data {
-                let idx = part_data.index;
-                let mut out = PartitionProduceResponse {
-                    index: idx,
-                    ..Default::default()
-                };
+            if topic_denied {
+                out.error_code = codes::TOPIC_AUTHORIZATION_FAILED;
+                partition_results.push(out);
+                continue;
+            }
 
-                // Either there's a single decoded RecordBatch to append, or
-                // the field was null / undecodable → INVALID_REQUEST.
-                let Some(mut batch) = part_data.records else {
-                    out.error_code = codes::INVALID_REQUEST;
-                    partition_results.push(out);
-                    continue;
-                };
+            // Either there's a single decoded RecordBatch to append, or
+            // the field was null / undecodable → INVALID_REQUEST.
+            let Some(mut batch) = part_data.records else {
+                out.error_code = codes::INVALID_REQUEST;
+                partition_results.push(out);
+                continue;
+            };
 
-                let part = if topic_name.is_empty() {
-                    None
-                } else {
-                    partitions
-                        .get(&(topic_name.clone(), idx))
-                        .map(|p| p.clone())
-                };
-                let Some(part) = part else {
-                    out.error_code = codes::UNKNOWN_TOPIC_OR_PARTITION;
-                    partition_results.push(out);
-                    continue;
-                };
+            let part = if topic_name.is_empty() {
+                None
+            } else {
+                partitions
+                    .get(&(topic_name.clone(), idx))
+                    .map(|p| p.clone())
+            };
+            let Some(part) = part else {
+                out.error_code = codes::UNKNOWN_TOPIC_OR_PARTITION;
+                partition_results.push(out);
+                continue;
+            };
 
-                // Stamp the current leader epoch onto the batch — this becomes
-                // the `partition_leader_epoch` carried on the wire and used by
-                // KIP-101 fence validation on the follower's Fetch.
-                batch.partition_leader_epoch = part
-                    .current_leader_epoch
-                    .load(std::sync::atomic::Ordering::Acquire);
+            // Stamp the current leader epoch onto the batch — this becomes
+            // the `partition_leader_epoch` carried on the wire and used by
+            // KIP-101 fence validation on the follower's Fetch.
+            batch.partition_leader_epoch = part
+                .current_leader_epoch
+                .load(std::sync::atomic::Ordering::Acquire);
 
-                // ── transactional produce verify (KIP-1319 v2) ──────────
-                // This check is more authoritative than idempotent dedup,
-                // so it runs first. Non-transactional batches (pid < 0 or
-                // is_transactional=false) skip directly to the dedup gate.
-                let is_transactional = batch.attributes.is_transactional();
-                {
-                    let pid_txn = batch.producer_id;
-                    let epoch_txn = batch.producer_epoch;
-                    if is_transactional && pid_txn >= 0 {
-                        let Some(tid) = txn_coordinator.tid_for_pid(pid_txn) else {
-                            // Unknown producer_id — reject.
+            // ── transactional produce verify (KIP-1319 v2) ──────────
+            // This check is more authoritative than idempotent dedup,
+            // so it runs first. Non-transactional batches (pid < 0 or
+            // is_transactional=false) skip directly to the dedup gate.
+            let is_transactional = batch.attributes.is_transactional();
+            {
+                let pid_txn = batch.producer_id;
+                let epoch_txn = batch.producer_epoch;
+                if is_transactional && pid_txn >= 0 {
+                    let Some(tid) = txn_coordinator.tid_for_pid(pid_txn) else {
+                        // Unknown producer_id — reject.
+                        out.error_code = codes::INVALID_PRODUCER_ID_MAPPING;
+                        partition_results.push(out);
+                        continue;
+                    };
+                    if txn_coordinator.is_coordinator_for(&tid).await {
+                        let Some(entry_mutex) = txn_coordinator.get(&tid) else {
                             out.error_code = codes::INVALID_PRODUCER_ID_MAPPING;
                             partition_results.push(out);
                             continue;
                         };
-                        if txn_coordinator.is_coordinator_for(&tid).await {
-                            let Some(entry_mutex) = txn_coordinator.get(&tid) else {
-                                out.error_code = codes::INVALID_PRODUCER_ID_MAPPING;
+                        let mut entry = entry_mutex.lock().await;
+                        if entry.producer_epoch != epoch_txn {
+                            out.error_code = codes::INVALID_PRODUCER_EPOCH;
+                            partition_results.push(out);
+                            continue;
+                        }
+                        let tp = crate::txn::state::TopicPartition {
+                            topic: topic_name.clone(),
+                            partition: idx,
+                        };
+                        // Consider the partition "needs registering" if it
+                        // isn't in the current partition set OR if the
+                        // current state is CompleteCommit/CompleteAbort
+                        // (indicating a new transaction after a completed
+                        // one — the partition set is stale).
+                        let needs_register = !entry.partitions.contains(&tp)
+                            || matches!(
+                                entry.state,
+                                crate::txn::state::TxnState::CompleteCommit
+                                    | crate::txn::state::TxnState::CompleteAbort
+                            );
+                        if needs_register {
+                            // v2 auto-AddPartitionsToTxn: register the
+                            // partition inline if the state allows it.
+                            if !entry
+                                .state
+                                .can_transition_to(crate::txn::state::TxnState::Ongoing)
+                            {
+                                out.error_code = codes::INVALID_TXN_STATE;
                                 partition_results.push(out);
                                 continue;
-                            };
-                            let mut entry = entry_mutex.lock().await;
-                            if entry.producer_epoch != epoch_txn {
-                                out.error_code = codes::INVALID_PRODUCER_EPOCH;
-                                partition_results.push(out);
-                                continue;
                             }
-                            let tp = crate::txn::state::TopicPartition {
-                                topic: topic_name.clone(),
-                                partition: idx,
-                            };
-                            // Consider the partition "needs registering" if it
-                            // isn't in the current partition set OR if the
-                            // current state is CompleteCommit/CompleteAbort
-                            // (indicating a new transaction after a completed
-                            // one — the partition set is stale).
-                            let needs_register = !entry.partitions.contains(&tp)
-                                || matches!(
-                                    entry.state,
-                                    crate::txn::state::TxnState::CompleteCommit
-                                        | crate::txn::state::TxnState::CompleteAbort
-                                );
-                            if needs_register {
-                                // v2 auto-AddPartitionsToTxn: register the
-                                // partition inline if the state allows it.
-                                if !entry
-                                    .state
-                                    .can_transition_to(crate::txn::state::TxnState::Ongoing)
-                                {
-                                    out.error_code = codes::INVALID_TXN_STATE;
-                                    partition_results.push(out);
-                                    continue;
-                                }
-                                // If starting a new txn after a completed one,
-                                // clear the stale partition set.
-                                if matches!(
-                                    entry.state,
-                                    crate::txn::state::TxnState::CompleteCommit
-                                        | crate::txn::state::TxnState::CompleteAbort
-                                ) {
-                                    entry.partitions.clear();
-                                    entry.offset_commit_groups.clear();
-                                }
-                                entry.state = crate::txn::state::TxnState::Ongoing;
-                                entry.partitions.insert(tp);
-                                entry.last_update_ms = crate::txn::util::now_millis();
-                                let snap = entry.clone();
-                                // Lock must be dropped before the async put.
-                                drop(entry);
-                                txn_coordinator.put(snap).await?;
+                            // If starting a new txn after a completed one,
+                            // clear the stale partition set.
+                            if matches!(
+                                entry.state,
+                                crate::txn::state::TxnState::CompleteCommit
+                                    | crate::txn::state::TxnState::CompleteAbort
+                            ) {
+                                entry.partitions.clear();
+                                entry.offset_commit_groups.clear();
                             }
-                            // else: partition already registered in an active txn — fall through.
+                            entry.state = crate::txn::state::TxnState::Ongoing;
+                            entry.partitions.insert(tp);
+                            entry.last_update_ms = crate::txn::util::now_millis();
+                            let snap = entry.clone();
+                            // Lock must be dropped before the async put.
+                            drop(entry);
+                            txn_coordinator.put(snap).await?;
                         }
-                        // else: not the coordinator for this tid (slice-9 MVP).
-                        // Trust the producer to have called AddPartitionsToTxn
-                        // through the correct coordinator. Inter-broker v2
-                        // auto-add is deferred (slice 10+).
+                        // else: partition already registered in an active txn — fall through.
                     }
+                    // else: not the coordinator for this tid (slice-9 MVP).
+                    // Trust the producer to have called AddPartitionsToTxn
+                    // through the correct coordinator. Inter-broker v2
+                    // auto-add is deferred (slice 10+).
                 }
+            }
 
-                // ── idempotent-producer dedup gate ───────────────────────
-                let pid = batch.producer_id;
-                let epoch = batch.producer_epoch;
-                let base_seq = batch.base_sequence;
-                let last_offset_delta = batch.last_offset_delta;
-                let max_timestamp = batch.max_timestamp;
+            // ── idempotent-producer dedup gate ───────────────────────
+            let pid = batch.producer_id;
+            let epoch = batch.producer_epoch;
+            let base_seq = batch.base_sequence;
+            let last_offset_delta = batch.last_offset_delta;
+            let max_timestamp = batch.max_timestamp;
 
-                let dedup_outcome = if pid >= 0 {
-                    Some(
-                        producer_state
-                            .check(&topic_name, idx, pid, epoch, base_seq, last_offset_delta)
-                            .await,
-                    )
-                } else {
-                    None
-                };
+            let dedup_outcome = if pid >= 0 {
+                Some(
+                    producer_state
+                        .check(&topic_name, idx, pid, epoch, base_seq, last_offset_delta)
+                        .await,
+                )
+            } else {
+                None
+            };
 
-                match dedup_outcome {
-                    Some(crate::producer_state::Decision::Duplicate { base_offset }) => {
-                        // The original Produce's append went through but its
-                        // HW gate may have timed out — that's why the idempotent
-                        // producer is retrying with the same `base_sequence`.
-                        // For `acks=-1`, we MUST still wait for HW to reach
-                        // the duplicate's last offset before claiming success.
-                        // Returning NONE unconditionally would silently bypass
-                        // the full-ISR durability guarantee that acks=all
-                        // promises: the original append is on the leader, but
-                        // followers may not have it yet, and a leader crash
-                        // before they catch up would lose data the producer
-                        // believed acknowledged.
-                        if req.acks == -1 {
-                            let target = base_offset + i64::from(last_offset_delta) + 1;
-                            let deadline = std::time::Instant::now() + timeout;
-                            match part.await_hw_at_least(target, deadline).await {
-                                Ok(()) => {
-                                    out.error_code = codes::NONE;
-                                    out.base_offset = base_offset;
-                                }
-                                Err(_timeout) => {
-                                    out.error_code = codes::NOT_ENOUGH_REPLICAS_AFTER_APPEND;
-                                    out.base_offset = base_offset;
-                                }
+            match dedup_outcome {
+                Some(crate::producer_state::Decision::Duplicate { base_offset }) => {
+                    // The original Produce's append went through but its
+                    // HW gate may have timed out — that's why the idempotent
+                    // producer is retrying with the same `base_sequence`.
+                    // For `acks=-1`, we MUST still wait for HW to reach
+                    // the duplicate's last offset before claiming success.
+                    // Returning NONE unconditionally would silently bypass
+                    // the full-ISR durability guarantee that acks=all
+                    // promises: the original append is on the leader, but
+                    // followers may not have it yet, and a leader crash
+                    // before they catch up would lose data the producer
+                    // believed acknowledged.
+                    if req.acks == -1 {
+                        let target = base_offset + i64::from(last_offset_delta) + 1;
+                        let deadline = std::time::Instant::now() + timeout;
+                        match part.await_hw_at_least(target, deadline).await {
+                            Ok(()) => {
+                                out.error_code = codes::NONE;
+                                out.base_offset = base_offset;
                             }
-                        } else {
-                            out.error_code = codes::NONE;
-                            out.base_offset = base_offset;
+                            Err(_timeout) => {
+                                out.error_code = codes::NOT_ENOUGH_REPLICAS_AFTER_APPEND;
+                                out.base_offset = base_offset;
+                            }
                         }
-                        partition_results.push(out);
-                        continue;
+                    } else {
+                        out.error_code = codes::NONE;
+                        out.base_offset = base_offset;
                     }
-                    Some(crate::producer_state::Decision::OutOfOrder) => {
-                        out.error_code = codes::OUT_OF_ORDER_SEQUENCE_NUMBER;
-                        partition_results.push(out);
-                        continue;
-                    }
-                    Some(crate::producer_state::Decision::Fenced) => {
-                        out.error_code = codes::INVALID_PRODUCER_EPOCH;
-                        partition_results.push(out);
-                        continue;
-                    }
-                    Some(crate::producer_state::Decision::Append) | None => {
-                        // fall through to writer dispatch
-                    }
-                }
-
-                let (ack_tx, ack_rx) = oneshot::channel();
-                let job = WriterMessage::Produce(ProduceJob { batch, ack: ack_tx });
-
-                if part.writer_tx.send(job).await.is_err() {
-                    out.error_code = codes::NOT_LEADER_OR_FOLLOWER;
                     partition_results.push(out);
                     continue;
                 }
-
-                match tokio::time::timeout(timeout, ack_rx).await {
-                    Ok(Ok(Ok(base_offset))) => {
-                        if req.acks == -1 {
-                            let target = base_offset + i64::from(last_offset_delta) + 1;
-                            let deadline = std::time::Instant::now() + timeout;
-                            match part.await_hw_at_least(target, deadline).await {
-                                Ok(()) => {
-                                    out.error_code = codes::NONE;
-                                    out.base_offset = base_offset;
-                                    if pid >= 0 {
-                                        producer_state
-                                            .commit(
-                                                &topic_name,
-                                                idx,
-                                                pid,
-                                                epoch,
-                                                base_seq,
-                                                last_offset_delta,
-                                                base_offset,
-                                                max_timestamp,
-                                            )
-                                            .await;
-                                    }
-                                }
-                                Err(_timeout) => {
-                                    out.error_code = codes::NOT_ENOUGH_REPLICAS_AFTER_APPEND;
-                                    out.base_offset = base_offset;
-                                    if pid >= 0 {
-                                        producer_state
-                                            .commit(
-                                                &topic_name,
-                                                idx,
-                                                pid,
-                                                epoch,
-                                                base_seq,
-                                                last_offset_delta,
-                                                base_offset,
-                                                max_timestamp,
-                                            )
-                                            .await;
-                                    }
-                                }
-                            }
-                        } else {
-                            out.error_code = codes::NONE;
-                            out.base_offset = base_offset;
-                            if pid >= 0 {
-                                producer_state
-                                    .commit(
-                                        &topic_name,
-                                        idx,
-                                        pid,
-                                        epoch,
-                                        base_seq,
-                                        last_offset_delta,
-                                        base_offset,
-                                        max_timestamp,
-                                    )
-                                    .await;
-                            }
-                        }
-                    }
-                    Ok(Ok(Err(e))) => {
-                        out.error_code = codes::from_broker_error(&e);
-                    }
-                    Ok(Err(_)) => {
-                        // Writer dropped the oneshot without sending — shouldn't
-                        // happen unless the writer task panicked between recv
-                        // and ack. Map to NOT_LEADER_OR_FOLLOWER.
-                        out.error_code = codes::NOT_LEADER_OR_FOLLOWER;
-                    }
-                    Err(_) => {
-                        out.error_code = codes::REQUEST_TIMED_OUT;
-                    }
+                Some(crate::producer_state::Decision::OutOfOrder) => {
+                    out.error_code = codes::OUT_OF_ORDER_SEQUENCE_NUMBER;
+                    partition_results.push(out);
+                    continue;
                 }
-                partition_results.push(out);
+                Some(crate::producer_state::Decision::Fenced) => {
+                    out.error_code = codes::INVALID_PRODUCER_EPOCH;
+                    partition_results.push(out);
+                    continue;
+                }
+                Some(crate::producer_state::Decision::Append) | None => {
+                    // fall through to writer dispatch
+                }
             }
 
-            topic_results.push(TopicProduceResponse {
-                name: topic_name,
-                topic_id: topic.topic_id,
-                partition_responses: partition_results,
-                ..Default::default()
-            });
+            let (ack_tx, ack_rx) = oneshot::channel();
+            let job = WriterMessage::Produce(ProduceJob { batch, ack: ack_tx });
+
+            if part.writer_tx.send(job).await.is_err() {
+                out.error_code = codes::NOT_LEADER_OR_FOLLOWER;
+                partition_results.push(out);
+                continue;
+            }
+
+            match tokio::time::timeout(timeout, ack_rx).await {
+                Ok(Ok(Ok(base_offset))) => {
+                    if req.acks == -1 {
+                        let target = base_offset + i64::from(last_offset_delta) + 1;
+                        let deadline = std::time::Instant::now() + timeout;
+                        match part.await_hw_at_least(target, deadline).await {
+                            Ok(()) => {
+                                out.error_code = codes::NONE;
+                                out.base_offset = base_offset;
+                                if pid >= 0 {
+                                    producer_state
+                                        .commit(
+                                            &topic_name,
+                                            idx,
+                                            pid,
+                                            epoch,
+                                            base_seq,
+                                            last_offset_delta,
+                                            base_offset,
+                                            max_timestamp,
+                                        )
+                                        .await;
+                                }
+                            }
+                            Err(_timeout) => {
+                                out.error_code = codes::NOT_ENOUGH_REPLICAS_AFTER_APPEND;
+                                out.base_offset = base_offset;
+                                if pid >= 0 {
+                                    producer_state
+                                        .commit(
+                                            &topic_name,
+                                            idx,
+                                            pid,
+                                            epoch,
+                                            base_seq,
+                                            last_offset_delta,
+                                            base_offset,
+                                            max_timestamp,
+                                        )
+                                        .await;
+                                }
+                            }
+                        }
+                    } else {
+                        out.error_code = codes::NONE;
+                        out.base_offset = base_offset;
+                        if pid >= 0 {
+                            producer_state
+                                .commit(
+                                    &topic_name,
+                                    idx,
+                                    pid,
+                                    epoch,
+                                    base_seq,
+                                    last_offset_delta,
+                                    base_offset,
+                                    max_timestamp,
+                                )
+                                .await;
+                        }
+                    }
+                }
+                Ok(Ok(Err(e))) => {
+                    out.error_code = codes::from_broker_error(&e);
+                }
+                Ok(Err(_)) => {
+                    // Writer dropped the oneshot without sending — shouldn't
+                    // happen unless the writer task panicked between recv
+                    // and ack. Map to NOT_LEADER_OR_FOLLOWER.
+                    out.error_code = codes::NOT_LEADER_OR_FOLLOWER;
+                }
+                Err(_) => {
+                    out.error_code = codes::REQUEST_TIMED_OUT;
+                }
+            }
+            partition_results.push(out);
         }
 
-        let resp = ProduceResponse {
-            responses: topic_results,
-            throttle_time_ms: 0,
+        topic_results.push(TopicProduceResponse {
+            name: topic_name,
+            topic_id: topic.topic_id,
+            partition_responses: partition_results,
             ..Default::default()
-        };
-        let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-        resp.encode(&mut buf, version)?;
-        Ok(buf.freeze())
-    })
+        });
+    }
+
+    let resp = ProduceResponse {
+        responses: topic_results,
+        throttle_time_ms: 0,
+        ..Default::default()
+    };
+    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
+    resp.encode(&mut buf, version)?;
+    Ok(buf.freeze())
 }

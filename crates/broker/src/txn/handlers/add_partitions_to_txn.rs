@@ -10,10 +10,21 @@
 //! This broker only handles the single-tid case (the only shape a
 //! producer client ever sends). If a v4+ request carries more than one
 //! transaction entry we process them all sequentially.
+//!
+//! ## slice-13 ACL preamble
+//!
+//! Per transaction in the request:
+//! * `Write` on `TransactionalId(tid)`. Deny → every topic row in that
+//!   transaction's results emits
+//!   `TRANSACTIONAL_ID_AUTHORIZATION_FAILED (53)` on every partition.
+//! * Per topic, `Write` on `Topic(name)`. Deny → that topic's partition
+//!   rows emit `TOPIC_AUTHORIZATION_FAILED (29)`.
+
+use std::net::SocketAddr;
 
 use bytes::{Bytes, BytesMut};
-use futures_util::future::BoxFuture;
 
+use crabka_metadata::{AclOperation, MetadataImage, ResourceType};
 use crabka_protocol::owned::add_partitions_to_txn_request::AddPartitionsToTxnRequest;
 use crabka_protocol::owned::add_partitions_to_txn_response::{
     AddPartitionsToTxnResponse, AddPartitionsToTxnResult,
@@ -22,38 +33,57 @@ use crabka_protocol::owned::common::add_partitions_to_txn_partition_result::AddP
 use crabka_protocol::owned::common::add_partitions_to_txn_topic::AddPartitionsToTxnTopic;
 use crabka_protocol::owned::common::add_partitions_to_txn_topic_result::AddPartitionsToTxnTopicResult;
 use crabka_protocol::{Decode, Encode};
+use crabka_security::Principal;
 
+use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize, authorize_topics};
 use crate::broker::Broker;
 use crate::codes;
 use crate::error::BrokerError;
 use crate::txn::state::{TopicPartition, TxnState};
 use crate::txn::util::now_millis;
 
-pub(crate) fn handle(
+pub(crate) async fn handle(
     broker: &Broker,
     version: i16,
     _correlation_id: i32,
     req_bytes: &[u8],
-) -> BoxFuture<'static, Result<Bytes, BrokerError>> {
-    let req_bytes = req_bytes.to_vec();
+    principal: &Principal,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
     let coord = broker.txn_coordinator.clone();
     let controller = broker.controller.clone();
-    Box::pin(async move {
-        let mut cur: &[u8] = &req_bytes;
-        let req = AddPartitionsToTxnRequest::decode(&mut cur, version)?;
+    let super_user = broker.config.super_user_name.clone();
+    let mut cur: &[u8] = req_bytes;
+    let req = AddPartitionsToTxnRequest::decode(&mut cur, version)?;
 
-        // Mirror Task 12's race-fix pattern: refresh leader-partition view
-        // from the current metadata image before checking coordinator-ness.
-        coord
-            .refresh_leader_partitions(&controller.current_image())
-            .await;
+    // Mirror Task 12's race-fix pattern: refresh leader-partition view
+    // from the current metadata image before checking coordinator-ness.
+    let image = controller.current_image();
+    coord.refresh_leader_partitions(&image).await;
 
-        if version >= 4 {
-            handle_v4(&coord, version, &req).await
-        } else {
-            handle_v3(&coord, version, &req).await
-        }
-    })
+    if version >= 4 {
+        handle_v4(
+            &coord,
+            version,
+            &req,
+            &image,
+            super_user.as_deref(),
+            principal,
+            peer,
+        )
+        .await
+    } else {
+        handle_v3(
+            &coord,
+            version,
+            &req,
+            &image,
+            super_user.as_deref(),
+            principal,
+            peer,
+        )
+        .await
+    }
 }
 
 // ── v4+ path ─────────────────────────────────────────────────────────────────
@@ -62,19 +92,38 @@ async fn handle_v4(
     coord: &crate::txn::coordinator::TxnCoordinator,
     version: i16,
     req: &AddPartitionsToTxnRequest,
+    image: &MetadataImage,
+    super_user: Option<&str>,
+    principal: &Principal,
+    peer: &SocketAddr,
 ) -> Result<Bytes, BrokerError> {
     let mut results_by_transaction: Vec<AddPartitionsToTxnResult> =
         Vec::with_capacity(req.transactions.len());
 
     for txn in &req.transactions {
-        let topic_results = process_one_txn(
-            coord,
-            txn.transactional_id.as_str(),
-            txn.producer_id,
-            txn.producer_epoch,
-            &txn.topics,
-        )
-        .await;
+        // ── slice-13 ACL preamble: per-txn Write on TransactionalId ─────
+        let tid_req = AuthorizationRequest {
+            principal,
+            host: peer,
+            resource_type: ResourceType::TransactionalId,
+            resource_name: txn.transactional_id.as_str(),
+            operation: AclOperation::Write,
+        };
+        let topic_results = if authorize(image, super_user, &tid_req) == AuthorizationResult::Deny {
+            topic_error(&txn.topics, codes::TRANSACTIONAL_ID_AUTHORIZATION_FAILED)
+        } else {
+            // Per-topic Write check.
+            let denied = denied_topics(image, super_user, principal, peer, &txn.topics);
+            process_one_txn(
+                coord,
+                txn.transactional_id.as_str(),
+                txn.producer_id,
+                txn.producer_epoch,
+                &txn.topics,
+                &denied,
+            )
+            .await
+        };
         results_by_transaction.push(AddPartitionsToTxnResult {
             transactional_id: txn.transactional_id.clone(),
             topic_results,
@@ -96,15 +145,36 @@ async fn handle_v3(
     coord: &crate::txn::coordinator::TxnCoordinator,
     version: i16,
     req: &AddPartitionsToTxnRequest,
+    image: &MetadataImage,
+    super_user: Option<&str>,
+    principal: &Principal,
+    peer: &SocketAddr,
 ) -> Result<Bytes, BrokerError> {
-    let topic_results = process_one_txn(
-        coord,
-        req.v3_and_below_transactional_id.as_str(),
-        req.v3_and_below_producer_id,
-        req.v3_and_below_producer_epoch,
-        &req.v3_and_below_topics,
-    )
-    .await;
+    // ── slice-13 ACL preamble: Write on TransactionalId ────────────────
+    let tid_req = AuthorizationRequest {
+        principal,
+        host: peer,
+        resource_type: ResourceType::TransactionalId,
+        resource_name: req.v3_and_below_transactional_id.as_str(),
+        operation: AclOperation::Write,
+    };
+    let topic_results = if authorize(image, super_user, &tid_req) == AuthorizationResult::Deny {
+        topic_error(
+            &req.v3_and_below_topics,
+            codes::TRANSACTIONAL_ID_AUTHORIZATION_FAILED,
+        )
+    } else {
+        let denied = denied_topics(image, super_user, principal, peer, &req.v3_and_below_topics);
+        process_one_txn(
+            coord,
+            req.v3_and_below_transactional_id.as_str(),
+            req.v3_and_below_producer_id,
+            req.v3_and_below_producer_epoch,
+            &req.v3_and_below_topics,
+            &denied,
+        )
+        .await
+    };
 
     let resp = AddPartitionsToTxnResponse {
         throttle_time_ms: 0,
@@ -116,29 +186,68 @@ async fn handle_v3(
 
 // ── shared per-transaction logic ──────────────────────────────────────────────
 
+/// Build the set of topic names denied `Write` on `Topic(name)` for this
+/// principal/host. Caller uses this to stamp `TOPIC_AUTHORIZATION_FAILED`
+/// on every partition row of denied topics.
+fn denied_topics(
+    image: &MetadataImage,
+    super_user: Option<&str>,
+    principal: &Principal,
+    peer: &SocketAddr,
+    topics: &[AddPartitionsToTxnTopic],
+) -> std::collections::HashSet<String> {
+    let names: Vec<&str> = topics.iter().map(|t| t.name.as_str()).collect();
+    let map = authorize_topics(
+        image,
+        super_user,
+        principal,
+        peer,
+        AclOperation::Write,
+        names,
+    );
+    map.into_iter()
+        .filter_map(|(name, r)| {
+            if r == AuthorizationResult::Deny {
+                Some(name.to_string())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 /// Process a single `transactional_id` / `producer_id` / `producer_epoch`.
-/// Returns per-topic, per-partition result entries (all with the same
-/// error code on failure, or NONE on success).
+/// Returns per-topic, per-partition result entries. Topics named in
+/// `denied` short-circuit with `TOPIC_AUTHORIZATION_FAILED`; the remaining
+/// topics go through the state-machine check and partition registration.
 async fn process_one_txn(
     coord: &crate::txn::coordinator::TxnCoordinator,
     tid: &str,
     producer_id: i64,
     producer_epoch: i16,
     topics: &[AddPartitionsToTxnTopic],
+    denied: &std::collections::HashSet<String>,
 ) -> Vec<AddPartitionsToTxnTopicResult> {
-    // 1. Coordinator check.
+    // Topics allowed to proceed past the per-topic Write ACL gate.
+    let allowed_topics: Vec<&AddPartitionsToTxnTopic> = topics
+        .iter()
+        .filter(|t| !denied.contains(&t.name))
+        .collect();
+
+    // 1. Coordinator check (applies only to non-denied topics — for
+    //    denied topics we always emit TOPIC_AUTHORIZATION_FAILED).
     if !coord.is_coordinator_for(tid).await {
-        return topic_error(topics, codes::NOT_COORDINATOR);
+        return per_topic_with_denied(topics, denied, codes::NOT_COORDINATOR);
     }
 
     // 2. Look up entry; verify (pid, epoch).
     let Some(entry_mutex) = coord.get(tid) else {
-        return topic_error(topics, codes::INVALID_PRODUCER_ID_MAPPING);
+        return per_topic_with_denied(topics, denied, codes::INVALID_PRODUCER_ID_MAPPING);
     };
 
     let mut entry = entry_mutex.lock().await;
     if entry.producer_id != producer_id || entry.producer_epoch != producer_epoch {
-        return topic_error(topics, codes::INVALID_PRODUCER_EPOCH);
+        return per_topic_with_denied(topics, denied, codes::INVALID_PRODUCER_EPOCH);
     }
 
     // 3. State machine: Empty/Ongoing → Ongoing.
@@ -147,7 +256,7 @@ async fn process_one_txn(
     //    In that case we clear the stale partition set so EndTxn only fans out
     //    markers to the new transaction's partitions.
     if !entry.state.can_transition_to(TxnState::Ongoing) {
-        return topic_error(topics, codes::INVALID_TXN_STATE);
+        return per_topic_with_denied(topics, denied, codes::INVALID_TXN_STATE);
     }
     let was_complete = matches!(
         entry.state,
@@ -161,8 +270,8 @@ async fn process_one_txn(
         entry.offset_commit_groups.clear();
     }
 
-    // 4. Register partitions.
-    for t in topics {
+    // 4. Register partitions for ALLOWED topics only.
+    for t in &allowed_topics {
         for &p in &t.partitions {
             entry.partitions.insert(TopicPartition {
                 topic: t.name.clone(),
@@ -178,17 +287,50 @@ async fn process_one_txn(
     // 5. Persist.
     if let Err(e) = coord.put(snap).await {
         tracing::error!(tid, error = %e, "AddPartitionsToTxn: failed to persist TxnEntry");
-        return topic_error(topics, codes::UNKNOWN_SERVER_ERROR);
+        return per_topic_with_denied(topics, denied, codes::UNKNOWN_SERVER_ERROR);
     }
 
-    // 6. Success — all error codes = NONE.
-    topic_ok(topics)
+    // 6. Success — NONE for allowed topics, TOPIC_AUTHORIZATION_FAILED for denied.
+    per_topic_with_denied(topics, denied, codes::NONE)
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
+/// Build a per-topic/per-partition result list. Topics named in `denied`
+/// get `TOPIC_AUTHORIZATION_FAILED (29)` on every partition row; the rest
+/// get `code`.
+fn per_topic_with_denied(
+    topics: &[AddPartitionsToTxnTopic],
+    denied: &std::collections::HashSet<String>,
+    code: i16,
+) -> Vec<AddPartitionsToTxnTopicResult> {
+    topics
+        .iter()
+        .map(|t| {
+            let row_code = if denied.contains(&t.name) {
+                codes::TOPIC_AUTHORIZATION_FAILED
+            } else {
+                code
+            };
+            AddPartitionsToTxnTopicResult {
+                name: t.name.clone(),
+                results_by_partition: t
+                    .partitions
+                    .iter()
+                    .map(|&p| AddPartitionsToTxnPartitionResult {
+                        partition_index: p,
+                        partition_error_code: row_code,
+                        ..Default::default()
+                    })
+                    .collect(),
+                ..Default::default()
+            }
+        })
+        .collect()
+}
+
 /// Build a per-topic/per-partition result list with every partition carrying
-/// `error_code`.
+/// `error_code` (used by whole-txn errors like the txn-id ACL deny path).
 fn topic_error(
     topics: &[AddPartitionsToTxnTopic],
     code: i16,
@@ -209,12 +351,6 @@ fn topic_error(
             ..Default::default()
         })
         .collect()
-}
-
-/// Build a per-topic/per-partition result list with every partition carrying
-/// `NONE` (success).
-fn topic_ok(topics: &[AddPartitionsToTxnTopic]) -> Vec<AddPartitionsToTxnTopicResult> {
-    topic_error(topics, codes::NONE)
 }
 
 fn encode_response(resp: &AddPartitionsToTxnResponse, version: i16) -> Result<Bytes, BrokerError> {

@@ -2404,18 +2404,26 @@ async fn jvm_sasl_scram_sha512_produce_consume() {
     );
 
     // Step B: drive produce + consume as alice over SCRAM-SHA-512.
+    // Slice 13: disable idempotent producer mode (cp-kafka 7.5 default) so
+    // the producer doesn't request `InitProducerId`, which would require
+    // `Cluster IdempotentWrite` ACL alice doesn't hold. acks=1 is a
+    // single-broker setup default that pairs cleanly with that.
     let alice_props = write_client_props(&format!(
         "security.protocol=SASL_PLAINTEXT\n\
          sasl.mechanism=SCRAM-SHA-512\n\
-         sasl.jaas.config={}\n",
+         sasl.jaas.config={}\n\
+         enable.idempotence=false\n\
+         acks=1\n",
         scram_jaas(ALICE, ALICE_PASS),
     ));
     let alice_mount = alice_props.mount_str();
 
-    // 1. Create the topic.
+    // 1. Create the topic. Run as `admin` (super-user) so the slice-13
+    //    `CreateTopics` Cluster-Create authorize check passes via the
+    //    super-user bypass. Alice has no Cluster ACLs.
     docker_run_kafka_tool_with_image_and_mount(
         KAFKA_IMAGE_TXN,
-        &alice_mount,
+        &admin_props.mount_str(),
         &[
             "kafka-topics",
             "--create",
@@ -2432,6 +2440,32 @@ async fn jvm_sasl_scram_sha512_produce_consume() {
             "/client.properties",
         ],
     );
+
+    // 1b. Grant alice the topic ACLs required for produce/consume.
+    //     Slice-13 enforces per-topic Read/Write/Describe with no
+    //     Read-implies-Describe semantics, so each operation is seeded
+    //     explicitly. Consumer uses `--partition 0` (no consumer group)
+    //     so no Group ACL is required.
+    for op in ["Read", "Write", "Describe"] {
+        docker_run_kafka_tool_with_image_and_mount(
+            KAFKA_IMAGE_TXN,
+            &admin_props.mount_str(),
+            &[
+                "kafka-acls",
+                "--add",
+                "--allow-principal",
+                &format!("User:{ALICE}"),
+                "--operation",
+                op,
+                "--topic",
+                TOPIC,
+                "--bootstrap-server",
+                BOOTSTRAP,
+                "--command-config",
+                "/client.properties",
+            ],
+        );
+    }
 
     // 2. Produce 10 records via stdin (kafka-console-producer wants
     //    `--producer.config`, not `--command-config`).
@@ -2908,21 +2942,27 @@ async fn jvm_sasl_ssl_full_stack() {
     );
 
     // Step B: drive produce + consume as alice over SASL_SSL + SCRAM-SHA-512.
+    // Slice 13: disable idempotent producer mode so alice doesn't need
+    // `Cluster IdempotentWrite`.
     let alice_props = write_client_props(&format!(
         "security.protocol=SASL_SSL\n\
          sasl.mechanism=SCRAM-SHA-512\n\
          sasl.jaas.config={}\n\
          ssl.truststore.location=/truststore.jks\n\
          ssl.truststore.password=changeit\n\
-         ssl.endpoint.identification.algorithm=\n",
+         ssl.endpoint.identification.algorithm=\n\
+         enable.idempotence=false\n\
+         acks=1\n",
         scram_jaas(ALICE, ALICE_PASS),
     ));
     let alice_props_mount = alice_props.mount_str();
 
-    // 1. Create the topic.
+    // 1. Create the topic. Run as `admin` (super-user) so the slice-13
+    //    `CreateTopics` Cluster-Create authorize check passes. Then grant
+    //    alice Read/Write/Describe on the topic (no implication, per T25).
     docker_run_kafka_tool_with_image_and_mounts(
         KAFKA_IMAGE_TXN,
-        &[&alice_props_mount, &ts_mount],
+        &[&admin_props.mount_str(), &ts_mount],
         &[
             "kafka-topics",
             "--create",
@@ -2939,6 +2979,26 @@ async fn jvm_sasl_ssl_full_stack() {
             "/client.properties",
         ],
     );
+    for op in ["Read", "Write", "Describe"] {
+        docker_run_kafka_tool_with_image_and_mounts(
+            KAFKA_IMAGE_TXN,
+            &[&admin_props.mount_str(), &ts_mount],
+            &[
+                "kafka-acls",
+                "--add",
+                "--allow-principal",
+                &format!("User:{ALICE}"),
+                "--operation",
+                op,
+                "--topic",
+                TOPIC,
+                "--bootstrap-server",
+                BOOTSTRAP,
+                "--command-config",
+                "/client.properties",
+            ],
+        );
+    }
 
     // 2. Produce 10 records via stdin.
     let mut child = Command::new("docker")
@@ -3558,21 +3618,27 @@ async fn jvm_inter_broker_sasl_ssl_raft_replication() {
     );
 
     // Step B: drive create-topic + produce as alice over SASL_SSL+SCRAM.
+    // Slice 13: disable idempotent producer mode so alice doesn't need
+    // `Cluster IdempotentWrite`.
     let alice_props = write_client_props(&format!(
         "security.protocol=SASL_SSL\n\
          sasl.mechanism=SCRAM-SHA-512\n\
          sasl.jaas.config={}\n\
          ssl.truststore.location=/truststore.jks\n\
          ssl.truststore.password=changeit\n\
-         ssl.endpoint.identification.algorithm=\n",
+         ssl.endpoint.identification.algorithm=\n\
+         enable.idempotence=false\n\
+         acks=1\n",
         scram_jaas(ALICE, ALICE_PASS),
     ));
     let alice_props_mount = alice_props.mount_str();
 
-    // Create topic rf=2 across both brokers.
+    // Create topic rf=2 across both brokers. Run as `admin` (super-user)
+    //  for slice-13's CreateTopics Cluster-Create authorize check, then
+    //  grant alice Read/Write/Describe on the topic.
     docker_run_kafka_tool_with_image_and_mounts(
         KAFKA_IMAGE_TXN,
-        &[&alice_props_mount, &ts_mount],
+        &[&admin_props.mount_str(), &ts_mount],
         &[
             "kafka-topics",
             "--create",
@@ -3589,6 +3655,26 @@ async fn jvm_inter_broker_sasl_ssl_raft_replication() {
             "/client.properties",
         ],
     );
+    for op in ["Read", "Write", "Describe"] {
+        docker_run_kafka_tool_with_image_and_mounts(
+            KAFKA_IMAGE_TXN,
+            &[&admin_props.mount_str(), &ts_mount],
+            &[
+                "kafka-acls",
+                "--add",
+                "--allow-principal",
+                &format!("User:{ALICE}"),
+                "--operation",
+                op,
+                "--topic",
+                TOPIC,
+                "--bootstrap-server",
+                BOOTSTRAP,
+                "--command-config",
+                "/client.properties",
+            ],
+        );
+    }
 
     // Wait for the topic to materialize on both brokers.
     let deadline = std::time::Instant::now() + std::time::Duration::from_mins(1);
@@ -3668,4 +3754,906 @@ async fn jvm_inter_broker_sasl_ssl_raft_replication() {
 
     broker0.shutdown().await;
     broker1.shutdown().await;
+}
+
+/// Spawn the broker with a single `SASL_PLAINTEXT` listener that enables
+/// PLAIN, plus a configured PLAIN super-user. Mirrors
+/// [`start_sasl_plaintext_broker`] otherwise. Used by the slice-13 ACL
+/// JVM acceptance tests: the super-user authenticates via PLAIN and runs
+/// `kafka-acls --add/--remove/--list` (which hit `CreateAcls (30)` /
+/// `DeleteAcls (31)` / `DescribeAcls (29)`, all of which require the
+/// `Cluster Alter` or `Cluster Describe` operation — the super-user bypass
+/// in `authorize()` short-circuits that check).
+async fn start_sasl_plaintext_broker_with_super_user(
+    super_user: &str,
+    users: &[(&str, &str)],
+) -> (crabka_broker::BrokerHandle, tempfile::TempDir) {
+    use crabka_broker::config::ListenerSpec;
+    use crabka_security::{ListenerProtocol, SaslMechanism};
+
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("crabka_broker=debug,info")),
+        )
+        .with_test_writer()
+        .try_init();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let listen_addr: std::net::SocketAddr = LISTEN.parse().expect("static addr");
+    let controller_addr: std::net::SocketAddr = "0.0.0.0:9093".parse().expect("static addr");
+    let mut config = BrokerConfig {
+        broker_id: 1,
+        listen_addr,
+        advertised_listener: BOOTSTRAP.into(),
+        log_dir: dir.path().to_path_buf(),
+        log_config: LogConfig::default(),
+        node_id: 1,
+        controller_listen_addr: controller_addr,
+        controller_quorum_voters: vec![(1, controller_addr)],
+        heartbeat_interval_ms: 3_000,
+        heartbeat_timeout_ms: 9_000,
+        replica_lag_time_max_ms: 30_000,
+        controller_election_timeout: std::time::Duration::from_secs(5),
+        controller_heartbeat_interval: std::time::Duration::from_millis(500),
+        bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
+        listeners: vec![ListenerSpec {
+            name: "SASL_PLAINTEXT".to_string(),
+            bind_addr: listen_addr,
+            advertised: BOOTSTRAP.to_string(),
+            protocol: ListenerProtocol::SaslPlaintext,
+        }],
+        inter_broker_listener_name: "SASL_PLAINTEXT".to_string(),
+        enabled_sasl_mechanisms: vec![SaslMechanism::Plain],
+        super_user_name: Some(super_user.to_string()),
+        ..BrokerConfig::default()
+    };
+    for (u, p) in users {
+        config
+            .plain_credentials
+            .insert((*u).to_string(), (*p).to_string());
+    }
+    let handle = Broker::start(config)
+        .await
+        .expect("start sasl broker with super-user");
+    eprintln!(
+        "CRABKA[test] sasl super-user broker started listen={LISTEN} advertised={BOOTSTRAP} super_user={super_user}"
+    );
+    (handle, dir)
+}
+
+/// JVM acceptance — `kafka-acls.sh` end-to-end provision flow.
+///
+/// Drives the modern `kafka-acls.sh` flag set (cp-kafka:7.5.0, Kafka 3.5+)
+/// against the Rust broker's `CreateAcls (30)` / `DescribeAcls (29)` /
+/// `DeleteAcls (31)` handlers. Admin authenticates as PLAIN super-user
+/// — its `Cluster Alter`/`Cluster Describe` checks bypass via the
+/// super-user short-circuit in `authorize()`.
+///
+/// Sequence:
+/// 1. `--add` an Allow Read on `Topic LITERAL "foo"` for `User:alice`.
+/// 2. `--list --topic foo` must show that binding.
+/// 3. `--remove --force` removes it; `--list --topic foo` must be empty.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Docker"]
+async fn jvm_kafka_acls_provision_via_cli() {
+    const ADMIN: &str = "admin";
+    const ADMIN_PASS: &str = "admin-secret";
+
+    let (broker, _dir) =
+        start_sasl_plaintext_broker_with_super_user(ADMIN, &[(ADMIN, ADMIN_PASS)]).await;
+    nc_check_connectivity();
+
+    let admin_props = write_client_props(&format!(
+        "security.protocol=SASL_PLAINTEXT\n\
+         sasl.mechanism=PLAIN\n\
+         sasl.jaas.config={}\n",
+        plain_jaas(ADMIN, ADMIN_PASS),
+    ));
+    let mount = admin_props.mount_str();
+
+    // 1. --add.
+    docker_run_kafka_tool_with_image_and_mount(
+        KAFKA_IMAGE_TXN,
+        &mount,
+        &[
+            "kafka-acls",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--command-config",
+            "/client.properties",
+            "--add",
+            "--allow-principal",
+            "User:alice",
+            "--operation",
+            "Read",
+            "--topic",
+            "foo",
+        ],
+    );
+
+    // 2. --list --topic foo. Expect a line containing alice + READ + ALLOW.
+    let list_out = docker_run_kafka_tool_with_image_and_mount(
+        KAFKA_IMAGE_TXN,
+        &mount,
+        &[
+            "kafka-acls",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--command-config",
+            "/client.properties",
+            "--list",
+            "--topic",
+            "foo",
+        ],
+    );
+    let listed = String::from_utf8_lossy(&list_out.stdout);
+    assert!(
+        listed.contains("User:alice"),
+        "expected alice in --list output; got: {listed}"
+    );
+    assert!(
+        listed.to_ascii_uppercase().contains("READ"),
+        "expected READ in --list output; got: {listed}"
+    );
+    assert!(
+        listed.to_ascii_uppercase().contains("ALLOW"),
+        "expected ALLOW in --list output; got: {listed}"
+    );
+
+    // 3. --remove --force. Then re-list and assert alice is no longer present.
+    docker_run_kafka_tool_with_image_and_mount(
+        KAFKA_IMAGE_TXN,
+        &mount,
+        &[
+            "kafka-acls",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--command-config",
+            "/client.properties",
+            "--remove",
+            "--force",
+            "--allow-principal",
+            "User:alice",
+            "--operation",
+            "Read",
+            "--topic",
+            "foo",
+        ],
+    );
+
+    let list_out2 = docker_run_kafka_tool_with_image_and_mount(
+        KAFKA_IMAGE_TXN,
+        &mount,
+        &[
+            "kafka-acls",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--command-config",
+            "/client.properties",
+            "--list",
+            "--topic",
+            "foo",
+        ],
+    );
+    let listed2 = String::from_utf8_lossy(&list_out2.stdout);
+    assert!(
+        !listed2.contains("User:alice"),
+        "alice should be gone after --remove; got: {listed2}"
+    );
+
+    broker.shutdown().await;
+}
+
+/// JVM acceptance — authorized produce + consume round-trip.
+///
+/// Admin (PLAIN super-user) provisions alice with:
+/// - `Allow Read+Write Topic LITERAL "foo"`
+/// - `Allow Read Group LITERAL "cg-foo"`
+///
+/// Then alice (PLAIN, no super-user, no cluster perms) drives
+/// `kafka-console-producer` and `kafka-console-consumer --group cg-foo`
+/// against the broker. Exercises the full `Produce`/`Fetch`/`JoinGroup`/
+/// `OffsetFetch`/`OffsetCommit` authorize preambles end-to-end.
+///
+/// Topic auto-creation is intentionally avoided: admin pre-creates `foo`
+/// before granting alice access, so the Produce path doesn't have to
+/// short-circuit on a missing topic.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Docker"]
+#[allow(clippy::too_many_lines)]
+async fn jvm_authorized_produce_consume() {
+    const TOPIC: &str = "foo";
+    const GROUP: &str = "cg-foo";
+    const ADMIN: &str = "admin";
+    const ADMIN_PASS: &str = "admin-secret";
+    const ALICE: &str = "alice";
+    const ALICE_PASS: &str = "alice-secret";
+
+    let (broker, _dir) = start_sasl_plaintext_broker_with_super_user(
+        ADMIN,
+        &[(ADMIN, ADMIN_PASS), (ALICE, ALICE_PASS)],
+    )
+    .await;
+    nc_check_connectivity();
+
+    // ---- Admin step: pre-create the topic and provision alice's ACLs.
+    let admin_props = write_client_props(&format!(
+        "security.protocol=SASL_PLAINTEXT\n\
+         sasl.mechanism=PLAIN\n\
+         sasl.jaas.config={}\n",
+        plain_jaas(ADMIN, ADMIN_PASS),
+    ));
+    let admin_mount = admin_props.mount_str();
+
+    docker_run_kafka_tool_with_image_and_mount(
+        KAFKA_IMAGE_TXN,
+        &admin_mount,
+        &[
+            "kafka-topics",
+            "--create",
+            "--if-not-exists",
+            "--topic",
+            TOPIC,
+            "--partitions",
+            "1",
+            "--replication-factor",
+            "1",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--command-config",
+            "/client.properties",
+        ],
+    );
+
+    // Allow Read+Write+Describe on Topic foo for User:alice. `kafka-acls`
+    // accepts multiple --operation flags per invocation. We add `Describe`
+    // explicitly because our authorizer (slice 13) does not infer the
+    // standard Kafka "Read/Write implies Describe" relation — the
+    // `Metadata` per-topic preamble checks `Describe` directly.
+    docker_run_kafka_tool_with_image_and_mount(
+        KAFKA_IMAGE_TXN,
+        &admin_mount,
+        &[
+            "kafka-acls",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--command-config",
+            "/client.properties",
+            "--add",
+            "--allow-principal",
+            "User:alice",
+            "--operation",
+            "Read",
+            "--operation",
+            "Write",
+            "--operation",
+            "Describe",
+            "--topic",
+            TOPIC,
+        ],
+    );
+
+    // Allow Read+Describe on Group cg-foo for User:alice. `Describe` is
+    // added for the same reason as on the topic: our authorizer does not
+    // infer Describe from Read.
+    docker_run_kafka_tool_with_image_and_mount(
+        KAFKA_IMAGE_TXN,
+        &admin_mount,
+        &[
+            "kafka-acls",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--command-config",
+            "/client.properties",
+            "--add",
+            "--allow-principal",
+            "User:alice",
+            "--operation",
+            "Read",
+            "--operation",
+            "Describe",
+            "--group",
+            GROUP,
+        ],
+    );
+
+    // ---- Alice step: produce + consume over PLAIN as an ordinary user.
+    //
+    // `enable.idempotence=false` is required: cp-kafka 7.5 producers default
+    // to idempotent mode, which sends `InitProducerId` without a
+    // transactional id and so checks `Cluster IdempotentWrite` — a
+    // cluster-scoped ACL that alice (a non-super-user with only topic +
+    // group ACLs) doesn't hold. Falling back to the non-idempotent path
+    // keeps alice's required ACL set bounded to what the plan calls out.
+    let alice_props = write_client_props(&format!(
+        "security.protocol=SASL_PLAINTEXT\n\
+         sasl.mechanism=PLAIN\n\
+         sasl.jaas.config={}\n\
+         enable.idempotence=false\n\
+         acks=1\n",
+        plain_jaas(ALICE, ALICE_PASS),
+    ));
+    let alice_mount = alice_props.mount_str();
+
+    // Produce 10 records via stdin.
+    let mut child = Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "-i",
+            "-v",
+            &alice_mount,
+            "--add-host=host.docker.internal:host-gateway",
+            KAFKA_IMAGE_TXN,
+            "kafka-console-producer",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--topic",
+            TOPIC,
+            "--producer.config",
+            "/client.properties",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn producer");
+    let payload: String = (0..10)
+        .map(|i| format!("msg-{i}\n"))
+        .collect::<Vec<_>>()
+        .concat();
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(payload.as_bytes())
+        .expect("write stdin");
+    drop(child.stdin.take());
+    let producer_out = child.wait_with_output().expect("wait producer");
+    assert!(
+        producer_out.status.success(),
+        "producer failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&producer_out.stdout),
+        String::from_utf8_lossy(&producer_out.stderr)
+    );
+
+    // Consume via `--group cg-foo --from-beginning` (the group-coordinator
+    // path; exercises JoinGroup/OffsetFetch/OffsetCommit authorize).
+    let consumer_out = docker_run_kafka_tool_with_image_and_mount(
+        KAFKA_IMAGE_TXN,
+        &alice_mount,
+        &[
+            "kafka-console-consumer",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--topic",
+            TOPIC,
+            "--group",
+            GROUP,
+            "--from-beginning",
+            "--max-messages",
+            "10",
+            "--timeout-ms",
+            "30000",
+            "--consumer.config",
+            "/client.properties",
+        ],
+    );
+    let s = String::from_utf8_lossy(&consumer_out.stdout);
+    for i in 0..10 {
+        let needle = format!("msg-{i}");
+        assert!(s.contains(&needle), "consumer missing {needle}: {s:?}");
+    }
+
+    broker.shutdown().await;
+}
+
+/// JVM acceptance — produce by an unauthorized principal must fail.
+///
+/// Admin (PLAIN super-user) provisions alice with Read+Write+Describe on
+/// topic `foo` (same ACLs as `jvm_authorized_produce_consume`). Bob has
+/// valid PLAIN credentials but no ACLs at all. Bob's
+/// `kafka-console-producer` must be denied.
+///
+/// Assertion strategy: `kafka-console-producer` is a fire-and-forget shell
+/// wrapper around the Java client. As of cp-kafka 7.5.0 it logs
+/// `TopicAuthorizationException` on every Metadata-denied response, but
+/// the wrapper itself exits 0 — it retries silently and never propagates
+/// the underlying broker-side AUTH failure into a non-zero exit code. So
+/// the contract we assert is stderr-shaped, not exit-code-shaped: stderr
+/// must contain `TopicAuthorizationException`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Docker"]
+#[allow(clippy::too_many_lines)]
+async fn jvm_unauthorized_produce_fails() {
+    const TOPIC: &str = "foo";
+    const ADMIN: &str = "admin";
+    const ADMIN_PASS: &str = "admin-secret";
+    const ALICE: &str = "alice";
+    const ALICE_PASS: &str = "alice-secret";
+    const BOB: &str = "bob";
+    const BOB_PASS: &str = "bob-secret";
+
+    let (broker, _dir) = start_sasl_plaintext_broker_with_super_user(
+        ADMIN,
+        &[(ADMIN, ADMIN_PASS), (ALICE, ALICE_PASS), (BOB, BOB_PASS)],
+    )
+    .await;
+    nc_check_connectivity();
+
+    // ---- Admin step: pre-create topic + provision alice (not bob).
+    let admin_props = write_client_props(&format!(
+        "security.protocol=SASL_PLAINTEXT\n\
+         sasl.mechanism=PLAIN\n\
+         sasl.jaas.config={}\n",
+        plain_jaas(ADMIN, ADMIN_PASS),
+    ));
+    let admin_mount = admin_props.mount_str();
+
+    docker_run_kafka_tool_with_image_and_mount(
+        KAFKA_IMAGE_TXN,
+        &admin_mount,
+        &[
+            "kafka-topics",
+            "--create",
+            "--if-not-exists",
+            "--topic",
+            TOPIC,
+            "--partitions",
+            "1",
+            "--replication-factor",
+            "1",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--command-config",
+            "/client.properties",
+        ],
+    );
+
+    // alice gets Read+Write+Describe — proves that the broker has ACLs
+    // configured (i.e. the empty-ACL ALLOW shim is not active).
+    docker_run_kafka_tool_with_image_and_mount(
+        KAFKA_IMAGE_TXN,
+        &admin_mount,
+        &[
+            "kafka-acls",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--command-config",
+            "/client.properties",
+            "--add",
+            "--allow-principal",
+            "User:alice",
+            "--operation",
+            "Read",
+            "--operation",
+            "Write",
+            "--operation",
+            "Describe",
+            "--topic",
+            TOPIC,
+        ],
+    );
+
+    // ---- Bob step: attempt to produce. Expect stderr to contain
+    //               TopicAuthorizationException.
+    let bob_props = write_client_props(&format!(
+        "security.protocol=SASL_PLAINTEXT\n\
+         sasl.mechanism=PLAIN\n\
+         sasl.jaas.config={}\n\
+         enable.idempotence=false\n\
+         acks=1\n",
+        plain_jaas(BOB, BOB_PASS),
+    ));
+    let bob_mount = bob_props.mount_str();
+
+    let mut child = Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "-i",
+            "-v",
+            &bob_mount,
+            "--add-host=host.docker.internal:host-gateway",
+            KAFKA_IMAGE_TXN,
+            "kafka-console-producer",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--topic",
+            TOPIC,
+            "--producer.config",
+            "/client.properties",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn bob producer");
+    let payload = b"unauth-msg\n";
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(payload)
+        .expect("write stdin");
+    drop(child.stdin.take());
+    let bob_out = child.wait_with_output().expect("wait bob producer");
+    let stderr = String::from_utf8_lossy(&bob_out.stderr);
+    let stdout = String::from_utf8_lossy(&bob_out.stdout);
+    eprintln!(
+        "CRABKA[test] bob producer status={} stderr={stderr} stdout={stdout}",
+        bob_out.status,
+    );
+    assert!(
+        stderr.contains("TopicAuthorizationException"),
+        "bob producer should log TopicAuthorizationException; stderr={stderr} stdout={stdout}",
+    );
+
+    broker.shutdown().await;
+}
+
+/// JVM acceptance — consumer denied on the group-resource path.
+///
+/// Alice has Read+Describe on topic `foo` but no ACL on group `cg-other`.
+/// `kafka-console-consumer --group cg-other` must fail with
+/// `GroupAuthorizationException` (denied at `JoinGroup`/`OffsetFetch`,
+/// before any Fetch happens).
+///
+/// Assertion strategy: stderr-shaped. We assert on stderr content for
+/// symmetry with `jvm_unauthorized_produce_fails` and to keep the
+/// contract stable across cp-kafka versions.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Docker"]
+#[allow(clippy::too_many_lines)]
+async fn jvm_unauthorized_consumer_fails_group_check() {
+    const TOPIC: &str = "foo";
+    const GROUP: &str = "cg-other";
+    const ADMIN: &str = "admin";
+    const ADMIN_PASS: &str = "admin-secret";
+    const ALICE: &str = "alice";
+    const ALICE_PASS: &str = "alice-secret";
+
+    let (broker, _dir) = start_sasl_plaintext_broker_with_super_user(
+        ADMIN,
+        &[(ADMIN, ADMIN_PASS), (ALICE, ALICE_PASS)],
+    )
+    .await;
+    nc_check_connectivity();
+
+    let admin_props = write_client_props(&format!(
+        "security.protocol=SASL_PLAINTEXT\n\
+         sasl.mechanism=PLAIN\n\
+         sasl.jaas.config={}\n",
+        plain_jaas(ADMIN, ADMIN_PASS),
+    ));
+    let admin_mount = admin_props.mount_str();
+
+    docker_run_kafka_tool_with_image_and_mount(
+        KAFKA_IMAGE_TXN,
+        &admin_mount,
+        &[
+            "kafka-topics",
+            "--create",
+            "--if-not-exists",
+            "--topic",
+            TOPIC,
+            "--partitions",
+            "1",
+            "--replication-factor",
+            "1",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--command-config",
+            "/client.properties",
+        ],
+    );
+
+    // alice: Read+Describe on Topic foo. Deliberately no group ACL.
+    docker_run_kafka_tool_with_image_and_mount(
+        KAFKA_IMAGE_TXN,
+        &admin_mount,
+        &[
+            "kafka-acls",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--command-config",
+            "/client.properties",
+            "--add",
+            "--allow-principal",
+            "User:alice",
+            "--operation",
+            "Read",
+            "--operation",
+            "Describe",
+            "--topic",
+            TOPIC,
+        ],
+    );
+
+    // ---- Alice consumer using --group cg-other. Expect group-denied stderr.
+    let alice_props = write_client_props(&format!(
+        "security.protocol=SASL_PLAINTEXT\n\
+         sasl.mechanism=PLAIN\n\
+         sasl.jaas.config={}\n",
+        plain_jaas(ALICE, ALICE_PASS),
+    ));
+    let alice_mount = alice_props.mount_str();
+
+    let out = Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "-v",
+            &alice_mount,
+            "--add-host=host.docker.internal:host-gateway",
+            KAFKA_IMAGE_TXN,
+            "kafka-console-consumer",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--topic",
+            TOPIC,
+            "--group",
+            GROUP,
+            "--from-beginning",
+            "--max-messages",
+            "1",
+            "--timeout-ms",
+            "15000",
+            "--consumer.config",
+            "/client.properties",
+        ])
+        .stderr(Stdio::piped())
+        .stdout(Stdio::piped())
+        .output()
+        .expect("spawn alice consumer");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    eprintln!(
+        "CRABKA[test] alice consumer group-denied status={} stderr={stderr} stdout={stdout}",
+        out.status,
+    );
+    assert!(
+        stderr.contains("GroupAuthorizationException"),
+        "consumer should log GroupAuthorizationException; stderr={stderr} stdout={stdout}",
+    );
+
+    broker.shutdown().await;
+}
+
+/// JVM acceptance — prefixed topic ACL grants exactly the prefix.
+///
+/// Admin provisions:
+/// - `Allow Read+Describe Topic PREFIXED "team-"` for alice
+/// - `Allow Read+Describe Group LITERAL "cg-prefixed"` for alice
+///
+/// Then pre-creates two topics: `team-foo` (covered by the prefix) and
+/// `other-foo` (NOT covered). Seeds one record into each via the admin
+/// (super-user, bypasses authorize).
+///
+/// Alice's consumer:
+/// 1. `--topic team-foo` succeeds and reads the seeded record (exercises
+///    the PREFIXED Read path in `authorize`).
+/// 2. `--topic other-foo` fails with `TopicAuthorizationException`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Docker"]
+#[allow(clippy::too_many_lines)]
+async fn jvm_prefixed_topic_acl_works() {
+    const PREFIX: &str = "team-";
+    const TOPIC_OK: &str = "team-foo";
+    const TOPIC_DENIED: &str = "other-foo";
+    const GROUP: &str = "cg-prefixed";
+    const ADMIN: &str = "admin";
+    const ADMIN_PASS: &str = "admin-secret";
+    const ALICE: &str = "alice";
+    const ALICE_PASS: &str = "alice-secret";
+
+    let (broker, _dir) = start_sasl_plaintext_broker_with_super_user(
+        ADMIN,
+        &[(ADMIN, ADMIN_PASS), (ALICE, ALICE_PASS)],
+    )
+    .await;
+    nc_check_connectivity();
+
+    let admin_props = write_client_props(&format!(
+        "security.protocol=SASL_PLAINTEXT\n\
+         sasl.mechanism=PLAIN\n\
+         sasl.jaas.config={}\n",
+        plain_jaas(ADMIN, ADMIN_PASS),
+    ));
+    let admin_mount = admin_props.mount_str();
+
+    // Pre-create both topics.
+    for topic in [TOPIC_OK, TOPIC_DENIED] {
+        docker_run_kafka_tool_with_image_and_mount(
+            KAFKA_IMAGE_TXN,
+            &admin_mount,
+            &[
+                "kafka-topics",
+                "--create",
+                "--if-not-exists",
+                "--topic",
+                topic,
+                "--partitions",
+                "1",
+                "--replication-factor",
+                "1",
+                "--bootstrap-server",
+                BOOTSTRAP,
+                "--command-config",
+                "/client.properties",
+            ],
+        );
+    }
+
+    // Prefixed Read+Describe on `team-*` for alice.
+    docker_run_kafka_tool_with_image_and_mount(
+        KAFKA_IMAGE_TXN,
+        &admin_mount,
+        &[
+            "kafka-acls",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--command-config",
+            "/client.properties",
+            "--add",
+            "--allow-principal",
+            "User:alice",
+            "--operation",
+            "Read",
+            "--operation",
+            "Describe",
+            "--resource-pattern-type",
+            "prefixed",
+            "--topic",
+            PREFIX,
+        ],
+    );
+
+    // Literal Read+Describe on group `cg-prefixed`.
+    docker_run_kafka_tool_with_image_and_mount(
+        KAFKA_IMAGE_TXN,
+        &admin_mount,
+        &[
+            "kafka-acls",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--command-config",
+            "/client.properties",
+            "--add",
+            "--allow-principal",
+            "User:alice",
+            "--operation",
+            "Read",
+            "--operation",
+            "Describe",
+            "--group",
+            GROUP,
+        ],
+    );
+
+    // Seed one record into each topic as admin (super-user bypasses authorize).
+    let admin_producer_props = write_client_props(&format!(
+        "security.protocol=SASL_PLAINTEXT\n\
+         sasl.mechanism=PLAIN\n\
+         sasl.jaas.config={}\n\
+         enable.idempotence=false\n\
+         acks=1\n",
+        plain_jaas(ADMIN, ADMIN_PASS),
+    ));
+    let admin_producer_mount = admin_producer_props.mount_str();
+
+    for topic in [TOPIC_OK, TOPIC_DENIED] {
+        let mut child = Command::new("docker")
+            .args([
+                "run",
+                "--rm",
+                "-i",
+                "-v",
+                &admin_producer_mount,
+                "--add-host=host.docker.internal:host-gateway",
+                KAFKA_IMAGE_TXN,
+                "kafka-console-producer",
+                "--bootstrap-server",
+                BOOTSTRAP,
+                "--topic",
+                topic,
+                "--producer.config",
+                "/client.properties",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn admin seed producer");
+        child
+            .stdin
+            .as_mut()
+            .expect("stdin")
+            .write_all(format!("seed-{topic}\n").as_bytes())
+            .expect("write seed");
+        drop(child.stdin.take());
+        let seed_out = child.wait_with_output().expect("wait seed producer");
+        assert!(
+            seed_out.status.success(),
+            "admin seed producer failed for {topic}: stderr={}",
+            String::from_utf8_lossy(&seed_out.stderr),
+        );
+    }
+
+    // ---- Alice: consume team-foo (allowed by prefix).
+    let alice_props = write_client_props(&format!(
+        "security.protocol=SASL_PLAINTEXT\n\
+         sasl.mechanism=PLAIN\n\
+         sasl.jaas.config={}\n",
+        plain_jaas(ALICE, ALICE_PASS),
+    ));
+    let alice_mount = alice_props.mount_str();
+
+    let consumer_out = docker_run_kafka_tool_with_image_and_mount(
+        KAFKA_IMAGE_TXN,
+        &alice_mount,
+        &[
+            "kafka-console-consumer",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--topic",
+            TOPIC_OK,
+            "--group",
+            GROUP,
+            "--from-beginning",
+            "--max-messages",
+            "1",
+            "--timeout-ms",
+            "30000",
+            "--consumer.config",
+            "/client.properties",
+        ],
+    );
+    let stdout = String::from_utf8_lossy(&consumer_out.stdout);
+    let needle = format!("seed-{TOPIC_OK}");
+    assert!(
+        stdout.contains(&needle),
+        "alice should read {needle} from prefixed topic; got: {stdout}",
+    );
+
+    // ---- Alice: consume other-foo (denied — no matching prefix).
+    let denied_out = Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "-v",
+            &alice_mount,
+            "--add-host=host.docker.internal:host-gateway",
+            KAFKA_IMAGE_TXN,
+            "kafka-console-consumer",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--topic",
+            TOPIC_DENIED,
+            "--group",
+            GROUP,
+            "--from-beginning",
+            "--max-messages",
+            "1",
+            "--timeout-ms",
+            "15000",
+            "--consumer.config",
+            "/client.properties",
+        ])
+        .stderr(Stdio::piped())
+        .stdout(Stdio::piped())
+        .output()
+        .expect("spawn alice denied consumer");
+    let denied_stderr = String::from_utf8_lossy(&denied_out.stderr);
+    let denied_stdout = String::from_utf8_lossy(&denied_out.stdout);
+    eprintln!(
+        "CRABKA[test] alice denied consumer status={} stderr={denied_stderr} stdout={denied_stdout}",
+        denied_out.status,
+    );
+    assert!(
+        denied_stderr.contains("TopicAuthorizationException"),
+        "alice should be denied on {TOPIC_DENIED}; stderr={denied_stderr} stdout={denied_stdout}",
+    );
+
+    broker.shutdown().await;
 }

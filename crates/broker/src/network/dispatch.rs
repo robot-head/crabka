@@ -14,6 +14,8 @@
 
 #![allow(dead_code)] // accept loop wires this up in Phase D (Task 11).
 
+use std::net::SocketAddr;
+
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use futures_util::{SinkExt, StreamExt};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -36,6 +38,15 @@ pub async fn serve_connection_on_listener(
     stream: TcpStream,
     spec: crate::config::ListenerSpec,
 ) {
+    // Capture the peer address from the underlying TCP socket before we
+    // hand the stream off to the TLS layer / framing loop. Slice-13 ACL
+    // handlers need this for host-based ACL matching. If `peer_addr`
+    // fails (rare — socket closed mid-accept), fall back to the
+    // unspecified address; ACL matchers treat it as a non-matching host.
+    let peer = stream.peer_addr().unwrap_or_else(|e| {
+        tracing::debug!(error = %e, "peer_addr() failed, using 0.0.0.0:0");
+        SocketAddr::from(([0u8, 0, 0, 0], 0))
+    });
     if spec.protocol.requires_tls() {
         let Some(acceptor) = broker.tls_acceptor.clone() else {
             tracing::error!(
@@ -45,11 +56,11 @@ pub async fn serve_connection_on_listener(
             return;
         };
         match acceptor.accept(stream).await {
-            Ok(tls_stream) => serve_connection_stream(broker, tls_stream, spec).await,
+            Ok(tls_stream) => serve_connection_stream(broker, tls_stream, spec, peer).await,
             Err(e) => tracing::debug!(error = %e, "TLS handshake failed"),
         }
     } else {
-        serve_connection_plaintext(broker, stream, spec).await;
+        serve_connection_plaintext(broker, stream, spec, peer).await;
     }
 }
 
@@ -60,8 +71,9 @@ async fn serve_connection_plaintext(
     broker: std::sync::Arc<Broker>,
     stream: TcpStream,
     spec: crate::config::ListenerSpec,
+    peer: SocketAddr,
 ) {
-    serve_connection_stream(broker, stream, spec).await;
+    serve_connection_stream(broker, stream, spec, peer).await;
 }
 
 /// Generic per-connection request loop. `S` is the post-handshake byte
@@ -69,10 +81,12 @@ async fn serve_connection_plaintext(
 /// for TLS listeners. `spec` carries the listener's protocol so the loop
 /// can initialise `ConnectionAuth` correctly and gate pre-auth requests on
 /// SASL listeners (Slice 12, T12).
+#[allow(clippy::too_many_lines)] // each api_key intercept arm adds ~15 lines; T8/T9 will extract them.
 async fn serve_connection_stream<S>(
     broker: std::sync::Arc<Broker>,
     stream: S,
     spec: crate::config::ListenerSpec,
+    peer: SocketAddr,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -161,12 +175,14 @@ async fn serve_connection_stream<S>(
             continue;
         }
         // AlterUserScramCredentials (51) needs the connection's authenticated
-        // principal so it can enforce the super-user gate; the handler table
-        // signature passes only `&Broker`, so this case is intercepted inline
-        // like the SASL frames are. Returning `Some` short-circuits the
-        // normal `dispatch_one()` path for this frame.
+        // principal and the peer `SocketAddr` so it can enforce the Cluster
+        // Alter ACL gate (slice-13 T19, replacing the slice-12 super-user-name
+        // equality check). The handler table signature passes only `&Broker`,
+        // so this case is intercepted inline like the SASL frames are.
+        // Returning `Some` short-circuits the normal `dispatch_one()` path
+        // for this frame.
         if peek_api_key(&frame).ok() == Some(51) {
-            match handle_alter_user_scram_credentials_frame(&broker, &frame, &auth).await {
+            match handle_alter_user_scram_credentials_frame(&broker, &frame, &auth, &peer).await {
                 Ok(bytes) => {
                     if let Err(e) = framed.send(bytes).await {
                         tracing::warn!(error = %e, "framed.send error during AUSCR, closing");
@@ -176,6 +192,486 @@ async fn serve_connection_stream<S>(
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "AUSCR dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
+        // Produce (0, slice-13 T10) needs both the authenticated
+        // principal AND the peer's `SocketAddr` so the handler can
+        // batch-authorize every topic in the request for `Write` and
+        // emit TOPIC_AUTHORIZATION_FAILED on the per-partition rows of
+        // any topic that comes back `Deny`. The `&Broker`-only handler
+        // table signature can't carry that context, so this api_key
+        // intercepts inline.
+        if peek_api_key(&frame).ok() == Some(0) {
+            match handle_produce_frame(&broker, &frame, &auth, &peer).await {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during Produce, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Produce dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
+        // Fetch (1, slice-13 T11) needs both the authenticated principal
+        // AND the peer's `SocketAddr` so the handler can batch-authorize
+        // every topic in the request for `Read` and emit
+        // TOPIC_AUTHORIZATION_FAILED on the per-partition rows of any
+        // topic that comes back `Deny`. The `&Broker`-only handler table
+        // signature can't carry that context, so this api_key intercepts
+        // inline.
+        if peek_api_key(&frame).ok() == Some(1) {
+            match handle_fetch_frame(&broker, &frame, &auth, &peer).await {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during Fetch, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Fetch dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
+        // Metadata (3, slice-13 T12) needs both the authenticated
+        // principal AND the peer's `SocketAddr` so the handler can
+        // batch-authorize every candidate topic for `Describe`.
+        // Asymmetric behaviour: named-topic Deny surfaces
+        // TOPIC_AUTHORIZATION_FAILED on the topic row; fetch-all Deny
+        // silently omits the topic from the response. The
+        // `&Broker`-only handler table signature can't carry the
+        // principal+peer context, so this api_key intercepts inline.
+        if peek_api_key(&frame).ok() == Some(3) {
+            match handle_metadata_frame(&broker, &frame, &auth, &peer).await {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during Metadata, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Metadata dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
+        // CreateTopics (19, slice-13 T13) needs both the authenticated
+        // principal AND the peer's `SocketAddr` so the handler can
+        // authorize `Create` on `Cluster("kafka-cluster")` and emit
+        // CLUSTER_AUTHORIZATION_FAILED on every topic row on Deny. The
+        // `&Broker`-only handler table signature can't carry that context,
+        // so this api_key intercepts inline.
+        if peek_api_key(&frame).ok() == Some(19) {
+            match handle_create_topics_frame(&broker, &frame, &auth, &peer).await {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during CreateTopics, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "CreateTopics dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
+        // DeleteTopics (20, slice-13 T13) needs both the authenticated
+        // principal AND the peer's `SocketAddr` so the handler can
+        // batch-authorize every topic for `Delete` and emit
+        // TOPIC_AUTHORIZATION_FAILED on denied topic rows. The
+        // `&Broker`-only handler table signature can't carry that context,
+        // so this api_key intercepts inline.
+        if peek_api_key(&frame).ok() == Some(20) {
+            match handle_delete_topics_frame(&broker, &frame, &auth, &peer).await {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during DeleteTopics, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "DeleteTopics dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
+        // AlterConfigs (33, slice-13 T14) needs both the authenticated
+        // principal AND the peer's `SocketAddr` so the handler can
+        // authorize `AlterConfigs` per resource: Topic resources check
+        // against `ResourceType::Topic(resource_name)` and emit
+        // TOPIC_AUTHORIZATION_FAILED on Deny; Broker resources check
+        // against `Cluster("kafka-cluster")` and emit
+        // CLUSTER_AUTHORIZATION_FAILED on Deny.
+        if peek_api_key(&frame).ok() == Some(33) {
+            match handle_alter_configs_frame(&broker, &frame, &auth, &peer).await {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during AlterConfigs, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "AlterConfigs dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
+        // IncrementalAlterConfigs (44, slice-13 T14) — same shape as
+        // AlterConfigs: needs both the authenticated principal and the peer
+        // `SocketAddr` for per-resource ACL enforcement.
+        if peek_api_key(&frame).ok() == Some(44) {
+            match handle_incremental_alter_configs_frame(&broker, &frame, &auth, &peer).await {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(
+                            error = %e,
+                            "framed.send error during IncrementalAlterConfigs, closing"
+                        );
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "IncrementalAlterConfigs dispatch error, closing connection"
+                    );
+                    break;
+                }
+            }
+        }
+        // DeleteRecords (21, slice-13 T15) needs both the authenticated
+        // principal AND the peer's `SocketAddr` so the handler can
+        // batch-authorize every topic in the request for `Delete` and emit
+        // TOPIC_AUTHORIZATION_FAILED on the per-partition rows of any
+        // topic that comes back `Deny`. The `&Broker`-only handler table
+        // signature can't carry that context, so this api_key intercepts
+        // inline.
+        if peek_api_key(&frame).ok() == Some(21) {
+            match handle_delete_records_frame(&broker, &frame, &auth, &peer).await {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during DeleteRecords, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "DeleteRecords dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
+        // CreatePartitions (37, slice-13 T15) needs both the authenticated
+        // principal AND the peer's `SocketAddr` so the handler can
+        // batch-authorize every topic in the request for `Alter` and emit
+        // TOPIC_AUTHORIZATION_FAILED on the topic row of any topic that
+        // comes back `Deny`. The `&Broker`-only handler table signature
+        // can't carry that context, so this api_key intercepts inline.
+        if peek_api_key(&frame).ok() == Some(37) {
+            match handle_create_partitions_frame(&broker, &frame, &auth, &peer).await {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during CreatePartitions, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "CreatePartitions dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
+        // DescribeGroups (15, slice-13 T16) needs both the authenticated
+        // principal AND the peer's `SocketAddr` so the handler can
+        // authorize `Describe` per group and emit
+        // GROUP_AUTHORIZATION_FAILED on denied group rows. The
+        // `&Broker`-only handler table signature can't carry that context,
+        // so this api_key intercepts inline.
+        if peek_api_key(&frame).ok() == Some(15) {
+            match handle_describe_groups_frame(&broker, &frame, &auth, &peer).await {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during DescribeGroups, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "DescribeGroups dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
+        // ListGroups (16, slice-13 T16) needs both the authenticated
+        // principal AND the peer's `SocketAddr` so the handler can
+        // silently filter out groups denied `Describe`. The
+        // `&Broker`-only handler table signature can't carry that context,
+        // so this api_key intercepts inline.
+        if peek_api_key(&frame).ok() == Some(16) {
+            match handle_list_groups_frame(&broker, &frame, &auth, &peer).await {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during ListGroups, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "ListGroups dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
+        // DeleteGroups (42, slice-13 T16) needs both the authenticated
+        // principal AND the peer's `SocketAddr` so the handler can
+        // authorize `Delete` per group and emit
+        // GROUP_AUTHORIZATION_FAILED on denied group rows. The
+        // `&Broker`-only handler table signature can't carry that context,
+        // so this api_key intercepts inline.
+        if peek_api_key(&frame).ok() == Some(42) {
+            match handle_delete_groups_frame(&broker, &frame, &auth, &peer).await {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during DeleteGroups, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "DeleteGroups dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
+        // JoinGroup (11, slice-13 T17) needs both the authenticated
+        // principal AND the peer's `SocketAddr` so the handler can
+        // authorize `Read` on `Group(group_id)` and emit
+        // GROUP_AUTHORIZATION_FAILED on the whole response on Deny. The
+        // `&Broker`-only handler table signature can't carry that context,
+        // so this api_key intercepts inline.
+        if peek_api_key(&frame).ok() == Some(11) {
+            match handle_join_group_frame(&broker, &frame, &auth, &peer).await {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during JoinGroup, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "JoinGroup dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
+        // OffsetCommit (8, slice-13 T18) needs both the authenticated
+        // principal AND the peer's `SocketAddr` so the handler can
+        // authorize `Read` on `Group(group_id)` (whole-response deny =
+        // GROUP_AUTHORIZATION_FAILED) and then per-topic `Read` (per-partition
+        // deny = TOPIC_AUTHORIZATION_FAILED). The `&Broker`-only handler
+        // table signature can't carry that context, so this api_key
+        // intercepts inline.
+        if peek_api_key(&frame).ok() == Some(8) {
+            match handle_offset_commit_frame(&broker, &frame, &auth, &peer).await {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during OffsetCommit, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "OffsetCommit dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
+        // OffsetFetch (9, slice-13 T18) needs both the authenticated
+        // principal AND the peer's `SocketAddr` so the handler can
+        // authorize `Describe` on `Group(group_id)` (whole-response deny =
+        // GROUP_AUTHORIZATION_FAILED) and then per-topic `Read` (per-topic
+        // deny = TOPIC_AUTHORIZATION_FAILED). The `topics: None` fetch-all
+        // sentinel also applies the per-topic check across committed-offsets
+        // topics. The `&Broker`-only handler table signature can't carry that
+        // context, so this api_key intercepts inline.
+        if peek_api_key(&frame).ok() == Some(9) {
+            match handle_offset_fetch_frame(&broker, &frame, &auth, &peer).await {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during OffsetFetch, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "OffsetFetch dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
+        // DescribeCluster (60, slice-13 T19) needs both the authenticated
+        // principal AND the peer's `SocketAddr` so the handler can
+        // authorize `Describe` on `Cluster("kafka-cluster")` and emit
+        // CLUSTER_AUTHORIZATION_FAILED on the whole response on Deny. The
+        // `&Broker`-only handler table signature can't carry that context,
+        // so this api_key intercepts inline.
+        if peek_api_key(&frame).ok() == Some(60) {
+            match handle_describe_cluster_frame(&broker, &frame, &auth, &peer).await {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during DescribeCluster, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "DescribeCluster dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
+        // DescribeAcls (29, slice-13 T7) needs both the authenticated
+        // principal AND the peer's `SocketAddr` for host-based ACL
+        // matching; neither is reachable from the `&Broker`-only handler
+        // table signature, so it intercepts inline.
+        if peek_api_key(&frame).ok() == Some(29) {
+            match handle_describe_acls_frame(&broker, &frame, &auth, &peer).await {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during DescribeAcls, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "DescribeAcls dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
+        // CreateAcls (30, slice-13 T8) — same shape as DescribeAcls: needs
+        // both the authenticated principal and the peer `SocketAddr` for
+        // host-based ACL matching on the `Alter` cluster gate.
+        if peek_api_key(&frame).ok() == Some(30) {
+            match handle_create_acls_frame(&broker, &frame, &auth, &peer).await {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during CreateAcls, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "CreateAcls dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
+        // DeleteAcls (31, slice-13 T9) — same shape as CreateAcls: needs
+        // both the authenticated principal and the peer `SocketAddr` for
+        // host-based ACL matching on the `Alter` cluster gate.
+        if peek_api_key(&frame).ok() == Some(31) {
+            match handle_delete_acls_frame(&broker, &frame, &auth, &peer).await {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during DeleteAcls, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "DeleteAcls dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
+        // InitProducerId (22, slice-13 T20) needs both the authenticated
+        // principal AND the peer's `SocketAddr` so the handler can
+        // authorize `Write` on `TransactionalId` (transactional path) or
+        // `IdempotentWrite` on `Cluster` (idempotent-only path). On Deny
+        // the handler returns a whole-response error_code = 53 or 31.
+        if peek_api_key(&frame).ok() == Some(22) {
+            match handle_init_producer_id_frame(&broker, &frame, &auth, &peer).await {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during InitProducerId, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "InitProducerId dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
+        // AddPartitionsToTxn (24, slice-13 T20) needs both the authenticated
+        // principal AND the peer's `SocketAddr` so the handler can
+        // authorize `Write` on `TransactionalId` (whole-txn deny =
+        // TRANSACTIONAL_ID_AUTHORIZATION_FAILED) and per-topic `Write` on
+        // `Topic` (per-row deny = TOPIC_AUTHORIZATION_FAILED).
+        if peek_api_key(&frame).ok() == Some(24) {
+            match handle_add_partitions_to_txn_frame(&broker, &frame, &auth, &peer).await {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during AddPartitionsToTxn, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "AddPartitionsToTxn dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
+        // EndTxn (26, slice-13 T20) needs both the authenticated principal
+        // AND the peer's `SocketAddr` so the handler can authorize
+        // `Write` on `TransactionalId`. On Deny → whole-response
+        // TRANSACTIONAL_ID_AUTHORIZATION_FAILED.
+        if peek_api_key(&frame).ok() == Some(26) {
+            match handle_end_txn_frame(&broker, &frame, &auth, &peer).await {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during EndTxn, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "EndTxn dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
+        // TxnOffsetCommit (28, slice-13 T20) needs both the authenticated
+        // principal AND the peer's `SocketAddr` so the handler can
+        // authorize `Write` on `TransactionalId` + `Read` on `Group` +
+        // per-topic `Read` on `Topic`.
+        if peek_api_key(&frame).ok() == Some(28) {
+            match handle_txn_offset_commit_frame(&broker, &frame, &auth, &peer).await {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during TxnOffsetCommit, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "TxnOffsetCommit dispatch error, closing connection");
                     break;
                 }
             }
@@ -308,8 +804,9 @@ fn handle_sasl_frame(
 }
 
 /// Decode + dispatch an `AlterUserScramCredentials` (`api_key` 51) frame.
-/// Pulls the authenticated principal off the per-connection `auth` state so
-/// the handler can enforce its super-user gate. On a SASL listener the
+/// Pulls the authenticated principal off the per-connection `auth` state and
+/// the peer `SocketAddr` from the accept-time capture so the handler can
+/// enforce the Cluster Alter ACL gate (slice-13 T19). On a SASL listener the
 /// pre-auth allowlist already rejects this frame; on PLAINTEXT/SSL listeners
 /// the connection is implicitly `Authenticated { ANONYMOUS / Plain }` (see
 /// the loop init), so `principal()` always returns `Some` here.
@@ -317,6 +814,7 @@ async fn handle_alter_user_scram_credentials_frame(
     broker: &Broker,
     frame: &[u8],
     auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
 ) -> Result<Bytes, BrokerError> {
     use crabka_protocol::{Decode, Encode};
 
@@ -338,10 +836,954 @@ async fn handle_alter_user_scram_credentials_frame(
             mechanism: crabka_security::SaslMechanism::Plain,
         });
 
-    let resp = crate::handlers::alter_user_scram_credentials::handle(broker, req, &principal).await;
+    let resp =
+        crate::handlers::alter_user_scram_credentials::handle(broker, req, &principal, peer).await;
     let mut buf = BytesMut::with_capacity(resp.encoded_len(api_version));
     resp.encode(&mut buf, api_version)?;
     let resp_body = buf.freeze();
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch a `DescribeCluster` (`api_key` 60) frame. Pulls the
+/// authenticated principal off the per-connection `auth` state and the
+/// peer `SocketAddr` from the accept-time capture so the handler can
+/// authorize `Describe` on `Cluster("kafka-cluster")` (slice-13 T19).
+/// On Deny the whole response receives `CLUSTER_AUTHORIZATION_FAILED`.
+async fn handle_describe_cluster_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 60);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let principal = auth
+        .principal()
+        .cloned()
+        .unwrap_or_else(|| crabka_security::Principal {
+            name: "ANONYMOUS".to_string(),
+            mechanism: crabka_security::SaslMechanism::Plain,
+        });
+
+    let resp_body = crate::handlers::describe_cluster::handle(
+        broker,
+        api_version,
+        correlation_id,
+        body,
+        &principal,
+        peer,
+    )
+    .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch a `Produce` (`api_key` 0) frame. Pulls the
+/// authenticated principal off the per-connection `auth` state and the
+/// peer `SocketAddr` from the accept-time capture so the handler can
+/// batch-authorize every topic in the request for `Write` (slice-13 T10).
+/// On PLAINTEXT/SSL listeners the connection is implicitly
+/// `Authenticated { ANONYMOUS / Plain }` (see the loop init), so
+/// `principal()` always returns `Some` here; the `unwrap_or_else`
+/// fallback covers the defensive SASL pre-auth case.
+async fn handle_produce_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 0);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let principal = auth
+        .principal()
+        .cloned()
+        .unwrap_or_else(|| crabka_security::Principal {
+            name: "ANONYMOUS".to_string(),
+            mechanism: crabka_security::SaslMechanism::Plain,
+        });
+
+    let resp_body = crate::handlers::produce::handle(
+        broker,
+        api_version,
+        correlation_id,
+        body,
+        &principal,
+        peer,
+    )
+    .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch a `Fetch` (`api_key` 1) frame. Pulls the
+/// authenticated principal off the per-connection `auth` state and the
+/// peer `SocketAddr` from the accept-time capture so the handler can
+/// batch-authorize every topic in the request for `Read` (slice-13 T11).
+/// On PLAINTEXT/SSL listeners the connection is implicitly
+/// `Authenticated { ANONYMOUS / Plain }` (see the loop init), so
+/// `principal()` always returns `Some` here; the `unwrap_or_else`
+/// fallback covers the defensive SASL pre-auth case.
+async fn handle_fetch_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 1);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let principal = auth
+        .principal()
+        .cloned()
+        .unwrap_or_else(|| crabka_security::Principal {
+            name: "ANONYMOUS".to_string(),
+            mechanism: crabka_security::SaslMechanism::Plain,
+        });
+
+    let resp_body =
+        crate::handlers::fetch::handle(broker, api_version, correlation_id, body, &principal, peer)
+            .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch a `Metadata` (`api_key` 3) frame. Pulls the
+/// authenticated principal off the per-connection `auth` state and the
+/// peer `SocketAddr` from the accept-time capture so the handler can
+/// batch-authorize every candidate topic for `Describe` (slice-13 T12).
+/// Named-topic Deny surfaces `TOPIC_AUTHORIZATION_FAILED`; fetch-all Deny
+/// silently omits the topic. On PLAINTEXT/SSL listeners the connection
+/// is implicitly `Authenticated { ANONYMOUS / Plain }` (see the loop
+/// init), so `principal()` always returns `Some` here; the
+/// `unwrap_or_else` fallback covers the defensive SASL pre-auth case.
+async fn handle_metadata_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 3);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let principal = auth
+        .principal()
+        .cloned()
+        .unwrap_or_else(|| crabka_security::Principal {
+            name: "ANONYMOUS".to_string(),
+            mechanism: crabka_security::SaslMechanism::Plain,
+        });
+
+    let resp_body = crate::handlers::metadata::handle(
+        broker,
+        api_version,
+        correlation_id,
+        body,
+        &principal,
+        peer,
+    )
+    .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch a `CreateTopics` (`api_key` 19) frame. Pulls the
+/// authenticated principal off the per-connection `auth` state and the
+/// peer `SocketAddr` from the accept-time capture so the handler can
+/// authorize `Create` on `Cluster("kafka-cluster")` (slice-13 T13).
+/// On PLAINTEXT/SSL listeners the connection is implicitly
+/// `Authenticated { ANONYMOUS / Plain }` (see the loop init), so
+/// `principal()` always returns `Some` here; the `unwrap_or_else`
+/// fallback covers the defensive SASL pre-auth case.
+async fn handle_create_topics_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 19);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let principal = auth
+        .principal()
+        .cloned()
+        .unwrap_or_else(|| crabka_security::Principal {
+            name: "ANONYMOUS".to_string(),
+            mechanism: crabka_security::SaslMechanism::Plain,
+        });
+
+    let resp_body = crate::handlers::create_topics::handle(
+        broker,
+        api_version,
+        correlation_id,
+        body,
+        &principal,
+        peer,
+    )
+    .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch a `DeleteTopics` (`api_key` 20) frame. Pulls the
+/// authenticated principal off the per-connection `auth` state and the
+/// peer `SocketAddr` from the accept-time capture so the handler can
+/// batch-authorize every topic for `Delete` (slice-13 T13).
+/// On PLAINTEXT/SSL listeners the connection is implicitly
+/// `Authenticated { ANONYMOUS / Plain }` (see the loop init), so
+/// `principal()` always returns `Some` here; the `unwrap_or_else`
+/// fallback covers the defensive SASL pre-auth case.
+async fn handle_delete_topics_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 20);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let principal = auth
+        .principal()
+        .cloned()
+        .unwrap_or_else(|| crabka_security::Principal {
+            name: "ANONYMOUS".to_string(),
+            mechanism: crabka_security::SaslMechanism::Plain,
+        });
+
+    let resp_body = crate::handlers::delete_topics::handle(
+        broker,
+        api_version,
+        correlation_id,
+        body,
+        &principal,
+        peer,
+    )
+    .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch a `DescribeAcls` (`api_key` 29) frame. Pulls the
+/// authenticated principal off the per-connection `auth` state and the
+/// peer `SocketAddr` from the accept-time capture so the handler can
+/// authorize `Describe` on `Cluster` with host-based ACL matching.
+/// On PLAINTEXT/SSL listeners the connection is implicitly
+/// `Authenticated { ANONYMOUS / Plain }` (see the loop init), so
+/// `principal()` always returns `Some` here; the `unwrap_or_else`
+/// fallback covers the defensive SASL pre-auth case.
+async fn handle_describe_acls_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    use crabka_protocol::Decode;
+
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 29);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let mut cur: &[u8] = body;
+    let req = crabka_protocol::owned::describe_acls_request::DescribeAclsRequest::decode(
+        &mut cur,
+        api_version,
+    )?;
+
+    let principal = auth
+        .principal()
+        .cloned()
+        .unwrap_or_else(|| crabka_security::Principal {
+            name: "ANONYMOUS".to_string(),
+            mechanism: crabka_security::SaslMechanism::Plain,
+        });
+
+    let resp_body =
+        crate::handlers::describe_acls::handle(broker, req, &principal, peer, api_version).await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch a `CreateAcls` (`api_key` 30) frame. Mirrors
+/// [`handle_describe_acls_frame`] — pulls the authenticated principal
+/// off the per-connection `auth` state and the peer `SocketAddr` from
+/// the accept-time capture so the handler can authorize `Alter` on
+/// `Cluster` with host-based ACL matching.
+async fn handle_create_acls_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    use crabka_protocol::Decode;
+
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 30);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let mut cur: &[u8] = body;
+    let req = crabka_protocol::owned::create_acls_request::CreateAclsRequest::decode(
+        &mut cur,
+        api_version,
+    )?;
+
+    let principal = auth
+        .principal()
+        .cloned()
+        .unwrap_or_else(|| crabka_security::Principal {
+            name: "ANONYMOUS".to_string(),
+            mechanism: crabka_security::SaslMechanism::Plain,
+        });
+
+    let resp_body =
+        crate::handlers::create_acls::handle(broker, req, &principal, peer, api_version).await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch a `DeleteAcls` (`api_key` 31) frame. Mirrors
+/// [`handle_create_acls_frame`] — pulls the authenticated principal
+/// off the per-connection `auth` state and the peer `SocketAddr` from
+/// the accept-time capture so the handler can authorize `Alter` on
+/// `Cluster` with host-based ACL matching.
+async fn handle_delete_acls_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    use crabka_protocol::Decode;
+
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 31);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let mut cur: &[u8] = body;
+    let req = crabka_protocol::owned::delete_acls_request::DeleteAclsRequest::decode(
+        &mut cur,
+        api_version,
+    )?;
+
+    let principal = auth
+        .principal()
+        .cloned()
+        .unwrap_or_else(|| crabka_security::Principal {
+            name: "ANONYMOUS".to_string(),
+            mechanism: crabka_security::SaslMechanism::Plain,
+        });
+
+    let resp_body =
+        crate::handlers::delete_acls::handle(broker, req, &principal, peer, api_version).await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch an `AlterConfigs` (`api_key` 33) frame. Pulls the
+/// authenticated principal off the per-connection `auth` state and the
+/// peer `SocketAddr` from the accept-time capture so the handler can
+/// authorize `AlterConfigs` per resource (slice-13 T14).
+/// Topic resources → `TOPIC_AUTHORIZATION_FAILED` on Deny.
+/// Broker resources → `CLUSTER_AUTHORIZATION_FAILED` on Deny.
+async fn handle_alter_configs_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 33);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let principal = auth
+        .principal()
+        .cloned()
+        .unwrap_or_else(|| crabka_security::Principal {
+            name: "ANONYMOUS".to_string(),
+            mechanism: crabka_security::SaslMechanism::Plain,
+        });
+
+    let resp_body = crate::handlers::alter_configs::handle(
+        broker,
+        api_version,
+        correlation_id,
+        body,
+        &principal,
+        peer,
+    )
+    .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch an `IncrementalAlterConfigs` (`api_key` 44) frame.
+/// Pulls the authenticated principal off the per-connection `auth` state
+/// and the peer `SocketAddr` from the accept-time capture so the handler
+/// can authorize `AlterConfigs` per resource (slice-13 T14).
+/// Topic resources → `TOPIC_AUTHORIZATION_FAILED` on Deny.
+/// Broker resources → `CLUSTER_AUTHORIZATION_FAILED` on Deny.
+async fn handle_incremental_alter_configs_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 44);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let principal = auth
+        .principal()
+        .cloned()
+        .unwrap_or_else(|| crabka_security::Principal {
+            name: "ANONYMOUS".to_string(),
+            mechanism: crabka_security::SaslMechanism::Plain,
+        });
+
+    let resp_body = crate::handlers::incremental_alter_configs::handle(
+        broker,
+        api_version,
+        correlation_id,
+        body,
+        &principal,
+        peer,
+    )
+    .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch a `DeleteRecords` (`api_key` 21) frame. Pulls the
+/// authenticated principal off the per-connection `auth` state and the
+/// peer `SocketAddr` from the accept-time capture so the handler can
+/// batch-authorize every topic in the request for `Delete` (slice-13 T15).
+/// Topics that come back `Deny` have `TOPIC_AUTHORIZATION_FAILED` set on
+/// every partition row.
+async fn handle_delete_records_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 21);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let principal = auth
+        .principal()
+        .cloned()
+        .unwrap_or_else(|| crabka_security::Principal {
+            name: "ANONYMOUS".to_string(),
+            mechanism: crabka_security::SaslMechanism::Plain,
+        });
+
+    let resp_body = crate::handlers::delete_records::handle(
+        broker,
+        api_version,
+        correlation_id,
+        body,
+        &principal,
+        peer,
+    )
+    .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch a `CreatePartitions` (`api_key` 37) frame. Pulls the
+/// authenticated principal off the per-connection `auth` state and the
+/// peer `SocketAddr` from the accept-time capture so the handler can
+/// batch-authorize every topic in the request for `Alter` (slice-13 T15).
+/// Topics that come back `Deny` receive `TOPIC_AUTHORIZATION_FAILED` on
+/// that topic row.
+async fn handle_create_partitions_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 37);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let principal = auth
+        .principal()
+        .cloned()
+        .unwrap_or_else(|| crabka_security::Principal {
+            name: "ANONYMOUS".to_string(),
+            mechanism: crabka_security::SaslMechanism::Plain,
+        });
+
+    let resp_body = crate::handlers::create_partitions::handle(
+        broker,
+        api_version,
+        correlation_id,
+        body,
+        &principal,
+        peer,
+    )
+    .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch a `DescribeGroups` (`api_key` 15) frame. Pulls the
+/// authenticated principal off the per-connection `auth` state and the
+/// peer `SocketAddr` from the accept-time capture so the handler can
+/// authorize `Describe` per group (slice-13 T16). Denied groups receive
+/// `GROUP_AUTHORIZATION_FAILED` on their per-group entry.
+async fn handle_describe_groups_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 15);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let principal = auth
+        .principal()
+        .cloned()
+        .unwrap_or_else(|| crabka_security::Principal {
+            name: "ANONYMOUS".to_string(),
+            mechanism: crabka_security::SaslMechanism::Plain,
+        });
+
+    let resp_body = crate::handlers::describe_groups::handle(
+        broker,
+        api_version,
+        correlation_id,
+        body,
+        &principal,
+        peer,
+    )
+    .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch a `ListGroups` (`api_key` 16) frame. Pulls the
+/// authenticated principal off the per-connection `auth` state and the
+/// peer `SocketAddr` from the accept-time capture so the handler can
+/// silently filter out groups denied `Describe` (slice-13 T16). Denied
+/// groups are omitted from the response without an error code.
+async fn handle_list_groups_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 16);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let principal = auth
+        .principal()
+        .cloned()
+        .unwrap_or_else(|| crabka_security::Principal {
+            name: "ANONYMOUS".to_string(),
+            mechanism: crabka_security::SaslMechanism::Plain,
+        });
+
+    let resp_body = crate::handlers::list_groups::handle(
+        broker,
+        api_version,
+        correlation_id,
+        body,
+        &principal,
+        peer,
+    )
+    .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch a `DeleteGroups` (`api_key` 42) frame. Pulls the
+/// authenticated principal off the per-connection `auth` state and the
+/// peer `SocketAddr` from the accept-time capture so the handler can
+/// authorize `Delete` per group (slice-13 T16). Denied groups receive
+/// `GROUP_AUTHORIZATION_FAILED` on their per-group entry.
+async fn handle_delete_groups_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 42);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let principal = auth
+        .principal()
+        .cloned()
+        .unwrap_or_else(|| crabka_security::Principal {
+            name: "ANONYMOUS".to_string(),
+            mechanism: crabka_security::SaslMechanism::Plain,
+        });
+
+    let resp_body = crate::handlers::delete_groups::handle(
+        broker,
+        api_version,
+        correlation_id,
+        body,
+        &principal,
+        peer,
+    )
+    .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch a `JoinGroup` (`api_key` 11) frame. Pulls the
+/// authenticated principal off the per-connection `auth` state and the
+/// peer `SocketAddr` from the accept-time capture so the handler can
+/// authorize `Read` on `Group(group_id)` (slice-13 T17). On Deny the
+/// whole response receives `GROUP_AUTHORIZATION_FAILED`.
+async fn handle_join_group_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 11);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let principal = auth
+        .principal()
+        .cloned()
+        .unwrap_or_else(|| crabka_security::Principal {
+            name: "ANONYMOUS".to_string(),
+            mechanism: crabka_security::SaslMechanism::Plain,
+        });
+
+    let resp_body = crate::handlers::join_group::handle(
+        broker,
+        api_version,
+        correlation_id,
+        body,
+        &principal,
+        peer,
+    )
+    .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch an `OffsetCommit` (`api_key` 8) frame. Pulls the
+/// authenticated principal off the per-connection `auth` state and the
+/// peer `SocketAddr` from the accept-time capture so the handler can
+/// authorize `Read` on `Group(group_id)` (whole-response deny =
+/// `GROUP_AUTHORIZATION_FAILED`) and per-topic `Read` (per-partition deny =
+/// `TOPIC_AUTHORIZATION_FAILED`) (slice-13 T18).
+async fn handle_offset_commit_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 8);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let principal = auth
+        .principal()
+        .cloned()
+        .unwrap_or_else(|| crabka_security::Principal {
+            name: "ANONYMOUS".to_string(),
+            mechanism: crabka_security::SaslMechanism::Plain,
+        });
+
+    let resp_body = crate::handlers::offset_commit::handle(
+        broker,
+        api_version,
+        correlation_id,
+        body,
+        &principal,
+        peer,
+    )
+    .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch an `OffsetFetch` (`api_key` 9) frame. Pulls the
+/// authenticated principal off the per-connection `auth` state and the
+/// peer `SocketAddr` from the accept-time capture so the handler can
+/// authorize `Describe` on `Group(group_id)` (whole-response deny =
+/// `GROUP_AUTHORIZATION_FAILED`) and per-topic `Read` (per-topic deny =
+/// `TOPIC_AUTHORIZATION_FAILED`). The `topics: None` fetch-all sentinel runs
+/// the per-topic check across discovered committed-offsets topics (slice-13 T18).
+async fn handle_offset_fetch_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 9);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let principal = auth
+        .principal()
+        .cloned()
+        .unwrap_or_else(|| crabka_security::Principal {
+            name: "ANONYMOUS".to_string(),
+            mechanism: crabka_security::SaslMechanism::Plain,
+        });
+
+    let resp_body = crate::handlers::offset_fetch::handle(
+        broker,
+        api_version,
+        correlation_id,
+        body,
+        &principal,
+        peer,
+    )
+    .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch an `InitProducerId` (`api_key` 22) frame. Pulls the
+/// authenticated principal off the per-connection `auth` state and the
+/// peer `SocketAddr` from the accept-time capture so the handler can
+/// authorize `Write` on `TransactionalId(transactional_id)` (transactional
+/// path) or `IdempotentWrite` on `Cluster("kafka-cluster")` (idempotent-only
+/// path) (slice-13 T20).
+async fn handle_init_producer_id_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 22);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let principal = auth
+        .principal()
+        .cloned()
+        .unwrap_or_else(|| crabka_security::Principal {
+            name: "ANONYMOUS".to_string(),
+            mechanism: crabka_security::SaslMechanism::Plain,
+        });
+
+    let resp_body = crate::handlers::init_producer_id::handle(
+        broker,
+        api_version,
+        correlation_id,
+        body,
+        &principal,
+        peer,
+    )
+    .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch an `AddPartitionsToTxn` (`api_key` 24) frame. Pulls
+/// the authenticated principal off the per-connection `auth` state and
+/// the peer `SocketAddr` from the accept-time capture so the handler can
+/// authorize `Write` on `TransactionalId` AND per-topic `Write` on
+/// `Topic` (slice-13 T20).
+async fn handle_add_partitions_to_txn_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 24);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let principal = auth
+        .principal()
+        .cloned()
+        .unwrap_or_else(|| crabka_security::Principal {
+            name: "ANONYMOUS".to_string(),
+            mechanism: crabka_security::SaslMechanism::Plain,
+        });
+
+    let resp_body = crate::txn::handlers::add_partitions_to_txn::handle(
+        broker,
+        api_version,
+        correlation_id,
+        body,
+        &principal,
+        peer,
+    )
+    .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch an `EndTxn` (`api_key` 26) frame. Pulls the
+/// authenticated principal off the per-connection `auth` state and the
+/// peer `SocketAddr` from the accept-time capture so the handler can
+/// authorize `Write` on `TransactionalId` (slice-13 T20).
+async fn handle_end_txn_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 26);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let principal = auth
+        .principal()
+        .cloned()
+        .unwrap_or_else(|| crabka_security::Principal {
+            name: "ANONYMOUS".to_string(),
+            mechanism: crabka_security::SaslMechanism::Plain,
+        });
+
+    let resp_body = crate::txn::handlers::end_txn::handle(
+        broker,
+        api_version,
+        correlation_id,
+        body,
+        &principal,
+        peer,
+    )
+    .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch a `TxnOffsetCommit` (`api_key` 28) frame. Pulls the
+/// authenticated principal off the per-connection `auth` state and the
+/// peer `SocketAddr` from the accept-time capture so the handler can
+/// authorize `Write` on `TransactionalId` + `Read` on `Group` +
+/// per-topic `Read` on `Topic` (slice-13 T20).
+async fn handle_txn_offset_commit_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 28);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let principal = auth
+        .principal()
+        .cloned()
+        .unwrap_or_else(|| crabka_security::Principal {
+            name: "ANONYMOUS".to_string(),
+            mechanism: crabka_security::SaslMechanism::Plain,
+        });
+
+    let resp_body = crate::txn::handlers::txn_offset_commit::handle(
+        broker,
+        api_version,
+        correlation_id,
+        body,
+        &principal,
+        peer,
+    )
+    .await?;
     Ok(encode_response(
         api_key,
         correlation_id,
@@ -505,6 +1947,9 @@ fn handler_body_flexible(api_key: i16, version: i16) -> bool {
         26 => version >= owned::end_txn_request::FLEXIBLE_MIN,
         27 => version >= owned::write_txn_markers_request::FLEXIBLE_MIN,
         28 => version >= owned::txn_offset_commit_request::FLEXIBLE_MIN,
+        29 => version >= owned::describe_acls_request::FLEXIBLE_MIN,
+        30 => version >= owned::create_acls_request::FLEXIBLE_MIN,
+        31 => version >= owned::delete_acls_request::FLEXIBLE_MIN,
         32 => version >= owned::describe_configs_request::FLEXIBLE_MIN,
         33 => version >= owned::alter_configs_request::FLEXIBLE_MIN,
         36 => version >= owned::sasl_authenticate_request::FLEXIBLE_MIN,

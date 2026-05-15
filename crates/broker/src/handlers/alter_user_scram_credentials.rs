@@ -13,9 +13,10 @@
 //!   `UNACCEPTABLE_CREDENTIAL`.
 //! - Unknown mechanism wire value → `UNACCEPTABLE_CREDENTIAL`.
 //!
-//! Authorization stand-in (no full ACL system in slice 12): the request
-//! principal's `name` must equal `BrokerConfig::super_user_name`. Otherwise
-//! every per-user result is `CLUSTER_AUTHORIZATION_FAILED` (31).
+//! Authorization (slice-13): `Alter` on `Cluster("kafka-cluster")`. On Deny,
+//! every per-user result is `CLUSTER_AUTHORIZATION_FAILED` (31). The
+//! authorizer's super-user bypass still handles slice-12 tests (they configure
+//! `super_user_name`, which short-circuits inside `authorize` → ALLOW).
 //!
 //! Duplicate detection: the same `(user, mechanism)` appearing twice in one
 //! request (either two upsertions, two deletions, or one of each) gets
@@ -30,8 +31,11 @@
 //! image consistent across multiple rows in the same request.
 
 use std::collections::HashSet;
+use std::net::SocketAddr;
 
-use crabka_metadata::{DeleteScramCredentialRecord, MetadataRecord, ScramCredentialRecord};
+use crabka_metadata::{
+    AclOperation, DeleteScramCredentialRecord, MetadataRecord, ScramCredentialRecord,
+};
 use crabka_protocol::owned::alter_user_scram_credentials_request::{
     AlterUserScramCredentialsRequest, ScramCredentialDeletion, ScramCredentialUpsertion,
 };
@@ -40,6 +44,7 @@ use crabka_protocol::owned::alter_user_scram_credentials_response::{
 };
 use crabka_security::{Principal, SaslMechanism};
 
+use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize};
 use crate::broker::Broker;
 use crate::codes;
 
@@ -53,12 +58,25 @@ pub(crate) async fn handle(
     broker: &Broker,
     req: AlterUserScramCredentialsRequest,
     principal: &Principal,
+    peer: &SocketAddr,
 ) -> AlterUserScramCredentialsResponse {
-    let authorized = broker
-        .config
-        .super_user_name
-        .as_deref()
-        .is_some_and(|s| s == principal.name);
+    // ── slice-13 ACL preamble ────────────────────────────────────────
+    // Whole-request Cluster Alter gate. On Deny, every per-user row
+    // reports CLUSTER_AUTHORIZATION_FAILED. The authorizer's super-user
+    // bypass still handles slice-12 tests (they configure
+    // `super_user_name`, which short-circuits inside `authorize` → ALLOW).
+    let image = broker.controller.current_image();
+    let authorized = authorize(
+        &image,
+        broker.config.super_user_name.as_deref(),
+        &AuthorizationRequest {
+            principal,
+            host: peer,
+            resource_type: crabka_metadata::ResourceType::Cluster,
+            resource_name: "kafka-cluster",
+            operation: AclOperation::Alter,
+        },
+    ) == AuthorizationResult::Allow;
 
     let mut seen: HashSet<(String, i8)> = HashSet::new();
     let mut user_results: Vec<AlterUserScramCredentialsResult> = Vec::new();
