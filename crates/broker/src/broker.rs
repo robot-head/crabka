@@ -53,7 +53,9 @@ impl Broker {
 pub struct BrokerHandle {
     listen_addr: SocketAddr,
     shutdown: CancellationToken,
-    listener_task: Option<JoinHandle<()>>,
+    /// One task per `ListenerSpec` bound during `Broker::start`. `shutdown()`
+    /// awaits every task to drain in-flight connections.
+    listener_tasks: Vec<JoinHandle<()>>,
     /// Held so partition writer tasks live as long as the handle.
     _broker: Arc<Broker>,
 }
@@ -354,7 +356,7 @@ impl BrokerHandle {
             let _ = h.await;
         }
         self.shutdown.cancel();
-        if let Some(t) = self.listener_task.take() {
+        for t in self.listener_tasks.drain(..) {
             let _ = t.await;
         }
         // Shut down the raft engine so this broker's openraft instance stops
@@ -617,12 +619,30 @@ impl Broker {
         // 5. Build handler table.
         let handlers = crate::handlers::build_table();
 
-        // 6. Bind first so the actual port is known. If
-        //    `advertised_listener` points at port 0 (tests typically),
-        //    rewrite it to the bound port so FindCoordinator/Metadata
-        //    return a useful host:port instead of `:0`.
-        let listener = TcpListener::bind(config.listen_addr).await?;
-        let listen_addr = listener.local_addr()?;
+        // 6. Bind one TcpListener per `ListenerSpec`. The legacy single-listener
+        //    path is preserved via `effective_listeners()`, which synthesizes
+        //    one PLAINTEXT spec from `listen_addr` + `advertised_listener` when
+        //    `config.listeners` is empty.
+        //
+        //    Picks a canonical `listen_addr` for `BrokerHandle::listen_addr()`:
+        //    the inter-broker listener's actual bound address when present,
+        //    otherwise the first bound listener.
+        let listeners_spec = config.effective_listeners();
+        let mut bound: Vec<(crate::config::ListenerSpec, TcpListener, SocketAddr)> =
+            Vec::with_capacity(listeners_spec.len());
+        for spec in listeners_spec {
+            let listener = TcpListener::bind(spec.bind_addr).await?;
+            let actual = listener.local_addr()?;
+            bound.push((spec, listener, actual));
+        }
+        let listen_addr = bound
+            .iter()
+            .find(|(spec, _, _)| spec.name == config.inter_broker_listener_name)
+            .map_or(bound[0].2, |(_, _, a)| *a);
+
+        // If the legacy `advertised_listener` points at port 0 (tests typically),
+        // rewrite it to the canonical bound port so FindCoordinator/Metadata
+        // return a useful host:port instead of `:0`.
         if config.advertised_listener.ends_with(":0")
             && let Some((host, _)) = config.advertised_listener.rsplit_once(':')
         {
@@ -643,12 +663,21 @@ impl Broker {
         });
 
         let shutdown = CancellationToken::new();
-        let listener_task = tokio::spawn(accept_loop(broker.clone(), listener, shutdown.clone()));
+        let mut listener_tasks = Vec::with_capacity(bound.len());
+        for (spec, listener, _) in bound {
+            let task = tokio::spawn(accept_loop(
+                broker.clone(),
+                listener,
+                spec,
+                shutdown.clone(),
+            ));
+            listener_tasks.push(task);
+        }
 
         Ok(BrokerHandle {
             listen_addr,
             shutdown,
-            listener_task: Some(listener_task),
+            listener_tasks,
             _broker: broker,
         })
     }
@@ -690,24 +719,30 @@ pub(crate) fn spawn_partition(
     })
 }
 
-async fn accept_loop(broker: Arc<Broker>, listener: TcpListener, shutdown: CancellationToken) {
+async fn accept_loop(
+    broker: Arc<Broker>,
+    listener: TcpListener,
+    spec: crate::config::ListenerSpec,
+    shutdown: CancellationToken,
+) {
     loop {
         tokio::select! {
             () = shutdown.cancelled() => {
-                tracing::info!("listener shutting down");
+                tracing::info!(name = %spec.name, "listener shutting down");
                 break;
             }
             accept = listener.accept() => {
                 match accept {
                     Ok((stream, peer)) => {
-                        tracing::debug!(%peer, "accepted connection");
+                        tracing::debug!(%peer, name = %spec.name, "accepted connection");
                         let b = broker.clone();
+                        let s = spec.clone();
                         tokio::spawn(async move {
-                            crate::network::dispatch::serve_connection(b, stream).await;
+                            crate::network::dispatch::serve_connection_on_listener(b, stream, s).await;
                         });
                     }
                     Err(e) => {
-                        tracing::warn!(error = %e, "accept failed");
+                        tracing::warn!(error = %e, name = %spec.name, "accept failed");
                     }
                 }
             }

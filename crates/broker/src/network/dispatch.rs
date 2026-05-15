@@ -26,8 +26,29 @@ use crate::network::codec::{self, MAX_FRAME_BYTES};
 
 const API_VERSIONS_KEY: i16 = 18;
 
+/// Per-listener entrypoint. The plaintext path delegates straight to
+/// [`serve_connection_plaintext`]; Task 10 adds the TLS handshake branch
+/// here based on `spec.protocol.requires_tls()`.
+pub async fn serve_connection_on_listener(
+    broker: std::sync::Arc<Broker>,
+    stream: TcpStream,
+    spec: crate::config::ListenerSpec,
+) {
+    // Task 10 wraps `stream` in tokio_rustls when spec.protocol.requires_tls().
+    // For now: plaintext path identical to the old `serve_connection`.
+    serve_connection_plaintext(broker, stream, spec).await;
+}
+
 /// Run the connection's read/dispatch/write loop until the peer disconnects.
-pub async fn serve_connection(broker: std::sync::Arc<Broker>, stream: TcpStream) {
+///
+/// Body is identical to the pre-T9 `serve_connection`; the `_spec` parameter
+/// is unused today and will carry the listener's protocol / name into the
+/// per-connection state added in T12.
+async fn serve_connection_plaintext(
+    broker: std::sync::Arc<Broker>,
+    stream: TcpStream,
+    _spec: crate::config::ListenerSpec,
+) {
     let peer = stream
         .peer_addr()
         .map_or_else(|_| "<unknown>".to_string(), |a| a.to_string());
