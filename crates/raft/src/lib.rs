@@ -48,6 +48,7 @@
 mod config;
 mod controller;
 mod error;
+pub mod handshake;
 mod log_store;
 mod network;
 mod server;
@@ -58,6 +59,7 @@ mod wire;
 pub use config::{BootstrapMode, ControllerConfig};
 pub use controller::{Controller, ControllerHandle};
 pub use error::RaftError;
+pub use handshake::{DuplexStream, RaftHandshakeError, RaftListenerHandshake};
 pub use network::OutboundDialer;
 pub use types::{AppData, AppDataResponse, Node, NodeId, Raft, TypeConfig};
 pub use wire::{
