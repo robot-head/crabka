@@ -77,6 +77,15 @@ Pre-1.0, pre-alpha. No production use.
   `crabka format --add-acl` for bootstrap. Compatibility shim
   preserves slice 11/12 test behavior when no ACLs AND no super-user
   are configured.
+- **Slice 13b** — ACL polish: operation implications
+  (`Read`/`Write`/`Delete`/`Alter` → `Describe`; `AlterConfigs` →
+  `DescribeConfigs`) match Kafka's `StandardAuthorizer` semantics.
+  Multi-super-user config: `BrokerConfig::super_users` is a
+  `HashSet<String>` so deployments can grant `super.users`-style
+  privileges to multiple identities. Workaround Describe-ACL seeds
+  in slice-12 SCRAM and slice-13 ACL JVM tests removed; standard
+  `kafka-acls.sh --operation Read ...` now works end-to-end without
+  extra Describe grants.
 
 ## Published crates
 
