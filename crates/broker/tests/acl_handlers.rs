@@ -137,6 +137,31 @@ fn sasl_plain_broker_config(
     cfg
 }
 
+/// Like `sasl_plain_broker_config` but accepts multiple super-users. Used by
+/// the slice-13b `multi_super_user_both_can_provision` test to verify that
+/// any principal in the `super_users` set can drive privileged admin APIs.
+fn sasl_plain_broker_config_multi_super(
+    log_dir: &std::path::Path,
+    creds: &[(&str, &str)],
+    super_users: &[&str],
+) -> BrokerConfig {
+    let mut cfg = BrokerConfig::for_tests(log_dir.to_path_buf());
+    cfg.listeners = vec![ListenerSpec {
+        name: "SASL_PLAINTEXT".to_string(),
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        advertised: "127.0.0.1:0".to_string(),
+        protocol: ListenerProtocol::SaslPlaintext,
+    }];
+    cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
+    cfg.enabled_sasl_mechanisms = vec![SaslMechanism::Plain];
+    for (u, p) in creds {
+        cfg.plain_credentials
+            .insert((*u).to_string(), (*p).to_string());
+    }
+    cfg.super_users = super_users.iter().map(|s| (*s).to_string()).collect();
+    cfg
+}
+
 /// Shorthand for `Allow <op> on Topic LITERAL <name> for <principal> from *`.
 /// Every test in this file uses literal Topic ACLs with host `*`, so the only
 /// dimensions that vary per binding are `resource_name`, `principal`, and
@@ -956,6 +981,192 @@ async fn init_producer_id_denied_without_txn_acl() {
         resp.error_code, ERR_TRANSACTIONAL_ID_AUTHORIZATION_FAILED,
         "alice has no TransactionalId Write ACL on tx-1, expected TRANSACTIONAL_ID_AUTHORIZATION_FAILED (53), got {resp:?}"
     );
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Slice 13b: operation-implication + multi-super-user integration tests.
+//
+// These cover the end-to-end implications: a Read or Write ACL on a topic
+// also grants Describe (so Metadata-by-name no longer needs a separate
+// Describe seed), and a CreateAcls request from any principal in the
+// `super_users` set succeeds while a non-super principal still gets
+// CLUSTER_AUTHORIZATION_FAILED per binding.
+// ────────────────────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn implication_metadata_describes_after_read_acl() {
+    let log_dir = tempfile::tempdir().unwrap();
+    let cfg = sasl_plain_broker_config(
+        log_dir.path(),
+        &[("admin", "admin-secret"), ("alice", "wonderland")],
+        Some("admin"),
+    );
+
+    let handle = Broker::start(cfg).await.expect("broker must start");
+    let addr = handle.listen_addr();
+
+    create_topic_as_admin(addr, "foo", 1).await;
+
+    // Seed Allow READ Topic LITERAL "foo" User:alice host=*. No explicit
+    // Describe ACL — relies on slice-13b's Read→Describe implication for
+    // the Metadata-by-name visibility check.
+    handle
+        .submit_metadata_record_for_test(crabka_metadata::MetadataRecord::V1AccessControlEntry(
+            crabka_metadata::AclEntry {
+                resource_type: crabka_metadata::ResourceType::Topic,
+                resource_name: "foo".into(),
+                pattern_type: crabka_metadata::PatternType::Literal,
+                principal: "User:alice".into(),
+                host: "*".into(),
+                operation: crabka_metadata::AclOperation::Read,
+                permission_type: crabka_metadata::PermissionType::Allow,
+            },
+        ))
+        .await
+        .expect("seed Read-on-foo ACL for alice");
+
+    // Wait for raft commit-then-apply, then ask Metadata for foo by name.
+    // Pre-13b would have returned TOPIC_AUTHORIZATION_FAILED (29).
+    let resp = retry_metadata_until_topic_visible(
+        addr,
+        "alice",
+        b"wonderland",
+        "foo",
+        Some(vec!["foo".to_string()]),
+    )
+    .await
+    .expect("Metadata must round-trip");
+    handle.shutdown().await;
+
+    assert_eq!(resp.topics.len(), 1, "one topic row in response");
+    let row = &resp.topics[0];
+    assert_eq!(row.name.as_deref(), Some("foo"));
+    assert_eq!(
+        row.error_code, 0,
+        "Read implies Describe, foo must be visible to alice with error_code=0, got {row:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn implication_metadata_describes_after_write_acl() {
+    let log_dir = tempfile::tempdir().unwrap();
+    let cfg = sasl_plain_broker_config(
+        log_dir.path(),
+        &[("admin", "admin-secret"), ("alice", "wonderland")],
+        Some("admin"),
+    );
+
+    let handle = Broker::start(cfg).await.expect("broker must start");
+    let addr = handle.listen_addr();
+
+    create_topic_as_admin(addr, "foo", 1).await;
+
+    // Seed Allow WRITE Topic LITERAL "foo" User:alice host=*. No explicit
+    // Describe ACL — relies on slice-13b's Write→Describe implication.
+    handle
+        .submit_metadata_record_for_test(crabka_metadata::MetadataRecord::V1AccessControlEntry(
+            crabka_metadata::AclEntry {
+                resource_type: crabka_metadata::ResourceType::Topic,
+                resource_name: "foo".into(),
+                pattern_type: crabka_metadata::PatternType::Literal,
+                principal: "User:alice".into(),
+                host: "*".into(),
+                operation: crabka_metadata::AclOperation::Write,
+                permission_type: crabka_metadata::PermissionType::Allow,
+            },
+        ))
+        .await
+        .expect("seed Write-on-foo ACL for alice");
+
+    let resp = retry_metadata_until_topic_visible(
+        addr,
+        "alice",
+        b"wonderland",
+        "foo",
+        Some(vec!["foo".to_string()]),
+    )
+    .await
+    .expect("Metadata must round-trip");
+    handle.shutdown().await;
+
+    assert_eq!(resp.topics.len(), 1, "one topic row in response");
+    let row = &resp.topics[0];
+    assert_eq!(row.name.as_deref(), Some("foo"));
+    assert_eq!(
+        row.error_code, 0,
+        "Write implies Describe, foo must be visible to alice with error_code=0, got {row:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn multi_super_user_both_can_provision() {
+    let log_dir = tempfile::tempdir().unwrap();
+    // Two super-users: admin + ops-bot. alice has PLAIN creds but is NOT
+    // in the super-users set, so her CreateAcls must hit the cluster gate.
+    let cfg = sasl_plain_broker_config_multi_super(
+        log_dir.path(),
+        &[
+            ("admin", "admin-secret"),
+            ("ops-bot", "ops-secret"),
+            ("alice", "wonderland"),
+        ],
+        &["admin", "ops-bot"],
+    );
+
+    let handle = Broker::start(cfg).await.expect("broker must start");
+    let addr = handle.listen_addr();
+
+    // admin (super-user #1) must succeed.
+    let admin_req = CreateAclsRequest {
+        creations: vec![topic_allow_creation("t-admin", "User:bob", OPERATION_READ)],
+        ..Default::default()
+    };
+    let admin_resp = drive_create_acls_as_plain(addr, "admin", b"admin-secret", admin_req)
+        .await
+        .expect("CreateAcls as admin must round-trip");
+    assert_eq!(admin_resp.results.len(), 1);
+    assert_eq!(
+        admin_resp.results[0].error_code, 0,
+        "admin is a super-user, CreateAcls must succeed: {:?}",
+        admin_resp.results[0]
+    );
+
+    // ops-bot (super-user #2) must also succeed.
+    let ops_req = CreateAclsRequest {
+        creations: vec![topic_allow_creation("t-ops", "User:carol", OPERATION_WRITE)],
+        ..Default::default()
+    };
+    let ops_resp = drive_create_acls_as_plain(addr, "ops-bot", b"ops-secret", ops_req)
+        .await
+        .expect("CreateAcls as ops-bot must round-trip");
+    assert_eq!(ops_resp.results.len(), 1);
+    assert_eq!(
+        ops_resp.results[0].error_code, 0,
+        "ops-bot is a super-user, CreateAcls must succeed: {:?}",
+        ops_resp.results[0]
+    );
+
+    // alice (not in super-set, no Cluster Alter ACL) must be denied per
+    // binding with CLUSTER_AUTHORIZATION_FAILED (31).
+    let alice_req = CreateAclsRequest {
+        creations: vec![
+            topic_allow_creation("t-x", "User:dave", OPERATION_READ),
+            topic_allow_creation("t-y", "User:eve", OPERATION_WRITE),
+        ],
+        ..Default::default()
+    };
+    let alice_resp = drive_create_acls_as_plain(addr, "alice", b"wonderland", alice_req)
+        .await
+        .expect("CreateAcls request must round-trip even when denied");
+    handle.shutdown().await;
+
+    assert_eq!(alice_resp.results.len(), 2);
+    for (i, r) in alice_resp.results.iter().enumerate() {
+        assert_eq!(
+            r.error_code, 31, /* CLUSTER_AUTHORIZATION_FAILED */
+            "binding {i} must be denied for alice (not in super_users), got {r:?}"
+        );
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────────

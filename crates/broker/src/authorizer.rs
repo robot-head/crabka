@@ -614,4 +614,153 @@ mod tests {
             AuthorizationResult::Deny,
         );
     }
+
+    fn acl_op_on(
+        rt: ResourceType,
+        permission: PermissionType,
+        op: AclOperation,
+        name: &str,
+    ) -> AclEntry {
+        AclEntry {
+            resource_type: rt,
+            resource_name: name.into(),
+            pattern_type: PatternType::Literal,
+            principal: "User:alice".into(),
+            host: "*".into(),
+            operation: op,
+            permission_type: permission,
+        }
+    }
+
+    fn req_on<'a>(
+        p: &'a Principal,
+        host: &'a SocketAddr,
+        rt: ResourceType,
+        name: &'a str,
+        op: AclOperation,
+    ) -> AuthorizationRequest<'a> {
+        AuthorizationRequest {
+            principal: p,
+            host,
+            resource_type: rt,
+            resource_name: name,
+            operation: op,
+        }
+    }
+
+    #[test]
+    fn implication_works_on_group_resource() {
+        let mut img = img();
+        img.apply(&MetadataRecord::V1AccessControlEntry(acl_op_on(
+            ResourceType::Group,
+            PermissionType::Allow,
+            AclOperation::Read,
+            "cg-1",
+        )));
+        let a = alice();
+        let h = addr();
+        assert_eq!(
+            authorize(
+                &img,
+                &no_super(),
+                &req_on(&a, &h, ResourceType::Group, "cg-1", AclOperation::Describe)
+            ),
+            AuthorizationResult::Allow,
+        );
+    }
+
+    #[test]
+    fn implication_works_on_cluster_resource() {
+        let mut img = img();
+        img.apply(&MetadataRecord::V1AccessControlEntry(acl_op_on(
+            ResourceType::Cluster,
+            PermissionType::Allow,
+            AclOperation::Alter,
+            "kafka-cluster",
+        )));
+        let a = alice();
+        let h = addr();
+        assert_eq!(
+            authorize(
+                &img,
+                &no_super(),
+                &req_on(
+                    &a,
+                    &h,
+                    ResourceType::Cluster,
+                    "kafka-cluster",
+                    AclOperation::Describe
+                )
+            ),
+            AuthorizationResult::Allow,
+        );
+    }
+
+    #[test]
+    fn implication_works_on_transactional_id_resource() {
+        let mut img = img();
+        img.apply(&MetadataRecord::V1AccessControlEntry(acl_op_on(
+            ResourceType::TransactionalId,
+            PermissionType::Allow,
+            AclOperation::Write,
+            "tx-1",
+        )));
+        let a = alice();
+        let h = addr();
+        assert_eq!(
+            authorize(
+                &img,
+                &no_super(),
+                &req_on(
+                    &a,
+                    &h,
+                    ResourceType::TransactionalId,
+                    "tx-1",
+                    AclOperation::Describe
+                )
+            ),
+            AuthorizationResult::Allow,
+        );
+    }
+
+    #[test]
+    fn multi_super_user_all_bypass() {
+        let img = img();
+        let h = addr();
+        let supers = {
+            let mut s = std::collections::HashSet::new();
+            s.insert("admin".to_string());
+            s.insert("ops-bot".to_string());
+            s
+        };
+        let admin = Principal {
+            name: "admin".into(),
+            mechanism: SaslMechanism::Plain,
+        };
+        let ops = Principal {
+            name: "ops-bot".into(),
+            mechanism: SaslMechanism::Plain,
+        };
+        let alice = alice();
+        assert_eq!(
+            authorize(&img, &supers, &req(&admin, &h, "foo", AclOperation::Write)),
+            AuthorizationResult::Allow,
+        );
+        assert_eq!(
+            authorize(&img, &supers, &req(&ops, &h, "foo", AclOperation::Write)),
+            AuthorizationResult::Allow,
+        );
+        // alice would hit the compat shim with an empty image; force a
+        // non-empty image by adding an unrelated ACL.
+        let mut img2 = img;
+        img2.apply(&MetadataRecord::V1AccessControlEntry(topic_acl_op(
+            PermissionType::Allow,
+            AclOperation::Read,
+            "_other",
+        )));
+        assert_eq!(
+            authorize(&img2, &supers, &req(&alice, &h, "foo", AclOperation::Write)),
+            AuthorizationResult::Deny,
+        );
+    }
 }
