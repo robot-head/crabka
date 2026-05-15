@@ -81,7 +81,9 @@ pub(crate) mod sync_group;
 #[must_use]
 pub(crate) fn build_table() -> HandlerTable {
     let mut t = HandlerTable::new();
-    t.register(0, produce::handle);
+    // Produce (api_key 0) is intercepted inline in `network::dispatch`
+    // (slice-13 T10) so the handler can receive the per-connection
+    // principal + peer `SocketAddr` for per-topic Write ACL enforcement.
     t.register(1, fetch::handle);
     t.register(2, list_offsets::handle);
     t.register(3, metadata::handle);

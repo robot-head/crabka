@@ -194,6 +194,28 @@ async fn serve_connection_stream<S>(
                 }
             }
         }
+        // Produce (0, slice-13 T10) needs both the authenticated
+        // principal AND the peer's `SocketAddr` so the handler can
+        // batch-authorize every topic in the request for `Write` and
+        // emit TOPIC_AUTHORIZATION_FAILED on the per-partition rows of
+        // any topic that comes back `Deny`. The `&Broker`-only handler
+        // table signature can't carry that context, so this api_key
+        // intercepts inline.
+        if peek_api_key(&frame).ok() == Some(0) {
+            match handle_produce_frame(&broker, &frame, &auth, &peer).await {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during Produce, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Produce dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
         // DescribeAcls (29, slice-13 T7) needs both the authenticated
         // principal AND the peer's `SocketAddr` for host-based ACL
         // matching; neither is reachable from the `&Broker`-only handler
@@ -411,6 +433,49 @@ async fn handle_alter_user_scram_credentials_frame(
     let mut buf = BytesMut::with_capacity(resp.encoded_len(api_version));
     resp.encode(&mut buf, api_version)?;
     let resp_body = buf.freeze();
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch a `Produce` (`api_key` 0) frame. Pulls the
+/// authenticated principal off the per-connection `auth` state and the
+/// peer `SocketAddr` from the accept-time capture so the handler can
+/// batch-authorize every topic in the request for `Write` (slice-13 T10).
+/// On PLAINTEXT/SSL listeners the connection is implicitly
+/// `Authenticated { ANONYMOUS / Plain }` (see the loop init), so
+/// `principal()` always returns `Some` here; the `unwrap_or_else`
+/// fallback covers the defensive SASL pre-auth case.
+async fn handle_produce_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 0);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let principal = auth
+        .principal()
+        .cloned()
+        .unwrap_or_else(|| crabka_security::Principal {
+            name: "ANONYMOUS".to_string(),
+            mechanism: crabka_security::SaslMechanism::Plain,
+        });
+
+    let resp_body = crate::handlers::produce::handle(
+        broker,
+        api_version,
+        correlation_id,
+        body,
+        &principal,
+        peer,
+    )
+    .await?;
     Ok(encode_response(
         api_key,
         correlation_id,
