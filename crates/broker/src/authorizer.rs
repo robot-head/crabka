@@ -87,7 +87,7 @@ pub fn authorize<S: std::hash::BuildHasher>(
     for entry in image.matching_acls(req.resource_type, req.resource_name) {
         if !matches_principal(entry, &user_pattern)
             || !matches_host(entry, &host_str)
-            || !matches_operation(entry, req.operation)
+            || !matches_operation(entry.operation, req.operation)
         {
             continue;
         }
@@ -111,8 +111,39 @@ fn matches_host(entry: &AclEntry, host: &str) -> bool {
     entry.host == "*" || entry.host == host
 }
 
-fn matches_operation(entry: &AclEntry, op: AclOperation) -> bool {
-    matches!(entry.operation, AclOperation::All) || entry.operation == op
+/// Returns true when an ACL with `stored` operation grants access for
+/// an authorization request with `requested` operation. Beyond exact
+/// match and the `All` wildcard, applies Kafka's operation-implication
+/// table:
+///
+/// | stored          | implies                |
+/// |-----------------|------------------------|
+/// | Read            | Describe               |
+/// | Write           | Describe               |
+/// | Delete          | Describe               |
+/// | Alter           | Describe               |
+/// | `AlterConfigs`  | `DescribeConfigs`      |
+/// | All             | Everything             |
+///
+/// The table is one-way: Describe does NOT imply Read, etc.
+fn matches_operation(stored: AclOperation, requested: AclOperation) -> bool {
+    if stored == requested {
+        return true;
+    }
+    if matches!(stored, AclOperation::All) {
+        return true;
+    }
+    implies(stored, requested)
+}
+
+fn implies(stored: AclOperation, requested: AclOperation) -> bool {
+    matches!(
+        (stored, requested),
+        (
+            AclOperation::Read | AclOperation::Write | AclOperation::Delete | AclOperation::Alter,
+            AclOperation::Describe,
+        ) | (AclOperation::AlterConfigs, AclOperation::DescribeConfigs)
+    )
 }
 
 #[cfg(test)]
@@ -452,6 +483,134 @@ mod tests {
         );
         assert_eq!(
             authorize(&img, &no_super(), &req(&a, &h, "foo", AclOperation::Write)),
+            AuthorizationResult::Deny,
+        );
+    }
+
+    fn topic_acl_op(permission: PermissionType, op: AclOperation, name: &str) -> AclEntry {
+        AclEntry {
+            resource_type: ResourceType::Topic,
+            resource_name: name.into(),
+            pattern_type: PatternType::Literal,
+            principal: "User:alice".into(),
+            host: "*".into(),
+            operation: op,
+            permission_type: permission,
+        }
+    }
+
+    #[test]
+    fn read_implies_describe_on_topic() {
+        let mut img = img();
+        img.apply(&MetadataRecord::V1AccessControlEntry(topic_acl_op(
+            PermissionType::Allow,
+            AclOperation::Read,
+            "foo",
+        )));
+        let a = alice();
+        let h = addr();
+        assert_eq!(
+            authorize(
+                &img,
+                &no_super(),
+                &req(&a, &h, "foo", AclOperation::Describe)
+            ),
+            AuthorizationResult::Allow,
+        );
+    }
+
+    #[test]
+    fn write_implies_describe_on_topic() {
+        let mut img = img();
+        img.apply(&MetadataRecord::V1AccessControlEntry(topic_acl_op(
+            PermissionType::Allow,
+            AclOperation::Write,
+            "foo",
+        )));
+        let a = alice();
+        let h = addr();
+        assert_eq!(
+            authorize(
+                &img,
+                &no_super(),
+                &req(&a, &h, "foo", AclOperation::Describe)
+            ),
+            AuthorizationResult::Allow,
+        );
+    }
+
+    #[test]
+    fn delete_implies_describe() {
+        let mut img = img();
+        img.apply(&MetadataRecord::V1AccessControlEntry(topic_acl_op(
+            PermissionType::Allow,
+            AclOperation::Delete,
+            "foo",
+        )));
+        let a = alice();
+        let h = addr();
+        assert_eq!(
+            authorize(
+                &img,
+                &no_super(),
+                &req(&a, &h, "foo", AclOperation::Describe)
+            ),
+            AuthorizationResult::Allow,
+        );
+    }
+
+    #[test]
+    fn alter_implies_describe() {
+        let mut img = img();
+        img.apply(&MetadataRecord::V1AccessControlEntry(topic_acl_op(
+            PermissionType::Allow,
+            AclOperation::Alter,
+            "foo",
+        )));
+        let a = alice();
+        let h = addr();
+        assert_eq!(
+            authorize(
+                &img,
+                &no_super(),
+                &req(&a, &h, "foo", AclOperation::Describe)
+            ),
+            AuthorizationResult::Allow,
+        );
+    }
+
+    #[test]
+    fn alter_configs_implies_describe_configs() {
+        let mut img = img();
+        img.apply(&MetadataRecord::V1AccessControlEntry(topic_acl_op(
+            PermissionType::Allow,
+            AclOperation::AlterConfigs,
+            "foo",
+        )));
+        let a = alice();
+        let h = addr();
+        assert_eq!(
+            authorize(
+                &img,
+                &no_super(),
+                &req(&a, &h, "foo", AclOperation::DescribeConfigs)
+            ),
+            AuthorizationResult::Allow,
+        );
+    }
+
+    #[test]
+    fn describe_does_not_imply_read() {
+        let mut img = img();
+        img.apply(&MetadataRecord::V1AccessControlEntry(topic_acl_op(
+            PermissionType::Allow,
+            AclOperation::Describe,
+            "foo",
+        )));
+        let a = alice();
+        let h = addr();
+        assert_eq!(
+            authorize(&img, &no_super(), &req(&a, &h, "foo", AclOperation::Read)),
             AuthorizationResult::Deny,
         );
     }
