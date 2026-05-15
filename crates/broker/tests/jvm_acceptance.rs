@@ -3319,13 +3319,14 @@ async fn jvm_inter_broker_replication_authed() {
 
 /// Slice 12b: spawn two in-process brokers that share an inter-broker SASL
 /// credential AND both terminate TLS on the data plane and the controller
-/// quorum listener. Mirrors [`start_two_sasl_brokers`] but with the SASL_SSL
+/// quorum listener. Mirrors [`start_two_sasl_brokers`] but with the `SASL_SSL`
 /// listener protocol + `controller_listener_protocol = ctrl` (typically
 /// `ListenerProtocol::SaslSsl`). Each broker advertises
 /// `host.docker.internal:<port>` so the JVM containers can reach them via
 /// `--add-host=host.docker.internal:host-gateway` AND so each broker can
 /// dial its peer using the same host name.
 #[cfg(not(target_os = "windows"))]
+#[allow(clippy::too_many_lines)]
 async fn start_two_sasl_ssl_brokers_with_controller_protocol(
     ctrl_protocol: crabka_security::ListenerProtocol,
     admin: &str,
@@ -3467,20 +3468,20 @@ async fn start_two_sasl_ssl_brokers_with_controller_protocol(
     (broker0, broker1, dir0, dir1)
 }
 
-/// Slice 12b: two-broker SASL_SSL cluster with `controller_listener_protocol =
+/// Slice 12b: two-broker `SASL_SSL` cluster with `controller_listener_protocol =
 /// SaslSsl`. Provisions a SCRAM user, produces rf=2 via JVM client, asserts
 /// both brokers replicate the records. Supersedes slice 12 T23's simplified
 /// inter-broker test (which only proved metadata convergence) by exercising
 /// the full production-shape stack: TLS-terminated controller raft RPC,
 /// TLS-terminated data-plane SASL, and rf=2 follower replication.
 ///
-/// Networking: like the SASL_PLAINTEXT inter-broker test, this advertises
+/// Networking: like the `SASL_PLAINTEXT` inter-broker test, this advertises
 /// `host.docker.internal:<port>` so the JVM containers can reach the
-/// brokers. Under WSL2 the broker→broker InterBrokerClient hop may fail
+/// brokers. Under WSL2 the broker→broker `InterBrokerClient` hop may fail
 /// because `host.docker.internal` resolves to the Windows host IP, not the
 /// WSL VM where the peers live. The CI runner's `/etc/hosts` setup makes
 /// that hop work end-to-end; on WSL the test may time out at the rf=2
-/// offset check even though SASL_SSL itself is correctly wired.
+/// offset check even though `SASL_SSL` itself is correctly wired.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires Docker"]
 #[allow(clippy::too_many_lines)]
@@ -3585,7 +3586,7 @@ async fn jvm_inter_broker_sasl_ssl_raft_replication() {
     );
 
     // Wait for the topic to materialize on both brokers.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_mins(1);
     loop {
         let on_b0 = broker0.has_partition(TOPIC, 0).await;
         let on_b1 = broker1.has_partition(TOPIC, 0).await;
