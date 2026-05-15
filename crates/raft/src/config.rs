@@ -2,8 +2,10 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
+use crate::network::OutboundDialer;
 use crate::types::NodeId;
 
 /// Bootstrap orchestration for a freshly-formatted controller node.
@@ -41,7 +43,7 @@ pub enum BootstrapMode {
     Rejoin,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ControllerConfig {
     pub node_id: NodeId,
     pub voters: Vec<(NodeId, SocketAddr)>,
@@ -51,6 +53,27 @@ pub struct ControllerConfig {
     pub heartbeat_interval: Duration,
     pub client_id: String,
     pub bootstrap_mode: BootstrapMode,
+    /// Optional outbound dialer. `None` means: open a plain TCP socket
+    /// to peers (legacy PLAINTEXT-only path). The broker injects an
+    /// `InterBrokerClient`-backed dialer here when inter-broker TLS or
+    /// SASL is configured.
+    pub dialer: Option<Arc<dyn OutboundDialer>>,
+}
+
+impl std::fmt::Debug for ControllerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ControllerConfig")
+            .field("node_id", &self.node_id)
+            .field("voters", &self.voters)
+            .field("controller_listen_addr", &self.controller_listen_addr)
+            .field("log_dir", &self.log_dir)
+            .field("election_timeout", &self.election_timeout)
+            .field("heartbeat_interval", &self.heartbeat_interval)
+            .field("client_id", &self.client_id)
+            .field("bootstrap_mode", &self.bootstrap_mode)
+            .field("dialer", &self.dialer.is_some())
+            .finish()
+    }
 }
 
 impl ControllerConfig {
@@ -65,6 +88,7 @@ impl ControllerConfig {
             heartbeat_interval: Duration::from_millis(200),
             client_id: "crabka-controller-test".into(),
             bootstrap_mode: BootstrapMode::Bootstrap,
+            dialer: None,
         }
     }
 }

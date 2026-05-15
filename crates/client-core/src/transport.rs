@@ -6,6 +6,7 @@
 #![allow(dead_code)]
 
 use bytes::BufMut;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
@@ -27,6 +28,17 @@ pub fn codec() -> LengthDelimitedCodec {
 
 /// Wrap a `TcpStream` with the Kafka length-delimited codec.
 pub fn frame(stream: TcpStream) -> Framed<TcpStream, LengthDelimitedCodec> {
+    Framed::new(stream, codec())
+}
+
+/// Generic wrapper: wrap any `AsyncRead + AsyncWrite` stream with the
+/// Kafka length-delimited codec. Used by [`crate::Connection::from_stream`]
+/// so callers can hand in a pre-authenticated stream (e.g., the output of
+/// the broker's `InterBrokerClient` after TLS + SASL).
+pub fn frame_generic<S>(stream: S) -> Framed<S, LengthDelimitedCodec>
+where
+    S: AsyncRead + AsyncWrite,
+{
     Framed::new(stream, codec())
 }
 

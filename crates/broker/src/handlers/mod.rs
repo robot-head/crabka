@@ -45,6 +45,7 @@ impl HandlerTable {
 
 pub(crate) mod alter_configs;
 pub(crate) mod alter_partition;
+pub(crate) mod alter_user_scram_credentials;
 pub(crate) mod api_versions;
 pub(crate) mod broker_heartbeat;
 pub(crate) mod create_partitions;

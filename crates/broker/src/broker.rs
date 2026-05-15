@@ -39,6 +39,15 @@ pub struct Broker {
     pub(crate) supervisor_shutdown: tokio_util::sync::CancellationToken,
     pub(crate) supervisor_handle: tokio::sync::Mutex<Option<JoinHandle<()>>>,
     pub(crate) liveness: Arc<crate::heartbeat::controller_state::ControllerLivenessState>,
+    /// `Some` when `BrokerConfig::tls_config` is set. Per-listener accept
+    /// loops clone this and call `accept` for every TLS connection.
+    pub(crate) tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
+    /// Shared outbound dialer used by the replicator, raft transport,
+    /// and controller-heartbeat loops. When `inter_broker_credentials`
+    /// is `None` and the listener is `PLAINTEXT` the dialer falls back
+    /// to a plain `TcpStream::connect` — the new wiring is transparent
+    /// for the legacy PLAINTEXT-only path.
+    pub(crate) inter_broker_client: Arc<crate::network::client::InterBrokerClient>,
     handlers: HandlerTable,
 }
 
@@ -53,7 +62,9 @@ impl Broker {
 pub struct BrokerHandle {
     listen_addr: SocketAddr,
     shutdown: CancellationToken,
-    listener_task: Option<JoinHandle<()>>,
+    /// One task per `ListenerSpec` bound during `Broker::start`. `shutdown()`
+    /// awaits every task to drain in-flight connections.
+    listener_tasks: Vec<JoinHandle<()>>,
     /// Held so partition writer tasks live as long as the handle.
     _broker: Arc<Broker>,
 }
@@ -91,6 +102,23 @@ impl BrokerHandle {
     #[allow(clippy::unused_async, clippy::used_underscore_binding)]
     pub async fn broker_count(&self) -> usize {
         self._broker.controller.current_image().brokers().count()
+    }
+
+    /// This broker's own registration endpoints, as stored in the
+    /// quorum-replicated [`crabka_metadata::MetadataImage`]. Used by
+    /// Task-11 integration tests to verify per-listener endpoints were
+    /// projected from `BrokerConfig::effective_listeners()` onto the
+    /// self-registration record. Returns the cloned endpoint list (or
+    /// empty if the broker has not yet self-registered).
+    #[allow(clippy::unused_async, clippy::used_underscore_binding)]
+    pub async fn self_registration_endpoints(&self) -> Vec<crabka_metadata::BrokerEndpoint> {
+        let node_id = self._broker.config.node_id;
+        self._broker
+            .controller
+            .current_image()
+            .broker(node_id)
+            .map(|b| b.endpoints.clone())
+            .unwrap_or_default()
     }
 
     /// Manually mutate the openraft voter set on this broker's controller.
@@ -332,6 +360,29 @@ impl BrokerHandle {
         Ok(last_offset)
     }
 
+    /// Test-only: submit a [`crabka_metadata::MetadataRecord`] directly to
+    /// this broker's controller, bypassing the public Kafka APIs. Used by
+    /// Task-14 integration tests to provision a SCRAM credential before the
+    /// `AlterUserScramCredentials` handler (Task 15) exists. Returns an
+    /// error if the submit fails (e.g., this broker is not the raft leader
+    /// and forwarding fails).
+    ///
+    /// # Errors
+    ///
+    /// Forwards the underlying raft errors as [`BrokerError::Replication`].
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[allow(clippy::used_underscore_binding)]
+    pub async fn submit_metadata_record_for_test(
+        &self,
+        rec: crabka_metadata::MetadataRecord,
+    ) -> Result<(), crate::error::BrokerError> {
+        self._broker
+            .controller
+            .submit_change(vec![rec])
+            .await
+            .map_err(|e| crate::error::BrokerError::Replication(format!("submit: {e}")))
+    }
+
     /// Test-only: insert a group into this broker's `GroupManager`. Returns
     /// immediately if the group already exists (idempotent). Used by
     /// admin-handler integration tests to seed the group registry without
@@ -354,7 +405,7 @@ impl BrokerHandle {
             let _ = h.await;
         }
         self.shutdown.cancel();
-        if let Some(t) = self.listener_task.take() {
+        for t in self.listener_tasks.drain(..) {
             let _ = t.await;
         }
         // Shut down the raft engine so this broker's openraft instance stops
@@ -372,10 +423,68 @@ impl Broker {
     /// return the handle.
     #[allow(clippy::too_many_lines)] // sequential bring-up; splitting hurts readability more than it helps
     pub async fn start(mut config: BrokerConfig) -> Result<BrokerHandle, BrokerError> {
+        // 0a. Install the rustls crypto provider exactly once per process.
+        //     `rustls 0.23` with `default-features = false` does NOT auto-install
+        //     a provider; without this the `ServerConfig::builder()` call below
+        //     (and any client-side rustls usage) panics at runtime. `.ok()`
+        //     swallows the `AlreadySet` error when a previous broker / test
+        //     in the same process installed it first.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        // 0b. Validate listener + auth configuration before any side effects.
+        config.validate()?;
+
+        // 0c. Build the TLS acceptor up front so we can fail fast on bad
+        //     cert / key paths before bringing up any state.
+        let tls_acceptor = match &config.tls_config {
+            Some(tls) => {
+                let server_cfg = tls
+                    .build_server_config()
+                    .map_err(|e| BrokerError::Tls(e.to_string()))?;
+                Some(tokio_rustls::TlsAcceptor::from(server_cfg))
+            }
+            None => None,
+        };
+
+        // 0d. Build the outbound `TlsConnector` and the shared
+        //     `InterBrokerClient` once. Both the replicator-supervisor
+        //     and the heartbeat client clone the resulting Arc; the
+        //     raft transport receives it as an injected dialer.
+        let tls_connector = match &config.tls_config {
+            Some(tls) => {
+                let client_cfg = tls
+                    .build_client_config()
+                    .map_err(|e| BrokerError::Tls(e.to_string()))?;
+                Some(tokio_rustls::TlsConnector::from(client_cfg))
+            }
+            None => None,
+        };
+        let inter_broker_client = Arc::new(crate::network::client::InterBrokerClient::new(
+            tls_connector,
+            config.inter_broker_credentials.clone(),
+        ));
+
         // 1. Bring up the metadata quorum BEFORE the client listener so
         //    handlers can read from it the moment they accept their first
         //    connection. The controller owns its own listener bound to
         //    `controller_listen_addr`.
+        //
+        //    NOTE on slice-12 raft dialer wiring:
+        //
+        //    Replication + heartbeat dials route through the data-plane
+        //    inter-broker listener (which speaks SASL/TLS when
+        //    configured). The Raft RPCs (`AppendEntries`, `Vote`,
+        //    `SubmitChange`) dial the *controller* listener — a separate
+        //    TCP listener that, in slice 12, still does plain framing
+        //    only. Hooking the SASL-equipped dialer to the raft transport
+        //    here would make the inter-broker handshake fail against the
+        //    controller listener. Slice 12's design therefore keeps raft
+        //    traffic on the existing plaintext path; promoting raft to
+        //    the unified inter-broker listener is a follow-up slice. We
+        //    still feed an explicit `OutboundDialer::PlaintextDialer`
+        //    through the trait so the abstraction is in place for that
+        //    future change.
+        let raft_dialer: Option<std::sync::Arc<dyn crabka_raft::OutboundDialer>> = None;
         let controller_cfg = crabka_raft::ControllerConfig {
             node_id: config.node_id,
             voters: config.controller_quorum_voters.clone(),
@@ -390,6 +499,7 @@ impl Broker {
             heartbeat_interval: config.controller_heartbeat_interval,
             client_id: format!("crabka-broker-{}-controller", config.broker_id),
             bootstrap_mode: config.bootstrap_mode,
+            dialer: raft_dialer,
         };
         let controller = Arc::new(
             crabka_raft::Controller::start(controller_cfg)
@@ -402,6 +512,24 @@ impl Broker {
         //    fails the next caller's request will surface the error and
         //    membership reconciliation can retry later.
         {
+            // Per-listener endpoints (Task 11): every configured listener's
+            // advertised `host:port` + protocol becomes a `BrokerEndpoint`
+            // on the broker's self-registration record. Clients on
+            // `Metadata` v9+ pick the right endpoint for their connection;
+            // legacy callers continue reading the top-level `host`/`port`.
+            let endpoints: Vec<crabka_metadata::BrokerEndpoint> = config
+                .effective_listeners()
+                .iter()
+                .map(|l| {
+                    let (host, port) = parse_advertised_host_port(&l.advertised);
+                    crabka_metadata::BrokerEndpoint {
+                        name: l.name.clone(),
+                        host,
+                        port,
+                        protocol: l.protocol,
+                    }
+                })
+                .collect();
             let self_reg = crabka_metadata::MetadataRecord::V1BrokerRegistration(
                 crabka_metadata::BrokerRegistrationRecord {
                     node_id: config.node_id,
@@ -413,6 +541,7 @@ impl Broker {
                         .to_string(),
                     port: config.listen_addr.port(),
                     rack: None,
+                    endpoints,
                 },
             );
             let mut leader_rx = controller.watch_leader();
@@ -477,6 +606,11 @@ impl Broker {
         //    set. With replication_factor=1 the desired follower set is
         //    always empty, so this is a no-op for single-broker setups.
         let supervisor_shutdown = CancellationToken::new();
+        let inter_listener_proto = config
+            .effective_listeners()
+            .iter()
+            .find(|l| l.name == config.inter_broker_listener_name)
+            .map_or(crabka_security::ListenerProtocol::Plaintext, |l| l.protocol);
         let supervisor = crate::replicator_supervisor::ReplicatorSupervisor::new(
             config.node_id,
             controller.clone(),
@@ -486,6 +620,9 @@ impl Broker {
             format!("crabka-broker-{}-replicator", config.broker_id),
             supervisor_shutdown.clone(),
             Some(txn_coordinator.clone()),
+            inter_broker_client.clone(),
+            inter_listener_proto,
+            config.inter_broker_listener_name.clone(),
         );
         let supervisor_handle = supervisor.spawn();
 
@@ -506,6 +643,9 @@ impl Broker {
                 interval: std::time::Duration::from_millis(config.heartbeat_interval_ms),
                 controller: controller.clone(),
                 shutdown: heartbeat_shutdown,
+                inter_broker_client: inter_broker_client.clone(),
+                inter_broker_listener_protocol: inter_listener_proto,
+                inter_broker_listener_name: config.inter_broker_listener_name.clone(),
             },
         ));
 
@@ -614,12 +754,30 @@ impl Broker {
         // 5. Build handler table.
         let handlers = crate::handlers::build_table();
 
-        // 6. Bind first so the actual port is known. If
-        //    `advertised_listener` points at port 0 (tests typically),
-        //    rewrite it to the bound port so FindCoordinator/Metadata
-        //    return a useful host:port instead of `:0`.
-        let listener = TcpListener::bind(config.listen_addr).await?;
-        let listen_addr = listener.local_addr()?;
+        // 6. Bind one TcpListener per `ListenerSpec`. The legacy single-listener
+        //    path is preserved via `effective_listeners()`, which synthesizes
+        //    one PLAINTEXT spec from `listen_addr` + `advertised_listener` when
+        //    `config.listeners` is empty.
+        //
+        //    Picks a canonical `listen_addr` for `BrokerHandle::listen_addr()`:
+        //    the inter-broker listener's actual bound address when present,
+        //    otherwise the first bound listener.
+        let listeners_spec = config.effective_listeners();
+        let mut bound: Vec<(crate::config::ListenerSpec, TcpListener, SocketAddr)> =
+            Vec::with_capacity(listeners_spec.len());
+        for spec in listeners_spec {
+            let listener = TcpListener::bind(spec.bind_addr).await?;
+            let actual = listener.local_addr()?;
+            bound.push((spec, listener, actual));
+        }
+        let listen_addr = bound
+            .iter()
+            .find(|(spec, _, _)| spec.name == config.inter_broker_listener_name)
+            .map_or(bound[0].2, |(_, _, a)| *a);
+
+        // If the legacy `advertised_listener` points at port 0 (tests typically),
+        // rewrite it to the canonical bound port so FindCoordinator/Metadata
+        // return a useful host:port instead of `:0`.
         if config.advertised_listener.ends_with(":0")
             && let Some((host, _)) = config.advertised_listener.rsplit_once(':')
         {
@@ -636,16 +794,27 @@ impl Broker {
             supervisor_shutdown,
             supervisor_handle: tokio::sync::Mutex::new(Some(supervisor_handle)),
             liveness: liveness.clone(),
+            tls_acceptor,
+            inter_broker_client,
             handlers,
         });
 
         let shutdown = CancellationToken::new();
-        let listener_task = tokio::spawn(accept_loop(broker.clone(), listener, shutdown.clone()));
+        let mut listener_tasks = Vec::with_capacity(bound.len());
+        for (spec, listener, _) in bound {
+            let task = tokio::spawn(accept_loop(
+                broker.clone(),
+                listener,
+                spec,
+                shutdown.clone(),
+            ));
+            listener_tasks.push(task);
+        }
 
         Ok(BrokerHandle {
             listen_addr,
             shutdown,
-            listener_task: Some(listener_task),
+            listener_tasks,
             _broker: broker,
         })
     }
@@ -687,24 +856,48 @@ pub(crate) fn spawn_partition(
     })
 }
 
-async fn accept_loop(broker: Arc<Broker>, listener: TcpListener, shutdown: CancellationToken) {
+/// Split a `host:port` advertised string. Mirrors the helpers in
+/// `handlers::find_coordinator` / `handlers::metadata` but returns
+/// `(String, u16)` for direct `BrokerEndpoint` use. Splits on the LAST
+/// `:` so IPv6 literals do not break on inner colons (we still expect
+/// IPv6 callers to wrap in `[...]`).
+fn parse_advertised_host_port(addr: &str) -> (String, u16) {
+    if let Some((h, p)) = addr.rsplit_once(':')
+        && let Ok(port) = p.parse::<u16>()
+    {
+        return (h.to_string(), port);
+    }
+    tracing::warn!(
+        addr,
+        "advertised not host:port; falling back to localhost:9092"
+    );
+    ("localhost".into(), 9092)
+}
+
+async fn accept_loop(
+    broker: Arc<Broker>,
+    listener: TcpListener,
+    spec: crate::config::ListenerSpec,
+    shutdown: CancellationToken,
+) {
     loop {
         tokio::select! {
             () = shutdown.cancelled() => {
-                tracing::info!("listener shutting down");
+                tracing::info!(name = %spec.name, "listener shutting down");
                 break;
             }
             accept = listener.accept() => {
                 match accept {
                     Ok((stream, peer)) => {
-                        tracing::debug!(%peer, "accepted connection");
+                        tracing::debug!(%peer, name = %spec.name, "accepted connection");
                         let b = broker.clone();
+                        let s = spec.clone();
                         tokio::spawn(async move {
-                            crate::network::dispatch::serve_connection(b, stream).await;
+                            crate::network::dispatch::serve_connection_on_listener(b, stream, s).await;
                         });
                     }
                     Err(e) => {
-                        tracing::warn!(error = %e, "accept failed");
+                        tracing::warn!(error = %e, name = %spec.name, "accept failed");
                     }
                 }
             }

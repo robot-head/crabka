@@ -1,0 +1,251 @@
+//! `AlterUserScramCredentials` handler (`api_key` 51, KIP-554).
+//!
+//! KIP-554 puts PBKDF2 on the *client* side: the wire request carries the
+//! already-stretched 64-byte SHA-512 PBKDF2 output as `salted_password`. The
+//! broker derives `stored_key` / `server_key` from that without ever seeing
+//! the user's plaintext password.
+//!
+//! Per-user validation (each upsertion is checked independently):
+//!
+//! - `iterations >= 4096` else `UNACCEPTABLE_CREDENTIAL` (78).
+//! - `salt` non-empty else `UNACCEPTABLE_CREDENTIAL`.
+//! - `salted_password.len() == 64` (SHA-512 output size) else
+//!   `UNACCEPTABLE_CREDENTIAL`.
+//! - Unknown mechanism wire value → `UNACCEPTABLE_CREDENTIAL`.
+//!
+//! Authorization stand-in (no full ACL system in slice 12): the request
+//! principal's `name` must equal `BrokerConfig::super_user_name`. Otherwise
+//! every per-user result is `CLUSTER_AUTHORIZATION_FAILED` (31).
+//!
+//! Duplicate detection: the same `(user, mechanism)` appearing twice in one
+//! request (either two upsertions, two deletions, or one of each) gets
+//! `DUPLICATE_RESOURCE` (84) on the second occurrence.
+//!
+//! Deletion targets that are not present in the current metadata image get
+//! `RESOURCE_NOT_FOUND` (66).
+//!
+//! On a successful submit the handler emits one `V1ScramCredential` or
+//! `V1DeleteScramCredential` record per accepted row through
+//! `controller.submit_change`. A single batched commit keeps the metadata
+//! image consistent across multiple rows in the same request.
+
+use std::collections::HashSet;
+
+use crabka_metadata::{DeleteScramCredentialRecord, MetadataRecord, ScramCredentialRecord};
+use crabka_protocol::owned::alter_user_scram_credentials_request::{
+    AlterUserScramCredentialsRequest, ScramCredentialDeletion, ScramCredentialUpsertion,
+};
+use crabka_protocol::owned::alter_user_scram_credentials_response::{
+    AlterUserScramCredentialsResponse, AlterUserScramCredentialsResult,
+};
+use crabka_security::{Principal, SaslMechanism};
+
+use crate::broker::Broker;
+use crate::codes;
+
+const MIN_ITERATIONS: i32 = 4096;
+const SHA512_OUTPUT_LEN: usize = 64;
+
+/// Run the `AlterUserScramCredentials` request and return the typed
+/// response. The caller (dispatch.rs) is responsible for wire-encoding
+/// the response and prepending the response header.
+pub(crate) async fn handle(
+    broker: &Broker,
+    req: AlterUserScramCredentialsRequest,
+    principal: &Principal,
+) -> AlterUserScramCredentialsResponse {
+    let authorized = broker
+        .config
+        .super_user_name
+        .as_deref()
+        .is_some_and(|s| s == principal.name);
+
+    let mut seen: HashSet<(String, i8)> = HashSet::new();
+    let mut user_results: Vec<AlterUserScramCredentialsResult> = Vec::new();
+    let mut records: Vec<MetadataRecord> = Vec::new();
+
+    for d in req.deletions {
+        user_results.push(process_deletion(
+            broker,
+            d,
+            authorized,
+            &mut seen,
+            &mut records,
+        ));
+    }
+
+    for u in req.upsertions {
+        user_results.push(process_upsertion(u, authorized, &mut seen, &mut records));
+    }
+
+    // Submit accepted records as a single batch. A submit failure converts
+    // every pending "ok" row to a generic error (per-row errors already in
+    // `user_results` keep their existing codes).
+    if !records.is_empty()
+        && let Err(e) = broker.controller.submit_change(records).await
+    {
+        tracing::warn!(error = %e, "AlterUserScramCredentials: submit_change failed");
+        let msg = format!("submit failed: {e}");
+        for r in user_results.iter_mut().filter(|r| r.error_code == 0) {
+            r.error_code = codes::UNKNOWN_SERVER_ERROR;
+            r.error_message = Some(msg.clone());
+        }
+    }
+
+    AlterUserScramCredentialsResponse {
+        throttle_time_ms: 0,
+        results: user_results,
+        ..Default::default()
+    }
+}
+
+/// Validate and optionally accept a single deletion. Returns the per-user
+/// result row to push into the response; pushes the metadata record to
+/// `records` on accept.
+fn process_deletion(
+    broker: &Broker,
+    d: ScramCredentialDeletion,
+    authorized: bool,
+    seen: &mut HashSet<(String, i8)>,
+    records: &mut Vec<MetadataRecord>,
+) -> AlterUserScramCredentialsResult {
+    let key = (d.name.clone(), d.mechanism);
+    if !seen.insert(key) {
+        return err_result(d.name, codes::DUPLICATE_RESOURCE, "duplicate resource");
+    }
+    let Some(mech) = wire_to_mech(d.mechanism) else {
+        return err_result(d.name, codes::UNACCEPTABLE_CREDENTIAL, "unknown mechanism");
+    };
+    if !authorized {
+        return err_result(
+            d.name,
+            codes::CLUSTER_AUTHORIZATION_FAILED,
+            "not super-user",
+        );
+    }
+    if broker
+        .controller
+        .current_image()
+        .scram_credential(&d.name, mech)
+        .is_none()
+    {
+        return err_result(d.name, codes::RESOURCE_NOT_FOUND, "credential not found");
+    }
+    records.push(MetadataRecord::V1DeleteScramCredential(
+        DeleteScramCredentialRecord {
+            user: d.name.clone(),
+            mechanism: mech,
+        },
+    ));
+    ok_result(d.name)
+}
+
+/// Validate and optionally accept a single upsertion. Returns the per-user
+/// result row to push into the response; pushes the metadata record to
+/// `records` on accept.
+fn process_upsertion(
+    u: ScramCredentialUpsertion,
+    authorized: bool,
+    seen: &mut HashSet<(String, i8)>,
+    records: &mut Vec<MetadataRecord>,
+) -> AlterUserScramCredentialsResult {
+    let key = (u.name.clone(), u.mechanism);
+    if !seen.insert(key) {
+        return err_result(u.name, codes::DUPLICATE_RESOURCE, "duplicate resource");
+    }
+    let Some(mech) = wire_to_mech(u.mechanism) else {
+        return err_result(u.name, codes::UNACCEPTABLE_CREDENTIAL, "unknown mechanism");
+    };
+    if u.iterations < MIN_ITERATIONS {
+        return err_result(u.name, codes::UNACCEPTABLE_CREDENTIAL, "iterations < 4096");
+    }
+    if u.salt.is_empty() {
+        return err_result(u.name, codes::UNACCEPTABLE_CREDENTIAL, "empty salt");
+    }
+    if u.salted_password.len() != SHA512_OUTPUT_LEN {
+        return err_result(
+            u.name,
+            codes::UNACCEPTABLE_CREDENTIAL,
+            "wrong salted_password length",
+        );
+    }
+    if !authorized {
+        return err_result(
+            u.name,
+            codes::CLUSTER_AUTHORIZATION_FAILED,
+            "not super-user",
+        );
+    }
+    // Per KIP-554 the wire `salted_password` is the 64-byte PBKDF2 output;
+    // recompute `stored_key` and `server_key` from it for storage in the
+    // metadata image.
+    let (stored_key, server_key) = crabka_security::derive_keys_from_salted(&u.salted_password);
+    records.push(MetadataRecord::V1ScramCredential(ScramCredentialRecord {
+        user: u.name.clone(),
+        mechanism: mech,
+        salt: u.salt.to_vec(),
+        stored_key,
+        server_key,
+        iterations: u.iterations.try_into().unwrap_or(u32::MAX),
+    }));
+    ok_result(u.name)
+}
+
+/// Map the KIP-554 wire mechanism byte to a [`SaslMechanism`].
+///
+/// Per KIP-554:
+/// - `0` — unknown (reserved)
+/// - `1` — SCRAM-SHA-256 (not supported in slice 12)
+/// - `2` — SCRAM-SHA-512
+fn wire_to_mech(wire: i8) -> Option<SaslMechanism> {
+    match wire {
+        2 => Some(SaslMechanism::ScramSha512),
+        _ => None,
+    }
+}
+
+fn ok_result(name: String) -> AlterUserScramCredentialsResult {
+    AlterUserScramCredentialsResult {
+        user: name,
+        error_code: 0,
+        error_message: None,
+        ..Default::default()
+    }
+}
+
+fn err_result(name: String, code: i16, msg: &str) -> AlterUserScramCredentialsResult {
+    AlterUserScramCredentialsResult {
+        user: name,
+        error_code: code,
+        error_message: Some(msg.to_string()),
+        ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wire_to_mech_only_sha512_supported() {
+        assert_eq!(wire_to_mech(2), Some(SaslMechanism::ScramSha512));
+        assert!(wire_to_mech(0).is_none());
+        assert!(wire_to_mech(1).is_none(), "SCRAM-SHA-256 not in slice 12");
+        assert!(wire_to_mech(99).is_none());
+    }
+
+    #[test]
+    fn err_result_carries_code_and_message() {
+        let r = err_result("alice".into(), codes::UNACCEPTABLE_CREDENTIAL, "bad");
+        assert_eq!(r.user, "alice");
+        assert_eq!(r.error_code, codes::UNACCEPTABLE_CREDENTIAL);
+        assert_eq!(r.error_message.as_deref(), Some("bad"));
+    }
+
+    #[test]
+    fn ok_result_has_zero_error_code() {
+        let r = ok_result("alice".into());
+        assert_eq!(r.error_code, 0);
+        assert!(r.error_message.is_none());
+    }
+}

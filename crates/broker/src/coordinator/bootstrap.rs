@@ -199,6 +199,7 @@ mod tests {
             heartbeat_interval: Duration::from_millis(50),
             client_id: "test".into(),
             bootstrap_mode: crabka_raft::BootstrapMode::Bootstrap,
+            dialer: None,
         };
         let handle = Arc::new(crabka_raft::Controller::start(cfg).await.unwrap());
         let mut rx = handle.watch_leader();

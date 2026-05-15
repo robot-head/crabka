@@ -6,6 +6,8 @@ use std::collections::{BTreeMap, HashMap};
 
 use uuid::Uuid;
 
+use crabka_security::{SaslMechanism, ScramCredential};
+
 use crate::error::MetadataError;
 use crate::records::{
     BrokerRegistrationRecord, MetadataRecord, NodeId, PartitionRecord, TopicRecord,
@@ -18,6 +20,7 @@ pub struct MetadataImage {
     partitions: HashMap<(String, i32), PartitionRecord>,
     brokers: HashMap<NodeId, BrokerRegistrationRecord>,
     topic_configs: HashMap<String, BTreeMap<String, String>>,
+    scram_credentials: HashMap<(String, SaslMechanism), ScramCredential>,
 }
 
 impl MetadataImage {
@@ -29,6 +32,7 @@ impl MetadataImage {
             partitions: HashMap::new(),
             brokers: HashMap::new(),
             topic_configs: HashMap::new(),
+            scram_credentials: HashMap::new(),
         }
     }
 
@@ -64,6 +68,15 @@ impl MetadataImage {
     #[must_use]
     pub fn topic_config(&self, topic: &str) -> Option<&BTreeMap<String, String>> {
         self.topic_configs.get(topic)
+    }
+
+    #[must_use]
+    pub fn scram_credential(
+        &self,
+        user: &str,
+        mechanism: SaslMechanism,
+    ) -> Option<&ScramCredential> {
+        self.scram_credentials.get(&(user.to_string(), mechanism))
     }
 
     #[must_use]
@@ -104,6 +117,22 @@ impl MetadataImage {
                     self.topic_configs
                         .insert(c.topic.clone(), c.overrides.clone());
                 }
+            }
+            MetadataRecord::V1ScramCredential(r) => {
+                self.scram_credentials.insert(
+                    (r.user.clone(), r.mechanism),
+                    ScramCredential {
+                        mechanism: r.mechanism,
+                        salt: r.salt.clone(),
+                        stored_key: r.stored_key.clone(),
+                        server_key: r.server_key.clone(),
+                        iterations: r.iterations,
+                    },
+                );
+            }
+            MetadataRecord::V1DeleteScramCredential(r) => {
+                self.scram_credentials
+                    .remove(&(r.user.clone(), r.mechanism));
             }
         }
     }
@@ -153,6 +182,9 @@ impl MetadataImage {
                 Ok(())
             }
             MetadataRecord::V1BrokerRegistration(_) => Ok(()),
+            MetadataRecord::V1ScramCredential(_) | MetadataRecord::V1DeleteScramCredential(_) => {
+                Ok(())
+            }
         }
     }
 }
@@ -160,7 +192,7 @@ impl MetadataImage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::records::DeleteTopicRecord;
+    use crate::records::{DeleteScramCredentialRecord, DeleteTopicRecord, ScramCredentialRecord};
 
     fn img() -> MetadataImage {
         MetadataImage::new(Uuid::nil())
@@ -281,6 +313,7 @@ mod tests {
             host: "h".into(),
             port: 9092,
             rack: None,
+            endpoints: vec![],
         });
         m.apply(&b);
         m.apply(&b);
@@ -357,5 +390,67 @@ mod tests {
         });
         let err = m.validate(&r).unwrap_err();
         assert!(matches!(err, MetadataError::UnknownTopic(_)));
+    }
+
+    #[test]
+    fn apply_scram_credential_stores() {
+        let mut m = img();
+        m.apply(&MetadataRecord::V1ScramCredential(ScramCredentialRecord {
+            user: "alice".into(),
+            mechanism: crabka_security::SaslMechanism::ScramSha512,
+            salt: vec![1; 16],
+            stored_key: vec![2; 64],
+            server_key: vec![3; 64],
+            iterations: 4096,
+        }));
+        let got = m.scram_credential("alice", crabka_security::SaslMechanism::ScramSha512);
+        assert!(got.is_some());
+        assert_eq!(got.unwrap().iterations, 4096);
+    }
+
+    #[test]
+    fn apply_scram_credential_last_write_wins() {
+        let mut m = img();
+        let mech = crabka_security::SaslMechanism::ScramSha512;
+        m.apply(&MetadataRecord::V1ScramCredential(ScramCredentialRecord {
+            user: "alice".into(),
+            mechanism: mech,
+            salt: vec![1; 16],
+            stored_key: vec![2; 64],
+            server_key: vec![3; 64],
+            iterations: 4096,
+        }));
+        m.apply(&MetadataRecord::V1ScramCredential(ScramCredentialRecord {
+            user: "alice".into(),
+            mechanism: mech,
+            salt: vec![9; 16],
+            stored_key: vec![9; 64],
+            server_key: vec![9; 64],
+            iterations: 8192,
+        }));
+        let got = m.scram_credential("alice", mech).unwrap();
+        assert_eq!(got.iterations, 8192);
+        assert_eq!(got.salt, vec![9; 16]);
+    }
+
+    #[test]
+    fn delete_scram_credential_removes() {
+        let mut m = img();
+        let mech = crabka_security::SaslMechanism::ScramSha512;
+        m.apply(&MetadataRecord::V1ScramCredential(ScramCredentialRecord {
+            user: "alice".into(),
+            mechanism: mech,
+            salt: vec![1; 16],
+            stored_key: vec![2; 64],
+            server_key: vec![3; 64],
+            iterations: 4096,
+        }));
+        m.apply(&MetadataRecord::V1DeleteScramCredential(
+            DeleteScramCredentialRecord {
+                user: "alice".into(),
+                mechanism: mech,
+            },
+        ));
+        assert!(m.scram_credential("alice", mech).is_none());
     }
 }

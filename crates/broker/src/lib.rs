@@ -122,7 +122,7 @@
 
 mod broker;
 mod codes;
-mod config;
+pub mod config;
 pub(crate) mod config_keys;
 mod coordinator;
 mod error;
@@ -131,7 +131,7 @@ pub(crate) mod heartbeat;
 pub(crate) mod isr_maintenance;
 pub(crate) mod leader_election;
 mod log_dir;
-mod network;
+pub mod network;
 mod partition;
 mod partition_writer;
 mod producer_id_manager;

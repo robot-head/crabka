@@ -1,13 +1,38 @@
 //! Broker configuration. Built directly (library use) or from CLI flags
 //! (binary entry point in `bin/broker.rs`).
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use crabka_log::LogConfig;
 use crabka_raft::NodeId;
+use crabka_security::{ListenerProtocol, SaslMechanism, TlsConfig};
+
+use crate::BrokerError;
 
 pub use crabka_raft::BootstrapMode;
+
+/// A single named listener: the port the broker binds + what it tells clients.
+#[derive(Debug, Clone)]
+pub struct ListenerSpec {
+    /// Listener name (e.g. `"PLAINTEXT"`, `"SSL"`, `"SASL_SSL"`).
+    pub name: String,
+    /// Local address to bind.
+    pub bind_addr: SocketAddr,
+    /// `host:port` advertised to clients in `Metadata` responses.
+    pub advertised: String,
+    /// Wire protocol (Plaintext / Ssl / `SaslPlaintext` / `SaslSsl`).
+    pub protocol: ListenerProtocol,
+}
+
+/// Credentials the broker uses when connecting *to* other brokers.
+#[derive(Debug, Clone)]
+pub struct InterBrokerCredentials {
+    pub mechanism: SaslMechanism,
+    pub username: String,
+    pub password: String,
+}
 
 /// Construction-time configuration for [`crate::Broker::start`].
 ///
@@ -72,6 +97,34 @@ pub struct BrokerConfig {
     /// use `Join`; a restart of any previously-formatted broker uses
     /// `Rejoin`. Single-broker setups always use `Bootstrap`.
     pub bootstrap_mode: BootstrapMode,
+
+    // ── Auth / listener registry (Task 7+) ──────────────────────────────
+    /// Named listener definitions. When empty, `effective_listeners()` synthesizes
+    /// a single PLAINTEXT listener from `listen_addr` + `advertised_listener`,
+    /// preserving full backward compatibility.
+    pub listeners: Vec<ListenerSpec>,
+
+    /// Name of the listener used for inter-broker traffic (raft, replication,
+    /// heartbeat). Must match a name in `listeners` when `listeners` is
+    /// non-empty. Default: `"PLAINTEXT"`.
+    pub inter_broker_listener_name: String,
+
+    /// Credentials the broker uses for outbound inter-broker connections.
+    /// `None` means no SASL — plaintext inter-broker traffic (slice 12 default).
+    pub inter_broker_credentials: Option<InterBrokerCredentials>,
+
+    /// Static PLAIN credentials: username → password.  Empty by default
+    /// (PLAIN auth disabled until mechanisms are explicitly enabled).
+    pub plain_credentials: HashMap<String, String>,
+
+    /// When set, this username bypasses ACL checks (super-user).
+    pub super_user_name: Option<String>,
+
+    /// TLS configuration. `None` — no TLS (slice 12 default).
+    pub tls_config: Option<TlsConfig>,
+
+    /// Which SASL mechanisms are enabled. Empty → no SASL.
+    pub enabled_sasl_mechanisms: Vec<SaslMechanism>,
 }
 
 impl BrokerConfig {
@@ -103,7 +156,82 @@ impl BrokerConfig {
             controller_election_timeout: std::time::Duration::from_millis(500),
             controller_heartbeat_interval: std::time::Duration::from_millis(100),
             bootstrap_mode: BootstrapMode::Bootstrap,
+            listeners: vec![],
+            inter_broker_listener_name: "PLAINTEXT".to_string(),
+            inter_broker_credentials: None,
+            plain_credentials: HashMap::new(),
+            super_user_name: None,
+            tls_config: None,
+            enabled_sasl_mechanisms: vec![],
         }
+    }
+
+    /// Validate the listener and auth configuration.
+    ///
+    /// Called by [`crate::Broker::start`] before any side effects so
+    /// mis-configurations surface immediately with a descriptive error rather
+    /// than at first connection.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` when:
+    /// - Two listeners share the same `bind_addr`.
+    /// - `inter_broker_listener_name` does not match any listener name.
+    /// - A SASL listener is declared while `enabled_sasl_mechanisms` is empty.
+    pub fn validate(&self) -> Result<(), BrokerError> {
+        let listeners = self.effective_listeners();
+
+        // Bind-address collisions.
+        for i in 0..listeners.len() {
+            for j in (i + 1)..listeners.len() {
+                if listeners[i].bind_addr == listeners[j].bind_addr {
+                    return Err(BrokerError::ListenerConflict {
+                        a: listeners[i].name.clone(),
+                        b: listeners[j].name.clone(),
+                    });
+                }
+            }
+        }
+
+        // Inter-broker listener must exist.
+        if !listeners
+            .iter()
+            .any(|l| l.name == self.inter_broker_listener_name)
+        {
+            return Err(BrokerError::InvalidInterBrokerListener {
+                name: self.inter_broker_listener_name.clone(),
+            });
+        }
+
+        // Every SASL listener requires at least one mechanism.
+        for l in &listeners {
+            if l.protocol.requires_sasl() && self.enabled_sasl_mechanisms.is_empty() {
+                return Err(BrokerError::SaslListenerNoMechanisms {
+                    name: l.name.clone(),
+                });
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Returns the effective listener list.
+    ///
+    /// When [`listeners`][Self::listeners] is empty (the pre-Task-7 default),
+    /// synthesizes a single `PLAINTEXT` listener from the legacy
+    /// `listen_addr` + `advertised_listener` fields so all existing code
+    /// continues to work without changes.
+    #[must_use]
+    pub fn effective_listeners(&self) -> Vec<ListenerSpec> {
+        if !self.listeners.is_empty() {
+            return self.listeners.clone();
+        }
+        vec![ListenerSpec {
+            name: "PLAINTEXT".to_string(),
+            bind_addr: self.listen_addr,
+            advertised: self.advertised_listener.clone(),
+            protocol: ListenerProtocol::Plaintext,
+        }]
     }
 }
 
@@ -126,6 +254,13 @@ impl Default for BrokerConfig {
             controller_election_timeout: std::time::Duration::from_secs(5),
             controller_heartbeat_interval: std::time::Duration::from_millis(500),
             bootstrap_mode: BootstrapMode::Bootstrap,
+            listeners: vec![],
+            inter_broker_listener_name: "PLAINTEXT".to_string(),
+            inter_broker_credentials: None,
+            plain_credentials: HashMap::new(),
+            super_user_name: None,
+            tls_config: None,
+            enabled_sasl_mechanisms: vec![],
         }
     }
 }
@@ -133,6 +268,64 @@ impl Default for BrokerConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::BrokerError as BrokerStartError;
+
+    /// A well-formed two-listener config used as the base for validation
+    /// tests.
+    fn base() -> BrokerConfig {
+        BrokerConfig {
+            listeners: vec![
+                ListenerSpec {
+                    name: "INTERNAL".to_string(),
+                    bind_addr: "127.0.0.1:9093".parse().unwrap(),
+                    advertised: "127.0.0.1:9093".to_string(),
+                    protocol: ListenerProtocol::Plaintext,
+                },
+                ListenerSpec {
+                    name: "EXTERNAL".to_string(),
+                    bind_addr: "0.0.0.0:9092".parse().unwrap(),
+                    advertised: "host.docker.internal:9092".to_string(),
+                    protocol: ListenerProtocol::SaslSsl,
+                },
+            ],
+            inter_broker_listener_name: "INTERNAL".to_string(),
+            enabled_sasl_mechanisms: vec![SaslMechanism::Plain, SaslMechanism::ScramSha512],
+            ..BrokerConfig::default()
+        }
+    }
+
+    #[test]
+    fn rejects_bind_collision() {
+        let mut c = base();
+        c.listeners[1].bind_addr = c.listeners[0].bind_addr;
+        assert!(matches!(
+            c.validate(),
+            Err(BrokerStartError::ListenerConflict { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_missing_inter_broker_listener() {
+        let mut c = base();
+        c.inter_broker_listener_name = "NONESUCH".to_string();
+        assert!(matches!(
+            c.validate(),
+            Err(BrokerStartError::InvalidInterBrokerListener { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_sasl_listener_without_mechanisms() {
+        let mut c = base();
+        c.enabled_sasl_mechanisms.clear();
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn legacy_default_passes() {
+        let c = BrokerConfig::default();
+        c.validate().expect("legacy default must validate");
+    }
 
     #[test]
     fn defaults_listen_on_localhost_9092() {

@@ -17,7 +17,7 @@ use dashmap::DashMap;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use crabka_client_core::{Client, ClientError};
+use crabka_client_core::{ClientError, Connection, ConnectionOptions};
 use crabka_log::{Log, LogConfig};
 use crabka_protocol::owned::fetch_request::{
     FetchPartition, FetchRequest, FetchTopic, ReplicaState,
@@ -28,6 +28,7 @@ use crabka_protocol::owned::offset_for_leader_epoch_request::{
 };
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 use crabka_raft::NodeId;
+use crabka_security::ListenerProtocol;
 
 use crate::broker::spawn_partition;
 use crate::codes;
@@ -50,12 +51,20 @@ pub(crate) struct Config {
     pub topic_id: WireUuid,
     pub partition: i32,
     pub leader_node_id: NodeId,
-    pub leader_addr: String,
+    /// Leader's `host` portion from the metadata image (the inter-broker
+    /// endpoint when available, otherwise the legacy broker host).
+    pub leader_host: String,
+    pub leader_port: u16,
     pub partitions: Arc<DashMap<(String, i32), Arc<Partition>>>,
     pub log_dir: PathBuf,
     pub log_config: LogConfig,
     pub client_id: String,
     pub shutdown: CancellationToken,
+    /// Shared outbound dialer. Connects through TLS + SASL when the
+    /// inter-broker listener requires them; falls back to raw TCP for
+    /// PLAINTEXT.
+    pub inter_broker_client: Arc<crate::network::client::InterBrokerClient>,
+    pub inter_broker_listener_protocol: ListenerProtocol,
 }
 
 /// Entry point: drive a single (topic, partition) replication loop until
@@ -317,10 +326,19 @@ async fn handle_epoch_fence(cfg: &Config) -> Result<(), String> {
         .load(std::sync::atomic::Ordering::Acquire);
     drop(entry);
 
-    let client = Client::builder()
-        .bootstrap(cfg.leader_addr.clone())
-        .client_id(cfg.client_id.clone())
-        .build()
+    let opts = ConnectionOptions {
+        client_id: cfg.client_id.clone(),
+        ..ConnectionOptions::default()
+    };
+    let client = cfg
+        .inter_broker_client
+        .connect_as_connection(
+            &cfg.leader_host,
+            cfg.leader_port,
+            cfg.inter_broker_listener_protocol,
+            "localhost",
+            opts,
+        )
         .await
         .map_err(|e| format!("handle_epoch_fence: connect: {e}"))?;
 
@@ -401,17 +419,28 @@ async fn handle_epoch_fence(cfg: &Config) -> Result<(), String> {
     Ok(())
 }
 
-/// Open a [`Client`] against the partition's leader, retrying with
+/// Open a [`Connection`] against the partition's leader, retrying with
 /// exponential backoff (capped at 5s). Returns `Err` only if shutdown is
 /// requested while we were waiting.
-async fn connect_with_backoff(cfg: &Config) -> Result<Client, String> {
+///
+/// Routes through the shared [`InterBrokerClient`] so TLS + SASL are run
+/// when the inter-broker listener demands them, and falls back to plain
+/// TCP for `ListenerProtocol::Plaintext`.
+async fn connect_with_backoff(cfg: &Config) -> Result<Connection, String> {
     let mut delay = Duration::from_millis(100);
     let cap = Duration::from_secs(5);
     loop {
-        let attempt = Client::builder()
-            .bootstrap(cfg.leader_addr.clone())
-            .client_id(cfg.client_id.clone())
-            .build();
+        let opts = ConnectionOptions {
+            client_id: cfg.client_id.clone(),
+            ..ConnectionOptions::default()
+        };
+        let attempt = cfg.inter_broker_client.connect_as_connection(
+            &cfg.leader_host,
+            cfg.leader_port,
+            cfg.inter_broker_listener_protocol,
+            "localhost",
+            opts,
+        );
         let result = tokio::select! {
             () = cfg.shutdown.cancelled() => return Err("cancelled".into()),
             r = attempt => r,
@@ -419,8 +448,10 @@ async fn connect_with_backoff(cfg: &Config) -> Result<Client, String> {
         match result {
             Ok(c) => return Ok(c),
             Err(e) => {
-                warn!(addr = %cfg.leader_addr, error = %e,
-                    "replicator: connect failed; retrying after {:?}", delay);
+                warn!(
+                    host = %cfg.leader_host, port = cfg.leader_port, error = %e,
+                    "replicator: connect failed; retrying after {:?}", delay
+                );
                 tokio::select! {
                     () = cfg.shutdown.cancelled() => return Err("cancelled".into()),
                     () = tokio::time::sleep(delay) => {}

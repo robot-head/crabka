@@ -49,6 +49,50 @@ use crabka_client_core::{ClientError, Connection, ConnectionOptions};
 
 use crate::error::RaftError as CrabkaRaftError;
 use crate::types::{Node, NodeId, TypeConfig};
+
+/// Outbound dialer the controller hands to the raft network factory.
+///
+/// `crabka-raft` cannot depend on `crabka-broker` (that would be a
+/// cycle), so the broker provides an impl wrapping its
+/// `InterBrokerClient` (TLS + SASL) and injects it via
+/// [`ControllerConfig::dialer`]. When no dialer is injected, the
+/// factory falls back to a plain `Connection::connect(addr)` — the
+/// legacy PLAINTEXT path used by every pre-slice-12 test.
+#[async_trait::async_trait]
+pub trait OutboundDialer: Send + Sync {
+    /// Open a `Connection` to the raft peer at `target` reachable on
+    /// `addr`. The returned connection has already negotiated
+    /// `ApiVersions` and is usable for `raw_request` immediately.
+    async fn dial(
+        &self,
+        target: NodeId,
+        addr: &str,
+        options: ConnectionOptions,
+    ) -> Result<Connection, ClientError>;
+}
+
+/// Default no-op dialer: opens a raw `TcpStream` via
+/// `Connection::connect`. Used when the broker hasn't injected a
+/// `InterBrokerClient`-backed dialer (legacy PLAINTEXT path).
+pub(crate) struct PlaintextDialer;
+
+#[async_trait::async_trait]
+impl OutboundDialer for PlaintextDialer {
+    async fn dial(
+        &self,
+        _target: NodeId,
+        addr: &str,
+        options: ConnectionOptions,
+    ) -> Result<Connection, ClientError> {
+        let sock: SocketAddr = addr.parse().map_err(|e: std::net::AddrParseError| {
+            ClientError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("invalid raft peer address {addr:?}: {e}"),
+            ))
+        })?;
+        Connection::connect(sock, options).await
+    }
+}
 use crate::wire::{
     API_KEY_APPEND_ENTRIES, API_KEY_VOTE, CrabkaAppendEntriesRequest, CrabkaAppendEntriesResponse,
     CrabkaLogEntry, CrabkaVoteRequest, CrabkaVoteResponse,
@@ -59,21 +103,24 @@ use crate::wire::{
 pub(crate) struct CrabkaRaftNetworkFactory {
     connections: Arc<DashMap<NodeId, Arc<Connection>>>,
     client_id: String,
+    dialer: Arc<dyn OutboundDialer>,
 }
 
 impl CrabkaRaftNetworkFactory {
-    pub(crate) fn new(client_id: String) -> Self {
+    pub(crate) fn new(client_id: String, dialer: Arc<dyn OutboundDialer>) -> Self {
         Self {
             connections: Arc::new(DashMap::new()),
             client_id,
+            dialer,
         }
     }
 
     /// Look up or open a connection to `target` at `addr`.
     ///
-    /// The cache holds an `Arc<Connection>`; cloning is cheap. On parse
-    /// failure of the address we return [`CrabkaRaftError::Network`] so
-    /// the caller can lift it into `RPCError::Network`.
+    /// The cache holds an `Arc<Connection>`; cloning is cheap. Connection
+    /// establishment is delegated to the injected [`OutboundDialer`] so
+    /// inter-broker TLS + SASL can transparently slot in at the broker
+    /// layer.
     async fn connect(
         &self,
         target: NodeId,
@@ -82,17 +129,11 @@ impl CrabkaRaftNetworkFactory {
         if let Some(c) = self.connections.get(&target) {
             return Ok(c.value().clone());
         }
-        let sock: SocketAddr = addr.parse().map_err(|e: std::net::AddrParseError| {
-            CrabkaRaftError::Network(ClientError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("invalid raft peer address {addr:?}: {e}"),
-            )))
-        })?;
         let opts = ConnectionOptions {
             client_id: self.client_id.clone(),
             ..ConnectionOptions::default()
         };
-        let conn = Arc::new(Connection::connect(sock, opts).await?);
+        let conn = Arc::new(self.dialer.dial(target, addr, opts).await?);
         self.connections.insert(target, conn.clone());
         Ok(conn)
     }
@@ -103,6 +144,7 @@ impl Clone for CrabkaRaftNetworkFactory {
         Self {
             connections: self.connections.clone(),
             client_id: self.client_id.clone(),
+            dialer: self.dialer.clone(),
         }
     }
 }

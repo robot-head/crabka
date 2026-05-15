@@ -20,6 +20,6 @@ mod records;
 pub use error::MetadataError;
 pub use image::MetadataImage;
 pub use records::{
-    BrokerRegistrationRecord, DeleteTopicRecord, MetadataRecord, NodeId, PartitionRecord,
-    TopicConfigRecord, TopicRecord,
+    BrokerEndpoint, BrokerRegistrationRecord, DeleteScramCredentialRecord, DeleteTopicRecord,
+    MetadataRecord, NodeId, PartitionRecord, ScramCredentialRecord, TopicConfigRecord, TopicRecord,
 };

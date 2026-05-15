@@ -54,6 +54,13 @@ Pre-1.0, pre-alpha. No production use.
   `CreatePartitions`, `DeleteRecords`, `ListGroups`, `DescribeGroups`,
   `DeleteGroups`, `DescribeCluster`. Validated end-to-end against the
   JVM `kafka-*.sh` operator tooling.
+- **Slice 12** — auth & security: TLS via `rustls`; SASL/PLAIN +
+  SASL/SCRAM-SHA-512 client auth; per-listener protocol multiplexing
+  (PLAINTEXT/SSL/SASL_PLAINTEXT/SASL_SSL); inter-broker auth (TLS +
+  SASL) on replication + heartbeat traffic; KIP-554
+  `AlterUserScramCredentials`; new `crabka format --add-scram`
+  bootstrap CLI. JVM clients connect over `SASL_SSL` and provision
+  SCRAM users via `kafka-configs --alter --entity-type users`.
 
 ## Published crates
 

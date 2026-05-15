@@ -57,7 +57,7 @@ mod version;
 mod mock;
 
 pub use client::{BrokerHandle, Client};
-pub use connection::{Connection, ConnectionOptions};
+pub use connection::{ClientDuplex, Connection, ConnectionOptions};
 pub use error::ClientError;
 pub use pool::{BrokerInfo, BrokerPool};
 pub use request::ProtocolRequest;

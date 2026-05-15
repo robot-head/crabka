@@ -144,6 +144,15 @@ pub(crate) struct ReplicatorSupervisor {
     task_targets: DashMap<(String, i32), (NodeId, i32)>,
     shutdown: CancellationToken,
     txn_coordinator: Option<Arc<TxnCoordinator>>,
+    /// Shared outbound dialer (TLS + SASL when configured, raw TCP
+    /// otherwise). Each spawned replicator clones this Arc.
+    inter_broker_client: Arc<crate::network::client::InterBrokerClient>,
+    /// Listener protocol used for inter-broker dials. Drives whether
+    /// the dialer runs TLS / SASL.
+    inter_broker_listener_protocol: crabka_security::ListenerProtocol,
+    /// Name of the listener whose endpoint we resolve from the
+    /// metadata image when dialing peers.
+    inter_broker_listener_name: String,
 }
 
 impl ReplicatorSupervisor {
@@ -157,6 +166,9 @@ impl ReplicatorSupervisor {
         client_id: String,
         shutdown: CancellationToken,
         txn_coordinator: Option<Arc<TxnCoordinator>>,
+        inter_broker_client: Arc<crate::network::client::InterBrokerClient>,
+        inter_broker_listener_protocol: crabka_security::ListenerProtocol,
+        inter_broker_listener_name: String,
     ) -> Self {
         Self {
             node_id,
@@ -169,6 +181,9 @@ impl ReplicatorSupervisor {
             task_targets: DashMap::new(),
             shutdown,
             txn_coordinator,
+            inter_broker_client,
+            inter_broker_listener_protocol,
+            inter_broker_listener_name,
         }
     }
 
@@ -281,18 +296,34 @@ impl ReplicatorSupervisor {
             self.tasks.insert(k.clone(), token.clone());
             self.task_targets
                 .insert(k.clone(), (leader, part.leader_epoch));
+            // Prefer the inter-broker listener's endpoint when the leader
+            // has projected it onto its registration record. Fall back to
+            // the legacy top-level host/port for brokers that haven't
+            // refreshed onto slice-12 yet (or PLAINTEXT-only deployments
+            // where the synthesized endpoint matches anyway).
+            let (leader_host, leader_port) = broker
+                .endpoints
+                .iter()
+                .find(|e| e.name == self.inter_broker_listener_name)
+                .map_or_else(
+                    || (broker.host.clone(), broker.port),
+                    |e| (e.host.clone(), e.port),
+                );
             tokio::spawn(replicator::run(replicator::Config {
                 node_id: self.node_id,
                 topic: k.0,
                 topic_id: crabka_protocol::primitives::uuid::Uuid(topic_rec.topic_id.into_bytes()),
                 partition: k.1,
                 leader_node_id: leader,
-                leader_addr: format!("{}:{}", broker.host, broker.port),
+                leader_host,
+                leader_port,
                 partitions: self.partitions.clone(),
                 log_dir: self.log_dir.clone(),
                 log_config: self.log_config.clone(),
                 client_id: self.client_id.clone(),
                 shutdown: token,
+                inter_broker_client: self.inter_broker_client.clone(),
+                inter_broker_listener_protocol: self.inter_broker_listener_protocol,
             }));
         }
 

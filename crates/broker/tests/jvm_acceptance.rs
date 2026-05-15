@@ -78,6 +78,7 @@ async fn start_host_broker() -> (crabka_broker::BrokerHandle, tempfile::TempDir)
         controller_election_timeout: std::time::Duration::from_secs(5),
         controller_heartbeat_interval: std::time::Duration::from_millis(500),
         bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
+        ..BrokerConfig::default()
     };
     let handle = Broker::start(config).await.expect("start broker");
     eprintln!("CRABKA[test] broker started listen={LISTEN} advertised={BOOTSTRAP}");
@@ -503,6 +504,7 @@ async fn three_node_jvm_round_trip() {
         controller_election_timeout: std::time::Duration::from_secs(5),
         controller_heartbeat_interval: std::time::Duration::from_millis(500),
         bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
+        ..BrokerConfig::default()
     };
     let broker0 = Broker::start(cfg0).await.expect("broker start");
 
@@ -529,6 +531,7 @@ async fn three_node_jvm_round_trip() {
             controller_election_timeout: std::time::Duration::from_secs(5),
             controller_heartbeat_interval: std::time::Duration::from_millis(500),
             bootstrap_mode: crabka_broker::BootstrapMode::Join,
+            ..BrokerConfig::default()
         };
         tempdirs.push(dir);
         join_spawns.push(tokio::spawn(async move {
@@ -785,6 +788,7 @@ async fn three_node_replication_byte_compare() {
         controller_election_timeout: std::time::Duration::from_secs(5),
         controller_heartbeat_interval: std::time::Duration::from_millis(500),
         bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
+        ..BrokerConfig::default()
     };
     let broker0 = Broker::start(cfg0).await.expect("broker start");
 
@@ -811,6 +815,7 @@ async fn three_node_replication_byte_compare() {
             controller_election_timeout: std::time::Duration::from_secs(5),
             controller_heartbeat_interval: std::time::Duration::from_millis(500),
             bootstrap_mode: crabka_broker::BootstrapMode::Join,
+            ..BrokerConfig::default()
         };
         tempdirs.push(dir);
         join_spawns.push(tokio::spawn(async move {
@@ -1072,6 +1077,7 @@ async fn transactional_console_producer_eos() {
             } else {
                 crabka_broker::BootstrapMode::Join
             },
+            ..BrokerConfig::default()
         };
         tempdirs.push(dir);
         spawns.push(tokio::spawn(async move {
@@ -1235,6 +1241,7 @@ async fn acks_all_durability() {
         controller_election_timeout: std::time::Duration::from_secs(5),
         controller_heartbeat_interval: std::time::Duration::from_millis(500),
         bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
+        ..crabka_broker::BrokerConfig::default()
     };
     let broker0 = crabka_broker::Broker::start(cfg0)
         .await
@@ -1259,6 +1266,7 @@ async fn acks_all_durability() {
             controller_election_timeout: std::time::Duration::from_secs(5),
             controller_heartbeat_interval: std::time::Duration::from_millis(500),
             bootstrap_mode: crabka_broker::BootstrapMode::Join,
+            ..crabka_broker::BrokerConfig::default()
         };
         tempdirs.push(dir);
         join_spawns.push(tokio::spawn(async move {
@@ -1436,6 +1444,7 @@ async fn acks_all_survives_leader_crash() {
         controller_election_timeout: std::time::Duration::from_millis(500),
         controller_heartbeat_interval: std::time::Duration::from_millis(100),
         bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
+        ..crabka_broker::BrokerConfig::default()
     };
     let broker0 = crabka_broker::Broker::start(cfg0)
         .await
@@ -1460,6 +1469,7 @@ async fn acks_all_survives_leader_crash() {
             controller_election_timeout: std::time::Duration::from_millis(500),
             controller_heartbeat_interval: std::time::Duration::from_millis(100),
             bootstrap_mode: crabka_broker::BootstrapMode::Join,
+            ..crabka_broker::BrokerConfig::default()
         };
         tempdirs.push(dir);
         join_spawns.push(tokio::spawn(async move {
@@ -1994,4 +2004,1315 @@ async fn kafka_cluster_describe() {
         s.contains("Cluster ID") || s.contains("cluster ID") || s.contains("00000000"),
         "cluster-id output missing cluster id: {s}"
     );
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Task 20+: SASL / TLS JVM acceptance tests.
+// ────────────────────────────────────────────────────────────────────────
+
+/// Build a JAAS config string for the `PlainLoginModule`. The trailing `;`
+/// is mandatory — Kafka's JAAS parser rejects the entry without it.
+fn plain_jaas(user: &str, pass: &str) -> String {
+    format!(
+        "org.apache.kafka.common.security.plain.PlainLoginModule required \
+         username=\"{user}\" password=\"{pass}\";",
+    )
+}
+
+/// Build a JAAS config string for the `ScramLoginModule`. Used by the
+/// SCRAM-SHA-512 acceptance test in task 21.
+fn scram_jaas(user: &str, pass: &str) -> String {
+    format!(
+        "org.apache.kafka.common.security.scram.ScramLoginModule required \
+         username=\"{user}\" password=\"{pass}\";",
+    )
+}
+
+/// Spawn the broker with a single `SASL_PLAINTEXT` listener on
+/// `0.0.0.0:9092` (advertised as `host.docker.internal:9092`), pre-populated
+/// with the given PLAIN `users`. Mirrors [`start_host_broker`] otherwise.
+async fn start_sasl_plaintext_broker(
+    users: &[(&str, &str)],
+) -> (crabka_broker::BrokerHandle, tempfile::TempDir) {
+    use crabka_broker::config::ListenerSpec;
+    use crabka_security::{ListenerProtocol, SaslMechanism};
+
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("crabka_broker=debug,info")),
+        )
+        .with_test_writer()
+        .try_init();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let listen_addr: std::net::SocketAddr = LISTEN.parse().expect("static addr");
+    let controller_addr: std::net::SocketAddr = "0.0.0.0:9093".parse().expect("static addr");
+    let mut config = BrokerConfig {
+        broker_id: 1,
+        listen_addr,
+        advertised_listener: BOOTSTRAP.into(),
+        log_dir: dir.path().to_path_buf(),
+        log_config: LogConfig::default(),
+        node_id: 1,
+        controller_listen_addr: controller_addr,
+        controller_quorum_voters: vec![(1, controller_addr)],
+        heartbeat_interval_ms: 3_000,
+        heartbeat_timeout_ms: 9_000,
+        replica_lag_time_max_ms: 30_000,
+        controller_election_timeout: std::time::Duration::from_secs(5),
+        controller_heartbeat_interval: std::time::Duration::from_millis(500),
+        bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
+        listeners: vec![ListenerSpec {
+            name: "SASL_PLAINTEXT".to_string(),
+            bind_addr: listen_addr,
+            advertised: BOOTSTRAP.to_string(),
+            protocol: ListenerProtocol::SaslPlaintext,
+        }],
+        inter_broker_listener_name: "SASL_PLAINTEXT".to_string(),
+        enabled_sasl_mechanisms: vec![SaslMechanism::Plain],
+        ..BrokerConfig::default()
+    };
+    for (u, p) in users {
+        config
+            .plain_credentials
+            .insert((*u).to_string(), (*p).to_string());
+    }
+    let handle = Broker::start(config).await.expect("start sasl broker");
+    eprintln!("CRABKA[test] sasl broker started listen={LISTEN} advertised={BOOTSTRAP}");
+    tracing::info!(
+        listen = %LISTEN,
+        advertised = %BOOTSTRAP,
+        "sasl broker started for jvm acceptance"
+    );
+    (handle, dir)
+}
+
+/// Spawn the broker with a single `SASL_PLAINTEXT` listener that enables
+/// *both* PLAIN and SCRAM-SHA-512 mechanisms, plus a single PLAIN super-user
+/// (`admin` / `admin_pass`). The super-user designation grants the admin
+/// principal `CLUSTER_AUTHORIZATION` on `AlterUserScramCredentials` (51), so
+/// the JVM `kafka-configs --alter --entity-type users` tool — which the
+/// admin runs over PLAIN — can provision SCRAM credentials for other users.
+///
+/// Used by `jvm_sasl_scram_sha512_produce_consume` (task 21).
+async fn start_dual_mech_broker(
+    admin: &str,
+    admin_pass: &str,
+) -> (crabka_broker::BrokerHandle, tempfile::TempDir) {
+    use crabka_broker::config::ListenerSpec;
+    use crabka_security::{ListenerProtocol, SaslMechanism};
+
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("crabka_broker=debug,info")),
+        )
+        .with_test_writer()
+        .try_init();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let listen_addr: std::net::SocketAddr = LISTEN.parse().expect("static addr");
+    let controller_addr: std::net::SocketAddr = "0.0.0.0:9093".parse().expect("static addr");
+    let mut config = BrokerConfig {
+        broker_id: 1,
+        listen_addr,
+        advertised_listener: BOOTSTRAP.into(),
+        log_dir: dir.path().to_path_buf(),
+        log_config: LogConfig::default(),
+        node_id: 1,
+        controller_listen_addr: controller_addr,
+        controller_quorum_voters: vec![(1, controller_addr)],
+        heartbeat_interval_ms: 3_000,
+        heartbeat_timeout_ms: 9_000,
+        replica_lag_time_max_ms: 30_000,
+        controller_election_timeout: std::time::Duration::from_secs(5),
+        controller_heartbeat_interval: std::time::Duration::from_millis(500),
+        bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
+        listeners: vec![ListenerSpec {
+            name: "SASL_PLAINTEXT".to_string(),
+            bind_addr: listen_addr,
+            advertised: BOOTSTRAP.to_string(),
+            protocol: ListenerProtocol::SaslPlaintext,
+        }],
+        inter_broker_listener_name: "SASL_PLAINTEXT".to_string(),
+        enabled_sasl_mechanisms: vec![SaslMechanism::Plain, SaslMechanism::ScramSha512],
+        super_user_name: Some(admin.to_string()),
+        ..BrokerConfig::default()
+    };
+    config
+        .plain_credentials
+        .insert(admin.to_string(), admin_pass.to_string());
+    let handle = Broker::start(config).await.expect("start dual-mech broker");
+    eprintln!("CRABKA[test] dual-mech broker started listen={LISTEN} advertised={BOOTSTRAP}");
+    tracing::info!(
+        listen = %LISTEN,
+        advertised = %BOOTSTRAP,
+        "dual-mech broker started for jvm acceptance"
+    );
+    (handle, dir)
+}
+
+/// Write `props` to a `tempfile::NamedTempFile` and (on unix) chmod it to
+/// `0644` so the cp-kafka container's non-root user can read it once it's
+/// bind-mounted. `tempfile` creates files `0600` by default which causes a
+/// silent `IOException: client.properties (Permission denied)` inside the
+/// JVM tool. Returned object holds the tempfile open; drop it after the
+/// last docker invocation that needs the mount.
+fn write_client_props(props: &str) -> ClientPropsFile {
+    let tmp = tempfile::NamedTempFile::new().expect("tmp");
+    std::fs::write(tmp.path(), props).expect("write props");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o644))
+            .expect("chmod props");
+    }
+    ClientPropsFile { tmp }
+}
+
+/// Owns a `client.properties` tempfile + builds the `-v` mount spec for it.
+struct ClientPropsFile {
+    tmp: tempfile::NamedTempFile,
+}
+
+impl ClientPropsFile {
+    /// `<host_path>:/client.properties:ro` — the second positional arg to
+    /// `docker run -v`. Inside the container the file is always at
+    /// `/client.properties`, so JVM tool flags can use a fixed path.
+    fn mount_str(&self) -> String {
+        format!("{}:/client.properties:ro", self.tmp.path().display())
+    }
+}
+
+/// Run a cp-kafka tool with an extra `-v <mount>` bind. Otherwise identical
+/// to [`docker_run_kafka_tool`]: asserts success, captures stdout+stderr.
+fn docker_run_kafka_tool_with_mount(mount: &str, args: &[&str]) -> std::process::Output {
+    docker_run_kafka_tool_with_image_and_mount(KAFKA_IMAGE, mount, args)
+}
+
+/// Like [`docker_run_kafka_tool_with_mount`] but lets the caller choose the
+/// image. Used by the SCRAM-SHA-512 acceptance test (task 21), which needs
+/// `cp-kafka:7.5.0` because `kafka-configs --alter --entity-type users` in
+/// `cp-kafka:6.1.1` (Kafka 2.7) sends `IncrementalAlterConfigs (api_key 44)`
+/// rather than `AlterUserScramCredentials (51)`. Kafka 3.5+ uses the typed
+/// KIP-554 request, which is what slice 12 implements.
+fn docker_run_kafka_tool_with_image_and_mount(
+    image: &str,
+    mount: &str,
+    args: &[&str],
+) -> std::process::Output {
+    let out = Command::new("docker")
+        .arg("run")
+        .arg("--rm")
+        .arg("-v")
+        .arg(mount)
+        .arg("--add-host=host.docker.internal:host-gateway")
+        .arg(image)
+        .args(args)
+        .stderr(Stdio::piped())
+        .stdout(Stdio::piped())
+        .output()
+        .expect("spawn docker run");
+    eprintln!(
+        "CRABKA[test] docker_run image={image} mount={mount} {args:?} status={} stderr_len={}",
+        out.status,
+        out.stderr.len(),
+    );
+    assert!(
+        out.status.success(),
+        "docker run image={image} mount={mount} {args:?} failed: stdout={}, stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    out
+}
+
+/// End-to-end `SASL_PLAINTEXT` + PLAIN drive of the JVM `kafka-topics`,
+/// `kafka-console-producer`, and `kafka-console-consumer` tools against a
+/// Rust broker with a `SASL_PLAINTEXT` listener and a single provisioned
+/// PLAIN user. Verifies the produce/consume round-trip end-to-end through
+/// the official Kafka client.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Docker"]
+async fn jvm_sasl_plain_produce_consume() {
+    const TOPIC: &str = "crabka-sasl-plain-itest";
+    const USER: &str = "alice";
+    const PASS: &str = "wonderland";
+
+    let (broker, _dir) = start_sasl_plaintext_broker(&[(USER, PASS)]).await;
+    nc_check_connectivity();
+
+    // 1. Write client.properties for the JVM tools.
+    let props = format!(
+        "security.protocol=SASL_PLAINTEXT\n\
+         sasl.mechanism=PLAIN\n\
+         sasl.jaas.config={}\n",
+        plain_jaas(USER, PASS),
+    );
+    let props_file = write_client_props(&props);
+    let mount = props_file.mount_str();
+
+    // 2. Create the topic. `kafka-topics` uses `--command-config`.
+    docker_run_kafka_tool_with_mount(
+        &mount,
+        &[
+            "kafka-topics",
+            "--create",
+            "--if-not-exists",
+            "--topic",
+            TOPIC,
+            "--partitions",
+            "1",
+            "--replication-factor",
+            "1",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--command-config",
+            "/client.properties",
+        ],
+    );
+
+    // 3. Produce 10 records via stdin. `kafka-console-producer` uses
+    //    `--producer.config` (not `--command-config`).
+    let mut child = Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "-i",
+            "-v",
+            &mount,
+            "--add-host=host.docker.internal:host-gateway",
+            KAFKA_IMAGE,
+            "kafka-console-producer",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--topic",
+            TOPIC,
+            "--producer.config",
+            "/client.properties",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn producer");
+    let payload: String = (0..10)
+        .map(|i| format!("msg-{i}\n"))
+        .collect::<Vec<_>>()
+        .concat();
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(payload.as_bytes())
+        .expect("write stdin");
+    drop(child.stdin.take());
+    let producer_out = child.wait_with_output().expect("wait producer");
+    assert!(
+        producer_out.status.success(),
+        "producer failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&producer_out.stdout),
+        String::from_utf8_lossy(&producer_out.stderr)
+    );
+
+    // 4. Consume them back. `kafka-console-consumer` uses `--consumer.config`.
+    let consumer_out = docker_run_kafka_tool_with_mount(
+        &mount,
+        &[
+            "kafka-console-consumer",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--topic",
+            TOPIC,
+            "--partition",
+            "0",
+            "--from-beginning",
+            "--max-messages",
+            "10",
+            "--timeout-ms",
+            "20000",
+            "--consumer.config",
+            "/client.properties",
+        ],
+    );
+    let s = String::from_utf8_lossy(&consumer_out.stdout);
+    for i in 0..10 {
+        let needle = format!("msg-{i}");
+        assert!(s.contains(&needle), "consumer missing {needle}: {s:?}");
+    }
+
+    broker.shutdown().await;
+}
+
+/// End-to-end `SASL_PLAINTEXT` + SCRAM-SHA-512 drive of the JVM tools
+/// against a Rust broker. Exercises two distinct authentication paths in a
+/// single run:
+///
+/// 1. **PLAIN as super-user.** The admin user authenticates via PLAIN and
+///    runs `kafka-configs --alter --entity-type users --add-config
+///    'SCRAM-SHA-512=[password=...]'`. On `cp-kafka:7.5.0` (Kafka 3.5+) the
+///    JVM tool translates this to `AlterUserScramCredentials (api_key 51)`
+///    — the KIP-554 typed request, which is what slice 12's handler
+///    accepts. (On the older `cp-kafka:6.1.1` / Kafka 2.7 image the same
+///    CLI invocation falls back to `IncrementalAlterConfigs (44)` with
+///    `entity_type=USER`, which slice 12 does not implement.)
+///
+/// 2. **SCRAM-SHA-512 as the provisioned user.** Alice then drives
+///    `kafka-topics`, `kafka-console-producer`, and `kafka-console-consumer`
+///    using `sasl.mechanism=SCRAM-SHA-512`, exercising the RFC 5802 state
+///    machine end-to-end through the official Kafka client.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Docker"]
+#[allow(clippy::too_many_lines)]
+async fn jvm_sasl_scram_sha512_produce_consume() {
+    const TOPIC: &str = "crabka-sasl-scram-itest";
+    const ADMIN: &str = "admin";
+    const ADMIN_PASS: &str = "admin-secret";
+    const ALICE: &str = "alice";
+    const ALICE_PASS: &str = "alice-secret";
+
+    let (broker, _dir) = start_dual_mech_broker(ADMIN, ADMIN_PASS).await;
+    nc_check_connectivity();
+
+    // Step A: provision alice's SCRAM-SHA-512 credential via admin/PLAIN.
+    // `kafka-configs --alter --entity-type users --add-config 'SCRAM-SHA-512=[...]'`
+    // on Kafka 3.5+ → `AlterUserScramCredentials (51)`. The JVM client
+    // performs the PBKDF2 stretch locally and sends the 64-byte
+    // `salted_password` in the request.
+    let admin_props = write_client_props(&format!(
+        "security.protocol=SASL_PLAINTEXT\n\
+         sasl.mechanism=PLAIN\n\
+         sasl.jaas.config={}\n",
+        plain_jaas(ADMIN, ADMIN_PASS),
+    ));
+    docker_run_kafka_tool_with_image_and_mount(
+        KAFKA_IMAGE_TXN,
+        &admin_props.mount_str(),
+        &[
+            "kafka-configs",
+            "--alter",
+            "--entity-type",
+            "users",
+            "--entity-name",
+            ALICE,
+            "--add-config",
+            &format!("SCRAM-SHA-512=[password={ALICE_PASS}]"),
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--command-config",
+            "/client.properties",
+        ],
+    );
+
+    // Step B: drive produce + consume as alice over SCRAM-SHA-512.
+    let alice_props = write_client_props(&format!(
+        "security.protocol=SASL_PLAINTEXT\n\
+         sasl.mechanism=SCRAM-SHA-512\n\
+         sasl.jaas.config={}\n",
+        scram_jaas(ALICE, ALICE_PASS),
+    ));
+    let alice_mount = alice_props.mount_str();
+
+    // 1. Create the topic.
+    docker_run_kafka_tool_with_image_and_mount(
+        KAFKA_IMAGE_TXN,
+        &alice_mount,
+        &[
+            "kafka-topics",
+            "--create",
+            "--if-not-exists",
+            "--topic",
+            TOPIC,
+            "--partitions",
+            "1",
+            "--replication-factor",
+            "1",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--command-config",
+            "/client.properties",
+        ],
+    );
+
+    // 2. Produce 10 records via stdin (kafka-console-producer wants
+    //    `--producer.config`, not `--command-config`).
+    let mut child = Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "-i",
+            "-v",
+            &alice_mount,
+            "--add-host=host.docker.internal:host-gateway",
+            KAFKA_IMAGE_TXN,
+            "kafka-console-producer",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--topic",
+            TOPIC,
+            "--producer.config",
+            "/client.properties",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn producer");
+    let payload: String = (0..10)
+        .map(|i| format!("msg-{i}\n"))
+        .collect::<Vec<_>>()
+        .concat();
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(payload.as_bytes())
+        .expect("write stdin");
+    drop(child.stdin.take());
+    let producer_out = child.wait_with_output().expect("wait producer");
+    assert!(
+        producer_out.status.success(),
+        "producer failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&producer_out.stdout),
+        String::from_utf8_lossy(&producer_out.stderr)
+    );
+
+    // 3. Consume them back (`--consumer.config`).
+    let consumer_out = docker_run_kafka_tool_with_image_and_mount(
+        KAFKA_IMAGE_TXN,
+        &alice_mount,
+        &[
+            "kafka-console-consumer",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--topic",
+            TOPIC,
+            "--partition",
+            "0",
+            "--from-beginning",
+            "--max-messages",
+            "10",
+            "--timeout-ms",
+            "20000",
+            "--consumer.config",
+            "/client.properties",
+        ],
+    );
+    let s = String::from_utf8_lossy(&consumer_out.stdout);
+    for i in 0..10 {
+        let needle = format!("msg-{i}");
+        assert!(s.contains(&needle), "consumer missing {needle}: {s:?}");
+    }
+
+    broker.shutdown().await;
+}
+
+/// Spawn the broker with a single `SSL` listener on `0.0.0.0:9092`
+/// (advertised as `host.docker.internal:9092`) using the dev cert/key from
+/// `crates/security/tests/fixtures/`. No SASL. Mirrors
+/// [`start_host_broker`] otherwise but flips the protocol to `Ssl` and
+/// supplies a [`TlsConfig`].
+async fn start_ssl_broker() -> (crabka_broker::BrokerHandle, tempfile::TempDir) {
+    use crabka_broker::config::ListenerSpec;
+    use crabka_security::{ListenerProtocol, TlsConfig};
+
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("crabka_broker=debug,info")),
+        )
+        .with_test_writer()
+        .try_init();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let listen_addr: std::net::SocketAddr = LISTEN.parse().expect("static addr");
+    let controller_addr: std::net::SocketAddr = "0.0.0.0:9093".parse().expect("static addr");
+
+    // Resolve the on-disk paths of the dev fixture certs. Relative to this
+    // crate's manifest dir, the fixture lives in the security crate.
+    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let cert_path = manifest_dir
+        .join("..")
+        .join("security")
+        .join("tests")
+        .join("fixtures")
+        .join("dev_cert.pem");
+    let key_path = manifest_dir
+        .join("..")
+        .join("security")
+        .join("tests")
+        .join("fixtures")
+        .join("dev_key.pem");
+    assert!(
+        cert_path.exists(),
+        "dev_cert.pem missing at {}",
+        cert_path.display(),
+    );
+    assert!(
+        key_path.exists(),
+        "dev_key.pem missing at {}",
+        key_path.display(),
+    );
+
+    let config = BrokerConfig {
+        broker_id: 1,
+        listen_addr,
+        advertised_listener: BOOTSTRAP.into(),
+        log_dir: dir.path().to_path_buf(),
+        log_config: LogConfig::default(),
+        node_id: 1,
+        controller_listen_addr: controller_addr,
+        controller_quorum_voters: vec![(1, controller_addr)],
+        heartbeat_interval_ms: 3_000,
+        heartbeat_timeout_ms: 9_000,
+        replica_lag_time_max_ms: 30_000,
+        controller_election_timeout: std::time::Duration::from_secs(5),
+        controller_heartbeat_interval: std::time::Duration::from_millis(500),
+        bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
+        listeners: vec![ListenerSpec {
+            name: "SSL".to_string(),
+            bind_addr: listen_addr,
+            advertised: BOOTSTRAP.to_string(),
+            protocol: ListenerProtocol::Ssl,
+        }],
+        inter_broker_listener_name: "SSL".to_string(),
+        tls_config: Some(TlsConfig {
+            cert_chain_path: cert_path,
+            private_key_path: key_path,
+            trust_roots_path: None,
+        }),
+        ..BrokerConfig::default()
+    };
+    let handle = Broker::start(config).await.expect("start ssl broker");
+    eprintln!("CRABKA[test] ssl broker started listen={LISTEN} advertised={BOOTSTRAP}");
+    tracing::info!(
+        listen = %LISTEN,
+        advertised = %BOOTSTRAP,
+        "ssl broker started for jvm acceptance"
+    );
+    (handle, dir)
+}
+
+/// Build a JKS truststore from the dev cert PEM by shelling out to
+/// `keytool` inside a one-shot Docker container. Returns the host-side
+/// path to a `ts.jks` file (chmod `0644` so the cp-kafka container's
+/// non-root user can read it once bind-mounted).
+///
+/// Caches the result under `<tmp>/crabka-jvm-truststore/ts.jks` so
+/// repeated invocations (across both this test and the `SASL_SSL` test in
+/// task 23) skip the keytool round-trip.
+///
+/// The cp-kafka:6.1.1 image ships its own JRE + `keytool` binary, so we
+/// reuse it via `--entrypoint keytool` rather than pulling `openjdk:17`.
+/// The image is guaranteed to be on disk because the SSL test itself
+/// invokes `kafka-broker-api-versions` from the same image.
+fn prepare_jks_truststore() -> std::path::PathBuf {
+    let cache_dir = std::env::temp_dir().join("crabka-jvm-truststore");
+    std::fs::create_dir_all(&cache_dir).expect("mkdir truststore cache");
+    let ts_path = cache_dir.join("ts.jks");
+
+    // Stage the cert in the cache dir so the bind mount is a directory we
+    // control. This sidesteps mount-path quoting on /mnt/c under WSL.
+    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let cert_src = manifest_dir
+        .join("..")
+        .join("security")
+        .join("tests")
+        .join("fixtures")
+        .join("dev_cert.pem");
+    let cert_staged = cache_dir.join("dev_cert.pem");
+    std::fs::copy(&cert_src, &cert_staged).expect("copy dev_cert.pem to cache");
+
+    if !ts_path.exists() {
+        let mount = format!("{}:/work", cache_dir.display());
+        // Run keytool + chmod as root inside the container so the host
+        // file ends up world-readable. `--user 0:0` lets keytool create
+        // `/work/ts.jks` regardless of host-dir owner (CI runner-owned
+        // tmpdir blocks cp-kafka's non-root default user). The `chmod
+        // 0644` is inside the container too because the file is owned
+        // by root on the host once keytool runs as root, so the host-side
+        // runner user can't chmod it later.
+        let inner = "set -e; \
+             keytool -import -alias crabka -file /work/dev_cert.pem \
+                 -keystore /work/ts.jks -storepass changeit -noprompt && \
+             chmod 0644 /work/ts.jks";
+        let out = Command::new("docker")
+            .args([
+                "run",
+                "--rm",
+                "--user",
+                "0:0",
+                "-v",
+                &mount,
+                "--entrypoint",
+                "bash",
+                KAFKA_IMAGE,
+                "-c",
+                inner,
+            ])
+            .output()
+            .expect("spawn keytool");
+        assert!(
+            out.status.success(),
+            "keytool import failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
+        assert!(
+            ts_path.exists(),
+            "keytool reported success but ts.jks missing at {}",
+            ts_path.display(),
+        );
+    }
+
+    ts_path
+}
+
+/// End-to-end TLS handshake check against an `SSL`-only listener. Drives
+/// `kafka-broker-api-versions` from inside the cp-kafka container with a
+/// JKS truststore containing the broker's dev cert. Verifies the JVM
+/// client completes the TLS handshake and exchanges an `ApiVersions`
+/// request over the encrypted channel.
+///
+/// Hostname verification is disabled
+/// (`ssl.endpoint.identification.algorithm=`) because the dev cert's CN
+/// is `crabka-dev`, not `host.docker.internal`. The dev cert is a
+/// self-signed ECDSA P-256 end-entity (regenerated in this task from the
+/// original ED25519 + CA:TRUE fixture — cp-kafka:6.1.1 ships Java 11
+/// whose `SunJSSE` does not advertise `ed25519` signature schemes during
+/// the TLS handshake, so the JVM client would reject ED25519 server
+/// certs with `NoSignatureSchemesInCommon`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Docker"]
+async fn jvm_ssl_handshake_succeeds() {
+    let (broker, _dir) = start_ssl_broker().await;
+    nc_check_connectivity();
+
+    let truststore_path = prepare_jks_truststore();
+
+    let props = "security.protocol=SSL\n\
+                 ssl.truststore.location=/truststore.jks\n\
+                 ssl.truststore.password=changeit\n\
+                 ssl.endpoint.identification.algorithm=\n";
+    let props_tmp = write_client_props(props);
+    let ts_mount = format!("{}:/truststore.jks:ro", truststore_path.display());
+
+    let out = Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "-v",
+            &props_tmp.mount_str(),
+            "-v",
+            &ts_mount,
+            "--add-host=host.docker.internal:host-gateway",
+            KAFKA_IMAGE,
+            "kafka-broker-api-versions",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--command-config",
+            "/client.properties",
+        ])
+        .stderr(Stdio::piped())
+        .stdout(Stdio::piped())
+        .output()
+        .expect("spawn kafka-broker-api-versions");
+    eprintln!(
+        "CRABKA[test] ssl api-versions status={} stdout={} stderr={}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(
+        out.status.success(),
+        "ssl handshake failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    broker.shutdown().await;
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Task 23: SASL_SSL full stack + JVM-driven inter-broker SASL replication.
+// ────────────────────────────────────────────────────────────────────────
+
+/// Like [`docker_run_kafka_tool_with_image_and_mount`] but supports multiple
+/// bind mounts. Needed by the `SASL_SSL` test (task 23), which mounts both
+/// a `client.properties` file and a JKS truststore into the same container.
+fn docker_run_kafka_tool_with_image_and_mounts(
+    image: &str,
+    mounts: &[&str],
+    args: &[&str],
+) -> std::process::Output {
+    let mut cmd = Command::new("docker");
+    cmd.arg("run").arg("--rm");
+    for m in mounts {
+        cmd.arg("-v").arg(m);
+    }
+    cmd.arg("--add-host=host.docker.internal:host-gateway")
+        .arg(image)
+        .args(args)
+        .stderr(Stdio::piped())
+        .stdout(Stdio::piped());
+    let out = cmd.output().expect("spawn docker run");
+    eprintln!(
+        "CRABKA[test] docker_run image={image} mounts={mounts:?} {args:?} status={} stderr_len={}",
+        out.status,
+        out.stderr.len(),
+    );
+    assert!(
+        out.status.success(),
+        "docker run image={image} mounts={mounts:?} {args:?} failed: stdout={}, stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    out
+}
+
+/// Spawn the broker with a single `SASL_SSL` listener — PLAIN +
+/// SCRAM-SHA-512 mechanisms enabled, the dev cert/key wired up for TLS,
+/// and `admin` provisioned as the super-user PLAIN identity so it can
+/// `AlterUserScramCredentials` to provision SCRAM users.
+///
+/// This is the dual-mech broker from [`start_dual_mech_broker`] flipped
+/// from `SaslPlaintext` to `SaslSsl` with a `TlsConfig` attached — i.e.
+/// the production-shape listener configuration.
+async fn start_sasl_ssl_broker(
+    admin: &str,
+    admin_pass: &str,
+) -> (crabka_broker::BrokerHandle, tempfile::TempDir) {
+    use crabka_broker::config::ListenerSpec;
+    use crabka_security::{ListenerProtocol, SaslMechanism, TlsConfig};
+
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("crabka_broker=debug,info")),
+        )
+        .with_test_writer()
+        .try_init();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let listen_addr: std::net::SocketAddr = LISTEN.parse().expect("static addr");
+    let controller_addr: std::net::SocketAddr = "0.0.0.0:9093".parse().expect("static addr");
+
+    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let cert_path = manifest_dir
+        .join("..")
+        .join("security")
+        .join("tests")
+        .join("fixtures")
+        .join("dev_cert.pem");
+    let key_path = manifest_dir
+        .join("..")
+        .join("security")
+        .join("tests")
+        .join("fixtures")
+        .join("dev_key.pem");
+
+    let mut config = BrokerConfig {
+        broker_id: 1,
+        listen_addr,
+        advertised_listener: BOOTSTRAP.into(),
+        log_dir: dir.path().to_path_buf(),
+        log_config: LogConfig::default(),
+        node_id: 1,
+        controller_listen_addr: controller_addr,
+        controller_quorum_voters: vec![(1, controller_addr)],
+        heartbeat_interval_ms: 3_000,
+        heartbeat_timeout_ms: 9_000,
+        replica_lag_time_max_ms: 30_000,
+        controller_election_timeout: std::time::Duration::from_secs(5),
+        controller_heartbeat_interval: std::time::Duration::from_millis(500),
+        bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
+        listeners: vec![ListenerSpec {
+            name: "SASL_SSL".to_string(),
+            bind_addr: listen_addr,
+            advertised: BOOTSTRAP.to_string(),
+            protocol: ListenerProtocol::SaslSsl,
+        }],
+        inter_broker_listener_name: "SASL_SSL".to_string(),
+        tls_config: Some(TlsConfig {
+            cert_chain_path: cert_path,
+            private_key_path: key_path,
+            trust_roots_path: None,
+        }),
+        enabled_sasl_mechanisms: vec![SaslMechanism::Plain, SaslMechanism::ScramSha512],
+        super_user_name: Some(admin.to_string()),
+        ..BrokerConfig::default()
+    };
+    config
+        .plain_credentials
+        .insert(admin.to_string(), admin_pass.to_string());
+    let handle = Broker::start(config).await.expect("start sasl_ssl broker");
+    eprintln!("CRABKA[test] sasl_ssl broker started listen={LISTEN} advertised={BOOTSTRAP}");
+    tracing::info!(
+        listen = %LISTEN,
+        advertised = %BOOTSTRAP,
+        "sasl_ssl broker started for jvm acceptance"
+    );
+    (handle, dir)
+}
+
+/// End-to-end `SASL_SSL` drive of the JVM tools — the production-shape auth
+/// path: TLS handshake + SCRAM-SHA-512 SASL exchange over the encrypted
+/// channel. Mirrors `jvm_sasl_scram_sha512_produce_consume` (task 21) but
+/// with the `SASL_PLAINTEXT` listener swapped for `SASL_SSL` and the JVM
+/// client configured with a JKS truststore.
+///
+/// Uses cp-kafka:7.5.0 so admin's `kafka-configs --alter --entity-type users
+/// --add-config 'SCRAM-SHA-512=[...]'` translates to KIP-554's
+/// `AlterUserScramCredentials (api_key 51)` rather than the legacy
+/// `IncrementalAlterConfigs (44)` path that slice 12 doesn't implement.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Docker"]
+#[allow(clippy::too_many_lines)]
+async fn jvm_sasl_ssl_full_stack() {
+    const TOPIC: &str = "crabka-sasl-ssl-itest";
+    const ADMIN: &str = "admin";
+    const ADMIN_PASS: &str = "admin-secret";
+    const ALICE: &str = "alice";
+    const ALICE_PASS: &str = "alice-secret";
+
+    let (broker, _dir) = start_sasl_ssl_broker(ADMIN, ADMIN_PASS).await;
+    nc_check_connectivity();
+    let truststore_path = prepare_jks_truststore();
+    let ts_mount = format!("{}:/truststore.jks:ro", truststore_path.display());
+
+    // Step A: provision alice's SCRAM-SHA-512 credential via admin/PLAIN
+    // over the SASL_SSL listener.
+    let admin_props = write_client_props(&format!(
+        "security.protocol=SASL_SSL\n\
+         sasl.mechanism=PLAIN\n\
+         sasl.jaas.config={}\n\
+         ssl.truststore.location=/truststore.jks\n\
+         ssl.truststore.password=changeit\n\
+         ssl.endpoint.identification.algorithm=\n",
+        plain_jaas(ADMIN, ADMIN_PASS),
+    ));
+    docker_run_kafka_tool_with_image_and_mounts(
+        KAFKA_IMAGE_TXN,
+        &[&admin_props.mount_str(), &ts_mount],
+        &[
+            "kafka-configs",
+            "--alter",
+            "--entity-type",
+            "users",
+            "--entity-name",
+            ALICE,
+            "--add-config",
+            &format!("SCRAM-SHA-512=[password={ALICE_PASS}]"),
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--command-config",
+            "/client.properties",
+        ],
+    );
+
+    // Step B: drive produce + consume as alice over SASL_SSL + SCRAM-SHA-512.
+    let alice_props = write_client_props(&format!(
+        "security.protocol=SASL_SSL\n\
+         sasl.mechanism=SCRAM-SHA-512\n\
+         sasl.jaas.config={}\n\
+         ssl.truststore.location=/truststore.jks\n\
+         ssl.truststore.password=changeit\n\
+         ssl.endpoint.identification.algorithm=\n",
+        scram_jaas(ALICE, ALICE_PASS),
+    ));
+    let alice_props_mount = alice_props.mount_str();
+
+    // 1. Create the topic.
+    docker_run_kafka_tool_with_image_and_mounts(
+        KAFKA_IMAGE_TXN,
+        &[&alice_props_mount, &ts_mount],
+        &[
+            "kafka-topics",
+            "--create",
+            "--if-not-exists",
+            "--topic",
+            TOPIC,
+            "--partitions",
+            "1",
+            "--replication-factor",
+            "1",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--command-config",
+            "/client.properties",
+        ],
+    );
+
+    // 2. Produce 10 records via stdin.
+    let mut child = Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "-i",
+            "-v",
+            &alice_props_mount,
+            "-v",
+            &ts_mount,
+            "--add-host=host.docker.internal:host-gateway",
+            KAFKA_IMAGE_TXN,
+            "kafka-console-producer",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--topic",
+            TOPIC,
+            "--producer.config",
+            "/client.properties",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn producer");
+    let payload: String = (0..10)
+        .map(|i| format!("msg-{i}\n"))
+        .collect::<Vec<_>>()
+        .concat();
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(payload.as_bytes())
+        .expect("write stdin");
+    drop(child.stdin.take());
+    let producer_out = child.wait_with_output().expect("wait producer");
+    assert!(
+        producer_out.status.success(),
+        "producer failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&producer_out.stdout),
+        String::from_utf8_lossy(&producer_out.stderr)
+    );
+
+    // 3. Consume them back.
+    let consumer_out = docker_run_kafka_tool_with_image_and_mounts(
+        KAFKA_IMAGE_TXN,
+        &[&alice_props_mount, &ts_mount],
+        &[
+            "kafka-console-consumer",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--topic",
+            TOPIC,
+            "--partition",
+            "0",
+            "--from-beginning",
+            "--max-messages",
+            "10",
+            "--timeout-ms",
+            "20000",
+            "--consumer.config",
+            "/client.properties",
+        ],
+    );
+    let s = String::from_utf8_lossy(&consumer_out.stdout);
+    for i in 0..10 {
+        let needle = format!("msg-{i}");
+        assert!(s.contains(&needle), "consumer missing {needle}: {s:?}");
+    }
+
+    broker.shutdown().await;
+}
+
+/// Host port assignments for the two-broker JVM inter-broker test. The
+/// `SASL_PLAINTEXT` listener of broker 0 binds `0.0.0.0:9092` (advertised as
+/// `host.docker.internal:9092`) and broker 1 binds `0.0.0.0:9094`
+/// (advertised as `host.docker.internal:9094`). Inter-broker traffic flows
+/// over the same listeners — each broker resolves `host.docker.internal`
+/// to its peer's bound port via the host's resolver.
+const HOST_PORT_B1: u16 = 9094;
+const BOOTSTRAP_B1: &str = "host.docker.internal:9094";
+const LISTEN_B1: &str = "0.0.0.0:9094";
+
+/// Spawn two in-process brokers that share a single inter-broker SASL
+/// credential. Each broker has one `SASL_PLAINTEXT` listener; both
+/// `plain_credentials[admin] = admin_pass` so each broker can authenticate
+/// to the other via the same admin identity. The inter-broker listener
+/// name on both is `"SASL_PLAINTEXT"`, so the broker peers dial each
+/// other's advertised host (which we set to `host.docker.internal:<port>`
+/// so the JVM containers can use the same metadata response).
+async fn start_two_sasl_brokers(
+    admin: &str,
+    admin_pass: &str,
+) -> (
+    crabka_broker::BrokerHandle,
+    crabka_broker::BrokerHandle,
+    tempfile::TempDir,
+    tempfile::TempDir,
+) {
+    use crabka_broker::config::{InterBrokerCredentials, ListenerSpec};
+    use crabka_security::{ListenerProtocol, SaslMechanism};
+
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("crabka_broker=info")),
+        )
+        .with_test_writer()
+        .try_init();
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let dir0 = tempfile::tempdir().expect("tempdir b0");
+    let dir1 = tempfile::tempdir().expect("tempdir b1");
+    let listen0: std::net::SocketAddr = LISTEN.parse().expect("static addr");
+    let listen1: std::net::SocketAddr = LISTEN_B1.parse().expect("static addr");
+    let ctrl0: std::net::SocketAddr = "0.0.0.0:9093".parse().expect("static addr");
+    let ctrl1: std::net::SocketAddr = "0.0.0.0:9095".parse().expect("static addr");
+    let voters = vec![(1_u64, ctrl0), (2_u64, ctrl1)];
+
+    let mk_cfg = |idx: u64,
+                  listen: std::net::SocketAddr,
+                  ctrl: std::net::SocketAddr,
+                  advertised: &str,
+                  log_dir: std::path::PathBuf,
+                  mode: crabka_broker::BootstrapMode|
+     -> BrokerConfig {
+        let mut cfg = BrokerConfig {
+            broker_id: i32::try_from(idx).unwrap(),
+            listen_addr: listen,
+            advertised_listener: advertised.to_string(),
+            log_dir,
+            log_config: LogConfig::default(),
+            node_id: idx,
+            controller_listen_addr: ctrl,
+            controller_quorum_voters: voters.clone(),
+            heartbeat_interval_ms: 3_000,
+            heartbeat_timeout_ms: 9_000,
+            replica_lag_time_max_ms: 30_000,
+            controller_election_timeout: std::time::Duration::from_secs(5),
+            controller_heartbeat_interval: std::time::Duration::from_millis(500),
+            bootstrap_mode: mode,
+            listeners: vec![ListenerSpec {
+                name: "SASL_PLAINTEXT".to_string(),
+                bind_addr: listen,
+                advertised: advertised.to_string(),
+                protocol: ListenerProtocol::SaslPlaintext,
+            }],
+            inter_broker_listener_name: "SASL_PLAINTEXT".to_string(),
+            enabled_sasl_mechanisms: vec![SaslMechanism::Plain],
+            super_user_name: Some(admin.to_string()),
+            inter_broker_credentials: Some(InterBrokerCredentials {
+                mechanism: SaslMechanism::Plain,
+                username: admin.to_string(),
+                password: admin_pass.to_string(),
+            }),
+            ..BrokerConfig::default()
+        };
+        cfg.plain_credentials
+            .insert(admin.to_string(), admin_pass.to_string());
+        cfg
+    };
+
+    let cfg0 = mk_cfg(
+        1,
+        listen0,
+        ctrl0,
+        BOOTSTRAP,
+        dir0.path().to_path_buf(),
+        crabka_broker::BootstrapMode::Bootstrap,
+    );
+    let broker0 = Broker::start(cfg0).await.expect("start broker 0");
+
+    let cfg1 = mk_cfg(
+        2,
+        listen1,
+        ctrl1,
+        BOOTSTRAP_B1,
+        dir1.path().to_path_buf(),
+        crabka_broker::BootstrapMode::Join,
+    );
+    let join_handle = tokio::spawn(async move { Broker::start(cfg1).await });
+
+    // Bring broker 1 into the raft voter set.
+    broker0
+        .add_learner(2, ctrl1)
+        .await
+        .expect("add_learner for broker 1");
+    let target: std::collections::BTreeSet<u64> = [1_u64, 2_u64].into_iter().collect();
+    broker0
+        .change_membership(target)
+        .await
+        .expect("change_membership to {1,2}");
+
+    let broker1 = join_handle
+        .await
+        .expect("broker 1 spawn join")
+        .expect("broker 1 start");
+
+    eprintln!(
+        "CRABKA[test] two-broker sasl: b0={LISTEN} adv={BOOTSTRAP} b1={LISTEN_B1} adv={BOOTSTRAP_B1}"
+    );
+    let _ = HOST_PORT;
+    let _ = HOST_PORT_B1;
+    (broker0, broker1, dir0, dir1)
+}
+
+/// JVM-driven 2-broker test exercising the `SASL_PLAINTEXT` inter-broker
+/// listener. Both brokers boot with the same shared `admin` credential
+/// (mechanism=PLAIN); the raft layer authenticates each peer in both
+/// directions before the cluster converges on a 2-broker metadata view.
+/// A JVM client then SASL-authenticates as the same `admin` identity over
+/// the data-plane listener, creates a topic, and produces 50 records.
+///
+/// Why this test is *not* a follower-replication assertion: the brokers
+/// in this test advertise `host.docker.internal:<port>` so the JVM
+/// container can reach them via `--add-host=...:host-gateway`. Under WSL2
+/// that hostname resolves to the Windows host IP (e.g. `10.0.0.170`),
+/// which is *not* routable back into the WSL VM where the broker peers
+/// live. So follower-fetch traffic that flows broker→broker
+/// (`InterBrokerClient` dialing the peer's advertised address from
+/// `MetadataImage`) cannot complete on this network topology. That isn't
+/// a SASL or replication bug — it's a Docker-on-WSL networking limitation.
+/// The Rust-driven equivalent — `tests/auth_handlers.rs::two_broker_sasl::
+/// two_broker_sasl_plaintext_replication` — uses 127.0.0.1 advertised
+/// addresses for both brokers and *does* exercise end-to-end inter-broker
+/// SASL replication. Use that as the load-bearing inter-broker SASL test.
+///
+/// What this test *does* assert end-to-end through the JVM client:
+///
+/// 1. Two brokers boot with `SASL_PLAINTEXT` inter-broker auth, exchanging
+///    raft `AppendEntries` + `BrokerHeartbeat` traffic over SASL.
+/// 2. The cluster converges on a 2-broker metadata view (both brokers'
+///    `broker_count() >= 2`).
+/// 3. The JVM `kafka-topics` and `kafka-console-producer` tools both
+///    SASL-authenticate as `admin` and successfully drive a single-partition
+///    topic produce against broker 0.
+/// 4. Broker 0's local log has all 50 records after produce returns.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires Docker"]
+#[allow(clippy::too_many_lines)]
+async fn jvm_inter_broker_replication_authed() {
+    const TOPIC: &str = "crabka-jvm-inter-broker-itest";
+    const ADMIN: &str = "admin";
+    const ADMIN_PASS: &str = "admin-secret";
+
+    let (broker0, broker1, _dir0, _dir1) = start_two_sasl_brokers(ADMIN, ADMIN_PASS).await;
+    nc_check_connectivity();
+
+    // Wait for both brokers to converge on a 2-broker metadata image —
+    // the load-bearing inter-broker SASL handshake. If the peer SASL
+    // credentials mismatched, broker 1 would never register and this
+    // would time out.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_mins(1);
+    loop {
+        let n0 = broker0.broker_count().await;
+        let n1 = broker1.broker_count().await;
+        if n0 >= 2 && n1 >= 2 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() <= deadline,
+            "brokers didn't converge on 2-broker view within 60s (b0={n0} b1={n1})"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    // JVM client config: SASL_PLAINTEXT + PLAIN as the admin (super-user).
+    let props = write_client_props(&format!(
+        "security.protocol=SASL_PLAINTEXT\n\
+         sasl.mechanism=PLAIN\n\
+         sasl.jaas.config={}\n",
+        plain_jaas(ADMIN, ADMIN_PASS),
+    ));
+    let mount = props.mount_str();
+
+    // Create an rf=1 topic (see test doc-comment — JVM-driven rf=2
+    // assertion isn't reliable under WSL networking). Single replica is
+    // enough to prove the JVM client → broker SASL handshake works in
+    // both directions across the two-broker cluster's controller layer.
+    docker_run_kafka_tool_with_mount(
+        &mount,
+        &[
+            "kafka-topics",
+            "--create",
+            "--if-not-exists",
+            "--topic",
+            TOPIC,
+            "--partitions",
+            "1",
+            "--replication-factor",
+            "1",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--command-config",
+            "/client.properties",
+        ],
+    );
+
+    // Wait for the topic to materialize on its leader (either broker).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let on_b0 = broker0.has_partition(TOPIC, 0).await;
+        let on_b1 = broker1.has_partition(TOPIC, 0).await;
+        if on_b0 || on_b1 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() <= deadline,
+            "topic did not propagate within 30s (b0={on_b0} b1={on_b1})"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    // Produce 50 records via `kafka-console-producer`. The metadata
+    // response steers the producer to whichever broker leads partition 0.
+    let mut child = Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "-i",
+            "-v",
+            &mount,
+            "--add-host=host.docker.internal:host-gateway",
+            KAFKA_IMAGE,
+            "kafka-console-producer",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--topic",
+            TOPIC,
+            "--producer.config",
+            "/client.properties",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn producer");
+    let payload: String = (0..50)
+        .map(|i| format!("rec-{i}\n"))
+        .collect::<Vec<_>>()
+        .concat();
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(payload.as_bytes())
+        .expect("write stdin");
+    drop(child.stdin.take());
+    let producer_out = child.wait_with_output().expect("wait producer");
+    assert!(
+        producer_out.status.success(),
+        "producer failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&producer_out.stdout),
+        String::from_utf8_lossy(&producer_out.stderr)
+    );
+
+    // Verify the leader has 50 records on disk. We don't know in advance
+    // which broker leads partition 0 (raft picks one), so accept either.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let off0 = broker0.local_log_end_offset(TOPIC, 0).await.unwrap_or(0);
+        let off1 = broker1.local_log_end_offset(TOPIC, 0).await.unwrap_or(0);
+        if off0 >= 50 || off1 >= 50 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() <= deadline,
+            "leader didn't reach 50 records within 10s (b0={off0} b1={off1})"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    broker0.shutdown().await;
+    broker1.shutdown().await;
 }

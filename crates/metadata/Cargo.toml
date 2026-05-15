@@ -17,6 +17,7 @@ bytes = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 uuid = { workspace = true }
+crabka-security = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

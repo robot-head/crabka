@@ -57,3 +57,15 @@ bon = "3"
 wincode = "=0.4"
 serde-wincode = "0.1"
 async-trait = "0.1"
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
+# rustls-pemfile retired upstream (RUSTSEC-2025-0134, archived 2025-08).
+# Use the PEM parsers in `rustls-pki-types` (same code; pull explicitly).
+rustls-pki-types = { version = "1.10", features = ["alloc"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["tls12"] }
+pbkdf2 = { version = "0.12", default-features = false, features = ["std", "hmac"] }
+hmac = "0.12"
+sha2 = "0.10"
+ring = "0.17"
+subtle = "2"
+base64 = "0.22"
+crabka-security = { path = "crates/security", version = "0.1.0" }

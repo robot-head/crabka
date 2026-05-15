@@ -25,6 +25,7 @@ pub(crate) fn handle(
 ) -> BoxFuture<'static, Result<Bytes, BrokerError>> {
     let req_bytes = req_bytes.to_vec();
     let controller = broker.controller.clone();
+    let inter_broker_name = broker.config.inter_broker_listener_name.clone();
 
     Box::pin(async move {
         let mut cur: &[u8] = &req_bytes;
@@ -33,18 +34,9 @@ pub(crate) fn handle(
         let image = controller.current_image();
 
         // Brokers: enumerate all registered nodes from the metadata image.
-        // NodeId is `u64` for openraft compatibility but the Kafka wire
-        // protocol uses `i32`; clamp to `i32::MAX` if it ever overflows
-        // (won't happen in practice — broker ids are tiny).
         let brokers: Vec<MetadataResponseBroker> = image
             .brokers()
-            .map(|b| MetadataResponseBroker {
-                node_id: i32::try_from(b.node_id).unwrap_or(i32::MAX),
-                host: b.host.clone(),
-                port: i32::from(b.port),
-                rack: b.rack.clone(),
-                ..Default::default()
-            })
+            .map(|b| project_broker(b, &inter_broker_name))
             .collect();
 
         // Topic names to include: all (None) or the explicitly requested set.
@@ -129,6 +121,39 @@ pub(crate) fn handle(
         resp.encode(&mut buf, version)?;
         Ok(buf.freeze())
     })
+}
+
+/// Project a stored [`crabka_metadata::BrokerRegistrationRecord`] into a
+/// single wire-format [`MetadataResponseBroker`].
+///
+/// The Kafka `MetadataResponse` wire format (v0..v12 at time of writing)
+/// carries exactly one `host:port`/`rack` tuple per broker — there is no
+/// `endpoints[]` array on `MetadataResponseBroker`. To honor the Task-11
+/// per-listener registration we pick the broker's inter-broker endpoint
+/// (matched by name) and fall back to the first recorded endpoint, then
+/// to the legacy top-level `host`/`port` if `endpoints` is empty.
+/// Clamps `node_id` to `i32::MAX` if the openraft `u64` overflows — broker
+/// ids are tiny in practice so this is purely defensive.
+fn project_broker(
+    b: &crabka_metadata::BrokerRegistrationRecord,
+    inter_broker_name: &str,
+) -> MetadataResponseBroker {
+    let primary = b
+        .endpoints
+        .iter()
+        .find(|e| e.name == inter_broker_name)
+        .or_else(|| b.endpoints.first());
+    let (host, port) = match primary {
+        Some(e) => (e.host.clone(), i32::from(e.port)),
+        None => (b.host.clone(), i32::from(b.port)),
+    };
+    MetadataResponseBroker {
+        node_id: i32::try_from(b.node_id).unwrap_or(i32::MAX),
+        host,
+        port,
+        rack: b.rack.clone(),
+        ..Default::default()
+    }
 }
 
 fn parse_host_port(addr: &str) -> (String, i32) {

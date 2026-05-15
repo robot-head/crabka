@@ -27,6 +27,10 @@ crabka-log = { version = "0.1", path = "../log" }
 crabka-raft = { version = "0.1", path = "../raft" }
 crabka-metadata = { version = "0.1", path = "../metadata" }
 crabka-client-core = { version = "0.1", path = "../client-core" }
+crabka-security.workspace = true
+async-trait.workspace = true
+rustls.workspace = true
+tokio-rustls.workspace = true
 bytes = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde-wincode = { workspace = true }
@@ -45,5 +49,12 @@ futures-util = { workspace = true }
 crabka-broker = { version = "0.1", path = ".", features = ["test-helpers"] }
 crabka-client-consumer = { version = "0.1", path = "../client-consumer" }
 crabka-client-producer = { version = "0.1", path = "../client-producer" }
+rustls.workspace = true
+rustls-pki-types.workspace = true
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }
+tokio-rustls.workspace = true
+# Slice 12 T15 tests: client-side PBKDF2 of the SCRAM password to build
+# `AlterUserScramCredentials` upsertions.
+pbkdf2 = { workspace = true }
+sha2 = { workspace = true }

@@ -69,6 +69,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         controller_election_timeout: std::time::Duration::from_secs(5),
         controller_heartbeat_interval: std::time::Duration::from_millis(500),
         bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
+        ..BrokerConfig::default()
     };
 
     let handle = Broker::start(config).await?;

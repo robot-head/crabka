@@ -38,6 +38,8 @@ fn supported_apis() -> Vec<ApiVersion> {
         v!(sync_group_request),
         v!(heartbeat_request),
         v!(leave_group_request),
+        v!(sasl_handshake_request),
+        v!(sasl_authenticate_request),
         // OffsetCommit and OffsetFetch: MVP only handles the legacy
         // single-group / name-keyed shape. v8+ (OffsetFetch) and v10+
         // (OffsetCommit) switch to topic_id / per-group arrays which
@@ -76,6 +78,7 @@ fn supported_apis() -> Vec<ApiVersion> {
         v!(alter_partition_request),
         v!(describe_cluster_request),
         v!(broker_heartbeat_request),
+        v!(alter_user_scram_credentials_request),
     ]
 }
 

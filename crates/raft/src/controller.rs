@@ -23,7 +23,7 @@ use crabka_metadata::{MetadataImage, MetadataRecord};
 use crate::config::{BootstrapMode, ControllerConfig};
 use crate::error::RaftError;
 use crate::log_store::RaftLogStore;
-use crate::network::CrabkaRaftNetworkFactory;
+use crate::network::{CrabkaRaftNetworkFactory, OutboundDialer, PlaintextDialer};
 use crate::server;
 use crate::state_machine::CrabkaStateMachine;
 use crate::types::{AppData, Node, NodeId, Raft};
@@ -374,6 +374,7 @@ impl Controller {
     /// `Join` skips initialize and waits for an external `add_learner`;
     /// `Rejoin` skips initialize and relies on the on-disk raft log.
     /// Mismatches between mode and log state return `RaftError::Startup`.
+    #[allow(clippy::too_many_lines)]
     pub async fn start(config: ControllerConfig) -> Result<ControllerHandle, RaftError> {
         // 1. Log + state machine. The cluster UUID is `nil` for slice 7;
         //    a later slice will derive it from the first record applied
@@ -399,7 +400,15 @@ impl Controller {
         // 3. Network factory. Sees each peer addr through the voter map
         //    surfaced to openraft via `Node` (the `addr` string lives in
         //    `BasicNode`).
-        let network = CrabkaRaftNetworkFactory::new(config.client_id.clone());
+        // Use the injected dialer if the broker provided one (slice-12
+        // inter-broker TLS / SASL), otherwise fall back to plain
+        // `TcpStream::connect`. This keeps every existing PLAINTEXT-only
+        // test path identical to slice 11.
+        let dialer: Arc<dyn OutboundDialer> = config
+            .dialer
+            .clone()
+            .unwrap_or_else(|| Arc::new(PlaintextDialer));
+        let network = CrabkaRaftNetworkFactory::new(config.client_id.clone(), dialer);
 
         // 4. Spawn openraft. `Raft::new` consumes the log store and state
         //    machine; we keep our own `Arc` clones so the controller
