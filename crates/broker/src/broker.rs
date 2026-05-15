@@ -469,22 +469,51 @@ impl Broker {
         //    connection. The controller owns its own listener bound to
         //    `controller_listen_addr`.
         //
-        //    NOTE on slice-12 raft dialer wiring:
+        //    Slice 12b raft dialer + handshake wiring:
         //
         //    Replication + heartbeat dials route through the data-plane
         //    inter-broker listener (which speaks SASL/TLS when
         //    configured). The Raft RPCs (`AppendEntries`, `Vote`,
-        //    `SubmitChange`) dial the *controller* listener — a separate
-        //    TCP listener that, in slice 12, still does plain framing
-        //    only. Hooking the SASL-equipped dialer to the raft transport
-        //    here would make the inter-broker handshake fail against the
-        //    controller listener. Slice 12's design therefore keeps raft
-        //    traffic on the existing plaintext path; promoting raft to
-        //    the unified inter-broker listener is a follow-up slice. We
-        //    still feed an explicit `OutboundDialer::PlaintextDialer`
-        //    through the trait so the abstraction is in place for that
-        //    future change.
-        let raft_dialer: Option<std::sync::Arc<dyn crabka_raft::OutboundDialer>> = None;
+        //    `SubmitChange`) dial the *controller* listener which now
+        //    shares the same SASL/TLS handshake path via the
+        //    `InterBrokerDialer` adapter on the outbound side and
+        //    `BrokerRaftHandshake` on the inbound side. With the default
+        //    `controller_listener_protocol = Plaintext`, the dialer's
+        //    `dial` impl reduces to a `TcpStream::connect` and the
+        //    handshake is `None`, so the legacy raw-TCP raft path is
+        //    byte-identical for existing deployments and tests.
+        //
+        //    `BrokerRaftHandshake` needs a `ControllerHandle` to satisfy
+        //    SCRAM credential lookups, but the handle isn't built until
+        //    `Controller::start` returns. We bridge that with an
+        //    `Arc<OnceCell<Arc<ControllerHandle>>>` that's installed into
+        //    the handshake up front and `set` once the controller exists.
+        let controller_cell: Arc<tokio::sync::OnceCell<Arc<crabka_raft::ControllerHandle>>> =
+            Arc::new(tokio::sync::OnceCell::new());
+
+        let handshake_opt: Option<Arc<dyn crabka_raft::RaftListenerHandshake>> = if config
+            .controller_listener_protocol
+            == crabka_security::ListenerProtocol::Plaintext
+        {
+            None
+        } else {
+            let hs = crate::raft_handshake::BrokerRaftHandshake {
+                tls_acceptor: tls_acceptor.clone(),
+                plain_credentials: config.plain_credentials.clone(),
+                enabled_sasl_mechanisms: config.enabled_sasl_mechanisms.clone(),
+                protocol: config.controller_listener_protocol,
+                controller: controller_cell.clone(),
+            };
+            Some(Arc::new(hs) as Arc<dyn crabka_raft::RaftListenerHandshake>)
+        };
+
+        let raft_dialer: Option<std::sync::Arc<dyn crabka_raft::OutboundDialer>> =
+            Some(Arc::new(crate::network::client::InterBrokerDialer::new(
+                inter_broker_client.clone(),
+                config.controller_listener_protocol,
+                "localhost".to_string(),
+            )) as Arc<dyn crabka_raft::OutboundDialer>);
+
         let controller_cfg = crabka_raft::ControllerConfig {
             node_id: config.node_id,
             voters: config.controller_quorum_voters.clone(),
@@ -500,13 +529,19 @@ impl Broker {
             client_id: format!("crabka-broker-{}-controller", config.broker_id),
             bootstrap_mode: config.bootstrap_mode,
             dialer: raft_dialer,
-            handshake: None,
+            handshake: handshake_opt,
         };
         let controller = Arc::new(
             crabka_raft::Controller::start(controller_cfg)
                 .await
                 .map_err(|e| BrokerError::Startup(e.to_string()))?,
         );
+        // Populate the late-bound controller handle so the inbound
+        // `BrokerRaftHandshake` (already wired into the controller's
+        // accept loop) can perform SCRAM credential lookups on the next
+        // authenticated connection. The `set` cannot fail in practice
+        // because we hold the only writer; swallow the `SetError` defensively.
+        let _ = controller_cell.set(controller.clone());
 
         // 2. Wait for a leader, then submit a self-registration record so
         //    other brokers can discover us. Best-effort: if the submit
