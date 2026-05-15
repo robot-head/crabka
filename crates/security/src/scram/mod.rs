@@ -68,6 +68,36 @@ pub fn hash_scram_password_with_salt(
     }
 }
 
+/// Reconstruct `(stored_key, server_key)` from the 64-byte PBKDF2 output
+/// (`salted_password`) the client sends in an
+/// `AlterUserScramCredentialsRequest` per KIP-554.
+///
+/// The KIP places PBKDF2 on the client side: the wire request carries the
+/// already-stretched 64-byte SHA-512 PBKDF2 output, and the broker derives
+/// the two stored keys from it. This avoids the broker holding the raw
+/// password even briefly. The transformation is:
+///
+/// ```text
+/// client_key  = HMAC-SHA-512(salted_password, "Client Key")
+/// stored_key  = SHA-512(client_key)
+/// server_key  = HMAC-SHA-512(salted_password, "Server Key")
+/// ```
+///
+/// Both outputs are 64 bytes for SHA-512. The function name elides the
+/// digest because slice 12 only supports SCRAM-SHA-512; a future SHA-256
+/// variant would split into a separate helper.
+#[must_use]
+pub fn derive_keys_from_salted(salted: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    let mut ck_mac = <Hmac<Sha512>>::new_from_slice(salted).expect("hmac accepts any key length");
+    ck_mac.update(b"Client Key");
+    let client_key = ck_mac.finalize().into_bytes();
+    let stored_key = Sha512::digest(client_key).to_vec();
+    let mut sk_mac = <Hmac<Sha512>>::new_from_slice(salted).expect("hmac accepts any key length");
+    sk_mac.update(b"Server Key");
+    let server_key = sk_mac.finalize().into_bytes().to_vec();
+    (stored_key, server_key)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,6 +172,24 @@ mod tests {
         // Client verifies server signature
         let final_check = client.verify_server_final(&s2);
         assert!(final_check.is_ok(), "server signature must verify");
+    }
+
+    #[test]
+    fn derive_keys_from_salted_matches_hash_scram_password() {
+        // The two paths must produce identical (stored_key, server_key)
+        // when fed the same salted_password — `hash_scram_password_with_salt`
+        // runs PBKDF2 then derives keys, and `derive_keys_from_salted` skips
+        // PBKDF2 and reads the salted output directly.
+        let password = b"hunter2";
+        let salt: Vec<u8> = (0..16).collect();
+        let cred =
+            hash_scram_password_with_salt(password, SaslMechanism::ScramSha512, 4096, salt.clone());
+        let salted: [u8; 64] = pbkdf2::pbkdf2_hmac_array::<sha2::Sha512, 64>(password, &salt, 4096);
+        let (stored_key, server_key) = derive_keys_from_salted(&salted);
+        assert_eq!(stored_key, cred.stored_key);
+        assert_eq!(server_key, cred.server_key);
+        assert_eq!(stored_key.len(), 64);
+        assert_eq!(server_key.len(), 64);
     }
 
     #[test]

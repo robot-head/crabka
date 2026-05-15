@@ -16,6 +16,10 @@ use bytes::{Buf, BufMut, BytesMut};
 use crabka_broker::config::ListenerSpec;
 use crabka_broker::{Broker, BrokerConfig};
 use crabka_client_core::Client;
+use crabka_protocol::owned::alter_user_scram_credentials_request::{
+    AlterUserScramCredentialsRequest, ScramCredentialUpsertion,
+};
+use crabka_protocol::owned::alter_user_scram_credentials_response::AlterUserScramCredentialsResponse;
 use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
 use crabka_protocol::owned::api_versions_response::ApiVersionsResponse;
 use crabka_protocol::owned::metadata_request::MetadataRequest;
@@ -710,4 +714,306 @@ async fn round_trip(
         let _tagged = cur.get_u8();
     }
     Ok(cur.to_vec())
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Task 15: AlterUserScramCredentials (api_key 51, KIP-554).
+// ────────────────────────────────────────────────────────────────────────
+
+/// SCRAM mechanism byte on the `AlterUserScramCredentials` wire (KIP-554):
+/// `2` = `SCRAM-SHA-512`. `1` would be `SCRAM-SHA-256` (not in slice 12).
+const WIRE_MECH_SCRAM_SHA_512: i8 = 2;
+
+/// Happy path: a super-user authenticates over PLAIN, sends an
+/// `AlterUserScramCredentials` upsertion for `alice`, and the broker stores
+/// the credential. We then auth as `alice` over SCRAM-SHA-512 to prove the
+/// upsertion actually wrote a valid credential to the metadata image.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn alter_scram_creds_super_user_can_provision() {
+    let log_dir = tempfile::tempdir().unwrap();
+    let mut cfg = BrokerConfig::for_tests(log_dir.path().to_path_buf());
+    cfg.listeners = vec![ListenerSpec {
+        name: "SASL_PLAINTEXT".to_string(),
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        advertised: "127.0.0.1:0".to_string(),
+        protocol: ListenerProtocol::SaslPlaintext,
+    }];
+    cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
+    cfg.enabled_sasl_mechanisms = vec![SaslMechanism::Plain, SaslMechanism::ScramSha512];
+    cfg.plain_credentials
+        .insert("admin".to_string(), "secret".to_string());
+    cfg.super_user_name = Some("admin".to_string());
+
+    let handle = Broker::start(cfg).await.expect("broker must start");
+    let addr = handle.listen_addr();
+
+    let (salt, salted) = pbkdf2_salt_and_salted(b"wonderland", 4096);
+    let req = AlterUserScramCredentialsRequest {
+        upsertions: vec![ScramCredentialUpsertion {
+            name: "alice".to_string(),
+            mechanism: WIRE_MECH_SCRAM_SHA_512,
+            iterations: 4096,
+            salt: bytes::Bytes::from(salt),
+            salted_password: bytes::Bytes::from(salted.to_vec()),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let resp = drive_alter_user_scram_credentials_as_plain(addr, "admin", b"secret", req)
+        .await
+        .expect("PLAIN auth + AUSCR upsertion");
+    assert_eq!(resp.results.len(), 1, "one result row per upsertion");
+    assert_eq!(
+        resp.results[0].error_code, 0,
+        "expected error_code=0, got {:?}",
+        resp.results[0]
+    );
+    assert_eq!(resp.results[0].user, "alice");
+
+    // Round-trip: now log in as `alice` over SCRAM, proving the upserted
+    // credential actually reached the metadata image. Wait briefly for the
+    // raft commit to apply.
+    let mut last_err: Option<io::Error> = None;
+    for _ in 0..40 {
+        match drive_sasl_scram_session(addr, "alice", "wonderland").await {
+            Ok(()) => {
+                last_err = None;
+                break;
+            }
+            Err(e) => last_err = Some(e),
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    handle.shutdown().await;
+    if let Some(e) = last_err {
+        panic!("post-upsertion SCRAM auth must succeed: {e}");
+    }
+}
+
+/// Non-super-user authenticates and tries to upsert. The broker accepts the
+/// request (it's a valid SASL listener API) but every per-user row reports
+/// `CLUSTER_AUTHORIZATION_FAILED` (31). No metadata change is made.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn alter_scram_creds_non_super_user_rejected() {
+    let log_dir = tempfile::tempdir().unwrap();
+    let mut cfg = BrokerConfig::for_tests(log_dir.path().to_path_buf());
+    cfg.listeners = vec![ListenerSpec {
+        name: "SASL_PLAINTEXT".to_string(),
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        advertised: "127.0.0.1:0".to_string(),
+        protocol: ListenerProtocol::SaslPlaintext,
+    }];
+    cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
+    cfg.enabled_sasl_mechanisms = vec![SaslMechanism::Plain];
+    cfg.plain_credentials
+        .insert("bob".to_string(), "hunter2".to_string());
+    cfg.super_user_name = Some("admin".to_string());
+
+    let handle = Broker::start(cfg).await.expect("broker must start");
+    let addr = handle.listen_addr();
+
+    let (salt, salted) = pbkdf2_salt_and_salted(b"wonderland", 4096);
+    let req = AlterUserScramCredentialsRequest {
+        upsertions: vec![ScramCredentialUpsertion {
+            name: "alice".to_string(),
+            mechanism: WIRE_MECH_SCRAM_SHA_512,
+            iterations: 4096,
+            salt: bytes::Bytes::from(salt),
+            salted_password: bytes::Bytes::from(salted.to_vec()),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let resp = drive_alter_user_scram_credentials_as_plain(addr, "bob", b"hunter2", req)
+        .await
+        .expect("PLAIN auth + AUSCR (rejected)");
+    handle.shutdown().await;
+    assert_eq!(resp.results.len(), 1);
+    assert_eq!(
+        resp.results[0].error_code,
+        31, // CLUSTER_AUTHORIZATION_FAILED
+        "non-super-user must get CLUSTER_AUTHORIZATION_FAILED, got {:?}",
+        resp.results[0]
+    );
+}
+
+/// `iterations < 4096` ⇒ `UNACCEPTABLE_CREDENTIAL`. Verified for a super-user
+/// principal so the only error path exercised is the parameter validation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn alter_scram_creds_low_iterations_rejected() {
+    let log_dir = tempfile::tempdir().unwrap();
+    let mut cfg = BrokerConfig::for_tests(log_dir.path().to_path_buf());
+    cfg.listeners = vec![ListenerSpec {
+        name: "SASL_PLAINTEXT".to_string(),
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        advertised: "127.0.0.1:0".to_string(),
+        protocol: ListenerProtocol::SaslPlaintext,
+    }];
+    cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
+    cfg.enabled_sasl_mechanisms = vec![SaslMechanism::Plain];
+    cfg.plain_credentials
+        .insert("admin".to_string(), "secret".to_string());
+    cfg.super_user_name = Some("admin".to_string());
+
+    let handle = Broker::start(cfg).await.expect("broker must start");
+    let addr = handle.listen_addr();
+
+    // 64-byte salted_password length is valid; only `iterations` violates.
+    let req = AlterUserScramCredentialsRequest {
+        upsertions: vec![ScramCredentialUpsertion {
+            name: "alice".to_string(),
+            mechanism: WIRE_MECH_SCRAM_SHA_512,
+            iterations: 1,
+            salt: bytes::Bytes::from(vec![0u8; 16]),
+            salted_password: bytes::Bytes::from(vec![0u8; 64]),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let resp = drive_alter_user_scram_credentials_as_plain(addr, "admin", b"secret", req)
+        .await
+        .expect("PLAIN auth + AUSCR (rejected)");
+    handle.shutdown().await;
+    assert_eq!(resp.results.len(), 1);
+    assert_eq!(
+        resp.results[0].error_code,
+        78, // UNACCEPTABLE_CREDENTIAL (canonical Kafka error code)
+        "iterations < 4096 must get UNACCEPTABLE_CREDENTIAL, got {:?}",
+        resp.results[0]
+    );
+}
+
+/// Two upsertions for the same `(user, mechanism)` in one request: the
+/// second occurrence gets `DUPLICATE_RESOURCE` (84). The first occurrence
+/// is otherwise valid and its result row reflects whatever the validation
+/// would normally return — for the super-user happy path that's `0`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn alter_scram_creds_duplicate_resource_rejected() {
+    let log_dir = tempfile::tempdir().unwrap();
+    let mut cfg = BrokerConfig::for_tests(log_dir.path().to_path_buf());
+    cfg.listeners = vec![ListenerSpec {
+        name: "SASL_PLAINTEXT".to_string(),
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        advertised: "127.0.0.1:0".to_string(),
+        protocol: ListenerProtocol::SaslPlaintext,
+    }];
+    cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
+    cfg.enabled_sasl_mechanisms = vec![SaslMechanism::Plain];
+    cfg.plain_credentials
+        .insert("admin".to_string(), "secret".to_string());
+    cfg.super_user_name = Some("admin".to_string());
+
+    let handle = Broker::start(cfg).await.expect("broker must start");
+    let addr = handle.listen_addr();
+
+    let (salt, salted) = pbkdf2_salt_and_salted(b"wonderland", 4096);
+    let upsert = ScramCredentialUpsertion {
+        name: "alice".to_string(),
+        mechanism: WIRE_MECH_SCRAM_SHA_512,
+        iterations: 4096,
+        salt: bytes::Bytes::from(salt),
+        salted_password: bytes::Bytes::from(salted.to_vec()),
+        ..Default::default()
+    };
+    let req = AlterUserScramCredentialsRequest {
+        upsertions: vec![upsert.clone(), upsert],
+        ..Default::default()
+    };
+    let resp = drive_alter_user_scram_credentials_as_plain(addr, "admin", b"secret", req)
+        .await
+        .expect("PLAIN auth + AUSCR (duplicate)");
+    handle.shutdown().await;
+    assert_eq!(resp.results.len(), 2, "one result row per upsertion");
+    // First row may be 0 (accepted) or any validation code; the contract
+    // tested here is that the *second* occurrence is the duplicate.
+    assert_eq!(
+        resp.results[1].error_code,
+        84, // DUPLICATE_RESOURCE
+        "second occurrence of (user, mech) must get DUPLICATE_RESOURCE, got {:?}",
+        resp.results[1]
+    );
+}
+
+/// Authenticate over SASL/PLAIN against `addr` as `user`/`password`, then
+/// send one `AlterUserScramCredentials v0` (`api_key` 51, flexible) request
+/// and decode the response. Used by every T15 test case so the SASL
+/// boilerplate stays in one place.
+async fn drive_alter_user_scram_credentials_as_plain(
+    addr: SocketAddr,
+    user: &str,
+    password: &[u8],
+    req: AlterUserScramCredentialsRequest,
+) -> Result<AlterUserScramCredentialsResponse, io::Error> {
+    let mut stream = TcpStream::connect(addr).await?;
+
+    // ── 1. ApiVersions (v0, non-flexible).
+    let av_req = ApiVersionsRequest::default();
+    let mut av_body = BytesMut::new();
+    av_req
+        .encode(&mut av_body, 0)
+        .map_err(|e| io::Error::other(format!("ApiVersions encode: {e}")))?;
+    let _ = round_trip(&mut stream, 18, 0, 1, false, &av_body).await?;
+
+    // ── 2. SaslHandshake v1.
+    let mut sh_body = BytesMut::new();
+    SaslHandshakeRequest {
+        mechanism: "PLAIN".to_string(),
+        ..Default::default()
+    }
+    .encode(&mut sh_body, 1)
+    .map_err(|e| io::Error::other(format!("SaslHandshake encode: {e}")))?;
+    let sh_resp_bytes = round_trip(&mut stream, 17, 1, 2, false, &sh_body).await?;
+    let mut cur: &[u8] = &sh_resp_bytes;
+    let sh_resp = SaslHandshakeResponse::decode(&mut cur, 1)
+        .map_err(|e| io::Error::other(format!("SaslHandshake decode: {e}")))?;
+    if sh_resp.error_code != 0 {
+        return Err(io::Error::other(format!(
+            "SaslHandshake failed: error_code={}",
+            sh_resp.error_code
+        )));
+    }
+
+    // ── 3. SaslAuthenticate v2 (flexible). auth_bytes = \0user\0password.
+    let mut payload = Vec::with_capacity(2 + user.len() + password.len());
+    payload.push(0);
+    payload.extend_from_slice(user.as_bytes());
+    payload.push(0);
+    payload.extend_from_slice(password);
+    let mut auth_body = BytesMut::new();
+    SaslAuthenticateRequest {
+        auth_bytes: bytes::Bytes::from(payload),
+        ..Default::default()
+    }
+    .encode(&mut auth_body, 2)
+    .map_err(|e| io::Error::other(format!("SaslAuthenticate encode: {e}")))?;
+    let auth_resp_bytes = round_trip(&mut stream, 36, 2, 3, true, &auth_body).await?;
+    let mut cur: &[u8] = &auth_resp_bytes;
+    let auth_resp = SaslAuthenticateResponse::decode(&mut cur, 2)
+        .map_err(|e| io::Error::other(format!("SaslAuthenticate decode: {e}")))?;
+    if auth_resp.error_code != 0 {
+        return Err(io::Error::other(format!(
+            "SaslAuthenticate failed: error_code={}",
+            auth_resp.error_code
+        )));
+    }
+
+    // ── 4. AlterUserScramCredentials v0 (api_key 51, flexible from v0).
+    let mut auscr_body = BytesMut::new();
+    req.encode(&mut auscr_body, 0)
+        .map_err(|e| io::Error::other(format!("AUSCR encode: {e}")))?;
+    let auscr_resp_bytes = round_trip(&mut stream, 51, 0, 4, true, &auscr_body).await?;
+    let mut cur: &[u8] = &auscr_resp_bytes;
+    AlterUserScramCredentialsResponse::decode(&mut cur, 0)
+        .map_err(|e| io::Error::other(format!("AUSCR decode: {e}")))
+}
+
+/// Compute `(salt, salted_password)` for a SCRAM-SHA-512 wire upsertion. The
+/// salt is a fixed 16-byte vector (deterministic for the test) and the
+/// salted password is the 64-byte PBKDF2-HMAC-SHA-512 output the KIP-554
+/// wire request carries.
+fn pbkdf2_salt_and_salted(password: &[u8], iterations: u32) -> (Vec<u8>, [u8; 64]) {
+    let salt: Vec<u8> = (0..16).collect();
+    let salted: [u8; 64] =
+        pbkdf2::pbkdf2_hmac_array::<sha2::Sha512, 64>(password, &salt, iterations);
+    (salt, salted)
 }

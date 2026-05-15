@@ -160,6 +160,26 @@ async fn serve_connection_stream<S>(
             }
             continue;
         }
+        // AlterUserScramCredentials (51) needs the connection's authenticated
+        // principal so it can enforce the super-user gate; the handler table
+        // signature passes only `&Broker`, so this case is intercepted inline
+        // like the SASL frames are. Returning `Some` short-circuits the
+        // normal `dispatch_one()` path for this frame.
+        if peek_api_key(&frame).ok() == Some(51) {
+            match handle_alter_user_scram_credentials_frame(&broker, &frame, &auth).await {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during AUSCR, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "AUSCR dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
         let response_bytes = match dispatch_one(&broker, &frame).await {
             Ok(b) => b,
             Err(e) => {
@@ -281,6 +301,49 @@ fn handle_sasl_frame(
         response_bytes,
         close_after,
     })
+}
+
+/// Decode + dispatch an `AlterUserScramCredentials` (`api_key` 51) frame.
+/// Pulls the authenticated principal off the per-connection `auth` state so
+/// the handler can enforce its super-user gate. On a SASL listener the
+/// pre-auth allowlist already rejects this frame; on PLAINTEXT/SSL listeners
+/// the connection is implicitly `Authenticated { ANONYMOUS / Plain }` (see
+/// the loop init), so `principal()` always returns `Some` here.
+async fn handle_alter_user_scram_credentials_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+) -> Result<Bytes, BrokerError> {
+    use crabka_protocol::{Decode, Encode};
+
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 51);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let mut cur: &[u8] = body;
+    let req =
+        crabka_protocol::owned::alter_user_scram_credentials_request::AlterUserScramCredentialsRequest::decode(
+            &mut cur, api_version,
+        )?;
+
+    let principal = auth
+        .principal()
+        .cloned()
+        .unwrap_or_else(|| crabka_security::Principal {
+            name: "ANONYMOUS".to_string(),
+            mechanism: crabka_security::SaslMechanism::Plain,
+        });
+
+    let resp = crate::handlers::alter_user_scram_credentials::handle(broker, req, &principal).await;
+    let mut buf = BytesMut::with_capacity(resp.encoded_len(api_version));
+    resp.encode(&mut buf, api_version)?;
+    let resp_body = buf.freeze();
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
 }
 
 /// Read just the `api_key` (first 2 bytes) of a request frame without
@@ -444,6 +507,8 @@ fn handler_body_flexible(api_key: i16, version: i16) -> bool {
         37 => version >= owned::create_partitions_request::FLEXIBLE_MIN,
         42 => version >= owned::delete_groups_request::FLEXIBLE_MIN,
         44 => version >= owned::incremental_alter_configs_request::FLEXIBLE_MIN,
+        // AlterUserScramCredentials (KIP-554, slice 12 T15) is flexible from v0.
+        51 => version >= owned::alter_user_scram_credentials_request::FLEXIBLE_MIN,
         56 => version >= owned::alter_partition_request::FLEXIBLE_MIN,
         60 => version >= owned::describe_cluster_request::FLEXIBLE_MIN,
         63 => version >= owned::broker_heartbeat_request::FLEXIBLE_MIN,

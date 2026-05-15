@@ -78,6 +78,7 @@ fn supported_apis() -> Vec<ApiVersion> {
         v!(alter_partition_request),
         v!(describe_cluster_request),
         v!(broker_heartbeat_request),
+        v!(alter_user_scram_credentials_request),
     ]
 }
 

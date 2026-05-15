@@ -70,6 +70,26 @@ pub const GROUP_ID_NOT_FOUND: i16 = 69;
 /// types; `INVALID_REQUEST` is the correct response.
 pub const INVALID_RESOURCE_TYPE: i16 = INVALID_REQUEST;
 
+// Slice 12 additions — `AlterUserScramCredentials` (KIP-554) result codes.
+/// `CLUSTER_AUTHORIZATION_FAILED` (31) — principal lacks cluster-level
+/// authorization. Used as a stand-in for ACL by the
+/// `AlterUserScramCredentials` handler when the request principal is not the
+/// configured super-user.
+pub const CLUSTER_AUTHORIZATION_FAILED: i16 = 31;
+/// `RESOURCE_NOT_FOUND` (66) — per-user error when a deletion targets a
+/// credential that does not exist in the metadata image.
+pub const RESOURCE_NOT_FOUND: i16 = 66;
+/// `UNACCEPTABLE_CREDENTIAL` (78) — per-user error when an upsertion carries
+/// invalid SCRAM parameters (iterations < 4096, empty salt, `salted_password`
+/// of the wrong length, or an unknown mechanism). Canonical Apache Kafka
+/// assigns code 78 to this error; the slice-12 plan/spec listed 74, but that
+/// value is already taken by `FENCED_LEADER_EPOCH` — `78` is correct.
+pub const UNACCEPTABLE_CREDENTIAL: i16 = 78;
+/// `DUPLICATE_RESOURCE` (84) — per-user error when the same
+/// `(user, mechanism)` appears twice in one `AlterUserScramCredentials`
+/// request (either two upsertions, two deletions, or one of each).
+pub const DUPLICATE_RESOURCE: i16 = 84;
+
 // Slice 10a additions — bulletproof EOS / acks=all codes.
 /// Per-partition error returned by `acks=all` Produce when the request
 /// completes without enough in-sync replicas confirming the write. The

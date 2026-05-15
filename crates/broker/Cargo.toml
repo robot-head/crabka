@@ -53,3 +53,7 @@ rustls-pemfile.workspace = true
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 tokio-rustls.workspace = true
+# Slice 12 T15 tests: client-side PBKDF2 of the SCRAM password to build
+# `AlterUserScramCredentials` upsertions.
+pbkdf2 = { workspace = true }
+sha2 = { workspace = true }

@@ -15,6 +15,7 @@ pub use mechanism::SaslMechanism;
 pub use plain::verify_plain;
 pub use principal::{AuthError, Principal};
 pub use scram::{
-    ScramClientExchange, ScramCredential, ScramServerExchange, StepResult, hash_scram_password,
+    ScramClientExchange, ScramCredential, ScramServerExchange, StepResult, derive_keys_from_salted,
+    hash_scram_password,
 };
 pub use tls::TlsConfig;
