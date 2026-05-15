@@ -2362,6 +2362,7 @@ async fn jvm_sasl_plain_produce_consume() {
 ///    machine end-to-end through the official Kafka client.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker"]
+#[allow(clippy::too_many_lines)]
 async fn jvm_sasl_scram_sha512_produce_consume() {
     const TOPIC: &str = "crabka-sasl-scram-itest";
     const ADMIN: &str = "admin";
@@ -2501,6 +2502,235 @@ async fn jvm_sasl_scram_sha512_produce_consume() {
         let needle = format!("msg-{i}");
         assert!(s.contains(&needle), "consumer missing {needle}: {s:?}");
     }
+
+    broker.shutdown().await;
+}
+
+/// Spawn the broker with a single `SSL` listener on `0.0.0.0:9092`
+/// (advertised as `host.docker.internal:9092`) using the dev cert/key from
+/// `crates/security/tests/fixtures/`. No SASL. Mirrors
+/// [`start_host_broker`] otherwise but flips the protocol to `Ssl` and
+/// supplies a [`TlsConfig`].
+async fn start_ssl_broker() -> (crabka_broker::BrokerHandle, tempfile::TempDir) {
+    use crabka_broker::config::ListenerSpec;
+    use crabka_security::{ListenerProtocol, TlsConfig};
+
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("crabka_broker=debug,info")),
+        )
+        .with_test_writer()
+        .try_init();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let listen_addr: std::net::SocketAddr = LISTEN.parse().expect("static addr");
+    let controller_addr: std::net::SocketAddr = "0.0.0.0:9093".parse().expect("static addr");
+
+    // Resolve the on-disk paths of the dev fixture certs. Relative to this
+    // crate's manifest dir, the fixture lives in the security crate.
+    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let cert_path = manifest_dir
+        .join("..")
+        .join("security")
+        .join("tests")
+        .join("fixtures")
+        .join("dev_cert.pem");
+    let key_path = manifest_dir
+        .join("..")
+        .join("security")
+        .join("tests")
+        .join("fixtures")
+        .join("dev_key.pem");
+    assert!(
+        cert_path.exists(),
+        "dev_cert.pem missing at {}",
+        cert_path.display(),
+    );
+    assert!(
+        key_path.exists(),
+        "dev_key.pem missing at {}",
+        key_path.display(),
+    );
+
+    let config = BrokerConfig {
+        broker_id: 1,
+        listen_addr,
+        advertised_listener: BOOTSTRAP.into(),
+        log_dir: dir.path().to_path_buf(),
+        log_config: LogConfig::default(),
+        node_id: 1,
+        controller_listen_addr: controller_addr,
+        controller_quorum_voters: vec![(1, controller_addr)],
+        heartbeat_interval_ms: 3_000,
+        heartbeat_timeout_ms: 9_000,
+        replica_lag_time_max_ms: 30_000,
+        controller_election_timeout: std::time::Duration::from_secs(5),
+        controller_heartbeat_interval: std::time::Duration::from_millis(500),
+        bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
+        listeners: vec![ListenerSpec {
+            name: "SSL".to_string(),
+            bind_addr: listen_addr,
+            advertised: BOOTSTRAP.to_string(),
+            protocol: ListenerProtocol::Ssl,
+        }],
+        inter_broker_listener_name: "SSL".to_string(),
+        tls_config: Some(TlsConfig {
+            cert_chain_path: cert_path,
+            private_key_path: key_path,
+            trust_roots_path: None,
+        }),
+        ..BrokerConfig::default()
+    };
+    let handle = Broker::start(config).await.expect("start ssl broker");
+    eprintln!("CRABKA[test] ssl broker started listen={LISTEN} advertised={BOOTSTRAP}");
+    tracing::info!(
+        listen = %LISTEN,
+        advertised = %BOOTSTRAP,
+        "ssl broker started for jvm acceptance"
+    );
+    (handle, dir)
+}
+
+/// Build a JKS truststore from the dev cert PEM by shelling out to
+/// `keytool` inside a one-shot Docker container. Returns the host-side
+/// path to a `ts.jks` file (chmod `0644` so the cp-kafka container's
+/// non-root user can read it once bind-mounted).
+///
+/// Caches the result under `<tmp>/crabka-jvm-truststore/ts.jks` so
+/// repeated invocations (across both this test and the `SASL_SSL` test in
+/// task 23) skip the keytool round-trip.
+///
+/// The cp-kafka:6.1.1 image ships its own JRE + `keytool` binary, so we
+/// reuse it via `--entrypoint keytool` rather than pulling `openjdk:17`.
+/// The image is guaranteed to be on disk because the SSL test itself
+/// invokes `kafka-broker-api-versions` from the same image.
+fn prepare_jks_truststore() -> std::path::PathBuf {
+    let cache_dir = std::env::temp_dir().join("crabka-jvm-truststore");
+    std::fs::create_dir_all(&cache_dir).expect("mkdir truststore cache");
+    let ts_path = cache_dir.join("ts.jks");
+
+    // Stage the cert in the cache dir so the bind mount is a directory we
+    // control. This sidesteps mount-path quoting on /mnt/c under WSL.
+    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let cert_src = manifest_dir
+        .join("..")
+        .join("security")
+        .join("tests")
+        .join("fixtures")
+        .join("dev_cert.pem");
+    let cert_staged = cache_dir.join("dev_cert.pem");
+    std::fs::copy(&cert_src, &cert_staged).expect("copy dev_cert.pem to cache");
+
+    if !ts_path.exists() {
+        let mount = format!("{}:/work", cache_dir.display());
+        let out = Command::new("docker")
+            .args([
+                "run",
+                "--rm",
+                "-v",
+                &mount,
+                "--entrypoint",
+                "keytool",
+                KAFKA_IMAGE,
+                "-import",
+                "-alias",
+                "crabka",
+                "-file",
+                "/work/dev_cert.pem",
+                "-keystore",
+                "/work/ts.jks",
+                "-storepass",
+                "changeit",
+                "-noprompt",
+            ])
+            .output()
+            .expect("spawn keytool");
+        assert!(
+            out.status.success(),
+            "keytool import failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
+        assert!(
+            ts_path.exists(),
+            "keytool reported success but ts.jks missing at {}",
+            ts_path.display(),
+        );
+    }
+
+    // Ensure cp-kafka's non-root user can read the truststore once
+    // bind-mounted (same trap as `write_client_props`).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&ts_path, std::fs::Permissions::from_mode(0o644))
+            .expect("chmod ts.jks");
+    }
+
+    ts_path
+}
+
+/// End-to-end TLS handshake check against an `SSL`-only listener. Drives
+/// `kafka-broker-api-versions` from inside the cp-kafka container with a
+/// JKS truststore containing the broker's dev cert. Verifies the JVM
+/// client completes the TLS handshake and exchanges an `ApiVersions`
+/// request over the encrypted channel.
+///
+/// Hostname verification is disabled
+/// (`ssl.endpoint.identification.algorithm=`) because the dev cert's CN
+/// is `crabka-dev`, not `host.docker.internal`. The dev cert is a
+/// self-signed ECDSA P-256 end-entity (regenerated in this task from the
+/// original ED25519 + CA:TRUE fixture — cp-kafka:6.1.1 ships Java 11
+/// whose `SunJSSE` does not advertise `ed25519` signature schemes during
+/// the TLS handshake, so the JVM client would reject ED25519 server
+/// certs with `NoSignatureSchemesInCommon`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Docker"]
+async fn jvm_ssl_handshake_succeeds() {
+    let (broker, _dir) = start_ssl_broker().await;
+    nc_check_connectivity();
+
+    let truststore_path = prepare_jks_truststore();
+
+    let props = "security.protocol=SSL\n\
+                 ssl.truststore.location=/truststore.jks\n\
+                 ssl.truststore.password=changeit\n\
+                 ssl.endpoint.identification.algorithm=\n";
+    let props_tmp = write_client_props(props);
+    let ts_mount = format!("{}:/truststore.jks:ro", truststore_path.display());
+
+    let out = Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "-v",
+            &props_tmp.mount_str(),
+            "-v",
+            &ts_mount,
+            "--add-host=host.docker.internal:host-gateway",
+            KAFKA_IMAGE,
+            "kafka-broker-api-versions",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--command-config",
+            "/client.properties",
+        ])
+        .stderr(Stdio::piped())
+        .stdout(Stdio::piped())
+        .output()
+        .expect("spawn kafka-broker-api-versions");
+    eprintln!(
+        "CRABKA[test] ssl api-versions status={} stdout={} stderr={}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(
+        out.status.success(),
+        "ssl handshake failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
 
     broker.shutdown().await;
 }
