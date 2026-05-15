@@ -393,6 +393,35 @@ impl BrokerHandle {
         let _ = self._broker.group_manager.get_or_create(group_id);
     }
 
+    /// Test-only: return the current leader node-id for `(topic, partition)`
+    /// as seen by this broker's metadata image. Returns `None` if the
+    /// partition is not yet in the image or the leader field is `0` (no
+    /// elected leader).
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[must_use]
+    #[allow(clippy::used_underscore_binding)]
+    pub fn partition_leader_for_test(&self, topic: &str, partition: i32) -> Option<u64> {
+        let img = self._broker.controller.current_image();
+        let p = img.partition(topic, partition)?;
+        if p.leader == 0 {
+            None
+        } else {
+            Some(p.leader)
+        }
+    }
+
+    /// Test-only: return the current ISR for `(topic, partition)` as seen
+    /// by this broker's metadata image. Returns `None` if the partition is
+    /// not yet in the image.
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[must_use]
+    #[allow(clippy::used_underscore_binding)]
+    pub fn partition_isr_for_test(&self, topic: &str, partition: i32) -> Option<Vec<u64>> {
+        let img = self._broker.controller.current_image();
+        let p = img.partition(topic, partition)?;
+        Some(p.isr.clone())
+    }
+
     /// Cancel the listener + drain in-flight connections. Awaiting the
     /// returned future blocks until the listener task exits.
     #[allow(clippy::used_underscore_binding)] // `_broker` carries shared state we must reach into during shutdown
