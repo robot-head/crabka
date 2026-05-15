@@ -129,6 +129,17 @@ pub enum BrokerError {
     /// TLS configuration error.
     #[error("tls: {0}")]
     Tls(String),
+
+    /// Failed to read or decode the bootstrap records file written by
+    /// `crabka format --add-scram`.
+    #[error("bootstrap file {path:?}: {source}")]
+    BootstrapFile {
+        /// Path to the file that could not be read or decoded.
+        path: std::path::PathBuf,
+        /// Underlying I/O or decode error.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 }
 
 #[cfg(test)]

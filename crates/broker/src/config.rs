@@ -104,6 +104,13 @@ pub struct BrokerConfig {
     /// preserving full backward compatibility.
     pub listeners: Vec<ListenerSpec>,
 
+    /// Protocol terminator for the controller listener. Default
+    /// `Plaintext` preserves the legacy raw-TCP raft transport.
+    /// Set to `SaslPlaintext` / `Ssl` / `SaslSsl` to require auth
+    /// on inbound raft RPCs (and outbound, when paired with
+    /// `inter_broker_credentials`).
+    pub controller_listener_protocol: crabka_security::ListenerProtocol,
+
     /// Name of the listener used for inter-broker traffic (raft, replication,
     /// heartbeat). Must match a name in `listeners` when `listeners` is
     /// non-empty. Default: `"PLAINTEXT"`.
@@ -157,6 +164,7 @@ impl BrokerConfig {
             controller_heartbeat_interval: std::time::Duration::from_millis(100),
             bootstrap_mode: BootstrapMode::Bootstrap,
             listeners: vec![],
+            controller_listener_protocol: crabka_security::ListenerProtocol::Plaintext,
             inter_broker_listener_name: "PLAINTEXT".to_string(),
             inter_broker_credentials: None,
             plain_credentials: HashMap::new(),
@@ -212,6 +220,18 @@ impl BrokerConfig {
             }
         }
 
+        let cp = self.controller_listener_protocol;
+        if cp.requires_tls() && self.tls_config.is_none() {
+            return Err(BrokerError::Tls(
+                "controller_listener_protocol requires TLS but tls_config is None".into(),
+            ));
+        }
+        if cp.requires_sasl() && self.enabled_sasl_mechanisms.is_empty() {
+            return Err(BrokerError::SaslListenerNoMechanisms {
+                name: "controller".into(),
+            });
+        }
+
         Ok(())
     }
 
@@ -255,6 +275,7 @@ impl Default for BrokerConfig {
             controller_heartbeat_interval: std::time::Duration::from_millis(500),
             bootstrap_mode: BootstrapMode::Bootstrap,
             listeners: vec![],
+            controller_listener_protocol: crabka_security::ListenerProtocol::Plaintext,
             inter_broker_listener_name: "PLAINTEXT".to_string(),
             inter_broker_credentials: None,
             plain_credentials: HashMap::new(),
@@ -373,5 +394,35 @@ mod tests {
     fn for_tests_uses_bootstrap_mode() {
         let c = BrokerConfig::for_tests(std::path::PathBuf::from("/tmp"));
         assert_eq!(c.bootstrap_mode, BootstrapMode::Bootstrap);
+    }
+
+    #[test]
+    fn rejects_controller_tls_without_config() {
+        let c = BrokerConfig {
+            controller_listener_protocol: ListenerProtocol::Ssl,
+            tls_config: None,
+            ..BrokerConfig::default()
+        };
+        assert!(matches!(c.validate(), Err(BrokerError::Tls(_))));
+    }
+
+    #[test]
+    fn rejects_controller_sasl_without_mechanisms() {
+        let c = BrokerConfig {
+            controller_listener_protocol: ListenerProtocol::SaslPlaintext,
+            enabled_sasl_mechanisms: vec![],
+            ..BrokerConfig::default()
+        };
+        assert!(matches!(
+            c.validate(),
+            Err(BrokerError::SaslListenerNoMechanisms { .. })
+        ));
+    }
+
+    #[test]
+    fn legacy_default_still_passes() {
+        BrokerConfig::default()
+            .validate()
+            .expect("legacy default validates");
     }
 }

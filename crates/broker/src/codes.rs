@@ -136,7 +136,8 @@ pub fn from_broker_error(err: &crate::error::BrokerError) -> i16 {
         | BrokerError::ListenerConflict { .. }
         | BrokerError::InvalidInterBrokerListener { .. }
         | BrokerError::SaslListenerNoMechanisms { .. }
-        | BrokerError::Tls(_) => UNKNOWN_SERVER_ERROR,
+        | BrokerError::Tls(_)
+        | BrokerError::BootstrapFile { .. } => UNKNOWN_SERVER_ERROR,
     }
 }
 

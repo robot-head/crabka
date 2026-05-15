@@ -58,6 +58,11 @@ pub struct ControllerConfig {
     /// `InterBrokerClient`-backed dialer here when inter-broker TLS or
     /// SASL is configured.
     pub dialer: Option<Arc<dyn OutboundDialer>>,
+    /// Optional inbound handshake hook. `None` keeps the legacy
+    /// PLAINTEXT path. The broker injects a `BrokerRaftHandshake`
+    /// implementation here when the controller listener should
+    /// terminate TLS and/or SASL before raft frames start flowing.
+    pub handshake: Option<Arc<dyn crate::RaftListenerHandshake>>,
 }
 
 impl std::fmt::Debug for ControllerConfig {
@@ -72,6 +77,7 @@ impl std::fmt::Debug for ControllerConfig {
             .field("client_id", &self.client_id)
             .field("bootstrap_mode", &self.bootstrap_mode)
             .field("dialer", &self.dialer.is_some())
+            .field("handshake", &self.handshake.is_some())
             .finish()
     }
 }
@@ -89,6 +95,7 @@ impl ControllerConfig {
             client_id: "crabka-controller-test".into(),
             bootstrap_mode: BootstrapMode::Bootstrap,
             dialer: None,
+            handshake: None,
         }
     }
 }

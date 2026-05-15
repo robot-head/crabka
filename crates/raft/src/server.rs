@@ -18,8 +18,8 @@
 use std::sync::Arc;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
@@ -40,7 +40,12 @@ const REJECT_NOT_IMPLEMENTED: i16 = -1;
 /// Crabka-private Raft RPCs.
 const API_KEY_API_VERSIONS: i16 = 18;
 
-pub(crate) async fn run(listener: TcpListener, raft: Arc<Raft>, shutdown: CancellationToken) {
+pub(crate) async fn run(
+    listener: TcpListener,
+    raft: Arc<Raft>,
+    shutdown: CancellationToken,
+    handshake: Option<Arc<dyn crate::RaftListenerHandshake>>,
+) {
     match listener.local_addr() {
         Ok(addr) => info!(%addr, "controller listener started"),
         Err(e) => info!(error = %e, "controller listener started (addr unknown)"),
@@ -53,8 +58,20 @@ pub(crate) async fn run(listener: TcpListener, raft: Arc<Raft>, shutdown: Cancel
                     Ok((stream, peer)) => {
                         let raft = raft.clone();
                         let shutdown = shutdown.clone();
+                        let handshake = handshake.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = handle_conn(stream, raft, shutdown).await {
+                            let boxed: Box<dyn crate::DuplexStream> = if let Some(hs) = handshake {
+                                match hs.upgrade(stream).await {
+                                    Ok(s) => s,
+                                    Err(e) => {
+                                        tracing::debug!(%peer, error = %e, "handshake failed");
+                                        return;
+                                    }
+                                }
+                            } else {
+                                Box::new(stream) as Box<dyn crate::DuplexStream>
+                            };
+                            if let Err(e) = handle_conn(boxed, raft, shutdown).await {
                                 error!(%peer, error = %e, "controller connection error");
                             }
                         });
@@ -68,11 +85,14 @@ pub(crate) async fn run(listener: TcpListener, raft: Arc<Raft>, shutdown: Cancel
     }
 }
 
-async fn handle_conn(
-    mut stream: TcpStream,
+async fn handle_conn<S>(
+    mut stream: S,
     raft: Arc<Raft>,
     shutdown: CancellationToken,
-) -> Result<(), RaftError> {
+) -> Result<(), RaftError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     loop {
         tokio::select! {
             () = shutdown.cancelled() => return Ok(()),
@@ -125,7 +145,10 @@ fn truncated(needed: usize) -> RaftError {
     RaftError::Protocol(crabka_protocol::ProtocolError::UnexpectedEof { needed })
 }
 
-async fn read_one_request(stream: &mut TcpStream) -> Result<(i16, i32, Bytes), RaftError> {
+async fn read_one_request<S>(stream: &mut S) -> Result<(i16, i32, Bytes), RaftError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let mut len_buf = [0u8; 4];
     stream.read_exact(&mut len_buf).await.map_err(io_err)?;
     let raw_len = i32::from_be_bytes(len_buf);
@@ -164,11 +187,14 @@ async fn read_one_request(stream: &mut TcpStream) -> Result<(i16, i32, Bytes), R
     Ok((api_key, correlation_id, Bytes::copy_from_slice(cur)))
 }
 
-async fn write_response(
-    stream: &mut TcpStream,
+async fn write_response<S>(
+    stream: &mut S,
     correlation_id: i32,
     body: Bytes,
-) -> Result<(), RaftError> {
+) -> Result<(), RaftError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let mut frame = BytesMut::with_capacity(4 + 1 + body.len());
     frame.put_i32(correlation_id);
     frame.put_u8(0); // empty tagged_fields
@@ -184,11 +210,14 @@ async fn write_response(
 
 /// Write a response without the leading tagged-fields byte. Used only
 /// by the `ApiVersions` v0 path, which decodes a `ResponseHeader v0`.
-async fn write_response_no_tagged_fields(
-    stream: &mut TcpStream,
+async fn write_response_no_tagged_fields<S>(
+    stream: &mut S,
     correlation_id: i32,
     body: Bytes,
-) -> Result<(), RaftError> {
+) -> Result<(), RaftError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let mut frame = BytesMut::with_capacity(4 + body.len());
     frame.put_i32(correlation_id);
     frame.put_slice(&body);

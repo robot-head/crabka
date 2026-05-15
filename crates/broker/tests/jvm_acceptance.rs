@@ -3316,3 +3316,356 @@ async fn jvm_inter_broker_replication_authed() {
     broker0.shutdown().await;
     broker1.shutdown().await;
 }
+
+/// Slice 12b: spawn two in-process brokers that share an inter-broker SASL
+/// credential AND both terminate TLS on the data plane and the controller
+/// quorum listener. Mirrors [`start_two_sasl_brokers`] but with the `SASL_SSL`
+/// listener protocol + `controller_listener_protocol = ctrl` (typically
+/// `ListenerProtocol::SaslSsl`). Each broker advertises
+/// `host.docker.internal:<port>` so the JVM containers can reach them via
+/// `--add-host=host.docker.internal:host-gateway` AND so each broker can
+/// dial its peer using the same host name.
+#[cfg(not(target_os = "windows"))]
+#[allow(clippy::too_many_lines)]
+async fn start_two_sasl_ssl_brokers_with_controller_protocol(
+    ctrl_protocol: crabka_security::ListenerProtocol,
+    admin: &str,
+    admin_pass: &str,
+) -> (
+    crabka_broker::BrokerHandle,
+    crabka_broker::BrokerHandle,
+    tempfile::TempDir,
+    tempfile::TempDir,
+) {
+    use crabka_broker::config::{InterBrokerCredentials, ListenerSpec};
+    use crabka_security::{ListenerProtocol, SaslMechanism, TlsConfig};
+
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("crabka_broker=info")),
+        )
+        .with_test_writer()
+        .try_init();
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let dir0 = tempfile::tempdir().expect("tempdir b0");
+    let dir1 = tempfile::tempdir().expect("tempdir b1");
+    let listen0: std::net::SocketAddr = LISTEN.parse().expect("static addr");
+    let listen1: std::net::SocketAddr = LISTEN_B1.parse().expect("static addr");
+    let ctrl0: std::net::SocketAddr = "0.0.0.0:9093".parse().expect("static addr");
+    let ctrl1: std::net::SocketAddr = "0.0.0.0:9095".parse().expect("static addr");
+    let voters = vec![(1_u64, ctrl0), (2_u64, ctrl1)];
+
+    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let cert_path = manifest_dir
+        .join("..")
+        .join("security")
+        .join("tests")
+        .join("fixtures")
+        .join("dev_cert.pem");
+    let key_path = manifest_dir
+        .join("..")
+        .join("security")
+        .join("tests")
+        .join("fixtures")
+        .join("dev_key.pem");
+
+    let mk_cfg = |idx: u64,
+                  listen: std::net::SocketAddr,
+                  ctrl: std::net::SocketAddr,
+                  advertised: &str,
+                  log_dir: std::path::PathBuf,
+                  mode: crabka_broker::BootstrapMode|
+     -> BrokerConfig {
+        let mut cfg = BrokerConfig {
+            broker_id: i32::try_from(idx).unwrap(),
+            listen_addr: listen,
+            advertised_listener: advertised.to_string(),
+            log_dir,
+            log_config: LogConfig::default(),
+            node_id: idx,
+            controller_listen_addr: ctrl,
+            controller_quorum_voters: voters.clone(),
+            heartbeat_interval_ms: 3_000,
+            heartbeat_timeout_ms: 9_000,
+            replica_lag_time_max_ms: 30_000,
+            // Slightly more generous than the SASL_PLAINTEXT helper because
+            // both data-plane and controller-plane handshakes now include
+            // a TLS handshake on top of SASL; on a busy WSL/CI runner the
+            // extra round trips can push past 5s.
+            controller_election_timeout: std::time::Duration::from_secs(8),
+            controller_heartbeat_interval: std::time::Duration::from_millis(500),
+            bootstrap_mode: mode,
+            listeners: vec![ListenerSpec {
+                name: "SASL_SSL".to_string(),
+                bind_addr: listen,
+                advertised: advertised.to_string(),
+                protocol: ListenerProtocol::SaslSsl,
+            }],
+            inter_broker_listener_name: "SASL_SSL".to_string(),
+            controller_listener_protocol: ctrl_protocol,
+            tls_config: Some(TlsConfig {
+                cert_chain_path: cert_path.clone(),
+                private_key_path: key_path.clone(),
+                // Each broker must trust the dev cert that its peer
+                // presents on inter-broker raft + replication dials.
+                // Without this, the InterBrokerClient TlsConnector has
+                // an empty trust-root store and rejects the peer's
+                // self-signed cert as `UnknownIssuer`.
+                trust_roots_path: Some(cert_path.clone()),
+            }),
+            enabled_sasl_mechanisms: vec![SaslMechanism::Plain, SaslMechanism::ScramSha512],
+            super_user_name: Some(admin.to_string()),
+            inter_broker_credentials: Some(InterBrokerCredentials {
+                mechanism: SaslMechanism::Plain,
+                username: admin.to_string(),
+                password: admin_pass.to_string(),
+            }),
+            ..BrokerConfig::default()
+        };
+        cfg.plain_credentials
+            .insert(admin.to_string(), admin_pass.to_string());
+        cfg
+    };
+
+    let cfg0 = mk_cfg(
+        1,
+        listen0,
+        ctrl0,
+        BOOTSTRAP,
+        dir0.path().to_path_buf(),
+        crabka_broker::BootstrapMode::Bootstrap,
+    );
+    let broker0 = Broker::start(cfg0).await.expect("start broker 0");
+
+    let cfg1 = mk_cfg(
+        2,
+        listen1,
+        ctrl1,
+        BOOTSTRAP_B1,
+        dir1.path().to_path_buf(),
+        crabka_broker::BootstrapMode::Join,
+    );
+    let join_handle = tokio::spawn(async move { Broker::start(cfg1).await });
+
+    // Bring broker 1 into the raft voter set.
+    broker0
+        .add_learner(2, ctrl1)
+        .await
+        .expect("add_learner for broker 1");
+    let target: std::collections::BTreeSet<u64> = [1_u64, 2_u64].into_iter().collect();
+    broker0
+        .change_membership(target)
+        .await
+        .expect("change_membership to {1,2}");
+
+    let broker1 = join_handle
+        .await
+        .expect("broker 1 spawn join")
+        .expect("broker 1 start");
+
+    eprintln!(
+        "CRABKA[test] two-broker sasl_ssl: b0={LISTEN} adv={BOOTSTRAP} b1={LISTEN_B1} adv={BOOTSTRAP_B1} ctrl_protocol={ctrl_protocol:?}"
+    );
+    let _ = HOST_PORT;
+    let _ = HOST_PORT_B1;
+    (broker0, broker1, dir0, dir1)
+}
+
+/// Slice 12b: two-broker `SASL_SSL` cluster with `controller_listener_protocol =
+/// SaslSsl`. Provisions a SCRAM user, produces rf=2 via JVM client, asserts
+/// both brokers replicate the records. Supersedes slice 12 T23's simplified
+/// inter-broker test (which only proved metadata convergence) by exercising
+/// the full production-shape stack: TLS-terminated controller raft RPC,
+/// TLS-terminated data-plane SASL, and rf=2 follower replication.
+///
+/// Networking: like the `SASL_PLAINTEXT` inter-broker test, this advertises
+/// `host.docker.internal:<port>` so the JVM containers can reach the
+/// brokers. Under WSL2 the broker→broker `InterBrokerClient` hop may fail
+/// because `host.docker.internal` resolves to the Windows host IP, not the
+/// WSL VM where the peers live. The CI runner's `/etc/hosts` setup makes
+/// that hop work end-to-end; on WSL the test may time out at the rf=2
+/// offset check even though `SASL_SSL` itself is correctly wired.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires Docker"]
+#[allow(clippy::too_many_lines)]
+async fn jvm_inter_broker_sasl_ssl_raft_replication() {
+    use crabka_security::ListenerProtocol;
+
+    const ADMIN: &str = "admin";
+    const ADMIN_PASS: &str = "admin-secret";
+    const ALICE: &str = "alice";
+    const ALICE_PASS: &str = "alice-secret";
+    const TOPIC: &str = "crabka-sasl-ssl-raft-rf2";
+
+    let (broker0, broker1, _dir0, _dir1) = start_two_sasl_ssl_brokers_with_controller_protocol(
+        ListenerProtocol::SaslSsl,
+        ADMIN,
+        ADMIN_PASS,
+    )
+    .await;
+    nc_check_connectivity();
+    let truststore_path = prepare_jks_truststore();
+    let ts_mount = format!("{}:/truststore.jks:ro", truststore_path.display());
+
+    // Wait for both brokers to converge on a 2-broker metadata image —
+    // the load-bearing inter-broker SASL_SSL handshake on the controller
+    // listener. Without TLS + SASL working in both directions, broker 1
+    // never registers and this would time out.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_mins(1);
+    loop {
+        let n0 = broker0.broker_count().await;
+        let n1 = broker1.broker_count().await;
+        if n0 >= 2 && n1 >= 2 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() <= deadline,
+            "brokers didn't converge on 2-broker view within 60s (b0={n0} b1={n1})"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    // Step A: provision alice's SCRAM-SHA-512 credential via admin/PLAIN
+    // over the SASL_SSL data-plane listener. Use cp-kafka:7.5.0 (KIP-554).
+    let admin_props = write_client_props(&format!(
+        "security.protocol=SASL_SSL\n\
+         sasl.mechanism=PLAIN\n\
+         sasl.jaas.config={}\n\
+         ssl.truststore.location=/truststore.jks\n\
+         ssl.truststore.password=changeit\n\
+         ssl.endpoint.identification.algorithm=\n",
+        plain_jaas(ADMIN, ADMIN_PASS),
+    ));
+    docker_run_kafka_tool_with_image_and_mounts(
+        KAFKA_IMAGE_TXN,
+        &[&admin_props.mount_str(), &ts_mount],
+        &[
+            "kafka-configs",
+            "--alter",
+            "--entity-type",
+            "users",
+            "--entity-name",
+            ALICE,
+            "--add-config",
+            &format!("SCRAM-SHA-512=[password={ALICE_PASS}]"),
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--command-config",
+            "/client.properties",
+        ],
+    );
+
+    // Step B: drive create-topic + produce as alice over SASL_SSL+SCRAM.
+    let alice_props = write_client_props(&format!(
+        "security.protocol=SASL_SSL\n\
+         sasl.mechanism=SCRAM-SHA-512\n\
+         sasl.jaas.config={}\n\
+         ssl.truststore.location=/truststore.jks\n\
+         ssl.truststore.password=changeit\n\
+         ssl.endpoint.identification.algorithm=\n",
+        scram_jaas(ALICE, ALICE_PASS),
+    ));
+    let alice_props_mount = alice_props.mount_str();
+
+    // Create topic rf=2 across both brokers.
+    docker_run_kafka_tool_with_image_and_mounts(
+        KAFKA_IMAGE_TXN,
+        &[&alice_props_mount, &ts_mount],
+        &[
+            "kafka-topics",
+            "--create",
+            "--if-not-exists",
+            "--topic",
+            TOPIC,
+            "--partitions",
+            "1",
+            "--replication-factor",
+            "2",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--command-config",
+            "/client.properties",
+        ],
+    );
+
+    // Wait for the topic to materialize on both brokers.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_mins(1);
+    loop {
+        let on_b0 = broker0.has_partition(TOPIC, 0).await;
+        let on_b1 = broker1.has_partition(TOPIC, 0).await;
+        if on_b0 && on_b1 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() <= deadline,
+            "topic did not propagate to both brokers within 60s (b0={on_b0} b1={on_b1})"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    // Produce 50 records via `kafka-console-producer` as alice over SASL_SSL.
+    let mut child = Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "-i",
+            "-v",
+            &alice_props_mount,
+            "-v",
+            &ts_mount,
+            "--add-host=host.docker.internal:host-gateway",
+            KAFKA_IMAGE_TXN,
+            "kafka-console-producer",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--topic",
+            TOPIC,
+            "--producer.config",
+            "/client.properties",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn producer");
+    let payload: String = (0..50)
+        .map(|i| format!("rec-{i}\n"))
+        .collect::<Vec<_>>()
+        .concat();
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(payload.as_bytes())
+        .expect("write stdin");
+    drop(child.stdin.take());
+    let producer_out = child.wait_with_output().expect("wait producer");
+    assert!(
+        producer_out.status.success(),
+        "producer failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&producer_out.stdout),
+        String::from_utf8_lossy(&producer_out.stderr)
+    );
+
+    // Assert BOTH brokers reach offset 50 on partition 0 — proves rf=2
+    // follower replication completed over the SASL_SSL inter-broker
+    // listener (the production-shape end-to-end claim).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+    loop {
+        let off0 = broker0.local_log_end_offset(TOPIC, 0).await.unwrap_or(0);
+        let off1 = broker1.local_log_end_offset(TOPIC, 0).await.unwrap_or(0);
+        if off0 >= 50 && off1 >= 50 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() <= deadline,
+            "SASL_SSL rf=2 brokers didn't both reach 50 records within 90s (b0={off0} b1={off1})"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+
+    broker0.shutdown().await;
+    broker1.shutdown().await;
+}

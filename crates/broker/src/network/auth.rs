@@ -198,7 +198,7 @@ pub fn handle_authenticate_plain<S: BuildHasher>(
 pub fn handle_authenticate_scram(
     req: &SaslAuthenticateRequest,
     auth: &mut ConnectionAuth,
-    broker: &crate::broker::Broker,
+    controller: &crabka_raft::ControllerHandle,
 ) -> SaslAuthenticateResponse {
     // Round-1 case: still in `ScramPending` — build the exchange now that
     // we have the client-first bytes (and thus the username).
@@ -211,8 +211,7 @@ pub fn handle_authenticate_scram(
         let Some(username) = parse_scram_username(&req.auth_bytes) else {
             return fail_authenticate("malformed SCRAM client-first");
         };
-        let Some(cred) = broker
-            .controller
+        let Some(cred) = controller
             .current_image()
             .scram_credential(&username, mech)
             .cloned()

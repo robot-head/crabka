@@ -101,3 +101,30 @@ Kafka client for ApiVersions.
 - Out of scope: ACLs (only a super-user-name stand-in), delegation
   tokens, OAUTHBEARER, GSSAPI, SCRAM-SHA-256, mTLS client-auth,
   quotas, raft-over-SASL.
+
+## Slice 12b — auth cleanup (2026-05-15)
+
+- New `BrokerConfig.controller_listener_protocol` (default
+  `Plaintext`). Controller listener terminates TLS + SASL when set
+  via a new `RaftListenerHandshake` trait in `crabka-raft`. The
+  `crabka-broker::raft_handshake::BrokerRaftHandshake` impl reuses
+  slice 12's `network::auth` state machines so the data plane and
+  controller share one source of truth for inbound SASL.
+- `InterBrokerDialer` (constructed-but-unused in slice 12) is now
+  wired into `ControllerConfig::dialer` AND into
+  `ControllerHandle::forward_submit_to` (follower→leader
+  submit_change forwarding). Both inbound and outbound raft RPC
+  honor the controller listener protocol.
+- `forward_submit_to` was rewritten to use
+  `Connection::raw_request` over a dialer-built `Connection`,
+  removing ~50 lines of bespoke framing.
+- `Broker::start` consumes `<log_dir>/bootstrap.records.bin`
+  (produced by `crabka format --add-scram`) on first start.
+  `controller.submit_change(records).await` blocks until applied
+  before the broker becomes ready. Corrupt files →
+  `BrokerError::BootstrapFile`.
+- 3 new no-Docker raft tests (`tests/raft_sasl.rs`); 3 new
+  bootstrap-consumption tests; 1 new JVM acceptance test
+  (`jvm_inter_broker_sasl_ssl_raft_replication`).
+- Out of scope: mTLS, ACLs, per-listener controller-quorum protocol
+  mapping, SCRAM rotation under live raft traffic.

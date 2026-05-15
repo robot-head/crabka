@@ -47,6 +47,14 @@ pub struct ControllerHandle {
     /// directly via the slice-7 `API_KEY_SUBMIT_CHANGE` RPC.
     voters: Vec<(NodeId, SocketAddr)>,
     client_id: String,
+    /// Outbound dialer cloned from the factory at construction time.
+    /// `forward_submit_to` uses it to reach the leader's controller
+    /// listener with the same TLS / SASL handshake that openraft's
+    /// `AppendEntries` / `Vote` RPCs ride on top of (slice 12). For the
+    /// legacy PLAINTEXT path the broker doesn't inject a dialer, and
+    /// `Controller::start` substitutes `PlaintextDialer` — equivalent
+    /// to a bare `Connection::connect`.
+    dialer: Arc<dyn OutboundDialer>,
 }
 
 impl ControllerHandle {
@@ -227,27 +235,28 @@ impl ControllerHandle {
             .find_map(|(id, addr)| (*id == node_id).then_some(*addr))
     }
 
-    /// Open a one-shot TCP connection to the leader's controller listener,
-    /// send a bincode-encoded `Vec<MetadataRecord>` as
-    /// `API_KEY_SUBMIT_CHANGE`, and translate the response back into a
+    /// Open a one-shot authenticated connection to the leader's
+    /// controller listener, send a bincode-encoded `Vec<MetadataRecord>`
+    /// as `API_KEY_SUBMIT_CHANGE`, and translate the response back into a
     /// `RaftError`.
     ///
-    /// We deliberately do NOT reuse `crabka_client_core::Connection` here
-    /// because that path forces an `ApiVersions` handshake on connect,
-    /// and the controller listener treats `ApiVersions` as a bootstrap
-    /// no-op only — it doesn't propagate request/response framing the way
-    /// `Connection::send` expects for typed messages. The submit RPC is
-    /// rare enough (one round trip per follower-side `submit_change`)
-    /// that an ad-hoc TCP path is simpler than extending `Connection`.
+    /// Routes through [`OutboundDialer::dial`] so the same TLS / SASL
+    /// handshake openraft's `AppendEntries` / `Vote` RPCs ride on top
+    /// of (slice 12) applies here too. For the legacy PLAINTEXT path,
+    /// `Controller::start` substitutes `PlaintextDialer`, which is
+    /// byte-equivalent to a bare `Connection::connect`.
+    ///
+    /// A fresh connection per call mirrors the pre-slice-12b raw
+    /// `TcpStream::connect` behaviour — `submit_change` forwarding is
+    /// rare (only on follower-side writes) and reusing the openraft
+    /// network factory's cache from here would complicate ownership for
+    /// negligible gain.
     async fn forward_submit_to(
         &self,
         leader: NodeId,
         addr: SocketAddr,
         records: &[crabka_metadata::MetadataRecord],
     ) -> Result<(), RaftError> {
-        use bytes::{BufMut, BytesMut};
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
         let body_bytes = <serde_wincode::SerdeCompat<Vec<crabka_metadata::MetadataRecord>> as wincode::Serialize>::serialize(
             &records.to_vec(),
         )
@@ -258,51 +267,36 @@ impl ControllerHandle {
         let mut body = Vec::with_capacity(payload.records.len() + 4);
         payload.encode_v0(&mut body)?;
 
-        // RequestHeader v2 (flexible).
-        let mut frame = BytesMut::with_capacity(32 + body.len());
-        frame.put_i16(crate::wire::API_KEY_SUBMIT_CHANGE);
-        frame.put_i16(0);
-        frame.put_i32(0);
-        let cid = i16::try_from(self.client_id.len()).unwrap_or(i16::MAX);
-        frame.put_i16(cid);
-        frame.put_slice(self.client_id.as_bytes());
-        frame.put_u8(0); // tagged_fields=0
-        frame.put_slice(&body);
+        // Dial through the injected dialer so SASL / TLS terminates
+        // before the first raft frame leaves this host. The dialer
+        // returns a `Connection` that has already negotiated
+        // `ApiVersions` and (when applicable) completed SASL auth.
+        let opts = crabka_client_core::ConnectionOptions {
+            client_id: self.client_id.clone(),
+            ..crabka_client_core::ConnectionOptions::default()
+        };
+        let conn = self
+            .dialer
+            .dial(leader, &addr.to_string(), opts)
+            .await
+            .map_err(RaftError::Network)?;
 
-        let mut stream = tokio::net::TcpStream::connect(addr)
+        // `raw_request` builds the v2 RequestHeader, writes the frame,
+        // reads the response, and strips the v1 ResponseHeader's
+        // leading tagged-fields byte. The server in `server.rs` returns
+        // a v1 ResponseHeader for every Crabka-private api key, so the
+        // returned bytes are the bare `CrabkaSubmitChangeResponse` body.
+        let resp_body = conn
+            .raw_request(
+                crate::wire::API_KEY_SUBMIT_CHANGE,
+                0,
+                bytes::Bytes::from(body),
+            )
             .await
-            .map_err(|e| RaftError::Network(crabka_client_core::ClientError::Io(e)))?;
-        let mut len_prefix = [0u8; 4];
-        len_prefix.copy_from_slice(&i32::try_from(frame.len()).unwrap_or(i32::MAX).to_be_bytes());
-        stream
-            .write_all(&len_prefix)
-            .await
-            .map_err(|e| RaftError::Network(crabka_client_core::ClientError::Io(e)))?;
-        stream
-            .write_all(&frame)
-            .await
-            .map_err(|e| RaftError::Network(crabka_client_core::ClientError::Io(e)))?;
-        stream
-            .flush()
-            .await
-            .map_err(|e| RaftError::Network(crabka_client_core::ClientError::Io(e)))?;
+            .map_err(RaftError::Network)?;
+        conn.close();
 
-        let mut resp_len_buf = [0u8; 4];
-        stream
-            .read_exact(&mut resp_len_buf)
-            .await
-            .map_err(|e| RaftError::Network(crabka_client_core::ClientError::Io(e)))?;
-        let resp_len = usize::try_from(i32::from_be_bytes(resp_len_buf).max(0)).unwrap_or(0);
-        let mut resp_buf = vec![0u8; resp_len];
-        stream
-            .read_exact(&mut resp_buf)
-            .await
-            .map_err(|e| RaftError::Network(crabka_client_core::ClientError::Io(e)))?;
-        // ResponseHeader v1: corr_id(4) + tagged_fields(1).
-        if resp_buf.len() < 5 {
-            return Err(RaftError::Openraft("truncated submit response".into()));
-        }
-        let mut cur: &[u8] = &resp_buf[5..];
+        let mut cur: &[u8] = &resp_body;
         let resp = crate::wire::CrabkaSubmitChangeResponse::decode_v0(&mut cur)?;
         match resp.error_code {
             0 => Ok(()),
@@ -408,7 +402,7 @@ impl Controller {
             .dialer
             .clone()
             .unwrap_or_else(|| Arc::new(PlaintextDialer));
-        let network = CrabkaRaftNetworkFactory::new(config.client_id.clone(), dialer);
+        let network = CrabkaRaftNetworkFactory::new(config.client_id.clone(), dialer.clone());
 
         // 4. Spawn openraft. `Raft::new` consumes the log store and state
         //    machine; we keep our own `Arc` clones so the controller
@@ -476,7 +470,12 @@ impl Controller {
             .local_addr()
             .map_err(|e| RaftError::Storage(crabka_log::LogError::Io(e)))?;
         let shutdown = CancellationToken::new();
-        let listener_task = tokio::spawn(server::run(listener, raft.clone(), shutdown.clone()));
+        let listener_task = tokio::spawn(server::run(
+            listener,
+            raft.clone(),
+            shutdown.clone(),
+            config.handshake.clone(),
+        ));
         info!(
             node_id = config.node_id,
             addr = %actual_addr,
@@ -515,6 +514,7 @@ impl Controller {
             leader_pump_task: Mutex::new(Some(leader_pump_task)),
             voters: config.voters.clone(),
             client_id: config.client_id.clone(),
+            dialer,
         })
     }
 }

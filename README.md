@@ -61,6 +61,12 @@ Pre-1.0, pre-alpha. No production use.
   `AlterUserScramCredentials`; new `crabka format --add-scram`
   bootstrap CLI. JVM clients connect over `SASL_SSL` and provision
   SCRAM users via `kafka-configs --alter --entity-type users`.
+- **Slice 12b** — auth cleanup: controller listener terminates TLS +
+  SASL via a `RaftListenerHandshake` trait shared with the data plane;
+  `InterBrokerDialer` wired into `ControllerConfig::dialer` (and
+  `forward_submit_to`) so raft RPC authenticates inbound and outbound;
+  `Broker::start` consumes `crabka format --add-scram` bootstrap
+  records on first start.
 
 ## Published crates
 

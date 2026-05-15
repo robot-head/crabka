@@ -276,7 +276,11 @@ fn handle_sasl_frame(
                         )
                     }
                     crabka_security::SaslMechanism::ScramSha512 => {
-                        crate::network::auth::handle_authenticate_scram(&req, auth, broker)
+                        crate::network::auth::handle_authenticate_scram(
+                            &req,
+                            auth,
+                            &broker.controller,
+                        )
                     }
                 }
             } else {
