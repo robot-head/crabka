@@ -107,4 +107,61 @@ mod tests {
         let b = hash_scram_password(b"x", SaslMechanism::ScramSha512, 4096);
         assert_ne!(a.salt, b.salt, "fresh salt each call");
     }
+
+    use crate::scram::client::ScramClientExchange;
+    use crate::scram::server::{ScramServerExchange, StepResult};
+
+    #[test]
+    fn scram_server_and_client_round_trip() {
+        let password = b"hunter2";
+        let cred = hash_scram_password_with_salt(
+            password,
+            SaslMechanism::ScramSha512,
+            4096,
+            (0..16).collect::<Vec<u8>>(),
+        );
+        let mut server = ScramServerExchange::new("alice".to_string(), cred);
+        let mut client = ScramClientExchange::new("alice".to_string(), password.to_vec());
+
+        // Client first
+        let c1 = client.client_first().expect("client first");
+        // Server step 1 -> server-first
+        let s1 = match server.step(&c1) {
+            StepResult::Continue(b) => b,
+            other => panic!("server step 1 must continue, got {other:?}"),
+        };
+        // Client final
+        let c2 = client.step(&s1).expect("client final");
+        // Server step 2 -> done
+        let (principal, s2) = match server.step(&c2) {
+            StepResult::Done(p, b) => (p, b),
+            other => panic!("server step 2 must Done, got {other:?}"),
+        };
+        assert_eq!(principal.name, "alice");
+        assert_eq!(principal.mechanism, SaslMechanism::ScramSha512);
+        // Client verifies server signature
+        let final_check = client.verify_server_final(&s2);
+        assert!(final_check.is_ok(), "server signature must verify");
+    }
+
+    #[test]
+    fn scram_server_rejects_bad_proof() {
+        let cred = hash_scram_password_with_salt(
+            b"correct",
+            SaslMechanism::ScramSha512,
+            4096,
+            vec![0u8; 16],
+        );
+        let mut server = ScramServerExchange::new("alice".to_string(), cred);
+        let mut client = ScramClientExchange::new("alice".to_string(), b"wrong".to_vec());
+        let c1 = client.client_first().unwrap();
+        let StepResult::Continue(s1) = server.step(&c1) else {
+            panic!();
+        };
+        let c2 = client.step(&s1).unwrap();
+        match server.step(&c2) {
+            StepResult::Failed(crate::AuthError::BadProof) => {}
+            other => panic!("expected BadProof, got {other:?}"),
+        }
+    }
 }
