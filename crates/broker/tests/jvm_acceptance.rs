@@ -2021,7 +2021,6 @@ fn plain_jaas(user: &str, pass: &str) -> String {
 
 /// Build a JAAS config string for the `ScramLoginModule`. Used by the
 /// SCRAM-SHA-512 acceptance test in task 21.
-#[allow(dead_code)]
 fn scram_jaas(user: &str, pass: &str) -> String {
     format!(
         "org.apache.kafka.common.security.scram.ScramLoginModule required \
@@ -2088,6 +2087,70 @@ async fn start_sasl_plaintext_broker(
     (handle, dir)
 }
 
+/// Spawn the broker with a single `SASL_PLAINTEXT` listener that enables
+/// *both* PLAIN and SCRAM-SHA-512 mechanisms, plus a single PLAIN super-user
+/// (`admin` / `admin_pass`). The super-user designation grants the admin
+/// principal `CLUSTER_AUTHORIZATION` on `AlterUserScramCredentials` (51), so
+/// the JVM `kafka-configs --alter --entity-type users` tool — which the
+/// admin runs over PLAIN — can provision SCRAM credentials for other users.
+///
+/// Used by `jvm_sasl_scram_sha512_produce_consume` (task 21).
+async fn start_dual_mech_broker(
+    admin: &str,
+    admin_pass: &str,
+) -> (crabka_broker::BrokerHandle, tempfile::TempDir) {
+    use crabka_broker::config::ListenerSpec;
+    use crabka_security::{ListenerProtocol, SaslMechanism};
+
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("crabka_broker=debug,info")),
+        )
+        .with_test_writer()
+        .try_init();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let listen_addr: std::net::SocketAddr = LISTEN.parse().expect("static addr");
+    let controller_addr: std::net::SocketAddr = "0.0.0.0:9093".parse().expect("static addr");
+    let mut config = BrokerConfig {
+        broker_id: 1,
+        listen_addr,
+        advertised_listener: BOOTSTRAP.into(),
+        log_dir: dir.path().to_path_buf(),
+        log_config: LogConfig::default(),
+        node_id: 1,
+        controller_listen_addr: controller_addr,
+        controller_quorum_voters: vec![(1, controller_addr)],
+        heartbeat_interval_ms: 3_000,
+        heartbeat_timeout_ms: 9_000,
+        replica_lag_time_max_ms: 30_000,
+        controller_election_timeout: std::time::Duration::from_secs(5),
+        controller_heartbeat_interval: std::time::Duration::from_millis(500),
+        bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
+        listeners: vec![ListenerSpec {
+            name: "SASL_PLAINTEXT".to_string(),
+            bind_addr: listen_addr,
+            advertised: BOOTSTRAP.to_string(),
+            protocol: ListenerProtocol::SaslPlaintext,
+        }],
+        inter_broker_listener_name: "SASL_PLAINTEXT".to_string(),
+        enabled_sasl_mechanisms: vec![SaslMechanism::Plain, SaslMechanism::ScramSha512],
+        super_user_name: Some(admin.to_string()),
+        ..BrokerConfig::default()
+    };
+    config
+        .plain_credentials
+        .insert(admin.to_string(), admin_pass.to_string());
+    let handle = Broker::start(config).await.expect("start dual-mech broker");
+    eprintln!("CRABKA[test] dual-mech broker started listen={LISTEN} advertised={BOOTSTRAP}");
+    tracing::info!(
+        listen = %LISTEN,
+        advertised = %BOOTSTRAP,
+        "dual-mech broker started for jvm acceptance"
+    );
+    (handle, dir)
+}
+
 /// Write `props` to a `tempfile::NamedTempFile` and (on unix) chmod it to
 /// `0644` so the cp-kafka container's non-root user can read it once it's
 /// bind-mounted. `tempfile` creates files `0600` by default which causes a
@@ -2123,26 +2186,40 @@ impl ClientPropsFile {
 /// Run a cp-kafka tool with an extra `-v <mount>` bind. Otherwise identical
 /// to [`docker_run_kafka_tool`]: asserts success, captures stdout+stderr.
 fn docker_run_kafka_tool_with_mount(mount: &str, args: &[&str]) -> std::process::Output {
+    docker_run_kafka_tool_with_image_and_mount(KAFKA_IMAGE, mount, args)
+}
+
+/// Like [`docker_run_kafka_tool_with_mount`] but lets the caller choose the
+/// image. Used by the SCRAM-SHA-512 acceptance test (task 21), which needs
+/// `cp-kafka:7.5.0` because `kafka-configs --alter --entity-type users` in
+/// `cp-kafka:6.1.1` (Kafka 2.7) sends `IncrementalAlterConfigs (api_key 44)`
+/// rather than `AlterUserScramCredentials (51)`. Kafka 3.5+ uses the typed
+/// KIP-554 request, which is what slice 12 implements.
+fn docker_run_kafka_tool_with_image_and_mount(
+    image: &str,
+    mount: &str,
+    args: &[&str],
+) -> std::process::Output {
     let out = Command::new("docker")
         .arg("run")
         .arg("--rm")
         .arg("-v")
         .arg(mount)
         .arg("--add-host=host.docker.internal:host-gateway")
-        .arg(KAFKA_IMAGE)
+        .arg(image)
         .args(args)
         .stderr(Stdio::piped())
         .stdout(Stdio::piped())
         .output()
         .expect("spawn docker run");
     eprintln!(
-        "CRABKA[test] docker_run image={KAFKA_IMAGE} mount={mount} {args:?} status={} stderr_len={}",
+        "CRABKA[test] docker_run image={image} mount={mount} {args:?} status={} stderr_len={}",
         out.status,
         out.stderr.len(),
     );
     assert!(
         out.status.success(),
-        "docker run image={KAFKA_IMAGE} mount={mount} {args:?} failed: stdout={}, stderr={}",
+        "docker run image={image} mount={mount} {args:?} failed: stdout={}, stderr={}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),
     );
@@ -2240,6 +2317,168 @@ async fn jvm_sasl_plain_produce_consume() {
     // 4. Consume them back. `kafka-console-consumer` uses `--consumer.config`.
     let consumer_out = docker_run_kafka_tool_with_mount(
         &mount,
+        &[
+            "kafka-console-consumer",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--topic",
+            TOPIC,
+            "--partition",
+            "0",
+            "--from-beginning",
+            "--max-messages",
+            "10",
+            "--timeout-ms",
+            "20000",
+            "--consumer.config",
+            "/client.properties",
+        ],
+    );
+    let s = String::from_utf8_lossy(&consumer_out.stdout);
+    for i in 0..10 {
+        let needle = format!("msg-{i}");
+        assert!(s.contains(&needle), "consumer missing {needle}: {s:?}");
+    }
+
+    broker.shutdown().await;
+}
+
+/// End-to-end `SASL_PLAINTEXT` + SCRAM-SHA-512 drive of the JVM tools
+/// against a Rust broker. Exercises two distinct authentication paths in a
+/// single run:
+///
+/// 1. **PLAIN as super-user.** The admin user authenticates via PLAIN and
+///    runs `kafka-configs --alter --entity-type users --add-config
+///    'SCRAM-SHA-512=[password=...]'`. On `cp-kafka:7.5.0` (Kafka 3.5+) the
+///    JVM tool translates this to `AlterUserScramCredentials (api_key 51)`
+///    — the KIP-554 typed request, which is what slice 12's handler
+///    accepts. (On the older `cp-kafka:6.1.1` / Kafka 2.7 image the same
+///    CLI invocation falls back to `IncrementalAlterConfigs (44)` with
+///    `entity_type=USER`, which slice 12 does not implement.)
+///
+/// 2. **SCRAM-SHA-512 as the provisioned user.** Alice then drives
+///    `kafka-topics`, `kafka-console-producer`, and `kafka-console-consumer`
+///    using `sasl.mechanism=SCRAM-SHA-512`, exercising the RFC 5802 state
+///    machine end-to-end through the official Kafka client.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Docker"]
+async fn jvm_sasl_scram_sha512_produce_consume() {
+    const TOPIC: &str = "crabka-sasl-scram-itest";
+    const ADMIN: &str = "admin";
+    const ADMIN_PASS: &str = "admin-secret";
+    const ALICE: &str = "alice";
+    const ALICE_PASS: &str = "alice-secret";
+
+    let (broker, _dir) = start_dual_mech_broker(ADMIN, ADMIN_PASS).await;
+    nc_check_connectivity();
+
+    // Step A: provision alice's SCRAM-SHA-512 credential via admin/PLAIN.
+    // `kafka-configs --alter --entity-type users --add-config 'SCRAM-SHA-512=[...]'`
+    // on Kafka 3.5+ → `AlterUserScramCredentials (51)`. The JVM client
+    // performs the PBKDF2 stretch locally and sends the 64-byte
+    // `salted_password` in the request.
+    let admin_props = write_client_props(&format!(
+        "security.protocol=SASL_PLAINTEXT\n\
+         sasl.mechanism=PLAIN\n\
+         sasl.jaas.config={}\n",
+        plain_jaas(ADMIN, ADMIN_PASS),
+    ));
+    docker_run_kafka_tool_with_image_and_mount(
+        KAFKA_IMAGE_TXN,
+        &admin_props.mount_str(),
+        &[
+            "kafka-configs",
+            "--alter",
+            "--entity-type",
+            "users",
+            "--entity-name",
+            ALICE,
+            "--add-config",
+            &format!("SCRAM-SHA-512=[password={ALICE_PASS}]"),
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--command-config",
+            "/client.properties",
+        ],
+    );
+
+    // Step B: drive produce + consume as alice over SCRAM-SHA-512.
+    let alice_props = write_client_props(&format!(
+        "security.protocol=SASL_PLAINTEXT\n\
+         sasl.mechanism=SCRAM-SHA-512\n\
+         sasl.jaas.config={}\n",
+        scram_jaas(ALICE, ALICE_PASS),
+    ));
+    let alice_mount = alice_props.mount_str();
+
+    // 1. Create the topic.
+    docker_run_kafka_tool_with_image_and_mount(
+        KAFKA_IMAGE_TXN,
+        &alice_mount,
+        &[
+            "kafka-topics",
+            "--create",
+            "--if-not-exists",
+            "--topic",
+            TOPIC,
+            "--partitions",
+            "1",
+            "--replication-factor",
+            "1",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--command-config",
+            "/client.properties",
+        ],
+    );
+
+    // 2. Produce 10 records via stdin (kafka-console-producer wants
+    //    `--producer.config`, not `--command-config`).
+    let mut child = Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "-i",
+            "-v",
+            &alice_mount,
+            "--add-host=host.docker.internal:host-gateway",
+            KAFKA_IMAGE_TXN,
+            "kafka-console-producer",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--topic",
+            TOPIC,
+            "--producer.config",
+            "/client.properties",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn producer");
+    let payload: String = (0..10)
+        .map(|i| format!("msg-{i}\n"))
+        .collect::<Vec<_>>()
+        .concat();
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(payload.as_bytes())
+        .expect("write stdin");
+    drop(child.stdin.take());
+    let producer_out = child.wait_with_output().expect("wait producer");
+    assert!(
+        producer_out.status.success(),
+        "producer failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&producer_out.stdout),
+        String::from_utf8_lossy(&producer_out.stderr)
+    );
+
+    // 3. Consume them back (`--consumer.config`).
+    let consumer_out = docker_run_kafka_tool_with_image_and_mount(
+        KAFKA_IMAGE_TXN,
+        &alice_mount,
         &[
             "kafka-console-consumer",
             "--bootstrap-server",
