@@ -2623,10 +2623,17 @@ fn prepare_jks_truststore() -> std::path::PathBuf {
 
     if !ts_path.exists() {
         let mount = format!("{}:/work", cache_dir.display());
-        // `--user 0:0` runs keytool as root in the container so it can
-        // write `/work/ts.jks` regardless of the host directory's owner.
-        // Without this, CI's runner-owned temp dir blocks the cp-kafka
-        // image's non-root default user from creating the keystore.
+        // Run keytool + chmod as root inside the container so the host
+        // file ends up world-readable. `--user 0:0` lets keytool create
+        // `/work/ts.jks` regardless of host-dir owner (CI runner-owned
+        // tmpdir blocks cp-kafka's non-root default user). The `chmod
+        // 0644` is inside the container too because the file is owned
+        // by root on the host once keytool runs as root, so the host-side
+        // runner user can't chmod it later.
+        let inner = "set -e; \
+             keytool -import -alias crabka -file /work/dev_cert.pem \
+                 -keystore /work/ts.jks -storepass changeit -noprompt && \
+             chmod 0644 /work/ts.jks";
         let out = Command::new("docker")
             .args([
                 "run",
@@ -2636,18 +2643,10 @@ fn prepare_jks_truststore() -> std::path::PathBuf {
                 "-v",
                 &mount,
                 "--entrypoint",
-                "keytool",
+                "bash",
                 KAFKA_IMAGE,
-                "-import",
-                "-alias",
-                "crabka",
-                "-file",
-                "/work/dev_cert.pem",
-                "-keystore",
-                "/work/ts.jks",
-                "-storepass",
-                "changeit",
-                "-noprompt",
+                "-c",
+                inner,
             ])
             .output()
             .expect("spawn keytool");
@@ -2662,15 +2661,6 @@ fn prepare_jks_truststore() -> std::path::PathBuf {
             "keytool reported success but ts.jks missing at {}",
             ts_path.display(),
         );
-    }
-
-    // Ensure cp-kafka's non-root user can read the truststore once
-    // bind-mounted (same trap as `write_client_props`).
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&ts_path, std::fs::Permissions::from_mode(0o644))
-            .expect("chmod ts.jks");
     }
 
     ts_path
