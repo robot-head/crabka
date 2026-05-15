@@ -60,6 +60,7 @@ pub(crate) mod describe_acls;
 pub(crate) mod describe_cluster;
 pub(crate) mod describe_configs;
 pub(crate) mod describe_groups;
+pub(crate) mod elect_leaders;
 pub(crate) mod fetch;
 pub(crate) mod find_coordinator;
 pub(crate) mod heartbeat;
