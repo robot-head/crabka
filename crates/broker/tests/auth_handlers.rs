@@ -1017,3 +1017,99 @@ fn pbkdf2_salt_and_salted(password: &[u8], iterations: u32) -> (Vec<u8>, [u8; 64
         pbkdf2::pbkdf2_hmac_array::<sha2::Sha512, 64>(password, &salt, iterations);
     (salt, salted)
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// Task 16: InterBrokerClient — outbound TLS + SASL handshake.
+// ────────────────────────────────────────────────────────────────────────
+
+/// Spin up a broker with a `SASL_PLAINTEXT` listener and one PLAIN
+/// credential, then dial it via the public `InterBrokerClient` API. The
+/// client must run `SaslHandshake` + `SaslAuthenticate` transparently and
+/// return a stream the caller can keep using for normal RPCs — proven
+/// here by driving a follow-up `ApiVersions` request over the returned
+/// stream and decoding the response.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inter_broker_client_authenticates_via_plain() {
+    let log_dir = tempfile::tempdir().unwrap();
+    let mut cfg = BrokerConfig::for_tests(log_dir.path().to_path_buf());
+    cfg.listeners = vec![ListenerSpec {
+        name: "SASL_PLAINTEXT".to_string(),
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        advertised: "127.0.0.1:0".to_string(),
+        protocol: ListenerProtocol::SaslPlaintext,
+    }];
+    cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
+    cfg.enabled_sasl_mechanisms = vec![SaslMechanism::Plain];
+    cfg.plain_credentials
+        .insert("broker".to_string(), "secret".to_string());
+
+    let handle = Broker::start(cfg).await.expect("broker must start");
+    let addr = handle.listen_addr();
+
+    let client = crabka_broker::network::client::InterBrokerClient::new(
+        None,
+        Some(crabka_broker::config::InterBrokerCredentials {
+            mechanism: SaslMechanism::Plain,
+            username: "broker".to_string(),
+            password: "secret".to_string(),
+        }),
+    );
+
+    let result = drive_inter_broker_client_plain(&client, addr).await;
+    handle.shutdown().await;
+    result.expect("InterBrokerClient PLAIN auth + ApiVersions round-trip must succeed");
+}
+
+/// Drive `InterBrokerClient::connect` and prove the post-auth stream
+/// survives by running one `ApiVersions` round-trip over it.
+async fn drive_inter_broker_client_plain(
+    client: &crabka_broker::network::client::InterBrokerClient,
+    addr: SocketAddr,
+) -> Result<(), io::Error> {
+    let mut stream = client
+        .connect(
+            &addr.ip().to_string(),
+            addr.port(),
+            ListenerProtocol::SaslPlaintext,
+            "localhost",
+        )
+        .await
+        .map_err(|e| io::Error::other(format!("InterBrokerClient::connect: {e}")))?;
+
+    // Build an ApiVersions v0 request, frame it, send it through the
+    // authenticated stream, decode the response. This proves (a) the
+    // client returned a usable stream and (b) the broker treats the
+    // stream as fully authenticated.
+    let av_req = ApiVersionsRequest::default();
+    let mut av_body = BytesMut::new();
+    av_req
+        .encode(&mut av_body, 0)
+        .map_err(|e| io::Error::other(format!("ApiVersions encode: {e}")))?;
+
+    let mut frame = BytesMut::with_capacity(16 + av_body.len());
+    frame.put_i16(18); // api_key = ApiVersions
+    frame.put_i16(0); // api_version
+    frame.put_i32(99); // post-auth correlation id (distinct from auth ones)
+    let client_id = "crabka-t16-test";
+    frame.put_i16(i16::try_from(client_id.len()).unwrap());
+    frame.put_slice(client_id.as_bytes());
+    // ApiVersions v0 is non-flexible → no tagged-fields byte.
+    frame.put_slice(&av_body);
+
+    stream
+        .write_u32(u32::try_from(frame.len()).unwrap())
+        .await?;
+    stream.write_all(&frame).await?;
+    stream.flush().await?;
+
+    let resp_len = stream.read_u32().await?;
+    let mut resp = vec![0u8; resp_len as usize];
+    stream.read_exact(&mut resp).await?;
+
+    // Non-flexible response: header is v0 (just corr_id).
+    let mut cur = &resp[..];
+    let _corr = cur.get_i32();
+    let _av_resp = ApiVersionsResponse::decode(&mut cur, 0)
+        .map_err(|e| io::Error::other(format!("ApiVersions decode: {e}")))?;
+    Ok(())
+}
