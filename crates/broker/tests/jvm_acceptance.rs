@@ -2442,11 +2442,11 @@ async fn jvm_sasl_scram_sha512_produce_consume() {
     );
 
     // 1b. Grant alice the topic ACLs required for produce/consume.
-    //     Slice-13 enforces per-topic Read/Write/Describe with no
-    //     Read-implies-Describe semantics, so each operation is seeded
-    //     explicitly. Consumer uses `--partition 0` (no consumer group)
+    //     Slice-13b implications: Read/Write each auto-grant Describe on
+    //     the same topic, so Describe is no longer seeded explicitly.
+    //     Consumer uses `--partition 0` (no consumer group)
     //     so no Group ACL is required.
-    for op in ["Read", "Write", "Describe"] {
+    for op in ["Read", "Write"] {
         docker_run_kafka_tool_with_image_and_mount(
             KAFKA_IMAGE_TXN,
             &admin_props.mount_str(),
@@ -2959,7 +2959,8 @@ async fn jvm_sasl_ssl_full_stack() {
 
     // 1. Create the topic. Run as `admin` (super-user) so the slice-13
     //    `CreateTopics` Cluster-Create authorize check passes. Then grant
-    //    alice Read/Write/Describe on the topic (no implication, per T25).
+    //    alice Read/Write on the topic; slice-13b implications auto-grant
+    //    Describe via Read and Write.
     docker_run_kafka_tool_with_image_and_mounts(
         KAFKA_IMAGE_TXN,
         &[&admin_props.mount_str(), &ts_mount],
@@ -2979,7 +2980,7 @@ async fn jvm_sasl_ssl_full_stack() {
             "/client.properties",
         ],
     );
-    for op in ["Read", "Write", "Describe"] {
+    for op in ["Read", "Write"] {
         docker_run_kafka_tool_with_image_and_mounts(
             KAFKA_IMAGE_TXN,
             &[&admin_props.mount_str(), &ts_mount],
@@ -3635,7 +3636,8 @@ async fn jvm_inter_broker_sasl_ssl_raft_replication() {
 
     // Create topic rf=2 across both brokers. Run as `admin` (super-user)
     //  for slice-13's CreateTopics Cluster-Create authorize check, then
-    //  grant alice Read/Write/Describe on the topic.
+    //  grant alice Read/Write on the topic; slice-13b implications
+    //  auto-grant Describe via Read and Write.
     docker_run_kafka_tool_with_image_and_mounts(
         KAFKA_IMAGE_TXN,
         &[&admin_props.mount_str(), &ts_mount],
@@ -3655,7 +3657,7 @@ async fn jvm_inter_broker_sasl_ssl_raft_replication() {
             "/client.properties",
         ],
     );
-    for op in ["Read", "Write", "Describe"] {
+    for op in ["Read", "Write"] {
         docker_run_kafka_tool_with_image_and_mounts(
             KAFKA_IMAGE_TXN,
             &[&admin_props.mount_str(), &ts_mount],
