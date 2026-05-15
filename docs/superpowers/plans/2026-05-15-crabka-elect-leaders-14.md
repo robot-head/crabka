@@ -70,10 +70,10 @@ pub(crate) enum ElectionType {
 pub(crate) enum ElectError {
     UnknownTopicOrPartition,
     PreferredAlreadyLeader,
+    ElectionNotNeeded,
     PreferredNotInIsr,
     PreferredNotAlive,
     NoEligibleReplica,
-    NotControllerLeader,
 }
 ```
 
@@ -124,7 +124,7 @@ pub(crate) async fn select_new_leader_for_partition(
             // catastrophic ISR loss, not routine rebalances.
             for &n in &pr.isr {
                 if liveness.is_alive(n).await {
-                    return Err(ElectError::PreferredAlreadyLeader);
+                    return Err(ElectError::ElectionNotNeeded);
                 }
             }
             // Find the first alive replica, in or out of ISR.
@@ -265,7 +265,7 @@ Then the 8 tests:
         let err = select_new_leader_for_partition(&img, &l, "foo", 0, ElectionType::Unclean)
             .await
             .unwrap_err();
-        assert_eq!(err, ElectError::PreferredAlreadyLeader);
+        assert_eq!(err, ElectError::ElectionNotNeeded);
     }
 
     #[tokio::test]
@@ -684,7 +684,10 @@ fn elect_error_to_wire(err: ElectError) -> (i16, &'static str) {
             (codes::UNKNOWN_TOPIC_OR_PARTITION, "unknown topic or partition")
         }
         ElectError::PreferredAlreadyLeader => {
-            (codes::ELECTION_NOT_NEEDED, "election not needed")
+            (codes::ELECTION_NOT_NEEDED, "preferred replica is already leader")
+        }
+        ElectError::ElectionNotNeeded => {
+            (codes::ELECTION_NOT_NEEDED, "isr still has a live member; unclean election not needed")
         }
         ElectError::PreferredNotInIsr => {
             (codes::PREFERRED_LEADER_NOT_AVAILABLE, "preferred replica not in ISR")
@@ -694,9 +697,6 @@ fn elect_error_to_wire(err: ElectError) -> (i16, &'static str) {
         }
         ElectError::NoEligibleReplica => {
             (codes::ELIGIBLE_LEADERS_NOT_AVAILABLE, "no alive replica")
-        }
-        ElectError::NotControllerLeader => {
-            (codes::COORDINATOR_NOT_AVAILABLE, "not controller leader")
         }
     }
 }
