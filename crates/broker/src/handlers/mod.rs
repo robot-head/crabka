@@ -84,7 +84,9 @@ pub(crate) fn build_table() -> HandlerTable {
     // Produce (api_key 0) is intercepted inline in `network::dispatch`
     // (slice-13 T10) so the handler can receive the per-connection
     // principal + peer `SocketAddr` for per-topic Write ACL enforcement.
-    t.register(1, fetch::handle);
+    // Fetch (api_key 1) is intercepted inline in `network::dispatch`
+    // (slice-13 T11) so the handler can receive the per-connection
+    // principal + peer `SocketAddr` for per-topic Read ACL enforcement.
     t.register(2, list_offsets::handle);
     t.register(3, metadata::handle);
     t.register(8, offset_commit::handle);
