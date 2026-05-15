@@ -3950,6 +3950,10 @@ async fn jvm_kafka_acls_provision_via_cli() {
 /// - `Allow Read+Write Topic LITERAL "foo"`
 /// - `Allow Read Group LITERAL "cg-foo"`
 ///
+/// Slice-13b implies Describe from Read/Write on the same resource, so no
+/// explicit Describe ACL is seeded here — the Metadata per-topic check
+/// relies on the implication path.
+///
 /// Then alice (PLAIN, no super-user, no cluster perms) drives
 /// `kafka-console-producer` and `kafka-console-consumer --group cg-foo`
 /// against the broker. Exercises the full `Produce`/`Fetch`/`JoinGroup`/
@@ -4005,11 +4009,9 @@ async fn jvm_authorized_produce_consume() {
         ],
     );
 
-    // Allow Read+Write+Describe on Topic foo for User:alice. `kafka-acls`
-    // accepts multiple --operation flags per invocation. We add `Describe`
-    // explicitly because our authorizer (slice 13) does not infer the
-    // standard Kafka "Read/Write implies Describe" relation — the
-    // `Metadata` per-topic preamble checks `Describe` directly.
+    // Allow Read+Write on Topic foo for User:alice. Slice-13b implies
+    // Describe from Read/Write on the same topic, so no explicit Describe
+    // ACL is required here.
     docker_run_kafka_tool_with_image_and_mount(
         KAFKA_IMAGE_TXN,
         &admin_mount,
@@ -4026,16 +4028,14 @@ async fn jvm_authorized_produce_consume() {
             "Read",
             "--operation",
             "Write",
-            "--operation",
-            "Describe",
             "--topic",
             TOPIC,
         ],
     );
 
-    // Allow Read+Describe on Group cg-foo for User:alice. `Describe` is
-    // added for the same reason as on the topic: our authorizer does not
-    // infer Describe from Read.
+    // Allow Read on Group cg-foo for User:alice. Slice-13b implies Describe
+    // from Read on the same group resource, so no explicit Describe is
+    // needed.
     docker_run_kafka_tool_with_image_and_mount(
         KAFKA_IMAGE_TXN,
         &admin_mount,
@@ -4050,8 +4050,6 @@ async fn jvm_authorized_produce_consume() {
             "User:alice",
             "--operation",
             "Read",
-            "--operation",
-            "Describe",
             "--group",
             GROUP,
         ],
@@ -4150,10 +4148,10 @@ async fn jvm_authorized_produce_consume() {
 
 /// JVM acceptance — produce by an unauthorized principal must fail.
 ///
-/// Admin (PLAIN super-user) provisions alice with Read+Write+Describe on
-/// topic `foo` (same ACLs as `jvm_authorized_produce_consume`). Bob has
-/// valid PLAIN credentials but no ACLs at all. Bob's
-/// `kafka-console-producer` must be denied.
+/// Admin (PLAIN super-user) provisions alice with Read+Write on topic `foo`
+/// (Describe is implied by slice-13b; same effective ACLs as
+/// `jvm_authorized_produce_consume`). Bob has valid PLAIN credentials but
+/// no ACLs at all. Bob's `kafka-console-producer` must be denied.
 ///
 /// Assertion strategy: `kafka-console-producer` is a fire-and-forget shell
 /// wrapper around the Java client. As of cp-kafka 7.5.0 it logs
@@ -4210,8 +4208,9 @@ async fn jvm_unauthorized_produce_fails() {
         ],
     );
 
-    // alice gets Read+Write+Describe — proves that the broker has ACLs
-    // configured (i.e. the empty-ACL ALLOW shim is not active).
+    // alice gets Read+Write — proves that the broker has ACLs configured
+    // (i.e. the empty-ACL ALLOW shim is not active). Slice-13b implies
+    // Describe from Read/Write so no explicit Describe ACL is needed.
     docker_run_kafka_tool_with_image_and_mount(
         KAFKA_IMAGE_TXN,
         &admin_mount,
@@ -4228,8 +4227,6 @@ async fn jvm_unauthorized_produce_fails() {
             "Read",
             "--operation",
             "Write",
-            "--operation",
-            "Describe",
             "--topic",
             TOPIC,
         ],
@@ -4294,9 +4291,9 @@ async fn jvm_unauthorized_produce_fails() {
 
 /// JVM acceptance — consumer denied on the group-resource path.
 ///
-/// Alice has Read+Describe on topic `foo` but no ACL on group `cg-other`.
-/// `kafka-console-consumer --group cg-other` must fail with
-/// `GroupAuthorizationException` (denied at `JoinGroup`/`OffsetFetch`,
+/// Alice has Read on topic `foo` (Describe implied by slice-13b) but no ACL
+/// on group `cg-other`. `kafka-console-consumer --group cg-other` must fail
+/// with `GroupAuthorizationException` (denied at `JoinGroup`/`OffsetFetch`,
 /// before any Fetch happens).
 ///
 /// Assertion strategy: stderr-shaped. We assert on stderr content for
@@ -4348,7 +4345,8 @@ async fn jvm_unauthorized_consumer_fails_group_check() {
         ],
     );
 
-    // alice: Read+Describe on Topic foo. Deliberately no group ACL.
+    // alice: Read on Topic foo (Describe implied by slice-13b). Deliberately
+    // no group ACL so the consumer hits GroupAuthorizationException.
     docker_run_kafka_tool_with_image_and_mount(
         KAFKA_IMAGE_TXN,
         &admin_mount,
@@ -4363,8 +4361,6 @@ async fn jvm_unauthorized_consumer_fails_group_check() {
             "User:alice",
             "--operation",
             "Read",
-            "--operation",
-            "Describe",
             "--topic",
             TOPIC,
         ],
@@ -4423,8 +4419,8 @@ async fn jvm_unauthorized_consumer_fails_group_check() {
 /// JVM acceptance — prefixed topic ACL grants exactly the prefix.
 ///
 /// Admin provisions:
-/// - `Allow Read+Describe Topic PREFIXED "team-"` for alice
-/// - `Allow Read+Describe Group LITERAL "cg-prefixed"` for alice
+/// - `Allow Read Topic PREFIXED "team-"` for alice (Describe implied by slice-13b)
+/// - `Allow Read Group LITERAL "cg-prefixed"` for alice (Describe implied by slice-13b)
 ///
 /// Then pre-creates two topics: `team-foo` (covered by the prefix) and
 /// `other-foo` (NOT covered). Seeds one record into each via the admin
@@ -4485,7 +4481,8 @@ async fn jvm_prefixed_topic_acl_works() {
         );
     }
 
-    // Prefixed Read+Describe on `team-*` for alice.
+    // Prefixed Read on `team-*` for alice. Slice-13b implies Describe from
+    // Read on the same topic resource.
     docker_run_kafka_tool_with_image_and_mount(
         KAFKA_IMAGE_TXN,
         &admin_mount,
@@ -4500,8 +4497,6 @@ async fn jvm_prefixed_topic_acl_works() {
             "User:alice",
             "--operation",
             "Read",
-            "--operation",
-            "Describe",
             "--resource-pattern-type",
             "prefixed",
             "--topic",
@@ -4509,7 +4504,8 @@ async fn jvm_prefixed_topic_acl_works() {
         ],
     );
 
-    // Literal Read+Describe on group `cg-prefixed`.
+    // Literal Read on group `cg-prefixed`. Slice-13b implies Describe from
+    // Read on the same group resource.
     docker_run_kafka_tool_with_image_and_mount(
         KAFKA_IMAGE_TXN,
         &admin_mount,
@@ -4524,8 +4520,6 @@ async fn jvm_prefixed_topic_acl_works() {
             "User:alice",
             "--operation",
             "Read",
-            "--operation",
-            "Describe",
             "--group",
             GROUP,
         ],
