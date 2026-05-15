@@ -8,8 +8,6 @@
 //! whole request returns `CLUSTER_AUTHORIZATION_FAILED (31)` on every
 //! per-partition row.
 
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 use std::net::SocketAddr;
 
