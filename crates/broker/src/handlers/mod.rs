@@ -96,6 +96,12 @@ pub(crate) fn build_table() -> HandlerTable {
     // DeleteTopics (api_key 20) is intercepted inline in `network::dispatch`
     // (slice-13 T13) so the handler can receive the per-connection
     // principal + peer `SocketAddr` for per-topic Delete ACL enforcement.
+    // AlterConfigs (api_key 33) is intercepted inline in `network::dispatch`
+    // (slice-13 T14) so the handler can receive the per-connection
+    // principal + peer `SocketAddr` for per-resource AlterConfigs ACL enforcement.
+    // IncrementalAlterConfigs (api_key 44) is intercepted inline in `network::dispatch`
+    // (slice-13 T14) so the handler can receive the per-connection
+    // principal + peer `SocketAddr` for per-resource AlterConfigs ACL enforcement.
     t.register(2, list_offsets::handle);
     t.register(8, offset_commit::handle);
     t.register(9, offset_fetch::handle);
@@ -116,10 +122,10 @@ pub(crate) fn build_table() -> HandlerTable {
     t.register(27, crate::txn::handlers::write_txn_markers::handle);
     t.register(28, crate::txn::handlers::txn_offset_commit::handle);
     t.register(32, describe_configs::handle);
-    t.register(33, alter_configs::handle);
+    // 33 (AlterConfigs) intercepted inline — see comment above.
     t.register(37, create_partitions::handle);
     t.register(42, delete_groups::handle);
-    t.register(44, incremental_alter_configs::handle);
+    // 44 (IncrementalAlterConfigs) intercepted inline — see comment above.
     t.register(56, alter_partition::handle);
     t.register(60, describe_cluster::handle);
     t.register(63, broker_heartbeat::handle);

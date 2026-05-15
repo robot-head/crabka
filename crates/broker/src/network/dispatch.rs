@@ -303,6 +303,52 @@ async fn serve_connection_stream<S>(
                 }
             }
         }
+        // AlterConfigs (33, slice-13 T14) needs both the authenticated
+        // principal AND the peer's `SocketAddr` so the handler can
+        // authorize `AlterConfigs` per resource: Topic resources check
+        // against `ResourceType::Topic(resource_name)` and emit
+        // TOPIC_AUTHORIZATION_FAILED on Deny; Broker resources check
+        // against `Cluster("kafka-cluster")` and emit
+        // CLUSTER_AUTHORIZATION_FAILED on Deny.
+        if peek_api_key(&frame).ok() == Some(33) {
+            match handle_alter_configs_frame(&broker, &frame, &auth, &peer).await {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during AlterConfigs, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "AlterConfigs dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
+        // IncrementalAlterConfigs (44, slice-13 T14) — same shape as
+        // AlterConfigs: needs both the authenticated principal and the peer
+        // `SocketAddr` for per-resource ACL enforcement.
+        if peek_api_key(&frame).ok() == Some(44) {
+            match handle_incremental_alter_configs_frame(&broker, &frame, &auth, &peer).await {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(
+                            error = %e,
+                            "framed.send error during IncrementalAlterConfigs, closing"
+                        );
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "IncrementalAlterConfigs dispatch error, closing connection"
+                    );
+                    break;
+                }
+            }
+        }
         // DescribeAcls (29, slice-13 T7) needs both the authenticated
         // principal AND the peer's `SocketAddr` for host-based ACL
         // matching; neither is reachable from the `&Broker`-only handler
@@ -856,6 +902,88 @@ async fn handle_delete_acls_frame(
 
     let resp_body =
         crate::handlers::delete_acls::handle(broker, req, &principal, peer, api_version).await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch an `AlterConfigs` (`api_key` 33) frame. Pulls the
+/// authenticated principal off the per-connection `auth` state and the
+/// peer `SocketAddr` from the accept-time capture so the handler can
+/// authorize `AlterConfigs` per resource (slice-13 T14).
+/// Topic resources → `TOPIC_AUTHORIZATION_FAILED` on Deny.
+/// Broker resources → `CLUSTER_AUTHORIZATION_FAILED` on Deny.
+async fn handle_alter_configs_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 33);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let principal = auth
+        .principal()
+        .cloned()
+        .unwrap_or_else(|| crabka_security::Principal {
+            name: "ANONYMOUS".to_string(),
+            mechanism: crabka_security::SaslMechanism::Plain,
+        });
+
+    let resp_body = crate::handlers::alter_configs::handle(
+        broker,
+        api_version,
+        correlation_id,
+        body,
+        &principal,
+        peer,
+    )
+    .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch an `IncrementalAlterConfigs` (`api_key` 44) frame.
+/// Pulls the authenticated principal off the per-connection `auth` state
+/// and the peer `SocketAddr` from the accept-time capture so the handler
+/// can authorize `AlterConfigs` per resource (slice-13 T14).
+/// Topic resources → `TOPIC_AUTHORIZATION_FAILED` on Deny.
+/// Broker resources → `CLUSTER_AUTHORIZATION_FAILED` on Deny.
+async fn handle_incremental_alter_configs_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 44);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let principal = auth
+        .principal()
+        .cloned()
+        .unwrap_or_else(|| crabka_security::Principal {
+            name: "ANONYMOUS".to_string(),
+            mechanism: crabka_security::SaslMechanism::Plain,
+        });
+
+    let resp_body = crate::handlers::incremental_alter_configs::handle(
+        broker,
+        api_version,
+        correlation_id,
+        body,
+        &principal,
+        peer,
+    )
+    .await?;
     Ok(encode_response(
         api_key,
         correlation_id,
