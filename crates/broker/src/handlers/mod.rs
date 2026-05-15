@@ -90,6 +90,12 @@ pub(crate) fn build_table() -> HandlerTable {
     // Metadata (api_key 3) is intercepted inline in `network::dispatch`
     // (slice-13 T12) so the handler can receive the per-connection
     // principal + peer `SocketAddr` for per-topic Describe ACL enforcement.
+    // CreateTopics (api_key 19) is intercepted inline in `network::dispatch`
+    // (slice-13 T13) so the handler can receive the per-connection
+    // principal + peer `SocketAddr` for Cluster Create ACL enforcement.
+    // DeleteTopics (api_key 20) is intercepted inline in `network::dispatch`
+    // (slice-13 T13) so the handler can receive the per-connection
+    // principal + peer `SocketAddr` for per-topic Delete ACL enforcement.
     t.register(2, list_offsets::handle);
     t.register(8, offset_commit::handle);
     t.register(9, offset_fetch::handle);
@@ -101,8 +107,6 @@ pub(crate) fn build_table() -> HandlerTable {
     t.register(15, describe_groups::handle);
     t.register(16, list_groups::handle);
     t.register(18, api_versions::handle);
-    t.register(19, create_topics::handle);
-    t.register(20, delete_topics::handle);
     t.register(21, delete_records::handle);
     t.register(22, init_producer_id::handle);
     t.register(23, offset_for_leader_epoch::handle);

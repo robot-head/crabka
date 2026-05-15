@@ -261,6 +261,48 @@ async fn serve_connection_stream<S>(
                 }
             }
         }
+        // CreateTopics (19, slice-13 T13) needs both the authenticated
+        // principal AND the peer's `SocketAddr` so the handler can
+        // authorize `Create` on `Cluster("kafka-cluster")` and emit
+        // CLUSTER_AUTHORIZATION_FAILED on every topic row on Deny. The
+        // `&Broker`-only handler table signature can't carry that context,
+        // so this api_key intercepts inline.
+        if peek_api_key(&frame).ok() == Some(19) {
+            match handle_create_topics_frame(&broker, &frame, &auth, &peer).await {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during CreateTopics, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "CreateTopics dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
+        // DeleteTopics (20, slice-13 T13) needs both the authenticated
+        // principal AND the peer's `SocketAddr` so the handler can
+        // batch-authorize every topic for `Delete` and emit
+        // TOPIC_AUTHORIZATION_FAILED on denied topic rows. The
+        // `&Broker`-only handler table signature can't carry that context,
+        // so this api_key intercepts inline.
+        if peek_api_key(&frame).ok() == Some(20) {
+            match handle_delete_topics_frame(&broker, &frame, &auth, &peer).await {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during DeleteTopics, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "DeleteTopics dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
         // DescribeAcls (29, slice-13 T7) needs both the authenticated
         // principal AND the peer's `SocketAddr` for host-based ACL
         // matching; neither is reachable from the `&Broker`-only handler
@@ -594,6 +636,92 @@ async fn handle_metadata_frame(
         });
 
     let resp_body = crate::handlers::metadata::handle(
+        broker,
+        api_version,
+        correlation_id,
+        body,
+        &principal,
+        peer,
+    )
+    .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch a `CreateTopics` (`api_key` 19) frame. Pulls the
+/// authenticated principal off the per-connection `auth` state and the
+/// peer `SocketAddr` from the accept-time capture so the handler can
+/// authorize `Create` on `Cluster("kafka-cluster")` (slice-13 T13).
+/// On PLAINTEXT/SSL listeners the connection is implicitly
+/// `Authenticated { ANONYMOUS / Plain }` (see the loop init), so
+/// `principal()` always returns `Some` here; the `unwrap_or_else`
+/// fallback covers the defensive SASL pre-auth case.
+async fn handle_create_topics_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 19);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let principal = auth
+        .principal()
+        .cloned()
+        .unwrap_or_else(|| crabka_security::Principal {
+            name: "ANONYMOUS".to_string(),
+            mechanism: crabka_security::SaslMechanism::Plain,
+        });
+
+    let resp_body = crate::handlers::create_topics::handle(
+        broker,
+        api_version,
+        correlation_id,
+        body,
+        &principal,
+        peer,
+    )
+    .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch a `DeleteTopics` (`api_key` 20) frame. Pulls the
+/// authenticated principal off the per-connection `auth` state and the
+/// peer `SocketAddr` from the accept-time capture so the handler can
+/// batch-authorize every topic for `Delete` (slice-13 T13).
+/// On PLAINTEXT/SSL listeners the connection is implicitly
+/// `Authenticated { ANONYMOUS / Plain }` (see the loop init), so
+/// `principal()` always returns `Some` here; the `unwrap_or_else`
+/// fallback covers the defensive SASL pre-auth case.
+async fn handle_delete_topics_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 20);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let principal = auth
+        .principal()
+        .cloned()
+        .unwrap_or_else(|| crabka_security::Principal {
+            name: "ANONYMOUS".to_string(),
+            mechanism: crabka_security::SaslMechanism::Plain,
+        });
+
+    let resp_body = crate::handlers::delete_topics::handle(
         broker,
         api_version,
         correlation_id,

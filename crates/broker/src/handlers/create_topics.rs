@@ -2,17 +2,19 @@
 //! so every topic/partition creation goes through the metadata quorum before
 //! the partition directories are materialized on disk.
 
-use bytes::{Bytes, BytesMut};
-use futures_util::future::BoxFuture;
+use std::net::SocketAddr;
 
-use crabka_metadata::{MetadataRecord, PartitionRecord, TopicRecord};
+use bytes::{Bytes, BytesMut};
+use crabka_metadata::{AclOperation, MetadataRecord, PartitionRecord, TopicRecord};
 use crabka_protocol::owned::create_topics_request::CreateTopicsRequest;
 use crabka_protocol::owned::create_topics_response::{CreatableTopicResult, CreateTopicsResponse};
 use crabka_protocol::primitives::uuid::Uuid as ProtoUuid;
 use crabka_protocol::{Decode, Encode};
 use crabka_raft::RaftError;
+use crabka_security::Principal;
 use uuid::Uuid;
 
+use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize};
 use crate::broker::Broker;
 use crate::codes;
 use crate::error::BrokerError;
@@ -47,12 +49,56 @@ pub(crate) fn round_robin_replicas(
 }
 
 #[allow(clippy::too_many_lines)]
-pub(crate) fn handle(
+pub(crate) async fn handle(
     broker: &Broker,
     version: i16,
     _correlation_id: i32,
     req_bytes: &[u8],
-) -> BoxFuture<'static, Result<Bytes, BrokerError>> {
+    principal: &Principal,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    // ── slice-13 ACL preamble ────────────────────────────────────────
+    // Whole-request Cluster Create gate. On Deny, return
+    // CLUSTER_AUTHORIZATION_FAILED on every topic row and short-circuit.
+    {
+        let image = broker.controller.current_image();
+        let allow = authorize(
+            &image,
+            broker.config.super_user_name.as_deref(),
+            &AuthorizationRequest {
+                principal,
+                host: peer,
+                resource_type: crabka_metadata::ResourceType::Cluster,
+                resource_name: "kafka-cluster",
+                operation: AclOperation::Create,
+            },
+        );
+        if allow == AuthorizationResult::Deny {
+            // Peek at the topic names without consuming the request fully.
+            let mut cur: &[u8] = req_bytes;
+            let req = CreateTopicsRequest::decode(&mut cur, version)?;
+            let results: Vec<CreatableTopicResult> = req
+                .topics
+                .into_iter()
+                .map(|t| CreatableTopicResult {
+                    name: t.name,
+                    topic_id: ProtoUuid([0u8; 16]),
+                    error_code: codes::CLUSTER_AUTHORIZATION_FAILED,
+                    error_message: Some("create-topics denied".into()),
+                    ..Default::default()
+                })
+                .collect();
+            let resp = CreateTopicsResponse {
+                topics: results,
+                throttle_time_ms: 0,
+                ..Default::default()
+            };
+            let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
+            resp.encode(&mut buf, version)?;
+            return Ok(buf.freeze());
+        }
+    }
+
     let req_bytes = req_bytes.to_vec();
     let controller = broker.controller.clone();
     let node_id = broker.config.node_id;
@@ -60,7 +106,7 @@ pub(crate) fn handle(
     let log_config = broker.config.log_config.clone();
     let partitions_map = broker.partitions.clone();
 
-    Box::pin(async move {
+    {
         let mut cur: &[u8] = &req_bytes;
         let req = CreateTopicsRequest::decode(&mut cur, version)?;
         let mut results: Vec<CreatableTopicResult> = Vec::with_capacity(req.topics.len());
@@ -240,7 +286,7 @@ pub(crate) fn handle(
         let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
         resp.encode(&mut buf, version)?;
         Ok(buf.freeze())
-    })
+    }
 }
 
 #[cfg(test)]
