@@ -136,6 +136,7 @@ mod partition;
 mod partition_writer;
 mod producer_id_manager;
 mod producer_state;
+pub mod raft_handshake;
 pub(crate) mod replica_state;
 mod replicator;
 mod replicator_supervisor;
