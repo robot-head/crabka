@@ -61,3 +61,43 @@ Kafka client for ApiVersions.
   dispatch table + ApiVersions response register all slice-11 api_keys.
 - Out of scope: Rust CLI, ACLs, quotas, partition reassignments,
   ElectLeaders, log compaction, broker-side recompression.
+
+## Slice 12 — auth & security (2026-05-15)
+
+- 2 new crates: `crabka-security` (pure-logic SCRAM-SHA-512 server +
+  client state machines, PBKDF2 hashing, PLAIN constant-time verifier,
+  `rustls` `ServerConfig`/`ClientConfig` builders) and `crabka-cli`
+  (`crabka format --add-scram` bootstrap subcommand).
+- 3 new wire handlers: `SaslHandshake` (17), `SaslAuthenticate` (36),
+  `AlterUserScramCredentials` (51, KIP-554).
+- 2 new metadata records: `V1ScramCredential`,
+  `V1DeleteScramCredential`.
+- Per-listener accept loops; TLS termination per listener via
+  `tokio_rustls::TlsAcceptor`; `ConnectionAuth` state machine + pre-auth
+  allowlist gate (`ApiVersions`, `SaslHandshake`, `SaslAuthenticate`
+  pre-auth on SASL listeners; everything else rejected).
+- `InterBrokerClient` runs TLS + outbound SASL handshake for the
+  replicator and the controller-heartbeat client. Raft transport gains
+  an `OutboundDialer` trait abstraction but stays plaintext in this
+  slice (promoting raft RPC onto the unified inter-broker listener is
+  deferred — the controller listener itself needs SASL/TLS termination
+  first).
+- 5 new JVM acceptance tests: SASL/PLAIN produce/consume,
+  SASL/SCRAM-SHA-512 produce/consume (provisioning via
+  `kafka-configs --alter --entity-type users`), SSL handshake,
+  SASL_SSL full stack, two-broker SASL inter-broker.
+- Bootstrap CLI: `crabka format --log-dir D --add-scram
+  'SCRAM-SHA-512=[name=admin,password=…]'` writes
+  `bootstrap.{json,records.bin}` artifacts; the broker doesn't consume
+  them yet — wiring `Broker::start` to read them on
+  `BootstrapMode::Bootstrap` is deferred to a follow-up slice. The
+  super-user-via-static-PLAIN-creds path is the operator bootstrap
+  channel today.
+- Cert fixtures regenerated as ECDSA P-256 end-entity (was ED25519 with
+  `CA:TRUE` — Java 11 in cp-kafka:6.1.1 doesn't negotiate ed25519 in
+  TLS).
+- Side fix: `UNACCEPTABLE_CREDENTIAL = 78` (plan spec said 74 — that
+  value collides with `FENCED_LEADER_EPOCH`).
+- Out of scope: ACLs (only a super-user-name stand-in), delegation
+  tokens, OAUTHBEARER, GSSAPI, SCRAM-SHA-256, mTLS client-auth,
+  quotas, raft-over-SASL.
