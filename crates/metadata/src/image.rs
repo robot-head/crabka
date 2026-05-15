@@ -134,6 +134,9 @@ impl MetadataImage {
                 self.scram_credentials
                     .remove(&(r.user.clone(), r.mechanism));
             }
+            // T3 will implement real ACL storage; placeholder for T2.
+            MetadataRecord::V1AccessControlEntry(_)
+            | MetadataRecord::V1DeleteAccessControlEntry(_) => {}
         }
     }
 
@@ -181,10 +184,12 @@ impl MetadataImage {
                 }
                 Ok(())
             }
-            MetadataRecord::V1BrokerRegistration(_) => Ok(()),
-            MetadataRecord::V1ScramCredential(_) | MetadataRecord::V1DeleteScramCredential(_) => {
-                Ok(())
-            }
+            MetadataRecord::V1BrokerRegistration(_)
+            | MetadataRecord::V1ScramCredential(_)
+            | MetadataRecord::V1DeleteScramCredential(_)
+            // T3 will implement real ACL validation; placeholder for T2.
+            | MetadataRecord::V1AccessControlEntry(_)
+            | MetadataRecord::V1DeleteAccessControlEntry(_) => Ok(()),
         }
     }
 }
