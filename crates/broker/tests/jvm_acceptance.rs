@@ -3408,7 +3408,12 @@ async fn start_two_sasl_ssl_brokers_with_controller_protocol(
             tls_config: Some(TlsConfig {
                 cert_chain_path: cert_path.clone(),
                 private_key_path: key_path.clone(),
-                trust_roots_path: None,
+                // Each broker must trust the dev cert that its peer
+                // presents on inter-broker raft + replication dials.
+                // Without this, the InterBrokerClient TlsConnector has
+                // an empty trust-root store and rejects the peer's
+                // self-signed cert as `UnknownIssuer`.
+                trust_roots_path: Some(cert_path.clone()),
             }),
             enabled_sasl_mechanisms: vec![SaslMechanism::Plain, SaslMechanism::ScramSha512],
             super_user_name: Some(admin.to_string()),
