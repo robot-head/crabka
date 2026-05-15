@@ -36,6 +36,7 @@ use tokio_rustls::TlsConnector;
 use tokio_rustls::rustls::client::danger::{
     HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
 };
+use tokio_rustls::rustls::pki_types::pem::PemObject;
 use tokio_rustls::rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use tokio_rustls::rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
 
@@ -86,11 +87,10 @@ async fn tls_listener_accepts_tls_handshake_only() {
     // no real authentication, plug in a verifier that pins to the dev
     // cert's DER bytes and accepts anything that matches. Subsequent
     // task tests (T22 JVM TLS) regenerate proper cert chains.
-    let cert_pem = std::fs::read(&cert_path).unwrap();
-    let certs: Vec<CertificateDer<'static>> =
-        rustls_pemfile::certs(&mut std::io::Cursor::new(cert_pem))
-            .collect::<Result<_, _>>()
-            .unwrap();
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(&cert_path)
+        .expect("open dev cert")
+        .collect::<Result<_, _>>()
+        .expect("parse dev cert");
     let expected_cert = certs.into_iter().next().expect("at least one cert").clone();
     let client_cfg = ClientConfig::builder()
         .dangerous()

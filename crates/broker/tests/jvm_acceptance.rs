@@ -2623,10 +2623,16 @@ fn prepare_jks_truststore() -> std::path::PathBuf {
 
     if !ts_path.exists() {
         let mount = format!("{}:/work", cache_dir.display());
+        // `--user 0:0` runs keytool as root in the container so it can
+        // write `/work/ts.jks` regardless of the host directory's owner.
+        // Without this, CI's runner-owned temp dir blocks the cp-kafka
+        // image's non-root default user from creating the keystore.
         let out = Command::new("docker")
             .args([
                 "run",
                 "--rm",
+                "--user",
+                "0:0",
                 "-v",
                 &mount,
                 "--entrypoint",

@@ -1,5 +1,3 @@
-use std::fs::File;
-use std::io::BufReader;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -50,10 +48,11 @@ impl TlsConfig {
 }
 
 fn load_certs(path: &PathBuf) -> Result<Vec<CertificateDer<'static>>, TlsError> {
-    let f = File::open(path)?;
-    let mut r = BufReader::new(f);
-    let certs: Result<Vec<_>, _> = rustls_pemfile::certs(&mut r).collect();
-    let certs = certs?;
+    use rustls::pki_types::pem::PemObject;
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(path)
+        .map_err(|e| TlsError::Io(std::io::Error::other(e.to_string())))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| TlsError::Io(std::io::Error::other(e.to_string())))?;
     if certs.is_empty() {
         return Err(TlsError::NoCerts(path.clone()));
     }
@@ -61,14 +60,14 @@ fn load_certs(path: &PathBuf) -> Result<Vec<CertificateDer<'static>>, TlsError> 
 }
 
 fn load_private_key(path: &PathBuf) -> Result<PrivateKeyDer<'static>, TlsError> {
-    let f = File::open(path)?;
-    let mut r = BufReader::new(f);
-    rustls_pemfile::private_key(&mut r)?.ok_or_else(|| TlsError::NoPrivateKey(path.clone()))
+    use rustls::pki_types::pem::PemObject;
+    PrivateKeyDer::from_pem_file(path).map_err(|_| TlsError::NoPrivateKey(path.clone()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::File;
     use std::io::Write;
 
     fn install_provider() {
