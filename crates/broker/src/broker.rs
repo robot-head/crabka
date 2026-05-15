@@ -597,6 +597,35 @@ impl Broker {
             if let Err(e) = controller.submit_change(vec![self_reg]).await {
                 tracing::warn!(error = %e, "self-registration failed; continuing");
             }
+
+            // 2b. First-start bootstrap-records submit (slice 12b).
+            //
+            //     On a fresh-cluster cold boot (`BootstrapMode::Bootstrap`),
+            //     consume `log_dir/bootstrap.records.bin` if present and submit
+            //     its records through raft as a single batched change. This is
+            //     how operator-supplied SCRAM credentials (and any future
+            //     bootstrap-only metadata) enter the cluster before any client
+            //     connection succeeds — `submit_change` blocks until raft has
+            //     committed and applied the batch, so by the time we proceed
+            //     past this point the records are visible in
+            //     `controller.current_image()`.
+            //
+            //     `Join` brokers skip this entirely: bootstrap records are a
+            //     fresh-cluster initialization concern, never replayed by
+            //     joining voters (the leader already has the committed state).
+            //
+            //     Missing-file is treated as empty (handled by the loader),
+            //     so the legacy zero-record path is a no-op and existing
+            //     deployments / tests are byte-identical.
+            if matches!(config.bootstrap_mode, crate::BootstrapMode::Bootstrap) {
+                let records = crate::bootstrap::load_bootstrap_records(&config.log_dir)?;
+                if !records.is_empty() {
+                    tracing::info!(count = records.len(), "submitting bootstrap records");
+                    controller.submit_change(records).await.map_err(|e| {
+                        BrokerError::Replication(format!("bootstrap submit failed: {e}"))
+                    })?;
+                }
+            }
         }
 
         // 3. Scan + recover partitions on disk. Partition state is still
