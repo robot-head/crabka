@@ -14,6 +14,8 @@
 
 #![allow(dead_code)] // accept loop wires this up in Phase D (Task 11).
 
+use std::net::SocketAddr;
+
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use futures_util::{SinkExt, StreamExt};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -36,6 +38,15 @@ pub async fn serve_connection_on_listener(
     stream: TcpStream,
     spec: crate::config::ListenerSpec,
 ) {
+    // Capture the peer address from the underlying TCP socket before we
+    // hand the stream off to the TLS layer / framing loop. Slice-13 ACL
+    // handlers need this for host-based ACL matching. If `peer_addr`
+    // fails (rare — socket closed mid-accept), fall back to the
+    // unspecified address; ACL matchers treat it as a non-matching host.
+    let peer = stream.peer_addr().unwrap_or_else(|e| {
+        tracing::debug!(error = %e, "peer_addr() failed, using 0.0.0.0:0");
+        SocketAddr::from(([0u8, 0, 0, 0], 0))
+    });
     if spec.protocol.requires_tls() {
         let Some(acceptor) = broker.tls_acceptor.clone() else {
             tracing::error!(
@@ -45,11 +56,11 @@ pub async fn serve_connection_on_listener(
             return;
         };
         match acceptor.accept(stream).await {
-            Ok(tls_stream) => serve_connection_stream(broker, tls_stream, spec).await,
+            Ok(tls_stream) => serve_connection_stream(broker, tls_stream, spec, peer).await,
             Err(e) => tracing::debug!(error = %e, "TLS handshake failed"),
         }
     } else {
-        serve_connection_plaintext(broker, stream, spec).await;
+        serve_connection_plaintext(broker, stream, spec, peer).await;
     }
 }
 
@@ -60,8 +71,9 @@ async fn serve_connection_plaintext(
     broker: std::sync::Arc<Broker>,
     stream: TcpStream,
     spec: crate::config::ListenerSpec,
+    peer: SocketAddr,
 ) {
-    serve_connection_stream(broker, stream, spec).await;
+    serve_connection_stream(broker, stream, spec, peer).await;
 }
 
 /// Generic per-connection request loop. `S` is the post-handshake byte
@@ -69,10 +81,12 @@ async fn serve_connection_plaintext(
 /// for TLS listeners. `spec` carries the listener's protocol so the loop
 /// can initialise `ConnectionAuth` correctly and gate pre-auth requests on
 /// SASL listeners (Slice 12, T12).
+#[allow(clippy::too_many_lines)] // each api_key intercept arm adds ~15 lines; T8/T9 will extract them.
 async fn serve_connection_stream<S>(
     broker: std::sync::Arc<Broker>,
     stream: S,
     spec: crate::config::ListenerSpec,
+    peer: SocketAddr,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -176,6 +190,25 @@ async fn serve_connection_stream<S>(
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "AUSCR dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
+        // DescribeAcls (29, slice-13 T7) needs both the authenticated
+        // principal AND the peer's `SocketAddr` for host-based ACL
+        // matching; neither is reachable from the `&Broker`-only handler
+        // table signature, so it intercepts inline.
+        if peek_api_key(&frame).ok() == Some(29) {
+            match handle_describe_acls_frame(&broker, &frame, &auth, &peer).await {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during DescribeAcls, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "DescribeAcls dispatch error, closing connection");
                     break;
                 }
             }
@@ -342,6 +375,50 @@ async fn handle_alter_user_scram_credentials_frame(
     let mut buf = BytesMut::with_capacity(resp.encoded_len(api_version));
     resp.encode(&mut buf, api_version)?;
     let resp_body = buf.freeze();
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch a `DescribeAcls` (`api_key` 29) frame. Pulls the
+/// authenticated principal off the per-connection `auth` state and the
+/// peer `SocketAddr` from the accept-time capture so the handler can
+/// authorize `Describe` on `Cluster` with host-based ACL matching.
+/// On PLAINTEXT/SSL listeners the connection is implicitly
+/// `Authenticated { ANONYMOUS / Plain }` (see the loop init), so
+/// `principal()` always returns `Some` here; the `unwrap_or_else`
+/// fallback covers the defensive SASL pre-auth case.
+async fn handle_describe_acls_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    use crabka_protocol::Decode;
+
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 29);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let mut cur: &[u8] = body;
+    let req = crabka_protocol::owned::describe_acls_request::DescribeAclsRequest::decode(
+        &mut cur,
+        api_version,
+    )?;
+
+    let principal = auth
+        .principal()
+        .cloned()
+        .unwrap_or_else(|| crabka_security::Principal {
+            name: "ANONYMOUS".to_string(),
+            mechanism: crabka_security::SaslMechanism::Plain,
+        });
+
+    let resp_body =
+        crate::handlers::describe_acls::handle(broker, req, &principal, peer, api_version).await?;
     Ok(encode_response(
         api_key,
         correlation_id,
