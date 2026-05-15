@@ -7,7 +7,7 @@ pub use client::ScramClientExchange;
 pub use server::{ScramServerExchange, StepResult};
 
 use crate::SaslMechanism;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use ring::rand::{SecureRandom, SystemRandom};
 use sha2::{Digest, Sha512};
 
@@ -119,7 +119,7 @@ mod tests {
         let salted =
             pbkdf2::pbkdf2_hmac_array::<sha2::Sha512, 64>(password, &cred.salt, cred.iterations);
         let client_key = {
-            use hmac::{Hmac, Mac};
+            use hmac::{Hmac, KeyInit, Mac};
             let mut m = <Hmac<Sha512>>::new_from_slice(&salted).unwrap();
             m.update(b"Client Key");
             m.finalize().into_bytes()
