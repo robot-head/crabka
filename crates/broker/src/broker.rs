@@ -42,6 +42,12 @@ pub struct Broker {
     /// `Some` when `BrokerConfig::tls_config` is set. Per-listener accept
     /// loops clone this and call `accept` for every TLS connection.
     pub(crate) tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
+    /// Shared outbound dialer used by the replicator, raft transport,
+    /// and controller-heartbeat loops. When `inter_broker_credentials`
+    /// is `None` and the listener is `PLAINTEXT` the dialer falls back
+    /// to a plain `TcpStream::connect` — the new wiring is transparent
+    /// for the legacy PLAINTEXT-only path.
+    pub(crate) inter_broker_client: Arc<crate::network::client::InterBrokerClient>,
     handlers: HandlerTable,
 }
 
@@ -440,10 +446,45 @@ impl Broker {
             None => None,
         };
 
+        // 0d. Build the outbound `TlsConnector` and the shared
+        //     `InterBrokerClient` once. Both the replicator-supervisor
+        //     and the heartbeat client clone the resulting Arc; the
+        //     raft transport receives it as an injected dialer.
+        let tls_connector = match &config.tls_config {
+            Some(tls) => {
+                let client_cfg = tls
+                    .build_client_config()
+                    .map_err(|e| BrokerError::Tls(e.to_string()))?;
+                Some(tokio_rustls::TlsConnector::from(client_cfg))
+            }
+            None => None,
+        };
+        let inter_broker_client = Arc::new(crate::network::client::InterBrokerClient::new(
+            tls_connector,
+            config.inter_broker_credentials.clone(),
+        ));
+
         // 1. Bring up the metadata quorum BEFORE the client listener so
         //    handlers can read from it the moment they accept their first
         //    connection. The controller owns its own listener bound to
         //    `controller_listen_addr`.
+        //
+        //    NOTE on slice-12 raft dialer wiring:
+        //
+        //    Replication + heartbeat dials route through the data-plane
+        //    inter-broker listener (which speaks SASL/TLS when
+        //    configured). The Raft RPCs (`AppendEntries`, `Vote`,
+        //    `SubmitChange`) dial the *controller* listener — a separate
+        //    TCP listener that, in slice 12, still does plain framing
+        //    only. Hooking the SASL-equipped dialer to the raft transport
+        //    here would make the inter-broker handshake fail against the
+        //    controller listener. Slice 12's design therefore keeps raft
+        //    traffic on the existing plaintext path; promoting raft to
+        //    the unified inter-broker listener is a follow-up slice. We
+        //    still feed an explicit `OutboundDialer::PlaintextDialer`
+        //    through the trait so the abstraction is in place for that
+        //    future change.
+        let raft_dialer: Option<std::sync::Arc<dyn crabka_raft::OutboundDialer>> = None;
         let controller_cfg = crabka_raft::ControllerConfig {
             node_id: config.node_id,
             voters: config.controller_quorum_voters.clone(),
@@ -458,6 +499,7 @@ impl Broker {
             heartbeat_interval: config.controller_heartbeat_interval,
             client_id: format!("crabka-broker-{}-controller", config.broker_id),
             bootstrap_mode: config.bootstrap_mode,
+            dialer: raft_dialer,
         };
         let controller = Arc::new(
             crabka_raft::Controller::start(controller_cfg)
@@ -564,6 +606,11 @@ impl Broker {
         //    set. With replication_factor=1 the desired follower set is
         //    always empty, so this is a no-op for single-broker setups.
         let supervisor_shutdown = CancellationToken::new();
+        let inter_listener_proto = config
+            .effective_listeners()
+            .iter()
+            .find(|l| l.name == config.inter_broker_listener_name)
+            .map_or(crabka_security::ListenerProtocol::Plaintext, |l| l.protocol);
         let supervisor = crate::replicator_supervisor::ReplicatorSupervisor::new(
             config.node_id,
             controller.clone(),
@@ -573,6 +620,9 @@ impl Broker {
             format!("crabka-broker-{}-replicator", config.broker_id),
             supervisor_shutdown.clone(),
             Some(txn_coordinator.clone()),
+            inter_broker_client.clone(),
+            inter_listener_proto,
+            config.inter_broker_listener_name.clone(),
         );
         let supervisor_handle = supervisor.spawn();
 
@@ -593,6 +643,9 @@ impl Broker {
                 interval: std::time::Duration::from_millis(config.heartbeat_interval_ms),
                 controller: controller.clone(),
                 shutdown: heartbeat_shutdown,
+                inter_broker_client: inter_broker_client.clone(),
+                inter_broker_listener_protocol: inter_listener_proto,
+                inter_broker_listener_name: config.inter_broker_listener_name.clone(),
             },
         ));
 
@@ -742,6 +795,7 @@ impl Broker {
             supervisor_handle: tokio::sync::Mutex::new(Some(supervisor_handle)),
             liveness: liveness.clone(),
             tls_acceptor,
+            inter_broker_client,
             handlers,
         });
 

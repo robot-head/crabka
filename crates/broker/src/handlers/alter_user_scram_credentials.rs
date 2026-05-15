@@ -65,7 +65,13 @@ pub(crate) async fn handle(
     let mut records: Vec<MetadataRecord> = Vec::new();
 
     for d in req.deletions {
-        user_results.push(process_deletion(broker, d, authorized, &mut seen, &mut records));
+        user_results.push(process_deletion(
+            broker,
+            d,
+            authorized,
+            &mut seen,
+            &mut records,
+        ));
     }
 
     for u in req.upsertions {
@@ -111,7 +117,11 @@ fn process_deletion(
         return err_result(d.name, codes::UNACCEPTABLE_CREDENTIAL, "unknown mechanism");
     };
     if !authorized {
-        return err_result(d.name, codes::CLUSTER_AUTHORIZATION_FAILED, "not super-user");
+        return err_result(
+            d.name,
+            codes::CLUSTER_AUTHORIZATION_FAILED,
+            "not super-user",
+        );
     }
     if broker
         .controller
@@ -160,7 +170,11 @@ fn process_upsertion(
         );
     }
     if !authorized {
-        return err_result(u.name, codes::CLUSTER_AUTHORIZATION_FAILED, "not super-user");
+        return err_result(
+            u.name,
+            codes::CLUSTER_AUTHORIZATION_FAILED,
+            "not super-user",
+        );
     }
     // Per KIP-554 the wire `salted_password` is the 64-byte PBKDF2 output;
     // recompute `stored_key` and `server_key` from it for storage in the

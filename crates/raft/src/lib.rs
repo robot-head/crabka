@@ -58,6 +58,7 @@ mod wire;
 pub use config::{BootstrapMode, ControllerConfig};
 pub use controller::{Controller, ControllerHandle};
 pub use error::RaftError;
+pub use network::OutboundDialer;
 pub use types::{AppData, AppDataResponse, Node, NodeId, Raft, TypeConfig};
 pub use wire::{
     API_KEY_APPEND_ENTRIES, API_KEY_INSTALL_SNAPSHOT, API_KEY_VOTE, CrabkaAppendEntriesRequest,

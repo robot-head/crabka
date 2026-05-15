@@ -1113,3 +1113,284 @@ async fn drive_inter_broker_client_plain(
         .map_err(|e| io::Error::other(format!("ApiVersions decode: {e}")))?;
     Ok(())
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// Task 17: InterBrokerClient wired into replicator / heartbeat — proves a
+// two-broker cluster with a SASL_PLAINTEXT inter-broker listener
+// authenticates outbound fetch + heartbeat traffic and replicates records
+// end-to-end.
+//
+// Gated to non-Windows (openraft `debug_assert!` race on the hosted Windows
+// runner — same gate as `tests/replication.rs`).
+// ────────────────────────────────────────────────────────────────────────
+
+mod two_broker_sasl {
+    use super::*;
+    use crabka_broker::config::InterBrokerCredentials;
+    use crabka_broker::{BootstrapMode, Broker, BrokerHandle};
+    use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
+    use crabka_protocol::owned::produce_request::{
+        PartitionProduceData, ProduceRequest, TopicProduceData,
+    };
+    use crabka_protocol::records::{Record, RecordBatch};
+    use std::collections::BTreeSet;
+    use std::time::{Duration, Instant};
+    use tempfile::TempDir;
+
+    /// Reserve `n` ephemeral loopback ports via the bind-and-drop trick.
+    async fn reserve_ports(n: usize) -> Vec<SocketAddr> {
+        let mut out = Vec::with_capacity(n);
+        let mut listeners = Vec::with_capacity(n);
+        for _ in 0..n {
+            let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            out.push(l.local_addr().unwrap());
+            listeners.push(l);
+        }
+        drop(listeners);
+        out
+    }
+
+    /// Build a SASL-enabled broker config. Two listeners: a PLAINTEXT
+    /// data-plane listener (`listen_addr`, used by test clients which
+    /// don't yet speak SASL) and a `SASL_PLAINTEXT` inter-broker listener
+    /// (used by the replicator + heartbeat against the peer broker).
+    fn sasl_two_listener_config(
+        i: usize,
+        plaintext_addrs: &[SocketAddr],
+        sasl_addrs: &[SocketAddr],
+        controller_addrs: &[SocketAddr],
+        voters: &[(u64, SocketAddr)],
+        log_dir: &std::path::Path,
+        mode: BootstrapMode,
+    ) -> BrokerConfig {
+        let listen = plaintext_addrs[i];
+        let sasl = sasl_addrs[i];
+        let mut cfg = BrokerConfig::for_tests(log_dir.to_path_buf());
+        cfg.broker_id = i32::try_from(i + 1).unwrap();
+        cfg.listen_addr = listen;
+        cfg.advertised_listener = listen.to_string();
+        cfg.node_id = u64::try_from(i + 1).unwrap();
+        cfg.controller_listen_addr = controller_addrs[i];
+        cfg.controller_quorum_voters = voters.to_vec();
+        cfg.bootstrap_mode = mode;
+        cfg.listeners = vec![
+            ListenerSpec {
+                name: "PLAINTEXT".to_string(),
+                bind_addr: listen,
+                advertised: listen.to_string(),
+                protocol: ListenerProtocol::Plaintext,
+            },
+            ListenerSpec {
+                name: "SASL_PLAINTEXT".to_string(),
+                bind_addr: sasl,
+                advertised: sasl.to_string(),
+                protocol: ListenerProtocol::SaslPlaintext,
+            },
+        ];
+        cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
+        cfg.enabled_sasl_mechanisms = vec![SaslMechanism::Plain];
+        cfg.plain_credentials
+            .insert("broker".to_string(), "secret".to_string());
+        cfg.inter_broker_credentials = Some(InterBrokerCredentials {
+            mechanism: SaslMechanism::Plain,
+            username: "broker".to_string(),
+            password: "secret".to_string(),
+        });
+        cfg
+    }
+
+    /// Boot a 2-broker cluster where the inter-broker listener is
+    /// `SASL_PLAINTEXT`. Mirrors `support::start_n_node` but with the
+    /// two-listener config above. Returns `(handle, config, tempdir)`
+    /// triples ordered by broker id.
+    async fn start_two_node_sasl() -> Vec<(BrokerHandle, BrokerConfig, TempDir)> {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+            )
+            .with_test_writer()
+            .try_init();
+
+        let plaintext_addrs = reserve_ports(2).await;
+        let sasl_addrs = reserve_ports(2).await;
+        let controller_addrs = reserve_ports(2).await;
+        let voters: Vec<(u64, SocketAddr)> = (0..2_u64)
+            .map(|i| (i + 1, controller_addrs[usize::try_from(i).unwrap()]))
+            .collect();
+
+        let dir0 = TempDir::new().unwrap();
+        let cfg0 = sasl_two_listener_config(
+            0,
+            &plaintext_addrs,
+            &sasl_addrs,
+            &controller_addrs,
+            &voters,
+            dir0.path(),
+            BootstrapMode::Bootstrap,
+        );
+        let broker0 = Broker::start(cfg0.clone()).await.expect("broker0 start");
+
+        let dir1 = TempDir::new().unwrap();
+        let cfg1 = sasl_two_listener_config(
+            1,
+            &plaintext_addrs,
+            &sasl_addrs,
+            &controller_addrs,
+            &voters,
+            dir1.path(),
+            BootstrapMode::Join,
+        );
+        let cfg1_for_spawn = cfg1.clone();
+        let join_handle = tokio::spawn(async move { Broker::start(cfg1_for_spawn).await });
+
+        broker0
+            .add_learner(2, controller_addrs[1])
+            .await
+            .expect("add_learner");
+        let target: BTreeSet<u64> = [1u64, 2u64].into_iter().collect();
+        broker0
+            .change_membership(target)
+            .await
+            .expect("change_membership");
+
+        let broker1 = join_handle
+            .await
+            .expect("join spawn")
+            .expect("broker1 start");
+        vec![(broker0, cfg0, dir0), (broker1, cfg1, dir1)]
+    }
+
+    /// Spin up two brokers with `SASL_PLAINTEXT` inter-broker, create a
+    /// topic rf=2, produce, verify the follower converges.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[allow(clippy::too_many_lines)]
+    async fn two_broker_sasl_plaintext_replication() {
+        let cluster = start_two_node_sasl().await;
+
+        // Wait for both brokers to register in each other's image.
+        let deadline = Instant::now() + Duration::from_mins(1);
+        loop {
+            let mut all = true;
+            for (h, _, _) in &cluster {
+                if h.broker_count().await < 2 {
+                    all = false;
+                    break;
+                }
+            }
+            if all {
+                break;
+            }
+            assert!(
+                Instant::now() <= deadline,
+                "brokers didn't converge on 2-broker view within 60s"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        let leader_addr = cluster[0].1.listen_addr.to_string();
+        let admin = Client::builder()
+            .bootstrap(leader_addr.clone())
+            .build()
+            .await
+            .unwrap();
+        let resp = admin
+            .send(CreateTopicsRequest {
+                topics: vec![CreatableTopic {
+                    name: "sasl-repl".into(),
+                    num_partitions: 1,
+                    replication_factor: 2,
+                    ..Default::default()
+                }],
+                timeout_ms: 5_000,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(resp.topics[0].error_code, 0);
+        let topic_id = resp.topics[0].topic_id;
+
+        // Wait for the topic to propagate.
+        let deadline = Instant::now() + Duration::from_mins(1);
+        loop {
+            let mut all = true;
+            for (h, _, _) in &cluster {
+                if !h.has_partition("sasl-repl", 0).await {
+                    all = false;
+                    break;
+                }
+            }
+            if all {
+                break;
+            }
+            assert!(
+                Instant::now() <= deadline,
+                "topic did not propagate within 60s"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        // Produce 10 records to the leader.
+        let producer = Client::builder()
+            .bootstrap(leader_addr)
+            .build()
+            .await
+            .unwrap();
+        let batch = RecordBatch {
+            base_offset: 0,
+            last_offset_delta: 9,
+            records: (0..10)
+                .map(|i| Record {
+                    offset_delta: i,
+                    value: Some(bytes::Bytes::from(format!("v{i}"))),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let prod = producer
+            .send(ProduceRequest {
+                acks: -1,
+                timeout_ms: 5_000,
+                topic_data: vec![TopicProduceData {
+                    name: "sasl-repl".into(),
+                    topic_id,
+                    partition_data: vec![PartitionProduceData {
+                        index: 0,
+                        records: Some(batch),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(prod.responses[0].partition_responses[0].error_code, 0);
+
+        // Wait until every broker's local log reaches >= 10. The SASL
+        // inter-broker handshake on each follower-fetch round trip is the
+        // critical path here — a misconfigured replicator would never
+        // commit a record, the deadline would expire, and the test fails.
+        let deadline = Instant::now() + Duration::from_secs(90);
+        loop {
+            let mut offsets = Vec::with_capacity(cluster.len());
+            for (h, _, _) in &cluster {
+                offsets.push(h.local_log_end_offset("sasl-repl", 0).await.unwrap_or(0));
+            }
+            if offsets.iter().all(|&n| n >= 10) {
+                break;
+            }
+            assert!(
+                Instant::now() <= deadline,
+                "SASL-replicated brokers didn't reach 10 records within 90s; saw: {offsets:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        for (h, _, _) in cluster {
+            h.shutdown().await;
+        }
+    }
+}

@@ -8,8 +8,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crabka_client_core::ConnectionOptions;
 use crabka_protocol::owned::broker_heartbeat_request::BrokerHeartbeatRequest;
 use crabka_raft::ControllerHandle;
+use crabka_security::ListenerProtocol;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
@@ -18,6 +20,12 @@ pub(crate) struct Config {
     pub interval: Duration,
     pub controller: Arc<ControllerHandle>,
     pub shutdown: CancellationToken,
+    /// Shared inter-broker dialer used to reach the controller leader.
+    /// Runs TLS / SASL when the inter-broker listener requires them,
+    /// otherwise falls back to plain TCP.
+    pub inter_broker_client: Arc<crate::network::client::InterBrokerClient>,
+    pub inter_broker_listener_protocol: ListenerProtocol,
+    pub inter_broker_listener_name: String,
 }
 
 pub(crate) async fn run(cfg: Config) {
@@ -40,11 +48,30 @@ pub(crate) async fn run(cfg: Config) {
             debug!("heartbeat: controller leader not in metadata image yet");
             continue;
         };
-        let addr = format!("{}:{}", broker_rec.host, broker_rec.port);
-        let client_res = crabka_client_core::Client::builder()
-            .bootstrap(addr)
-            .client_id(format!("crabka-broker-{}-heartbeat", cfg.broker_id))
-            .build()
+        // Prefer the inter-broker listener's endpoint when available;
+        // fall back to the legacy top-level host/port. Mirrors the
+        // resolution in the replicator supervisor.
+        let (host, port) = broker_rec
+            .endpoints
+            .iter()
+            .find(|e| e.name == cfg.inter_broker_listener_name)
+            .map_or_else(
+                || (broker_rec.host.clone(), broker_rec.port),
+                |e| (e.host.clone(), e.port),
+            );
+        let opts = ConnectionOptions {
+            client_id: format!("crabka-broker-{}-heartbeat", cfg.broker_id),
+            ..ConnectionOptions::default()
+        };
+        let client_res = cfg
+            .inter_broker_client
+            .connect_as_connection(
+                &host,
+                port,
+                cfg.inter_broker_listener_protocol,
+                "localhost",
+                opts,
+            )
             .await;
         let Ok(client) = client_res else {
             debug!("heartbeat: connect failed");

@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use bytes::{BufMut, Bytes, BytesMut};
 use dashmap::DashMap;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -16,6 +17,12 @@ use tokio_util::sync::CancellationToken;
 use crate::error::ClientError;
 use crate::request::ProtocolRequest;
 use crate::version::ApiVersionTable;
+
+/// Trait alias for the duplex stream types `Connection::from_stream`
+/// accepts (`TcpStream`, `tokio_rustls::client::TlsStream`, etc.). Boxed
+/// so callers can hand in heterogeneous stream types via one path.
+pub trait ClientDuplex: AsyncRead + AsyncWrite + Send + Unpin {}
+impl<T: AsyncRead + AsyncWrite + Send + Unpin + ?Sized> ClientDuplex for T {}
 
 type Pending = Arc<DashMap<i32, oneshot::Sender<Result<Bytes, ClientError>>>>;
 
@@ -78,7 +85,21 @@ impl Connection {
 
         stream.set_nodelay(true).ok();
 
-        // Build the framed socket; spawn reader + writer.
+        Self::from_stream(Box::new(stream), options).await
+    }
+
+    /// Build a `Connection` over a pre-established, optionally
+    /// pre-authenticated stream. Negotiates API versions over the stream
+    /// and returns a usable `Connection`.
+    ///
+    /// Used by the broker's `InterBrokerClient` integration: TLS + SASL
+    /// handshake run before this call, so the stream is already
+    /// authenticated. From here on the connection's normal request /
+    /// response framing applies.
+    pub async fn from_stream(
+        stream: Box<dyn ClientDuplex>,
+        options: ConnectionOptions,
+    ) -> Result<Self, ClientError> {
         let (writer_tx, writer_rx) = mpsc::channel::<DispatchItem>(64);
         let shutdown = CancellationToken::new();
         let pending: Pending = Arc::new(DashMap::new());
@@ -99,9 +120,7 @@ impl Connection {
             }),
         };
 
-        // Bootstrap-time `ApiVersions` fetch. Fills the version table.
         let versions = fetch_api_versions(&conn).await?;
-        // Replace the empty table with the populated one.
         let inner = Arc::get_mut(&mut conn.inner).expect("unique handle at connect-time");
         inner.versions = versions;
 
@@ -280,14 +299,14 @@ impl Connection {
 /// A no-op second handle preserves the `(reader, writer)` API shape
 /// expected by `ConnectionInner`.
 fn spawn_io_tasks(
-    stream: TcpStream,
+    stream: Box<dyn ClientDuplex>,
     mut writer_rx: mpsc::Receiver<DispatchItem>,
     shutdown: CancellationToken,
     pending: Pending,
 ) -> (JoinHandle<()>, JoinHandle<()>) {
     use futures_util::{SinkExt, StreamExt};
 
-    let mut framed = crate::transport::frame(stream);
+    let mut framed = crate::transport::frame_generic(stream);
     let pending_for_drain = Arc::clone(&pending);
 
     let combined = tokio::spawn(async move {

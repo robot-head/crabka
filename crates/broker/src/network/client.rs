@@ -18,6 +18,8 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 
+use std::sync::Arc;
+
 use crate::config::InterBrokerCredentials;
 
 /// API keys this client speaks directly (everything else is the caller's
@@ -45,6 +47,10 @@ pub enum InterBrokerError {
 
 /// Trait alias for boxed duplex streams. Both `TcpStream` and
 /// `tokio_rustls::client::TlsStream<TcpStream>` satisfy it.
+///
+/// Same shape as `crabka_client_core::ClientDuplex` so the stream
+/// returned by `InterBrokerClient::connect` can be handed directly to
+/// `Connection::from_stream`.
 pub trait DuplexStream: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send + ?Sized> DuplexStream for T {}
 
@@ -100,16 +106,65 @@ impl InterBrokerClient {
         }
         Ok(stream)
     }
+
+    /// Dial `host:port` (running TLS + SASL as needed) and return a
+    /// [`crabka_client_core::Connection`] over the resulting stream. The
+    /// connection is fully usable for normal typed Kafka requests —
+    /// `Fetch`, `OffsetForLeaderEpoch`, `BrokerHeartbeat`, raft RPCs via
+    /// `raw_request`, etc.
+    pub async fn connect_as_connection(
+        &self,
+        host: &str,
+        port: u16,
+        listener_protocol: ListenerProtocol,
+        server_name: &str,
+        options: crabka_client_core::ConnectionOptions,
+    ) -> Result<crabka_client_core::Connection, InterBrokerError> {
+        // Build the auth'd stream directly into a `Box<dyn ClientDuplex>`
+        // (rather than `Box<dyn DuplexStream>`) so it lines up with
+        // `Connection::from_stream` without an unsizing coercion that
+        // Rust can't do between two equivalent-but-distinct trait
+        // objects.
+        let tcp = TcpStream::connect((host, port)).await?;
+        let mut stream: Box<dyn crabka_client_core::ClientDuplex> =
+            if listener_protocol.requires_tls() {
+                let connector = self.tls_connector.clone().ok_or_else(|| {
+                    InterBrokerError::Config("TLS listener without TlsConnector".into())
+                })?;
+                let sni =
+                    tokio_rustls::rustls::pki_types::ServerName::try_from(server_name.to_string())
+                        .map_err(|e| InterBrokerError::Tls(format!("invalid server name: {e}")))?;
+                let tls = connector
+                    .connect(sni, tcp)
+                    .await
+                    .map_err(|e| InterBrokerError::Tls(e.to_string()))?;
+                Box::new(tls)
+            } else {
+                Box::new(tcp)
+            };
+        if listener_protocol.requires_sasl() {
+            let creds = self.creds.clone().ok_or_else(|| {
+                InterBrokerError::Config("SASL listener without inter_broker_credentials".into())
+            })?;
+            run_outbound_sasl(&mut *stream, &creds).await?;
+        }
+        crabka_client_core::Connection::from_stream(stream, options)
+            .await
+            .map_err(|e| InterBrokerError::Config(format!("Connection::from_stream: {e}")))
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────────
 // Outbound SASL state machine.
 // ────────────────────────────────────────────────────────────────────────
 
-async fn run_outbound_sasl(
-    stream: &mut dyn DuplexStream,
+async fn run_outbound_sasl<S>(
+    stream: &mut S,
     creds: &InterBrokerCredentials,
-) -> Result<(), InterBrokerError> {
+) -> Result<(), InterBrokerError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + ?Sized,
+{
     // Step 1: ApiVersions. The JVM client always sends this first; we
     //         skip it for simplicity (plan §16 step 3). The broker's
     //         pre-auth allowlist tolerates skipping ApiVersions.
@@ -135,11 +190,14 @@ async fn run_outbound_sasl(
 /// (v1 — no trailing tagged-fields byte) and a non-flexible response
 /// header (v0 — bare `correlation_id`). This matches the server-side
 /// `drive_sasl_plain_session` helper in T13's integration test.
-async fn send_sasl_handshake(
-    stream: &mut dyn DuplexStream,
+async fn send_sasl_handshake<S>(
+    stream: &mut S,
     mechanism: SaslMechanism,
     corr_id: &mut i32,
-) -> Result<(), InterBrokerError> {
+) -> Result<(), InterBrokerError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + ?Sized,
+{
     let req = SaslHandshakeRequest {
         mechanism: mechanism.wire_name().to_string(),
         ..Default::default()
@@ -164,12 +222,15 @@ async fn send_sasl_handshake(
 
 /// Send `SaslAuthenticate v2` with PLAIN payload `\0user\0password`, read
 /// the response, fail if `error_code != 0`. PLAIN is one round-trip.
-async fn send_plain_authenticate(
-    stream: &mut dyn DuplexStream,
+async fn send_plain_authenticate<S>(
+    stream: &mut S,
     user: &str,
     pass: &str,
     corr_id: &mut i32,
-) -> Result<(), InterBrokerError> {
+) -> Result<(), InterBrokerError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + ?Sized,
+{
     let mut payload = Vec::with_capacity(2 + user.len() + pass.len());
     payload.push(0); // authzid (empty)
     payload.extend_from_slice(user.as_bytes());
@@ -189,12 +250,15 @@ async fn send_plain_authenticate(
 /// Run the RFC 5802 SCRAM-SHA-512 client state machine over two
 /// `SaslAuthenticate v2` round-trips. Verifies the server-final signature
 /// before declaring the connection authenticated.
-async fn run_scram_client(
-    stream: &mut dyn DuplexStream,
+async fn run_scram_client<S>(
+    stream: &mut S,
     user: &str,
     pass: &str,
     corr_id: &mut i32,
-) -> Result<(), InterBrokerError> {
+) -> Result<(), InterBrokerError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + ?Sized,
+{
     let mut exch = ScramClientExchange::new(user.to_string(), pass.as_bytes().to_vec());
 
     // Round 1: client-first → server-first.
@@ -230,11 +294,14 @@ async fn run_scram_client(
 
 /// Frame a `SaslAuthenticate v2` request carrying `auth_bytes`, send it,
 /// read the response, return the decoded `SaslAuthenticateResponse v2`.
-async fn send_sasl_authenticate(
-    stream: &mut dyn DuplexStream,
+async fn send_sasl_authenticate<S>(
+    stream: &mut S,
     auth_bytes: Vec<u8>,
     corr_id: &mut i32,
-) -> Result<SaslAuthenticateResponse, InterBrokerError> {
+) -> Result<SaslAuthenticateResponse, InterBrokerError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + ?Sized,
+{
     let req = SaslAuthenticateRequest {
         auth_bytes: bytes::Bytes::from(auth_bytes),
         ..Default::default()
@@ -266,14 +333,17 @@ async fn send_sasl_authenticate(
 /// - Response header: v0 for non-flexible *and* for `ApiVersions(18)`
 ///   regardless of body flexibility; v1 (`corr_id` + 0x00 tagged byte)
 ///   for every other flexible response.
-async fn round_trip(
-    stream: &mut dyn DuplexStream,
+async fn round_trip<S>(
+    stream: &mut S,
     api_key: i16,
     api_version: i16,
     corr_id: i32,
     flexible: bool,
     body: &[u8],
-) -> Result<Vec<u8>, InterBrokerError> {
+) -> Result<Vec<u8>, InterBrokerError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + ?Sized,
+{
     let mut frame = BytesMut::with_capacity(16 + body.len());
     // RequestHeader: api_key + version + corr_id + client_id (i16 NULLABLE_STRING).
     frame.put_i16(api_key);
@@ -321,4 +391,80 @@ async fn round_trip(
         let _tagged = cur.get_u8();
     }
     Ok(cur.to_vec())
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// OutboundDialer adapter for crabka_raft::CrabkaRaftNetworkFactory.
+// ────────────────────────────────────────────────────────────────────────
+
+/// Adapter that lets `crabka_raft` reach the broker's
+/// [`InterBrokerClient`] without taking a build dependency on the
+/// broker crate. Wraps an `Arc<InterBrokerClient>` plus the protocol /
+/// SNI configuration once; the raft network factory clones it cheaply.
+pub struct InterBrokerDialer {
+    client: Arc<InterBrokerClient>,
+    listener_protocol: ListenerProtocol,
+    server_name: String,
+}
+
+impl InterBrokerDialer {
+    #[must_use]
+    pub fn new(
+        client: Arc<InterBrokerClient>,
+        listener_protocol: ListenerProtocol,
+        server_name: String,
+    ) -> Self {
+        Self {
+            client,
+            listener_protocol,
+            server_name,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl crabka_raft::OutboundDialer for InterBrokerDialer {
+    async fn dial(
+        &self,
+        _target: crabka_raft::NodeId,
+        addr: &str,
+        options: crabka_client_core::ConnectionOptions,
+    ) -> Result<crabka_client_core::Connection, crabka_client_core::ClientError> {
+        // The raft transport hands us an address in `host:port` form
+        // (the openraft `Node.addr` string). For SocketAddr-style
+        // addresses we honour the configured `server_name` for SNI
+        // separately from the literal host string.
+        let (host, port) = match addr.rsplit_once(':') {
+            Some((h, p)) => {
+                let port: u16 = p.parse().map_err(|e: std::num::ParseIntError| {
+                    crabka_client_core::ClientError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("invalid raft peer port in {addr:?}: {e}"),
+                    ))
+                })?;
+                (h.to_string(), port)
+            }
+            None => {
+                return Err(crabka_client_core::ClientError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("raft peer address missing port: {addr:?}"),
+                )));
+            }
+        };
+        self.client
+            .connect_as_connection(
+                &host,
+                port,
+                self.listener_protocol,
+                &self.server_name,
+                options,
+            )
+            .await
+            .map_err(|e| match e {
+                InterBrokerError::Io(io) => crabka_client_core::ClientError::Io(io),
+                other => crabka_client_core::ClientError::Io(std::io::Error::other(format!(
+                    "InterBrokerClient dial: {other}"
+                ))),
+            })
+    }
 }
