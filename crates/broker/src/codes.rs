@@ -49,7 +49,7 @@ pub const INVALID_PRODUCER_EPOCH: i16 = 47;
 /// Both cases produce error code 47 on the wire, matching Apache Kafka's
 /// behavior (it uses `INVALID_PRODUCER_EPOCH` for all epoch/pid mismatches).
 pub const INVALID_PRODUCER_ID_MAPPING: i16 = INVALID_PRODUCER_EPOCH;
-pub const TRANSACTIONAL_ID_AUTHORIZATION_FAILED: i16 = 51;
+pub const TRANSACTIONAL_ID_AUTHORIZATION_FAILED: i16 = 53;
 
 // Phase 9 additions — transactional protocol codes.
 pub const INVALID_TXN_STATE: i16 = 24;
@@ -89,6 +89,16 @@ pub const UNACCEPTABLE_CREDENTIAL: i16 = 78;
 /// `(user, mechanism)` appears twice in one `AlterUserScramCredentials`
 /// request (either two upsertions, two deletions, or one of each).
 pub const DUPLICATE_RESOURCE: i16 = 84;
+
+// Slice 13 additions — ACL authorization codes.
+/// `TOPIC_AUTHORIZATION_FAILED` (29) — principal lacks permission on the topic.
+pub const TOPIC_AUTHORIZATION_FAILED: i16 = 29;
+/// `GROUP_AUTHORIZATION_FAILED` (30) — principal lacks permission on the group.
+pub const GROUP_AUTHORIZATION_FAILED: i16 = 30;
+/// `OPERATION_NOT_ATTEMPTED` (55) — returned for partitions/resources whose
+/// authorization check was short-circuited by an earlier error in the same
+/// request (e.g. when a prior resource already failed with an auth error).
+pub const OPERATION_NOT_ATTEMPTED: i16 = 55;
 
 // Slice 10a additions — bulletproof EOS / acks=all codes.
 /// Per-partition error returned by `acks=all` Produce when the request

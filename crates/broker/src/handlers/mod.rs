@@ -43,16 +43,20 @@ impl HandlerTable {
     }
 }
 
+pub(crate) mod acl_wire;
 pub(crate) mod alter_configs;
 pub(crate) mod alter_partition;
 pub(crate) mod alter_user_scram_credentials;
 pub(crate) mod api_versions;
 pub(crate) mod broker_heartbeat;
+pub(crate) mod create_acls;
 pub(crate) mod create_partitions;
 pub(crate) mod create_topics;
+pub(crate) mod delete_acls;
 pub(crate) mod delete_groups;
 pub(crate) mod delete_records;
 pub(crate) mod delete_topics;
+pub(crate) mod describe_acls;
 pub(crate) mod describe_cluster;
 pub(crate) mod describe_configs;
 pub(crate) mod describe_groups;
