@@ -2404,10 +2404,16 @@ async fn jvm_sasl_scram_sha512_produce_consume() {
     );
 
     // Step B: drive produce + consume as alice over SCRAM-SHA-512.
+    // Slice 13: disable idempotent producer mode (cp-kafka 7.5 default) so
+    // the producer doesn't request `InitProducerId`, which would require
+    // `Cluster IdempotentWrite` ACL alice doesn't hold. acks=1 is a
+    // single-broker setup default that pairs cleanly with that.
     let alice_props = write_client_props(&format!(
         "security.protocol=SASL_PLAINTEXT\n\
          sasl.mechanism=SCRAM-SHA-512\n\
-         sasl.jaas.config={}\n",
+         sasl.jaas.config={}\n\
+         enable.idempotence=false\n\
+         acks=1\n",
         scram_jaas(ALICE, ALICE_PASS),
     ));
     let alice_mount = alice_props.mount_str();
@@ -2936,13 +2942,17 @@ async fn jvm_sasl_ssl_full_stack() {
     );
 
     // Step B: drive produce + consume as alice over SASL_SSL + SCRAM-SHA-512.
+    // Slice 13: disable idempotent producer mode so alice doesn't need
+    // `Cluster IdempotentWrite`.
     let alice_props = write_client_props(&format!(
         "security.protocol=SASL_SSL\n\
          sasl.mechanism=SCRAM-SHA-512\n\
          sasl.jaas.config={}\n\
          ssl.truststore.location=/truststore.jks\n\
          ssl.truststore.password=changeit\n\
-         ssl.endpoint.identification.algorithm=\n",
+         ssl.endpoint.identification.algorithm=\n\
+         enable.idempotence=false\n\
+         acks=1\n",
         scram_jaas(ALICE, ALICE_PASS),
     ));
     let alice_props_mount = alice_props.mount_str();
@@ -3608,13 +3618,17 @@ async fn jvm_inter_broker_sasl_ssl_raft_replication() {
     );
 
     // Step B: drive create-topic + produce as alice over SASL_SSL+SCRAM.
+    // Slice 13: disable idempotent producer mode so alice doesn't need
+    // `Cluster IdempotentWrite`.
     let alice_props = write_client_props(&format!(
         "security.protocol=SASL_SSL\n\
          sasl.mechanism=SCRAM-SHA-512\n\
          sasl.jaas.config={}\n\
          ssl.truststore.location=/truststore.jks\n\
          ssl.truststore.password=changeit\n\
-         ssl.endpoint.identification.algorithm=\n",
+         ssl.endpoint.identification.algorithm=\n\
+         enable.idempotence=false\n\
+         acks=1\n",
         scram_jaas(ALICE, ALICE_PASS),
     ));
     let alice_props_mount = alice_props.mount_str();
