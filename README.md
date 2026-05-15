@@ -3,6 +3,8 @@
 [![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://codspeed.io/robot-head/crabka?utm_source=badge)
 [![codecov](https://codecov.io/gh/robot-head/crabka/graph/badge.svg?token=EU56CZE3DU)](https://codecov.io/gh/robot-head/crabka)
 
+![Crabka Logo](docs/crabka-text-wide.png)
+
 A Rust reimplementation of [Apache Kafka](https://kafka.apache.org), distributed under the
 Apache License 2.0 as a derivative work.
 
