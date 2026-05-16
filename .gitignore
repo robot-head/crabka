@@ -9,3 +9,5 @@ target/
 **/.gradle/
 **/build/
 *.class
+
+.worktree
