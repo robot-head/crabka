@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: read
+  pull-requests: write
+
 jobs:
   kind:
     runs-on: ubuntu-latest
@@ -122,26 +126,54 @@ jobs:
 
       - name: Cluster diagnostics on failure
         if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
         run: |
           set +e
-          echo "===== pods (all namespaces) ====="
-          kubectl get pods -A -o wide
-          echo "===== events (all namespaces, recent) ====="
-          kubectl get events -A --sort-by=.lastTimestamp | tail -50
-          echo "===== operator deployment ====="
-          kubectl describe deploy/operator-crabka-operator -n crabka-operator
-          echo "===== operator pods ====="
-          kubectl describe pods -n crabka-operator -l app.kubernetes.io/name=crabka-operator
-          echo "===== kind node images ====="
-          docker exec crabka-e2e-control-plane crictl images
-          echo "===== docker host images ====="
-          docker images
-
-      - name: Operator logs (debug)
-        if: always()
-        run: |
-          set +e
-          echo "===== current logs ====="
-          kubectl logs -n crabka-operator deploy/operator-crabka-operator --tail=500
-          echo "===== previous logs (if crash) ====="
-          kubectl logs -n crabka-operator deploy/operator-crabka-operator --tail=500 --previous
+          DIAG=/tmp/diag.md
+          {
+            echo "## operator-e2e diagnostics (run \`${GITHUB_RUN_ID}\`)"
+            echo
+            echo "### Critical findings"
+            pod_phase=$(kubectl get pods -n crabka-operator -l app.kubernetes.io/name=crabka-operator -o jsonpath='{.items[0].status.phase}' 2>/dev/null)
+            pod_reason=$(kubectl get pods -n crabka-operator -l app.kubernetes.io/name=crabka-operator -o jsonpath='{.items[0].status.containerStatuses[0].state.waiting.reason}' 2>/dev/null)
+            pod_msg=$(kubectl get pods -n crabka-operator -l app.kubernetes.io/name=crabka-operator -o jsonpath='{.items[0].status.containerStatuses[0].state.waiting.message}' 2>/dev/null)
+            pod_image=$(kubectl get pods -n crabka-operator -l app.kubernetes.io/name=crabka-operator -o jsonpath='{.items[0].spec.containers[0].image}' 2>/dev/null)
+            last_term=$(kubectl get pods -n crabka-operator -l app.kubernetes.io/name=crabka-operator -o jsonpath='{.items[0].status.containerStatuses[0].lastState.terminated}' 2>/dev/null)
+            echo "- pod phase: \`${pod_phase:-unknown}\`"
+            echo "- container image (spec): \`${pod_image:-(none)}\`"
+            echo "- waiting reason: \`${pod_reason:-(none)}\`"
+            echo "- waiting message: \`${pod_msg:-(none)}\`"
+            echo "- last terminated: \`${last_term:-(none)}\`"
+            echo "::error::operator pod phase=${pod_phase:-unknown} reason=${pod_reason:-none} image=${pod_image:-none}"
+            echo
+            for section in \
+              "pods|kubectl get pods -A -o wide" \
+              "events|kubectl get events -A --sort-by=.lastTimestamp" \
+              "describe deploy|kubectl describe deploy/operator-crabka-operator -n crabka-operator" \
+              "describe pods|kubectl describe pods -n crabka-operator -l app.kubernetes.io/name=crabka-operator" \
+              "operator logs|kubectl logs -n crabka-operator deploy/operator-crabka-operator --tail=500" \
+              "operator logs (previous)|kubectl logs -n crabka-operator deploy/operator-crabka-operator --tail=500 --previous" \
+              "kind node images|docker exec crabka-e2e-control-plane crictl images" \
+              "host images|docker images"
+            do
+              title=${section%%|*}
+              cmd=${section#*|}
+              echo "### ${title}"
+              echo '```'
+              eval "$cmd" 2>&1
+              echo '```'
+              echo
+            done
+          } > "$DIAG"
+          cat "$DIAG"
+          if [ -n "$PR_NUMBER" ] && [ -n "$GH_TOKEN" ]; then
+            jq -Rs '{body: .}' "$DIAG" > /tmp/comment.json
+            curl -sS -X POST \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${REPO}/issues/${PR_NUMBER}/comments" \
+              --data-binary @/tmp/comment.json | head -20
+          fi
