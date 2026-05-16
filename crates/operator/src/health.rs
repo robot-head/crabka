@@ -12,8 +12,10 @@ use crate::telemetry::SharedRegistry;
 
 #[derive(Clone)]
 pub struct HealthState {
+    /// Shared metrics registry. Cloned by controllers that need to
+    /// register metrics; read by the `/metrics` handler.
     pub registry: SharedRegistry,
-    pub ready: Arc<AtomicBool>,
+    ready: Arc<AtomicBool>,
 }
 
 impl HealthState {
@@ -25,6 +27,7 @@ impl HealthState {
         }
     }
 
+    /// Mark the operator as ready to serve. Reflected in `/readyz`.
     pub fn mark_ready(&self) {
         self.ready.store(true, Ordering::Release);
     }
@@ -152,5 +155,14 @@ mod tests {
             .to_str()
             .unwrap();
         assert!(ct.starts_with("application/openmetrics-text"));
+
+        // Body should be valid OpenMetrics text: encoder always emits `# EOF`
+        // as the terminator. Catches a future regression where the route is
+        // wired but the encoder isn't actually run.
+        let body_bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let body = std::str::from_utf8(&body_bytes).unwrap();
+        assert!(body.contains("# EOF"), "metrics body missing # EOF: {body}");
     }
 }
