@@ -1,0 +1,77 @@
+use std::net::SocketAddr;
+
+use clap::Args;
+use serde::{Deserialize, Serialize};
+
+/// Operator runtime configuration.
+///
+/// All fields can be set via CLI (`--watch-namespaces`, `--health-addr`, …)
+/// or via env (`WATCH_NAMESPACES`, `HEALTH_ADDR`, …). CLI wins on conflict.
+#[derive(Debug, Clone, Args, Serialize, Deserialize)]
+pub struct OperatorConfig {
+    /// Comma-separated namespaces to watch. Empty = cluster-scoped.
+    #[arg(long, env = "WATCH_NAMESPACES", value_delimiter = ',', num_args = 0..)]
+    pub watch_namespaces: Vec<String>,
+
+    /// Namespace the operator runs in (used for the leader-election Lease).
+    #[arg(long, env = "OPERATOR_NAMESPACE", default_value = "crabka-operator")]
+    pub operator_namespace: String,
+
+    /// Lease name for leader election.
+    #[arg(long, env = "LEASE_NAME", default_value = "crabka-operator-leader")]
+    pub lease_name: String,
+
+    /// Identity advertised in the Lease (typically the pod name).
+    #[arg(long, env = "POD_NAME", default_value = "crabka-operator-local")]
+    pub pod_name: String,
+
+    /// Address for `/healthz`, `/readyz`, `/metrics`.
+    #[arg(long, env = "HEALTH_ADDR", default_value = "0.0.0.0:8080")]
+    pub health_addr: SocketAddr,
+
+    /// Tracing filter (e.g. `info,kube=warn`).
+    #[arg(
+        long,
+        env = "RUST_LOG",
+        default_value = "info,kube_client::client::builder=warn"
+    )]
+    pub log_filter: String,
+}
+
+impl OperatorConfig {
+    /// Iterator over watched namespaces, or `None` for cluster-scoped.
+    #[must_use]
+    pub fn watched(&self) -> Option<&[String]> {
+        if self.watch_namespaces.is_empty() {
+            None
+        } else {
+            Some(&self.watch_namespaces)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct Wrap {
+        #[command(flatten)]
+        cfg: OperatorConfig,
+    }
+
+    #[test]
+    fn cli_defaults_compute_cluster_scope() {
+        let parsed = Wrap::parse_from(["bin"]);
+        assert!(parsed.cfg.watched().is_none());
+        assert_eq!(parsed.cfg.operator_namespace, "crabka-operator");
+    }
+
+    #[test]
+    fn comma_separated_namespaces_parse() {
+        let parsed = Wrap::parse_from(["bin", "--watch-namespaces=a,b,c"]);
+        assert_eq!(parsed.cfg.watch_namespaces, vec!["a", "b", "c"]);
+        assert!(parsed.cfg.watched().is_some());
+    }
+}
