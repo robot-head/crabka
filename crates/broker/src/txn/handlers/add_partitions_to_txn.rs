@@ -61,9 +61,27 @@ pub(crate) async fn handle(
     coord.refresh_leader_partitions(&image).await;
 
     if version >= 4 {
-        handle_v4(&coord, version, &req, &image, super_users, ctx.principal, ctx.peer).await
+        handle_v4(
+            &coord,
+            version,
+            &req,
+            &image,
+            super_users,
+            ctx.principal,
+            ctx.peer,
+        )
+        .await
     } else {
-        handle_v3(&coord, version, &req, &image, super_users, ctx.principal, ctx.peer).await
+        handle_v3(
+            &coord,
+            version,
+            &req,
+            &image,
+            super_users,
+            ctx.principal,
+            ctx.peer,
+        )
+        .await
     }
 }
 

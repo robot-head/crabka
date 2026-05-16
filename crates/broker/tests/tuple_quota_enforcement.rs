@@ -456,7 +456,7 @@ async fn drive_produce_sasl_with_client_id(
     req.encode(&mut body, VERSION).expect("encode Produce");
     let resp_bytes = round_trip_with_client_id(
         &mut stream,
-        0,      // Produce api_key
+        0, // Produce api_key
         VERSION,
         1,
         true, // flexible
@@ -523,7 +523,11 @@ async fn tuple_quota_throttles_only_matching_client_id() {
         false,
     )
     .await;
-    assert_eq!(alter_resp.len(), 1, "one entry in AlterClientQuotas response");
+    assert_eq!(
+        alter_resp.len(),
+        1,
+        "one entry in AlterClientQuotas response"
+    );
     assert_eq!(
         alter_resp[0].1, 0,
         "AlterClientQuotas must succeed; error_code={}",
@@ -560,10 +564,10 @@ async fn tuple_quota_throttles_only_matching_client_id() {
             addr,
             "alice",
             b"alice-secret",
-            "app-x",           // wire client_id — must match quota entity
+            "app-x", // wire client_id — must match quota entity
             "tuple-quota-topic",
-            1024,              // bytes per record
-            4,                 // 4 records × 1024 bytes = 4 KB
+            1024, // bytes per record
+            4,    // 4 records × 1024 bytes = 4 KB
         )
         .await;
         let ec = r
@@ -608,7 +612,7 @@ async fn tuple_quota_throttles_only_matching_client_id() {
             addr,
             "alice",
             b"alice-secret",
-            "other",           // different wire client_id — no quota match
+            "other", // different wire client_id — no quota match
             "tuple-quota-topic",
             1024,
             4,

@@ -1012,8 +1012,7 @@ async fn handle_alter_user_scram_credentials_frame(
         client_id,
     };
 
-    let resp =
-        crate::handlers::alter_user_scram_credentials::handle(broker, req, &ctx).await;
+    let resp = crate::handlers::alter_user_scram_credentials::handle(broker, req, &ctx).await;
     let mut buf = BytesMut::with_capacity(resp.encoded_len(api_version));
     resp.encode(&mut buf, api_version)?;
     let resp_body = buf.freeze();
@@ -1054,14 +1053,9 @@ async fn handle_describe_cluster_frame(
         client_id,
     };
 
-    let resp_body = crate::handlers::describe_cluster::handle(
-        broker,
-        api_version,
-        correlation_id,
-        body,
-        &ctx,
-    )
-    .await?;
+    let resp_body =
+        crate::handlers::describe_cluster::handle(broker, api_version, correlation_id, body, &ctx)
+            .await?;
     Ok(encode_response(
         api_key,
         correlation_id,
@@ -1102,14 +1096,8 @@ async fn handle_produce_frame(
         client_id,
     };
 
-    let resp_body = crate::handlers::produce::handle(
-        broker,
-        api_version,
-        correlation_id,
-        body,
-        &ctx,
-    )
-    .await?;
+    let resp_body =
+        crate::handlers::produce::handle(broker, api_version, correlation_id, body, &ctx).await?;
     Ok(encode_response(
         api_key,
         correlation_id,
@@ -1151,8 +1139,7 @@ async fn handle_fetch_frame(
     };
 
     let resp_body =
-        crate::handlers::fetch::handle(broker, api_version, correlation_id, body, &ctx)
-            .await?;
+        crate::handlers::fetch::handle(broker, api_version, correlation_id, body, &ctx).await?;
     Ok(encode_response(
         api_key,
         correlation_id,
@@ -1194,14 +1181,8 @@ async fn handle_metadata_frame(
         client_id,
     };
 
-    let resp_body = crate::handlers::metadata::handle(
-        broker,
-        api_version,
-        correlation_id,
-        body,
-        &ctx,
-    )
-    .await?;
+    let resp_body =
+        crate::handlers::metadata::handle(broker, api_version, correlation_id, body, &ctx).await?;
     Ok(encode_response(
         api_key,
         correlation_id,
@@ -1242,14 +1223,9 @@ async fn handle_create_topics_frame(
         client_id,
     };
 
-    let resp_body = crate::handlers::create_topics::handle(
-        broker,
-        api_version,
-        correlation_id,
-        body,
-        &ctx,
-    )
-    .await?;
+    let resp_body =
+        crate::handlers::create_topics::handle(broker, api_version, correlation_id, body, &ctx)
+            .await?;
     Ok(encode_response(
         api_key,
         correlation_id,
@@ -1290,14 +1266,9 @@ async fn handle_delete_topics_frame(
         client_id,
     };
 
-    let resp_body = crate::handlers::delete_topics::handle(
-        broker,
-        api_version,
-        correlation_id,
-        body,
-        &ctx,
-    )
-    .await?;
+    let resp_body =
+        crate::handlers::delete_topics::handle(broker, api_version, correlation_id, body, &ctx)
+            .await?;
     Ok(encode_response(
         api_key,
         correlation_id,
@@ -1346,8 +1317,7 @@ async fn handle_describe_acls_frame(
         client_id,
     };
 
-    let resp_body =
-        crate::handlers::describe_acls::handle(broker, req, &ctx, api_version).await?;
+    let resp_body = crate::handlers::describe_acls::handle(broker, req, &ctx, api_version).await?;
     Ok(encode_response(
         api_key,
         correlation_id,
@@ -1393,8 +1363,7 @@ async fn handle_create_acls_frame(
         client_id,
     };
 
-    let resp_body =
-        crate::handlers::create_acls::handle(broker, req, &ctx, api_version).await?;
+    let resp_body = crate::handlers::create_acls::handle(broker, req, &ctx, api_version).await?;
     Ok(encode_response(
         api_key,
         correlation_id,
@@ -1440,8 +1409,7 @@ async fn handle_delete_acls_frame(
         client_id,
     };
 
-    let resp_body =
-        crate::handlers::delete_acls::handle(broker, req, &ctx, api_version).await?;
+    let resp_body = crate::handlers::delete_acls::handle(broker, req, &ctx, api_version).await?;
     Ok(encode_response(
         api_key,
         correlation_id,
@@ -1487,8 +1455,7 @@ async fn handle_elect_leaders_frame(
         client_id,
     };
 
-    let resp_body =
-        crate::handlers::elect_leaders::handle(broker, req, &ctx, api_version).await?;
+    let resp_body = crate::handlers::elect_leaders::handle(broker, req, &ctx, api_version).await?;
     Ok(encode_response(
         api_key,
         correlation_id,
@@ -1534,13 +1501,9 @@ async fn handle_alter_partition_reassignments_frame(
         client_id,
     };
 
-    let resp_body = crate::handlers::alter_partition_reassignments::handle(
-        broker,
-        req,
-        &ctx,
-        api_version,
-    )
-    .await?;
+    let resp_body =
+        crate::handlers::alter_partition_reassignments::handle(broker, req, &ctx, api_version)
+            .await?;
     Ok(encode_response(
         api_key,
         correlation_id,
@@ -1586,13 +1549,9 @@ async fn handle_list_partition_reassignments_frame(
         client_id,
     };
 
-    let resp_body = crate::handlers::list_partition_reassignments::handle(
-        broker,
-        req,
-        &ctx,
-        api_version,
-    )
-    .await?;
+    let resp_body =
+        crate::handlers::list_partition_reassignments::handle(broker, req, &ctx, api_version)
+            .await?;
     Ok(encode_response(
         api_key,
         correlation_id,
@@ -1640,8 +1599,7 @@ async fn handle_describe_client_quotas_frame(
     };
 
     let resp_body =
-        crate::handlers::describe_client_quotas::handle(broker, req, &ctx, api_version)
-            .await?;
+        crate::handlers::describe_client_quotas::handle(broker, req, &ctx, api_version).await?;
     Ok(encode_response(
         api_key,
         correlation_id,
@@ -1690,8 +1648,7 @@ async fn handle_alter_client_quotas_frame(
     };
 
     let resp_body =
-        crate::handlers::alter_client_quotas::handle(broker, req, &ctx, api_version)
-            .await?;
+        crate::handlers::alter_client_quotas::handle(broker, req, &ctx, api_version).await?;
     Ok(encode_response(
         api_key,
         correlation_id,
@@ -1738,13 +1695,9 @@ async fn handle_describe_user_scram_credentials_frame(
         client_id,
     };
 
-    let resp_body = crate::handlers::describe_user_scram_credentials::handle(
-        broker,
-        req,
-        &ctx,
-        api_version,
-    )
-    .await?;
+    let resp_body =
+        crate::handlers::describe_user_scram_credentials::handle(broker, req, &ctx, api_version)
+            .await?;
     Ok(encode_response(
         api_key,
         correlation_id,
@@ -1783,14 +1736,9 @@ async fn handle_alter_configs_frame(
         client_id,
     };
 
-    let resp_body = crate::handlers::alter_configs::handle(
-        broker,
-        api_version,
-        correlation_id,
-        body,
-        &ctx,
-    )
-    .await?;
+    let resp_body =
+        crate::handlers::alter_configs::handle(broker, api_version, correlation_id, body, &ctx)
+            .await?;
     Ok(encode_response(
         api_key,
         correlation_id,
@@ -1875,14 +1823,9 @@ async fn handle_delete_records_frame(
         client_id,
     };
 
-    let resp_body = crate::handlers::delete_records::handle(
-        broker,
-        api_version,
-        correlation_id,
-        body,
-        &ctx,
-    )
-    .await?;
+    let resp_body =
+        crate::handlers::delete_records::handle(broker, api_version, correlation_id, body, &ctx)
+            .await?;
     Ok(encode_response(
         api_key,
         correlation_id,
@@ -1921,14 +1864,9 @@ async fn handle_create_partitions_frame(
         client_id,
     };
 
-    let resp_body = crate::handlers::create_partitions::handle(
-        broker,
-        api_version,
-        correlation_id,
-        body,
-        &ctx,
-    )
-    .await?;
+    let resp_body =
+        crate::handlers::create_partitions::handle(broker, api_version, correlation_id, body, &ctx)
+            .await?;
     Ok(encode_response(
         api_key,
         correlation_id,
@@ -1966,14 +1904,9 @@ async fn handle_describe_groups_frame(
         client_id,
     };
 
-    let resp_body = crate::handlers::describe_groups::handle(
-        broker,
-        api_version,
-        correlation_id,
-        body,
-        &ctx,
-    )
-    .await?;
+    let resp_body =
+        crate::handlers::describe_groups::handle(broker, api_version, correlation_id, body, &ctx)
+            .await?;
     Ok(encode_response(
         api_key,
         correlation_id,
@@ -2011,14 +1944,9 @@ async fn handle_list_groups_frame(
         client_id,
     };
 
-    let resp_body = crate::handlers::list_groups::handle(
-        broker,
-        api_version,
-        correlation_id,
-        body,
-        &ctx,
-    )
-    .await?;
+    let resp_body =
+        crate::handlers::list_groups::handle(broker, api_version, correlation_id, body, &ctx)
+            .await?;
     Ok(encode_response(
         api_key,
         correlation_id,
@@ -2056,14 +1984,9 @@ async fn handle_delete_groups_frame(
         client_id,
     };
 
-    let resp_body = crate::handlers::delete_groups::handle(
-        broker,
-        api_version,
-        correlation_id,
-        body,
-        &ctx,
-    )
-    .await?;
+    let resp_body =
+        crate::handlers::delete_groups::handle(broker, api_version, correlation_id, body, &ctx)
+            .await?;
     Ok(encode_response(
         api_key,
         correlation_id,
@@ -2101,14 +2024,9 @@ async fn handle_join_group_frame(
         client_id,
     };
 
-    let resp_body = crate::handlers::join_group::handle(
-        broker,
-        api_version,
-        correlation_id,
-        body,
-        &ctx,
-    )
-    .await?;
+    let resp_body =
+        crate::handlers::join_group::handle(broker, api_version, correlation_id, body, &ctx)
+            .await?;
     Ok(encode_response(
         api_key,
         correlation_id,
@@ -2147,14 +2065,9 @@ async fn handle_offset_commit_frame(
         client_id,
     };
 
-    let resp_body = crate::handlers::offset_commit::handle(
-        broker,
-        api_version,
-        correlation_id,
-        body,
-        &ctx,
-    )
-    .await?;
+    let resp_body =
+        crate::handlers::offset_commit::handle(broker, api_version, correlation_id, body, &ctx)
+            .await?;
     Ok(encode_response(
         api_key,
         correlation_id,
@@ -2194,14 +2107,9 @@ async fn handle_offset_fetch_frame(
         client_id,
     };
 
-    let resp_body = crate::handlers::offset_fetch::handle(
-        broker,
-        api_version,
-        correlation_id,
-        body,
-        &ctx,
-    )
-    .await?;
+    let resp_body =
+        crate::handlers::offset_fetch::handle(broker, api_version, correlation_id, body, &ctx)
+            .await?;
     Ok(encode_response(
         api_key,
         correlation_id,
@@ -2240,14 +2148,9 @@ async fn handle_init_producer_id_frame(
         client_id,
     };
 
-    let resp_body = crate::handlers::init_producer_id::handle(
-        broker,
-        api_version,
-        correlation_id,
-        body,
-        &ctx,
-    )
-    .await?;
+    let resp_body =
+        crate::handlers::init_producer_id::handle(broker, api_version, correlation_id, body, &ctx)
+            .await?;
     Ok(encode_response(
         api_key,
         correlation_id,
@@ -2329,14 +2232,9 @@ async fn handle_end_txn_frame(
         client_id,
     };
 
-    let resp_body = crate::txn::handlers::end_txn::handle(
-        broker,
-        api_version,
-        correlation_id,
-        body,
-        &ctx,
-    )
-    .await?;
+    let resp_body =
+        crate::txn::handlers::end_txn::handle(broker, api_version, correlation_id, body, &ctx)
+            .await?;
     Ok(encode_response(
         api_key,
         correlation_id,

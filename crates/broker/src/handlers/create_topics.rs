@@ -378,17 +378,15 @@ mod replica_assignment_tests {
             config_value: Some(1.0),
         }));
         let buckets = crate::quota::QuotaBuckets::new();
-        let delay_match = crate::quota::consume_controller_mutation_quota(
-            &img, &buckets, "alice", "app-x", 10,
-        );
+        let delay_match =
+            crate::quota::consume_controller_mutation_quota(&img, &buckets, "alice", "app-x", 10);
         assert!(
             delay_match > std::time::Duration::ZERO,
             "tuple quota match should throttle on overage; got {delay_match:?}"
         );
         let buckets2 = crate::quota::QuotaBuckets::new();
-        let delay_other = crate::quota::consume_controller_mutation_quota(
-            &img, &buckets2, "alice", "other", 10,
-        );
+        let delay_other =
+            crate::quota::consume_controller_mutation_quota(&img, &buckets2, "alice", "other", 10);
         assert_eq!(
             delay_other,
             std::time::Duration::ZERO,
