@@ -6287,6 +6287,7 @@ async fn jvm_kafka_configs_describe_users_scram_credentials_end_to_end() {
 /// 7. Assert stdout does NOT contain `v1` or `v2` (stale values compacted away).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires Docker"]
+#[allow(clippy::too_many_lines)]
 async fn jvm_kafka_console_consumer_sees_compacted_topic_end_to_end() {
     const TOPIC: &str = "compacted-jvm";
 
