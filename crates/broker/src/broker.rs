@@ -418,6 +418,24 @@ impl BrokerHandle {
         Some(p.isr.clone())
     }
 
+    /// Test-only: return a clone of the full `PartitionRecord` for
+    /// `(topic, partition)` as seen by this broker's metadata image.
+    /// Returns `None` if the partition is not yet in the image.
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[must_use]
+    #[allow(clippy::used_underscore_binding)]
+    pub fn partition_record_for_test(
+        &self,
+        topic: &str,
+        partition: i32,
+    ) -> Option<crabka_metadata::PartitionRecord> {
+        self._broker
+            .controller
+            .current_image()
+            .partition(topic, partition)
+            .cloned()
+    }
+
     /// Cancel the listener + drain in-flight connections. Awaiting the
     /// returned future blocks until the listener task exits.
     #[allow(clippy::used_underscore_binding)] // `_broker` carries shared state we must reach into during shutdown
