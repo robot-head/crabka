@@ -298,8 +298,7 @@ async fn fetch_all(addr: SocketAddr, topic: &str, topic_id: Uuid) -> Vec<FlatRec
                 );
                 if let Some(batch) = &part_resp.records {
                     got_any = true;
-                    let batch_last_abs =
-                        batch.base_offset + i64::from(batch.last_offset_delta);
+                    let batch_last_abs = batch.base_offset + i64::from(batch.last_offset_delta);
                     for record in &batch.records {
                         let key = match &record.key {
                             Some(k) => k.to_vec(),
