@@ -5,7 +5,9 @@
 //! so they can be unit-tested without spinning up the binary.
 
 pub mod config;
+pub mod context;
 pub mod crd;
 pub mod gen_crds;
 pub mod health;
+pub mod leader_election;
 pub mod telemetry;
