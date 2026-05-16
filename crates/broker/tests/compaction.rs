@@ -414,24 +414,40 @@ async fn compaction_dedupes_via_native_client() {
         .await;
     }
 
+    // Push the active segment into a sealed state so the FINAL v10-* records
+    // can also be deduped. Without this the active still holds (at least) the
+    // very last v10-k3 record, the compactor (which never touches the active)
+    // can't see it, and the previous compaction's "latest" entry for k3 — the
+    // v9-k3 record in the now-sealed segment — survives.
+    //
+    // We can't directly call `Log::roll_active_segment` from a test, so we
+    // produce a small burst of records using a sentinel "pad" key (which the
+    // assertions below ignore) until enough bytes accumulate to roll the
+    // segment past `segment.bytes=256`. ~8 small records is more than enough.
+    for round in 0..8 {
+        let value = format!("padding-{round}");
+        produce_record(addr, "compacted", topic_id, b"__pad__", value.as_bytes()).await;
+    }
+
     // Wait again so the newly-sealed segments get compacted.
     tokio::time::sleep(Duration::from_secs(3)).await;
 
     // Fetch all records from offset 0.
     let records = fetch_all(addr, "compacted", topic_id).await;
 
-    // Assert exactly 3 distinct keys survive.
-    let mut distinct_keys: Vec<String> = records
+    // Assert k1, k2, k3 all survive. The `__pad__` sentinel may also be
+    // present (it's used to force a segment roll) and is ignored here.
+    let distinct_keys: std::collections::BTreeSet<String> = records
         .iter()
         .map(|r| String::from_utf8(r.key.clone()).unwrap())
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
+        .filter(|k| k != "__pad__")
         .collect();
-    distinct_keys.sort();
     assert_eq!(
         distinct_keys,
-        vec!["k1".to_string(), "k2".to_string(), "k3".to_string()],
-        "exactly 3 distinct keys must survive compaction; got: {distinct_keys:?}"
+        ["k1".to_string(), "k2".to_string(), "k3".to_string()]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>(),
+        "k1, k2, k3 must all survive compaction; got: {distinct_keys:?}"
     );
 
     // For each key, assert:

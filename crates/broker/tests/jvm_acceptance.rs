@@ -6388,11 +6388,20 @@ async fn jvm_kafka_console_consumer_sees_compacted_topic_end_to_end() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn producer");
+    // First 5 records: the actual workload. After that, a burst of "pad"
+    // records under a sentinel key forces the active segment past
+    // `segment.bytes=256` so v5 ends up sealed (otherwise the compactor
+    // can't see it; it never touches the active segment) and the test's
+    // "no stale v1" assertion can actually hold for k1.
     child
         .stdin
         .as_mut()
         .expect("stdin")
-        .write_all(b"k1:v1\nk1:v2\nk2:v3\nk1:v4\nk3:v5\n")
+        .write_all(
+            b"k1:v1\nk1:v2\nk2:v3\nk1:v4\nk3:v5\n\
+              __pad__:p0\n__pad__:p1\n__pad__:p2\n__pad__:p3\n\
+              __pad__:p4\n__pad__:p5\n__pad__:p6\n__pad__:p7\n",
+        )
         .expect("write stdin");
     drop(child.stdin.take());
     let producer_out = child.wait_with_output().expect("wait producer");
