@@ -24,6 +24,8 @@ melange build packaging/melange/crabka-operator.yaml \
 apko build packaging/apko/crabka-operator.yaml \
   "$TAG" \
   crabka-operator.tar \
-  --arch x86_64
+  --arch x86_64 \
+  --repository-append "@local $WORK/packages" \
+  --keyring-append "$WORK/melange.rsa.pub"
 
 echo "Built image archive: crabka-operator.tar (tag: $TAG)"

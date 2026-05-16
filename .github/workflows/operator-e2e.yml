@@ -45,7 +45,9 @@ jobs:
           apko build packaging/apko/crabka-operator.yaml \
             crabka-operator:e2e \
             crabka-operator.tar \
-            --arch x86_64
+            --arch x86_64 \
+            --repository-append "@local $PWD/packages" \
+            --keyring-append "$PWD/melange.rsa.pub"
 
       - name: Create kind cluster
         uses: helm/kind-action@v1
