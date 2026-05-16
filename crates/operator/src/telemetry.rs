@@ -8,8 +8,9 @@ use tokio::sync::Mutex;
 /// and we want controllers to register lazily on first reconcile.
 pub type SharedRegistry = Arc<Mutex<Registry>>;
 
-/// Initialise the global `tracing` subscriber. Idempotent in tests
-/// (returns Ok if already set).
+/// Initialise the global `tracing` subscriber. Idempotent: silently
+/// no-ops if a global subscriber is already installed (e.g., in tests
+/// that call this more than once across a process).
 pub fn init_tracing(filter: &str) {
     let env = tracing_subscriber::EnvFilter::try_new(filter)
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
@@ -43,6 +44,7 @@ mod tests {
     #[test]
     fn init_tracing_idempotent() {
         init_tracing("info");
+        // Second call's filter is intentionally ignored — global subscriber is already installed.
         init_tracing("debug");
     }
 }
