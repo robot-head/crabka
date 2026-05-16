@@ -2,7 +2,6 @@
 //! `OffsetCommitValue` records, appends them to `__consumer_offsets-0`
 //! via the partition writer, then updates `Group.committed_offsets`.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
@@ -14,7 +13,6 @@ use crabka_protocol::owned::offset_commit_response::{
 };
 use crabka_protocol::records::{Record, RecordBatch};
 use crabka_protocol::{Decode, Encode};
-use crabka_security::Principal;
 use dashmap::DashMap;
 use tokio::sync::oneshot;
 
@@ -34,8 +32,7 @@ pub(crate) async fn handle(
     version: i16,
     _correlation_id: i32,
     req_bytes: &[u8],
-    principal: &Principal,
-    peer: &SocketAddr,
+    ctx: &crate::handlers::RequestContext<'_>,
 ) -> Result<Bytes, BrokerError> {
     let mut cur: &[u8] = req_bytes;
     let req = OffsetCommitRequest::decode(&mut cur, version)?;
@@ -47,8 +44,8 @@ pub(crate) async fn handle(
     {
         let image = broker.controller.current_image();
         let acl_req = AuthorizationRequest {
-            principal,
-            host: peer,
+            principal: ctx.principal,
+            host: ctx.peer,
             resource_type: ResourceType::Group,
             resource_name: req.group_id.as_str(),
             operation: AclOperation::Read,
@@ -79,8 +76,8 @@ pub(crate) async fn handle(
         authorize_topics(
             &image,
             &broker.config.super_users,
-            principal,
-            peer,
+            ctx.principal,
+            ctx.peer,
             AclOperation::Read,
             topic_names,
         )

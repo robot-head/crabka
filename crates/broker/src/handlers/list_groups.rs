@@ -3,15 +3,12 @@
 //! honored; the optional `types_filter` (v5+) is ignored — this slice
 //! has no group types beyond "consumer".
 
-use std::net::SocketAddr;
-
 use bytes::{Bytes, BytesMut};
 
 use crabka_metadata::{AclOperation, ResourceType};
 use crabka_protocol::owned::list_groups_request::ListGroupsRequest;
 use crabka_protocol::owned::list_groups_response::{ListGroupsResponse, ListedGroup};
 use crabka_protocol::{Decode, Encode};
-use crabka_security::Principal;
 
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize};
 use crate::broker::Broker;
@@ -24,8 +21,7 @@ pub(crate) async fn handle(
     version: i16,
     _correlation_id: i32,
     req_bytes: &[u8],
-    principal: &Principal,
-    peer: &SocketAddr,
+    ctx: &crate::handlers::RequestContext<'_>,
 ) -> Result<Bytes, BrokerError> {
     let mut cur: &[u8] = req_bytes;
     let req = ListGroupsRequest::decode(&mut cur, version)?;
@@ -45,8 +41,8 @@ pub(crate) async fn handle(
         // compatibility shim (no ACLs + no super-user) and the
         // super-user bypass both let all groups through.
         let acl_req = AuthorizationRequest {
-            principal,
-            host: peer,
+            principal: ctx.principal,
+            host: ctx.peer,
             resource_type: ResourceType::Group,
             resource_name: s.group_id.as_str(),
             operation: AclOperation::Describe,

@@ -8,7 +8,6 @@
 //! trailing bytes during decode. Clients that send a single batch per
 //! partition (the typical case) are fully supported.
 
-use std::net::SocketAddr;
 use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
@@ -20,7 +19,6 @@ use crabka_protocol::owned::produce_response::{
 };
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 use crabka_protocol::{Decode, Encode};
-use crabka_security::Principal;
 use tokio::sync::oneshot;
 
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize, authorize_topics};
@@ -35,8 +33,7 @@ pub(crate) async fn handle(
     version: i16,
     _correlation_id: i32,
     req_bytes: &[u8],
-    principal: &Principal,
-    peer: &SocketAddr,
+    ctx: &crate::handlers::RequestContext<'_>,
 ) -> Result<Bytes, BrokerError> {
     let partitions = broker.partitions.clone();
     let controller = broker.controller.clone();
@@ -64,8 +61,8 @@ pub(crate) async fn handle(
     let txn_id_denied = match req.transactional_id.as_deref() {
         Some(tid) if !tid.is_empty() => {
             let acl_req = AuthorizationRequest {
-                principal,
-                host: peer,
+                principal: ctx.principal,
+                host: ctx.peer,
                 resource_type: ResourceType::TransactionalId,
                 resource_name: tid,
                 operation: AclOperation::Write,
@@ -94,8 +91,8 @@ pub(crate) async fn handle(
     let acl_results = authorize_topics(
         &image,
         &broker.config.super_users,
-        principal,
-        peer,
+        ctx.principal,
+        ctx.peer,
         AclOperation::Write,
         topic_names_for_acl.iter().map(String::as_str),
     );
@@ -445,7 +442,7 @@ pub(crate) async fn handle(
     let delay = consume_producer_quota(
         &image,
         &broker.quota_buckets,
-        &principal.name,
+        &ctx.principal.name,
         "",
         total_produce_bytes,
     );

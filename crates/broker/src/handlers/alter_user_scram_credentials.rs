@@ -31,7 +31,6 @@
 //! image consistent across multiple rows in the same request.
 
 use std::collections::HashSet;
-use std::net::SocketAddr;
 
 use crabka_metadata::{
     AclOperation, DeleteScramCredentialRecord, MetadataRecord, ScramCredentialRecord,
@@ -42,7 +41,7 @@ use crabka_protocol::owned::alter_user_scram_credentials_request::{
 use crabka_protocol::owned::alter_user_scram_credentials_response::{
     AlterUserScramCredentialsResponse, AlterUserScramCredentialsResult,
 };
-use crabka_security::{Principal, SaslMechanism};
+use crabka_security::SaslMechanism;
 
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize};
 use crate::broker::Broker;
@@ -57,8 +56,7 @@ const SHA512_OUTPUT_LEN: usize = 64;
 pub(crate) async fn handle(
     broker: &Broker,
     req: AlterUserScramCredentialsRequest,
-    principal: &Principal,
-    peer: &SocketAddr,
+    ctx: &crate::handlers::RequestContext<'_>,
 ) -> AlterUserScramCredentialsResponse {
     // ── slice-13 ACL preamble ────────────────────────────────────────
     // Whole-request Cluster Alter gate. On Deny, every per-user row
@@ -70,8 +68,8 @@ pub(crate) async fn handle(
         &image,
         &broker.config.super_users,
         &AuthorizationRequest {
-            principal,
-            host: peer,
+            principal: ctx.principal,
+            host: ctx.peer,
             resource_type: crabka_metadata::ResourceType::Cluster,
             resource_name: "kafka-cluster",
             operation: AclOperation::Alter,

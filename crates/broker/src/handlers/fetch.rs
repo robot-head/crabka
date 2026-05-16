@@ -9,7 +9,6 @@
 //! Clients pulling small batches one at a time and re-fetching from
 //! `last.base_offset + last.last_offset_delta + 1` see correct data.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -24,7 +23,6 @@ use crabka_protocol::owned::fetch_response::{
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 use crabka_protocol::records::RecordBatch;
 use crabka_protocol::{Decode, Encode};
-use crabka_security::Principal;
 
 use crate::authorizer::{AuthorizationResult, authorize_topics};
 use crate::broker::Broker;
@@ -63,8 +61,7 @@ pub(crate) async fn handle(
     version: i16,
     _correlation_id: i32,
     req_bytes: &[u8],
-    principal: &Principal,
-    peer: &SocketAddr,
+    ctx: &crate::handlers::RequestContext<'_>,
 ) -> Result<Bytes, BrokerError> {
     let partitions = broker.partitions.clone();
     let controller = broker.controller.clone();
@@ -102,8 +99,8 @@ pub(crate) async fn handle(
     let acl_results = authorize_topics(
         &image,
         &broker.config.super_users,
-        principal,
-        peer,
+        ctx.principal,
+        ctx.peer,
         AclOperation::Read,
         topic_names_for_acl.iter().map(String::as_str),
     );
@@ -351,7 +348,7 @@ pub(crate) async fn handle(
         let delay = consume_consumer_quota(
             &image,
             &broker.quota_buckets,
-            &principal.name,
+            &ctx.principal.name,
             "",
             total_bytes,
         );

@@ -5,8 +5,6 @@
 //! single `V1TopicConfig` record. Replication-side propagation runs on
 //! every reconcile (see `ReplicatorSupervisor::reconcile`).
 
-use std::net::SocketAddr;
-
 use bytes::{Bytes, BytesMut};
 
 use crabka_metadata::{AclOperation, MetadataRecord, ResourceType, TopicConfigRecord};
@@ -16,7 +14,6 @@ use crabka_protocol::owned::alter_configs_response::{
 };
 use crabka_protocol::{Decode, Encode};
 use crabka_raft::RaftError;
-use crabka_security::Principal;
 
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize};
 use crate::broker::Broker;
@@ -33,8 +30,7 @@ pub(crate) async fn handle(
     version: i16,
     _correlation_id: i32,
     req_bytes: &[u8],
-    principal: &Principal,
-    peer: &SocketAddr,
+    ctx: &crate::handlers::RequestContext<'_>,
 ) -> Result<Bytes, BrokerError> {
     let mut cur: &[u8] = req_bytes;
     let req = AlterConfigsRequest::decode(&mut cur, version)?;
@@ -61,8 +57,8 @@ pub(crate) async fn handle(
                 &image,
                 &broker.config.super_users,
                 &AuthorizationRequest {
-                    principal,
-                    host: peer,
+                    principal: ctx.principal,
+                    host: ctx.peer,
                     resource_type: ResourceType::Topic,
                     resource_name: &resource.resource_name,
                     operation: AclOperation::AlterConfigs,
@@ -72,8 +68,8 @@ pub(crate) async fn handle(
                 &image,
                 &broker.config.super_users,
                 &AuthorizationRequest {
-                    principal,
-                    host: peer,
+                    principal: ctx.principal,
+                    host: ctx.peer,
                     resource_type: ResourceType::Cluster,
                     resource_name: "kafka-cluster",
                     operation: AclOperation::AlterConfigs,

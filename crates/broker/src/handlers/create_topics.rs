@@ -2,7 +2,6 @@
 //! so every topic/partition creation goes through the metadata quorum before
 //! the partition directories are materialized on disk.
 
-use std::net::SocketAddr;
 use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
@@ -12,7 +11,6 @@ use crabka_protocol::owned::create_topics_response::{CreatableTopicResult, Creat
 use crabka_protocol::primitives::uuid::Uuid as ProtoUuid;
 use crabka_protocol::{Decode, Encode};
 use crabka_raft::RaftError;
-use crabka_security::Principal;
 use uuid::Uuid;
 
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize};
@@ -55,8 +53,7 @@ pub(crate) async fn handle(
     version: i16,
     _correlation_id: i32,
     req_bytes: &[u8],
-    principal: &Principal,
-    peer: &SocketAddr,
+    ctx: &crate::handlers::RequestContext<'_>,
 ) -> Result<Bytes, BrokerError> {
     // ── slice-13 ACL preamble ────────────────────────────────────────
     // Whole-request Cluster Create gate. On Deny, return
@@ -67,8 +64,8 @@ pub(crate) async fn handle(
             &image,
             &broker.config.super_users,
             &AuthorizationRequest {
-                principal,
-                host: peer,
+                principal: ctx.principal,
+                host: ctx.peer,
                 resource_type: crabka_metadata::ResourceType::Cluster,
                 resource_name: "kafka-cluster",
                 operation: AclOperation::Create,
@@ -302,8 +299,8 @@ pub(crate) async fn handle(
         let delay = crate::quota::consume_controller_mutation_quota(
             &image,
             &broker.quota_buckets,
-            &principal.name,
-            "", // client_id not threaded through HandlerTable — see slice 16 known limitation
+            &ctx.principal.name,
+            "", // client_id — T3 will replace "" with ctx.client_id
             mutation_count,
         );
         let resp = CreateTopicsResponse {

@@ -3,8 +3,6 @@
 //! path. Operator-supplied `assignments` are ignored in this slice
 //! (round-robin only); honoring them is deferred.
 
-use std::net::SocketAddr;
-
 use bytes::{Bytes, BytesMut};
 
 use crabka_metadata::{AclOperation, MetadataRecord, PartitionRecord, TopicRecord};
@@ -14,7 +12,6 @@ use crabka_protocol::owned::create_partitions_response::{
 };
 use crabka_protocol::{Decode, Encode};
 use crabka_raft::RaftError;
-use crabka_security::Principal;
 
 use crate::authorizer::{AuthorizationResult, authorize_topics};
 use crate::broker::Broker;
@@ -29,8 +26,7 @@ pub(crate) async fn handle(
     version: i16,
     _correlation_id: i32,
     req_bytes: &[u8],
-    principal: &Principal,
-    peer: &SocketAddr,
+    ctx: &crate::handlers::RequestContext<'_>,
 ) -> Result<Bytes, BrokerError> {
     let mut cur: &[u8] = req_bytes;
     let req = CreatePartitionsRequest::decode(&mut cur, version)?;
@@ -65,8 +61,8 @@ pub(crate) async fn handle(
     let acl_results = authorize_topics(
         &image,
         &broker.config.super_users,
-        principal,
-        peer,
+        ctx.principal,
+        ctx.peer,
         AclOperation::Alter,
         topic_names.iter().copied(),
     );
@@ -207,12 +203,11 @@ pub(crate) async fn handle(
 
     // KIP-599: apply controller_mutation_rate throttle after response assembly,
     // before encoding. Sets throttle_time_ms and sleeps so the client waits.
-    let principal_name = principal.name.as_str();
     let delay = crate::quota::consume_controller_mutation_quota(
         &image,
         &broker.quota_buckets,
-        principal_name,
-        "", // client_id not threaded through HandlerTable — slice-16 known limitation
+        ctx.principal.name.as_str(),
+        "", // client_id — T3 will replace "" with ctx.client_id
         mutation_count,
     );
     let resp = CreatePartitionsResponse {
