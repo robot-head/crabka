@@ -2,8 +2,6 @@
 
 #![allow(clippy::cast_possible_truncation, clippy::unused_async)]
 
-use std::net::SocketAddr;
-
 use bytes::Bytes;
 use crabka_metadata::{PartitionRecord, ResourceType};
 use crabka_protocol::Encode;
@@ -11,7 +9,6 @@ use crabka_protocol::owned::list_partition_reassignments_request::ListPartitionR
 use crabka_protocol::owned::list_partition_reassignments_response::{
     ListPartitionReassignmentsResponse, OngoingPartitionReassignment, OngoingTopicReassignment,
 };
-use crabka_security::Principal;
 
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize};
 use crate::broker::Broker;
@@ -20,8 +17,7 @@ use crate::codes::CLUSTER_AUTHORIZATION_FAILED;
 pub(crate) async fn handle(
     broker: &Broker,
     req: ListPartitionReassignmentsRequest,
-    principal: &Principal,
-    peer: &SocketAddr,
+    ctx: &crate::handlers::RequestContext<'_>,
     api_version: i16,
 ) -> Result<Bytes, crate::error::BrokerError> {
     let image = broker.controller.current_image();
@@ -29,8 +25,8 @@ pub(crate) async fn handle(
         &image,
         &broker.config.super_users,
         &AuthorizationRequest {
-            principal,
-            host: peer,
+            principal: ctx.principal,
+            host: ctx.peer,
             resource_type: ResourceType::Cluster,
             resource_name: "kafka-cluster",
             operation: crabka_metadata::AclOperation::Describe,

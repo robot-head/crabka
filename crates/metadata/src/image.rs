@@ -138,6 +138,29 @@ impl MetadataImage {
         self.scram_credentials.get(&(user.to_string(), mechanism))
     }
 
+    /// All distinct users with at least one SCRAM credential. Order is
+    /// unspecified.
+    #[must_use]
+    pub fn scram_credentials_users(&self) -> Vec<String> {
+        self.scram_credentials
+            .keys()
+            .map(|(u, _)| u.clone())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    /// All `(mechanism, iterations)` pairs for `user`. Empty if user has
+    /// no SCRAM credentials. Order is unspecified.
+    #[must_use]
+    pub fn scram_credentials_for_user(&self, user: &str) -> Vec<(SaslMechanism, u32)> {
+        self.scram_credentials
+            .iter()
+            .filter(|((u, _), _)| u == user)
+            .map(|((_, mech), cred)| (*mech, cred.iterations))
+            .collect()
+    }
+
     #[must_use]
     pub fn broker(&self, node_id: NodeId) -> Option<&BrokerRegistrationRecord> {
         self.brokers.get(&node_id)
@@ -931,5 +954,47 @@ mod tests {
         let canon = canonicalize_entity(input);
         assert_eq!(canon[0].0, "client-id");
         assert_eq!(canon[1].0, "user");
+    }
+
+    #[test]
+    fn scram_credentials_users_returns_distinct_users() {
+        let mut img = MetadataImage::new(uuid::Uuid::nil());
+        img.apply(&MetadataRecord::V1ScramCredential(ScramCredentialRecord {
+            user: "alice".into(),
+            mechanism: SaslMechanism::ScramSha512,
+            salt: vec![1, 2, 3],
+            stored_key: vec![4, 5, 6],
+            server_key: vec![7, 8, 9],
+            iterations: 4096,
+        }));
+        img.apply(&MetadataRecord::V1ScramCredential(ScramCredentialRecord {
+            user: "bob".into(),
+            mechanism: SaslMechanism::ScramSha512,
+            salt: vec![1, 2, 3],
+            stored_key: vec![4, 5, 6],
+            server_key: vec![7, 8, 9],
+            iterations: 4096,
+        }));
+        let mut users = img.scram_credentials_users();
+        users.sort();
+        assert_eq!(users, vec!["alice".to_string(), "bob".to_string()]);
+    }
+
+    #[test]
+    fn scram_credentials_for_user_returns_pairs() {
+        let mut img = MetadataImage::new(uuid::Uuid::nil());
+        img.apply(&MetadataRecord::V1ScramCredential(ScramCredentialRecord {
+            user: "alice".into(),
+            mechanism: SaslMechanism::ScramSha512,
+            salt: vec![1, 2, 3],
+            stored_key: vec![4, 5, 6],
+            server_key: vec![7, 8, 9],
+            iterations: 8192,
+        }));
+        let pairs = img.scram_credentials_for_user("alice");
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].0, SaslMechanism::ScramSha512);
+        assert_eq!(pairs[0].1, 8192);
+        assert!(img.scram_credentials_for_user("ghost").is_empty());
     }
 }

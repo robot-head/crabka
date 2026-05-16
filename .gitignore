@@ -15,3 +15,4 @@ melange.rsa
 melange.rsa.pub
 packages/
 crabka-operator.tar
+.worktree

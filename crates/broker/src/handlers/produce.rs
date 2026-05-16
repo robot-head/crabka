@@ -8,7 +8,6 @@
 //! trailing bytes during decode. Clients that send a single batch per
 //! partition (the typical case) are fully supported.
 
-use std::net::SocketAddr;
 use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
@@ -20,7 +19,6 @@ use crabka_protocol::owned::produce_response::{
 };
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 use crabka_protocol::{Decode, Encode};
-use crabka_security::Principal;
 use tokio::sync::oneshot;
 
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize, authorize_topics};
@@ -35,8 +33,7 @@ pub(crate) async fn handle(
     version: i16,
     _correlation_id: i32,
     req_bytes: &[u8],
-    principal: &Principal,
-    peer: &SocketAddr,
+    ctx: &crate::handlers::RequestContext<'_>,
 ) -> Result<Bytes, BrokerError> {
     let partitions = broker.partitions.clone();
     let controller = broker.controller.clone();
@@ -64,8 +61,8 @@ pub(crate) async fn handle(
     let txn_id_denied = match req.transactional_id.as_deref() {
         Some(tid) if !tid.is_empty() => {
             let acl_req = AuthorizationRequest {
-                principal,
-                host: peer,
+                principal: ctx.principal,
+                host: ctx.peer,
                 resource_type: ResourceType::TransactionalId,
                 resource_name: tid,
                 operation: AclOperation::Write,
@@ -94,8 +91,8 @@ pub(crate) async fn handle(
     let acl_results = authorize_topics(
         &image,
         &broker.config.super_users,
-        principal,
-        peer,
+        ctx.principal,
+        ctx.peer,
         AclOperation::Write,
         topic_names_for_acl.iter().map(String::as_str),
     );
@@ -440,13 +437,11 @@ pub(crate) async fn handle(
     }
 
     // ── KIP-13 producer_byte_rate enforcement ───────────────────────
-    // client_id is not yet threaded into this handler (T11 wires it through
-    // dispatch); use "" so that user-only and default quotas still fire.
     let delay = consume_producer_quota(
         &image,
         &broker.quota_buckets,
-        &principal.name,
-        "",
+        &ctx.principal.name,
+        ctx.client_id,
         total_produce_bytes,
     );
     let resp = ProduceResponse {
@@ -490,4 +485,42 @@ fn consume_producer_quota(
     let overage = bytes - granted;
     let delay_secs = overage as f64 / rate;
     Duration::from_micros((delay_secs * 1_000_000.0) as u64).min(Duration::from_secs(1))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn consume_producer_quota_tuple_match_overage_throttles() {
+        use crabka_metadata::{ClientQuotaRecord, MetadataImage, MetadataRecord, QuotaEntity};
+        let mut img = MetadataImage::new(uuid::Uuid::nil());
+        img.apply(&MetadataRecord::V1ClientQuota(ClientQuotaRecord {
+            entity: vec![
+                QuotaEntity {
+                    entity_type: "user".into(),
+                    entity_name: Some("alice".into()),
+                },
+                QuotaEntity {
+                    entity_type: "client-id".into(),
+                    entity_name: Some("app-x".into()),
+                },
+            ],
+            config_key: "producer_byte_rate".into(),
+            config_value: Some(1024.0),
+        }));
+        let buckets = crate::quota::QuotaBuckets::new();
+        // Tuple match → 4096 bytes overage at 1024 B/s → throttle > 0.
+        let delay_match = super::consume_producer_quota(&img, &buckets, "alice", "app-x", 4096);
+        assert!(
+            delay_match > std::time::Duration::ZERO,
+            "tuple quota match should throttle on overage; got {delay_match:?}"
+        );
+        // No tuple match for client_id="other"; no (user=alice)-only quota exists.
+        let buckets2 = crate::quota::QuotaBuckets::new();
+        let delay_other = super::consume_producer_quota(&img, &buckets2, "alice", "other", 4096);
+        assert_eq!(
+            delay_other,
+            std::time::Duration::ZERO,
+            "non-matching client_id should not throttle; got {delay_other:?}"
+        );
+    }
 }

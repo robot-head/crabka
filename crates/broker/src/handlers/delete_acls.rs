@@ -1,7 +1,5 @@
 //! `DeleteAcls` handler (`api_key` 31).
 
-use std::net::SocketAddr;
-
 use bytes::Bytes;
 use crabka_metadata::{AclEntry, AclEntryFilter, MetadataRecord};
 use crabka_protocol::Encode;
@@ -9,7 +7,6 @@ use crabka_protocol::owned::delete_acls_request::{DeleteAclsFilter, DeleteAclsRe
 use crabka_protocol::owned::delete_acls_response::{
     DeleteAclsFilterResult, DeleteAclsMatchingAcl, DeleteAclsResponse,
 };
-use crabka_security::Principal;
 
 use super::acl_wire::{
     operation_filter, operation_to_wire, pattern_type_filter, pattern_type_to_wire,
@@ -22,8 +19,7 @@ use crate::codes;
 pub(crate) async fn handle(
     broker: &Broker,
     req: DeleteAclsRequest,
-    principal: &Principal,
-    peer: &SocketAddr,
+    ctx: &crate::handlers::RequestContext<'_>,
     api_version: i16,
 ) -> Result<Bytes, crate::error::BrokerError> {
     let image = broker.controller.current_image();
@@ -33,8 +29,8 @@ pub(crate) async fn handle(
         &image,
         &broker.config.super_users,
         &AuthorizationRequest {
-            principal,
-            host: peer,
+            principal: ctx.principal,
+            host: ctx.peer,
             resource_type: crabka_metadata::ResourceType::Cluster,
             resource_name: "kafka-cluster",
             operation: crabka_metadata::AclOperation::Alter,

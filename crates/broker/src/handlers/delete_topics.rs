@@ -2,15 +2,12 @@
 //! so every topic deletion is recorded in the metadata quorum before the
 //! partition dirs and in-memory state are torn down.
 
-use std::net::SocketAddr;
-
 use bytes::{Bytes, BytesMut};
 use crabka_metadata::{AclOperation, DeleteTopicRecord, MetadataRecord};
 use crabka_protocol::owned::delete_topics_request::DeleteTopicsRequest;
 use crabka_protocol::owned::delete_topics_response::{DeletableTopicResult, DeleteTopicsResponse};
 use crabka_protocol::{Decode, Encode};
 use crabka_raft::RaftError;
-use crabka_security::Principal;
 
 use crate::authorizer::{AuthorizationResult, authorize_topics};
 use crate::broker::Broker;
@@ -24,8 +21,7 @@ pub(crate) async fn handle(
     version: i16,
     _correlation_id: i32,
     req_bytes: &[u8],
-    principal: &Principal,
-    peer: &SocketAddr,
+    ctx: &crate::handlers::RequestContext<'_>,
 ) -> Result<Bytes, BrokerError> {
     let controller = &broker.controller;
     let partitions = broker.partitions.clone();
@@ -79,8 +75,8 @@ pub(crate) async fn handle(
     let acl_results = authorize_topics(
         &image,
         &broker.config.super_users,
-        principal,
-        peer,
+        ctx.principal,
+        ctx.peer,
         AclOperation::Delete,
         known_names.iter().copied(),
     );
@@ -156,12 +152,11 @@ pub(crate) async fn handle(
     }
 
     // KIP-599: apply controller_mutation_rate throttle after response assembly.
-    let principal_name = principal.name.as_str();
     let delay = crate::quota::consume_controller_mutation_quota(
         &image,
         &broker.quota_buckets,
-        principal_name,
-        "", // client_id not threaded through HandlerTable — slice-16 known limitation
+        ctx.principal.name.as_str(),
+        ctx.client_id,
         mutation_count,
     );
     let throttle_time_ms = i32::try_from(delay.as_millis()).unwrap_or(i32::MAX);

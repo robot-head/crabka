@@ -699,6 +699,27 @@ async fn serve_connection_stream<S>(
                 }
             }
         }
+        // DescribeUserScramCredentials (50, slice-17a T3) needs both the
+        // authenticated principal AND the peer's `SocketAddr` so the handler
+        // can authorize `Alter` on `Cluster("kafka-cluster")` and emit
+        // CLUSTER_AUTHORIZATION_FAILED. The `&Broker`-only handler table
+        // signature can't carry that context, so this api_key intercepts inline.
+        if peek_api_key(&frame).ok() == Some(50) {
+            match handle_describe_user_scram_credentials_frame(&broker, &frame, &auth, &peer).await
+            {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during DescribeUserScramCredentials, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "DescribeUserScramCredentials dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
         // InitProducerId (22, slice-13 T20) needs both the authenticated
         // principal AND the peer's `SocketAddr` so the handler can
         // authorize `Write` on `TransactionalId` (transactional path) or
@@ -984,9 +1005,14 @@ async fn handle_alter_user_scram_credentials_frame(
             name: "ANONYMOUS".to_string(),
             mechanism: crabka_security::SaslMechanism::Plain,
         });
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let ctx = crate::handlers::RequestContext {
+        principal: &principal,
+        peer,
+        client_id,
+    };
 
-    let resp =
-        crate::handlers::alter_user_scram_credentials::handle(broker, req, &principal, peer).await;
+    let resp = crate::handlers::alter_user_scram_credentials::handle(broker, req, &ctx).await;
     let mut buf = BytesMut::with_capacity(resp.encoded_len(api_version));
     resp.encode(&mut buf, api_version)?;
     let resp_body = buf.freeze();
@@ -1020,16 +1046,16 @@ async fn handle_describe_cluster_frame(
             name: "ANONYMOUS".to_string(),
             mechanism: crabka_security::SaslMechanism::Plain,
         });
-
-    let resp_body = crate::handlers::describe_cluster::handle(
-        broker,
-        api_version,
-        correlation_id,
-        body,
-        &principal,
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let ctx = crate::handlers::RequestContext {
+        principal: &principal,
         peer,
-    )
-    .await?;
+        client_id,
+    };
+
+    let resp_body =
+        crate::handlers::describe_cluster::handle(broker, api_version, correlation_id, body, &ctx)
+            .await?;
     Ok(encode_response(
         api_key,
         correlation_id,
@@ -1063,16 +1089,15 @@ async fn handle_produce_frame(
             name: "ANONYMOUS".to_string(),
             mechanism: crabka_security::SaslMechanism::Plain,
         });
-
-    let resp_body = crate::handlers::produce::handle(
-        broker,
-        api_version,
-        correlation_id,
-        body,
-        &principal,
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let ctx = crate::handlers::RequestContext {
+        principal: &principal,
         peer,
-    )
-    .await?;
+        client_id,
+    };
+
+    let resp_body =
+        crate::handlers::produce::handle(broker, api_version, correlation_id, body, &ctx).await?;
     Ok(encode_response(
         api_key,
         correlation_id,
@@ -1106,10 +1131,15 @@ async fn handle_fetch_frame(
             name: "ANONYMOUS".to_string(),
             mechanism: crabka_security::SaslMechanism::Plain,
         });
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let ctx = crate::handlers::RequestContext {
+        principal: &principal,
+        peer,
+        client_id,
+    };
 
     let resp_body =
-        crate::handlers::fetch::handle(broker, api_version, correlation_id, body, &principal, peer)
-            .await?;
+        crate::handlers::fetch::handle(broker, api_version, correlation_id, body, &ctx).await?;
     Ok(encode_response(
         api_key,
         correlation_id,
@@ -1144,16 +1174,15 @@ async fn handle_metadata_frame(
             name: "ANONYMOUS".to_string(),
             mechanism: crabka_security::SaslMechanism::Plain,
         });
-
-    let resp_body = crate::handlers::metadata::handle(
-        broker,
-        api_version,
-        correlation_id,
-        body,
-        &principal,
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let ctx = crate::handlers::RequestContext {
+        principal: &principal,
         peer,
-    )
-    .await?;
+        client_id,
+    };
+
+    let resp_body =
+        crate::handlers::metadata::handle(broker, api_version, correlation_id, body, &ctx).await?;
     Ok(encode_response(
         api_key,
         correlation_id,
@@ -1187,16 +1216,16 @@ async fn handle_create_topics_frame(
             name: "ANONYMOUS".to_string(),
             mechanism: crabka_security::SaslMechanism::Plain,
         });
-
-    let resp_body = crate::handlers::create_topics::handle(
-        broker,
-        api_version,
-        correlation_id,
-        body,
-        &principal,
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let ctx = crate::handlers::RequestContext {
+        principal: &principal,
         peer,
-    )
-    .await?;
+        client_id,
+    };
+
+    let resp_body =
+        crate::handlers::create_topics::handle(broker, api_version, correlation_id, body, &ctx)
+            .await?;
     Ok(encode_response(
         api_key,
         correlation_id,
@@ -1230,16 +1259,16 @@ async fn handle_delete_topics_frame(
             name: "ANONYMOUS".to_string(),
             mechanism: crabka_security::SaslMechanism::Plain,
         });
-
-    let resp_body = crate::handlers::delete_topics::handle(
-        broker,
-        api_version,
-        correlation_id,
-        body,
-        &principal,
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let ctx = crate::handlers::RequestContext {
+        principal: &principal,
         peer,
-    )
-    .await?;
+        client_id,
+    };
+
+    let resp_body =
+        crate::handlers::delete_topics::handle(broker, api_version, correlation_id, body, &ctx)
+            .await?;
     Ok(encode_response(
         api_key,
         correlation_id,
@@ -1281,9 +1310,14 @@ async fn handle_describe_acls_frame(
             name: "ANONYMOUS".to_string(),
             mechanism: crabka_security::SaslMechanism::Plain,
         });
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let ctx = crate::handlers::RequestContext {
+        principal: &principal,
+        peer,
+        client_id,
+    };
 
-    let resp_body =
-        crate::handlers::describe_acls::handle(broker, req, &principal, peer, api_version).await?;
+    let resp_body = crate::handlers::describe_acls::handle(broker, req, &ctx, api_version).await?;
     Ok(encode_response(
         api_key,
         correlation_id,
@@ -1322,9 +1356,14 @@ async fn handle_create_acls_frame(
             name: "ANONYMOUS".to_string(),
             mechanism: crabka_security::SaslMechanism::Plain,
         });
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let ctx = crate::handlers::RequestContext {
+        principal: &principal,
+        peer,
+        client_id,
+    };
 
-    let resp_body =
-        crate::handlers::create_acls::handle(broker, req, &principal, peer, api_version).await?;
+    let resp_body = crate::handlers::create_acls::handle(broker, req, &ctx, api_version).await?;
     Ok(encode_response(
         api_key,
         correlation_id,
@@ -1363,9 +1402,14 @@ async fn handle_delete_acls_frame(
             name: "ANONYMOUS".to_string(),
             mechanism: crabka_security::SaslMechanism::Plain,
         });
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let ctx = crate::handlers::RequestContext {
+        principal: &principal,
+        peer,
+        client_id,
+    };
 
-    let resp_body =
-        crate::handlers::delete_acls::handle(broker, req, &principal, peer, api_version).await?;
+    let resp_body = crate::handlers::delete_acls::handle(broker, req, &ctx, api_version).await?;
     Ok(encode_response(
         api_key,
         correlation_id,
@@ -1404,9 +1448,14 @@ async fn handle_elect_leaders_frame(
             name: "ANONYMOUS".to_string(),
             mechanism: crabka_security::SaslMechanism::Plain,
         });
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let ctx = crate::handlers::RequestContext {
+        principal: &principal,
+        peer,
+        client_id,
+    };
 
-    let resp_body =
-        crate::handlers::elect_leaders::handle(broker, req, &principal, peer, api_version).await?;
+    let resp_body = crate::handlers::elect_leaders::handle(broker, req, &ctx, api_version).await?;
     Ok(encode_response(
         api_key,
         correlation_id,
@@ -1445,15 +1494,16 @@ async fn handle_alter_partition_reassignments_frame(
             name: "ANONYMOUS".to_string(),
             mechanism: crabka_security::SaslMechanism::Plain,
         });
-
-    let resp_body = crate::handlers::alter_partition_reassignments::handle(
-        broker,
-        req,
-        &principal,
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let ctx = crate::handlers::RequestContext {
+        principal: &principal,
         peer,
-        api_version,
-    )
-    .await?;
+        client_id,
+    };
+
+    let resp_body =
+        crate::handlers::alter_partition_reassignments::handle(broker, req, &ctx, api_version)
+            .await?;
     Ok(encode_response(
         api_key,
         correlation_id,
@@ -1492,15 +1542,16 @@ async fn handle_list_partition_reassignments_frame(
             name: "ANONYMOUS".to_string(),
             mechanism: crabka_security::SaslMechanism::Plain,
         });
-
-    let resp_body = crate::handlers::list_partition_reassignments::handle(
-        broker,
-        req,
-        &principal,
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let ctx = crate::handlers::RequestContext {
+        principal: &principal,
         peer,
-        api_version,
-    )
-    .await?;
+        client_id,
+    };
+
+    let resp_body =
+        crate::handlers::list_partition_reassignments::handle(broker, req, &ctx, api_version)
+            .await?;
     Ok(encode_response(
         api_key,
         correlation_id,
@@ -1540,10 +1591,15 @@ async fn handle_describe_client_quotas_frame(
             name: "ANONYMOUS".to_string(),
             mechanism: crabka_security::SaslMechanism::Plain,
         });
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let ctx = crate::handlers::RequestContext {
+        principal: &principal,
+        peer,
+        client_id,
+    };
 
     let resp_body =
-        crate::handlers::describe_client_quotas::handle(broker, req, &principal, peer, api_version)
-            .await?;
+        crate::handlers::describe_client_quotas::handle(broker, req, &ctx, api_version).await?;
     Ok(encode_response(
         api_key,
         correlation_id,
@@ -1584,9 +1640,63 @@ async fn handle_alter_client_quotas_frame(
             name: "ANONYMOUS".to_string(),
             mechanism: crabka_security::SaslMechanism::Plain,
         });
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let ctx = crate::handlers::RequestContext {
+        principal: &principal,
+        peer,
+        client_id,
+    };
 
     let resp_body =
-        crate::handlers::alter_client_quotas::handle(broker, req, &principal, peer, api_version)
+        crate::handlers::alter_client_quotas::handle(broker, req, &ctx, api_version).await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch a `DescribeUserScramCredentials` (`api_key` 50) frame.
+/// Mirrors [`handle_describe_client_quotas_frame`] — pulls the
+/// authenticated principal off the per-connection `auth` state and the
+/// peer `SocketAddr` from the accept-time capture so the handler can
+/// authorize `Alter` on `Cluster("kafka-cluster")` with host-based
+/// ACL matching.
+async fn handle_describe_user_scram_credentials_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    use crabka_protocol::Decode;
+
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 50);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let mut cur: &[u8] = body;
+    let req = crabka_protocol::owned::describe_user_scram_credentials_request::DescribeUserScramCredentialsRequest::decode(
+        &mut cur,
+        api_version,
+    )?;
+
+    let principal = auth
+        .principal()
+        .cloned()
+        .unwrap_or_else(|| crabka_security::Principal {
+            name: "ANONYMOUS".to_string(),
+            mechanism: crabka_security::SaslMechanism::Plain,
+        });
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let ctx = crate::handlers::RequestContext {
+        principal: &principal,
+        peer,
+        client_id,
+    };
+
+    let resp_body =
+        crate::handlers::describe_user_scram_credentials::handle(broker, req, &ctx, api_version)
             .await?;
     Ok(encode_response(
         api_key,
@@ -1619,16 +1729,16 @@ async fn handle_alter_configs_frame(
             name: "ANONYMOUS".to_string(),
             mechanism: crabka_security::SaslMechanism::Plain,
         });
-
-    let resp_body = crate::handlers::alter_configs::handle(
-        broker,
-        api_version,
-        correlation_id,
-        body,
-        &principal,
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let ctx = crate::handlers::RequestContext {
+        principal: &principal,
         peer,
-    )
-    .await?;
+        client_id,
+    };
+
+    let resp_body =
+        crate::handlers::alter_configs::handle(broker, api_version, correlation_id, body, &ctx)
+            .await?;
     Ok(encode_response(
         api_key,
         correlation_id,
@@ -1660,14 +1770,19 @@ async fn handle_incremental_alter_configs_frame(
             name: "ANONYMOUS".to_string(),
             mechanism: crabka_security::SaslMechanism::Plain,
         });
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let ctx = crate::handlers::RequestContext {
+        principal: &principal,
+        peer,
+        client_id,
+    };
 
     let resp_body = crate::handlers::incremental_alter_configs::handle(
         broker,
         api_version,
         correlation_id,
         body,
-        &principal,
-        peer,
+        &ctx,
     )
     .await?;
     Ok(encode_response(
@@ -1701,16 +1816,16 @@ async fn handle_delete_records_frame(
             name: "ANONYMOUS".to_string(),
             mechanism: crabka_security::SaslMechanism::Plain,
         });
-
-    let resp_body = crate::handlers::delete_records::handle(
-        broker,
-        api_version,
-        correlation_id,
-        body,
-        &principal,
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let ctx = crate::handlers::RequestContext {
+        principal: &principal,
         peer,
-    )
-    .await?;
+        client_id,
+    };
+
+    let resp_body =
+        crate::handlers::delete_records::handle(broker, api_version, correlation_id, body, &ctx)
+            .await?;
     Ok(encode_response(
         api_key,
         correlation_id,
@@ -1742,16 +1857,16 @@ async fn handle_create_partitions_frame(
             name: "ANONYMOUS".to_string(),
             mechanism: crabka_security::SaslMechanism::Plain,
         });
-
-    let resp_body = crate::handlers::create_partitions::handle(
-        broker,
-        api_version,
-        correlation_id,
-        body,
-        &principal,
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let ctx = crate::handlers::RequestContext {
+        principal: &principal,
         peer,
-    )
-    .await?;
+        client_id,
+    };
+
+    let resp_body =
+        crate::handlers::create_partitions::handle(broker, api_version, correlation_id, body, &ctx)
+            .await?;
     Ok(encode_response(
         api_key,
         correlation_id,
@@ -1782,16 +1897,16 @@ async fn handle_describe_groups_frame(
             name: "ANONYMOUS".to_string(),
             mechanism: crabka_security::SaslMechanism::Plain,
         });
-
-    let resp_body = crate::handlers::describe_groups::handle(
-        broker,
-        api_version,
-        correlation_id,
-        body,
-        &principal,
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let ctx = crate::handlers::RequestContext {
+        principal: &principal,
         peer,
-    )
-    .await?;
+        client_id,
+    };
+
+    let resp_body =
+        crate::handlers::describe_groups::handle(broker, api_version, correlation_id, body, &ctx)
+            .await?;
     Ok(encode_response(
         api_key,
         correlation_id,
@@ -1822,16 +1937,16 @@ async fn handle_list_groups_frame(
             name: "ANONYMOUS".to_string(),
             mechanism: crabka_security::SaslMechanism::Plain,
         });
-
-    let resp_body = crate::handlers::list_groups::handle(
-        broker,
-        api_version,
-        correlation_id,
-        body,
-        &principal,
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let ctx = crate::handlers::RequestContext {
+        principal: &principal,
         peer,
-    )
-    .await?;
+        client_id,
+    };
+
+    let resp_body =
+        crate::handlers::list_groups::handle(broker, api_version, correlation_id, body, &ctx)
+            .await?;
     Ok(encode_response(
         api_key,
         correlation_id,
@@ -1862,16 +1977,16 @@ async fn handle_delete_groups_frame(
             name: "ANONYMOUS".to_string(),
             mechanism: crabka_security::SaslMechanism::Plain,
         });
-
-    let resp_body = crate::handlers::delete_groups::handle(
-        broker,
-        api_version,
-        correlation_id,
-        body,
-        &principal,
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let ctx = crate::handlers::RequestContext {
+        principal: &principal,
         peer,
-    )
-    .await?;
+        client_id,
+    };
+
+    let resp_body =
+        crate::handlers::delete_groups::handle(broker, api_version, correlation_id, body, &ctx)
+            .await?;
     Ok(encode_response(
         api_key,
         correlation_id,
@@ -1902,16 +2017,16 @@ async fn handle_join_group_frame(
             name: "ANONYMOUS".to_string(),
             mechanism: crabka_security::SaslMechanism::Plain,
         });
-
-    let resp_body = crate::handlers::join_group::handle(
-        broker,
-        api_version,
-        correlation_id,
-        body,
-        &principal,
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let ctx = crate::handlers::RequestContext {
+        principal: &principal,
         peer,
-    )
-    .await?;
+        client_id,
+    };
+
+    let resp_body =
+        crate::handlers::join_group::handle(broker, api_version, correlation_id, body, &ctx)
+            .await?;
     Ok(encode_response(
         api_key,
         correlation_id,
@@ -1943,16 +2058,16 @@ async fn handle_offset_commit_frame(
             name: "ANONYMOUS".to_string(),
             mechanism: crabka_security::SaslMechanism::Plain,
         });
-
-    let resp_body = crate::handlers::offset_commit::handle(
-        broker,
-        api_version,
-        correlation_id,
-        body,
-        &principal,
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let ctx = crate::handlers::RequestContext {
+        principal: &principal,
         peer,
-    )
-    .await?;
+        client_id,
+    };
+
+    let resp_body =
+        crate::handlers::offset_commit::handle(broker, api_version, correlation_id, body, &ctx)
+            .await?;
     Ok(encode_response(
         api_key,
         correlation_id,
@@ -1985,16 +2100,16 @@ async fn handle_offset_fetch_frame(
             name: "ANONYMOUS".to_string(),
             mechanism: crabka_security::SaslMechanism::Plain,
         });
-
-    let resp_body = crate::handlers::offset_fetch::handle(
-        broker,
-        api_version,
-        correlation_id,
-        body,
-        &principal,
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let ctx = crate::handlers::RequestContext {
+        principal: &principal,
         peer,
-    )
-    .await?;
+        client_id,
+    };
+
+    let resp_body =
+        crate::handlers::offset_fetch::handle(broker, api_version, correlation_id, body, &ctx)
+            .await?;
     Ok(encode_response(
         api_key,
         correlation_id,
@@ -2026,16 +2141,16 @@ async fn handle_init_producer_id_frame(
             name: "ANONYMOUS".to_string(),
             mechanism: crabka_security::SaslMechanism::Plain,
         });
-
-    let resp_body = crate::handlers::init_producer_id::handle(
-        broker,
-        api_version,
-        correlation_id,
-        body,
-        &principal,
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let ctx = crate::handlers::RequestContext {
+        principal: &principal,
         peer,
-    )
-    .await?;
+        client_id,
+    };
+
+    let resp_body =
+        crate::handlers::init_producer_id::handle(broker, api_version, correlation_id, body, &ctx)
+            .await?;
     Ok(encode_response(
         api_key,
         correlation_id,
@@ -2066,14 +2181,19 @@ async fn handle_add_partitions_to_txn_frame(
             name: "ANONYMOUS".to_string(),
             mechanism: crabka_security::SaslMechanism::Plain,
         });
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let ctx = crate::handlers::RequestContext {
+        principal: &principal,
+        peer,
+        client_id,
+    };
 
     let resp_body = crate::txn::handlers::add_partitions_to_txn::handle(
         broker,
         api_version,
         correlation_id,
         body,
-        &principal,
-        peer,
+        &ctx,
     )
     .await?;
     Ok(encode_response(
@@ -2105,16 +2225,16 @@ async fn handle_end_txn_frame(
             name: "ANONYMOUS".to_string(),
             mechanism: crabka_security::SaslMechanism::Plain,
         });
-
-    let resp_body = crate::txn::handlers::end_txn::handle(
-        broker,
-        api_version,
-        correlation_id,
-        body,
-        &principal,
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let ctx = crate::handlers::RequestContext {
+        principal: &principal,
         peer,
-    )
-    .await?;
+        client_id,
+    };
+
+    let resp_body =
+        crate::txn::handlers::end_txn::handle(broker, api_version, correlation_id, body, &ctx)
+            .await?;
     Ok(encode_response(
         api_key,
         correlation_id,
@@ -2145,14 +2265,19 @@ async fn handle_txn_offset_commit_frame(
             name: "ANONYMOUS".to_string(),
             mechanism: crabka_security::SaslMechanism::Plain,
         });
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let ctx = crate::handlers::RequestContext {
+        principal: &principal,
+        peer,
+        client_id,
+    };
 
     let resp_body = crate::txn::handlers::txn_offset_commit::handle(
         broker,
         api_version,
         correlation_id,
         body,
-        &principal,
-        peer,
+        &ctx,
     )
     .await?;
     Ok(encode_response(
@@ -2358,6 +2483,7 @@ fn handler_body_flexible(api_key: i16, version: i16) -> bool {
         46 => version >= owned::list_partition_reassignments_request::FLEXIBLE_MIN,
         48 => version >= owned::describe_client_quotas_request::FLEXIBLE_MIN,
         49 => version >= owned::alter_client_quotas_request::FLEXIBLE_MIN,
+        50 => version >= owned::describe_user_scram_credentials_request::FLEXIBLE_MIN,
         // AlterUserScramCredentials (KIP-554, slice 12 T15) is flexible from v0.
         51 => version >= owned::alter_user_scram_credentials_request::FLEXIBLE_MIN,
         56 => version >= owned::alter_partition_request::FLEXIBLE_MIN,

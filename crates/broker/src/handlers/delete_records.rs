@@ -3,8 +3,6 @@
 //! via the existing `OFFSET_OUT_OF_RANGE` recovery path — matching the
 //! Apache Kafka model.
 
-use std::net::SocketAddr;
-
 use bytes::{Bytes, BytesMut};
 
 use crabka_metadata::AclOperation;
@@ -13,7 +11,6 @@ use crabka_protocol::owned::delete_records_response::{
     DeleteRecordsPartitionResult, DeleteRecordsResponse, DeleteRecordsTopicResult,
 };
 use crabka_protocol::{Decode, Encode};
-use crabka_security::Principal;
 
 use crate::authorizer::{AuthorizationResult, authorize_topics};
 use crate::broker::Broker;
@@ -26,8 +23,7 @@ pub(crate) async fn handle(
     version: i16,
     _correlation_id: i32,
     req_bytes: &[u8],
-    principal: &Principal,
-    peer: &SocketAddr,
+    ctx: &crate::handlers::RequestContext<'_>,
 ) -> Result<Bytes, BrokerError> {
     let mut cur: &[u8] = req_bytes;
     let req = DeleteRecordsRequest::decode(&mut cur, version)?;
@@ -45,8 +41,8 @@ pub(crate) async fn handle(
     let acl_results = authorize_topics(
         &image,
         &broker.config.super_users,
-        principal,
-        peer,
+        ctx.principal,
+        ctx.peer,
         AclOperation::Delete,
         topic_names.iter().copied(),
     );

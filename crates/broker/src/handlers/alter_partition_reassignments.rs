@@ -163,7 +163,6 @@ fn start_path(pr: &PartitionRecord, target: &[i32]) -> Option<PartitionRecord> {
 }
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
 
 use bytes::Bytes;
 use crabka_metadata::ResourceType;
@@ -172,7 +171,6 @@ use crabka_protocol::owned::alter_partition_reassignments_request::AlterPartitio
 use crabka_protocol::owned::alter_partition_reassignments_response::{
     AlterPartitionReassignmentsResponse, ReassignablePartitionResponse, ReassignableTopicResponse,
 };
-use crabka_security::Principal;
 
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize};
 use crate::broker::Broker;
@@ -181,8 +179,7 @@ use crate::codes::{CLUSTER_AUTHORIZATION_FAILED, COORDINATOR_NOT_AVAILABLE};
 pub(crate) async fn handle(
     broker: &Broker,
     req: AlterPartitionReassignmentsRequest,
-    principal: &Principal,
-    peer: &SocketAddr,
+    ctx: &crate::handlers::RequestContext<'_>,
     api_version: i16,
 ) -> Result<Bytes, crate::error::BrokerError> {
     let image = broker.controller.current_image();
@@ -191,8 +188,8 @@ pub(crate) async fn handle(
         &image,
         &broker.config.super_users,
         &AuthorizationRequest {
-            principal,
-            host: peer,
+            principal: ctx.principal,
+            host: ctx.peer,
             resource_type: ResourceType::Cluster,
             resource_name: "kafka-cluster",
             operation: crabka_metadata::AclOperation::Alter,

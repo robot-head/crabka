@@ -15,7 +15,6 @@
 //!   `IdempotentWrite` on `Cluster("kafka-cluster")`. Deny →
 //!   `error_code = CLUSTER_AUTHORIZATION_FAILED (31)`.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
@@ -24,7 +23,6 @@ use crabka_metadata::{AclOperation, ResourceType};
 use crabka_protocol::owned::init_producer_id_request::InitProducerIdRequest;
 use crabka_protocol::owned::init_producer_id_response::InitProducerIdResponse;
 use crabka_protocol::{Decode, Encode};
-use crabka_security::Principal;
 
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize};
 use crate::broker::Broker;
@@ -40,8 +38,7 @@ pub(crate) async fn handle(
     version: i16,
     _correlation_id: i32,
     req_bytes: &[u8],
-    principal: &Principal,
-    peer: &SocketAddr,
+    ctx: &crate::handlers::RequestContext<'_>,
 ) -> Result<Bytes, BrokerError> {
     let producer_ids = broker.producer_ids.clone();
     let coord = broker.txn_coordinator.clone();
@@ -61,8 +58,8 @@ pub(crate) async fn handle(
         match req.transactional_id.as_deref() {
             Some(tid) if !tid.is_empty() => {
                 let acl_req = AuthorizationRequest {
-                    principal,
-                    host: peer,
+                    principal: ctx.principal,
+                    host: ctx.peer,
                     resource_type: ResourceType::TransactionalId,
                     resource_name: tid,
                     operation: AclOperation::Write,
@@ -73,8 +70,8 @@ pub(crate) async fn handle(
             }
             _ => {
                 let acl_req = AuthorizationRequest {
-                    principal,
-                    host: peer,
+                    principal: ctx.principal,
+                    host: ctx.peer,
                     resource_type: ResourceType::Cluster,
                     resource_name: "kafka-cluster",
                     operation: AclOperation::IdempotentWrite,

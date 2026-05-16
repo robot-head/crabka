@@ -9,7 +9,6 @@
 //! Clients pulling small batches one at a time and re-fetching from
 //! `last.base_offset + last.last_offset_delta + 1` see correct data.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -24,7 +23,6 @@ use crabka_protocol::owned::fetch_response::{
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 use crabka_protocol::records::RecordBatch;
 use crabka_protocol::{Decode, Encode};
-use crabka_security::Principal;
 
 use crate::authorizer::{AuthorizationResult, authorize_topics};
 use crate::broker::Broker;
@@ -63,8 +61,7 @@ pub(crate) async fn handle(
     version: i16,
     _correlation_id: i32,
     req_bytes: &[u8],
-    principal: &Principal,
-    peer: &SocketAddr,
+    ctx: &crate::handlers::RequestContext<'_>,
 ) -> Result<Bytes, BrokerError> {
     let partitions = broker.partitions.clone();
     let controller = broker.controller.clone();
@@ -102,8 +99,8 @@ pub(crate) async fn handle(
     let acl_results = authorize_topics(
         &image,
         &broker.config.super_users,
-        principal,
-        peer,
+        ctx.principal,
+        ctx.peer,
         AclOperation::Read,
         topic_names_for_acl.iter().map(String::as_str),
     );
@@ -351,8 +348,8 @@ pub(crate) async fn handle(
         let delay = consume_consumer_quota(
             &image,
             &broker.quota_buckets,
-            &principal.name,
-            "",
+            &ctx.principal.name,
+            ctx.client_id,
             total_bytes,
         );
         if delay > Duration::ZERO {
@@ -648,4 +645,40 @@ fn group_into_topic_responses(pending: Vec<PendingRead>) -> Vec<FetchableTopicRe
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn consume_consumer_quota_tuple_match_overage_throttles() {
+        use crabka_metadata::{ClientQuotaRecord, MetadataImage, MetadataRecord, QuotaEntity};
+        let mut img = MetadataImage::new(uuid::Uuid::nil());
+        img.apply(&MetadataRecord::V1ClientQuota(ClientQuotaRecord {
+            entity: vec![
+                QuotaEntity {
+                    entity_type: "user".into(),
+                    entity_name: Some("alice".into()),
+                },
+                QuotaEntity {
+                    entity_type: "client-id".into(),
+                    entity_name: Some("app-x".into()),
+                },
+            ],
+            config_key: "consumer_byte_rate".into(),
+            config_value: Some(1024.0),
+        }));
+        let buckets = crate::quota::QuotaBuckets::new();
+        let delay_match = super::consume_consumer_quota(&img, &buckets, "alice", "app-x", 4096);
+        assert!(
+            delay_match > std::time::Duration::ZERO,
+            "tuple quota match should throttle on overage; got {delay_match:?}"
+        );
+        let buckets2 = crate::quota::QuotaBuckets::new();
+        let delay_other = super::consume_consumer_quota(&img, &buckets2, "alice", "other", 4096);
+        assert_eq!(
+            delay_other,
+            std::time::Duration::ZERO,
+            "non-matching client_id should not throttle; got {delay_other:?}"
+        );
+    }
 }

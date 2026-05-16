@@ -17,7 +17,6 @@
 //! Response fields: `throttle_time_ms`, `error_code`.
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
 
 use bytes::{Bytes, BytesMut};
 
@@ -30,7 +29,6 @@ use crabka_protocol::owned::end_txn_response::EndTxnResponse;
 use crabka_protocol::owned::write_txn_markers_request::{
     WritableTxnMarker, WritableTxnMarkerTopic, WriteTxnMarkersRequest,
 };
-use crabka_security::Principal;
 
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize};
 use crate::broker::Broker;
@@ -53,8 +51,7 @@ pub(crate) async fn handle(
     version: i16,
     _correlation_id: i32,
     req_bytes: &[u8],
-    principal: &Principal,
-    peer: &SocketAddr,
+    ctx: &crate::handlers::RequestContext<'_>,
 ) -> Result<Bytes, BrokerError> {
     let coord = broker.txn_coordinator.clone();
     let controller = broker.controller.clone();
@@ -73,8 +70,8 @@ pub(crate) async fn handle(
 
     // ── slice-13 ACL preamble: Write on TransactionalId ─────────────
     let tid_req = AuthorizationRequest {
-        principal,
-        host: peer,
+        principal: ctx.principal,
+        host: ctx.peer,
         resource_type: ResourceType::TransactionalId,
         resource_name: tid,
         operation: AclOperation::Write,
