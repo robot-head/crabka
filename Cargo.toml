@@ -71,7 +71,7 @@ base64 = "0.22"
 crabka-security = { path = "crates/security", version = "0.1.0" }
 kube = { version = "0.99", default-features = false, features = ["client", "runtime", "derive", "rustls-tls"] }
 k8s-openapi = { version = "0.27", default-features = false, features = ["v1_30"] }
-schemars = "0.8"
+schemars = "0.9"
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 prometheus-client = "0.23"
 tower = "0.5"
