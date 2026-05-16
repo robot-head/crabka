@@ -293,6 +293,16 @@ impl Segment {
         self.sealed = true;
     }
 
+    /// Directory holding this segment's `.log`/`.index`/`.timeindex` files.
+    /// Used by the compactor to read the underlying `.log` file directly,
+    /// bypassing the `Segment::read` path which depends on the in-memory
+    /// `last_offset` (which is stale for sealed segments loaded via
+    /// `Segment::open`).
+    #[must_use]
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
     /// Force-sync everything to disk.
     pub fn flush(&mut self) -> Result<(), LogError> {
         self.log_file.sync_data()?;

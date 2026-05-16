@@ -26,16 +26,23 @@ use crate::name;
 use crate::segment::Segment;
 
 /// Read every `RecordBatch` from a sealed segment by streaming the
-/// whole `.log` file. The segment's offset/time indexes are not used —
-/// compaction reads all batches regardless of sparse-index granularity.
+/// whole `.log` file directly. We bypass `Segment::read` because that
+/// path early-returns when the segment's in-memory `last_offset` is
+/// stale (sealed segments loaded from disk via `Segment::open` have
+/// `last_offset = base_offset - 1` until a tail-scan populates it,
+/// and `Segment::read(base_offset, ..)` would short-circuit to empty).
 fn read_all_batches(seg: &Segment) -> Result<Vec<RecordBatch>, LogError> {
-    // `Segment::read` already streams from the lowest indexed position
-    // and bounds by `max_bytes`. For compaction we want every batch in
-    // the segment, so use a max_bytes large enough to cover the file
-    // (segment.bytes is at most a few GiB; usize on 64-bit hosts is
-    // ample). On 32-bit hosts the cast saturates to usize::MAX.
-    let max_bytes = usize::try_from(seg.size_bytes()).unwrap_or(usize::MAX);
-    seg.read(seg.base_offset(), max_bytes)
+    let path = name::log_path(seg.dir(), seg.base_offset());
+    let bytes = std::fs::read(&path)?;
+    let mut cursor: &[u8] = &bytes;
+    let mut out: Vec<RecordBatch> = Vec::new();
+    while !cursor.is_empty() {
+        let Ok(batch) = RecordBatch::decode(&mut cursor) else {
+            break;
+        };
+        out.push(batch);
+    }
+    Ok(out)
 }
 
 /// Build a map of `key → latest absolute offset` across the given
