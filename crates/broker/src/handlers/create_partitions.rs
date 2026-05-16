@@ -146,6 +146,8 @@ pub(crate) async fn handle(
                 replicas: replicas.clone(),
                 isr: replicas,
                 leader_epoch: 0,
+                adding_replicas: vec![],
+                removing_replicas: vec![],
             }));
         }
 

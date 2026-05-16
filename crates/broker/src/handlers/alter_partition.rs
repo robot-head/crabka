@@ -191,6 +191,8 @@ fn handle_partition(
         replicas: part_rec.replicas.clone(),
         isr: proposed_isr,
         leader_epoch: part_rec.leader_epoch,
+        adding_replicas: part_rec.adding_replicas.clone(),
+        removing_replicas: part_rec.removing_replicas.clone(),
     }));
 
     RespPartitionData {

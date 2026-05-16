@@ -66,6 +66,8 @@ pub(crate) async fn on_broker_dead(
                     replicas: pr.replicas.clone(),
                     isr: alive_isr,
                     leader_epoch: pr.leader_epoch + 1,
+                    adding_replicas: pr.adding_replicas.clone(),
+                    removing_replicas: pr.removing_replicas.clone(),
                 }));
             } else if alive_isr.len() < pr.isr.len() {
                 changes.push(MetadataRecord::V1Partition(PartitionRecord {
@@ -75,6 +77,8 @@ pub(crate) async fn on_broker_dead(
                     replicas: pr.replicas.clone(),
                     isr: alive_isr,
                     leader_epoch: pr.leader_epoch,
+                    adding_replicas: pr.adding_replicas.clone(),
+                    removing_replicas: pr.removing_replicas.clone(),
                 }));
             }
         }
@@ -161,6 +165,8 @@ pub(crate) async fn select_new_leader_for_partition(
                 replicas: pr.replicas.clone(),
                 isr: pr.isr.clone(),
                 leader_epoch: pr.leader_epoch + 1,
+                adding_replicas: pr.adding_replicas.clone(),
+                removing_replicas: pr.removing_replicas.clone(),
             })
         }
         ElectionType::Unclean => {
@@ -181,6 +187,8 @@ pub(crate) async fn select_new_leader_for_partition(
                         replicas: pr.replicas.clone(),
                         isr: vec![n],
                         leader_epoch: pr.leader_epoch + 1,
+                        adding_replicas: pr.adding_replicas.clone(),
+                        removing_replicas: pr.removing_replicas.clone(),
                     });
                 }
             }
@@ -223,6 +231,8 @@ mod tests {
             replicas: replicas.to_vec(),
             isr: isr.to_vec(),
             leader_epoch: 5,
+            adding_replicas: vec![],
+            removing_replicas: vec![],
         }));
         img
     }

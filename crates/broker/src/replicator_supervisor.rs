@@ -401,6 +401,8 @@ mod tests {
                 replicas: vec![1, 2, 3],
                 isr: vec![1, 2, 3],
                 leader_epoch: 0,
+                adding_replicas: vec![],
+                removing_replicas: vec![],
             }),
         ]);
         let d = desired_follower_set(2, &img);
@@ -424,6 +426,8 @@ mod tests {
                 replicas: vec![1, 2, 3],
                 isr: vec![1, 2, 3],
                 leader_epoch: 0,
+                adding_replicas: vec![],
+                removing_replicas: vec![],
             }),
         ]);
         assert!(desired_follower_set(1, &img).is_empty());
@@ -445,6 +449,8 @@ mod tests {
                 replicas: vec![1, 2, 3],
                 isr: vec![1, 2, 3],
                 leader_epoch: 0,
+                adding_replicas: vec![],
+                removing_replicas: vec![],
             }),
         ]);
         assert!(desired_follower_set(99, &img).is_empty());
@@ -486,6 +492,8 @@ mod tests {
                 replicas: vec![1, 2, 3],
                 isr: vec![1, 2, 3],
                 leader_epoch: 0,
+                adding_replicas: vec![],
+                removing_replicas: vec![],
             }),
             MetadataRecord::V1Topic(TopicRecord {
                 name: "b".into(),
@@ -500,6 +508,8 @@ mod tests {
                 replicas: vec![1, 2, 3],
                 isr: vec![1, 2, 3],
                 leader_epoch: 0,
+                adding_replicas: vec![],
+                removing_replicas: vec![],
             }),
             MetadataRecord::V1Partition(PartitionRecord {
                 topic: "b".into(),
@@ -508,6 +518,8 @@ mod tests {
                 replicas: vec![1, 2, 3],
                 isr: vec![1, 2, 3],
                 leader_epoch: 0,
+                adding_replicas: vec![],
+                removing_replicas: vec![],
             }),
         ]);
         let d = desired_follower_set(2, &img);
@@ -542,6 +554,8 @@ mod tests {
             replicas: vec![1],
             isr: vec![1],
             leader_epoch: 0,
+            adding_replicas: vec![],
+            removing_replicas: vec![],
         }));
         let mut overrides = BTreeMap::new();
         overrides.insert("retention.ms".to_string(), "60000".to_string());
@@ -595,6 +609,8 @@ mod tests {
             replicas: vec![1],
             isr: vec![1],
             leader_epoch: 0,
+            adding_replicas: vec![],
+            removing_replicas: vec![],
         }));
 
         let dir = tempdir().expect("tempdir");

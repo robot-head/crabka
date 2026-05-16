@@ -5046,6 +5046,8 @@ async fn jvm_kafka_leader_election_preferred() {
             replicas: vec![1, 2],
             isr: vec![2, 1],
             leader_epoch: 1,
+            adding_replicas: vec![],
+            removing_replicas: vec![],
         },
     ))
     .await

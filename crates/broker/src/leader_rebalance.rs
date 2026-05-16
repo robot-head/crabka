@@ -141,6 +141,8 @@ mod tests {
                 replicas: vec![1, 2, 3],
                 isr: vec![1, 2, 3],
                 leader_epoch: 5,
+                adding_replicas: vec![],
+                removing_replicas: vec![],
             }));
             p += 1;
         }
@@ -153,6 +155,8 @@ mod tests {
                 replicas: vec![1, 2, 3],
                 isr: vec![1, 2, 3],
                 leader_epoch: 5,
+                adding_replicas: vec![],
+                removing_replicas: vec![],
             }));
             p += 1;
         }

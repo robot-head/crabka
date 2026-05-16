@@ -56,6 +56,8 @@ pub async fn bootstrap(
                 replicas: vec![config.node_id],
                 isr: vec![config.node_id],
                 leader_epoch: 0,
+                adding_replicas: vec![],
+                removing_replicas: vec![],
             }),
         ];
         match controller.submit_change(records).await {

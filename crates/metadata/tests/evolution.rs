@@ -35,7 +35,7 @@ prop_compose! {
     ) -> PartitionRecord {
         let leader = replicas[0];
         let isr = replicas.clone();
-        PartitionRecord { topic, partition, leader, replicas, isr, leader_epoch }
+        PartitionRecord { topic, partition, leader, replicas, isr, leader_epoch, adding_replicas: vec![], removing_replicas: vec![] }
     }
 }
 
