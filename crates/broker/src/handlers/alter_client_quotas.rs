@@ -25,6 +25,7 @@ const KNOWN_QUOTA_KEYS: &[&str] = &[
     "consumer_byte_rate",
     "request_percentage",
     "connection_creation_rate", // KIP-612 — only enforced when paired with ip entity
+    "controller_mutation_rate", // KIP-599 (slice 16c)
 ];
 const SUPPORTED_ENTITY_TYPES: &[&str] = &["user", "client-id", "ip"];
 
@@ -349,5 +350,20 @@ mod tests {
         );
         let err = process_one_entry(&e).unwrap_err();
         assert_eq!(err.0, INVALID_REQUEST);
+    }
+
+    #[test]
+    fn controller_mutation_rate_key_accepted() {
+        let e = entry(
+            vec![("user", Some("alice"))],
+            vec![("controller_mutation_rate", 2.0, false)],
+        );
+        let records = process_one_entry(&e).expect("ok");
+        assert_eq!(records.len(), 1);
+        let MetadataRecord::V1ClientQuota(r) = &records[0] else {
+            panic!("wrong variant");
+        };
+        assert_eq!(r.config_key, "controller_mutation_rate");
+        assert_eq!(r.config_value, Some(2.0));
     }
 }
