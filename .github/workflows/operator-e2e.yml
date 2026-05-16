@@ -17,8 +17,20 @@ jobs:
         with:
           version: v3.16.2
 
-      - uses: chainguard-dev/actions/setup-melange@main
-      - uses: chainguard-dev/actions/setup-apko@main
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Install melange and apko
+        run: |
+          go install chainguard.dev/melange@latest
+          go install chainguard.dev/apko@latest
+          echo "$HOME/go/bin" >> "$GITHUB_PATH"
+
+      - name: Verify melange + apko on PATH
+        run: |
+          melange version
+          apko version
 
       - name: Build crabka-operator apk + OCI image
         run: |
