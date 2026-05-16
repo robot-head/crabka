@@ -73,7 +73,7 @@ kube = { version = "0.99", default-features = false, features = ["client", "runt
 k8s-openapi = { version = "0.27", default-features = false, features = ["v1_30"] }
 schemars = "0.8"
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
-prometheus-client = "0.23"
+prometheus-client = "0.24"
 tower = "0.5"
 futures = "0.3"
 anyhow = "1"
