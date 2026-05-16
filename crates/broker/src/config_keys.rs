@@ -1,11 +1,14 @@
 //! Topic-config whitelist for `AlterConfigs` / `IncrementalAlterConfigs`.
 //!
-//! Six keys are recognized. Three propagate live to `Log.config`
+//! Eight keys are recognized. Three propagate live to `Log.config`
 //! (`retention.ms`, `retention.bytes`, `segment.bytes`). Three are
 //! accepted as no-op defaults for compatibility but reject non-default
 //! values: `cleanup.policy` (only `delete`), `compression.type` (only
 //! `producer`), `min.insync.replicas` (integers >= 1 accepted but not
-//! yet enforced — see the design spec for the rationale).
+//! yet enforced — see the design spec for the rationale). Two are
+//! KIP-73 throttle keys (`leader.replication.throttled.replicas`,
+//! `follower.replication.throttled.replicas`) validated via
+//! `ThrottledReplicas::parse`.
 //!
 //! Unknown keys are rejected with `INVALID_CONFIG`.
 
@@ -51,6 +54,10 @@ pub(crate) fn validate_topic_config(key: &str, value: &str) -> Result<(), String
             }
         }
         MIN_INSYNC_REPLICAS => parse_i64_at_least(1, value).map(|_| ()),
+        crate::throttle::LEADER_THROTTLED_REPLICAS_KEY
+        | crate::throttle::FOLLOWER_THROTTLED_REPLICAS_KEY => {
+            crate::throttle::ThrottledReplicas::parse(value).map(|_| ())
+        }
         unknown => Err(format!("unrecognized config key `{unknown}`")),
     }
 }
@@ -75,7 +82,7 @@ fn parse_u64_at_least(min: u64, value: &str) -> Result<u64, String> {
     Ok(parsed)
 }
 
-/// Returns `true` if `key` is one of the six whitelisted topic-config keys.
+/// Returns `true` if `key` is one of the eight whitelisted topic-config keys.
 /// Useful for `IncrementalAlterConfigs` DELETE-op validation without
 /// requiring a sentinel probe value.
 pub(crate) fn is_recognized(key: &str) -> bool {
@@ -87,6 +94,8 @@ pub(crate) fn is_recognized(key: &str) -> bool {
             | CLEANUP_POLICY
             | COMPRESSION_TYPE
             | MIN_INSYNC_REPLICAS
+            | crate::throttle::LEADER_THROTTLED_REPLICAS_KEY
+            | crate::throttle::FOLLOWER_THROTTLED_REPLICAS_KEY
     )
 }
 

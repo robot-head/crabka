@@ -35,6 +35,29 @@ const RESOURCE_TYPE_BROKER: i8 = 4;
 const OP_SET: i8 = 0;
 const OP_DELETE: i8 = 1;
 
+/// Returns `true` if `name` is one of the two KIP-73 broker-scoped rate
+/// config keys recognized by this broker.
+fn is_known_broker_config(name: &str) -> bool {
+    matches!(
+        name,
+        crate::throttle::LEADER_THROTTLED_RATE_KEY | crate::throttle::FOLLOWER_THROTTLED_RATE_KEY
+    )
+}
+
+/// Validates the value for a broker-scoped config key.
+/// Returns `Err` if the key is unknown or the value cannot be parsed as an
+/// `i64`. T5 wires this into the broker-scoped dispatch path.
+fn validate_broker_config_value(name: &str, value: &str) -> Result<(), String> {
+    match name {
+        crate::throttle::LEADER_THROTTLED_RATE_KEY
+        | crate::throttle::FOLLOWER_THROTTLED_RATE_KEY => value
+            .parse::<i64>()
+            .map(|_| ())
+            .map_err(|e| format!("invalid rate: {e}")),
+        _ => Err(format!("unknown broker config {name}")),
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn handle(
     broker: &Broker,
@@ -199,4 +222,48 @@ pub(crate) async fn handle(
     let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
     resp.encode(&mut buf, version)?;
     Ok(buf.freeze())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn topic_throttle_config_value_validated() {
+        // Verify ThrottledReplicas::parse rejects malformed input that
+        // the validator delegates to.
+        assert!(crate::throttle::ThrottledReplicas::parse("not-a-pair").is_err());
+        assert!(crate::throttle::ThrottledReplicas::parse("0:bad").is_err());
+    }
+
+    #[test]
+    fn broker_scoped_rate_config_accepted() {
+        assert!(is_known_broker_config(
+            crate::throttle::LEADER_THROTTLED_RATE_KEY
+        ));
+        assert!(is_known_broker_config(
+            crate::throttle::FOLLOWER_THROTTLED_RATE_KEY
+        ));
+    }
+
+    #[test]
+    fn broker_scoped_unknown_config_rejected() {
+        assert!(!is_known_broker_config("not.a.real.config"));
+        assert!(validate_broker_config_value("not.a.real.config", "1024").is_err());
+    }
+
+    #[test]
+    fn broker_scoped_invalid_value_rejected() {
+        assert!(
+            validate_broker_config_value(
+                crate::throttle::LEADER_THROTTLED_RATE_KEY,
+                "not-a-number"
+            )
+            .is_err()
+        );
+        assert!(
+            validate_broker_config_value(crate::throttle::LEADER_THROTTLED_RATE_KEY, "1024")
+                .is_ok()
+        );
+    }
 }
