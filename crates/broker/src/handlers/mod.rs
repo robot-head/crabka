@@ -43,6 +43,9 @@ impl HandlerTable {
     }
 }
 
+pub(crate) mod context;
+pub(crate) use context::RequestContext;
+
 pub(crate) mod acl_wire;
 pub(crate) mod alter_client_quotas;
 pub(crate) mod alter_configs;
