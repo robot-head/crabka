@@ -56,8 +56,16 @@ jobs:
           version: v0.24.0
           node_image: kindest/node:v1.30.0
 
-      - name: Load operator image into kind
-        run: kind load image-archive crabka-operator.tar --name crabka-e2e
+      - name: Load operator image into kind (via docker)
+        run: |
+          # apko writes an OCI archive; load it into the local docker daemon
+          # first so it gets a normalized name, then push that into the kind
+          # node. `kind load image-archive` is finicky with OCI multi-arch
+          # indices; the docker → kind route is robust.
+          docker load -i crabka-operator.tar
+          docker image ls | grep crabka-operator || true
+          kind load docker-image crabka-operator:e2e --name crabka-e2e
+          docker exec crabka-e2e-control-plane crictl images | grep crabka-operator || true
 
       - name: Install CRDs
         run: kubectl apply -f deploy/crds/crabka.io_kafkas.yaml
