@@ -320,6 +320,28 @@ impl BrokerHandle {
         Some(snap.retention_ms)
     }
 
+    /// Test-only: full `LogConfig` snapshot for `(topic, partition)`.
+    /// Returns `None` if the partition is not hosted on this broker.
+    /// Used by slice-18's compaction integration test to wait for
+    /// `cleanup.policy=compact` + `segment.bytes` overrides to propagate
+    /// from the metadata image through the supervisor's reconcile loop.
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[must_use]
+    #[allow(clippy::used_underscore_binding)]
+    pub fn partition_log_config_for_test(
+        &self,
+        topic: &str,
+        partition: i32,
+    ) -> Option<crabka_log::LogConfig> {
+        let part = self
+            ._broker
+            .partitions
+            .get(&(topic.to_string(), partition))?
+            .value()
+            .clone();
+        Some(part.log.lock().ok()?.config_snapshot())
+    }
+
     /// Test-only: append `n` single-record batches to `(topic, partition)`
     /// through the partition's writer task. Used by admin-handler integration
     /// tests that need a non-empty log without going through the Kafka Produce

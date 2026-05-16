@@ -6344,6 +6344,26 @@ async fn jvm_kafka_console_consumer_sees_compacted_topic_end_to_end() {
         BOOTSTRAP,
     ]);
 
+    // 1b. Wait for cleanup.policy=compact + segment.bytes=256 to propagate
+    //     from the metadata image into the partition's LogConfig via the
+    //     ReplicatorSupervisor reconcile loop. Without this wait, produces
+    //     can land in a default-config Log (1GiB segments, Delete policy) →
+    //     no segment rolls, no compaction.
+    let cfg_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if let Some(cfg) = broker.partition_log_config_for_test(TOPIC, 0)
+            && cfg.cleanup_policy == crabka_log::CleanupPolicy::Compact
+            && cfg.segment_bytes == 256
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() <= cfg_deadline,
+            "cleanup.policy/segment.bytes never propagated within 10s"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
     // 2. Produce 5 records under 3 keys — k1 has three values (v1, v2, v4);
     //    only v4 should survive compaction.
     let mut child = Command::new("docker")

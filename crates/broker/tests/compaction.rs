@@ -354,6 +354,27 @@ async fn compaction_dedupes_via_native_client() {
     // Wait for the partition to appear in the broker's registry.
     wait_partition_exists(&handle, "compacted", 0).await;
 
+    // Wait for the topic-config overrides (cleanup.policy=compact +
+    // segment.bytes=256) to propagate from the metadata image through the
+    // ReplicatorSupervisor reconcile loop into the partition's LogConfig.
+    // Without this wait, produces can start before the supervisor reconciles,
+    // so they land in a default-config Log (1GiB segments, Delete policy) →
+    // no segment rolls, no compaction, test sees every record.
+    let cfg_deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(cfg) = handle.partition_log_config_for_test("compacted", 0)
+            && cfg.cleanup_policy == crabka_log::CleanupPolicy::Compact
+            && cfg.segment_bytes == 256
+        {
+            break;
+        }
+        assert!(
+            Instant::now() <= cfg_deadline,
+            "cleanup.policy/segment.bytes never propagated to partition LogConfig within 10s"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
     // Get the topic_id (needed for Fetch).
     let topic_id = get_topic_id(addr, "compacted").await;
 
