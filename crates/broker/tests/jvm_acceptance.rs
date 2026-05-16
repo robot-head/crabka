@@ -5927,11 +5927,12 @@ async fn jvm_kafka_configs_alter_client_quota_end_to_end() {
 /// JVM acceptance: `kafka-configs --entity-type ips` KIP-612 round-trip.
 ///
 /// Three-broker SASL/PLAINTEXT cluster; alter + describe (stdout substring) +
-/// delete-config on (ip=127.0.0.1) connection_creation_rate via the JVM admin CLI.
+/// `delete-config` on `(ip=127.0.0.1)` `connection_creation_rate` via the JVM admin CLI.
 /// Wall-time enforcement is not exercised here (single connection doesn't trigger
 /// the rate limit); the Rust integration test in `tests/ip_quotas.rs` covers that.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires Docker"]
+#[allow(clippy::too_many_lines)]
 async fn jvm_kafka_configs_alter_ip_quota_end_to_end() {
     const ADMIN: &str = "admin";
     const ADMIN_PASS: &str = "admin-secret";
