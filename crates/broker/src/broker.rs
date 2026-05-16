@@ -1037,6 +1037,21 @@ impl Broker {
             ));
         }
 
+        // Slice-18: per-broker log compaction ticker. Always-on; the
+        // cleaner internally filters to (leader && cleanup.policy=compact)
+        // partitions so brokers with no compact topics pay nothing.
+        {
+            let partitions = partitions.clone();
+            let shutdown = supervisor_shutdown.child_token();
+            let cfg = crate::cleaner::CleanerConfig::default();
+            tokio::spawn(crate::cleaner::run(
+                partitions,
+                config.node_id,
+                cfg,
+                shutdown,
+            ));
+        }
+
         // KIP-73 throttle refresh task. Always-on; the bucket itself
         // has a rate-0 fast path so unthrottled clusters pay nothing.
         // `throttle_state` was created above (before the supervisor) so it

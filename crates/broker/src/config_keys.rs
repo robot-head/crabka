@@ -288,8 +288,10 @@ mod tests {
     fn apply_cleanup_policy_delete_propagates() {
         let mut overrides = std::collections::BTreeMap::new();
         overrides.insert(CLEANUP_POLICY.to_string(), "delete".to_string());
-        let mut base = crabka_log::LogConfig::default();
-        base.cleanup_policy = crabka_log::CleanupPolicy::Compact;
+        let base = crabka_log::LogConfig {
+            cleanup_policy: crabka_log::CleanupPolicy::Compact,
+            ..crabka_log::LogConfig::default()
+        };
         let out = apply_to_log_config(&overrides, &base);
         assert_eq!(out.cleanup_policy, crabka_log::CleanupPolicy::Delete);
     }

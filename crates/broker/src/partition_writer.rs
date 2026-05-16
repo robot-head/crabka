@@ -103,6 +103,16 @@ pub async fn run(
                 log.lock().expect("log mutex poisoned").set_config(config);
                 let _ = ack.send(());
             }
+            WriterMessage::Compact { ack } => {
+                let result = {
+                    let mut log = log.lock().expect("log mutex poisoned");
+                    log.compact().map_err(crate::error::BrokerError::from)
+                };
+                let _ = ack.send(result);
+                // No `append_notify` — compaction doesn't produce new
+                // records, only consolidates existing ones at the same
+                // absolute offsets.
+            }
             #[cfg(any(test, feature = "test-helpers"))]
             WriterMessage::TestSetLogStart { new_start, ack } => {
                 let result = {

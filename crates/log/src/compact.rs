@@ -161,6 +161,7 @@ pub struct RewriteOutput {
     /// `base_offset` of the new segment (== lowest input segment).
     pub new_base_offset: i64,
     /// Highest absolute offset of any surviving record.
+    #[allow(dead_code)]
     pub new_last_offset: i64,
 }
 
@@ -217,7 +218,7 @@ pub fn rewrite_segments(
     for seg in segments {
         for batch in read_all_batches(seg)? {
             let mut kept: Vec<crabka_protocol::records::Record> = Vec::with_capacity(batch.records.len());
-            for record in batch.records.iter() {
+            for record in &batch.records {
                 let Some(key_bytes) = record.key.as_ref() else {
                     continue;
                 };

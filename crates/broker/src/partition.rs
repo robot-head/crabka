@@ -76,6 +76,11 @@ pub enum WriterMessage {
         config: crabka_log::LogConfig,
         ack: tokio::sync::oneshot::Sender<()>,
     },
+    /// Run one compaction pass. The writer actor serializes this with
+    /// appends to preserve the single-writer invariant on `Log`.
+    Compact {
+        ack: tokio::sync::oneshot::Sender<Result<(), BrokerError>>,
+    },
     /// Trim from the start of the log: drop sealed segments whose last
     /// offset is `< new_start`, advance `log_start_offset` if `new_start`
     /// falls inside the active segment. Returns the resulting
@@ -262,6 +267,20 @@ impl Partition {
         ack_rx
             .await
             .map_err(|_| BrokerError::Replication("ack dropped".into()))?
+    }
+
+    /// Send a `WriterMessage::Compact` to the partition's writer
+    /// actor and await the ack. Used by the broker-wide [`Cleaner`]
+    /// ticker.
+    pub async fn compact_log(&self) -> Result<(), BrokerError> {
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+        self.writer_tx
+            .send(WriterMessage::Compact { ack: ack_tx })
+            .await
+            .map_err(|_| BrokerError::Replication("partition writer dead".into()))?;
+        ack_rx
+            .await
+            .map_err(|_| BrokerError::Replication("compact ack dropped".into()))?
     }
 
     /// First absolute offset still present in the underlying [`Log`].
