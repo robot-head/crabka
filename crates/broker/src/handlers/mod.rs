@@ -71,6 +71,7 @@ pub(crate) mod join_group;
 pub(crate) mod leave_group;
 pub(crate) mod list_groups;
 pub(crate) mod list_offsets;
+pub(crate) mod list_partition_reassignments;
 pub(crate) mod metadata;
 pub(crate) mod offset_commit;
 pub(crate) mod offset_fetch;
