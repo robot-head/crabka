@@ -6382,6 +6382,18 @@ async fn jvm_kafka_console_consumer_sees_compacted_topic_end_to_end() {
             "parse.key=true",
             "--property",
             "key.separator=:",
+            // Force per-record batches so each line is its own RecordBatch.
+            // Default linger.ms=0 already, but batch.size+linger.ms keep
+            // multiple in-flight records bundled when they're submitted
+            // back-to-back. Setting batch.size=1 and max-in-flight=1 makes
+            // each line a separate batch, which is what we need so
+            // segment.bytes=256 actually rolls segments mid-workload.
+            "--producer-property",
+            "batch.size=1",
+            "--producer-property",
+            "linger.ms=0",
+            "--producer-property",
+            "max.in.flight.requests.per.connection=1",
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
