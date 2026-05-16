@@ -9,20 +9,7 @@ feature-depth = 1
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "deny"
-ignore = [
-    # backoff via kube-runtime (kube 0.97). Unmaintained upstream; upstream
-    # recommends `backon` as the replacement. Re-evaluate when kube migrates.
-    "RUSTSEC-2025-0012",
-    # instant via kube-runtime → backoff (kube 0.97). Unmaintained upstream
-    # with no safe upgrade path. Falls away when [RUSTSEC-2025-0012] is
-    # resolved upstream (instant is backoff's only consumer here).
-    "RUSTSEC-2024-0384",
-    # rustls-pemfile via kube-client (kube 0.97). Crate is archived; the
-    # functionality lives in rustls-pki-types which Crabka already uses
-    # directly, but kube-client still pulls it transitively. Re-evaluate when
-    # kube upgrades.
-    "RUSTSEC-2025-0134",
-]
+ignore = []
 
 [licenses]
 allow = [

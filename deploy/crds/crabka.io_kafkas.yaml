@@ -23,7 +23,8 @@ spec:
             description: |-
               Crabka cluster spec.
 
-              Slice 17 ships a placeholder with only `kafka_version`; the real schema lands in slice 18.
+              Slice 17 ships a placeholder with only `kafka_version`; the real
+              schema lands in slice 18.
             properties:
               kafkaVersion:
                 description: Crabka version to deploy (semver). Required.
