@@ -72,6 +72,10 @@ mod tests {
             },
         );
         let json = serde_json::to_string(&k).unwrap();
+        assert!(
+            json.contains("\"kafkaVersion\""),
+            "expected camelCase wire shape, got: {json}"
+        );
         let back: Kafka = serde_json::from_str(&json).unwrap();
         assert_eq!(back.spec, k.spec);
     }
