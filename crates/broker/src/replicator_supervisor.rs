@@ -29,6 +29,7 @@ use crabka_raft::{ControllerHandle, NodeId};
 use crate::broker::spawn_partition;
 use crate::partition::Partition;
 use crate::replicator;
+use crate::throttle::ThrottleState;
 use crate::txn::coordinator::TxnCoordinator;
 
 /// `(topic, partition)` pairs where `node_id` is in `replicas` AND
@@ -153,6 +154,9 @@ pub(crate) struct ReplicatorSupervisor {
     /// Name of the listener whose endpoint we resolve from the
     /// metadata image when dialing peers.
     inter_broker_listener_name: String,
+    /// KIP-73: broker-wide throttle state forwarded to each spawned
+    /// replicator so they can consult the follower-in token bucket.
+    throttle_state: Arc<ThrottleState>,
 }
 
 impl ReplicatorSupervisor {
@@ -169,6 +173,7 @@ impl ReplicatorSupervisor {
         inter_broker_client: Arc<crate::network::client::InterBrokerClient>,
         inter_broker_listener_protocol: crabka_security::ListenerProtocol,
         inter_broker_listener_name: String,
+        throttle_state: Arc<ThrottleState>,
     ) -> Self {
         Self {
             node_id,
@@ -184,6 +189,7 @@ impl ReplicatorSupervisor {
             inter_broker_client,
             inter_broker_listener_protocol,
             inter_broker_listener_name,
+            throttle_state,
         }
     }
 
@@ -324,6 +330,8 @@ impl ReplicatorSupervisor {
                 shutdown: token,
                 inter_broker_client: self.inter_broker_client.clone(),
                 inter_broker_listener_protocol: self.inter_broker_listener_protocol,
+                throttle_state: self.throttle_state.clone(),
+                controller: self.controller.clone(),
             }));
         }
 

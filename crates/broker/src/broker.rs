@@ -797,6 +797,12 @@ impl Broker {
         //    set. With replication_factor=1 the desired follower set is
         //    always empty, so this is a no-op for single-broker setups.
         let supervisor_shutdown = CancellationToken::new();
+
+        // KIP-73 throttle state. Created here so it can be forwarded to
+        // the replicator supervisor (and from there to each replicator
+        // task). The refresh task is spawned later but shares the same Arc.
+        let throttle_state = Arc::new(crate::throttle::ThrottleState::new());
+
         let inter_listener_proto = config
             .effective_listeners()
             .iter()
@@ -814,6 +820,7 @@ impl Broker {
             inter_broker_client.clone(),
             inter_listener_proto,
             config.inter_broker_listener_name.clone(),
+            throttle_state.clone(),
         );
         let supervisor_handle = supervisor.spawn();
 
@@ -989,7 +996,8 @@ impl Broker {
 
         // KIP-73 throttle refresh task. Always-on; the bucket itself
         // has a rate-0 fast path so unthrottled clusters pay nothing.
-        let throttle_state = Arc::new(crate::throttle::ThrottleState::new());
+        // `throttle_state` was created above (before the supervisor) so it
+        // can be forwarded to the replicator.
         {
             let throttle = throttle_state.clone();
             let watcher: Arc<dyn crate::throttle::ImageWatcher> =
