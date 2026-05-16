@@ -17,6 +17,7 @@ use crabka_metadata::{EntityKey, MetadataImage};
 /// All candidate keys are pre-sorted by `entity_type` ("client-id" <
 /// "user" alphabetically), so the lookup runs against the image map
 /// without further canonicalization.
+// Disjoint from `lookup_ip_quota` (which checks `("ip", *)` candidates only).
 #[must_use]
 pub fn lookup_quota(
     image: &MetadataImage,
@@ -55,6 +56,42 @@ pub fn lookup_quota_with_key(
         vec![("client-id".into(), Some(client_id.into()))],
         vec![("user".into(), None)],
         vec![("client-id".into(), None)],
+    ];
+    for key in candidates {
+        if let Some(configs) = image.client_quotas().get(&key)
+            && let Some(&v) = configs.get(quota_key)
+        {
+            return Some((key, v));
+        }
+    }
+    None
+}
+
+/// Lookup an `ip`-scoped quota for `peer_ip`. Priority order:
+///   1. (ip = `Some(peer_ip)`) — specific
+///   2. (ip = None)            — default
+///
+/// Disjoint from `lookup_quota` (which checks `("user", *)` and
+/// `("client-id", *)` candidates only). Used by KIP-612
+/// `connection_creation_rate` enforcement.
+#[must_use]
+pub fn lookup_ip_quota(
+    image: &MetadataImage,
+    peer_ip: &std::net::Ipv4Addr,
+    quota_key: &str,
+) -> Option<f64> {
+    lookup_ip_quota_with_key(image, peer_ip, quota_key).map(|(_, v)| v)
+}
+
+#[must_use]
+pub fn lookup_ip_quota_with_key(
+    image: &MetadataImage,
+    peer_ip: &std::net::Ipv4Addr,
+    quota_key: &str,
+) -> Option<(EntityKey, f64)> {
+    let candidates: [EntityKey; 2] = [
+        vec![("ip".into(), Some(peer_ip.to_string()))],
+        vec![("ip".into(), None)],
     ];
     for key in candidates {
         if let Some(configs) = image.client_quotas().get(&key)
@@ -204,5 +241,68 @@ mod tests {
             lookup_quota(&img, "alice", "app1", "producer_byte_rate"),
             Some(512.0)
         );
+    }
+
+    fn rec_ip(ip: Option<&str>, key: &str, value: f64) -> ClientQuotaRecord {
+        ClientQuotaRecord {
+            entity: vec![QuotaEntity {
+                entity_type: "ip".into(),
+                entity_name: ip.map(Into::into),
+            }],
+            config_key: key.into(),
+            config_value: Some(value),
+        }
+    }
+
+    fn img_with_ip(records: Vec<ClientQuotaRecord>) -> MetadataImage {
+        let mut img = MetadataImage::new(uuid::Uuid::nil());
+        for r in records {
+            img.apply(&MetadataRecord::V1ClientQuota(r));
+        }
+        img
+    }
+
+    #[test]
+    fn ip_specific_match() {
+        let img = img_with_ip(vec![rec_ip(
+            Some("127.0.0.1"),
+            "connection_creation_rate",
+            1.0,
+        )]);
+        let ip: std::net::Ipv4Addr = "127.0.0.1".parse().unwrap();
+        assert_eq!(
+            lookup_ip_quota(&img, &ip, "connection_creation_rate"),
+            Some(1.0)
+        );
+    }
+
+    #[test]
+    fn ip_default_fallback() {
+        let img = img_with_ip(vec![rec_ip(None, "connection_creation_rate", 2.0)]);
+        let ip: std::net::Ipv4Addr = "10.0.0.7".parse().unwrap();
+        assert_eq!(
+            lookup_ip_quota(&img, &ip, "connection_creation_rate"),
+            Some(2.0)
+        );
+    }
+
+    #[test]
+    fn ip_specific_wins_over_default() {
+        let img = img_with_ip(vec![
+            rec_ip(None, "connection_creation_rate", 8.0),
+            rec_ip(Some("127.0.0.1"), "connection_creation_rate", 1.0),
+        ]);
+        let ip: std::net::Ipv4Addr = "127.0.0.1".parse().unwrap();
+        assert_eq!(
+            lookup_ip_quota(&img, &ip, "connection_creation_rate"),
+            Some(1.0)
+        );
+    }
+
+    #[test]
+    fn ip_no_match_returns_none() {
+        let img = img_with_ip(vec![]);
+        let ip: std::net::Ipv4Addr = "127.0.0.1".parse().unwrap();
+        assert!(lookup_ip_quota(&img, &ip, "connection_creation_rate").is_none());
     }
 }

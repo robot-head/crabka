@@ -1205,6 +1205,39 @@ async fn accept_loop(
                 match accept {
                     Ok((stream, peer)) => {
                         tracing::debug!(%peer, name = %spec.name, "accepted connection");
+                        // KIP-612 connection_creation_rate enforcement (slice 16b).
+                        // IPv4 only — slice 13 ACL parity. IPv6 peers skip the quota check.
+                        if let std::net::IpAddr::V4(peer_ipv4) = peer.ip() {
+                            let image = broker.controller.current_image();
+                            if let Some((entity_key, rate)) =
+                                crate::quota::lookup_ip_quota_with_key(
+                                    &image,
+                                    &peer_ipv4,
+                                    "connection_creation_rate",
+                                )
+                                && rate > 0.0
+                            {
+                                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                                let initial_rate = rate.max(1.0) as u64;
+                                let bucket = broker.quota_buckets.get_or_create(
+                                    "connection_creation_rate",
+                                    &entity_key,
+                                    initial_rate,
+                                );
+                                if bucket.try_consume(1) == 0 {
+                                    #[allow(
+                                        clippy::cast_possible_truncation,
+                                        clippy::cast_sign_loss
+                                    )]
+                                    let delay_micros =
+                                        ((1.0_f64 / rate) * 1_000_000.0) as u64;
+                                    let delay =
+                                        std::time::Duration::from_micros(delay_micros)
+                                            .min(std::time::Duration::from_secs(1));
+                                    tokio::time::sleep(delay).await;
+                                }
+                            }
+                        }
                         let b = broker.clone();
                         let s = spec.clone();
                         tokio::spawn(async move {

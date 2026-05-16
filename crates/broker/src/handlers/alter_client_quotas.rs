@@ -24,8 +24,10 @@ const KNOWN_QUOTA_KEYS: &[&str] = &[
     "producer_byte_rate",
     "consumer_byte_rate",
     "request_percentage",
+    "connection_creation_rate", // KIP-612 — only enforced when paired with ip entity
+    "controller_mutation_rate", // KIP-599 (slice 16c)
 ];
-const SUPPORTED_ENTITY_TYPES: &[&str] = &["user", "client-id"];
+const SUPPORTED_ENTITY_TYPES: &[&str] = &["user", "client-id", "ip"];
 
 pub(crate) async fn handle(
     broker: &Broker,
@@ -108,6 +110,13 @@ pub(crate) fn process_one_entry(entry: &EntryData) -> Result<Vec<MetadataRecord>
                 INVALID_REQUEST,
                 format!("duplicate entity_type {:?}", e.entity_type),
             ));
+        }
+        // entity_name == None is fine for ip — that means the default ip entity.
+        if e.entity_type == "ip"
+            && let Some(name) = &e.entity_name
+            && name.parse::<std::net::Ipv4Addr>().is_err()
+        {
+            return Err((INVALID_REQUEST, format!("invalid IPv4 address {name:?}")));
         }
     }
     let mut records = Vec::with_capacity(entry.ops.len());
@@ -277,7 +286,7 @@ mod tests {
     #[test]
     fn unsupported_entity_type_rejected() {
         let e = entry(
-            vec![("ip", Some("10.0.0.1"))],
+            vec![("group", Some("g1"))],
             vec![("producer_byte_rate", 1024.0, false)],
         );
         let err = process_one_entry(&e).unwrap_err();
@@ -316,5 +325,45 @@ mod tests {
         );
         let err3 = process_one_entry(&e3).unwrap_err();
         assert_eq!(err3.0, INVALID_CONFIG);
+    }
+
+    #[test]
+    fn ip_entity_with_valid_ipv4_accepted() {
+        let e = entry(
+            vec![("ip", Some("10.0.0.1"))],
+            vec![("connection_creation_rate", 1.0, false)],
+        );
+        let records = process_one_entry(&e).expect("ok");
+        assert_eq!(records.len(), 1);
+        let MetadataRecord::V1ClientQuota(r) = &records[0] else {
+            panic!()
+        };
+        assert_eq!(r.config_key, "connection_creation_rate");
+        assert_eq!(r.config_value, Some(1.0));
+    }
+
+    #[test]
+    fn ip_entity_with_invalid_address_rejected() {
+        let e = entry(
+            vec![("ip", Some("not-an-ip"))],
+            vec![("connection_creation_rate", 1.0, false)],
+        );
+        let err = process_one_entry(&e).unwrap_err();
+        assert_eq!(err.0, INVALID_REQUEST);
+    }
+
+    #[test]
+    fn controller_mutation_rate_key_accepted() {
+        let e = entry(
+            vec![("user", Some("alice"))],
+            vec![("controller_mutation_rate", 2.0, false)],
+        );
+        let records = process_one_entry(&e).expect("ok");
+        assert_eq!(records.len(), 1);
+        let MetadataRecord::V1ClientQuota(r) = &records[0] else {
+            panic!("wrong variant");
+        };
+        assert_eq!(r.config_key, "controller_mutation_rate");
+        assert_eq!(r.config_value, Some(2.0));
     }
 }

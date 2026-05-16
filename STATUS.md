@@ -381,3 +381,41 @@ Kafka client for ApiVersions.
 - **Known limitation:** `kafka-configs --describe --entity-type users` calls `DescribeUserScramCredentials` (api_key 51) after fetching quotas. Crabka does not implement api_key 51 yet, so the JVM tool exits non-zero even though the quota stdout is correct. JVM acceptance test asserts on stdout substring instead of exit code. Follow-up: implement api_key 51.
 - **Known limitation:** `throttle_time_ms` in the response is only set for Produce + Fetch. Other handlers absorb the `request_percentage` delay silently. Closing this requires routing the throttle value through the handler trait — deferred.
 - Out of scope: `ip` entity + KIP-612 connection_creation_rate (slice 16b), KIP-599 controller_mutation_rate (slice 16c).
+
+## Slice 16b — IP quotas + KIP-612 (2026-05-15)
+
+- `ip` entity type recognized by `AlterClientQuotas` (api_key 49) and `DescribeClientQuotas` (api_key 48). IPv4 only — entity_name validated via `Ipv4Addr::from_str`; IPv6 rejected with `INVALID_REQUEST` (slice-13 ACL parity).
+- New `connection_creation_rate` quota key (KIP-612). Stored in `ClientQuotaRecord` like any other quota; no new metadata record.
+- `lookup_ip_quota` + `lookup_ip_quota_with_key` in `crates/broker/src/quota/lookup.rs` — two-priority (specific IP → default). Disjoint from the 8-priority user/client-id lookup. 4 unit tests.
+- Validator extension in `process_one_entry`: `SUPPORTED_ENTITY_TYPES` += `"ip"`; `KNOWN_QUOTA_KEYS` += `"connection_creation_rate"`; IPv4 validation on `entity_name`. 2 unit tests.
+- **T2 caught a slice 16 test bug:** `unsupported_entity_type_rejected` used `"ip"` as the example unsupported entity type. Since slice 16b now SUPPORTS `ip`, that test would have silently started passing against the wrong code path. T2 changed the example to `"group"` to keep the test honest.
+- TCP accept enforcement in `broker.rs` accept loop. After `listener.accept()` returns `(stream, peer)`, look up `(ip=peer.ip())` `connection_creation_rate`; if rate > 0 and bucket exhausted, compute `delay = 1/rate` seconds (capped at 1s) and `tokio::time::sleep` before spawning the per-connection handler. Connection is never rejected — only delayed (KIP-612 semantic).
+- **T4 wall-time tolerance is `≥1.5s` not `≥3s` per plan.** `TcpStream::connect()` returns at the OS TCP handshake level — the throttle delays the broker's RESPONSE to the first request, not the TCP handshake itself. T4 sends an ApiVersions request on each connection and times the full round-trip. Additionally, the token bucket refills during the sleep interval, so 5 connections at rate=1 take ~2s not ~4s (correct token-bucket behavior, just different from the naive sequential expectation).
+- 3 broker integration tests in `tests/ip_quotas.rs`: SASL/PLAIN alter+describe round-trip, accept-throttle wall-clock proof (≥1.5s for 5 connections at rate=1/sec), unthrottled baseline (<500ms). Gated `#![cfg(not(target_os = "windows"))]`; run in CI on Linux.
+- **T5 positive surprise:** `--describe --entity-type ips` does NOT trigger the `DescribeUserScramCredentials` side-call that slice 16's user-scoped describe hit. Exit code is 0 cleanly — no stdout-substring workaround needed. The JVM describe assertion uses `assert_status_success`.
+- 1 new JVM acceptance test for `kafka-configs --entity-type ips` alter + describe + delete-config round-trip.
+- **Known limitations:**
+  - Sub-1-connection-per-second rates floor to 1 — `rate.max(1.0) as u64` to avoid the "0 tokens/sec = always blocked" footgun. Production operators don't configure sub-1 rates.
+  - Byte-rate quotas on `(ip)` entity are accepted by the validator but not enforced (matches Kafka's permissive validator).
+  - Per-IP bucket cache grows unbounded over the broker's lifetime (inherits slice 16's no-eviction limitation).
+- Out of scope: IPv6 entity names, connection rejection (vs delay), `controller_mutation_rate` (KIP-599 — slice 16c).
+
+## Slice 16c — controller_mutation_rate (2026-05-15)
+
+- KIP-599 `controller_mutation_rate` quota type — partition-mutations-per-second; user / client-id entity scopes (no IP per KIP-599).
+- Validator extension: `KNOWN_QUOTA_KEYS += "controller_mutation_rate"` in `alter_client_quotas.rs`. 1 unit test.
+- New helper `consume_controller_mutation_quota` in `crates/broker/src/quota/controller_mutation.rs`. Reuses slice-16's `lookup_quota_with_key` (8-priority) and `QuotaBuckets`. 3 unit tests.
+- Enforcement on three handlers:
+  - `CreateTopics` — mutation count = sum of `num_partitions` across all topics (`-1` → 1 for accounting).
+  - `CreatePartitions` — count = sum of `(target_count - current_partition_count)` across topics; nonexistent topics count their full target.
+  - `DeleteTopics` — count = sum of partition counts (image lookup); nonexistent topics count 0.
+- Counted BEFORE handler runs (so invalid requests still count — bad-faith clients can't escape the throttle by spamming malformed RPCs).
+- Throttle delay set on `throttle_time_ms` + `tokio::time::sleep` before encoding response. Capped at 1 second per slice-16 convention.
+- 3 broker integration tests (`tests/controller_mutation_quota.rs`): throttled CreateTopics with wall-clock proof, unthrottled baseline, throttled DeleteTopics.
+  - **T6 ACL correction:** the plan suggested seeding a `Cluster Delete` ACL for the DeleteTopics throttle test, but Crabka's authorizer checks `ResourceType::Topic` + `AclOperation::Delete` on the specific topic name (not a cluster-level operation). T6 was corrected to seed `Topic Delete` on `"to-delete"` to match the actual authorizer behavior.
+- 1 new JVM acceptance test (`jvm_kafka_configs_alter_controller_mutation_rate_end_to_end`).
+  - **T7 finding:** `kafka-configs --delete-config --entity-type users` also exits non-zero due to the `DescribeUserScramCredentials` side-call — not just `--describe` as slice 16 T13 documented. T7 used raw `std::process::Command` for both the `--describe` and `--delete-config` steps (asserting on stdout substring and image state respectively) to work around this.
+- **Inherits slice 16 known limitations:**
+  - `client_id` not threaded through `HandlerTable` — `(user, client-id)` tuple quotas don't fire from these handlers; `(user)`-only quotas work. Closing requires the slice-16 cleanup work.
+  - Per-entity bucket cache grows unbounded over broker's lifetime.
+- Out of scope: IP entity (KIP-599 doesn't apply to IP); other admin operations (ACL CRUD, IncrementalAlterConfigs, AlterPartitionReassignments — KIP-599 limits to topic/partition CRUD).

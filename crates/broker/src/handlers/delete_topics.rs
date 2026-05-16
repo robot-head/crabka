@@ -60,6 +60,17 @@ pub(crate) async fn handle(
         }
     }
 
+    // KIP-599: count partition mutations before running the delete logic.
+    // Nonexistent topics (name_opt = None) contribute 0 partitions.
+    let mutation_count: u64 = name_list
+        .iter()
+        .map(|name_opt| {
+            name_opt
+                .as_deref()
+                .map_or(0, |name| image.partitions_of(name).count() as u64)
+        })
+        .sum();
+
     // ── slice-13 ACL preamble ────────────────────────────────────────
     // Batch-authorize every topic name for `Delete`. Topics that come
     // back `Deny` short-circuit the delete loop and emit
@@ -144,9 +155,23 @@ pub(crate) async fn handle(
         });
     }
 
+    // KIP-599: apply controller_mutation_rate throttle after response assembly.
+    let principal_name = principal.name.as_str();
+    let delay = crate::quota::consume_controller_mutation_quota(
+        &image,
+        &broker.quota_buckets,
+        principal_name,
+        "", // client_id not threaded through HandlerTable — slice-16 known limitation
+        mutation_count,
+    );
+    let throttle_time_ms = i32::try_from(delay.as_millis()).unwrap_or(i32::MAX);
+    if delay > std::time::Duration::ZERO {
+        tokio::time::sleep(delay).await;
+    }
+
     let resp = DeleteTopicsResponse {
         responses: results,
-        throttle_time_ms: 0,
+        throttle_time_ms,
         ..Default::default()
     };
     let mut buf = BytesMut::with_capacity(resp.encoded_len(version));

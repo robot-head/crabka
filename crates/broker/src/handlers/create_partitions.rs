@@ -43,6 +43,20 @@ pub(crate) async fn handle(
 
     let image = controller.current_image();
 
+    // KIP-599: count partition mutations before running handler logic so that
+    // even invalid/rejected requests consume quota (bad-faith clients can't
+    // escape throttling by sending malformed RPCs).
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    let mutation_count: u64 = req
+        .topics
+        .iter()
+        .map(|t| {
+            let current: i32 =
+                i32::try_from(image.partitions_of(&t.name).count()).unwrap_or(i32::MAX);
+            (t.count - current).max(0) as u64
+        })
+        .sum();
+
     // ── slice-13 ACL preamble ────────────────────────────────────────
     // Batch-authorize every topic name for `Alter`. Topics that come
     // back `Deny` short-circuit the partition-change loop and emit
@@ -191,11 +205,24 @@ pub(crate) async fn handle(
         results.push(out);
     }
 
+    // KIP-599: apply controller_mutation_rate throttle after response assembly,
+    // before encoding. Sets throttle_time_ms and sleeps so the client waits.
+    let principal_name = principal.name.as_str();
+    let delay = crate::quota::consume_controller_mutation_quota(
+        &image,
+        &broker.quota_buckets,
+        principal_name,
+        "", // client_id not threaded through HandlerTable — slice-16 known limitation
+        mutation_count,
+    );
     let resp = CreatePartitionsResponse {
         results,
-        throttle_time_ms: 0,
+        throttle_time_ms: i32::try_from(delay.as_millis()).unwrap_or(i32::MAX),
         ..Default::default()
     };
+    if delay > std::time::Duration::ZERO {
+        tokio::time::sleep(delay).await;
+    }
     let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
     resp.encode(&mut buf, version)?;
     Ok(buf.freeze())
