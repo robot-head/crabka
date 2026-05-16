@@ -21,9 +21,17 @@ pub struct MetadataImage {
     partitions: HashMap<(String, i32), PartitionRecord>,
     brokers: HashMap<NodeId, BrokerRegistrationRecord>,
     topic_configs: HashMap<String, BTreeMap<String, String>>,
+    broker_configs: HashMap<NodeId, BTreeMap<String, String>>,
     scram_credentials: HashMap<(String, SaslMechanism), ScramCredential>,
     acls_literal: HashMap<(ResourceType, String), Vec<AclEntry>>,
     acls_prefixed: HashMap<ResourceType, Vec<AclEntry>>,
+}
+
+/// Selects which KIP-73 throttle rate config key to read.
+#[derive(Debug, Clone, Copy)]
+pub enum ThrottleKind {
+    Leader,
+    Follower,
 }
 
 impl MetadataImage {
@@ -35,6 +43,7 @@ impl MetadataImage {
             partitions: HashMap::new(),
             brokers: HashMap::new(),
             topic_configs: HashMap::new(),
+            broker_configs: HashMap::new(),
             scram_credentials: HashMap::new(),
             acls_literal: HashMap::new(),
             acls_prefixed: HashMap::new(),
@@ -81,6 +90,28 @@ impl MetadataImage {
     #[must_use]
     pub fn topic_config(&self, topic: &str) -> Option<&BTreeMap<String, String>> {
         self.topic_configs.get(topic)
+    }
+
+    /// Per-broker config overrides for `node_id`, or `None` if no
+    /// `V1BrokerConfig` record has been applied for this broker.
+    #[must_use]
+    pub fn broker_config(&self, node_id: NodeId) -> Option<&BTreeMap<String, String>> {
+        self.broker_configs.get(&node_id)
+    }
+
+    /// Returns the throttle rate in bytes/sec for `node_id` and `kind`.
+    /// Returns `None` if the config key is absent, unparseable, or is `-1`
+    /// (Kafka convention for "disabled / unlimited").
+    #[must_use]
+    pub fn broker_throttle_rate(&self, node_id: NodeId, kind: ThrottleKind) -> Option<u64> {
+        let key = match kind {
+            ThrottleKind::Leader => "leader.replication.throttled.rate",
+            ThrottleKind::Follower => "follower.replication.throttled.rate",
+        };
+        let raw = self.broker_config(node_id)?.get(key)?;
+        let v: i64 = raw.parse().ok()?;
+        #[allow(clippy::cast_sign_loss)]
+        if v < 0 { None } else { Some(v as u64) }
     }
 
     #[must_use]
@@ -202,6 +233,17 @@ impl MetadataImage {
                     !v.is_empty()
                 });
             }
+            MetadataRecord::V1BrokerConfig(rec) => {
+                let entry = self.broker_configs.entry(rec.node_id).or_default();
+                match &rec.config_value {
+                    Some(v) => {
+                        entry.insert(rec.config_name.clone(), v.clone());
+                    }
+                    None => {
+                        entry.remove(&rec.config_name);
+                    }
+                }
+            }
         }
     }
 
@@ -253,7 +295,8 @@ impl MetadataImage {
             | MetadataRecord::V1ScramCredential(_)
             | MetadataRecord::V1DeleteScramCredential(_)
             | MetadataRecord::V1AccessControlEntry(_)
-            | MetadataRecord::V1DeleteAccessControlEntry(_) => Ok(()),
+            | MetadataRecord::V1DeleteAccessControlEntry(_)
+            | MetadataRecord::V1BrokerConfig(_) => Ok(()),
         }
     }
 }
@@ -262,7 +305,9 @@ impl MetadataImage {
 mod tests {
     use super::*;
     use crate::acl::{AclEntryFilter, AclOperation, PermissionType};
-    use crate::records::{DeleteScramCredentialRecord, DeleteTopicRecord, ScramCredentialRecord};
+    use crate::records::{
+        BrokerConfigRecord, DeleteScramCredentialRecord, DeleteTopicRecord, ScramCredentialRecord,
+    };
 
     fn img() -> MetadataImage {
         MetadataImage::new(Uuid::nil())
@@ -716,5 +761,62 @@ mod tests {
             }));
         }
         assert_eq!(img.reassignments_in_flight().count(), 2);
+    }
+
+    #[test]
+    fn broker_config_set_inserts_into_image() {
+        let mut img = MetadataImage::new(uuid::Uuid::nil());
+        img.apply(&MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
+            node_id: 1,
+            config_name: "leader.replication.throttled.rate".into(),
+            config_value: Some("2048".into()),
+        }));
+        let bc = img.broker_config(1).expect("broker config");
+        assert_eq!(
+            bc.get("leader.replication.throttled.rate"),
+            Some(&"2048".to_string())
+        );
+    }
+
+    #[test]
+    fn broker_config_delete_removes_from_image() {
+        let mut img = MetadataImage::new(uuid::Uuid::nil());
+        img.apply(&MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
+            node_id: 1,
+            config_name: "leader.replication.throttled.rate".into(),
+            config_value: Some("2048".into()),
+        }));
+        img.apply(&MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
+            node_id: 1,
+            config_name: "leader.replication.throttled.rate".into(),
+            config_value: None,
+        }));
+        let bc = img.broker_config(1).expect("broker_configs entry retained");
+        assert!(bc.get("leader.replication.throttled.rate").is_none());
+    }
+
+    #[test]
+    fn broker_throttle_rate_parses_positive_value() {
+        let mut img = MetadataImage::new(uuid::Uuid::nil());
+        img.apply(&MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
+            node_id: 1,
+            config_name: "leader.replication.throttled.rate".into(),
+            config_value: Some("2048".into()),
+        }));
+        assert_eq!(
+            img.broker_throttle_rate(1, ThrottleKind::Leader),
+            Some(2048)
+        );
+    }
+
+    #[test]
+    fn broker_throttle_rate_returns_none_for_negative_one() {
+        let mut img = MetadataImage::new(uuid::Uuid::nil());
+        img.apply(&MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
+            node_id: 1,
+            config_name: "leader.replication.throttled.rate".into(),
+            config_value: Some("-1".into()),
+        }));
+        assert!(img.broker_throttle_rate(1, ThrottleKind::Leader).is_none());
     }
 }
