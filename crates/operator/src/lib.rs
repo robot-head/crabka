@@ -11,4 +11,5 @@ pub mod crd;
 pub mod gen_crds;
 pub mod health;
 pub mod leader_election;
+pub mod run;
 pub mod telemetry;

@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 
 use crabka_operator::config::OperatorConfig;
+use crabka_operator::{gen_crds, run};
 
 #[derive(Debug, Parser)]
 #[command(name = "crabka-operator", version, about)]
@@ -13,7 +14,7 @@ struct Cli {
 enum Command {
     /// Run the operator: watch CRDs and reconcile.
     Run(RunArgs),
-    /// Emit CRD YAML manifests to a directory (for committing under deploy/crds/).
+    /// Emit CRD YAML manifests to a directory.
     GenCrds { out_dir: std::path::PathBuf },
 }
 
@@ -23,10 +24,11 @@ struct RunArgs {
     config: OperatorConfig,
 }
 
-fn main() -> anyhow::Result<()> {
+#[tokio::main(flavor = "multi_thread")]
+async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Run(_) => anyhow::bail!("`run` not implemented yet (Task 9)"),
-        Command::GenCrds { out_dir } => crabka_operator::gen_crds::write_all(&out_dir),
+        Command::Run(args) => run::run(args.config).await,
+        Command::GenCrds { out_dir } => gen_crds::write_all(&out_dir),
     }
 }
