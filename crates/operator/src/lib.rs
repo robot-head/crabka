@@ -5,3 +5,4 @@
 //! so they can be unit-tested without spinning up the binary.
 
 pub mod config;
+pub mod crd;
