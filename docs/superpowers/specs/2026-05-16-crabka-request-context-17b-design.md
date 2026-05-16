@@ -95,36 +95,37 @@ pub(crate) async fn handle(
 
 In-handler references `principal` / `peer` become `ctx.principal` / `ctx.peer`. New `ctx.client_id` is available where needed (5 sites in this slice).
 
-### Inline-intercept handler inventory (22 modules)
+### Inline-intercept handler inventory (30 modules, 2 signature families)
 
-From `crates/broker/src/handlers/mod.rs` comments + the `handle_*_frame` fns in `dispatch.rs`:
+Enumerated from `grep '^async fn handle_\w+_frame' crates/broker/src/network/dispatch.rs` (30 frame fns).
 
-| Module | `api_key` |
-|---|---|
-| `produce` | 0 |
-| `fetch` | 1 |
-| `metadata` | 3 |
-| `offset_commit` | 8 |
-| `offset_fetch` | 9 |
-| `join_group` | 11 |
-| `describe_groups` | 15 |
-| `list_groups` | 16 |
-| `create_topics` | 19 |
-| `delete_topics` | 20 |
-| `delete_records` | 21 |
-| `init_producer_id` | 22 |
-| `add_partitions_to_txn` (in `txn::handlers`) | 24 |
-| `end_txn` (in `txn::handlers`) | 26 |
-| `txn_offset_commit` (in `txn::handlers`) | 28 |
-| `alter_configs` | 33 |
-| `create_partitions` | 37 |
-| `delete_groups` | 42 |
-| `incremental_alter_configs` | 44 |
-| `describe_user_scram_credentials` | 50 |
-| `alter_user_scram_credentials` | 51 |
-| `describe_cluster` | 60 |
+**Family A — "raw bytes" handlers** (20 modules). Current signature:
+```rust
+pub(crate) async fn handle(broker: &Broker, version: i16, _correlation_id: i32,
+    req_bytes: &[u8], principal: &Principal, peer: &SocketAddr) -> Result<Bytes, BrokerError>
+```
+becomes
+```rust
+pub(crate) async fn handle(broker: &Broker, version: i16, _correlation_id: i32,
+    req_bytes: &[u8], ctx: &RequestContext<'_>) -> Result<Bytes, BrokerError>
+```
 
-Each module's `handle` plus its `handle_*_frame` caller in `dispatch.rs` is touched in one mechanical pass. No behavior change for the ~17 non-quota handlers — pure parameter repack.
+Modules: `produce` (0), `fetch` (1), `metadata` (3), `offset_commit` (8), `offset_fetch` (9), `join_group` (11), `describe_groups` (15), `list_groups` (16), `create_topics` (19), `delete_topics` (20), `delete_records` (21), `init_producer_id` (22), `txn::handlers::add_partitions_to_txn` (24), `txn::handlers::end_txn` (26), `txn::handlers::txn_offset_commit` (28), `alter_configs` (33), `create_partitions` (37), `delete_groups` (42), `incremental_alter_configs` (44), `describe_cluster` (60).
+
+**Family B — "decoded request" handlers** (10 modules). Current signature:
+```rust
+pub(crate) async fn handle(broker: &Broker, req: <Type>,
+    principal: &Principal, peer: &SocketAddr, api_version: i16) -> Result<Bytes, BrokerError>
+```
+becomes
+```rust
+pub(crate) async fn handle(broker: &Broker, req: <Type>,
+    ctx: &RequestContext<'_>, api_version: i16) -> Result<Bytes, BrokerError>
+```
+
+Modules: `describe_acls` (29), `create_acls` (30), `delete_acls` (31), `alter_partition_reassignments` (45), `list_partition_reassignments` (46), `describe_client_quotas` (48), `alter_client_quotas` (49), `describe_user_scram_credentials` (50), `alter_user_scram_credentials` (51), `elect_leaders` (54).
+
+Each module's `handle` plus its `handle_*_frame` caller in `dispatch.rs` is touched in one mechanical pass. No behavior change for the 25 non-quota handlers — pure parameter repack.
 
 ---
 
@@ -247,7 +248,16 @@ crates/broker/src/txn/handlers/
 ├── add_partitions_to_txn.rs                         # MODIFIED — sig
 ├── end_txn.rs                                       # MODIFIED — sig
 └── txn_offset_commit.rs                             # MODIFIED — sig
-crates/broker/src/network/dispatch.rs                # MODIFIED — 22 frame fns
+crates/broker/src/network/dispatch.rs                # MODIFIED — 30 frame fns
+crates/broker/src/handlers/                          # ALSO MODIFIED (Family B, not listed above):
+├── describe_acls.rs                                 #   sig only
+├── create_acls.rs                                   #   sig only
+├── delete_acls.rs                                   #   sig only
+├── describe_client_quotas.rs                        #   sig only
+├── alter_client_quotas.rs                           #   sig only
+├── alter_partition_reassignments.rs                 #   sig only
+├── list_partition_reassignments.rs                  #   sig only
+└── elect_leaders.rs                                 #   sig only
 crates/broker/tests/
 └── tuple_quota_enforcement.rs                       # NEW — 1 integration test
 ```
