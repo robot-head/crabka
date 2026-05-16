@@ -65,6 +65,12 @@ pub fn build_offset_map(segments: &[&Segment]) -> Result<HashMap<Vec<u8>, i64>, 
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::similar_names,
+    clippy::redundant_closure,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap
+)]
 mod build_map_tests {
     use super::*;
     use bytes::Bytes;
@@ -74,15 +80,15 @@ mod build_map_tests {
     pub(super) fn make_record(offset_delta: i32, key: Option<&[u8]>, value: Option<&[u8]>) -> Record {
         Record {
             offset_delta,
-            key: key.map(|k| Bytes::copy_from_slice(k)),
-            value: value.map(|v| Bytes::copy_from_slice(v)),
+            key: key.map(Bytes::copy_from_slice),
+            value: value.map(Bytes::copy_from_slice),
             ..Default::default()
         }
     }
 
     pub(super) fn write_sealed_segment(dir: &Path, base_offset: i64, records: Vec<Record>) -> Segment {
         let mut seg = Segment::create(dir, base_offset).unwrap();
-        let n = records.len() as i32;
+        let n = i32::try_from(records.len()).expect("record count fits i32");
         let max_ts = records.iter().map(|r| r.timestamp_delta).max().unwrap_or(0);
         let batch = RecordBatch {
             base_offset,
@@ -279,6 +285,7 @@ fn swap_path(dir: &Path, base_offset: i64, ext: &str) -> PathBuf {
 }
 
 #[cfg(test)]
+#[allow(clippy::similar_names)]
 mod rewrite_tests {
     use super::*;
     use super::build_map_tests::{make_record, write_sealed_segment};
@@ -417,6 +424,7 @@ pub fn atomic_swap(
 }
 
 #[cfg(test)]
+#[allow(clippy::similar_names)]
 mod swap_tests {
     use super::*;
     use super::build_map_tests::{make_record, write_sealed_segment};

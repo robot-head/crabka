@@ -1207,8 +1207,10 @@ mod tests {
     #[test]
     fn compact_no_op_when_only_one_segment() {
         let dir = tempdir().unwrap();
-        let mut cfg = LogConfig::default();
-        cfg.cleanup_policy = crate::CleanupPolicy::Compact;
+        let cfg = LogConfig {
+            cleanup_policy: crate::CleanupPolicy::Compact,
+            ..Default::default()
+        };
         let mut log = Log::open(dir.path(), cfg).unwrap();
         let mut b = keyed_batch(0, &[(0, b"k1", b"v1")]);
         log.append(&mut b).unwrap();
@@ -1220,9 +1222,11 @@ mod tests {
     #[test]
     fn compact_dedupes_sealed_segments_keeps_active_intact() {
         let dir = tempdir().unwrap();
-        let mut cfg = LogConfig::default();
-        cfg.cleanup_policy = crate::CleanupPolicy::Compact;
-        cfg.segment_bytes = 256; // force rolls
+        let cfg = LogConfig {
+            cleanup_policy: crate::CleanupPolicy::Compact,
+            segment_bytes: 256, // force rolls
+            ..Default::default()
+        };
         let mut log = Log::open(dir.path(), cfg).unwrap();
 
         // Write 3 sealed segments, each with one record under "k1".
@@ -1264,9 +1268,11 @@ mod tests {
     #[test]
     fn compact_is_idempotent() {
         let dir = tempdir().unwrap();
-        let mut cfg = LogConfig::default();
-        cfg.cleanup_policy = crate::CleanupPolicy::Compact;
-        cfg.segment_bytes = 256;
+        let cfg = LogConfig {
+            cleanup_policy: crate::CleanupPolicy::Compact,
+            segment_bytes: 256,
+            ..Default::default()
+        };
         let mut log = Log::open(dir.path(), cfg).unwrap();
         for i in 0..3 {
             let v = format!("v{i}");
