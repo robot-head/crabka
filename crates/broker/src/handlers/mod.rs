@@ -44,6 +44,7 @@ impl HandlerTable {
 }
 
 pub(crate) mod acl_wire;
+pub(crate) mod alter_client_quotas;
 pub(crate) mod alter_configs;
 pub(crate) mod alter_partition;
 pub(crate) mod alter_partition_reassignments;
@@ -58,6 +59,7 @@ pub(crate) mod delete_groups;
 pub(crate) mod delete_records;
 pub(crate) mod delete_topics;
 pub(crate) mod describe_acls;
+pub(crate) mod describe_client_quotas;
 pub(crate) mod describe_cluster;
 pub(crate) mod describe_configs;
 pub(crate) mod describe_groups;

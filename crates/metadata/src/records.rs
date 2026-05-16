@@ -85,6 +85,20 @@ pub struct BrokerConfigRecord {
     pub config_value: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct QuotaEntity {
+    pub entity_type: String,
+    pub entity_name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClientQuotaRecord {
+    /// Canonicalized entity tuple — sorted by `entity_type` alphabetically.
+    pub entity: Vec<QuotaEntity>,
+    pub config_key: String,
+    pub config_value: Option<f64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScramCredentialRecord {
     pub user: String,
@@ -101,7 +115,7 @@ pub struct DeleteScramCredentialRecord {
     pub mechanism: crabka_security::SaslMechanism,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum MetadataRecord {
     V1Topic(TopicRecord),
@@ -114,6 +128,7 @@ pub enum MetadataRecord {
     V1AccessControlEntry(crate::AclEntry),
     V1DeleteAccessControlEntry(crate::AclEntryFilter),
     V1BrokerConfig(BrokerConfigRecord),
+    V1ClientQuota(ClientQuotaRecord),
 }
 
 #[cfg(test)]
@@ -260,6 +275,25 @@ mod tests {
             node_id: 7,
             config_name: "leader.replication.throttled.rate".into(),
             config_value: Some("2048".into()),
+        });
+        assert_eq!(round_trip(&r), r);
+    }
+
+    #[test]
+    fn client_quota_record_round_trip() {
+        let r = MetadataRecord::V1ClientQuota(ClientQuotaRecord {
+            entity: vec![
+                QuotaEntity {
+                    entity_type: "client-id".into(),
+                    entity_name: Some("app1".into()),
+                },
+                QuotaEntity {
+                    entity_type: "user".into(),
+                    entity_name: Some("alice".into()),
+                },
+            ],
+            config_key: "producer_byte_rate".into(),
+            config_value: Some(1024.0),
         });
         assert_eq!(round_trip(&r), r);
     }

@@ -51,6 +51,9 @@ pub struct Broker {
     /// KIP-73 throttle buckets. Updated by the throttle refresh task and
     /// consulted by the Fetch handler and replicator.
     pub throttle_state: Arc<crate::throttle::ThrottleState>,
+    /// KIP-13/KIP-124 quota buckets. Updated by the quota refresh task and
+    /// consulted by the Produce/Fetch handlers and request-rate enforcement.
+    pub quota_buckets: Arc<crate::quota::QuotaBuckets>,
     handlers: HandlerTable,
 }
 
@@ -565,6 +568,24 @@ impl crate::throttle::ImageWatcher for ThrottleControllerAdapter {
     }
 }
 
+/// Wraps a real [`crabka_raft::ControllerHandle`] so it can satisfy the
+/// [`crate::quota::ImageWatcher`] trait required by the quota refresh
+/// background task. Every broker runs this (not just the controller leader)
+/// since each broker enforces its own quotas via its own buckets.
+struct QuotaControllerAdapter {
+    handle: Arc<crabka_raft::ControllerHandle>,
+}
+
+impl crate::quota::ImageWatcher for QuotaControllerAdapter {
+    fn current_image(&self) -> Arc<crabka_metadata::MetadataImage> {
+        self.handle.current_image()
+    }
+
+    fn watch_image(&self) -> tokio::sync::watch::Receiver<Arc<crabka_metadata::MetadataImage>> {
+        self.handle.watch_image()
+    }
+}
+
 impl Broker {
     /// Build a `Broker`, scan the log dir, spawn partition writers for
     /// every existing `<topic>-<partition>/`, bind the TCP listener, and
@@ -1031,6 +1052,18 @@ impl Broker {
             tokio::spawn(crate::throttle::run(watcher, node_id, throttle, shutdown));
         }
 
+        // KIP-13/KIP-124 quota refresh task. Always-on; every broker
+        // enforces its own quotas via its own buckets (no leader gate needed).
+        let quota_buckets = Arc::new(crate::quota::QuotaBuckets::new());
+        {
+            let buckets = quota_buckets.clone();
+            let watcher: Arc<dyn crate::quota::ImageWatcher> = Arc::new(QuotaControllerAdapter {
+                handle: controller.clone(),
+            });
+            let shutdown = supervisor_shutdown.child_token();
+            tokio::spawn(crate::quota::run(watcher, buckets, shutdown));
+        }
+
         // 5. Build handler table.
         let handlers = crate::handlers::build_table();
 
@@ -1077,6 +1110,7 @@ impl Broker {
             tls_acceptor,
             inter_broker_client,
             throttle_state,
+            quota_buckets,
             handlers,
         });
 

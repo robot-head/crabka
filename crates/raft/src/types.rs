@@ -14,7 +14,7 @@ pub type Node = openraft::BasicNode;
 /// What we ask Raft to replicate. A batch of `MetadataRecord`s so
 /// `submit_change` can group related records (Topic + N Partitions)
 /// in a single committed entry.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AppData {
     pub records: Vec<MetadataRecord>,
 }

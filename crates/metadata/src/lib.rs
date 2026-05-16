@@ -20,9 +20,9 @@ mod records;
 
 pub use acl::{AclEntry, AclEntryFilter, AclOperation, PatternType, PermissionType, ResourceType};
 pub use error::MetadataError;
-pub use image::{MetadataImage, ThrottleKind};
+pub use image::{EntityKey, MetadataImage, ThrottleKind, canonicalize_entity};
 pub use records::{
-    BrokerConfigRecord, BrokerEndpoint, BrokerRegistrationRecord, DeleteScramCredentialRecord,
-    DeleteTopicRecord, MetadataRecord, NodeId, PartitionRecord, ScramCredentialRecord,
-    TopicConfigRecord, TopicRecord,
+    BrokerConfigRecord, BrokerEndpoint, BrokerRegistrationRecord, ClientQuotaRecord,
+    DeleteScramCredentialRecord, DeleteTopicRecord, MetadataRecord, NodeId, PartitionRecord,
+    QuotaEntity, ScramCredentialRecord, TopicConfigRecord, TopicRecord,
 };

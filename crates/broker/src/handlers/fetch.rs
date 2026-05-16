@@ -341,8 +341,28 @@ pub(crate) async fn handle(
         }
     }
 
+    // Consumer fetches (replica_id < 0) use client quotas; inter-broker
+    // fetches (replica_id >= 0) use KIP-73 throttle from slice 15b.
+    let mut throttle_time_ms_val: i32 = 0;
+    if !is_follower_fetch {
+        // KIP-13 consumer_byte_rate. Mutually exclusive with slice-15b's
+        // inter-broker leader throttle (which fires only when replica_id >= 0).
+        let total_bytes = sum_response_bytes(&responses);
+        let delay = consume_consumer_quota(
+            &image,
+            &broker.quota_buckets,
+            &principal.name,
+            "",
+            total_bytes,
+        );
+        if delay > Duration::ZERO {
+            throttle_time_ms_val = i32::try_from(delay.as_millis()).unwrap_or(i32::MAX);
+            tokio::time::sleep(delay).await;
+        }
+    }
+
     let resp = FetchResponse {
-        throttle_time_ms: 0,
+        throttle_time_ms: throttle_time_ms_val,
         error_code: 0,
         session_id: 0,
         responses,
@@ -555,6 +575,50 @@ fn truncate_throttled_responses(
             remaining = 0;
         }
     }
+}
+
+/// Sum the encoded byte sizes of all record batches across all topic partitions
+/// in the assembled Fetch response. Used by the KIP-13 `consumer_byte_rate` hook.
+fn sum_response_bytes(responses: &[FetchableTopicResponse]) -> u64 {
+    responses
+        .iter()
+        .flat_map(|t| t.partitions.iter())
+        .map(|p| p.records.as_ref().map_or(0, RecordBatch::encoded_len) as u64)
+        .sum()
+}
+
+/// KIP-13 `consumer_byte_rate` enforcement. Looks up the matching quota for
+/// `(principal, client_id)`, consumes `bytes` from the bucket, and returns
+/// the throttle delay capped at 1 second. Returns `Duration::ZERO` when no
+/// quota is configured or the bucket has sufficient capacity.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+fn consume_consumer_quota(
+    image: &crabka_metadata::MetadataImage,
+    buckets: &crate::quota::QuotaBuckets,
+    principal: &str,
+    client_id: &str,
+    bytes: u64,
+) -> Duration {
+    let Some((entity_key, rate)) =
+        crate::quota::lookup_quota_with_key(image, principal, client_id, "consumer_byte_rate")
+    else {
+        return Duration::ZERO;
+    };
+    if rate <= 0.0 {
+        return Duration::ZERO;
+    }
+    let bucket = buckets.get_or_create("consumer_byte_rate", &entity_key, rate as u64);
+    let granted = bucket.try_consume(bytes);
+    if granted >= bytes {
+        return Duration::ZERO;
+    }
+    let overage = bytes - granted;
+    let delay_secs = overage as f64 / rate;
+    Duration::from_micros((delay_secs * 1_000_000.0) as u64).min(Duration::from_secs(1))
 }
 
 /// Group resolved `PendingRead`s back into per-topic response entries,

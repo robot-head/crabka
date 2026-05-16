@@ -115,6 +115,16 @@ pub(crate) async fn handle(
 
     let mut topic_results: Vec<TopicProduceResponse> = Vec::with_capacity(req.topic_data.len());
 
+    // ── KIP-13: measure total request bytes before consuming the topic_data ──
+    // Computed here so the iterator doesn't conflict with `for topic in req.topic_data`
+    // below (which moves the vector).
+    let total_produce_bytes: u64 = req
+        .topic_data
+        .iter()
+        .flat_map(|t| t.partition_data.iter())
+        .map(|p| p.records.as_ref().map_or(0, |r| r.encoded_len() as u64))
+        .sum();
+
     for topic in req.topic_data {
         // v ≤ 12 sends the topic name; v ≥ 13 sends only topic_id and
         // we look it up in the metadata image.
@@ -429,12 +439,55 @@ pub(crate) async fn handle(
         });
     }
 
+    // ── KIP-13 producer_byte_rate enforcement ───────────────────────
+    // client_id is not yet threaded into this handler (T11 wires it through
+    // dispatch); use "" so that user-only and default quotas still fire.
+    let delay = consume_producer_quota(
+        &image,
+        &broker.quota_buckets,
+        &principal.name,
+        "",
+        total_produce_bytes,
+    );
     let resp = ProduceResponse {
         responses: topic_results,
-        throttle_time_ms: 0,
+        throttle_time_ms: i32::try_from(delay.as_millis()).unwrap_or(i32::MAX),
         ..Default::default()
     };
+    if delay > Duration::ZERO {
+        tokio::time::sleep(delay).await;
+    }
     let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
     resp.encode(&mut buf, version)?;
     Ok(buf.freeze())
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+fn consume_producer_quota(
+    image: &crabka_metadata::MetadataImage,
+    buckets: &crate::quota::QuotaBuckets,
+    principal: &str,
+    client_id: &str,
+    bytes: u64,
+) -> Duration {
+    let Some((entity_key, rate)) =
+        crate::quota::lookup_quota_with_key(image, principal, client_id, "producer_byte_rate")
+    else {
+        return Duration::ZERO;
+    };
+    if rate <= 0.0 {
+        return Duration::ZERO;
+    }
+    let bucket = buckets.get_or_create("producer_byte_rate", &entity_key, rate as u64);
+    let granted = bucket.try_consume(bytes);
+    if granted >= bytes {
+        return Duration::ZERO;
+    }
+    let overage = bytes - granted;
+    let delay_secs = overage as f64 / rate;
+    Duration::from_micros((delay_secs * 1_000_000.0) as u64).min(Duration::from_secs(1))
 }

@@ -14,6 +14,14 @@ use crate::records::{
     BrokerRegistrationRecord, MetadataRecord, NodeId, PartitionRecord, TopicRecord,
 };
 
+pub type EntityKey = Vec<(String, Option<String>)>;
+
+#[must_use]
+pub fn canonicalize_entity(mut tuple: Vec<(String, Option<String>)>) -> EntityKey {
+    tuple.sort_by(|a, b| a.0.cmp(&b.0));
+    tuple
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct MetadataImage {
     cluster_id: Uuid,
@@ -25,6 +33,7 @@ pub struct MetadataImage {
     scram_credentials: HashMap<(String, SaslMechanism), ScramCredential>,
     acls_literal: HashMap<(ResourceType, String), Vec<AclEntry>>,
     acls_prefixed: HashMap<ResourceType, Vec<AclEntry>>,
+    client_quotas: HashMap<EntityKey, BTreeMap<String, f64>>,
 }
 
 /// Selects which KIP-73 throttle rate config key to read.
@@ -47,6 +56,7 @@ impl MetadataImage {
             scram_credentials: HashMap::new(),
             acls_literal: HashMap::new(),
             acls_prefixed: HashMap::new(),
+            client_quotas: HashMap::new(),
         }
     }
 
@@ -112,6 +122,11 @@ impl MetadataImage {
         let v: i64 = raw.parse().ok()?;
         #[allow(clippy::cast_sign_loss)]
         if v < 0 { None } else { Some(v as u64) }
+    }
+
+    #[must_use]
+    pub fn client_quotas(&self) -> &HashMap<EntityKey, BTreeMap<String, f64>> {
+        &self.client_quotas
     }
 
     #[must_use]
@@ -244,6 +259,23 @@ impl MetadataImage {
                     }
                 }
             }
+            MetadataRecord::V1ClientQuota(rec) => {
+                let key = canonicalize_entity(
+                    rec.entity
+                        .iter()
+                        .map(|e| (e.entity_type.clone(), e.entity_name.clone()))
+                        .collect(),
+                );
+                let configs = self.client_quotas.entry(key).or_default();
+                match rec.config_value {
+                    Some(v) => {
+                        configs.insert(rec.config_key.clone(), v);
+                    }
+                    None => {
+                        configs.remove(&rec.config_key);
+                    }
+                }
+            }
         }
     }
 
@@ -296,7 +328,8 @@ impl MetadataImage {
             | MetadataRecord::V1DeleteScramCredential(_)
             | MetadataRecord::V1AccessControlEntry(_)
             | MetadataRecord::V1DeleteAccessControlEntry(_)
-            | MetadataRecord::V1BrokerConfig(_) => Ok(()),
+            | MetadataRecord::V1BrokerConfig(_)
+            | MetadataRecord::V1ClientQuota(_) => Ok(()),
         }
     }
 }
@@ -306,7 +339,8 @@ mod tests {
     use super::*;
     use crate::acl::{AclEntryFilter, AclOperation, PermissionType};
     use crate::records::{
-        BrokerConfigRecord, DeleteScramCredentialRecord, DeleteTopicRecord, ScramCredentialRecord,
+        BrokerConfigRecord, ClientQuotaRecord, DeleteScramCredentialRecord, DeleteTopicRecord,
+        QuotaEntity, ScramCredentialRecord,
     };
 
     fn img() -> MetadataImage {
@@ -818,5 +852,84 @@ mod tests {
             config_value: Some("-1".into()),
         }));
         assert!(img.broker_throttle_rate(1, ThrottleKind::Leader).is_none());
+    }
+
+    #[test]
+    fn client_quota_apply_inserts_canonicalized() {
+        let mut img = MetadataImage::new(uuid::Uuid::nil());
+        // Input order: (user, client-id) — should canonicalize to (client-id, user).
+        img.apply(&MetadataRecord::V1ClientQuota(ClientQuotaRecord {
+            entity: vec![
+                QuotaEntity {
+                    entity_type: "user".into(),
+                    entity_name: Some("alice".into()),
+                },
+                QuotaEntity {
+                    entity_type: "client-id".into(),
+                    entity_name: Some("app1".into()),
+                },
+            ],
+            config_key: "producer_byte_rate".into(),
+            config_value: Some(1024.0),
+        }));
+        let key: EntityKey = vec![
+            ("client-id".into(), Some("app1".into())),
+            ("user".into(), Some("alice".into())),
+        ];
+        let configs = img
+            .client_quotas()
+            .get(&key)
+            .expect("entry under canonical key");
+        assert_eq!(configs.get("producer_byte_rate"), Some(&1024.0));
+    }
+
+    #[test]
+    fn client_quota_apply_delete_removes_key() {
+        let mut img = MetadataImage::new(uuid::Uuid::nil());
+        img.apply(&MetadataRecord::V1ClientQuota(ClientQuotaRecord {
+            entity: vec![QuotaEntity {
+                entity_type: "user".into(),
+                entity_name: Some("alice".into()),
+            }],
+            config_key: "producer_byte_rate".into(),
+            config_value: Some(1024.0),
+        }));
+        img.apply(&MetadataRecord::V1ClientQuota(ClientQuotaRecord {
+            entity: vec![QuotaEntity {
+                entity_type: "user".into(),
+                entity_name: Some("alice".into()),
+            }],
+            config_key: "producer_byte_rate".into(),
+            config_value: None,
+        }));
+        let key: EntityKey = vec![("user".into(), Some("alice".into()))];
+        let configs = img.client_quotas().get(&key).expect("entry retained");
+        assert!(configs.get("producer_byte_rate").is_none());
+    }
+
+    #[test]
+    fn client_quota_default_entity_uses_none_name() {
+        let mut img = MetadataImage::new(uuid::Uuid::nil());
+        img.apply(&MetadataRecord::V1ClientQuota(ClientQuotaRecord {
+            entity: vec![QuotaEntity {
+                entity_type: "user".into(),
+                entity_name: None,
+            }],
+            config_key: "producer_byte_rate".into(),
+            config_value: Some(512.0),
+        }));
+        let key: EntityKey = vec![("user".into(), None)];
+        assert!(img.client_quotas().contains_key(&key));
+    }
+
+    #[test]
+    fn canonicalize_sorts_alphabetically_by_entity_type() {
+        let input = vec![
+            ("user".to_string(), Some("alice".to_string())),
+            ("client-id".to_string(), Some("app1".to_string())),
+        ];
+        let canon = canonicalize_entity(input);
+        assert_eq!(canon[0].0, "client-id");
+        assert_eq!(canon[1].0, "user");
     }
 }
