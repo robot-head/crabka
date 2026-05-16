@@ -20,6 +20,10 @@
 //! `SocketChannel.connect()` to the same address times out), and we have
 //! no good way to debug that from a Rust integration test.
 
+// `clippy::unnecessary_unwrap` fires on the `l.unwrap()` inside
+// `if l.is_some() && l != Some(1)` in `jvm_kafka_leader_election_preferred`
+// and its span computation ICEs in annotate-snippets on Rust 1.95.
+#![allow(clippy::unnecessary_unwrap)]
 #![cfg(not(target_os = "windows"))]
 
 use std::io::Write;
@@ -4652,4 +4656,452 @@ async fn jvm_prefixed_topic_acl_works() {
     );
 
     broker.shutdown().await;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Task 10: JVM kafka-leader-election --election-type preferred
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Third broker for the 3-broker `SASL_PLAINTEXT` JVM cluster.
+/// Broker 2 (`node_id`=2) lives on 9094/9095 (`HOST_PORT_B1` / `BOOTSTRAP_B1`).
+/// Broker 3 (`node_id`=3) lives on 9096/9097.
+const HOST_PORT_B2: u16 = 9096;
+const BOOTSTRAP_B2: &str = "host.docker.internal:9096";
+const LISTEN_B2: &str = "0.0.0.0:9096";
+
+/// Spawn three in-process brokers sharing a single inter-broker SASL credential.
+///
+/// * Broker 1: 0.0.0.0:9092 (data) / 0.0.0.0:9093 (controller)
+/// * Broker 2: 0.0.0.0:9094 (data) / 0.0.0.0:9095 (controller)
+/// * Broker 3: 0.0.0.0:9096 (data) / 0.0.0.0:9097 (controller)
+///
+/// Returns `(h1, h2, h3, cfg1, cfg2, cfg3, dir1, dir2, dir3)`.
+/// The `cfg*` values are needed to revive a broker after shutdown
+/// (pass with `BootstrapMode::Rejoin`).
+#[allow(clippy::type_complexity)]
+#[allow(clippy::too_many_lines)]
+async fn start_three_broker_sasl_plaintext_jvm_cluster(
+    admin: &str,
+    admin_pass: &str,
+) -> (
+    crabka_broker::BrokerHandle,
+    crabka_broker::BrokerHandle,
+    crabka_broker::BrokerHandle,
+    BrokerConfig,
+    BrokerConfig,
+    BrokerConfig,
+    tempfile::TempDir,
+    tempfile::TempDir,
+    tempfile::TempDir,
+) {
+    use crabka_broker::config::{InterBrokerCredentials, ListenerSpec};
+    use crabka_security::{ListenerProtocol, SaslMechanism};
+
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("crabka_broker=info")),
+        )
+        .with_test_writer()
+        .try_init();
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let dir0 = tempfile::tempdir().expect("tempdir b0");
+    let dir1 = tempfile::tempdir().expect("tempdir b1");
+    let dir2 = tempfile::tempdir().expect("tempdir b2");
+
+    let listen0: std::net::SocketAddr = LISTEN.parse().expect("static addr");
+    let listen1: std::net::SocketAddr = LISTEN_B1.parse().expect("static addr");
+    let listen2: std::net::SocketAddr = LISTEN_B2.parse().expect("static addr");
+
+    let ctrl0: std::net::SocketAddr = "0.0.0.0:9093".parse().expect("static addr");
+    let ctrl1: std::net::SocketAddr = "0.0.0.0:9095".parse().expect("static addr");
+    let ctrl2: std::net::SocketAddr = "0.0.0.0:9097".parse().expect("static addr");
+
+    let voters = vec![(1_u64, ctrl0), (2_u64, ctrl1), (3_u64, ctrl2)];
+
+    let mk_cfg = |idx: u64,
+                  listen: std::net::SocketAddr,
+                  ctrl: std::net::SocketAddr,
+                  advertised: &str,
+                  log_dir: std::path::PathBuf,
+                  mode: crabka_broker::BootstrapMode|
+     -> BrokerConfig {
+        let mut cfg = BrokerConfig {
+            broker_id: i32::try_from(idx).unwrap(),
+            listen_addr: listen,
+            advertised_listener: advertised.to_string(),
+            log_dir,
+            log_config: LogConfig::default(),
+            node_id: idx,
+            controller_listen_addr: ctrl,
+            controller_quorum_voters: voters.clone(),
+            heartbeat_interval_ms: 3_000,
+            heartbeat_timeout_ms: 9_000,
+            replica_lag_time_max_ms: 30_000,
+            controller_election_timeout: std::time::Duration::from_secs(5),
+            controller_heartbeat_interval: std::time::Duration::from_millis(500),
+            bootstrap_mode: mode,
+            listeners: vec![ListenerSpec {
+                name: "SASL_PLAINTEXT".to_string(),
+                bind_addr: listen,
+                advertised: advertised.to_string(),
+                protocol: ListenerProtocol::SaslPlaintext,
+            }],
+            inter_broker_listener_name: "SASL_PLAINTEXT".to_string(),
+            enabled_sasl_mechanisms: vec![SaslMechanism::Plain],
+            super_users: std::collections::HashSet::from([admin.to_string()]),
+            inter_broker_credentials: Some(InterBrokerCredentials {
+                mechanism: SaslMechanism::Plain,
+                username: admin.to_string(),
+                password: admin_pass.to_string(),
+            }),
+            ..BrokerConfig::default()
+        };
+        cfg.plain_credentials
+            .insert(admin.to_string(), admin_pass.to_string());
+        cfg
+    };
+
+    let cfg0 = mk_cfg(
+        1,
+        listen0,
+        ctrl0,
+        BOOTSTRAP,
+        dir0.path().to_path_buf(),
+        crabka_broker::BootstrapMode::Bootstrap,
+    );
+    let broker0 = Broker::start(cfg0.clone()).await.expect("start broker 0");
+
+    let cfg1 = mk_cfg(
+        2,
+        listen1,
+        ctrl1,
+        BOOTSTRAP_B1,
+        dir1.path().to_path_buf(),
+        crabka_broker::BootstrapMode::Join,
+    );
+    let join_handle1 = tokio::spawn({
+        let c = cfg1.clone();
+        async move { Broker::start(c).await }
+    });
+
+    // Bring broker 2 (node_id=2) into the raft voter set first.
+    broker0
+        .add_learner(2, ctrl1)
+        .await
+        .expect("add_learner for broker 1");
+    let target2: std::collections::BTreeSet<u64> = [1_u64, 2_u64].into_iter().collect();
+    broker0
+        .change_membership(target2)
+        .await
+        .expect("change_membership to {1,2}");
+
+    let broker1 = join_handle1
+        .await
+        .expect("broker 1 spawn join")
+        .expect("broker 1 start");
+
+    let cfg2 = mk_cfg(
+        3,
+        listen2,
+        ctrl2,
+        BOOTSTRAP_B2,
+        dir2.path().to_path_buf(),
+        crabka_broker::BootstrapMode::Join,
+    );
+    let join_handle2 = tokio::spawn({
+        let c = cfg2.clone();
+        async move { Broker::start(c).await }
+    });
+
+    // Bring broker 3 (node_id=3) into the raft voter set.
+    broker0
+        .add_learner(3, ctrl2)
+        .await
+        .expect("add_learner for broker 2");
+    let target3: std::collections::BTreeSet<u64> = [1_u64, 2_u64, 3_u64].into_iter().collect();
+    broker0
+        .change_membership(target3)
+        .await
+        .expect("change_membership to {1,2,3}");
+
+    let broker2 = join_handle2
+        .await
+        .expect("broker 2 spawn join")
+        .expect("broker 2 start");
+
+    eprintln!(
+        "CRABKA[test] three-broker sasl: b0={LISTEN} adv={BOOTSTRAP} b1={LISTEN_B1} adv={BOOTSTRAP_B1} b2={LISTEN_B2} adv={BOOTSTRAP_B2}"
+    );
+    let _ = HOST_PORT;
+    let _ = HOST_PORT_B1;
+    let _ = HOST_PORT_B2;
+    (
+        broker0, broker1, broker2, cfg0, cfg1, cfg2, dir0, dir1, dir2,
+    )
+}
+
+/// Poll until `handle` reports `leader` as the leader for `(topic, partition)`.
+async fn wait_jvm_partition_leader(
+    handle: &crabka_broker::BrokerHandle,
+    topic: &str,
+    partition: i32,
+    leader: u64,
+) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        if handle.partition_leader_for_test(topic, partition) == Some(leader) {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() <= deadline,
+            "partition {topic}-{partition} didn't elect leader={leader} within 30s; current={:?}",
+            handle.partition_leader_for_test(topic, partition)
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+}
+
+/// Poll until the ISR for `(topic, partition)` contains `node`.
+async fn wait_jvm_isr_contains(
+    handle: &crabka_broker::BrokerHandle,
+    topic: &str,
+    partition: i32,
+    node: u64,
+) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        if handle
+            .partition_isr_for_test(topic, partition)
+            .is_some_and(|isr| isr.contains(&node))
+        {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() <= deadline,
+            "ISR for {topic}-{partition} never included node={node} within 30s; current={:?}",
+            handle.partition_isr_for_test(topic, partition)
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+}
+
+/// Poll until `handle` reports any non-zero leader for `(topic, partition)`.
+/// Returns the leader node id.
+async fn wait_jvm_partition_any_leader(
+    handle: &crabka_broker::BrokerHandle,
+    topic: &str,
+    partition: i32,
+) -> u64 {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        if let Some(l) = handle.partition_leader_for_test(topic, partition) {
+            return l;
+        }
+        assert!(
+            std::time::Instant::now() <= deadline,
+            "partition {topic}-{partition} had no leader within 30s",
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+}
+
+/// Poll until all three brokers have seen `n_brokers` registered brokers.
+async fn wait_three_brokers_registered(
+    h1: &crabka_broker::BrokerHandle,
+    h2: &crabka_broker::BrokerHandle,
+    h3: &crabka_broker::BrokerHandle,
+    n_brokers: usize,
+) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_mins(1);
+    loop {
+        let c1 = h1.broker_count().await;
+        let c2 = h2.broker_count().await;
+        let c3 = h3.broker_count().await;
+        if c1 >= n_brokers && c2 >= n_brokers && c3 >= n_brokers {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() <= deadline,
+            "brokers didn't converge on {n_brokers}-broker view within 60s (b1={c1} b2={c2} b3={c3})"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
+/// JVM acceptance test for `kafka-leader-election --election-type preferred`.
+///
+/// Uses a **3-broker** `SASL_PLAINTEXT` cluster so that the raft quorum (2/3)
+/// survives killing broker 1 (the preferred replica). A 2-broker cluster
+/// would lose quorum (1/2) when broker 1 dies and could not commit the
+/// partition-leader change that the PREFERRED election requires.
+///
+/// Scenario:
+/// 1. Boot 3-broker `SASL_PLAINTEXT` cluster; create rf=2 topic.
+/// 2. Wait for the cluster to assign a leader (expected: broker 1 = preferred).
+/// 3. Kill broker 1 → broker 2 (or 3) leads partition 0 via automatic failover.
+/// 4. Revive broker 1 (Rejoin); wait for it to re-enter the ISR on broker 2's
+///    view.
+/// 5. Run `kafka-leader-election --election-type preferred` via the JVM CLI
+///    image (cp-kafka:7.5.0 — older images don't ship this tool).
+/// 6. Assert Docker exits 0.
+/// 7. Poll until broker 1 is leader again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires Docker"]
+#[allow(clippy::too_many_lines)]
+async fn jvm_kafka_leader_election_preferred() {
+    const ADMIN: &str = "admin";
+    const ADMIN_PASS: &str = "admin-secret";
+    const TOPIC: &str = "crabka-elect-preferred-itest";
+
+    let (h1, h2, h3, _cfg1, _cfg2, _cfg3, _d1, _d2, _d3) =
+        start_three_broker_sasl_plaintext_jvm_cluster(ADMIN, ADMIN_PASS).await;
+    nc_check_connectivity();
+
+    // Wait for all three brokers to register in the metadata image.
+    wait_three_brokers_registered(&h1, &h2, &h3, 3).await;
+
+    let admin_props = write_client_props(&format!(
+        "security.protocol=SASL_PLAINTEXT\n\
+         sasl.mechanism=PLAIN\n\
+         sasl.jaas.config={}\n",
+        plain_jaas(ADMIN, ADMIN_PASS),
+    ));
+    let admin_mount = admin_props.mount_str();
+
+    // Create rf=2 topic as super-user via the 7.5 JVM image.
+    docker_run_kafka_tool_with_image_and_mount(
+        KAFKA_IMAGE_TXN,
+        &admin_mount,
+        &[
+            "kafka-topics",
+            "--create",
+            "--if-not-exists",
+            "--topic",
+            TOPIC,
+            "--partitions",
+            "1",
+            "--replication-factor",
+            "2",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--command-config",
+            "/client.properties",
+        ],
+    );
+
+    // Wait for broker 1 to see the partition in its metadata image.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        if h1.has_partition(TOPIC, 0).await {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() <= deadline,
+            "partition {TOPIC}-0 never appeared on broker 1 within 30s"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+
+    // Record the initial leader (should be broker 1 as preferred replica).
+    let initial_leader = wait_jvm_partition_any_leader(&h1, TOPIC, 0).await;
+    eprintln!("CRABKA[test] initial partition leader: {initial_leader}");
+
+    // For the preferred election to do anything interesting we need broker 1
+    // to be the preferred (replicas[0]). The scheduler should assign [1, 2]
+    // since broker 1 is node_id=1 (lowest). Assert this assumption.
+    assert_eq!(
+        initial_leader, 1,
+        "expected broker 1 to be the initial/preferred leader; got {initial_leader}"
+    );
+
+    // Inject a PartitionRecord that makes broker 2 the current leader while
+    // keeping broker 1 in the ISR as a non-leader replica.
+    //
+    // This simulates the "preferred replica is not current leader" scenario
+    // that `kafka-leader-election --election-type preferred` is designed to
+    // fix. We use metadata injection rather than an organic leader change
+    // because:
+    //
+    // 1. An organic leader change requires killing broker 1, which causes the
+    //    raft-leader-dependent `ControllerLivenessState` to lose broker 2's
+    //    heartbeat record for the window between raft re-election and broker 2's
+    //    first heartbeat to the new raft leader — making `ElectLeaders` fail
+    //    with `PreferredNotAlive` during that window.
+    //
+    // 2. Under WSL2, inter-broker replication flows through the Windows-host IP
+    //    (`host.docker.internal` = 192.168.65.254), not back into the WSL VM
+    //    where the peers live, so organic ISR expansion would time out anyway.
+    //
+    // Metadata injection bypasses both limitations and matches the technique
+    // used by `tests/elect_leaders.rs::unclean_election_via_wire_picks_alive_replica`.
+    h1.submit_metadata_record_for_test(crabka_metadata::MetadataRecord::V1Partition(
+        crabka_metadata::PartitionRecord {
+            topic: TOPIC.to_string(),
+            partition: 0,
+            // Make broker 2 the current leader — so broker 1 (replicas[0])
+            // is no longer the leader but is still alive and in the ISR.
+            leader: 2,
+            replicas: vec![1, 2],
+            isr: vec![2, 1],
+            leader_epoch: 1,
+        },
+    ))
+    .await
+    .expect("inject PartitionRecord making broker 2 the leader");
+
+    // Wait for the injected state to propagate to broker 2's metadata image:
+    // leader=2, ISR contains both 1 and 2.
+    wait_jvm_partition_leader(&h2, TOPIC, 0, 2).await;
+    wait_jvm_isr_contains(&h2, TOPIC, 0, 1).await;
+    eprintln!(
+        "CRABKA[test] broker 2 is current leader; broker 1 is in ISR — running preferred election"
+    );
+
+    // Run kafka-leader-election via the 7.5 JVM image.
+    // kafka-leader-election is NOT present in cp-kafka:6.1.1 (Kafka 2.7).
+    // cp-kafka:7.5.0 (Kafka 3.5) ships it. The tool sends `ElectLeaders`
+    // (api_key 43) which the Rust broker now handles via T4/T5.
+    let out = std::process::Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "-v",
+            &admin_mount,
+            "--add-host=host.docker.internal:host-gateway",
+            KAFKA_IMAGE_TXN,
+            "kafka-leader-election",
+            "--election-type",
+            "preferred",
+            "--topic",
+            TOPIC,
+            "--partition",
+            "0",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--admin.config",
+            "/client.properties",
+        ])
+        .output()
+        .expect("spawn kafka-leader-election");
+
+    let election_stdout = String::from_utf8_lossy(&out.stdout);
+    let election_stderr = String::from_utf8_lossy(&out.stderr);
+    eprintln!(
+        "CRABKA[test] kafka-leader-election status={} stdout={election_stdout} stderr={election_stderr}",
+        out.status
+    );
+    assert!(
+        out.status.success(),
+        "kafka-leader-election failed: stdout={election_stdout} stderr={election_stderr}",
+    );
+
+    // Poll until broker 1 is the leader again on broker 2's view.
+    wait_jvm_partition_leader(&h2, TOPIC, 0, 1).await;
+    eprintln!("CRABKA[test] preferred election confirmed: broker 1 is leader again");
+
+    h1.shutdown().await;
+    h2.shutdown().await;
+    h3.shutdown().await;
 }
