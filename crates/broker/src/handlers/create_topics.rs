@@ -3,6 +3,7 @@
 //! the partition directories are materialized on disk.
 
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
 use crabka_metadata::{AclOperation, MetadataRecord, PartitionRecord, TopicRecord};
@@ -109,6 +110,22 @@ pub(crate) async fn handle(
     {
         let mut cur: &[u8] = &req_bytes;
         let req = CreateTopicsRequest::decode(&mut cur, version)?;
+
+        // KIP-599: count mutations before running handler logic so that even
+        // invalid requests consume quota (bad-faith clients can't escape by
+        // sending malformed RPCs). num_partitions == -1 means "use cluster
+        // default"; count it as 1 for accounting.
+        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        let mutation_count: u64 = req
+            .topics
+            .iter()
+            .map(|t| t.num_partitions.max(1) as u64)
+            .sum();
+
+        // Hoist the image once; the per-topic loop reuses it for broker-set
+        // lookup instead of calling current_image() on every iteration.
+        let image = controller.current_image();
+
         let mut results: Vec<CreatableTopicResult> = Vec::with_capacity(req.topics.len());
 
         for topic_req in req.topics {
@@ -139,7 +156,6 @@ pub(crate) async fn handle(
             // is the only known broker" so the single-broker case (which is by
             // far the most common) doesn't silently degrade to
             // INVALID_REPLICATION_FACTOR.
-            let image = controller.current_image();
             let mut sorted_brokers: Vec<crabka_raft::NodeId> =
                 image.brokers().map(|b| b.node_id).collect();
             if sorted_brokers.is_empty() {
@@ -280,11 +296,24 @@ pub(crate) async fn handle(
             results.push(result);
         }
 
+        // KIP-599: consume controller_mutation_rate quota. client_id is not
+        // threaded through HandlerTable (slice-16 known limitation); pass ""
+        // so that (user)-only and default quotas still fire.
+        let delay = crate::quota::consume_controller_mutation_quota(
+            &image,
+            &broker.quota_buckets,
+            &principal.name,
+            "", // client_id not threaded through HandlerTable — see slice 16 known limitation
+            mutation_count,
+        );
         let resp = CreateTopicsResponse {
             topics: results,
-            throttle_time_ms: 0,
+            throttle_time_ms: i32::try_from(delay.as_millis()).unwrap_or(i32::MAX),
             ..Default::default()
         };
+        if delay > Duration::ZERO {
+            tokio::time::sleep(delay).await;
+        }
         let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
         resp.encode(&mut buf, version)?;
         Ok(buf.freeze())
