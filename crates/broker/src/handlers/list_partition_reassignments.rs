@@ -1,6 +1,6 @@
 //! `ListPartitionReassignments` (`api_key` 46, KIP-455).
 
-#![allow(dead_code, clippy::cast_possible_truncation, clippy::unused_async)]
+#![allow(clippy::cast_possible_truncation, clippy::unused_async)]
 
 use std::net::SocketAddr;
 

@@ -4,8 +4,6 @@
 //! pure-logic `process_one_partition` helper that turns one alter row
 //! into a `PartitionRecord` ready to submit, or a wire error code.
 
-#![allow(dead_code)]
-
 use crabka_metadata::{MetadataImage, PartitionRecord};
 use crabka_raft::NodeId;
 
