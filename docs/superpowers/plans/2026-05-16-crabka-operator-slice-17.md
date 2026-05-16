@@ -31,7 +31,9 @@ Files this slice creates:
 - `crates/operator/tests/reconcile.rs` — unit-style controller tests with a mocked `kube::Client`.
 - `deploy/crds/crabka.io_kafkas.yaml` — generated CRD manifest, committed.
 - `tools/regen-crds.sh` — convenience wrapper invoking the binary.
-- `Dockerfile.operator` — multi-stage build → distroless-cc image.
+- `packaging/melange/crabka-operator.yaml` — melange config that builds `crabka-operator.apk` from source.
+- `packaging/apko/crabka-operator.yaml` — apko config that composes the apk onto wolfi-base into an OCI image.
+- `tools/build-image.sh` — local convenience wrapper running melange + apko end-to-end.
 - `charts/crabka-operator/Chart.yaml` — Helm chart metadata.
 - `charts/crabka-operator/values.yaml` — default values.
 - `charts/crabka-operator/templates/_helpers.tpl` — name/labels helpers.
@@ -77,7 +79,7 @@ Append to the `[workspace.dependencies]` section in `Cargo.toml`:
 
 ```toml
 kube = { version = "0.97", default-features = false, features = ["client", "runtime", "derive", "rustls-tls"] }
-k8s-openapi = { version = "0.24", default-features = false, features = ["v1_30"] }
+k8s-openapi = { version = "0.23", default-features = false, features = ["v1_30"] }
 schemars = "0.8"
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 prometheus-client = "0.23"
@@ -85,6 +87,8 @@ tower = "0.5"
 futures = "0.3"
 anyhow = "1"
 ```
+
+Also add the `json` feature to the workspace `tracing-subscriber` entry (existing `tracing-subscriber = { version = "0.3", features = ["env-filter"] }` → add `"json"`). This is needed by Task 5's `tracing_subscriber::fmt().json()` builder.
 
 (`tower` and `futures` are pulled in by `kube` already, but explicit pins keep clippy from grumbling about transitive features in unit tests.)
 
@@ -218,7 +222,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Args, Serialize, Deserialize)]
 pub struct OperatorConfig {
     /// Comma-separated namespaces to watch. Empty = cluster-scoped.
-    #[arg(long, env = "WATCH_NAMESPACES", value_delimiter = ',', default_value = "")]
+    #[arg(long, env = "WATCH_NAMESPACES", value_delimiter = ',', num_args = 0..)]
     pub watch_namespaces: Vec<String>,
 
     /// Namespace the operator runs in (used for the leader-election Lease).
@@ -379,7 +383,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Slice 17 ships a placeholder with only `kafka_version`; the real
 /// schema lands in slice 18.
-#[derive(CustomResource, Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[derive(CustomResource, Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[kube(
     group = "crabka.io",
     version = "v1alpha1",
@@ -490,8 +494,6 @@ git commit -m "feat(operator): Kafka v1alpha1 CRD type (slice 17, task 3)"
 ```rust
 use std::fs;
 use std::path::Path;
-
-use kube::CustomResourceExt as _;
 
 use crate::crd::Kafka;
 
@@ -744,7 +746,6 @@ impl HealthState {
     }
 }
 
-#[must_use]
 pub fn router(state: HealthState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
@@ -1099,7 +1100,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt as _;
-use kube::Resource as _;
+use kube::ResourceExt as _;
 use kube::api::{Api, Patch, PatchParams};
 use kube::runtime::controller::{Action, Controller};
 use kube::runtime::watcher;
@@ -1346,7 +1347,7 @@ pub async fn run(config: OperatorConfig) -> anyhow::Result<()> {
             Ok(Err(e)) => tracing::error!(error = %e, "controller exited with error"),
             Err(e) => tracing::error!(error = %e, "controller task panicked"),
         },
-        _ = shutdown_signal() => tracing::info!("shutdown signal received"),
+        () = shutdown_signal() => tracing::info!("shutdown signal received"),
     }
     Ok(())
 }
@@ -1439,58 +1440,149 @@ git commit -m "feat(operator): wire run subcommand (slice 17, task 9)"
 
 ---
 
-## Task 10 — `Dockerfile.operator`
+## Task 10 — apko image built from melange-built `crabka-operator.apk`
 
 **Files:**
-- Create: `Dockerfile.operator`
-- Create: `.dockerignore` (if not present)
+- Create: `packaging/melange/crabka-operator.yaml`
+- Create: `packaging/apko/crabka-operator.yaml`
+- Create: `tools/build-image.sh`
+- Modify: `.gitignore` (ignore generated artifacts)
 
-- [ ] **Step 1: Check `.dockerignore`**
+The image is built declaratively via [melange](https://github.com/chainguard-dev/melange) (source → apk) and [apko](https://github.com/chainguard-dev/apko) (apk + wolfi-base → OCI image). This gives us reproducible builds, an embedded SBOM, and a single packaging pipeline that future Crabka binaries (`crabka-broker`, `crabka-connect`, …) will reuse as sibling files in `packaging/`.
 
-If `.dockerignore` does not exist, create it with:
+- [ ] **Step 1: Create `packaging/melange/crabka-operator.yaml`**
 
+```yaml
+package:
+  name: crabka-operator
+  version: 0.1.1
+  epoch: 0
+  description: Kubernetes operator for Crabka clusters
+  copyright:
+    - license: Apache-2.0
+
+environment:
+  contents:
+    repositories:
+      - https://packages.wolfi.dev/os
+    keyring:
+      - https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
+    packages:
+      - ca-certificates-bundle
+      - build-base
+      - busybox
+      - git
+      - rustup
+
+pipeline:
+  - name: Install pinned Rust toolchain
+    runs: |
+      rustup-init -y --default-toolchain none --no-modify-path
+      export PATH="$HOME/.cargo/bin:$PATH"
+      rustup toolchain install 1.95.0 --component cargo --profile minimal
+      rustup default 1.95.0
+  - name: Build crabka-operator
+    runs: |
+      export PATH="$HOME/.cargo/bin:$PATH"
+      cargo build --release --bin crabka-operator -p crabka-operator
+      install -D -m 0755 target/release/crabka-operator "${{targets.contextdir}}/usr/bin/crabka-operator"
 ```
-target
-.git
-.github
-docs
-*.png
+
+Implementer note: wolfi package names can drift. Before assuming `rustup` is the correct package name, run `apk search rust` against a wolfi-os image or check the wolfi-os repo (https://github.com/wolfi-dev/os) for the actual package providing `rustup-init`. If wolfi ships `rust-stable` or similar that's already at 1.95+, you may be able to skip the `rustup toolchain install` step entirely.
+
+- [ ] **Step 2: Create `packaging/apko/crabka-operator.yaml`**
+
+```yaml
+contents:
+  repositories:
+    - https://packages.wolfi.dev/os
+    - "@local /work/packages"
+  keyring:
+    - https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
+    - /work/melange.rsa.pub
+  packages:
+    - ca-certificates-bundle
+    - tzdata
+    - wolfi-baselayout
+    - "@local crabka-operator"
+
+accounts:
+  groups:
+    - groupname: nonroot
+      gid: 65532
+  users:
+    - username: nonroot
+      uid: 65532
+      gid: 65532
+  run-as: 65532
+
+entrypoint:
+  command: /usr/bin/crabka-operator
+
+cmd: run
+
+archs:
+  - x86_64
 ```
 
-- [ ] **Step 2: Create `Dockerfile.operator`**
-
-```dockerfile
-# syntax=docker/dockerfile:1.7
-FROM rust:1.95-slim-bookworm AS builder
-WORKDIR /src
-
-# Cache dependencies first.
-RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev ca-certificates && rm -rf /var/lib/apt/lists/*
-
-COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
-COPY crates ./crates
-COPY tools ./tools
-
-RUN cargo build -p crabka-operator --release && \
-    strip target/release/crabka-operator
-
-FROM gcr.io/distroless/cc-debian12:nonroot
-COPY --from=builder /src/target/release/crabka-operator /usr/local/bin/crabka-operator
-USER nonroot:nonroot
-ENTRYPOINT ["/usr/local/bin/crabka-operator"]
-CMD ["run"]
-```
-
-- [ ] **Step 3: Local build (optional but recommended)**
-
-Run: `docker build -f Dockerfile.operator -t crabka-operator:dev .`
-Expected: image built. If Docker is unavailable locally, defer to CI.
-
-- [ ] **Step 4: Commit**
+- [ ] **Step 3: Create `tools/build-image.sh`**
 
 ```bash
-git add Dockerfile.operator .dockerignore
-git commit -m "feat(operator): distroless container image (slice 17, task 10)"
+#!/usr/bin/env bash
+set -euo pipefail
+TAG="${1:-crabka-operator:dev}"
+WORK="$(pwd)"
+mkdir -p packages
+
+# Generate a melange signing keypair if one doesn't exist locally.
+if [ ! -f melange.rsa ]; then
+  melange keygen
+fi
+
+# Build the apk.
+melange build packaging/melange/crabka-operator.yaml \
+  --source-dir "$WORK" \
+  --signing-key melange.rsa \
+  --arch x86_64 \
+  --out-dir packages/
+
+# Build the OCI image.
+apko build packaging/apko/crabka-operator.yaml \
+  "$TAG" \
+  crabka-operator.tar \
+  --arch x86_64
+
+echo "Built image archive: crabka-operator.tar (tag: $TAG)"
+```
+
+`chmod +x tools/build-image.sh` (or `git update-index --chmod=+x tools/build-image.sh` on Windows).
+
+- [ ] **Step 4: Add `.gitignore` entries**
+
+Append (creating the file if needed):
+
+```
+melange.rsa
+melange.rsa.pub
+packages/
+crabka-operator.tar
+```
+
+- [ ] **Step 5: Local smoke (optional, requires melange + apko binaries on `PATH`)**
+
+```bash
+./tools/build-image.sh crabka-operator:dev
+```
+
+Expected: produces `crabka-operator.tar` (Docker-loadable OCI image archive).
+
+If melange/apko aren't installed locally, skip this step and rely on the CI workflow (Task 12) to exercise the build.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add packaging tools/build-image.sh .gitignore
+git commit -m "feat(operator): apko/melange image build (slice 17, task 10)"
 ```
 
 ---
@@ -1943,9 +2035,22 @@ jobs:
         with:
           version: v3.16.2
 
-      - name: Build operator image
+      - uses: chainguard-dev/actions/setup-melange@main
+      - uses: chainguard-dev/actions/setup-apko@main
+
+      - name: Build crabka-operator apk + OCI image
         run: |
-          docker build -f Dockerfile.operator -t crabka-operator:e2e .
+          mkdir -p packages
+          melange keygen
+          melange build packaging/melange/crabka-operator.yaml \
+            --source-dir . \
+            --signing-key melange.rsa \
+            --arch x86_64 \
+            --out-dir packages/
+          apko build packaging/apko/crabka-operator.yaml \
+            crabka-operator:e2e \
+            crabka-operator.tar \
+            --arch x86_64
 
       - name: Create kind cluster
         uses: helm/kind-action@v1
@@ -1955,7 +2060,7 @@ jobs:
           node_image: kindest/node:v1.30.0
 
       - name: Load operator image into kind
-        run: kind load docker-image crabka-operator:e2e --name crabka-e2e
+        run: kind load image-archive crabka-operator.tar --name crabka-e2e
 
       - name: Install CRDs
         run: kubectl apply -f deploy/crds/crabka.io_kafkas.yaml

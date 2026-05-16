@@ -32,7 +32,7 @@ One operator binary, multiple controllers composed in-process. Strimzi's split i
 ### Naming & API surface
 
 - Crate / binary / container image: `crabka-operator`
-- Container images for workloads: `crabka/broker`, `crabka/connect`, `crabka/operator`
+- Container images for workloads: `crabka/broker`, `crabka/connect`, `crabka/operator`. All Crabka images are built via [melange](https://github.com/chainguard-dev/melange) (source → apk) + [apko](https://github.com/chainguard-dev/apko) (apk + wolfi-base → OCI), not multi-stage Dockerfiles. Each Crabka binary ships as its own melange-built apk so images can be composed cleanly.
 - API group: `crabka.io`
 - Schema versions evolve `v1alpha1` → `v1beta1` → `v1` as features stabilize
 - CRD kinds: `Kafka`, `KafkaNodePool`, `KafkaTopic`, `KafkaUser`, `KafkaRebalance`, `KafkaConnect`, `KafkaConnector`, `KafkaMirrorMaker2`, `KafkaBridge`
