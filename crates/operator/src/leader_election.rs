@@ -60,7 +60,10 @@ pub async fn acquire(
                     return Ok(());
                 }
                 if is_expired(&existing) {
-                    // Try to take over.
+                    // TODO(slice-future): bump `leaseTransitions` on takeover
+                    // per k8s convention (client-go's leaderelection does
+                    // this). Deferred until an observer cares; omitting it
+                    // doesn't affect correctness of single-leader election.
                     let patch = serde_json::json!({
                         "spec": {
                             "holderIdentity": identity,
@@ -69,13 +72,17 @@ pub async fn acquire(
                             "renewTime": MicroTime(Utc::now()),
                         }
                     });
-                    if api
+                    match api
                         .patch(name, &PatchParams::default(), &Patch::Merge(&patch))
                         .await
-                        .is_ok()
                     {
-                        tracing::info!(%name, %identity, "acquired expired lease");
-                        return Ok(());
+                        Ok(_) => {
+                            tracing::info!(%name, %identity, "acquired expired lease");
+                            return Ok(());
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, %name, "takeover patch failed; will retry");
+                        }
                     }
                 }
                 tracing::debug!(%name, "lease held by another replica, waiting");
