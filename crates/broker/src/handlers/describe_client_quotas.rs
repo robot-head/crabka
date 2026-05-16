@@ -1,7 +1,5 @@
 //! `DescribeClientQuotas` (`api_key` 48, KIP-13/124).
 
-#![allow(dead_code)]
-
 use std::net::SocketAddr;
 
 use bytes::Bytes;

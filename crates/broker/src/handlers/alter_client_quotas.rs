@@ -1,7 +1,5 @@
 //! `AlterClientQuotas` (`api_key` 49, KIP-13/124/257).
 
-#![allow(dead_code)]
-
 use std::collections::HashSet;
 use std::net::SocketAddr;
 
