@@ -164,6 +164,167 @@ fn start_path(pr: &PartitionRecord, target: &[i32]) -> Option<PartitionRecord> {
     })
 }
 
+use std::collections::HashMap;
+use std::net::SocketAddr;
+
+use bytes::Bytes;
+use crabka_metadata::ResourceType;
+use crabka_protocol::Encode;
+use crabka_protocol::owned::alter_partition_reassignments_request::AlterPartitionReassignmentsRequest;
+use crabka_protocol::owned::alter_partition_reassignments_response::{
+    AlterPartitionReassignmentsResponse, ReassignablePartitionResponse, ReassignableTopicResponse,
+};
+use crabka_security::Principal;
+
+use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize};
+use crate::broker::Broker;
+use crate::codes::{CLUSTER_AUTHORIZATION_FAILED, COORDINATOR_NOT_AVAILABLE};
+
+pub(crate) async fn handle(
+    broker: &Broker,
+    req: AlterPartitionReassignmentsRequest,
+    principal: &Principal,
+    peer: &SocketAddr,
+    api_version: i16,
+) -> Result<Bytes, crate::error::BrokerError> {
+    let image = broker.controller.current_image();
+    // Whole-request Cluster Alter authorize.
+    let allow = authorize(
+        &image,
+        &broker.config.super_users,
+        &AuthorizationRequest {
+            principal,
+            host: peer,
+            resource_type: ResourceType::Cluster,
+            resource_name: "kafka-cluster",
+            operation: crabka_metadata::AclOperation::Alter,
+        },
+    );
+    if matches!(allow, AuthorizationResult::Deny) {
+        return encode_whole_request_error(
+            &req,
+            CLUSTER_AUTHORIZATION_FAILED,
+            "alter-reassignment denied",
+            api_version,
+        );
+    }
+
+    let mut by_topic: HashMap<String, Vec<ReassignablePartitionResponse>> = HashMap::new();
+    let mut to_submit: Vec<crabka_metadata::MetadataRecord> = Vec::new();
+    for topic in &req.topics {
+        let mut rows = Vec::with_capacity(topic.partitions.len());
+        for p in &topic.partitions {
+            let target_slice: Option<&[i32]> = p.replicas.as_deref();
+            match process_one_partition(
+                &image,
+                &topic.name,
+                p.partition_index,
+                target_slice,
+                req.allow_replication_factor_change,
+            ) {
+                Ok(Some(record)) => {
+                    to_submit.push(crabka_metadata::MetadataRecord::V1Partition(record));
+                    rows.push(ok_row(p.partition_index));
+                }
+                Ok(None) => rows.push(ok_row(p.partition_index)),
+                Err((code, msg)) => rows.push(err_row(p.partition_index, code, msg)),
+            }
+        }
+        by_topic.insert(topic.name.clone(), rows);
+    }
+
+    if !to_submit.is_empty()
+        && let Err(e) = broker.controller.submit_change(to_submit).await
+    {
+        tracing::warn!(error = %e, "alter-reassignment submit failed");
+        for rows in by_topic.values_mut() {
+            for r in rows.iter_mut() {
+                if r.error_code == 0 {
+                    r.error_code = COORDINATOR_NOT_AVAILABLE;
+                    r.error_message = Some(format!("submit failed: {e}"));
+                }
+            }
+        }
+    }
+
+    let responses: Vec<ReassignableTopicResponse> = by_topic
+        .into_iter()
+        .map(|(name, partitions)| ReassignableTopicResponse {
+            name,
+            partitions,
+            ..Default::default()
+        })
+        .collect();
+    let resp = AlterPartitionReassignmentsResponse {
+        throttle_time_ms: 0,
+        allow_replication_factor_change: req.allow_replication_factor_change,
+        error_code: 0,
+        error_message: None,
+        responses,
+        ..Default::default()
+    };
+    encode_response(&resp, api_version)
+}
+
+fn ok_row(partition_index: i32) -> ReassignablePartitionResponse {
+    ReassignablePartitionResponse {
+        partition_index,
+        error_code: 0,
+        error_message: None,
+        ..Default::default()
+    }
+}
+
+fn err_row(partition_index: i32, code: i16, msg: String) -> ReassignablePartitionResponse {
+    ReassignablePartitionResponse {
+        partition_index,
+        error_code: code,
+        error_message: Some(msg),
+        ..Default::default()
+    }
+}
+
+fn encode_whole_request_error(
+    req: &AlterPartitionReassignmentsRequest,
+    code: i16,
+    msg: &str,
+    api_version: i16,
+) -> Result<Bytes, crate::error::BrokerError> {
+    let responses: Vec<ReassignableTopicResponse> = req
+        .topics
+        .iter()
+        .map(|t| ReassignableTopicResponse {
+            name: t.name.clone(),
+            partitions: t
+                .partitions
+                .iter()
+                .map(|p| err_row(p.partition_index, code, msg.into()))
+                .collect(),
+            ..Default::default()
+        })
+        .collect();
+    let resp = AlterPartitionReassignmentsResponse {
+        throttle_time_ms: 0,
+        allow_replication_factor_change: req.allow_replication_factor_change,
+        error_code: 0,
+        error_message: None,
+        responses,
+        ..Default::default()
+    };
+    encode_response(&resp, api_version)
+}
+
+fn encode_response<R: Encode>(
+    resp: &R,
+    api_version: i16,
+) -> Result<Bytes, crate::error::BrokerError> {
+    let mut body = Vec::new();
+    resp.encode(&mut body, api_version).map_err(|e| {
+        crate::error::BrokerError::Replication(format!("encode AlterPartitionReassignments: {e}"))
+    })?;
+    Ok(Bytes::from(body))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
