@@ -21,7 +21,7 @@ where
     let file = out_dir.join(format!("{group}_{plural}.yaml"));
     let yaml = serde_yaml::to_string(&crd)?;
     fs::write(&file, yaml)?;
-    tracing::info!(path = %file.display(), "wrote CRD");
+    eprintln!("wrote {}", file.display());
     Ok(())
 }
 
