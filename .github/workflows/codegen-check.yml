@@ -10,10 +10,11 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - run: ./tools/regenerate.sh
+      - run: ./tools/regen-crds.sh
       - name: Fail on drift
         run: |
-          if ! git diff --quiet crates/protocol/generated; then
-            echo "::error::Generated files are out of sync. Run tools/regenerate.sh and commit."
-            git --no-pager diff crates/protocol/generated
+          if ! git diff --quiet crates/protocol/generated deploy/crds; then
+            echo "::error::Generated files are out of sync. Run tools/regenerate.sh and tools/regen-crds.sh and commit."
+            git --no-pager diff crates/protocol/generated deploy/crds
             exit 1
           fi

@@ -27,6 +27,6 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Run(_) => anyhow::bail!("`run` not implemented yet (Task 9)"),
-        Command::GenCrds { .. } => anyhow::bail!("`gen-crds` not implemented yet (Task 4)"),
+        Command::GenCrds { out_dir } => crabka_operator::gen_crds::write_all(&out_dir),
     }
 }

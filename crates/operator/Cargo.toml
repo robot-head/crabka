@@ -35,3 +35,4 @@ tracing-subscriber = { workspace = true }
 [dev-dependencies]
 http = "1"
 hyper = { version = "1", features = ["client", "http1"] }
+tempfile = { workspace = true }
