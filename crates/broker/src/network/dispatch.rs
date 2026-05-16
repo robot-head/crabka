@@ -777,6 +777,13 @@ async fn serve_connection_stream<S>(
                 }
             }
         }
+        // KIP-124 request_percentage enforcement — fallback HandlerTable path only.
+        // Intercept arms (admin RPCs: ACLs, ElectLeaders, AlterPartitionReassignments,
+        // ListPartitionReassignments, AlterClientQuotas, DescribeClientQuotas, etc.)
+        // handle their own response write inline and are NOT subject to
+        // request_percentage throttling here. Admin RPCs are low-frequency operator
+        // traffic; the exemption is documented in STATUS.md.
+        let started = std::time::Instant::now();
         let response_bytes = match dispatch_one(&broker, &frame).await {
             Ok(b) => b,
             Err(e) => {
@@ -784,6 +791,47 @@ async fn serve_connection_stream<S>(
                 break;
             }
         };
+        // Saturate at u64::MAX (≈580k years) rather than panicking on
+        // extraordinarily long requests.
+        #[allow(clippy::cast_possible_truncation)]
+        let elapsed_micros = started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+
+        // Consume elapsed CPU time from the request_percentage bucket and
+        // sleep before writing the response (server-side throttle only;
+        // throttle_time_ms in the response is populated by Produce/Fetch
+        // handlers — T9/T10 — not here).
+        if let Some(principal) = auth.principal() {
+            let principal_name = &principal.name;
+            let client_id_str = peek_client_id(&frame).unwrap_or("");
+            let image = broker.controller.current_image();
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            if let Some((entity_key, rate_pct)) = crate::quota::lookup_quota_with_key(
+                &image,
+                principal_name,
+                client_id_str,
+                "request_percentage",
+            ) && rate_pct > 0.0
+            {
+                let rate_micros_per_sec = (rate_pct * 10_000.0) as u64;
+                if rate_micros_per_sec > 0 {
+                    let bucket = broker.quota_buckets.get_or_create(
+                        "request_percentage",
+                        &entity_key,
+                        rate_micros_per_sec,
+                    );
+                    let granted = bucket.try_consume(elapsed_micros);
+                    if granted < elapsed_micros {
+                        let overage_micros = elapsed_micros - granted;
+                        let delay_micros =
+                            overage_micros.saturating_mul(1_000_000) / rate_micros_per_sec;
+                        let delay = std::time::Duration::from_micros(delay_micros)
+                            .min(std::time::Duration::from_secs(1));
+                        tokio::time::sleep(delay).await;
+                    }
+                }
+            }
+        }
+
         if let Err(e) = framed.send(response_bytes).await {
             tracing::warn!(error = %e, "framed.send error, closing");
             break;
@@ -2127,6 +2175,32 @@ fn peek_api_key(frame: &[u8]) -> Result<i16, BrokerError> {
         ));
     }
     Ok(i16::from_be_bytes([frame[0], frame[1]]))
+}
+
+/// Extract the `client_id` string from a request frame without fully parsing
+/// it. Frame layout: `api_key(2) + api_version(2) + correlation_id(4) +
+/// client_id_len(2) + client_id(n)`. Returns `None` if the frame is too short
+/// or the `client_id` field is null (len == -1). Used by the
+/// `request_percentage` quota enforcement path.
+fn peek_client_id(frame: &[u8]) -> Option<&str> {
+    // Minimum: api_key(2) + api_version(2) + corr_id(4) + cid_len(2) = 10 bytes.
+    if frame.len() < 10 {
+        return None;
+    }
+    let cid_len = i16::from_be_bytes([frame[8], frame[9]]);
+    if cid_len <= 0 {
+        // null (−1) or empty (0)
+        return None;
+    }
+    // cid_len > 0 here, so the cast to usize is safe.
+    #[allow(clippy::cast_sign_loss)]
+    let n = cid_len as usize;
+    let start = 10usize;
+    let end = start.checked_add(n)?;
+    if frame.len() < end {
+        return None;
+    }
+    std::str::from_utf8(&frame[start..end]).ok()
 }
 
 /// Decode one request from the framed bytes, call the handler, build a
