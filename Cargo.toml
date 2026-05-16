@@ -48,7 +48,7 @@ testcontainers-modules = { version = "0.15", features = ["kafka"] }
 futures-util = { version = "0.3", features = ["sink"] }
 clap = { version = "4", features = ["derive"] }
 uuid = { version = "1", features = ["v4", "serde"] }
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 bon = "3"
 # wincode + serde-wincode replace bincode for serde-derived wire shapes.
 # Pinned to 0.4: serde-wincode 0.1.0 depends on wincode ^0.4, so a 0.5
@@ -69,3 +69,11 @@ ring = "0.17"
 subtle = "2"
 base64 = "0.22"
 crabka-security = { path = "crates/security", version = "0.1.0" }
+kube = { version = "0.97", default-features = false, features = ["client", "runtime", "derive", "rustls-tls"] }
+k8s-openapi = { version = "0.23", default-features = false, features = ["v1_30"] }
+schemars = "0.8"
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+prometheus-client = "0.23"
+tower = "0.5"
+futures = "0.3"
+anyhow = "1"

@@ -1,0 +1,16 @@
+{{- if .Values.rbac.create -}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "crabka-operator.fullname" . }}-leader
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "crabka-operator.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "crabka-operator.fullname" . }}-leader
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "crabka-operator.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

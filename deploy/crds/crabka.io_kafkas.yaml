@@ -1,0 +1,73 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: kafkas.crabka.io
+spec:
+  group: crabka.io
+  names:
+    categories: []
+    kind: Kafka
+    plural: kafkas
+    shortNames:
+    - kk
+    singular: kafka
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns: []
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Auto-generated derived type for KafkaSpec via `CustomResource`
+        properties:
+          spec:
+            description: |-
+              Crabka cluster spec.
+
+              Slice 17 ships a placeholder with only `kafka_version`; the real schema lands in slice 18.
+            properties:
+              kafkaVersion:
+                description: Crabka version to deploy (semver). Required.
+                type: string
+            required:
+            - kafkaVersion
+            type: object
+          status:
+            nullable: true
+            properties:
+              conditions:
+                default: []
+                description: Standard Kubernetes-style condition list.
+                items:
+                  properties:
+                    lastTransitionTime:
+                      description: RFC3339 timestamp.
+                      type: string
+                    message:
+                      description: Human-readable message.
+                      type: string
+                    reason:
+                      description: CamelCase machine reason.
+                      type: string
+                    status:
+                      description: '`True`, `False`, or `Unknown`.'
+                      type: string
+                    type:
+                      description: e.g. `Ready`.
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+            type: object
+        required:
+        - spec
+        title: Kafka
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

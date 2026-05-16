@@ -1,0 +1,107 @@
+name: operator-e2e
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  kind:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.95.0"
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.2
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Install melange and apko
+        run: |
+          go install chainguard.dev/melange@latest
+          go install chainguard.dev/apko@latest
+          echo "$HOME/go/bin" >> "$GITHUB_PATH"
+
+      - name: Verify melange + apko on PATH
+        run: |
+          melange version
+          apko version
+
+      - name: Build crabka-operator apk + OCI image
+        run: |
+          mkdir -p packages
+          melange keygen
+          melange build packaging/melange/crabka-operator.yaml \
+            --source-dir . \
+            --signing-key melange.rsa \
+            --arch x86_64 \
+            --runner docker \
+            --out-dir packages/
+          apko build packaging/apko/crabka-operator.yaml \
+            crabka-operator:e2e \
+            crabka-operator.tar \
+            --arch x86_64 \
+            --repository-append "@local $PWD/packages" \
+            --keyring-append "$PWD/melange.rsa.pub"
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: crabka-e2e
+          version: v0.24.0
+          node_image: kindest/node:v1.30.0
+
+      - name: Load operator image into kind
+        run: kind load image-archive crabka-operator.tar --name crabka-e2e
+
+      - name: Install CRDs
+        run: kubectl apply -f deploy/crds/crabka.io_kafkas.yaml
+
+      - name: Install chart
+        run: |
+          kubectl create namespace crabka-operator
+          helm install operator charts/crabka-operator \
+            --namespace crabka-operator \
+            --set image.repository=crabka-operator \
+            --set image.tag=e2e \
+            --set image.pullPolicy=IfNotPresent
+
+      - name: Wait for operator rollout
+        run: |
+          kubectl rollout status -n crabka-operator deploy/operator-crabka-operator --timeout=120s
+
+      - name: Apply a placeholder Kafka CR
+        run: |
+          cat <<EOF | kubectl apply -f -
+          apiVersion: crabka.io/v1alpha1
+          kind: Kafka
+          metadata:
+            name: demo
+            namespace: default
+          spec:
+            kafkaVersion: "0.1.1"
+          EOF
+
+      - name: Wait for Ready=True
+        run: |
+          for i in $(seq 1 30); do
+            status=$(kubectl get kafka demo -n default -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
+            echo "attempt $i: status=$status"
+            if [ "$status" = "True" ]; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::Kafka 'demo' did not become Ready in 60s"
+          kubectl describe kafka demo -n default
+          kubectl logs -n crabka-operator deploy/operator-crabka-operator --tail=200
+          exit 1
+
+      - name: Operator logs (debug)
+        if: always()
+        run: kubectl logs -n crabka-operator deploy/operator-crabka-operator --tail=500 || true
