@@ -139,6 +139,7 @@ mod partition;
 mod partition_writer;
 mod producer_id_manager;
 mod producer_state;
+pub mod quota;
 pub mod raft_handshake;
 pub(crate) mod reassignment;
 pub(crate) mod replica_state;
