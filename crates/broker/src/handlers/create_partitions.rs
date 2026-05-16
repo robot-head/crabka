@@ -207,7 +207,7 @@ pub(crate) async fn handle(
         &image,
         &broker.quota_buckets,
         ctx.principal.name.as_str(),
-        "", // client_id — T3 will replace "" with ctx.client_id
+        ctx.client_id,
         mutation_count,
     );
     let resp = CreatePartitionsResponse {

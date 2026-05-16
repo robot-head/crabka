@@ -437,13 +437,11 @@ pub(crate) async fn handle(
     }
 
     // ── KIP-13 producer_byte_rate enforcement ───────────────────────
-    // client_id is not yet threaded into this handler (T11 wires it through
-    // dispatch); use "" so that user-only and default quotas still fire.
     let delay = consume_producer_quota(
         &image,
         &broker.quota_buckets,
         &ctx.principal.name,
-        "",
+        ctx.client_id,
         total_produce_bytes,
     );
     let resp = ProduceResponse {
@@ -487,4 +485,42 @@ fn consume_producer_quota(
     let overage = bytes - granted;
     let delay_secs = overage as f64 / rate;
     Duration::from_micros((delay_secs * 1_000_000.0) as u64).min(Duration::from_secs(1))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn consume_producer_quota_tuple_match_overage_throttles() {
+        use crabka_metadata::{ClientQuotaRecord, MetadataImage, MetadataRecord, QuotaEntity};
+        let mut img = MetadataImage::new(uuid::Uuid::nil());
+        img.apply(&MetadataRecord::V1ClientQuota(ClientQuotaRecord {
+            entity: vec![
+                QuotaEntity {
+                    entity_type: "user".into(),
+                    entity_name: Some("alice".into()),
+                },
+                QuotaEntity {
+                    entity_type: "client-id".into(),
+                    entity_name: Some("app-x".into()),
+                },
+            ],
+            config_key: "producer_byte_rate".into(),
+            config_value: Some(1024.0),
+        }));
+        let buckets = crate::quota::QuotaBuckets::new();
+        // Tuple match → 4096 bytes overage at 1024 B/s → throttle > 0.
+        let delay_match = super::consume_producer_quota(&img, &buckets, "alice", "app-x", 4096);
+        assert!(
+            delay_match > std::time::Duration::ZERO,
+            "tuple quota match should throttle on overage; got {delay_match:?}"
+        );
+        // No tuple match for client_id="other"; no (user=alice)-only quota exists.
+        let buckets2 = crate::quota::QuotaBuckets::new();
+        let delay_other = super::consume_producer_quota(&img, &buckets2, "alice", "other", 4096);
+        assert_eq!(
+            delay_other,
+            std::time::Duration::ZERO,
+            "non-matching client_id should not throttle; got {delay_other:?}"
+        );
+    }
 }

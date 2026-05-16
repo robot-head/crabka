@@ -293,14 +293,12 @@ pub(crate) async fn handle(
             results.push(result);
         }
 
-        // KIP-599: consume controller_mutation_rate quota. client_id is not
-        // threaded through HandlerTable (slice-16 known limitation); pass ""
-        // so that (user)-only and default quotas still fire.
+        // KIP-599: consume controller_mutation_rate quota.
         let delay = crate::quota::consume_controller_mutation_quota(
             &image,
             &broker.quota_buckets,
             &ctx.principal.name,
-            "", // client_id — T3 will replace "" with ctx.client_id
+            ctx.client_id,
             mutation_count,
         );
         let resp = CreateTopicsResponse {
@@ -359,5 +357,42 @@ mod replica_assignment_tests {
         let bs = vec![1u64];
         let out = round_robin_replicas(&bs, 2, 1);
         assert_eq!(out, vec![vec![1u64], vec![1u64]]);
+    }
+
+    #[test]
+    fn consume_controller_mutation_quota_tuple_match_overage_throttles() {
+        use crabka_metadata::{ClientQuotaRecord, MetadataImage, MetadataRecord, QuotaEntity};
+        let mut img = MetadataImage::new(uuid::Uuid::nil());
+        img.apply(&MetadataRecord::V1ClientQuota(ClientQuotaRecord {
+            entity: vec![
+                QuotaEntity {
+                    entity_type: "user".into(),
+                    entity_name: Some("alice".into()),
+                },
+                QuotaEntity {
+                    entity_type: "client-id".into(),
+                    entity_name: Some("app-x".into()),
+                },
+            ],
+            config_key: "controller_mutation_rate".into(),
+            config_value: Some(1.0),
+        }));
+        let buckets = crate::quota::QuotaBuckets::new();
+        let delay_match = crate::quota::consume_controller_mutation_quota(
+            &img, &buckets, "alice", "app-x", 10,
+        );
+        assert!(
+            delay_match > std::time::Duration::ZERO,
+            "tuple quota match should throttle on overage; got {delay_match:?}"
+        );
+        let buckets2 = crate::quota::QuotaBuckets::new();
+        let delay_other = crate::quota::consume_controller_mutation_quota(
+            &img, &buckets2, "alice", "other", 10,
+        );
+        assert_eq!(
+            delay_other,
+            std::time::Duration::ZERO,
+            "non-matching client_id should not throttle; got {delay_other:?}"
+        );
     }
 }

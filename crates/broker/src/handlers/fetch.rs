@@ -349,7 +349,7 @@ pub(crate) async fn handle(
             &image,
             &broker.quota_buckets,
             &ctx.principal.name,
-            "",
+            ctx.client_id,
             total_bytes,
         );
         if delay > Duration::ZERO {
@@ -645,4 +645,40 @@ fn group_into_topic_responses(pending: Vec<PendingRead>) -> Vec<FetchableTopicRe
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn consume_consumer_quota_tuple_match_overage_throttles() {
+        use crabka_metadata::{ClientQuotaRecord, MetadataImage, MetadataRecord, QuotaEntity};
+        let mut img = MetadataImage::new(uuid::Uuid::nil());
+        img.apply(&MetadataRecord::V1ClientQuota(ClientQuotaRecord {
+            entity: vec![
+                QuotaEntity {
+                    entity_type: "user".into(),
+                    entity_name: Some("alice".into()),
+                },
+                QuotaEntity {
+                    entity_type: "client-id".into(),
+                    entity_name: Some("app-x".into()),
+                },
+            ],
+            config_key: "consumer_byte_rate".into(),
+            config_value: Some(1024.0),
+        }));
+        let buckets = crate::quota::QuotaBuckets::new();
+        let delay_match = super::consume_consumer_quota(&img, &buckets, "alice", "app-x", 4096);
+        assert!(
+            delay_match > std::time::Duration::ZERO,
+            "tuple quota match should throttle on overage; got {delay_match:?}"
+        );
+        let buckets2 = crate::quota::QuotaBuckets::new();
+        let delay_other = super::consume_consumer_quota(&img, &buckets2, "alice", "other", 4096);
+        assert_eq!(
+            delay_other,
+            std::time::Duration::ZERO,
+            "non-matching client_id should not throttle; got {delay_other:?}"
+        );
+    }
 }
