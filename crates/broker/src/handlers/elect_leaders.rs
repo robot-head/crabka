@@ -9,7 +9,6 @@
 //! per-partition row.
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
 
 use bytes::Bytes;
 use crabka_metadata::{MetadataRecord, ResourceType};
@@ -18,7 +17,6 @@ use crabka_protocol::owned::elect_leaders_request::ElectLeadersRequest;
 use crabka_protocol::owned::elect_leaders_response::{
     ElectLeadersResponse, PartitionResult, ReplicaElectionResult,
 };
-use crabka_security::Principal;
 
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize};
 use crate::broker::Broker;
@@ -32,8 +30,7 @@ const WIRE_ELECTION_UNCLEAN: i8 = 1;
 pub(crate) async fn handle(
     broker: &Broker,
     req: ElectLeadersRequest,
-    principal: &Principal,
-    peer: &SocketAddr,
+    ctx: &crate::handlers::RequestContext<'_>,
     api_version: i16,
 ) -> Result<Bytes, crate::error::BrokerError> {
     // Authorize Cluster Alter — whole-request gate.
@@ -42,8 +39,8 @@ pub(crate) async fn handle(
         &image,
         &broker.config.super_users,
         &AuthorizationRequest {
-            principal,
-            host: peer,
+            principal: ctx.principal,
+            host: ctx.peer,
             resource_type: ResourceType::Cluster,
             resource_name: "kafka-cluster",
             operation: crabka_metadata::AclOperation::Alter,

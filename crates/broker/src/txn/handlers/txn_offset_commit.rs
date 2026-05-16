@@ -19,8 +19,6 @@
 //! * Per-topic `Read` on `Topic(name)`. Deny → per-partition
 //!   `TOPIC_AUTHORIZATION_FAILED (29)` on the rows of that topic.
 
-use std::net::SocketAddr;
-
 use bytes::{Bytes, BytesMut};
 
 use crabka_metadata::{AclOperation, ResourceType};
@@ -30,7 +28,6 @@ use crabka_protocol::owned::txn_offset_commit_response::{
 };
 use crabka_protocol::records::{Attributes, Record, RecordBatch};
 use crabka_protocol::{Decode, Encode};
-use crabka_security::Principal;
 
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize, authorize_topics};
 use crate::broker::Broker;
@@ -45,8 +42,7 @@ pub(crate) async fn handle(
     version: i16,
     _correlation_id: i32,
     req_bytes: &[u8],
-    principal: &Principal,
-    peer: &SocketAddr,
+    ctx: &crate::handlers::RequestContext<'_>,
 ) -> Result<Bytes, BrokerError> {
     let partitions = broker.partitions.clone();
     let group_manager = broker.group_manager.clone();
@@ -58,8 +54,8 @@ pub(crate) async fn handle(
         let image = broker.controller.current_image();
         let super_users = &broker.config.super_users;
         let tid_req = AuthorizationRequest {
-            principal,
-            host: peer,
+            principal: ctx.principal,
+            host: ctx.peer,
             resource_type: ResourceType::TransactionalId,
             resource_name: req.transactional_id.as_str(),
             operation: AclOperation::Write,
@@ -69,8 +65,8 @@ pub(crate) async fn handle(
         }
         // Group Read gate.
         let group_req = AuthorizationRequest {
-            principal,
-            host: peer,
+            principal: ctx.principal,
+            host: ctx.peer,
             resource_type: ResourceType::Group,
             resource_name: req.group_id.as_str(),
             operation: AclOperation::Read,
@@ -87,8 +83,8 @@ pub(crate) async fn handle(
         authorize_topics(
             &image,
             &broker.config.super_users,
-            principal,
-            peer,
+            ctx.principal,
+            ctx.peer,
             AclOperation::Read,
             topic_names,
         )

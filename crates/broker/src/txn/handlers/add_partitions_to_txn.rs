@@ -47,8 +47,7 @@ pub(crate) async fn handle(
     version: i16,
     _correlation_id: i32,
     req_bytes: &[u8],
-    principal: &Principal,
-    peer: &SocketAddr,
+    ctx: &crate::handlers::RequestContext<'_>,
 ) -> Result<Bytes, BrokerError> {
     let coord = broker.txn_coordinator.clone();
     let controller = broker.controller.clone();
@@ -62,9 +61,27 @@ pub(crate) async fn handle(
     coord.refresh_leader_partitions(&image).await;
 
     if version >= 4 {
-        handle_v4(&coord, version, &req, &image, super_users, principal, peer).await
+        handle_v4(
+            &coord,
+            version,
+            &req,
+            &image,
+            super_users,
+            ctx.principal,
+            ctx.peer,
+        )
+        .await
     } else {
-        handle_v3(&coord, version, &req, &image, super_users, principal, peer).await
+        handle_v3(
+            &coord,
+            version,
+            &req,
+            &image,
+            super_users,
+            ctx.principal,
+            ctx.peer,
+        )
+        .await
     }
 }
 

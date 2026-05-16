@@ -1,7 +1,5 @@
 //! `DescribeUserScramCredentials` (`api_key` 50, KIP-554 read half).
 
-use std::net::SocketAddr;
-
 use bytes::Bytes;
 use crabka_metadata::{MetadataImage, ResourceType};
 use crabka_protocol::Encode;
@@ -9,7 +7,7 @@ use crabka_protocol::owned::describe_user_scram_credentials_request::DescribeUse
 use crabka_protocol::owned::describe_user_scram_credentials_response::{
     CredentialInfo, DescribeUserScramCredentialsResponse, DescribeUserScramCredentialsResult,
 };
-use crabka_security::{Principal, SaslMechanism};
+use crabka_security::SaslMechanism;
 
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize};
 use crate::broker::Broker;
@@ -19,8 +17,7 @@ use crate::codes::{CLUSTER_AUTHORIZATION_FAILED, RESOURCE_NOT_FOUND_USER};
 pub(crate) async fn handle(
     broker: &Broker,
     req: DescribeUserScramCredentialsRequest,
-    principal: &Principal,
-    peer: &SocketAddr,
+    ctx: &crate::handlers::RequestContext<'_>,
     api_version: i16,
 ) -> Result<Bytes, crate::error::BrokerError> {
     let image = broker.controller.current_image();
@@ -29,8 +26,8 @@ pub(crate) async fn handle(
         &image,
         &broker.config.super_users,
         &AuthorizationRequest {
-            principal,
-            host: peer,
+            principal: ctx.principal,
+            host: ctx.peer,
             resource_type: ResourceType::Cluster,
             resource_name: "kafka-cluster",
             operation: crabka_metadata::AclOperation::Alter,

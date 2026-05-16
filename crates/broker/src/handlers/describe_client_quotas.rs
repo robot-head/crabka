@@ -1,7 +1,5 @@
 //! `DescribeClientQuotas` (`api_key` 48, KIP-13/124).
 
-use std::net::SocketAddr;
-
 use bytes::Bytes;
 use crabka_metadata::{EntityKey, ResourceType};
 use crabka_protocol::Encode;
@@ -11,7 +9,6 @@ use crabka_protocol::owned::describe_client_quotas_request::{
 use crabka_protocol::owned::describe_client_quotas_response::{
     DescribeClientQuotasResponse, EntityData, EntryData, ValueData,
 };
-use crabka_security::Principal;
 
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize};
 use crate::broker::Broker;
@@ -25,8 +22,7 @@ const MATCH_TYPE_ANY: i8 = 2;
 pub(crate) async fn handle(
     broker: &Broker,
     req: DescribeClientQuotasRequest,
-    principal: &Principal,
-    peer: &SocketAddr,
+    ctx: &crate::handlers::RequestContext<'_>,
     api_version: i16,
 ) -> Result<Bytes, crate::error::BrokerError> {
     let image = broker.controller.current_image();
@@ -34,8 +30,8 @@ pub(crate) async fn handle(
         &image,
         &broker.config.super_users,
         &AuthorizationRequest {
-            principal,
-            host: peer,
+            principal: ctx.principal,
+            host: ctx.peer,
             resource_type: ResourceType::Cluster,
             resource_name: "kafka-cluster",
             operation: crabka_metadata::AclOperation::Describe,

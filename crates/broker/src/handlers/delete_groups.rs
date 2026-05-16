@@ -1,15 +1,12 @@
 //! `DeleteGroups` (`api_key=42`). Drops empty groups from the in-memory
 //! registry. Non-empty groups are rejected with `NON_EMPTY_GROUP`.
 
-use std::net::SocketAddr;
-
 use bytes::{Bytes, BytesMut};
 
 use crabka_metadata::{AclOperation, ResourceType};
 use crabka_protocol::owned::delete_groups_request::DeleteGroupsRequest;
 use crabka_protocol::owned::delete_groups_response::{DeletableGroupResult, DeleteGroupsResponse};
 use crabka_protocol::{Decode, Encode};
-use crabka_security::Principal;
 
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize};
 use crate::broker::Broker;
@@ -22,8 +19,7 @@ pub(crate) async fn handle(
     version: i16,
     _correlation_id: i32,
     req_bytes: &[u8],
-    principal: &Principal,
-    peer: &SocketAddr,
+    ctx: &crate::handlers::RequestContext<'_>,
 ) -> Result<Bytes, BrokerError> {
     let mut cur: &[u8] = req_bytes;
     let req = DeleteGroupsRequest::decode(&mut cur, version)?;
@@ -36,8 +32,8 @@ pub(crate) async fn handle(
         // Per-group `Delete` check. On Deny → per-group
         // `error_code = GROUP_AUTHORIZATION_FAILED (30)`.
         let acl_req = AuthorizationRequest {
-            principal,
-            host: peer,
+            principal: ctx.principal,
+            host: ctx.peer,
             resource_type: ResourceType::Group,
             resource_name: gid.as_str(),
             operation: AclOperation::Delete,

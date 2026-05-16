@@ -3,8 +3,6 @@
 //! Metadata is sourced from `controller.current_image()` — the
 //! quorum-replicated snapshot — rather than a local in-memory struct.
 
-use std::net::SocketAddr;
-
 use bytes::{Bytes, BytesMut};
 
 use crabka_metadata::AclOperation;
@@ -14,7 +12,6 @@ use crabka_protocol::owned::metadata_response::{
 };
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 use crabka_protocol::{Decode, Encode};
-use crabka_security::Principal;
 
 use crate::authorizer::{AuthorizationResult, authorize_topics};
 use crate::broker::Broker;
@@ -31,8 +28,7 @@ pub(crate) async fn handle(
     version: i16,
     _correlation_id: i32,
     req_bytes: &[u8],
-    principal: &Principal,
-    peer: &SocketAddr,
+    ctx: &crate::handlers::RequestContext<'_>,
 ) -> Result<Bytes, BrokerError> {
     let controller = broker.controller.clone();
     let inter_broker_name = broker.config.inter_broker_listener_name.clone();
@@ -80,8 +76,8 @@ pub(crate) async fn handle(
     let acl_by_name = authorize_topics(
         &image,
         &broker.config.super_users,
-        principal,
-        peer,
+        ctx.principal,
+        ctx.peer,
         AclOperation::Describe,
         candidate_topics.iter().map(String::as_str),
     );

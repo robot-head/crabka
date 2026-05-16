@@ -1,7 +1,6 @@
 //! `JoinGroup` (`api_key=11`). Blocks for up to `rebalance_timeout_ms`
 //! waiting for the group to transition out of `PreparingRebalance`.
 
-use std::net::SocketAddr;
 use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
@@ -11,7 +10,6 @@ use crabka_metadata::{AclOperation, ResourceType};
 use crabka_protocol::owned::join_group_request::JoinGroupRequest;
 use crabka_protocol::owned::join_group_response::{JoinGroupResponse, JoinGroupResponseMember};
 use crabka_protocol::{Decode, Encode};
-use crabka_security::Principal;
 
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize};
 use crate::broker::Broker;
@@ -33,8 +31,7 @@ pub(crate) async fn handle(
     version: i16,
     _correlation_id: i32,
     req_bytes: &[u8],
-    principal: &Principal,
-    peer: &SocketAddr,
+    ctx: &crate::handlers::RequestContext<'_>,
 ) -> Result<Bytes, BrokerError> {
     let mut cur: &[u8] = req_bytes;
     let req = JoinGroupRequest::decode(&mut cur, version)?;
@@ -45,8 +42,8 @@ pub(crate) async fn handle(
     {
         let image = broker.controller.current_image();
         let acl_req = AuthorizationRequest {
-            principal,
-            host: peer,
+            principal: ctx.principal,
+            host: ctx.peer,
             resource_type: ResourceType::Group,
             resource_name: req.group_id.as_str(),
             operation: AclOperation::Read,

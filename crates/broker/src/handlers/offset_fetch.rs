@@ -5,8 +5,6 @@
 //! to a per-group array; for the MVP we ignore the `groups` array and only
 //! serve the legacy single-group shape.
 
-use std::net::SocketAddr;
-
 use bytes::{Bytes, BytesMut};
 
 use crabka_metadata::{AclOperation, ResourceType};
@@ -15,7 +13,6 @@ use crabka_protocol::owned::offset_fetch_response::{
     OffsetFetchResponse, OffsetFetchResponsePartition, OffsetFetchResponseTopic,
 };
 use crabka_protocol::{Decode, Encode};
-use crabka_security::Principal;
 
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize, authorize_topics};
 use crate::broker::Broker;
@@ -28,8 +25,7 @@ pub(crate) async fn handle(
     version: i16,
     _correlation_id: i32,
     req_bytes: &[u8],
-    principal: &Principal,
-    peer: &SocketAddr,
+    ctx: &crate::handlers::RequestContext<'_>,
 ) -> Result<Bytes, BrokerError> {
     let mut cur: &[u8] = req_bytes;
     let req = OffsetFetchRequest::decode(&mut cur, version)?;
@@ -40,8 +36,8 @@ pub(crate) async fn handle(
     {
         let image = broker.controller.current_image();
         let acl_req = AuthorizationRequest {
-            principal,
-            host: peer,
+            principal: ctx.principal,
+            host: ctx.peer,
             resource_type: ResourceType::Group,
             resource_name: req.group_id.as_str(),
             operation: AclOperation::Describe,
@@ -91,8 +87,8 @@ pub(crate) async fn handle(
             authorize_topics(
                 &image,
                 &broker.config.super_users,
-                principal,
-                peer,
+                ctx.principal,
+                ctx.peer,
                 AclOperation::Read,
                 discovered_topics.iter().map(String::as_str),
             )
@@ -143,8 +139,8 @@ pub(crate) async fn handle(
             authorize_topics(
                 &image,
                 &broker.config.super_users,
-                principal,
-                peer,
+                ctx.principal,
+                ctx.peer,
                 AclOperation::Read,
                 req_topics.iter().map(|t| t.name.as_str()),
             )

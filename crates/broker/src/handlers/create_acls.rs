@@ -4,14 +4,11 @@
 //! the resource shape and submits a `V1AccessControlEntry` to the
 //! controller. Returns per-binding results.
 
-use std::net::SocketAddr;
-
 use bytes::Bytes;
 use crabka_metadata::{AclEntry, MetadataRecord};
 use crabka_protocol::Encode;
 use crabka_protocol::owned::create_acls_request::CreateAclsRequest;
 use crabka_protocol::owned::create_acls_response::{AclCreationResult, CreateAclsResponse};
-use crabka_security::Principal;
 
 use super::acl_wire::{
     operation_concrete, pattern_type_concrete, permission_concrete, resource_type_concrete,
@@ -26,8 +23,7 @@ const MAX_RESOURCE_NAME_LEN: usize = 256;
 pub(crate) async fn handle(
     broker: &Broker,
     req: CreateAclsRequest,
-    principal: &Principal,
-    peer: &SocketAddr,
+    ctx: &crate::handlers::RequestContext<'_>,
     api_version: i16,
 ) -> Result<Bytes, crate::error::BrokerError> {
     let image = broker.controller.current_image();
@@ -37,8 +33,8 @@ pub(crate) async fn handle(
         &image,
         &broker.config.super_users,
         &AuthorizationRequest {
-            principal,
-            host: peer,
+            principal: ctx.principal,
+            host: ctx.peer,
             resource_type: crabka_metadata::ResourceType::Cluster,
             resource_name: "kafka-cluster",
             operation: crabka_metadata::AclOperation::Alter,
