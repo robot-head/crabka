@@ -46,6 +46,7 @@ impl HandlerTable {
 pub(crate) mod acl_wire;
 pub(crate) mod alter_configs;
 pub(crate) mod alter_partition;
+pub(crate) mod alter_partition_reassignments;
 pub(crate) mod alter_user_scram_credentials;
 pub(crate) mod api_versions;
 pub(crate) mod broker_heartbeat;
@@ -70,6 +71,7 @@ pub(crate) mod join_group;
 pub(crate) mod leave_group;
 pub(crate) mod list_groups;
 pub(crate) mod list_offsets;
+pub(crate) mod list_partition_reassignments;
 pub(crate) mod metadata;
 pub(crate) mod offset_commit;
 pub(crate) mod offset_fetch;

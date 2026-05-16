@@ -67,6 +67,14 @@ impl MetadataImage {
             .map(|(_, v)| v)
     }
 
+    /// All partitions where a reassignment is currently in flight
+    /// (`adding_replicas` or `removing_replicas` non-empty).
+    pub fn reassignments_in_flight(&self) -> impl Iterator<Item = &PartitionRecord> + '_ {
+        self.topics()
+            .flat_map(move |t| self.partitions_of(&t.name))
+            .filter(|p| !p.adding_replicas.is_empty() || !p.removing_replicas.is_empty())
+    }
+
     /// Currently-effective config overrides for `topic`, or `None` if no
     /// `V1TopicConfig` record has been applied for this topic since the last
     /// `V1DeleteTopic` (or since image creation).
@@ -287,6 +295,8 @@ mod tests {
             replicas: vec![1],
             isr: vec![1],
             leader_epoch: 0,
+            adding_replicas: vec![],
+            removing_replicas: vec![],
         }));
         m.apply(&MetadataRecord::V1Partition(PartitionRecord {
             topic: "t".into(),
@@ -295,6 +305,8 @@ mod tests {
             replicas: vec![1],
             isr: vec![1],
             leader_epoch: 0,
+            adding_replicas: vec![],
+            removing_replicas: vec![],
         }));
         assert_eq!(m.partitions_of("t").count(), 2);
         m.apply(&MetadataRecord::V1DeleteTopic(DeleteTopicRecord {
@@ -362,6 +374,8 @@ mod tests {
             replicas: vec![1],
             isr: vec![1],
             leader_epoch: 0,
+            adding_replicas: vec![],
+            removing_replicas: vec![],
         });
         let err = m.validate(&p).unwrap_err();
         assert!(matches!(err, MetadataError::UnknownTopic(_)));
@@ -608,5 +622,99 @@ mod tests {
         m.apply(&MetadataRecord::V1AccessControlEntry(topic_read_for_alice()));
         m.apply(&MetadataRecord::V1AccessControlEntry(topic_prefixed_team()));
         assert_eq!(m.all_acls().count(), 2);
+    }
+
+    #[test]
+    fn reassignments_in_flight_excludes_idle_partitions() {
+        let mut img = MetadataImage::new(uuid::Uuid::nil());
+        img.apply(&MetadataRecord::V1Topic(TopicRecord {
+            name: "foo".into(),
+            topic_id: uuid::Uuid::nil(),
+            partitions: 1,
+            replication_factor: 3,
+        }));
+        img.apply(&MetadataRecord::V1Partition(PartitionRecord {
+            topic: "foo".into(),
+            partition: 0,
+            leader: 1,
+            replicas: vec![1, 2, 3],
+            isr: vec![1, 2, 3],
+            leader_epoch: 0,
+            adding_replicas: vec![],
+            removing_replicas: vec![],
+        }));
+        assert_eq!(img.reassignments_in_flight().count(), 0);
+    }
+
+    #[test]
+    fn reassignments_in_flight_returns_partitions_with_adding() {
+        let mut img = MetadataImage::new(uuid::Uuid::nil());
+        img.apply(&MetadataRecord::V1Topic(TopicRecord {
+            name: "foo".into(),
+            topic_id: uuid::Uuid::nil(),
+            partitions: 1,
+            replication_factor: 3,
+        }));
+        img.apply(&MetadataRecord::V1Partition(PartitionRecord {
+            topic: "foo".into(),
+            partition: 0,
+            leader: 1,
+            replicas: vec![1, 2, 3, 4],
+            isr: vec![1, 2, 3],
+            leader_epoch: 0,
+            adding_replicas: vec![4],
+            removing_replicas: vec![],
+        }));
+        let rows: Vec<_> = img.reassignments_in_flight().collect();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].adding_replicas, vec![4]);
+    }
+
+    #[test]
+    fn reassignments_in_flight_returns_partitions_with_removing() {
+        let mut img = MetadataImage::new(uuid::Uuid::nil());
+        img.apply(&MetadataRecord::V1Topic(TopicRecord {
+            name: "foo".into(),
+            topic_id: uuid::Uuid::nil(),
+            partitions: 1,
+            replication_factor: 3,
+        }));
+        img.apply(&MetadataRecord::V1Partition(PartitionRecord {
+            topic: "foo".into(),
+            partition: 0,
+            leader: 1,
+            replicas: vec![1, 2, 3],
+            isr: vec![1, 2, 3],
+            leader_epoch: 0,
+            adding_replicas: vec![],
+            removing_replicas: vec![3],
+        }));
+        let rows: Vec<_> = img.reassignments_in_flight().collect();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].removing_replicas, vec![3]);
+    }
+
+    #[test]
+    fn reassignments_in_flight_covers_multiple_topics() {
+        let mut img = MetadataImage::new(uuid::Uuid::nil());
+        for name in ["foo", "bar"] {
+            img.apply(&MetadataRecord::V1Topic(TopicRecord {
+                name: name.into(),
+                topic_id: uuid::Uuid::nil(),
+                partitions: 1,
+                replication_factor: 3,
+            }));
+            img.apply(&MetadataRecord::V1Partition(PartitionRecord {
+                topic: name.into(),
+                partition: 0,
+                leader: 1,
+                replicas: vec![1, 2, 3, 4],
+                isr: vec![1, 2, 3],
+                leader_epoch: 0,
+                adding_replicas: vec![4],
+                removing_replicas: vec![],
+            }));
+        }
+        assert_eq!(img.reassignments_in_flight().count(), 2);
     }
 }

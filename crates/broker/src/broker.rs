@@ -418,6 +418,24 @@ impl BrokerHandle {
         Some(p.isr.clone())
     }
 
+    /// Test-only: return a clone of the full `PartitionRecord` for
+    /// `(topic, partition)` as seen by this broker's metadata image.
+    /// Returns `None` if the partition is not yet in the image.
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[must_use]
+    #[allow(clippy::used_underscore_binding)]
+    pub fn partition_record_for_test(
+        &self,
+        topic: &str,
+        partition: i32,
+    ) -> Option<crabka_metadata::PartitionRecord> {
+        self._broker
+            .controller
+            .current_image()
+            .partition(topic, partition)
+            .cloned()
+    }
+
     /// Cancel the listener + drain in-flight connections. Awaiting the
     /// returned future blocks until the listener task exits.
     #[allow(clippy::used_underscore_binding)] // `_broker` carries shared state we must reach into during shutdown
@@ -458,6 +476,39 @@ impl crate::leader_rebalance::ControllerLike for ControllerAdapter {
 
     fn current_image(&self) -> Arc<crabka_metadata::MetadataImage> {
         self.handle.current_image()
+    }
+
+    async fn submit_change(
+        &self,
+        records: Vec<crabka_metadata::MetadataRecord>,
+    ) -> Result<(), String> {
+        self.handle
+            .submit_change(records)
+            .await
+            .map_err(|e| e.to_string())
+    }
+}
+
+/// Wraps a real [`crabka_raft::ControllerHandle`] so it can satisfy the
+/// [`crate::reassignment::ReassignmentController`] trait required by the
+/// reassignment-completion background task.
+struct ReassignmentControllerAdapter {
+    handle: Arc<crabka_raft::ControllerHandle>,
+    node_id: crabka_raft::NodeId,
+}
+
+#[async_trait::async_trait]
+impl crate::reassignment::ReassignmentController for ReassignmentControllerAdapter {
+    fn is_leader(&self) -> bool {
+        *self.handle.watch_leader().borrow() == Some(self.node_id)
+    }
+
+    fn current_image(&self) -> Arc<crabka_metadata::MetadataImage> {
+        self.handle.current_image()
+    }
+
+    fn watch_image(&self) -> tokio::sync::watch::Receiver<Arc<crabka_metadata::MetadataImage>> {
+        self.handle.watch_image()
     }
 
     async fn submit_change(
@@ -893,6 +944,25 @@ impl Broker {
                 rebalance_liveness,
                 rebalance_cfg,
                 rebalance_shutdown,
+            ));
+        }
+
+        // Spawn reassignment-completion background task. The task itself
+        // checks is_leader() per image apply — safe to run on every broker.
+        // Always-on (no config gate): reassignment completion is a
+        // correctness requirement, not an optional behavior.
+        {
+            let adapter: Arc<dyn crate::reassignment::ReassignmentController> =
+                Arc::new(ReassignmentControllerAdapter {
+                    handle: controller.clone(),
+                    node_id: config.node_id,
+                });
+            let liveness_clone = liveness.clone();
+            let shutdown_clone = supervisor_shutdown.child_token();
+            tokio::spawn(crate::reassignment::run(
+                adapter,
+                liveness_clone,
+                shutdown_clone,
             ));
         }
 

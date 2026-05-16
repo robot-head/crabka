@@ -25,6 +25,12 @@ pub struct PartitionRecord {
     /// Per-partition leader epoch. Bumped on every leader change.
     /// Slice-10b adds this; older on-disk metadata is not migrated.
     pub leader_epoch: i32,
+    /// Replicas being added in an in-flight reassignment. Empty when no
+    /// reassignment in flight. KIP-455.
+    pub adding_replicas: Vec<NodeId>,
+    /// Replicas being removed in an in-flight reassignment. Empty when
+    /// no reassignment in flight. KIP-455.
+    pub removing_replicas: Vec<NodeId>,
 }
 
 /// A single named listener endpoint advertised by a broker. Stored as a
@@ -131,6 +137,8 @@ mod tests {
             replicas: vec![1, 2, 3],
             isr: vec![1, 2],
             leader_epoch: 0,
+            adding_replicas: vec![],
+            removing_replicas: vec![],
         });
         assert_eq!(round_trip(&r), r);
     }

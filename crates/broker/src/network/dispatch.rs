@@ -619,6 +619,46 @@ async fn serve_connection_stream<S>(
                 }
             }
         }
+        // AlterPartitionReassignments (45, slice-15 T7) needs both the
+        // authenticated principal AND the peer's `SocketAddr` so the handler
+        // can authorize `Alter` on `Cluster("kafka-cluster")` and emit
+        // CLUSTER_AUTHORIZATION_FAILED. The `&Broker`-only handler table
+        // signature can't carry that context, so this api_key intercepts inline.
+        if peek_api_key(&frame).ok() == Some(45) {
+            match handle_alter_partition_reassignments_frame(&broker, &frame, &auth, &peer).await {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during AlterPartitionReassignments, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "AlterPartitionReassignments dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
+        // ListPartitionReassignments (46, slice-15 T7) needs both the
+        // authenticated principal AND the peer's `SocketAddr` so the handler
+        // can authorize `Describe` on `Cluster("kafka-cluster")` and emit
+        // CLUSTER_AUTHORIZATION_FAILED. The `&Broker`-only handler table
+        // signature can't carry that context, so this api_key intercepts inline.
+        if peek_api_key(&frame).ok() == Some(46) {
+            match handle_list_partition_reassignments_frame(&broker, &frame, &auth, &peer).await {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during ListPartitionReassignments, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "ListPartitionReassignments dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
         // InitProducerId (22, slice-13 T20) needs both the authenticated
         // principal AND the peer's `SocketAddr` so the handler can
         // authorize `Write` on `TransactionalId` (transactional path) or
@@ -1279,6 +1319,100 @@ async fn handle_elect_leaders_frame(
 
     let resp_body =
         crate::handlers::elect_leaders::handle(broker, req, &principal, peer, api_version).await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch an `AlterPartitionReassignments` (`api_key` 45) frame.
+/// Mirrors [`handle_elect_leaders_frame`] — pulls the authenticated principal
+/// off the per-connection `auth` state and the peer `SocketAddr` from the
+/// accept-time capture so the handler can authorize `Alter` on
+/// `Cluster("kafka-cluster")` with host-based ACL matching.
+async fn handle_alter_partition_reassignments_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    use crabka_protocol::Decode;
+
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 45);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let mut cur: &[u8] = body;
+    let req = crabka_protocol::owned::alter_partition_reassignments_request::AlterPartitionReassignmentsRequest::decode(
+        &mut cur,
+        api_version,
+    )?;
+
+    let principal = auth
+        .principal()
+        .cloned()
+        .unwrap_or_else(|| crabka_security::Principal {
+            name: "ANONYMOUS".to_string(),
+            mechanism: crabka_security::SaslMechanism::Plain,
+        });
+
+    let resp_body = crate::handlers::alter_partition_reassignments::handle(
+        broker,
+        req,
+        &principal,
+        peer,
+        api_version,
+    )
+    .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch a `ListPartitionReassignments` (`api_key` 46) frame.
+/// Mirrors [`handle_elect_leaders_frame`] — pulls the authenticated principal
+/// off the per-connection `auth` state and the peer `SocketAddr` from the
+/// accept-time capture so the handler can authorize `Describe` on
+/// `Cluster("kafka-cluster")` with host-based ACL matching.
+async fn handle_list_partition_reassignments_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    use crabka_protocol::Decode;
+
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 46);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let mut cur: &[u8] = body;
+    let req = crabka_protocol::owned::list_partition_reassignments_request::ListPartitionReassignmentsRequest::decode(
+        &mut cur,
+        api_version,
+    )?;
+
+    let principal = auth
+        .principal()
+        .cloned()
+        .unwrap_or_else(|| crabka_security::Principal {
+            name: "ANONYMOUS".to_string(),
+            mechanism: crabka_security::SaslMechanism::Plain,
+        });
+
+    let resp_body = crate::handlers::list_partition_reassignments::handle(
+        broker,
+        req,
+        &principal,
+        peer,
+        api_version,
+    )
+    .await?;
     Ok(encode_response(
         api_key,
         correlation_id,
@@ -2019,6 +2153,8 @@ fn handler_body_flexible(api_key: i16, version: i16) -> bool {
         42 => version >= owned::delete_groups_request::FLEXIBLE_MIN,
         43 => version >= owned::elect_leaders_request::FLEXIBLE_MIN,
         44 => version >= owned::incremental_alter_configs_request::FLEXIBLE_MIN,
+        45 => version >= owned::alter_partition_reassignments_request::FLEXIBLE_MIN,
+        46 => version >= owned::list_partition_reassignments_request::FLEXIBLE_MIN,
         // AlterUserScramCredentials (KIP-554, slice 12 T15) is flexible from v0.
         51 => version >= owned::alter_user_scram_credentials_request::FLEXIBLE_MIN,
         56 => version >= owned::alter_partition_request::FLEXIBLE_MIN,
