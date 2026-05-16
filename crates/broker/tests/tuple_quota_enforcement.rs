@@ -535,14 +535,15 @@ async fn tuple_quota_throttles_only_matching_client_id() {
     );
 
     // Poll until the quota appears in the metadata image (absorb raft latency).
-    // 15s matches the auth-propagation deadline used elsewhere; macOS CI runners
-    // can exceed the 5s used in slice-16 single-quota tests.
+    //
+    // `MetadataImage` canonicalizes EntityKey by sorting entries alphabetically
+    // by entity_type, so the stored key has "client-id" before "user".
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         let img = handle.controller_image_for_test();
         let key: crabka_metadata::EntityKey = vec![
-            ("user".into(), Some("alice".into())),
             ("client-id".into(), Some("app-x".into())),
+            ("user".into(), Some("alice".into())),
         ];
         if let Some(cfgs) = img.client_quotas().get(&key)
             && cfgs.get("producer_byte_rate") == Some(&1024.0)
