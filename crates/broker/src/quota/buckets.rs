@@ -17,7 +17,9 @@ pub struct QuotaBuckets {
 impl QuotaBuckets {
     #[must_use]
     pub fn new() -> Self {
-        Self { buckets: DashMap::new() }
+        Self {
+            buckets: DashMap::new(),
+        }
     }
 
     /// Get or lazily create a bucket for `(quota_key, entity_key)`,
@@ -29,7 +31,10 @@ impl QuotaBuckets {
         entity_key: &EntityKey,
         initial_rate: u64,
     ) -> Arc<TokenBucket> {
-        if let Some(b) = self.buckets.get(&(quota_key.to_string(), entity_key.clone())) {
+        if let Some(b) = self
+            .buckets
+            .get(&(quota_key.to_string(), entity_key.clone()))
+        {
             return b.clone();
         }
         let b = Arc::new(TokenBucket::new());
@@ -44,7 +49,9 @@ impl QuotaBuckets {
     /// Iterate every (`quota_key`, `entity_key`, bucket) — used by the
     /// refresh task to push new rates after an image change.
     pub fn iter(&self) -> impl Iterator<Item = ((String, EntityKey), Arc<TokenBucket>)> + '_ {
-        self.buckets.iter().map(|r| (r.key().clone(), r.value().clone()))
+        self.buckets
+            .iter()
+            .map(|r| (r.key().clone(), r.value().clone()))
     }
 
     #[cfg(test)]
