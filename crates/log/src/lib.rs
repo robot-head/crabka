@@ -41,6 +41,7 @@
 
 #![doc(html_root_url = "https://docs.rs/crabka-log/0.0.0")]
 
+mod compact;
 mod config;
 mod error;
 mod index;
