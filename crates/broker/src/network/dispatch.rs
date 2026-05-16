@@ -598,6 +598,27 @@ async fn serve_connection_stream<S>(
                 }
             }
         }
+        // ElectLeaders (43, slice-14 T5) needs both the authenticated
+        // principal AND the peer's `SocketAddr` so the handler can
+        // authorize `Alter` on `Cluster("kafka-cluster")` and emit
+        // CLUSTER_AUTHORIZATION_FAILED on every per-partition row on Deny.
+        // The `&Broker`-only handler table signature can't carry that
+        // context, so this api_key intercepts inline.
+        if peek_api_key(&frame).ok() == Some(43) {
+            match handle_elect_leaders_frame(&broker, &frame, &auth, &peer).await {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during ElectLeaders, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "ElectLeaders dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
         // InitProducerId (22, slice-13 T20) needs both the authenticated
         // principal AND the peer's `SocketAddr` so the handler can
         // authorize `Write` on `TransactionalId` (transactional path) or
@@ -1217,6 +1238,47 @@ async fn handle_delete_acls_frame(
 
     let resp_body =
         crate::handlers::delete_acls::handle(broker, req, &principal, peer, api_version).await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch an `ElectLeaders` (`api_key` 43) frame. Mirrors
+/// [`handle_delete_acls_frame`] — pulls the authenticated principal off the
+/// per-connection `auth` state and the peer `SocketAddr` from the
+/// accept-time capture so the handler can authorize `Alter` on
+/// `Cluster("kafka-cluster")` with host-based ACL matching.
+async fn handle_elect_leaders_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    use crabka_protocol::Decode;
+
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 43);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let mut cur: &[u8] = body;
+    let req = crabka_protocol::owned::elect_leaders_request::ElectLeadersRequest::decode(
+        &mut cur,
+        api_version,
+    )?;
+
+    let principal = auth
+        .principal()
+        .cloned()
+        .unwrap_or_else(|| crabka_security::Principal {
+            name: "ANONYMOUS".to_string(),
+            mechanism: crabka_security::SaslMechanism::Plain,
+        });
+
+    let resp_body =
+        crate::handlers::elect_leaders::handle(broker, req, &principal, peer, api_version).await?;
     Ok(encode_response(
         api_key,
         correlation_id,
@@ -1955,6 +2017,7 @@ fn handler_body_flexible(api_key: i16, version: i16) -> bool {
         36 => version >= owned::sasl_authenticate_request::FLEXIBLE_MIN,
         37 => version >= owned::create_partitions_request::FLEXIBLE_MIN,
         42 => version >= owned::delete_groups_request::FLEXIBLE_MIN,
+        43 => version >= owned::elect_leaders_request::FLEXIBLE_MIN,
         44 => version >= owned::incremental_alter_configs_request::FLEXIBLE_MIN,
         // AlterUserScramCredentials (KIP-554, slice 12 T15) is flexible from v0.
         51 => version >= owned::alter_user_scram_credentials_request::FLEXIBLE_MIN,

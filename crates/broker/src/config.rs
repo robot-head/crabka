@@ -132,6 +132,22 @@ pub struct BrokerConfig {
 
     /// Which SASL mechanisms are enabled. Empty → no SASL.
     pub enabled_sasl_mechanisms: Vec<SaslMechanism>,
+
+    /// KIP-460 auto preferred-replica election. When true, a background
+    /// task on the controller leader periodically scans partitions and
+    /// re-elects the preferred replica as leader when it's alive + in
+    /// ISR. Matches Kafka's `auto.leader.rebalance.enable`.
+    pub auto_leader_rebalance_enable: bool,
+
+    /// How often the auto-rebalance ticker fires, in seconds. Default
+    /// 300 (5 minutes). Matches Kafka's
+    /// `leader.imbalance.check.interval.seconds`.
+    pub leader_imbalance_check_interval_secs: u64,
+
+    /// Minimum percentage of imbalanced partitions before the
+    /// auto-rebalance ticker submits any changes. Default 10. Matches
+    /// Kafka's `leader.imbalance.per.broker.percentage`.
+    pub leader_imbalance_per_broker_percentage: u32,
 }
 
 impl BrokerConfig {
@@ -171,6 +187,9 @@ impl BrokerConfig {
             super_users: std::collections::HashSet::new(),
             tls_config: None,
             enabled_sasl_mechanisms: vec![],
+            auto_leader_rebalance_enable: false, // tests opt in explicitly
+            leader_imbalance_check_interval_secs: 300,
+            leader_imbalance_per_broker_percentage: 10,
         }
     }
 
@@ -232,6 +251,15 @@ impl BrokerConfig {
             });
         }
 
+        if self.leader_imbalance_check_interval_secs == 0 {
+            return Err(BrokerError::InvalidLeaderRebalanceInterval { value: 0 });
+        }
+        if self.leader_imbalance_per_broker_percentage > 100 {
+            return Err(BrokerError::InvalidLeaderRebalanceThreshold {
+                value: self.leader_imbalance_per_broker_percentage,
+            });
+        }
+
         Ok(())
     }
 
@@ -282,6 +310,9 @@ impl Default for BrokerConfig {
             super_users: std::collections::HashSet::new(),
             tls_config: None,
             enabled_sasl_mechanisms: vec![],
+            auto_leader_rebalance_enable: true,
+            leader_imbalance_check_interval_secs: 300,
+            leader_imbalance_per_broker_percentage: 10,
         }
     }
 }
@@ -424,5 +455,43 @@ mod tests {
         BrokerConfig::default()
             .validate()
             .expect("legacy default validates");
+    }
+
+    #[test]
+    fn auto_leader_rebalance_defaults_to_true_in_default() {
+        let c = BrokerConfig::default();
+        assert!(c.auto_leader_rebalance_enable);
+        assert_eq!(c.leader_imbalance_check_interval_secs, 300);
+        assert_eq!(c.leader_imbalance_per_broker_percentage, 10);
+    }
+
+    #[test]
+    fn auto_leader_rebalance_defaults_to_false_in_for_tests() {
+        let c = BrokerConfig::for_tests(std::path::PathBuf::from("/tmp"));
+        assert!(!c.auto_leader_rebalance_enable);
+    }
+
+    #[test]
+    fn rebalance_zero_interval_rejected_by_validate() {
+        let c = BrokerConfig {
+            leader_imbalance_check_interval_secs: 0,
+            ..BrokerConfig::default()
+        };
+        assert!(matches!(
+            c.validate(),
+            Err(BrokerError::InvalidLeaderRebalanceInterval { value: 0 })
+        ));
+    }
+
+    #[test]
+    fn rebalance_threshold_over_100_rejected_by_validate() {
+        let c = BrokerConfig {
+            leader_imbalance_per_broker_percentage: 101,
+            ..BrokerConfig::default()
+        };
+        assert!(matches!(
+            c.validate(),
+            Err(BrokerError::InvalidLeaderRebalanceThreshold { value: 101 })
+        ));
     }
 }

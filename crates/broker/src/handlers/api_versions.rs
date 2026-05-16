@@ -82,6 +82,7 @@ fn supported_apis() -> Vec<ApiVersion> {
         v!(describe_acls_request),
         v!(create_acls_request),
         v!(delete_acls_request),
+        v!(elect_leaders_request),
     ]
 }
 

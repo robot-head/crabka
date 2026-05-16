@@ -393,6 +393,31 @@ impl BrokerHandle {
         let _ = self._broker.group_manager.get_or_create(group_id);
     }
 
+    /// Test-only: return the current leader node-id for `(topic, partition)`
+    /// as seen by this broker's metadata image. Returns `None` if the
+    /// partition is not yet in the image or the leader field is `0` (no
+    /// elected leader).
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[must_use]
+    #[allow(clippy::used_underscore_binding)]
+    pub fn partition_leader_for_test(&self, topic: &str, partition: i32) -> Option<u64> {
+        let img = self._broker.controller.current_image();
+        let p = img.partition(topic, partition)?;
+        if p.leader == 0 { None } else { Some(p.leader) }
+    }
+
+    /// Test-only: return the current ISR for `(topic, partition)` as seen
+    /// by this broker's metadata image. Returns `None` if the partition is
+    /// not yet in the image.
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[must_use]
+    #[allow(clippy::used_underscore_binding)]
+    pub fn partition_isr_for_test(&self, topic: &str, partition: i32) -> Option<Vec<u64>> {
+        let img = self._broker.controller.current_image();
+        let p = img.partition(topic, partition)?;
+        Some(p.isr.clone())
+    }
+
     /// Cancel the listener + drain in-flight connections. Awaiting the
     /// returned future blocks until the listener task exits.
     #[allow(clippy::used_underscore_binding)] // `_broker` carries shared state we must reach into during shutdown
@@ -414,6 +439,35 @@ impl BrokerHandle {
         // and re-elects itself, preventing the surviving nodes from detecting
         // the leader failure and electing a replacement.
         self._broker.controller.cancel().await;
+    }
+}
+
+/// Wraps a real [`crabka_raft::ControllerHandle`] so it can satisfy the
+/// [`crate::leader_rebalance::ControllerLike`] trait required by the
+/// auto-rebalance background task.
+struct ControllerAdapter {
+    handle: Arc<crabka_raft::ControllerHandle>,
+    node_id: crabka_raft::NodeId,
+}
+
+#[async_trait::async_trait]
+impl crate::leader_rebalance::ControllerLike for ControllerAdapter {
+    fn is_leader(&self) -> bool {
+        *self.handle.watch_leader().borrow() == Some(self.node_id)
+    }
+
+    fn current_image(&self) -> Arc<crabka_metadata::MetadataImage> {
+        self.handle.current_image()
+    }
+
+    async fn submit_change(
+        &self,
+        records: Vec<crabka_metadata::MetadataRecord>,
+    ) -> Result<(), String> {
+        self.handle
+            .submit_change(records)
+            .await
+            .map_err(|e| e.to_string())
     }
 }
 
@@ -815,6 +869,32 @@ impl Broker {
                 shutdown: isr_shutdown,
             },
         ));
+
+        // 4g. Auto-rebalance background task (KIP-460). The task itself
+        //     checks is_leader() on every tick so it is safe to run on
+        //     every broker; only the raft leader will actually submit
+        //     partition changes. Child token of supervisor_shutdown.
+        if config.auto_leader_rebalance_enable {
+            let rebalance_cfg = crate::leader_rebalance::AutoRebalanceConfig {
+                check_interval: std::time::Duration::from_secs(
+                    config.leader_imbalance_check_interval_secs,
+                ),
+                imbalance_threshold_pct: config.leader_imbalance_per_broker_percentage,
+            };
+            let adapter: Arc<dyn crate::leader_rebalance::ControllerLike> =
+                Arc::new(ControllerAdapter {
+                    handle: controller.clone(),
+                    node_id: config.node_id,
+                });
+            let rebalance_liveness = liveness.clone();
+            let rebalance_shutdown = supervisor_shutdown.child_token();
+            tokio::spawn(crate::leader_rebalance::run(
+                adapter,
+                rebalance_liveness,
+                rebalance_cfg,
+                rebalance_shutdown,
+            ));
+        }
 
         // 5. Build handler table.
         let handlers = crate::handlers::build_table();
