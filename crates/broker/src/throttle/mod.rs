@@ -1,5 +1,8 @@
 //! KIP-73 throttled replication — value types and parser.
 
+mod bucket;
+pub use bucket::{ThrottleState, TokenBucket};
+
 use crabka_metadata::{MetadataImage, NodeId};
 
 /// Topic-level `*.throttled.replicas` config value.
