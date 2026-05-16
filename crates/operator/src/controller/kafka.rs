@@ -55,16 +55,17 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
             status: "True".into(),
             reason: "Stub".into(),
             message: "Slice 17 placeholder: no workload reconciliation yet.".into(),
-            last_transition_time: chrono::Utc::now().to_rfc3339(),
+            last_transition_time: chrono::Utc::now()
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         }],
     };
     let patch = json!({ "status": status });
-    api.patch_status(
-        &name,
-        &PatchParams::apply(FIELD_MANAGER),
-        &Patch::Merge(&patch),
-    )
-    .await?;
+    let params = PatchParams {
+        field_manager: Some(FIELD_MANAGER.into()),
+        ..Default::default()
+    };
+    api.patch_status(&name, &params, &Patch::Merge(&patch))
+        .await?;
 
     Ok(Action::requeue(Duration::from_mins(1)))
 }
