@@ -209,3 +209,34 @@ Kafka client for ApiVersions.
 - Out of scope: ACL audit logging, `User:` prefix in super-user
   config strings, `ClusterAction` implication, persisted broker
   config.
+
+## Slice 14 — ElectLeaders + auto-rebalance (2026-05-15)
+
+- Pure-logic `select_new_leader_for_partition` in
+  `crates/broker/src/leader_election.rs` computes the new
+  `PartitionRecord` for one partition under PREFERRED or UNCLEAN.
+  Returns a small `ElectError` enum mapped to wire codes 3/15/80/81/84.
+- New `crates/broker/src/handlers/elect_leaders.rs` (api_key 43, KIP-460).
+  Cluster Alter authorize gate; per-partition results in the response.
+  Inline-intercept dispatch matches the slice-13 ACL handler pattern.
+- New `crates/broker/src/leader_rebalance.rs`. Background ticker on
+  the controller leader scans for imbalanced partitions every
+  `leader_imbalance_check_interval_secs` (default 300s, matches Kafka);
+  submits batched preferred-elections when imbalance crosses
+  `leader_imbalance_per_broker_percentage` (default 10%).
+- `BrokerConfig` gains `auto_leader_rebalance_enable` (default `true`
+  in `Default`, `false` in `for_tests` so slice-10b multi-broker tests
+  don't see surprise re-elections from the ticker),
+  `leader_imbalance_check_interval_secs`, and
+  `leader_imbalance_per_broker_percentage`. Two new `BrokerError`
+  variants validate non-zero interval and ≤100% threshold at startup.
+- 8 new authorizer-pure unit tests (PREFERRED + UNCLEAN matrix), 2
+  rebalance-tick unit tests with mock controller, 4 broker integration
+  tests (preferred + unclean wire paths, non-super-user denied,
+  auto-rebalance restores preferred leader within 15s on a 1-second
+  tick; gated `#[cfg(not(target_os = "windows"))]` per multi-broker
+  test convention). 1 new JVM acceptance test drives
+  `kafka-leader-election --election-type preferred` through a 3-broker
+  cp-kafka:7.5 cluster.
+- Out of scope: manual partition reassignment, quotas, log compaction,
+  KIP-841 force-elect, operator preferred-replica override.

@@ -86,6 +86,13 @@ Pre-1.0, pre-alpha. No production use.
   in slice-12 SCRAM and slice-13 ACL JVM tests removed; standard
   `kafka-acls.sh --operation Read ...` now works end-to-end without
   extra Describe grants.
+- **Slice 14** — leader-election controls: operator-triggered
+  `ElectLeaders` RPC (api_key 43, KIP-460) with PREFERRED + UNCLEAN
+  types. Auto preferred-replica rebalance background task driven by
+  Kafka's `auto.leader.rebalance.enable` / `leader.imbalance.*`
+  config knobs. JVM `kafka-leader-election.sh` works end-to-end.
+  Slice 10b's automatic-on-broker-death election is unchanged; this
+  slice adds the manual and scheduled trigger paths.
 
 ## Published crates
 
