@@ -111,6 +111,13 @@ Pre-1.0, pre-alpha. No production use.
   throttles via `IncrementalAlterConfigs resource_type=4`, which is not
   yet implemented; the reassignment itself completes correctly. KIP-73
   throttled replication deferred to slice 15b.
+- **Slice 15b** — KIP-73 throttled replication: `IncrementalAlterConfigs` now
+  handles broker-scoped (`resource_type=4`); `*.throttled.replicas` (topic) +
+  `*.throttled.rate` (broker) configs persist and surface via `DescribeConfigs`.
+  A token-bucket rate limiter on the Fetch path enforces both leader and
+  follower throttles. JVM `kafka-reassign-partitions --throttle` works
+  end-to-end including `--verify` exit 0. Metrics emission deferred to a
+  future observability slice.
 
 ## Published crates
 

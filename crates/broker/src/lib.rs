@@ -144,6 +144,7 @@ pub(crate) mod reassignment;
 pub(crate) mod replica_state;
 mod replicator;
 mod replicator_supervisor;
+pub mod throttle;
 mod txn;
 
 pub use broker::{Broker, BrokerHandle};

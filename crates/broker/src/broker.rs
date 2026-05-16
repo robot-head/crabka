@@ -48,6 +48,9 @@ pub struct Broker {
     /// to a plain `TcpStream::connect` — the new wiring is transparent
     /// for the legacy PLAINTEXT-only path.
     pub(crate) inter_broker_client: Arc<crate::network::client::InterBrokerClient>,
+    /// KIP-73 throttle buckets. Updated by the throttle refresh task and
+    /// consulted by the Fetch handler and replicator.
+    pub throttle_state: Arc<crate::throttle::ThrottleState>,
     handlers: HandlerTable,
 }
 
@@ -393,6 +396,28 @@ impl BrokerHandle {
         let _ = self._broker.group_manager.get_or_create(group_id);
     }
 
+    /// This broker's raft `node_id` (1-indexed broker id used in raft quorum
+    /// and metadata records). Exposed so integration tests can build
+    /// `IncrementalAlterConfigs` broker-resource requests targeting this
+    /// broker without hard-coding a node id.
+    #[must_use]
+    #[allow(clippy::used_underscore_binding)]
+    pub fn node_id(&self) -> u64 {
+        self._broker.config.node_id
+    }
+
+    /// Test-only: return a snapshot of the current `MetadataImage` as seen by
+    /// this broker's controller. Mirrors `partition_leader_for_test` /
+    /// `partition_record_for_test` but exposes the whole image so throttle
+    /// integration tests can call `broker_throttle_rate` and
+    /// `topic_config` directly without adding per-field accessors.
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[must_use]
+    #[allow(clippy::used_underscore_binding)]
+    pub fn controller_image_for_test(&self) -> std::sync::Arc<crabka_metadata::MetadataImage> {
+        self._broker.controller.current_image()
+    }
+
     /// Test-only: return the current leader node-id for `(topic, partition)`
     /// as seen by this broker's metadata image. Returns `None` if the
     /// partition is not yet in the image or the leader field is `0` (no
@@ -519,6 +544,24 @@ impl crate::reassignment::ReassignmentController for ReassignmentControllerAdapt
             .submit_change(records)
             .await
             .map_err(|e| e.to_string())
+    }
+}
+
+/// Wraps a real [`crabka_raft::ControllerHandle`] so it can satisfy the
+/// [`crate::throttle::ImageWatcher`] trait required by the throttle refresh
+/// background task. Every broker runs this (not just the controller leader)
+/// since each broker manages its own throttle buckets.
+struct ThrottleControllerAdapter {
+    handle: Arc<crabka_raft::ControllerHandle>,
+}
+
+impl crate::throttle::ImageWatcher for ThrottleControllerAdapter {
+    fn current_image(&self) -> Arc<crabka_metadata::MetadataImage> {
+        self.handle.current_image()
+    }
+
+    fn watch_image(&self) -> tokio::sync::watch::Receiver<Arc<crabka_metadata::MetadataImage>> {
+        self.handle.watch_image()
     }
 }
 
@@ -776,6 +819,12 @@ impl Broker {
         //    set. With replication_factor=1 the desired follower set is
         //    always empty, so this is a no-op for single-broker setups.
         let supervisor_shutdown = CancellationToken::new();
+
+        // KIP-73 throttle state. Created here so it can be forwarded to
+        // the replicator supervisor (and from there to each replicator
+        // task). The refresh task is spawned later but shares the same Arc.
+        let throttle_state = Arc::new(crate::throttle::ThrottleState::new());
+
         let inter_listener_proto = config
             .effective_listeners()
             .iter()
@@ -793,6 +842,7 @@ impl Broker {
             inter_broker_client.clone(),
             inter_listener_proto,
             config.inter_broker_listener_name.clone(),
+            throttle_state.clone(),
         );
         let supervisor_handle = supervisor.spawn();
 
@@ -966,6 +1016,21 @@ impl Broker {
             ));
         }
 
+        // KIP-73 throttle refresh task. Always-on; the bucket itself
+        // has a rate-0 fast path so unthrottled clusters pay nothing.
+        // `throttle_state` was created above (before the supervisor) so it
+        // can be forwarded to the replicator.
+        {
+            let throttle = throttle_state.clone();
+            let watcher: Arc<dyn crate::throttle::ImageWatcher> =
+                Arc::new(ThrottleControllerAdapter {
+                    handle: controller.clone(),
+                });
+            let shutdown = supervisor_shutdown.child_token();
+            let node_id = config.node_id;
+            tokio::spawn(crate::throttle::run(watcher, node_id, throttle, shutdown));
+        }
+
         // 5. Build handler table.
         let handlers = crate::handlers::build_table();
 
@@ -1011,6 +1076,7 @@ impl Broker {
             liveness: liveness.clone(),
             tls_acceptor,
             inter_broker_client,
+            throttle_state,
             handlers,
         });
 

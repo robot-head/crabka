@@ -27,12 +27,13 @@ use crabka_protocol::owned::offset_for_leader_epoch_request::{
     OffsetForLeaderEpochRequest, OffsetForLeaderPartition, OffsetForLeaderTopic,
 };
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
-use crabka_raft::NodeId;
+use crabka_raft::{ControllerHandle, NodeId};
 use crabka_security::ListenerProtocol;
 
 use crate::broker::spawn_partition;
 use crate::codes;
 use crate::partition::Partition;
+use crate::throttle::{ThrottleState, TopicThrottle};
 
 const FETCH_MAX_BYTES: i32 = 1 << 20;
 const FETCH_MAX_WAIT_MS: i32 = 500;
@@ -65,6 +66,12 @@ pub(crate) struct Config {
     /// PLAINTEXT.
     pub inter_broker_client: Arc<crate::network::client::InterBrokerClient>,
     pub inter_broker_listener_protocol: ListenerProtocol,
+    /// KIP-73: broker-wide throttle state. The follower-in bucket gates
+    /// outbound Fetch bytes when this partition is throttled.
+    pub throttle_state: Arc<ThrottleState>,
+    /// Controller handle used to read the current metadata image each
+    /// Fetch round (for `follower.replication.throttled.replicas` lookup).
+    pub controller: Arc<ControllerHandle>,
 }
 
 /// Entry point: drive a single (topic, partition) replication loop until
@@ -128,7 +135,44 @@ async fn run_inner(cfg: &Config) -> Result<(), String> {
             entry.value().log_end_offset()
         };
 
-        let req = build_fetch_request(cfg, fetch_offset);
+        // KIP-73: follower-side throttle. Check the current metadata image
+        // to see if this (partition, node) pair is in the follower throttled
+        // replicas list. If so, cap the request size via the follower-in
+        // token bucket.
+        //
+        // The replicator already issues one Fetch per (topic, partition), so
+        // throttled-partition Fetch isolation is free — no need to split
+        // requests here. We set `partition_max_bytes` on the single partition
+        // in the request to the bucket-granted amount.
+        let partition_max_bytes_cap = {
+            let image = cfg.controller.current_image();
+            let throttle = TopicThrottle::for_topic(&image, &cfg.topic);
+            let throttled = throttle.follower.contains(cfg.partition, cfg.node_id);
+            if throttled && cfg.throttle_state.follower_in.rate() > 0 {
+                let granted = cfg
+                    .throttle_state
+                    .follower_in
+                    .try_consume(u64::try_from(FETCH_MAX_BYTES).unwrap_or(0));
+                if granted == 0 {
+                    tracing::debug!(
+                        topic = %cfg.topic,
+                        partition = cfg.partition,
+                        "follower throttle: skip fetch this round (bucket exhausted)"
+                    );
+                    // Bucket exhausted — yield and retry next loop iteration.
+                    tokio::select! {
+                        () = cfg.shutdown.cancelled() => return Ok(()),
+                        () = tokio::time::sleep(Duration::from_millis(100)) => {}
+                    }
+                    continue;
+                }
+                i32::try_from(granted).unwrap_or(FETCH_MAX_BYTES)
+            } else {
+                FETCH_MAX_BYTES
+            }
+        };
+
+        let req = build_fetch_request(cfg, fetch_offset, partition_max_bytes_cap);
 
         let send = tokio::select! {
             () = cfg.shutdown.cancelled() => return Ok(()),
@@ -173,7 +217,14 @@ async fn run_inner(cfg: &Config) -> Result<(), String> {
 /// KIP-101: `current_leader_epoch` is included so the leader can detect
 /// stale or fenced replicas and return `FENCED_LEADER_EPOCH` or
 /// `UNKNOWN_LEADER_EPOCH` when appropriate.
-fn build_fetch_request(cfg: &Config, fetch_offset: i64) -> FetchRequest {
+///
+/// `partition_max_bytes_cap` is the KIP-73 follower-throttle cap for
+/// `partition_max_bytes`. Pass `FETCH_MAX_BYTES` when unthrottled.
+fn build_fetch_request(
+    cfg: &Config,
+    fetch_offset: i64,
+    partition_max_bytes_cap: i32,
+) -> FetchRequest {
     let leader_epoch = cfg
         .partitions
         .get(&(cfg.topic.clone(), cfg.partition))
@@ -204,7 +255,7 @@ fn build_fetch_request(cfg: &Config, fetch_offset: i64) -> FetchRequest {
                 partition: cfg.partition,
                 fetch_offset,
                 current_leader_epoch: leader_epoch,
-                partition_max_bytes: FETCH_MAX_BYTES,
+                partition_max_bytes: partition_max_bytes_cap,
                 ..FetchPartition::default()
             }],
             ..FetchTopic::default()

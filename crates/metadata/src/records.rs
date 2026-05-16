@@ -76,6 +76,15 @@ pub struct TopicConfigRecord {
     pub overrides: std::collections::BTreeMap<String, String>,
 }
 
+/// Per-broker configuration key/value pair. `Some(value)` = set; `None` = delete.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrokerConfigRecord {
+    pub node_id: NodeId,
+    pub config_name: String,
+    /// `Some(value)` = set; `None` = delete.
+    pub config_value: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScramCredentialRecord {
     pub user: String,
@@ -104,6 +113,7 @@ pub enum MetadataRecord {
     V1DeleteScramCredential(DeleteScramCredentialRecord),
     V1AccessControlEntry(crate::AclEntry),
     V1DeleteAccessControlEntry(crate::AclEntryFilter),
+    V1BrokerConfig(BrokerConfigRecord),
 }
 
 #[cfg(test)]
@@ -241,6 +251,16 @@ mod tests {
             permission_type: None,
         };
         let r = MetadataRecord::V1DeleteAccessControlEntry(filter);
+        assert_eq!(round_trip(&r), r);
+    }
+
+    #[test]
+    fn broker_config_record_round_trip() {
+        let r = MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
+            node_id: 7,
+            config_name: "leader.replication.throttled.rate".into(),
+            config_value: Some("2048".into()),
+        });
         assert_eq!(round_trip(&r), r);
     }
 }

@@ -305,7 +305,41 @@ pub(crate) async fn handle(
         long_poll_then_reread(&mut pending, req.max_wait_ms).await?;
     }
 
-    let responses = group_into_topic_responses(pending);
+    let mut responses = group_into_topic_responses(pending);
+
+    // KIP-73 leader-side throttle: only applies to follower (inter-broker)
+    // fetch requests. Consumer fetches have replica_id < 0.
+    if is_follower_fetch {
+        use crate::throttle::TopicThrottle;
+        // `leader.replication.throttled.replicas` stores (partition, follower_id) pairs.
+        // The leader throttles a follower fetch when (partition, effective_replica_id) is
+        // in that set. We cast to u64 because NodeId is u64 and replica_id is i32; a
+        // valid follower id is always positive so the cast is safe.
+        let follower_id = u64::try_from(effective_replica_id).unwrap_or(0);
+        let mut throttled_byte_count: u64 = 0;
+        // (topic_idx, partition_idx) pairs for throttled chunks.
+        let mut throttled_idxs: Vec<(usize, usize)> = Vec::new();
+        for (ti, topic_resp) in responses.iter().enumerate() {
+            let throttle = TopicThrottle::for_topic(&image, &topic_resp.topic);
+            for (pi, part) in topic_resp.partitions.iter().enumerate() {
+                if throttle.leader.contains(part.partition_index, follower_id) {
+                    let chunk_bytes =
+                        part.records.as_ref().map_or(0, RecordBatch::encoded_len) as u64;
+                    throttled_byte_count += chunk_bytes;
+                    throttled_idxs.push((ti, pi));
+                }
+            }
+        }
+        if throttled_byte_count > 0 {
+            let granted = broker
+                .throttle_state
+                .leader_out
+                .try_consume(throttled_byte_count);
+            if granted < throttled_byte_count {
+                truncate_throttled_responses(&mut responses, &throttled_idxs, granted);
+            }
+        }
+    }
 
     let resp = FetchResponse {
         throttle_time_ms: 0,
@@ -498,6 +532,29 @@ async fn long_poll_then_reread(
         }
     }
     Ok(())
+}
+
+/// KIP-73 leader-side throttle: walk `throttled_idxs` in order and drop
+/// whole-partition chunks until the remaining throttled bytes fit within
+/// `budget`. Partitions are dropped completely (records set to `None`) — no
+/// mid-batch truncation, since Kafka clients expect complete record batches.
+fn truncate_throttled_responses(
+    responses: &mut [FetchableTopicResponse],
+    throttled_idxs: &[(usize, usize)],
+    budget: u64,
+) {
+    let mut remaining = budget;
+    for &(ti, pi) in throttled_idxs {
+        let part = &mut responses[ti].partitions[pi];
+        let chunk_size = part.records.as_ref().map_or(0, RecordBatch::encoded_len) as u64;
+        if chunk_size <= remaining {
+            remaining -= chunk_size;
+        } else {
+            // Budget exhausted — drop this chunk and all subsequent throttled ones.
+            part.records = None;
+            remaining = 0;
+        }
+    }
 }
 
 /// Group resolved `PendingRead`s back into per-topic response entries,

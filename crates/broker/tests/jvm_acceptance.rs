@@ -5327,18 +5327,262 @@ async fn jvm_kafka_reassign_partitions_end_to_end() {
         String::from_utf8_lossy(&verify_out.stdout),
         String::from_utf8_lossy(&verify_out.stderr),
     );
-    // NOTE: --verify exits with 1 after a successful reassignment check because
-    // it also tries to clear broker-level throttles via IncrementalAlterConfigs
-    // (resource_type=4), which our broker doesn't implement. We therefore check
-    // stdout for the reassignment-complete message rather than the exit code.
-    let stdout = String::from_utf8_lossy(&verify_out.stdout);
+    // Slice 15b supports broker-scoped IncrementalAlterConfigs (resource_type=4),
+    // so --verify can now clear throttles and exit 0.
     assert!(
-        stdout.contains("is completed")
-            || stdout.contains("completed successfully")
-            || stdout.contains("is complete"),
-        "kafka-reassign-partitions --verify stdout did not indicate success: stdout={stdout} stderr={}",
+        verify_out.status.success(),
+        "kafka-reassign-partitions --verify failed: stderr={}",
         String::from_utf8_lossy(&verify_out.stderr)
     );
+
+    h1.shutdown().await;
+    h2.shutdown().await;
+    h3.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// JVM acceptance test: kafka-reassign-partitions --throttle (slice 15b)
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires Docker"]
+#[allow(clippy::too_many_lines)]
+#[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+async fn jvm_kafka_reassign_partitions_with_throttle_end_to_end() {
+    const ADMIN: &str = "admin";
+    const ADMIN_PASS: &str = "admin-secret";
+    const TOPIC: &str = "crabka-throttle-reassign-itest";
+
+    let (h1, h2, h3, _cfg1, _cfg2, _cfg3, _d1, _d2, _d3) =
+        start_three_broker_sasl_plaintext_jvm_cluster(ADMIN, ADMIN_PASS).await;
+    nc_check_connectivity();
+
+    wait_three_brokers_registered(&h1, &h2, &h3, 3).await;
+
+    let admin_props = write_client_props(&format!(
+        "security.protocol=SASL_PLAINTEXT\n\
+         sasl.mechanism=PLAIN\n\
+         sasl.jaas.config={}\n",
+        plain_jaas(ADMIN, ADMIN_PASS),
+    ));
+    let admin_mount = admin_props.mount_str();
+
+    // Create rf=2 topic.
+    docker_run_kafka_tool_with_image_and_mount(
+        KAFKA_IMAGE_TXN,
+        &admin_mount,
+        &[
+            "kafka-topics",
+            "--create",
+            "--if-not-exists",
+            "--topic",
+            TOPIC,
+            "--partitions",
+            "1",
+            "--replication-factor",
+            "2",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--command-config",
+            "/client.properties",
+        ],
+    );
+
+    // Wait for broker 1 to see the partition.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        if h1.has_partition(TOPIC, 0).await {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() <= deadline,
+            "partition {TOPIC}-0 never appeared on broker 1 within 30s"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+
+    // Determine initial replicas; pick the broker not in the replica set.
+    let pr = h1
+        .partition_record_for_test(TOPIC, 0)
+        .expect("partition record");
+    let initial = pr.replicas.clone();
+    let new_node: u64 = (1u64..=3)
+        .find(|n| !initial.contains(n))
+        .expect("free broker");
+    let staying: u64 = *initial.first().unwrap();
+    eprintln!("CRABKA[test] initial replicas={initial:?} staying={staying} new_node={new_node}");
+
+    // Write reassignment JSON.
+    let json = format!(
+        r#"{{"version":1,"partitions":[{{"topic":"{TOPIC}","partition":0,"replicas":[{staying},{new_node}]}}]}}"#,
+    );
+    let json_file = write_temp_file("reassignment.json", &json);
+    let json_mount = format!("{}:/reassignment.json", json_file.host_path());
+
+    // Execute reassignment with --throttle 1024.
+    let out = std::process::Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "-v",
+            &admin_mount,
+            "-v",
+            &json_mount,
+            "--add-host=host.docker.internal:host-gateway",
+            KAFKA_IMAGE_TXN,
+            "kafka-reassign-partitions",
+            "--execute",
+            "--reassignment-json-file",
+            "/reassignment.json",
+            "--throttle",
+            "1024",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--command-config",
+            "/client.properties",
+        ])
+        .output()
+        .expect("spawn kafka-reassign-partitions --execute --throttle");
+    eprintln!(
+        "CRABKA[test] --execute --throttle status={} stdout={} stderr={}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(
+        out.status.success(),
+        "kafka-reassign-partitions --execute --throttle failed: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Verify throttle configs were applied via kafka-configs --describe.
+    let desc = std::process::Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "-v",
+            &admin_mount,
+            "--add-host=host.docker.internal:host-gateway",
+            KAFKA_IMAGE_TXN,
+            "kafka-configs",
+            "--describe",
+            "--entity-type",
+            "brokers",
+            "--entity-name",
+            "1",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--command-config",
+            "/client.properties",
+        ])
+        .output()
+        .expect("spawn kafka-configs --describe");
+    eprintln!(
+        "CRABKA[test] kafka-configs describe status={} stdout={} stderr={}",
+        desc.status,
+        String::from_utf8_lossy(&desc.stdout),
+        String::from_utf8_lossy(&desc.stderr),
+    );
+    let desc_stdout = String::from_utf8_lossy(&desc.stdout);
+    assert!(
+        desc_stdout.contains("leader.replication.throttled.rate=1024"),
+        "leader.replication.throttled.rate=1024 not visible in kafka-configs output: {desc_stdout}"
+    );
+
+    // Inject ISR including new_node so the background reassignment-completion
+    // task can see the new broker in ISR without relying on inter-broker
+    // replication (which is broken under WSL2 due to host-gateway routing;
+    // see slice-14 T10 for the same technique).
+    let pr_after = h1
+        .partition_record_for_test(TOPIC, 0)
+        .expect("partition record after execute");
+    let removing_replica = pr_after
+        .removing_replicas
+        .first()
+        .copied()
+        .unwrap_or_else(|| initial.last().copied().unwrap_or(0));
+    let injected = crabka_metadata::PartitionRecord {
+        isr: vec![staying, new_node, removing_replica],
+        ..pr_after.clone()
+    };
+    h1.submit_metadata_record_for_test(crabka_metadata::MetadataRecord::V1Partition(injected))
+        .await
+        .expect("inject ISR for reassignment completion");
+
+    // Poll until reassignment completes.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let pr = h1
+            .partition_record_for_test(TOPIC, 0)
+            .expect("partition record (poll)");
+        if pr.adding_replicas.is_empty() && pr.removing_replicas.is_empty() {
+            let got: std::collections::HashSet<u64> = pr.replicas.iter().copied().collect();
+            let want: std::collections::HashSet<u64> = [staying, new_node].into_iter().collect();
+            assert_eq!(
+                got, want,
+                "reassignment completed but replicas mismatch: got={got:?} want={want:?}"
+            );
+            break;
+        }
+        assert!(
+            std::time::Instant::now() <= deadline,
+            "reassignment did not complete within 20s; pr={pr:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    eprintln!("CRABKA[test] reassignment completed; running --verify");
+
+    // --verify clears throttle configs and exits 0 (slice 15b supports
+    // broker-scoped IncrementalAlterConfigs).
+    let verify_out = std::process::Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "-v",
+            &admin_mount,
+            "-v",
+            &json_mount,
+            "--add-host=host.docker.internal:host-gateway",
+            KAFKA_IMAGE_TXN,
+            "kafka-reassign-partitions",
+            "--verify",
+            "--reassignment-json-file",
+            "/reassignment.json",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--command-config",
+            "/client.properties",
+        ])
+        .output()
+        .expect("spawn kafka-reassign-partitions --verify");
+    eprintln!(
+        "CRABKA[test] --verify status={} stdout={} stderr={}",
+        verify_out.status,
+        String::from_utf8_lossy(&verify_out.stdout),
+        String::from_utf8_lossy(&verify_out.stderr),
+    );
+    assert!(
+        verify_out.status.success(),
+        "kafka-reassign-partitions --verify failed (slice 15b should fix this): stderr={}",
+        String::from_utf8_lossy(&verify_out.stderr)
+    );
+
+    // Confirm throttle configs were cleared from the metadata image after --verify.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let img = h1.controller_image_for_test();
+        if img
+            .broker_throttle_rate(1, crabka_metadata::ThrottleKind::Leader)
+            .is_none()
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() <= deadline,
+            "throttle config not cleared from image within 5s after --verify"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
 
     h1.shutdown().await;
     h2.shutdown().await;
