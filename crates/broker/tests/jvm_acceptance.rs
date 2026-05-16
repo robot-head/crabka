@@ -5923,3 +5923,156 @@ async fn jvm_kafka_configs_alter_client_quota_end_to_end() {
     h2.shutdown().await;
     h3.shutdown().await;
 }
+
+/// JVM acceptance: `kafka-configs --entity-type ips` KIP-612 round-trip.
+///
+/// Three-broker SASL/PLAINTEXT cluster; alter + describe (stdout substring) +
+/// delete-config on (ip=127.0.0.1) connection_creation_rate via the JVM admin CLI.
+/// Wall-time enforcement is not exercised here (single connection doesn't trigger
+/// the rate limit); the Rust integration test in `tests/ip_quotas.rs` covers that.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires Docker"]
+async fn jvm_kafka_configs_alter_ip_quota_end_to_end() {
+    const ADMIN: &str = "admin";
+    const ADMIN_PASS: &str = "admin-secret";
+
+    let (h1, h2, h3, _cfg1, _cfg2, _cfg3, _d1, _d2, _d3) =
+        start_three_broker_sasl_plaintext_jvm_cluster_with_users(ADMIN, ADMIN_PASS, &[]).await;
+    nc_check_connectivity();
+
+    wait_three_brokers_registered(&h1, &h2, &h3, 3).await;
+
+    let admin_props = write_client_props(&format!(
+        "security.protocol=SASL_PLAINTEXT\n\
+         sasl.mechanism=PLAIN\n\
+         sasl.jaas.config={}\n",
+        plain_jaas(ADMIN, ADMIN_PASS),
+    ));
+    let admin_mount = admin_props.mount_str();
+
+    // Set connection_creation_rate=2 for 127.0.0.1.
+    let out = docker_run_kafka_tool_with_image_and_mount(
+        KAFKA_IMAGE_TXN,
+        &admin_mount,
+        &[
+            "kafka-configs",
+            "--alter",
+            "--entity-type",
+            "ips",
+            "--entity-name",
+            "127.0.0.1",
+            "--add-config",
+            "connection_creation_rate=2.0",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--command-config",
+            "/client.properties",
+        ],
+    );
+    eprintln!(
+        "CRABKA[test] alter status={} stdout={} stderr={}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(
+        out.status.success(),
+        "alter failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Describe — confirm visibility.
+    // Note: cp-kafka:7.5.0's kafka-configs --describe --entity-type ips may exit
+    // non-zero due to a DescribeUserScramCredentials side-call (same pattern as
+    // --entity-type users in jvm_kafka_configs_alter_client_quota_end_to_end).
+    // Drive docker directly and assert only on stdout.
+    let desc = std::process::Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "-v",
+            &admin_mount,
+            "--add-host=host.docker.internal:host-gateway",
+            KAFKA_IMAGE_TXN,
+            "kafka-configs",
+            "--describe",
+            "--entity-type",
+            "ips",
+            "--entity-name",
+            "127.0.0.1",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--command-config",
+            "/client.properties",
+        ])
+        .output()
+        .expect("spawn kafka-configs --describe");
+    eprintln!(
+        "CRABKA[test] describe status={} stdout={} stderr={}",
+        desc.status,
+        String::from_utf8_lossy(&desc.stdout),
+        String::from_utf8_lossy(&desc.stderr),
+    );
+    let stdout = String::from_utf8_lossy(&desc.stdout);
+    assert!(
+        stdout.contains("connection_creation_rate=2"),
+        "expected ip quota in describe output: {stdout}"
+    );
+
+    // Delete the config.
+    // Same note: drive docker directly to avoid assert-on-success in the helper.
+    let del_out = std::process::Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "-v",
+            &admin_mount,
+            "--add-host=host.docker.internal:host-gateway",
+            KAFKA_IMAGE_TXN,
+            "kafka-configs",
+            "--alter",
+            "--entity-type",
+            "ips",
+            "--entity-name",
+            "127.0.0.1",
+            "--delete-config",
+            "connection_creation_rate",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--command-config",
+            "/client.properties",
+        ])
+        .output()
+        .expect("spawn kafka-configs --delete-config");
+    eprintln!(
+        "CRABKA[test] delete status={} stdout={} stderr={}",
+        del_out.status,
+        String::from_utf8_lossy(&del_out.stdout),
+        String::from_utf8_lossy(&del_out.stderr),
+    );
+
+    // Confirm quota cleared from image (poll up to 5 s).
+    let ip_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let img = h1.controller_image_for_test();
+        let key: crabka_metadata::EntityKey =
+            vec![("ip".to_string(), Some("127.0.0.1".to_string()))];
+        if img
+            .client_quotas()
+            .get(&key)
+            .and_then(|m| m.get("connection_creation_rate"))
+            .is_none()
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() <= ip_deadline,
+            "ip quota not cleared from image within 5s after --delete-config"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+
+    h1.shutdown().await;
+    h2.shutdown().await;
+    h3.shutdown().await;
+}
