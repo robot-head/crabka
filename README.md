@@ -1,123 +1,198 @@
+<p align="center">
+  <img src="docs/crabka-text-wide.png" alt="Crabka" width="480">
+</p>
+
+<p align="center">
+  <a href="https://codspeed.io/robot-head/crabka?utm_source=badge"><img src="https://img.shields.io/endpoint?url=https://codspeed.io/badge.json" alt="CodSpeed"></a>
+  <a href="https://codecov.io/gh/robot-head/crabka"><img src="https://codecov.io/gh/robot-head/crabka/graph/badge.svg?token=EU56CZE3DU" alt="codecov"></a>
+</p>
+
 # Crabka
 
-[![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://codspeed.io/robot-head/crabka?utm_source=badge)
-[![codecov](https://codecov.io/gh/robot-head/crabka/graph/badge.svg?token=EU56CZE3DU)](https://codecov.io/gh/robot-head/crabka)
+**Crabka is a Rust reimplementation of [Apache Kafka](https://kafka.apache.org).**
 
-![Crabka Logo](docs/crabka-text-wide.png)
+It speaks the Apache Kafka wire protocol byte-for-byte, stores data in Kafka-compatible
+log segments, runs its metadata quorum on KRaft, and integrates cleanly with the
+standard JVM tooling — `kafka-topics.sh`, `kafka-configs.sh`, `kafka-acls.sh`,
+`kafka-consumer-groups.sh`, `kafka-leader-election.sh`, `kafka-reassign-partitions.sh`,
+and the official Java client. Existing producers, consumers, and operator workflows
+work against a Crabka broker without modification.
 
-A Rust reimplementation of [Apache Kafka](https://kafka.apache.org), distributed under the
-Apache License 2.0 as a derivative work.
+Distributed under the Apache License 2.0 as a derivative work.
 
-This repository hosts the [`crabka-protocol`](crates/protocol) crate. Other components
-(broker, clients, KRaft, etc.) will arrive in their own crates over time. See the design
-spec for the full roadmap.
+## Why Crabka
 
-## Status
+- **Drop-in protocol compatibility.** Crabka is validated against the JVM Kafka
+  client via differential byte-equality tests, not against a hand-rolled spec.
+- **Memory-safe, fearlessly concurrent.** Written in async Rust on `tokio`, with
+  no JVM and no GC pauses.
+- **Single static binary.** No JDK, no ZooKeeper, no separate controller process.
+- **KRaft-native.** Metadata lives in an `openraft`-backed quorum from day one.
+- **Modern crypto.** TLS via `rustls`; SASL/SCRAM-SHA-512 and SASL/PLAIN out of
+  the box.
 
-Pre-1.0, pre-alpha. No production use.
+## Architecture
 
-### Slices delivered
+Crabka is organized as a Rust workspace:
 
-- **Slice 1** — `crabka-protocol`: wire-protocol codec, JVM-differential
-  tested.
-- **Slice 2** — `crabka-client-core`: connection pool, API-version
-  negotiation, request dispatch.
-- **Slice 3** — `crabka-log`: Apache Kafka byte-compatible segments,
-  indexes, retention.
-- **Slice 4** — single-node broker MVP: Produce/Fetch/Metadata/CreateTopics
-  over TCP. JVM clients connect, produce, and consume.
-- **Slice 5** — consumer groups + coordinator: `__consumer_offsets`,
-  OffsetCommit, OffsetFetch, group rebalance.
-- **Slice 6** — idempotent producer: `InitProducerId`, per-(producer_id,
-  epoch, sequence) dedup.
-- **Slice 7** — KRaft / metadata quorum: openraft-backed controller,
-  metadata image, CreateTopics through quorum.
-- **Slice 8** — replication: multi-broker clusters, follower Fetch loop,
-  rf-aware leader/follower roles. Deferred: HW, acks=all, leader
-  election, KIP-101 (slice 10).
-- **Slice 9** — transactions: KIP-98 + full KIP-1319 v2. TxnCoordinator,
-  `__transaction_state`, per-segment `.txnindex`, LSO, transactional
-  producer + consumer `isolation_level=read_committed`.
-- **Slice 10a** — bulletproof EOS (HW + acks=all): partition-leader HW
-  tracking; `acks=all` Produces block until full-ISR replication;
-  consumer Fetch + `read_committed` LSO clamped at HW. Slice 10b will
-  add KIP-101 leader-epoch, leader-election-on-failure, and ISR
-  shrink/expand.
-- **Slice 10b** — bulletproof EOS complete: KIP-101 leader-epoch
-  fencing; leader election on broker death (BrokerHeartbeat-driven);
-  ISR shrink/expand via AlterPartition. A 3-broker cluster survives
-  partition-leader crashes and slow followers; `acks=all` produces
-  complete after election; zombie writes from fenced ex-leaders are
-  rejected.
-- **Slice 11** — admin handlers: `AlterConfigs` /
-  `IncrementalAlterConfigs` (with live propagation to `Log.config`),
-  `CreatePartitions`, `DeleteRecords`, `ListGroups`, `DescribeGroups`,
-  `DeleteGroups`, `DescribeCluster`. Validated end-to-end against the
-  JVM `kafka-*.sh` operator tooling.
-- **Slice 12** — auth & security: TLS via `rustls`; SASL/PLAIN +
-  SASL/SCRAM-SHA-512 client auth; per-listener protocol multiplexing
-  (PLAINTEXT/SSL/SASL_PLAINTEXT/SASL_SSL); inter-broker auth (TLS +
-  SASL) on replication + heartbeat traffic; KIP-554
-  `AlterUserScramCredentials`; new `crabka format --add-scram`
-  bootstrap CLI. JVM clients connect over `SASL_SSL` and provision
-  SCRAM users via `kafka-configs --alter --entity-type users`.
-- **Slice 12b** — auth cleanup: controller listener terminates TLS +
-  SASL via a `RaftListenerHandshake` trait shared with the data plane;
-  `InterBrokerDialer` wired into `ControllerConfig::dialer` (and
-  `forward_submit_to`) so raft RPC authenticates inbound and outbound;
-  `Broker::start` consumes `crabka format --add-scram` bootstrap
-  records on first start.
-- **Slice 13** — ACLs: real Kafka authorizer replaces slice 12's
-  super-user-name stand-in. Production-shape — 4 resource types
-  (`Topic`, `Group`, `Cluster`, `TransactionalId`), `Literal` +
-  `Prefixed` pattern matching, `Allow` + `Deny` (DENY-wins,
-  deny-by-default), IPv4 host filter. New wire handlers:
-  `CreateAcls` (30), `DeleteAcls` (31), `DescribeAcls` (29). 16
-  existing handlers gain an authorize preamble. New
-  `crabka format --add-acl` for bootstrap. Compatibility shim
-  preserves slice 11/12 test behavior when no ACLs AND no super-user
-  are configured.
-- **Slice 13b** — ACL polish: operation implications
-  (`Read`/`Write`/`Delete`/`Alter` → `Describe`; `AlterConfigs` →
-  `DescribeConfigs`) match Kafka's `StandardAuthorizer` semantics.
-  Multi-super-user config: `BrokerConfig::super_users` is a
-  `HashSet<String>` so deployments can grant `super.users`-style
-  privileges to multiple identities. Workaround Describe-ACL seeds
-  in slice-12 SCRAM and slice-13 ACL JVM tests removed; standard
-  `kafka-acls.sh --operation Read ...` now works end-to-end without
-  extra Describe grants.
-- **Slice 14** — leader-election controls: operator-triggered
-  `ElectLeaders` RPC (api_key 43, KIP-460) with PREFERRED + UNCLEAN
-  types. Auto preferred-replica rebalance background task driven by
-  Kafka's `auto.leader.rebalance.enable` / `leader.imbalance.*`
-  config knobs. JVM `kafka-leader-election.sh` works end-to-end.
-  Slice 10b's automatic-on-broker-death election is unchanged; this
-  slice adds the manual and scheduled trigger paths.
-- **Slice 15** — KIP-455 partition reassignment: two-phase URP-aware
-  state machine. `PartitionRecord` gains `adding_replicas` +
-  `removing_replicas`. `AlterPartitionReassignments` (api_key 45)
-  handles start (`replicas: Some(target)`), cancel (`replicas: None`),
-  and replace-in-flight operations; honors
-  `allow_replication_factor_change`; Cluster Alter authorize gate.
-  `ListPartitionReassignments` (api_key 46) filters by topic or lists
-  all in-flight reassignments; Cluster Describe gate. Background task
-  on the controller leader observes ISR catch-up image-by-image,
-  performs leader handoff first when the current leader is in
-  `removing_replicas`, then atomically commits the target replica set.
-  Per-tick `is_leader()` check makes the task a no-op on followers.
-  JVM `kafka-reassign-partitions --execute|--verify` works end-to-end
-  against a 3-broker SASL/PLAINTEXT cluster. Known limitation:
-  `--verify` exits 1 because it unconditionally clears broker-scoped
-  throttles via `IncrementalAlterConfigs resource_type=4`, which is not
-  yet implemented; the reassignment itself completes correctly. KIP-73
-  throttled replication deferred to slice 15b.
-- **Slice 15b** — KIP-73 throttled replication: `IncrementalAlterConfigs` now
-  handles broker-scoped (`resource_type=4`); `*.throttled.replicas` (topic) +
-  `*.throttled.rate` (broker) configs persist and surface via `DescribeConfigs`.
-  A token-bucket rate limiter on the Fetch path enforces both leader and
-  follower throttles. JVM `kafka-reassign-partitions --throttle` works
-  end-to-end including `--verify` exit 0. Metrics emission deferred to a
-  future observability slice.
+| Crate | Role |
+|-------|------|
+| [`crabka-protocol`](crates/protocol) | Kafka wire-protocol codec (codegen-driven from message schemas) |
+| [`crabka-compression`](crates/compression) | Kafka-compatible compression codecs |
+| [`crabka-log`](crates/log) | Byte-compatible log segments, indexes, retention |
+| [`crabka-metadata`](crates/metadata) | KRaft metadata image, records, replicas |
+| [`crabka-raft`](crates/raft) | Controller quorum on top of `openraft` |
+| [`crabka-security`](crates/security) | TLS, SASL/PLAIN, SASL/SCRAM-SHA-512 |
+| [`crabka-broker`](crates/broker) | Broker runtime: handlers, replication, coordinators |
+| [`crabka-client-core`](crates/client-core) | Client connection pool + API-version negotiation |
+| [`crabka-client-producer`](crates/client-producer) | Native Rust producer |
+| [`crabka-client-consumer`](crates/client-consumer) | Native Rust consumer |
+| [`crabka-cli`](crates/cli) | `crabka` binary: `format`, bootstrap, operator commands |
+
+## Feature compatibility
+
+The following table lists Apache Kafka functional surface area and whether Crabka
+implements it today.
+
+### Wire protocol & clients
+
+| Feature | Status |
+|---------|:------:|
+| Wire-protocol byte-exact codec (request / response) | ✅ |
+| API version negotiation (`ApiVersions`) | ✅ |
+| Flexible / tagged-field versions | ✅ |
+| Compression: gzip, snappy, lz4, zstd | ✅ |
+| JVM Java client interoperability | ✅ |
+| Native Rust producer | ✅ |
+| Native Rust consumer | ✅ |
+| Broker-side recompression | ❌ |
+
+### Storage
+
+| Feature | Status |
+|---------|:------:|
+| Byte-compatible log segments | ✅ |
+| Offset + time indexes | ✅ |
+| Time-based and size-based retention | ✅ |
+| Transaction index (`.txnindex`) per segment | ✅ |
+| Log compaction (`cleanup.policy=compact`) | ❌ |
+| Tiered storage (KIP-405) | ❌ |
+| Multiple log directories / KIP-113 log-dir reassignment | ❌ |
+
+### Producer
+
+| Feature | Status |
+|---------|:------:|
+| `Produce` (acks=0, acks=1, acks=all) | ✅ |
+| Idempotent producer (`enable.idempotence=true`) | ✅ |
+| `InitProducerId` + per-(pid, epoch, sequence) dedup | ✅ |
+| Transactional producer (KIP-98) | ✅ |
+| KIP-1319 transactions v2 | ✅ |
+
+### Consumer
+
+| Feature | Status |
+|---------|:------:|
+| `Fetch` (single + multi-partition) | ✅ |
+| Consumer groups + group coordinator | ✅ |
+| `__consumer_offsets` topic | ✅ |
+| `OffsetCommit` / `OffsetFetch` | ✅ |
+| Group rebalance protocol | ✅ |
+| `isolation.level=read_committed` (LSO clamping) | ✅ |
+| KIP-848 next-gen consumer group protocol | ❌ |
+| Static membership (KIP-345) | ❌ |
+
+### Replication & durability
+
+| Feature | Status |
+|---------|:------:|
+| Multi-broker replication, follower Fetch loop | ✅ |
+| In-Sync Replica (ISR) tracking | ✅ |
+| ISR shrink / expand via `AlterPartition` | ✅ |
+| High-watermark tracking | ✅ |
+| `acks=all` blocks until full-ISR replication | ✅ |
+| KIP-101 leader-epoch fencing | ✅ |
+| Automatic leader election on broker death | ✅ |
+| `ElectLeaders` API (KIP-460, PREFERRED + UNCLEAN) | ✅ |
+| Auto preferred-replica rebalance | ✅ |
+| `AlterPartitionReassignments` / `ListPartitionReassignments` (KIP-455) | ✅ |
+| KIP-73 throttled replication | ✅ |
+| KIP-841 force-elect / unclean recovery toggle | ❌ |
+
+### Metadata quorum (KRaft)
+
+| Feature | Status |
+|---------|:------:|
+| KRaft controller quorum (raft-based) | ✅ |
+| Metadata image + delta apply | ✅ |
+| Controller bootstrap via `crabka format` | ✅ |
+| ZooKeeper mode | ❌ (won't implement — KRaft only) |
+
+### Admin & operator surface
+
+| Feature | Status |
+|---------|:------:|
+| `CreateTopics` / `DeleteTopics` | ✅ |
+| `CreatePartitions` | ✅ |
+| `DeleteRecords` | ✅ |
+| `Metadata` / `DescribeCluster` | ✅ |
+| `AlterConfigs` / `IncrementalAlterConfigs` (topic + broker scope) | ✅ |
+| `DescribeConfigs` | ✅ |
+| `ListGroups` / `DescribeGroups` / `DeleteGroups` | ✅ |
+| JVM `kafka-*.sh` operator-tool compatibility | ✅ |
+
+### Security
+
+| Feature | Status |
+|---------|:------:|
+| TLS (`rustls`-backed, per-listener) | ✅ |
+| SASL/PLAIN | ✅ |
+| SASL/SCRAM-SHA-512 | ✅ |
+| Per-listener protocol multiplexing (PLAINTEXT / SSL / SASL_PLAINTEXT / SASL_SSL) | ✅ |
+| Inter-broker auth (TLS + SASL on data plane & raft) | ✅ |
+| `AlterUserScramCredentials` (KIP-554) | ✅ |
+| SASL/SCRAM-SHA-256 | ❌ |
+| mTLS client authentication | ❌ |
+| SASL/OAUTHBEARER | ❌ |
+| SASL/GSSAPI (Kerberos) | ❌ |
+| Delegation tokens | ❌ |
+
+### Authorization
+
+| Feature | Status |
+|---------|:------:|
+| ACL authorizer (Topic / Group / Cluster / TransactionalId) | ✅ |
+| `Literal` + `Prefixed` pattern matching | ✅ |
+| `Allow` + `Deny` rules, DENY-wins, deny-by-default | ✅ |
+| Operation implications (`Read`/`Write`/`Delete`/`Alter` → `Describe`) | ✅ |
+| `CreateAcls` / `DeleteAcls` / `DescribeAcls` | ✅ |
+| Multiple super-users (`super.users`-style) | ✅ |
+| IPv4 host filter | ✅ |
+| IPv6 host filter | ❌ |
+| ACL audit log sinks beyond `tracing` | ❌ |
+
+### Observability
+
+| Feature | Status |
+|---------|:------:|
+| Structured logging via `tracing` | ✅ |
+| Metrics / JMX-equivalent exporter | ❌ |
+| Distributed tracing integration | ❌ |
+
+### Quotas
+
+| Feature | Status |
+|---------|:------:|
+| Client / user / IP quotas | ❌ |
+
+### Ecosystem (out of broker core)
+
+| Feature | Status |
+|---------|:------:|
+| Kafka Streams equivalent | ❌ |
+| Kafka Connect equivalent | ❌ |
+| MirrorMaker equivalent | ❌ |
+| Schema Registry | ❌ |
 
 ## Published crates
 
