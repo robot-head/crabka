@@ -5824,20 +5824,12 @@ async fn jvm_kafka_configs_alter_client_quota_end_to_end() {
     );
 
     // Describe — confirm visibility.
-    // Note: cp-kafka:7.5.0's kafka-configs --describe --entity-type users also
-    // tries DescribeUserScramCredentials (api_key 51), which crabka doesn't
-    // implement yet. The JVM tool exits non-zero because of that secondary
-    // call, but still prints the quota result to stdout first. We therefore
-    // drive docker directly instead of using the helper (which asserts success)
-    // and only check stdout.
-    let desc = std::process::Command::new("docker")
-        .args([
-            "run",
-            "--rm",
-            "-v",
-            &admin_mount,
-            "--add-host=host.docker.internal:host-gateway",
-            KAFKA_IMAGE_TXN,
+    // api_key 50 (DescribeUserScramCredentials) is now implemented (slice 17a),
+    // so the JVM tool exits 0 cleanly. Use the helper which asserts success.
+    let desc = docker_run_kafka_tool_with_image_and_mount(
+        KAFKA_IMAGE_TXN,
+        &admin_mount,
+        &[
             "kafka-configs",
             "--describe",
             "--entity-type",
@@ -5848,14 +5840,12 @@ async fn jvm_kafka_configs_alter_client_quota_end_to_end() {
             BOOTSTRAP,
             "--command-config",
             "/client.properties",
-        ])
-        .output()
-        .expect("spawn kafka-configs --describe");
-    eprintln!(
-        "CRABKA[test] describe status={} stdout={} stderr={}",
-        desc.status,
-        String::from_utf8_lossy(&desc.stdout),
-        String::from_utf8_lossy(&desc.stderr),
+        ],
+    );
+    assert!(
+        desc.status.success(),
+        "describe failed: {}",
+        String::from_utf8_lossy(&desc.stderr)
     );
     let stdout = String::from_utf8_lossy(&desc.stdout);
     assert!(
@@ -5864,16 +5854,10 @@ async fn jvm_kafka_configs_alter_client_quota_end_to_end() {
     );
 
     // Delete the config.
-    // Same note: delete may also exit non-zero on the SCRAM side-call.
-    // We assert on the quota-cleared image state below rather than exit code.
-    let del_out = std::process::Command::new("docker")
-        .args([
-            "run",
-            "--rm",
-            "-v",
-            &admin_mount,
-            "--add-host=host.docker.internal:host-gateway",
-            KAFKA_IMAGE_TXN,
+    let del_out = docker_run_kafka_tool_with_image_and_mount(
+        KAFKA_IMAGE_TXN,
+        &admin_mount,
+        &[
             "kafka-configs",
             "--alter",
             "--entity-type",
@@ -5886,18 +5870,13 @@ async fn jvm_kafka_configs_alter_client_quota_end_to_end() {
             BOOTSTRAP,
             "--command-config",
             "/client.properties",
-        ])
-        .output()
-        .expect("spawn kafka-configs --delete-config");
-    eprintln!(
-        "CRABKA[test] delete status={} stdout={} stderr={}",
-        del_out.status,
-        String::from_utf8_lossy(&del_out.stdout),
-        String::from_utf8_lossy(&del_out.stderr),
+        ],
     );
-    // The alter itself always exits 0 for client-quota operations; only the
-    // trailing SCRAM describe (if any) causes non-zero. Verify the quota was
-    // actually removed from the image in the polling step below.
+    assert!(
+        del_out.status.success(),
+        "delete-config failed: {}",
+        String::from_utf8_lossy(&del_out.stderr)
+    );
 
     // Confirm quota cleared from image (poll up to 5 s).
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -5983,18 +5962,12 @@ async fn jvm_kafka_configs_alter_ip_quota_end_to_end() {
     );
 
     // Describe — confirm visibility.
-    // Note: cp-kafka:7.5.0's kafka-configs --describe --entity-type ips may exit
-    // non-zero due to a DescribeUserScramCredentials side-call (same pattern as
-    // --entity-type users in jvm_kafka_configs_alter_client_quota_end_to_end).
-    // Drive docker directly and assert only on stdout.
-    let desc = std::process::Command::new("docker")
-        .args([
-            "run",
-            "--rm",
-            "-v",
-            &admin_mount,
-            "--add-host=host.docker.internal:host-gateway",
-            KAFKA_IMAGE_TXN,
+    // api_key 50 (DescribeUserScramCredentials) is now implemented (slice 17a),
+    // so the JVM tool exits 0 cleanly. Use the helper which asserts success.
+    let desc = docker_run_kafka_tool_with_image_and_mount(
+        KAFKA_IMAGE_TXN,
+        &admin_mount,
+        &[
             "kafka-configs",
             "--describe",
             "--entity-type",
@@ -6005,14 +5978,12 @@ async fn jvm_kafka_configs_alter_ip_quota_end_to_end() {
             BOOTSTRAP,
             "--command-config",
             "/client.properties",
-        ])
-        .output()
-        .expect("spawn kafka-configs --describe");
-    eprintln!(
-        "CRABKA[test] describe status={} stdout={} stderr={}",
-        desc.status,
-        String::from_utf8_lossy(&desc.stdout),
-        String::from_utf8_lossy(&desc.stderr),
+        ],
+    );
+    assert!(
+        desc.status.success(),
+        "describe failed: {}",
+        String::from_utf8_lossy(&desc.stderr)
     );
     let stdout = String::from_utf8_lossy(&desc.stdout);
     assert!(
@@ -6021,15 +5992,10 @@ async fn jvm_kafka_configs_alter_ip_quota_end_to_end() {
     );
 
     // Delete the config.
-    // Same note: drive docker directly to avoid assert-on-success in the helper.
-    let del_out = std::process::Command::new("docker")
-        .args([
-            "run",
-            "--rm",
-            "-v",
-            &admin_mount,
-            "--add-host=host.docker.internal:host-gateway",
-            KAFKA_IMAGE_TXN,
+    let del_out = docker_run_kafka_tool_with_image_and_mount(
+        KAFKA_IMAGE_TXN,
+        &admin_mount,
+        &[
             "kafka-configs",
             "--alter",
             "--entity-type",
@@ -6042,14 +6008,12 @@ async fn jvm_kafka_configs_alter_ip_quota_end_to_end() {
             BOOTSTRAP,
             "--command-config",
             "/client.properties",
-        ])
-        .output()
-        .expect("spawn kafka-configs --delete-config");
-    eprintln!(
-        "CRABKA[test] delete status={} stdout={} stderr={}",
-        del_out.status,
-        String::from_utf8_lossy(&del_out.stdout),
-        String::from_utf8_lossy(&del_out.stderr),
+        ],
+    );
+    assert!(
+        del_out.status.success(),
+        "delete-config failed: {}",
+        String::from_utf8_lossy(&del_out.stderr)
     );
 
     // Confirm quota cleared from image (poll up to 5 s).
@@ -6145,20 +6109,12 @@ async fn jvm_kafka_configs_alter_controller_mutation_rate_end_to_end() {
     );
 
     // Describe — confirm visibility.
-    // Note: cp-kafka:7.5.0's kafka-configs --describe --entity-type users also
-    // tries DescribeUserScramCredentials (api_key 51), which crabka doesn't
-    // implement yet. The JVM tool exits non-zero because of that secondary
-    // call, but still prints the quota result to stdout first. Drive docker
-    // directly instead of using the helper (which asserts success) and only
-    // check stdout.
-    let desc = std::process::Command::new("docker")
-        .args([
-            "run",
-            "--rm",
-            "-v",
-            &admin_mount,
-            "--add-host=host.docker.internal:host-gateway",
-            KAFKA_IMAGE_TXN,
+    // api_key 50 (DescribeUserScramCredentials) is now implemented (slice 17a),
+    // so the JVM tool exits 0 cleanly. Use the helper which asserts success.
+    let desc = docker_run_kafka_tool_with_image_and_mount(
+        KAFKA_IMAGE_TXN,
+        &admin_mount,
+        &[
             "kafka-configs",
             "--describe",
             "--entity-type",
@@ -6169,14 +6125,12 @@ async fn jvm_kafka_configs_alter_controller_mutation_rate_end_to_end() {
             BOOTSTRAP,
             "--command-config",
             "/client.properties",
-        ])
-        .output()
-        .expect("spawn kafka-configs --describe");
-    eprintln!(
-        "CRABKA[test] describe status={} stdout={} stderr={}",
-        desc.status,
-        String::from_utf8_lossy(&desc.stdout),
-        String::from_utf8_lossy(&desc.stderr),
+        ],
+    );
+    assert!(
+        desc.status.success(),
+        "describe failed: {}",
+        String::from_utf8_lossy(&desc.stderr)
     );
     let stdout = String::from_utf8_lossy(&desc.stdout);
     assert!(
@@ -6185,15 +6139,10 @@ async fn jvm_kafka_configs_alter_controller_mutation_rate_end_to_end() {
     );
 
     // Delete the config.
-    // Same note: drive docker directly to avoid assert-on-success in the helper.
-    let del_out = std::process::Command::new("docker")
-        .args([
-            "run",
-            "--rm",
-            "-v",
-            &admin_mount,
-            "--add-host=host.docker.internal:host-gateway",
-            KAFKA_IMAGE_TXN,
+    let del_out = docker_run_kafka_tool_with_image_and_mount(
+        KAFKA_IMAGE_TXN,
+        &admin_mount,
+        &[
             "kafka-configs",
             "--alter",
             "--entity-type",
@@ -6206,14 +6155,12 @@ async fn jvm_kafka_configs_alter_controller_mutation_rate_end_to_end() {
             BOOTSTRAP,
             "--command-config",
             "/client.properties",
-        ])
-        .output()
-        .expect("spawn kafka-configs --delete-config");
-    eprintln!(
-        "CRABKA[test] delete status={} stdout={} stderr={}",
-        del_out.status,
-        String::from_utf8_lossy(&del_out.stdout),
-        String::from_utf8_lossy(&del_out.stderr),
+        ],
+    );
+    assert!(
+        del_out.status.success(),
+        "delete-config failed: {}",
+        String::from_utf8_lossy(&del_out.stderr)
     );
 
     // Confirm quota cleared from image (poll up to 5 s).
@@ -6239,4 +6186,84 @@ async fn jvm_kafka_configs_alter_controller_mutation_rate_end_to_end() {
     h1.shutdown().await;
     h2.shutdown().await;
     h3.shutdown().await;
+}
+
+/// JVM acceptance: `kafka-configs --describe --entity-type users` round-trip for
+/// SCRAM credentials (KIP-554 read half, api_key 50).
+///
+/// Three-broker SASL/PLAINTEXT cluster; provision alice's SCRAM-SHA-512 credential
+/// via `kafka-configs --alter --add-config SCRAM-SHA-512=[...]`, then describe and
+/// assert exit 0 + `SCRAM-SHA-512` in stdout.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires Docker"]
+async fn jvm_kafka_configs_describe_users_scram_credentials_end_to_end() {
+    const ADMIN: &str = "admin";
+    const ADMIN_PASS: &str = "admin-secret";
+
+    let (h1, _h2, _h3, _cfg1, _cfg2, _cfg3, _d1, _d2, _d3) =
+        start_three_broker_sasl_plaintext_jvm_cluster_with_users(ADMIN, ADMIN_PASS, &[]).await;
+    nc_check_connectivity();
+
+    let admin_props = write_client_props(&format!(
+        "security.protocol=SASL_PLAINTEXT\n\
+         sasl.mechanism=PLAIN\n\
+         sasl.jaas.config={}\n",
+        plain_jaas(ADMIN, ADMIN_PASS),
+    ));
+    let admin_mount = admin_props.mount_str();
+
+    // Provision a SCRAM user via kafka-configs --alter (hits AlterUserScramCredentials, api_key 51).
+    let alter = docker_run_kafka_tool_with_image_and_mount(
+        KAFKA_IMAGE_TXN,
+        &admin_mount,
+        &[
+            "kafka-configs",
+            "--alter",
+            "--entity-type",
+            "users",
+            "--entity-name",
+            "alice",
+            "--add-config",
+            "SCRAM-SHA-512=[iterations=4096,password=alice-secret]",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--command-config",
+            "/client.properties",
+        ],
+    );
+    assert!(
+        alter.status.success(),
+        "alter SCRAM failed: {}",
+        String::from_utf8_lossy(&alter.stderr)
+    );
+
+    // Describe — should exit 0 cleanly (api_key 50 now implemented).
+    let desc = docker_run_kafka_tool_with_image_and_mount(
+        KAFKA_IMAGE_TXN,
+        &admin_mount,
+        &[
+            "kafka-configs",
+            "--describe",
+            "--entity-type",
+            "users",
+            "--entity-name",
+            "alice",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--command-config",
+            "/client.properties",
+        ],
+    );
+    assert!(
+        desc.status.success(),
+        "describe failed: {}",
+        String::from_utf8_lossy(&desc.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&desc.stdout);
+    assert!(
+        stdout.contains("SCRAM-SHA-512"),
+        "expected SCRAM-SHA-512 in describe output: {stdout}"
+    );
+
+    let _ = h1; // keep alive
 }
