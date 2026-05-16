@@ -41,6 +41,7 @@
 
 #![doc(html_root_url = "https://docs.rs/crabka-log/0.0.0")]
 
+mod compact;
 mod config;
 mod error;
 mod index;
@@ -52,7 +53,7 @@ mod retention;
 mod segment;
 mod txn_index;
 
-pub use config::LogConfig;
+pub use config::{CleanupPolicy, LogConfig};
 pub use error::LogError;
 pub use leader_epoch_checkpoint::{EpochEntry, LeaderEpochCheckpoint};
 pub use log::{Log, ReadOutput};

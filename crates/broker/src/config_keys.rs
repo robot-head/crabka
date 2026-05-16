@@ -1,12 +1,12 @@
 //! Topic-config whitelist for `AlterConfigs` / `IncrementalAlterConfigs`.
 //!
-//! Eight keys are recognized. Three propagate live to `Log.config`
-//! (`retention.ms`, `retention.bytes`, `segment.bytes`). Three are
-//! accepted as no-op defaults for compatibility but reject non-default
-//! values: `cleanup.policy` (only `delete`), `compression.type` (only
-//! `producer`), `min.insync.replicas` (integers >= 1 accepted but not
-//! yet enforced — see the design spec for the rationale). Two are
-//! KIP-73 throttle keys (`leader.replication.throttled.replicas`,
+//! Eight keys are recognized. Four propagate live to `Log.config`
+//! (`retention.ms`, `retention.bytes`, `segment.bytes`, `cleanup.policy`).
+//! Two are accepted as no-op defaults for compatibility but reject
+//! non-default values: `compression.type` (only `producer`),
+//! `min.insync.replicas` (integers >= 1 accepted but not yet enforced —
+//! see the design spec for the rationale). Two are KIP-73 throttle keys
+//! (`leader.replication.throttled.replicas`,
 //! `follower.replication.throttled.replicas`) validated via
 //! `ThrottledReplicas::parse`.
 //!
@@ -35,15 +35,12 @@ pub(crate) fn validate_topic_config(key: &str, value: &str) -> Result<(), String
     match key {
         RETENTION_MS | RETENTION_BYTES => parse_i64_at_least(-1, value).map(|_| ()),
         SEGMENT_BYTES => parse_u64_at_least(1, value).map(|_| ()),
-        CLEANUP_POLICY => {
-            if value == "delete" {
-                Ok(())
-            } else {
-                Err(format!(
-                    "cleanup.policy={value} not supported; only `delete` is currently honored"
-                ))
-            }
-        }
+        CLEANUP_POLICY => match value {
+            "delete" | "compact" => Ok(()),
+            _ => Err(format!(
+                "cleanup.policy={value} not supported; expected `delete` or `compact`"
+            )),
+        },
         COMPRESSION_TYPE => {
             if value == "producer" {
                 Ok(())
@@ -137,6 +134,13 @@ pub(crate) fn apply_to_log_config(
                     out.segment_bytes = b;
                 }
             }
+            CLEANUP_POLICY => {
+                out.cleanup_policy = if v == "compact" {
+                    crabka_log::CleanupPolicy::Compact
+                } else {
+                    crabka_log::CleanupPolicy::Delete
+                };
+            }
             // The remaining keys are recognized but no broker behavior is
             // wired to them yet (see module docs).
             _ => {}
@@ -171,14 +175,15 @@ mod tests {
     }
 
     #[test]
-    fn validate_cleanup_policy_compact_rejected() {
-        let err = validate_topic_config(CLEANUP_POLICY, "compact").unwrap_err();
-        assert!(err.contains("not supported"));
+    fn validate_cleanup_policy_accepts_delete_and_compact() {
+        assert!(validate_topic_config(CLEANUP_POLICY, "delete").is_ok());
+        assert!(validate_topic_config(CLEANUP_POLICY, "compact").is_ok());
     }
 
     #[test]
-    fn validate_cleanup_policy_delete_accepted() {
-        assert!(validate_topic_config(CLEANUP_POLICY, "delete").is_ok());
+    fn validate_cleanup_policy_rejects_unknown() {
+        assert!(validate_topic_config(CLEANUP_POLICY, "compact,delete").is_err());
+        assert!(validate_topic_config(CLEANUP_POLICY, "junk").is_err());
     }
 
     #[test]
@@ -269,5 +274,25 @@ mod tests {
         };
         let out = apply_to_log_config(&BTreeMap::new(), &base);
         assert_eq!(out.retention_ms, base.retention_ms);
+    }
+
+    #[test]
+    fn apply_cleanup_policy_compact_propagates() {
+        let mut overrides = std::collections::BTreeMap::new();
+        overrides.insert(CLEANUP_POLICY.to_string(), "compact".to_string());
+        let out = apply_to_log_config(&overrides, &crabka_log::LogConfig::default());
+        assert_eq!(out.cleanup_policy, crabka_log::CleanupPolicy::Compact);
+    }
+
+    #[test]
+    fn apply_cleanup_policy_delete_propagates() {
+        let mut overrides = std::collections::BTreeMap::new();
+        overrides.insert(CLEANUP_POLICY.to_string(), "delete".to_string());
+        let base = crabka_log::LogConfig {
+            cleanup_policy: crabka_log::CleanupPolicy::Compact,
+            ..crabka_log::LogConfig::default()
+        };
+        let out = apply_to_log_config(&overrides, &base);
+        assert_eq!(out.cleanup_policy, crabka_log::CleanupPolicy::Delete);
     }
 }

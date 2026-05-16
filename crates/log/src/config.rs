@@ -2,6 +2,19 @@
 
 use std::time::Duration;
 
+/// Per-topic policy for what to do with old log segments.
+///
+/// `Delete` (default): age- or size-based segment deletion via
+/// [`crate::retention`]. `Compact`: newest-wins dedup-by-key,
+/// implemented in [`crate::compact`] and invoked through
+/// [`crate::Log::compact`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CleanupPolicy {
+    #[default]
+    Delete,
+    Compact,
+}
+
 /// Tunables for [`Log`](crate::Log) behavior.
 ///
 /// Defaults match Apache Kafka 4.2 (`segment.bytes`, `segment.ms`,
@@ -31,6 +44,9 @@ pub struct LogConfig {
 
     /// On open, CRC every batch in the active segment from the last index entry to EOF.
     pub validate_on_open: bool,
+
+    /// Cleanup policy. Defaults to `Delete`. See [`CleanupPolicy`].
+    pub cleanup_policy: CleanupPolicy,
 }
 
 impl Default for LogConfig {
@@ -43,6 +59,7 @@ impl Default for LogConfig {
             index_interval_bytes: 4096,
             flush_on_append: false,
             validate_on_open: true,
+            cleanup_policy: CleanupPolicy::Delete,
         }
     }
 }
@@ -58,5 +75,11 @@ mod tests {
         assert_eq!(c.index_interval_bytes, 4096);
         assert!(!c.flush_on_append);
         assert!(c.validate_on_open);
+    }
+
+    #[test]
+    fn default_cleanup_policy_is_delete() {
+        let c = LogConfig::default();
+        assert_eq!(c.cleanup_policy, CleanupPolicy::Delete);
     }
 }

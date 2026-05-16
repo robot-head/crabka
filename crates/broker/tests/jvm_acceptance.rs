@@ -6267,3 +6267,197 @@ async fn jvm_kafka_configs_describe_users_scram_credentials_end_to_end() {
 
     let _ = h1; // keep alive
 }
+
+/// Slice 18 — `kafka-console-consumer` sees a compacted topic with only
+/// the latest value per key.
+///
+/// 1. Spin up a single-broker cluster with a fast cleaner interval (3s).
+/// 2. `kafka-topics --create --topic compacted-jvm --config cleanup.policy=compact
+///    --config segment.bytes=256 --partitions 1 --replication-factor 1`
+/// 3. `kafka-console-producer --property parse.key=true --property key.separator=:`
+///    piping stdin:
+///      k1:v1
+///      k1:v2
+///      k2:v3
+///      k1:v4
+///      k3:v5
+/// 4. Sleep 8s to allow the 3s cleaner tick + segment rolls.
+/// 5. `kafka-console-consumer --topic compacted-jvm --from-beginning --timeout-ms 5000`
+/// 6. Assert stdout contains `v4`, `v3`, `v5` (latest per-key values).
+/// 7. Assert stdout does NOT contain `v1` or `v2` (stale values compacted away).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires Docker"]
+#[allow(clippy::too_many_lines)]
+async fn jvm_kafka_console_consumer_sees_compacted_topic_end_to_end() {
+    const TOPIC: &str = "compacted-jvm";
+
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("crabka_broker=debug,info")),
+        )
+        .with_test_writer()
+        .try_init();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let listen_addr: std::net::SocketAddr = LISTEN.parse().expect("static addr");
+    let controller_addr: std::net::SocketAddr = "0.0.0.0:9093".parse().expect("static addr");
+    let config = BrokerConfig {
+        broker_id: 1,
+        listen_addr,
+        advertised_listener: BOOTSTRAP.into(),
+        log_dir: dir.path().to_path_buf(),
+        log_config: crabka_log::LogConfig::default(),
+        node_id: 1,
+        controller_listen_addr: controller_addr,
+        controller_quorum_voters: vec![(1, controller_addr)],
+        heartbeat_interval_ms: 3_000,
+        heartbeat_timeout_ms: 9_000,
+        replica_lag_time_max_ms: 30_000,
+        controller_election_timeout: std::time::Duration::from_secs(5),
+        controller_heartbeat_interval: std::time::Duration::from_millis(500),
+        bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
+        // 3s cleaner tick so we don't have to wait the full 30s default.
+        cleaner_interval_override: Some(std::time::Duration::from_secs(3)),
+        ..BrokerConfig::default()
+    };
+    let broker = Broker::start(config).await.expect("start broker");
+    eprintln!("CRABKA[test] compaction broker started listen={LISTEN} advertised={BOOTSTRAP}");
+    nc_check_connectivity();
+
+    // 1. Create the topic with cleanup.policy=compact and tiny segment.bytes
+    //    so records are sealed into a second segment before the cleaner runs.
+    docker_run_kafka_tool(&[
+        "kafka-topics",
+        "--create",
+        "--if-not-exists",
+        "--topic",
+        TOPIC,
+        "--partitions",
+        "1",
+        "--replication-factor",
+        "1",
+        "--config",
+        "cleanup.policy=compact",
+        "--config",
+        "segment.bytes=256",
+        "--bootstrap-server",
+        BOOTSTRAP,
+    ]);
+
+    // 1b. Wait for cleanup.policy=compact + segment.bytes=256 to propagate
+    //     from the metadata image into the partition's LogConfig via the
+    //     ReplicatorSupervisor reconcile loop. Without this wait, produces
+    //     can land in a default-config Log (1GiB segments, Delete policy) →
+    //     no segment rolls, no compaction.
+    let cfg_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if let Some(cfg) = broker.partition_log_config_for_test(TOPIC, 0)
+            && cfg.cleanup_policy == crabka_log::CleanupPolicy::Compact
+            && cfg.segment_bytes == 256
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() <= cfg_deadline,
+            "cleanup.policy/segment.bytes never propagated within 10s"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    // 2. Produce 5 records under 3 keys — k1 has three values (v1, v2, v4);
+    //    only v4 should survive compaction.
+    let mut child = Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "-i",
+            "--add-host=host.docker.internal:host-gateway",
+            KAFKA_IMAGE,
+            "kafka-console-producer",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--topic",
+            TOPIC,
+            "--property",
+            "parse.key=true",
+            "--property",
+            "key.separator=:",
+            // Force per-record batches so each line is its own RecordBatch.
+            // Default linger.ms=0 already, but batch.size+linger.ms keep
+            // multiple in-flight records bundled when they're submitted
+            // back-to-back. Setting batch.size=1 and max-in-flight=1 makes
+            // each line a separate batch, which is what we need so
+            // segment.bytes=256 actually rolls segments mid-workload.
+            "--producer-property",
+            "batch.size=1",
+            "--producer-property",
+            "linger.ms=0",
+            "--producer-property",
+            "max.in.flight.requests.per.connection=1",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn producer");
+    // First 5 records: the actual workload. After that, a burst of "pad"
+    // records under a sentinel key forces the active segment past
+    // `segment.bytes=256` so v5 ends up sealed (otherwise the compactor
+    // can't see it; it never touches the active segment) and the test's
+    // "no stale v1" assertion can actually hold for k1.
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(
+            b"k1:v1\nk1:v2\nk2:v3\nk1:v4\nk3:v5\n\
+              __pad__:p0\n__pad__:p1\n__pad__:p2\n__pad__:p3\n\
+              __pad__:p4\n__pad__:p5\n__pad__:p6\n__pad__:p7\n",
+        )
+        .expect("write stdin");
+    drop(child.stdin.take());
+    let producer_out = child.wait_with_output().expect("wait producer");
+    assert!(
+        producer_out.status.success(),
+        "producer failed: {}",
+        String::from_utf8_lossy(&producer_out.stderr)
+    );
+    eprintln!("CRABKA[test] produced 5 records; waiting for cleaner to compact...");
+
+    // 3. Wait for at least two cleaner ticks (3s interval → wait 8s) so
+    //    the stale k1 values are compacted away.
+    tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+
+    // 4. Consume from beginning — only the latest per-key records should appear.
+    let consumer_out = docker_run_kafka_tool(&[
+        "kafka-console-consumer",
+        "--bootstrap-server",
+        BOOTSTRAP,
+        "--topic",
+        TOPIC,
+        "--partition",
+        "0",
+        "--from-beginning",
+        "--timeout-ms",
+        "5000",
+    ]);
+    let stdout = String::from_utf8_lossy(&consumer_out.stdout);
+    eprintln!("CRABKA[test] consumer stdout: {stdout:?}");
+
+    // Latest values for each key must be present.
+    for needle in ["v4", "v3", "v5"] {
+        assert!(
+            stdout.contains(needle),
+            "expected {needle} in consumer output (latest per-key); got: {stdout:?}"
+        );
+    }
+    // Stale values for k1 must have been compacted away.
+    for stale in ["v1", "v2"] {
+        assert!(
+            !stdout.contains(stale),
+            "stale value {stale} still present after compaction; got: {stdout:?}"
+        );
+    }
+
+    broker.shutdown().await;
+}
