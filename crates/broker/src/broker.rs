@@ -48,6 +48,9 @@ pub struct Broker {
     /// to a plain `TcpStream::connect` — the new wiring is transparent
     /// for the legacy PLAINTEXT-only path.
     pub(crate) inter_broker_client: Arc<crate::network::client::InterBrokerClient>,
+    /// KIP-73 throttle buckets. Updated by the throttle refresh task and
+    /// consulted by the Fetch handler and replicator.
+    pub throttle_state: Arc<crate::throttle::ThrottleState>,
     handlers: HandlerTable,
 }
 
@@ -522,6 +525,24 @@ impl crate::reassignment::ReassignmentController for ReassignmentControllerAdapt
     }
 }
 
+/// Wraps a real [`crabka_raft::ControllerHandle`] so it can satisfy the
+/// [`crate::throttle::ImageWatcher`] trait required by the throttle refresh
+/// background task. Every broker runs this (not just the controller leader)
+/// since each broker manages its own throttle buckets.
+struct ThrottleControllerAdapter {
+    handle: Arc<crabka_raft::ControllerHandle>,
+}
+
+impl crate::throttle::ImageWatcher for ThrottleControllerAdapter {
+    fn current_image(&self) -> Arc<crabka_metadata::MetadataImage> {
+        self.handle.current_image()
+    }
+
+    fn watch_image(&self) -> tokio::sync::watch::Receiver<Arc<crabka_metadata::MetadataImage>> {
+        self.handle.watch_image()
+    }
+}
+
 impl Broker {
     /// Build a `Broker`, scan the log dir, spawn partition writers for
     /// every existing `<topic>-<partition>/`, bind the TCP listener, and
@@ -966,6 +987,20 @@ impl Broker {
             ));
         }
 
+        // KIP-73 throttle refresh task. Always-on; the bucket itself
+        // has a rate-0 fast path so unthrottled clusters pay nothing.
+        let throttle_state = Arc::new(crate::throttle::ThrottleState::new());
+        {
+            let throttle = throttle_state.clone();
+            let watcher: Arc<dyn crate::throttle::ImageWatcher> =
+                Arc::new(ThrottleControllerAdapter {
+                    handle: controller.clone(),
+                });
+            let shutdown = supervisor_shutdown.child_token();
+            let node_id = config.node_id;
+            tokio::spawn(crate::throttle::run(watcher, node_id, throttle, shutdown));
+        }
+
         // 5. Build handler table.
         let handlers = crate::handlers::build_table();
 
@@ -1011,6 +1046,7 @@ impl Broker {
             liveness: liveness.clone(),
             tls_acceptor,
             inter_broker_client,
+            throttle_state,
             handlers,
         });
 
