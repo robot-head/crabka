@@ -25,8 +25,19 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use bytes::{Buf, BufMut, BytesMut};
-use crabka_broker::BrokerHandle;
+use crabka_broker::config::ListenerSpec;
+use crabka_broker::{Broker, BrokerHandle};
+use crabka_metadata::{
+    AclEntry, AclOperation, MetadataRecord, PatternType, PermissionType, ResourceType,
+};
+use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
+use crabka_protocol::owned::api_versions_response::ApiVersionsResponse;
+use crabka_protocol::owned::sasl_authenticate_request::SaslAuthenticateRequest;
+use crabka_protocol::owned::sasl_authenticate_response::SaslAuthenticateResponse;
+use crabka_protocol::owned::sasl_handshake_request::SaslHandshakeRequest;
+use crabka_protocol::owned::sasl_handshake_response::SaslHandshakeResponse;
 use crabka_protocol::{Decode, Encode};
+use crabka_security::{ListenerProtocol, SaslMechanism};
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -477,6 +488,284 @@ async fn list_in_flight_returns_pending_rows() {
     h1.shutdown().await;
     h2.shutdown().await;
     h3.shutdown().await;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SASL/PLAIN wire helpers (T10)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Open a TCP stream to `addr` and drive `ApiVersions` → `SaslHandshake(PLAIN)`
+/// → `SaslAuthenticate(\0user\0password)`. Returns the authenticated stream.
+/// Copied verbatim from `elect_leaders.rs`.
+async fn sasl_plain_authenticate(
+    addr: SocketAddr,
+    user: &str,
+    password: &[u8],
+) -> Result<TcpStream, io::Error> {
+    let mut stream = TcpStream::connect(addr).await?;
+
+    // 1. ApiVersions v0 (non-flexible).
+    let av_req = ApiVersionsRequest::default();
+    let mut av_body = BytesMut::new();
+    av_req
+        .encode(&mut av_body, 0)
+        .map_err(|e| io::Error::other(format!("ApiVersions encode: {e}")))?;
+    let av_resp_bytes = round_trip(&mut stream, 18, 0, 1, false, &av_body).await?;
+    let mut cur: &[u8] = &av_resp_bytes;
+    ApiVersionsResponse::decode(&mut cur, 0)
+        .map_err(|e| io::Error::other(format!("ApiVersions decode: {e}")))?;
+
+    // 2. SaslHandshake v1 (non-flexible, mechanism="PLAIN").
+    let mut sh_body = BytesMut::new();
+    SaslHandshakeRequest {
+        mechanism: "PLAIN".to_string(),
+        ..Default::default()
+    }
+    .encode(&mut sh_body, 1)
+    .map_err(|e| io::Error::other(format!("SaslHandshake encode: {e}")))?;
+    let sh_resp_bytes = round_trip(&mut stream, 17, 1, 2, false, &sh_body).await?;
+    let mut cur: &[u8] = &sh_resp_bytes;
+    let sh_resp = SaslHandshakeResponse::decode(&mut cur, 1)
+        .map_err(|e| io::Error::other(format!("SaslHandshake decode: {e}")))?;
+    if sh_resp.error_code != 0 {
+        return Err(io::Error::other(format!(
+            "SaslHandshake failed: error_code={}",
+            sh_resp.error_code
+        )));
+    }
+
+    // 3. SaslAuthenticate v2 (flexible). auth_bytes = \0user\0password.
+    let mut payload = Vec::with_capacity(2 + user.len() + password.len());
+    payload.push(0); // empty authzid
+    payload.extend_from_slice(user.as_bytes());
+    payload.push(0);
+    payload.extend_from_slice(password);
+    let mut auth_body = BytesMut::new();
+    SaslAuthenticateRequest {
+        auth_bytes: bytes::Bytes::from(payload),
+        ..Default::default()
+    }
+    .encode(&mut auth_body, 2)
+    .map_err(|e| io::Error::other(format!("SaslAuthenticate encode: {e}")))?;
+    let auth_resp_bytes = round_trip(&mut stream, 36, 2, 3, true, &auth_body).await?;
+    let mut cur: &[u8] = &auth_resp_bytes;
+    let auth_resp = SaslAuthenticateResponse::decode(&mut cur, 2)
+        .map_err(|e| io::Error::other(format!("SaslAuthenticate decode: {e}")))?;
+    if auth_resp.error_code != 0 {
+        return Err(io::Error::other(format!(
+            "SaslAuthenticate failed: error_code={} message={:?}",
+            auth_resp.error_code, auth_resp.error_message
+        )));
+    }
+
+    Ok(stream)
+}
+
+/// Start a single-broker SASL/PLAINTEXT cluster.
+/// Returns `(handle, _dir, addr)`.
+/// `super_user` is set as the only super-user.
+/// `users` is a slice of `(username, password)` pairs added to `plain_credentials`.
+async fn start_single_broker_sasl_plaintext_with_users(
+    super_user: &str,
+    users: &[(&str, &str)],
+) -> (BrokerHandle, TempDir, SocketAddr) {
+    let log_dir = tempfile::tempdir().unwrap();
+    let mut cfg = crabka_broker::BrokerConfig::for_tests(log_dir.path().to_path_buf());
+    cfg.listeners = vec![ListenerSpec {
+        name: "SASL_PLAINTEXT".to_string(),
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        advertised: "127.0.0.1:0".to_string(),
+        protocol: ListenerProtocol::SaslPlaintext,
+    }];
+    cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
+    cfg.enabled_sasl_mechanisms = vec![SaslMechanism::Plain];
+    for (name, pass) in users {
+        cfg.plain_credentials
+            .insert((*name).to_string(), (*pass).to_string());
+    }
+    cfg.super_users = std::iter::once(super_user.to_string()).collect();
+
+    let handle = Broker::start(cfg).await.expect("broker must start");
+    let addr = handle.listen_addr();
+    (handle, log_dir, addr)
+}
+
+/// Create a topic via SASL/PLAIN as the given admin user.
+/// Copied from `elect_leaders.rs`'s `create_topic_sasl_plain`.
+async fn create_topic_as_admin(
+    addr: SocketAddr,
+    topic: &str,
+    partitions: i32,
+    replication_factor: i16,
+) {
+    use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
+    use crabka_protocol::owned::create_topics_response::CreateTopicsResponse;
+
+    let req = CreateTopicsRequest {
+        topics: vec![CreatableTopic {
+            name: topic.to_string(),
+            num_partitions: partitions,
+            replication_factor,
+            ..Default::default()
+        }],
+        timeout_ms: 5_000,
+        ..Default::default()
+    };
+    let mut stream = sasl_plain_authenticate(addr, "admin", b"admin-secret")
+        .await
+        .expect("SASL authenticate for CreateTopics");
+    let mut body = BytesMut::new();
+    req.encode(&mut body, 7).expect("encode CreateTopics");
+    let resp_bytes = round_trip(&mut stream, 19, 7, 1, true, &body)
+        .await
+        .expect("CreateTopics round-trip");
+    let mut cur: &[u8] = &resp_bytes;
+    let resp = CreateTopicsResponse::decode(&mut cur, 7).expect("decode CreateTopicsResponse");
+    assert_eq!(resp.topics.len(), 1);
+    assert_eq!(
+        resp.topics[0].error_code, 0,
+        "CreateTopics({topic}) must succeed: {:?}",
+        resp.topics[0].error_message
+    );
+}
+
+/// Drive `AlterPartitionReassignments` over a SASL/PLAIN authenticated connection.
+/// Returns `(topic_name, [(partition_index, error_code)])` rows.
+async fn drive_alter_reassignments_sasl_plain(
+    addr: SocketAddr,
+    user: &str,
+    pass: &str,
+    rows: Vec<(&str, i32, Option<Vec<i32>>)>,
+) -> Vec<(String, Vec<(i32, i16)>)> {
+    use crabka_protocol::owned::alter_partition_reassignments_request::{
+        AlterPartitionReassignmentsRequest, ReassignablePartition, ReassignableTopic,
+    };
+    use crabka_protocol::owned::alter_partition_reassignments_response::AlterPartitionReassignmentsResponse;
+
+    // Group by topic.
+    let mut by_topic: std::collections::BTreeMap<String, Vec<ReassignablePartition>> =
+        std::collections::BTreeMap::new();
+    for (topic, partition, target_opt) in rows {
+        by_topic
+            .entry(topic.to_string())
+            .or_default()
+            .push(ReassignablePartition {
+                partition_index: partition,
+                replicas: target_opt,
+                ..Default::default()
+            });
+    }
+    let topics: Vec<ReassignableTopic> = by_topic
+        .into_iter()
+        .map(|(name, partitions)| ReassignableTopic {
+            name,
+            partitions,
+            ..Default::default()
+        })
+        .collect();
+    let req = AlterPartitionReassignmentsRequest {
+        timeout_ms: 30_000,
+        allow_replication_factor_change: true,
+        topics,
+        ..Default::default()
+    };
+    let mut stream = sasl_plain_authenticate(addr, user, pass.as_bytes())
+        .await
+        .expect("SASL authenticate for AlterPartitionReassignments");
+    let mut body = BytesMut::new();
+    req.encode(&mut body, 1)
+        .expect("encode AlterPartitionReassignments");
+    let resp_bytes = round_trip(&mut stream, 45, 1, 1, true, &body)
+        .await
+        .expect("AlterPartitionReassignments round-trip");
+    let mut cur: &[u8] = &resp_bytes;
+    let resp = AlterPartitionReassignmentsResponse::decode(&mut cur, 1)
+        .expect("decode AlterPartitionReassignmentsResponse");
+
+    resp.responses
+        .into_iter()
+        .map(|r| {
+            (
+                r.name,
+                r.partitions
+                    .into_iter()
+                    .map(|p| (p.partition_index, p.error_code))
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// T10: auth-deny integration test
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Test 4: alice (authenticated via SASL/PLAIN, no ACLs) sends
+/// `AlterPartitionReassignments` and must receive
+/// `CLUSTER_AUTHORIZATION_FAILED (31)` per-partition.
+///
+/// A dummy ACL is seeded first to disable the compat shim (the shim allows
+/// everything when `image.acls` is empty).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn non_super_user_denied() {
+    let (handle, _dir, addr) = start_single_broker_sasl_plaintext_with_users(
+        "admin",
+        &[("admin", "admin-secret"), ("alice", "alice-secret")],
+    )
+    .await;
+
+    // Seed a dummy ACL to disable the compat shim.  The ACL itself is
+    // irrelevant — any non-empty `image.acls` flips the shim off and forces
+    // the authorizer to evaluate every request.
+    handle
+        .submit_metadata_record_for_test(MetadataRecord::V1AccessControlEntry(AclEntry {
+            resource_type: ResourceType::Topic,
+            resource_name: "__compat_shim_disable__".to_string(),
+            pattern_type: PatternType::Literal,
+            principal: "User:admin".to_string(),
+            host: "*".to_string(),
+            operation: AclOperation::Read,
+            permission_type: PermissionType::Allow,
+        }))
+        .await
+        .expect("seed dummy ACL");
+
+    // `submit_metadata_record_for_test` blocks until the raft entry is
+    // committed and the state machine applies it to the image, so the ACL
+    // is guaranteed to be in the image before we proceed.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    create_topic_as_admin(addr, "foo", 1, 1).await;
+    wait_partition_exists(&handle, "foo", 0).await;
+
+    // Retry up to 5s to absorb raft apply latency on slow runners.
+    let deadline_auth = Instant::now() + Duration::from_secs(5);
+    let resp = loop {
+        let r = drive_alter_reassignments_sasl_plain(
+            addr,
+            "alice",
+            "alice-secret",
+            vec![("foo", 0, Some(vec![1]))],
+        )
+        .await;
+        // If we see 31, the shim is off and we're done.
+        if r.iter().all(|(_, parts)| parts.iter().all(|(_, ec)| *ec == 31)) {
+            break r;
+        }
+        assert!(
+            Instant::now() <= deadline_auth,
+            "ACL shim still active or wrong error after 5s; got {r:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+
+    handle.shutdown().await;
+
+    assert_eq!(
+        resp[0].1,
+        vec![(0, 31)],
+        "expected CLUSTER_AUTHORIZATION_FAILED (31) for alice; got {resp:?}"
+    );
 }
 
 /// Test 3: Cancel an in-flight reassignment by sending target=None (null replicas).
