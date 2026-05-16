@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 TAG="${1:-crabka-operator:dev}"
+# Sandbox runtime for the melange build step. Override with `bubblewrap`
+# if your local env has bwrap and you'd rather avoid Docker.
+RUNNER="${MELANGE_RUNNER:-docker}"
 WORK="$(pwd)"
 mkdir -p packages
 
@@ -14,6 +17,7 @@ melange build packaging/melange/crabka-operator.yaml \
   --source-dir "$WORK" \
   --signing-key melange.rsa \
   --arch x86_64 \
+  --runner "$RUNNER" \
   --out-dir packages/
 
 # Build the OCI image.

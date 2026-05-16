@@ -40,6 +40,7 @@ jobs:
             --source-dir . \
             --signing-key melange.rsa \
             --arch x86_64 \
+            --runner docker \
             --out-dir packages/
           apko build packaging/apko/crabka-operator.yaml \
             crabka-operator:e2e \
