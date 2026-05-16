@@ -17,6 +17,7 @@ workspace = true
 [dependencies]
 anyhow = { workspace = true }
 axum = { workspace = true }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 clap = { workspace = true, features = ["env"] }
 futures = { workspace = true }
 k8s-openapi = { workspace = true }
@@ -34,5 +35,6 @@ tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 http = "1"
+http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "http1"] }
 tempfile = { workspace = true }

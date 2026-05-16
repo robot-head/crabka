@@ -6,6 +6,7 @@
 
 pub mod config;
 pub mod context;
+pub mod controller;
 pub mod crd;
 pub mod gen_crds;
 pub mod health;
