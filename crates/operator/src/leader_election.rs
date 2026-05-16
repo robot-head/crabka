@@ -2,12 +2,16 @@ use std::time::Duration;
 
 use k8s_openapi::api::coordination::v1::{Lease, LeaseSpec};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{MicroTime, ObjectMeta};
-use k8s_openapi::chrono::Utc;
+use k8s_openapi::jiff;
 use kube::Client;
 use kube::api::{Api, Patch, PatchParams, PostParams};
 
 const LEASE_DURATION_SECS: i32 = 15;
 const RETRY: Duration = Duration::from_secs(2);
+
+fn now() -> jiff::Timestamp {
+    jiff::Timestamp::now()
+}
 
 /// Block until this process holds the Lease.
 ///
@@ -29,7 +33,6 @@ pub async fn acquire(
     loop {
         match api.get_opt(name).await? {
             None => {
-                // Create the Lease with us as holder.
                 let lease = Lease {
                     metadata: ObjectMeta {
                         name: Some(name.into()),
@@ -38,9 +41,10 @@ pub async fn acquire(
                     spec: Some(LeaseSpec {
                         holder_identity: Some(identity.into()),
                         lease_duration_seconds: Some(LEASE_DURATION_SECS),
-                        acquire_time: Some(MicroTime(Utc::now())),
-                        renew_time: Some(MicroTime(Utc::now())),
+                        acquire_time: Some(MicroTime(now())),
+                        renew_time: Some(MicroTime(now())),
                         lease_transitions: Some(1),
+                        ..Default::default()
                     }),
                 };
                 match api.create(&PostParams::default(), &lease).await {
@@ -60,16 +64,12 @@ pub async fn acquire(
                     return Ok(());
                 }
                 if is_expired(&existing) {
-                    // TODO(slice-future): bump `leaseTransitions` on takeover
-                    // per k8s convention (client-go's leaderelection does
-                    // this). Deferred until an observer cares; omitting it
-                    // doesn't affect correctness of single-leader election.
                     let patch = serde_json::json!({
                         "spec": {
                             "holderIdentity": identity,
                             "leaseDurationSeconds": LEASE_DURATION_SECS,
-                            "acquireTime": MicroTime(Utc::now()),
-                            "renewTime": MicroTime(Utc::now()),
+                            "acquireTime": MicroTime(now()),
+                            "renewTime": MicroTime(now()),
                         }
                     });
                     match api
@@ -107,16 +107,16 @@ fn is_expired(lease: &Lease) -> bool {
     let Some(renew) = spec.renew_time.as_ref() else {
         return true;
     };
-    let dur = i64::from(spec.lease_duration_seconds.unwrap_or(LEASE_DURATION_SECS));
-    Utc::now().signed_duration_since(renew.0).num_seconds() > dur
+    let dur_secs = i64::from(spec.lease_duration_seconds.unwrap_or(LEASE_DURATION_SECS));
+    let elapsed_secs = now().as_second() - renew.0.as_second();
+    elapsed_secs > dur_secs
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use k8s_openapi::chrono;
 
-    fn lease_with(holder: &str, renew: chrono::DateTime<chrono::Utc>) -> Lease {
+    fn lease_with(holder: &str, renew: jiff::Timestamp) -> Lease {
         Lease {
             metadata: ObjectMeta::default(),
             spec: Some(LeaseSpec {
@@ -125,21 +125,22 @@ mod tests {
                 acquire_time: Some(MicroTime(renew)),
                 renew_time: Some(MicroTime(renew)),
                 lease_transitions: Some(1),
+                ..Default::default()
             }),
         }
     }
 
     #[test]
     fn held_by_us_matches_identity() {
-        let l = lease_with("me", Utc::now());
+        let l = lease_with("me", now());
         assert!(held_by_us(&l, "me"));
         assert!(!held_by_us(&l, "someone-else"));
     }
 
     #[test]
     fn expiry_uses_renew_time() {
-        let stale = Utc::now() - chrono::Duration::seconds(60);
-        let fresh = Utc::now();
+        let stale = jiff::Timestamp::from_second(now().as_second() - 60).unwrap();
+        let fresh = now();
         assert!(is_expired(&lease_with("x", stale)));
         assert!(!is_expired(&lease_with("x", fresh)));
     }
