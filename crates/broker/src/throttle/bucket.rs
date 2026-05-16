@@ -144,7 +144,10 @@ mod tests {
         std::thread::sleep(Duration::from_millis(1500));
         // After 1.5s, refill would be 1536, but cap is 1024.
         let g = b.try_consume(2048);
-        assert!((900..=1024).contains(&g), "expected ~1024 (capped), got {g}");
+        assert!(
+            (900..=1024).contains(&g),
+            "expected ~1024 (capped), got {g}"
+        );
     }
 
     #[test]

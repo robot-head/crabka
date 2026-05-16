@@ -311,14 +311,18 @@ pub(crate) async fn handle(
     // fetch requests. Consumer fetches have replica_id < 0.
     if is_follower_fetch {
         use crate::throttle::TopicThrottle;
-        let node_id = broker.config.node_id;
+        // `leader.replication.throttled.replicas` stores (partition, follower_id) pairs.
+        // The leader throttles a follower fetch when (partition, effective_replica_id) is
+        // in that set. We cast to u64 because NodeId is u64 and replica_id is i32; a
+        // valid follower id is always positive so the cast is safe.
+        let follower_id = u64::try_from(effective_replica_id).unwrap_or(0);
         let mut throttled_byte_count: u64 = 0;
         // (topic_idx, partition_idx) pairs for throttled chunks.
         let mut throttled_idxs: Vec<(usize, usize)> = Vec::new();
         for (ti, topic_resp) in responses.iter().enumerate() {
             let throttle = TopicThrottle::for_topic(&image, &topic_resp.topic);
             for (pi, part) in topic_resp.partitions.iter().enumerate() {
-                if throttle.leader.contains(part.partition_index, node_id) {
+                if throttle.leader.contains(part.partition_index, follower_id) {
                     let chunk_bytes =
                         part.records.as_ref().map_or(0, RecordBatch::encoded_len) as u64;
                     throttled_byte_count += chunk_bytes;

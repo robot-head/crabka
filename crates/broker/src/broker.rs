@@ -396,6 +396,28 @@ impl BrokerHandle {
         let _ = self._broker.group_manager.get_or_create(group_id);
     }
 
+    /// This broker's raft `node_id` (1-indexed broker id used in raft quorum
+    /// and metadata records). Exposed so integration tests can build
+    /// `IncrementalAlterConfigs` broker-resource requests targeting this
+    /// broker without hard-coding a node id.
+    #[must_use]
+    #[allow(clippy::used_underscore_binding)]
+    pub fn node_id(&self) -> u64 {
+        self._broker.config.node_id
+    }
+
+    /// Test-only: return a snapshot of the current `MetadataImage` as seen by
+    /// this broker's controller. Mirrors `partition_leader_for_test` /
+    /// `partition_record_for_test` but exposes the whole image so throttle
+    /// integration tests can call `broker_throttle_rate` and
+    /// `topic_config` directly without adding per-field accessors.
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[must_use]
+    #[allow(clippy::used_underscore_binding)]
+    pub fn controller_image_for_test(&self) -> std::sync::Arc<crabka_metadata::MetadataImage> {
+        self._broker.controller.current_image()
+    }
+
     /// Test-only: return the current leader node-id for `(topic, partition)`
     /// as seen by this broker's metadata image. Returns `None` if the
     /// partition is not yet in the image or the leader field is `0` (no
