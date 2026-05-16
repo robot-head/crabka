@@ -5,7 +5,9 @@
 use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
-use crabka_metadata::{AclOperation, MetadataRecord, PartitionRecord, TopicRecord};
+use crabka_metadata::{
+    AclOperation, MetadataRecord, PartitionRecord, TopicConfigRecord, TopicRecord,
+};
 use crabka_protocol::owned::create_topics_request::CreateTopicsRequest;
 use crabka_protocol::owned::create_topics_response::{CreatableTopicResult, CreateTopicsResponse};
 use crabka_protocol::primitives::uuid::Uuid as ProtoUuid;
@@ -197,6 +199,28 @@ pub(crate) async fn handle(
                     adding_replicas: vec![],
                     removing_replicas: vec![],
                 }));
+            }
+
+            // Persist any topic-level configs the client sent. Without
+            // this, cleanup.policy / segment.bytes / retention.ms etc.
+            // set at CreateTopics time would be silently dropped — clients
+            // would need a follow-up AlterConfigs round-trip. Match Kafka's
+            // CreateTopics semantics by emitting one V1TopicConfig record
+            // covering the full override map.
+            if !topic_req.configs.is_empty() {
+                let mut overrides: std::collections::BTreeMap<String, String> =
+                    std::collections::BTreeMap::new();
+                for cfg in &topic_req.configs {
+                    if let Some(value) = &cfg.value {
+                        overrides.insert(cfg.name.clone(), value.clone());
+                    }
+                }
+                if !overrides.is_empty() {
+                    records.push(MetadataRecord::V1TopicConfig(TopicConfigRecord {
+                        topic: name.clone(),
+                        overrides,
+                    }));
+                }
             }
 
             let result = controller.submit_change(records).await;
