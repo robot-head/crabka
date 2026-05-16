@@ -3,6 +3,9 @@
 mod bucket;
 pub use bucket::{ThrottleState, TokenBucket};
 
+mod refresh;
+pub use refresh::{ImageWatcher, run};
+
 use crabka_metadata::{MetadataImage, NodeId};
 
 /// Topic-level `*.throttled.replicas` config value.
