@@ -699,6 +699,27 @@ async fn serve_connection_stream<S>(
                 }
             }
         }
+        // DescribeUserScramCredentials (50, slice-17a T3) needs both the
+        // authenticated principal AND the peer's `SocketAddr` so the handler
+        // can authorize `Alter` on `Cluster("kafka-cluster")` and emit
+        // CLUSTER_AUTHORIZATION_FAILED. The `&Broker`-only handler table
+        // signature can't carry that context, so this api_key intercepts inline.
+        if peek_api_key(&frame).ok() == Some(50) {
+            match handle_describe_user_scram_credentials_frame(&broker, &frame, &auth, &peer).await
+            {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during DescribeUserScramCredentials, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "DescribeUserScramCredentials dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
         // InitProducerId (22, slice-13 T20) needs both the authenticated
         // principal AND the peer's `SocketAddr` so the handler can
         // authorize `Write` on `TransactionalId` (transactional path) or
@@ -1596,6 +1617,54 @@ async fn handle_alter_client_quotas_frame(
     ))
 }
 
+/// Decode + dispatch a `DescribeUserScramCredentials` (`api_key` 50) frame.
+/// Mirrors [`handle_describe_client_quotas_frame`] — pulls the
+/// authenticated principal off the per-connection `auth` state and the
+/// peer `SocketAddr` from the accept-time capture so the handler can
+/// authorize `Alter` on `Cluster("kafka-cluster")` with host-based
+/// ACL matching.
+async fn handle_describe_user_scram_credentials_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    use crabka_protocol::Decode;
+
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 50);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let mut cur: &[u8] = body;
+    let req = crabka_protocol::owned::describe_user_scram_credentials_request::DescribeUserScramCredentialsRequest::decode(
+        &mut cur,
+        api_version,
+    )?;
+
+    let principal = auth
+        .principal()
+        .cloned()
+        .unwrap_or_else(|| crabka_security::Principal {
+            name: "ANONYMOUS".to_string(),
+            mechanism: crabka_security::SaslMechanism::Plain,
+        });
+
+    let resp_body = crate::handlers::describe_user_scram_credentials::handle(
+        broker,
+        req,
+        &principal,
+        peer,
+        api_version,
+    )
+    .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
 /// Decode + dispatch an `AlterConfigs` (`api_key` 33) frame. Pulls the
 /// authenticated principal off the per-connection `auth` state and the
 /// peer `SocketAddr` from the accept-time capture so the handler can
@@ -2358,6 +2427,7 @@ fn handler_body_flexible(api_key: i16, version: i16) -> bool {
         46 => version >= owned::list_partition_reassignments_request::FLEXIBLE_MIN,
         48 => version >= owned::describe_client_quotas_request::FLEXIBLE_MIN,
         49 => version >= owned::alter_client_quotas_request::FLEXIBLE_MIN,
+        50 => version >= owned::describe_user_scram_credentials_request::FLEXIBLE_MIN,
         // AlterUserScramCredentials (KIP-554, slice 12 T15) is flexible from v0.
         51 => version >= owned::alter_user_scram_credentials_request::FLEXIBLE_MIN,
         56 => version >= owned::alter_partition_request::FLEXIBLE_MIN,

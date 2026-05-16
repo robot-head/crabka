@@ -63,6 +63,7 @@ pub(crate) mod describe_client_quotas;
 pub(crate) mod describe_cluster;
 pub(crate) mod describe_configs;
 pub(crate) mod describe_groups;
+pub(crate) mod describe_user_scram_credentials;
 pub(crate) mod elect_leaders;
 pub(crate) mod fetch;
 pub(crate) mod find_coordinator;
