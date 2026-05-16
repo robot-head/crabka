@@ -40,12 +40,17 @@ const RESOURCE_TYPE_BROKER: i8 = 4;
 const OP_SET: i8 = 0;
 const OP_DELETE: i8 = 1;
 
-/// Returns `true` if `name` is one of the two KIP-73 broker-scoped rate
-/// config keys recognized by this broker.
+/// Returns `true` if `name` is a broker-scoped config key accepted by this
+/// broker. We accept the two KIP-73 throttle rate keys (which we persist) plus
+/// `replica.alter.log.dirs.io.max.bytes.per.second` which Kafka's
+/// `kafka-reassign-partitions --verify` also clears. The third key is silently
+/// accepted but not stored (we have no log-dir throttle implementation).
 fn is_known_broker_config(name: &str) -> bool {
     matches!(
         name,
-        crate::throttle::LEADER_THROTTLED_RATE_KEY | crate::throttle::FOLLOWER_THROTTLED_RATE_KEY
+        crate::throttle::LEADER_THROTTLED_RATE_KEY
+            | crate::throttle::FOLLOWER_THROTTLED_RATE_KEY
+            | "replica.alter.log.dirs.io.max.bytes.per.second"
     )
 }
 
@@ -275,10 +280,17 @@ fn handle_broker_scoped(
             out.error_message = Some(format!("unknown broker config {}", cfg.name));
             return; // halt processing this resource
         }
+        // Keys we accept but don't persist (no implementation yet): silently
+        // skip — just validate that the operation is valid.
+        let persist = matches!(
+            cfg.name.as_str(),
+            crate::throttle::LEADER_THROTTLED_RATE_KEY
+                | crate::throttle::FOLLOWER_THROTTLED_RATE_KEY
+        );
         let new_value = match cfg.config_operation {
             OP_SET => {
                 let v = cfg.value.clone().unwrap_or_default();
-                if let Err(e) = validate_broker_config_value(&cfg.name, &v) {
+                if persist && let Err(e) = validate_broker_config_value(&cfg.name, &v) {
                     out.error_code = codes::INVALID_CONFIG;
                     out.error_message = Some(e);
                     return;
@@ -295,11 +307,13 @@ fn handle_broker_scoped(
                 return;
             }
         };
-        to_submit.push(MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
-            node_id,
-            config_name: cfg.name.clone(),
-            config_value: new_value,
-        }));
+        if persist {
+            to_submit.push(MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
+                node_id,
+                config_name: cfg.name.clone(),
+                config_value: new_value,
+            }));
+        }
     }
 }
 
