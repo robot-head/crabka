@@ -97,7 +97,7 @@ For each `(topic, partition, target_opt)`:
 ### ListPartitionReassignments flow
 
 - `topics = None` → every partition where `adding ≠ [] ∨ removing ≠ []`.
-- `topics = Some([{name, partition_indexes}])` → filter; `partition_indexes = None` = all of that topic; `Some([...])` = just those. Skip partitions where adding+removing are both empty.
+- `topics = Some([{name, partition_indexes: Vec<i32>}])` → filter; **empty `partition_indexes`** = all of that topic; non-empty = just those. (Per generated owned type: `partition_indexes` is a `Vec<i32>`, not an `Option`. Empty is the "all" sentinel.) Skip partitions where adding+removing are both empty.
 - Per row: `{partition_index, replicas, adding_replicas, removing_replicas}`.
 
 ### Background completion task — algorithm
