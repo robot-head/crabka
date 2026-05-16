@@ -240,3 +240,62 @@ Kafka client for ApiVersions.
   cp-kafka:7.5 cluster.
 - Out of scope: manual partition reassignment, quotas, log compaction,
   KIP-841 force-elect, operator preferred-replica override.
+
+## Slice 15 — Partition reassignment (KIP-455) (2026-05-15)
+
+- `PartitionRecord` gains `adding_replicas: Vec<NodeId>` +
+  `removing_replicas: Vec<NodeId>`. `MetadataImage::reassignments_in_flight()`
+  iterator returns all partitions with a non-empty `adding_replicas` or
+  `removing_replicas`.
+- Pure-logic `process_one_partition` in
+  `crates/broker/src/handlers/alter_partition_reassignments.rs` converts
+  one `AlterablePartitionReassignment` row into an intermediate
+  `PartitionRecord` (start: union-replicas; cancel: revert with optional
+  leader-revert; replace-in-flight: re-compute union from current target;
+  RF-change guard behind `allow_replication_factor_change`). Returns a
+  `(i16, &str)` wire error on validation failure.
+- New `crates/broker/src/handlers/alter_partition_reassignments.rs`
+  (api_key 45, KIP-455). Cluster Alter authorize gate; builds a batch of
+  `MetadataRecord` updates and submits via `controller.submit_change`.
+- New `crates/broker/src/handlers/list_partition_reassignments.rs`
+  (api_key 46). Filters by topic+partition index or returns all in-flight
+  rows; grouped by topic name in BTreeMap order. Cluster Describe gate.
+- New `crates/broker/src/reassignment.rs`. Background task spawned in
+  `Broker::start`; per-tick `is_leader()` check makes it a no-op on
+  followers (no `BrokerConfig` gate needed, unlike slice 14's
+  `auto_leader_rebalance_enable`). `compute_reassignment_progress`
+  reads the current image via `reassignments_in_flight()`, checks ISR
+  catch-up, performs leader handoff when the current leader is in
+  `removing_replicas`, then atomically commits the target replica set.
+  Image-driven (not timer-driven): runs on every controller-image update.
+- New `BrokerHandle::partition_record_for_test` helper used by T9
+  integration tests to poll partition state.
+- Test inventory:
+  - 4 unit tests on `reassignments_in_flight` in
+    `crates/metadata/src/image.rs` (T1).
+  - 7 unit tests on `process_one_partition` in
+    `crates/broker/src/handlers/alter_partition_reassignments.rs` (T3):
+    noop-already-at-target, start-union-replicas, replace-in-flight,
+    RF-change rejected/allowed, cancel-with-leader-in-adding, empty-target.
+  - 8 async unit tests on `compute_reassignment_progress` in
+    `crates/broker/src/reassignment.rs` (T4): complete when adding in
+    ISR, wait when adding not in ISR, leader handoff when leader in
+    removing, leader handoff skipped if no alive target, idle partition
+    no-op, multiple partitions independent, target replicas computed
+    correctly, ISR intersection.
+  - 4 broker integration tests in `tests/partition_reassignment.rs`
+    (T9+T10): alter-and-complete, list-in-flight, cancel, and
+    auth-deny (Cluster Alter). Gated `#[cfg(not(target_os = "windows"))]`
+    per multi-broker convention; run in CI on Linux.
+  - 1 JVM acceptance test (T11) driving `kafka-reassign-partitions
+    --execute` + `--verify` against a 3-broker SASL/PLAINTEXT cluster
+    in WSL Docker.
+- Known limitation: `kafka-reassign-partitions --verify` exits 1 because
+  it unconditionally issues `IncrementalAlterConfigs resource_type=4`
+  (broker-scoped throttle config clear) which Crabka does not implement
+  yet. The reassignment itself completes correctly; the JVM test asserts
+  on stdout (`"is completed"` / `"completed successfully"` / `"is
+  complete"`) rather than exit code. Slice 15b will add KIP-73 throttling
+  configs and close this gap.
+- Out of scope: KIP-73 throttled replication (slice 15b), KIP-113
+  log-dir reassignment, KIP-841 force-elect.

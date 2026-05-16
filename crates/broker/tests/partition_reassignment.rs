@@ -749,7 +749,9 @@ async fn non_super_user_denied() {
         )
         .await;
         // If we see 31, the shim is off and we're done.
-        if r.iter().all(|(_, parts)| parts.iter().all(|(_, ec)| *ec == 31)) {
+        if r.iter()
+            .all(|(_, parts)| parts.iter().all(|(_, ec)| *ec == 31))
+        {
             break r;
         }
         assert!(

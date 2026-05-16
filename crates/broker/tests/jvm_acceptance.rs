@@ -5284,8 +5284,7 @@ async fn jvm_kafka_reassign_partitions_end_to_end() {
             .expect("partition record (poll)");
         if pr.adding_replicas.is_empty() && pr.removing_replicas.is_empty() {
             let got: std::collections::HashSet<u64> = pr.replicas.iter().copied().collect();
-            let want: std::collections::HashSet<u64> =
-                [staying, new_node].into_iter().collect();
+            let want: std::collections::HashSet<u64> = [staying, new_node].into_iter().collect();
             assert_eq!(
                 got, want,
                 "reassignment completed but replicas mismatch: got={got:?} want={want:?}"
@@ -5334,7 +5333,9 @@ async fn jvm_kafka_reassign_partitions_end_to_end() {
     // stdout for the reassignment-complete message rather than the exit code.
     let stdout = String::from_utf8_lossy(&verify_out.stdout);
     assert!(
-        stdout.contains("is completed") || stdout.contains("completed successfully") || stdout.contains("is complete"),
+        stdout.contains("is completed")
+            || stdout.contains("completed successfully")
+            || stdout.contains("is complete"),
         "kafka-reassign-partitions --verify stdout did not indicate success: stdout={stdout} stderr={}",
         String::from_utf8_lossy(&verify_out.stderr)
     );

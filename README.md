@@ -93,6 +93,24 @@ Pre-1.0, pre-alpha. No production use.
   config knobs. JVM `kafka-leader-election.sh` works end-to-end.
   Slice 10b's automatic-on-broker-death election is unchanged; this
   slice adds the manual and scheduled trigger paths.
+- **Slice 15** — KIP-455 partition reassignment: two-phase URP-aware
+  state machine. `PartitionRecord` gains `adding_replicas` +
+  `removing_replicas`. `AlterPartitionReassignments` (api_key 45)
+  handles start (`replicas: Some(target)`), cancel (`replicas: None`),
+  and replace-in-flight operations; honors
+  `allow_replication_factor_change`; Cluster Alter authorize gate.
+  `ListPartitionReassignments` (api_key 46) filters by topic or lists
+  all in-flight reassignments; Cluster Describe gate. Background task
+  on the controller leader observes ISR catch-up image-by-image,
+  performs leader handoff first when the current leader is in
+  `removing_replicas`, then atomically commits the target replica set.
+  Per-tick `is_leader()` check makes the task a no-op on followers.
+  JVM `kafka-reassign-partitions --execute|--verify` works end-to-end
+  against a 3-broker SASL/PLAINTEXT cluster. Known limitation:
+  `--verify` exits 1 because it unconditionally clears broker-scoped
+  throttles via `IncrementalAlterConfigs resource_type=4`, which is not
+  yet implemented; the reassignment itself completes correctly. KIP-73
+  throttled replication deferred to slice 15b.
 
 ## Published crates
 
