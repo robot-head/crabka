@@ -6189,7 +6189,7 @@ async fn jvm_kafka_configs_alter_controller_mutation_rate_end_to_end() {
 }
 
 /// JVM acceptance: `kafka-configs --describe --entity-type users` round-trip for
-/// SCRAM credentials (KIP-554 read half, api_key 50).
+/// SCRAM credentials (KIP-554 read half, `api_key` 50).
 ///
 /// Three-broker SASL/PLAINTEXT cluster; provision alice's SCRAM-SHA-512 credential
 /// via `kafka-configs --alter --add-config SCRAM-SHA-512=[...]`, then describe and
