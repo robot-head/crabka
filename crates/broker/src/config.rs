@@ -148,6 +148,11 @@ pub struct BrokerConfig {
     /// auto-rebalance ticker submits any changes. Default 10. Matches
     /// Kafka's `leader.imbalance.per.broker.percentage`.
     pub leader_imbalance_per_broker_percentage: u32,
+
+    /// Test-only: override the cleaner ticker interval.
+    /// Production callers leave this as `None` (default 30s).
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub cleaner_interval_override: Option<std::time::Duration>,
 }
 
 impl BrokerConfig {
@@ -190,6 +195,8 @@ impl BrokerConfig {
             auto_leader_rebalance_enable: false, // tests opt in explicitly
             leader_imbalance_check_interval_secs: 300,
             leader_imbalance_per_broker_percentage: 10,
+            #[cfg(any(test, feature = "test-helpers"))]
+            cleaner_interval_override: None,
         }
     }
 
@@ -313,6 +320,8 @@ impl Default for BrokerConfig {
             auto_leader_rebalance_enable: true,
             leader_imbalance_check_interval_secs: 300,
             leader_imbalance_per_broker_percentage: 10,
+            #[cfg(any(test, feature = "test-helpers"))]
+            cleaner_interval_override: None,
         }
     }
 }

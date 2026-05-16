@@ -1043,7 +1043,12 @@ impl Broker {
         {
             let partitions = partitions.clone();
             let shutdown = supervisor_shutdown.child_token();
-            let cfg = crate::cleaner::CleanerConfig::default();
+            #[allow(unused_mut)]
+            let mut cfg = crate::cleaner::CleanerConfig::default();
+            #[cfg(any(test, feature = "test-helpers"))]
+            if let Some(interval) = config.cleaner_interval_override {
+                cfg.interval = interval;
+            }
             tokio::spawn(crate::cleaner::run(
                 partitions,
                 config.node_id,
