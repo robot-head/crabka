@@ -46,7 +46,7 @@ jobs:
             crabka-operator:e2e \
             crabka-operator.tar \
             --arch x86_64 \
-            --repository-append "@local $PWD/packages" \
+            --repository-append "$PWD/packages" \
             --keyring-append "$PWD/melange.rsa.pub"
 
       - name: Create kind cluster

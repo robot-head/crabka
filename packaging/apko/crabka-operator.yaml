@@ -7,7 +7,7 @@ contents:
     - ca-certificates-bundle
     - tzdata
     - wolfi-baselayout
-    - "@local crabka-operator"
+    - crabka-operator
 
 accounts:
   groups:
