@@ -80,6 +80,10 @@ impl Log {
         let dir = dir.as_ref().to_path_buf();
         fs::create_dir_all(&dir)?;
 
+        // Slice 18: heal any orphaned compaction `.swap` files before
+        // we scan the directory for segments.
+        crate::recovery::swap_orphan_recover(&dir)?;
+
         let mut base_offsets: Vec<i64> = Vec::new();
         for entry in fs::read_dir(&dir)? {
             let entry = entry?;
@@ -639,6 +643,48 @@ impl Log {
         }
         Ok(())
     }
+
+    /// Run one compaction pass over the sealed segment list. No-op if
+    /// fewer than 2 sealed segments exist (nothing to dedup yet).
+    ///
+    /// The active segment is never touched. Output is a single new
+    /// sealed segment at the lowest input base offset, replacing all
+    /// consumed sealed segments.
+    pub fn compact(&mut self) -> Result<(), LogError> {
+        if self.segments.len() < 2 {
+            return Ok(());
+        }
+
+        let cfg_guard = self.config.read().unwrap();
+        if cfg_guard.cleanup_policy != crate::CleanupPolicy::Compact {
+            return Ok(());
+        }
+        let index_interval = cfg_guard.index_interval_bytes;
+        drop(cfg_guard);
+
+        let consumed_bases: Vec<i64> = self.segments.iter().map(|s| s.base_offset()).collect();
+
+        // Borrow sealed segments to run map + rewrite (which open
+        // additional file handles internally for reading). Then drop the
+        // borrows and clear self.segments so the original Arc<Segment>
+        // file handles close before atomic_swap deletes/renames
+        // (Windows requires no open handle on a file before remove/rename).
+        let rewrite = {
+            let sealed_refs: Vec<&Segment> = self.segments.iter().map(AsRef::as_ref).collect();
+            let offset_map = crate::compact::build_offset_map(&sealed_refs)?;
+            crate::compact::rewrite_segments(&self.dir, &sealed_refs, &offset_map, index_interval)?
+        };
+
+        self.segments.clear();
+        crate::compact::atomic_swap(&self.dir, &consumed_bases, &rewrite)?;
+
+        // open_active(validate=true) tail-scans the new .log to populate
+        // last_offset + max_timestamp; then seal() flips the flag.
+        let mut new_seg = Segment::open_active(&self.dir, rewrite.new_base_offset, true)?;
+        new_seg.seal();
+        self.segments.push(Arc::new(new_seg));
+        Ok(())
+    }
 }
 
 /// Parse the control-marker type from the key of the first record in a
@@ -1136,5 +1182,103 @@ mod tests {
         // Trim to 0 on a fresh log → no change.
         let r = log.trim_to_offset(0).expect("trim");
         assert_eq!(r, log.log_start_offset());
+    }
+
+    fn keyed_batch(base: i64, items: &[(i32, &[u8], &[u8])]) -> RecordBatch {
+        let records: Vec<Record> = items
+            .iter()
+            .map(|(d, k, v)| Record {
+                offset_delta: *d,
+                key: Some(Bytes::copy_from_slice(k)),
+                value: Some(Bytes::copy_from_slice(v)),
+                ..Default::default()
+            })
+            .collect();
+        let last_delta = items.iter().map(|(d, _, _)| *d).max().unwrap_or(0);
+        RecordBatch {
+            base_offset: base,
+            last_offset_delta: last_delta,
+            max_timestamp: 0,
+            records,
+            ..RecordBatch::default()
+        }
+    }
+
+    #[test]
+    fn compact_no_op_when_only_one_segment() {
+        let dir = tempdir().unwrap();
+        let mut cfg = LogConfig::default();
+        cfg.cleanup_policy = crate::CleanupPolicy::Compact;
+        let mut log = Log::open(dir.path(), cfg).unwrap();
+        let mut b = keyed_batch(0, &[(0, b"k1", b"v1")]);
+        log.append(&mut b).unwrap();
+        // Only the active segment exists; sealed list is empty.
+        log.compact().unwrap();
+        assert_eq!(log.log_end_offset(), 1);
+    }
+
+    #[test]
+    fn compact_dedupes_sealed_segments_keeps_active_intact() {
+        let dir = tempdir().unwrap();
+        let mut cfg = LogConfig::default();
+        cfg.cleanup_policy = crate::CleanupPolicy::Compact;
+        cfg.segment_bytes = 256; // force rolls
+        let mut log = Log::open(dir.path(), cfg).unwrap();
+
+        // Write 3 sealed segments, each with one record under "k1".
+        for i in 0..3 {
+            let v = format!("v{i}");
+            let mut b = keyed_batch(0, &[(0, b"k1", v.as_bytes())]);
+            log.append(&mut b).unwrap();
+            // Roll the active segment by forcing a tick or a large pad batch.
+            // Easiest: call set_segment_bytes or rely on the small segment_bytes.
+        }
+        // Add one more append to ensure the last write is in a fresh active
+        // segment (not part of what compaction touches).
+        let mut b = keyed_batch(0, &[(0, b"active-key", b"active-value")]);
+        log.append(&mut b).unwrap();
+
+        let active_leo_before = log.log_end_offset();
+        log.compact().unwrap();
+        assert_eq!(
+            log.log_end_offset(),
+            active_leo_before,
+            "compaction must not change LEO"
+        );
+
+        // After compaction: read everything, assert only the newest k1 plus
+        // the active "active-key" survive.
+        let out = log.read(0, 1024 * 1024).unwrap();
+        let all_records: Vec<_> = out.batches.iter().flat_map(|b| b.records.iter()).collect();
+        let keys: Vec<&[u8]> = all_records
+            .iter()
+            .map(|r| r.key.as_ref().unwrap().as_ref())
+            .collect();
+        assert!(keys.contains(&b"k1".as_ref()), "k1 must survive as newest");
+        assert!(
+            keys.contains(&b"active-key".as_ref()),
+            "active segment record must survive"
+        );
+    }
+
+    #[test]
+    fn compact_is_idempotent() {
+        let dir = tempdir().unwrap();
+        let mut cfg = LogConfig::default();
+        cfg.cleanup_policy = crate::CleanupPolicy::Compact;
+        cfg.segment_bytes = 256;
+        let mut log = Log::open(dir.path(), cfg).unwrap();
+        for i in 0..3 {
+            let v = format!("v{i}");
+            let mut b = keyed_batch(0, &[(0, b"k1", v.as_bytes())]);
+            log.append(&mut b).unwrap();
+        }
+        let mut b = keyed_batch(0, &[(0, b"active", b"x")]);
+        log.append(&mut b).unwrap();
+        log.compact().unwrap();
+        let leo1 = log.log_end_offset();
+        log.compact().unwrap();
+        let leo2 = log.log_end_offset();
+        assert_eq!(leo1, leo2);
     }
 }
