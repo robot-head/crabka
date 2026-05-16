@@ -419,3 +419,20 @@ Kafka client for ApiVersions.
   - `client_id` not threaded through `HandlerTable` — `(user, client-id)` tuple quotas don't fire from these handlers; `(user)`-only quotas work. Closing requires the slice-16 cleanup work.
   - Per-entity bucket cache grows unbounded over broker's lifetime.
 - Out of scope: IP entity (KIP-599 doesn't apply to IP); other admin operations (ACL CRUD, IncrementalAlterConfigs, AlterPartitionReassignments — KIP-599 limits to topic/partition CRUD).
+
+## Slice 17a — DescribeUserScramCredentials (2026-05-15)
+
+- KIP-554 read half: `DescribeUserScramCredentials` (api_key 50, v0). Reads from existing slice-12 `MetadataImage::scram_credentials`.
+- Two new image accessors: `scram_credentials_users() -> Vec<String>` and `scram_credentials_for_user(user) -> Vec<(SaslMechanism, i32)>`. 2 unit tests.
+- New handler `crates/broker/src/handlers/describe_user_scram_credentials.rs`. Filter semantics: `users=None` OR empty list → all users; non-empty → filter. Unknown users return per-user `RESOURCE_NOT_FOUND_USER (83)`. 4 unit tests.
+  - **Real finding:** `RESOURCE_NOT_FOUND = 66` already existed in `codes.rs` for delete-target-missing. Added a distinct `RESOURCE_NOT_FOUND_USER = 83` for the describe-unknown-user case. Both wire values match Kafka conventions.
+  - **Real finding:** `SaslMechanism` only has `Plain` + `ScramSha512` in Crabka (no `ScramSha256` variant). `sasl_mechanism_to_byte` matches exhaustively.
+  - **Real finding:** Used `cast_signed()` to convert `u32` iterations to `i32` for the wire `CredentialInfo.iterations`.
+- Authorization: Cluster Alter (matches slice-12 `AlterUserScramCredentials` — JVM AdminClient uses Alter for both Alter and Describe SCRAM ops).
+- Inline-intercept dispatch (handler needs `&Principal`). Mirrors slice-16 `DescribeClientQuotas` framing.
+- **Real finding:** `SaslMechanism` lives in `crabka_security`, not `crabka_metadata` — handler imports adjusted accordingly.
+- 2 broker integration tests in `tests/describe_user_scram_credentials.rs`: all-users round-trip with seeded alice credential, unknown-user RESOURCE_NOT_FOUND.
+- 3 slice-16-family JVM tests retroactively cleaned up: `jvm_kafka_configs_alter_client_quota_end_to_end`, `jvm_kafka_configs_alter_ip_quota_end_to_end`, `jvm_kafka_configs_alter_controller_mutation_rate_end_to_end` now use `docker_run_kafka_tool_with_image_and_mount` + `assert!(status.success())` for `--describe`/`--delete-config` instead of the stdout-only workaround. Stdout-substring assertions kept as additional coverage.
+- 1 new JVM acceptance test: `jvm_kafka_configs_describe_users_scram_credentials_end_to_end` provisions a SCRAM user and confirms `kafka-configs --describe --entity-type users` shows the credential.
+- Closes the recurring JVM-tool quirk that slices 16/16b/16c documented as known limitations.
+- Out of scope: slice 16 `client_id` HandlerTable gap (slice 17b).
