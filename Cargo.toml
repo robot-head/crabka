@@ -48,7 +48,7 @@ testcontainers-modules = { version = "0.15", features = ["kafka"] }
 futures-util = { version = "0.3", features = ["sink"] }
 clap = { version = "4", features = ["derive"] }
 uuid = { version = "1", features = ["v4", "serde"] }
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 bon = "3"
 # wincode + serde-wincode replace bincode for serde-derived wire shapes.
 # Pinned to 0.4: serde-wincode 0.1.0 depends on wincode ^0.4, so a 0.5

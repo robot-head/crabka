@@ -7,3 +7,4 @@
 pub mod config;
 pub mod crd;
 pub mod gen_crds;
+pub mod telemetry;
