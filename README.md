@@ -183,7 +183,11 @@ implements it today.
 
 | Feature | Status |
 |---------|:------:|
-| Client / user / IP quotas | ❌ |
+| Client quotas (`producer_byte_rate`, `consumer_byte_rate`, `request_percentage`) | ✅ |
+| `AlterClientQuotas` / `DescribeClientQuotas` (KIP-13 + KIP-124 + KIP-257) | ✅ |
+| User + (user, client-id) tuple + default entity scopes | ✅ |
+| IP entity + `connection_creation_rate` (KIP-612) | ❌ |
+| Controller mutation rate (KIP-599) | ❌ |
 
 ### Ecosystem (out of broker core)
 
