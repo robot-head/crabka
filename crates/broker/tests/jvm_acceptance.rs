@@ -6077,3 +6077,166 @@ async fn jvm_kafka_configs_alter_ip_quota_end_to_end() {
     h2.shutdown().await;
     h3.shutdown().await;
 }
+
+/// JVM acceptance: `kafka-configs --entity-type users controller_mutation_rate` round-trip.
+///
+/// Three-broker SASL/PLAINTEXT cluster; alter + describe (stdout substring) +
+/// delete-config on (user=alice) `controller_mutation_rate` via the JVM admin CLI.
+/// No wall-time enforcement test — single `kafka-topics --create` is one request,
+/// max throttle 1 s. The Rust integration test in `tests/controller_mutation_quota.rs`
+/// covers enforcement.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires Docker"]
+#[allow(clippy::too_many_lines)]
+async fn jvm_kafka_configs_alter_controller_mutation_rate_end_to_end() {
+    const ADMIN: &str = "admin";
+    const ADMIN_PASS: &str = "admin-secret";
+    const ALICE: &str = "alice";
+    const ALICE_PASS: &str = "alice-secret";
+
+    let (h1, h2, h3, _cfg1, _cfg2, _cfg3, _d1, _d2, _d3) =
+        start_three_broker_sasl_plaintext_jvm_cluster_with_users(
+            ADMIN,
+            ADMIN_PASS,
+            &[(ALICE, ALICE_PASS)],
+        )
+        .await;
+    nc_check_connectivity();
+
+    wait_three_brokers_registered(&h1, &h2, &h3, 3).await;
+
+    let admin_props = write_client_props(&format!(
+        "security.protocol=SASL_PLAINTEXT\n\
+         sasl.mechanism=PLAIN\n\
+         sasl.jaas.config={}\n",
+        plain_jaas(ADMIN, ADMIN_PASS),
+    ));
+    let admin_mount = admin_props.mount_str();
+
+    // Alter — set controller_mutation_rate=2.0 for alice.
+    let out = docker_run_kafka_tool_with_image_and_mount(
+        KAFKA_IMAGE_TXN,
+        &admin_mount,
+        &[
+            "kafka-configs",
+            "--alter",
+            "--entity-type",
+            "users",
+            "--entity-name",
+            ALICE,
+            "--add-config",
+            "controller_mutation_rate=2.0",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--command-config",
+            "/client.properties",
+        ],
+    );
+    eprintln!(
+        "CRABKA[test] alter status={} stdout={} stderr={}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(
+        out.status.success(),
+        "alter failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Describe — confirm visibility.
+    // Note: cp-kafka:7.5.0's kafka-configs --describe --entity-type users also
+    // tries DescribeUserScramCredentials (api_key 51), which crabka doesn't
+    // implement yet. The JVM tool exits non-zero because of that secondary
+    // call, but still prints the quota result to stdout first. Drive docker
+    // directly instead of using the helper (which asserts success) and only
+    // check stdout.
+    let desc = std::process::Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "-v",
+            &admin_mount,
+            "--add-host=host.docker.internal:host-gateway",
+            KAFKA_IMAGE_TXN,
+            "kafka-configs",
+            "--describe",
+            "--entity-type",
+            "users",
+            "--entity-name",
+            ALICE,
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--command-config",
+            "/client.properties",
+        ])
+        .output()
+        .expect("spawn kafka-configs --describe");
+    eprintln!(
+        "CRABKA[test] describe status={} stdout={} stderr={}",
+        desc.status,
+        String::from_utf8_lossy(&desc.stdout),
+        String::from_utf8_lossy(&desc.stderr),
+    );
+    let stdout = String::from_utf8_lossy(&desc.stdout);
+    assert!(
+        stdout.contains("controller_mutation_rate=2"),
+        "expected quota in describe output: {stdout}"
+    );
+
+    // Delete the config.
+    // Same note: drive docker directly to avoid assert-on-success in the helper.
+    let del_out = std::process::Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "-v",
+            &admin_mount,
+            "--add-host=host.docker.internal:host-gateway",
+            KAFKA_IMAGE_TXN,
+            "kafka-configs",
+            "--alter",
+            "--entity-type",
+            "users",
+            "--entity-name",
+            ALICE,
+            "--delete-config",
+            "controller_mutation_rate",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--command-config",
+            "/client.properties",
+        ])
+        .output()
+        .expect("spawn kafka-configs --delete-config");
+    eprintln!(
+        "CRABKA[test] delete status={} stdout={} stderr={}",
+        del_out.status,
+        String::from_utf8_lossy(&del_out.stdout),
+        String::from_utf8_lossy(&del_out.stderr),
+    );
+
+    // Confirm quota cleared from image (poll up to 5 s).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let img = h1.controller_image_for_test();
+        let key: crabka_metadata::EntityKey = vec![("user".to_string(), Some(ALICE.to_string()))];
+        if img
+            .client_quotas()
+            .get(&key)
+            .and_then(|m| m.get("controller_mutation_rate"))
+            .is_none()
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() <= deadline,
+            "controller_mutation_rate not cleared from image within 5s after --delete-config"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+
+    h1.shutdown().await;
+    h2.shutdown().await;
+    h3.shutdown().await;
+}
