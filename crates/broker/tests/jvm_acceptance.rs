@@ -5410,9 +5410,7 @@ async fn jvm_kafka_reassign_partitions_with_throttle_end_to_end() {
         .find(|n| !initial.contains(n))
         .expect("free broker");
     let staying: u64 = *initial.first().unwrap();
-    eprintln!(
-        "CRABKA[test] initial replicas={initial:?} staying={staying} new_node={new_node}"
-    );
+    eprintln!("CRABKA[test] initial replicas={initial:?} staying={staying} new_node={new_node}");
 
     // Write reassignment JSON.
     let json = format!(
@@ -5521,8 +5519,7 @@ async fn jvm_kafka_reassign_partitions_with_throttle_end_to_end() {
             let got: std::collections::HashSet<u64> = pr.replicas.iter().copied().collect();
             let want: std::collections::HashSet<u64> = [staying, new_node].into_iter().collect();
             assert_eq!(
-                got,
-                want,
+                got, want,
                 "reassignment completed but replicas mismatch: got={got:?} want={want:?}"
             );
             break;

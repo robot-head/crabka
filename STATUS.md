@@ -299,3 +299,67 @@ Kafka client for ApiVersions.
   configs and close this gap.
 - Out of scope: KIP-73 throttled replication (slice 15b), KIP-113
   log-dir reassignment, KIP-841 force-elect.
+
+## Slice 15b — Replication throttling (KIP-73) (2026-05-15)
+
+- `IncrementalAlterConfigs` broker-scoped (`resource_type=4`) now accepted;
+  validates two KIP-73 rate keys (`leader.replication.throttled.rate`,
+  `follower.replication.throttled.rate`) and stores them as `BrokerConfigRecord`
+  in metadata. All other broker keys are still rejected.
+- Topic-level `*.throttled.replicas` configs added to the validator allowlist;
+  values parse via `ThrottledReplicas` enum (none / `*` / explicit pair list).
+- New `BrokerConfigRecord` + `V1BrokerConfig` metadata record carries per-broker
+  key/value pairs. `MetadataImage::broker_configs` map + `broker_throttle_rate`
+  accessor. 4 unit tests.
+- `TokenBucket` in `crates/broker/src/throttle/bucket.rs` — one-second burst
+  capacity at configured rate, rate-0 fast path for unthrottled. 6 unit tests
+  covering refill / drain / cap / set.
+- Background refresh task in `throttle/refresh.rs` subscribes to
+  `controller.watch_image()` and pushes rate updates to the buckets on every
+  image apply. 2 unit tests via a mock `ImageWatcher`.
+- Fetch handler: leader-side enforcement caps response bytes when partitions in
+  `leader.replication.throttled.replicas` are fetched by listed followers.
+  Whole-partition-chunk drop (no mid-batch truncation).
+- Replicator: follower-side enforcement caps `max_bytes` in outgoing Fetch
+  requests when this broker is listed as a throttled follower.
+- `DescribeConfigs` broker-resource path now emits per-broker configs from
+  `MetadataImage::broker_configs`. Note: `config_source` is set to `2`
+  (`DYNAMIC_BROKER_LOGGER_CONFIG`) rather than the canonical Kafka value `3`
+  (`DYNAMIC_BROKER_CONFIG`). JVM tools were tolerant of this (T12 JVM test
+  passed); cleanup deferred as a follow-up.
+- 22 new unit tests total: 6 throttle parser, 6 token bucket, 4 metadata image
+  apply, 4 config validator allowlist, 2 refresh task.
+- 4 broker integration tests in `tests/throttle.rs`: broker-scoped alter
+  persists, topic throttle propagates, rate caps Fetch response size, unthrottled
+  topic unaffected. Gated `#[cfg(not(target_os = "windows"))]` per multi-broker
+  convention; run in CI on Linux.
+- 1 new JVM acceptance test (`jvm_kafka_reassign_partitions_with_throttle_end_to_end`)
+  exercising the full KIP-73 round-trip including `kafka-configs --describe`
+  visibility check.
+- Closes slice 15 T11 known limitation: `kafka-reassign-partitions --verify`
+  now exits 0; the slice-15 JVM test updated to assert on exit code.
+
+### Real bugs surfaced during integration
+
+- **T9 leader-side throttle keyed off the wrong id.** Original T9 implementation
+  checked the leader's own broker id; KIP-73's
+  `leader.replication.throttled.replicas` actually lists `(partition, follower_id)`
+  pairs. The fix (keying off `replica_id` from the Fetch request) was applied in
+  T11 alongside the integration tests that caught it.
+- **`kafka-reassign-partitions --verify` clears three configs, not two.** The
+  third key (`replica.alter.log.dirs.io.max.bytes.per.second`, KIP-113 log-dir
+  throttle) was rejected by the broker-config allowlist, causing `--verify` to
+  exit 1. T12 added this key to the allowlist as accept-but-don't-persist (log-dir
+  throttle is not yet implemented; the no-op accept exists purely so JVM tooling
+  completes its `--verify` workflow without error).
+
+### Known follow-ups
+
+- `DescribeConfigs` `config_source=2` for broker resources (canonical value is `3`
+  `DYNAMIC_BROKER_CONFIG`). JVM tools tolerate either; cleanup deferred.
+- Metrics emission (`replication_bytes_in/out`) deferred to a dedicated
+  observability slice (Crabka has no metrics framework yet).
+- KIP-113 log-dir throttle (`replica.alter.log.dirs.io.max.bytes.per.second`)
+  accepted but not enforced.
+- Out of scope: per-listener config refresh, dynamic reload of non-throttle
+  broker configs.
