@@ -78,6 +78,21 @@ jobs:
         with:
           command: check advisories bans sources licenses
 
+  helm-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.2
+      - run: helm lint charts/crabka-operator
+      - run: helm template demo charts/crabka-operator > /tmp/rendered.yaml
+      - run: |
+          # Basic shape check: at least one Deployment, Service, and ClusterRole.
+          grep -q "kind: Deployment" /tmp/rendered.yaml
+          grep -q "kind: Service" /tmp/rendered.yaml
+          grep -q "kind: ClusterRole" /tmp/rendered.yaml
+
   # cargo-semver-checks is intentionally disabled until Crabka publishes its
   # first crate to crates.io (tracked under the slice 1e publishing workflow).
   # Until then, the tool has no baseline to compare against and errors out with
