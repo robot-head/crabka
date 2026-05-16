@@ -16,10 +16,10 @@ coverage:
   status:
     project:
       default:
-        after_n_builds: 5
+        threshold: 1%
     patch:
       default:
-        after_n_builds: 5
+        only_pulls: true
 
 flags:
   unit:
