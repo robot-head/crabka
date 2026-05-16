@@ -1,0 +1,18 @@
+crabka-operator is installed.
+
+The operator is watching {{ if .Values.watchNamespaces }}namespaces: {{ join "," .Values.watchNamespaces }}{{ else }}all namespaces (cluster-scoped){{ end }}.
+
+Install the CRDs separately (operator does not self-install):
+
+  kubectl apply -f https://raw.githubusercontent.com/robot-head/crabka/main/deploy/crds/crabka.io_kafkas.yaml
+
+Create a placeholder cluster:
+
+  cat <<EOF | kubectl apply -f -
+  apiVersion: crabka.io/v1alpha1
+  kind: Kafka
+  metadata:
+    name: demo
+  spec:
+    kafkaVersion: "0.1.1"
+  EOF

@@ -1,0 +1,56 @@
+image:
+  repository: ghcr.io/robot-head/crabka-operator
+  tag: "0.1.1"
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+watchNamespaces: []  # empty = cluster-scoped
+
+# Resources for the operator pod (not the brokers it manages).
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 1000m
+    memory: 512Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+podAnnotations: {}
+podLabels: {}
+
+serviceAccount:
+  create: true
+  name: ""  # default: chart fullname
+
+rbac:
+  create: true
+
+service:
+  type: ClusterIP
+  port: 8080
+
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  labels: {}
+
+logFilter: "info,kube=warn"
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: [ALL]
