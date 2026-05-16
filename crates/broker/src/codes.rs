@@ -126,6 +126,10 @@ pub const PREFERRED_LEADER_NOT_AVAILABLE: i16 = 80;
 pub const ELIGIBLE_LEADERS_NOT_AVAILABLE: i16 = 81;
 pub const ELECTION_NOT_NEEDED: i16 = 84;
 
+// Slice 15 additions — partition reassignment codes (KIP-455).
+pub const INVALID_REPLICA_ASSIGNMENT: i16 = 39;
+pub const NO_REASSIGNMENT_IN_PROGRESS: i16 = 85;
+
 /// Map an internal [`crate::error::BrokerError`] to a wire-level code.
 /// Most internal errors map to `UNKNOWN_SERVER_ERROR`; specific variants
 /// pick more meaningful codes.
