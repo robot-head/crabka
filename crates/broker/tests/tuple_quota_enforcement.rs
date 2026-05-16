@@ -535,7 +535,9 @@ async fn tuple_quota_throttles_only_matching_client_id() {
     );
 
     // Poll until the quota appears in the metadata image (absorb raft latency).
-    let deadline = Instant::now() + Duration::from_secs(5);
+    // 15s matches the auth-propagation deadline used elsewhere; macOS CI runners
+    // can exceed the 5s used in slice-16 single-quota tests.
+    let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         let img = handle.controller_image_for_test();
         let key: crabka_metadata::EntityKey = vec![
@@ -549,7 +551,7 @@ async fn tuple_quota_throttles_only_matching_client_id() {
         }
         assert!(
             Instant::now() <= deadline,
-            "tuple quota not visible in metadata image within 5s"
+            "tuple quota not visible in metadata image within 15s"
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
