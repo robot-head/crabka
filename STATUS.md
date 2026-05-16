@@ -399,3 +399,23 @@ Kafka client for ApiVersions.
   - Byte-rate quotas on `(ip)` entity are accepted by the validator but not enforced (matches Kafka's permissive validator).
   - Per-IP bucket cache grows unbounded over the broker's lifetime (inherits slice 16's no-eviction limitation).
 - Out of scope: IPv6 entity names, connection rejection (vs delay), `controller_mutation_rate` (KIP-599 — slice 16c).
+
+## Slice 16c — controller_mutation_rate (2026-05-15)
+
+- KIP-599 `controller_mutation_rate` quota type — partition-mutations-per-second; user / client-id entity scopes (no IP per KIP-599).
+- Validator extension: `KNOWN_QUOTA_KEYS += "controller_mutation_rate"` in `alter_client_quotas.rs`. 1 unit test.
+- New helper `consume_controller_mutation_quota` in `crates/broker/src/quota/controller_mutation.rs`. Reuses slice-16's `lookup_quota_with_key` (8-priority) and `QuotaBuckets`. 3 unit tests.
+- Enforcement on three handlers:
+  - `CreateTopics` — mutation count = sum of `num_partitions` across all topics (`-1` → 1 for accounting).
+  - `CreatePartitions` — count = sum of `(target_count - current_partition_count)` across topics; nonexistent topics count their full target.
+  - `DeleteTopics` — count = sum of partition counts (image lookup); nonexistent topics count 0.
+- Counted BEFORE handler runs (so invalid requests still count — bad-faith clients can't escape the throttle by spamming malformed RPCs).
+- Throttle delay set on `throttle_time_ms` + `tokio::time::sleep` before encoding response. Capped at 1 second per slice-16 convention.
+- 3 broker integration tests (`tests/controller_mutation_quota.rs`): throttled CreateTopics with wall-clock proof, unthrottled baseline, throttled DeleteTopics.
+  - **T6 ACL correction:** the plan suggested seeding a `Cluster Delete` ACL for the DeleteTopics throttle test, but Crabka's authorizer checks `ResourceType::Topic` + `AclOperation::Delete` on the specific topic name (not a cluster-level operation). T6 was corrected to seed `Topic Delete` on `"to-delete"` to match the actual authorizer behavior.
+- 1 new JVM acceptance test (`jvm_kafka_configs_alter_controller_mutation_rate_end_to_end`).
+  - **T7 finding:** `kafka-configs --delete-config --entity-type users` also exits non-zero due to the `DescribeUserScramCredentials` side-call — not just `--describe` as slice 16 T13 documented. T7 used raw `std::process::Command` for both the `--describe` and `--delete-config` steps (asserting on stdout substring and image state respectively) to work around this.
+- **Inherits slice 16 known limitations:**
+  - `client_id` not threaded through `HandlerTable` — `(user, client-id)` tuple quotas don't fire from these handlers; `(user)`-only quotas work. Closing requires the slice-16 cleanup work.
+  - Per-entity bucket cache grows unbounded over broker's lifetime.
+- Out of scope: IP entity (KIP-599 doesn't apply to IP); other admin operations (ACL CRUD, IncrementalAlterConfigs, AlterPartitionReassignments — KIP-599 limits to topic/partition CRUD).

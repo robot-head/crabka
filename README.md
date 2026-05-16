@@ -187,7 +187,7 @@ implements it today.
 | `AlterClientQuotas` / `DescribeClientQuotas` (KIP-13 + KIP-124 + KIP-257) | ✅ |
 | User + (user, client-id) tuple + default entity scopes | ✅ |
 | IP entity + `connection_creation_rate` (KIP-612) | ✅ |
-| Controller mutation rate (KIP-599) | ❌ |
+| Controller mutation rate (KIP-599) | ✅ |
 
 ### Ecosystem (out of broker core)
 
