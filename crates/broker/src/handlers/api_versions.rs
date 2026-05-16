@@ -87,6 +87,7 @@ fn supported_apis() -> Vec<ApiVersion> {
         v!(list_partition_reassignments_request),
         v!(describe_client_quotas_request),
         v!(alter_client_quotas_request),
+        v!(describe_user_scram_credentials_request),
     ]
 }
 

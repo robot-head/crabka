@@ -1,7 +1,5 @@
 //! `DescribeUserScramCredentials` (`api_key` 50, KIP-554 read half).
 
-#![allow(dead_code)]
-
 use std::net::SocketAddr;
 
 use bytes::Bytes;
