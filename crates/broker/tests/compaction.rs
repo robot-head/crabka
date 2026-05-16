@@ -250,59 +250,73 @@ struct FlatRecord {
 
 /// Fetch all records from (topic, partition 0) starting at offset 0.
 /// Returns a flat list of (key, value) pairs from all batches.
+///
+/// The generated `FetchResponse` codec decodes only the FIRST batch from
+/// each partition's `records` field (the rest of the byte stream is
+/// silently discarded). To collect every batch we re-fetch repeatedly,
+/// advancing `fetch_offset` past the last batch we saw, until the broker
+/// returns no batch.
 async fn fetch_all(addr: SocketAddr, topic: &str, topic_id: Uuid) -> Vec<FlatRecord> {
-    let req = FetchRequest {
-        replica_id: -1,
-        max_wait_ms: 100,
-        min_bytes: 1,
-        max_bytes: 1 << 22, // 4 MiB — generous enough for our test data
-        topics: vec![FetchTopic {
-            topic: topic.to_string(),
-            topic_id,
-            partitions: vec![FetchPartition {
-                partition: 0,
-                fetch_offset: 0,
-                partition_max_bytes: 1 << 22,
+    const VERSION: i16 = 12; // flexible
+    let mut out: Vec<FlatRecord> = Vec::new();
+    let mut next_offset: i64 = 0;
+    loop {
+        let req = FetchRequest {
+            replica_id: -1,
+            max_wait_ms: 100,
+            min_bytes: 1,
+            max_bytes: 1 << 22,
+            topics: vec![FetchTopic {
+                topic: topic.to_string(),
+                topic_id,
+                partitions: vec![FetchPartition {
+                    partition: 0,
+                    fetch_offset: next_offset,
+                    partition_max_bytes: 1 << 22,
+                    ..Default::default()
+                }],
                 ..Default::default()
             }],
             ..Default::default()
-        }],
-        ..Default::default()
-    };
+        };
+        let mut stream = TcpStream::connect(addr).await.expect("connect");
+        let mut body = BytesMut::new();
+        req.encode(&mut body, VERSION).expect("encode Fetch");
+        let resp_bytes = round_trip(&mut stream, 1, VERSION, 1, true, &body)
+            .await
+            .expect("Fetch round-trip");
+        let mut cur: &[u8] = &resp_bytes;
+        let resp = FetchResponse::decode(&mut cur, VERSION).expect("decode FetchResponse");
 
-    const VERSION: i16 = 12; // flexible
-    let mut stream = TcpStream::connect(addr).await.expect("connect");
-    let mut body = BytesMut::new();
-    req.encode(&mut body, VERSION).expect("encode Fetch");
-    let resp_bytes = round_trip(&mut stream, 1, VERSION, 1, true, &body)
-        .await
-        .expect("Fetch round-trip");
-    let mut cur: &[u8] = &resp_bytes;
-    let resp = FetchResponse::decode(&mut cur, VERSION).expect("decode FetchResponse");
-
-    let mut out = Vec::new();
-    for topic_resp in &resp.responses {
-        for part_resp in &topic_resp.partitions {
-            assert_eq!(
-                part_resp.error_code, 0,
-                "Fetch partition error: {}",
-                part_resp.error_code
-            );
-            if let Some(batch) = &part_resp.records {
-                for record in &batch.records {
-                    // Skip records with no key (compaction drops keyless records;
-                    // we never produce them, but guard defensively).
-                    let key = match &record.key {
-                        Some(k) => k.to_vec(),
-                        None => continue,
-                    };
-                    let value = match &record.value {
-                        Some(v) => v.to_vec(),
-                        None => Vec::new(),
-                    };
-                    out.push(FlatRecord { key, value });
+        let mut got_any = false;
+        for topic_resp in &resp.responses {
+            for part_resp in &topic_resp.partitions {
+                assert_eq!(
+                    part_resp.error_code, 0,
+                    "Fetch partition error: {}",
+                    part_resp.error_code
+                );
+                if let Some(batch) = &part_resp.records {
+                    got_any = true;
+                    let batch_last_abs =
+                        batch.base_offset + i64::from(batch.last_offset_delta);
+                    for record in &batch.records {
+                        let key = match &record.key {
+                            Some(k) => k.to_vec(),
+                            None => continue,
+                        };
+                        let value = match &record.value {
+                            Some(v) => v.to_vec(),
+                            None => Vec::new(),
+                        };
+                        out.push(FlatRecord { key, value });
+                    }
+                    next_offset = batch_last_abs + 1;
                 }
             }
+        }
+        if !got_any {
+            break;
         }
     }
     out

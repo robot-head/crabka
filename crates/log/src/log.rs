@@ -651,7 +651,7 @@ impl Log {
     /// sealed segment at the lowest input base offset, replacing all
     /// consumed sealed segments.
     pub fn compact(&mut self) -> Result<(), LogError> {
-        if self.segments.len() < 2 {
+        if self.segments.is_empty() {
             return Ok(());
         }
 
