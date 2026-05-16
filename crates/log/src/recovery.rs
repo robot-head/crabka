@@ -74,11 +74,7 @@ pub fn swap_orphan_recover(dir: &Path) -> Result<(), LogError> {
 }
 
 fn swap_triple(dir: &Path, base: i64, ext: &str) -> std::path::PathBuf {
-    dir.join(format!(
-        "{}.{}.swap",
-        name::format_base_offset(base),
-        ext
-    ))
+    dir.join(format!("{}.{}.swap", name::format_base_offset(base), ext))
 }
 
 #[cfg(test)]

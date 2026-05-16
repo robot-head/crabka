@@ -77,7 +77,11 @@ mod build_map_tests {
     use crabka_protocol::records::{Attributes, Record};
     use tempfile::tempdir;
 
-    pub(super) fn make_record(offset_delta: i32, key: Option<&[u8]>, value: Option<&[u8]>) -> Record {
+    pub(super) fn make_record(
+        offset_delta: i32,
+        key: Option<&[u8]>,
+        value: Option<&[u8]>,
+    ) -> Record {
         Record {
             offset_delta,
             key: key.map(Bytes::copy_from_slice),
@@ -86,7 +90,11 @@ mod build_map_tests {
         }
     }
 
-    pub(super) fn write_sealed_segment(dir: &Path, base_offset: i64, records: Vec<Record>) -> Segment {
+    pub(super) fn write_sealed_segment(
+        dir: &Path,
+        base_offset: i64,
+        records: Vec<Record>,
+    ) -> Segment {
         let mut seg = Segment::create(dir, base_offset).unwrap();
         let n = i32::try_from(records.len()).expect("record count fits i32");
         let max_ts = records.iter().map(|r| r.timestamp_delta).max().unwrap_or(0);
@@ -189,9 +197,9 @@ pub fn rewrite_segments(
     offset_map: &HashMap<Vec<u8>, i64>,
     _index_interval_bytes: u32,
 ) -> Result<RewriteOutput, LogError> {
-    let first = segments.first().ok_or_else(|| LogError::Io(
-        std::io::Error::other("rewrite_segments: empty input"),
-    ))?;
+    let first = segments
+        .first()
+        .ok_or_else(|| LogError::Io(std::io::Error::other("rewrite_segments: empty input")))?;
     let new_base = first.base_offset();
 
     let log_swap = swap_path(dir, new_base, "log");
@@ -223,7 +231,8 @@ pub fn rewrite_segments(
 
     for seg in segments {
         for batch in read_all_batches(seg)? {
-            let mut kept: Vec<crabka_protocol::records::Record> = Vec::with_capacity(batch.records.len());
+            let mut kept: Vec<crabka_protocol::records::Record> =
+                Vec::with_capacity(batch.records.len());
             for record in &batch.records {
                 let Some(key_bytes) = record.key.as_ref() else {
                     continue;
@@ -287,8 +296,8 @@ fn swap_path(dir: &Path, base_offset: i64, ext: &str) -> PathBuf {
 #[cfg(test)]
 #[allow(clippy::similar_names)]
 mod rewrite_tests {
-    use super::*;
     use super::build_map_tests::{make_record, write_sealed_segment};
+    use super::*;
     use std::fs;
 
     #[test]
@@ -313,7 +322,9 @@ mod rewrite_tests {
         let mut cursor = &bytes[..];
         let batch = RecordBatch::decode(&mut cursor).unwrap();
         assert_eq!(batch.records.len(), 2);
-        let keys: Vec<_> = batch.records.iter()
+        let keys: Vec<_> = batch
+            .records
+            .iter()
             .map(|r| r.key.as_ref().unwrap().to_vec())
             .collect();
         assert_eq!(keys, vec![b"k2".to_vec(), b"k1".to_vec()]);
@@ -366,7 +377,9 @@ mod rewrite_tests {
         // k2 kept at offset_delta 1, k1 kept at offset_delta 2; base 100,
         // last_offset_delta 2 → batch covers abs offsets 100..=102 with k2,k1.
         assert_eq!(batch.last_offset_delta, 2);
-        let abs_offsets: Vec<i64> = batch.records.iter()
+        let abs_offsets: Vec<i64> = batch
+            .records
+            .iter()
             .map(|r| batch.base_offset + i64::from(r.offset_delta))
             .collect();
         assert_eq!(abs_offsets, vec![101, 102]);
@@ -393,9 +406,18 @@ pub fn atomic_swap(
 ) -> Result<(), LogError> {
     // Step 1: fsync swap files. Open with write access so
     // `FlushFileBuffers` (Windows) / `fsync` (Linux) succeeds.
-    OpenOptions::new().write(true).open(&rewrite.log_swap)?.sync_all()?;
-    OpenOptions::new().write(true).open(&rewrite.index_swap)?.sync_all()?;
-    OpenOptions::new().write(true).open(&rewrite.timeindex_swap)?.sync_all()?;
+    OpenOptions::new()
+        .write(true)
+        .open(&rewrite.log_swap)?
+        .sync_all()?;
+    OpenOptions::new()
+        .write(true)
+        .open(&rewrite.index_swap)?
+        .sync_all()?;
+    OpenOptions::new()
+        .write(true)
+        .open(&rewrite.timeindex_swap)?
+        .sync_all()?;
 
     // Step 2: delete originals.
     for base in consumed_base_offsets {
@@ -405,8 +427,14 @@ pub fn atomic_swap(
     }
 
     // Step 3: rename swap → final.
-    std::fs::rename(&rewrite.log_swap, name::log_path(dir, rewrite.new_base_offset))?;
-    std::fs::rename(&rewrite.index_swap, name::index_path(dir, rewrite.new_base_offset))?;
+    std::fs::rename(
+        &rewrite.log_swap,
+        name::log_path(dir, rewrite.new_base_offset),
+    )?;
+    std::fs::rename(
+        &rewrite.index_swap,
+        name::index_path(dir, rewrite.new_base_offset),
+    )?;
     std::fs::rename(
         &rewrite.timeindex_swap,
         name::timeindex_path(dir, rewrite.new_base_offset),
@@ -426,8 +454,8 @@ pub fn atomic_swap(
 #[cfg(test)]
 #[allow(clippy::similar_names)]
 mod swap_tests {
-    use super::*;
     use super::build_map_tests::{make_record, write_sealed_segment};
+    use super::*;
 
     #[test]
     fn atomic_swap_replaces_two_segments_with_one() {
@@ -437,11 +465,13 @@ mod swap_tests {
         // are closed. On Windows an open file handle prevents rename/delete.
         let rewrite = {
             let seg0 = write_sealed_segment(
-                dir.path(), 0,
+                dir.path(),
+                0,
                 vec![make_record(0, Some(b"k1"), Some(b"v1"))],
             );
             let seg1 = write_sealed_segment(
-                dir.path(), 10,
+                dir.path(),
+                10,
                 vec![make_record(0, Some(b"k1"), Some(b"v2"))],
             );
             let segs = vec![&seg0, &seg1];

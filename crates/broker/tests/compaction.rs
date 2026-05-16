@@ -159,7 +159,8 @@ async fn create_topic_with_configs(
         .await
         .expect("CreateTopics round-trip");
     let mut cur: &[u8] = &resp_bytes;
-    let resp = CreateTopicsResponse::decode(&mut cur, VERSION).expect("decode CreateTopicsResponse");
+    let resp =
+        CreateTopicsResponse::decode(&mut cur, VERSION).expect("decode CreateTopicsResponse");
     assert_eq!(resp.topics.len(), 1);
     assert_eq!(
         resp.topics[0].error_code, 0,
@@ -194,13 +195,7 @@ async fn get_topic_id(addr: SocketAddr, topic: &str) -> Uuid {
 }
 
 /// Produce a single record with an explicit key+value to (topic, partition 0).
-async fn produce_record(
-    addr: SocketAddr,
-    topic: &str,
-    topic_id: Uuid,
-    key: &[u8],
-    value: &[u8],
-) {
+async fn produce_record(addr: SocketAddr, topic: &str, topic_id: Uuid, key: &[u8], value: &[u8]) {
     let record = Record {
         offset_delta: 0,
         key: Some(Bytes::copy_from_slice(key)),
@@ -339,10 +334,7 @@ async fn compaction_dedupes_via_native_client() {
         "compacted",
         1,
         1,
-        vec![
-            ("cleanup.policy", "compact"),
-            ("segment.bytes", "256"),
-        ],
+        vec![("cleanup.policy", "compact"), ("segment.bytes", "256")],
     )
     .await;
 
@@ -357,7 +349,14 @@ async fn compaction_dedupes_via_native_client() {
     for round in 0..10u32 {
         for key in ["k1", "k2", "k3"] {
             let value = format!("v{round}-{key}");
-            produce_record(addr, "compacted", topic_id, key.as_bytes(), value.as_bytes()).await;
+            produce_record(
+                addr,
+                "compacted",
+                topic_id,
+                key.as_bytes(),
+                value.as_bytes(),
+            )
+            .await;
         }
     }
 
@@ -371,7 +370,14 @@ async fn compaction_dedupes_via_native_client() {
     // for the next compaction pass.
     for key in ["k1", "k2", "k3"] {
         let value = format!("v10-{key}");
-        produce_record(addr, "compacted", topic_id, key.as_bytes(), value.as_bytes()).await;
+        produce_record(
+            addr,
+            "compacted",
+            topic_id,
+            key.as_bytes(),
+            value.as_bytes(),
+        )
+        .await;
     }
 
     // Wait again so the newly-sealed segments get compacted.

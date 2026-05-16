@@ -28,7 +28,9 @@ pub(crate) struct CleanerConfig {
 
 impl Default for CleanerConfig {
     fn default() -> Self {
-        Self { interval: Duration::from_secs(30) }
+        Self {
+            interval: Duration::from_secs(30),
+        }
     }
 }
 
@@ -52,14 +54,9 @@ pub(crate) async fn run(
     }
 }
 
-pub(crate) async fn tick_all(
-    partitions: &DashMap<(String, i32), Arc<Partition>>,
-    node_id: NodeId,
-) {
+pub(crate) async fn tick_all(partitions: &DashMap<(String, i32), Arc<Partition>>, node_id: NodeId) {
     // Snapshot first to avoid holding the DashMap iter across await.
-    let snapshot: Vec<Arc<Partition>> = partitions.iter()
-        .map(|kv| kv.value().clone())
-        .collect();
+    let snapshot: Vec<Arc<Partition>> = partitions.iter().map(|kv| kv.value().clone()).collect();
     for partition in snapshot {
         let leader = partition.current_leader.load(Ordering::Relaxed);
         if leader != node_id {
