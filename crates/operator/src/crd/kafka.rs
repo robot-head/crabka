@@ -39,6 +39,13 @@ pub struct KafkaSpec {
     /// when `listeners` is empty, the synthesized default `"PLAIN"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inter_broker_listener_name: Option<String>,
+    /// Slice 40: Prometheus scrape configuration. When `None`, brokers do
+    /// not bind `/metrics` and no `PodMonitor` / `ServiceMonitor` is
+    /// rendered. When `Some`, the broker `StatefulSet` gains a `metrics`
+    /// container port (TCP 9404) and the resources requested by
+    /// `pod_monitor` / `service_monitor` are SSA-applied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metrics_config: Option<crate::crd::MetricsConfig>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
@@ -100,6 +107,7 @@ mod tests {
                 config: None,
                 listeners: vec![],
                 inter_broker_listener_name: None,
+                metrics_config: None,
             },
         );
         let json = serde_json::to_string(&k).unwrap();
@@ -109,6 +117,32 @@ mod tests {
         );
         let back: Kafka = serde_json::from_str(&json).unwrap();
         assert_eq!(back.spec, k.spec);
+    }
+
+    #[test]
+    fn spec_omits_metrics_config_when_none() {
+        let k = Kafka::new(
+            "demo",
+            KafkaSpec {
+                kafka_version: "0.1.1".into(),
+                config: None,
+                listeners: vec![],
+                inter_broker_listener_name: None,
+                metrics_config: None,
+            },
+        );
+        let j = serde_json::to_string(&k.spec).unwrap();
+        assert!(!j.contains("metricsConfig"), "got: {j}");
+    }
+
+    #[test]
+    fn spec_carries_metrics_config_pod_monitor() {
+        use crate::crd::{MetricsConfig, PodMonitorSpec};
+        let json = r#"{"kafkaVersion":"0.1.1","metricsConfig":{"podMonitor":{"interval":"30s"}}}"#;
+        let spec: KafkaSpec = serde_json::from_str(json).unwrap();
+        let cfg: MetricsConfig = spec.metrics_config.expect("metricsConfig present");
+        let pm: PodMonitorSpec = cfg.pod_monitor.expect("podMonitor present");
+        assert_eq!(pm.interval.as_deref(), Some("30s"));
     }
 
     #[test]

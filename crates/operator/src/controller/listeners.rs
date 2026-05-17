@@ -344,6 +344,7 @@ mod service_rendering_tests {
                 config: None,
                 listeners: vec![],
                 inter_broker_listener_name: None,
+                metrics_config: None,
             },
         );
         k.meta_mut().namespace = Some("default".into());

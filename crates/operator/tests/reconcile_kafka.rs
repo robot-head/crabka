@@ -44,6 +44,7 @@ fn kafka_cr(name: &str, namespace: &str) -> Kafka {
             config: None,
             listeners: vec![],
             inter_broker_listener_name: None,
+            metrics_config: None,
         },
     );
     k.metadata.namespace = Some(namespace.into());
@@ -66,6 +67,7 @@ fn kafka_cr_with_config(
             config: Some(config),
             listeners: vec![],
             inter_broker_listener_name: None,
+            metrics_config: None,
         },
     );
     k.metadata.namespace = Some(namespace.into());

@@ -503,6 +503,7 @@ mod config_hash_tests {
             }),
             listeners: vec![],
             inter_broker_listener_name: None,
+            metrics_config: None,
         };
         let h = combined_config_hash(&spec_a);
         let h_again = combined_config_hash(&spec_a);
@@ -530,6 +531,7 @@ mod config_hash_tests {
                 config: None,
                 listeners: vec![],
                 inter_broker_listener_name: None,
+                metrics_config: None,
             },
         );
         k.meta_mut().namespace = Some("default".into());
