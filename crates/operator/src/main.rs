@@ -26,6 +26,14 @@ struct RunArgs {
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> anyhow::Result<()> {
+    // rustls 0.23 refuses to auto-pick a CryptoProvider when multiple
+    // are linkable (or none is enabled at the binary level). kube's
+    // rustls-tls feature pulls rustls transitively without selecting
+    // one, so install ring explicitly before any TLS use.
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("install default rustls CryptoProvider");
+
     let cli = Cli::parse();
     match cli.command {
         Command::Run(args) => run::run(args.config).await,
