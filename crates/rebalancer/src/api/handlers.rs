@@ -15,9 +15,12 @@ use std::sync::Arc;
 use axum::Extension;
 use connectrpc_axum::message::error::Code;
 use connectrpc_axum::message::{ConnectError, ConnectRequest, ConnectResponse};
+use tokio_util::sync::CancellationToken;
 
+use crate::executor::{Execution, ExecutionHandle};
 use crate::ingest::SharedSnapshot;
 use crate::metrics::RebalancerMetrics;
+use crate::model::proposal::ProposalStatus;
 use crate::model::{ClusterState, ProposalStore};
 use crate::optimizer;
 use crate::pb;
@@ -30,6 +33,9 @@ pub struct AppState {
     pub goal_registry: super::GoalRegistry,
     pub goal_ctx: crate::goals::GoalContext,
     pub metrics: RebalancerMetrics,
+    // new in 43b:
+    pub executor: crate::executor::ExecutorState,
+    pub client_facade: Arc<dyn crate::executor::phases::ClientFacade>,
 }
 
 /// Convert a `ClusterState` into the proto `GetStateResponse`.
@@ -78,10 +84,21 @@ pub fn cluster_state_to_proto(state: &ClusterState) -> pb::GetStateResponse {
 }
 
 #[must_use]
+fn status_to_proto(s: ProposalStatus) -> pb::ProposalStatus {
+    match s {
+        ProposalStatus::Computed => pb::ProposalStatus::Computed,
+        ProposalStatus::Executing => pb::ProposalStatus::Executing,
+        ProposalStatus::Completed => pb::ProposalStatus::Completed,
+        ProposalStatus::Failed => pb::ProposalStatus::Failed,
+        ProposalStatus::Cancelled => pb::ProposalStatus::Cancelled,
+    }
+}
+
+#[must_use]
 pub fn proposal_to_proto(p: &crate::model::Proposal) -> pb::Proposal {
     pb::Proposal {
         id: p.id.clone(),
-        status: i32::from(pb::ProposalStatus::Computed),
+        status: i32::from(status_to_proto(p.status)),
         created_at_ms: p.created_at_ms,
         goals_applied: p.goals_applied.clone(),
         summary: Some(pb::ProposalSummary {
@@ -193,13 +210,145 @@ pub async fn list_proposals(
     }))
 }
 
-/// Execute is implemented in slice 43b — return `Unimplemented` (501) here.
+/// Kick off an execution. Returns Executing-state proposal; operator
+/// polls `GetProposal` for progress. Async — the executor runs on a
+/// detached task.
 pub async fn execute_proposal(
-    Extension(_state): Extension<Arc<AppState>>,
-    _req: ConnectRequest<pb::ExecuteProposalRequest>,
+    Extension(state): Extension<Arc<AppState>>,
+    req: ConnectRequest<pb::ExecuteProposalRequest>,
 ) -> Result<ConnectResponse<pb::ExecuteProposalResponse>, ConnectError> {
-    Err(ConnectError::new(
-        Code::Unimplemented,
-        "execute path lands in slice 43b",
-    ))
+    let inner = req.0;
+    let id = inner.id;
+    let throttle_bytes_per_sec = inner
+        .throttle_bytes_per_sec
+        .unwrap_or(state.executor.config.default_throttle_bytes_per_sec);
+
+    let proposal = state.store.get(&id).ok_or_else(|| {
+        ConnectError::new(Code::NotFound, format!("proposal `{id}` not found"))
+    })?;
+    if proposal.status.is_terminal() || matches!(proposal.status, ProposalStatus::Executing) {
+        return Err(ConnectError::new(
+            Code::FailedPrecondition,
+            format!("proposal `{id}` is {:?} (must be Computed)", proposal.status),
+        ));
+    }
+    if proposal.movements.is_empty() {
+        return Err(ConnectError::new(
+            Code::FailedPrecondition,
+            format!("proposal `{id}` has no movements"),
+        ));
+    }
+
+    let mut slot = state.executor.in_flight.lock().await;
+    if slot.is_some() {
+        return Err(ConnectError::new(
+            Code::FailedPrecondition,
+            "another execution is already in flight",
+        ));
+    }
+
+    let now = now_ms();
+    let updated = state
+        .store
+        .mutate(&id, |p| {
+            p.status = ProposalStatus::Executing;
+            p.started_at_ms = now;
+            p.throttle_bytes_per_sec = throttle_bytes_per_sec;
+        })
+        .ok_or_else(|| ConnectError::new(Code::Internal, "store.mutate vanished"))?;
+
+    let cancel = CancellationToken::new();
+    let executor_state = state.executor.clone();
+    let client = state.client_facade.clone();
+    let prop_for_task = updated.clone();
+    let cancel_for_task = cancel.clone();
+
+    let task = tokio::spawn(async move {
+        Execution::new(
+            client,
+            executor_state,
+            prop_for_task,
+            throttle_bytes_per_sec,
+            cancel_for_task,
+        )
+        .run()
+        .await;
+    });
+
+    *slot = Some(ExecutionHandle {
+        proposal_id: id.clone(),
+        task,
+        cancel,
+        started_at: std::time::Instant::now(),
+    });
+    drop(slot);
+
+    state.executor.metrics.executions_started_total.inc();
+
+    Ok(ConnectResponse(pb::ExecuteProposalResponse {
+        proposal: Some(proposal_to_proto(&updated)),
+    }))
+}
+
+/// Signal cancellation on the in-flight execution. Returns the proposal
+/// already transitioned to `Cancelled`.
+pub async fn cancel_execution(
+    Extension(state): Extension<Arc<AppState>>,
+    req: ConnectRequest<pb::CancelExecutionRequest>,
+) -> Result<ConnectResponse<pb::CancelExecutionResponse>, ConnectError> {
+    let id = req.0.id;
+
+    let cancel_token = {
+        let slot = state.executor.in_flight.lock().await;
+        let Some(handle) = slot.as_ref() else {
+            return Err(ConnectError::new(
+                Code::NotFound,
+                "no execution in flight",
+            ));
+        };
+        if handle.proposal_id != id {
+            return Err(ConnectError::new(
+                Code::FailedPrecondition,
+                format!(
+                    "in-flight execution is `{}`, not `{id}`",
+                    handle.proposal_id
+                ),
+            ));
+        }
+        handle.cancel.clone()
+    };
+
+    cancel_token.cancel();
+
+    // Spin briefly waiting for the executor task to release the slot
+    // and update the store. Bound to 5s; if the executor doesn't drain
+    // in that time, return the current (Executing) proposal — the
+    // operator can re-poll.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let proposal = state
+            .store
+            .get(&id)
+            .ok_or_else(|| ConnectError::new(Code::NotFound, format!("proposal `{id}` vanished")))?;
+        if matches!(
+            proposal.status,
+            ProposalStatus::Cancelled | ProposalStatus::Failed | ProposalStatus::Completed
+        ) {
+            return Ok(ConnectResponse(pb::CancelExecutionResponse {
+                proposal: Some(proposal_to_proto(&proposal)),
+            }));
+        }
+        if std::time::Instant::now() >= deadline {
+            return Ok(ConnectResponse(pb::CancelExecutionResponse {
+                proposal: Some(proposal_to_proto(&proposal)),
+            }));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
 }

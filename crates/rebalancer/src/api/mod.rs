@@ -78,6 +78,7 @@ pub fn router(state: Arc<handlers::AppState>) -> axum::Router {
         .get_proposal(handlers::get_proposal)
         .list_proposals(handlers::list_proposals)
         .execute_proposal(handlers::execute_proposal)
+        .cancel_execution(handlers::cancel_execution)
         .build()
         .layer(axum::Extension(state))
 }

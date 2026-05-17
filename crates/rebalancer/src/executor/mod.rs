@@ -54,7 +54,7 @@ pub struct ExecutionHandle {
 }
 
 /// One run of the state machine.
-pub struct Execution<C: ClientFacade + 'static> {
+pub struct Execution<C: ClientFacade + ?Sized + 'static> {
     client: Arc<C>,
     state: ExecutorState,
     proposal: Proposal,
@@ -64,7 +64,7 @@ pub struct Execution<C: ClientFacade + 'static> {
     starting_phase: Phase,
 }
 
-impl<C: ClientFacade + 'static> Execution<C> {
+impl<C: ClientFacade + ?Sized + 'static> Execution<C> {
     /// Build a fresh execution starting from `ApplyThrottle`.
     pub fn new(
         client: Arc<C>,

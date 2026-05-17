@@ -61,7 +61,7 @@ pub enum PhaseError {
 /// Apply throttle: one `IncrementalAlterConfigs` request with all four
 /// KIP-73 keys SET to the target values.
 pub async fn apply_throttle(
-    client: &dyn ClientFacade,
+    client: &(impl ClientFacade + ?Sized),
     targets: &ThrottleTargets,
     throttle_bytes_per_sec: i64,
 ) -> Result<(), PhaseError> {
@@ -74,7 +74,7 @@ pub async fn apply_throttle(
 /// KIP-73 keys DELETED on the same resources. Idempotent — safe to
 /// re-run.
 pub async fn clear_throttle(
-    client: &dyn ClientFacade,
+    client: &(impl ClientFacade + ?Sized),
     targets: &ThrottleTargets,
 ) -> Result<(), PhaseError> {
     client
@@ -84,7 +84,7 @@ pub async fn clear_throttle(
 
 /// Submit a movement plan, chunked at `batch_size`.
 pub async fn submit_movements(
-    client: &dyn ClientFacade,
+    client: &(impl ClientFacade + ?Sized),
     movements: &[Movement],
     batch_size: usize,
 ) -> Result<(), PhaseError> {
