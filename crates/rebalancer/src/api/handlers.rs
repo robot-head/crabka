@@ -258,8 +258,12 @@ pub async fn execute_proposal(
     // keys off `in_flight.json`'s existence; persisting `proposals.json`
     // first opens a crash window where the proposal is `Executing` but
     // no recovery marker exists, leaving the proposal orphaned.
-    let in_flight_file =
-        InFlightFile::new(id.clone(), Phase::ApplyThrottle, now, throttle_bytes_per_sec);
+    let in_flight_file = InFlightFile::new(
+        id.clone(),
+        Phase::ApplyThrottle,
+        now,
+        throttle_bytes_per_sec,
+    );
     if let Err(e) = in_flight_file.write(&state.executor.config.data_dir) {
         return Err(ConnectError::new(
             Code::Internal,

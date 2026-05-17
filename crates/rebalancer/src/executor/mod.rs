@@ -150,8 +150,7 @@ impl<C: ClientFacade + ?Sized + 'static> Execution<C> {
                 };
                 terminal = Some((ProposalStatus::Cancelled, cancel_note.clone()));
                 phase = Phase::ClearThrottle;
-                let _ =
-                    self.persist_phase(phase, Some(ProposalStatus::Cancelled), cancel_note);
+                let _ = self.persist_phase(phase, Some(ProposalStatus::Cancelled), cancel_note);
                 continue;
             }
 
@@ -201,11 +200,8 @@ impl<C: ClientFacade + ?Sized + 'static> Execution<C> {
                         };
                         terminal = Some((ProposalStatus::Cancelled, cancel_note.clone()));
                         phase = Phase::ClearThrottle;
-                        let _ = self.persist_phase(
-                            phase,
-                            Some(ProposalStatus::Cancelled),
-                            cancel_note,
-                        );
+                        let _ =
+                            self.persist_phase(phase, Some(ProposalStatus::Cancelled), cancel_note);
                     }
                     WaitOutcome::DeadlineExceeded => {
                         let mut reason = String::from("Wait: deadline exceeded");

@@ -244,7 +244,9 @@ async fn main() -> anyhow::Result<()> {
         match tokio::time::timeout(Duration::from_secs(10), handle.task).await {
             Ok(Ok(())) => info!(proposal_id = %handle.proposal_id, "executor drained cleanly"),
             Ok(Err(e)) => warn!(error = %e, "executor task join error"),
-            Err(_) => warn!(proposal_id = %handle.proposal_id, "executor drain timed out after 10s; aborting"),
+            Err(_) => {
+                warn!(proposal_id = %handle.proposal_id, "executor drain timed out after 10s; aborting");
+            }
         }
     }
 
