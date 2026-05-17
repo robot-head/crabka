@@ -1017,3 +1017,135 @@ mod advertised_tests {
         assert_eq!(a.port, 32100);
     }
 }
+
+/// Render the complete TOML for one broker (cluster-wide content +
+/// this broker's advertised addresses). Deterministic — same input
+/// always produces byte-identical output so the slice-21 config-hash
+/// is stable.
+#[allow(dead_code)]
+pub fn render_broker_toml(
+    broker_id: i32,
+    listeners: &[Listener],
+    addresses_per_listener: &std::collections::BTreeMap<String, AdvertisedAddress>,
+    inter_broker_listener_name: &str,
+    server_properties: &std::collections::BTreeMap<String, String>,
+) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let _ = writeln!(out, "broker_id = {broker_id}");
+    let _ = writeln!(out, "log_dir = \"/var/lib/crabka/data\"");
+    let _ = writeln!(
+        out,
+        "inter_broker_listener_name = \"{inter_broker_listener_name}\""
+    );
+    out.push('\n');
+
+    for l in listeners {
+        let adv = addresses_per_listener
+            .get(&l.name)
+            .map(|a| format!("{}:{}", a.host, a.port))
+            .unwrap_or_default();
+        let _ = writeln!(out, "[[listeners]]");
+        let _ = writeln!(out, "name = \"{}\"", l.name);
+        let _ = writeln!(out, "bind_addr = \"0.0.0.0:{}\"", l.port);
+        let _ = writeln!(out, "advertised = \"{adv}\"");
+        let _ = writeln!(out, "protocol = \"Plaintext\"");
+        out.push('\n');
+    }
+
+    if !server_properties.is_empty() {
+        let _ = writeln!(out, "[server_properties]");
+        for (k, v) in server_properties {
+            let _ = writeln!(out, "\"{k}\" = \"{v}\"");
+        }
+    }
+
+    out
+}
+
+/// Build the synthesized internal-only listener used when
+/// `Kafka.spec.listeners` is empty. Kept here so the operator and
+/// tests agree on the bytes.
+#[allow(dead_code)]
+#[must_use]
+pub fn synthesized_default_listener() -> Listener {
+    Listener {
+        name: "PLAIN".into(),
+        port: 9092,
+        type_: ListenerType::Internal,
+        tls: false,
+        configuration: None,
+    }
+}
+
+#[cfg(test)]
+mod toml_rendering_tests {
+    use super::*;
+
+    #[test]
+    fn renders_minimal_broker_toml_and_round_trips() {
+        let mut addrs = std::collections::BTreeMap::new();
+        addrs.insert(
+            "PLAIN".into(),
+            AdvertisedAddress {
+                host: "demo-0.svc.local".into(),
+                port: 9092,
+            },
+        );
+        let listeners = vec![synthesized_default_listener()];
+        let props = std::collections::BTreeMap::new();
+        let toml_str = render_broker_toml(0, &listeners, &addrs, "PLAIN", &props);
+
+        // Sanity: parses cleanly with the broker's FileConfig.
+        let parsed: crabka_broker::file_config::FileConfig =
+            toml::from_str(&toml_str).expect("rendered TOML must parse with broker FileConfig");
+        assert_eq!(parsed.broker_id, Some(0));
+        assert_eq!(parsed.inter_broker_listener_name.as_deref(), Some("PLAIN"));
+        assert_eq!(parsed.listeners.len(), 1);
+        assert_eq!(parsed.listeners[0].advertised, "demo-0.svc.local:9092");
+    }
+
+    #[test]
+    fn deterministic_byte_output() {
+        let mut addrs = std::collections::BTreeMap::new();
+        addrs.insert(
+            "PLAIN".into(),
+            AdvertisedAddress {
+                host: "h".into(),
+                port: 9092,
+            },
+        );
+        let l = vec![synthesized_default_listener()];
+        let mut p = std::collections::BTreeMap::new();
+        p.insert("z.last".into(), "1".into());
+        p.insert("a.first".into(), "0".into());
+
+        let t1 = render_broker_toml(0, &l, &addrs, "PLAIN", &p);
+        let t2 = render_broker_toml(0, &l, &addrs, "PLAIN", &p);
+        assert_eq!(t1, t2);
+        // Sorted property keys (BTreeMap iteration).
+        let a_pos = t1.find("a.first").unwrap();
+        let z_pos = t1.find("z.last").unwrap();
+        assert!(a_pos < z_pos);
+    }
+
+    #[test]
+    fn server_properties_section_omitted_when_empty() {
+        let mut addrs = std::collections::BTreeMap::new();
+        addrs.insert(
+            "PLAIN".into(),
+            AdvertisedAddress {
+                host: "h".into(),
+                port: 9092,
+            },
+        );
+        let t = render_broker_toml(
+            0,
+            &[synthesized_default_listener()],
+            &addrs,
+            "PLAIN",
+            &std::collections::BTreeMap::new(),
+        );
+        assert!(!t.contains("[server_properties]"), "got:\n{t}");
+    }
+}
