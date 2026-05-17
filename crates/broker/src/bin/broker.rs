@@ -97,8 +97,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     });
     let metrics_listen_addr = parse_metrics_addr(&args.metrics_listen_addr)?;
-    let bootstrap_mode = detect_bootstrap_mode(&args.log_dir);
-    tracing::info!(?bootstrap_mode, log_dir = %args.log_dir.display(), "selected bootstrap mode");
     let mut config = BrokerConfig {
         broker_id: args.broker_id,
         listen_addr: args.listen_addr,
@@ -113,7 +111,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         replica_lag_time_max_ms: 30_000,
         controller_election_timeout: std::time::Duration::from_secs(5),
         controller_heartbeat_interval: std::time::Duration::from_millis(500),
-        bootstrap_mode,
+        // Placeholder — overwritten after `apply_to` against the final `log_dir`.
+        bootstrap_mode: BootstrapMode::Bootstrap,
         cluster_id: args.cluster_id,
         metrics_listen_addr,
         ..BrokerConfig::default()
@@ -121,6 +120,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(fc) = file_config {
         fc.apply_to(&mut config);
     }
+    // Detect against the *resolved* log_dir so a TOML override picks up
+    // its on-disk state rather than the CLI-default empty path. This is
+    // the difference between a fresh-pod Bootstrap and a rolled-pod
+    // Rejoin against an existing PVC.
+    config.bootstrap_mode = detect_bootstrap_mode(&config.log_dir);
+    tracing::info!(
+        bootstrap_mode = ?config.bootstrap_mode,
+        log_dir = %config.log_dir.display(),
+        "selected bootstrap mode"
+    );
 
     let handle = Broker::start(config).await?;
     tracing::info!(addr = %handle.listen_addr(), "crabka-broker listening");
