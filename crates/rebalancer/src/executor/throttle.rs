@@ -1,5 +1,5 @@
 //! Pure-logic KIP-73 throttle target computation. Given a slice of
-//! Movements, returns the per-broker rate targets and per-topic
+//! `Movement`s, returns the per-broker rate targets and per-topic
 //! replica-list targets that `ApplyThrottle` will write via
 //! `IncrementalAlterConfigs`.
 //!
@@ -21,7 +21,7 @@ pub struct ThrottleTargets {
     pub follower_brokers: BTreeSet<i32>,
     /// Per-topic value for `leader.replication.throttled.replicas`.
     /// Map value is the canonical `partition:broker,partition:broker,...`
-    /// string ready for IncrementalAlterConfigs.
+    /// string ready for `IncrementalAlterConfigs`.
     pub leader_replicas_per_topic: BTreeMap<String, String>,
     /// Per-topic value for `follower.replication.throttled.replicas`.
     pub follower_replicas_per_topic: BTreeMap<String, String>,

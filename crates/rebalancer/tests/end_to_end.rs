@@ -296,6 +296,7 @@ async fn create_proposal_on_balanced_cluster_returns_empty_movements() {
             Extension(state.clone()),
             req(pb::ExecuteProposalRequest {
                 id: proposal.id.clone(),
+                throttle_bytes_per_sec: None,
             }),
         )
         .await,
@@ -372,6 +373,7 @@ async fn get_state_returns_unavailable_before_first_snapshot() {
             Extension(state.clone()),
             req(pb::ExecuteProposalRequest {
                 id: "irrelevant".to_string(),
+                throttle_bytes_per_sec: None,
             }),
         )
         .await,
