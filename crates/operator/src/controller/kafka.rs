@@ -477,13 +477,15 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
     let lp = ListParams::default().labels(&format!("crabka.io/cluster={name}"));
     let pools = pool_api.list(&lp).await?;
 
-    // If validation failed, write an empty ConfigMap (no broker TOML
-    // keys) before adopting pools / patching status. This keeps every
-    // owned object present but unconfigured.
+    // If validation failed, leave the existing ConfigMap untouched —
+    // per the spec, "existing objects are not deleted; surface the
+    // error and wait." Stripping `broker-{id}.toml` keys would crash
+    // a previously-healthy cluster on the next pod restart. The pool
+    // is still adopted so the config-hash annotation reflects the
+    // (invalid) intent, but no roll fires until the user fixes the spec.
     let listener_status: Vec<ListenerStatus>;
     let (listeners_valid_cond, listeners_ready_cond);
     if let Err(e) = validation {
-        apply_cm(&[], &BTreeMap::new()).await?;
         adopt_pools(&pool_api, &obj, pools.iter(), &cfg_hash).await?;
         listener_status = vec![];
         listeners_valid_cond = condition("ListenersValid", "False", e.reason(), &e.message());
@@ -526,10 +528,12 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
             &broker_services,
         ) {
             Err(err) => {
-                // Render an empty ConfigMap (no broker TOML keys) so
-                // brokers don't try to boot with stale data; report
-                // ListenersReady=False with the actionable message.
-                apply_cm(&[], &BTreeMap::new()).await?;
+                // Pending external addresses (cold-start LB provisioning,
+                // node not scheduled yet). Leave the existing ConfigMap
+                // untouched — pods that are already running should not
+                // be disturbed; cold-start pods sit pending the CM,
+                // which arrives once the apiserver populates the
+                // Service status on a subsequent reconcile.
                 adopt_pools(&pool_api, &obj, pools.iter(), &cfg_hash).await?;
                 listener_status = vec![];
                 listeners_valid_cond =

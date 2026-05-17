@@ -446,7 +446,12 @@ async fn kafka_status_synthesized_default_listener_is_valid_and_ready() {
 #[tokio::test]
 async fn kafka_invalid_listener_tls_blocks_broker_configmap_and_sets_conditions() {
     let items = vec![fake_pool_list_item("brokers", "y", "demo", 1, 1)];
-    let (ctx, state) = build_ctx("y", happy_path_rules("demo", "y", &items));
+    // Validation failure must NOT patch the broker-config ConfigMap, so
+    // drop that rule from the happy-path set. Path-substr `/configmaps/`
+    // is unique enough among the rule URIs to identify it.
+    let mut rules = happy_path_rules("demo", "y", &items);
+    rules.retain(|r| !r.path_substr.contains("/configmaps/"));
+    let (ctx, state) = build_ctx("y", rules);
     let mut kafka = kafka_cr("demo", "y");
     kafka.spec.listeners = vec![Listener {
         name: "PLAIN".into(),
@@ -460,27 +465,21 @@ async fn kafka_invalid_listener_tls_blocks_broker_configmap_and_sets_conditions(
 
     let observed = state.take_observed();
 
-    // The ConfigMap PATCH body must have no broker-* keys (validation
-    // failure path renders an empty `data` map).
-    let cm_patch = observed
-        .iter()
-        .find(|r| {
-            r.method() == Method::PATCH
-                && r.uri()
-                    .to_string()
-                    .contains("/configmaps/demo-broker-config")
-        })
-        .expect("configmap PATCH captured");
-    let cm_body: serde_json::Value =
-        serde_json::from_slice(cm_patch.body()).expect("CM body is JSON");
-    if let Some(data) = cm_body["data"].as_object() {
-        for key in data.keys() {
-            assert!(
-                !key.starts_with("broker-"),
-                "validation failure must produce no broker-*.toml keys; got {key:?}"
-            );
-        }
-    }
+    // Validation failure leaves the existing ConfigMap untouched —
+    // stripping `broker-*.toml` keys would crash a previously-healthy
+    // cluster on the next pod restart. Per the spec, "existing objects
+    // are not deleted; surface the error and wait."
+    let cm_patch = observed.iter().find(|r| {
+        r.method() == Method::PATCH
+            && r.uri()
+                .to_string()
+                .contains("/configmaps/demo-broker-config")
+    });
+    assert!(
+        cm_patch.is_none(),
+        "validation failure must NOT patch the broker-config ConfigMap: {:?}",
+        cm_patch.map(|p| p.uri().to_string())
+    );
 
     // Verify no per-broker / bootstrap external Services were rendered:
     for r in &observed {
