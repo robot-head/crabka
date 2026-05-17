@@ -16,3 +16,5 @@
 pub mod pb {
     include!(concat!(env!("OUT_DIR"), "/crabka.rebalancer.v1.rs"));
 }
+
+pub mod model;
