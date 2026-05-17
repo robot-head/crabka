@@ -1214,7 +1214,7 @@ dependencies = [
  "pbjson",
  "prometheus-client",
  "prost",
- "reqwest",
+ "reqwest 0.13.3",
  "serde",
  "serde_json",
  "tempfile",
@@ -3451,7 +3451,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1b96eef35359cc9f4d4087679bacdd8c9fbbb699ce628e8299ea29b375fa01e5"
 dependencies = [
  "anyhow",
- "reqwest",
+ "reqwest 0.12.28",
  "zip-extract",
 ]
 
@@ -3713,6 +3713,37 @@ dependencies = [
  "sync_wrapper",
  "tokio",
  "tokio-native-tls",
+ "tower",
+ "tower-http",
+ "tower-service",
+ "url",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+]
+
+[[package]]
+name = "reqwest"
+version = "0.13.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "62e0021ea2c22aed41653bc7e1419abb2c97e038ff2c33d0e1309e49a97deec0"
+dependencies = [
+ "base64",
+ "bytes",
+ "futures-core",
+ "http",
+ "http-body",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "js-sys",
+ "log",
+ "percent-encoding",
+ "pin-project-lite",
+ "serde",
+ "serde_json",
+ "sync_wrapper",
+ "tokio",
  "tower",
  "tower-http",
  "tower-service",
