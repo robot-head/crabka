@@ -21,3 +21,4 @@ pub mod model;
 pub mod goals;
 pub mod optimizer;
 pub mod ingest;
+pub mod api;
