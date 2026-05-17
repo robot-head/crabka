@@ -1,13 +1,14 @@
 use std::fs;
 use std::path::Path;
 
-use crate::crd::Kafka;
+use crate::crd::{Kafka, KafkaNodePool};
 
 /// Write every CRD this operator owns into `out_dir` as
 /// `<group>_<plural>.yaml`. Existing files are overwritten.
 pub fn write_all(out_dir: &Path) -> anyhow::Result<()> {
     fs::create_dir_all(out_dir)?;
     write_one::<Kafka>(out_dir)?;
+    write_one::<KafkaNodePool>(out_dir)?;
     Ok(())
 }
 
@@ -31,14 +32,17 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn writes_kafka_crd_file() {
+    fn writes_kafka_and_pool_crd_files() {
         let dir = tempdir().unwrap();
         write_all(dir.path()).unwrap();
-        let f = dir.path().join("crabka.io_kafkas.yaml");
-        assert!(f.exists());
-        let content = std::fs::read_to_string(&f).unwrap();
-        assert!(content.contains("kind: CustomResourceDefinition"));
-        assert!(content.contains("group: crabka.io"));
-        assert!(content.contains("plural: kafkas"));
+        let kf = dir.path().join("crabka.io_kafkas.yaml");
+        let pf = dir.path().join("crabka.io_kafkanodepools.yaml");
+        assert!(kf.exists());
+        assert!(pf.exists());
+        let kafka = std::fs::read_to_string(&kf).unwrap();
+        assert!(kafka.contains("plural: kafkas"));
+        let pool = std::fs::read_to_string(&pf).unwrap();
+        assert!(pool.contains("plural: kafkanodepools"));
+        assert!(pool.contains("- knp"));
     }
 }

@@ -111,7 +111,9 @@ jobs:
           kind load docker-image crabka-broker:e2e --name crabka-e2e
 
       - name: Install CRDs
-        run: kubectl apply -f deploy/crds/crabka.io_kafkas.yaml
+        run: |
+          kubectl apply -f deploy/crds/crabka.io_kafkas.yaml
+          kubectl apply -f deploy/crds/crabka.io_kafkanodepools.yaml
 
       - name: Install chart
         run: |
@@ -129,7 +131,7 @@ jobs:
         run: |
           kubectl rollout status -n crabka-operator deploy/operator-crabka-operator --timeout=240s
 
-      - name: Apply a placeholder Kafka CR
+      - name: Apply Kafka + KafkaNodePool
         run: |
           cat <<EOF | kubectl apply -f -
           apiVersion: crabka.io/v1alpha1
@@ -139,6 +141,18 @@ jobs:
             namespace: default
           spec:
             kafkaVersion: "0.1.1"
+          ---
+          apiVersion: crabka.io/v1alpha1
+          kind: KafkaNodePool
+          metadata:
+            name: brokers
+            namespace: default
+            labels:
+              crabka.io/cluster: demo
+          spec:
+            roles: [Controller, Broker]
+            replicas: 1
+            nodeIdStart: 0
           EOF
 
       - name: Wait for Ready=True
@@ -154,25 +168,28 @@ jobs:
           done
           echo "::error::Kafka 'demo' did not become Ready in 5 minutes"
           kubectl describe kafka demo -n default
-          kubectl describe sts demo-broker -n default
-          kubectl logs -n default demo-broker-0 -c broker --tail=200 || true
+          kubectl describe kafkanodepool brokers -n default
+          kubectl describe sts demo-brokers -n default
+          kubectl logs -n default demo-brokers-0 -c broker --tail=200 || true
           exit 1
 
       - name: Smoke — broker binary launched in pod
         run: |
-          kubectl exec -n default demo-broker-0 -c broker -- /usr/bin/crabka-broker --version
-          kubectl logs -n default demo-broker-0 -c broker | grep -q 'crabka-broker listening'
+          kubectl exec -n default demo-brokers-0 -c broker -- /usr/bin/crabka-broker --version
+          kubectl logs -n default demo-brokers-0 -c broker | grep -q 'crabka-broker listening'
 
       - name: Garbage-collection on Kafka delete
         run: |
           kubectl delete kafka demo -n default --wait=false
           for i in $(seq 1 30); do
-            remaining=$(kubectl get sts,svc,cm,secret -n default -l app.kubernetes.io/instance=demo -o name 2>/dev/null | wc -l)
-            echo "attempt $i: remaining=$remaining"
-            if [ "$remaining" = "0" ]; then exit 0; fi
+            knp=$(kubectl get knp -n default -o name 2>/dev/null | wc -l)
+            owned=$(kubectl get sts,svc,cm,secret -n default -l app.kubernetes.io/instance=demo -o name 2>/dev/null | wc -l)
+            echo "attempt $i: knp=$knp owned=$owned"
+            if [ "$knp" = "0" ] && [ "$owned" = "0" ]; then exit 0; fi
             sleep 2
           done
           echo "::error::owned objects not GC'd within 60s"
+          kubectl get knp -n default
           kubectl get sts,svc,cm,secret -n default -l app.kubernetes.io/instance=demo
           exit 1
 
@@ -209,9 +226,10 @@ jobs:
               "operator logs|kubectl logs -n crabka-operator deploy/operator-crabka-operator --tail=500" \
               "operator logs (previous)|kubectl logs -n crabka-operator deploy/operator-crabka-operator --tail=500 --previous" \
               "kafka CR|kubectl get kafka demo -n default -o yaml" \
-              "broker sts|kubectl get sts demo-broker -n default -o yaml" \
-              "broker pod logs|kubectl logs -n default demo-broker-0 -c broker --tail=500 || true" \
-              "broker init logs|kubectl logs -n default demo-broker-0 -c format --tail=500 || true" \
+              "kafkanodepool|kubectl get knp -A -o yaml" \
+              "broker sts|kubectl get sts demo-brokers -n default -o yaml" \
+              "broker pod logs|kubectl logs -n default demo-brokers-0 -c broker --tail=500 || true" \
+              "broker init logs|kubectl logs -n default demo-brokers-0 -c format --tail=500 || true" \
               "owned objects|kubectl get sts,svc,cm,secret -n default -l app.kubernetes.io/instance=demo -o yaml" \
               "kind node images|docker exec crabka-e2e-control-plane crictl images" \
               "host images|docker images"

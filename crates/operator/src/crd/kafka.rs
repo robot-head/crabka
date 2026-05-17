@@ -1,13 +1,10 @@
-use k8s_openapi::api::core::v1::ResourceRequirements;
 use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// Crabka cluster spec.
-///
-/// Slice 19 introduces `replicas`, `image`, and `resources` alongside the
-/// `kafka_version` field; multi-broker support arrives in slice 20 via
-/// `KafkaNodePool`.
+/// Crabka cluster spec. Slice 20: spec carries only the version label;
+/// broker pods are described by sibling `KafkaNodePool`s labeled
+/// `crabka.io/cluster=<this name>`.
 #[derive(CustomResource, Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[kube(
     group = "crabka.io",
@@ -22,28 +19,9 @@ use serde::{Deserialize, Serialize};
 )]
 #[serde(rename_all = "camelCase")]
 pub struct KafkaSpec {
-    /// Crabka version label (informational; image tag governs the actual
-    /// binary version).
+    /// Crabka version label, propagated to all pool pods via the
+    /// `app.kubernetes.io/version` label.
     pub kafka_version: String,
-
-    /// Number of broker replicas. Slice 19 supports `1` only;
-    /// `KafkaNodePool` (slice 20) generalizes this.
-    #[serde(default = "default_replicas")]
-    #[schemars(range(min = 1, max = 1))]
-    pub replicas: i32,
-
-    /// Container image. Reconciler falls back to the operator's
-    /// `--default-broker-image` flag if absent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub image: Option<String>,
-
-    /// Resource requests / limits applied to the broker container.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resources: Option<ResourceRequirements>,
-}
-
-const fn default_replicas() -> i32 {
-    1
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
@@ -97,9 +75,6 @@ mod tests {
             "demo",
             KafkaSpec {
                 kafka_version: "0.1.1".into(),
-                replicas: 1,
-                image: None,
-                resources: None,
             },
         );
         let json = serde_json::to_string(&k).unwrap();
@@ -112,11 +87,9 @@ mod tests {
     }
 
     #[test]
-    fn spec_defaults_replicas_to_one() {
+    fn spec_only_carries_kafka_version() {
         let json = r#"{"kafkaVersion":"0.1.1"}"#;
         let spec: KafkaSpec = serde_json::from_str(json).unwrap();
-        assert_eq!(spec.replicas, 1);
-        assert!(spec.image.is_none());
-        assert!(spec.resources.is_none());
+        assert_eq!(spec.kafka_version, "0.1.1");
     }
 }
