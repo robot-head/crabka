@@ -210,10 +210,10 @@ protocol = "Plaintext"
     fn apply_to_does_not_clobber_non_default_broker_id() {
         use crate::config::BrokerConfig;
 
-        let src = r#"broker_id = 42"#;
+        let src = r"broker_id = 42";
         let file: FileConfig = toml::from_str(src).unwrap();
-        let mut cfg = BrokerConfig::default();
-        cfg.broker_id = 7; // simulate CLI --broker-id 7 already applied
+        // simulate CLI --broker-id 7 already applied
+        let mut cfg = BrokerConfig { broker_id: 7, ..BrokerConfig::default() };
 
         file.apply_to(&mut cfg);
 
@@ -225,7 +225,7 @@ protocol = "Plaintext"
     fn apply_to_fills_in_default_broker_id() {
         use crate::config::BrokerConfig;
 
-        let src = r#"broker_id = 42"#;
+        let src = r"broker_id = 42";
         let file: FileConfig = toml::from_str(src).unwrap();
         let mut cfg = BrokerConfig::default(); // broker_id == default (1)
 
@@ -239,13 +239,15 @@ protocol = "Plaintext"
         use crate::config::BrokerConfig;
 
         let file: FileConfig = toml::from_str("").unwrap();
-        let mut cfg = BrokerConfig::default();
-        cfg.listeners = vec![crate::config::ListenerSpec {
-            name: "X".into(),
-            bind_addr: "0.0.0.0:9094".parse().unwrap(),
-            advertised: "h:9094".into(),
-            protocol: crabka_security::ListenerProtocol::Plaintext,
-        }];
+        let mut cfg = BrokerConfig {
+            listeners: vec![crate::config::ListenerSpec {
+                name: "X".into(),
+                bind_addr: "0.0.0.0:9094".parse().unwrap(),
+                advertised: "h:9094".into(),
+                protocol: crabka_security::ListenerProtocol::Plaintext,
+            }],
+            ..BrokerConfig::default()
+        };
 
         file.apply_to(&mut cfg);
 
