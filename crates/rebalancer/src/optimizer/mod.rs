@@ -52,14 +52,18 @@ pub fn optimize(
     //    the next goal sees it.
     let mut working = state.clone();
 
-    // (topic, partition) → Movement. Last writer wins on coalesce.
-    let mut accum: HashMap<(String, i32), Movement> = HashMap::new();
+    // (topic, partition) → (Movement, priority of the goal that wrote it).
+    // Last writer wins on coalesce — and the priority tag follows the
+    // last writer, so a soft goal overwriting a hard goal's slot
+    // demotes that slot to soft for truncation purposes.
+    let mut accum: HashMap<(String, i32), (Movement, GoalPriority)> = HashMap::new();
     let mut goals_applied: Vec<String> = Vec::new();
     let mut hard_overflow: Option<(String, usize)> = None;
 
     for (_idx, g) in &ordered {
         goals_applied.push(g.name().to_string());
         let movements = g.propose(&working, ctx);
+        let prio = g.priority();
         for m in movements {
             if validate_movement(&working, &m).is_err() {
                 // Silently drop — the goal will see the unchanged state next iter.
@@ -68,13 +72,11 @@ pub fn optimize(
             // Apply to working state immediately.
             apply_movement(&mut working, &m);
             let key = (m.topic.clone(), m.partition);
-            accum.insert(key, m);
+            accum.insert(key, (m, prio));
         }
-        if accum.len() > ctx.max_movements_per_proposal {
+        if accum.len() > ctx.max_movements_per_proposal && matches!(prio, GoalPriority::Hard) {
             let extra = accum.len() - ctx.max_movements_per_proposal;
-            if matches!(g.priority(), GoalPriority::Hard) {
-                hard_overflow = Some((g.name().to_string(), extra));
-            }
+            hard_overflow = Some((g.name().to_string(), extra));
         }
     }
 
@@ -86,13 +88,44 @@ pub fn optimize(
         });
     }
 
-    // 3. Order the accumulated movements deterministically: by (topic, partition).
-    let mut movements: Vec<Movement> = accum.into_values().collect();
-    movements.sort_by_key(|m| (m.topic.clone(), m.partition));
-    // 4. Truncate to cap.
-    movements.truncate(ctx.max_movements_per_proposal);
+    // 3. Partition accumulated movements by priority so truncation can
+    //    drop soft-goal movements first (spec invariant).
+    let cap = ctx.max_movements_per_proposal;
+    let (mut hard_mvs, mut soft_mvs): (Vec<Movement>, Vec<Movement>) =
+        accum
+            .into_values()
+            .fold((Vec::new(), Vec::new()), |(mut h, mut s), (m, p)| {
+                match p {
+                    GoalPriority::Hard => h.push(m),
+                    GoalPriority::Soft => s.push(m),
+                }
+                (h, s)
+            });
 
-    // 5. Compute summary.
+    // Belt-and-suspenders: the per-iteration check above should have
+    // already caught this, but reassert here in case future
+    // refactorings change accumulation order.
+    if hard_mvs.len() > cap {
+        let extra = hard_mvs.len() - cap;
+        return Err(OptimizeError::HardGoalUnsatisfied {
+            goal: "<post-loop>".to_string(),
+            extra,
+            cap,
+        });
+    }
+
+    // 4. Keep all hard movements + as many soft as fit under the cap.
+    let soft_room = cap - hard_mvs.len();
+    // Sort soft deterministically before slicing so truncation is stable.
+    soft_mvs.sort_by(|a, b| (a.topic.as_str(), a.partition).cmp(&(b.topic.as_str(), b.partition)));
+    soft_mvs.truncate(soft_room);
+
+    hard_mvs.append(&mut soft_mvs);
+    let mut movements = hard_mvs;
+    // 5. Final deterministic order: by (topic, partition).
+    movements.sort_by(|a, b| (a.topic.as_str(), a.partition).cmp(&(b.topic.as_str(), b.partition)));
+
+    // 6. Compute summary.
     let summary = compute_summary(state, &working, &movements);
 
     Ok(OptimizeOutput {
@@ -319,6 +352,115 @@ mod tests {
         let goals: Vec<&dyn Goal> = vec![&bad];
         let out = optimize(&state(), &goals, &ctx()).unwrap();
         assert!(out.proposal.movements.is_empty());
+    }
+
+    #[test]
+    fn truncation_protects_hard_goal_movements() {
+        // Regression test for slice 43a review finding: prior to the
+        // priority-aware truncation, sort-then-truncate could drop
+        // hard-goal movements whose (topic, partition) sorted later
+        // than soft-goal movements.
+        //
+        // Scenario: cap = 3, 2 hard movements with keys ("z", 0..1),
+        // 3 soft movements with keys ("a", 0..2). Pre-fix output kept
+        // ("a", 0..2) and dropped the hard movements. Post-fix output
+        // keeps both ("z", _) movements + exactly one ("a", _).
+        let brokers = vec![
+            BrokerView {
+                id: 1,
+                host: "h1".into(),
+                port: 9092,
+                rack: None,
+            },
+            BrokerView {
+                id: 2,
+                host: "h2".into(),
+                port: 9092,
+                rack: None,
+            },
+        ];
+        let mut partitions = Vec::new();
+        for p in 0..3 {
+            partitions.push(PartitionView {
+                topic: "a".into(),
+                partition: p,
+                replicas: vec![1, 2],
+                leader: 2,
+                isr: vec![1, 2],
+            });
+        }
+        for p in 0..2 {
+            partitions.push(PartitionView {
+                topic: "z".into(),
+                partition: p,
+                replicas: vec![1, 2],
+                leader: 2,
+                isr: vec![1, 2],
+            });
+        }
+        let s = ClusterState {
+            cluster_id: None,
+            snapshot_at_ms: 0,
+            brokers,
+            partitions,
+            in_flight_reassignments: vec![],
+        };
+
+        let hard_movements = (0..2)
+            .map(|p| Movement {
+                topic: "z".into(),
+                partition: p,
+                old_replicas: vec![1, 2],
+                new_replicas: vec![1, 2],
+                old_leader: 2,
+                new_leader: 1,
+            })
+            .collect();
+        let soft_movements = (0..3)
+            .map(|p| Movement {
+                topic: "a".into(),
+                partition: p,
+                old_replicas: vec![1, 2],
+                new_replicas: vec![1, 2],
+                old_leader: 2,
+                new_leader: 1,
+            })
+            .collect();
+
+        let hard = FixedGoal {
+            name: "hard",
+            priority: GoalPriority::Hard,
+            movements: hard_movements,
+        };
+        let soft = FixedGoal {
+            name: "soft",
+            priority: GoalPriority::Soft,
+            movements: soft_movements,
+        };
+        let ctx = GoalContext {
+            imbalance_threshold_pct: 10,
+            max_movements_per_proposal: 3,
+        };
+        let goals: Vec<&dyn Goal> = vec![&hard, &soft];
+        let out = optimize(&s, &goals, &ctx).unwrap();
+
+        assert_eq!(out.proposal.movements.len(), 3);
+        let z_count = out
+            .proposal
+            .movements
+            .iter()
+            .filter(|m| m.topic == "z")
+            .count();
+        let a_count = out
+            .proposal
+            .movements
+            .iter()
+            .filter(|m| m.topic == "a")
+            .count();
+        // Both hard movements must survive.
+        assert_eq!(z_count, 2, "both hard ('z', _) movements must be kept");
+        // Exactly one soft movement fits in the remaining slot.
+        assert_eq!(a_count, 1, "exactly one soft ('a', _) movement should fit");
     }
 
     #[test]
