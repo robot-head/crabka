@@ -5,3 +5,9 @@
 //! and the surrounding roadmap doc for the full slice plan.
 
 // Module mounts come online as later tasks land them.
+
+/// Generated protobuf + Connect server stubs. The actual content lives
+/// in `OUT_DIR/crabka.rebalancer.v1.rs` and is produced by `build.rs`.
+pub mod pb {
+    include!(concat!(env!("OUT_DIR"), "/crabka.rebalancer.v1.rs"));
+}
