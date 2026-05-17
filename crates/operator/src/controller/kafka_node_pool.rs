@@ -110,9 +110,15 @@ if [ ! -f /var/lib/crabka/data/.formatted ]; then\n\
 fi\n\
 printf '%s' \"$NODE_ID\" > /var/lib/crabka/data/.node-id\n";
 
-// Main script: read the persisted node id and exec the broker.
+// Main script: copy the per-broker TOML from the ConfigMap volume into a
+// writable tmpfs path (the root FS is read-only), then exec the broker
+// with `--config-file` so it picks up advertised listeners and all other
+// per-broker config from the rendered TOML.
 const MAIN_SCRIPT: &str = "set -eu\n\
-exec /usr/bin/crabka-broker \\\n  --listen-addr=0.0.0.0:9092 \\\n  --log-dir=/var/lib/crabka/data \\\n  --broker-id=\"$(cat /var/lib/crabka/data/.node-id)\"\n";
+NODE_ID=\"$(cat /var/lib/crabka/data/.node-id)\"\n\
+mkdir -p /run/crabka\n\
+cp /etc/crabka/config/broker-${NODE_ID}.toml /run/crabka/broker.toml\n\
+exec /usr/bin/crabka-broker \\\n  --config-file=/run/crabka/broker.toml \\\n  --broker-id=\"${NODE_ID}\"\n";
 
 fn render_init_container(
     broker_image: &str,
@@ -140,7 +146,6 @@ fn render_init_container(
 fn render_broker_container(
     broker_image: &str,
     secret_name: &str,
-    advertised: &str,
     resources: &ResourceRequirements,
 ) -> serde_json::Value {
     json!({
@@ -151,8 +156,7 @@ fn render_broker_container(
         "env": [
             { "name": "POD_NAME", "valueFrom": { "fieldRef": { "fieldPath": "metadata.name" } } },
             { "name": "POD_NAMESPACE", "valueFrom": { "fieldRef": { "fieldPath": "metadata.namespace" } } },
-            { "name": "CRABKA_CLUSTER_ID", "valueFrom": { "secretKeyRef": { "name": secret_name, "key": "clusterId" } } },
-            { "name": "CRABKA_ADVERTISED_LISTENER", "value": advertised }
+            { "name": "CRABKA_CLUSTER_ID", "valueFrom": { "secretKeyRef": { "name": secret_name, "key": "clusterId" } } }
         ],
         "ports": [{ "containerPort": BROKER_PORT, "name": "kafka-internal", "protocol": "TCP" }],
         "readinessProbe": {
@@ -166,7 +170,10 @@ fn render_broker_container(
             "periodSeconds": 10
         },
         "resources": resources,
-        "volumeMounts": [{ "name": "data", "mountPath": "/var/lib/crabka/data" }],
+        "volumeMounts": [
+            { "name": "data", "mountPath": "/var/lib/crabka/data" },
+            { "name": "broker-config", "mountPath": "/etc/crabka/config", "readOnly": true }
+        ],
         "securityContext": {
             "allowPrivilegeEscalation": false,
             "readOnlyRootFilesystem": true,
@@ -175,21 +182,27 @@ fn render_broker_container(
     })
 }
 
-/// Build the `StatefulSet`'s pod-volume entry and (optionally) its
+/// Build the `StatefulSet`'s pod-volume entries and (optionally) its
 /// `volumeClaimTemplates` based on the pool's `Storage` setting.
 /// Returns `(pod_volumes_json, volume_claim_templates_json_or_none)`.
 ///
-/// For `PersistentClaim` the returned `volumes` array is empty (no
-/// `data` entry): the `StatefulSet` controller mounts the PVC into the
-/// pod under the same name as the template automatically, so an
-/// explicit pod-volume entry would conflict.
+/// The returned `volumes` array always includes the `broker-config`
+/// `ConfigMap` volume (unconditional). For `PersistentClaim` the `data`
+/// volume entry is omitted: the `StatefulSet` controller mounts the
+/// PVC into the pod under the same name as the template automatically,
+/// so an explicit pod-volume entry would conflict.
 fn render_storage(
     storage: Option<&Storage>,
     pod_labels: &BTreeMap<String, String>,
+    parent_name: &str,
 ) -> (serde_json::Value, Option<serde_json::Value>) {
+    let broker_config_vol = json!({
+        "name": "broker-config",
+        "configMap": { "name": format!("{parent_name}-broker-config") }
+    });
     match storage {
         None | Some(Storage::Ephemeral) => {
-            let volumes = json!([{ "name": "data", "emptyDir": {} }]);
+            let volumes = json!([{ "name": "data", "emptyDir": {} }, broker_config_vol]);
             (volumes, None)
         }
         Some(Storage::PersistentClaim(pc)) => {
@@ -208,7 +221,7 @@ fn render_storage(
             if let Some(class) = pc.class.as_ref() {
                 template["spec"]["storageClassName"] = serde_json::Value::String(class.clone());
             }
-            (json!([]), Some(template))
+            (json!([broker_config_vol]), Some(template))
         }
     }
 }
@@ -271,11 +284,9 @@ pub(crate) fn render_statefulset(
     let secret_name = format!("{parent_name}-cluster-id");
     let service_name = format!("{parent_name}-broker-headless");
     let sts_name = format!("{parent_name}-{pool_name}");
-    let advertised =
-        format!("$(POD_NAME).{service_name}.$(POD_NAMESPACE).svc.cluster.local:{BROKER_PORT}");
 
     let init = render_init_container(broker_image, &secret_name, pool.spec.node_id_start);
-    let main = render_broker_container(broker_image, &secret_name, &advertised, &resources);
+    let main = render_broker_container(broker_image, &secret_name, &resources);
 
     // Merge user-provided pod metadata under operator-owned labels.
     // Operator labels win collisions; user labels fill in the rest.
@@ -340,7 +351,7 @@ pub(crate) fn render_statefulset(
     }
 
     let (pod_volumes, volume_claim_templates) =
-        render_storage(pool.spec.storage.as_ref(), &pod_labels);
+        render_storage(pool.spec.storage.as_ref(), &pod_labels, &parent_name);
     let retention_policy = render_pvc_retention_policy(pool.spec.storage.as_ref());
 
     let mut sts_spec = json!({
