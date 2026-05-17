@@ -136,6 +136,10 @@ pub fn optimize(
             goals_applied,
             summary,
             movements,
+            started_at_ms: 0,
+            terminated_at_ms: 0,
+            failure_reason: None,
+            throttle_bytes_per_sec: 0,
         },
         state_after: working,
     })

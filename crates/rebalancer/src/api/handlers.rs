@@ -104,6 +104,10 @@ pub fn proposal_to_proto(p: &crate::model::Proposal) -> pb::Proposal {
                 new_leader: m.new_leader,
             })
             .collect(),
+        started_at_ms: p.started_at_ms,
+        terminated_at_ms: p.terminated_at_ms,
+        failure_reason: p.failure_reason.clone(),
+        throttle_bytes_per_sec: p.throttle_bytes_per_sec,
     }
 }
 
