@@ -31,7 +31,7 @@ use crate::controller::common::{
     self, APP_LABEL, BROKER_PORT, DEFAULT_BROKER_IMAGE, ReconcileError, apply_object,
     common_labels, condition, derive_status, owner_ref,
 };
-use crate::crd::{Kafka, KafkaCondition, KafkaNodePool, KafkaNodePoolStatus, NodeRole};
+use crate::crd::{Kafka, KafkaCondition, KafkaNodePool, KafkaNodePoolStatus, NodeRole, Storage};
 
 /// Validation errors for a `KafkaNodePool`. Each variant maps to a
 /// distinct condition reason; the operator surfaces the variant as
@@ -154,6 +154,69 @@ fn render_broker_container(
     })
 }
 
+/// Build the `StatefulSet`'s pod-volume entry and (optionally) its
+/// `volumeClaimTemplates` based on the pool's `Storage` setting.
+/// Returns `(pod_volumes_json, volume_claim_templates_json_or_none)`.
+///
+/// For `PersistentClaim` the returned `volumes` array is empty (no
+/// `data` entry): the `StatefulSet` controller mounts the PVC into the
+/// pod under the same name as the template automatically, so an
+/// explicit pod-volume entry would conflict.
+fn render_storage(
+    storage: Option<&Storage>,
+    pod_labels: &BTreeMap<String, String>,
+) -> (serde_json::Value, Option<serde_json::Value>) {
+    match storage {
+        None | Some(Storage::Ephemeral) => {
+            let volumes = json!([{ "name": "data", "emptyDir": {} }]);
+            (volumes, None)
+        }
+        Some(Storage::PersistentClaim(pc)) => {
+            let mut template = json!({
+                "metadata": {
+                    "name": "data",
+                    "labels": pod_labels,
+                },
+                "spec": {
+                    "accessModes": ["ReadWriteOnce"],
+                    "resources": {
+                        "requests": { "storage": pc.size }
+                    }
+                }
+            });
+            if let Some(class) = pc.class.as_ref() {
+                template["spec"]["storageClassName"] = serde_json::Value::String(class.clone());
+            }
+            (json!([]), Some(template))
+        }
+    }
+}
+
+/// Build the `StatefulSet`'s `persistentVolumeClaimRetentionPolicy`
+/// block when storage is `PersistentClaim`. Returns `None` for
+/// `Ephemeral` (no PVCs to retain).
+fn render_pvc_retention_policy(storage: Option<&Storage>) -> Option<serde_json::Value> {
+    match storage {
+        Some(Storage::PersistentClaim(pc)) => Some(json!({
+            "whenDeleted": if pc.delete_claim { "Delete" } else { "Retain" },
+            "whenScaled": "Retain",
+        })),
+        _ => None,
+    }
+}
+
+/// Overwrite `pod_spec`'s `volumes` field with the rendered
+/// `pod_volumes`. The `pod_spec` template already carries an emptyDir
+/// `data` entry from the inline `json!` block; this replaces it so the
+/// `PersistentClaim` path doesn't double-declare `data`.
+fn pod_spec_with_data_volume(
+    mut pod_spec: serde_json::Value,
+    pod_volumes: serde_json::Value,
+) -> serde_json::Value {
+    pod_spec["volumes"] = pod_volumes;
+    pod_spec
+}
+
 /// Render the `StatefulSet` for a pool. Naming: `<parent>-<pool>`,
 /// served from the parent's shared headless `Service`
 /// `<parent>-broker-headless`. Owner-ref points to the pool, not the
@@ -255,6 +318,27 @@ pub(crate) fn render_statefulset(
         }
     }
 
+    let (pod_volumes, volume_claim_templates) =
+        render_storage(pool.spec.storage.as_ref(), &pod_labels);
+    let retention_policy = render_pvc_retention_policy(pool.spec.storage.as_ref());
+
+    let mut sts_spec = json!({
+        "serviceName": service_name,
+        "replicas": pool.spec.replicas,
+        "podManagementPolicy": "Parallel",
+        "selector": { "matchLabels": selector },
+        "template": {
+            "metadata": template_meta,
+            "spec": pod_spec_with_data_volume(pod_spec, pod_volumes),
+        }
+    });
+    if let Some(vct) = volume_claim_templates {
+        sts_spec["volumeClaimTemplates"] = json!([vct]);
+    }
+    if let Some(policy) = retention_policy {
+        sts_spec["persistentVolumeClaimRetentionPolicy"] = policy;
+    }
+
     let sts: StatefulSet = serde_json::from_value(json!({
         "metadata": {
             "name": sts_name,
@@ -262,16 +346,7 @@ pub(crate) fn render_statefulset(
             "labels": labels,
             "ownerReferences": [owner_ref::<KafkaNodePool>(pool)?],
         },
-        "spec": {
-            "serviceName": service_name,
-            "replicas": pool.spec.replicas,
-            "podManagementPolicy": "Parallel",
-            "selector": { "matchLabels": selector },
-            "template": {
-                "metadata": template_meta,
-                "spec": pod_spec,
-            }
-        }
+        "spec": sts_spec,
     }))?;
     Ok(sts)
 }
@@ -433,7 +508,9 @@ pub fn error_policy(_obj: Arc<KafkaNodePool>, err: &ReconcileError, _ctx: Arc<Co
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::{KafkaNodePoolSpec, KafkaSpec, MetadataTemplate, PodTemplate};
+    use crate::crd::{
+        KafkaNodePoolSpec, KafkaSpec, MetadataTemplate, PersistentClaimSpec, PodTemplate, Storage,
+    };
     use std::collections::BTreeMap;
 
     fn parent_fixture(name: &str) -> Kafka {
@@ -760,5 +837,169 @@ mod tests {
         if let Some(anno) = sts.spec.unwrap().template.metadata.unwrap().annotations {
             assert!(!anno.contains_key("crabka.io/config-hash"));
         }
+    }
+
+    #[test]
+    fn render_statefulset_emptydir_when_storage_none() {
+        let pool = pool_fixture("brokers", "demo", 1);
+        let sts = render_statefulset(&parent_fixture("demo"), &pool, "img:1").unwrap();
+        let spec = sts.spec.unwrap();
+        assert!(
+            spec.volume_claim_templates.is_none()
+                || spec.volume_claim_templates.as_ref().unwrap().is_empty()
+        );
+        let volumes = spec.template.spec.unwrap().volumes.unwrap();
+        let data_vol = volumes
+            .iter()
+            .find(|v| v.name == "data")
+            .expect("data volume present");
+        assert!(
+            data_vol.empty_dir.is_some(),
+            "data volume must be emptyDir; got {data_vol:?}"
+        );
+    }
+
+    #[test]
+    fn render_statefulset_emptydir_when_storage_ephemeral() {
+        let mut pool = pool_fixture("brokers", "demo", 1);
+        pool.spec.storage = Some(Storage::Ephemeral);
+        let sts = render_statefulset(&parent_fixture("demo"), &pool, "img:1").unwrap();
+        let spec = sts.spec.unwrap();
+        assert!(
+            spec.volume_claim_templates.is_none()
+                || spec.volume_claim_templates.as_ref().unwrap().is_empty()
+        );
+        let volumes = spec.template.spec.unwrap().volumes.unwrap();
+        let data_vol = volumes.iter().find(|v| v.name == "data").unwrap();
+        assert!(data_vol.empty_dir.is_some());
+    }
+
+    #[test]
+    fn render_statefulset_volume_claim_template_when_persistent() {
+        let mut pool = pool_fixture("brokers", "demo", 1);
+        pool.spec.storage = Some(Storage::PersistentClaim(PersistentClaimSpec {
+            size: "10Gi".into(),
+            class: Some("fast-ssd".into()),
+            delete_claim: false,
+        }));
+        let sts = render_statefulset(&parent_fixture("demo"), &pool, "img:1").unwrap();
+        let spec = sts.spec.unwrap();
+        let volumes = spec.template.spec.as_ref().unwrap().volumes.as_ref();
+        if let Some(vols) = volumes {
+            assert!(
+                vols.iter()
+                    .all(|v| v.name != "data" || v.empty_dir.is_none()),
+                "expected no emptyDir for data; got {vols:?}"
+            );
+        }
+        let vct = spec.volume_claim_templates.unwrap();
+        assert_eq!(vct.len(), 1);
+        let data_pvc = &vct[0];
+        assert_eq!(data_pvc.metadata.name.as_deref(), Some("data"));
+        let pvc_spec = data_pvc.spec.as_ref().unwrap();
+        assert_eq!(
+            pvc_spec.access_modes.as_deref(),
+            Some(["ReadWriteOnce".to_string()].as_slice())
+        );
+        let req = pvc_spec
+            .resources
+            .as_ref()
+            .unwrap()
+            .requests
+            .as_ref()
+            .unwrap();
+        assert_eq!(req.get("storage").map(|q| q.0.as_str()), Some("10Gi"));
+        assert_eq!(pvc_spec.storage_class_name.as_deref(), Some("fast-ssd"));
+    }
+
+    #[test]
+    fn render_statefulset_no_storage_class_when_class_absent() {
+        let mut pool = pool_fixture("brokers", "demo", 1);
+        pool.spec.storage = Some(Storage::PersistentClaim(PersistentClaimSpec {
+            size: "1Gi".into(),
+            class: None,
+            delete_claim: false,
+        }));
+        let sts = render_statefulset(&parent_fixture("demo"), &pool, "img:1").unwrap();
+        let pvc_spec = sts.spec.unwrap().volume_claim_templates.unwrap()[0]
+            .spec
+            .clone()
+            .unwrap();
+        assert!(
+            pvc_spec.storage_class_name.is_none(),
+            "must omit storageClassName when class is None"
+        );
+    }
+
+    #[test]
+    fn render_statefulset_pvc_labels_inherit_pod_labels() {
+        let mut pool = pool_fixture("brokers", "demo", 1);
+        pool.spec.storage = Some(Storage::PersistentClaim(PersistentClaimSpec {
+            size: "1Gi".into(),
+            class: None,
+            delete_claim: false,
+        }));
+        let sts = render_statefulset(&parent_fixture("demo"), &pool, "img:1").unwrap();
+        let labels = sts.spec.unwrap().volume_claim_templates.unwrap()[0]
+            .metadata
+            .labels
+            .clone()
+            .expect("PVC has labels");
+        assert_eq!(
+            labels.get("app.kubernetes.io/instance").map(String::as_str),
+            Some("demo")
+        );
+        assert_eq!(
+            labels.get("crabka.io/pool").map(String::as_str),
+            Some("brokers")
+        );
+    }
+
+    #[test]
+    fn render_statefulset_retention_policy_delete_when_delete_claim_true() {
+        let mut pool = pool_fixture("brokers", "demo", 1);
+        pool.spec.storage = Some(Storage::PersistentClaim(PersistentClaimSpec {
+            size: "1Gi".into(),
+            class: None,
+            delete_claim: true,
+        }));
+        let sts = render_statefulset(&parent_fixture("demo"), &pool, "img:1").unwrap();
+        let policy = sts
+            .spec
+            .unwrap()
+            .persistent_volume_claim_retention_policy
+            .unwrap();
+        assert_eq!(policy.when_deleted.as_deref(), Some("Delete"));
+        assert_eq!(policy.when_scaled.as_deref(), Some("Retain"));
+    }
+
+    #[test]
+    fn render_statefulset_retention_policy_retain_when_delete_claim_false() {
+        let mut pool = pool_fixture("brokers", "demo", 1);
+        pool.spec.storage = Some(Storage::PersistentClaim(PersistentClaimSpec {
+            size: "1Gi".into(),
+            class: None,
+            delete_claim: false,
+        }));
+        let sts = render_statefulset(&parent_fixture("demo"), &pool, "img:1").unwrap();
+        let policy = sts
+            .spec
+            .unwrap()
+            .persistent_volume_claim_retention_policy
+            .unwrap();
+        assert_eq!(policy.when_deleted.as_deref(), Some("Retain"));
+        assert_eq!(policy.when_scaled.as_deref(), Some("Retain"));
+    }
+
+    #[test]
+    fn render_statefulset_no_retention_policy_when_ephemeral() {
+        let pool = pool_fixture("brokers", "demo", 1);
+        let sts = render_statefulset(&parent_fixture("demo"), &pool, "img:1").unwrap();
+        assert!(
+            sts.spec
+                .unwrap()
+                .persistent_volume_claim_retention_policy
+                .is_none()
+        );
     }
 }
