@@ -779,6 +779,7 @@ impl Broker {
             heartbeat_interval: config.controller_heartbeat_interval,
             client_id: format!("crabka-broker-{}-controller", config.broker_id),
             bootstrap_mode: config.bootstrap_mode,
+            cluster_id: config.cluster_id,
             dialer: raft_dialer,
             handshake: handshake_opt,
         };

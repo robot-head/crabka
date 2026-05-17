@@ -1,11 +1,13 @@
+use k8s_openapi::api::core::v1::ResourceRequirements;
 use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// Crabka cluster spec.
 ///
-/// Slice 17 ships a placeholder with only `kafka_version`; the real
-/// schema lands in slice 18.
+/// Slice 19 introduces `replicas`, `image`, and `resources` alongside the
+/// `kafka_version` field; multi-broker support arrives in slice 20 via
+/// `KafkaNodePool`.
 #[derive(CustomResource, Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[kube(
     group = "crabka.io",
@@ -20,8 +22,28 @@ use serde::{Deserialize, Serialize};
 )]
 #[serde(rename_all = "camelCase")]
 pub struct KafkaSpec {
-    /// Crabka version to deploy (semver). Required.
+    /// Crabka version label (informational; image tag governs the actual
+    /// binary version).
     pub kafka_version: String,
+
+    /// Number of broker replicas. Slice 19 supports `1` only;
+    /// `KafkaNodePool` (slice 20) generalizes this.
+    #[serde(default = "default_replicas")]
+    #[schemars(range(min = 1, max = 1))]
+    pub replicas: i32,
+
+    /// Container image. Reconciler falls back to the operator's
+    /// `--default-broker-image` flag if absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+
+    /// Resource requests / limits applied to the broker container.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resources: Option<ResourceRequirements>,
+}
+
+const fn default_replicas() -> i32 {
+    1
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
@@ -30,6 +52,12 @@ pub struct KafkaStatus {
     /// Standard Kubernetes-style condition list.
     #[serde(default)]
     pub conditions: Vec<KafkaCondition>,
+    /// Mirrors `StatefulSet.status.replicas`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replicas: Option<i32>,
+    /// Mirrors `StatefulSet.status.readyReplicas`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ready_replicas: Option<i32>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
@@ -69,6 +97,9 @@ mod tests {
             "demo",
             KafkaSpec {
                 kafka_version: "0.1.1".into(),
+                replicas: 1,
+                image: None,
+                resources: None,
             },
         );
         let json = serde_json::to_string(&k).unwrap();
@@ -78,5 +109,14 @@ mod tests {
         );
         let back: Kafka = serde_json::from_str(&json).unwrap();
         assert_eq!(back.spec, k.spec);
+    }
+
+    #[test]
+    fn spec_defaults_replicas_to_one() {
+        let json = r#"{"kafkaVersion":"0.1.1"}"#;
+        let spec: KafkaSpec = serde_json::from_str(json).unwrap();
+        assert_eq!(spec.replicas, 1);
+        assert!(spec.image.is_none());
+        assert!(spec.resources.is_none());
     }
 }

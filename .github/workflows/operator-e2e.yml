@@ -53,6 +53,21 @@ jobs:
             --repository-append "$PWD/packages" \
             --keyring-append "$PWD/melange.rsa.pub"
 
+      - name: Build crabka-broker apk + OCI image
+        run: |
+          melange build packaging/melange/crabka-broker.yaml \
+            --source-dir . \
+            --signing-key melange.rsa \
+            --arch x86_64 \
+            --runner docker \
+            --out-dir packages/
+          apko build packaging/apko/crabka-broker.yaml \
+            crabka-broker:e2e \
+            crabka-broker.tar \
+            --arch x86_64 \
+            --repository-append "$PWD/packages" \
+            --keyring-append "$PWD/melange.rsa.pub"
+
       - name: Create kind cluster
         uses: helm/kind-action@v1
         with:
@@ -82,6 +97,19 @@ jobs:
           echo "--- crictl images on kind node ---"
           docker exec crabka-e2e-control-plane crictl images
 
+      - name: Load broker image into kind (via docker)
+        run: |
+          docker load -i crabka-broker.tar 2>&1 | tee /tmp/load-broker.log
+          loaded=$(sed -n 's/^Loaded image: //p' /tmp/load-broker.log | head -1)
+          if [ -z "$loaded" ]; then
+            echo "::error::docker load did not report a loaded image"
+            exit 1
+          fi
+          if [ "$loaded" != "crabka-broker:e2e" ]; then
+            docker tag "$loaded" crabka-broker:e2e
+          fi
+          kind load docker-image crabka-broker:e2e --name crabka-e2e
+
       - name: Install CRDs
         run: kubectl apply -f deploy/crds/crabka.io_kafkas.yaml
 
@@ -92,7 +120,10 @@ jobs:
             --namespace crabka-operator \
             --set image.repository=crabka-operator \
             --set image.tag=e2e \
-            --set image.pullPolicy=IfNotPresent
+            --set image.pullPolicy=IfNotPresent \
+            --set brokerImage.repository=crabka-broker \
+            --set brokerImage.tag=e2e \
+            --set brokerImage.pullPolicy=IfNotPresent
 
       - name: Wait for operator rollout
         run: |
@@ -112,16 +143,37 @@ jobs:
 
       - name: Wait for Ready=True
         run: |
-          for i in $(seq 1 30); do
+          for i in $(seq 1 60); do
             status=$(kubectl get kafka demo -n default -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
-            echo "attempt $i: status=$status"
+            ready=$(kubectl get kafka demo -n default -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)
+            echo "attempt $i: status=$status readyReplicas=$ready"
             if [ "$status" = "True" ]; then
               exit 0
             fi
+            sleep 5
+          done
+          echo "::error::Kafka 'demo' did not become Ready in 5 minutes"
+          kubectl describe kafka demo -n default
+          kubectl describe sts demo-broker -n default
+          kubectl logs -n default demo-broker-0 -c broker --tail=200 || true
+          exit 1
+
+      - name: Smoke — broker binary launched in pod
+        run: |
+          kubectl exec -n default demo-broker-0 -c broker -- /usr/bin/crabka-broker --version
+          kubectl logs -n default demo-broker-0 -c broker | grep -q 'crabka-broker listening'
+
+      - name: Garbage-collection on Kafka delete
+        run: |
+          kubectl delete kafka demo -n default --wait=false
+          for i in $(seq 1 30); do
+            remaining=$(kubectl get sts,svc,cm,secret -n default -l app.kubernetes.io/instance=demo -o name 2>/dev/null | wc -l)
+            echo "attempt $i: remaining=$remaining"
+            if [ "$remaining" = "0" ]; then exit 0; fi
             sleep 2
           done
-          echo "::error::Kafka 'demo' did not become Ready in 60s"
-          kubectl describe kafka demo -n default
+          echo "::error::owned objects not GC'd within 60s"
+          kubectl get sts,svc,cm,secret -n default -l app.kubernetes.io/instance=demo
           exit 1
 
       - name: Cluster diagnostics on failure
@@ -156,6 +208,11 @@ jobs:
               "describe pods|kubectl describe pods -n crabka-operator -l app.kubernetes.io/name=crabka-operator" \
               "operator logs|kubectl logs -n crabka-operator deploy/operator-crabka-operator --tail=500" \
               "operator logs (previous)|kubectl logs -n crabka-operator deploy/operator-crabka-operator --tail=500 --previous" \
+              "kafka CR|kubectl get kafka demo -n default -o yaml" \
+              "broker sts|kubectl get sts demo-broker -n default -o yaml" \
+              "broker pod logs|kubectl logs -n default demo-broker-0 -c broker --tail=500 || true" \
+              "broker init logs|kubectl logs -n default demo-broker-0 -c format --tail=500 || true" \
+              "owned objects|kubectl get sts,svc,cm,secret -n default -l app.kubernetes.io/instance=demo -o yaml" \
               "kind node images|docker exec crabka-e2e-control-plane crictl images" \
               "host images|docker images"
             do

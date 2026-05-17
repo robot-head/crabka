@@ -939,6 +939,7 @@ version = "0.1.1"
 dependencies = [
  "anyhow",
  "axum",
+ "base64",
  "chrono",
  "clap",
  "futures",
@@ -959,6 +960,7 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
@@ -2166,6 +2168,7 @@ checksum = "51b326f5219dd55872a72c1b6ddd1b830b8334996c667449c29391d657d78d5e"
 dependencies = [
  "base64",
  "jiff",
+ "schemars 1.2.1",
  "serde",
  "serde_json",
 ]

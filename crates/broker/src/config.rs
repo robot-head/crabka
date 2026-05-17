@@ -98,6 +98,11 @@ pub struct BrokerConfig {
     /// `Rejoin`. Single-broker setups always use `Bootstrap`.
     pub bootstrap_mode: BootstrapMode,
 
+    /// Cluster UUID forwarded to `ControllerConfig::cluster_id`. Sourced
+    /// from the operator (the `KafkaCluster` UID) via `--cluster-id`.
+    /// `None` defaults to `Uuid::nil()` inside `Controller::start`.
+    pub cluster_id: Option<uuid::Uuid>,
+
     // ── Auth / listener registry (Task 7+) ──────────────────────────────
     /// Named listener definitions. When empty, `effective_listeners()` synthesizes
     /// a single PLAINTEXT listener from `listen_addr` + `advertised_listener`,
@@ -184,6 +189,7 @@ impl BrokerConfig {
             controller_election_timeout: std::time::Duration::from_millis(500),
             controller_heartbeat_interval: std::time::Duration::from_millis(100),
             bootstrap_mode: BootstrapMode::Bootstrap,
+            cluster_id: None,
             listeners: vec![],
             controller_listener_protocol: crabka_security::ListenerProtocol::Plaintext,
             inter_broker_listener_name: "PLAINTEXT".to_string(),
@@ -309,6 +315,7 @@ impl Default for BrokerConfig {
             controller_election_timeout: std::time::Duration::from_secs(5),
             controller_heartbeat_interval: std::time::Duration::from_millis(500),
             bootstrap_mode: BootstrapMode::Bootstrap,
+            cluster_id: None,
             listeners: vec![],
             controller_listener_protocol: crabka_security::ListenerProtocol::Plaintext,
             inter_broker_listener_name: "PLAINTEXT".to_string(),
