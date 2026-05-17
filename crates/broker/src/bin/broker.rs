@@ -15,14 +15,26 @@ use crabka_log::LogConfig;
     about = "Single-node Kafka-compatible broker (MVP)"
 )]
 struct Args {
-    /// TCP address to listen on.
-    #[arg(long, default_value = "127.0.0.1:9092")]
+    /// TCP address to listen on. Mutually exclusive with `--config-file`.
+    #[arg(long, default_value = "127.0.0.1:9092", conflicts_with = "config_file")]
     listen_addr: SocketAddr,
 
     /// `host:port` to advertise to clients (defaults to `listen_addr`).
     /// Set via env `CRABKA_ADVERTISED_LISTENER` from the operator.
-    #[arg(long, env = "CRABKA_ADVERTISED_LISTENER")]
+    /// Mutually exclusive with `--config-file`.
+    #[arg(
+        long,
+        env = "CRABKA_ADVERTISED_LISTENER",
+        conflicts_with = "config_file"
+    )]
     advertised_listener: Option<String>,
+
+    /// Path to a TOML config file (operator-managed). When set,
+    /// `--listen-addr` / `--advertised-listener` must NOT be set;
+    /// listener configuration comes from the file's `[[listeners]]`
+    /// table. See `crabka_broker::file_config::FileConfig`.
+    #[arg(long)]
+    config_file: Option<PathBuf>,
 
     /// Directory containing per-partition log dirs.
     #[arg(long, default_value = "./crabka-data")]
@@ -60,6 +72,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let args = Args::parse();
+    let file_config: Option<crabka_broker::file_config::FileConfig> =
+        match args.config_file.as_ref() {
+            Some(p) => {
+                let contents = std::fs::read_to_string(p)
+                    .map_err(|e| format!("failed to read {}: {e}", p.display()))?;
+                Some(
+                    toml::from_str(&contents)
+                        .map_err(|e| format!("failed to parse {}: {e}", p.display()))?,
+                )
+            }
+            None => None,
+        };
     let advertised = args
         .advertised_listener
         .unwrap_or_else(|| args.listen_addr.to_string());
@@ -75,7 +99,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let metrics_listen_addr = parse_metrics_addr(&args.metrics_listen_addr)?;
     let bootstrap_mode = detect_bootstrap_mode(&args.log_dir);
     tracing::info!(?bootstrap_mode, log_dir = %args.log_dir.display(), "selected bootstrap mode");
-    let config = BrokerConfig {
+    let mut config = BrokerConfig {
         broker_id: args.broker_id,
         listen_addr: args.listen_addr,
         advertised_listener: advertised,
@@ -94,6 +118,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         metrics_listen_addr,
         ..BrokerConfig::default()
     };
+    if let Some(fc) = file_config {
+        fc.apply_to(&mut config);
+    }
 
     let handle = Broker::start(config).await?;
     tracing::info!(addr = %handle.listen_addr(), "crabka-broker listening");
@@ -187,5 +214,51 @@ mod tests {
         // @metadata-0 subdir doesn't — should still be Bootstrap.
         std::fs::create_dir_all(dir.path().join("__cluster_metadata")).unwrap();
         assert_eq!(detect_bootstrap_mode(dir.path()), BootstrapMode::Bootstrap);
+    }
+
+    #[test]
+    fn config_file_mutually_exclusive_with_listen_addr() {
+        use clap::Parser;
+
+        let res = Args::try_parse_from([
+            "crabka-broker",
+            "--config-file=/tmp/a.toml",
+            "--listen-addr=127.0.0.1:9092",
+        ]);
+        let err = res.expect_err("expected mutual-exclusion error");
+        let s = err.to_string();
+        assert!(
+            s.contains("config-file") && s.contains("listen-addr"),
+            "expected clap conflict mentioning both flags, got: {s}"
+        );
+    }
+
+    #[test]
+    fn config_file_mutually_exclusive_with_advertised_listener() {
+        use clap::Parser;
+
+        let res = Args::try_parse_from([
+            "crabka-broker",
+            "--config-file=/tmp/a.toml",
+            "--advertised-listener=h:9092",
+        ]);
+        let err = res.expect_err("expected mutual-exclusion error");
+        let s = err.to_string();
+        assert!(
+            s.contains("config-file") && s.contains("advertised-listener"),
+            "expected clap conflict, got: {s}"
+        );
+    }
+
+    #[test]
+    fn config_file_alone_parses() {
+        use clap::Parser;
+
+        let args = Args::try_parse_from(["crabka-broker", "--config-file=/tmp/a.toml"]).unwrap();
+        assert_eq!(
+            args.config_file.as_deref(),
+            Some(std::path::Path::new("/tmp/a.toml"))
+        );
+        assert!(args.advertised_listener.is_none());
     }
 }

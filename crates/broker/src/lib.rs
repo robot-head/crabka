@@ -129,6 +129,7 @@ pub mod config;
 pub(crate) mod config_keys;
 mod coordinator;
 mod error;
+pub mod file_config;
 mod handlers;
 pub(crate) mod heartbeat;
 pub(crate) mod isr_maintenance;
