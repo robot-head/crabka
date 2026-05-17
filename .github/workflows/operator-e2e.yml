@@ -74,6 +74,39 @@ jobs:
           version: v0.24.0
           node_image: kindest/node:v1.30.0
 
+      - name: Install MetalLB (so LoadBalancer Services get an IP in kind)
+        run: |
+          set -e
+          kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/v0.14.7/config/manifests/metallb-native.yaml
+          # Wait for the speaker DaemonSet + controller Deployment to roll out.
+          kubectl rollout status -n metallb-system deploy/controller --timeout=180s
+          kubectl rollout status -n metallb-system daemonset/speaker --timeout=180s
+
+          # Pick an IP range inside the docker bridge that kind sits on.
+          # On the GitHub Actions runners this is reliably 172.18.0.0/16
+          # under the default `kind` docker network; carve out the high
+          # end of the .255 octet so we don't clash with any future kind
+          # nodes.
+          subnet=$(docker network inspect kind --format '{{(index .IPAM.Config 0).Subnet}}')
+          echo "kind subnet: $subnet"
+          # IPAddressPool + L2Advertisement.
+          cat <<EOF | kubectl apply -f -
+          apiVersion: metallb.io/v1beta1
+          kind: IPAddressPool
+          metadata:
+            name: kind-pool
+            namespace: metallb-system
+          spec:
+            addresses:
+              - 172.18.255.200-172.18.255.250
+          ---
+          apiVersion: metallb.io/v1beta1
+          kind: L2Advertisement
+          metadata:
+            name: kind-l2
+            namespace: metallb-system
+          EOF
+
       - name: Load operator image into kind (via docker)
         run: |
           # apko writes an OCI archive tagged with an arch suffix
@@ -352,6 +385,84 @@ jobs:
           done
           [ "$svcs" = "0" ] || { echo "::error::external Services not GC'd after Kafka delete"; kubectl get svc -n default -l app.kubernetes.io/instance=ext; exit 1; }
           kubectl delete knp ext-broker -n default --ignore-not-found
+
+      - name: Smoke — LoadBalancer listener pulls an IP from MetalLB
+        run: |
+          set -e
+          cat <<EOF | kubectl apply -f -
+          apiVersion: crabka.io/v1alpha1
+          kind: Kafka
+          metadata:
+            name: lb
+            namespace: default
+          spec:
+            kafkaVersion: "0.1.1"
+            listeners:
+              - name: PLAIN
+                port: 9092
+                type: internal
+                tls: false
+              - name: cloud
+                port: 9095
+                type: loadbalancer
+                tls: false
+          ---
+          apiVersion: crabka.io/v1alpha1
+          kind: KafkaNodePool
+          metadata:
+            name: lb-broker
+            namespace: default
+            labels:
+              crabka.io/cluster: lb
+          spec:
+            roles: [Controller, Broker]
+            replicas: 1
+            nodeIdStart: 20
+          EOF
+
+          # MetalLB may take a few seconds to allocate. Wait for ListenersReady=True.
+          for i in $(seq 1 60); do
+            ready=$(kubectl get kafka lb -n default -o jsonpath='{.status.conditions[?(@.type=="ListenersReady")].status}' 2>/dev/null || true)
+            echo "attempt $i: ListenersReady=$ready"
+            if [ "$ready" = "True" ]; then break; fi
+            sleep 5
+          done
+          if [ "$ready" != "True" ]; then
+            echo "::error::ListenersReady never reached True for LoadBalancer listener"
+            kubectl describe kafka lb -n default
+            kubectl get svc -n default -l app.kubernetes.io/instance=lb
+            kubectl describe svc lb-cloud-bootstrap -n default || true
+            kubectl logs -n metallb-system deploy/controller --tail=200 || true
+            exit 1
+          fi
+
+          # The per-broker Service has type=LoadBalancer and MetalLB
+          # populated `status.loadBalancer.ingress[0].ip`.
+          stype=$(kubectl get svc lb-cloud-20 -n default -o jsonpath='{.spec.type}')
+          [ "$stype" = "LoadBalancer" ] || { echo "::error::per-broker type=$stype, want LoadBalancer"; exit 1; }
+          ip=$(kubectl get svc lb-cloud-20 -n default -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+          [ -n "$ip" ] || { echo "::error::per-broker LB IP empty"; kubectl describe svc lb-cloud-20 -n default; exit 1; }
+          echo "per-broker LB IP: $ip"
+
+          # Bootstrap Service also has an IP.
+          bip=$(kubectl get svc lb-cloud-bootstrap -n default -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+          [ -n "$bip" ] || { echo "::error::bootstrap LB IP empty"; exit 1; }
+          echo "bootstrap LB IP: $bip"
+
+          # status.listeners reflects the bootstrap IP + the listener port.
+          bs=$(kubectl get kafka lb -n default -o jsonpath='{.status.listeners[?(@.name=="cloud")].bootstrapServers}')
+          [ "$bs" = "${bip}:9095" ] || { echo "::error::status.listeners[cloud].bootstrapServers got '$bs', want '${bip}:9095'"; exit 1; }
+
+          # Cascade-delete via owner-ref.
+          kubectl delete kafka lb -n default --wait=false
+          for i in $(seq 1 30); do
+            svcs=$(kubectl get svc -n default -l app.kubernetes.io/instance=lb -o name 2>/dev/null | wc -l)
+            echo "attempt $i: lb svcs=$svcs"
+            if [ "$svcs" = "0" ]; then break; fi
+            sleep 2
+          done
+          [ "$svcs" = "0" ] || { echo "::error::LB Services not GC'd"; exit 1; }
+          kubectl delete knp lb-broker -n default --ignore-not-found
 
       - name: Garbage-collection on Kafka delete
         run: |
