@@ -1,0 +1,49 @@
+suite: deployment
+templates:
+  - deployment.yaml
+release:
+  name: demo
+  namespace: kafka
+set:
+  bootstrapServers: kafka-bootstrap:9092
+tests:
+  - it: renders one replica with Recreate strategy
+    asserts:
+      - equal:
+          path: spec.replicas
+          value: 1
+      - equal:
+          path: spec.strategy.type
+          value: Recreate
+
+  - it: container exposes Connect-RPC port 9300
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].ports[0].containerPort
+          value: 9300
+
+  - it: probes wired to /healthz and /readyz
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe.httpGet.path
+          value: /healthz
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.httpGet.path
+          value: /readyz
+
+  - it: passes bootstrapServers env var
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CRABKA_BOOTSTRAP_SERVERS
+            value: kafka-bootstrap:9092
+
+  - it: mounts persistent volume at expected path
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].volumeMounts[0].mountPath
+          value: /var/lib/crabka-rebalancer
+      - equal:
+          path: spec.template.spec.volumes[0].persistentVolumeClaim.claimName
+          value: demo-crabka-rebalancer

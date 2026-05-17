@@ -100,6 +100,19 @@ jobs:
           grep -q "kind: Deployment" /tmp/rendered.yaml
           grep -q "kind: Service" /tmp/rendered.yaml
           grep -q "kind: ClusterRole" /tmp/rendered.yaml
+      - name: Install helm-unittest plugin
+        run: helm plugin install https://github.com/helm-unittest/helm-unittest --version v0.6.0
+      - name: helm lint rebalancer chart
+        run: helm lint charts/crabka-rebalancer --set bootstrapServers=test:9092
+      - name: helm template rebalancer chart (sanity)
+        run: |
+          helm template demo charts/crabka-rebalancer --set bootstrapServers=test:9092 > /tmp/rebalancer.yaml
+          grep -q "kind: Deployment" /tmp/rebalancer.yaml
+          grep -q "kind: Service" /tmp/rebalancer.yaml
+          grep -q "kind: ServiceAccount" /tmp/rebalancer.yaml
+          grep -q "kind: PersistentVolumeClaim" /tmp/rebalancer.yaml
+      - name: helm unittest rebalancer chart
+        run: helm unittest charts/crabka-rebalancer
 
   # cargo-semver-checks is intentionally disabled until Crabka publishes its
   # first crate to crates.io (tracked under the slice 1e publishing workflow).

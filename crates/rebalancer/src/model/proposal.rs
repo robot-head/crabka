@@ -2,7 +2,9 @@
 //! by the model layer so the optimizer + goals don't depend on
 //! generated code.
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Movement {
     pub topic: String,
     pub partition: i32,
@@ -12,15 +14,27 @@ pub struct Movement {
     pub new_leader: i32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProposalStatus {
-    /// The optimizer computed the proposal but it has not been
-    /// executed. Slice 43a only ever returns this state — execute
-    /// lands in 43b.
     Computed,
+    Executing,
+    Completed,
+    Failed,
+    Cancelled,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+impl ProposalStatus {
+    /// True if the status is a final state (no further transitions).
+    #[must_use]
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            ProposalStatus::Completed | ProposalStatus::Failed | ProposalStatus::Cancelled
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ProposalSummary {
     pub replica_movements: i32,
     pub leader_movements: i32,
@@ -30,7 +44,7 @@ pub struct ProposalSummary {
     pub max_leaders_after: i32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Proposal {
     pub id: String,
     pub status: ProposalStatus,
@@ -38,4 +52,31 @@ pub struct Proposal {
     pub goals_applied: Vec<String>,
     pub summary: ProposalSummary,
     pub movements: Vec<Movement>,
+    /// Set when transitioning to `Executing`; 0 otherwise.
+    #[serde(default)]
+    pub started_at_ms: i64,
+    /// Set when transitioning to a terminal status; 0 otherwise.
+    #[serde(default)]
+    pub terminated_at_ms: i64,
+    /// Set on `Failed`. None otherwise.
+    #[serde(default)]
+    pub failure_reason: Option<String>,
+    /// Set when transitioning to `Executing` (echoes the throttle the
+    /// executor applied). 0 otherwise.
+    #[serde(default)]
+    pub throttle_bytes_per_sec: i64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_terminal_flags() {
+        assert!(!ProposalStatus::Computed.is_terminal());
+        assert!(!ProposalStatus::Executing.is_terminal());
+        assert!(ProposalStatus::Completed.is_terminal());
+        assert!(ProposalStatus::Failed.is_terminal());
+        assert!(ProposalStatus::Cancelled.is_terminal());
+    }
 }

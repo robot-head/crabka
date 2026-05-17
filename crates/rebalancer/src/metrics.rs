@@ -26,6 +26,14 @@ pub struct RebalancerMetrics {
     pub snapshots_total: Counter,
     /// Total proposals computed via `CreateProposal`.
     pub proposals_created_total: Counter,
+    /// Total `ExecuteProposal` invocations that successfully entered `Executing`.
+    pub executions_started_total: Counter,
+    /// Total executions that reached `Completed`.
+    pub executions_completed_total: Counter,
+    /// Total executions that reached `Failed`.
+    pub executions_failed_total: Counter,
+    /// Total executions that reached `Cancelled` via `CancelExecution`.
+    pub executions_cancelled_total: Counter,
 }
 
 impl RebalancerMetrics {
@@ -53,6 +61,26 @@ impl RebalancerMetrics {
             "proposals_created",
             "Total proposals computed via CreateProposal",
             m.proposals_created_total.clone(),
+        );
+        registry.register(
+            "executions_started",
+            "Total ExecuteProposal invocations that successfully entered Executing",
+            m.executions_started_total.clone(),
+        );
+        registry.register(
+            "executions_completed",
+            "Total executions that reached Completed",
+            m.executions_completed_total.clone(),
+        );
+        registry.register(
+            "executions_failed",
+            "Total executions that reached Failed",
+            m.executions_failed_total.clone(),
+        );
+        registry.register(
+            "executions_cancelled",
+            "Total executions that reached Cancelled via CancelExecution",
+            m.executions_cancelled_total.clone(),
         );
         m
     }

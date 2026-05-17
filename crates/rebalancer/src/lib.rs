@@ -18,6 +18,7 @@ pub mod pb {
 }
 
 pub mod api;
+pub mod executor;
 pub mod goals;
 pub mod health;
 pub mod ingest;

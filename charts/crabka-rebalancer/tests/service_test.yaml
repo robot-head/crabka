@@ -1,0 +1,19 @@
+suite: service
+templates:
+  - service.yaml
+release:
+  name: demo
+set:
+  bootstrapServers: kafka-bootstrap:9092
+tests:
+  - it: defaults to ClusterIP on 9300
+    asserts:
+      - equal:
+          path: spec.type
+          value: ClusterIP
+      - equal:
+          path: spec.ports[0].port
+          value: 9300
+      - equal:
+          path: spec.ports[0].targetPort
+          value: connect-rpc

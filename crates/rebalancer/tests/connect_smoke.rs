@@ -34,6 +34,7 @@ async fn connect_get_state_over_http_json() {
     // 3. Spawn the binary. `CARGO_BIN_EXE_<name>` is set automatically by
     // cargo when an integration test in the same crate references the
     // binary target.
+    let data_dir = tempfile::tempdir().unwrap();
     let bin_path = env!("CARGO_BIN_EXE_crabka-rebalancer");
     let mut child = tokio::process::Command::new(bin_path)
         .arg("--bootstrap-servers")
@@ -42,6 +43,8 @@ async fn connect_get_state_over_http_json() {
         .arg(&rebal_addr)
         .arg("--scrape-interval-secs")
         .arg("1")
+        .arg("--data-dir")
+        .arg(data_dir.path())
         .env("RUST_LOG", "crabka_rebalancer=info,warn")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -102,4 +105,107 @@ async fn connect_get_state_over_http_json() {
     // background tasks during shutdown; the OS will clean up the
     // tempfile-prefixed dir on next reboot.
     std::mem::forget(dir);
+    std::mem::forget(data_dir);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn connect_execute_proposal_and_cancel_over_http_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
+    let broker = Broker::start(cfg).await.unwrap();
+    let broker_addr = broker.listen_addr();
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let rebal_port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let rebal_addr = format!("127.0.0.1:{rebal_port}");
+
+    let data_dir = tempfile::tempdir().unwrap();
+
+    let bin_path = env!("CARGO_BIN_EXE_crabka-rebalancer");
+    let mut child = tokio::process::Command::new(bin_path)
+        .arg("--bootstrap-servers")
+        .arg(broker_addr.to_string())
+        .arg("--listen-addr")
+        .arg(&rebal_addr)
+        .arg("--scrape-interval-secs")
+        .arg("1")
+        .arg("--data-dir")
+        .arg(data_dir.path())
+        .env("RUST_LOG", "crabka_rebalancer=info,warn")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("spawn crabka-rebalancer");
+
+    let client = reqwest::Client::new();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        match client
+            .get(format!("http://{rebal_addr}/readyz"))
+            .send()
+            .await
+        {
+            Ok(r) if r.status() == reqwest::StatusCode::OK => break,
+            _ => {}
+        }
+        assert!(
+            Instant::now() < deadline,
+            "rebalancer /readyz never returned 200"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    // CreateProposal — empty goals returns a Computed proposal (may have
+    // zero movements on a single-broker cluster; that's fine for the
+    // wire-path test).
+    let create = client
+        .post(format!(
+            "http://{rebal_addr}/crabka.rebalancer.v1.Rebalancer/CreateProposal"
+        ))
+        .header("Content-Type", "application/json")
+        .body("{}")
+        .send()
+        .await
+        .expect("create POST");
+    assert!(
+        create.status().is_success(),
+        "create_proposal status {}",
+        create.status()
+    );
+    let create_body: serde_json::Value = create.json().await.expect("create JSON");
+    let id = create_body
+        .get("id")
+        .and_then(|v| v.as_str())
+        .expect("id")
+        .to_string();
+
+    // ExecuteProposal on a zero-movements proposal returns FailedPrecondition.
+    let exec = client
+        .post(format!(
+            "http://{rebal_addr}/crabka.rebalancer.v1.Rebalancer/ExecuteProposal"
+        ))
+        .header("Content-Type", "application/json")
+        .body(format!(r#"{{"id":"{id}"}}"#))
+        .send()
+        .await
+        .expect("execute POST");
+    // Connect's FailedPrecondition maps to HTTP 400.
+    assert_eq!(
+        exec.status(),
+        reqwest::StatusCode::BAD_REQUEST,
+        "expected FailedPrecondition for zero-movement proposal; got {}",
+        exec.status()
+    );
+    let body_text = exec.text().await.unwrap_or_default();
+    assert!(
+        body_text.contains("movement") || body_text.contains("Computed"),
+        "expected explanatory message in error body; got {body_text}"
+    );
+
+    let _ = child.kill().await;
+    let _ = tokio::time::timeout(Duration::from_secs(30), broker.shutdown()).await;
+    std::mem::forget(dir);
+    std::mem::forget(data_dir);
 }

@@ -1,0 +1,10 @@
+suite: required values
+templates:
+  - deployment.yaml
+release:
+  name: demo
+tests:
+  - it: rendering fails when bootstrapServers is unset
+    asserts:
+      - failedTemplate:
+          errorMessage: "values.bootstrapServers is required (no default)"

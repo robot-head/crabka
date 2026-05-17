@@ -8,6 +8,7 @@ service Rebalancer {
   rpc GetProposal(GetProposalRequest) returns (Proposal);
   rpc ListProposals(ListProposalsRequest) returns (ListProposalsResponse);
   rpc ExecuteProposal(ExecuteProposalRequest) returns (ExecuteProposalResponse);
+  rpc CancelExecution(CancelExecutionRequest) returns (CancelExecutionResponse);
 }
 
 message Broker {
@@ -44,6 +45,10 @@ message GetStateResponse {
 enum ProposalStatus {
   PROPOSAL_STATUS_UNSPECIFIED = 0;
   PROPOSAL_STATUS_COMPUTED = 1;
+  PROPOSAL_STATUS_EXECUTING = 2;
+  PROPOSAL_STATUS_COMPLETED = 3;
+  PROPOSAL_STATUS_FAILED = 4;
+  PROPOSAL_STATUS_CANCELLED = 5;
 }
 
 message Movement {
@@ -71,6 +76,10 @@ message Proposal {
   repeated string goals_applied = 4;
   ProposalSummary summary = 5;
   repeated Movement movements = 6;
+  int64 started_at_ms = 7;
+  int64 terminated_at_ms = 8;
+  optional string failure_reason = 9;
+  int64 throttle_bytes_per_sec = 10;
 }
 
 message CreateProposalRequest { repeated string goals = 1; }
@@ -83,5 +92,12 @@ message DryRunResponse {
 message GetProposalRequest { string id = 1; }
 message ListProposalsRequest { int32 limit = 1; }
 message ListProposalsResponse { repeated Proposal proposals = 1; }
-message ExecuteProposalRequest { string id = 1; }
-message ExecuteProposalResponse {}
+
+message ExecuteProposalRequest {
+  string id = 1;
+  optional int64 throttle_bytes_per_sec = 2;
+}
+message ExecuteProposalResponse { Proposal proposal = 1; }
+
+message CancelExecutionRequest { string id = 1; }
+message CancelExecutionResponse { Proposal proposal = 1; }

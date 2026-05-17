@@ -1,48 +1,115 @@
-//! In-memory ring buffer of recent `Proposal`s, UUID-keyed.
-//!
-//! Slice 43a only persists proposals for the lifetime of the
-//! `crabka-rebalancer` process. Restart drops them. Slice 43b adds
-//! on-disk persistence.
+//! Ring buffer of recent `Proposal`s, UUID-keyed, with atomic on-disk
+//! persistence. Slice 43b persists to `{data_dir}/proposals.json` so
+//! proposals survive a rebalancer restart.
 
 use std::collections::VecDeque;
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+
+use serde::{Deserialize, Serialize};
+use tracing::{debug, warn};
 
 use super::proposal::Proposal;
 
+const FILE_VERSION: u32 = 1;
+const DEFAULT_FILENAME: &str = "proposals.json";
+
+#[derive(Debug, thiserror::Error)]
+pub enum StoreError {
+    #[error("io: {0}")]
+    Io(#[from] io::Error),
+    #[error("json: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("schema version {found} not supported (expected {expected})")]
+    UnsupportedVersion { found: u32, expected: u32 },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct OnDisk {
+    version: u32,
+    capacity: usize,
+    proposals: Vec<Proposal>,
+}
+
+#[derive(Debug)]
 pub struct ProposalStore {
-    /// Most recent insertion at the back, oldest at the front. Bounded
-    /// by `capacity`.
     inner: Mutex<VecDeque<Proposal>>,
     capacity: usize,
+    /// Where to persist. `None` = in-memory only (tests / 43a-compat).
+    path: Option<PathBuf>,
 }
 
 impl ProposalStore {
+    /// New in-memory-only store. Used in unit tests where persistence
+    /// isn't under test.
     #[must_use]
     pub fn new(capacity: usize) -> Self {
         Self {
-            inner: Mutex::new(VecDeque::with_capacity(capacity)),
+            inner: Mutex::new(VecDeque::with_capacity(capacity.max(1))),
             capacity: capacity.max(1),
+            path: None,
         }
     }
 
-    /// Append a proposal; drop the oldest if capacity is exceeded.
+    /// Open or create a persisted store at `{data_dir}/proposals.json`.
+    /// If the file is missing, returns an empty store and will create
+    /// the file on first write.
+    pub fn open(data_dir: &Path, capacity: usize) -> Result<Self, StoreError> {
+        fs::create_dir_all(data_dir)?;
+        let path = data_dir.join(DEFAULT_FILENAME);
+        let inner = match fs::read(&path) {
+            Ok(bytes) => {
+                let parsed: OnDisk = serde_json::from_slice(&bytes)?;
+                if parsed.version != FILE_VERSION {
+                    return Err(StoreError::UnsupportedVersion {
+                        found: parsed.version,
+                        expected: FILE_VERSION,
+                    });
+                }
+                VecDeque::from(parsed.proposals)
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => VecDeque::new(),
+            Err(e) => return Err(e.into()),
+        };
+        Ok(Self {
+            inner: Mutex::new(inner),
+            capacity: capacity.max(1),
+            path: Some(path),
+        })
+    }
+
     pub fn insert(&self, p: Proposal) {
-        let mut q = self.inner.lock().expect("ProposalStore mutex poisoned");
-        if q.len() == self.capacity {
-            q.pop_front();
+        {
+            let mut q = self.inner.lock().expect("ProposalStore mutex poisoned");
+            if q.len() == self.capacity {
+                q.pop_front();
+            }
+            q.push_back(p);
         }
-        q.push_back(p);
+        self.persist_if_durable();
     }
 
-    /// Fetch one proposal by id.
+    /// Apply `f` to the proposal with `id`. Returns the post-mutation
+    /// clone, or `None` if no such id. Persists.
+    pub fn mutate<F: FnOnce(&mut Proposal)>(&self, id: &str, f: F) -> Option<Proposal> {
+        let updated = {
+            let mut q = self.inner.lock().expect("ProposalStore mutex poisoned");
+            let p = q.iter_mut().find(|p| p.id == id)?;
+            f(p);
+            p.clone()
+        };
+        self.persist_if_durable();
+        Some(updated)
+    }
+
     #[must_use]
     pub fn get(&self, id: &str) -> Option<Proposal> {
         let q = self.inner.lock().expect("ProposalStore mutex poisoned");
         q.iter().find(|p| p.id == id).cloned()
     }
 
-    /// Return up to `limit` proposals, most recent first. `limit == 0`
-    /// uses the store's capacity as the default.
     #[must_use]
     pub fn list(&self, limit: usize) -> Vec<Proposal> {
         let q = self.inner.lock().expect("ProposalStore mutex poisoned");
@@ -53,6 +120,35 @@ impl ProposalStore {
         };
         q.iter().rev().take(n).cloned().collect()
     }
+
+    fn persist_if_durable(&self) {
+        let Some(ref path) = self.path else {
+            return;
+        };
+        let snapshot: Vec<Proposal> = {
+            let q = self.inner.lock().expect("ProposalStore mutex poisoned");
+            q.iter().cloned().collect()
+        };
+        let on_disk = OnDisk {
+            version: FILE_VERSION,
+            capacity: self.capacity,
+            proposals: snapshot,
+        };
+        match write_atomic(path, &on_disk) {
+            Ok(()) => debug!(?path, "proposals.json persisted"),
+            Err(e) => {
+                warn!(?path, error = %e, "proposals.json persist failed; in-memory state ahead of disk");
+            }
+        }
+    }
+}
+
+fn write_atomic(path: &Path, on_disk: &OnDisk) -> Result<(), StoreError> {
+    let tmp = path.with_extension("json.tmp");
+    let bytes = serde_json::to_vec_pretty(on_disk)?;
+    fs::write(&tmp, &bytes)?;
+    fs::rename(&tmp, path)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -68,6 +164,10 @@ mod tests {
             goals_applied: vec![],
             summary: ProposalSummary::default(),
             movements: vec![],
+            started_at_ms: 0,
+            terminated_at_ms: 0,
+            failure_reason: None,
+            throttle_bytes_per_sec: 0,
         }
     }
 
@@ -85,7 +185,7 @@ mod tests {
         s.insert(p("a"));
         s.insert(p("b"));
         s.insert(p("c"));
-        assert!(s.get("a").is_none(), "a should have been evicted");
+        assert!(s.get("a").is_none());
         assert!(s.get("b").is_some());
         assert!(s.get("c").is_some());
     }
@@ -105,7 +205,7 @@ mod tests {
         let s = ProposalStore::new(2);
         s.insert(p("a"));
         s.insert(p("b"));
-        s.insert(p("c")); // evicts "a"
+        s.insert(p("c"));
         let listed: Vec<String> = s.list(0).into_iter().map(|p| p.id).collect();
         assert_eq!(listed, vec!["c".to_string(), "b".to_string()]);
     }
@@ -117,5 +217,63 @@ mod tests {
         s.insert(p("b"));
         assert!(s.get("a").is_none());
         assert!(s.get("b").is_some());
+    }
+
+    #[test]
+    fn mutate_updates_status_and_persists() {
+        let s = ProposalStore::new(4);
+        s.insert(p("a"));
+        let updated = s
+            .mutate("a", |pp| {
+                pp.status = ProposalStatus::Executing;
+                pp.started_at_ms = 42;
+            })
+            .expect("mutated");
+        assert_eq!(updated.status, ProposalStatus::Executing);
+        assert_eq!(updated.started_at_ms, 42);
+        assert_eq!(s.get("a").unwrap().status, ProposalStatus::Executing);
+    }
+
+    #[test]
+    fn mutate_returns_none_for_unknown_id() {
+        let s = ProposalStore::new(4);
+        assert!(s.mutate("ghost", |_| {}).is_none());
+    }
+
+    #[test]
+    fn open_creates_empty_when_file_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = ProposalStore::open(dir.path(), 4).unwrap();
+        assert!(s.list(0).is_empty());
+    }
+
+    #[test]
+    fn persist_round_trips_via_open() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let s = ProposalStore::open(dir.path(), 4).unwrap();
+            s.insert(p("a"));
+            s.insert(p("b"));
+            s.mutate("a", |pp| pp.status = ProposalStatus::Executing);
+        }
+        let s2 = ProposalStore::open(dir.path(), 4).unwrap();
+        assert_eq!(s2.get("a").unwrap().status, ProposalStatus::Executing);
+        assert!(s2.get("b").is_some());
+    }
+
+    #[test]
+    fn open_rejects_unsupported_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(DEFAULT_FILENAME);
+        let bogus = r#"{"version":999,"capacity":4,"proposals":[]}"#;
+        fs::write(&path, bogus).unwrap();
+        let err = ProposalStore::open(dir.path(), 4).unwrap_err();
+        assert!(matches!(
+            err,
+            StoreError::UnsupportedVersion {
+                found: 999,
+                expected: 1
+            }
+        ));
     }
 }

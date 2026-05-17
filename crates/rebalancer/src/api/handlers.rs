@@ -15,9 +15,13 @@ use std::sync::Arc;
 use axum::Extension;
 use connectrpc_axum::message::error::Code;
 use connectrpc_axum::message::{ConnectError, ConnectRequest, ConnectResponse};
+use tokio_util::sync::CancellationToken;
 
+use crate::executor::state::{InFlightFile, Phase};
+use crate::executor::{Execution, ExecutionHandle};
 use crate::ingest::SharedSnapshot;
 use crate::metrics::RebalancerMetrics;
+use crate::model::proposal::ProposalStatus;
 use crate::model::{ClusterState, ProposalStore};
 use crate::optimizer;
 use crate::pb;
@@ -30,6 +34,9 @@ pub struct AppState {
     pub goal_registry: super::GoalRegistry,
     pub goal_ctx: crate::goals::GoalContext,
     pub metrics: RebalancerMetrics,
+    // new in 43b:
+    pub executor: crate::executor::ExecutorState,
+    pub client_facade: Arc<dyn crate::executor::phases::ClientFacade>,
 }
 
 /// Convert a `ClusterState` into the proto `GetStateResponse`.
@@ -78,10 +85,21 @@ pub fn cluster_state_to_proto(state: &ClusterState) -> pb::GetStateResponse {
 }
 
 #[must_use]
+fn status_to_proto(s: ProposalStatus) -> pb::ProposalStatus {
+    match s {
+        ProposalStatus::Computed => pb::ProposalStatus::Computed,
+        ProposalStatus::Executing => pb::ProposalStatus::Executing,
+        ProposalStatus::Completed => pb::ProposalStatus::Completed,
+        ProposalStatus::Failed => pb::ProposalStatus::Failed,
+        ProposalStatus::Cancelled => pb::ProposalStatus::Cancelled,
+    }
+}
+
+#[must_use]
 pub fn proposal_to_proto(p: &crate::model::Proposal) -> pb::Proposal {
     pb::Proposal {
         id: p.id.clone(),
-        status: i32::from(pb::ProposalStatus::Computed),
+        status: i32::from(status_to_proto(p.status)),
         created_at_ms: p.created_at_ms,
         goals_applied: p.goals_applied.clone(),
         summary: Some(pb::ProposalSummary {
@@ -104,6 +122,10 @@ pub fn proposal_to_proto(p: &crate::model::Proposal) -> pb::Proposal {
                 new_leader: m.new_leader,
             })
             .collect(),
+        started_at_ms: p.started_at_ms,
+        terminated_at_ms: p.terminated_at_ms,
+        failure_reason: p.failure_reason.clone(),
+        throttle_bytes_per_sec: p.throttle_bytes_per_sec,
     }
 }
 
@@ -189,13 +211,386 @@ pub async fn list_proposals(
     }))
 }
 
-/// Execute is implemented in slice 43b — return `Unimplemented` (501) here.
+/// Kick off an execution. Returns Executing-state proposal; operator
+/// polls `GetProposal` for progress. Async — the executor runs on a
+/// detached task.
 pub async fn execute_proposal(
-    Extension(_state): Extension<Arc<AppState>>,
-    _req: ConnectRequest<pb::ExecuteProposalRequest>,
+    Extension(state): Extension<Arc<AppState>>,
+    req: ConnectRequest<pb::ExecuteProposalRequest>,
 ) -> Result<ConnectResponse<pb::ExecuteProposalResponse>, ConnectError> {
-    Err(ConnectError::new(
-        Code::Unimplemented,
-        "execute path lands in slice 43b",
-    ))
+    let inner = req.0;
+    let id = inner.id;
+    let throttle_bytes_per_sec = inner
+        .throttle_bytes_per_sec
+        .unwrap_or(state.executor.config.default_throttle_bytes_per_sec);
+
+    let proposal = state
+        .store
+        .get(&id)
+        .ok_or_else(|| ConnectError::new(Code::NotFound, format!("proposal `{id}` not found")))?;
+    if proposal.status.is_terminal() || matches!(proposal.status, ProposalStatus::Executing) {
+        return Err(ConnectError::new(
+            Code::FailedPrecondition,
+            format!(
+                "proposal `{id}` is {:?} (must be Computed)",
+                proposal.status
+            ),
+        ));
+    }
+    if proposal.movements.is_empty() {
+        return Err(ConnectError::new(
+            Code::FailedPrecondition,
+            format!("proposal `{id}` has no movements"),
+        ));
+    }
+
+    let mut slot = state.executor.in_flight.lock().await;
+    if slot.is_some() {
+        return Err(ConnectError::new(
+            Code::FailedPrecondition,
+            "another execution is already in flight",
+        ));
+    }
+
+    let now = now_ms();
+
+    // Write `in_flight.json` BEFORE mutating `proposals.json`. Recovery
+    // keys off `in_flight.json`'s existence; persisting `proposals.json`
+    // first opens a crash window where the proposal is `Executing` but
+    // no recovery marker exists, leaving the proposal orphaned.
+    let in_flight_file = InFlightFile::new(
+        id.clone(),
+        Phase::ApplyThrottle,
+        now,
+        throttle_bytes_per_sec,
+    );
+    if let Err(e) = in_flight_file.write(&state.executor.config.data_dir) {
+        return Err(ConnectError::new(
+            Code::Internal,
+            format!("failed to persist in_flight.json: {e}"),
+        ));
+    }
+
+    let updated = state
+        .store
+        .mutate(&id, |p| {
+            p.status = ProposalStatus::Executing;
+            p.started_at_ms = now;
+            p.throttle_bytes_per_sec = throttle_bytes_per_sec;
+        })
+        .ok_or_else(|| {
+            // Clean up the in_flight.json we just wrote — we're aborting before launch.
+            let _ = InFlightFile::delete(&state.executor.config.data_dir);
+            ConnectError::new(Code::Internal, "store.mutate vanished")
+        })?;
+
+    let cancel = CancellationToken::new();
+    let executor_state = state.executor.clone();
+    let client = state.client_facade.clone();
+    let prop_for_task = updated.clone();
+    let cancel_for_task = cancel.clone();
+
+    let task = tokio::spawn(async move {
+        Execution::new(
+            client,
+            executor_state,
+            prop_for_task,
+            throttle_bytes_per_sec,
+            cancel_for_task,
+        )
+        .run()
+        .await;
+    });
+
+    *slot = Some(ExecutionHandle {
+        proposal_id: id.clone(),
+        task,
+        cancel,
+        started_at: std::time::Instant::now(),
+    });
+    drop(slot);
+
+    state.executor.metrics.executions_started_total.inc();
+
+    Ok(ConnectResponse(pb::ExecuteProposalResponse {
+        proposal: Some(proposal_to_proto(&updated)),
+    }))
+}
+
+/// Signal cancellation on the in-flight execution. Returns the proposal
+/// already transitioned to `Cancelled`.
+pub async fn cancel_execution(
+    Extension(state): Extension<Arc<AppState>>,
+    req: ConnectRequest<pb::CancelExecutionRequest>,
+) -> Result<ConnectResponse<pb::CancelExecutionResponse>, ConnectError> {
+    let id = req.0.id;
+
+    let cancel_token = {
+        let slot = state.executor.in_flight.lock().await;
+        let Some(handle) = slot.as_ref() else {
+            return Err(ConnectError::new(Code::NotFound, "no execution in flight"));
+        };
+        if handle.proposal_id != id {
+            return Err(ConnectError::new(
+                Code::FailedPrecondition,
+                format!(
+                    "in-flight execution is `{}`, not `{id}`",
+                    handle.proposal_id
+                ),
+            ));
+        }
+        handle.cancel.clone()
+    };
+
+    cancel_token.cancel();
+
+    // Spin briefly waiting for the executor task to release the slot
+    // and update the store. Bound to 5s; if the executor doesn't drain
+    // in that time, return the current (Executing) proposal — the
+    // operator can re-poll.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let proposal = state.store.get(&id).ok_or_else(|| {
+            ConnectError::new(Code::NotFound, format!("proposal `{id}` vanished"))
+        })?;
+        if matches!(
+            proposal.status,
+            ProposalStatus::Cancelled | ProposalStatus::Failed | ProposalStatus::Completed
+        ) {
+            return Ok(ConnectResponse(pb::CancelExecutionResponse {
+                proposal: Some(proposal_to_proto(&proposal)),
+            }));
+        }
+        if std::time::Instant::now() >= deadline {
+            return Ok(ConnectResponse(pb::CancelExecutionResponse {
+                proposal: Some(proposal_to_proto(&proposal)),
+            }));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::executor::phases::{ClientFacade, ConfigOp, PhaseError};
+    use crate::executor::throttle::ThrottleTargets;
+    use crate::executor::{ExecutorConfig, ExecutorState};
+    use crate::goals::GoalContext;
+    use crate::ingest::new_shared_snapshot;
+    use crate::metrics::RebalancerMetrics;
+    use crate::model::proposal::{Movement, Proposal, ProposalSummary};
+    use async_trait::async_trait;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    /// Local no-op `ClientFacade` for handler-level unit tests. We don't
+    /// actually run the executor here — the handler tests only need a
+    /// type-correct `client_facade` field on `AppState`.
+    struct NoopClient;
+
+    #[async_trait]
+    impl ClientFacade for NoopClient {
+        async fn alter_throttle_configs(
+            &self,
+            _op: ConfigOp,
+            _targets: &ThrottleTargets,
+            _throttle_bytes_per_sec: i64,
+        ) -> Result<(), PhaseError> {
+            Ok(())
+        }
+        async fn submit_reassignments(&self, _movements: &[Movement]) -> Result<(), PhaseError> {
+            Ok(())
+        }
+        async fn cancel_reassignments(
+            &self,
+            _partitions: &[(String, i32)],
+        ) -> Result<(), PhaseError> {
+            Ok(())
+        }
+        async fn list_in_flight(
+            &self,
+            _of_interest: &[(String, i32)],
+        ) -> Result<Vec<(String, i32)>, PhaseError> {
+            // Return an empty list so the executor would complete immediately
+            // if it ever ran — but these handler tests don't actually let it run.
+            Ok(vec![])
+        }
+    }
+
+    fn build_app_state(dir: &std::path::Path) -> Arc<AppState> {
+        let store = Arc::new(ProposalStore::new(20));
+        let mut registry = prometheus_client::registry::Registry::with_prefix("crabka_rebalancer");
+        let metrics = RebalancerMetrics::register(&mut registry);
+        let executor = ExecutorState {
+            store: store.clone(),
+            config: ExecutorConfig {
+                data_dir: dir.to_path_buf(),
+                default_throttle_bytes_per_sec: 50_000_000,
+                poll_interval: Duration::from_millis(50),
+                execute_deadline: Duration::from_secs(30),
+                batch_size: 200,
+            },
+            metrics: metrics.clone(),
+            in_flight: Arc::new(tokio::sync::Mutex::new(None)),
+        };
+        let client_facade: Arc<dyn ClientFacade> = Arc::new(NoopClient);
+        Arc::new(AppState {
+            snapshot: new_shared_snapshot(),
+            store,
+            goal_registry: crate::api::GoalRegistry::default_registry(),
+            goal_ctx: GoalContext {
+                imbalance_threshold_pct: 10,
+                max_movements_per_proposal: 256,
+            },
+            metrics,
+            executor,
+            client_facade,
+        })
+    }
+
+    fn insert_computed_proposal(state: &AppState, id: &str, movements: Vec<Movement>) {
+        state.store.insert(Proposal {
+            id: id.into(),
+            status: ProposalStatus::Computed,
+            created_at_ms: 0,
+            goals_applied: vec![],
+            summary: ProposalSummary::default(),
+            movements,
+            started_at_ms: 0,
+            terminated_at_ms: 0,
+            failure_reason: None,
+            throttle_bytes_per_sec: 0,
+        });
+    }
+
+    fn mv(topic: &str, p: i32, old: Vec<i32>, new: Vec<i32>) -> Movement {
+        Movement {
+            topic: topic.into(),
+            partition: p,
+            old_replicas: old,
+            new_replicas: new,
+            old_leader: 0,
+            new_leader: 0,
+        }
+    }
+
+    fn req<T>(msg: T) -> ConnectRequest<T> {
+        ConnectRequest(msg)
+    }
+
+    #[tokio::test]
+    async fn execute_proposal_zero_movements_returns_failed_precondition() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = build_app_state(dir.path());
+        insert_computed_proposal(&state, "p", vec![]);
+
+        let err = execute_proposal(
+            Extension(state),
+            req(pb::ExecuteProposalRequest {
+                id: "p".into(),
+                throttle_bytes_per_sec: None,
+            }),
+        )
+        .await
+        .expect_err("expected FailedPrecondition");
+        assert_eq!(err.code(), Code::FailedPrecondition);
+    }
+
+    #[tokio::test]
+    async fn execute_proposal_unknown_id_returns_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = build_app_state(dir.path());
+
+        let err = execute_proposal(
+            Extension(state),
+            req(pb::ExecuteProposalRequest {
+                id: "ghost".into(),
+                throttle_bytes_per_sec: None,
+            }),
+        )
+        .await
+        .expect_err("expected NotFound");
+        assert_eq!(err.code(), Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn execute_proposal_terminal_status_returns_failed_precondition() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = build_app_state(dir.path());
+        state.store.insert(Proposal {
+            id: "done".into(),
+            status: ProposalStatus::Completed,
+            created_at_ms: 0,
+            goals_applied: vec![],
+            summary: ProposalSummary::default(),
+            movements: vec![mv("t", 0, vec![1], vec![2])],
+            started_at_ms: 1,
+            terminated_at_ms: 2,
+            failure_reason: None,
+            throttle_bytes_per_sec: 0,
+        });
+
+        let err = execute_proposal(
+            Extension(state),
+            req(pb::ExecuteProposalRequest {
+                id: "done".into(),
+                throttle_bytes_per_sec: None,
+            }),
+        )
+        .await
+        .expect_err("expected FailedPrecondition");
+        assert_eq!(err.code(), Code::FailedPrecondition);
+    }
+
+    #[tokio::test]
+    async fn cancel_execution_when_idle_returns_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = build_app_state(dir.path());
+
+        let err = cancel_execution(
+            Extension(state),
+            req(pb::CancelExecutionRequest {
+                id: "anything".into(),
+            }),
+        )
+        .await
+        .expect_err("expected NotFound");
+        assert_eq!(err.code(), Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn cancel_execution_id_mismatch_returns_failed_precondition() {
+        use crate::executor::ExecutionHandle;
+        use tokio_util::sync::CancellationToken;
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = build_app_state(dir.path());
+
+        // Pre-stage an in-flight handle for a different proposal.
+        let cancel = CancellationToken::new();
+        let dummy_task = tokio::spawn(async {});
+        *state.executor.in_flight.lock().await = Some(ExecutionHandle {
+            proposal_id: "actually-running".into(),
+            task: dummy_task,
+            cancel,
+            started_at: std::time::Instant::now(),
+        });
+
+        let err = cancel_execution(
+            Extension(state),
+            req(pb::CancelExecutionRequest {
+                id: "different-id".into(),
+            }),
+        )
+        .await
+        .expect_err("expected FailedPrecondition");
+        assert_eq!(err.code(), Code::FailedPrecondition);
+    }
 }

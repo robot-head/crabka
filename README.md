@@ -119,7 +119,7 @@ implements it today.
 | KIP-73 throttled replication | ✅ |
 | KIP-841 force-elect / unclean recovery toggle | ❌ |
 | Cruise-Control-equivalent rebalancer (advisor) | ✅ |
-| Cruise-Control-equivalent rebalancer (executor) | ❌ |
+| Cruise-Control-equivalent rebalancer (executor) | ✅ |
 
 ### Metadata quorum (KRaft)
 
