@@ -79,7 +79,7 @@ NODE_ID=$((NODE_ID_START + ORDINAL))\n\
 mkdir -p /var/lib/crabka/data\n\
 printf '%s' \"$NODE_ID\" > /var/lib/crabka/data/.node-id\n\
 if [ ! -f /var/lib/crabka/data/.formatted ]; then\n\
-  /usr/bin/crabka format --log-dir /var/lib/crabka/data --cluster-id \"$CRABKA_CLUSTER_ID\" --node-id \"$NODE_ID\"\n\
+  /usr/bin/crabka format --log-dir /var/lib/crabka/data --cluster-id \"$CRABKA_CLUSTER_ID\"\n\
   touch /var/lib/crabka/data/.formatted\n\
 fi\n";
 
