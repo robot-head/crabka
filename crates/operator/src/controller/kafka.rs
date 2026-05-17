@@ -19,16 +19,17 @@ use std::time::Duration;
 
 use futures::StreamExt as _;
 use k8s_openapi::api::core::v1::{ConfigMap, Secret, Service};
-use kube::api::{Api, ListParams};
+use kube::api::{Api, ListParams, Patch, PatchParams};
 use kube::runtime::controller::{Action, Controller};
 use kube::runtime::reflector::ObjectRef;
 use kube::runtime::watcher;
 use kube::{Resource, ResourceExt as _};
+use serde_json::json;
 
 use crate::context::Context;
 use crate::controller::common::{
-    ReconcileError, apply_object, condition, ensure_cluster_id_secret, patch_status,
-    render_configmap, render_service,
+    FIELD_MANAGER, ReconcileError, apply_object, condition, ensure_cluster_id_secret, owner_ref,
+    patch_status, render_configmap, render_service,
 };
 use crate::crd::{Kafka, KafkaNodePool, KafkaStatus};
 
@@ -154,6 +155,15 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
     let lp = ListParams::default().labels(&format!("crabka.io/cluster={name}"));
     let pools = pool_api.list(&lp).await?;
 
+    // 3b. Adopt sibling pools: patch each pool's `metadata.ownerReferences`
+    //     to include this Kafka as the controlling owner. Idempotent —
+    //     Kubernetes server-side resolves the patch to a no-op when the
+    //     ref already matches. The owner-ref drives Kubernetes' built-in
+    //     GC: `kubectl delete kafka demo` cascades to all pools labeled
+    //     `crabka.io/cluster=demo`, and (transitively, via the pool's own
+    //     owner-ref on its `StatefulSet`) to the broker workloads.
+    adopt_pools(&pool_api, &obj, pools.iter()).await?;
+
     // 4. Aggregate + patch our own status.
     let rollup = aggregate_pool_status(pools.iter());
     let (ready, reason, message) = rollup_condition(&rollup);
@@ -171,6 +181,40 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
     patch_status::<Kafka, KafkaStatus>(&kafka_api, &name, status).await?;
 
     Ok(Action::requeue(Duration::from_secs(30)))
+}
+
+/// For every pool labeled `crabka.io/cluster=<this Kafka>`, patch
+/// `metadata.ownerReferences` so the Kafka is the controlling owner.
+/// Uses a server-side apply with the operator's field manager so the
+/// patch wins over any out-of-band manual edits.
+async fn adopt_pools<'a>(
+    pool_api: &Api<KafkaNodePool>,
+    parent: &Kafka,
+    pools: impl IntoIterator<Item = &'a KafkaNodePool>,
+) -> Result<(), ReconcileError> {
+    let owner = owner_ref::<Kafka>(parent)?;
+    let params = PatchParams {
+        field_manager: Some(FIELD_MANAGER.into()),
+        force: true,
+        ..Default::default()
+    };
+    // SSA needs apiVersion + kind on the patch payload. The patch
+    // *target* is a KafkaNodePool, so the payload's apiVersion/kind
+    // match the pool, not the parent Kafka.
+    let patch_body = json!({
+        "apiVersion": KafkaNodePool::api_version(&()),
+        "kind": KafkaNodePool::kind(&()),
+        "metadata": {
+            "ownerReferences": [owner],
+        }
+    });
+    for pool in pools {
+        let pool_name = pool.name_any();
+        pool_api
+            .patch(&pool_name, &params, &Patch::Apply(&patch_body))
+            .await?;
+    }
+    Ok(())
 }
 
 pub fn error_policy(_obj: Arc<Kafka>, err: &ReconcileError, _ctx: Arc<Context>) -> Action {

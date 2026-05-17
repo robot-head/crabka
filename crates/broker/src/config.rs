@@ -158,6 +158,14 @@ pub struct BrokerConfig {
     /// Production callers leave this as `None` (default 30s).
     #[cfg(any(test, feature = "test-helpers"))]
     pub cleaner_interval_override: Option<std::time::Duration>,
+
+    /// Slice 33: how often the TLS reload watcher polls cert / key /
+    /// client-CA file mtimes and rebuilds the `ServerConfig` if any
+    /// changed. Defaults to 30s. Set lower in tests to keep watcher
+    /// latency tight. `Duration::ZERO` disables the periodic watcher
+    /// — callers can still trigger an immediate reload via
+    /// [`crate::BrokerHandle::reload_tls`].
+    pub tls_reload_interval: std::time::Duration,
 }
 
 impl BrokerConfig {
@@ -203,6 +211,9 @@ impl BrokerConfig {
             leader_imbalance_per_broker_percentage: 10,
             #[cfg(any(test, feature = "test-helpers"))]
             cleaner_interval_override: None,
+            // Short interval so hot-reload tests don't wait long for a
+            // watcher tick. Tests that don't care can ignore it.
+            tls_reload_interval: std::time::Duration::from_millis(200),
         }
     }
 
@@ -329,6 +340,7 @@ impl Default for BrokerConfig {
             leader_imbalance_per_broker_percentage: 10,
             #[cfg(any(test, feature = "test-helpers"))]
             cleaner_interval_override: None,
+            tls_reload_interval: std::time::Duration::from_secs(30),
         }
     }
 }

@@ -71,17 +71,23 @@ pub(crate) fn validate(pool: &KafkaNodePool) -> Result<(), PoolValidationError> 
 
 // Init script: derive ORDINAL from $HOSTNAME (StatefulSet pods are
 // named `<sts>-<ordinal>`), compute NODE_ID = NODE_ID_START + ORDINAL,
-// persist it to `.node-id` for the main container, and run
-// `crabka format` if `.formatted` is missing.
+// run `crabka format` if `.formatted` is missing, then persist the
+// node id to `.node-id` for the main container.
+//
+// `.node-id` is written *after* `crabka format` because `format`
+// refuses to overwrite a non-empty `log_dir`. Writing it inside the
+// freshly-formatted directory keeps the data dir empty when the
+// formatter runs, while still leaving the file in place for the
+// broker container.
 const INIT_SCRIPT: &str = "set -eu\n\
 ORDINAL=\"${HOSTNAME##*-}\"\n\
 NODE_ID=$((NODE_ID_START + ORDINAL))\n\
 mkdir -p /var/lib/crabka/data\n\
-printf '%s' \"$NODE_ID\" > /var/lib/crabka/data/.node-id\n\
 if [ ! -f /var/lib/crabka/data/.formatted ]; then\n\
   /usr/bin/crabka format --log-dir /var/lib/crabka/data --cluster-id \"$CRABKA_CLUSTER_ID\"\n\
   touch /var/lib/crabka/data/.formatted\n\
-fi\n";
+fi\n\
+printf '%s' \"$NODE_ID\" > /var/lib/crabka/data/.node-id\n";
 
 // Main script: read the persisted node id and exec the broker.
 const MAIN_SCRIPT: &str = "set -eu\n\
@@ -474,6 +480,24 @@ mod tests {
         assert!(
             script.contains("NODE_ID_START + ORDINAL"),
             "expected the init script to compute NODE_ID = NODE_ID_START + ORDINAL, got: {script}"
+        );
+        // Regression: `crabka format` refuses to run when the log_dir
+        // is non-empty. The init script must therefore write `.node-id`
+        // *after* the format step, not before — otherwise the first
+        // boot of an empty PVC fails with
+        // "refusing to overwrite non-empty log_dir".
+        let format_pos = script
+            .find("crabka format")
+            .expect("init script must invoke `crabka format`");
+        let node_id_write_pos = script
+            .find(".node-id")
+            .expect("init script must write .node-id");
+        assert!(
+            node_id_write_pos > format_pos,
+            "init script must write .node-id AFTER crabka format. \
+             Otherwise `crabka format` refuses to overwrite a non-empty \
+             log_dir on the first boot of an empty PVC. \
+             format at byte {format_pos}, .node-id at byte {node_id_write_pos}",
         );
     }
 

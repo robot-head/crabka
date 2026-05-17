@@ -437,6 +437,50 @@ Kafka client for ApiVersions.
 - Closes the recurring JVM-tool quirk that slices 16/16b/16c documented as known limitations.
 - Out of scope: slice 16 `client_id` HandlerTable gap (slice 17b).
 
+## Slice 33 — TLS cert hot-reload (2026-05-16)
+
+- New `crabka_security::DynamicServerConfig` wraps the `rustls::ServerConfig`
+  in an `arc_swap::ArcSwap`. The broker snapshots the current `Arc<ServerConfig>`
+  on each TLS accept and wraps it in a fresh `tokio_rustls::TlsAcceptor`,
+  so a mid-rotation reload affects only *new* handshakes — in-flight
+  TLS sessions keep the config they negotiated against.
+- `DynamicServerConfig::reload_from(&TlsConfig)` re-reads cert / key /
+  optional client-CA paths and atomically swaps the inner `Arc`.
+  Reload-on-error leaves the previous config in place (better to keep
+  serving with the old cert than to drop connections on a typo).
+- Broker plumbing: replaced `Broker::tls_acceptor: Option<TlsAcceptor>`
+  with `tls_dynamic: Option<Arc<DynamicServerConfig>>`. Updated the
+  data-plane dispatch path and the raft handshake to snapshot per use.
+- New `BrokerConfig::tls_reload_interval` (default 30s production /
+  200ms `for_tests`). `Duration::ZERO` disables the watcher; callers
+  can still drive immediate reloads via the new public
+  `BrokerHandle::reload_tls()`.
+- New `crabka_broker::tls_reload::run` background task: polls cert /
+  key / client-CA mtimes every `tls_reload_interval`, reloads on
+  change. Spawned only when `tls_config` is set; cancelled via the
+  supervisor shutdown token.
+- New `BrokerHandle::reload_tls() -> Result<(), BrokerError>` — for
+  operators / sidecars that just rewrote cert files and want the
+  change to take effect immediately without waiting for a watcher
+  tick.
+- New dev fixture `dev_cert_alt.pem` / `dev_key_alt.pem` (P-256
+  self-signed, CN=crabka-dev-alt — distinct from the original
+  `dev_cert.pem`'s `CN=crabka-dev` and sha256 fingerprint).
+- 2 new unit tests in `crabka_security::reload` (snapshot stability
+  across reload; reload-on-error preserves prior config).
+- 2 new broker integration tests in `tests/cert_hot_reload.rs`:
+  explicit `reload_tls()` swaps the served cert; periodic
+  mtime-watcher swaps after an on-disk rewrite (100ms tick, 1.1s
+  warm-up so the new mtime exceeds the old by ≥1s on coarse FS
+  resolutions).
+- New workspace dep: `arc-swap` (lock-free atomic Arc swap).
+- Unblocks operator slice 34 (non-disruptive CA rotation
+  orchestration) and slice 30 (cluster CA + inter-broker mTLS).
+- Out of scope: outbound `ClientConfig` hot-reload (only the server
+  side reloads today — inter-broker outbound dialers use the original
+  trust roots; rotation requires a broker restart). Hot-reload of
+  `BrokerConfig.tls_reload_interval` itself.
+
 ## Slice 29 — mTLS client authentication (2026-05-16)
 
 - `TlsConfig` gains two fields: `client_auth: ClientAuthMode`

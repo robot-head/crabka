@@ -147,6 +147,7 @@ pub(crate) mod replica_state;
 mod replicator;
 mod replicator_supervisor;
 pub mod throttle;
+pub(crate) mod tls_reload;
 mod txn;
 
 pub use broker::{Broker, BrokerHandle};
