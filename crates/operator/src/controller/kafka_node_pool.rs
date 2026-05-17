@@ -459,6 +459,7 @@ mod tests {
                 image: None,
                 resources: None,
                 template: None,
+                storage: None,
             },
         );
         p.metadata.namespace = Some("default".into());

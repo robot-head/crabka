@@ -35,6 +35,7 @@ fn pool_cr(name: &str, namespace: &str, parent: Option<&str>, replicas: i32) -> 
             image: None,
             resources: None,
             template: None,
+            storage: None,
         },
     );
     p.metadata.namespace = Some(namespace.into());
