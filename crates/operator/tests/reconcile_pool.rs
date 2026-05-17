@@ -3,12 +3,14 @@
 //!
 //! Happy-path request sequence on a fresh pool:
 //!   1. GET   kafkas/<parent>                  (-> 200 parent Kafka)
-//!   2. PATCH statefulsets/<parent>-<pool>     (SSA)
-//!   3. GET   statefulsets/<parent>-<pool>     (status read)
-//!   4. PATCH kafkanodepools/<pool>/status     (merge)
+//!   2. GET   statefulsets/<parent>-<pool>     (pre-apply; slice-24 monotonic-storage check)
+//!   3. PATCH statefulsets/<parent>-<pool>     (SSA)
+//!   4. GET   statefulsets/<parent>-<pool>     (post-apply status read)
+//!   5. PATCH kafkanodepools/<pool>/status     (merge)
 //!
-//! Validation-failure paths short-circuit to step 4 (or skip step 1
-//! entirely when the cluster label is missing).
+//! Validation-failure paths short-circuit to step 5 (or skip step 1
+//! entirely when the cluster label is missing). Slice-24 monotonic-
+//! storage failures short-circuit after step 2.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -21,8 +23,8 @@ use http::{Method, Response};
 mod shared;
 
 use shared::{
-    MockRule, MockState, fake_parent_kafka_body, fake_pool_body, fake_sts_body, fixture_ctx,
-    json_response, mock_client, not_found_body,
+    MockRule, MockState, fake_parent_kafka_body, fake_pool_body, fake_sts_body,
+    fake_sts_body_with_storage, fixture_ctx, json_response, mock_client, not_found_body,
 };
 
 fn pool_cr(name: &str, namespace: &str, parent: Option<&str>, replicas: i32) -> KafkaNodePool {
@@ -50,6 +52,14 @@ fn pool_cr(name: &str, namespace: &str, parent: Option<&str>, replicas: i32) -> 
 
 /// Happy-path rules: parent Kafka exists, STS apply succeeds, STS status
 /// read returns `ready_replicas`, pool status patch echoes the pool.
+///
+/// Slice 24 added a pre-apply STS GET to the reconcile flow (for
+/// monotonic-storage validation), so the rule sequence is now:
+///   1. GET parent Kafka.
+///   2. GET STS (pre-apply): 404 → first-reconcile, validation accepts any spec.
+///   3. PATCH STS (SSA).
+///   4. GET STS (post-apply): returns `ready_replicas` for the status mirror.
+///   5. PATCH pool status.
 fn happy_path_rules(
     parent: &str,
     pool: &str,
@@ -65,19 +75,30 @@ fn happy_path_rules(
             path_substr: format!("/kafkas/{parent}"),
             response: json_response(200, &fake_parent_kafka_body(parent, namespace)),
         },
-        // 2. PATCH statefulset (SSA).
+        // 2. GET statefulset (pre-apply, slice-24 monotonic-storage check):
+        //    no live STS on first reconcile.
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/statefulsets/{sts_name}"),
+            response: Response::builder()
+                .status(404)
+                .header("content-type", "application/json")
+                .body(not_found_body("first reconcile, no live STS"))
+                .expect("404 builds"),
+        },
+        // 3. PATCH statefulset (SSA).
         MockRule {
             method: Method::PATCH,
             path_substr: format!("/statefulsets/{sts_name}"),
             response: json_response(200, &fake_sts_body(&sts_name, namespace, 1, ready_replicas)),
         },
-        // 3. GET statefulset (status read).
+        // 4. GET statefulset (post-apply status read).
         MockRule {
             method: Method::GET,
             path_substr: format!("/statefulsets/{sts_name}"),
             response: json_response(200, &fake_sts_body(&sts_name, namespace, 1, ready_replicas)),
         },
-        // 4. PATCH kafkanodepools/<pool>/status.
+        // 5. PATCH kafkanodepools/<pool>/status.
         MockRule {
             method: Method::PATCH,
             path_substr: format!("/kafkanodepools/{pool}/status"),
@@ -278,6 +299,189 @@ async fn pool_status_parent_not_found() {
     assert_eq!(cond["type"], "Ready", "body = {body}");
     assert_eq!(cond["status"], "False", "body = {body}");
     assert_eq!(cond["reason"], "ParentNotFound", "body = {body}");
+
+    assert_eq!(state.remaining_rules(), 0);
+}
+
+#[tokio::test]
+async fn pool_persistent_claim_renders_volume_claim_template() {
+    use crabka_operator::crd::{PersistentClaimSpec, Storage};
+
+    let parent = "demo";
+    let pool_name = "brokers";
+    let ns = "y";
+    let sts_name = format!("{parent}-{pool_name}");
+
+    let rules = vec![
+        // 1. GET parent Kafka.
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/kafkas/{parent}"),
+            response: json_response(200, &fake_parent_kafka_body(parent, ns)),
+        },
+        // 2. Pre-apply GET: no live STS (first reconcile).
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/statefulsets/{sts_name}"),
+            response: Response::builder()
+                .status(404)
+                .header("content-type", "application/json")
+                .body(not_found_body("first reconcile, no live STS"))
+                .expect("404 builds"),
+        },
+        // 3. PATCH STS (SSA-apply).
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/statefulsets/{sts_name}"),
+            response: json_response(200, &fake_sts_body(&sts_name, ns, 1, Some(1))),
+        },
+        // 4. Post-apply GET (status read).
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/statefulsets/{sts_name}"),
+            response: json_response(200, &fake_sts_body(&sts_name, ns, 1, Some(1))),
+        },
+        // 5. PATCH pool status.
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/kafkanodepools/{pool_name}/status"),
+            response: json_response(200, &fake_pool_body(pool_name, ns, parent)),
+        },
+    ];
+
+    let (ctx, state) = build_ctx(ns, rules);
+    let mut pool = pool_cr(pool_name, ns, Some(parent), 1);
+    pool.spec.storage = Some(Storage::PersistentClaim(PersistentClaimSpec {
+        size: "10Gi".into(),
+        class: Some("fast-ssd".into()),
+        delete_claim: false,
+    }));
+
+    reconcile(Arc::new(pool), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    let sts_patch = observed
+        .iter()
+        .find(|r| {
+            r.method() == Method::PATCH
+                && r.uri()
+                    .to_string()
+                    .contains(&format!("/statefulsets/{sts_name}"))
+        })
+        .expect("STS PATCH was captured");
+    let body: serde_json::Value =
+        serde_json::from_slice(sts_patch.body()).expect("STS PATCH body is JSON");
+
+    // volumeClaimTemplates carries our data PVC at the requested size +
+    // accessModes + storageClassName.
+    let vct = body["spec"]["volumeClaimTemplates"]
+        .as_array()
+        .unwrap_or_else(|| panic!("volumeClaimTemplates present; body = {body}"));
+    assert_eq!(vct.len(), 1, "body = {body}");
+    assert_eq!(vct[0]["metadata"]["name"], "data", "body = {body}");
+    assert_eq!(
+        vct[0]["spec"]["resources"]["requests"]["storage"], "10Gi",
+        "body = {body}"
+    );
+    assert_eq!(
+        vct[0]["spec"]["accessModes"][0], "ReadWriteOnce",
+        "body = {body}"
+    );
+    assert_eq!(
+        vct[0]["spec"]["storageClassName"], "fast-ssd",
+        "body = {body}"
+    );
+
+    // No emptyDir for `data` in the pod-template volumes (the
+    // StatefulSet controller mounts the PVC under the same name).
+    let volumes = body["spec"]["template"]["spec"]["volumes"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    for v in &volumes {
+        if v["name"] == "data" {
+            assert!(
+                v.get("emptyDir").is_none(),
+                "expected no emptyDir entry for data; got {v}",
+            );
+        }
+    }
+
+    assert_eq!(state.remaining_rules(), 0);
+}
+
+#[tokio::test]
+async fn pool_storage_shrink_is_rejected() {
+    use crabka_operator::crd::{PersistentClaimSpec, Storage};
+
+    let parent = "demo";
+    let pool_name = "brokers";
+    let ns = "y";
+    let sts_name = format!("{parent}-{pool_name}");
+
+    let rules = vec![
+        // 1. GET parent Kafka.
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/kafkas/{parent}"),
+            response: json_response(200, &fake_parent_kafka_body(parent, ns)),
+        },
+        // 2. Pre-apply GET: live STS has volumeClaimTemplates with 10Gi.
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/statefulsets/{sts_name}"),
+            response: json_response(
+                200,
+                &fake_sts_body_with_storage(&sts_name, ns, 1, Some(1), Some(("10Gi", None))),
+            ),
+        },
+        // 3. Validation rejects the shrink; status PATCH is the only
+        //    request that follows. No STS PATCH, no second STS GET.
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/kafkanodepools/{pool_name}/status"),
+            response: json_response(200, &fake_pool_body(pool_name, ns, parent)),
+        },
+    ];
+
+    let (ctx, state) = build_ctx(ns, rules);
+    let mut pool = pool_cr(pool_name, ns, Some(parent), 1);
+    pool.spec.storage = Some(Storage::PersistentClaim(PersistentClaimSpec {
+        size: "5Gi".into(),
+        class: None,
+        delete_claim: false,
+    }));
+
+    reconcile(Arc::new(pool), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    // Assert NO STS PATCH was attempted (the SSA-apply is short-circuited
+    // by the monotonic-storage validator).
+    for req in &observed {
+        let uri = req.uri().to_string();
+        if req.method() == Method::PATCH {
+            assert!(
+                !uri.contains(&format!("/statefulsets/{sts_name}")),
+                "shrink path must not PATCH the StatefulSet: {uri}",
+            );
+        }
+    }
+    // Status PATCH body has reason=StorageImmutable.
+    let status_patch = observed
+        .iter()
+        .find(|r| {
+            r.method() == Method::PATCH
+                && r.uri()
+                    .to_string()
+                    .contains(&format!("/kafkanodepools/{pool_name}/status"))
+        })
+        .expect("status PATCH must be captured");
+    let body: serde_json::Value =
+        serde_json::from_slice(status_patch.body()).expect("status PATCH body is JSON");
+    let cond = &body["status"]["conditions"][0];
+    assert_eq!(cond["type"], "Ready", "body = {body}");
+    assert_eq!(cond["status"], "False", "body = {body}");
+    assert_eq!(cond["reason"], "StorageImmutable", "body = {body}");
 
     assert_eq!(state.remaining_rules(), 0);
 }
