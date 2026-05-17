@@ -39,7 +39,7 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 base64 = { workspace = true }
-crabka-broker = { path = "../broker" }
+crabka-broker = { version = "0.1", path = "../broker" }
 http = "1"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "http1"] }
