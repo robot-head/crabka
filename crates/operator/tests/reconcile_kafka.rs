@@ -36,6 +36,8 @@ fn kafka_cr(name: &str, namespace: &str) -> Kafka {
         KafkaSpec {
             kafka_version: "0.1.1".into(),
             config: None,
+            listeners: vec![],
+            inter_broker_listener_name: None,
         },
     );
     k.metadata.namespace = Some(namespace.into());
@@ -56,6 +58,8 @@ fn kafka_cr_with_config(
         KafkaSpec {
             kafka_version: "0.1.1".into(),
             config: Some(config),
+            listeners: vec![],
+            inter_broker_listener_name: None,
         },
     );
     k.metadata.namespace = Some(namespace.into());

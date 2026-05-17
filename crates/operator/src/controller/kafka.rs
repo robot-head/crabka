@@ -220,6 +220,7 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
         ],
         replicas: Some(rollup.replicas),
         ready_replicas: Some(rollup.ready_replicas),
+        listeners: vec![],
     };
     let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), &ns);
     patch_status::<Kafka, KafkaStatus>(&kafka_api, &name, status).await?;

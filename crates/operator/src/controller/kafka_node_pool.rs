@@ -669,6 +669,8 @@ mod tests {
             KafkaSpec {
                 kafka_version: "0.1.1".into(),
                 config: None,
+                listeners: vec![],
+                inter_broker_listener_name: None,
             },
         );
         k.metadata.namespace = Some("default".into());

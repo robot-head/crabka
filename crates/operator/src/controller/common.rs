@@ -477,6 +477,8 @@ mod config_hash_tests {
         let spec = KafkaSpec {
             kafka_version: "0.1.1".into(),
             config: Some(cfg),
+            listeners: vec![],
+            inter_broker_listener_name: None,
         };
         // Keys sort alphabetically: log.retention.hours < num.partitions.
         assert_eq!(
@@ -490,6 +492,8 @@ mod config_hash_tests {
         let spec = KafkaSpec {
             kafka_version: "0.1.1".into(),
             config: None,
+            listeners: vec![],
+            inter_broker_listener_name: None,
         };
         assert_eq!(serialize_broker_properties(&spec), "");
     }
