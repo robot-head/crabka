@@ -41,7 +41,7 @@ tokio-util = { workspace = true, features = ["codec", "rt"] }
 dashmap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-clap = { workspace = true }
+clap = { workspace = true, features = ["env"] }
 uuid = { workspace = true }
 futures-util = { workspace = true }
 

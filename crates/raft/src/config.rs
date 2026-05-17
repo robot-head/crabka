@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use uuid::Uuid;
+
 use crate::network::OutboundDialer;
 use crate::types::NodeId;
 
@@ -53,6 +55,11 @@ pub struct ControllerConfig {
     pub heartbeat_interval: Duration,
     pub client_id: String,
     pub bootstrap_mode: BootstrapMode,
+    /// Cluster UUID applied to the `MetadataImage` on first construction.
+    /// `None` falls back to `Uuid::nil()` (legacy single-node default).
+    /// The operator sets this to the `KafkaCluster` UID so every broker
+    /// in the same cluster shares one identifier across restarts.
+    pub cluster_id: Option<Uuid>,
     /// Optional outbound dialer. `None` means: open a plain TCP socket
     /// to peers (legacy PLAINTEXT-only path). The broker injects an
     /// `InterBrokerClient`-backed dialer here when inter-broker TLS or
@@ -76,6 +83,7 @@ impl std::fmt::Debug for ControllerConfig {
             .field("heartbeat_interval", &self.heartbeat_interval)
             .field("client_id", &self.client_id)
             .field("bootstrap_mode", &self.bootstrap_mode)
+            .field("cluster_id", &self.cluster_id)
             .field("dialer", &self.dialer.is_some())
             .field("handshake", &self.handshake.is_some())
             .finish()
@@ -94,6 +102,7 @@ impl ControllerConfig {
             heartbeat_interval: Duration::from_millis(200),
             client_id: "crabka-controller-test".into(),
             bootstrap_mode: BootstrapMode::Bootstrap,
+            cluster_id: None,
             dialer: None,
             handshake: None,
         }

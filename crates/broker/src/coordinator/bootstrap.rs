@@ -201,6 +201,7 @@ mod tests {
             heartbeat_interval: Duration::from_millis(50),
             client_id: "test".into(),
             bootstrap_mode: crabka_raft::BootstrapMode::Bootstrap,
+            cluster_id: None,
             dialer: None,
             handshake: None,
         };

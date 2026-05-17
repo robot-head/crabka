@@ -29,6 +29,7 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
             - run
+            - --default-broker-image={{ .Values.brokerImage.repository }}:{{ .Values.brokerImage.tag }}
             {{- if .Values.watchNamespaces }}
             - --watch-namespaces={{ join "," .Values.watchNamespaces }}
             {{- end }}
