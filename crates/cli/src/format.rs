@@ -66,7 +66,8 @@ pub struct FormatArgs {
     #[arg(long)]
     cluster_id: Option<Uuid>,
     /// Seed a SCRAM credential. May be repeated.
-    /// Format: `SCRAM-SHA-512=[name=<u>,password=<p>,iterations=<n>]`
+    /// Format: `SCRAM-SHA-256=[name=<u>,password=<p>,iterations=<n>]`
+    /// or `SCRAM-SHA-512=[name=<u>,password=<p>,iterations=<n>]`
     /// (iterations defaults to 4096 when omitted)
     #[arg(long, value_parser = parse_scram_spec)]
     add_scram: Vec<ScramSpec>,
@@ -87,14 +88,18 @@ pub struct ScramSpec {
 
 fn parse_scram_spec(s: &str) -> Result<ScramSpec, String> {
     let s = s.trim();
-    let s = s
-        .strip_prefix("SCRAM-SHA-512=[")
-        .ok_or("must start with SCRAM-SHA-512=[")?;
-    let s = s.strip_suffix(']').ok_or("must end with ]")?;
+    let (mechanism, body) = if let Some(rest) = s.strip_prefix("SCRAM-SHA-512=[") {
+        (SaslMechanism::ScramSha512, rest)
+    } else if let Some(rest) = s.strip_prefix("SCRAM-SHA-256=[") {
+        (SaslMechanism::ScramSha256, rest)
+    } else {
+        return Err("must start with SCRAM-SHA-256=[ or SCRAM-SHA-512=[".into());
+    };
+    let body = body.strip_suffix(']').ok_or("must end with ]")?;
     let mut name = None;
     let mut password = None;
     let mut iterations: u32 = 4096;
-    for attr in s.split(',') {
+    for attr in body.split(',') {
         let (k, v) = attr
             .split_once('=')
             .ok_or_else(|| format!("malformed attr: {attr}"))?;
@@ -108,7 +113,7 @@ fn parse_scram_spec(s: &str) -> Result<ScramSpec, String> {
         }
     }
     Ok(ScramSpec {
-        mechanism: SaslMechanism::ScramSha512,
+        mechanism,
         name: name.ok_or("missing name")?,
         password: password.ok_or("missing password")?,
         iterations,
@@ -391,6 +396,14 @@ mod tests {
     fn parse_scram_spec_iterations_default() {
         let spec = parse_scram_spec("SCRAM-SHA-512=[name=bob,password=p]").unwrap();
         assert_eq!(spec.iterations, 4096);
+    }
+
+    #[test]
+    fn parse_scram_spec_sha256_prefix() {
+        let spec = parse_scram_spec("SCRAM-SHA-256=[name=alice,password=hunter2,iterations=8192]")
+            .unwrap();
+        assert_eq!(spec.name, "alice");
+        assert_eq!(spec.mechanism, SaslMechanism::ScramSha256);
     }
 
     #[test]

@@ -153,7 +153,7 @@ async fn run_inbound_sasl(
                     SaslMechanism::Plain => {
                         handle_authenticate_plain(&req, &mut auth, &cfg.plain_credentials)
                     }
-                    SaslMechanism::ScramSha512 => {
+                    SaslMechanism::ScramSha256 | SaslMechanism::ScramSha512 => {
                         let controller = cfg.controller.get().ok_or_else(|| {
                             RaftHandshakeError::Sasl(
                                 "controller handle not initialised for SCRAM lookup".into(),

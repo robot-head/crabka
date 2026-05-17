@@ -494,7 +494,8 @@ async fn sasl_scram_sha512_happy_path() {
         .expect("submit V1ScramCredential");
 
     let addr = handle.listen_addr();
-    let result = drive_sasl_scram_session(addr, "alice", "wonderland").await;
+    let result =
+        drive_sasl_scram_session(addr, "alice", "wonderland", SaslMechanism::ScramSha512).await;
     handle.shutdown().await;
     result.expect("SASL/SCRAM session must succeed end-to-end");
 }
@@ -536,7 +537,8 @@ async fn sasl_scram_sha512_wrong_password_closes_connection() {
         .expect("submit V1ScramCredential");
 
     let addr = handle.listen_addr();
-    let result = drive_sasl_scram_session(addr, "alice", "hunter2").await;
+    let result =
+        drive_sasl_scram_session(addr, "alice", "hunter2", SaslMechanism::ScramSha512).await;
     handle.shutdown().await;
     assert!(
         result.is_err(),
@@ -544,8 +546,94 @@ async fn sasl_scram_sha512_wrong_password_closes_connection() {
     );
 }
 
-/// Drive a complete SASL/SCRAM-SHA-512 session against a `SASL_PLAINTEXT`
-/// listener.
+/// Slice 32: SASL/SCRAM-SHA-256 happy path. Mirrors the SHA-512 test but
+/// provisions a SHA-256 credential and configures the listener to enable
+/// only SHA-256, proving the new mechanism is wired end-to-end and not
+/// accidentally piggybacking on SHA-512 plumbing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sasl_scram_sha256_happy_path() {
+    let log_dir = tempfile::tempdir().unwrap();
+    let mut cfg = BrokerConfig::for_tests(log_dir.path().to_path_buf());
+    cfg.listeners = vec![ListenerSpec {
+        name: "SASL_PLAINTEXT".to_string(),
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        advertised: "127.0.0.1:0".to_string(),
+        protocol: ListenerProtocol::SaslPlaintext,
+    }];
+    cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
+    cfg.enabled_sasl_mechanisms = vec![SaslMechanism::ScramSha256];
+
+    let handle = Broker::start(cfg).await.expect("broker must start");
+
+    let cred =
+        crabka_security::hash_scram_password(b"wonderland", SaslMechanism::ScramSha256, 4096);
+    handle
+        .submit_metadata_record_for_test(crabka_metadata::MetadataRecord::V1ScramCredential(
+            crabka_metadata::ScramCredentialRecord {
+                user: "alice".into(),
+                mechanism: SaslMechanism::ScramSha256,
+                salt: cred.salt,
+                stored_key: cred.stored_key,
+                server_key: cred.server_key,
+                iterations: cred.iterations,
+            },
+        ))
+        .await
+        .expect("submit V1ScramCredential");
+
+    let addr = handle.listen_addr();
+    let result =
+        drive_sasl_scram_session(addr, "alice", "wonderland", SaslMechanism::ScramSha256).await;
+    handle.shutdown().await;
+    result.expect("SASL/SCRAM-SHA-256 session must succeed end-to-end");
+}
+
+/// Negative path for SHA-256 — wrong password must close the connection
+/// just like the SHA-512 variant.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sasl_scram_sha256_wrong_password_closes_connection() {
+    let log_dir = tempfile::tempdir().unwrap();
+    let mut cfg = BrokerConfig::for_tests(log_dir.path().to_path_buf());
+    cfg.listeners = vec![ListenerSpec {
+        name: "SASL_PLAINTEXT".to_string(),
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        advertised: "127.0.0.1:0".to_string(),
+        protocol: ListenerProtocol::SaslPlaintext,
+    }];
+    cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
+    cfg.enabled_sasl_mechanisms = vec![SaslMechanism::ScramSha256];
+
+    let handle = Broker::start(cfg).await.expect("broker must start");
+
+    let cred =
+        crabka_security::hash_scram_password(b"wonderland", SaslMechanism::ScramSha256, 4096);
+    handle
+        .submit_metadata_record_for_test(crabka_metadata::MetadataRecord::V1ScramCredential(
+            crabka_metadata::ScramCredentialRecord {
+                user: "alice".into(),
+                mechanism: SaslMechanism::ScramSha256,
+                salt: cred.salt,
+                stored_key: cred.stored_key,
+                server_key: cred.server_key,
+                iterations: cred.iterations,
+            },
+        ))
+        .await
+        .expect("submit V1ScramCredential");
+
+    let addr = handle.listen_addr();
+    let result =
+        drive_sasl_scram_session(addr, "alice", "hunter2", SaslMechanism::ScramSha256).await;
+    handle.shutdown().await;
+    assert!(
+        result.is_err(),
+        "wrong password must fail SHA-256 SCRAM session: {result:?}"
+    );
+}
+
+/// Drive a complete SASL/SCRAM session against a `SASL_PLAINTEXT`
+/// listener. Works for both SHA-256 and SHA-512; the mechanism is
+/// passed through to the handshake and the client state machine.
 ///
 /// On success returns `Ok(())` after a successful post-auth Metadata
 /// round-trip. Returns `Err` when any step fails — non-zero error code on
@@ -555,6 +643,7 @@ async fn drive_sasl_scram_session(
     addr: SocketAddr,
     user: &str,
     password: &str,
+    mechanism: crabka_security::SaslMechanism,
 ) -> Result<(), io::Error> {
     let mut stream = TcpStream::connect(addr).await?;
 
@@ -569,10 +658,10 @@ async fn drive_sasl_scram_session(
     let _av_resp = ApiVersionsResponse::decode(&mut cur, 0)
         .map_err(|e| io::Error::other(format!("ApiVersions decode: {e}")))?;
 
-    // ── 2. SaslHandshake v1 (non-flexible, mechanism="SCRAM-SHA-512").
+    // ── 2. SaslHandshake v1 (non-flexible).
     let mut sh_body = BytesMut::new();
     let sh_req = SaslHandshakeRequest {
-        mechanism: "SCRAM-SHA-512".to_string(),
+        mechanism: mechanism.wire_name().to_string(),
         ..Default::default()
     };
     sh_req
@@ -590,8 +679,11 @@ async fn drive_sasl_scram_session(
     }
 
     // ── 3. SCRAM client-first → server-first.
-    let mut client =
-        crabka_security::ScramClientExchange::new(user.to_string(), password.as_bytes().to_vec());
+    let mut client = crabka_security::ScramClientExchange::new(
+        user.to_string(),
+        password.as_bytes().to_vec(),
+        mechanism,
+    );
     let client_first = client
         .client_first()
         .map_err(|e| io::Error::other(format!("scram client_first: {e:?}")))?;
@@ -721,7 +813,8 @@ async fn round_trip(
 // ────────────────────────────────────────────────────────────────────────
 
 /// SCRAM mechanism byte on the `AlterUserScramCredentials` wire (KIP-554):
-/// `2` = `SCRAM-SHA-512`. `1` would be `SCRAM-SHA-256` (not in slice 12).
+/// `1` = `SCRAM-SHA-256`, `2` = `SCRAM-SHA-512`.
+const WIRE_MECH_SCRAM_SHA_256: i8 = 1;
 const WIRE_MECH_SCRAM_SHA_512: i8 = 2;
 
 /// Happy path: a super-user authenticates over PLAIN, sends an
@@ -775,7 +868,9 @@ async fn alter_scram_creds_super_user_can_provision() {
     // raft commit to apply.
     let mut last_err: Option<io::Error> = None;
     for _ in 0..40 {
-        match drive_sasl_scram_session(addr, "alice", "wonderland").await {
+        match drive_sasl_scram_session(addr, "alice", "wonderland", SaslMechanism::ScramSha512)
+            .await
+        {
             Ok(()) => {
                 last_err = None;
                 break;
@@ -787,6 +882,72 @@ async fn alter_scram_creds_super_user_can_provision() {
     handle.shutdown().await;
     if let Some(e) = last_err {
         panic!("post-upsertion SCRAM auth must succeed: {e}");
+    }
+}
+
+/// Slice 32 wire-mapping proof: `AlterUserScramCredentials` accepts
+/// `mechanism=1` (SCRAM-SHA-256) and stores a credential the broker
+/// can later authenticate against over SHA-256. Mirrors
+/// `alter_scram_creds_super_user_can_provision` but with the SHA-256
+/// wire byte and a 32-byte `salted_password` payload.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn alter_scram_creds_super_user_can_provision_sha256() {
+    let log_dir = tempfile::tempdir().unwrap();
+    let mut cfg = BrokerConfig::for_tests(log_dir.path().to_path_buf());
+    cfg.listeners = vec![ListenerSpec {
+        name: "SASL_PLAINTEXT".to_string(),
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        advertised: "127.0.0.1:0".to_string(),
+        protocol: ListenerProtocol::SaslPlaintext,
+    }];
+    cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
+    cfg.enabled_sasl_mechanisms = vec![SaslMechanism::Plain, SaslMechanism::ScramSha256];
+    cfg.plain_credentials
+        .insert("admin".to_string(), "secret".to_string());
+    cfg.super_users = std::collections::HashSet::from(["admin".to_string()]);
+
+    let handle = Broker::start(cfg).await.expect("broker must start");
+    let addr = handle.listen_addr();
+
+    let (salt, salted) = pbkdf2_salt_and_salted_sha256(b"wonderland", 4096);
+    let req = AlterUserScramCredentialsRequest {
+        upsertions: vec![ScramCredentialUpsertion {
+            name: "alice".to_string(),
+            mechanism: WIRE_MECH_SCRAM_SHA_256,
+            iterations: 4096,
+            salt: bytes::Bytes::from(salt),
+            salted_password: bytes::Bytes::from(salted.to_vec()),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let resp = drive_alter_user_scram_credentials_as_plain(addr, "admin", b"secret", req)
+        .await
+        .expect("PLAIN auth + AUSCR upsertion (SHA-256)");
+    assert_eq!(resp.results.len(), 1);
+    assert_eq!(
+        resp.results[0].error_code, 0,
+        "expected error_code=0, got {:?}",
+        resp.results[0]
+    );
+    assert_eq!(resp.results[0].user, "alice");
+
+    let mut last_err: Option<io::Error> = None;
+    for _ in 0..40 {
+        match drive_sasl_scram_session(addr, "alice", "wonderland", SaslMechanism::ScramSha256)
+            .await
+        {
+            Ok(()) => {
+                last_err = None;
+                break;
+            }
+            Err(e) => last_err = Some(e),
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    handle.shutdown().await;
+    if let Some(e) = last_err {
+        panic!("post-upsertion SHA-256 SCRAM auth must succeed: {e}");
     }
 }
 
@@ -1015,6 +1176,15 @@ fn pbkdf2_salt_and_salted(password: &[u8], iterations: u32) -> (Vec<u8>, [u8; 64
     let salt: Vec<u8> = (0..16).collect();
     let salted: [u8; 64] =
         pbkdf2::pbkdf2_hmac_array::<sha2::Sha512, 64>(password, &salt, iterations);
+    (salt, salted)
+}
+
+/// SHA-256 analog of [`pbkdf2_salt_and_salted`]: produces the 32-byte
+/// PBKDF2-HMAC-SHA-256 output for slice-32 wire tests.
+fn pbkdf2_salt_and_salted_sha256(password: &[u8], iterations: u32) -> (Vec<u8>, [u8; 32]) {
+    let salt: Vec<u8> = (0..16).collect();
+    let salted: [u8; 32] =
+        pbkdf2::pbkdf2_hmac_array::<sha2::Sha256, 32>(password, &salt, iterations);
     (salt, salted)
 }
 

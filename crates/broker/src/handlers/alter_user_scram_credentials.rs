@@ -1,16 +1,17 @@
 //! `AlterUserScramCredentials` handler (`api_key` 51, KIP-554).
 //!
 //! KIP-554 puts PBKDF2 on the *client* side: the wire request carries the
-//! already-stretched 64-byte SHA-512 PBKDF2 output as `salted_password`. The
-//! broker derives `stored_key` / `server_key` from that without ever seeing
-//! the user's plaintext password.
+//! already-stretched PBKDF2 output as `salted_password` (32 bytes for
+//! SHA-256, 64 bytes for SHA-512). The broker derives `stored_key` /
+//! `server_key` from that without ever seeing the user's plaintext
+//! password.
 //!
 //! Per-user validation (each upsertion is checked independently):
 //!
 //! - `iterations >= 4096` else `UNACCEPTABLE_CREDENTIAL` (78).
 //! - `salt` non-empty else `UNACCEPTABLE_CREDENTIAL`.
-//! - `salted_password.len() == 64` (SHA-512 output size) else
-//!   `UNACCEPTABLE_CREDENTIAL`.
+//! - `salted_password.len()` matches the chosen mechanism's hash length
+//!   (32 for SHA-256, 64 for SHA-512) else `UNACCEPTABLE_CREDENTIAL`.
 //! - Unknown mechanism wire value → `UNACCEPTABLE_CREDENTIAL`.
 //!
 //! Authorization (slice-13): `Alter` on `Cluster("kafka-cluster")`. On Deny,
@@ -48,7 +49,6 @@ use crate::broker::Broker;
 use crate::codes;
 
 const MIN_ITERATIONS: i32 = 4096;
-const SHA512_OUTPUT_LEN: usize = 64;
 
 /// Run the `AlterUserScramCredentials` request and return the typed
 /// response. The caller (dispatch.rs) is responsible for wire-encoding
@@ -178,7 +178,8 @@ fn process_upsertion(
     if u.salt.is_empty() {
         return err_result(u.name, codes::UNACCEPTABLE_CREDENTIAL, "empty salt");
     }
-    if u.salted_password.len() != SHA512_OUTPUT_LEN {
+    let expected_salted_len = crabka_security::scram_hash_len(mech);
+    if u.salted_password.len() != expected_salted_len {
         return err_result(
             u.name,
             codes::UNACCEPTABLE_CREDENTIAL,
@@ -192,10 +193,11 @@ fn process_upsertion(
             "not super-user",
         );
     }
-    // Per KIP-554 the wire `salted_password` is the 64-byte PBKDF2 output;
-    // recompute `stored_key` and `server_key` from it for storage in the
-    // metadata image.
-    let (stored_key, server_key) = crabka_security::derive_keys_from_salted(&u.salted_password);
+    // Per KIP-554 the wire `salted_password` is the PBKDF2 output (32
+    // bytes for SHA-256, 64 for SHA-512); recompute `stored_key` and
+    // `server_key` from it for storage in the metadata image.
+    let (stored_key, server_key) =
+        crabka_security::derive_keys_from_salted(mech, &u.salted_password);
     records.push(MetadataRecord::V1ScramCredential(ScramCredentialRecord {
         user: u.name.clone(),
         mechanism: mech,
@@ -211,10 +213,11 @@ fn process_upsertion(
 ///
 /// Per KIP-554:
 /// - `0` — unknown (reserved)
-/// - `1` — SCRAM-SHA-256 (not supported in slice 12)
+/// - `1` — SCRAM-SHA-256
 /// - `2` — SCRAM-SHA-512
 fn wire_to_mech(wire: i8) -> Option<SaslMechanism> {
     match wire {
+        1 => Some(SaslMechanism::ScramSha256),
         2 => Some(SaslMechanism::ScramSha512),
         _ => None,
     }
@@ -243,10 +246,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn wire_to_mech_only_sha512_supported() {
+    fn wire_to_mech_maps_both_scram_variants() {
+        assert_eq!(wire_to_mech(1), Some(SaslMechanism::ScramSha256));
         assert_eq!(wire_to_mech(2), Some(SaslMechanism::ScramSha512));
         assert!(wire_to_mech(0).is_none());
-        assert!(wire_to_mech(1).is_none(), "SCRAM-SHA-256 not in slice 12");
         assert!(wire_to_mech(99).is_none());
     }
 

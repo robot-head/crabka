@@ -941,7 +941,8 @@ fn handle_sasl_frame(
                             &broker.config.plain_credentials,
                         )
                     }
-                    crabka_security::SaslMechanism::ScramSha512 => {
+                    crabka_security::SaslMechanism::ScramSha256
+                    | crabka_security::SaslMechanism::ScramSha512 => {
                         crate::network::auth::handle_authenticate_scram(
                             &req,
                             auth,

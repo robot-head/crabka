@@ -177,8 +177,15 @@ where
         SaslMechanism::Plain => {
             send_plain_authenticate(stream, &creds.username, &creds.password, &mut corr_id).await
         }
-        SaslMechanism::ScramSha512 => {
-            run_scram_client(stream, &creds.username, &creds.password, &mut corr_id).await
+        SaslMechanism::ScramSha256 | SaslMechanism::ScramSha512 => {
+            run_scram_client(
+                stream,
+                &creds.username,
+                &creds.password,
+                creds.mechanism,
+                &mut corr_id,
+            )
+            .await
         }
     }
 }
@@ -247,19 +254,21 @@ where
     Ok(())
 }
 
-/// Run the RFC 5802 SCRAM-SHA-512 client state machine over two
-/// `SaslAuthenticate v2` round-trips. Verifies the server-final signature
-/// before declaring the connection authenticated.
+/// Run the RFC 5802 SCRAM (SHA-256 or SHA-512) client state machine
+/// over two `SaslAuthenticate v2` round-trips. Verifies the
+/// server-final signature before declaring the connection
+/// authenticated.
 async fn run_scram_client<S>(
     stream: &mut S,
     user: &str,
     pass: &str,
+    mechanism: SaslMechanism,
     corr_id: &mut i32,
 ) -> Result<(), InterBrokerError>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + ?Sized,
 {
-    let mut exch = ScramClientExchange::new(user.to_string(), pass.as_bytes().to_vec());
+    let mut exch = ScramClientExchange::new(user.to_string(), pass.as_bytes().to_vec(), mechanism);
 
     // Round 1: client-first → server-first.
     let client_first = exch

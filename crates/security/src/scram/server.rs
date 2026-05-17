@@ -1,13 +1,15 @@
-//! `ScramServerExchange` — RFC 5802 SCRAM-SHA-512 server state machine.
+//! `ScramServerExchange` — RFC 5802 SCRAM server state machine.
+//! Supports SCRAM-SHA-256 and SCRAM-SHA-512; the mechanism comes from
+//! the credential being authenticated against.
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use hmac::{Hmac, KeyInit, Mac};
 use ring::rand::{SecureRandom, SystemRandom};
-use sha2::{Digest, Sha512};
+use sha2::{Digest, Sha256, Sha512};
 use subtle::ConstantTimeEq;
 
-use super::ScramCredential;
+use super::{ScramCredential, scram_hash_len};
 use crate::{AuthError, Principal, SaslMechanism};
 
 #[derive(Debug)]
@@ -122,8 +124,9 @@ impl ScramServerExchange {
         let (Some(_cb), Some(_nonce), Some(proof_b64)) = (channel_binding, nonce, proof_b64) else {
             return StepResult::Failed(AuthError::MalformedMessage);
         };
+        let expected_proof_len = scram_hash_len(self.credential.mechanism);
         let proof = match B64.decode(proof_b64) {
-            Ok(b) if b.len() == 64 => b,
+            Ok(b) if b.len() == expected_proof_len => b,
             _ => return StepResult::Failed(AuthError::MalformedMessage),
         };
 
@@ -135,21 +138,24 @@ impl ScramServerExchange {
 
         let auth_message = format!("{client_first_bare},{server_first},{client_final_no_proof}");
 
-        // client_signature = HMAC(stored_key, auth_message)
-        let Ok(mut mac) = <Hmac<Sha512>>::new_from_slice(&self.credential.stored_key) else {
-            return StepResult::Failed(AuthError::MalformedMessage);
+        let (computed_stored, server_signature) = match self.credential.mechanism {
+            SaslMechanism::ScramSha512 => verify_and_sign_sha512(
+                &self.credential.stored_key,
+                &self.credential.server_key,
+                &proof,
+                auth_message.as_bytes(),
+            ),
+            SaslMechanism::ScramSha256 => verify_and_sign_sha256(
+                &self.credential.stored_key,
+                &self.credential.server_key,
+                &proof,
+                auth_message.as_bytes(),
+            ),
+            SaslMechanism::Plain => {
+                return StepResult::Failed(AuthError::MalformedMessage);
+            }
         };
-        mac.update(auth_message.as_bytes());
-        let client_signature = mac.finalize().into_bytes();
 
-        // client_key = client_signature XOR proof
-        let client_key: Vec<u8> = client_signature
-            .iter()
-            .zip(proof.iter())
-            .map(|(a, b)| a ^ b)
-            .collect();
-        // stored_key = H(client_key)
-        let computed_stored = Sha512::digest(&client_key);
         if computed_stored
             .ct_eq(self.credential.stored_key.as_slice())
             .unwrap_u8()
@@ -157,18 +163,55 @@ impl ScramServerExchange {
         {
             return StepResult::Failed(AuthError::BadProof);
         }
-        // server_signature = HMAC(server_key, auth_message)
-        let mut server_mac =
-            <Hmac<Sha512>>::new_from_slice(&self.credential.server_key).expect("hmac");
-        server_mac.update(auth_message.as_bytes());
-        let server_signature = server_mac.finalize().into_bytes();
-        let server_final = format!("v={}", B64.encode(server_signature));
+        let server_final = format!("v={}", B64.encode(&server_signature));
         StepResult::Done(
             Principal {
                 name: self.username.clone(),
-                mechanism: SaslMechanism::ScramSha512,
+                mechanism: self.credential.mechanism,
             },
             server_final.into_bytes(),
         )
     }
+}
+
+fn verify_and_sign_sha512(
+    stored_key: &[u8],
+    server_key: &[u8],
+    proof: &[u8],
+    auth_message: &[u8],
+) -> (Vec<u8>, Vec<u8>) {
+    let mut mac = <Hmac<Sha512>>::new_from_slice(stored_key).expect("hmac");
+    mac.update(auth_message);
+    let client_signature = mac.finalize().into_bytes();
+    let client_key: Vec<u8> = client_signature
+        .iter()
+        .zip(proof.iter())
+        .map(|(a, b)| a ^ b)
+        .collect();
+    let computed_stored = Sha512::digest(&client_key).to_vec();
+    let mut server_mac = <Hmac<Sha512>>::new_from_slice(server_key).expect("hmac");
+    server_mac.update(auth_message);
+    let server_signature = server_mac.finalize().into_bytes().to_vec();
+    (computed_stored, server_signature)
+}
+
+fn verify_and_sign_sha256(
+    stored_key: &[u8],
+    server_key: &[u8],
+    proof: &[u8],
+    auth_message: &[u8],
+) -> (Vec<u8>, Vec<u8>) {
+    let mut mac = <Hmac<Sha256>>::new_from_slice(stored_key).expect("hmac");
+    mac.update(auth_message);
+    let client_signature = mac.finalize().into_bytes();
+    let client_key: Vec<u8> = client_signature
+        .iter()
+        .zip(proof.iter())
+        .map(|(a, b)| a ^ b)
+        .collect();
+    let computed_stored = Sha256::digest(&client_key).to_vec();
+    let mut server_mac = <Hmac<Sha256>>::new_from_slice(server_key).expect("hmac");
+    server_mac.update(auth_message);
+    let server_signature = server_mac.finalize().into_bytes().to_vec();
+    (computed_stored, server_signature)
 }

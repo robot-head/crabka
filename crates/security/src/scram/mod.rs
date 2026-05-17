@@ -1,4 +1,4 @@
-//! SCRAM-SHA-512 — implemented in tasks 2-3.
+//! SCRAM (RFC 5802) — supports SHA-256 and SHA-512.
 
 mod client;
 mod server;
@@ -9,7 +9,7 @@ pub use server::{ScramServerExchange, StepResult};
 use crate::SaslMechanism;
 use hmac::{Hmac, KeyInit, Mac};
 use ring::rand::{SecureRandom, SystemRandom};
-use sha2::{Digest, Sha512};
+use sha2::{Digest, Sha256, Sha512};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScramCredential {
@@ -18,6 +18,20 @@ pub struct ScramCredential {
     pub stored_key: Vec<u8>,
     pub server_key: Vec<u8>,
     pub iterations: u32,
+}
+
+/// Output byte length of the underlying hash function for a given
+/// SCRAM mechanism: 32 for SHA-256, 64 for SHA-512. Panics on a
+/// non-SCRAM mechanism.
+#[must_use]
+pub fn scram_hash_len(mechanism: SaslMechanism) -> usize {
+    match mechanism {
+        SaslMechanism::ScramSha256 => 32,
+        SaslMechanism::ScramSha512 => 64,
+        SaslMechanism::Plain => {
+            panic!("scram_hash_len called with non-SCRAM mechanism PLAIN")
+        }
+    }
 }
 
 #[must_use]
@@ -42,23 +56,21 @@ pub fn hash_scram_password_with_salt(
     iterations: u32,
     salt: Vec<u8>,
 ) -> ScramCredential {
-    assert_eq!(
-        mechanism,
-        SaslMechanism::ScramSha512,
-        "only SCRAM-SHA-512 supported in slice 12"
-    );
-    let salted: [u8; 64] = pbkdf2::pbkdf2_hmac_array::<Sha512, 64>(password, &salt, iterations);
-    let mut client_key_mac =
-        <Hmac<Sha512>>::new_from_slice(&salted).expect("hmac accepts any key length");
-    client_key_mac.update(b"Client Key");
-    let client_key = client_key_mac.finalize().into_bytes();
-    let stored_key = Sha512::digest(client_key).to_vec();
-
-    let mut server_key_mac =
-        <Hmac<Sha512>>::new_from_slice(&salted).expect("hmac accepts any key length");
-    server_key_mac.update(b"Server Key");
-    let server_key = server_key_mac.finalize().into_bytes().to_vec();
-
+    let (stored_key, server_key) = match mechanism {
+        SaslMechanism::ScramSha512 => {
+            let salted: [u8; 64] =
+                pbkdf2::pbkdf2_hmac_array::<Sha512, 64>(password, &salt, iterations);
+            derive_keys_sha512(&salted)
+        }
+        SaslMechanism::ScramSha256 => {
+            let salted: [u8; 32] =
+                pbkdf2::pbkdf2_hmac_array::<Sha256, 32>(password, &salt, iterations);
+            derive_keys_sha256(&salted)
+        }
+        SaslMechanism::Plain => {
+            panic!("hash_scram_password called with non-SCRAM mechanism PLAIN");
+        }
+    };
     ScramCredential {
         mechanism,
         salt,
@@ -68,26 +80,36 @@ pub fn hash_scram_password_with_salt(
     }
 }
 
-/// Reconstruct `(stored_key, server_key)` from the 64-byte PBKDF2 output
-/// (`salted_password`) the client sends in an
-/// `AlterUserScramCredentialsRequest` per KIP-554.
+/// Reconstruct `(stored_key, server_key)` from the salted-password
+/// output the client sends in an `AlterUserScramCredentialsRequest`
+/// per KIP-554.
 ///
-/// The KIP places PBKDF2 on the client side: the wire request carries the
-/// already-stretched 64-byte SHA-512 PBKDF2 output, and the broker derives
-/// the two stored keys from it. This avoids the broker holding the raw
-/// password even briefly. The transformation is:
+/// The KIP places PBKDF2 on the client side: the wire request carries
+/// the already-stretched PBKDF2 output (32 bytes for SHA-256, 64 bytes
+/// for SHA-512), and the broker derives the two stored keys from it.
+/// This avoids the broker holding the raw password even briefly. The
+/// transformation, for each hash H:
 ///
 /// ```text
-/// client_key  = HMAC-SHA-512(salted_password, "Client Key")
-/// stored_key  = SHA-512(client_key)
-/// server_key  = HMAC-SHA-512(salted_password, "Server Key")
+/// client_key  = HMAC-H(salted_password, "Client Key")
+/// stored_key  = H(client_key)
+/// server_key  = HMAC-H(salted_password, "Server Key")
 /// ```
 ///
-/// Both outputs are 64 bytes for SHA-512. The function name elides the
-/// digest because slice 12 only supports SCRAM-SHA-512; a future SHA-256
-/// variant would split into a separate helper.
+/// The mechanism argument selects which `H` to use. Panics on a
+/// non-SCRAM mechanism.
 #[must_use]
-pub fn derive_keys_from_salted(salted: &[u8]) -> (Vec<u8>, Vec<u8>) {
+pub fn derive_keys_from_salted(mechanism: SaslMechanism, salted: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    match mechanism {
+        SaslMechanism::ScramSha512 => derive_keys_sha512(salted),
+        SaslMechanism::ScramSha256 => derive_keys_sha256(salted),
+        SaslMechanism::Plain => {
+            panic!("derive_keys_from_salted called with non-SCRAM mechanism PLAIN");
+        }
+    }
+}
+
+fn derive_keys_sha512(salted: &[u8]) -> (Vec<u8>, Vec<u8>) {
     let mut ck_mac = <Hmac<Sha512>>::new_from_slice(salted).expect("hmac accepts any key length");
     ck_mac.update(b"Client Key");
     let client_key = ck_mac.finalize().into_bytes();
@@ -98,14 +120,23 @@ pub fn derive_keys_from_salted(salted: &[u8]) -> (Vec<u8>, Vec<u8>) {
     (stored_key, server_key)
 }
 
+fn derive_keys_sha256(salted: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    let mut ck_mac = <Hmac<Sha256>>::new_from_slice(salted).expect("hmac accepts any key length");
+    ck_mac.update(b"Client Key");
+    let client_key = ck_mac.finalize().into_bytes();
+    let stored_key = Sha256::digest(client_key).to_vec();
+    let mut sk_mac = <Hmac<Sha256>>::new_from_slice(salted).expect("hmac accepts any key length");
+    sk_mac.update(b"Server Key");
+    let server_key = sk_mac.finalize().into_bytes().to_vec();
+    (stored_key, server_key)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use sha2::{Digest, Sha512};
 
-    /// RFC 7677 vector for SCRAM-SHA-256 doesn't translate directly,
-    /// but we can verify PBKDF2-HMAC-SHA-512 with a known vector and
-    /// then assert `stored_key` = `H(client_key)`, `server_key` = `HMAC(salted, "Server Key")`.
+    /// SHA-512 PBKDF2 vector + verify `stored_key = H(client_key)`.
     #[test]
     fn hash_scram_password_produces_expected_keys() {
         let password = b"pencil";
@@ -115,7 +146,6 @@ mod tests {
         assert_eq!(cred.stored_key.len(), 64, "SHA-512 output is 64 bytes");
         assert_eq!(cred.server_key.len(), 64);
         assert_eq!(cred.iterations, 4096);
-        // stored_key = H(client_key) — verify by recomputing
         let salted =
             pbkdf2::pbkdf2_hmac_array::<sha2::Sha512, 64>(password, &cred.salt, cred.iterations);
         let client_key = {
@@ -128,11 +158,31 @@ mod tests {
         assert_eq!(cred.stored_key, expected_stored.as_slice());
     }
 
+    /// SHA-256 analog of the SHA-512 vector. Verifies output lengths
+    /// (32 bytes) and the same `stored_key = H(client_key)`
+    /// invariant.
+    #[test]
+    fn hash_scram_password_sha256_produces_expected_keys() {
+        let password = b"pencil";
+        let cred = hash_scram_password(password, SaslMechanism::ScramSha256, 4096);
+        assert_eq!(cred.mechanism, SaslMechanism::ScramSha256);
+        assert_eq!(cred.salt.len(), 16);
+        assert_eq!(cred.stored_key.len(), 32, "SHA-256 output is 32 bytes");
+        assert_eq!(cred.server_key.len(), 32);
+        let salted =
+            pbkdf2::pbkdf2_hmac_array::<sha2::Sha256, 32>(password, &cred.salt, cred.iterations);
+        let client_key = {
+            use hmac::{Hmac, KeyInit, Mac};
+            let mut m = <Hmac<sha2::Sha256>>::new_from_slice(&salted).unwrap();
+            m.update(b"Client Key");
+            m.finalize().into_bytes()
+        };
+        let expected_stored = sha2::Sha256::digest(client_key);
+        assert_eq!(cred.stored_key, expected_stored.as_slice());
+    }
+
     #[test]
     fn hash_scram_password_is_deterministic_given_salt() {
-        // Internal helper that takes a fixed salt for reproducibility.
-        // We can't assert against a public hash_scram_password (which generates
-        // random salt), so smoke-test via two calls producing different salts.
         let a = hash_scram_password(b"x", SaslMechanism::ScramSha512, 4096);
         let b = hash_scram_password(b"x", SaslMechanism::ScramSha512, 4096);
         assert_ne!(a.salt, b.salt, "fresh salt each call");
@@ -151,7 +201,11 @@ mod tests {
             (0..16).collect::<Vec<u8>>(),
         );
         let mut server = ScramServerExchange::new("alice".to_string(), cred);
-        let mut client = ScramClientExchange::new("alice".to_string(), password.to_vec());
+        let mut client = ScramClientExchange::new(
+            "alice".to_string(),
+            password.to_vec(),
+            SaslMechanism::ScramSha512,
+        );
 
         // Client first
         let c1 = client.client_first().expect("client first");
@@ -174,22 +228,67 @@ mod tests {
         assert!(final_check.is_ok(), "server signature must verify");
     }
 
+    /// Mirror of the SHA-512 round-trip with SHA-256 — proves the
+    /// generalized state machines produce a matching client/server
+    /// pair on the smaller-hash path.
     #[test]
-    fn derive_keys_from_salted_matches_hash_scram_password() {
-        // The two paths must produce identical (stored_key, server_key)
-        // when fed the same salted_password — `hash_scram_password_with_salt`
-        // runs PBKDF2 then derives keys, and `derive_keys_from_salted` skips
-        // PBKDF2 and reads the salted output directly.
+    fn scram_server_and_client_round_trip_sha256() {
+        let password = b"hunter2";
+        let cred = hash_scram_password_with_salt(
+            password,
+            SaslMechanism::ScramSha256,
+            4096,
+            (0..16).collect::<Vec<u8>>(),
+        );
+        let mut server = ScramServerExchange::new("alice".to_string(), cred);
+        let mut client = ScramClientExchange::new(
+            "alice".to_string(),
+            password.to_vec(),
+            SaslMechanism::ScramSha256,
+        );
+
+        let c1 = client.client_first().expect("client first");
+        let s1 = match server.step(&c1) {
+            StepResult::Continue(b) => b,
+            other => panic!("server step 1 must continue, got {other:?}"),
+        };
+        let c2 = client.step(&s1).expect("client final");
+        let (principal, s2) = match server.step(&c2) {
+            StepResult::Done(p, b) => (p, b),
+            other => panic!("server step 2 must Done, got {other:?}"),
+        };
+        assert_eq!(principal.name, "alice");
+        assert_eq!(principal.mechanism, SaslMechanism::ScramSha256);
+        let final_check = client.verify_server_final(&s2);
+        assert!(final_check.is_ok(), "server signature must verify");
+    }
+
+    #[test]
+    fn derive_keys_from_salted_matches_hash_scram_password_sha512() {
         let password = b"hunter2";
         let salt: Vec<u8> = (0..16).collect();
         let cred =
             hash_scram_password_with_salt(password, SaslMechanism::ScramSha512, 4096, salt.clone());
         let salted: [u8; 64] = pbkdf2::pbkdf2_hmac_array::<sha2::Sha512, 64>(password, &salt, 4096);
-        let (stored_key, server_key) = derive_keys_from_salted(&salted);
+        let (stored_key, server_key) = derive_keys_from_salted(SaslMechanism::ScramSha512, &salted);
         assert_eq!(stored_key, cred.stored_key);
         assert_eq!(server_key, cred.server_key);
         assert_eq!(stored_key.len(), 64);
         assert_eq!(server_key.len(), 64);
+    }
+
+    #[test]
+    fn derive_keys_from_salted_matches_hash_scram_password_sha256() {
+        let password = b"hunter2";
+        let salt: Vec<u8> = (0..16).collect();
+        let cred =
+            hash_scram_password_with_salt(password, SaslMechanism::ScramSha256, 4096, salt.clone());
+        let salted: [u8; 32] = pbkdf2::pbkdf2_hmac_array::<sha2::Sha256, 32>(password, &salt, 4096);
+        let (stored_key, server_key) = derive_keys_from_salted(SaslMechanism::ScramSha256, &salted);
+        assert_eq!(stored_key, cred.stored_key);
+        assert_eq!(server_key, cred.server_key);
+        assert_eq!(stored_key.len(), 32);
+        assert_eq!(server_key.len(), 32);
     }
 
     #[test]
@@ -201,7 +300,11 @@ mod tests {
             vec![0u8; 16],
         );
         let mut server = ScramServerExchange::new("alice".to_string(), cred);
-        let mut client = ScramClientExchange::new("alice".to_string(), b"wrong".to_vec());
+        let mut client = ScramClientExchange::new(
+            "alice".to_string(),
+            b"wrong".to_vec(),
+            SaslMechanism::ScramSha512,
+        );
         let c1 = client.client_first().unwrap();
         let StepResult::Continue(s1) = server.step(&c1) else {
             panic!();
