@@ -774,3 +774,56 @@ Kafka client for ApiVersions.
   (slice 43b), metric scraping for usage goals (slice 43e),
   rack-aware / capacity / usage / CPU / anomaly goals (slices
   43c–43g), operator `KafkaRebalance` CRD (slice 44).
+
+## Slice 43b — Rebalancer execute path (2026-05-17)
+
+- Rebalancer transitions from advisor to executor. `ExecuteProposal`
+  now drives `AlterPartitionReassignments` (KIP-455) under a
+  KIP-73 throttle managed via `IncrementalAlterConfigs`, with
+  progress polled via `ListPartitionReassignments`. `ClearThrottle`
+  runs in every terminal path — success, failure, and cancel —
+  so the broker never gets stuck with throttle configs set.
+- New `CancelExecution` RPC reverts pending reassignments (KIP-455
+  null-replicas) and clears throttle, transitioning the proposal to
+  `Cancelled`.
+- `ProposalStatus` extended with `Executing` / `Completed` /
+  `Failed` / `Cancelled`. `Proposal` gains `started_at_ms`,
+  `terminated_at_ms`, `failure_reason`, `throttle_bytes_per_sec`.
+- One execution at a time. Concurrent `ExecuteProposal` returns
+  `FailedPrecondition`. `CreateProposal` continues to compute
+  against the current (transition-state) snapshot during execution.
+- On-disk persistence at `{data_dir}/proposals.json` (full ring
+  buffer, atomic write) + `{data_dir}/in_flight.json` (active
+  marker, deleted on terminal). On startup, recovery loads both and
+  resumes the persisted phase via re-issuing
+  `AlterPartitionReassignments` (KIP-455 idempotent). `data_dir`
+  defaults to `/var/lib/crabka-rebalancer`.
+- Production Helm chart at `charts/crabka-rebalancer/`: Deployment
+  (replicas: 1, strategy: Recreate), ClusterIP Service on 9300,
+  ServiceAccount (no cluster RBAC), RWO PVC. `bootstrapServers` is
+  a required value (chart fails to render without it).
+- Five `helm-unittest` test files under
+  `charts/crabka-rebalancer/tests/` run in CI alongside `helm lint`
+  and the `helm template + grep` sanity check.
+- New CLI flags: `--data-dir`, `--default-throttle-bytes-per-sec`
+  (default 50 MB/s), `--execute-deadline-secs` (default 1800),
+  `--reassignment-poll-interval-secs` (default 5),
+  `--reassignment-batch-size` (default 200).
+- New metrics:
+  `crabka_rebalancer_executions_started_total` /
+  `_completed_total` / `_failed_total` / `_cancelled_total`.
+- 62 lib unit tests across `model`, `executor`, `api`,
+  `health`, `metrics`, `optimizer`, `goals`, plus 7
+  integration tests (`end_to_end.rs`'s
+  `execute_proposal_settles_against_real_broker`,
+  `cancel_clears_throttle_and_reverts`,
+  `restart_resumes_in_flight_plan`, and the two carried-over 43a
+  tests) and an extended Connect HTTP smoke test
+  (`connect_smoke.rs` covers ExecuteProposal's FailedPrecondition
+  path).
+- Reference doc:
+  [`docs/superpowers/specs/2026-05-17-crabka-rebalancer-43b-design.md`].
+- Out of scope (deferred): multi-replica HA (later slice), metric
+  scraping for usage goals (43e), rack-aware / capacity / usage /
+  CPU / anomaly goals (43c–43g), operator `KafkaRebalance` CRD
+  (slice 44), pause/step-through, adaptive throttle.
