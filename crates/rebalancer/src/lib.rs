@@ -19,3 +19,4 @@ pub mod pb {
 
 pub mod model;
 pub mod goals;
+pub mod optimizer;

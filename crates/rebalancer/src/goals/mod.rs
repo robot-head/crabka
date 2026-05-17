@@ -47,17 +47,17 @@ pub trait Goal: Send + Sync {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
 
     /// Minimal goal that returns a fixed movement list. Used by
     /// `optimizer::tests` to exercise the optimizer without depending
     /// on any concrete goal implementation.
     #[allow(dead_code)] // Consumed by optimizer tests in T9.
-    pub(crate) struct FixedGoal {
-        pub(crate) name: &'static str,
-        pub(crate) priority: GoalPriority,
-        pub(crate) movements: Vec<Movement>,
+    pub struct FixedGoal {
+        pub name: &'static str,
+        pub priority: GoalPriority,
+        pub movements: Vec<Movement>,
     }
 
     impl Goal for FixedGoal {
