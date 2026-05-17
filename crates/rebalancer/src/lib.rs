@@ -21,5 +21,6 @@ pub mod api;
 pub mod goals;
 pub mod health;
 pub mod ingest;
+pub mod metrics;
 pub mod model;
 pub mod optimizer;

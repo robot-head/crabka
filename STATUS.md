@@ -751,8 +751,13 @@ Kafka client for ApiVersions.
 - Operational endpoints (`/healthz`, `/readyz`, `/metrics`) on the
   same axum listener. `/readyz` gates on the first successful
   snapshot. `/metrics` serves OpenMetrics text from a
-  `crabka_rebalancer`-prefixed registry; metrics surface starts
-  empty in 43a — populated as later slices ship counters and gauges.
+  `crabka_rebalancer`-prefixed registry exposing three metrics:
+  `crabka_rebalancer_snapshot_at_ms` (gauge, epoch-millis of the
+  last successful snapshot), `crabka_rebalancer_snapshots_total`
+  (counter, successful snapshots), and
+  `crabka_rebalancer_proposals_created_total` (counter, proposals
+  computed via `CreateProposal`). Later slices add usage / latency
+  counters off the same registry.
 - New workspace deps: `connectrpc-axum` 0.1, `connectrpc-axum-build` 0.1,
   `prost` 0.14 (bumped from 0.13 to match what `connectrpc-axum` requires),
   `pbjson` 0.9. New dev-dep on `reqwest` for the Connect HTTP smoke test.

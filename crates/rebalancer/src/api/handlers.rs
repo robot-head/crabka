@@ -17,6 +17,7 @@ use connectrpc_axum::message::error::Code;
 use connectrpc_axum::message::{ConnectError, ConnectRequest, ConnectResponse};
 
 use crate::ingest::SharedSnapshot;
+use crate::metrics::RebalancerMetrics;
 use crate::model::{ClusterState, ProposalStore};
 use crate::optimizer;
 use crate::pb;
@@ -28,6 +29,7 @@ pub struct AppState {
     pub store: Arc<ProposalStore>,
     pub goal_registry: super::GoalRegistry,
     pub goal_ctx: crate::goals::GoalContext,
+    pub metrics: RebalancerMetrics,
 }
 
 /// Convert a `ClusterState` into the proto `GetStateResponse`.
@@ -138,6 +140,7 @@ pub async fn create_proposal(
     let out = optimizer::optimize(snap, &goals, &state.goal_ctx)
         .map_err(|e| ConnectError::new(Code::Internal, e.to_string()))?;
     state.store.insert(out.proposal.clone());
+    state.metrics.proposals_created_total.inc();
     Ok(ConnectResponse::new(proposal_to_proto(&out.proposal)))
 }
 

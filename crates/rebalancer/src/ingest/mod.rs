@@ -12,6 +12,7 @@ use crabka_client_core::Client;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
+use crate::metrics::RebalancerMetrics;
 use crate::model::{BrokerView, ClusterState, InFlightReassignment, PartitionView};
 
 pub type SharedSnapshot = Arc<ArcSwap<Option<ClusterState>>>;
@@ -26,6 +27,7 @@ pub struct Ingester {
     interval: Duration,
     snapshot: SharedSnapshot,
     shutdown: CancellationToken,
+    metrics: RebalancerMetrics,
 }
 
 impl Ingester {
@@ -35,12 +37,14 @@ impl Ingester {
         interval: Duration,
         snapshot: SharedSnapshot,
         shutdown: CancellationToken,
+        metrics: RebalancerMetrics,
     ) -> Self {
         Self {
             client,
             interval,
             snapshot,
             shutdown,
+            metrics,
         }
     }
 
@@ -63,6 +67,12 @@ impl Ingester {
                         partitions = state.partitions.len(),
                         "snapshot ok"
                     );
+                    // Record observability before swapping the snapshot
+                    // so a /metrics scrape that races a store-and-read
+                    // sees the counter for the snapshot it is about to
+                    // observe.
+                    self.metrics.snapshot_at_ms.set(state.snapshot_at_ms);
+                    self.metrics.snapshots_total.inc();
                     self.snapshot.store(Arc::new(Some(state)));
                 }
                 Err(e) => {

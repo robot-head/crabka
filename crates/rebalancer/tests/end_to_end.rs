@@ -22,9 +22,12 @@ use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopics
 use crabka_rebalancer::api::GoalRegistry;
 use crabka_rebalancer::api::handlers::{self, AppState};
 use crabka_rebalancer::goals::GoalContext;
+use crabka_rebalancer::health::new_registry;
 use crabka_rebalancer::ingest::{SharedSnapshot, new_shared_snapshot, snapshot_once};
+use crabka_rebalancer::metrics::RebalancerMetrics;
 use crabka_rebalancer::model::ProposalStore;
 use crabka_rebalancer::pb;
+use prometheus_client::registry::Registry;
 use tempfile::TempDir;
 
 /// Boot a single-broker in-process Crabka and return its handle, the
@@ -74,10 +77,13 @@ async fn create_topic(bootstrap: &str, name: &str, partitions: i32) {
     );
 }
 
-/// Build the `AppState` carried by the `Extension` layer in production.
+/// Build the `AppState` carried by the `Extension` layer in production,
+/// alongside the shared `Registry` the binary mounts on `/metrics`.
 /// Threshold + cap match the binary's defaults (see `bin/rebalancer.rs`).
-fn build_state(snapshot: SharedSnapshot) -> Arc<AppState> {
-    Arc::new(AppState {
+fn build_state(snapshot: SharedSnapshot) -> (Arc<AppState>, Registry) {
+    let mut registry = new_registry();
+    let metrics = RebalancerMetrics::register(&mut registry);
+    let state = Arc::new(AppState {
         snapshot,
         store: Arc::new(ProposalStore::new(20)),
         goal_registry: GoalRegistry::default_registry(),
@@ -85,7 +91,9 @@ fn build_state(snapshot: SharedSnapshot) -> Arc<AppState> {
             imbalance_threshold_pct: 10,
             max_movements_per_proposal: 256,
         },
-    })
+        metrics,
+    });
+    (state, registry)
 }
 
 /// Helper for calling a handler. The crate's `ConnectRequest<T>` is a
@@ -140,7 +148,22 @@ async fn create_proposal_on_balanced_cluster_returns_empty_movements() {
     let shared = new_shared_snapshot();
     shared.store(Arc::new(Some(snap)));
 
-    let state = build_state(shared);
+    let (state, registry) = build_state(shared);
+    // Mimic the ingester's per-tick bookkeeping — the test drives the
+    // handlers directly, so without this the snapshot-side metrics
+    // never get touched. The corresponding handler-side counter
+    // (`proposals_created_total`) is incremented for us by the
+    // `create_proposal` call below.
+    state.metrics.snapshots_total.inc();
+    state.metrics.snapshot_at_ms.set(
+        state
+            .snapshot
+            .load()
+            .as_ref()
+            .as_ref()
+            .unwrap()
+            .snapshot_at_ms,
+    );
 
     // GetState — must reflect the topics we just created.
     let gs =
@@ -279,6 +302,22 @@ async fn create_proposal_on_balanced_cluster_returns_empty_movements() {
     );
     assert_eq!(exec.code(), Code::Unimplemented);
 
+    // OpenMetrics: the registry that `/metrics` would scrape contains
+    // all three spec-promised metrics with the `crabka_rebalancer_`
+    // prefix, and the OpenMetrics terminator. Snapshot-side metrics
+    // were bumped above; `proposals_created_total` is bumped by the
+    // `create_proposal` handler we just exercised.
+    let mut buf = String::new();
+    prometheus_client::encoding::text::encode(&mut buf, &registry).unwrap();
+    for needle in [
+        "crabka_rebalancer_snapshot_at_ms",
+        "crabka_rebalancer_snapshots_total",
+        "crabka_rebalancer_proposals_created_total",
+    ] {
+        assert!(buf.contains(needle), "missing {needle} in /metrics:\n{buf}");
+    }
+    assert!(buf.contains("# EOF"), "OpenMetrics terminator missing");
+
     // Bound the test's wall-clock — broker shutdown can hang if a task
     // is stuck; surface that as a test failure rather than a CI timeout.
     tokio::time::timeout(Duration::from_secs(30), broker.shutdown())
@@ -294,7 +333,7 @@ async fn get_state_returns_unavailable_before_first_snapshot() {
     // `Unavailable`, while paths that don't (ListProposals, the
     // Unimplemented stub) behave normally.
     let shared = new_shared_snapshot();
-    let state = build_state(shared);
+    let (state, _registry) = build_state(shared);
 
     // GetState → Unavailable.
     let gs = unwrap_err(

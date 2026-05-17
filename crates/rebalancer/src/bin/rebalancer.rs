@@ -16,6 +16,7 @@ use crabka_rebalancer::api::handlers::AppState;
 use crabka_rebalancer::goals::GoalContext;
 use crabka_rebalancer::health::{HealthState, new_registry};
 use crabka_rebalancer::ingest::{Ingester, new_shared_snapshot};
+use crabka_rebalancer::metrics::RebalancerMetrics;
 use crabka_rebalancer::model::ProposalStore;
 
 #[derive(Debug, Parser)]
@@ -76,6 +77,13 @@ async fn main() -> anyhow::Result<()> {
     // Shared snapshot state.
     let snapshot = new_shared_snapshot();
 
+    // Registry + metrics. Build the Registry up-front so the ingester
+    // and the RPC handlers can be handed clones of the same metric
+    // handles — the `/metrics` endpoint reads from this same Registry.
+    let mut registry = new_registry();
+    let metrics = RebalancerMetrics::register(&mut registry);
+    let registry = Arc::new(Mutex::new(registry));
+
     // Ingester.
     let shutdown = CancellationToken::new();
     let ingester = Ingester::new(
@@ -83,11 +91,11 @@ async fn main() -> anyhow::Result<()> {
         Duration::from_secs(args.scrape_interval_secs),
         snapshot.clone(),
         shutdown.clone(),
+        metrics.clone(),
     );
-    tokio::spawn(ingester.run());
+    let ingester_handle = tokio::spawn(ingester.run());
 
     // Service state.
-    let registry = Arc::new(Mutex::new(new_registry()));
     let store = Arc::new(ProposalStore::new(args.proposal_ring_buffer_size));
     let app_state = Arc::new(AppState {
         snapshot: snapshot.clone(),
@@ -97,6 +105,7 @@ async fn main() -> anyhow::Result<()> {
             imbalance_threshold_pct: args.imbalance_threshold_pct,
             max_movements_per_proposal: args.max_movements_per_proposal,
         },
+        metrics: metrics.clone(),
     });
     let connect_router = crabka_rebalancer::api::router(app_state);
 
@@ -117,5 +126,10 @@ async fn main() -> anyhow::Result<()> {
             shutdown_for_axum.cancel();
         })
         .await?;
+
+    // Let the ingester drain its in-flight tick and emit its
+    // "shutting down" log line before `main` returns. A 5s timeout
+    // ensures a stuck admin RPC can't wedge process shutdown.
+    let _ = tokio::time::timeout(Duration::from_secs(5), ingester_handle).await;
     Ok(())
 }
