@@ -12,15 +12,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### <!-- 7 -->⚙️ Miscellaneous Tasks
 
 
-- Release v0.1.0 ([#49](https://github.com/robot-head/crabka/pull/49))
-
-- Release v0.1.0 ([#52](https://github.com/robot-head/crabka/pull/52))
-
-## [0.1.0] — 2026-05-12
-
-
-### <!-- 7 -->⚙️ Miscellaneous Tasks
-
-
-- Release v0.1.0 ([#49](https://github.com/robot-head/crabka/pull/49))
+- Robust image-tag detection + failure diagnostics ([#110](https://github.com/robot-head/crabka/pull/110))
 
