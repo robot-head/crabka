@@ -28,8 +28,8 @@ use serde_json::json;
 
 use crate::context::Context;
 use crate::controller::common::{
-    FIELD_MANAGER, ReconcileError, apply_object, condition, ensure_cluster_id_secret, owner_ref,
-    patch_status, render_configmap, render_service,
+    self, FIELD_MANAGER, ReconcileError, apply_object, condition, ensure_cluster_id_secret,
+    owner_ref, patch_status, render_configmap, render_service,
 };
 use crate::crd::{Kafka, KafkaNodePool, KafkaStatus};
 
@@ -60,6 +60,32 @@ pub(crate) fn aggregate_pool_status<'a>(
         r.ready_replicas += s.and_then(|s| s.ready_replicas).unwrap_or(0);
     }
     r
+}
+
+/// Translate a rollup into `(rolling, reason, message)` for the cluster
+/// `Rolling` condition. `Rolling=True` is surfaced whenever at least one
+/// pool exists and not all brokers have reached Ready — covers both
+/// initial bring-up and config-drift-triggered restarts (which we can't
+/// distinguish from the rollup alone).
+pub(crate) fn rolling_condition_from_rollup(
+    rollup: &ClusterRollup,
+) -> (bool, &'static str, String) {
+    if rollup.pool_count > 0 && rollup.ready_replicas < rollup.replicas {
+        (
+            true,
+            "RollingUpdate",
+            format!(
+                "{}/{} brokers ready (roll in progress)",
+                rollup.ready_replicas, rollup.replicas
+            ),
+        )
+    } else {
+        (
+            false,
+            "Stable",
+            "all brokers on current revision".to_string(),
+        )
+    }
 }
 
 /// Translate a rollup into `(ready, reason, message)` for the cluster
@@ -144,6 +170,12 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
     let cm = render_configmap(&obj)?;
     apply_object(&cm_api, &cm_name(&name), &cm).await?;
 
+    // Compute the content hash of the serialized broker.properties. We
+    // hash the same string we wrote into the ConfigMap, so the hash is
+    // a stable function of `spec.config` (sorted, deterministic).
+    let broker_props = common::serialize_broker_properties(&obj.spec);
+    let cfg_hash = common::config_hash(&broker_props);
+
     // 2. Cluster-id Secret: one-shot create-if-missing. The pool
     //    reconciler reads this secret to inject CRABKA_CLUSTER_ID into
     //    broker pods.
@@ -156,24 +188,36 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
     let pools = pool_api.list(&lp).await?;
 
     // 3b. Adopt sibling pools: patch each pool's `metadata.ownerReferences`
-    //     to include this Kafka as the controlling owner. Idempotent —
-    //     Kubernetes server-side resolves the patch to a no-op when the
-    //     ref already matches. The owner-ref drives Kubernetes' built-in
-    //     GC: `kubectl delete kafka demo` cascades to all pools labeled
-    //     `crabka.io/cluster=demo`, and (transitively, via the pool's own
-    //     owner-ref on its `StatefulSet`) to the broker workloads.
-    adopt_pools(&pool_api, &obj, pools.iter()).await?;
+    //     to include this Kafka as the controlling owner, and stamp the
+    //     `crabka.io/config-hash` label so the pool reconciler can
+    //     propagate it into the broker pod template (which forces a
+    //     StatefulSet rolling restart on drift). Idempotent — Kubernetes
+    //     server-side resolves the patch to a no-op when the fields
+    //     already match. The owner-ref drives Kubernetes' built-in GC.
+    adopt_pools(&pool_api, &obj, pools.iter(), &cfg_hash).await?;
 
-    // 4. Aggregate + patch our own status.
+    // 4. Aggregate + patch our own status. Surface both a `Ready`
+    //    condition (existing slice-20 contract) and a `Rolling`
+    //    condition (slice 21) so admins can distinguish "broker down"
+    //    from "rolling restart in progress".
     let rollup = aggregate_pool_status(pools.iter());
     let (ready, reason, message) = rollup_condition(&rollup);
+    let (rolling, rolling_reason, rolling_message) = rolling_condition_from_rollup(&rollup);
     let status = KafkaStatus {
-        conditions: vec![condition(
-            "Ready",
-            if ready { "True" } else { "False" },
-            reason,
-            &message,
-        )],
+        conditions: vec![
+            condition(
+                "Ready",
+                if ready { "True" } else { "False" },
+                reason,
+                &message,
+            ),
+            condition(
+                "Rolling",
+                if rolling { "True" } else { "False" },
+                rolling_reason,
+                &rolling_message,
+            ),
+        ],
         replicas: Some(rollup.replicas),
         ready_replicas: Some(rollup.ready_replicas),
     };
@@ -184,13 +228,15 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
 }
 
 /// For every pool labeled `crabka.io/cluster=<this Kafka>`, patch
-/// `metadata.ownerReferences` so the Kafka is the controlling owner.
-/// Uses a server-side apply with the operator's field manager so the
-/// patch wins over any out-of-band manual edits.
+/// `metadata.ownerReferences` so the Kafka is the controlling owner
+/// AND `metadata.labels["crabka.io/config-hash"]` so the pool reconciler
+/// observes config drift. Uses a server-side apply with the operator's
+/// field manager so the patch wins over any out-of-band manual edits.
 async fn adopt_pools<'a>(
     pool_api: &Api<KafkaNodePool>,
     parent: &Kafka,
     pools: impl IntoIterator<Item = &'a KafkaNodePool>,
+    config_hash: &str,
 ) -> Result<(), ReconcileError> {
     let owner = owner_ref::<Kafka>(parent)?;
     let params = PatchParams {
@@ -206,6 +252,7 @@ async fn adopt_pools<'a>(
         "kind": KafkaNodePool::kind(&()),
         "metadata": {
             "ownerReferences": [owner],
+            "labels": { "crabka.io/config-hash": config_hash },
         }
     });
     for pool in pools {
@@ -279,5 +326,29 @@ mod tests {
         let (ready, reason, _) = rollup_condition(&r);
         assert!(ready);
         assert_eq!(reason, "Available");
+    }
+
+    #[test]
+    fn rolling_condition_when_pool_partial() {
+        let r = ClusterRollup {
+            replicas: 3,
+            ready_replicas: 1,
+            pool_count: 1,
+        };
+        let (rolling, reason, _) = rolling_condition_from_rollup(&r);
+        assert!(rolling);
+        assert_eq!(reason, "RollingUpdate");
+    }
+
+    #[test]
+    fn rolling_condition_when_pool_stable() {
+        let r = ClusterRollup {
+            replicas: 1,
+            ready_replicas: 1,
+            pool_count: 1,
+        };
+        let (rolling, reason, _) = rolling_condition_from_rollup(&r);
+        assert!(!rolling);
+        assert_eq!(reason, "Stable");
     }
 }

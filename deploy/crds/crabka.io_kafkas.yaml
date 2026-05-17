@@ -25,6 +25,15 @@ spec:
               broker pods are described by sibling `KafkaNodePool`s labeled
               `crabka.io/cluster=<this name>`.
             properties:
+              config:
+                additionalProperties:
+                  type: string
+                description: |-
+                  Opaque broker properties (`server.properties`-style key/value
+                  pairs). Serialized into the broker `ConfigMap`; changes propagate
+                  through a content hash that triggers a rolling restart.
+                nullable: true
+                type: object
               kafkaVersion:
                 description: |-
                   Crabka version label, propagated to all pool pods via the

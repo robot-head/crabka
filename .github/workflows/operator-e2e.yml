@@ -140,6 +140,8 @@ jobs:
             namespace: default
           spec:
             kafkaVersion: "0.1.1"
+            config:
+              log.retention.hours: "24"
           ---
           apiVersion: crabka.io/v1alpha1
           kind: KafkaNodePool
@@ -203,6 +205,40 @@ jobs:
 
           tol_key=$(kubectl get pod demo-brokers-0 -n default -o jsonpath='{.spec.tolerations[?(@.key=="dedicated")].key}')
           [ "$tol_key" = "dedicated" ] || { echo "::error::toleration missing"; exit 1; }
+
+      - name: Smoke — config change rolls broker pod
+        run: |
+          set -e
+          initial_uid=$(kubectl get pod demo-brokers-0 -n default -o jsonpath='{.metadata.uid}')
+          initial_rev=$(kubectl get sts demo-brokers -n default -o jsonpath='{.status.currentRevision}')
+          echo "before: uid=$initial_uid rev=$initial_rev"
+
+          kubectl patch kafka demo -n default --type=merge \
+            -p '{"spec":{"config":{"log.retention.hours":"48"}}}'
+
+          # Wait up to 90s for the pod's UID to change (replacement).
+          for i in $(seq 1 45); do
+            current_uid=$(kubectl get pod demo-brokers-0 -n default -o jsonpath='{.metadata.uid}' 2>/dev/null || true)
+            echo "attempt $i: uid=$current_uid"
+            if [ -n "$current_uid" ] && [ "$current_uid" != "$initial_uid" ]; then
+              break
+            fi
+            sleep 2
+          done
+
+          if [ "$current_uid" = "$initial_uid" ]; then
+            echo "::error::pod UID didn't change within 90s (initial=$initial_uid)"
+            kubectl describe pod demo-brokers-0 -n default || true
+            kubectl describe sts demo-brokers -n default || true
+            exit 1
+          fi
+
+          # Wait for the new pod to reach Ready.
+          kubectl wait --for=condition=Ready -n default pod/demo-brokers-0 --timeout=120s
+
+          final_rev=$(kubectl get sts demo-brokers -n default -o jsonpath='{.status.currentRevision}')
+          [ "$final_rev" != "$initial_rev" ] || { echo "::error::sts revision didn't change ($initial_rev -> $final_rev)"; exit 1; }
+          echo "rolled: $initial_rev -> $final_rev"
 
       - name: Garbage-collection on Kafka delete
         run: |

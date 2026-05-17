@@ -177,7 +177,10 @@ pub(crate) fn render_service(owner: &Kafka) -> Result<Service, ReconcileError> {
 }
 
 /// Render the cluster-level `ConfigMap`. Owner-ref'd to the parent
-/// `Kafka`.
+/// `Kafka`. `data.broker.properties` is included only when
+/// `Kafka.spec.config` is set; serialization is deterministic
+/// (`BTreeMap` iteration = sorted) so the resulting content hash is
+/// stable across reconciles.
 pub(crate) fn render_configmap(owner: &Kafka) -> Result<ConfigMap, ReconcileError> {
     let name = owner.meta().name.clone().unwrap_or_default();
     let labels = common_labels(&name, &owner.spec.kafka_version, None);
@@ -187,6 +190,10 @@ pub(crate) fn render_configmap(owner: &Kafka) -> Result<ConfigMap, ReconcileErro
         "broker.env".to_string(),
         format!("CRABKA_LISTEN_ADDR=0.0.0.0:{BROKER_PORT}\n"),
     );
+    let broker_props = serialize_broker_properties(&owner.spec);
+    if !broker_props.is_empty() {
+        data.insert("broker.properties".to_string(), broker_props);
+    }
 
     Ok(ConfigMap {
         metadata: ObjectMeta {
@@ -199,6 +206,25 @@ pub(crate) fn render_configmap(owner: &Kafka) -> Result<ConfigMap, ReconcileErro
         data: Some(data),
         ..Default::default()
     })
+}
+
+/// Serialize `Kafka.spec.config` into a deterministic `broker.properties`
+/// string (one `key=value` line per entry, `BTreeMap` iteration = sorted).
+/// Returns `""` when `config` is `None` or empty. The content is hashed
+/// by [`config_hash`] to detect drift and trigger a rolling restart.
+#[must_use]
+pub(crate) fn serialize_broker_properties(spec: &crate::crd::KafkaSpec) -> String {
+    let Some(cfg) = spec.config.as_ref() else {
+        return String::new();
+    };
+    let mut out = String::new();
+    for (k, v) in cfg {
+        out.push_str(k);
+        out.push('=');
+        out.push_str(v);
+        out.push('\n');
+    }
+    out
 }
 
 /// Render the cluster-id `Secret`. Owner-ref'd to the parent `Kafka`.
@@ -301,5 +327,72 @@ pub(crate) fn derive_status(
             "PartiallyReady",
             format!("{ready_count}/{desired_replicas} brokers ready"),
         )
+    }
+}
+
+/// SHA-256 hex digest of the given content. Used by slice 21 to detect
+/// `Kafka.spec.config` changes that the K8s `StatefulSet` controller
+/// can't see directly.
+#[must_use]
+pub fn config_hash(content: &str) -> String {
+    use std::fmt::Write;
+
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(content.as_bytes());
+    let digest = h.finalize();
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(&mut out, "{byte:02x}").expect("writing to a String never fails");
+    }
+    out
+}
+
+#[cfg(test)]
+mod config_hash_tests {
+    use super::*;
+    use crate::crd::KafkaSpec;
+
+    #[test]
+    fn config_hash_is_sha256_hex() {
+        let h = config_hash("hello");
+        assert_eq!(
+            h,
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        );
+    }
+
+    #[test]
+    fn config_hash_empty_string() {
+        let h = config_hash("");
+        assert_eq!(
+            h,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    #[test]
+    fn serialize_broker_properties_sorted() {
+        let mut cfg = BTreeMap::new();
+        cfg.insert("num.partitions".into(), "3".into());
+        cfg.insert("log.retention.hours".into(), "24".into());
+        let spec = KafkaSpec {
+            kafka_version: "0.1.1".into(),
+            config: Some(cfg),
+        };
+        // Keys sort alphabetically: log.retention.hours < num.partitions.
+        assert_eq!(
+            serialize_broker_properties(&spec),
+            "log.retention.hours=24\nnum.partitions=3\n"
+        );
+    }
+
+    #[test]
+    fn serialize_broker_properties_none_is_empty_string() {
+        let spec = KafkaSpec {
+            kafka_version: "0.1.1".into(),
+            config: None,
+        };
+        assert_eq!(serialize_broker_properties(&spec), "");
     }
 }

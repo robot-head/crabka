@@ -35,6 +35,27 @@ fn kafka_cr(name: &str, namespace: &str) -> Kafka {
         name,
         KafkaSpec {
             kafka_version: "0.1.1".into(),
+            config: None,
+        },
+    );
+    k.metadata.namespace = Some(namespace.into());
+    k.metadata.uid = Some("kafka-uid".into());
+    k
+}
+
+/// Variant carrying a `spec.config` for slice-21 tests. Uses
+/// `log.retention.hours=24` because the plan pins the expected hash on
+/// exactly that key/value pair.
+fn kafka_cr_with_config(
+    name: &str,
+    namespace: &str,
+    config: std::collections::BTreeMap<String, String>,
+) -> Kafka {
+    let mut k = Kafka::new(
+        name,
+        KafkaSpec {
+            kafka_version: "0.1.1".into(),
+            config: Some(config),
         },
     );
     k.metadata.namespace = Some(namespace.into());
@@ -275,12 +296,116 @@ async fn kafka_status_aggregates_pool_readyreplicas() {
 
     let body: serde_json::Value =
         serde_json::from_slice(status_patch.body()).expect("status PATCH body is JSON");
-    let cond = &body["status"]["conditions"][0];
-    assert_eq!(cond["type"], "Ready", "body = {body}");
-    assert_eq!(cond["status"], "True", "body = {body}");
-    assert_eq!(cond["reason"], "Available", "body = {body}");
+    let conds = body["status"]["conditions"]
+        .as_array()
+        .expect("conditions array");
+    let ready = conds
+        .iter()
+        .find(|c| c["type"] == "Ready")
+        .expect("Ready condition present");
+    assert_eq!(ready["status"], "True", "body = {body}");
+    assert_eq!(ready["reason"], "Available", "body = {body}");
     assert_eq!(body["status"]["replicas"], json!(1), "body = {body}");
     assert_eq!(body["status"]["readyReplicas"], json!(1), "body = {body}");
+
+    assert_eq!(state.remaining_rules(), 0);
+}
+
+#[tokio::test]
+async fn kafka_writes_broker_properties_data_when_config_set() {
+    let mut cfg = std::collections::BTreeMap::new();
+    cfg.insert("log.retention.hours".to_string(), "24".to_string());
+
+    let items = vec![fake_pool_list_item("brokers", "y", "demo", 1, 1)];
+    let (ctx, state) = build_ctx("y", happy_path_rules("demo", "y", &items));
+    let kafka = kafka_cr_with_config("demo", "y", cfg);
+
+    reconcile(Arc::new(kafka), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    let cm_patch = observed
+        .iter()
+        .find(|r| {
+            r.method() == Method::PATCH
+                && r.uri()
+                    .to_string()
+                    .contains("/configmaps/demo-broker-config")
+        })
+        .expect("ConfigMap PATCH must have been captured");
+
+    let body: serde_json::Value =
+        serde_json::from_slice(cm_patch.body()).expect("ConfigMap PATCH body is JSON");
+    let props = body["data"]["broker.properties"]
+        .as_str()
+        .unwrap_or_else(|| panic!("expected data.broker.properties string, body = {body}"));
+    assert_eq!(
+        props, "log.retention.hours=24\n",
+        "broker.properties content, body = {body}"
+    );
+
+    assert_eq!(state.remaining_rules(), 0);
+}
+
+#[tokio::test]
+async fn kafka_patches_pool_label_with_config_hash() {
+    let mut cfg = std::collections::BTreeMap::new();
+    cfg.insert("log.retention.hours".to_string(), "24".to_string());
+    let expected_hash =
+        crabka_operator::controller::common::config_hash("log.retention.hours=24\n");
+
+    let items = vec![fake_pool_list_item("brokers", "y", "demo", 1, 1)];
+    let (ctx, state) = build_ctx("y", happy_path_rules("demo", "y", &items));
+    let kafka = kafka_cr_with_config("demo", "y", cfg);
+
+    reconcile(Arc::new(kafka), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    let pool_patch = observed
+        .iter()
+        .find(|r| {
+            r.method() == Method::PATCH && r.uri().to_string().contains("/kafkanodepools/brokers")
+        })
+        .expect("pool adopt PATCH must have been captured");
+
+    let body: serde_json::Value =
+        serde_json::from_slice(pool_patch.body()).expect("pool PATCH body is JSON");
+    let hash = body["metadata"]["labels"]["crabka.io/config-hash"]
+        .as_str()
+        .unwrap_or_else(|| {
+            panic!("expected metadata.labels[crabka.io/config-hash] str, body = {body}")
+        });
+    assert_eq!(hash, expected_hash, "body = {body}");
+
+    assert_eq!(state.remaining_rules(), 0);
+}
+
+#[tokio::test]
+async fn kafka_status_includes_rolling_condition_stable() {
+    let items = vec![fake_pool_list_item("brokers", "y", "demo", 1, 1)];
+    let (ctx, state) = build_ctx("y", happy_path_rules("demo", "y", &items));
+    let kafka = kafka_cr("demo", "y");
+
+    reconcile(Arc::new(kafka), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    let status_patch = observed
+        .iter()
+        .find(|r| {
+            r.method() == Method::PATCH && r.uri().to_string().contains("/kafkas/demo/status")
+        })
+        .expect("status PATCH must have been captured");
+
+    let body: serde_json::Value =
+        serde_json::from_slice(status_patch.body()).expect("status PATCH body is JSON");
+    let conds = body["status"]["conditions"]
+        .as_array()
+        .expect("conditions array");
+    let rolling = conds
+        .iter()
+        .find(|c| c["type"] == "Rolling")
+        .unwrap_or_else(|| panic!("Rolling condition present, body = {body}"));
+    assert_eq!(rolling["status"], "False", "body = {body}");
+    assert_eq!(rolling["reason"], "Stable", "body = {body}");
 
     assert_eq!(state.remaining_rules(), 0);
 }
