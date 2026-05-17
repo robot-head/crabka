@@ -39,9 +39,11 @@ pub struct Broker {
     pub(crate) supervisor_shutdown: tokio_util::sync::CancellationToken,
     pub(crate) supervisor_handle: tokio::sync::Mutex<Option<JoinHandle<()>>>,
     pub(crate) liveness: Arc<crate::heartbeat::controller_state::ControllerLivenessState>,
-    /// `Some` when `BrokerConfig::tls_config` is set. Per-listener accept
-    /// loops clone this and call `accept` for every TLS connection.
-    pub(crate) tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
+    /// `Some` when `BrokerConfig::tls_config` is set. Per-listener
+    /// accept loops snapshot the current `Arc<ServerConfig>` via
+    /// `current()` and wrap it in a fresh `TlsAcceptor`. Slice 33's
+    /// hot-reload path swaps the inner config without restart.
+    pub(crate) tls_dynamic: Option<Arc<crabka_security::DynamicServerConfig>>,
     /// Shared outbound dialer used by the replicator, raft transport,
     /// and controller-heartbeat loops. When `inter_broker_credentials`
     /// is `None` and the listener is `PLAINTEXT` the dialer falls back
@@ -496,6 +498,39 @@ impl BrokerHandle {
             .cloned()
     }
 
+    /// Slice 33: rebuild the TLS server config from the cert/key paths
+    /// in `BrokerConfig::tls_config` *right now*, bypassing the
+    /// periodic mtime watcher. New TLS handshakes after this call see
+    /// the rebuilt config; in-flight handshakes are unaffected.
+    ///
+    /// Operators call this from sidecars / hook scripts that just
+    /// wrote new cert files into place and want the change to take
+    /// effect without waiting for the next `tls_reload_interval` tick.
+    ///
+    /// # Errors
+    ///
+    /// - `BrokerError::Tls` — the new cert / key / client-CA failed
+    ///   to parse or rustls rejected the assembled config. The
+    ///   previous config remains in place; the broker keeps serving
+    ///   with the old cert.
+    /// - `BrokerError::Startup` — no TLS config is configured.
+    #[allow(clippy::used_underscore_binding)]
+    pub fn reload_tls(&self) -> Result<(), BrokerError> {
+        let Some(dynamic) = self._broker.tls_dynamic.as_ref() else {
+            return Err(BrokerError::Startup(
+                "reload_tls: broker has no tls_config".into(),
+            ));
+        };
+        let Some(tls_cfg) = self._broker.config.tls_config.as_ref() else {
+            return Err(BrokerError::Startup(
+                "reload_tls: broker has no tls_config".into(),
+            ));
+        };
+        dynamic
+            .reload_from(tls_cfg)
+            .map_err(|e| BrokerError::Tls(e.to_string()))
+    }
+
     /// Request a graceful, controlled shutdown of this broker.
     ///
     /// Signals the heartbeat client to set `want_shut_down=true` on
@@ -685,15 +720,15 @@ impl Broker {
         // 0b. Validate listener + auth configuration before any side effects.
         config.validate()?;
 
-        // 0c. Build the TLS acceptor up front so we can fail fast on bad
-        //     cert / key paths before bringing up any state.
-        let tls_acceptor = match &config.tls_config {
-            Some(tls) => {
-                let server_cfg = tls
-                    .build_server_config()
-                    .map_err(|e| BrokerError::Tls(e.to_string()))?;
-                Some(tokio_rustls::TlsAcceptor::from(server_cfg))
-            }
+        // 0c. Build the dynamic TLS server config up front so we can
+        //     fail fast on bad cert / key paths before bringing up any
+        //     state. Wrapped in a `DynamicServerConfig` so slice 33's
+        //     hot-reload path can swap certs without restart.
+        let tls_dynamic = match &config.tls_config {
+            Some(tls) => Some(
+                crabka_security::DynamicServerConfig::from_tls_config(tls)
+                    .map_err(|e| BrokerError::Tls(e.to_string()))?,
+            ),
             None => None,
         };
 
@@ -748,8 +783,15 @@ impl Broker {
         {
             None
         } else {
+            // Raft handshake uses the current (snapshot) acceptor. A
+            // mid-rotation reload affects only *new* raft handshakes;
+            // already-established peer connections keep their negotiated
+            // ServerConfig.
+            let raft_acceptor = tls_dynamic
+                .as_ref()
+                .map(|d| tokio_rustls::TlsAcceptor::from(d.current()));
             let hs = crate::raft_handshake::BrokerRaftHandshake {
-                tls_acceptor: tls_acceptor.clone(),
+                tls_acceptor: raft_acceptor,
                 plain_credentials: config.plain_credentials.clone(),
                 enabled_sasl_mechanisms: config.enabled_sasl_mechanisms.clone(),
                 protocol: config.controller_listener_protocol,
@@ -1146,6 +1188,20 @@ impl Broker {
             ));
         }
 
+        // Slice 33: TLS hot-reload watcher. Only spawn when a TLS
+        // config is present — non-TLS brokers don't need it.
+        if let (Some(dynamic), Some(tls_cfg_owned)) =
+            (tls_dynamic.clone(), config.tls_config.clone())
+        {
+            let shutdown = supervisor_shutdown.child_token();
+            tokio::spawn(crate::tls_reload::run(
+                dynamic,
+                tls_cfg_owned,
+                config.tls_reload_interval,
+                shutdown,
+            ));
+        }
+
         // KIP-73 throttle refresh task. Always-on; the bucket itself
         // has a rate-0 fast path so unthrottled clusters pay nothing.
         // `throttle_state` was created above (before the supervisor) so it
@@ -1216,7 +1272,7 @@ impl Broker {
             supervisor_shutdown,
             supervisor_handle: tokio::sync::Mutex::new(Some(supervisor_handle)),
             liveness: liveness.clone(),
-            tls_acceptor,
+            tls_dynamic: tls_dynamic.clone(),
             inter_broker_client,
             throttle_state,
             quota_buckets,

@@ -155,6 +155,7 @@ implements it today.
 | `AlterUserScramCredentials` (KIP-554) | ✅ |
 | `DescribeUserScramCredentials` (KIP-554) | ✅ |
 | mTLS client authentication | ✅ |
+| TLS cert hot-reload (non-disruptive rotation) | ✅ |
 | SASL/OAUTHBEARER | ❌ |
 | SASL/GSSAPI (Kerberos) | ❌ |
 | Delegation tokens | ❌ |

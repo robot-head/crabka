@@ -48,13 +48,17 @@ pub async fn serve_connection_on_listener(
         SocketAddr::from(([0u8, 0, 0, 0], 0))
     });
     if spec.protocol.requires_tls() {
-        let Some(acceptor) = broker.tls_acceptor.clone() else {
+        let Some(dynamic) = broker.tls_dynamic.as_ref() else {
             tracing::error!(
                 listener = %spec.name,
                 "TLS listener configured but broker has no TlsAcceptor"
             );
             return;
         };
+        // Snapshot the current ServerConfig per accept. Slice 33's
+        // reload swaps the inner Arc atomically; an in-flight
+        // handshake keeps the snapshot it captured here.
+        let acceptor = tokio_rustls::TlsAcceptor::from(dynamic.current());
         match acceptor.accept(stream).await {
             Ok(tls_stream) => {
                 // Slice 29: derive a Principal from the peer cert
