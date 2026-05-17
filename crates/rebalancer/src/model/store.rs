@@ -137,7 +137,7 @@ impl ProposalStore {
         match write_atomic(path, &on_disk) {
             Ok(()) => debug!(?path, "proposals.json persisted"),
             Err(e) => {
-                warn!(?path, error = %e, "proposals.json persist failed; in-memory state ahead of disk")
+                warn!(?path, error = %e, "proposals.json persist failed; in-memory state ahead of disk");
             }
         }
     }
