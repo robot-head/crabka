@@ -45,8 +45,7 @@ impl Goal for LeaderDistribution {
         let mut out: Vec<Movement> = Vec::new();
 
         loop {
-            let mut counts: HashMap<i32, usize> =
-                state.brokers.iter().map(|b| (b.id, 0)).collect();
+            let mut counts: HashMap<i32, usize> = state.brokers.iter().map(|b| (b.id, 0)).collect();
             for p in &working {
                 *counts.entry(p.leader).or_insert(0) += 1;
             }
@@ -126,8 +125,20 @@ mod tests {
     #[test]
     fn balanced_no_movements() {
         let parts = vec![
-            PartitionView { topic: "t".into(), partition: 0, replicas: vec![1, 2], leader: 1, isr: vec![1, 2] },
-            PartitionView { topic: "t".into(), partition: 1, replicas: vec![1, 2], leader: 2, isr: vec![1, 2] },
+            PartitionView {
+                topic: "t".into(),
+                partition: 0,
+                replicas: vec![1, 2],
+                leader: 1,
+                isr: vec![1, 2],
+            },
+            PartitionView {
+                topic: "t".into(),
+                partition: 1,
+                replicas: vec![1, 2],
+                leader: 2,
+                isr: vec![1, 2],
+            },
         ];
         let s = state_with(parts, vec![1, 2]);
         assert!(LeaderDistribution.propose(&s, &ctx()).is_empty());

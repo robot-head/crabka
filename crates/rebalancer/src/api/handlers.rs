@@ -13,8 +13,8 @@
 use std::sync::Arc;
 
 use axum::Extension;
-use connectrpc_axum::message::{ConnectError, ConnectRequest, ConnectResponse};
 use connectrpc_axum::message::error::Code;
+use connectrpc_axum::message::{ConnectError, ConnectRequest, ConnectResponse};
 
 use crate::ingest::SharedSnapshot;
 use crate::model::{ClusterState, ProposalStore};
@@ -148,9 +148,10 @@ pub async fn dry_run_proposal(
     req: ConnectRequest<pb::DryRunProposalRequest>,
 ) -> Result<ConnectResponse<pb::DryRunResponse>, ConnectError> {
     let id = req.0.id;
-    let p = state.store.get(&id).ok_or_else(|| {
-        ConnectError::new(Code::NotFound, format!("proposal `{id}` not found"))
-    })?;
+    let p = state
+        .store
+        .get(&id)
+        .ok_or_else(|| ConnectError::new(Code::NotFound, format!("proposal `{id}` not found")))?;
     let proto = proposal_to_proto(&p);
     Ok(ConnectResponse::new(pb::DryRunResponse {
         id: p.id,
@@ -165,9 +166,10 @@ pub async fn get_proposal(
     req: ConnectRequest<pb::GetProposalRequest>,
 ) -> Result<ConnectResponse<pb::Proposal>, ConnectError> {
     let id = req.0.id;
-    let p = state.store.get(&id).ok_or_else(|| {
-        ConnectError::new(Code::NotFound, format!("proposal `{id}` not found"))
-    })?;
+    let p = state
+        .store
+        .get(&id)
+        .ok_or_else(|| ConnectError::new(Code::NotFound, format!("proposal `{id}` not found")))?;
     Ok(ConnectResponse::new(proposal_to_proto(&p)))
 }
 
@@ -178,13 +180,10 @@ pub async fn list_proposals(
 ) -> Result<ConnectResponse<pb::ListProposalsResponse>, ConnectError> {
     let limit = req.0.limit;
     let n = usize::try_from(limit).unwrap_or(0);
-    let proposals = state
-        .store
-        .list(n)
-        .iter()
-        .map(proposal_to_proto)
-        .collect();
-    Ok(ConnectResponse::new(pb::ListProposalsResponse { proposals }))
+    let proposals = state.store.list(n).iter().map(proposal_to_proto).collect();
+    Ok(ConnectResponse::new(pb::ListProposalsResponse {
+        proposals,
+    }))
 }
 
 /// Execute is implemented in slice 43b — return `Unimplemented` (501) here.

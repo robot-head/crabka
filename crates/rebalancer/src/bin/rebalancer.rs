@@ -30,7 +30,11 @@ struct Args {
     bootstrap_servers: String,
 
     /// Bind address for the Connect-RPC + operational HTTP server.
-    #[arg(long, env = "CRABKA_REBALANCER_LISTEN_ADDR", default_value = "0.0.0.0:9300")]
+    #[arg(
+        long,
+        env = "CRABKA_REBALANCER_LISTEN_ADDR",
+        default_value = "0.0.0.0:9300"
+    )]
     listen_addr: SocketAddr,
 
     /// Cluster-state snapshot cadence.

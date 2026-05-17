@@ -21,7 +21,9 @@ impl Goal for PreferredLeaderIdempotency {
         let alive: std::collections::HashSet<i32> = state.brokers.iter().map(|b| b.id).collect();
         let mut out = Vec::new();
         for p in &state.partitions {
-            let Some(&preferred) = p.replicas.first() else { continue };
+            let Some(&preferred) = p.replicas.first() else {
+                continue;
+            };
             if p.leader == preferred {
                 continue;
             }

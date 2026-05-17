@@ -114,9 +114,24 @@ mod tests {
             cluster_id: None,
             snapshot_at_ms: 0,
             brokers: vec![
-                BrokerView { id: 1, host: "h1".into(), port: 9092, rack: None },
-                BrokerView { id: 2, host: "h2".into(), port: 9092, rack: None },
-                BrokerView { id: 3, host: "h3".into(), port: 9092, rack: None },
+                BrokerView {
+                    id: 1,
+                    host: "h1".into(),
+                    port: 9092,
+                    rack: None,
+                },
+                BrokerView {
+                    id: 2,
+                    host: "h2".into(),
+                    port: 9092,
+                    rack: None,
+                },
+                BrokerView {
+                    id: 3,
+                    host: "h3".into(),
+                    port: 9092,
+                    rack: None,
+                },
             ],
             partitions: vec![PartitionView {
                 topic: "foo".into(),

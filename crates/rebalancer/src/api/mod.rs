@@ -42,10 +42,7 @@ impl GoalRegistry {
     /// Translate user-supplied goal name strings into `&dyn Goal`
     /// references. An empty `names` slice returns all registered goals
     /// in registration order.
-    pub fn select<'a>(
-        &'a self,
-        names: &[String],
-    ) -> Result<Vec<&'a dyn Goal>, GoalSelectError> {
+    pub fn select<'a>(&'a self, names: &[String]) -> Result<Vec<&'a dyn Goal>, GoalSelectError> {
         if names.is_empty() {
             return Ok(self.goals.iter().map(std::convert::AsRef::as_ref).collect());
         }

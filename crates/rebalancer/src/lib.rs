@@ -17,9 +17,9 @@ pub mod pb {
     include!(concat!(env!("OUT_DIR"), "/crabka.rebalancer.v1.rs"));
 }
 
-pub mod model;
-pub mod goals;
-pub mod optimizer;
-pub mod ingest;
 pub mod api;
+pub mod goals;
 pub mod health;
+pub mod ingest;
+pub mod model;
+pub mod optimizer;

@@ -9,8 +9,7 @@
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let proto = "proto/crabka/rebalancer/v1/rebalancer.proto";
-    let mut builder =
-        connectrpc_axum_build::compile_protos(&[proto], &["proto"]);
+    let mut builder = connectrpc_axum_build::compile_protos(&[proto], &["proto"]);
     if !system_protoc_available() {
         builder = builder.fetch_protoc(None, None)?;
     }

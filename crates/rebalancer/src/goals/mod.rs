@@ -4,9 +4,9 @@
 
 use crate::model::{ClusterState, Movement};
 
+pub mod leader_distribution;
 pub mod preferred_leader_idempotency;
 pub mod replica_distribution;
-pub mod leader_distribution;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GoalPriority {

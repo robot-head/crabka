@@ -52,8 +52,7 @@ impl Goal for ReplicaDistribution {
 
         loop {
             // Recompute counts from `working`.
-            let mut counts: HashMap<i32, usize> =
-                state.brokers.iter().map(|b| (b.id, 0)).collect();
+            let mut counts: HashMap<i32, usize> = state.brokers.iter().map(|b| (b.id, 0)).collect();
             for p in &working {
                 for r in &p.replicas {
                     *counts.entry(*r).or_insert(0) += 1;
@@ -147,9 +146,27 @@ mod tests {
     #[test]
     fn balanced_cluster_no_movements() {
         let parts = vec![
-            PartitionView { topic: "t".into(), partition: 0, replicas: vec![1, 2], leader: 1, isr: vec![1, 2] },
-            PartitionView { topic: "t".into(), partition: 1, replicas: vec![2, 3], leader: 2, isr: vec![2, 3] },
-            PartitionView { topic: "t".into(), partition: 2, replicas: vec![1, 3], leader: 3, isr: vec![1, 3] },
+            PartitionView {
+                topic: "t".into(),
+                partition: 0,
+                replicas: vec![1, 2],
+                leader: 1,
+                isr: vec![1, 2],
+            },
+            PartitionView {
+                topic: "t".into(),
+                partition: 1,
+                replicas: vec![2, 3],
+                leader: 2,
+                isr: vec![2, 3],
+            },
+            PartitionView {
+                topic: "t".into(),
+                partition: 2,
+                replicas: vec![1, 3],
+                leader: 3,
+                isr: vec![1, 3],
+            },
         ];
         let s = state_with(parts, vec![1, 2, 3]);
         assert!(ReplicaDistribution.propose(&s, &ctx()).is_empty());

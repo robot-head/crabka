@@ -19,10 +19,10 @@ use connectrpc_axum::message::{ConnectError, ConnectRequest, ConnectResponse};
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_core::Client;
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-use crabka_rebalancer::api::handlers::{self, AppState};
 use crabka_rebalancer::api::GoalRegistry;
+use crabka_rebalancer::api::handlers::{self, AppState};
 use crabka_rebalancer::goals::GoalContext;
-use crabka_rebalancer::ingest::{new_shared_snapshot, snapshot_once, SharedSnapshot};
+use crabka_rebalancer::ingest::{SharedSnapshot, new_shared_snapshot, snapshot_once};
 use crabka_rebalancer::model::ProposalStore;
 use crabka_rebalancer::pb;
 use tempfile::TempDir;
@@ -143,9 +143,8 @@ async fn create_proposal_on_balanced_cluster_returns_empty_movements() {
     let state = build_state(shared);
 
     // GetState — must reflect the topics we just created.
-    let gs = unwrap_ok(
-        handlers::get_state(Extension(state.clone()), req(pb::GetStateRequest {})).await,
-    );
+    let gs =
+        unwrap_ok(handlers::get_state(Extension(state.clone()), req(pb::GetStateRequest {})).await);
     assert_eq!(gs.brokers.len(), 1, "single-broker cluster");
     assert_eq!(gs.brokers[0].id, 1, "broker id matches for_tests config");
     let topic_names: std::collections::BTreeSet<String> =
@@ -196,7 +195,9 @@ async fn create_proposal_on_balanced_cluster_returns_empty_movements() {
     let fetched = unwrap_ok(
         handlers::get_proposal(
             Extension(state.clone()),
-            req(pb::GetProposalRequest { id: proposal.id.clone() }),
+            req(pb::GetProposalRequest {
+                id: proposal.id.clone(),
+            }),
         )
         .await,
     );
@@ -221,7 +222,9 @@ async fn create_proposal_on_balanced_cluster_returns_empty_movements() {
     let dry = unwrap_ok(
         handlers::dry_run_proposal(
             Extension(state.clone()),
-            req(pb::DryRunProposalRequest { id: proposal.id.clone() }),
+            req(pb::DryRunProposalRequest {
+                id: proposal.id.clone(),
+            }),
         )
         .await,
     );
@@ -268,7 +271,9 @@ async fn create_proposal_on_balanced_cluster_returns_empty_movements() {
     let exec = unwrap_err(
         handlers::execute_proposal(
             Extension(state.clone()),
-            req(pb::ExecuteProposalRequest { id: proposal.id.clone() }),
+            req(pb::ExecuteProposalRequest {
+                id: proposal.id.clone(),
+            }),
         )
         .await,
     );

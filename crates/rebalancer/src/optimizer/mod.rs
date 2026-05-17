@@ -7,14 +7,18 @@ use uuid::Uuid;
 
 use crate::goals::{Goal, GoalContext, GoalPriority};
 use crate::model::{
-    validate_movement, ClusterState, Movement, PartitionView, Proposal, ProposalStatus,
-    ProposalSummary,
+    ClusterState, Movement, PartitionView, Proposal, ProposalStatus, ProposalSummary,
+    validate_movement,
 };
 
 #[derive(Debug, thiserror::Error)]
 pub enum OptimizeError {
     #[error("hard goal `{goal}` produced {extra} movements past the {cap} cap")]
-    HardGoalUnsatisfied { goal: String, extra: usize, cap: usize },
+    HardGoalUnsatisfied {
+        goal: String,
+        extra: usize,
+        cap: usize,
+    },
 }
 
 #[derive(Debug)]
@@ -199,8 +203,18 @@ mod tests {
             cluster_id: None,
             snapshot_at_ms: 0,
             brokers: vec![
-                BrokerView { id: 1, host: "h1".into(), port: 9092, rack: None },
-                BrokerView { id: 2, host: "h2".into(), port: 9092, rack: None },
+                BrokerView {
+                    id: 1,
+                    host: "h1".into(),
+                    port: 9092,
+                    rack: None,
+                },
+                BrokerView {
+                    id: 2,
+                    host: "h2".into(),
+                    port: 9092,
+                    rack: None,
+                },
             ],
             partitions: vec![PartitionView {
                 topic: "t".into(),
@@ -345,7 +359,11 @@ mod tests {
         let err = optimize(&s, &goals, &ctx).unwrap_err();
         assert!(matches!(
             err,
-            OptimizeError::HardGoalUnsatisfied { extra: 2, cap: 3, .. }
+            OptimizeError::HardGoalUnsatisfied {
+                extra: 2,
+                cap: 3,
+                ..
+            }
         ));
     }
 }
