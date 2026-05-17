@@ -353,6 +353,93 @@ pub fn config_hash(content: &str) -> String {
     out
 }
 
+/// Parse a K8s `Quantity` string into a comparable byte count.
+///
+/// Accepts:
+/// - Binary suffixes: `Ki`, `Mi`, `Gi`, `Ti`, `Pi`, `Ei` (1 Ki = 1024).
+/// - Decimal suffixes: `K`, `M`, `G`, `T`, `P`, `E` (1 K = 1000).
+/// - Bare numbers (no suffix → bytes).
+/// - Integer or decimal mantissa (`1.5Gi`).
+///
+/// Rejects: scientific notation, negative numbers, zero, empty
+/// strings, or any value that doesn't match `<mantissa><suffix?>`.
+///
+/// Returns the byte count as `i128` (1.5 Pi fits with headroom for
+/// arithmetic). Slice 24 only uses the result for ordered comparison
+/// — we never round-trip back to a string, so sub-byte rounding from
+/// the `f64` intermediate is acceptable. The in-tree implementation
+/// is ~50 lines and saves a workspace dependency; no third-party
+/// Quantity parser is wired into Crabka yet.
+///
+/// # Errors
+///
+/// Returns a static `&str` describing the parse failure.
+#[allow(
+    dead_code,
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
+pub(crate) fn parse_quantity(s: &str) -> Result<i128, &'static str> {
+    if s.is_empty() {
+        return Err("empty quantity string");
+    }
+
+    let (mantissa_str, multiplier): (&str, i128) = if let Some(rest) = s.strip_suffix("Ki") {
+        (rest, 1_024)
+    } else if let Some(rest) = s.strip_suffix("Mi") {
+        (rest, 1_024_i128.pow(2))
+    } else if let Some(rest) = s.strip_suffix("Gi") {
+        (rest, 1_024_i128.pow(3))
+    } else if let Some(rest) = s.strip_suffix("Ti") {
+        (rest, 1_024_i128.pow(4))
+    } else if let Some(rest) = s.strip_suffix("Pi") {
+        (rest, 1_024_i128.pow(5))
+    } else if let Some(rest) = s.strip_suffix("Ei") {
+        (rest, 1_024_i128.pow(6))
+    } else if let Some(rest) = s.strip_suffix('K') {
+        (rest, 1_000)
+    } else if let Some(rest) = s.strip_suffix('M') {
+        (rest, 1_000_000)
+    } else if let Some(rest) = s.strip_suffix('G') {
+        (rest, 1_000_000_000)
+    } else if let Some(rest) = s.strip_suffix('T') {
+        (rest, 1_000_000_000_000)
+    } else if let Some(rest) = s.strip_suffix('P') {
+        (rest, 1_000_000_000_000_000)
+    } else if let Some(rest) = s.strip_suffix('E') {
+        (rest, 1_000_000_000_000_000_000)
+    } else {
+        (s, 1)
+    };
+
+    if mantissa_str.is_empty() {
+        return Err("missing numeric mantissa before suffix");
+    }
+    if mantissa_str.contains(['e', 'E']) {
+        return Err("scientific notation not supported");
+    }
+    if mantissa_str.starts_with('-') {
+        return Err("negative quantity rejected");
+    }
+
+    let mantissa: f64 = mantissa_str
+        .parse()
+        .map_err(|_| "mantissa is not a valid number")?;
+    if !mantissa.is_finite() {
+        return Err("mantissa is not finite");
+    }
+    if mantissa <= 0.0 {
+        return Err("quantity must be strictly positive");
+    }
+
+    let bytes = mantissa * multiplier as f64;
+    if bytes > i128::MAX as f64 {
+        return Err("quantity overflows i128");
+    }
+    Ok(bytes as i128)
+}
+
 #[cfg(test)]
 mod config_hash_tests {
     use super::*;
@@ -406,5 +493,52 @@ mod config_hash_tests {
             config: None,
         };
         assert_eq!(serialize_broker_properties(&spec), "");
+    }
+}
+
+#[cfg(test)]
+mod parse_quantity_tests {
+    use super::parse_quantity;
+
+    #[test]
+    fn quantity_parse_binary_suffixes() {
+        assert_eq!(parse_quantity("1Ki").unwrap(), 1024);
+        assert_eq!(parse_quantity("512Mi").unwrap(), 512 * 1024 * 1024);
+        assert_eq!(parse_quantity("10Gi").unwrap(), 10 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn quantity_parse_decimal_suffixes() {
+        assert_eq!(parse_quantity("1K").unwrap(), 1_000);
+        assert_eq!(parse_quantity("500M").unwrap(), 500_000_000);
+        assert_eq!(parse_quantity("10G").unwrap(), 10_000_000_000);
+    }
+
+    #[test]
+    fn quantity_parse_decimal_mantissa() {
+        // 1.5Gi = 1.5 * 1024^3 = 1,610,612,736
+        assert_eq!(parse_quantity("1.5Gi").unwrap(), 1_610_612_736);
+    }
+
+    #[test]
+    fn quantity_parse_no_suffix_is_bytes() {
+        assert_eq!(parse_quantity("1024").unwrap(), 1024);
+    }
+
+    #[test]
+    fn quantity_parse_rejects_garbage() {
+        assert!(parse_quantity("").is_err());
+        assert!(parse_quantity("banana").is_err());
+        assert!(parse_quantity("1.5x").is_err());
+        assert!(parse_quantity("Gi").is_err());
+        // No scientific notation:
+        assert!(parse_quantity("1e3").is_err());
+    }
+
+    #[test]
+    fn quantity_parse_zero_and_negative_are_errors() {
+        assert!(parse_quantity("0").is_err());
+        assert!(parse_quantity("0Gi").is_err());
+        assert!(parse_quantity("-10Gi").is_err());
     }
 }
