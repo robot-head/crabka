@@ -4,6 +4,8 @@
 
 use crate::model::{ClusterState, Movement};
 
+pub mod preferred_leader_idempotency;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GoalPriority {
     /// Hard goals must be satisfied. If the optimizer truncates the
