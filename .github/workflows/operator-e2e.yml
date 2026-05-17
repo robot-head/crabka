@@ -474,13 +474,39 @@ jobs:
       - name: Enable PodMonitor via Kafka.spec.metricsConfig
         run: |
           set -e
+          initial_uid=$(kubectl get pod demo-brokers-0 -n default -o jsonpath='{.metadata.uid}')
+          echo "before metricsConfig patch: uid=$initial_uid"
+
           kubectl patch kafka demo -n default --type=merge \
             -p '{"spec":{"metricsConfig":{"podMonitor":{"interval":"15s"}}}}'
-          # Slice-40 enabling metricsConfig changes the pod template
-          # (adds the metrics container port + CLI flag) so the StatefulSet
-          # controller will roll the pod. Wait for the rolled pod to be Ready.
+
+          # MetricsReady=True lands as soon as the operator applies the
+          # PodMonitor — which happens before the pod itself rolls. Wait
+          # for it as a first gate.
           kubectl wait kafka/demo -n default \
             --for=condition=MetricsReady=True --timeout=120s
+
+          # Enabling metricsConfig changes the broker pod template (adds
+          # the metrics container port + --metrics-listen-addr flag) so
+          # the StatefulSet controller rolls the pod. Wait for the pod's
+          # UID to change so the subsequent smoke checks observe the new
+          # pod, not the stale one.
+          for i in $(seq 1 60); do
+            current_uid=$(kubectl get pod demo-brokers-0 -n default -o jsonpath='{.metadata.uid}' 2>/dev/null || true)
+            echo "attempt $i: uid=$current_uid"
+            if [ -n "$current_uid" ] && [ "$current_uid" != "$initial_uid" ]; then
+              break
+            fi
+            sleep 2
+          done
+          if [ "$current_uid" = "$initial_uid" ]; then
+            echo "::error::metricsConfig patch did not roll the broker pod within 120s (uid still=$initial_uid)"
+            kubectl describe kafka demo -n default || true
+            kubectl describe sts demo-brokers -n default || true
+            kubectl get configmap demo-broker-config -n default -o yaml || true
+            exit 1
+          fi
+
           kubectl wait --for=condition=Ready -n default pod/demo-brokers-0 --timeout=180s
 
       - name: Smoke — PodMonitor rendered

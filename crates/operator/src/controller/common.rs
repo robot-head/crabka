@@ -350,10 +350,20 @@ pub fn config_hash(content: &str) -> String {
     out
 }
 
-/// Slice 25: combined hash over user `spec.config` and the canonical
-/// listener intent. Empty listeners produce empty intent, so the
-/// combined hash is identical to the slice-24 hash for an unchanged
-/// `spec.config`.
+/// Slice 25 (+ slice 40): combined hash over user `spec.config`, the
+/// canonical listener intent, and a `metrics_config.is_some()` bit.
+/// Empty listeners produce empty intent and metrics-unset produces an
+/// empty third segment, so the combined hash is identical to the
+/// slice-24 hash for an unchanged `spec.config` with neither listeners
+/// nor metrics.
+///
+/// The metrics segment is a coarse `metrics_enabled` bit, not a hash of
+/// the full `metrics_config` body — toggling `metricsConfig` on/off
+/// changes the broker pod template (adds/removes the metrics port + CLI
+/// flag) and so must trigger a pool reconcile (which re-renders the
+/// `StatefulSet`). Sub-field changes (interval, scrape labels) affect
+/// only the `PodMonitor`/`ServiceMonitor` objects, not the broker pod,
+/// and do not need a roll.
 #[must_use]
 pub fn combined_config_hash(spec: &crate::crd::KafkaSpec) -> String {
     let config_part = spec
@@ -374,10 +384,17 @@ pub fn combined_config_hash(spec: &crate::crd::KafkaSpec) -> String {
         &spec.listeners,
         spec.inter_broker_listener_name.as_deref(),
     );
-    let mut buf = String::with_capacity(config_part.len() + 1 + intent.len());
+    let metrics_part = if spec.metrics_config.is_some() {
+        "metrics=on"
+    } else {
+        ""
+    };
+    let mut buf = String::with_capacity(config_part.len() + 2 + intent.len() + metrics_part.len());
     buf.push_str(&config_part);
     buf.push('\x1F'); // ASCII unit separator
     buf.push_str(&intent);
+    buf.push('\x1F');
+    buf.push_str(metrics_part);
     config_hash(&buf)
 }
 
@@ -522,6 +539,47 @@ mod config_hash_tests {
         assert_ne!(
             h, h_with_listener,
             "non-empty listener intent must change hash"
+        );
+    }
+
+    #[test]
+    fn combined_hash_flips_when_metrics_config_toggles() {
+        use crate::crd::{KafkaSpec, MetricsConfig, PodMonitorSpec};
+
+        let spec_off = KafkaSpec {
+            kafka_version: "0.1.1".into(),
+            config: None,
+            listeners: vec![],
+            inter_broker_listener_name: None,
+            metrics_config: None,
+        };
+        let h_off = combined_config_hash(&spec_off);
+
+        let mut spec_on = spec_off.clone();
+        spec_on.metrics_config = Some(MetricsConfig {
+            pod_monitor: Some(PodMonitorSpec::default()),
+            ..Default::default()
+        });
+        let h_on = combined_config_hash(&spec_on);
+        assert_ne!(
+            h_off, h_on,
+            "enabling metrics_config must bump the hash (triggers pool reconcile + StatefulSet re-render)"
+        );
+
+        // Toggling sub-fields (interval, labels) does NOT change the
+        // hash — those only affect the PodMonitor/ServiceMonitor body,
+        // not the broker pod template, so they must not trigger a roll.
+        let mut spec_on_diff_interval = spec_on.clone();
+        if let Some(cfg) = spec_on_diff_interval.metrics_config.as_mut() {
+            cfg.pod_monitor = Some(PodMonitorSpec {
+                interval: Some("60s".into()),
+                ..Default::default()
+            });
+        }
+        assert_eq!(
+            h_on,
+            combined_config_hash(&spec_on_diff_interval),
+            "PodMonitor interval change must NOT roll the broker pod",
         );
     }
 
