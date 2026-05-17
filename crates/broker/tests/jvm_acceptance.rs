@@ -2790,6 +2790,8 @@ async fn start_ssl_broker() -> (crabka_broker::BrokerHandle, tempfile::TempDir) 
             cert_chain_path: cert_path,
             private_key_path: key_path,
             trust_roots_path: None,
+            client_ca_path: None,
+            client_auth: crabka_security::ClientAuthMode::Disabled,
         }),
         ..BrokerConfig::default()
     };
@@ -3046,6 +3048,8 @@ async fn start_sasl_ssl_broker(
             cert_chain_path: cert_path,
             private_key_path: key_path,
             trust_roots_path: None,
+            client_ca_path: None,
+            client_auth: crabka_security::ClientAuthMode::Disabled,
         }),
         enabled_sasl_mechanisms: vec![SaslMechanism::Plain, SaslMechanism::ScramSha512],
         super_users: std::collections::HashSet::from([admin.to_string()]),
@@ -3653,6 +3657,8 @@ async fn start_two_sasl_ssl_brokers_with_controller_protocol(
                 // an empty trust-root store and rejects the peer's
                 // self-signed cert as `UnknownIssuer`.
                 trust_roots_path: Some(cert_path.clone()),
+                client_ca_path: None,
+                client_auth: crabka_security::ClientAuthMode::Disabled,
             }),
             enabled_sasl_mechanisms: vec![SaslMechanism::Plain, SaslMechanism::ScramSha512],
             super_users: std::collections::HashSet::from([admin.to_string()]),

@@ -5,6 +5,7 @@
 
 mod listener;
 mod mechanism;
+mod mtls;
 mod plain;
 mod principal;
 pub mod scram;
@@ -12,10 +13,11 @@ mod tls;
 
 pub use listener::ListenerProtocol;
 pub use mechanism::SaslMechanism;
+pub use mtls::extract_principal_from_cert;
 pub use plain::verify_plain;
-pub use principal::{AuthError, Principal};
+pub use principal::{AuthError, AuthMethod, Principal};
 pub use scram::{
     ScramClientExchange, ScramCredential, ScramServerExchange, StepResult, derive_keys_from_salted,
     hash_scram_password, scram_hash_len,
 };
-pub use tls::TlsConfig;
+pub use tls::{ClientAuthMode, TlsConfig};

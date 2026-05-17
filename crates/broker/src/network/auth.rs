@@ -358,12 +358,12 @@ mod tests {
         let a = ConnectionAuth::Authenticated {
             principal: Principal {
                 name: "alice".into(),
-                mechanism: SaslMechanism::ScramSha512,
+                auth_method: crabka_security::AuthMethod::SaslScramSha512,
             },
         };
         assert!(a.is_authenticated());
         let p = a.principal().expect("principal");
         assert_eq!(p.name, "alice");
-        assert_eq!(p.mechanism, SaslMechanism::ScramSha512);
+        assert_eq!(p.auth_method, crabka_security::AuthMethod::SaslScramSha512);
     }
 }

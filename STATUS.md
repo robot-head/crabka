@@ -437,6 +437,55 @@ Kafka client for ApiVersions.
 - Closes the recurring JVM-tool quirk that slices 16/16b/16c documented as known limitations.
 - Out of scope: slice 16 `client_id` HandlerTable gap (slice 17b).
 
+## Slice 29 — mTLS client authentication (2026-05-16)
+
+- `TlsConfig` gains two fields: `client_auth: ClientAuthMode`
+  (`Disabled` / `Optional` / `Required`, defaults to `Disabled` to
+  preserve pre-slice behaviour) and `client_ca_path: Option<PathBuf>`
+  (operator-supplied clients CA, mirrors Kafka's
+  `ssl.client.auth.truststore.location`).
+- `build_server_config` branches on the mode: `Disabled` uses
+  `with_no_client_auth` as before; `Optional`/`Required` wire a
+  `rustls::server::WebPkiClientVerifier` against `client_ca_path`.
+  `Required` rejects the handshake when no cert is presented;
+  `Optional` accepts both.
+- New `crabka-security::extract_principal_from_cert` parses the
+  DER-encoded X.509 client cert via `x509-parser` and returns the
+  Subject DN (matches Kafka's `DefaultKafkaPrincipalBuilder`).
+- New `AuthMethod` enum on `Principal` — strict superset of
+  `SaslMechanism` covering `Anonymous`, `SaslPlain`,
+  `SaslScramSha{256,512}`, and `MTls`. `Principal::mechanism:
+  SaslMechanism` is renamed to `auth_method: AuthMethod`. All ~50
+  call sites updated; `SaslMechanism` stays the canonical SASL enum
+  (used by `V1ScramCredential` metadata + `ConnectionAuth::Negotiating`).
+- `network/dispatch.rs::serve_connection_on_listener` extracts the
+  peer cert via `tokio_rustls::TlsStream::get_ref()` after a successful
+  handshake. When present, the connection starts as `Authenticated`
+  with `auth_method = MTls`; otherwise falls back to `ANONYMOUS`.
+  SASL listeners ignore mTLS principals — Kafka's SASL_SSL semantics
+  require SASL to be the auth even if a cert was negotiated.
+- New dev fixtures in `crates/security/tests/fixtures/`:
+  `dev_client_ca.pem` (self-signed P-256 CA), `dev_client_cert.pem`
+  (CN=test-client signed by the CA), `dev_client_key.pem`.
+- 3 new `TlsConfig` unit tests (missing-CA error, Required +
+  Optional builders). 2 new mTLS unit tests in
+  `crabka_security::mtls` (Subject DN extraction, malformed-cert
+  None). 1 new broker integration test in `tests/mtls.rs`:
+  SSL listener with `client_auth=Required`, fixture-cert TLS client,
+  `super_users = [CLIENT_PRINCIPAL]`. The test sends `CreateTopics`
+  — which requires Cluster Create — and asserts `error_code=0`.
+  ANONYMOUS would have been denied with `CLUSTER_AUTHORIZATION_FAILED`,
+  so success proves the principal was the cert DN.
+- New workspace deps: `x509-parser` (Subject DN extraction),
+  `rustls-webpki` (already transitively present, now explicit).
+- **Real finding:** `x509-parser` renders the Subject DN
+  most-significant first with no spaces: e.g.
+  `CN=test-client,OU=integration,O=crabka`. Operators must pin this
+  exact string in ACLs / super_users.
+- Out of scope: cert hot-reload (slice 33), CA rotation orchestration
+  (operator slice 34), `Optional` mode end-to-end test (covered by
+  unit `client_auth_optional_with_ca_builds` only).
+
 ## Slice 32 — SASL/SCRAM-SHA-256 (2026-05-16)
 
 - New `SaslMechanism::ScramSha256` variant + `wire_name`/`from_wire`

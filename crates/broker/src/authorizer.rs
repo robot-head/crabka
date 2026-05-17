@@ -150,7 +150,6 @@ fn implies(stored: AclOperation, requested: AclOperation) -> bool {
 mod tests {
     use super::*;
     use crabka_metadata::{MetadataRecord, PatternType};
-    use crabka_security::SaslMechanism;
     use uuid::Uuid;
 
     fn no_super() -> std::collections::HashSet<String> {
@@ -165,7 +164,7 @@ mod tests {
     fn alice() -> Principal {
         Principal {
             name: "alice".into(),
-            mechanism: SaslMechanism::Plain,
+            auth_method: crabka_security::AuthMethod::SaslPlain,
         }
     }
 
@@ -735,11 +734,11 @@ mod tests {
         };
         let admin = Principal {
             name: "admin".into(),
-            mechanism: SaslMechanism::Plain,
+            auth_method: crabka_security::AuthMethod::SaslPlain,
         };
         let ops = Principal {
             name: "ops-bot".into(),
-            mechanism: SaslMechanism::Plain,
+            auth_method: crabka_security::AuthMethod::SaslPlain,
         };
         let alice = alice();
         assert_eq!(

@@ -154,7 +154,7 @@ implements it today.
 | Inter-broker auth (TLS + SASL on data plane & raft) | ✅ |
 | `AlterUserScramCredentials` (KIP-554) | ✅ |
 | `DescribeUserScramCredentials` (KIP-554) | ✅ |
-| mTLS client authentication | ❌ |
+| mTLS client authentication | ✅ |
 | SASL/OAUTHBEARER | ❌ |
 | SASL/GSSAPI (Kerberos) | ❌ |
 | Delegation tokens | ❌ |

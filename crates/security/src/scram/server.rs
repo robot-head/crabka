@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256, Sha512};
 use subtle::ConstantTimeEq;
 
 use super::{ScramCredential, scram_hash_len};
-use crate::{AuthError, Principal, SaslMechanism};
+use crate::{AuthError, AuthMethod, Principal, SaslMechanism};
 
 #[derive(Debug)]
 enum State {
@@ -167,7 +167,7 @@ impl ScramServerExchange {
         StepResult::Done(
             Principal {
                 name: self.username.clone(),
-                mechanism: self.credential.mechanism,
+                auth_method: AuthMethod::from_sasl(self.credential.mechanism),
             },
             server_final.into_bytes(),
         )
