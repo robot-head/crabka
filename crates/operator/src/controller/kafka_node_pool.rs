@@ -114,9 +114,10 @@ printf '%s' \"$NODE_ID\" > /var/lib/crabka/data/.node-id\n";
 // writable tmpfs path (the root FS is read-only), then exec the broker
 // with `--config-file` so it picks up advertised listeners and all other
 // per-broker config from the rendered TOML.
+// `/run/crabka` is backed by an emptyDir volume (see `render_storage`)
+// so it's writable even with `readOnlyRootFilesystem: true`.
 const MAIN_SCRIPT: &str = "set -eu\n\
 NODE_ID=\"$(cat /var/lib/crabka/data/.node-id)\"\n\
-mkdir -p /run/crabka\n\
 cp /etc/crabka/config/broker-${NODE_ID}.toml /run/crabka/broker.toml\n\
 exec /usr/bin/crabka-broker \\\n  --config-file=/run/crabka/broker.toml \\\n  --broker-id=\"${NODE_ID}\"\n";
 
@@ -172,7 +173,8 @@ fn render_broker_container(
         "resources": resources,
         "volumeMounts": [
             { "name": "data", "mountPath": "/var/lib/crabka/data" },
-            { "name": "broker-config", "mountPath": "/etc/crabka/config", "readOnly": true }
+            { "name": "broker-config", "mountPath": "/etc/crabka/config", "readOnly": true },
+            { "name": "broker-runtime", "mountPath": "/run/crabka" }
         ],
         "securityContext": {
             "allowPrivilegeEscalation": false,
@@ -200,9 +202,17 @@ fn render_storage(
         "name": "broker-config",
         "configMap": { "name": format!("{parent_name}-broker-config") }
     });
+    // Writable emptyDir for the init script's `/run/crabka/broker.toml`
+    // assembly. The container runs `readOnlyRootFilesystem: true`, so
+    // `mkdir /run/crabka` would fail without an explicit mount.
+    let runtime_vol = json!({ "name": "broker-runtime", "emptyDir": {} });
     match storage {
         None | Some(Storage::Ephemeral) => {
-            let volumes = json!([{ "name": "data", "emptyDir": {} }, broker_config_vol]);
+            let volumes = json!([
+                { "name": "data", "emptyDir": {} },
+                broker_config_vol,
+                runtime_vol,
+            ]);
             (volumes, None)
         }
         Some(Storage::PersistentClaim(pc)) => {
@@ -221,7 +231,7 @@ fn render_storage(
             if let Some(class) = pc.class.as_ref() {
                 template["spec"]["storageClassName"] = serde_json::Value::String(class.clone());
             }
-            (json!([broker_config_vol]), Some(template))
+            (json!([broker_config_vol, runtime_vol]), Some(template))
         }
     }
 }
