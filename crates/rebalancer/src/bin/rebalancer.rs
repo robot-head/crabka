@@ -1,29 +1,33 @@
 //! `crabka-rebalancer` — Cruise-Control-equivalent partition
-//! rebalancer for Crabka clusters. Slice 43a: advisor surface only —
-//! propose / dry-run / list / get. Execute lands in slice 43b.
+//! rebalancer for Crabka clusters.
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::{info, warn};
 
 use crabka_rebalancer::api::GoalRegistry;
 use crabka_rebalancer::api::handlers::AppState;
+use crabka_rebalancer::executor::client_impl::LiveClient;
+use crabka_rebalancer::executor::state::InFlightFile;
+use crabka_rebalancer::executor::{Execution, ExecutionHandle, ExecutorConfig, ExecutorState};
 use crabka_rebalancer::goals::GoalContext;
 use crabka_rebalancer::health::{HealthState, new_registry};
 use crabka_rebalancer::ingest::{Ingester, new_shared_snapshot};
 use crabka_rebalancer::metrics::RebalancerMetrics;
-use crabka_rebalancer::model::ProposalStore;
+use crabka_rebalancer::model::proposal::ProposalStatus;
+use crabka_rebalancer::model::store::ProposalStore;
 
 #[derive(Debug, Parser)]
 #[command(
     name = "crabka-rebalancer",
     version,
-    about = "Cruise-Control-equivalent partition rebalancer (advisor, slice 43a)"
+    about = "Cruise-Control-equivalent partition rebalancer"
 )]
 struct Args {
     /// `host:port,host:port,...` of brokers to use for bootstrap.
@@ -53,9 +57,45 @@ struct Args {
     /// In-memory ring buffer capacity for recent proposals.
     #[arg(long, env = "CRABKA_PROPOSAL_RING_BUFFER_SIZE", default_value_t = 20)]
     proposal_ring_buffer_size: usize,
+
+    /// On-disk persistence directory. Created if missing.
+    #[arg(
+        long,
+        env = "CRABKA_DATA_DIR",
+        default_value = "/var/lib/crabka-rebalancer"
+    )]
+    data_dir: PathBuf,
+
+    /// Default KIP-73 throttle (bytes/sec, per broker direction) when
+    /// `ExecuteProposalRequest.throttle_bytes_per_sec` is unset.
+    #[arg(
+        long,
+        env = "CRABKA_DEFAULT_THROTTLE_BYTES_PER_SEC",
+        default_value_t = 50_000_000
+    )]
+    default_throttle_bytes_per_sec: i64,
+
+    /// Per-execution deadline before the executor cancels in-flight
+    /// reassignments and fails the proposal.
+    #[arg(long, env = "CRABKA_EXECUTE_DEADLINE_SECS", default_value_t = 1800)]
+    execute_deadline_secs: u64,
+
+    /// How often the executor polls `ListPartitionReassignments` during
+    /// the Wait phase.
+    #[arg(
+        long,
+        env = "CRABKA_REASSIGNMENT_POLL_INTERVAL_SECS",
+        default_value_t = 5
+    )]
+    reassignment_poll_interval_secs: u64,
+
+    /// Maximum movements per `AlterPartitionReassignments` request.
+    #[arg(long, env = "CRABKA_REASSIGNMENT_BATCH_SIZE", default_value_t = 200)]
+    reassignment_batch_size: usize,
 }
 
 #[tokio::main]
+#[allow(clippy::too_many_lines)]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -65,27 +105,33 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let args = Args::parse();
-    info!(listen = %args.listen_addr, bootstrap = %args.bootstrap_servers, "crabka-rebalancer starting");
+    info!(
+        listen = %args.listen_addr,
+        bootstrap = %args.bootstrap_servers,
+        data_dir = ?args.data_dir,
+        "crabka-rebalancer starting"
+    );
 
-    // Admin client.
+    std::fs::create_dir_all(&args.data_dir)?;
+
     let client = crabka_client_core::Client::builder()
         .bootstrap(args.bootstrap_servers.clone())
         .client_id("crabka-rebalancer")
         .build()
         .await?;
 
-    // Shared snapshot state.
     let snapshot = new_shared_snapshot();
+    let shutdown = CancellationToken::new();
 
-    // Registry + metrics. Build the Registry up-front so the ingester
-    // and the RPC handlers can be handed clones of the same metric
-    // handles — the `/metrics` endpoint reads from this same Registry.
     let mut registry = new_registry();
     let metrics = RebalancerMetrics::register(&mut registry);
     let registry = Arc::new(Mutex::new(registry));
 
-    // Ingester.
-    let shutdown = CancellationToken::new();
+    let store = Arc::new(ProposalStore::open(
+        &args.data_dir,
+        args.proposal_ring_buffer_size,
+    )?);
+
     let ingester = Ingester::new(
         client.clone(),
         Duration::from_secs(args.scrape_interval_secs),
@@ -95,8 +141,69 @@ async fn main() -> anyhow::Result<()> {
     );
     let ingester_handle = tokio::spawn(ingester.run());
 
-    // Service state.
-    let store = Arc::new(ProposalStore::new(args.proposal_ring_buffer_size));
+    let executor_config = ExecutorConfig {
+        data_dir: args.data_dir.clone(),
+        default_throttle_bytes_per_sec: args.default_throttle_bytes_per_sec,
+        poll_interval: Duration::from_secs(args.reassignment_poll_interval_secs),
+        execute_deadline: Duration::from_secs(args.execute_deadline_secs),
+        batch_size: args.reassignment_batch_size,
+    };
+
+    let in_flight_slot: Arc<Mutex<Option<ExecutionHandle>>> = Arc::new(Mutex::new(None));
+    let executor_state = ExecutorState {
+        store: store.clone(),
+        config: executor_config,
+        metrics: metrics.clone(),
+        in_flight: in_flight_slot.clone(),
+    };
+
+    let live_client: Arc<dyn crabka_rebalancer::executor::phases::ClientFacade> =
+        Arc::new(LiveClient::new(client.clone()));
+
+    // Recovery on startup: replay in_flight.json if present.
+    if let Some(in_flight) = InFlightFile::load(&args.data_dir)? {
+        info!(
+            proposal_id = %in_flight.proposal_id,
+            phase = ?in_flight.phase,
+            "recovering in-flight execution"
+        );
+        if let Some(proposal) = store.get(&in_flight.proposal_id) {
+            let prop_for_resume = store
+                .mutate(&in_flight.proposal_id, |p| {
+                    p.status = ProposalStatus::Executing;
+                })
+                .unwrap_or(proposal);
+            let cancel = CancellationToken::new();
+            let handle_cancel = cancel.clone();
+            let exec_state = executor_state.clone();
+            let exec_client = live_client.clone();
+            let in_flight_for_resume = in_flight.clone();
+            let task = tokio::spawn(async move {
+                Execution::resume(
+                    exec_client,
+                    exec_state,
+                    prop_for_resume,
+                    &in_flight_for_resume,
+                    cancel,
+                )
+                .run()
+                .await;
+            });
+            *in_flight_slot.lock().await = Some(ExecutionHandle {
+                proposal_id: in_flight.proposal_id.clone(),
+                task,
+                cancel: handle_cancel,
+                started_at: std::time::Instant::now(),
+            });
+        } else {
+            warn!(
+                proposal_id = %in_flight.proposal_id,
+                "in_flight.json references unknown proposal; clearing"
+            );
+            let _ = InFlightFile::delete(&args.data_dir);
+        }
+    }
+
     let app_state = Arc::new(AppState {
         snapshot: snapshot.clone(),
         store,
@@ -106,15 +213,15 @@ async fn main() -> anyhow::Result<()> {
             max_movements_per_proposal: args.max_movements_per_proposal,
         },
         metrics: metrics.clone(),
+        executor: executor_state,
+        client_facade: live_client,
     });
-    let connect_router = crabka_rebalancer::api::router(app_state);
 
+    let connect_router = crabka_rebalancer::api::router(app_state);
     let health_router = crabka_rebalancer::health::router(HealthState {
         snapshot: snapshot.clone(),
         registry,
     });
-
-    // Merge Connect + health onto one axum app.
     let app = connect_router.merge(health_router);
 
     let listener = tokio::net::TcpListener::bind(args.listen_addr).await?;
@@ -127,9 +234,6 @@ async fn main() -> anyhow::Result<()> {
         })
         .await?;
 
-    // Let the ingester drain its in-flight tick and emit its
-    // "shutting down" log line before `main` returns. A 5s timeout
-    // ensures a stuck admin RPC can't wedge process shutdown.
     let _ = tokio::time::timeout(Duration::from_secs(5), ingester_handle).await;
     Ok(())
 }

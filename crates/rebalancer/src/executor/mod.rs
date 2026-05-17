@@ -4,6 +4,7 @@
 //! Slice 43b adds the full state machine (`ApplyThrottle` -> `Submit` ->
 //! `Wait` -> `ClearThrottle`) and on-disk persistence with restart resume.
 
+pub mod client_impl;
 pub mod phases;
 pub mod state;
 pub mod throttle;
