@@ -153,6 +153,18 @@ jobs:
             roles: [Controller, Broker]
             replicas: 1
             nodeIdStart: 0
+            template:
+              metadata:
+                labels:
+                  team: platform
+                annotations:
+                  crabka.io/test-anno: "yes"
+              tolerations:
+                - key: dedicated
+                  operator: Exists
+                  effect: NoSchedule
+              nodeSelector:
+                kubernetes.io/os: linux
           EOF
 
       - name: Wait for Ready=True
@@ -177,6 +189,21 @@ jobs:
         run: |
           kubectl exec -n default demo-brokers-0 -c broker -- /usr/bin/crabka-broker --version
           kubectl logs -n default demo-brokers-0 -c broker | grep -q 'crabka-broker listening'
+
+      - name: Smoke — pod template values applied
+        run: |
+          set -e
+          team=$(kubectl get pod demo-brokers-0 -n default -o jsonpath='{.metadata.labels.team}')
+          [ "$team" = "platform" ] || { echo "::error::team label missing, got '$team'"; exit 1; }
+
+          anno=$(kubectl get pod demo-brokers-0 -n default -o jsonpath='{.metadata.annotations.crabka\.io/test-anno}')
+          [ "$anno" = "yes" ] || { echo "::error::annotation missing, got '$anno'"; exit 1; }
+
+          ns=$(kubectl get pod demo-brokers-0 -n default -o jsonpath='{.spec.nodeSelector.kubernetes\.io/os}')
+          [ "$ns" = "linux" ] || { echo "::error::nodeSelector missing, got '$ns'"; exit 1; }
+
+          tol_key=$(kubectl get pod demo-brokers-0 -n default -o jsonpath='{.spec.tolerations[?(@.key=="dedicated")].key}')
+          [ "$tol_key" = "dedicated" ] || { echo "::error::toleration missing"; exit 1; }
 
       - name: Garbage-collection on Kafka delete
         run: |

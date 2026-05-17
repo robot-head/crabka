@@ -40,6 +40,10 @@ pub struct KafkaNodePoolSpec {
     /// Broker container resources.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resources: Option<ResourceRequirements>,
+
+    /// Optional pod-level customization applied to every pod in this pool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<PodTemplate>,
 }
 
 const fn default_replicas() -> i32 {
@@ -50,6 +54,32 @@ const fn default_replicas() -> i32 {
 pub enum NodeRole {
     Controller,
     Broker,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PodTemplate {
+    /// Extra labels / annotations on the pod template.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<MetadataTemplate>,
+    /// Forwarded to `PodSpec.affinity`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub affinity: Option<k8s_openapi::api::core::v1::Affinity>,
+    /// Forwarded to `PodSpec.tolerations`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tolerations: Vec<k8s_openapi::api::core::v1::Toleration>,
+    /// Forwarded to `PodSpec.nodeSelector`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_selector: Option<std::collections::BTreeMap<String, String>>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MetadataTemplate {
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub labels: std::collections::BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub annotations: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
@@ -100,6 +130,7 @@ mod tests {
                 node_id_start: 0,
                 image: None,
                 resources: None,
+                template: None,
             },
         );
         let json = serde_json::to_string(&pool).unwrap();
@@ -122,5 +153,60 @@ mod tests {
         assert_eq!(spec.replicas, 1);
         assert!(spec.image.is_none());
         assert!(spec.resources.is_none());
+    }
+
+    #[test]
+    fn pod_template_round_trips_through_json() {
+        use k8s_openapi::api::core::v1::{
+            Affinity, NodeAffinity, NodeSelector, NodeSelectorTerm, Toleration,
+        };
+
+        let mut labels = std::collections::BTreeMap::new();
+        labels.insert("team".into(), "platform".into());
+
+        let template = PodTemplate {
+            metadata: Some(MetadataTemplate {
+                labels: labels.clone(),
+                annotations: std::collections::BTreeMap::new(),
+            }),
+            affinity: Some(Affinity {
+                node_affinity: Some(NodeAffinity {
+                    required_during_scheduling_ignored_during_execution: Some(NodeSelector {
+                        node_selector_terms: vec![NodeSelectorTerm::default()],
+                    }),
+                    preferred_during_scheduling_ignored_during_execution: None,
+                }),
+                ..Default::default()
+            }),
+            tolerations: vec![Toleration {
+                key: Some("dedicated".into()),
+                operator: Some("Exists".into()),
+                effect: Some("NoSchedule".into()),
+                ..Default::default()
+            }],
+            node_selector: Some({
+                let mut m = std::collections::BTreeMap::new();
+                m.insert("kubernetes.io/os".into(), "linux".into());
+                m
+            }),
+        };
+        let pool = KafkaNodePool::new(
+            "brokers",
+            KafkaNodePoolSpec {
+                roles: vec![NodeRole::Controller, NodeRole::Broker],
+                replicas: 1,
+                node_id_start: 0,
+                image: None,
+                resources: None,
+                template: Some(template),
+            },
+        );
+
+        let json = serde_json::to_string(&pool).unwrap();
+        assert!(json.contains("\"team\":\"platform\""), "labels: {json}");
+        assert!(json.contains("\"dedicated\""), "tolerations: {json}");
+        assert!(json.contains("\"nodeSelector\""), "node_selector: {json}");
+        let back: KafkaNodePool = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.spec, pool.spec);
     }
 }
