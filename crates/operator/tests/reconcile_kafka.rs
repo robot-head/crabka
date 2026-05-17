@@ -319,12 +319,11 @@ async fn kafka_status_aggregates_pool_readyreplicas() {
 async fn kafka_patches_pool_label_with_config_hash() {
     let mut cfg = std::collections::BTreeMap::new();
     cfg.insert("log.retention.hours".to_string(), "24".to_string());
-    let expected_hash =
-        crabka_operator::controller::common::config_hash("log.retention.hours=24\n");
 
     let items = vec![fake_pool_list_item("brokers", "y", "demo", 1, 1)];
     let (ctx, state) = build_ctx("y", happy_path_rules("demo", "y", &items));
     let kafka = kafka_cr_with_config("demo", "y", cfg);
+    let expected_hash = crabka_operator::controller::common::combined_config_hash(&kafka.spec);
 
     reconcile(Arc::new(kafka), ctx).await.unwrap();
 

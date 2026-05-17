@@ -1149,3 +1149,103 @@ mod toml_rendering_tests {
         assert!(!t.contains("[server_properties]"), "got:\n{t}");
     }
 }
+
+/// Deterministic serialization of `spec.listeners` intent. Empty
+/// (or absent) listeners produce the empty string so a cluster with
+/// no `spec.listeners` set keeps its slice-24 hash on upgrade.
+#[allow(dead_code)]
+pub fn canonical_listener_intent(
+    listeners: &[Listener],
+    inter_broker_listener_name: Option<&str>,
+) -> String {
+    use std::fmt::Write as _;
+    if listeners.is_empty() {
+        return String::new();
+    }
+    let mut s = String::new();
+    if let Some(name) = inter_broker_listener_name {
+        let _ = writeln!(s, "inter_broker={name}");
+    }
+    for l in listeners {
+        let _ = writeln!(
+            s,
+            "listener:name={},port={},type={:?},tls={}",
+            l.name, l.port, l.type_, l.tls
+        );
+        if let Some(cfg) = &l.configuration {
+            if let Some(b) = &cfg.bootstrap {
+                if let Some(np) = b.node_port {
+                    let _ = writeln!(s, "  bootstrap.nodePort={np}");
+                }
+                if let Some(ip) = &b.load_balancer_ip {
+                    let _ = writeln!(s, "  bootstrap.loadBalancerIP={ip}");
+                }
+            }
+            let mut sorted = cfg.brokers.clone();
+            sorted.sort_by_key(|o| o.broker);
+            for o in &sorted {
+                if let Some(h) = &o.advertised_host {
+                    let _ = writeln!(s, "  broker{}.advertisedHost={h}", o.broker);
+                }
+                if let Some(p) = o.advertised_port {
+                    let _ = writeln!(s, "  broker{}.advertisedPort={p}", o.broker);
+                }
+                if let Some(np) = o.node_port {
+                    let _ = writeln!(s, "  broker{}.nodePort={np}", o.broker);
+                }
+                if let Some(ip) = &o.load_balancer_ip {
+                    let _ = writeln!(s, "  broker{}.loadBalancerIP={ip}", o.broker);
+                }
+            }
+        }
+    }
+    s
+}
+
+#[cfg(test)]
+mod intent_tests {
+    use super::*;
+
+    #[test]
+    fn empty_listeners_yields_empty_string() {
+        assert_eq!(canonical_listener_intent(&[], None), "");
+    }
+
+    #[test]
+    fn non_empty_listeners_yield_content() {
+        let l = vec![synthesized_default_listener()];
+        assert!(!canonical_listener_intent(&l, Some("PLAIN")).is_empty());
+    }
+
+    #[test]
+    fn deterministic() {
+        let l = vec![Listener {
+            name: "PLAIN".into(),
+            port: 9092,
+            type_: ListenerType::Internal,
+            tls: false,
+            configuration: Some(crate::crd::ListenerConfiguration {
+                bootstrap: None,
+                brokers: vec![
+                    crate::crd::BrokerOverride {
+                        broker: 1,
+                        advertised_host: Some("h1".into()),
+                        ..Default::default()
+                    },
+                    crate::crd::BrokerOverride {
+                        broker: 0,
+                        advertised_host: Some("h0".into()),
+                        ..Default::default()
+                    },
+                ],
+            }),
+        }];
+        let a = canonical_listener_intent(&l, Some("PLAIN"));
+        let b = canonical_listener_intent(&l, Some("PLAIN"));
+        assert_eq!(a, b);
+        // Sorted by broker id.
+        let h0 = a.find("broker0.advertisedHost").unwrap();
+        let h1 = a.find("broker1.advertisedHost").unwrap();
+        assert!(h0 < h1);
+    }
+}

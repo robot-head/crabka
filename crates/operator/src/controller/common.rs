@@ -344,6 +344,37 @@ pub fn config_hash(content: &str) -> String {
     out
 }
 
+/// Slice 25: combined hash over user `spec.config` and the canonical
+/// listener intent. Empty listeners produce empty intent, so the
+/// combined hash is identical to the slice-24 hash for an unchanged
+/// `spec.config`.
+#[must_use]
+pub fn combined_config_hash(spec: &crate::crd::KafkaSpec) -> String {
+    let config_part = spec
+        .config
+        .as_ref()
+        .map(|m| {
+            let mut s = String::new();
+            for (k, v) in m {
+                s.push_str(k);
+                s.push('=');
+                s.push_str(v);
+                s.push('\n');
+            }
+            s
+        })
+        .unwrap_or_default();
+    let intent = crate::controller::listeners::canonical_listener_intent(
+        &spec.listeners,
+        spec.inter_broker_listener_name.as_deref(),
+    );
+    let mut buf = String::with_capacity(config_part.len() + 1 + intent.len());
+    buf.push_str(&config_part);
+    buf.push('\x1F'); // ASCII unit separator
+    buf.push_str(&intent);
+    config_hash(&buf)
+}
+
 /// Parse a K8s `Quantity` string into a comparable byte count.
 ///
 /// Accepts:
@@ -457,6 +488,34 @@ mod config_hash_tests {
         // hash must always fit; this test guards against future widening.
         let h = config_hash("any content at all");
         assert!(h.len() <= 63, "hash {h} exceeds K8s label limit");
+    }
+
+    #[test]
+    fn combined_hash_unchanged_when_listeners_empty() {
+        use crate::crd::KafkaSpec;
+
+        let spec_a = KafkaSpec {
+            kafka_version: "0.1.1".into(),
+            config: Some({
+                let mut m = std::collections::BTreeMap::new();
+                m.insert("log.retention.hours".into(), "24".into());
+                m
+            }),
+            listeners: vec![],
+            inter_broker_listener_name: None,
+        };
+        let h = combined_config_hash(&spec_a);
+        let h_again = combined_config_hash(&spec_a);
+        assert_eq!(h, h_again);
+
+        let mut spec_b = spec_a.clone();
+        spec_b.listeners = vec![crate::controller::listeners::synthesized_default_listener()];
+        spec_b.inter_broker_listener_name = Some("PLAIN".into());
+        let h_with_listener = combined_config_hash(&spec_b);
+        assert_ne!(
+            h, h_with_listener,
+            "non-empty listener intent must change hash"
+        );
     }
 
     #[test]

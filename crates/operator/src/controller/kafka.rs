@@ -179,22 +179,8 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
     )?;
     apply_object(&cm_api, &cm_name(&name), &cm).await?;
 
-    // Compute the content hash. Task 25/8 will update this to use
-    // combined_config_hash with listener intent; for now we hash the
-    // raw spec.config string as before so the rolling-restart label
-    // continues to function.
-    let broker_props = obj.spec.config.as_ref().map_or_else(String::new, |cfg| {
-        // inline: sorted key=value lines (same output as the removed
-        // serialize_broker_properties helper, kept here until Task 25/8)
-        cfg.iter().fold(String::new(), |mut s, (k, v)| {
-            s.push_str(k);
-            s.push('=');
-            s.push_str(v);
-            s.push('\n');
-            s
-        })
-    });
-    let cfg_hash = common::config_hash(&broker_props);
+    // Compute the combined config hash (spec.config + listener intent).
+    let cfg_hash = common::combined_config_hash(&obj.spec);
 
     // 2. Cluster-id Secret: one-shot create-if-missing. The pool
     //    reconciler reads this secret to inject CRABKA_CLUSTER_ID into
