@@ -134,9 +134,15 @@ pub(crate) fn rollup_condition(rollup: &ClusterRollup) -> (bool, &'static str, S
 /// Watches `KafkaNodePool` so a pool status change wakes its parent's
 /// reconcile. The mapper resolves the parent name via the
 /// `crabka.io/cluster` label and the namespace from the pool itself.
+///
+/// Also watches `Node` (cluster-scoped) so that `ExternalIP` changes
+/// (relevant for `NodePort` listeners) eventually trigger a reconcile.
+/// The mapper returns empty — the periodic requeue (30 s) picks up the
+/// change rather than enqueuing every Kafka on every Node event.
 pub async fn run(ctx: Context) -> anyhow::Result<()> {
     let api: Api<Kafka> = Api::all(ctx.client.clone());
     let pools: Api<KafkaNodePool> = Api::all(ctx.client.clone());
+    let nodes: Api<Node> = Api::all(ctx.client.clone());
     Controller::new(api, watcher::Config::default())
         .watches(pools, watcher::Config::default(), |pool| {
             let ns = pool.meta().namespace.clone();
@@ -150,6 +156,14 @@ pub async fn run(ctx: Context) -> anyhow::Result<()> {
                 _ => None,
             }
             .into_iter()
+        })
+        // Slice 25/11: Node changes (e.g. ExternalIP added/removed) may
+        // invalidate a Kafka's advertised-listener TOML for NodePort
+        // listeners. We return empty here and rely on the periodic requeue
+        // to pick up the change, avoiding a flood of reconciles on large
+        // clusters where every node churn fires 100 events.
+        .watches(nodes, watcher::Config::default(), |_node| {
+            Vec::<ObjectRef<Kafka>>::new().into_iter()
         })
         .run(reconcile, error_policy, Arc::new(ctx))
         .for_each(|res| async move {
