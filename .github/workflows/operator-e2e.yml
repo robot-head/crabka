@@ -6,7 +6,6 @@ on:
 
 permissions:
   contents: read
-  pull-requests: write
 
 jobs:
   kind:
@@ -153,6 +152,18 @@ jobs:
             roles: [Controller, Broker]
             replicas: 1
             nodeIdStart: 0
+            template:
+              metadata:
+                labels:
+                  team: platform
+                annotations:
+                  crabka.io/test-anno: "yes"
+              tolerations:
+                - key: dedicated
+                  operator: Exists
+                  effect: NoSchedule
+              nodeSelector:
+                kubernetes.io/os: linux
           EOF
 
       - name: Wait for Ready=True
@@ -178,6 +189,21 @@ jobs:
           kubectl exec -n default demo-brokers-0 -c broker -- /usr/bin/crabka-broker --version
           kubectl logs -n default demo-brokers-0 -c broker | grep -q 'crabka-broker listening'
 
+      - name: Smoke — pod template values applied
+        run: |
+          set -e
+          team=$(kubectl get pod demo-brokers-0 -n default -o jsonpath='{.metadata.labels.team}')
+          [ "$team" = "platform" ] || { echo "::error::team label missing, got '$team'"; exit 1; }
+
+          anno=$(kubectl get pod demo-brokers-0 -n default -o jsonpath='{.metadata.annotations.crabka\.io/test-anno}')
+          [ "$anno" = "yes" ] || { echo "::error::annotation missing, got '$anno'"; exit 1; }
+
+          ns=$(kubectl get pod demo-brokers-0 -n default -o jsonpath='{.spec.nodeSelector.kubernetes\.io/os}')
+          [ "$ns" = "linux" ] || { echo "::error::nodeSelector missing, got '$ns'"; exit 1; }
+
+          tol_key=$(kubectl get pod demo-brokers-0 -n default -o jsonpath='{.spec.tolerations[?(@.key=="dedicated")].key}')
+          [ "$tol_key" = "dedicated" ] || { echo "::error::toleration missing"; exit 1; }
+
       - name: Garbage-collection on Kafka delete
         run: |
           kubectl delete kafka demo -n default --wait=false
@@ -193,15 +219,12 @@ jobs:
           kubectl get sts,svc,cm,secret -n default -l app.kubernetes.io/instance=demo
           exit 1
 
-      - name: Cluster diagnostics on failure
+      - name: Collect cluster diagnostics on failure
         if: failure()
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          REPO: ${{ github.repository }}
         run: |
           set +e
-          DIAG=/tmp/diag.md
+          mkdir -p /tmp/operator-e2e-diag
+          DIAG=/tmp/operator-e2e-diag/diagnostics.md
           {
             echo "## operator-e2e diagnostics (run \`${GITHUB_RUN_ID}\`)"
             echo
@@ -243,12 +266,19 @@ jobs:
               echo
             done
           } > "$DIAG"
-          cat "$DIAG"
-          if [ -n "$PR_NUMBER" ] && [ -n "$GH_TOKEN" ]; then
-            jq -Rs '{body: .}' "$DIAG" > /tmp/comment.json
-            curl -sS -X POST \
-              -H "Authorization: Bearer $GH_TOKEN" \
-              -H "Accept: application/vnd.github+json" \
-              "https://api.github.com/repos/${REPO}/issues/${PR_NUMBER}/comments" \
-              --data-binary @/tmp/comment.json | head -20
-          fi
+          # Surface a short summary in the job log so the failure cause is
+          # visible without downloading the artifact.
+          echo "::group::diagnostics summary"
+          head -40 "$DIAG"
+          echo "..."
+          echo "(full diagnostics uploaded as artifact 'operator-e2e-diagnostics')"
+          echo "::endgroup::"
+
+      - name: Upload diagnostics artifact
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: operator-e2e-diagnostics
+          path: /tmp/operator-e2e-diag/
+          retention-days: 14
+          if-no-files-found: ignore

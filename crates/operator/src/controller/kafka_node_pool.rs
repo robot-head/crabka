@@ -193,6 +193,54 @@ pub(crate) fn render_statefulset(
     let init = render_init_container(broker_image, &secret_name, pool.spec.node_id_start);
     let main = render_broker_container(broker_image, &secret_name, &advertised, &resources);
 
+    // Merge user-provided pod metadata under operator-owned labels.
+    // Operator labels win collisions; user labels fill in the rest.
+    let mut pod_labels = labels.clone();
+    let mut pod_annotations: BTreeMap<String, String> = BTreeMap::new();
+    if let Some(meta) = pool
+        .spec
+        .template
+        .as_ref()
+        .and_then(|t| t.metadata.as_ref())
+    {
+        for (k, v) in &meta.labels {
+            pod_labels.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+        for (k, v) in &meta.annotations {
+            pod_annotations.insert(k.clone(), v.clone());
+        }
+    }
+
+    let mut template_meta = json!({ "labels": pod_labels });
+    if !pod_annotations.is_empty() {
+        template_meta["annotations"] = serde_json::to_value(&pod_annotations)?;
+    }
+
+    let mut pod_spec = json!({
+        "securityContext": {
+            "runAsNonRoot": true,
+            "runAsUser": 65532,
+            "fsGroup": 65532,
+            "seccompProfile": { "type": "RuntimeDefault" }
+        },
+        "initContainers": [init],
+        "containers": [main],
+        "volumes": [{ "name": "data", "emptyDir": {} }],
+    });
+    if let Some(tpl) = pool.spec.template.as_ref() {
+        if let Some(affinity) = tpl.affinity.as_ref() {
+            pod_spec["affinity"] = serde_json::to_value(affinity)?;
+        }
+        if !tpl.tolerations.is_empty() {
+            pod_spec["tolerations"] = serde_json::to_value(&tpl.tolerations)?;
+        }
+        if let Some(ns) = tpl.node_selector.as_ref()
+            && !ns.is_empty()
+        {
+            pod_spec["nodeSelector"] = serde_json::to_value(ns)?;
+        }
+    }
+
     let sts: StatefulSet = serde_json::from_value(json!({
         "metadata": {
             "name": sts_name,
@@ -206,18 +254,8 @@ pub(crate) fn render_statefulset(
             "podManagementPolicy": "Parallel",
             "selector": { "matchLabels": selector },
             "template": {
-                "metadata": { "labels": labels },
-                "spec": {
-                    "securityContext": {
-                        "runAsNonRoot": true,
-                        "runAsUser": 65532,
-                        "fsGroup": 65532,
-                        "seccompProfile": { "type": "RuntimeDefault" }
-                    },
-                    "initContainers": [init],
-                    "containers": [main],
-                    "volumes": [{ "name": "data", "emptyDir": {} }]
-                }
+                "metadata": template_meta,
+                "spec": pod_spec,
             }
         }
     }))?;
@@ -381,7 +419,7 @@ pub fn error_policy(_obj: Arc<KafkaNodePool>, err: &ReconcileError, _ctx: Arc<Co
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::{KafkaNodePoolSpec, KafkaSpec};
+    use crate::crd::{KafkaNodePoolSpec, KafkaSpec, MetadataTemplate, PodTemplate};
     use std::collections::BTreeMap;
 
     fn parent_fixture(name: &str) -> Kafka {
@@ -405,6 +443,7 @@ mod tests {
                 node_id_start: 0,
                 image: None,
                 resources: None,
+                template: None,
             },
         );
         p.metadata.namespace = Some("default".into());
@@ -542,5 +581,136 @@ mod tests {
             matches!(err, PoolValidationError::NodeIdOutOfRange(-1)),
             "expected NodeIdOutOfRange(-1), got {err:?}"
         );
+    }
+
+    fn pool_with_template(template: PodTemplate) -> KafkaNodePool {
+        let mut pool = pool_fixture("brokers", "demo", 1);
+        pool.spec.template = Some(template);
+        pool
+    }
+
+    #[test]
+    fn render_statefulset_template_labels_merge_under_operator_labels() {
+        let mut user_labels = BTreeMap::new();
+        user_labels.insert("team".into(), "platform".into());
+        user_labels.insert("app.kubernetes.io/name".into(), "hijack".into());
+
+        let pool = pool_with_template(PodTemplate {
+            metadata: Some(MetadataTemplate {
+                labels: user_labels,
+                annotations: BTreeMap::new(),
+            }),
+            ..Default::default()
+        });
+        let sts = render_statefulset(&parent_fixture("demo"), &pool, "img:1").unwrap();
+        let pod_labels = sts.spec.unwrap().template.metadata.unwrap().labels.unwrap();
+        assert_eq!(pod_labels.get("team").map(String::as_str), Some("platform"));
+        // operator-managed name MUST win
+        assert_eq!(
+            pod_labels.get("app.kubernetes.io/name").map(String::as_str),
+            Some(APP_LABEL)
+        );
+    }
+
+    #[test]
+    fn render_statefulset_template_annotations_apply() {
+        let mut annos = BTreeMap::new();
+        annos.insert("crabka.io/test-anno".into(), "yes".into());
+        let pool = pool_with_template(PodTemplate {
+            metadata: Some(MetadataTemplate {
+                labels: BTreeMap::new(),
+                annotations: annos,
+            }),
+            ..Default::default()
+        });
+        let sts = render_statefulset(&parent_fixture("demo"), &pool, "img:1").unwrap();
+        let anno = sts
+            .spec
+            .unwrap()
+            .template
+            .metadata
+            .unwrap()
+            .annotations
+            .unwrap();
+        assert_eq!(
+            anno.get("crabka.io/test-anno").map(String::as_str),
+            Some("yes")
+        );
+    }
+
+    #[test]
+    fn render_statefulset_affinity_passes_through() {
+        use k8s_openapi::api::core::v1::{Affinity, NodeAffinity, NodeSelector, NodeSelectorTerm};
+        let affinity = Affinity {
+            node_affinity: Some(NodeAffinity {
+                required_during_scheduling_ignored_during_execution: Some(NodeSelector {
+                    node_selector_terms: vec![NodeSelectorTerm::default()],
+                }),
+                preferred_during_scheduling_ignored_during_execution: None,
+            }),
+            ..Default::default()
+        };
+        let pool = pool_with_template(PodTemplate {
+            affinity: Some(affinity.clone()),
+            ..Default::default()
+        });
+        let sts = render_statefulset(&parent_fixture("demo"), &pool, "img:1").unwrap();
+        let rendered = sts.spec.unwrap().template.spec.unwrap().affinity;
+        assert_eq!(rendered, Some(affinity));
+    }
+
+    #[test]
+    fn render_statefulset_tolerations_passes_through() {
+        use k8s_openapi::api::core::v1::Toleration;
+        let tol = Toleration {
+            key: Some("dedicated".into()),
+            operator: Some("Exists".into()),
+            effect: Some("NoSchedule".into()),
+            ..Default::default()
+        };
+        let pool = pool_with_template(PodTemplate {
+            tolerations: vec![tol.clone()],
+            ..Default::default()
+        });
+        let sts = render_statefulset(&parent_fixture("demo"), &pool, "img:1").unwrap();
+        let tols = sts
+            .spec
+            .unwrap()
+            .template
+            .spec
+            .unwrap()
+            .tolerations
+            .unwrap();
+        assert_eq!(tols, vec![tol]);
+    }
+
+    #[test]
+    fn render_statefulset_node_selector_passes_through() {
+        let mut ns = BTreeMap::new();
+        ns.insert("disktype".into(), "ssd".into());
+        let pool = pool_with_template(PodTemplate {
+            node_selector: Some(ns.clone()),
+            ..Default::default()
+        });
+        let sts = render_statefulset(&parent_fixture("demo"), &pool, "img:1").unwrap();
+        let rendered = sts
+            .spec
+            .unwrap()
+            .template
+            .spec
+            .unwrap()
+            .node_selector
+            .unwrap();
+        assert_eq!(rendered.get("disktype").map(String::as_str), Some("ssd"));
+    }
+
+    #[test]
+    fn render_statefulset_no_template_no_extra_fields() {
+        let pool = pool_fixture("brokers", "demo", 1);
+        let sts = render_statefulset(&parent_fixture("demo"), &pool, "img:1").unwrap();
+        let spec = sts.spec.unwrap().template.spec.unwrap();
+        assert!(spec.affinity.is_none());
+        assert!(spec.tolerations.is_none() || spec.tolerations.as_ref().unwrap().is_empty());
+        assert!(spec.node_selector.is_none() || spec.node_selector.as_ref().unwrap().is_empty());
     }
 }

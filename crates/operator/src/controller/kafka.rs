@@ -244,6 +244,7 @@ mod tests {
                 node_id_start: 0,
                 image: None,
                 resources: None,
+                template: None,
             },
         );
         p.status = Some(KafkaNodePoolStatus {
