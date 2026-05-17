@@ -144,24 +144,66 @@ pub fn fake_sts_body(
     replicas: i32,
     ready_replicas: Option<i32>,
 ) -> serde_json::Value {
+    fake_sts_body_with_storage(name, namespace, replicas, ready_replicas, None)
+}
+
+/// JSON body shaped like an `apps/v1/StatefulSet`, with optional
+/// `volumeClaimTemplates` injected into the spec. Slice-24 monotonic-
+/// storage validation reads the `data` PVC template's `size` and
+/// `storageClassName` off the pre-apply GET response, so the shrink-
+/// rejection path needs a way to seed those fields.
+///
+/// `storage = None` produces an STS body with no `volumeClaimTemplates`
+/// (slice-19/20 shape — the pod-template `emptyDir` volume is implied
+/// by the absence of a template). `Some((size, class))` embeds:
+///
+/// ```yaml
+/// volumeClaimTemplates:
+///   - metadata: { name: "data" }
+///     spec:
+///       accessModes: [ReadWriteOnce]
+///       resources: { requests: { storage: <size> } }
+///       storageClassName: <class>   # omitted when class is None
+/// ```
+pub fn fake_sts_body_with_storage(
+    name: &str,
+    namespace: &str,
+    replicas: i32,
+    ready_replicas: Option<i32>,
+    storage: Option<(&str, Option<&str>)>,
+) -> serde_json::Value {
     let mut status = serde_json::Map::new();
     status.insert("replicas".into(), serde_json::Value::from(replicas));
     if let Some(rr) = ready_replicas {
         status.insert("readyReplicas".into(), serde_json::Value::from(rr));
     }
+    let mut spec = serde_json::json!({
+        "serviceName": format!("{name}-headless"),
+        "replicas": replicas,
+        "selector": { "matchLabels": {} },
+        "template": {
+            "metadata": { "labels": {} },
+            "spec": { "containers": [] }
+        }
+    });
+    if let Some((size, class)) = storage {
+        let mut pvc = serde_json::json!({
+            "metadata": { "name": "data" },
+            "spec": {
+                "accessModes": ["ReadWriteOnce"],
+                "resources": { "requests": { "storage": size } }
+            }
+        });
+        if let Some(c) = class {
+            pvc["spec"]["storageClassName"] = serde_json::Value::String(c.into());
+        }
+        spec["volumeClaimTemplates"] = serde_json::json!([pvc]);
+    }
     serde_json::json!({
         "apiVersion": "apps/v1",
         "kind": "StatefulSet",
         "metadata": { "name": name, "namespace": namespace, "uid": "sts-uid" },
-        "spec": {
-            "serviceName": format!("{name}-headless"),
-            "replicas": replicas,
-            "selector": { "matchLabels": {} },
-            "template": {
-                "metadata": { "labels": {} },
-                "spec": { "containers": [] }
-            }
-        },
+        "spec": spec,
         "status": serde_json::Value::Object(status),
     })
 }

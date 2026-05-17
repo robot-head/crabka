@@ -7,5 +7,6 @@ pub mod kafka_node_pool;
 
 pub use kafka::{Kafka, KafkaCondition, KafkaSpec, KafkaStatus};
 pub use kafka_node_pool::{
-    KafkaNodePool, KafkaNodePoolSpec, KafkaNodePoolStatus, MetadataTemplate, NodeRole, PodTemplate,
+    KafkaNodePool, KafkaNodePoolSpec, KafkaNodePoolStatus, MetadataTemplate, NodeRole,
+    PersistentClaimSpec, PodTemplate, Storage,
 };

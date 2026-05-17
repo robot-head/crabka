@@ -89,6 +89,26 @@ spec:
                   - Broker
                   type: string
                 type: array
+              storage:
+                description: |-
+                  Storage configuration. `None` (field absent) → emptyDir (the
+                  slice 19/20 default). See [`Storage`].
+                nullable: true
+                properties:
+                  class:
+                    type: string
+                  deleteClaim:
+                    type: boolean
+                  size:
+                    type: string
+                  type:
+                    enum:
+                    - Ephemeral
+                    - PersistentClaim
+                    type: string
+                required:
+                - type
+                type: object
               template:
                 description: Optional pod-level customization applied to every pod in this pool.
                 nullable: true

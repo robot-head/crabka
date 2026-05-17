@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use futures::StreamExt as _;
 use k8s_openapi::api::apps::v1::StatefulSet;
-use k8s_openapi::api::core::v1::ResourceRequirements;
+use k8s_openapi::api::core::v1::{PersistentVolumeClaim, ResourceRequirements};
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use kube::api::Api;
 use kube::runtime::controller::{Action, Controller};
@@ -31,7 +31,10 @@ use crate::controller::common::{
     self, APP_LABEL, BROKER_PORT, DEFAULT_BROKER_IMAGE, ReconcileError, apply_object,
     common_labels, condition, derive_status, owner_ref,
 };
-use crate::crd::{Kafka, KafkaCondition, KafkaNodePool, KafkaNodePoolStatus, NodeRole};
+use crate::crd::{
+    Kafka, KafkaCondition, KafkaNodePool, KafkaNodePoolStatus, NodeRole, PersistentClaimSpec,
+    Storage,
+};
 
 /// Validation errors for a `KafkaNodePool`. Each variant maps to a
 /// distinct condition reason; the operator surfaces the variant as
@@ -47,6 +50,20 @@ pub enum PoolValidationError {
     NodeIdOutOfRange(i32),
     #[error("metadata.labels.\"crabka.io/cluster\" missing")]
     MissingClusterLabel,
+    #[error("spec.storage.size={0:?} is not a valid positive Quantity ({1})")]
+    StorageSizeInvalid(String, &'static str),
+    #[error("spec.storage.type changed from {from} to {to}: immutable")]
+    StorageTypeChanged {
+        from: &'static str,
+        to: &'static str,
+    },
+    #[error("spec.storage.class changed from {from:?} to {to:?}: immutable")]
+    StorageClassChanged {
+        from: Option<String>,
+        to: Option<String>,
+    },
+    #[error("spec.storage.size decrease from {current} to {desired}: shrink not allowed")]
+    StorageShrinkNotAllowed { current: String, desired: String },
 }
 
 /// Validate a `KafkaNodePool` spec against slice-20 invariants.
@@ -65,6 +82,10 @@ pub(crate) fn validate(pool: &KafkaNodePool) -> Result<(), PoolValidationError> 
         return Err(PoolValidationError::NodeIdOutOfRange(
             pool.spec.node_id_start,
         ));
+    }
+    if let Some(Storage::PersistentClaim(pc)) = pool.spec.storage.as_ref() {
+        common::parse_quantity(&pc.size)
+            .map_err(|why| PoolValidationError::StorageSizeInvalid(pc.size.clone(), why))?;
     }
     Ok(())
 }
@@ -152,6 +173,69 @@ fn render_broker_container(
             "capabilities": { "drop": ["ALL"] }
         }
     })
+}
+
+/// Build the `StatefulSet`'s pod-volume entry and (optionally) its
+/// `volumeClaimTemplates` based on the pool's `Storage` setting.
+/// Returns `(pod_volumes_json, volume_claim_templates_json_or_none)`.
+///
+/// For `PersistentClaim` the returned `volumes` array is empty (no
+/// `data` entry): the `StatefulSet` controller mounts the PVC into the
+/// pod under the same name as the template automatically, so an
+/// explicit pod-volume entry would conflict.
+fn render_storage(
+    storage: Option<&Storage>,
+    pod_labels: &BTreeMap<String, String>,
+) -> (serde_json::Value, Option<serde_json::Value>) {
+    match storage {
+        None | Some(Storage::Ephemeral) => {
+            let volumes = json!([{ "name": "data", "emptyDir": {} }]);
+            (volumes, None)
+        }
+        Some(Storage::PersistentClaim(pc)) => {
+            let mut template = json!({
+                "metadata": {
+                    "name": "data",
+                    "labels": pod_labels,
+                },
+                "spec": {
+                    "accessModes": ["ReadWriteOnce"],
+                    "resources": {
+                        "requests": { "storage": pc.size }
+                    }
+                }
+            });
+            if let Some(class) = pc.class.as_ref() {
+                template["spec"]["storageClassName"] = serde_json::Value::String(class.clone());
+            }
+            (json!([]), Some(template))
+        }
+    }
+}
+
+/// Build the `StatefulSet`'s `persistentVolumeClaimRetentionPolicy`
+/// block when storage is `PersistentClaim`. Returns `None` for
+/// `Ephemeral` (no PVCs to retain).
+fn render_pvc_retention_policy(storage: Option<&Storage>) -> Option<serde_json::Value> {
+    match storage {
+        Some(Storage::PersistentClaim(pc)) => Some(json!({
+            "whenDeleted": if pc.delete_claim { "Delete" } else { "Retain" },
+            "whenScaled": "Retain",
+        })),
+        _ => None,
+    }
+}
+
+/// Overwrite `pod_spec`'s `volumes` field with the rendered
+/// `pod_volumes`. The `pod_spec` template already carries an emptyDir
+/// `data` entry from the inline `json!` block; this replaces it so the
+/// `PersistentClaim` path doesn't double-declare `data`.
+fn pod_spec_with_data_volume(
+    mut pod_spec: serde_json::Value,
+    pod_volumes: serde_json::Value,
+) -> serde_json::Value {
+    pod_spec["volumes"] = pod_volumes;
+    pod_spec
 }
 
 /// Render the `StatefulSet` for a pool. Naming: `<parent>-<pool>`,
@@ -255,6 +339,27 @@ pub(crate) fn render_statefulset(
         }
     }
 
+    let (pod_volumes, volume_claim_templates) =
+        render_storage(pool.spec.storage.as_ref(), &pod_labels);
+    let retention_policy = render_pvc_retention_policy(pool.spec.storage.as_ref());
+
+    let mut sts_spec = json!({
+        "serviceName": service_name,
+        "replicas": pool.spec.replicas,
+        "podManagementPolicy": "Parallel",
+        "selector": { "matchLabels": selector },
+        "template": {
+            "metadata": template_meta,
+            "spec": pod_spec_with_data_volume(pod_spec, pod_volumes),
+        }
+    });
+    if let Some(vct) = volume_claim_templates {
+        sts_spec["volumeClaimTemplates"] = json!([vct]);
+    }
+    if let Some(policy) = retention_policy {
+        sts_spec["persistentVolumeClaimRetentionPolicy"] = policy;
+    }
+
     let sts: StatefulSet = serde_json::from_value(json!({
         "metadata": {
             "name": sts_name,
@@ -262,16 +367,7 @@ pub(crate) fn render_statefulset(
             "labels": labels,
             "ownerReferences": [owner_ref::<KafkaNodePool>(pool)?],
         },
-        "spec": {
-            "serviceName": service_name,
-            "replicas": pool.spec.replicas,
-            "podManagementPolicy": "Parallel",
-            "selector": { "matchLabels": selector },
-            "template": {
-                "metadata": template_meta,
-                "spec": pod_spec,
-            }
-        }
+        "spec": sts_spec,
     }))?;
     Ok(sts)
 }
@@ -287,6 +383,99 @@ fn default_resources() -> ResourceRequirements {
         requests: Some(requests),
         limits: Some(limits),
         ..Default::default()
+    }
+}
+
+/// Monotonic validation of `spec.storage` against the live
+/// `StatefulSet`'s observed `volumeClaimTemplates`. Returns `Ok(())`
+/// when no live `StatefulSet` exists (first reconcile — any spec is
+/// acceptable) or when desired and observed agree on the immutable
+/// fields.
+///
+/// Rejections (all map to `Ready=False, reason=StorageImmutable`):
+/// - `Ephemeral ↔ PersistentClaim` switch.
+/// - `class` change.
+/// - `size` decrease.
+///
+/// `delete_claim` is *not* checked: the spec (§ 4) intentionally
+/// classifies it as mutable, and the PVC template doesn't reflect it
+/// (the retention policy lives on the `StatefulSet` spec). The
+/// reconstructed observed `Storage` therefore hardcodes
+/// `delete_claim: false` and this comparison never inspects that
+/// field, so a flip from `false → true` (or vice versa) passes
+/// through to the SSA-apply path.
+fn validate_storage_change(
+    desired: Option<&Storage>,
+    observed_template: Option<&PersistentVolumeClaim>,
+) -> Result<(), PoolValidationError> {
+    let observed = observed_template.map(observed_storage_from_pvc_template);
+    let desired_kind = storage_kind(desired);
+    let observed_kind = observed.as_ref().map(|s| storage_kind(Some(s)));
+
+    let Some(observed_kind) = observed_kind else {
+        return Ok(());
+    };
+
+    if desired_kind != observed_kind {
+        return Err(PoolValidationError::StorageTypeChanged {
+            from: observed_kind,
+            to: desired_kind,
+        });
+    }
+
+    let (Some(Storage::PersistentClaim(desired_pc)), Some(Storage::PersistentClaim(observed_pc))) =
+        (desired, observed.as_ref())
+    else {
+        return Ok(());
+    };
+
+    if desired_pc.class != observed_pc.class {
+        return Err(PoolValidationError::StorageClassChanged {
+            from: observed_pc.class.clone(),
+            to: desired_pc.class.clone(),
+        });
+    }
+
+    let observed_bytes = common::parse_quantity(&observed_pc.size).unwrap_or(0);
+    let desired_bytes = common::parse_quantity(&desired_pc.size).unwrap_or(0);
+    if desired_bytes < observed_bytes {
+        return Err(PoolValidationError::StorageShrinkNotAllowed {
+            current: observed_pc.size.clone(),
+            desired: desired_pc.size.clone(),
+        });
+    }
+
+    Ok(())
+}
+
+/// Reconstruct a `Storage` value from the live `StatefulSet`'s `data`
+/// `volumeClaimTemplate`. `delete_claim` is set to `false` because the
+/// retention policy is not reflected in the PVC template; the
+/// monotonic validator never inspects this field (see
+/// [`validate_storage_change`]).
+fn observed_storage_from_pvc_template(pvc: &PersistentVolumeClaim) -> Storage {
+    let Some(spec) = pvc.spec.as_ref() else {
+        return Storage::Ephemeral;
+    };
+    let size = spec
+        .resources
+        .as_ref()
+        .and_then(|r| r.requests.as_ref())
+        .and_then(|m| m.get("storage"))
+        .map(|q| q.0.clone())
+        .unwrap_or_default();
+    let class = spec.storage_class_name.clone();
+    Storage::PersistentClaim(PersistentClaimSpec {
+        size,
+        class,
+        delete_claim: false,
+    })
+}
+
+fn storage_kind(s: Option<&Storage>) -> &'static str {
+    match s {
+        None | Some(Storage::Ephemeral) => "Ephemeral",
+        Some(Storage::PersistentClaim(_)) => "PersistentClaim",
     }
 }
 
@@ -310,6 +499,22 @@ fn condition_for_validation_error(err: &PoolValidationError) -> KafkaCondition {
         PoolValidationError::MissingClusterLabel => (
             "MissingClusterLabel",
             "metadata.labels.\"crabka.io/cluster\" missing".to_string(),
+        ),
+        PoolValidationError::StorageSizeInvalid(value, why) => (
+            "StorageSizeInvalid",
+            format!("spec.storage.size={value:?} ({why})"),
+        ),
+        PoolValidationError::StorageTypeChanged { from, to } => (
+            "StorageImmutable",
+            format!("spec.storage.type changed from {from} to {to}"),
+        ),
+        PoolValidationError::StorageClassChanged { from, to } => (
+            "StorageImmutable",
+            format!("spec.storage.class changed from {from:?} to {to:?}"),
+        ),
+        PoolValidationError::StorageShrinkNotAllowed { current, desired } => (
+            "StorageImmutable",
+            format!("spec.storage.size {current} -> {desired} (shrink rejected)"),
         ),
     };
     condition("Ready", "False", reason, &message)
@@ -400,13 +605,33 @@ pub async fn reconcile(
         .or_else(|| ctx.config.default_broker_image.clone())
         .unwrap_or_else(|| DEFAULT_BROKER_IMAGE.into());
 
-    // 4. Render + apply the StatefulSet.
-    let sts = render_statefulset(&parent, &pool, &image)?;
+    // 4. Pre-apply GET: capture the live StatefulSet (or None on first
+    //    reconcile) so the monotonic-storage validator can compare
+    //    desired spec.storage against the existing volumeClaimTemplates.
     let sts_api: Api<StatefulSet> = Api::namespaced(ctx.client.clone(), &ns);
     let sts_name = format!("{kafka_name}-{name}");
+    let observed_sts = sts_api.get_opt(&sts_name).await?;
+    let observed_pvc_template = observed_sts
+        .as_ref()
+        .and_then(|s| s.spec.as_ref())
+        .and_then(|spec| spec.volume_claim_templates.as_ref())
+        .and_then(|templates| {
+            templates
+                .iter()
+                .find(|t| t.metadata.name.as_deref() == Some("data"))
+        });
+
+    if let Err(e) = validate_storage_change(pool.spec.storage.as_ref(), observed_pvc_template) {
+        let cond = condition_for_validation_error(&e);
+        patch_status_for_pool(&pool_api, &name, cond).await?;
+        return Ok(Action::await_change());
+    }
+
+    // 5. Render + apply the StatefulSet.
+    let sts = render_statefulset(&parent, &pool, &image)?;
     apply_object(&sts_api, &sts_name, &sts).await?;
 
-    // 5. Read back live state and patch status.
+    // 6. Read back live state and patch status.
     let live = sts_api.get_opt(&sts_name).await?;
     let (replicas, ready_replicas, reason, message) =
         derive_status(live.as_ref(), pool.spec.replicas);
@@ -433,7 +658,9 @@ pub fn error_policy(_obj: Arc<KafkaNodePool>, err: &ReconcileError, _ctx: Arc<Co
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::{KafkaNodePoolSpec, KafkaSpec, MetadataTemplate, PodTemplate};
+    use crate::crd::{
+        KafkaNodePoolSpec, KafkaSpec, MetadataTemplate, PersistentClaimSpec, PodTemplate, Storage,
+    };
     use std::collections::BTreeMap;
 
     fn parent_fixture(name: &str) -> Kafka {
@@ -459,6 +686,7 @@ mod tests {
                 image: None,
                 resources: None,
                 template: None,
+                storage: None,
             },
         );
         p.metadata.namespace = Some("default".into());
@@ -759,5 +987,263 @@ mod tests {
         if let Some(anno) = sts.spec.unwrap().template.metadata.unwrap().annotations {
             assert!(!anno.contains_key("crabka.io/config-hash"));
         }
+    }
+
+    #[test]
+    fn render_statefulset_emptydir_when_storage_none() {
+        let pool = pool_fixture("brokers", "demo", 1);
+        let sts = render_statefulset(&parent_fixture("demo"), &pool, "img:1").unwrap();
+        let spec = sts.spec.unwrap();
+        assert!(
+            spec.volume_claim_templates.is_none()
+                || spec.volume_claim_templates.as_ref().unwrap().is_empty()
+        );
+        let volumes = spec.template.spec.unwrap().volumes.unwrap();
+        let data_vol = volumes
+            .iter()
+            .find(|v| v.name == "data")
+            .expect("data volume present");
+        assert!(
+            data_vol.empty_dir.is_some(),
+            "data volume must be emptyDir; got {data_vol:?}"
+        );
+    }
+
+    #[test]
+    fn render_statefulset_emptydir_when_storage_ephemeral() {
+        let mut pool = pool_fixture("brokers", "demo", 1);
+        pool.spec.storage = Some(Storage::Ephemeral);
+        let sts = render_statefulset(&parent_fixture("demo"), &pool, "img:1").unwrap();
+        let spec = sts.spec.unwrap();
+        assert!(
+            spec.volume_claim_templates.is_none()
+                || spec.volume_claim_templates.as_ref().unwrap().is_empty()
+        );
+        let volumes = spec.template.spec.unwrap().volumes.unwrap();
+        let data_vol = volumes.iter().find(|v| v.name == "data").unwrap();
+        assert!(data_vol.empty_dir.is_some());
+    }
+
+    #[test]
+    fn render_statefulset_volume_claim_template_when_persistent() {
+        let mut pool = pool_fixture("brokers", "demo", 1);
+        pool.spec.storage = Some(Storage::PersistentClaim(PersistentClaimSpec {
+            size: "10Gi".into(),
+            class: Some("fast-ssd".into()),
+            delete_claim: false,
+        }));
+        let sts = render_statefulset(&parent_fixture("demo"), &pool, "img:1").unwrap();
+        let spec = sts.spec.unwrap();
+        let volumes = spec.template.spec.as_ref().unwrap().volumes.as_ref();
+        if let Some(vols) = volumes {
+            assert!(
+                vols.iter()
+                    .all(|v| v.name != "data" || v.empty_dir.is_none()),
+                "expected no emptyDir for data; got {vols:?}"
+            );
+        }
+        let vct = spec.volume_claim_templates.unwrap();
+        assert_eq!(vct.len(), 1);
+        let data_pvc = &vct[0];
+        assert_eq!(data_pvc.metadata.name.as_deref(), Some("data"));
+        let pvc_spec = data_pvc.spec.as_ref().unwrap();
+        assert_eq!(
+            pvc_spec.access_modes.as_deref(),
+            Some(["ReadWriteOnce".to_string()].as_slice())
+        );
+        let req = pvc_spec
+            .resources
+            .as_ref()
+            .unwrap()
+            .requests
+            .as_ref()
+            .unwrap();
+        assert_eq!(req.get("storage").map(|q| q.0.as_str()), Some("10Gi"));
+        assert_eq!(pvc_spec.storage_class_name.as_deref(), Some("fast-ssd"));
+    }
+
+    #[test]
+    fn render_statefulset_no_storage_class_when_class_absent() {
+        let mut pool = pool_fixture("brokers", "demo", 1);
+        pool.spec.storage = Some(Storage::PersistentClaim(PersistentClaimSpec {
+            size: "1Gi".into(),
+            class: None,
+            delete_claim: false,
+        }));
+        let sts = render_statefulset(&parent_fixture("demo"), &pool, "img:1").unwrap();
+        let pvc_spec = sts.spec.unwrap().volume_claim_templates.unwrap()[0]
+            .spec
+            .clone()
+            .unwrap();
+        assert!(
+            pvc_spec.storage_class_name.is_none(),
+            "must omit storageClassName when class is None"
+        );
+    }
+
+    #[test]
+    fn render_statefulset_pvc_labels_inherit_pod_labels() {
+        let mut pool = pool_fixture("brokers", "demo", 1);
+        pool.spec.storage = Some(Storage::PersistentClaim(PersistentClaimSpec {
+            size: "1Gi".into(),
+            class: None,
+            delete_claim: false,
+        }));
+        let sts = render_statefulset(&parent_fixture("demo"), &pool, "img:1").unwrap();
+        let labels = sts.spec.unwrap().volume_claim_templates.unwrap()[0]
+            .metadata
+            .labels
+            .clone()
+            .expect("PVC has labels");
+        assert_eq!(
+            labels.get("app.kubernetes.io/instance").map(String::as_str),
+            Some("demo")
+        );
+        assert_eq!(
+            labels.get("crabka.io/pool").map(String::as_str),
+            Some("brokers")
+        );
+    }
+
+    #[test]
+    fn render_statefulset_retention_policy_delete_when_delete_claim_true() {
+        let mut pool = pool_fixture("brokers", "demo", 1);
+        pool.spec.storage = Some(Storage::PersistentClaim(PersistentClaimSpec {
+            size: "1Gi".into(),
+            class: None,
+            delete_claim: true,
+        }));
+        let sts = render_statefulset(&parent_fixture("demo"), &pool, "img:1").unwrap();
+        let policy = sts
+            .spec
+            .unwrap()
+            .persistent_volume_claim_retention_policy
+            .unwrap();
+        assert_eq!(policy.when_deleted.as_deref(), Some("Delete"));
+        assert_eq!(policy.when_scaled.as_deref(), Some("Retain"));
+    }
+
+    #[test]
+    fn render_statefulset_retention_policy_retain_when_delete_claim_false() {
+        let mut pool = pool_fixture("brokers", "demo", 1);
+        pool.spec.storage = Some(Storage::PersistentClaim(PersistentClaimSpec {
+            size: "1Gi".into(),
+            class: None,
+            delete_claim: false,
+        }));
+        let sts = render_statefulset(&parent_fixture("demo"), &pool, "img:1").unwrap();
+        let policy = sts
+            .spec
+            .unwrap()
+            .persistent_volume_claim_retention_policy
+            .unwrap();
+        assert_eq!(policy.when_deleted.as_deref(), Some("Retain"));
+        assert_eq!(policy.when_scaled.as_deref(), Some("Retain"));
+    }
+
+    #[test]
+    fn render_statefulset_no_retention_policy_when_ephemeral() {
+        let pool = pool_fixture("brokers", "demo", 1);
+        let sts = render_statefulset(&parent_fixture("demo"), &pool, "img:1").unwrap();
+        assert!(
+            sts.spec
+                .unwrap()
+                .persistent_volume_claim_retention_policy
+                .is_none()
+        );
+    }
+
+    fn pvc_template(size: &str, class: Option<&str>) -> PersistentVolumeClaim {
+        let mut map = std::collections::BTreeMap::new();
+        map.insert(
+            "storage".to_string(),
+            k8s_openapi::apimachinery::pkg::api::resource::Quantity(size.into()),
+        );
+        PersistentVolumeClaim {
+            metadata: kube::core::ObjectMeta {
+                name: Some("data".into()),
+                ..Default::default()
+            },
+            spec: Some(k8s_openapi::api::core::v1::PersistentVolumeClaimSpec {
+                access_modes: Some(vec!["ReadWriteOnce".into()]),
+                resources: Some(k8s_openapi::api::core::v1::VolumeResourceRequirements {
+                    requests: Some(map),
+                    ..Default::default()
+                }),
+                storage_class_name: class.map(String::from),
+                ..Default::default()
+            }),
+            status: None,
+        }
+    }
+
+    fn pc(size: &str, class: Option<&str>) -> Storage {
+        Storage::PersistentClaim(PersistentClaimSpec {
+            size: size.into(),
+            class: class.map(String::from),
+            delete_claim: false,
+        })
+    }
+
+    #[test]
+    fn validate_storage_change_first_reconcile_accepts_any() {
+        assert!(validate_storage_change(None, None).is_ok());
+        assert!(validate_storage_change(Some(&Storage::Ephemeral), None).is_ok());
+        assert!(validate_storage_change(Some(&pc("10Gi", None)), None).is_ok());
+    }
+
+    #[test]
+    fn validate_storage_change_rejects_type_switch() {
+        let observed = pvc_template("10Gi", None);
+        let err = validate_storage_change(Some(&Storage::Ephemeral), Some(&observed)).unwrap_err();
+        assert!(matches!(
+            err,
+            PoolValidationError::StorageTypeChanged { .. }
+        ));
+    }
+
+    #[test]
+    fn validate_storage_change_rejects_class_change() {
+        let observed = pvc_template("10Gi", Some("class-a"));
+        let err = validate_storage_change(Some(&pc("10Gi", Some("class-b"))), Some(&observed))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            PoolValidationError::StorageClassChanged { .. }
+        ));
+    }
+
+    #[test]
+    fn validate_storage_change_rejects_shrink() {
+        let observed = pvc_template("10Gi", None);
+        let err = validate_storage_change(Some(&pc("5Gi", None)), Some(&observed)).unwrap_err();
+        assert!(matches!(
+            err,
+            PoolValidationError::StorageShrinkNotAllowed { .. }
+        ));
+    }
+
+    #[test]
+    fn validate_storage_change_allows_grow() {
+        let observed = pvc_template("10Gi", None);
+        assert!(validate_storage_change(Some(&pc("20Gi", None)), Some(&observed)).is_ok());
+    }
+
+    #[test]
+    fn validate_storage_change_allows_delete_claim_flip() {
+        let observed = pvc_template("10Gi", None);
+        let mut desired = pc("10Gi", None);
+        if let Storage::PersistentClaim(ref mut p) = desired {
+            p.delete_claim = true;
+        }
+        assert!(validate_storage_change(Some(&desired), Some(&observed)).is_ok());
+    }
+
+    #[test]
+    fn validate_static_rejects_unparseable_size() {
+        let mut pool = pool_fixture("brokers", "demo", 1);
+        pool.spec.storage = Some(pc("banana", None));
+        let err = validate(&pool).unwrap_err();
+        assert!(matches!(err, PoolValidationError::StorageSizeInvalid(_, _)));
     }
 }

@@ -154,6 +154,10 @@ jobs:
             roles: [Controller, Broker]
             replicas: 1
             nodeIdStart: 0
+            storage:
+              type: PersistentClaim
+              size: 1Gi
+              deleteClaim: true
             template:
               metadata:
                 labels:
@@ -206,6 +210,17 @@ jobs:
           tol_key=$(kubectl get pod demo-brokers-0 -n default -o jsonpath='{.spec.tolerations[?(@.key=="dedicated")].key}')
           [ "$tol_key" = "dedicated" ] || { echo "::error::toleration missing"; exit 1; }
 
+      - name: Smoke — broker bound a PersistentVolumeClaim
+        run: |
+          set -e
+          # PVC name pattern: <volumeClaimTemplate.name>-<sts>-<ordinal>
+          phase=$(kubectl get pvc data-demo-brokers-0 -n default -o jsonpath='{.status.phase}')
+          [ "$phase" = "Bound" ] || { echo "::error::PVC not Bound: $phase"; kubectl describe pvc data-demo-brokers-0 -n default; exit 1; }
+          cap=$(kubectl get pvc data-demo-brokers-0 -n default -o jsonpath='{.status.capacity.storage}')
+          echo "PVC bound, capacity=$cap"
+          instance_label=$(kubectl get pvc data-demo-brokers-0 -n default -o jsonpath='{.metadata.labels.app\.kubernetes\.io/instance}')
+          [ "$instance_label" = "demo" ] || { echo "::error::PVC missing instance label: '$instance_label'"; exit 1; }
+
       - name: Smoke — config change rolls broker pod
         run: |
           set -e
@@ -246,13 +261,15 @@ jobs:
           for i in $(seq 1 30); do
             knp=$(kubectl get knp -n default -o name 2>/dev/null | wc -l)
             owned=$(kubectl get sts,svc,cm,secret -n default -l app.kubernetes.io/instance=demo -o name 2>/dev/null | wc -l)
-            echo "attempt $i: knp=$knp owned=$owned"
-            if [ "$knp" = "0" ] && [ "$owned" = "0" ]; then exit 0; fi
+            pvcs=$(kubectl get pvc -n default -l app.kubernetes.io/instance=demo -o name 2>/dev/null | wc -l)
+            echo "attempt $i: knp=$knp owned=$owned pvcs=$pvcs"
+            if [ "$knp" = "0" ] && [ "$owned" = "0" ] && [ "$pvcs" = "0" ]; then exit 0; fi
             sleep 2
           done
           echo "::error::owned objects not GC'd within 60s"
           kubectl get knp -n default
           kubectl get sts,svc,cm,secret -n default -l app.kubernetes.io/instance=demo
+          kubectl get pvc -n default
           exit 1
 
       - name: Collect cluster diagnostics on failure
@@ -290,6 +307,7 @@ jobs:
               "broker pod logs|kubectl logs -n default demo-brokers-0 -c broker --tail=500 || true" \
               "broker init logs|kubectl logs -n default demo-brokers-0 -c format --tail=500 || true" \
               "owned objects|kubectl get sts,svc,cm,secret -n default -l app.kubernetes.io/instance=demo -o yaml" \
+              "pvcs|kubectl get pvc -n default -o yaml" \
               "kind node images|docker exec crabka-e2e-control-plane crictl images" \
               "host images|docker images"
             do

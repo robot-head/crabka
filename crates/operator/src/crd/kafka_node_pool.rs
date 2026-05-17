@@ -44,6 +44,11 @@ pub struct KafkaNodePoolSpec {
     /// Optional pod-level customization applied to every pod in this pool.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template: Option<PodTemplate>,
+
+    /// Storage configuration. `None` (field absent) → emptyDir (the
+    /// slice 19/20 default). See [`Storage`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage: Option<Storage>,
 }
 
 const fn default_replicas() -> i32 {
@@ -54,6 +59,67 @@ const fn default_replicas() -> i32 {
 pub enum NodeRole {
     Controller,
     Broker,
+}
+
+/// Storage configuration for the pool's pods. Slice 24 supports two
+/// variants:
+/// - `Ephemeral` (or field absent) — `emptyDir` volume, no PVC. Matches
+///   slice 19/20 behavior; suitable for dev clusters.
+/// - `PersistentClaim` — single PVC per pod via the `StatefulSet`'s
+///   `volumeClaimTemplates`. Production-shaped.
+///
+/// The wire shape is flat (Strimzi-compatible): `type` is the
+/// discriminator and `PersistentClaim`'s fields (`size`, `class`,
+/// `deleteClaim`) are siblings of `type`. The custom `schema_with`
+/// hand-rolls a structural schema because kube-rs 3.x's
+/// `StructuralSchemaRewriter` panics when `oneOf` branches share a
+/// `type` property with differing enum values (the default schemars
+/// output for tagged-union enums).
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(tag = "type")]
+#[schemars(schema_with = "storage_schema")]
+pub enum Storage {
+    Ephemeral,
+    PersistentClaim(PersistentClaimSpec),
+}
+
+/// Hand-rolled structural schema for `Storage`. See the doc comment on
+/// [`Storage`] for why this is necessary. The schema validates only
+/// the discriminator (`type ∈ {Ephemeral, PersistentClaim}`) and the
+/// `PersistentClaim` field types; cross-variant constraints (e.g.
+/// "`size` must be present when `type=PersistentClaim`") are enforced
+/// by the operator at reconcile time, not by the apiserver.
+fn storage_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "object",
+        "required": ["type"],
+        "properties": {
+            "type": {
+                "type": "string",
+                "enum": ["Ephemeral", "PersistentClaim"],
+            },
+            "size": { "type": "string" },
+            "class": { "type": "string" },
+            "deleteClaim": { "type": "boolean" },
+        },
+    })
+}
+
+/// `PersistentClaim` configuration. Mirrors Strimzi's
+/// `KafkaNodePool.spec.storage` flat shape.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PersistentClaimSpec {
+    /// K8s `Quantity` (e.g., `"10Gi"`, `"500Mi"`). Validated at
+    /// reconcile time.
+    pub size: String,
+    /// Storage class name. `None` = cluster default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class: Option<String>,
+    /// `true` → `persistentVolumeClaimRetentionPolicy.whenDeleted: Delete`.
+    /// Default `false` (Retain) is the safe option.
+    #[serde(default)]
+    pub delete_claim: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
@@ -131,6 +197,7 @@ mod tests {
                 image: None,
                 resources: None,
                 template: None,
+                storage: None,
             },
         );
         let json = serde_json::to_string(&pool).unwrap();
@@ -199,6 +266,7 @@ mod tests {
                 image: None,
                 resources: None,
                 template: Some(template),
+                storage: None,
             },
         );
 
@@ -208,5 +276,62 @@ mod tests {
         assert!(json.contains("\"nodeSelector\""), "node_selector: {json}");
         let back: KafkaNodePool = serde_json::from_str(&json).unwrap();
         assert_eq!(back.spec, pool.spec);
+    }
+
+    #[test]
+    fn storage_ephemeral_round_trips_through_json() {
+        let pool = KafkaNodePool::new(
+            "brokers",
+            KafkaNodePoolSpec {
+                roles: vec![NodeRole::Controller, NodeRole::Broker],
+                replicas: 1,
+                node_id_start: 0,
+                image: None,
+                resources: None,
+                template: None,
+                storage: Some(Storage::Ephemeral),
+            },
+        );
+        let json = serde_json::to_string(&pool).unwrap();
+        assert!(
+            json.contains("\"storage\":{\"type\":\"Ephemeral\"}"),
+            "expected flat tagged shape, got: {json}"
+        );
+        let back: KafkaNodePool = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.spec, pool.spec);
+    }
+
+    #[test]
+    fn storage_persistent_claim_round_trips_through_json() {
+        let pool = KafkaNodePool::new(
+            "brokers",
+            KafkaNodePoolSpec {
+                roles: vec![NodeRole::Controller, NodeRole::Broker],
+                replicas: 1,
+                node_id_start: 0,
+                image: None,
+                resources: None,
+                template: None,
+                storage: Some(Storage::PersistentClaim(PersistentClaimSpec {
+                    size: "10Gi".into(),
+                    class: Some("fast-ssd".into()),
+                    delete_claim: true,
+                })),
+            },
+        );
+        let json = serde_json::to_string(&pool).unwrap();
+        assert!(json.contains("\"type\":\"PersistentClaim\""), "got: {json}");
+        assert!(json.contains("\"size\":\"10Gi\""), "got: {json}");
+        assert!(json.contains("\"class\":\"fast-ssd\""), "got: {json}");
+        assert!(json.contains("\"deleteClaim\":true"), "got: {json}");
+        let back: KafkaNodePool = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.spec, pool.spec);
+    }
+
+    #[test]
+    fn spec_defaults_storage_to_none() {
+        let json = r#"{"roles":["Controller","Broker"],"nodeIdStart":0}"#;
+        let spec: KafkaNodePoolSpec = serde_json::from_str(json).unwrap();
+        assert!(spec.storage.is_none());
     }
 }

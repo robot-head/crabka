@@ -292,6 +292,7 @@ mod tests {
                 image: None,
                 resources: None,
                 template: None,
+                storage: None,
             },
         );
         p.status = Some(KafkaNodePoolStatus {
