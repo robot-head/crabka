@@ -437,6 +437,50 @@ Kafka client for ApiVersions.
 - Closes the recurring JVM-tool quirk that slices 16/16b/16c documented as known limitations.
 - Out of scope: slice 16 `client_id` HandlerTable gap (slice 17b).
 
+## Slice 67 — Broker-side recompression (2026-05-17)
+
+- Topic-level `compression.type` now enforces broker-side
+  re-encoding. The Kafka default `producer` stays as pass-through;
+  `gzip` / `snappy` / `lz4` / `zstd` / `uncompressed` re-encode every
+  Produce batch on this topic before write.
+- `LogConfig` gains
+  `compression_type: Option<crabka_compression::CompressionType>`.
+  `None` = pass-through. Defaults to `None`.
+- `config_keys::validate_topic_config` now accepts all five codec
+  names plus the existing `producer`. New `parse_compression_type`
+  helper maps the wire value to the `Option<CompressionType>`. The
+  applier wires it into `LogConfig.compression_type` via the existing
+  slice-11 `Arc<RwLock<LogConfig>>` push.
+- Recompression itself happens inside the partition writer task:
+  before each `Log::append` of a Produce batch, if the topic's
+  target codec is set and differs from the batch's current codec,
+  the batch's `Attributes::compression` is overwritten. The encoder
+  in `RecordBatch::encode` (called from `Log::append`) re-compresses
+  the records body to match.
+- New `crabka-log` dep on `crabka-compression` (for the
+  `CompressionType` enum reference in the new `LogConfig` field).
+  New `crabka-broker` dep on `crabka-compression` for
+  `parse_compression_type`.
+- Test inventory:
+  - 6 new lib unit tests in `config_keys.rs` (all-five-codecs
+    accepted, bogus rejected, producer/concrete mapping,
+    `apply_to_log_config` zstd propagates + producer resets-to-None).
+  - 1 new lib unit test in `crabka-log`'s `config` (default is
+    `None` / pass-through).
+  - 2 new broker integration tests in `tests/recompression.rs`:
+    `compression.type=lz4` happy path (produce gzip → fetch lz4 +
+    payload intact) and a `compression.type=producer` negative
+    guard that proves the broker preserves the producer flag when
+    no override is set.
+- Closes the last ❌ in the `Wire protocol & clients` section of the
+  README feature matrix.
+- Out of scope: per-batch compression negotiation against producer
+  capabilities (the broker assumes the producer supports the codec
+  it forces); preserving the producer's compression bytes verbatim
+  for `compression.type=producer` (we decode-and-re-encode for all
+  Produce batches that pass through Crabka's record path —
+  byte-equivalent on the codec side but not byte-identical).
+
 ## Slice 39 — Prometheus metrics exporter (2026-05-17)
 
 - New `crabka_broker::metrics` module: a `BrokerMetrics` bundle of
