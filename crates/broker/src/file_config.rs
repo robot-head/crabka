@@ -63,7 +63,11 @@ impl FileConfig {
             cfg.log_dir = std::path::PathBuf::from(ld);
         }
         if !self.listeners.is_empty() {
-            cfg.listeners = self.listeners.into_iter().map(FileListener::into_spec).collect();
+            cfg.listeners = self
+                .listeners
+                .into_iter()
+                .map(FileListener::into_spec)
+                .collect();
         }
         if let Some(name) = self.inter_broker_listener_name {
             cfg.inter_broker_listener_name = name;
@@ -124,7 +128,9 @@ protocol = "Plaintext"
         assert_eq!(cfg.listeners[0].name, "PLAIN");
         assert_eq!(cfg.listeners[0].protocol, ListenerProtocol::Plaintext);
         assert_eq!(
-            cfg.server_properties.get("log.retention.hours").map(String::as_str),
+            cfg.server_properties
+                .get("log.retention.hours")
+                .map(String::as_str),
             Some("24")
         );
     }
@@ -213,7 +219,10 @@ protocol = "Plaintext"
         let src = r"broker_id = 42";
         let file: FileConfig = toml::from_str(src).unwrap();
         // simulate CLI --broker-id 7 already applied
-        let mut cfg = BrokerConfig { broker_id: 7, ..BrokerConfig::default() };
+        let mut cfg = BrokerConfig {
+            broker_id: 7,
+            ..BrokerConfig::default()
+        };
 
         file.apply_to(&mut cfg);
 

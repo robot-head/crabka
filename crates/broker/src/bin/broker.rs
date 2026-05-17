@@ -22,7 +22,11 @@ struct Args {
     /// `host:port` to advertise to clients (defaults to `listen_addr`).
     /// Set via env `CRABKA_ADVERTISED_LISTENER` from the operator.
     /// Mutually exclusive with `--config-file`.
-    #[arg(long, env = "CRABKA_ADVERTISED_LISTENER", conflicts_with = "config_file")]
+    #[arg(
+        long,
+        env = "CRABKA_ADVERTISED_LISTENER",
+        conflicts_with = "config_file"
+    )]
     advertised_listener: Option<String>,
 
     /// Path to a TOML config file (operator-managed). When set,
@@ -73,9 +77,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(p) => {
                 let contents = std::fs::read_to_string(p)
                     .map_err(|e| format!("failed to read {}: {e}", p.display()))?;
-                Some(toml::from_str(&contents).map_err(|e| {
-                    format!("failed to parse {}: {e}", p.display())
-                })?)
+                Some(
+                    toml::from_str(&contents)
+                        .map_err(|e| format!("failed to parse {}: {e}", p.display()))?,
+                )
             }
             None => None,
         };
@@ -250,7 +255,10 @@ mod tests {
         use clap::Parser;
 
         let args = Args::try_parse_from(["crabka-broker", "--config-file=/tmp/a.toml"]).unwrap();
-        assert_eq!(args.config_file.as_deref(), Some(std::path::Path::new("/tmp/a.toml")));
+        assert_eq!(
+            args.config_file.as_deref(),
+            Some(std::path::Path::new("/tmp/a.toml"))
+        );
         assert!(args.advertised_listener.is_none());
     }
 }
