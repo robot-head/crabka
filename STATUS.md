@@ -720,3 +720,57 @@ Kafka client for ApiVersions.
 - Out of scope: the legacy `ControlledShutdown` RPC (api_key 7) — the
   KIP-500 / KRaft world uses `BrokerHeartbeat.want_shut_down` exclusively;
   no slice consumer needs the legacy RPC.
+
+## Slice 43a — Rebalancer foundation (2026-05-17)
+
+- New workspace member `crates/rebalancer/` producing the
+  `crabka-rebalancer` binary. Connects to a Crabka cluster as a
+  regular admin client (`crabka_client_core::Client`), snapshots
+  state every 10s via `Metadata` + `DescribeCluster` +
+  `ListPartitionReassignments`, and exposes a Connect-RPC service
+  on `:9300` for "what would balance this?" proposals.
+- Connect-RPC service shape via `connectrpc-axum` 0.1 + prost 0.14.
+  Six RPCs (`GetState`, `CreateProposal`, `DryRunProposal`,
+  `GetProposal`, `ListProposals`, stub `ExecuteProposal`). Slice
+  43a's `ExecuteProposal` returns `Code::Unimplemented` — execute
+  lands in slice 43b. Clients can use JSON or protobuf per request
+  (Connect content negotiation). Codegen produces a builder pattern
+  (not a tonic-style trait); freestanding async fn handlers receive
+  shared `AppState` via an `axum::Extension(Arc<AppState>)` layer.
+- Three goals: `PreferredLeaderIdempotency` (hard),
+  `ReplicaDistribution` (soft), `LeaderDistribution` (soft). Pure
+  trait-based plumbing — slices 43c–43g add rack-aware, capacity,
+  usage, and anomaly goals against the same surface.
+- Optimizer: hard-goals-first ordering, last-writer-wins coalesce on
+  duplicate `(topic, partition)` keys, `OptimizeError::HardGoalUnsatisfied`
+  when the cap drops a hard movement, deterministic post-coalesce
+  movement order.
+- In-memory `ProposalStore` (UUID-keyed VecDeque ring buffer,
+  default capacity 20). No on-disk persistence in 43a — slice 43b
+  adds it alongside the executor.
+- Operational endpoints (`/healthz`, `/readyz`, `/metrics`) on the
+  same axum listener. `/readyz` gates on the first successful
+  snapshot. `/metrics` serves OpenMetrics text from a
+  `crabka_rebalancer`-prefixed registry exposing three metrics:
+  `crabka_rebalancer_snapshot_at_ms` (gauge, epoch-millis of the
+  last successful snapshot), `crabka_rebalancer_snapshots_total`
+  (counter, successful snapshots), and
+  `crabka_rebalancer_proposals_created_total` (counter, proposals
+  computed via `CreateProposal`). Later slices add usage / latency
+  counters off the same registry.
+- New workspace deps: `connectrpc-axum` 0.1, `connectrpc-axum-build` 0.1,
+  `prost` 0.14 (bumped from 0.13 to match what `connectrpc-axum` requires),
+  `pbjson` 0.9. New dev-dep on `reqwest` for the Connect HTTP smoke test.
+- 36 new unit tests across `model`, `goals/*`, `optimizer`,
+  `ingest`, `api`, `health`. 2 in-process integration tests in
+  `tests/end_to_end.rs` (balanced cluster proposal + pre-snapshot
+  `Unavailable`). 1 binary-level Connect-protocol smoke test in
+  `tests/connect_smoke.rs` (HTTP+JSON `GetState` round-trip).
+- Reference doc:
+  [`docs/superpowers/specs/2026-05-17-crabka-rebalancer-43a-design.md`].
+  Roadmap (slices 43a–43g + operator slice 44) in
+  [`docs/superpowers/specs/2026-05-17-crabka-rebalancer-roadmap-design.md`].
+- Out of scope (deferred): execute path (slice 43b), persistence
+  (slice 43b), metric scraping for usage goals (slice 43e),
+  rack-aware / capacity / usage / CPU / anomaly goals (slices
+  43c–43g), operator `KafkaRebalance` CRD (slice 44).

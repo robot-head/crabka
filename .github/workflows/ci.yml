@@ -18,6 +18,10 @@ jobs:
         with:
           toolchain: ${{ matrix.toolchain }}
           components: rustfmt, clippy
+      - uses: arduino/setup-protoc@v3
+        with:
+          version: "31.x"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: taiki-e/install-action@cargo-llvm-cov
         if: matrix.os == 'ubuntu-latest'
       - run: cargo fmt --all -- --check
@@ -43,6 +47,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
+      - uses: arduino/setup-protoc@v3
+        with:
+          version: "31.x"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: taiki-e/install-action@cargo-llvm-cov
       - uses: actions/setup-java@v5
         with:

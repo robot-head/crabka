@@ -1,0 +1,87 @@
+syntax = "proto3";
+package crabka.rebalancer.v1;
+
+service Rebalancer {
+  rpc GetState(GetStateRequest) returns (GetStateResponse);
+  rpc CreateProposal(CreateProposalRequest) returns (Proposal);
+  rpc DryRunProposal(DryRunProposalRequest) returns (DryRunResponse);
+  rpc GetProposal(GetProposalRequest) returns (Proposal);
+  rpc ListProposals(ListProposalsRequest) returns (ListProposalsResponse);
+  rpc ExecuteProposal(ExecuteProposalRequest) returns (ExecuteProposalResponse);
+}
+
+message Broker {
+  int32 id = 1;
+  string host = 2;
+  int32 port = 3;
+  optional string rack = 4;
+}
+
+message Partition {
+  int32 partition = 1;
+  repeated int32 replicas = 2;
+  int32 leader = 3;
+  repeated int32 isr = 4;
+}
+
+message Topic { string name = 1; repeated Partition partitions = 2; }
+
+message InFlightReassignment {
+  string topic = 1;
+  int32 partition = 2;
+  repeated int32 adding_replicas = 3;
+  repeated int32 removing_replicas = 4;
+}
+
+message GetStateRequest {}
+message GetStateResponse {
+  int64 snapshot_at_ms = 1;
+  repeated Broker brokers = 2;
+  repeated Topic topics = 3;
+  repeated InFlightReassignment in_flight_reassignments = 4;
+}
+
+enum ProposalStatus {
+  PROPOSAL_STATUS_UNSPECIFIED = 0;
+  PROPOSAL_STATUS_COMPUTED = 1;
+}
+
+message Movement {
+  string topic = 1;
+  int32 partition = 2;
+  repeated int32 old_replicas = 3;
+  repeated int32 new_replicas = 4;
+  int32 old_leader = 5;
+  int32 new_leader = 6;
+}
+
+message ProposalSummary {
+  int32 replica_movements = 1;
+  int32 leader_movements = 2;
+  int32 max_replicas_before = 3;
+  int32 max_replicas_after = 4;
+  int32 max_leaders_before = 5;
+  int32 max_leaders_after = 6;
+}
+
+message Proposal {
+  string id = 1;
+  ProposalStatus status = 2;
+  int64 created_at_ms = 3;
+  repeated string goals_applied = 4;
+  ProposalSummary summary = 5;
+  repeated Movement movements = 6;
+}
+
+message CreateProposalRequest { repeated string goals = 1; }
+message DryRunProposalRequest { string id = 1; }
+message DryRunResponse {
+  string id = 1;
+  ProposalSummary summary = 2;
+  int64 estimated_bytes_moved = 3;
+}
+message GetProposalRequest { string id = 1; }
+message ListProposalsRequest { int32 limit = 1; }
+message ListProposalsResponse { repeated Proposal proposals = 1; }
+message ExecuteProposalRequest { string id = 1; }
+message ExecuteProposalResponse {}
