@@ -353,7 +353,13 @@ impl Default for BrokerConfig {
             #[cfg(any(test, feature = "test-helpers"))]
             cleaner_interval_override: None,
             tls_reload_interval: std::time::Duration::from_secs(30),
-            metrics_listen_addr: Some("0.0.0.0:9404".parse().expect("static metrics addr parses")),
+            // Default to `None` so multi-broker library users (and
+            // multi-broker tests) don't race on a fixed port. The
+            // `crabka-broker` binary opts in to `Some(0.0.0.0:9404)`
+            // via its `--metrics-listen-addr` CLI flag — the operator
+            // sets that via env, so production deployments still get
+            // metrics by default.
+            metrics_listen_addr: None,
         }
     }
 }

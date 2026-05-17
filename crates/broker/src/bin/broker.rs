@@ -37,6 +37,17 @@ struct Args {
     /// (the `KafkaCluster` UID).
     #[arg(long, env = "CRABKA_CLUSTER_ID")]
     cluster_id: Option<uuid::Uuid>,
+
+    /// Bind address for the Prometheus `/metrics` HTTP endpoint.
+    /// Empty string (or `none`) disables. Defaults to `0.0.0.0:9404`
+    /// — the same port `jmx_prometheus_javaagent` uses for vanilla
+    /// Kafka, so existing scrape configs apply unchanged.
+    #[arg(
+        long,
+        env = "CRABKA_METRICS_LISTEN_ADDR",
+        default_value = "0.0.0.0:9404"
+    )]
+    metrics_listen_addr: String,
 }
 
 #[tokio::main]
@@ -61,6 +72,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("broker_id must be non-negative");
         std::process::exit(1);
     });
+    let metrics_listen_addr = parse_metrics_addr(&args.metrics_listen_addr)?;
     let config = BrokerConfig {
         broker_id: args.broker_id,
         listen_addr: args.listen_addr,
@@ -77,6 +89,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         controller_heartbeat_interval: std::time::Duration::from_millis(500),
         bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
         cluster_id: args.cluster_id,
+        metrics_listen_addr,
         ..BrokerConfig::default()
     };
 
@@ -88,4 +101,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     handle.shutdown().await;
     tracing::info!("crabka-broker stopped");
     Ok(())
+}
+
+/// Map the `--metrics-listen-addr` CLI value onto an `Option<SocketAddr>`.
+/// Empty string or `none` (case-insensitive) disables the endpoint;
+/// anything else must parse as `SocketAddr`.
+fn parse_metrics_addr(s: &str) -> Result<Option<SocketAddr>, Box<dyn std::error::Error>> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("none") {
+        return Ok(None);
+    }
+    Ok(Some(trimmed.parse()?))
 }
