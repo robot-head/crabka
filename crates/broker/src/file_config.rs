@@ -36,6 +36,42 @@ pub struct FileListener {
     pub protocol: ListenerProtocol,
 }
 
+impl FileConfig {
+    /// Apply this file-config to a `BrokerConfig` that already holds
+    /// CLI-derived values. The file fills in unset values and provides
+    /// `listeners` + `inter_broker_listener_name` wholesale when those
+    /// are at their respective "empty" defaults.
+    ///
+    /// CLI values always win — the binary's `main()` constructs the
+    /// `BrokerConfig` from CLI args first, then calls `apply_to`. The
+    /// file never overrides what was explicitly set on the CLI.
+    ///
+    /// **Caller contract:** when `--config-file` is used, the caller
+    /// must NOT pass `--listen-addr` or `--advertised-listener`. The
+    /// binary entrypoint enforces this (see `bin/broker.rs`); this
+    /// method just merges what it's given.
+    pub fn apply_to(self, cfg: &mut crate::config::BrokerConfig) {
+        let defaults = crate::config::BrokerConfig::default();
+        if let Some(id) = self.broker_id
+            && cfg.broker_id == defaults.broker_id
+        {
+            cfg.broker_id = id;
+        }
+        if let Some(ld) = self.log_dir
+            && cfg.log_dir == defaults.log_dir
+        {
+            cfg.log_dir = std::path::PathBuf::from(ld);
+        }
+        if !self.listeners.is_empty() {
+            cfg.listeners = self.listeners.into_iter().map(FileListener::into_spec).collect();
+        }
+        if let Some(name) = self.inter_broker_listener_name {
+            cfg.inter_broker_listener_name = name;
+        }
+        // `[server_properties]` is intentionally ignored in slice 25a.
+    }
+}
+
 impl FileListener {
     #[must_use]
     pub fn into_spec(self) -> ListenerSpec {
@@ -145,5 +181,75 @@ protocol = "Plaintext"
         assert_eq!(spec.name, "X");
         assert_eq!(spec.advertised, "h:9094");
         assert_eq!(spec.protocol, ListenerProtocol::Plaintext);
+    }
+
+    #[test]
+    fn apply_to_populates_listeners() {
+        use crate::config::BrokerConfig;
+
+        let src = r#"
+inter_broker_listener_name = "PLAIN"
+
+[[listeners]]
+name = "PLAIN"
+bind_addr = "0.0.0.0:9092"
+advertised = "demo-0:9092"
+protocol = "Plaintext"
+"#;
+        let file: FileConfig = toml::from_str(src).unwrap();
+        let mut cfg = BrokerConfig::default();
+        file.apply_to(&mut cfg);
+
+        assert_eq!(cfg.listeners.len(), 1);
+        assert_eq!(cfg.listeners[0].name, "PLAIN");
+        assert_eq!(cfg.listeners[0].advertised, "demo-0:9092");
+        assert_eq!(cfg.inter_broker_listener_name, "PLAIN");
+    }
+
+    #[test]
+    fn apply_to_does_not_clobber_non_default_broker_id() {
+        use crate::config::BrokerConfig;
+
+        let src = r#"broker_id = 42"#;
+        let file: FileConfig = toml::from_str(src).unwrap();
+        let mut cfg = BrokerConfig::default();
+        cfg.broker_id = 7; // simulate CLI --broker-id 7 already applied
+
+        file.apply_to(&mut cfg);
+
+        // CLI value wins because it differs from default.
+        assert_eq!(cfg.broker_id, 7);
+    }
+
+    #[test]
+    fn apply_to_fills_in_default_broker_id() {
+        use crate::config::BrokerConfig;
+
+        let src = r#"broker_id = 42"#;
+        let file: FileConfig = toml::from_str(src).unwrap();
+        let mut cfg = BrokerConfig::default(); // broker_id == default (1)
+
+        file.apply_to(&mut cfg);
+
+        assert_eq!(cfg.broker_id, 42);
+    }
+
+    #[test]
+    fn apply_to_empty_listeners_does_not_clear_existing() {
+        use crate::config::BrokerConfig;
+
+        let file: FileConfig = toml::from_str("").unwrap();
+        let mut cfg = BrokerConfig::default();
+        cfg.listeners = vec![crate::config::ListenerSpec {
+            name: "X".into(),
+            bind_addr: "0.0.0.0:9094".parse().unwrap(),
+            advertised: "h:9094".into(),
+            protocol: crabka_security::ListenerProtocol::Plaintext,
+        }];
+
+        file.apply_to(&mut cfg);
+
+        assert_eq!(cfg.listeners.len(), 1);
+        assert_eq!(cfg.listeners[0].name, "X");
     }
 }
