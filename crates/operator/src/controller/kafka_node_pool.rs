@@ -211,6 +211,20 @@ pub(crate) fn render_statefulset(
         }
     }
 
+    // Operator-owned annotation: propagate `crabka.io/config-hash` from
+    // the pool's metadata label (set by the Kafka reconciler) into the
+    // pod-template annotation. Placed after the user-annotation merge so
+    // the operator wins on a same-key collision — the hash is the
+    // mechanism that triggers a rolling restart on config drift.
+    if let Some(hash) = pool
+        .metadata
+        .labels
+        .as_ref()
+        .and_then(|l| l.get("crabka.io/config-hash"))
+    {
+        pod_annotations.insert("crabka.io/config-hash".into(), hash.clone());
+    }
+
     let mut template_meta = json!({ "labels": pod_labels });
     if !pod_annotations.is_empty() {
         template_meta["annotations"] = serde_json::to_value(&pod_annotations)?;
@@ -427,6 +441,7 @@ mod tests {
             name,
             KafkaSpec {
                 kafka_version: "0.1.1".into(),
+                config: None,
             },
         );
         k.metadata.namespace = Some("default".into());
@@ -712,5 +727,37 @@ mod tests {
         assert!(spec.affinity.is_none());
         assert!(spec.tolerations.is_none() || spec.tolerations.as_ref().unwrap().is_empty());
         assert!(spec.node_selector.is_none() || spec.node_selector.as_ref().unwrap().is_empty());
+    }
+
+    #[test]
+    fn render_statefulset_propagates_config_hash_from_label() {
+        let mut pool = pool_fixture("brokers", "demo", 1);
+        pool.metadata
+            .labels
+            .get_or_insert_with(BTreeMap::new)
+            .insert("crabka.io/config-hash".into(), "abc123".into());
+        let sts = render_statefulset(&parent_fixture("demo"), &pool, "img:1").unwrap();
+        let anno = sts
+            .spec
+            .unwrap()
+            .template
+            .metadata
+            .unwrap()
+            .annotations
+            .unwrap();
+        assert_eq!(
+            anno.get("crabka.io/config-hash").map(String::as_str),
+            Some("abc123")
+        );
+    }
+
+    #[test]
+    fn render_statefulset_no_config_hash_when_label_absent() {
+        let pool = pool_fixture("brokers", "demo", 1);
+        let sts = render_statefulset(&parent_fixture("demo"), &pool, "img:1").unwrap();
+        // Annotation map may be None or just lack our key — both fine.
+        if let Some(anno) = sts.spec.unwrap().template.metadata.unwrap().annotations {
+            assert!(!anno.contains_key("crabka.io/config-hash"));
+        }
     }
 }

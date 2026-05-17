@@ -177,7 +177,10 @@ pub(crate) fn render_service(owner: &Kafka) -> Result<Service, ReconcileError> {
 }
 
 /// Render the cluster-level `ConfigMap`. Owner-ref'd to the parent
-/// `Kafka`.
+/// `Kafka`. `data.broker.properties` is included only when
+/// `Kafka.spec.config` is set; serialization is deterministic
+/// (`BTreeMap` iteration = sorted) so the resulting content hash is
+/// stable across reconciles.
 pub(crate) fn render_configmap(owner: &Kafka) -> Result<ConfigMap, ReconcileError> {
     let name = owner.meta().name.clone().unwrap_or_default();
     let labels = common_labels(&name, &owner.spec.kafka_version, None);
@@ -187,6 +190,10 @@ pub(crate) fn render_configmap(owner: &Kafka) -> Result<ConfigMap, ReconcileErro
         "broker.env".to_string(),
         format!("CRABKA_LISTEN_ADDR=0.0.0.0:{BROKER_PORT}\n"),
     );
+    let broker_props = serialize_broker_properties(&owner.spec);
+    if !broker_props.is_empty() {
+        data.insert("broker.properties".to_string(), broker_props);
+    }
 
     Ok(ConfigMap {
         metadata: ObjectMeta {
@@ -199,6 +206,25 @@ pub(crate) fn render_configmap(owner: &Kafka) -> Result<ConfigMap, ReconcileErro
         data: Some(data),
         ..Default::default()
     })
+}
+
+/// Serialize `Kafka.spec.config` into a deterministic `broker.properties`
+/// string (one `key=value` line per entry, `BTreeMap` iteration = sorted).
+/// Returns `""` when `config` is `None` or empty. The content is hashed
+/// by [`config_hash`] to detect drift and trigger a rolling restart.
+#[must_use]
+pub(crate) fn serialize_broker_properties(spec: &crate::crd::KafkaSpec) -> String {
+    let Some(cfg) = spec.config.as_ref() else {
+        return String::new();
+    };
+    let mut out = String::new();
+    for (k, v) in cfg {
+        out.push_str(k);
+        out.push('=');
+        out.push_str(v);
+        out.push('\n');
+    }
+    out
 }
 
 /// Render the cluster-id `Secret`. Owner-ref'd to the parent `Kafka`.
@@ -301,5 +327,84 @@ pub(crate) fn derive_status(
             "PartiallyReady",
             format!("{ready_count}/{desired_replicas} brokers ready"),
         )
+    }
+}
+
+/// Truncated SHA-256 hex digest (16 hex chars / 8 bytes of entropy)
+/// of the given content. Used by slice 21 to detect `Kafka.spec.config`
+/// changes that the K8s `StatefulSet` controller can't see directly.
+///
+/// The full sha256 is 64 hex chars, which exceeds the 63-char K8s
+/// label-value limit. 64 bits of entropy is more than enough for a
+/// drift detector — collisions for accidental config changes are
+/// astronomically unlikely.
+#[must_use]
+pub fn config_hash(content: &str) -> String {
+    use std::fmt::Write;
+
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(content.as_bytes());
+    let digest = h.finalize();
+    let mut out = String::with_capacity(16);
+    for byte in digest.iter().take(8) {
+        write!(&mut out, "{byte:02x}").expect("writing to a String never fails");
+    }
+    out
+}
+
+#[cfg(test)]
+mod config_hash_tests {
+    use super::*;
+    use crate::crd::KafkaSpec;
+
+    #[test]
+    fn config_hash_is_truncated_sha256_hex() {
+        // First 16 hex chars (8 bytes) of sha256("hello"):
+        //   2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
+        //   ^^^^^^^^^^^^^^^^
+        let h = config_hash("hello");
+        assert_eq!(h, "2cf24dba5fb0a30e");
+        assert_eq!(h.len(), 16, "must fit within K8s 63-char label limit");
+    }
+
+    #[test]
+    fn config_hash_empty_string() {
+        // First 16 hex chars of sha256("").
+        let h = config_hash("");
+        assert_eq!(h, "e3b0c44298fc1c14");
+    }
+
+    #[test]
+    fn config_hash_fits_in_kubernetes_label_value() {
+        // K8s label values are limited to 63 characters. Our truncated
+        // hash must always fit; this test guards against future widening.
+        let h = config_hash("any content at all");
+        assert!(h.len() <= 63, "hash {h} exceeds K8s label limit");
+    }
+
+    #[test]
+    fn serialize_broker_properties_sorted() {
+        let mut cfg = BTreeMap::new();
+        cfg.insert("num.partitions".into(), "3".into());
+        cfg.insert("log.retention.hours".into(), "24".into());
+        let spec = KafkaSpec {
+            kafka_version: "0.1.1".into(),
+            config: Some(cfg),
+        };
+        // Keys sort alphabetically: log.retention.hours < num.partitions.
+        assert_eq!(
+            serialize_broker_properties(&spec),
+            "log.retention.hours=24\nnum.partitions=3\n"
+        );
+    }
+
+    #[test]
+    fn serialize_broker_properties_none_is_empty_string() {
+        let spec = KafkaSpec {
+            kafka_version: "0.1.1".into(),
+            config: None,
+        };
+        assert_eq!(serialize_broker_properties(&spec), "");
     }
 }

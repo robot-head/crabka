@@ -22,6 +22,11 @@ pub struct KafkaSpec {
     /// Crabka version label, propagated to all pool pods via the
     /// `app.kubernetes.io/version` label.
     pub kafka_version: String,
+    /// Opaque broker properties (`server.properties`-style key/value
+    /// pairs). Serialized into the broker `ConfigMap`; changes propagate
+    /// through a content hash that triggers a rolling restart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<std::collections::BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
@@ -75,6 +80,7 @@ mod tests {
             "demo",
             KafkaSpec {
                 kafka_version: "0.1.1".into(),
+                config: None,
             },
         );
         let json = serde_json::to_string(&k).unwrap();
@@ -91,5 +97,17 @@ mod tests {
         let json = r#"{"kafkaVersion":"0.1.1"}"#;
         let spec: KafkaSpec = serde_json::from_str(json).unwrap();
         assert_eq!(spec.kafka_version, "0.1.1");
+        assert!(spec.config.is_none());
+    }
+
+    #[test]
+    fn spec_carries_config() {
+        let json = r#"{"kafkaVersion":"0.1.1","config":{"log.retention.hours":"24"}}"#;
+        let spec: KafkaSpec = serde_json::from_str(json).unwrap();
+        let cfg = spec.config.expect("config present");
+        assert_eq!(
+            cfg.get("log.retention.hours").map(String::as_str),
+            Some("24")
+        );
     }
 }
