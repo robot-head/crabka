@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use k8s_openapi::api::core::v1::Service;
+use k8s_openapi::api::core::v1::{Node, Service};
 use kube::Resource as _;
 
 use crate::controller::common::{APP_LABEL, ReconcileError, owner_ref};
@@ -581,5 +581,439 @@ mod tests {
     #[test]
     fn effective_name_empty_defaults_to_plain() {
         assert_eq!(effective_inter_broker_listener_name(&[], None), "PLAIN");
+    }
+}
+
+/// Per-broker resolved advertised address.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+pub struct AdvertisedAddress {
+    pub host: String,
+    pub port: i32,
+}
+
+/// Errors that block advertised-listener computation. They map onto
+/// `ListenersReady=False reason=PendingExternalAddresses`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum AdvertisedError {
+    PodNotScheduled { broker: i32 },
+    NodeNotFound { broker: i32, node_name: String },
+    NodeHasNoAddress { broker: i32, node_name: String },
+    ServiceMissing { broker: i32, service_name: String },
+    NodePortNotAllocated { broker: i32 },
+    LoadBalancerPending { broker: i32, service_name: String },
+}
+
+#[allow(dead_code)]
+impl AdvertisedError {
+    pub fn message(&self) -> String {
+        match self {
+            Self::PodNotScheduled { broker } => {
+                format!("pod for broker {broker} not yet scheduled")
+            }
+            Self::NodeNotFound { broker, node_name } => {
+                format!("node {node_name} for broker {broker} not visible")
+            }
+            Self::NodeHasNoAddress { broker, node_name } => {
+                format!("node {node_name} for broker {broker} has no addresses")
+            }
+            Self::ServiceMissing {
+                broker,
+                service_name,
+            } => {
+                format!("service {service_name} for broker {broker} missing")
+            }
+            Self::NodePortNotAllocated { broker } => {
+                format!("nodePort for broker {broker} not allocated yet")
+            }
+            Self::LoadBalancerPending {
+                broker,
+                service_name,
+            } => {
+                format!("loadBalancer for service {service_name} (broker {broker}) not provisioned")
+            }
+        }
+    }
+}
+
+/// Compute the advertised host:port for one (listener, broker).
+///
+/// `pod_node_name` is `Pod.spec.nodeName` of the pod hosting this
+/// broker (None if not yet scheduled). `nodes_by_name` is a map of
+/// all Nodes the operator has observed. `per_broker_service` is the
+/// per-broker Service the operator just rendered+applied (None until
+/// the apiserver returns it).
+///
+/// # Panics
+///
+/// Panics if called with `Ingress` or `Route` listener types — validation
+/// short-circuits those.
+#[allow(dead_code)]
+pub fn compute_advertised(
+    listener: &Listener,
+    broker_id: i32,
+    pod_fqdn: &str,
+    pod_node_name: Option<&str>,
+    nodes_by_name: &std::collections::HashMap<String, Node>,
+    per_broker_service: Option<&Service>,
+) -> Result<AdvertisedAddress, AdvertisedError> {
+    let override_ = listener
+        .configuration
+        .as_ref()
+        .and_then(|c| c.brokers.iter().find(|b| b.broker == broker_id));
+
+    match listener.type_ {
+        ListenerType::Internal => Ok(AdvertisedAddress {
+            host: pod_fqdn.to_string(),
+            port: listener.port,
+        }),
+        ListenerType::Nodeport => {
+            let host = if let Some(h) = override_.and_then(|o| o.advertised_host.as_ref()) {
+                h.clone()
+            } else {
+                let node_name =
+                    pod_node_name.ok_or(AdvertisedError::PodNotScheduled { broker: broker_id })?;
+                let node =
+                    nodes_by_name
+                        .get(node_name)
+                        .ok_or_else(|| AdvertisedError::NodeNotFound {
+                            broker: broker_id,
+                            node_name: node_name.to_string(),
+                        })?;
+                let addrs = node.status.as_ref().and_then(|s| s.addresses.as_ref());
+                addrs
+                    .and_then(|a| {
+                        a.iter()
+                            .find(|x| x.type_ == "ExternalIP")
+                            .or_else(|| a.iter().find(|x| x.type_ == "InternalIP"))
+                            .map(|x| x.address.clone())
+                    })
+                    .ok_or_else(|| AdvertisedError::NodeHasNoAddress {
+                        broker: broker_id,
+                        node_name: node_name.to_string(),
+                    })?
+            };
+            let port = if let Some(p) = override_.and_then(|o| o.advertised_port) {
+                p
+            } else if let Some(p) = override_.and_then(|o| o.node_port) {
+                p
+            } else {
+                let svc = per_broker_service.ok_or_else(|| AdvertisedError::ServiceMissing {
+                    broker: broker_id,
+                    service_name: String::new(),
+                })?;
+                svc.spec
+                    .as_ref()
+                    .and_then(|s| s.ports.as_ref())
+                    .and_then(|ps| ps.first().and_then(|p| p.node_port))
+                    .ok_or(AdvertisedError::NodePortNotAllocated { broker: broker_id })?
+            };
+            Ok(AdvertisedAddress { host, port })
+        }
+        ListenerType::Loadbalancer => {
+            let svc_name = per_broker_service
+                .and_then(|s| s.metadata.name.clone())
+                .unwrap_or_default();
+            let host = if let Some(h) = override_.and_then(|o| o.advertised_host.as_ref()) {
+                h.clone()
+            } else {
+                let svc = per_broker_service.ok_or_else(|| AdvertisedError::ServiceMissing {
+                    broker: broker_id,
+                    service_name: String::new(),
+                })?;
+                let ingress = svc
+                    .status
+                    .as_ref()
+                    .and_then(|st| st.load_balancer.as_ref())
+                    .and_then(|lb| lb.ingress.as_ref())
+                    .and_then(|ig| ig.first())
+                    .ok_or_else(|| AdvertisedError::LoadBalancerPending {
+                        broker: broker_id,
+                        service_name: svc_name.clone(),
+                    })?;
+                ingress
+                    .hostname
+                    .clone()
+                    .or_else(|| ingress.ip.clone())
+                    .ok_or(AdvertisedError::LoadBalancerPending {
+                        broker: broker_id,
+                        service_name: svc_name,
+                    })?
+            };
+            let port = override_
+                .and_then(|o| o.advertised_port)
+                .unwrap_or(listener.port);
+            Ok(AdvertisedAddress { host, port })
+        }
+        ListenerType::Ingress | ListenerType::Route => {
+            unreachable!(
+                "compute_advertised called with deferred type {:?}",
+                listener.type_
+            )
+        }
+    }
+}
+
+#[cfg(test)]
+mod advertised_tests {
+    use super::*;
+    use k8s_openapi::api::core::v1::{
+        LoadBalancerIngress, LoadBalancerStatus, Node, NodeAddress, NodeStatus, Service,
+        ServicePort, ServiceSpec, ServiceStatus,
+    };
+    use std::collections::HashMap;
+
+    fn internal(name: &str, port: i32) -> Listener {
+        Listener {
+            name: name.into(),
+            port,
+            type_: ListenerType::Internal,
+            tls: false,
+            configuration: None,
+        }
+    }
+    fn nodeport(name: &str, port: i32) -> Listener {
+        Listener {
+            name: name.into(),
+            port,
+            type_: ListenerType::Nodeport,
+            tls: false,
+            configuration: None,
+        }
+    }
+    fn loadbalancer(name: &str, port: i32) -> Listener {
+        Listener {
+            name: name.into(),
+            port,
+            type_: ListenerType::Loadbalancer,
+            tls: false,
+            configuration: None,
+        }
+    }
+
+    #[test]
+    fn internal_uses_pod_fqdn() {
+        let l = internal("PLAIN", 9092);
+        let nodes = HashMap::new();
+        let a = compute_advertised(&l, 0, "pod.svc.local", None, &nodes, None).unwrap();
+        assert_eq!(
+            a,
+            AdvertisedAddress {
+                host: "pod.svc.local".into(),
+                port: 9092
+            }
+        );
+    }
+
+    #[test]
+    fn nodeport_pending_when_pod_unscheduled() {
+        let l = nodeport("ext", 9094);
+        let nodes = HashMap::new();
+        let err = compute_advertised(&l, 0, "pod", None, &nodes, None).unwrap_err();
+        assert!(matches!(
+            err,
+            AdvertisedError::PodNotScheduled { broker: 0 }
+        ));
+    }
+
+    #[test]
+    fn nodeport_resolves_external_ip_from_node() {
+        let l = nodeport("ext", 9094);
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            "n1".into(),
+            Node {
+                status: Some(NodeStatus {
+                    addresses: Some(vec![
+                        NodeAddress {
+                            type_: "InternalIP".into(),
+                            address: "10.0.0.1".into(),
+                        },
+                        NodeAddress {
+                            type_: "ExternalIP".into(),
+                            address: "1.2.3.4".into(),
+                        },
+                    ]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+        let svc = Service {
+            metadata: kube::api::ObjectMeta {
+                name: Some("demo-ext-0".into()),
+                ..Default::default()
+            },
+            spec: Some(ServiceSpec {
+                ports: Some(vec![ServicePort {
+                    port: 9094,
+                    node_port: Some(32100),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let a = compute_advertised(&l, 0, "pod", Some("n1"), &nodes, Some(&svc)).unwrap();
+        assert_eq!(
+            a,
+            AdvertisedAddress {
+                host: "1.2.3.4".into(),
+                port: 32100
+            }
+        );
+    }
+
+    #[test]
+    fn nodeport_falls_back_to_internal_ip() {
+        let l = nodeport("ext", 9094);
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            "n1".into(),
+            Node {
+                status: Some(NodeStatus {
+                    addresses: Some(vec![NodeAddress {
+                        type_: "InternalIP".into(),
+                        address: "10.0.0.1".into(),
+                    }]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+        let svc = Service {
+            metadata: kube::api::ObjectMeta {
+                name: Some("demo-ext-0".into()),
+                ..Default::default()
+            },
+            spec: Some(ServiceSpec {
+                ports: Some(vec![ServicePort {
+                    port: 9094,
+                    node_port: Some(32100),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let a = compute_advertised(&l, 0, "pod", Some("n1"), &nodes, Some(&svc)).unwrap();
+        assert_eq!(a.host, "10.0.0.1");
+    }
+
+    #[test]
+    fn nodeport_pending_when_service_has_no_nodeport() {
+        let l = nodeport("ext", 9094);
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            "n1".into(),
+            Node {
+                status: Some(NodeStatus {
+                    addresses: Some(vec![NodeAddress {
+                        type_: "InternalIP".into(),
+                        address: "10.0.0.1".into(),
+                    }]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+        let svc = Service {
+            metadata: kube::api::ObjectMeta {
+                name: Some("demo-ext-0".into()),
+                ..Default::default()
+            },
+            spec: Some(ServiceSpec {
+                ports: Some(vec![ServicePort {
+                    port: 9094,
+                    node_port: None,
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let err = compute_advertised(&l, 0, "pod", Some("n1"), &nodes, Some(&svc)).unwrap_err();
+        assert!(matches!(err, AdvertisedError::NodePortNotAllocated { .. }));
+    }
+
+    #[test]
+    fn loadbalancer_resolves_hostname() {
+        let l = loadbalancer("lb", 9094);
+        let nodes = HashMap::new();
+        let svc = Service {
+            metadata: kube::api::ObjectMeta {
+                name: Some("demo-lb-0".into()),
+                ..Default::default()
+            },
+            spec: Some(ServiceSpec::default()),
+            status: Some(ServiceStatus {
+                load_balancer: Some(LoadBalancerStatus {
+                    ingress: Some(vec![LoadBalancerIngress {
+                        hostname: Some("lb.example.com".into()),
+                        ip: None,
+                        ip_mode: None,
+                        ports: None,
+                    }]),
+                }),
+                ..Default::default()
+            }),
+        };
+        let a = compute_advertised(&l, 0, "pod", Some("n1"), &nodes, Some(&svc)).unwrap();
+        assert_eq!(
+            a,
+            AdvertisedAddress {
+                host: "lb.example.com".into(),
+                port: 9094
+            }
+        );
+    }
+
+    #[test]
+    fn loadbalancer_pending_when_status_missing() {
+        let l = loadbalancer("lb", 9094);
+        let nodes = HashMap::new();
+        let svc = Service {
+            metadata: kube::api::ObjectMeta {
+                name: Some("demo-lb-0".into()),
+                ..Default::default()
+            },
+            spec: Some(ServiceSpec::default()),
+            status: None,
+        };
+        let err = compute_advertised(&l, 0, "pod", Some("n1"), &nodes, Some(&svc)).unwrap_err();
+        assert!(matches!(err, AdvertisedError::LoadBalancerPending { .. }));
+    }
+
+    #[test]
+    fn override_advertised_host_wins() {
+        let mut l = nodeport("ext", 9094);
+        l.configuration = Some(crate::crd::ListenerConfiguration {
+            bootstrap: None,
+            brokers: vec![crate::crd::BrokerOverride {
+                broker: 0,
+                advertised_host: Some("public.host".into()),
+                ..Default::default()
+            }],
+        });
+        let nodes = HashMap::new();
+        let svc = Service {
+            metadata: kube::api::ObjectMeta {
+                name: Some("demo-ext-0".into()),
+                ..Default::default()
+            },
+            spec: Some(ServiceSpec {
+                ports: Some(vec![ServicePort {
+                    port: 9094,
+                    node_port: Some(32100),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let a = compute_advertised(&l, 0, "pod", None, &nodes, Some(&svc)).unwrap();
+        assert_eq!(a.host, "public.host");
+        assert_eq!(a.port, 32100);
     }
 }
