@@ -9,6 +9,7 @@ pub mod phases;
 pub mod state;
 pub mod throttle;
 
+use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -121,9 +122,39 @@ impl<C: ClientFacade + ?Sized + 'static> Execution<C> {
                 .and_then(|f| f.target_terminal_status.map(|s| (s, f.failure_reason))),
             _ => None,
         };
-        let _ = self.persist_phase(phase, None, None);
+        // Preserve any resumed target/reason on the initial persist so a
+        // subsequent crash during ClearThrottle still resumes with the
+        // correct terminal target.
+        let (init_target, init_reason) = terminal
+            .as_ref()
+            .map_or((None, None), |(s, r)| (Some(*s), r.clone()));
+        let _ = self.persist_phase(phase, init_target, init_reason);
 
         loop {
+            // Cancel-from-any-phase short-circuits to Cancelled. The
+            // per-phase fns no longer do their own cancel checks; the
+            // outer loop owns cancellation routing.
+            if self.cancel.is_cancelled()
+                && !matches!(phase, Phase::ClearThrottle)
+                && terminal.is_none()
+            {
+                let cancel_note = match self.cancel_in_flight().await {
+                    Ok(()) => None,
+                    Err(e) => {
+                        warn!(
+                            error = %e,
+                            "cancel_in_flight failed during cancel short-circuit"
+                        );
+                        Some(format!("cancel_reassignments failed: {e}"))
+                    }
+                };
+                terminal = Some((ProposalStatus::Cancelled, cancel_note.clone()));
+                phase = Phase::ClearThrottle;
+                let _ =
+                    self.persist_phase(phase, Some(ProposalStatus::Cancelled), cancel_note);
+                continue;
+            }
+
             match phase {
                 Phase::ApplyThrottle => match self.do_apply_throttle().await {
                     Ok(()) => {
@@ -158,14 +189,33 @@ impl<C: ClientFacade + ?Sized + 'static> Execution<C> {
                         let _ = self.persist_phase(phase, Some(ProposalStatus::Completed), None);
                     }
                     WaitOutcome::Cancelled => {
-                        let _ = self.cancel_in_flight().await;
-                        terminal = Some((ProposalStatus::Cancelled, None));
+                        let cancel_note = match self.cancel_in_flight().await {
+                            Ok(()) => None,
+                            Err(e) => {
+                                warn!(
+                                    error = %e,
+                                    "cancel_in_flight failed during Cancelled path"
+                                );
+                                Some(format!("cancel_reassignments failed: {e}"))
+                            }
+                        };
+                        terminal = Some((ProposalStatus::Cancelled, cancel_note.clone()));
                         phase = Phase::ClearThrottle;
-                        let _ = self.persist_phase(phase, Some(ProposalStatus::Cancelled), None);
+                        let _ = self.persist_phase(
+                            phase,
+                            Some(ProposalStatus::Cancelled),
+                            cancel_note,
+                        );
                     }
                     WaitOutcome::DeadlineExceeded => {
-                        let _ = self.cancel_in_flight().await;
-                        let reason = "Wait: deadline exceeded".to_string();
+                        let mut reason = String::from("Wait: deadline exceeded");
+                        if let Err(e) = self.cancel_in_flight().await {
+                            warn!(
+                                error = %e,
+                                "cancel_in_flight failed during DeadlineExceeded path"
+                            );
+                            let _ = write!(reason, "; cancel_reassignments failed: {e}");
+                        }
                         terminal = Some((ProposalStatus::Failed, Some(reason.clone())));
                         phase = Phase::ClearThrottle;
                         let _ =
@@ -200,9 +250,6 @@ impl<C: ClientFacade + ?Sized + 'static> Execution<C> {
     }
 
     async fn do_apply_throttle(&self) -> Result<(), PhaseError> {
-        if self.cancel.is_cancelled() {
-            return Err(PhaseError::Broker("cancelled before ApplyThrottle".into()));
-        }
         apply_throttle(
             self.client.as_ref(),
             &self.targets,
@@ -212,9 +259,6 @@ impl<C: ClientFacade + ?Sized + 'static> Execution<C> {
     }
 
     async fn do_submit(&self) -> Result<(), PhaseError> {
-        if self.cancel.is_cancelled() {
-            return Err(PhaseError::Broker("cancelled before Submit".into()));
-        }
         submit_movements(
             self.client.as_ref(),
             &self.proposal.movements,
@@ -462,6 +506,28 @@ mod tests {
             .filter(|c| matches!(c, MockCall::Cancel(_)))
             .count();
         assert!(cancels >= 1);
+    }
+
+    #[tokio::test]
+    async fn cancel_before_submit_results_in_cancelled() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = proposal_with_movements("p1", vec![mv("t", 0, vec![1], vec![2])]);
+        let state = state_with_store(dir.path(), p.clone());
+
+        let client = Arc::new(MockClient::new());
+        let cancel = CancellationToken::new();
+        cancel.cancel(); // already cancelled before run() starts
+        let exec = Execution::new(client.clone(), state.clone(), p, 50_000_000, cancel);
+        exec.run().await;
+
+        let after = state.store.get("p1").unwrap();
+        assert_eq!(
+            after.status,
+            ProposalStatus::Cancelled,
+            "cancel-before-Submit must produce Cancelled, not {:?}",
+            after.status
+        );
+        assert!(InFlightFile::load(dir.path()).unwrap().is_none());
     }
 
     #[tokio::test]
