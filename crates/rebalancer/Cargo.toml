@@ -20,7 +20,7 @@ crabka-protocol = { version = "0.1", path = "../protocol", default-features = fa
 crabka-metadata = { version = "0.1", path = "../metadata" }
 connectrpc-axum.workspace = true
 prost.workspace = true
-pbjson = "0.9"
+pbjson.workspace = true
 axum.workspace = true
 arc-swap.workspace = true
 prometheus-client.workspace = true
