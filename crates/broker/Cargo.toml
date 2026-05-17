@@ -39,7 +39,7 @@ wincode = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["net", "rt", "rt-multi-thread", "io-util", "macros", "sync", "time", "signal"] }
 tokio-util = { workspace = true, features = ["codec", "rt"] }
-toml = "0.8"
+toml = { workspace = true }
 dashmap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

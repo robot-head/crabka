@@ -19,11 +19,8 @@ use crate::config::ListenerSpec;
 /// than refuse to start.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 pub struct FileConfig {
-    #[serde(default)]
     pub broker_id: Option<i32>,
-    #[serde(default)]
     pub log_dir: Option<String>,
-    #[serde(default)]
     pub inter_broker_listener_name: Option<String>,
     #[serde(default)]
     pub listeners: Vec<FileListener>,
@@ -36,27 +33,7 @@ pub struct FileListener {
     pub name: String,
     pub bind_addr: SocketAddr,
     pub advertised: String,
-    pub protocol: FileListenerProtocol,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum FileListenerProtocol {
-    Plaintext,
-    Ssl,
-    SaslPlaintext,
-    SaslSsl,
-}
-
-impl From<FileListenerProtocol> for ListenerProtocol {
-    fn from(v: FileListenerProtocol) -> Self {
-        match v {
-            FileListenerProtocol::Plaintext => ListenerProtocol::Plaintext,
-            FileListenerProtocol::Ssl => ListenerProtocol::Ssl,
-            FileListenerProtocol::SaslPlaintext => ListenerProtocol::SaslPlaintext,
-            FileListenerProtocol::SaslSsl => ListenerProtocol::SaslSsl,
-        }
-    }
+    pub protocol: ListenerProtocol,
 }
 
 impl FileListener {
@@ -66,7 +43,7 @@ impl FileListener {
             name: self.name,
             bind_addr: self.bind_addr,
             advertised: self.advertised,
-            protocol: self.protocol.into(),
+            protocol: self.protocol,
         }
     }
 }
@@ -92,13 +69,13 @@ inter_broker_listener_name = "PLAIN"
 name = "PLAIN"
 bind_addr = "0.0.0.0:9092"
 advertised = "demo-0:9092"
-protocol = "plaintext"
+protocol = "Plaintext"
 
 [[listeners]]
 name = "EXTERNAL"
 bind_addr = "0.0.0.0:9094"
 advertised = "10.0.1.5:32100"
-protocol = "plaintext"
+protocol = "Plaintext"
 
 [server_properties]
 "log.retention.hours" = "24"
@@ -109,7 +86,7 @@ protocol = "plaintext"
         assert_eq!(cfg.inter_broker_listener_name.as_deref(), Some("PLAIN"));
         assert_eq!(cfg.listeners.len(), 2);
         assert_eq!(cfg.listeners[0].name, "PLAIN");
-        assert_eq!(cfg.listeners[0].protocol, FileListenerProtocol::Plaintext);
+        assert_eq!(cfg.listeners[0].protocol, ListenerProtocol::Plaintext);
         assert_eq!(
             cfg.server_properties.get("log.retention.hours").map(String::as_str),
             Some("24")
@@ -134,10 +111,10 @@ some_future_field = "from-a-later-slice"
 name = "S"
 bind_addr = "0.0.0.0:9094"
 advertised = "h:9094"
-protocol = "sasl_ssl"
+protocol = "SaslSsl"
 "#;
         let cfg: FileConfig = toml::from_str(src).unwrap();
-        assert_eq!(cfg.listeners[0].protocol, FileListenerProtocol::SaslSsl);
+        assert_eq!(cfg.listeners[0].protocol, ListenerProtocol::SaslSsl);
     }
 
     #[test]
@@ -147,7 +124,7 @@ protocol = "sasl_ssl"
 name = "X"
 bind_addr = "not-a-socket-address"
 advertised = "h:9094"
-protocol = "plaintext"
+protocol = "Plaintext"
 "#;
         let err = toml::from_str::<FileConfig>(src).unwrap_err();
         assert!(
@@ -162,7 +139,7 @@ protocol = "plaintext"
             name: "X".into(),
             bind_addr: "0.0.0.0:9094".parse().unwrap(),
             advertised: "h:9094".into(),
-            protocol: FileListenerProtocol::Plaintext,
+            protocol: ListenerProtocol::Plaintext,
         };
         let spec = fl.into_spec();
         assert_eq!(spec.name, "X");
