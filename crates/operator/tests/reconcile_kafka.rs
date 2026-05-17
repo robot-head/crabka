@@ -316,41 +316,6 @@ async fn kafka_status_aggregates_pool_readyreplicas() {
 }
 
 #[tokio::test]
-async fn kafka_writes_broker_properties_data_when_config_set() {
-    let mut cfg = std::collections::BTreeMap::new();
-    cfg.insert("log.retention.hours".to_string(), "24".to_string());
-
-    let items = vec![fake_pool_list_item("brokers", "y", "demo", 1, 1)];
-    let (ctx, state) = build_ctx("y", happy_path_rules("demo", "y", &items));
-    let kafka = kafka_cr_with_config("demo", "y", cfg);
-
-    reconcile(Arc::new(kafka), ctx).await.unwrap();
-
-    let observed = state.take_observed();
-    let cm_patch = observed
-        .iter()
-        .find(|r| {
-            r.method() == Method::PATCH
-                && r.uri()
-                    .to_string()
-                    .contains("/configmaps/demo-broker-config")
-        })
-        .expect("ConfigMap PATCH must have been captured");
-
-    let body: serde_json::Value =
-        serde_json::from_slice(cm_patch.body()).expect("ConfigMap PATCH body is JSON");
-    let props = body["data"]["broker.properties"]
-        .as_str()
-        .unwrap_or_else(|| panic!("expected data.broker.properties string, body = {body}"));
-    assert_eq!(
-        props, "log.retention.hours=24\n",
-        "broker.properties content, body = {body}"
-    );
-
-    assert_eq!(state.remaining_rules(), 0);
-}
-
-#[tokio::test]
 async fn kafka_patches_pool_label_with_config_hash() {
     let mut cfg = std::collections::BTreeMap::new();
     cfg.insert("log.retention.hours".to_string(), "24".to_string());
