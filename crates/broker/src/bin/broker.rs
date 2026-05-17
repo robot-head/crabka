@@ -119,14 +119,18 @@ fn parse_metrics_addr(s: &str) -> Result<Option<SocketAddr>, Box<dyn std::error:
 /// Pick `Bootstrap` (fresh cluster) vs `Rejoin` (restart on existing
 /// state) based on whether the raft log directory has been populated.
 ///
-/// `RaftLogStore::open` puts its segment files under
-/// `<log_dir>/@metadata-0/`. On the first broker boot the directory
-/// doesn't exist yet; on every subsequent boot it has segment files
-/// from the prior run. Using directory presence + non-empty as the
-/// signal matches `Controller::start`'s `log_is_empty` check without
-/// having to open the log store from here.
+/// The broker hands `BrokerConfig.log_dir.join("__cluster_metadata")`
+/// to `ControllerConfig.log_dir` (see `broker.rs:833`), and
+/// `RaftLogStore::open` then puts its segment files under
+/// `<that>/@metadata-0/`. So the absolute path of the raft segments is
+/// `<log_dir>/__cluster_metadata/@metadata-0/`. On the first broker
+/// boot the directory doesn't exist yet; on every subsequent boot it
+/// has segment files from the prior run. Using directory presence +
+/// non-empty as the signal matches `Controller::start`'s
+/// `log_is_empty` check without having to open the log store from
+/// here.
 fn detect_bootstrap_mode(log_dir: &Path) -> BootstrapMode {
-    let raft_log_dir = log_dir.join("@metadata-0");
+    let raft_log_dir = log_dir.join("__cluster_metadata").join("@metadata-0");
     let has_state = match std::fs::read_dir(&raft_log_dir) {
         Ok(mut entries) => entries.next().is_some(),
         Err(_) => false,
@@ -153,7 +157,7 @@ mod tests {
     fn detect_bootstrap_when_metadata_dir_missing() {
         let dir = tempdir().unwrap();
         // log_dir exists with unrelated content (bootstrap.json from
-        // `crabka format`) but no @metadata-0 subdir.
+        // `crabka format`) but no __cluster_metadata/@metadata-0 subdir.
         std::fs::write(dir.path().join("bootstrap.json"), "{}").unwrap();
         assert_eq!(detect_bootstrap_mode(dir.path()), BootstrapMode::Bootstrap);
     }
@@ -161,7 +165,7 @@ mod tests {
     #[test]
     fn detect_rejoin_when_metadata_dir_has_state() {
         let dir = tempdir().unwrap();
-        let meta = dir.path().join("@metadata-0");
+        let meta = dir.path().join("__cluster_metadata").join("@metadata-0");
         std::fs::create_dir_all(&meta).unwrap();
         std::fs::write(meta.join("00000000000000000000.log"), b"segment").unwrap();
         assert_eq!(detect_bootstrap_mode(dir.path()), BootstrapMode::Rejoin);
@@ -170,9 +174,19 @@ mod tests {
     #[test]
     fn detect_bootstrap_when_metadata_dir_empty() {
         let dir = tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("@metadata-0")).unwrap();
+        std::fs::create_dir_all(dir.path().join("__cluster_metadata").join("@metadata-0"))
+            .unwrap();
         // empty @metadata-0 dir is treated as no state (corner case:
         // crashed first start before any segment was written).
+        assert_eq!(detect_bootstrap_mode(dir.path()), BootstrapMode::Bootstrap);
+    }
+
+    #[test]
+    fn detect_bootstrap_when_only_outer_cluster_metadata_dir_exists() {
+        let dir = tempdir().unwrap();
+        // The outer __cluster_metadata dir exists but the inner
+        // @metadata-0 subdir doesn't — should still be Bootstrap.
+        std::fs::create_dir_all(dir.path().join("__cluster_metadata")).unwrap();
         assert_eq!(detect_bootstrap_mode(dir.path()), BootstrapMode::Bootstrap);
     }
 }
