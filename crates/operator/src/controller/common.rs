@@ -375,7 +375,6 @@ pub fn config_hash(content: &str) -> String {
 ///
 /// Returns a static `&str` describing the parse failure.
 #[allow(
-    dead_code,
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss
