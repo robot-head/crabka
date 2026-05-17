@@ -24,7 +24,7 @@ pbjson.workspace = true
 axum.workspace = true
 arc-swap.workspace = true
 prometheus-client.workspace = true
-tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "macros", "signal", "time", "sync"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "macros", "signal", "time", "sync", "process"] }
 tokio-util = { workspace = true, features = ["rt"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
