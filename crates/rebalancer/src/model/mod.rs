@@ -9,7 +9,7 @@ pub mod proposal;
 pub mod store;
 
 pub use proposal::{Movement, Proposal, ProposalStatus, ProposalSummary};
-pub use store::ProposalStore;
+pub use store::{ProposalStore, StoreError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClusterState {
