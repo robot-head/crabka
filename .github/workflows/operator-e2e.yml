@@ -276,7 +276,7 @@ jobs:
 
       - name: Upload diagnostics artifact
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: operator-e2e-diagnostics
           path: /tmp/operator-e2e-diag/
