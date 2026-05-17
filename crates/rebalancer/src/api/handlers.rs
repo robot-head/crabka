@@ -223,13 +223,17 @@ pub async fn execute_proposal(
         .throttle_bytes_per_sec
         .unwrap_or(state.executor.config.default_throttle_bytes_per_sec);
 
-    let proposal = state.store.get(&id).ok_or_else(|| {
-        ConnectError::new(Code::NotFound, format!("proposal `{id}` not found"))
-    })?;
+    let proposal = state
+        .store
+        .get(&id)
+        .ok_or_else(|| ConnectError::new(Code::NotFound, format!("proposal `{id}` not found")))?;
     if proposal.status.is_terminal() || matches!(proposal.status, ProposalStatus::Executing) {
         return Err(ConnectError::new(
             Code::FailedPrecondition,
-            format!("proposal `{id}` is {:?} (must be Computed)", proposal.status),
+            format!(
+                "proposal `{id}` is {:?} (must be Computed)",
+                proposal.status
+            ),
         ));
     }
     if proposal.movements.is_empty() {
@@ -301,10 +305,7 @@ pub async fn cancel_execution(
     let cancel_token = {
         let slot = state.executor.in_flight.lock().await;
         let Some(handle) = slot.as_ref() else {
-            return Err(ConnectError::new(
-                Code::NotFound,
-                "no execution in flight",
-            ));
+            return Err(ConnectError::new(Code::NotFound, "no execution in flight"));
         };
         if handle.proposal_id != id {
             return Err(ConnectError::new(
@@ -326,10 +327,9 @@ pub async fn cancel_execution(
     // operator can re-poll.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
-        let proposal = state
-            .store
-            .get(&id)
-            .ok_or_else(|| ConnectError::new(Code::NotFound, format!("proposal `{id}` vanished")))?;
+        let proposal = state.store.get(&id).ok_or_else(|| {
+            ConnectError::new(Code::NotFound, format!("proposal `{id}` vanished"))
+        })?;
         if matches!(
             proposal.status,
             ProposalStatus::Cancelled | ProposalStatus::Failed | ProposalStatus::Completed

@@ -22,9 +22,7 @@ use crabka_client_core::Client;
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
 use crabka_rebalancer::api::GoalRegistry;
 use crabka_rebalancer::api::handlers::{self, AppState};
-use crabka_rebalancer::executor::phases::{
-    ClientFacade, ConfigOp, PhaseError,
-};
+use crabka_rebalancer::executor::phases::{ClientFacade, ConfigOp, PhaseError};
 use crabka_rebalancer::executor::throttle::ThrottleTargets;
 use crabka_rebalancer::executor::{ExecutorConfig, ExecutorState};
 use crabka_rebalancer::goals::GoalContext;
@@ -55,10 +53,7 @@ impl ClientFacade for NoopClient {
     async fn submit_reassignments(&self, _movements: &[Movement]) -> Result<(), PhaseError> {
         Ok(())
     }
-    async fn cancel_reassignments(
-        &self,
-        _partitions: &[(String, i32)],
-    ) -> Result<(), PhaseError> {
+    async fn cancel_reassignments(&self, _partitions: &[(String, i32)]) -> Result<(), PhaseError> {
         Ok(())
     }
     async fn list_in_flight(
@@ -490,8 +485,7 @@ async fn execute_proposal_settles_against_real_broker() {
     };
     store.insert(proposal.clone());
 
-    let mut registry =
-        prometheus_client::registry::Registry::with_prefix("crabka_rebalancer");
+    let mut registry = prometheus_client::registry::Registry::with_prefix("crabka_rebalancer");
     let metrics = RebalancerMetrics::register(&mut registry);
     let executor_state = ExecutorState {
         store: store.clone(),
@@ -508,13 +502,7 @@ async fn execute_proposal_settles_against_real_broker() {
     let live_client = Arc::new(LiveClient::new(client));
 
     let cancel = tokio_util::sync::CancellationToken::new();
-    let exec = Execution::new(
-        live_client,
-        executor_state,
-        proposal,
-        50_000_000,
-        cancel,
-    );
+    let exec = Execution::new(live_client, executor_state, proposal, 50_000_000, cancel);
     let exec_task = tokio::spawn(exec.run());
 
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -586,8 +574,7 @@ async fn cancel_clears_throttle_and_reverts() {
     };
     store.insert(proposal.clone());
 
-    let mut registry =
-        prometheus_client::registry::Registry::with_prefix("crabka_rebalancer");
+    let mut registry = prometheus_client::registry::Registry::with_prefix("crabka_rebalancer");
     let metrics = RebalancerMetrics::register(&mut registry);
     let executor_state = ExecutorState {
         store: store.clone(),
@@ -604,13 +591,7 @@ async fn cancel_clears_throttle_and_reverts() {
     let live_client = Arc::new(LiveClient::new(client));
     let cancel = tokio_util::sync::CancellationToken::new();
     let cancel_for_caller = cancel.clone();
-    let exec = Execution::new(
-        live_client,
-        executor_state,
-        proposal,
-        50_000_000,
-        cancel,
-    );
+    let exec = Execution::new(live_client, executor_state, proposal, 50_000_000, cancel);
     let exec_task = tokio::spawn(exec.run());
 
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -681,8 +662,7 @@ async fn restart_resumes_in_flight_plan() {
         .write(dir.path())
         .unwrap();
 
-    let mut registry =
-        prometheus_client::registry::Registry::with_prefix("crabka_rebalancer");
+    let mut registry = prometheus_client::registry::Registry::with_prefix("crabka_rebalancer");
     let metrics = RebalancerMetrics::register(&mut registry);
     let executor_state = ExecutorState {
         store: store.clone(),

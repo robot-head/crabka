@@ -136,7 +136,9 @@ impl ProposalStore {
         };
         match write_atomic(path, &on_disk) {
             Ok(()) => debug!(?path, "proposals.json persisted"),
-            Err(e) => warn!(?path, error = %e, "proposals.json persist failed; in-memory state ahead of disk"),
+            Err(e) => {
+                warn!(?path, error = %e, "proposals.json persist failed; in-memory state ahead of disk")
+            }
         }
     }
 }
@@ -266,6 +268,12 @@ mod tests {
         let bogus = r#"{"version":999,"capacity":4,"proposals":[]}"#;
         fs::write(&path, bogus).unwrap();
         let err = ProposalStore::open(dir.path(), 4).unwrap_err();
-        assert!(matches!(err, StoreError::UnsupportedVersion { found: 999, expected: 1 }));
+        assert!(matches!(
+            err,
+            StoreError::UnsupportedVersion {
+                found: 999,
+                expected: 1
+            }
+        ));
     }
 }

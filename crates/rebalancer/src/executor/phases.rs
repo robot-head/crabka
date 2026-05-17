@@ -175,7 +175,8 @@ pub mod tests {
 
         async fn submit_reassignments(&self, movements: &[Movement]) -> Result<(), PhaseError> {
             if self.submit_remaining_failures.load(Ordering::SeqCst) > 0 {
-                self.submit_remaining_failures.fetch_sub(1, Ordering::SeqCst);
+                self.submit_remaining_failures
+                    .fetch_sub(1, Ordering::SeqCst);
                 return Err(PhaseError::Broker("simulated".into()));
             }
             self.calls
@@ -228,12 +229,22 @@ pub mod tests {
     #[tokio::test]
     async fn submit_movements_chunks_at_batch_size() {
         let client = MockClient::new();
-        let ms = vec![mv("t", 0, vec![1], vec![2]), mv("t", 1, vec![1], vec![2]), mv("t", 2, vec![1], vec![2])];
+        let ms = vec![
+            mv("t", 0, vec![1], vec![2]),
+            mv("t", 1, vec![1], vec![2]),
+            mv("t", 2, vec![1], vec![2]),
+        ];
         submit_movements(&client, &ms, 2).await.unwrap();
         let calls = client.calls();
         let submits: Vec<_> = calls
             .iter()
-            .filter_map(|c| if let MockCall::Submit(m) = c { Some(m.len()) } else { None })
+            .filter_map(|c| {
+                if let MockCall::Submit(m) = c {
+                    Some(m.len())
+                } else {
+                    None
+                }
+            })
             .collect();
         assert_eq!(submits, vec![2, 1]);
     }
@@ -241,18 +252,20 @@ pub mod tests {
     #[tokio::test]
     async fn apply_throttle_then_clear_records_two_alter_configs() {
         let client = MockClient::new();
-        let targets = crate::executor::throttle::compute_throttle_targets(&[mv(
-            "t",
-            0,
-            vec![1],
-            vec![2],
-        )]);
+        let targets =
+            crate::executor::throttle::compute_throttle_targets(&[mv("t", 0, vec![1], vec![2])]);
         apply_throttle(&client, &targets, 50_000_000).await.unwrap();
         clear_throttle(&client, &targets).await.unwrap();
         let calls = client.calls();
         let ops: Vec<_> = calls
             .iter()
-            .filter_map(|c| if let MockCall::AlterConfigs { op, .. } = c { Some(*op) } else { None })
+            .filter_map(|c| {
+                if let MockCall::AlterConfigs { op, .. } = c {
+                    Some(*op)
+                } else {
+                    None
+                }
+            })
             .collect();
         assert_eq!(ops, vec![ConfigOp::Set, ConfigOp::Delete]);
     }
@@ -265,9 +278,6 @@ pub mod tests {
             mv("b", 1, vec![1], vec![3]),
         ];
         let keys = partition_keys(&ms);
-        assert_eq!(
-            keys,
-            vec![("a".to_string(), 0), ("b".to_string(), 1)]
-        );
+        assert_eq!(keys, vec![("a".to_string(), 0), ("b".to_string(), 1)]);
     }
 }

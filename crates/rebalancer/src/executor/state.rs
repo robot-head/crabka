@@ -128,7 +128,10 @@ mod tests {
         f.write(dir.path()).unwrap();
         let loaded2 = InFlightFile::load(dir.path()).unwrap().unwrap();
         assert_eq!(loaded2.phase, Phase::ClearThrottle);
-        assert_eq!(loaded2.target_terminal_status, Some(ProposalStatus::Completed));
+        assert_eq!(
+            loaded2.target_terminal_status,
+            Some(ProposalStatus::Completed)
+        );
     }
 
     #[test]
@@ -154,6 +157,12 @@ mod tests {
         let bogus = r#"{"version":999,"proposal_id":"x","phase":"Submit","started_at_ms":0,"throttle_bytes_per_sec":0}"#;
         std::fs::write(dir.path().join(FILENAME), bogus).unwrap();
         let err = InFlightFile::load(dir.path()).unwrap_err();
-        assert!(matches!(err, StateError::UnsupportedVersion { found: 999, expected: 1 }));
+        assert!(matches!(
+            err,
+            StateError::UnsupportedVersion {
+                found: 999,
+                expected: 1
+            }
+        ));
     }
 }

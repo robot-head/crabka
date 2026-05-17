@@ -169,14 +169,8 @@ mod tests {
 
     #[test]
     fn output_is_deterministic_across_input_orders() {
-        let a = vec![
-            mv("z", 1, vec![3], vec![4]),
-            mv("a", 0, vec![1], vec![2]),
-        ];
-        let b = vec![
-            mv("a", 0, vec![1], vec![2]),
-            mv("z", 1, vec![3], vec![4]),
-        ];
+        let a = vec![mv("z", 1, vec![3], vec![4]), mv("a", 0, vec![1], vec![2])];
+        let b = vec![mv("a", 0, vec![1], vec![2]), mv("z", 1, vec![3], vec![4])];
         assert_eq!(compute_throttle_targets(&a), compute_throttle_targets(&b));
     }
 }

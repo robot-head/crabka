@@ -134,11 +134,8 @@ impl<C: ClientFacade + ?Sized + 'static> Execution<C> {
                         let reason = format!("ApplyThrottle: {e}");
                         terminal = Some((ProposalStatus::Failed, Some(reason.clone())));
                         phase = Phase::ClearThrottle;
-                        let _ = self.persist_phase(
-                            phase,
-                            Some(ProposalStatus::Failed),
-                            Some(reason),
-                        );
+                        let _ =
+                            self.persist_phase(phase, Some(ProposalStatus::Failed), Some(reason));
                     }
                 },
                 Phase::Submit => match self.do_submit().await {
@@ -150,54 +147,36 @@ impl<C: ClientFacade + ?Sized + 'static> Execution<C> {
                         let reason = format!("Submit: {e}");
                         terminal = Some((ProposalStatus::Failed, Some(reason.clone())));
                         phase = Phase::ClearThrottle;
-                        let _ = self.persist_phase(
-                            phase,
-                            Some(ProposalStatus::Failed),
-                            Some(reason),
-                        );
+                        let _ =
+                            self.persist_phase(phase, Some(ProposalStatus::Failed), Some(reason));
                     }
                 },
                 Phase::Wait => match self.do_wait().await {
                     WaitOutcome::Completed => {
                         terminal = Some((ProposalStatus::Completed, None));
                         phase = Phase::ClearThrottle;
-                        let _ = self.persist_phase(
-                            phase,
-                            Some(ProposalStatus::Completed),
-                            None,
-                        );
+                        let _ = self.persist_phase(phase, Some(ProposalStatus::Completed), None);
                     }
                     WaitOutcome::Cancelled => {
                         let _ = self.cancel_in_flight().await;
                         terminal = Some((ProposalStatus::Cancelled, None));
                         phase = Phase::ClearThrottle;
-                        let _ = self.persist_phase(
-                            phase,
-                            Some(ProposalStatus::Cancelled),
-                            None,
-                        );
+                        let _ = self.persist_phase(phase, Some(ProposalStatus::Cancelled), None);
                     }
                     WaitOutcome::DeadlineExceeded => {
                         let _ = self.cancel_in_flight().await;
                         let reason = "Wait: deadline exceeded".to_string();
-                        terminal =
-                            Some((ProposalStatus::Failed, Some(reason.clone())));
+                        terminal = Some((ProposalStatus::Failed, Some(reason.clone())));
                         phase = Phase::ClearThrottle;
-                        let _ = self.persist_phase(
-                            phase,
-                            Some(ProposalStatus::Failed),
-                            Some(reason),
-                        );
+                        let _ =
+                            self.persist_phase(phase, Some(ProposalStatus::Failed), Some(reason));
                     }
                     WaitOutcome::Error(e) => {
                         let reason = format!("Wait: {e}");
                         terminal = Some((ProposalStatus::Failed, Some(reason.clone())));
                         phase = Phase::ClearThrottle;
-                        let _ = self.persist_phase(
-                            phase,
-                            Some(ProposalStatus::Failed),
-                            Some(reason),
-                        );
+                        let _ =
+                            self.persist_phase(phase, Some(ProposalStatus::Failed), Some(reason));
                     }
                 },
                 Phase::ClearThrottle => {
@@ -209,7 +188,9 @@ impl<C: ClientFacade + ?Sized + 'static> Execution<C> {
                     }
                     let (status, reason) = terminal
                         .as_ref()
-                        .map_or((ProposalStatus::Completed, None), |(s, r)| (*s, r.as_deref()));
+                        .map_or((ProposalStatus::Completed, None), |(s, r)| {
+                            (*s, r.as_deref())
+                        });
                     self.commit_terminal(status, reason);
                     let _ = self.cleanup_in_flight_file();
                     return;
@@ -357,8 +338,7 @@ mod tests {
     fn state_with_store(dir: &std::path::Path, p: Proposal) -> ExecutorState {
         let store = Arc::new(ProposalStore::new(20));
         store.insert(p);
-        let mut registry =
-            prometheus_client::registry::Registry::with_prefix("crabka_rebalancer");
+        let mut registry = prometheus_client::registry::Registry::with_prefix("crabka_rebalancer");
         let metrics = RebalancerMetrics::register(&mut registry);
         ExecutorState {
             store,
