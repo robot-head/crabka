@@ -263,6 +263,96 @@ jobs:
           [ "$final_rev" != "$initial_rev" ] || { echo "::error::sts revision didn't change ($initial_rev -> $final_rev)"; exit 1; }
           echo "rolled: $initial_rev -> $final_rev"
 
+      - name: Smoke — NodePort listener exposes per-broker + bootstrap Services
+        run: |
+          set -e
+          # Apply a Kafka with internal + NodePort listeners alongside the
+          # existing `demo` cluster. Uses a separate pool so we can keep
+          # the GC test on `demo` working independently.
+          cat <<EOF | kubectl apply -f -
+          apiVersion: crabka.io/v1alpha1
+          kind: Kafka
+          metadata:
+            name: ext
+            namespace: default
+          spec:
+            kafkaVersion: "0.1.1"
+            listeners:
+              - name: PLAIN
+                port: 9092
+                type: internal
+                tls: false
+              - name: external
+                port: 9094
+                type: nodeport
+                tls: false
+                configuration:
+                  bootstrap:
+                    nodePort: 32099
+                  brokers:
+                    - broker: 10
+                      nodePort: 32100
+          ---
+          apiVersion: crabka.io/v1alpha1
+          kind: KafkaNodePool
+          metadata:
+            name: ext-broker
+            namespace: default
+            labels:
+              crabka.io/cluster: ext
+          spec:
+            roles: [Controller, Broker]
+            replicas: 1
+            nodeIdStart: 10
+          EOF
+
+          # Wait for ListenersReady=True (covers Service creation + status
+          # readback through the apiserver).
+          for i in $(seq 1 60); do
+            valid=$(kubectl get kafka ext -n default -o jsonpath='{.status.conditions[?(@.type=="ListenersValid")].status}' 2>/dev/null || true)
+            ready=$(kubectl get kafka ext -n default -o jsonpath='{.status.conditions[?(@.type=="ListenersReady")].status}' 2>/dev/null || true)
+            echo "attempt $i: ListenersValid=$valid ListenersReady=$ready"
+            if [ "$valid" = "True" ] && [ "$ready" = "True" ]; then break; fi
+            sleep 5
+          done
+          if [ "$valid" != "True" ] || [ "$ready" != "True" ]; then
+            echo "::error::ListenersValid/ListenersReady never reached True"
+            kubectl describe kafka ext -n default
+            kubectl get svc -n default -l app.kubernetes.io/instance=ext
+            exit 1
+          fi
+
+          # Per-broker NodePort Service has the user-supplied nodePort.
+          np=$(kubectl get svc ext-external-10 -n default -o jsonpath='{.spec.ports[0].nodePort}')
+          [ "$np" = "32100" ] || { echo "::error::per-broker nodePort got $np, want 32100"; exit 1; }
+          stype=$(kubectl get svc ext-external-10 -n default -o jsonpath='{.spec.type}')
+          [ "$stype" = "NodePort" ] || { echo "::error::per-broker Service type got $stype, want NodePort"; exit 1; }
+
+          # Bootstrap NodePort Service has the configured bootstrap nodePort.
+          bnp=$(kubectl get svc ext-external-bootstrap -n default -o jsonpath='{.spec.ports[0].nodePort}')
+          [ "$bnp" = "32099" ] || { echo "::error::bootstrap nodePort got $bnp, want 32099"; exit 1; }
+
+          # Per-broker Service pins selector to the StatefulSet's pod-name label.
+          sel=$(kubectl get svc ext-external-10 -n default -o jsonpath='{.spec.selector.statefulset\.kubernetes\.io/pod-name}')
+          [ "$sel" = "ext-ext-broker-0" ] || { echo "::error::per-broker selector got $sel, want ext-ext-broker-0"; exit 1; }
+
+          # status.listeners[name=external] surfaces the bootstrap address.
+          bs=$(kubectl get kafka ext -n default -o jsonpath='{.status.listeners[?(@.name=="external")].bootstrapServers}')
+          [ -n "$bs" ] || { echo "::error::status.listeners[external].bootstrapServers empty"; exit 1; }
+          echo "status.listeners[external].bootstrapServers=$bs"
+
+          # Owned-by-Kafka cleanup: deleting the Kafka should cascade to
+          # the external Services via owner-ref.
+          kubectl delete kafka ext -n default --wait=false
+          for i in $(seq 1 30); do
+            svcs=$(kubectl get svc -n default -l app.kubernetes.io/instance=ext -o name 2>/dev/null | wc -l)
+            echo "attempt $i: ext svcs=$svcs"
+            if [ "$svcs" = "0" ]; then break; fi
+            sleep 2
+          done
+          [ "$svcs" = "0" ] || { echo "::error::external Services not GC'd after Kafka delete"; kubectl get svc -n default -l app.kubernetes.io/instance=ext; exit 1; }
+          kubectl delete knp ext-broker -n default --ignore-not-found
+
       - name: Garbage-collection on Kafka delete
         run: |
           kubectl delete kafka demo -n default --wait=false
