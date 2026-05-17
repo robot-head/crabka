@@ -54,6 +54,16 @@ pub struct Broker {
     /// KIP-13/KIP-124 quota buckets. Updated by the quota refresh task and
     /// consulted by the Produce/Fetch handlers and request-rate enforcement.
     pub quota_buckets: Arc<crate::quota::QuotaBuckets>,
+    /// Slice 22 (controlled shutdown). Set to `true` by
+    /// [`BrokerHandle::controlled_shutdown`]; the heartbeat client reads
+    /// this every tick and stamps `want_shut_down=true` onto outbound
+    /// `BrokerHeartbeat` requests.
+    pub(crate) want_shutdown: Arc<tokio::sync::watch::Sender<bool>>,
+    /// Slice 22 (controlled shutdown). Set to `true` by the heartbeat
+    /// client when the controller responds `should_shut_down=true`;
+    /// [`BrokerHandle::controlled_shutdown`] awaits this before invoking
+    /// the regular shutdown path.
+    pub(crate) should_shutdown: Arc<tokio::sync::watch::Sender<bool>>,
     handlers: HandlerTable,
 }
 
@@ -486,6 +496,56 @@ impl BrokerHandle {
             .cloned()
     }
 
+    /// Request a graceful, controlled shutdown of this broker.
+    ///
+    /// Signals the heartbeat client to set `want_shut_down=true` on
+    /// outbound `BrokerHeartbeat` requests. The controller leader
+    /// reassigns leadership of every partition currently led by this
+    /// broker; once leadership is fully drained, the controller
+    /// responds with `should_shut_down=true`. This call then invokes
+    /// the regular [`shutdown`](Self::shutdown).
+    ///
+    /// Returns `Err(BrokerError::ShutdownTimeout)` if leadership is not
+    /// fully drained within `timeout`. The caller can then fall back to
+    /// a hard shutdown via [`shutdown`](Self::shutdown) if it wishes.
+    ///
+    /// # Errors
+    ///
+    /// - `BrokerError::ShutdownTimeout` — the controller did not
+    ///   acknowledge `should_shut_down=true` within `timeout`.
+    #[allow(clippy::used_underscore_binding)]
+    pub async fn controlled_shutdown(
+        self,
+        timeout: std::time::Duration,
+    ) -> Result<(), BrokerError> {
+        let mut should_shutdown_rx = self._broker.should_shutdown.subscribe();
+        // Latch the request flag. Idempotent — repeated sends to a
+        // `watch::Sender` with the same value are harmless and the
+        // heartbeat client reads `borrow_and_update()` each tick.
+        let _ = self._broker.want_shutdown.send(true);
+        // Wait for the heartbeat client to observe should_shut_down=true.
+        let wait = async {
+            // `subscribe()` returns the current value (`false`) without
+            // marking it seen — so the first `changed()` only fires on
+            // a true edge.
+            loop {
+                if *should_shutdown_rx.borrow() {
+                    return;
+                }
+                if should_shutdown_rx.changed().await.is_err() {
+                    return;
+                }
+            }
+        };
+        match tokio::time::timeout(timeout, wait).await {
+            Ok(()) => {
+                self.shutdown().await;
+                Ok(())
+            }
+            Err(_) => Err(BrokerError::ShutdownTimeout(timeout)),
+        }
+    }
+
     /// Cancel the listener + drain in-flight connections. Awaiting the
     /// returned future blocks until the listener task exits.
     #[allow(clippy::used_underscore_binding)] // `_broker` carries shared state we must reach into during shutdown
@@ -899,6 +959,10 @@ impl Broker {
         // 4d. Broker-side heartbeat client: sends BrokerHeartbeat to the
         //     controller leader on every tick. Child token of
         //     supervisor_shutdown so it is cancelled on broker shutdown.
+        let (want_shutdown_tx, want_shutdown_rx) = tokio::sync::watch::channel(false);
+        let (should_shutdown_tx, _should_shutdown_rx) = tokio::sync::watch::channel(false);
+        let want_shutdown_tx = Arc::new(want_shutdown_tx);
+        let should_shutdown_tx = Arc::new(should_shutdown_tx);
         let heartbeat_shutdown = supervisor_shutdown.child_token();
         let _heartbeat_handle = tokio::spawn(crate::heartbeat::client::run(
             crate::heartbeat::client::Config {
@@ -909,6 +973,8 @@ impl Broker {
                 inter_broker_client: inter_broker_client.clone(),
                 inter_broker_listener_protocol: inter_listener_proto,
                 inter_broker_listener_name: config.inter_broker_listener_name.clone(),
+                want_shutdown: want_shutdown_rx,
+                should_shutdown: should_shutdown_tx.clone(),
             },
         ));
 
@@ -1153,6 +1219,8 @@ impl Broker {
             inter_broker_client,
             throttle_state,
             quota_buckets,
+            want_shutdown: want_shutdown_tx,
+            should_shutdown: should_shutdown_tx,
             handlers,
         });
 

@@ -26,9 +26,17 @@ pub(crate) struct Config {
     pub inter_broker_client: Arc<crate::network::client::InterBrokerClient>,
     pub inter_broker_listener_protocol: ListenerProtocol,
     pub inter_broker_listener_name: String,
+    /// Slice 22: when `true`, stamp `want_shut_down=true` on outbound
+    /// `BrokerHeartbeat` requests. Driven by
+    /// [`crate::BrokerHandle::controlled_shutdown`].
+    pub want_shutdown: tokio::sync::watch::Receiver<bool>,
+    /// Slice 22: set to `true` when the controller responds with
+    /// `should_shut_down=true`. The caller of `controlled_shutdown`
+    /// awaits this flag.
+    pub should_shutdown: Arc<tokio::sync::watch::Sender<bool>>,
 }
 
-pub(crate) async fn run(cfg: Config) {
+pub(crate) async fn run(mut cfg: Config) {
     let mut tick = tokio::time::interval(cfg.interval);
     loop {
         tokio::select! {
@@ -77,18 +85,27 @@ pub(crate) async fn run(cfg: Config) {
             debug!("heartbeat: connect failed");
             continue;
         };
+        let want_shut_down = *cfg.want_shutdown.borrow_and_update();
         let resp = client
             .send(BrokerHeartbeatRequest {
                 broker_id: cfg.broker_id,
                 broker_epoch: 0,
                 current_metadata_offset: 0,
                 want_fence: false,
-                want_shut_down: false,
+                want_shut_down,
                 ..Default::default()
             })
             .await;
-        if let Err(e) = resp {
-            warn!(error = %e, "heartbeat send failed");
+        match resp {
+            Ok(r) => {
+                if r.should_shut_down {
+                    // Latch true; never flip back. The
+                    // `BrokerHandle::controlled_shutdown` waiter is
+                    // single-shot.
+                    let _ = cfg.should_shutdown.send(true);
+                }
+            }
+            Err(e) => warn!(error = %e, "heartbeat send failed"),
         }
     }
 }

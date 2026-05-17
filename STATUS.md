@@ -436,3 +436,54 @@ Kafka client for ApiVersions.
 - 1 new JVM acceptance test: `jvm_kafka_configs_describe_users_scram_credentials_end_to_end` provisions a SCRAM user and confirms `kafka-configs --describe --entity-type users` shows the credential.
 - Closes the recurring JVM-tool quirk that slices 16/16b/16c documented as known limitations.
 - Out of scope: slice 16 `client_id` HandlerTable gap (slice 17b).
+
+## Slice 22 — Controlled shutdown (2026-05-16)
+
+- KIP-500 `BrokerHeartbeat.want_shut_down` is now honored end-to-end.
+  The wire field already existed (api_key 63 v0/v1 in the generated
+  codec) but slice 10b's heartbeat handler ignored it and always
+  responded `should_shut_down=false`.
+- `ControllerLivenessState` gains a `wants_shutdown: HashSet<u64>` plus
+  `set_wants_shutdown(broker_id, want)` / `wants_shutdown(broker_id)`
+  accessors. 2 new unit tests.
+- New pure function `leader_election::select_replacement_leader_for_shutdown`.
+  Picks the first alive ISR member that isn't the draining broker, bumps
+  `leader_epoch`, leaves ISR untouched (the draining broker stays in ISR
+  until the heartbeat ticker observes it dead). 5 new unit tests
+  covering the success path, dead-ISR fallback, not-actually-leader
+  no-op, no-eligible-replica failure, and unknown-partition error.
+- `handlers::broker_heartbeat` runs `drain_leaderships_for_shutdown`
+  when `want_shut_down=true`: scans every partition where the
+  shutting-down broker is leader, submits one `V1Partition` record per
+  drainable partition, returns `should_shut_down=true` iff the pre-submit
+  leader count was zero. Image-driven (no per-partition wait inside the
+  handler); the client polls via subsequent heartbeats.
+- Broker plumbing: two new `watch::Sender` channels on `Broker`
+  (`want_shutdown`, `should_shutdown`). The heartbeat client stamps the
+  request flag onto outbound `BrokerHeartbeatRequest`s via
+  `borrow_and_update()`; it latches `should_shutdown` on the first
+  `should_shut_down=true` response.
+- New `BrokerHandle::controlled_shutdown(timeout) -> Result<(), BrokerError>`.
+  Signals `want_shutdown=true`, awaits `should_shutdown=true` via a
+  `watch::Receiver`, then invokes the existing `shutdown()`. Returns
+  `BrokerError::ShutdownTimeout` if leadership doesn't drain within the
+  timeout.
+- 1 new broker integration test in `tests/controlled_shutdown.rs`:
+  3-broker PLAINTEXT cluster, rf=3 topic with target broker forced as
+  leader of all 4 partitions, `controlled_shutdown` drains leadership
+  and returns `Ok(())`; surviving brokers verify the post-shutdown image
+  shows zero partitions led by the target. Gated
+  `#[cfg(not(target_os = "windows"))]` per multi-broker convention.
+- **Real finding:** the bootstrap broker is the sole replica of
+  `__consumer_offsets/0` (rf=1, replicas=[node_id]). Picking it as the
+  controlled-shutdown target causes the drain loop to block on that
+  rf=1 partition forever — `select_replacement_leader_for_shutdown` has
+  no live alternative to pick. The integration test sidesteps this by
+  targeting a follower broker; production operators must either bump
+  `__consumer_offsets`'s replication factor before draining the
+  bootstrap broker, or hard-shutdown after a deadline. This mirrors
+  Kafka's own behavior (KIP-500 returns `partitions_remaining > 0`
+  until the operator increases rf).
+- Out of scope: the legacy `ControlledShutdown` RPC (api_key 7) — the
+  KIP-500 / KRaft world uses `BrokerHeartbeat.want_shut_down` exclusively;
+  no slice consumer needs the legacy RPC.
