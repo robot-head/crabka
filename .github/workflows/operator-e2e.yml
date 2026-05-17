@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: read
+  pull-requests: write
+
 jobs:
   kind:
     runs-on: ubuntu-latest
@@ -46,7 +50,7 @@ jobs:
             crabka-operator:e2e \
             crabka-operator.tar \
             --arch x86_64 \
-            --repository-append "@local $PWD/packages" \
+            --repository-append "$PWD/packages" \
             --keyring-append "$PWD/melange.rsa.pub"
 
       - name: Create kind cluster
@@ -56,8 +60,27 @@ jobs:
           version: v0.24.0
           node_image: kindest/node:v1.30.0
 
-      - name: Load operator image into kind
-        run: kind load image-archive crabka-operator.tar --name crabka-e2e
+      - name: Load operator image into kind (via docker)
+        run: |
+          # apko writes an OCI archive tagged with an arch suffix
+          # (`crabka-operator:e2e-amd64`). docker load picks that up; we
+          # capture the actual loaded reference and retag to the chart's
+          # expected `crabka-operator:e2e` before pushing into kind.
+          docker load -i crabka-operator.tar 2>&1 | tee /tmp/load.log
+          loaded=$(sed -n 's/^Loaded image: //p' /tmp/load.log | head -1)
+          if [ -z "$loaded" ]; then
+            echo "::error::docker load did not report a loaded image"
+            exit 1
+          fi
+          echo "Resolved loaded image reference: $loaded"
+          echo "--- docker images after load ---"
+          docker images
+          if [ "$loaded" != "crabka-operator:e2e" ]; then
+            docker tag "$loaded" crabka-operator:e2e
+          fi
+          kind load docker-image crabka-operator:e2e --name crabka-e2e
+          echo "--- crictl images on kind node ---"
+          docker exec crabka-e2e-control-plane crictl images
 
       - name: Install CRDs
         run: kubectl apply -f deploy/crds/crabka.io_kafkas.yaml
@@ -73,7 +96,7 @@ jobs:
 
       - name: Wait for operator rollout
         run: |
-          kubectl rollout status -n crabka-operator deploy/operator-crabka-operator --timeout=120s
+          kubectl rollout status -n crabka-operator deploy/operator-crabka-operator --timeout=240s
 
       - name: Apply a placeholder Kafka CR
         run: |
@@ -99,9 +122,58 @@ jobs:
           done
           echo "::error::Kafka 'demo' did not become Ready in 60s"
           kubectl describe kafka demo -n default
-          kubectl logs -n crabka-operator deploy/operator-crabka-operator --tail=200
           exit 1
 
-      - name: Operator logs (debug)
-        if: always()
-        run: kubectl logs -n crabka-operator deploy/operator-crabka-operator --tail=500 || true
+      - name: Cluster diagnostics on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set +e
+          DIAG=/tmp/diag.md
+          {
+            echo "## operator-e2e diagnostics (run \`${GITHUB_RUN_ID}\`)"
+            echo
+            echo "### Critical findings"
+            pod_phase=$(kubectl get pods -n crabka-operator -l app.kubernetes.io/name=crabka-operator -o jsonpath='{.items[0].status.phase}' 2>/dev/null)
+            pod_reason=$(kubectl get pods -n crabka-operator -l app.kubernetes.io/name=crabka-operator -o jsonpath='{.items[0].status.containerStatuses[0].state.waiting.reason}' 2>/dev/null)
+            pod_msg=$(kubectl get pods -n crabka-operator -l app.kubernetes.io/name=crabka-operator -o jsonpath='{.items[0].status.containerStatuses[0].state.waiting.message}' 2>/dev/null)
+            pod_image=$(kubectl get pods -n crabka-operator -l app.kubernetes.io/name=crabka-operator -o jsonpath='{.items[0].spec.containers[0].image}' 2>/dev/null)
+            last_term=$(kubectl get pods -n crabka-operator -l app.kubernetes.io/name=crabka-operator -o jsonpath='{.items[0].status.containerStatuses[0].lastState.terminated}' 2>/dev/null)
+            echo "- pod phase: \`${pod_phase:-unknown}\`"
+            echo "- container image (spec): \`${pod_image:-(none)}\`"
+            echo "- waiting reason: \`${pod_reason:-(none)}\`"
+            echo "- waiting message: \`${pod_msg:-(none)}\`"
+            echo "- last terminated: \`${last_term:-(none)}\`"
+            echo "::error::operator pod phase=${pod_phase:-unknown} reason=${pod_reason:-none} image=${pod_image:-none}"
+            echo
+            for section in \
+              "pods|kubectl get pods -A -o wide" \
+              "events|kubectl get events -A --sort-by=.lastTimestamp" \
+              "describe deploy|kubectl describe deploy/operator-crabka-operator -n crabka-operator" \
+              "describe pods|kubectl describe pods -n crabka-operator -l app.kubernetes.io/name=crabka-operator" \
+              "operator logs|kubectl logs -n crabka-operator deploy/operator-crabka-operator --tail=500" \
+              "operator logs (previous)|kubectl logs -n crabka-operator deploy/operator-crabka-operator --tail=500 --previous" \
+              "kind node images|docker exec crabka-e2e-control-plane crictl images" \
+              "host images|docker images"
+            do
+              title=${section%%|*}
+              cmd=${section#*|}
+              echo "### ${title}"
+              echo '```'
+              eval "$cmd" 2>&1
+              echo '```'
+              echo
+            done
+          } > "$DIAG"
+          cat "$DIAG"
+          if [ -n "$PR_NUMBER" ] && [ -n "$GH_TOKEN" ]; then
+            jq -Rs '{body: .}' "$DIAG" > /tmp/comment.json
+            curl -sS -X POST \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${REPO}/issues/${PR_NUMBER}/comments" \
+              --data-binary @/tmp/comment.json | head -20
+          fi
