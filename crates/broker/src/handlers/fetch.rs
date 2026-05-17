@@ -358,6 +358,23 @@ pub(crate) async fn handle(
         }
     }
 
+    // Slice 39: per-topic Prometheus accounting. Sum the encoded
+    // record-batch bytes the response is about to ship, per topic.
+    // Topics that returned an error (empty `records`) still get a
+    // request count (the fetch arrived), matching Kafka's
+    // BrokerTopicMetrics:TotalFetchRequestsPerSec semantics.
+    for topic_resp in &responses {
+        if topic_resp.topic.is_empty() {
+            continue;
+        }
+        let bytes: u64 = topic_resp
+            .partitions
+            .iter()
+            .map(|p| p.records.as_ref().map_or(0, RecordBatch::encoded_len) as u64)
+            .sum();
+        broker.metrics.record_fetch(&topic_resp.topic, bytes);
+    }
+
     let resp = FetchResponse {
         throttle_time_ms: throttle_time_ms_val,
         error_code: 0,

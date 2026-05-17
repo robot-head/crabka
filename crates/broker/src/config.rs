@@ -166,6 +166,14 @@ pub struct BrokerConfig {
     /// — callers can still trigger an immediate reload via
     /// [`crate::BrokerHandle::reload_tls`].
     pub tls_reload_interval: std::time::Duration,
+
+    /// Slice 39: bind address for the Prometheus `/metrics` HTTP
+    /// endpoint. `None` disables the server entirely (the broker still
+    /// updates its internal counters, but nothing scrapes them).
+    /// Defaults to `Some(0.0.0.0:9404)` in production (the same port
+    /// the JMX exporter uses for vanilla Kafka), `None` in
+    /// `for_tests` so unit tests don't fight over port allocation.
+    pub metrics_listen_addr: Option<SocketAddr>,
 }
 
 impl BrokerConfig {
@@ -214,6 +222,10 @@ impl BrokerConfig {
             // Short interval so hot-reload tests don't wait long for a
             // watcher tick. Tests that don't care can ignore it.
             tls_reload_interval: std::time::Duration::from_millis(200),
+            // Tests opt into the metrics endpoint individually by
+            // setting this to `Some(127.0.0.1:0)`; sharing a default
+            // port would race in parallel test runs.
+            metrics_listen_addr: None,
         }
     }
 
@@ -341,6 +353,13 @@ impl Default for BrokerConfig {
             #[cfg(any(test, feature = "test-helpers"))]
             cleaner_interval_override: None,
             tls_reload_interval: std::time::Duration::from_secs(30),
+            // Default to `None` so multi-broker library users (and
+            // multi-broker tests) don't race on a fixed port. The
+            // `crabka-broker` binary opts in to `Some(0.0.0.0:9404)`
+            // via its `--metrics-listen-addr` CLI flag — the operator
+            // sets that via env, so production deployments still get
+            // metrics by default.
+            metrics_listen_addr: None,
         }
     }
 }

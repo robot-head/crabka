@@ -1,0 +1,227 @@
+//! Broker-side Prometheus metrics (slice 39).
+//!
+//! Mirrors the operator's `telemetry` / `health` pattern: a shared
+//! `Registry` is wrapped in `Arc<Mutex<…>>` so hot-path counters can
+//! be looked up without holding the registry lock. The
+//! [`BrokerMetrics`] struct hands out cheap `Arc<Counter>` / `Arc<Gauge>`
+//! handles that handlers and background tasks clone and increment
+//! directly.
+//!
+//! Naming follows Prometheus convention: `crabka_broker_<subject>_<unit>`.
+//! Where Kafka has a canonical JMX name, we keep the metric semantics
+//! close to it (e.g. `BrokerTopicMetrics:BytesInPerSec` ↔
+//! `crabka_broker_topic_bytes_in_total`), but the units convert from
+//! per-second gauges to monotonic counters per Prometheus best practice
+//! — operators compute rates with `rate()` at scrape time.
+
+use std::sync::Arc;
+
+use prometheus_client::encoding::EncodeLabelSet;
+use prometheus_client::metrics::counter::Counter;
+use prometheus_client::metrics::family::Family;
+use prometheus_client::metrics::gauge::Gauge;
+use prometheus_client::registry::Registry;
+use tokio::sync::Mutex;
+
+/// Shared registry owning every metric the broker emits. Wrapped in
+/// `Arc<Mutex<…>>` because `prometheus-client` requires `&mut Registry`
+/// to register and we want lazy registration from multiple init paths.
+pub type SharedRegistry = Arc<Mutex<Registry>>;
+
+/// Per-topic label set. `EncodeLabelSet` is the prometheus-client
+/// derive that produces the `topic="<name>"` label on emitted samples.
+#[derive(Debug, Clone, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct TopicLabel {
+    pub topic: String,
+}
+
+/// Cheaply-clonable bundle of counter / gauge handles. Construct once
+/// in `Broker::start`; hand out clones (each clone is a single
+/// `Arc::clone`) to every subsystem that emits.
+#[derive(Clone)]
+pub struct BrokerMetrics {
+    pub registry: SharedRegistry,
+    pub topic_bytes_in: Family<TopicLabel, Counter>,
+    pub topic_bytes_out: Family<TopicLabel, Counter>,
+    pub topic_produce_requests: Family<TopicLabel, Counter>,
+    pub topic_fetch_requests: Family<TopicLabel, Counter>,
+    pub partitions_led: Gauge,
+    pub active_controller: Gauge,
+    pub isr_shrinks_total: Counter,
+    pub isr_expands_total: Counter,
+}
+
+impl BrokerMetrics {
+    /// Build a fresh registry, register every metric, and return the
+    /// bundle. Idempotent register failures aren't a concern because we
+    /// only call this once per broker process.
+    #[must_use]
+    pub fn new() -> Self {
+        let mut registry = Registry::with_prefix("crabka_broker");
+
+        let topic_bytes_in: Family<TopicLabel, Counter> = Family::default();
+        let topic_bytes_out: Family<TopicLabel, Counter> = Family::default();
+        let topic_produce_requests: Family<TopicLabel, Counter> = Family::default();
+        let topic_fetch_requests: Family<TopicLabel, Counter> = Family::default();
+        let partitions_led = Gauge::default();
+        let active_controller = Gauge::default();
+        let isr_shrinks_total = Counter::default();
+        let isr_expands_total = Counter::default();
+
+        registry.register(
+            "topic_bytes_in",
+            "Bytes received from producers, per topic (cumulative). \
+             Operators compute throughput via rate(...).",
+            topic_bytes_in.clone(),
+        );
+        registry.register(
+            "topic_bytes_out",
+            "Bytes delivered to fetchers, per topic (cumulative).",
+            topic_bytes_out.clone(),
+        );
+        registry.register(
+            "topic_produce_requests",
+            "Produce requests handled, per topic (cumulative). One \
+             increment per topic per Produce request.",
+            topic_produce_requests.clone(),
+        );
+        registry.register(
+            "topic_fetch_requests",
+            "Fetch requests handled, per topic (cumulative). One \
+             increment per topic per Fetch request.",
+            topic_fetch_requests.clone(),
+        );
+        registry.register(
+            "partitions_led",
+            "Number of partitions for which this broker is currently leader.",
+            partitions_led.clone(),
+        );
+        registry.register(
+            "active_controller",
+            "1 if this broker is the raft (controller) leader, 0 otherwise.",
+            active_controller.clone(),
+        );
+        // Counter names omit the `_total` suffix — `prometheus-client`
+        // appends it automatically when encoding (so emitting
+        // `isr_shrinks` here renders as `crabka_broker_isr_shrinks_total`
+        // on the wire).
+        registry.register(
+            "isr_shrinks",
+            "Cumulative count of ISR shrinks proposed by this broker's \
+             ISR-maintenance loop.",
+            isr_shrinks_total.clone(),
+        );
+        registry.register(
+            "isr_expands",
+            "Cumulative count of ISR expands proposed by this broker's \
+             ISR-maintenance loop.",
+            isr_expands_total.clone(),
+        );
+
+        Self {
+            registry: Arc::new(Mutex::new(registry)),
+            topic_bytes_in,
+            topic_bytes_out,
+            topic_produce_requests,
+            topic_fetch_requests,
+            partitions_led,
+            active_controller,
+            isr_shrinks_total,
+            isr_expands_total,
+        }
+    }
+
+    /// Convenience: record a Produce hit on `topic` with the given
+    /// payload size. No-op on the error path — callers shouldn't call
+    /// this if the request was rejected.
+    pub fn record_produce(&self, topic: &str, bytes: u64) {
+        let lbl = TopicLabel {
+            topic: topic.to_string(),
+        };
+        self.topic_produce_requests.get_or_create(&lbl).inc();
+        if bytes > 0 {
+            self.topic_bytes_in.get_or_create(&lbl).inc_by(bytes);
+        }
+    }
+
+    /// Convenience: record a Fetch hit on `topic` with the bytes
+    /// delivered. The `bytes` arg may legitimately be zero (empty
+    /// fetch); the request counter still increments.
+    pub fn record_fetch(&self, topic: &str, bytes: u64) {
+        let lbl = TopicLabel {
+            topic: topic.to_string(),
+        };
+        self.topic_fetch_requests.get_or_create(&lbl).inc();
+        if bytes > 0 {
+            self.topic_bytes_out.get_or_create(&lbl).inc_by(bytes);
+        }
+    }
+}
+
+impl Default for BrokerMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn registry_has_broker_prefix_and_all_metrics() {
+        let m = BrokerMetrics::new();
+        m.record_produce("topic-a", 100);
+        m.record_fetch("topic-a", 50);
+        m.partitions_led.set(7);
+        m.active_controller.set(1);
+        m.isr_shrinks_total.inc();
+        m.isr_expands_total.inc_by(2);
+
+        let mut buf = String::new();
+        let r = m.registry.lock().await;
+        prometheus_client::encoding::text::encode(&mut buf, &r).unwrap();
+        // Spot-check every metric is present and prefixed.
+        for needle in [
+            "crabka_broker_topic_bytes_in_total",
+            "crabka_broker_topic_bytes_out_total",
+            "crabka_broker_topic_produce_requests_total",
+            "crabka_broker_topic_fetch_requests_total",
+            "crabka_broker_partitions_led",
+            "crabka_broker_active_controller",
+            "crabka_broker_isr_shrinks_total",
+            "crabka_broker_isr_expands_total",
+        ] {
+            assert!(buf.contains(needle), "missing {needle} in:\n{buf}");
+        }
+        assert!(buf.contains("topic=\"topic-a\""), "topic label missing");
+        // Values made it through.
+        assert!(buf.contains("100"), "bytes_in=100 missing");
+        assert!(buf.contains("50"), "bytes_out=50 missing");
+        assert!(buf.contains('7'), "partitions_led=7 missing");
+    }
+
+    #[test]
+    fn record_fetch_zero_bytes_still_bumps_request_count() {
+        let m = BrokerMetrics::new();
+        let lbl = TopicLabel {
+            topic: "t".to_string(),
+        };
+        // Pre-condition: no entry for the label yet.
+        m.record_fetch("t", 0);
+        assert_eq!(m.topic_fetch_requests.get_or_create(&lbl).get(), 1);
+        assert_eq!(m.topic_bytes_out.get_or_create(&lbl).get(), 0);
+    }
+
+    #[test]
+    fn record_produce_increments_both_counters() {
+        let m = BrokerMetrics::new();
+        let lbl = TopicLabel {
+            topic: "t".to_string(),
+        };
+        m.record_produce("t", 1024);
+        m.record_produce("t", 2048);
+        assert_eq!(m.topic_produce_requests.get_or_create(&lbl).get(), 2);
+        assert_eq!(m.topic_bytes_in.get_or_create(&lbl).get(), 3072);
+    }
+}

@@ -179,7 +179,7 @@ implements it today.
 | Feature | Status |
 |---------|:------:|
 | Structured logging via `tracing` | ✅ |
-| Metrics / JMX-equivalent exporter | ❌ |
+| Prometheus metrics / JMX-equivalent exporter | ✅ |
 | Distributed tracing integration | ❌ |
 
 ### Quotas

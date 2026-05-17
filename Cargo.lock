@@ -820,6 +820,7 @@ name = "crabka-broker"
 version = "0.1.1"
 dependencies = [
  "async-trait",
+ "axum",
  "bytes",
  "clap",
  "crabka-broker",
@@ -834,6 +835,7 @@ dependencies = [
  "dashmap",
  "futures-util",
  "pbkdf2",
+ "prometheus-client",
  "rustls",
  "rustls-pki-types",
  "serde",
@@ -844,6 +846,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tokio-util",
+ "tower",
  "tracing",
  "tracing-subscriber",
  "uuid",
