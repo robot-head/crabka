@@ -1,11 +1,11 @@
 //! `crabka-broker` — single-node Kafka-compatible broker daemon.
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::Parser;
 
-use crabka_broker::{Broker, BrokerConfig};
+use crabka_broker::{BootstrapMode, Broker, BrokerConfig};
 use crabka_log::LogConfig;
 
 #[derive(Debug, Parser)]
@@ -73,6 +73,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     });
     let metrics_listen_addr = parse_metrics_addr(&args.metrics_listen_addr)?;
+    let bootstrap_mode = detect_bootstrap_mode(&args.log_dir);
+    tracing::info!(?bootstrap_mode, log_dir = %args.log_dir.display(), "selected bootstrap mode");
     let config = BrokerConfig {
         broker_id: args.broker_id,
         listen_addr: args.listen_addr,
@@ -87,7 +89,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         replica_lag_time_max_ms: 30_000,
         controller_election_timeout: std::time::Duration::from_secs(5),
         controller_heartbeat_interval: std::time::Duration::from_millis(500),
-        bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
+        bootstrap_mode,
         cluster_id: args.cluster_id,
         metrics_listen_addr,
         ..BrokerConfig::default()
@@ -112,4 +114,65 @@ fn parse_metrics_addr(s: &str) -> Result<Option<SocketAddr>, Box<dyn std::error:
         return Ok(None);
     }
     Ok(Some(trimmed.parse()?))
+}
+
+/// Pick `Bootstrap` (fresh cluster) vs `Rejoin` (restart on existing
+/// state) based on whether the raft log directory has been populated.
+///
+/// `RaftLogStore::open` puts its segment files under
+/// `<log_dir>/@metadata-0/`. On the first broker boot the directory
+/// doesn't exist yet; on every subsequent boot it has segment files
+/// from the prior run. Using directory presence + non-empty as the
+/// signal matches `Controller::start`'s `log_is_empty` check without
+/// having to open the log store from here.
+fn detect_bootstrap_mode(log_dir: &Path) -> BootstrapMode {
+    let raft_log_dir = log_dir.join("@metadata-0");
+    let has_state = match std::fs::read_dir(&raft_log_dir) {
+        Ok(mut entries) => entries.next().is_some(),
+        Err(_) => false,
+    };
+    if has_state {
+        BootstrapMode::Rejoin
+    } else {
+        BootstrapMode::Bootstrap
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn detect_bootstrap_when_log_dir_is_empty() {
+        let dir = tempdir().unwrap();
+        assert_eq!(detect_bootstrap_mode(dir.path()), BootstrapMode::Bootstrap);
+    }
+
+    #[test]
+    fn detect_bootstrap_when_metadata_dir_missing() {
+        let dir = tempdir().unwrap();
+        // log_dir exists with unrelated content (bootstrap.json from
+        // `crabka format`) but no @metadata-0 subdir.
+        std::fs::write(dir.path().join("bootstrap.json"), "{}").unwrap();
+        assert_eq!(detect_bootstrap_mode(dir.path()), BootstrapMode::Bootstrap);
+    }
+
+    #[test]
+    fn detect_rejoin_when_metadata_dir_has_state() {
+        let dir = tempdir().unwrap();
+        let meta = dir.path().join("@metadata-0");
+        std::fs::create_dir_all(&meta).unwrap();
+        std::fs::write(meta.join("00000000000000000000.log"), b"segment").unwrap();
+        assert_eq!(detect_bootstrap_mode(dir.path()), BootstrapMode::Rejoin);
+    }
+
+    #[test]
+    fn detect_bootstrap_when_metadata_dir_empty() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("@metadata-0")).unwrap();
+        // empty @metadata-0 dir is treated as no state (corner case:
+        // crashed first start before any segment was written).
+        assert_eq!(detect_bootstrap_mode(dir.path()), BootstrapMode::Bootstrap);
+    }
 }
