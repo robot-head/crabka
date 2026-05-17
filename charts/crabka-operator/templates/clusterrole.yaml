@@ -26,4 +26,9 @@ rules:
   - apiGroups: [""]
     resources: ["nodes"]
     verbs: ["get", "list", "watch"]
+  # Slice 25: the Kafka reconciler lists pods to read
+  # `pod.spec.nodeName` when resolving NodePort listener advertised hosts.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
 {{- end }}
