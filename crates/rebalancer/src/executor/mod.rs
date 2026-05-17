@@ -6,4 +6,5 @@
 //! The file is intentionally split across `phases`, `state`, and
 //! `throttle` so each piece is independently testable.
 
+pub mod state;
 pub mod throttle;
