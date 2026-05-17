@@ -128,6 +128,57 @@ pub(crate) enum ElectError {
     NoEligibleReplica,
 }
 
+/// Pick a replacement leader for a partition currently led by a broker
+/// that asked to shut down. Returns the new `PartitionRecord` ready to
+/// submit, or `ElectError::ElectionNotNeeded` when `shutting_down` is
+/// not actually this partition's current leader, or
+/// `ElectError::NoEligibleReplica` when no other ISR member is alive.
+///
+/// Differs from `select_new_leader_for_partition(Preferred)`:
+/// - Trigger is "current leader wants to drain", not "preferred replica
+///   isn't leader". So we pick any alive ISR member that isn't the
+///   shutting-down broker, not strictly the preferred one.
+/// - ISR is left unchanged. The shutting-down broker stays in ISR
+///   until it actually goes offline; the heartbeat loop is what flips
+///   it dead.
+pub(crate) async fn select_replacement_leader_for_shutdown(
+    image: &crabka_metadata::MetadataImage,
+    liveness: &ControllerLivenessState,
+    topic: &str,
+    partition: i32,
+    shutting_down: NodeId,
+) -> Result<crabka_metadata::PartitionRecord, ElectError> {
+    let pr = image
+        .partition(topic, partition)
+        .ok_or(ElectError::UnknownTopicOrPartition)?;
+    if pr.leader != shutting_down {
+        return Err(ElectError::ElectionNotNeeded);
+    }
+    let mut new_leader: Option<NodeId> = None;
+    for &n in &pr.isr {
+        if n == shutting_down {
+            continue;
+        }
+        if liveness.is_alive(n).await {
+            new_leader = Some(n);
+            break;
+        }
+    }
+    let Some(new_leader) = new_leader else {
+        return Err(ElectError::NoEligibleReplica);
+    };
+    Ok(crabka_metadata::PartitionRecord {
+        topic: pr.topic.clone(),
+        partition: pr.partition,
+        leader: new_leader,
+        replicas: pr.replicas.clone(),
+        isr: pr.isr.clone(),
+        leader_epoch: pr.leader_epoch + 1,
+        adding_replicas: pr.adding_replicas.clone(),
+        removing_replicas: pr.removing_replicas.clone(),
+    })
+}
+
 /// Operator-triggered single-partition election. Returns the new
 /// `PartitionRecord` ready to submit, or an `ElectError`.
 ///
@@ -207,6 +258,7 @@ mod tests {
 
     use super::{
         ControllerLivenessState, ElectError, ElectionType, select_new_leader_for_partition,
+        select_replacement_leader_for_shutdown,
     };
     use crabka_raft::NodeId;
 
@@ -318,6 +370,78 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err, ElectError::ElectionNotNeeded);
+    }
+
+    #[tokio::test]
+    async fn shutdown_replacement_picks_alive_isr_member() {
+        // Broker 1 is leader and wants to shut down. ISR is {1,2,3}, all alive.
+        let img = img_with_partition("foo", 0, /*leader*/ 1, &[1, 2, 3], &[1, 2, 3]);
+        let l = liveness_with_alive(&[1, 2, 3]).await;
+        let new_pr =
+            select_replacement_leader_for_shutdown(&img, &l, "foo", 0, /*shutting_down*/ 1)
+                .await
+                .expect("should pick replacement");
+        assert_eq!(new_pr.leader, 2);
+        // ISR untouched — shutting-down broker stays in ISR until dead.
+        assert_eq!(new_pr.isr, vec![1, 2, 3]);
+        assert_eq!(new_pr.leader_epoch, 6);
+    }
+
+    #[tokio::test]
+    async fn shutdown_replacement_skips_dead_isr_members() {
+        // Broker 1 (leader) wants to drain. ISR {1,2,3} but 2 is dead.
+        // Replacement should be 3.
+        let img = img_with_partition("foo", 0, 1, &[1, 2, 3], &[1, 2, 3]);
+        let l = liveness_with_alive(&[1, 3]).await;
+        let new_pr = select_replacement_leader_for_shutdown(&img, &l, "foo", 0, 1)
+            .await
+            .expect("should pick replacement");
+        assert_eq!(new_pr.leader, 3);
+        assert_eq!(new_pr.leader_epoch, 6);
+    }
+
+    #[tokio::test]
+    async fn shutdown_replacement_election_not_needed_when_not_leader() {
+        // Broker 5 wants to shut down, but leader is 1. No-op.
+        let img = img_with_partition("foo", 0, 1, &[1, 2, 3], &[1, 2, 3]);
+        let l = liveness_with_alive(&[1, 2, 3, 5]).await;
+        let err = select_replacement_leader_for_shutdown(&img, &l, "foo", 0, 5)
+            .await
+            .unwrap_err();
+        assert_eq!(err, ElectError::ElectionNotNeeded);
+    }
+
+    #[tokio::test]
+    async fn shutdown_replacement_no_other_isr_alive() {
+        // Broker 1 wants to drain. ISR is {1} only (singleton). No
+        // other broker eligible.
+        let img = img_with_partition("foo", 0, 1, &[1, 2, 3], &[1]);
+        let l = liveness_with_alive(&[1, 2, 3]).await;
+        let err = select_replacement_leader_for_shutdown(&img, &l, "foo", 0, 1)
+            .await
+            .unwrap_err();
+        assert_eq!(err, ElectError::NoEligibleReplica);
+    }
+
+    #[tokio::test]
+    async fn shutdown_replacement_other_isr_member_dead_falls_to_no_eligible() {
+        // Broker 1 wants to drain. ISR {1,2} but 2 is dead.
+        let img = img_with_partition("foo", 0, 1, &[1, 2, 3], &[1, 2]);
+        let l = liveness_with_alive(&[1, 3]).await; // 2 dead, 3 alive but not in ISR
+        let err = select_replacement_leader_for_shutdown(&img, &l, "foo", 0, 1)
+            .await
+            .unwrap_err();
+        assert_eq!(err, ElectError::NoEligibleReplica);
+    }
+
+    #[tokio::test]
+    async fn shutdown_replacement_unknown_partition() {
+        let img = MetadataImage::new(Uuid::nil());
+        let l = liveness_with_alive(&[1]).await;
+        let err = select_replacement_leader_for_shutdown(&img, &l, "ghost", 0, 1)
+            .await
+            .unwrap_err();
+        assert_eq!(err, ElectError::UnknownTopicOrPartition);
     }
 
     #[tokio::test]

@@ -1,0 +1,318 @@
+// Rust 1.95 annotate-snippets ICE on `clippy::pedantic` (see
+// elect_leaders.rs / acl_handlers.rs preamble).
+#![allow(clippy::pedantic)]
+
+//! Slice 22 — `BrokerHandle::controlled_shutdown` integration test.
+//!
+//! A 3-broker PLAINTEXT cluster, rf=3 topic on which broker 1 is the
+//! preferred leader of every partition. `controlled_shutdown(broker 1)`
+//! must:
+//! 1. Move leadership of every partition off broker 1, and
+//! 2. Return `Ok(())` once the controller has acknowledged
+//!    `should_shut_down=true` (i.e. zero partitions still leadered by
+//!    broker 1).
+//!
+//! Gated to non-Windows to match the multi-broker convention from
+//! slices 10b/12b (openraft `debug_assert!` races on the hosted
+//! Windows task scheduler are unrelated to the protocol under test).
+
+#![cfg(not(target_os = "windows"))]
+
+use std::io;
+use std::net::SocketAddr;
+use std::time::{Duration, Instant};
+
+use bytes::{Buf, BufMut, BytesMut};
+use crabka_broker::BrokerHandle;
+use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
+use crabka_protocol::owned::create_topics_response::CreateTopicsResponse;
+use crabka_protocol::{Decode, Encode};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
+
+mod support;
+
+const CREATE_TOPICS_API_KEY: i16 = 19;
+const CREATE_TOPICS_VERSION: i16 = 7;
+
+/// Length-prefixed PLAINTEXT request/response over a single TCP
+/// stream. Mirrors the helper in `tests/elect_leaders.rs`.
+async fn round_trip(
+    stream: &mut TcpStream,
+    api_key: i16,
+    api_version: i16,
+    corr_id: i32,
+    flexible: bool,
+    body: &[u8],
+) -> Result<Vec<u8>, io::Error> {
+    let mut frame = BytesMut::with_capacity(16 + body.len());
+    frame.put_i16(api_key);
+    frame.put_i16(api_version);
+    frame.put_i32(corr_id);
+    let client_id = "crabka-controlled-shutdown-test";
+    frame.put_i16(i16::try_from(client_id.len()).expect("client_id fits"));
+    frame.put_slice(client_id.as_bytes());
+    if flexible {
+        frame.put_u8(0);
+    }
+    frame.put_slice(body);
+
+    stream
+        .write_u32(u32::try_from(frame.len()).expect("frame fits in u32"))
+        .await?;
+    stream.write_all(&frame).await?;
+    stream.flush().await?;
+
+    let resp_len = stream.read_u32().await?;
+    let mut resp = vec![0u8; resp_len as usize];
+    stream.read_exact(&mut resp).await?;
+
+    let mut cur = &resp[..];
+    let _corr = cur.get_i32();
+    if flexible {
+        let _tagged = cur.get_u8();
+    }
+    Ok(cur.to_vec())
+}
+
+async fn create_topic(addr: SocketAddr, name: &str, partitions: i32, rf: i16) {
+    let req = CreateTopicsRequest {
+        topics: vec![CreatableTopic {
+            name: name.to_string(),
+            num_partitions: partitions,
+            replication_factor: rf,
+            ..Default::default()
+        }],
+        timeout_ms: 5_000,
+        ..Default::default()
+    };
+    let mut stream = TcpStream::connect(addr).await.expect("connect");
+    let mut body = BytesMut::new();
+    req.encode(&mut body, CREATE_TOPICS_VERSION)
+        .expect("encode CreateTopics");
+    let resp_bytes = round_trip(
+        &mut stream,
+        CREATE_TOPICS_API_KEY,
+        CREATE_TOPICS_VERSION,
+        1,
+        true,
+        &body,
+    )
+    .await
+    .expect("CreateTopics round-trip");
+    let mut cur: &[u8] = &resp_bytes;
+    let resp = CreateTopicsResponse::decode(&mut cur, CREATE_TOPICS_VERSION)
+        .expect("decode CreateTopicsResponse");
+    assert_eq!(resp.topics.len(), 1);
+    assert_eq!(
+        resp.topics[0].error_code, 0,
+        "CreateTopics({name}) must succeed: {:?}",
+        resp.topics[0].error_message
+    );
+}
+
+/// Wait until `(topic, partition)` appears in `handle`'s metadata
+/// image.
+async fn wait_partition_exists(handle: &BrokerHandle, topic: &str, partition: i32) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        if handle.has_partition(topic, partition).await {
+            return;
+        }
+        assert!(
+            Instant::now() <= deadline,
+            "partition {topic}-{partition} never appeared within 15s"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Inject a `PartitionRecord` forcing `target` to be the leader for
+/// every partition of `topic`. Uses `submit_metadata_record_for_test`
+/// to bypass the public wire path so the test doesn't have to drive
+/// ElectLeaders. Returns once every partition is observed as
+/// `leader=target` in the image.
+async fn force_leadership_for_test(
+    leader_handle: &BrokerHandle,
+    topic: &str,
+    partitions: i32,
+    target: u64,
+    replicas: &[u64],
+) {
+    use crabka_metadata::{MetadataRecord, PartitionRecord};
+
+    let image = leader_handle.controller_image_for_test();
+    for p in 0..partitions {
+        let Some(pr) = image.partition(topic, p) else {
+            continue;
+        };
+        let record = MetadataRecord::V1Partition(PartitionRecord {
+            topic: topic.to_string(),
+            partition: p,
+            leader: target,
+            replicas: replicas.to_vec(),
+            isr: replicas.to_vec(),
+            leader_epoch: pr.leader_epoch + 1,
+            adding_replicas: vec![],
+            removing_replicas: vec![],
+        });
+        leader_handle
+            .submit_metadata_record_for_test(record)
+            .await
+            .expect("submit forced leadership");
+    }
+
+    // Wait until every partition reports `target` as leader.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let mut all = true;
+        for p in 0..partitions {
+            if leader_handle.partition_leader_for_test(topic, p) != Some(target) {
+                all = false;
+                break;
+            }
+        }
+        if all {
+            return;
+        }
+        assert!(
+            Instant::now() <= deadline,
+            "forced leader {target} not observed on all {partitions} partitions within 15s"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Returns the count of partitions in `topic` currently led by `target`
+/// according to `observer`'s image.
+fn leader_count(observer: &BrokerHandle, topic: &str, partitions: i32, target: u64) -> usize {
+    let mut count = 0usize;
+    for p in 0..partitions {
+        if observer.partition_leader_for_test(topic, p) == Some(target) {
+            count += 1;
+        }
+    }
+    count
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn controlled_shutdown_drains_leadership_and_returns_ok() {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    let lock = LOCK.get_or_init(|| tokio::sync::Mutex::new(()));
+    let _g = lock.lock().await;
+
+    support::init_tracing();
+
+    let mut cluster = support::start_n_node_with_retry(3).await;
+    support::wait_for_all_brokers_registered(&cluster, 3).await;
+
+    // Resolve the raft (controller) leader. We then pick a *follower*
+    // broker as the controlled-shutdown target. Picking the controller
+    // leader would also exercise the path — its heartbeat to itself is
+    // a local round-trip — but the bootstrap broker is also the sole
+    // replica of `__consumer_offsets/0` (rf=1, replicas=[node_id]),
+    // which cannot be drained. Targeting a follower keeps the test
+    // focused on the controllable wire path.
+    let raft_leader_idx = {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            let lid = cluster[0].0.controller_leader_id().await;
+            if let Some(l) = lid
+                && let Some(pos) = cluster.iter().position(|(_, cfg, _)| cfg.node_id == l)
+            {
+                break pos;
+            }
+            assert!(
+                Instant::now() <= deadline,
+                "controller leader not visible within 15s"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    };
+    let target_idx = (raft_leader_idx + 1) % cluster.len();
+    let target_node_id = cluster[target_idx].1.node_id;
+    eprintln!(
+        "controlled shutdown target: broker_id={target_node_id} (cluster idx {target_idx}, \
+         raft leader is idx {raft_leader_idx})"
+    );
+
+    // Create topic on the cluster leader's listen addr.
+    let addr = cluster[raft_leader_idx].1.listen_addr;
+    const TOPIC: &str = "drain-me";
+    const PARTITIONS: i32 = 4;
+    create_topic(addr, TOPIC, PARTITIONS, 3).await;
+    for p in 0..PARTITIONS {
+        for (h, _, _) in &cluster {
+            wait_partition_exists(h, TOPIC, p).await;
+        }
+    }
+
+    // Force the target to be leader of every partition. The natural
+    // round-robin assignment with 3 brokers / 4 partitions would
+    // leader-balance across the cluster — we want to prove draining is
+    // exhaustive, so concentrate every leader onto the target first.
+    let mut replicas: Vec<u64> = (1..=3).collect();
+    // Put target first so its `replicas[0]` is itself (preferred).
+    replicas.sort_by_key(|n| if *n == target_node_id { 0 } else { 1 });
+    force_leadership_for_test(
+        &cluster[raft_leader_idx].0,
+        TOPIC,
+        PARTITIONS,
+        target_node_id,
+        &replicas,
+    )
+    .await;
+
+    // Sanity: target leads everything before we start. Use the raft
+    // leader's image since the target is about to be drained.
+    assert_eq!(
+        leader_count(
+            &cluster[raft_leader_idx].0,
+            TOPIC,
+            PARTITIONS,
+            target_node_id
+        ),
+        PARTITIONS as usize,
+        "target should lead all partitions before shutdown",
+    );
+
+    // Pop the target out of the cluster vec — `controlled_shutdown`
+    // consumes the handle, and we need to keep the surviving brokers
+    // alive afterward to verify the post-shutdown image.
+    let (target_handle, target_cfg, target_dir) = cluster.remove(target_idx);
+    drop(target_cfg);
+    drop(target_dir);
+
+    // Drive controlled shutdown. The handler-side leader transfer
+    // submits records on each heartbeat tick (default 200ms in
+    // for_tests config). Allow several ticks plus raft commit
+    // latency.
+    target_handle
+        .controlled_shutdown(Duration::from_secs(30))
+        .await
+        .expect("controlled_shutdown should drain and exit cleanly");
+
+    // After the controlled-shutdown future resolves, the target's
+    // heartbeat client has observed should_shut_down=true. That means
+    // the controller's image, at the moment of that response, had zero
+    // partitions led by the target. Verify on a surviving broker.
+    let observer = &cluster[0].0;
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let remaining = leader_count(observer, TOPIC, PARTITIONS, target_node_id);
+        if remaining == 0 {
+            break;
+        }
+        assert!(
+            Instant::now() <= deadline,
+            "target broker {target_node_id} still leads {remaining} partitions \
+             15s after controlled_shutdown returned"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // Tidy up surviving brokers.
+    for (h, _, _) in cluster {
+        h.shutdown().await;
+    }
+}

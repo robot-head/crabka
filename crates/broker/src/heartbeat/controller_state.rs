@@ -8,7 +8,7 @@
 // liveness ticker spawn (Task 14). Allow dead_code until those land.
 #![allow(dead_code)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
@@ -46,6 +46,11 @@ struct BrokerEntry {
 pub(crate) struct ControllerLivenessState {
     timeout: Duration,
     brokers: Mutex<HashMap<u64, BrokerEntry>>,
+    /// Brokers that signaled `want_shut_down=true` on a recent
+    /// heartbeat. The controller tries to move leadership away from
+    /// these brokers and returns `should_shut_down=true` once every
+    /// partition has been re-led.
+    wants_shutdown: Mutex<HashSet<u64>>,
 }
 
 impl ControllerLivenessState {
@@ -54,7 +59,27 @@ impl ControllerLivenessState {
         Self {
             timeout,
             brokers: Mutex::new(HashMap::new()),
+            wants_shutdown: Mutex::new(HashSet::new()),
         }
+    }
+
+    /// Record whether `broker_id` is currently asking to shut down.
+    /// `true` adds to the set; `false` removes (covers a broker that
+    /// retracts the request, though in practice the controller only
+    /// clears state when the broker is observed dead).
+    pub(crate) async fn set_wants_shutdown(&self, broker_id: u64, want: bool) {
+        let mut set = self.wants_shutdown.lock().await;
+        if want {
+            set.insert(broker_id);
+        } else {
+            set.remove(&broker_id);
+        }
+    }
+
+    /// Returns `true` if `broker_id` is currently in the wants-shutdown
+    /// set.
+    pub(crate) async fn wants_shutdown(&self, broker_id: u64) -> bool {
+        self.wants_shutdown.lock().await.contains(&broker_id)
     }
 
     /// Record a heartbeat from `broker_id`. Returns `Some(DeadToAlive)`
@@ -167,6 +192,29 @@ mod tests {
         let transition = liveness.record_heartbeat(3).await;
         assert_eq!(transition, Some(LivenessTransition::DeadToAlive(3)));
         assert_eq!(liveness.state(3).await, Some(BrokerLivenessState::Alive));
+    }
+
+    #[tokio::test]
+    async fn wants_shutdown_set_and_unset() {
+        let liveness = ControllerLivenessState::new(Duration::from_secs(10));
+        assert!(!liveness.wants_shutdown(5).await);
+        liveness.set_wants_shutdown(5, true).await;
+        assert!(liveness.wants_shutdown(5).await);
+        liveness.set_wants_shutdown(5, false).await;
+        assert!(!liveness.wants_shutdown(5).await);
+    }
+
+    #[tokio::test]
+    async fn wants_shutdown_is_per_broker() {
+        let liveness = ControllerLivenessState::new(Duration::from_secs(10));
+        liveness.set_wants_shutdown(1, true).await;
+        liveness.set_wants_shutdown(2, true).await;
+        assert!(liveness.wants_shutdown(1).await);
+        assert!(liveness.wants_shutdown(2).await);
+        assert!(!liveness.wants_shutdown(3).await);
+        liveness.set_wants_shutdown(1, false).await;
+        assert!(!liveness.wants_shutdown(1).await);
+        assert!(liveness.wants_shutdown(2).await);
     }
 
     #[tokio::test]

@@ -75,7 +75,7 @@ implements it today.
 | Offset + time indexes | ✅ |
 | Time-based and size-based retention | ✅ |
 | Transaction index (`.txnindex`) per segment | ✅ |
-| Log compaction (`cleanup.policy=compact`) | ❌ |
+| Log compaction (`cleanup.policy=compact`) | ✅ |
 | Tiered storage (KIP-405) | ❌ |
 | Multiple log directories / KIP-113 log-dir reassignment | ❌ |
 
@@ -139,6 +139,7 @@ implements it today.
 | `AlterConfigs` / `IncrementalAlterConfigs` (topic + broker scope) | ✅ |
 | `DescribeConfigs` | ✅ |
 | `ListGroups` / `DescribeGroups` / `DeleteGroups` | ✅ |
+| Controlled shutdown (`BrokerHeartbeat.want_shut_down`) | ✅ |
 | JVM `kafka-*.sh` operator-tool compatibility | ✅ |
 
 ### Security

@@ -163,7 +163,8 @@ pub fn from_broker_error(err: &crate::error::BrokerError) -> i16 {
         | BrokerError::Tls(_)
         | BrokerError::BootstrapFile { .. }
         | BrokerError::InvalidLeaderRebalanceInterval { .. }
-        | BrokerError::InvalidLeaderRebalanceThreshold { .. } => UNKNOWN_SERVER_ERROR,
+        | BrokerError::InvalidLeaderRebalanceThreshold { .. }
+        | BrokerError::ShutdownTimeout(_) => UNKNOWN_SERVER_ERROR,
     }
 }
 
