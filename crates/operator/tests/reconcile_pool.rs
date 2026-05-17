@@ -485,3 +485,148 @@ async fn pool_storage_shrink_is_rejected() {
 
     assert_eq!(state.remaining_rules(), 0);
 }
+
+/// Slice 25/10: the rendered `StatefulSet` must:
+///   1. Include a `broker-config` `ConfigMap` volume in the pod template.
+///   2. Pass `--config-file=/run/crabka/broker.toml` in the broker container args.
+///   3. Mount the `ConfigMap` at `/etc/crabka/config` (readOnly) in the broker container.
+///   4. NOT include `CRABKA_ADVERTISED_LISTENER` in the broker container env.
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn statefulset_mounts_broker_config_volume_and_uses_config_file() {
+    let parent = "demo";
+    let pool_name = "brokers";
+    let ns = "y";
+    let sts_name = format!("{parent}-{pool_name}");
+
+    let rules = vec![
+        // 1. GET parent Kafka.
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/kafkas/{parent}"),
+            response: json_response(200, &fake_parent_kafka_body(parent, ns)),
+        },
+        // 2. Pre-apply GET: no live STS (first reconcile).
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/statefulsets/{sts_name}"),
+            response: shared::json_response(
+                404,
+                &serde_json::json!({
+                    "kind": "Status",
+                    "apiVersion": "v1",
+                    "status": "Failure",
+                    "code": 404,
+                    "reason": "NotFound",
+                    "message": "not found"
+                }),
+            ),
+        },
+        // 3. PATCH STS (SSA-apply).
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/statefulsets/{sts_name}"),
+            response: json_response(200, &fake_sts_body(&sts_name, ns, 1, Some(1))),
+        },
+        // 4. Post-apply GET (status read).
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/statefulsets/{sts_name}"),
+            response: json_response(200, &fake_sts_body(&sts_name, ns, 1, Some(1))),
+        },
+        // 5. PATCH pool status.
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/kafkanodepools/{pool_name}/status"),
+            response: json_response(200, &fake_pool_body(pool_name, ns, parent)),
+        },
+    ];
+
+    let (ctx, state) = build_ctx(ns, rules);
+    let pool = pool_cr(pool_name, ns, Some(parent), 1);
+
+    reconcile(Arc::new(pool), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    let sts_patch = observed
+        .iter()
+        .find(|r| {
+            r.method() == Method::PATCH
+                && r.uri()
+                    .to_string()
+                    .contains(&format!("/statefulsets/{sts_name}"))
+        })
+        .expect("STS PATCH was captured");
+    let body: serde_json::Value =
+        serde_json::from_slice(sts_patch.body()).expect("STS PATCH body is JSON");
+
+    // 1. Pod template volumes must include a broker-config ConfigMap volume.
+    let volumes = body["spec"]["template"]["spec"]["volumes"]
+        .as_array()
+        .unwrap_or_else(|| panic!("volumes present; body = {body}"));
+    let broker_config_vol = volumes
+        .iter()
+        .find(|v| v["name"] == "broker-config")
+        .unwrap_or_else(|| panic!("broker-config volume missing; volumes = {volumes:?}"));
+    assert_eq!(
+        broker_config_vol["configMap"]["name"], "demo-broker-config",
+        "broker-config volume must reference <parent>-broker-config; body = {body}"
+    );
+
+    // 2. Broker container args must reference --config-file.
+    let containers = body["spec"]["template"]["spec"]["containers"]
+        .as_array()
+        .unwrap_or_else(|| panic!("containers present; body = {body}"));
+    let broker = containers
+        .iter()
+        .find(|c| c["name"] == "broker")
+        .unwrap_or_else(|| panic!("broker container missing; body = {body}"));
+    let args = broker["args"]
+        .as_array()
+        .unwrap_or_else(|| panic!("broker args present; body = {body}"));
+    let script = args
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        script.contains("--config-file=/run/crabka/broker.toml"),
+        "--config-file flag missing from broker args; args = {script}"
+    );
+    assert!(
+        !script.contains("--listen-addr"),
+        "--listen-addr must not be present in broker args; args = {script}"
+    );
+
+    // 3. Broker container must mount broker-config at /etc/crabka/config.
+    let volume_mounts = broker["volumeMounts"]
+        .as_array()
+        .unwrap_or_else(|| panic!("broker volumeMounts present; body = {body}"));
+    let config_mount = volume_mounts
+        .iter()
+        .find(|m| m["name"] == "broker-config")
+        .unwrap_or_else(|| panic!("broker-config volumeMount missing; mounts = {volume_mounts:?}"));
+    assert_eq!(
+        config_mount["mountPath"], "/etc/crabka/config",
+        "broker-config must mount at /etc/crabka/config; body = {body}"
+    );
+    assert_eq!(
+        config_mount["readOnly"],
+        serde_json::Value::Bool(true),
+        "broker-config mount must be readOnly; body = {body}"
+    );
+
+    // 4. CRABKA_ADVERTISED_LISTENER must not be in the broker container env.
+    let env = broker["env"]
+        .as_array()
+        .unwrap_or_else(|| panic!("broker env present; body = {body}"));
+    let has_advertised_listener = env
+        .iter()
+        .any(|e| e["name"] == "CRABKA_ADVERTISED_LISTENER");
+    assert!(
+        !has_advertised_listener,
+        "CRABKA_ADVERTISED_LISTENER must not be in broker env (replaced by per-broker TOML); body = {body}"
+    );
+
+    assert_eq!(state.remaining_rules(), 0);
+}

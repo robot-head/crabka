@@ -249,7 +249,15 @@ jobs:
           fi
 
           # Wait for the new pod to reach Ready.
-          kubectl wait --for=condition=Ready -n default pod/demo-brokers-0 --timeout=120s
+          if ! kubectl wait --for=condition=Ready -n default pod/demo-brokers-0 --timeout=120s; then
+            echo "::error::rolled pod did not become Ready within 120s"
+            kubectl describe pod demo-brokers-0 -n default || true
+            kubectl logs -n default demo-brokers-0 -c format --tail=200 || true
+            kubectl logs -n default demo-brokers-0 -c broker --tail=200 || true
+            kubectl logs -n default demo-brokers-0 -c broker --previous --tail=200 || true
+            kubectl get configmap demo-broker-config -n default -o yaml || true
+            exit 1
+          fi
 
           final_rev=$(kubectl get sts demo-brokers -n default -o jsonpath='{.status.currentRevision}')
           [ "$final_rev" != "$initial_rev" ] || { echo "::error::sts revision didn't change ($initial_rev -> $final_rev)"; exit 1; }

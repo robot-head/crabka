@@ -23,16 +23,29 @@ pub struct KafkaSpec {
     /// `app.kubernetes.io/version` label.
     pub kafka_version: String,
     /// Opaque broker properties (`server.properties`-style key/value
-    /// pairs). Serialized into the broker `ConfigMap`; changes propagate
-    /// through a content hash that triggers a rolling restart.
+    /// pairs). Slice 25 passes these through to the broker's
+    /// `[server_properties]` TOML table; the broker currently treats
+    /// them as inert. Changes propagate through the slice-21 config
+    /// hash.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config: Option<std::collections::BTreeMap<String, String>>,
+    /// Slice 25: named listeners. Empty (or absent) synthesizes a
+    /// single internal `PLAIN` listener on port 9092 (slice 19/20
+    /// compatibility default).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub listeners: Vec<crate::crd::Listener>,
+    /// Slice 25: name of the listener used for inter-broker traffic.
+    /// When `None`, the operator picks the first `internal` listener;
+    /// when `listeners` is empty, the synthesized default `"PLAIN"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inter_broker_listener_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct KafkaStatus {
-    /// Standard Kubernetes-style condition list.
+    /// Standard Kubernetes-style condition list. Surfaces
+    /// `Ready`, `ListenersValid`, `ListenersReady`.
     #[serde(default)]
     pub conditions: Vec<KafkaCondition>,
     /// Mirrors `StatefulSet.status.replicas`.
@@ -41,6 +54,10 @@ pub struct KafkaStatus {
     /// Mirrors `StatefulSet.status.readyReplicas`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ready_replicas: Option<i32>,
+    /// Slice 25: per-listener resolved addresses. Populated once
+    /// `ListenersReady=True`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub listeners: Vec<crate::crd::ListenerStatus>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
@@ -81,6 +98,8 @@ mod tests {
             KafkaSpec {
                 kafka_version: "0.1.1".into(),
                 config: None,
+                listeners: vec![],
+                inter_broker_listener_name: None,
             },
         );
         let json = serde_json::to_string(&k).unwrap();
@@ -109,5 +128,53 @@ mod tests {
             cfg.get("log.retention.hours").map(String::as_str),
             Some("24")
         );
+    }
+
+    #[test]
+    fn spec_carries_listeners() {
+        use crate::crd::ListenerType;
+
+        let json = r#"{
+            "kafkaVersion":"0.1.1",
+            "listeners":[{"name":"PLAIN","port":9092,"type":"internal","tls":false}],
+            "interBrokerListenerName":"PLAIN"
+        }"#;
+        let spec: KafkaSpec = serde_json::from_str(json).unwrap();
+        assert_eq!(spec.listeners.len(), 1);
+        assert_eq!(spec.listeners[0].name, "PLAIN");
+        assert_eq!(spec.listeners[0].type_, ListenerType::Internal);
+        assert_eq!(spec.inter_broker_listener_name.as_deref(), Some("PLAIN"));
+    }
+
+    #[test]
+    fn spec_defaults_listeners_to_empty() {
+        let json = r#"{"kafkaVersion":"0.1.1"}"#;
+        let spec: KafkaSpec = serde_json::from_str(json).unwrap();
+        assert!(spec.listeners.is_empty());
+        assert!(spec.inter_broker_listener_name.is_none());
+    }
+
+    #[test]
+    fn status_carries_listener_status() {
+        use crate::crd::{ListenerAddress, ListenerStatus, ListenerType};
+
+        let status = KafkaStatus {
+            conditions: vec![],
+            replicas: Some(1),
+            ready_replicas: Some(1),
+            listeners: vec![ListenerStatus {
+                name: "PLAIN".into(),
+                type_: ListenerType::Internal,
+                bootstrap_servers: "demo-broker-headless.default.svc.cluster.local:9092".into(),
+                addresses: vec![ListenerAddress {
+                    host: "demo-broker-headless.default.svc.cluster.local".into(),
+                    port: 9092,
+                }],
+            }],
+        };
+        let json = serde_json::to_string(&status).unwrap();
+        assert!(json.contains("\"bootstrapServers\""), "got: {json}");
+        let back: KafkaStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, status);
     }
 }

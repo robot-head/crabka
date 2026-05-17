@@ -30,15 +30,130 @@ spec:
                   type: string
                 description: |-
                   Opaque broker properties (`server.properties`-style key/value
-                  pairs). Serialized into the broker `ConfigMap`; changes propagate
-                  through a content hash that triggers a rolling restart.
+                  pairs). Slice 25 passes these through to the broker's
+                  `[server_properties]` TOML table; the broker currently treats
+                  them as inert. Changes propagate through the slice-21 config
+                  hash.
                 nullable: true
                 type: object
+              interBrokerListenerName:
+                description: |-
+                  Slice 25: name of the listener used for inter-broker traffic.
+                  When `None`, the operator picks the first `internal` listener;
+                  when `listeners` is empty, the synthesized default `"PLAIN"`.
+                nullable: true
+                type: string
               kafkaVersion:
                 description: |-
                   Crabka version label, propagated to all pool pods via the
                   `app.kubernetes.io/version` label.
                 type: string
+              listeners:
+                description: |-
+                  Slice 25: named listeners. Empty (or absent) synthesizes a
+                  single internal `PLAIN` listener on port 9092 (slice 19/20
+                  compatibility default).
+                items:
+                  properties:
+                    configuration:
+                      description: Optional listener-type-specific configuration.
+                      nullable: true
+                      properties:
+                        bootstrap:
+                          nullable: true
+                          properties:
+                            annotations:
+                              additionalProperties:
+                                type: string
+                              description: Annotations to add to the bootstrap Service.
+                              type: object
+                            host:
+                              description: '`ingress` / `route` only (slice 27): bootstrap hostname.'
+                              nullable: true
+                              type: string
+                            labels:
+                              additionalProperties:
+                                type: string
+                              description: Labels to add to the bootstrap Service.
+                              type: object
+                            loadBalancerIP:
+                              description: '`loadbalancer` only: pin the bootstrap LB IP.'
+                              nullable: true
+                              type: string
+                            nodePort:
+                              description: '`nodeport` only: pin the bootstrap `NodePort`.'
+                              format: int32
+                              nullable: true
+                              type: integer
+                          type: object
+                        brokers:
+                          items:
+                            properties:
+                              advertisedHost:
+                                description: Override the computed advertised host.
+                                nullable: true
+                                type: string
+                              advertisedPort:
+                                description: Override the computed advertised port.
+                                format: int32
+                                nullable: true
+                                type: integer
+                              broker:
+                                description: Broker id this override applies to (matches the node id).
+                                format: int32
+                                type: integer
+                              host:
+                                description: '`ingress` / `route` only (slice 27): per-broker hostname.'
+                                nullable: true
+                                type: string
+                              loadBalancerIP:
+                                description: '`loadbalancer` only: pin this broker''s `Service.spec.loadBalancerIP`.'
+                                nullable: true
+                                type: string
+                              nodePort:
+                                description: '`nodeport` only: pin this broker''s `Service.spec.ports[0].nodePort`.'
+                                format: int32
+                                nullable: true
+                                type: integer
+                            required:
+                            - broker
+                            type: object
+                          type: array
+                      type: object
+                    name:
+                      description: |-
+                        Unique within the cluster. Alphanumeric + `-`, ≤25 chars. Used
+                        as the Kafka listener name; surfaces in `bootstrap.servers`-style
+                        URLs.
+                      type: string
+                    port:
+                      description: Container port the broker binds. Unique within the cluster.
+                      format: int32
+                      type: integer
+                    tls:
+                      default: false
+                      description: |-
+                        Must be `false` in this slice; reconcile rejects `true` until
+                        Phase 4 (slices 30/31) wires up TLS.
+                      type: boolean
+                    type:
+                      description: |-
+                        Listener type. `internal` is in-cluster; `nodeport` /
+                        `loadbalancer` create external Services; `ingress` / `route` are
+                        accepted by the schema but rejected at reconcile until slice 27.
+                      enum:
+                      - internal
+                      - nodeport
+                      - loadbalancer
+                      - ingress
+                      - route
+                      type: string
+                  required:
+                  - name
+                  - port
+                  - type
+                  type: object
+                type: array
             required:
             - kafkaVersion
             type: object
@@ -47,7 +162,9 @@ spec:
             properties:
               conditions:
                 default: []
-                description: Standard Kubernetes-style condition list.
+                description: |-
+                  Standard Kubernetes-style condition list. Surfaces
+                  `Ready`, `ListenersValid`, `ListenersReady`.
                 items:
                   properties:
                     lastTransitionTime:
@@ -70,6 +187,45 @@ spec:
                   - message
                   - reason
                   - status
+                  - type
+                  type: object
+                type: array
+              listeners:
+                description: |-
+                  Slice 25: per-listener resolved addresses. Populated once
+                  `ListenersReady=True`.
+                items:
+                  properties:
+                    addresses:
+                      default: []
+                      items:
+                        properties:
+                          host:
+                            type: string
+                          port:
+                            format: int32
+                            type: integer
+                        required:
+                        - host
+                        - port
+                        type: object
+                      type: array
+                    bootstrapServers:
+                      description: '`host:port` clients should put in `bootstrap.servers`.'
+                      type: string
+                    name:
+                      type: string
+                    type:
+                      enum:
+                      - internal
+                      - nodeport
+                      - loadbalancer
+                      - ingress
+                      - route
+                      type: string
+                  required:
+                  - bootstrapServers
+                  - name
                   - type
                   type: object
                 type: array
