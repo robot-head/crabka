@@ -29,7 +29,7 @@ use serde_json::json;
 use crate::context::Context;
 use crate::controller::common::{
     self, FIELD_MANAGER, ReconcileError, apply_object, condition, ensure_cluster_id_secret,
-    owner_ref, patch_status, render_configmap, render_service,
+    owner_ref, patch_status, render_service,
 };
 use crate::crd::{Kafka, KafkaNodePool, KafkaStatus};
 
@@ -166,14 +166,34 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
     let svc = render_service(&obj)?;
     apply_object(&svc_api, &svc_name(&name), &svc).await?;
 
+    // Slice 25/7 transitional: ConfigMap is rendered with empty per-broker
+    // data until Task 25/9 wires the full reconcile flow. The CM keys
+    // disappear from the cluster on first reconcile; pods can't start until
+    // Task 25/9 populates the per-broker TOML.
     let cm_api: Api<ConfigMap> = Api::namespaced(ctx.client.clone(), &ns);
-    let cm = render_configmap(&obj)?;
+    let cm = common::render_configmap(
+        &obj,
+        &[],                                // listeners — empty until Task 25/9 wires reconcile
+        &std::collections::BTreeMap::new(), // addresses_per_broker — empty until Task 25/9
+        "PLAIN", // inter_broker_listener_name — placeholder until Task 25/9
+    )?;
     apply_object(&cm_api, &cm_name(&name), &cm).await?;
 
-    // Compute the content hash of the serialized broker.properties. We
-    // hash the same string we wrote into the ConfigMap, so the hash is
-    // a stable function of `spec.config` (sorted, deterministic).
-    let broker_props = common::serialize_broker_properties(&obj.spec);
+    // Compute the content hash. Task 25/8 will update this to use
+    // combined_config_hash with listener intent; for now we hash the
+    // raw spec.config string as before so the rolling-restart label
+    // continues to function.
+    let broker_props = obj.spec.config.as_ref().map_or_else(String::new, |cfg| {
+        // inline: sorted key=value lines (same output as the removed
+        // serialize_broker_properties helper, kept here until Task 25/8)
+        cfg.iter().fold(String::new(), |mut s, (k, v)| {
+            s.push_str(k);
+            s.push('=');
+            s.push_str(v);
+            s.push('\n');
+            s
+        })
+    });
     let cfg_hash = common::config_hash(&broker_props);
 
     // 2. Cluster-id Secret: one-shot create-if-missing. The pool
