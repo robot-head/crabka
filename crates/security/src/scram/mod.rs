@@ -222,7 +222,7 @@ mod tests {
             other => panic!("server step 2 must Done, got {other:?}"),
         };
         assert_eq!(principal.name, "alice");
-        assert_eq!(principal.mechanism, SaslMechanism::ScramSha512);
+        assert_eq!(principal.auth_method, crate::AuthMethod::SaslScramSha512);
         // Client verifies server signature
         let final_check = client.verify_server_final(&s2);
         assert!(final_check.is_ok(), "server signature must verify");
@@ -258,7 +258,7 @@ mod tests {
             other => panic!("server step 2 must Done, got {other:?}"),
         };
         assert_eq!(principal.name, "alice");
-        assert_eq!(principal.mechanism, SaslMechanism::ScramSha256);
+        assert_eq!(principal.auth_method, crate::AuthMethod::SaslScramSha256);
         let final_check = client.verify_server_final(&s2);
         assert!(final_check.is_ok(), "server signature must verify");
     }

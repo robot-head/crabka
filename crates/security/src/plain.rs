@@ -3,7 +3,7 @@ use std::hash::BuildHasher;
 
 use subtle::ConstantTimeEq;
 
-use crate::{AuthError, Principal, SaslMechanism};
+use crate::{AuthError, AuthMethod, Principal};
 
 /// Verifies a SASL/PLAIN auth attempt against a static credential map.
 ///
@@ -21,7 +21,7 @@ pub fn verify_plain<S: BuildHasher>(
     if expected.as_bytes().ct_eq(password).unwrap_u8() == 1 {
         Ok(Principal {
             name: user.to_string(),
-            mechanism: SaslMechanism::Plain,
+            auth_method: AuthMethod::SaslPlain,
         })
     } else {
         Err(AuthError::BadPassword)
@@ -42,7 +42,7 @@ mod tests {
     fn correct_creds_pass() {
         let p = verify_plain(&creds(), "alice", b"wonderland").unwrap();
         assert_eq!(p.name, "alice");
-        assert_eq!(p.mechanism, SaslMechanism::Plain);
+        assert_eq!(p.auth_method, AuthMethod::SaslPlain);
     }
 
     #[test]

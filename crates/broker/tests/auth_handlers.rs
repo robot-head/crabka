@@ -75,6 +75,8 @@ async fn tls_listener_accepts_tls_handshake_only() {
         cert_chain_path: cert_path.clone(),
         private_key_path: key_path,
         trust_roots_path: None,
+        client_ca_path: None,
+        client_auth: crabka_security::ClientAuthMode::Disabled,
     });
 
     let handle = Broker::start(cfg).await.expect("broker must start");
@@ -228,6 +230,8 @@ async fn metadata_response_carries_listener_endpoints() {
         cert_chain_path: cert_path,
         private_key_path: key_path,
         trust_roots_path: None,
+        client_ca_path: None,
+        client_auth: crabka_security::ClientAuthMode::Disabled,
     });
 
     let handle = Broker::start(cfg).await.expect("broker must start");
