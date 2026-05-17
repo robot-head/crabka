@@ -234,6 +234,20 @@ async fn main() -> anyhow::Result<()> {
         })
         .await?;
 
+    // Drain the in-flight executor task, if any. The cancel + clear path
+    // runs in the executor's run() loop and reaches ClearThrottle for
+    // every terminal — bounded by execute_deadline + clear_throttle RPC
+    // time, so a 10s timeout is generous.
+    if let Some(handle) = in_flight_slot.lock().await.take() {
+        info!(proposal_id = %handle.proposal_id, "draining in-flight executor on shutdown");
+        handle.cancel.cancel();
+        match tokio::time::timeout(Duration::from_secs(10), handle.task).await {
+            Ok(Ok(())) => info!(proposal_id = %handle.proposal_id, "executor drained cleanly"),
+            Ok(Err(e)) => warn!(error = %e, "executor task join error"),
+            Err(_) => warn!(proposal_id = %handle.proposal_id, "executor drain timed out after 10s; aborting"),
+        }
+    }
+
     let _ = tokio::time::timeout(Duration::from_secs(5), ingester_handle).await;
     Ok(())
 }
