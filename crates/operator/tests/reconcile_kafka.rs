@@ -25,7 +25,7 @@ use serde_json::json;
 mod shared;
 
 use shared::{
-    MockRule, MockState, fake_configmap_body, fake_kafka_body, fake_pool_list_body,
+    MockRule, MockState, fake_configmap_body, fake_kafka_body, fake_pool_body, fake_pool_list_body,
     fake_pool_list_item, fake_secret_body, fake_service_body, fixture_ctx, json_response,
     mock_client, not_found_body,
 };
@@ -54,7 +54,7 @@ fn happy_path_rules(
     let cm_name = format!("{name}-broker-config");
     let secret_name = format!("{name}-cluster-id");
 
-    vec![
+    let mut rules = vec![
         // 1. PATCH service
         MockRule {
             method: Method::PATCH,
@@ -96,13 +96,30 @@ fn happy_path_rules(
             path_substr: format!("/namespaces/{namespace}/kafkanodepools"),
             response: json_response(200, &fake_pool_list_body(pool_items)),
         },
-        // 6. PATCH kafkas/<name>/status
-        MockRule {
+    ];
+    // 5b. PATCH each pool to inject the controller owner-ref. The pool
+    //     reconciler doesn't set this itself — the Kafka reconciler is
+    //     the one that adopts existing pools labeled
+    //     `crabka.io/cluster=<this>`. Without these owner-refs, deleting
+    //     the Kafka CR doesn't cascade to the pool's StatefulSet, which
+    //     the operator-e2e GC step asserts on.
+    for item in pool_items {
+        let pool_name = item["metadata"]["name"]
+            .as_str()
+            .expect("fake pool item has metadata.name");
+        rules.push(MockRule {
             method: Method::PATCH,
-            path_substr: format!("/kafkas/{name}/status"),
-            response: json_response(200, &fake_kafka_body(name, namespace)),
-        },
-    ]
+            path_substr: format!("/kafkanodepools/{pool_name}?"),
+            response: json_response(200, &fake_pool_body(pool_name, namespace, name)),
+        });
+    }
+    // 6. PATCH kafkas/<name>/status
+    rules.push(MockRule {
+        method: Method::PATCH,
+        path_substr: format!("/kafkas/{name}/status"),
+        response: json_response(200, &fake_kafka_body(name, namespace)),
+    });
+    rules
 }
 
 fn build_ctx(
@@ -133,8 +150,9 @@ async fn kafka_applies_service_configmap_secret_no_statefulset() {
 
     assert_eq!(
         observed.len(),
-        6,
-        "expected exactly 6 requests (no StatefulSet I/O), saw {}: {:?}",
+        7,
+        "expected exactly 7 requests (svc, cm, get-secret, post-secret, list-pools, \
+         patch-pool-owner-ref, status), saw {}: {:?}",
         observed.len(),
         methods_and_uris,
     );
@@ -193,9 +211,16 @@ async fn kafka_applies_service_configmap_secret_no_statefulset() {
 
     assert_eq!(methods_and_uris[5].0, Method::PATCH);
     assert!(
-        methods_and_uris[5].1.contains("/kafkas/demo/status"),
-        "step 6 should patch Kafka status: {}",
+        methods_and_uris[5].1.contains("/kafkanodepools/brokers"),
+        "step 6 should patch the pool's owner-refs: {}",
         methods_and_uris[5].1
+    );
+
+    assert_eq!(methods_and_uris[6].0, Method::PATCH);
+    assert!(
+        methods_and_uris[6].1.contains("/kafkas/demo/status"),
+        "step 7 should patch Kafka status: {}",
+        methods_and_uris[6].1
     );
 
     assert_eq!(
