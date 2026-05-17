@@ -30,6 +30,67 @@ const RATE_KEY_FOLLOWER: &str = "follower.replication.throttled.rate";
 const REPLICAS_KEY_LEADER: &str = "leader.replication.throttled.replicas";
 const REPLICAS_KEY_FOLLOWER: &str = "follower.replication.throttled.replicas";
 
+fn check_alter_configs_response(
+    resp: &crabka_protocol::owned::incremental_alter_configs_response::IncrementalAlterConfigsResponse,
+) -> Result<(), PhaseError> {
+    let failures: Vec<String> = resp
+        .responses
+        .iter()
+        .filter(|r| r.error_code != 0)
+        .map(|r| {
+            let msg = r.error_message.as_deref().unwrap_or("");
+            format!(
+                "resource `{}` (type={}): error_code={} {}",
+                r.resource_name, r.resource_type, r.error_code, msg
+            )
+        })
+        .collect();
+    if !failures.is_empty() {
+        return Err(PhaseError::Broker(format!(
+            "IncrementalAlterConfigs failed: {}",
+            failures.join("; ")
+        )));
+    }
+    Ok(())
+}
+
+fn check_reassign_response(
+    resp: &crabka_protocol::owned::alter_partition_reassignments_response::AlterPartitionReassignmentsResponse,
+) -> Result<(), PhaseError> {
+    if resp.error_code != 0 {
+        let msg = resp.error_message.as_deref().unwrap_or("");
+        return Err(PhaseError::Broker(format!(
+            "AlterPartitionReassignments top-level error_code={} {}",
+            resp.error_code, msg
+        )));
+    }
+    let failures: Vec<String> = resp
+        .responses
+        .iter()
+        .flat_map(|t| {
+            let topic = t.name.clone();
+            t.partitions.iter().filter_map(move |p| {
+                if p.error_code == 0 {
+                    None
+                } else {
+                    let msg = p.error_message.as_deref().unwrap_or("");
+                    Some(format!(
+                        "`{}`/{} error_code={} {}",
+                        topic, p.partition_index, p.error_code, msg
+                    ))
+                }
+            })
+        })
+        .collect();
+    if !failures.is_empty() {
+        return Err(PhaseError::Broker(format!(
+            "AlterPartitionReassignments per-partition failures: {}",
+            failures.join("; ")
+        )));
+    }
+    Ok(())
+}
+
 pub struct LiveClient {
     pub inner: Client,
 }
@@ -138,11 +199,12 @@ impl ClientFacade for LiveClient {
             resources,
             ..Default::default()
         };
-        let _resp = self
+        let resp = self
             .inner
             .send(req)
             .await
             .map_err(|e| PhaseError::Client(e.to_string()))?;
+        check_alter_configs_response(&resp)?;
         Ok(())
     }
 
@@ -171,11 +233,12 @@ impl ClientFacade for LiveClient {
             topics,
             ..Default::default()
         };
-        let _resp = self
+        let resp = self
             .inner
             .send(req)
             .await
             .map_err(|e| PhaseError::Client(e.to_string()))?;
+        check_reassign_response(&resp)?;
         Ok(())
     }
 
@@ -204,11 +267,12 @@ impl ClientFacade for LiveClient {
             topics,
             ..Default::default()
         };
-        let _resp = self
+        let resp = self
             .inner
             .send(req)
             .await
             .map_err(|e| PhaseError::Client(e.to_string()))?;
+        check_reassign_response(&resp)?;
         Ok(())
     }
 
