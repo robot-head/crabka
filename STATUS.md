@@ -437,6 +437,60 @@ Kafka client for ApiVersions.
 - Closes the recurring JVM-tool quirk that slices 16/16b/16c documented as known limitations.
 - Out of scope: slice 16 `client_id` HandlerTable gap (slice 17b).
 
+## Slice 39 — Prometheus metrics exporter (2026-05-17)
+
+- New `crabka_broker::metrics` module: a `BrokerMetrics` bundle of
+  cheap `Arc`-cloneable counter/gauge handles registered against a
+  shared `Registry` (`prometheus-client`). Eight metrics covering the
+  Kafka JMX surface that operators commonly scrape:
+  - per-topic counters: `topic_bytes_in`, `topic_bytes_out`,
+    `topic_produce_requests`, `topic_fetch_requests`
+  - scalar gauges: `partitions_led`, `active_controller`
+  - scalar counters: `isr_shrinks`, `isr_expands`
+- New `crabka_broker::metrics_server` axum app exposing `GET /metrics`
+  in OpenMetrics text. Spawned by `Broker::start` when
+  `BrokerConfig::metrics_listen_addr` is `Some`; cancelled via the
+  supervisor shutdown token.
+- New `BrokerConfig::metrics_listen_addr: Option<SocketAddr>`
+  (default `Some(0.0.0.0:9404)` in production — same port as
+  `jmx_prometheus_javaagent`; default `None` in `for_tests` so unit
+  tests don't compete for ports).
+- New `BrokerHandle::metrics_addr() -> Option<SocketAddr>` returns the
+  bound address so integration tests can use `127.0.0.1:0` and
+  discover the OS-assigned port.
+- Counter wiring:
+  - `Produce` handler accounts per-topic `bytes_in` + `requests` from
+    the encoded `RecordBatch` length, regardless of per-partition
+    outcome (matches `BrokerTopicMetrics:TotalProduceRequestsPerSec`).
+  - `Fetch` handler accounts per-topic `bytes_out` + `requests` from
+    the encoded response bytes about to be shipped.
+  - `isr_maintenance` background loop bumps `isr_shrinks` /
+    `isr_expands` whenever `compute_proposal` returns a change,
+    classified by set-difference against the pre-proposal ISR.
+  - Background gauge updater runs once a second: counts partitions
+    where `current_leader == this node`, and sets
+    `active_controller` from the raft `watch_leader()` borrow.
+- 4 new lib unit tests (registry shape, label semantics, zero-byte
+  fetch still increments request count). 1 broker integration test
+  in `tests/metrics.rs`: boots a broker with metrics on
+  `127.0.0.1:0`, scrapes pre-traffic for scalar metrics, drives
+  Create/Produce/Fetch, scrapes again for topic-labelled metrics and
+  the post-tick gauges.
+- New broker workspace deps: `prometheus-client` (already in the
+  workspace), `axum`. New dev-dep: `tower` for the
+  `Router::oneshot` test helper.
+- **Real finding:** `prometheus-client` auto-appends `_total` when
+  encoding `Counter`s, so registering as `isr_shrinks_total` would
+  emit `isr_shrinks_total_total`. Counters are named without the
+  suffix in the registry; the wire output gets the suffix from the
+  encoder.
+- Unblocks operator slice 40 (`Kafka.spec.metricsConfig` →
+  `ServiceMonitor` / `PodMonitor` generation against this endpoint).
+- Out of scope: per-broker label on Family metrics (single-broker
+  Prometheus targets already encode `broker_id` via the K8s
+  `__address__` discovery); request-latency histograms; per-API-key
+  request counters.
+
 ## Slice 33 — TLS cert hot-reload (2026-05-16)
 
 - New `crabka_security::DynamicServerConfig` wraps the `rustls::ServerConfig`

@@ -56,6 +56,15 @@ pub struct Broker {
     /// KIP-13/KIP-124 quota buckets. Updated by the quota refresh task and
     /// consulted by the Produce/Fetch handlers and request-rate enforcement.
     pub quota_buckets: Arc<crate::quota::QuotaBuckets>,
+    /// Slice 39: Prometheus metrics. Cloned into every subsystem that
+    /// emits (produce/fetch handlers, isr-maintenance loop, etc.). The
+    /// `BrokerMetrics` struct internally clones cheaply (single Arc).
+    pub metrics: crate::metrics::BrokerMetrics,
+    /// Slice 39: the actual `SocketAddr` the `/metrics` HTTP server is
+    /// bound to. Populated only when `BrokerConfig::metrics_listen_addr`
+    /// is `Some`; useful for tests that pass `127.0.0.1:0` and need to
+    /// discover the OS-assigned port.
+    pub(crate) metrics_bound_addr: Option<SocketAddr>,
     /// Slice 22 (controlled shutdown). Set to `true` by
     /// [`BrokerHandle::controlled_shutdown`]; the heartbeat client reads
     /// this every tick and stamps `want_shut_down=true` onto outbound
@@ -93,6 +102,16 @@ impl BrokerHandle {
     #[must_use]
     pub fn listen_addr(&self) -> SocketAddr {
         self.listen_addr
+    }
+
+    /// Slice 39: the actual bound address of the Prometheus `/metrics`
+    /// HTTP server, if one is configured. Tests pass `127.0.0.1:0` in
+    /// `BrokerConfig::metrics_listen_addr` and read the OS-assigned
+    /// port back through this accessor.
+    #[must_use]
+    #[allow(clippy::used_underscore_binding)]
+    pub fn metrics_addr(&self) -> Option<SocketAddr> {
+        self._broker.metrics_bound_addr
     }
 
     /// Current Raft leader id as observed by this broker's controller.
@@ -1106,6 +1125,59 @@ impl Broker {
             });
         }
 
+        // Slice 39: build the Prometheus metrics registry + handles
+        // *before* spawning subsystems that emit. Each subsystem clones
+        // a cheap `BrokerMetrics` (single Arc bump). The HTTP
+        // `/metrics` server is spawned only when configured; ISR
+        // maintenance / produce / fetch always update counters.
+        let metrics = crate::metrics::BrokerMetrics::new();
+        let metrics_bound_addr = if let Some(addr) = config.metrics_listen_addr {
+            let shutdown = supervisor_shutdown.child_token();
+            let registry = metrics.registry.clone();
+            // `run` already spawns the server task internally; await
+            // its bind so a port conflict surfaces from `Broker::start`
+            // instead of being lost in a detached task.
+            let bound = crate::metrics_server::run(addr, registry, shutdown)
+                .await
+                .map_err(BrokerError::Io)?;
+            Some(bound)
+        } else {
+            None
+        };
+        // Background gauge updater: poll partitions_led + active_controller
+        // once a second. Cheap (DashMap iteration + one atomic borrow).
+        {
+            let partitions_for_gauge = partitions.clone();
+            let controller_for_gauge = controller.clone();
+            let node_id = config.node_id;
+            let m = metrics.clone();
+            let shutdown = supervisor_shutdown.child_token();
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+                loop {
+                    tokio::select! {
+                        _ = tick.tick() => {}
+                        () = shutdown.cancelled() => return,
+                    }
+                    let led = partitions_for_gauge
+                        .iter()
+                        .filter(|e| {
+                            e.value()
+                                .current_leader
+                                .load(std::sync::atomic::Ordering::Acquire)
+                                == node_id
+                        })
+                        .count();
+                    m.partitions_led.set(i64::try_from(led).unwrap_or(i64::MAX));
+                    let is_ctrl_leader = controller_for_gauge
+                        .watch_leader()
+                        .borrow()
+                        .is_some_and(|n| n == node_id);
+                    m.active_controller.set(i64::from(u8::from(is_ctrl_leader)));
+                }
+            });
+        }
+
         // 4f. ISR maintenance: per-leader-partition shrink/expand tick.
         //     Proposes AlterPartition changes when follower lag exceeds
         //     `replica_lag_time_max_ms`. Child token of supervisor_shutdown.
@@ -1120,6 +1192,7 @@ impl Broker {
                 ),
                 broker_id: config.broker_id,
                 shutdown: isr_shutdown,
+                metrics: metrics.clone(),
             },
         ));
 
@@ -1274,6 +1347,8 @@ impl Broker {
             liveness: liveness.clone(),
             tls_dynamic: tls_dynamic.clone(),
             inter_broker_client,
+            metrics: metrics.clone(),
+            metrics_bound_addr,
             throttle_state,
             quota_buckets,
             want_shutdown: want_shutdown_tx,

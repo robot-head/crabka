@@ -44,6 +44,8 @@ tracing-subscriber = { workspace = true }
 clap = { workspace = true, features = ["env"] }
 uuid = { workspace = true }
 futures-util = { workspace = true }
+prometheus-client.workspace = true
+axum.workspace = true
 
 [dev-dependencies]
 crabka-broker = { version = "0.1", path = ".", features = ["test-helpers"] }
@@ -58,3 +60,5 @@ tokio-rustls.workspace = true
 # `AlterUserScramCredentials` upsertions.
 pbkdf2 = { workspace = true }
 sha2 = { workspace = true }
+# Slice 39 metrics tests: exercise the axum Router::oneshot helper.
+tower.workspace = true

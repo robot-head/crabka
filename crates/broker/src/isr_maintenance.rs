@@ -21,6 +21,8 @@ pub(crate) struct Config {
     pub replica_lag_time_max: Duration,
     pub broker_id: i32,
     pub shutdown: CancellationToken,
+    /// Slice 39: bumped on each proposed shrink / expand.
+    pub metrics: crate::metrics::BrokerMetrics,
 }
 
 pub(crate) async fn run(cfg: Config) {
@@ -48,6 +50,21 @@ pub(crate) async fn run(cfg: Config) {
             else {
                 continue;
             };
+            // Slice 39: classify the proposal as shrink/expand by
+            // comparing membership against the pre-proposal ISR.
+            // `compute_proposal` already filtered for "actually
+            // changed", so at least one of these bumps fires.
+            let prev_isr: std::collections::HashSet<NodeId> = {
+                let st = part.replica_state.lock().await;
+                st.isr.iter().copied().collect()
+            };
+            let next_isr: std::collections::HashSet<NodeId> = new_isr.iter().copied().collect();
+            if prev_isr.difference(&next_isr).next().is_some() {
+                cfg.metrics.isr_shrinks_total.inc();
+            }
+            if next_isr.difference(&prev_isr).next().is_some() {
+                cfg.metrics.isr_expands_total.inc();
+            }
             if let Err(e) = send_alter_partition(
                 &cfg.controller,
                 cfg.broker_id,

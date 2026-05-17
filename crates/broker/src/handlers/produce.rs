@@ -138,6 +138,21 @@ pub(crate) async fn handle(
             String::new()
         };
 
+        // Slice 39: account for the topic in Prometheus before
+        // consuming `partition_data`. Sum the record-batch encoded
+        // lengths so the bytes-in counter matches the wire-level
+        // payload. We count even for authorize-denied / unknown-topic
+        // paths since the produce *request* arrived; that mirrors
+        // Kafka's BrokerTopicMetrics semantics.
+        if !topic_name.is_empty() {
+            let topic_bytes: u64 = topic
+                .partition_data
+                .iter()
+                .map(|p| p.records.as_ref().map_or(0, |r| r.encoded_len() as u64))
+                .sum();
+            broker.metrics.record_produce(&topic_name, topic_bytes);
+        }
+
         let mut partition_results: Vec<PartitionProduceResponse> =
             Vec::with_capacity(topic.partition_data.len());
 
