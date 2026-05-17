@@ -1,7 +1,7 @@
 //! Slice 43a end-to-end: spin up a single-broker Crabka in-process,
 //! snapshot it, drive the Connect-RPC handlers directly, and assert
-//! the propose/get/list paths plus the Unavailable / Unimplemented /
-//! NotFound / InvalidArgument error codes.
+//! the propose/get/list paths plus the `Unavailable` / `Unimplemented`
+//! / `NotFound` / `InvalidArgument` error codes.
 //!
 //! Handlers are called directly (not via the axum router) so the test
 //! exercises handler logic at the same level a real Connect call
