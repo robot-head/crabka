@@ -218,10 +218,7 @@ pub(crate) async fn reconcile_metrics(
         .await;
         let svc_api: Api<Service> = Api::namespaced(ctx.client.clone(), namespace);
         let _ = svc_api
-            .delete(
-                &format!("{name}-broker-metrics"),
-                &DeleteParams::default(),
-            )
+            .delete(&format!("{name}-broker-metrics"), &DeleteParams::default())
             .await;
     } else if let Some(sm) = &cfg.service_monitor {
         let svc_api: Api<Service> = Api::namespaced(ctx.client.clone(), namespace);

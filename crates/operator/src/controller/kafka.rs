@@ -564,6 +564,40 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
         }
     }
 
+    // Metrics resources: surface a MetricsReady condition regardless of
+    // whether spec.metricsConfig is set. MutuallyExclusive and
+    // PrometheusOperatorCrdsMissing are reported via the condition only —
+    // the reconcile continues so the rest of the status patch lands.
+    let metrics_outcome =
+        crate::controller::metrics::reconcile_metrics(&ctx, &obj, &name, &ns).await;
+    let metrics_condition = match &metrics_outcome {
+        None => condition(
+            "MetricsReady",
+            "False",
+            "Disabled",
+            "spec.metricsConfig is not set",
+        ),
+        Some(Ok(())) => condition(
+            "MetricsReady",
+            "True",
+            "Available",
+            "metrics resources reconciled",
+        ),
+        Some(Err(ReconcileError::MetricsMutuallyExclusive)) => condition(
+            "MetricsReady",
+            "False",
+            "MutuallyExclusive",
+            "podMonitor and serviceMonitor are mutually exclusive",
+        ),
+        Some(Err(ReconcileError::PrometheusOperatorCrdsMissing)) => condition(
+            "MetricsReady",
+            "False",
+            "PrometheusOperatorCrdsMissing",
+            "monitoring.coreos.com/v1 is not served by the API server",
+        ),
+        Some(Err(_)) => condition("MetricsReady", "False", "Error", "metrics reconcile failed"),
+    };
+
     // Aggregate + patch our own status.
     let rollup = aggregate_pool_status(pools.iter());
     let (ready, reason, message) = rollup_condition(&rollup);
@@ -584,6 +618,7 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
             ),
             listeners_valid_cond,
             listeners_ready_cond,
+            metrics_condition,
         ],
         replicas: Some(rollup.replicas),
         ready_replicas: Some(rollup.ready_replicas),
@@ -591,6 +626,18 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
     };
     let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), &ns);
     patch_status::<Kafka, KafkaStatus>(&kafka_api, &name, status).await?;
+
+    // Propagate any non-condition-mapped metrics error after the status
+    // patch — we want admins to see the condition update before bouncing.
+    if let Some(Err(e)) = metrics_outcome
+        && !matches!(
+            e,
+            ReconcileError::MetricsMutuallyExclusive
+                | ReconcileError::PrometheusOperatorCrdsMissing
+        )
+    {
+        return Err(e);
+    }
 
     Ok(Action::requeue(Duration::from_secs(30)))
 }
