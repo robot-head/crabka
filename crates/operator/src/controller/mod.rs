@@ -6,3 +6,4 @@ pub mod common;
 pub mod kafka;
 pub mod kafka_node_pool;
 pub(crate) mod listeners;
+pub(crate) mod metrics;

@@ -45,6 +45,12 @@ pub enum ReconcileError {
     UnsupportedReplicas(i32),
     #[error("cluster-id secret malformed: {0}")]
     MalformedSecret(String),
+    #[error("metricsConfig: podMonitor and serviceMonitor are mutually exclusive")]
+    MetricsMutuallyExclusive,
+    #[error("monitoring.coreos.com/v1 is not served by the API server")]
+    PrometheusOperatorCrdsMissing,
+    #[error("malformed input: {0}")]
+    Malformed(String),
 }
 
 /// Build a Kubernetes-style condition with `lastTransitionTime` set to

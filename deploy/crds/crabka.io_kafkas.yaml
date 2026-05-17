@@ -154,6 +154,49 @@ spec:
                   - type
                   type: object
                 type: array
+              metricsConfig:
+                description: |-
+                  Slice 40: Prometheus scrape configuration. When `None`, brokers do
+                  not bind `/metrics` and no `PodMonitor` / `ServiceMonitor` is
+                  rendered. When `Some`, the broker `StatefulSet` gains a `metrics`
+                  container port (TCP 9404) and the resources requested by
+                  `pod_monitor` / `service_monitor` are SSA-applied.
+                nullable: true
+                properties:
+                  podMonitor:
+                    nullable: true
+                    properties:
+                      interval:
+                        nullable: true
+                        type: string
+                      labels:
+                        additionalProperties:
+                          type: string
+                        type: object
+                      scrapeTimeout:
+                        nullable: true
+                        type: string
+                    type: object
+                  serviceMonitor:
+                    nullable: true
+                    properties:
+                      interval:
+                        nullable: true
+                        type: string
+                      labels:
+                        additionalProperties:
+                          type: string
+                        type: object
+                      scrapeTimeout:
+                        nullable: true
+                        type: string
+                    type: object
+                  type:
+                    default: prometheus
+                    enum:
+                    - prometheus
+                    type: string
+                type: object
             required:
             - kafkaVersion
             type: object

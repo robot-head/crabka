@@ -142,6 +142,13 @@ jobs:
           fi
           kind load docker-image crabka-broker:e2e --name crabka-e2e
 
+      - name: Install prometheus-operator CRDs (PodMonitor + ServiceMonitor)
+        run: |
+          # Renovate: datasource=github-tags depName=prometheus-operator/prometheus-operator
+          PROM_OP_TAG=v0.79.2
+          kubectl apply -f "https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/${PROM_OP_TAG}/example/prometheus-operator-crd/monitoring.coreos.com_podmonitors.yaml"
+          kubectl apply -f "https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/${PROM_OP_TAG}/example/prometheus-operator-crd/monitoring.coreos.com_servicemonitors.yaml"
+
       - name: Install CRDs
         run: |
           kubectl apply -f deploy/crds/crabka.io_kafkas.yaml
@@ -463,6 +470,49 @@ jobs:
           done
           [ "$svcs" = "0" ] || { echo "::error::LB Services not GC'd"; exit 1; }
           kubectl delete knp lb-broker -n default --ignore-not-found
+
+      - name: Enable PodMonitor via Kafka.spec.metricsConfig
+        run: |
+          set -e
+          kubectl patch kafka demo -n default --type=merge \
+            -p '{"spec":{"metricsConfig":{"podMonitor":{"interval":"15s"}}}}'
+          # Slice-40 enabling metricsConfig changes the pod template
+          # (adds the metrics container port + CLI flag) so the StatefulSet
+          # controller will roll the pod. Wait for the rolled pod to be Ready.
+          kubectl wait kafka/demo -n default \
+            --for=condition=MetricsReady=True --timeout=120s
+          kubectl wait --for=condition=Ready -n default pod/demo-brokers-0 --timeout=180s
+
+      - name: Smoke — PodMonitor rendered
+        run: |
+          set -e
+          port=$(kubectl get podmonitor demo-broker -n default -o jsonpath='{.spec.podMetricsEndpoints[0].port}')
+          [ "$port" = "metrics" ] || { echo "::error::PodMonitor port wrong: '$port'"; exit 1; }
+          interval=$(kubectl get podmonitor demo-broker -n default -o jsonpath='{.spec.podMetricsEndpoints[0].interval}')
+          [ "$interval" = "15s" ] || { echo "::error::interval wrong: '$interval'"; exit 1; }
+          path=$(kubectl get podmonitor demo-broker -n default -o jsonpath='{.spec.podMetricsEndpoints[0].path}')
+          [ "$path" = "/metrics" ] || { echo "::error::path wrong: '$path'"; exit 1; }
+
+      - name: Smoke — broker pod exposes metrics container port
+        run: |
+          set -e
+          port=$(kubectl get pod demo-brokers-0 -n default -o jsonpath='{.spec.containers[?(@.name=="broker")].ports[?(@.name=="metrics")].containerPort}')
+          [ "$port" = "9404" ] || { echo "::error::metrics port wrong: '$port'"; exit 1; }
+
+      - name: Smoke — /metrics endpoint exposes crabka_broker_ metrics
+        run: |
+          set -e
+          # Use a one-shot curl pod inside the cluster to scrape the broker's
+          # /metrics endpoint via its pod DNS name.
+          kubectl run curl-metrics -n default --rm -i --restart=Never \
+            --image=curlimages/curl:8.10.1 --quiet -- \
+            -sf "http://demo-brokers-0.demo-broker-headless.default.svc.cluster.local:9404/metrics" \
+            > /tmp/metrics.out
+          grep -q '^# TYPE crabka_broker' /tmp/metrics.out || {
+            echo "::error::crabka_broker_* metrics not exposed; first 20 lines of output:"
+            head -20 /tmp/metrics.out
+            exit 1
+          }
 
       - name: Garbage-collection on Kafka delete
         run: |
