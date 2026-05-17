@@ -36,6 +36,10 @@ pub struct OperatorConfig {
         default_value = "info,kube_client::client::builder=warn"
     )]
     pub log_filter: String,
+
+    /// Default broker image used when `Kafka.spec.image` is unset.
+    #[arg(long, env = "DEFAULT_BROKER_IMAGE")]
+    pub default_broker_image: Option<String>,
 }
 
 impl OperatorConfig {

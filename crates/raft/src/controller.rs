@@ -370,11 +370,15 @@ impl Controller {
     /// Mismatches between mode and log state return `RaftError::Startup`.
     #[allow(clippy::too_many_lines)]
     pub async fn start(config: ControllerConfig) -> Result<ControllerHandle, RaftError> {
-        // 1. Log + state machine. The cluster UUID is `nil` for slice 7;
-        //    a later slice will derive it from the first record applied
-        //    so cross-node images compare equal.
+        // 1. Log + state machine. The cluster UUID is injected from the
+        //    operator (via `BrokerConfig::cluster_id`) so every broker in
+        //    the same `KafkaCluster` reports a matching `MetadataImage`
+        //    cluster id. Falls back to `Uuid::nil()` for legacy
+        //    single-node tests that don't set it.
         let log_store = Arc::new(RaftLogStore::open(config.log_dir.clone()).await?);
-        let state_machine = Arc::new(CrabkaStateMachine::new(Uuid::nil()));
+        let state_machine = Arc::new(CrabkaStateMachine::new(
+            config.cluster_id.unwrap_or_else(Uuid::nil),
+        ));
 
         // 2. openraft engine config. Times are millis; we widen the
         //    election window to `[t, 2t]` to keep the standard openraft

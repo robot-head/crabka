@@ -20,7 +20,8 @@ struct Args {
     listen_addr: SocketAddr,
 
     /// `host:port` to advertise to clients (defaults to `listen_addr`).
-    #[arg(long)]
+    /// Set via env `CRABKA_ADVERTISED_LISTENER` from the operator.
+    #[arg(long, env = "CRABKA_ADVERTISED_LISTENER")]
     advertised_listener: Option<String>,
 
     /// Directory containing per-partition log dirs.
@@ -30,6 +31,12 @@ struct Args {
     /// Numeric broker id.
     #[arg(long, default_value_t = 1)]
     broker_id: i32,
+
+    /// Cluster UUID. Every broker in the same cluster must share this
+    /// value. Set via env `CRABKA_CLUSTER_ID` from the operator
+    /// (the `KafkaCluster` UID).
+    #[arg(long, env = "CRABKA_CLUSTER_ID")]
+    cluster_id: Option<uuid::Uuid>,
 }
 
 #[tokio::main]
@@ -69,6 +76,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         controller_election_timeout: std::time::Duration::from_secs(5),
         controller_heartbeat_interval: std::time::Duration::from_millis(500),
         bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
+        cluster_id: args.cluster_id,
         ..BrokerConfig::default()
     };
 
