@@ -148,12 +148,12 @@ implements it today.
 |---------|:------:|
 | TLS (`rustls`-backed, per-listener) | ✅ |
 | SASL/PLAIN | ✅ |
+| SASL/SCRAM-SHA-256 | ✅ |
 | SASL/SCRAM-SHA-512 | ✅ |
 | Per-listener protocol multiplexing (PLAINTEXT / SSL / SASL_PLAINTEXT / SASL_SSL) | ✅ |
 | Inter-broker auth (TLS + SASL on data plane & raft) | ✅ |
 | `AlterUserScramCredentials` (KIP-554) | ✅ |
 | `DescribeUserScramCredentials` (KIP-554) | ✅ |
-| SASL/SCRAM-SHA-256 | ❌ |
 | mTLS client authentication | ❌ |
 | SASL/OAUTHBEARER | ❌ |
 | SASL/GSSAPI (Kerberos) | ❌ |

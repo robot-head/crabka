@@ -16,6 +16,6 @@ pub use plain::verify_plain;
 pub use principal::{AuthError, Principal};
 pub use scram::{
     ScramClientExchange, ScramCredential, ScramServerExchange, StepResult, derive_keys_from_salted,
-    hash_scram_password,
+    hash_scram_password, scram_hash_len,
 };
 pub use tls::TlsConfig;

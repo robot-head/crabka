@@ -112,8 +112,12 @@ pub fn handle_handshake(
                 SaslMechanism::Plain => SaslExchange::Plain,
                 // SCRAM exchange is built lazily on the first SaslAuthenticate
                 // round (T14), once the username is known. Until then we sit
-                // in `ScramPending`.
-                SaslMechanism::ScramSha512 => SaslExchange::ScramPending,
+                // in `ScramPending`. SHA-256 and SHA-512 share the same
+                // dispatch state; the mechanism is preserved on the outer
+                // `Negotiating` variant.
+                SaslMechanism::ScramSha256 | SaslMechanism::ScramSha512 => {
+                    SaslExchange::ScramPending
+                }
             };
             *auth = ConnectionAuth::Negotiating {
                 mechanism: m,

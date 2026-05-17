@@ -437,6 +437,48 @@ Kafka client for ApiVersions.
 - Closes the recurring JVM-tool quirk that slices 16/16b/16c documented as known limitations.
 - Out of scope: slice 16 `client_id` HandlerTable gap (slice 17b).
 
+## Slice 32 — SASL/SCRAM-SHA-256 (2026-05-16)
+
+- New `SaslMechanism::ScramSha256` variant + `wire_name`/`from_wire`
+  round-trip ("SCRAM-SHA-256") and a `is_scram()` predicate that the
+  handler / handshake code uses to treat both SCRAM variants uniformly.
+- `crabka-security` SCRAM primitives now branch on the mechanism:
+  `hash_scram_password_with_salt` runs `PBKDF2-HMAC-{SHA256,SHA512}`
+  and stretches to the matching output size (32 / 64 bytes);
+  `derive_keys_from_salted` takes a mechanism arg and dispatches
+  accordingly. New helper `scram_hash_len(mechanism) -> usize`.
+- `ScramServerExchange` reads the mechanism off the credential it was
+  constructed with. `ScramClientExchange::new` gained a third arg
+  (mechanism) so it can compute the right hash on the client side too.
+  Asserts the mechanism is a SCRAM variant at construction.
+- Wire mapping changes:
+  - `alter_user_scram_credentials`: `wire_to_mech(1)` now returns
+    `Some(ScramSha256)`; `salted_password` length check is per-mechanism
+    via `scram_hash_len(mech)`.
+  - `describe_user_scram_credentials`: `sasl_mechanism_to_byte(ScramSha256) = 1`.
+  - `network/auth.rs::handle_handshake`: SCRAM-SHA-256 enters
+    `SaslExchange::ScramPending` like SHA-512.
+  - `network/dispatch.rs` + `raft_handshake.rs` + `network/client.rs`:
+    SCRAM-SHA-256 routes through the same `handle_authenticate_scram`
+    / `run_scram_client` paths; outbound inter-broker dialer threads
+    the mechanism through.
+- `crabka format --add-scram` accepts both `SCRAM-SHA-256=[...]` and
+  `SCRAM-SHA-512=[...]` prefixes. 1 new CLI unit test.
+- 7 new unit tests in `crabka-security`: SHA-256 PBKDF2 + key
+  derivation, SHA-256 round-trip, mechanism wire-name round-trip,
+  `is_scram` predicate.
+- 3 new broker integration tests in `tests/auth_handlers.rs`:
+  SHA-256 happy path, SHA-256 wrong-password connection close,
+  end-to-end `AlterUserScramCredentials` provisioning with
+  `mechanism=1` followed by a successful SHA-256 SCRAM session.
+- 1 new JVM acceptance test
+  (`jvm_sasl_scram_sha256_produce_consume`) drives `kafka-configs
+  --alter --entity-type users --add-config 'SCRAM-SHA-256=[...]'`
+  + `kafka-console-producer/consumer` with
+  `sasl.mechanism=SCRAM-SHA-256`.
+- Out of scope: mTLS client auth, OAUTHBEARER, GSSAPI, delegation
+  tokens.
+
 ## Slice 22 — Controlled shutdown (2026-05-16)
 
 - KIP-500 `BrokerHeartbeat.want_shut_down` is now honored end-to-end.

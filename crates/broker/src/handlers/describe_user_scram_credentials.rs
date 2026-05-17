@@ -108,6 +108,7 @@ fn build_results(
 #[must_use]
 fn sasl_mechanism_to_byte(m: SaslMechanism) -> i8 {
     match m {
+        SaslMechanism::ScramSha256 => 1,
         SaslMechanism::ScramSha512 => 2,
         SaslMechanism::Plain => 0,
     }
@@ -232,6 +233,7 @@ mod tests {
 
     #[test]
     fn sasl_mechanism_byte_mapping() {
+        assert_eq!(sasl_mechanism_to_byte(SaslMechanism::ScramSha256), 1);
         assert_eq!(sasl_mechanism_to_byte(SaslMechanism::ScramSha512), 2);
         assert_eq!(sasl_mechanism_to_byte(SaslMechanism::Plain), 0);
     }

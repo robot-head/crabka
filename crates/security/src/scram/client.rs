@@ -1,13 +1,15 @@
-//! `ScramClientExchange` — RFC 5802 SCRAM-SHA-512 client state machine.
+//! `ScramClientExchange` — RFC 5802 SCRAM client state machine.
+//! Supports SCRAM-SHA-256 and SCRAM-SHA-512; the mechanism is fixed at
+//! construction.
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use hmac::{Hmac, KeyInit, Mac};
 use ring::rand::{SecureRandom, SystemRandom};
-use sha2::{Digest, Sha512};
+use sha2::{Digest, Sha256, Sha512};
 use subtle::ConstantTimeEq;
 
-use crate::AuthError;
+use crate::{AuthError, SaslMechanism};
 
 #[derive(Debug)]
 enum State {
@@ -27,15 +29,21 @@ enum State {
 pub struct ScramClientExchange {
     username: String,
     password: Vec<u8>,
+    mechanism: SaslMechanism,
     state: State,
 }
 
 impl ScramClientExchange {
     #[must_use]
-    pub fn new(username: String, password: Vec<u8>) -> Self {
+    pub fn new(username: String, password: Vec<u8>, mechanism: SaslMechanism) -> Self {
+        assert!(
+            mechanism.is_scram(),
+            "ScramClientExchange::new called with non-SCRAM mechanism {mechanism:?}"
+        );
         Self {
             username,
             password,
+            mechanism,
             state: State::Initial,
         }
     }
@@ -86,30 +94,20 @@ impl ScramClientExchange {
             return Err(AuthError::BadProof);
         }
 
-        let salted: [u8; 64] =
-            pbkdf2::pbkdf2_hmac_array::<Sha512, 64>(&self.password, &salt, iters);
-        let mut client_key_mac =
-            <Hmac<Sha512>>::new_from_slice(&salted).map_err(|_| AuthError::MalformedMessage)?;
-        client_key_mac.update(b"Client Key");
-        let client_key = client_key_mac.finalize().into_bytes();
-        let stored_key = Sha512::digest(client_key);
-        let mut server_key_mac =
-            <Hmac<Sha512>>::new_from_slice(&salted).map_err(|_| AuthError::MalformedMessage)?;
-        server_key_mac.update(b"Server Key");
-        let server_key = server_key_mac.finalize().into_bytes().to_vec();
-
         let channel_binding = B64.encode(b"n,,");
         let client_final_no_proof = format!("c={channel_binding},r={combined_nonce}");
         let auth_message = format!("{client_first_bare},{s},{client_final_no_proof}");
-        let mut client_sig_mac =
-            <Hmac<Sha512>>::new_from_slice(&stored_key).map_err(|_| AuthError::MalformedMessage)?;
-        client_sig_mac.update(auth_message.as_bytes());
-        let client_signature = client_sig_mac.finalize().into_bytes();
-        let proof: Vec<u8> = client_key
-            .iter()
-            .zip(client_signature.iter())
-            .map(|(a, b)| a ^ b)
-            .collect();
+
+        let (proof, server_key) = match self.mechanism {
+            SaslMechanism::ScramSha512 => {
+                compute_proof_sha512(&self.password, &salt, iters, auth_message.as_bytes())?
+            }
+            SaslMechanism::ScramSha256 => {
+                compute_proof_sha256(&self.password, &salt, iters, auth_message.as_bytes())?
+            }
+            SaslMechanism::Plain => return Err(AuthError::MalformedMessage),
+        };
+
         let client_final = format!("{client_final_no_proof},p={}", B64.encode(&proof));
         self.state = State::AwaitingServerFinal {
             auth_message,
@@ -129,13 +127,82 @@ impl ScramClientExchange {
         let s = std::str::from_utf8(server_bytes).map_err(|_| AuthError::MalformedMessage)?;
         let v_b64 = s.strip_prefix("v=").ok_or(AuthError::MalformedMessage)?;
         let v = B64.decode(v_b64).map_err(|_| AuthError::MalformedMessage)?;
-        let mut mac =
-            <Hmac<Sha512>>::new_from_slice(&server_key).map_err(|_| AuthError::MalformedMessage)?;
-        mac.update(auth_message.as_bytes());
-        let expected = mac.finalize().into_bytes();
+        let expected: Vec<u8> = match self.mechanism {
+            SaslMechanism::ScramSha512 => {
+                let mut mac = <Hmac<Sha512>>::new_from_slice(&server_key)
+                    .map_err(|_| AuthError::MalformedMessage)?;
+                mac.update(auth_message.as_bytes());
+                mac.finalize().into_bytes().to_vec()
+            }
+            SaslMechanism::ScramSha256 => {
+                let mut mac = <Hmac<Sha256>>::new_from_slice(&server_key)
+                    .map_err(|_| AuthError::MalformedMessage)?;
+                mac.update(auth_message.as_bytes());
+                mac.finalize().into_bytes().to_vec()
+            }
+            SaslMechanism::Plain => return Err(AuthError::MalformedMessage),
+        };
         if expected.ct_eq(&v).unwrap_u8() != 1 {
             return Err(AuthError::BadProof);
         }
         Ok(())
     }
+}
+
+fn compute_proof_sha512(
+    password: &[u8],
+    salt: &[u8],
+    iters: u32,
+    auth_message: &[u8],
+) -> Result<(Vec<u8>, Vec<u8>), AuthError> {
+    let salted: [u8; 64] = pbkdf2::pbkdf2_hmac_array::<Sha512, 64>(password, salt, iters);
+    let mut client_key_mac =
+        <Hmac<Sha512>>::new_from_slice(&salted).map_err(|_| AuthError::MalformedMessage)?;
+    client_key_mac.update(b"Client Key");
+    let client_key = client_key_mac.finalize().into_bytes();
+    let stored_key = Sha512::digest(client_key);
+    let mut server_key_mac =
+        <Hmac<Sha512>>::new_from_slice(&salted).map_err(|_| AuthError::MalformedMessage)?;
+    server_key_mac.update(b"Server Key");
+    let server_key = server_key_mac.finalize().into_bytes().to_vec();
+
+    let mut client_sig_mac =
+        <Hmac<Sha512>>::new_from_slice(&stored_key).map_err(|_| AuthError::MalformedMessage)?;
+    client_sig_mac.update(auth_message);
+    let client_signature = client_sig_mac.finalize().into_bytes();
+    let proof: Vec<u8> = client_key
+        .iter()
+        .zip(client_signature.iter())
+        .map(|(a, b)| a ^ b)
+        .collect();
+    Ok((proof, server_key))
+}
+
+fn compute_proof_sha256(
+    password: &[u8],
+    salt: &[u8],
+    iters: u32,
+    auth_message: &[u8],
+) -> Result<(Vec<u8>, Vec<u8>), AuthError> {
+    let salted: [u8; 32] = pbkdf2::pbkdf2_hmac_array::<Sha256, 32>(password, salt, iters);
+    let mut client_key_mac =
+        <Hmac<Sha256>>::new_from_slice(&salted).map_err(|_| AuthError::MalformedMessage)?;
+    client_key_mac.update(b"Client Key");
+    let client_key = client_key_mac.finalize().into_bytes();
+    let stored_key = Sha256::digest(client_key);
+    let mut server_key_mac =
+        <Hmac<Sha256>>::new_from_slice(&salted).map_err(|_| AuthError::MalformedMessage)?;
+    server_key_mac.update(b"Server Key");
+    let server_key = server_key_mac.finalize().into_bytes().to_vec();
+
+    let mut client_sig_mac =
+        <Hmac<Sha256>>::new_from_slice(&stored_key).map_err(|_| AuthError::MalformedMessage)?;
+    client_sig_mac.update(auth_message);
+    let client_signature = client_sig_mac.finalize().into_bytes();
+    let proof: Vec<u8> = client_key
+        .iter()
+        .zip(client_signature.iter())
+        .map(|(a, b)| a ^ b)
+        .collect();
+    Ok((proof, server_key))
 }

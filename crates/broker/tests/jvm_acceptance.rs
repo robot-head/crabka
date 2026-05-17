@@ -2092,13 +2092,15 @@ async fn start_sasl_plaintext_broker(
 }
 
 /// Spawn the broker with a single `SASL_PLAINTEXT` listener that enables
-/// *both* PLAIN and SCRAM-SHA-512 mechanisms, plus a single PLAIN super-user
-/// (`admin` / `admin_pass`). The super-user designation grants the admin
-/// principal `CLUSTER_AUTHORIZATION` on `AlterUserScramCredentials` (51), so
-/// the JVM `kafka-configs --alter --entity-type users` tool — which the
-/// admin runs over PLAIN — can provision SCRAM credentials for other users.
+/// PLAIN, SCRAM-SHA-256, and SCRAM-SHA-512 mechanisms, plus a single PLAIN
+/// super-user (`admin` / `admin_pass`). The super-user designation grants
+/// the admin principal `CLUSTER_AUTHORIZATION` on
+/// `AlterUserScramCredentials` (51), so the JVM `kafka-configs --alter
+/// --entity-type users` tool — which the admin runs over PLAIN — can
+/// provision SCRAM credentials for other users.
 ///
-/// Used by `jvm_sasl_scram_sha512_produce_consume` (task 21).
+/// Used by `jvm_sasl_scram_sha512_produce_consume` (slice 12) and
+/// `jvm_sasl_scram_sha256_produce_consume` (slice 32).
 async fn start_dual_mech_broker(
     admin: &str,
     admin_pass: &str,
@@ -2138,7 +2140,11 @@ async fn start_dual_mech_broker(
             protocol: ListenerProtocol::SaslPlaintext,
         }],
         inter_broker_listener_name: "SASL_PLAINTEXT".to_string(),
-        enabled_sasl_mechanisms: vec![SaslMechanism::Plain, SaslMechanism::ScramSha512],
+        enabled_sasl_mechanisms: vec![
+            SaslMechanism::Plain,
+            SaslMechanism::ScramSha256,
+            SaslMechanism::ScramSha512,
+        ],
         super_users: std::collections::HashSet::from([admin.to_string()]),
         ..BrokerConfig::default()
     };
@@ -2515,6 +2521,174 @@ async fn jvm_sasl_scram_sha512_produce_consume() {
     );
 
     // 3. Consume them back (`--consumer.config`).
+    let consumer_out = docker_run_kafka_tool_with_image_and_mount(
+        KAFKA_IMAGE_TXN,
+        &alice_mount,
+        &[
+            "kafka-console-consumer",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--topic",
+            TOPIC,
+            "--partition",
+            "0",
+            "--from-beginning",
+            "--max-messages",
+            "10",
+            "--timeout-ms",
+            "20000",
+            "--consumer.config",
+            "/client.properties",
+        ],
+    );
+    let s = String::from_utf8_lossy(&consumer_out.stdout);
+    for i in 0..10 {
+        let needle = format!("msg-{i}");
+        assert!(s.contains(&needle), "consumer missing {needle}: {s:?}");
+    }
+
+    broker.shutdown().await;
+}
+
+/// Slice 32: SHA-256 analog of `jvm_sasl_scram_sha512_produce_consume`.
+/// Provisions alice's credential via `kafka-configs --add-config
+/// 'SCRAM-SHA-256=[password=...]'` (KIP-554 wire byte 1) then drives
+/// produce + consume with `sasl.mechanism=SCRAM-SHA-256`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Docker"]
+#[allow(clippy::too_many_lines)]
+async fn jvm_sasl_scram_sha256_produce_consume() {
+    const TOPIC: &str = "crabka-sasl-scram256-itest";
+    const ADMIN: &str = "admin";
+    const ADMIN_PASS: &str = "admin-secret";
+    const ALICE: &str = "alice";
+    const ALICE_PASS: &str = "alice-secret";
+
+    let (broker, _dir) = start_dual_mech_broker(ADMIN, ADMIN_PASS).await;
+    nc_check_connectivity();
+
+    let admin_props = write_client_props(&format!(
+        "security.protocol=SASL_PLAINTEXT\n\
+         sasl.mechanism=PLAIN\n\
+         sasl.jaas.config={}\n",
+        plain_jaas(ADMIN, ADMIN_PASS),
+    ));
+    docker_run_kafka_tool_with_image_and_mount(
+        KAFKA_IMAGE_TXN,
+        &admin_props.mount_str(),
+        &[
+            "kafka-configs",
+            "--alter",
+            "--entity-type",
+            "users",
+            "--entity-name",
+            ALICE,
+            "--add-config",
+            &format!("SCRAM-SHA-256=[password={ALICE_PASS}]"),
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--command-config",
+            "/client.properties",
+        ],
+    );
+
+    let alice_props = write_client_props(&format!(
+        "security.protocol=SASL_PLAINTEXT\n\
+         sasl.mechanism=SCRAM-SHA-256\n\
+         sasl.jaas.config={}\n\
+         enable.idempotence=false\n\
+         acks=1\n",
+        scram_jaas(ALICE, ALICE_PASS),
+    ));
+    let alice_mount = alice_props.mount_str();
+
+    // Create the topic as admin.
+    docker_run_kafka_tool_with_image_and_mount(
+        KAFKA_IMAGE_TXN,
+        &admin_props.mount_str(),
+        &[
+            "kafka-topics",
+            "--create",
+            "--if-not-exists",
+            "--topic",
+            TOPIC,
+            "--partitions",
+            "1",
+            "--replication-factor",
+            "1",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--command-config",
+            "/client.properties",
+        ],
+    );
+
+    // Grant alice Read + Write on the topic. Slice-13b implications cover
+    // Describe.
+    for op in ["Read", "Write"] {
+        docker_run_kafka_tool_with_image_and_mount(
+            KAFKA_IMAGE_TXN,
+            &admin_props.mount_str(),
+            &[
+                "kafka-acls",
+                "--add",
+                "--allow-principal",
+                &format!("User:{ALICE}"),
+                "--operation",
+                op,
+                "--topic",
+                TOPIC,
+                "--bootstrap-server",
+                BOOTSTRAP,
+                "--command-config",
+                "/client.properties",
+            ],
+        );
+    }
+
+    // Produce 10 records.
+    let mut child = Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "-i",
+            "-v",
+            &alice_mount,
+            "--add-host=host.docker.internal:host-gateway",
+            KAFKA_IMAGE_TXN,
+            "kafka-console-producer",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--topic",
+            TOPIC,
+            "--producer.config",
+            "/client.properties",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn producer");
+    let payload: String = (0..10)
+        .map(|i| format!("msg-{i}\n"))
+        .collect::<Vec<_>>()
+        .concat();
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(payload.as_bytes())
+        .expect("write stdin");
+    drop(child.stdin.take());
+    let producer_out = child.wait_with_output().expect("wait producer");
+    assert!(
+        producer_out.status.success(),
+        "producer failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&producer_out.stdout),
+        String::from_utf8_lossy(&producer_out.stderr)
+    );
+
+    // Consume them back.
     let consumer_out = docker_run_kafka_tool_with_image_and_mount(
         KAFKA_IMAGE_TXN,
         &alice_mount,

@@ -200,8 +200,11 @@ async fn drive_sasl_scram_session(
     }
 
     // 3. SCRAM client-first → server-first.
-    let mut client =
-        crabka_security::ScramClientExchange::new(user.to_string(), password.as_bytes().to_vec());
+    let mut client = crabka_security::ScramClientExchange::new(
+        user.to_string(),
+        password.as_bytes().to_vec(),
+        crabka_security::SaslMechanism::ScramSha512,
+    );
     let client_first = client
         .client_first()
         .map_err(|e| io::Error::other(format!("scram client_first: {e:?}")))?;
