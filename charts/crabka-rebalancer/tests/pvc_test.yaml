@@ -1,0 +1,27 @@
+suite: pvc
+templates:
+  - persistentvolumeclaim.yaml
+release:
+  name: demo
+set:
+  bootstrapServers: kafka-bootstrap:9092
+tests:
+  - it: accessMode is ReadWriteOnce
+    asserts:
+      - equal:
+          path: spec.accessModes[0]
+          value: ReadWriteOnce
+
+  - it: size defaults to 1Gi
+    asserts:
+      - equal:
+          path: spec.resources.requests.storage
+          value: 1Gi
+
+  - it: honors explicit storageClass when set
+    set:
+      persistence.storageClass: fast-ssd
+    asserts:
+      - equal:
+          path: spec.storageClassName
+          value: fast-ssd

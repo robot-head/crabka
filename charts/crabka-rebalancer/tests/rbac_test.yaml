@@ -1,0 +1,18 @@
+suite: rbac
+templates:
+  - serviceaccount.yaml
+release:
+  name: demo
+set:
+  bootstrapServers: kafka-bootstrap:9092
+tests:
+  - it: ServiceAccount is created
+    asserts:
+      - hasDocuments:
+          count: 1
+      - equal:
+          path: kind
+          value: ServiceAccount
+      - equal:
+          path: metadata.name
+          value: demo-crabka-rebalancer
