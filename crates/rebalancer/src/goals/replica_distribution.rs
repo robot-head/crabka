@@ -50,6 +50,24 @@ impl Goal for ReplicaDistribution {
         let mut working: Vec<PartitionView> = state.partitions.clone();
         let mut out: Vec<Movement> = Vec::new();
 
+        // Snapshot the original replica set + leader per partition. When
+        // a partition gets swapped twice in the loop, the second
+        // Movement's `old_replicas` / `old_leader` must still reflect
+        // the original cluster state — not the post-first-swap working
+        // state. The optimizer's last-writer-wins coalesce keeps the
+        // later Movement, so without this snapshot operators would see
+        // an intermediate "before" state in the proposal.
+        let original_replicas: HashMap<(String, i32), Vec<i32>> = state
+            .partitions
+            .iter()
+            .map(|p| ((p.topic.clone(), p.partition), p.replicas.clone()))
+            .collect();
+        let original_leader: HashMap<(String, i32), i32> = state
+            .partitions
+            .iter()
+            .map(|p| ((p.topic.clone(), p.partition), p.leader))
+            .collect();
+
         loop {
             // Recompute counts from `working`.
             let mut counts: HashMap<i32, usize> = state.brokers.iter().map(|b| (b.id, 0)).collect();
@@ -81,7 +99,15 @@ impl Goal for ReplicaDistribution {
                 break;
             };
             let p = &mut working[idx];
-            let old_replicas = p.replicas.clone();
+            let key = (p.topic.clone(), p.partition);
+            // Use the originally-captured pre-loop state, not the mutated
+            // working copy, so a partition swapped twice still reports
+            // its true original `old_replicas` / `old_leader`.
+            let old_replicas = original_replicas
+                .get(&key)
+                .cloned()
+                .unwrap_or_else(|| p.replicas.clone());
+            let old_leader = original_leader.get(&key).copied().unwrap_or(p.leader);
             let pos = p.replicas.iter().position(|r| *r == hot).unwrap();
             p.replicas[pos] = cold;
             // If the leader was `hot`, choose a new leader from the new replica set.
@@ -100,7 +126,7 @@ impl Goal for ReplicaDistribution {
                 partition: p.partition,
                 old_replicas,
                 new_replicas: p.replicas.clone(),
-                old_leader: p.leader,
+                old_leader,
                 new_leader,
             });
             p.leader = new_leader;
@@ -205,5 +231,55 @@ mod tests {
         }];
         let s = state_with(parts, vec![1, 2, 3]);
         assert!(ReplicaDistribution.propose(&s, &ctx()).is_empty());
+    }
+
+    #[test]
+    fn old_replicas_reflects_original_state() {
+        // Force a double-swap on the same partition. With a single
+        // partition replicated on brokers 1 + 2 on a 4-broker cluster,
+        // brokers 3 + 4 are empty (imbalance = (2-0)*100/2 = 100%).
+        // The greedy loop picks (hot=1-or-2, cold=3-or-4) and swaps the
+        // sole candidate partition repeatedly. After two swaps the only
+        // partition has been mutated twice, and pre-fix its second
+        // Movement records the post-first-swap replicas as
+        // `old_replicas`. We assert the contract: every Movement's
+        // `old_replicas` / `old_leader` matches the *input*
+        // ClusterState, regardless of how many times the algorithm
+        // visited that partition.
+        let parts: Vec<_> = vec![PartitionView {
+            topic: "t".into(),
+            partition: 0,
+            replicas: vec![1, 2],
+            leader: 1,
+            isr: vec![1, 2],
+        }];
+        let s = state_with(parts.clone(), vec![1, 2, 3, 4]);
+        let mvs = ReplicaDistribution.propose(&s, &ctx());
+        assert!(!mvs.is_empty(), "expected at least one swap");
+        // Sanity check: we want this scenario to actually trigger the
+        // double-swap path. Otherwise the test is silently passing for
+        // the wrong reason and the bug could regress unnoticed.
+        assert!(
+            mvs.len() >= 2,
+            "expected the algorithm to swap the same partition multiple times \
+             (got {} movements) — test scenario must exercise the double-swap",
+            mvs.len()
+        );
+        for m in &mvs {
+            let original = parts
+                .iter()
+                .find(|p| p.topic == m.topic && p.partition == m.partition)
+                .expect("movement references a partition in the input");
+            assert_eq!(
+                m.old_replicas, original.replicas,
+                "movement old_replicas must reflect the original cluster state, \
+                 not an intermediate working-state snapshot"
+            );
+            assert_eq!(
+                m.old_leader, original.leader,
+                "movement old_leader must reflect the original cluster state, \
+                 not an intermediate working-state snapshot"
+            );
+        }
     }
 }
