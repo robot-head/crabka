@@ -2,13 +2,12 @@
 //! to keep `controller/kafka.rs` and `controller/common.rs` from
 //! growing further.
 
-#![allow(dead_code)]
-
 use crate::crd::{Listener, ListenerType};
 
 /// Reason values for the `ListenersValid` status condition.
 /// Stable strings — consumed by `kubectl wait --for=condition=…` and
 /// asserted by tests.
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValidationError {
     DuplicateListenerName(String),
@@ -22,6 +21,7 @@ pub enum ValidationError {
     NoInternalListener,
 }
 
+#[allow(dead_code)]
 impl ValidationError {
     pub fn reason(&self) -> &'static str {
         match self {
@@ -74,6 +74,7 @@ impl ValidationError {
 /// `Ok(())` if everything is well-formed; otherwise the first error
 /// encountered (validation is short-circuit — surface the most
 /// actionable problem rather than a list).
+#[allow(dead_code)]
 pub fn validate_listeners(
     listeners: &[Listener],
     inter_broker_listener_name: Option<&str>,
@@ -141,6 +142,7 @@ pub fn validate_listeners(
 /// otherwise picks the first `internal` listener. Returns the synthesized
 /// default name (`"PLAIN"`) when `listeners` is empty (the slice-19
 /// compatibility path).
+#[allow(dead_code)]
 #[must_use]
 pub fn effective_inter_broker_listener_name(
     listeners: &[Listener],
