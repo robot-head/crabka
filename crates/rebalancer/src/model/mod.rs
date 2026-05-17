@@ -6,8 +6,10 @@
 //! reach the optimizer's accumulator.
 
 pub mod proposal;
+pub mod store;
 
 pub use proposal::{Movement, Proposal, ProposalStatus, ProposalSummary};
+pub use store::ProposalStore;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClusterState {
