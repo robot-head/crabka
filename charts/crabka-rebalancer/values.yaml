@@ -1,0 +1,35 @@
+# Default values for crabka-rebalancer.
+
+image:
+  repository: ghcr.io/robot-head/crabka-rebalancer
+  tag: ""  # defaults to .Chart.AppVersion when empty
+  pullPolicy: IfNotPresent
+
+# REQUIRED: comma-separated host:port list of Crabka bootstrap brokers.
+bootstrapServers: ""
+
+listenAddr: "0.0.0.0:9300"
+scrapeIntervalSecs: 10
+imbalanceThresholdPct: 10
+maxMovementsPerProposal: 256
+proposalRingBufferSize: 20
+
+throttle:
+  defaultBytesPerSec: 50000000
+
+executeDeadlineSecs: 1800
+reassignmentPollIntervalSecs: 5
+reassignmentBatchSize: 200
+
+persistence:
+  size: 1Gi
+  storageClass: ""  # uses default storage class when empty
+
+resources: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+service:
+  type: ClusterIP
+  port: 9300

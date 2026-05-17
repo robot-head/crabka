@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "rebalancer.fullname" . }}
+  labels:
+    {{- include "rebalancer.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: connect-rpc
+      protocol: TCP
+      name: connect-rpc
+  selector:
+    {{- include "rebalancer.selectorLabels" . | nindent 4 }}

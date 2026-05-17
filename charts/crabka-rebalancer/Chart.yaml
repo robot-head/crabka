@@ -1,0 +1,9 @@
+apiVersion: v2
+name: crabka-rebalancer
+description: Cruise-Control-equivalent partition rebalancer for Crabka clusters.
+type: application
+version: 0.1.1
+appVersion: "0.1.1"
+home: https://github.com/robot-head/crabka
+sources:
+  - https://github.com/robot-head/crabka/tree/main/crates/rebalancer

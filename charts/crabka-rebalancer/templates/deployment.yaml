@@ -1,0 +1,86 @@
+{{- if not .Values.bootstrapServers }}
+{{- fail "values.bootstrapServers is required (no default)" }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "rebalancer.fullname" . }}
+  labels:
+    {{- include "rebalancer.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "rebalancer.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "rebalancer.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "rebalancer.fullname" . }}
+      containers:
+        - name: crabka-rebalancer
+          image: {{ include "rebalancer.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: CRABKA_BOOTSTRAP_SERVERS
+              value: {{ .Values.bootstrapServers | quote }}
+            - name: CRABKA_REBALANCER_LISTEN_ADDR
+              value: {{ .Values.listenAddr | quote }}
+            - name: CRABKA_SCRAPE_INTERVAL_SECS
+              value: {{ .Values.scrapeIntervalSecs | quote }}
+            - name: CRABKA_IMBALANCE_THRESHOLD_PCT
+              value: {{ .Values.imbalanceThresholdPct | quote }}
+            - name: CRABKA_MAX_MOVEMENTS_PER_PROPOSAL
+              value: {{ .Values.maxMovementsPerProposal | quote }}
+            - name: CRABKA_PROPOSAL_RING_BUFFER_SIZE
+              value: {{ .Values.proposalRingBufferSize | quote }}
+            - name: CRABKA_DEFAULT_THROTTLE_BYTES_PER_SEC
+              value: {{ .Values.throttle.defaultBytesPerSec | quote }}
+            - name: CRABKA_EXECUTE_DEADLINE_SECS
+              value: {{ .Values.executeDeadlineSecs | quote }}
+            - name: CRABKA_REASSIGNMENT_POLL_INTERVAL_SECS
+              value: {{ .Values.reassignmentPollIntervalSecs | quote }}
+            - name: CRABKA_REASSIGNMENT_BATCH_SIZE
+              value: {{ .Values.reassignmentBatchSize | quote }}
+            - name: CRABKA_DATA_DIR
+              value: /var/lib/crabka-rebalancer
+          ports:
+            - name: connect-rpc
+              containerPort: 9300
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: connect-rpc
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: connect-rpc
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/crabka-rebalancer
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ include "rebalancer.fullname" . }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
