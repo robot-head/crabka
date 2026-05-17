@@ -14,11 +14,12 @@
 //! - all ready          -> `Ready=True`,  reason `Available`
 //! - otherwise          -> `Ready=False`, reason `PartiallyReady`
 
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt as _;
-use k8s_openapi::api::core::v1::{ConfigMap, Secret, Service};
+use k8s_openapi::api::core::v1::{ConfigMap, Node, Pod, Secret, Service};
 use kube::api::{Api, ListParams, Patch, PatchParams};
 use kube::runtime::controller::{Action, Controller};
 use kube::runtime::reflector::ObjectRef;
@@ -31,7 +32,14 @@ use crate::controller::common::{
     self, FIELD_MANAGER, ReconcileError, apply_object, condition, ensure_cluster_id_secret,
     owner_ref, patch_status, render_service,
 };
-use crate::crd::{Kafka, KafkaNodePool, KafkaStatus};
+use crate::controller::listeners::{
+    self, AdvertisedAddress, compute_advertised, effective_inter_broker_listener_name,
+    render_bootstrap_service, render_broker_service, synthesized_default_listener,
+    validate_listeners,
+};
+use crate::crd::{
+    Kafka, KafkaNodePool, KafkaStatus, Listener, ListenerAddress, ListenerStatus, ListenerType,
+};
 
 /// Rolled-up view of a cluster's pools. Computed by
 /// `aggregate_pool_status` and consumed by `rollup_condition`.
@@ -154,58 +162,391 @@ pub async fn run(ctx: Context) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Identifier triple for one broker, derived from a `KafkaNodePool`.
+/// `pod_fqdn` is the stable in-cluster DNS name (cluster headless
+/// Service subdomain) — same string whether the pod is scheduled or
+/// not, so internal listeners can advertise it before any pod exists.
+#[derive(Debug, Clone)]
+pub(crate) struct BrokerInfo {
+    pub broker_id: i32,
+    pub pod_name: String,
+    pub pod_fqdn: String,
+}
+
+/// Walk pools (in caller-provided order) and emit one `BrokerInfo` per
+/// pool. Slice-20 enforces `replicas == 1`, so each pool maps to
+/// exactly one broker whose id is the pool's `nodeIdStart`.
+pub(crate) fn enumerate_brokers(
+    cluster_name: &str,
+    namespace: &str,
+    pools: &[KafkaNodePool],
+) -> Vec<BrokerInfo> {
+    let svc = format!("{cluster_name}-broker-headless");
+    let mut out = Vec::with_capacity(pools.len());
+    let mut sorted: Vec<&KafkaNodePool> = pools.iter().collect();
+    sorted.sort_by_key(|p| p.name_any());
+    for pool in sorted {
+        let pool_name = pool.name_any();
+        let pod_name = format!("{cluster_name}-{pool_name}-0");
+        let pod_fqdn = format!("{pod_name}.{svc}.{namespace}.svc.cluster.local");
+        out.push(BrokerInfo {
+            broker_id: pool.spec.node_id_start,
+            pod_name,
+            pod_fqdn,
+        });
+    }
+    out
+}
+
+/// Build the per-listener `ListenerStatus` entries. Internal listeners
+/// surface the headless Service FQDN; external listeners pull a
+/// bootstrap host:port from the apiserver-returned bootstrap Service.
+/// Returns only entries whose addresses successfully resolved — a
+/// listener still pending external infra is omitted.
+pub(crate) fn build_listener_status(
+    effective_listeners: &[Listener],
+    addresses_per_broker: &BTreeMap<i32, BTreeMap<String, AdvertisedAddress>>,
+    bootstrap_services: &HashMap<String, Service>,
+    nodes: &HashMap<String, Node>,
+    cluster_name: &str,
+    namespace: &str,
+) -> Vec<ListenerStatus> {
+    let mut out = Vec::new();
+    for l in effective_listeners {
+        let mut addresses: Vec<ListenerAddress> = addresses_per_broker
+            .values()
+            .filter_map(|m| m.get(&l.name))
+            .map(|a| ListenerAddress {
+                host: a.host.clone(),
+                port: a.port,
+            })
+            .collect();
+        addresses.sort_by(|a, b| a.host.cmp(&b.host).then(a.port.cmp(&b.port)));
+
+        let bootstrap =
+            resolve_bootstrap_servers(l, bootstrap_services, nodes, cluster_name, namespace);
+        if let Some(bootstrap_servers) = bootstrap {
+            out.push(ListenerStatus {
+                name: l.name.clone(),
+                type_: l.type_,
+                bootstrap_servers,
+                addresses,
+            });
+        }
+    }
+    out
+}
+
+/// Inner helper for [`build_listener_status`]. Splits the per-listener
+/// bootstrap-address derivation out so the body can `?`-chain through
+/// the Option-returning apiserver lookups.
+fn resolve_bootstrap_servers(
+    listener: &Listener,
+    bootstrap_services: &HashMap<String, Service>,
+    nodes: &HashMap<String, Node>,
+    cluster_name: &str,
+    namespace: &str,
+) -> Option<String> {
+    match listener.type_ {
+        ListenerType::Internal => Some(format!(
+            "{cluster_name}-broker-headless.{namespace}.svc.cluster.local:{}",
+            listener.port
+        )),
+        ListenerType::Nodeport => {
+            let svc_name = format!("{cluster_name}-{}-bootstrap", listener.name);
+            let svc = bootstrap_services.get(&svc_name)?;
+            let node_port = svc
+                .spec
+                .as_ref()
+                .and_then(|s| s.ports.as_ref())
+                .and_then(|ps| ps.first())
+                .and_then(|p| p.node_port)?;
+            // Pick any node address — prefer ExternalIP, fall back to
+            // InternalIP. Clients re-resolve via the per-broker list.
+            let host = nodes.values().find_map(|n| {
+                let addrs = n.status.as_ref().and_then(|s| s.addresses.as_ref())?;
+                addrs
+                    .iter()
+                    .find(|a| a.type_ == "ExternalIP")
+                    .or_else(|| addrs.iter().find(|a| a.type_ == "InternalIP"))
+                    .map(|a| a.address.clone())
+            })?;
+            Some(format!("{host}:{node_port}"))
+        }
+        ListenerType::Loadbalancer => {
+            let svc_name = format!("{cluster_name}-{}-bootstrap", listener.name);
+            let svc = bootstrap_services.get(&svc_name)?;
+            let ingress = svc
+                .status
+                .as_ref()
+                .and_then(|st| st.load_balancer.as_ref())
+                .and_then(|lb| lb.ingress.as_ref())
+                .and_then(|ig| ig.first())?;
+            let host = ingress.hostname.clone().or_else(|| ingress.ip.clone())?;
+            Some(format!("{host}:{}", listener.port))
+        }
+        ListenerType::Ingress | ListenerType::Route => None,
+    }
+}
+
+/// Apply both the bootstrap and per-broker Services for each external
+/// (`nodeport` / `loadbalancer`) listener. Internal listeners don't
+/// need any Service objects beyond the cluster-wide headless one.
+async fn apply_external_services(
+    svc_api: &Api<Service>,
+    owner: &Kafka,
+    cluster_name: &str,
+    effective_listeners: &[Listener],
+    brokers: &[BrokerInfo],
+) -> Result<(), ReconcileError> {
+    for l in effective_listeners
+        .iter()
+        .filter(|l| matches!(l.type_, ListenerType::Nodeport | ListenerType::Loadbalancer))
+    {
+        let bs = render_bootstrap_service(owner, l)?;
+        let bs_name = format!("{cluster_name}-{}-bootstrap", l.name);
+        apply_object(svc_api, &bs_name, &bs).await?;
+        for b in brokers {
+            let per = render_broker_service(owner, l, b.broker_id, &b.pod_name)?;
+            let per_name = format!("{cluster_name}-{}-{}", l.name, b.broker_id);
+            apply_object(svc_api, &per_name, &per).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Read back the cluster Nodes, broker Pods, and per-listener Services
+/// the operator just applied. Returned as three `HashMap`s plus the
+/// pod-by-name lookup the address resolver needs.
+///
+/// Returning `Ok(default)` rather than failing on any individual GET's
+/// 404 is intentional: a Pod that hasn't been created yet is not an
+/// error — it surfaces as `PodNotScheduled` in `compute_advertised`.
+#[allow(clippy::type_complexity)]
+async fn read_external_state(
+    ctx: &Context,
+    svc_api: &Api<Service>,
+    namespace: &str,
+    cluster_name: &str,
+    effective_listeners: &[Listener],
+    brokers: &[BrokerInfo],
+) -> Result<
+    (
+        HashMap<String, Node>,
+        HashMap<String, Pod>,
+        HashMap<String, Service>,
+        HashMap<(String, i32), Service>,
+    ),
+    ReconcileError,
+> {
+    let node_api: Api<Node> = Api::all(ctx.client.clone());
+    let mut nodes = HashMap::new();
+    for n in node_api.list(&ListParams::default()).await?.items {
+        if let Some(nname) = n.metadata.name.clone() {
+            nodes.insert(nname, n);
+        }
+    }
+
+    let pod_api: Api<Pod> = Api::namespaced(ctx.client.clone(), namespace);
+    let pod_lp =
+        ListParams::default().labels(&format!("app.kubernetes.io/instance={cluster_name}"));
+    let mut pods_by_name = HashMap::new();
+    for p in pod_api.list(&pod_lp).await?.items {
+        if let Some(pname) = p.metadata.name.clone() {
+            pods_by_name.insert(pname, p);
+        }
+    }
+
+    let mut bootstrap_services = HashMap::new();
+    let mut broker_services = HashMap::new();
+    for l in effective_listeners
+        .iter()
+        .filter(|l| matches!(l.type_, ListenerType::Nodeport | ListenerType::Loadbalancer))
+    {
+        let bs_name = format!("{cluster_name}-{}-bootstrap", l.name);
+        if let Some(bs) = svc_api.get_opt(&bs_name).await? {
+            bootstrap_services.insert(bs_name, bs);
+        }
+        for b in brokers {
+            let per_name = format!("{cluster_name}-{}-{}", l.name, b.broker_id);
+            if let Some(s) = svc_api.get_opt(&per_name).await? {
+                broker_services.insert((l.name.clone(), b.broker_id), s);
+            }
+        }
+    }
+    Ok((nodes, pods_by_name, bootstrap_services, broker_services))
+}
+
+/// For each (broker, listener) pair, resolve the advertised host:port
+/// via [`compute_advertised`]. Short-circuits on the first
+/// `AdvertisedError` so the caller can surface a single
+/// `PendingExternalAddresses` reason rather than a flapping list.
+fn resolve_addresses_per_broker(
+    effective_listeners: &[Listener],
+    brokers: &[BrokerInfo],
+    pods_by_name: &HashMap<String, Pod>,
+    nodes: &HashMap<String, Node>,
+    broker_services: &HashMap<(String, i32), Service>,
+) -> Result<BTreeMap<i32, BTreeMap<String, AdvertisedAddress>>, listeners::AdvertisedError> {
+    let mut out: BTreeMap<i32, BTreeMap<String, AdvertisedAddress>> = BTreeMap::new();
+    for b in brokers {
+        let mut listener_map: BTreeMap<String, AdvertisedAddress> = BTreeMap::new();
+        for l in effective_listeners {
+            let pod_node = pods_by_name
+                .get(&b.pod_name)
+                .and_then(|p| p.spec.as_ref())
+                .and_then(|s| s.node_name.as_deref());
+            let svc_ref = broker_services.get(&(l.name.clone(), b.broker_id));
+            let addr = compute_advertised(l, b.broker_id, &b.pod_fqdn, pod_node, nodes, svc_ref)?;
+            listener_map.insert(l.name.clone(), addr);
+        }
+        out.insert(b.broker_id, listener_map);
+    }
+    Ok(out)
+}
+
+#[allow(clippy::too_many_lines)] // linear pipeline; the three branches (invalid / pending / ready) need direct condition + status binding
 pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, ReconcileError> {
     let ns = obj.namespace().unwrap_or_else(|| "default".into());
     let name = obj.name_any();
     tracing::info!(%ns, %name, "reconciling Kafka");
 
-    // 1. Cluster-level Service + ConfigMap via SSA. Names are derived
-    //    inside the renderers; we mirror them here for the api.patch
-    //    target.
+    // 1. Cluster-level headless Service via SSA. Selectors target every
+    //    broker pod; rendered identically whether listeners validate or
+    //    not so admins can `kubectl get svc` immediately.
     let svc_api: Api<Service> = Api::namespaced(ctx.client.clone(), &ns);
     let svc = render_service(&obj)?;
     apply_object(&svc_api, &svc_name(&name), &svc).await?;
 
-    // Slice 25/7 transitional: ConfigMap is rendered with empty per-broker
-    // data until Task 25/9 wires the full reconcile flow. The CM keys
-    // disappear from the cluster on first reconcile; pods can't start until
-    // Task 25/9 populates the per-broker TOML.
-    let cm_api: Api<ConfigMap> = Api::namespaced(ctx.client.clone(), &ns);
-    let cm = common::render_configmap(
-        &obj,
-        &[],                                // listeners — empty until Task 25/9 wires reconcile
-        &std::collections::BTreeMap::new(), // addresses_per_broker — empty until Task 25/9
-        "PLAIN", // inter_broker_listener_name — placeholder until Task 25/9
-    )?;
-    apply_object(&cm_api, &cm_name(&name), &cm).await?;
+    // 2. Validate `spec.listeners`. On failure we still apply the
+    //    headless Service (done) and ensure the cluster-id Secret + adopt
+    //    pools below, but skip per-broker Service rendering and write
+    //    an empty per-broker ConfigMap so existing TOML keys reflect
+    //    "no broker should boot". The spec describes this as
+    //    "existing objects are not deleted; surface the error and wait."
+    let validation = validate_listeners(
+        &obj.spec.listeners,
+        obj.spec.inter_broker_listener_name.as_deref(),
+    );
 
-    // Compute the combined config hash (spec.config + listener intent).
+    // Effective listeners: synthesize the slice-19/20 default when
+    // `spec.listeners` is empty.
+    let effective_listeners: Vec<Listener> = if obj.spec.listeners.is_empty() {
+        vec![synthesized_default_listener()]
+    } else {
+        obj.spec.listeners.clone()
+    };
+    let inter_broker_name = effective_inter_broker_listener_name(
+        &obj.spec.listeners,
+        obj.spec.inter_broker_listener_name.as_deref(),
+    );
+
+    let cm_api: Api<ConfigMap> = Api::namespaced(ctx.client.clone(), &ns);
+
+    // Helper to render+apply a ConfigMap with the supplied address map.
+    // Reused on the validation-fail / pending-external paths (empty map)
+    // and the happy path (full map).
+    let apply_cm = async |listeners_for_cm: &[Listener],
+                          addresses: &BTreeMap<i32, BTreeMap<String, AdvertisedAddress>>|
+           -> Result<(), ReconcileError> {
+        let cm = common::render_configmap(&obj, listeners_for_cm, addresses, &inter_broker_name)?;
+        apply_object(&cm_api, &cm_name(&name), &cm).await?;
+        Ok(())
+    };
+
     let cfg_hash = common::combined_config_hash(&obj.spec);
 
-    // 2. Cluster-id Secret: one-shot create-if-missing. The pool
-    //    reconciler reads this secret to inject CRABKA_CLUSTER_ID into
-    //    broker pods.
     let secret_api: Api<Secret> = Api::namespaced(ctx.client.clone(), &ns);
     let _cluster_id = ensure_cluster_id_secret(&secret_api, &obj).await?;
 
-    // 3. List sibling pools by label.
     let pool_api: Api<KafkaNodePool> = Api::namespaced(ctx.client.clone(), &ns);
     let lp = ListParams::default().labels(&format!("crabka.io/cluster={name}"));
     let pools = pool_api.list(&lp).await?;
 
-    // 3b. Adopt sibling pools: patch each pool's `metadata.ownerReferences`
-    //     to include this Kafka as the controlling owner, and stamp the
-    //     `crabka.io/config-hash` label so the pool reconciler can
-    //     propagate it into the broker pod template (which forces a
-    //     StatefulSet rolling restart on drift). Idempotent — Kubernetes
-    //     server-side resolves the patch to a no-op when the fields
-    //     already match. The owner-ref drives Kubernetes' built-in GC.
-    adopt_pools(&pool_api, &obj, pools.iter(), &cfg_hash).await?;
+    // If validation failed, write an empty ConfigMap (no broker TOML
+    // keys) before adopting pools / patching status. This keeps every
+    // owned object present but unconfigured.
+    let listener_status: Vec<ListenerStatus>;
+    let (listeners_valid_cond, listeners_ready_cond);
+    if let Err(e) = validation {
+        apply_cm(&[], &BTreeMap::new()).await?;
+        adopt_pools(&pool_api, &obj, pools.iter(), &cfg_hash).await?;
+        listener_status = vec![];
+        listeners_valid_cond = condition("ListenersValid", "False", e.reason(), &e.message());
+        listeners_ready_cond =
+            condition("ListenersReady", "False", "ListenersInvalid", &e.message());
+    } else {
+        // Enumerate brokers from sibling pools. Empty pool list ->
+        // empty broker list -> ConfigMap with no per-broker TOML keys,
+        // but listeners are still "valid" (just no consumers yet).
+        let pool_items: Vec<KafkaNodePool> = pools.items.clone();
+        let brokers = enumerate_brokers(&name, &ns, &pool_items);
 
-    // 4. Aggregate + patch our own status. Surface both a `Ready`
-    //    condition (existing slice-20 contract) and a `Rolling`
-    //    condition (slice 21) so admins can distinguish "broker down"
-    //    from "rolling restart in progress".
+        // Optimization: when `spec.listeners` is empty, the synthesized
+        // default is internal-only — `compute_advertised` for internal
+        // listeners only needs `pod_fqdn`, computable from `BrokerInfo`
+        // alone, so we can skip the Pod/Node list and per-broker
+        // Service rendering entirely. This preserves the slice-24
+        // request sequence exactly.
+        let has_external = effective_listeners
+            .iter()
+            .any(|l| matches!(l.type_, ListenerType::Nodeport | ListenerType::Loadbalancer));
+
+        let (nodes, pods_by_name, bootstrap_services, broker_services) = if has_external {
+            apply_external_services(&svc_api, &obj, &name, &effective_listeners, &brokers).await?;
+            read_external_state(&ctx, &svc_api, &ns, &name, &effective_listeners, &brokers).await?
+        } else {
+            (
+                HashMap::new(),
+                HashMap::new(),
+                HashMap::new(),
+                HashMap::new(),
+            )
+        };
+
+        match resolve_addresses_per_broker(
+            &effective_listeners,
+            &brokers,
+            &pods_by_name,
+            &nodes,
+            &broker_services,
+        ) {
+            Err(err) => {
+                // Render an empty ConfigMap (no broker TOML keys) so
+                // brokers don't try to boot with stale data; report
+                // ListenersReady=False with the actionable message.
+                apply_cm(&[], &BTreeMap::new()).await?;
+                adopt_pools(&pool_api, &obj, pools.iter(), &cfg_hash).await?;
+                listener_status = vec![];
+                listeners_valid_cond =
+                    condition("ListenersValid", "True", "Valid", "listeners validated");
+                listeners_ready_cond = condition(
+                    "ListenersReady",
+                    "False",
+                    "PendingExternalAddresses",
+                    &err.message(),
+                );
+            }
+            Ok(addresses_per_broker) => {
+                apply_cm(&effective_listeners, &addresses_per_broker).await?;
+                adopt_pools(&pool_api, &obj, pools.iter(), &cfg_hash).await?;
+                listener_status = build_listener_status(
+                    &effective_listeners,
+                    &addresses_per_broker,
+                    &bootstrap_services,
+                    &nodes,
+                    &name,
+                    &ns,
+                );
+                listeners_valid_cond =
+                    condition("ListenersValid", "True", "Valid", "listeners validated");
+                let msg = format!("{} listener(s) ready", effective_listeners.len());
+                listeners_ready_cond = condition("ListenersReady", "True", "Ready", &msg);
+            }
+        }
+    }
+
+    // Aggregate + patch our own status.
     let rollup = aggregate_pool_status(pools.iter());
     let (ready, reason, message) = rollup_condition(&rollup);
     let (rolling, rolling_reason, rolling_message) = rolling_condition_from_rollup(&rollup);
@@ -223,10 +564,12 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
                 rolling_reason,
                 &rolling_message,
             ),
+            listeners_valid_cond,
+            listeners_ready_cond,
         ],
         replicas: Some(rollup.replicas),
         ready_replicas: Some(rollup.ready_replicas),
-        listeners: vec![],
+        listeners: listener_status,
     };
     let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), &ns);
     patch_status::<Kafka, KafkaStatus>(&kafka_api, &name, status).await?;

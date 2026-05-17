@@ -6,18 +6,24 @@
 //! `StatefulSet`s live on the pool reconciler — the Kafka reconciler
 //! must never touch `/statefulsets/`.
 //!
-//! Request sequence on a fresh Kafka:
+//! Request sequence on a fresh Kafka with no `spec.listeners` set
+//! (slice 25 synthesized internal-default path):
 //!   1. PATCH services/<name>-broker-headless   (SSA)
-//!   2. PATCH configmaps/<name>-broker-config   (SSA)
-//!   3. GET   secrets/<name>-cluster-id         (-> 404)
-//!   4. POST  secrets                           (-> 201)
-//!   5. GET   kafkanodepools?labelSelector=...  (-> 200 `KafkaNodePoolList`)
-//!   6. PATCH kafkas/<name>/status              (merge)
+//!   2. GET   secrets/<name>-cluster-id         (-> 404)
+//!   3. POST  secrets                           (-> 201)
+//!   4. GET   kafkanodepools?labelSelector=...  (-> 200 `KafkaNodePoolList`)
+//!   5. PATCH configmaps/<name>-broker-config   (SSA, populated with per-broker TOML)
+//!   6. PATCH kafkanodepools/<pool>             (owner-ref adopt)
+//!   7. PATCH kafkas/<name>/status              (merge)
+//!
+//! The `ConfigMap` moved after the pool list because slice 25 derives one
+//! `broker-{id}.toml` key per pool — we have to enumerate the pools
+//! first to know which keys to emit.
 
 use std::sync::Arc;
 
 use crabka_operator::controller::kafka::reconcile;
-use crabka_operator::crd::{Kafka, KafkaSpec};
+use crabka_operator::crd::{Kafka, KafkaSpec, Listener, ListenerType};
 use http::{Method, Response};
 use serde_json::json;
 
@@ -80,19 +86,13 @@ fn happy_path_rules(
     let secret_name = format!("{name}-cluster-id");
 
     let mut rules = vec![
-        // 1. PATCH service
+        // 1. PATCH headless service.
         MockRule {
             method: Method::PATCH,
             path_substr: format!("/services/{svc_name}"),
             response: json_response(200, &fake_service_body(&svc_name, namespace)),
         },
-        // 2. PATCH configmap
-        MockRule {
-            method: Method::PATCH,
-            path_substr: format!("/configmaps/{cm_name}"),
-            response: json_response(200, &fake_configmap_body(&cm_name, namespace)),
-        },
-        // 3. GET secret -> 404
+        // 2. GET cluster-id secret -> 404 (slice-20 one-shot create).
         MockRule {
             method: Method::GET,
             path_substr: format!("/secrets/{secret_name}"),
@@ -102,7 +102,7 @@ fn happy_path_rules(
                 .body(not_found_body("secret not found"))
                 .expect("404 builds"),
         },
-        // 4. POST secret -> 201
+        // 3. POST secret -> 201.
         MockRule {
             method: Method::POST,
             path_substr: format!("/namespaces/{namespace}/secrets"),
@@ -115,19 +115,25 @@ fn happy_path_rules(
                 ),
             ),
         },
-        // 5. GET kafkanodepools (list by label).
+        // 4. GET kafkanodepools (list by label).
         MockRule {
             method: Method::GET,
             path_substr: format!("/namespaces/{namespace}/kafkanodepools"),
             response: json_response(200, &fake_pool_list_body(pool_items)),
         },
+        // 5. PATCH configmap (per-broker TOML keys derived from the pool list).
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/configmaps/{cm_name}"),
+            response: json_response(200, &fake_configmap_body(&cm_name, namespace)),
+        },
     ];
-    // 5b. PATCH each pool to inject the controller owner-ref. The pool
-    //     reconciler doesn't set this itself — the Kafka reconciler is
-    //     the one that adopts existing pools labeled
-    //     `crabka.io/cluster=<this>`. Without these owner-refs, deleting
-    //     the Kafka CR doesn't cascade to the pool's StatefulSet, which
-    //     the operator-e2e GC step asserts on.
+    // 6. PATCH each pool to inject the controller owner-ref. The pool
+    //    reconciler doesn't set this itself — the Kafka reconciler is
+    //    the one that adopts existing pools labeled
+    //    `crabka.io/cluster=<this>`. Without these owner-refs, deleting
+    //    the Kafka CR doesn't cascade to the pool's StatefulSet, which
+    //    the operator-e2e GC step asserts on.
     for item in pool_items {
         let pool_name = item["metadata"]["name"]
             .as_str()
@@ -138,7 +144,7 @@ fn happy_path_rules(
             response: json_response(200, &fake_pool_body(pool_name, namespace, name)),
         });
     }
-    // 6. PATCH kafkas/<name>/status
+    // 7. PATCH kafkas/<name>/status
     rules.push(MockRule {
         method: Method::PATCH,
         path_substr: format!("/kafkas/{name}/status"),
@@ -176,7 +182,7 @@ async fn kafka_applies_service_configmap_secret_no_statefulset() {
     assert_eq!(
         observed.len(),
         7,
-        "expected exactly 7 requests (svc, cm, get-secret, post-secret, list-pools, \
+        "expected exactly 7 requests (svc, get-secret, post-secret, list-pools, cm, \
          patch-pool-owner-ref, status), saw {}: {:?}",
         observed.len(),
         methods_and_uris,
@@ -199,38 +205,38 @@ async fn kafka_applies_service_configmap_secret_no_statefulset() {
         methods_and_uris[0].1
     );
 
-    assert_eq!(methods_and_uris[1].0, Method::PATCH);
+    assert_eq!(methods_and_uris[1].0, Method::GET);
     assert!(
-        methods_and_uris[1]
-            .1
-            .contains("/configmaps/demo-broker-config"),
-        "step 2 should patch the configmap: {}",
+        methods_and_uris[1].1.contains("/secrets/demo-cluster-id"),
+        "step 2 should get the cluster-id secret: {}",
         methods_and_uris[1].1
     );
 
-    assert_eq!(methods_and_uris[2].0, Method::GET);
+    assert_eq!(methods_and_uris[2].0, Method::POST);
     assert!(
-        methods_and_uris[2].1.contains("/secrets/demo-cluster-id"),
-        "step 3 should get the cluster-id secret: {}",
+        methods_and_uris[2].1.contains("/namespaces/y/secrets"),
+        "step 3 should create the cluster-id secret: {}",
         methods_and_uris[2].1
     );
 
-    assert_eq!(methods_and_uris[3].0, Method::POST);
+    assert_eq!(methods_and_uris[3].0, Method::GET);
     assert!(
-        methods_and_uris[3].1.contains("/namespaces/y/secrets"),
-        "step 4 should create the cluster-id secret: {}",
+        methods_and_uris[3].1.contains("/kafkanodepools"),
+        "step 4 should list kafkanodepools: {}",
+        methods_and_uris[3].1
+    );
+    assert!(
+        methods_and_uris[3].1.contains("labelSelector="),
+        "step 4 should filter by labelSelector: {}",
         methods_and_uris[3].1
     );
 
-    assert_eq!(methods_and_uris[4].0, Method::GET);
+    assert_eq!(methods_and_uris[4].0, Method::PATCH);
     assert!(
-        methods_and_uris[4].1.contains("/kafkanodepools"),
-        "step 5 should list kafkanodepools: {}",
-        methods_and_uris[4].1
-    );
-    assert!(
-        methods_and_uris[4].1.contains("labelSelector="),
-        "step 5 should filter by labelSelector: {}",
+        methods_and_uris[4]
+            .1
+            .contains("/configmaps/demo-broker-config"),
+        "step 5 should patch the configmap (after pool enumeration): {}",
         methods_and_uris[4].1
     );
 
@@ -374,6 +380,151 @@ async fn kafka_status_includes_rolling_condition_stable() {
         .unwrap_or_else(|| panic!("Rolling condition present, body = {body}"));
     assert_eq!(rolling["status"], "False", "body = {body}");
     assert_eq!(rolling["reason"], "Stable", "body = {body}");
+
+    assert_eq!(state.remaining_rules(), 0);
+}
+
+/// Slice 25: when `spec.listeners` is empty the operator synthesizes a
+/// single internal `PLAIN` listener. The status PATCH must include
+/// `ListenersValid=True`, `ListenersReady=True`, and a one-entry
+/// `listeners[]` array describing the synthesized listener.
+#[tokio::test]
+async fn kafka_status_synthesized_default_listener_is_valid_and_ready() {
+    let items = vec![fake_pool_list_item("brokers", "y", "demo", 1, 1)];
+    let (ctx, state) = build_ctx("y", happy_path_rules("demo", "y", &items));
+    let kafka = kafka_cr("demo", "y");
+
+    reconcile(Arc::new(kafka), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    let status_patch = observed
+        .iter()
+        .find(|r| {
+            r.method() == Method::PATCH && r.uri().to_string().contains("/kafkas/demo/status")
+        })
+        .expect("status PATCH must have been captured");
+
+    let body: serde_json::Value =
+        serde_json::from_slice(status_patch.body()).expect("status PATCH body is JSON");
+    let conds = body["status"]["conditions"]
+        .as_array()
+        .expect("conditions array");
+
+    let valid = conds
+        .iter()
+        .find(|c| c["type"] == "ListenersValid")
+        .unwrap_or_else(|| panic!("ListenersValid condition present, body = {body}"));
+    assert_eq!(valid["status"], "True", "body = {body}");
+    assert_eq!(valid["reason"], "Valid", "body = {body}");
+
+    let ready = conds
+        .iter()
+        .find(|c| c["type"] == "ListenersReady")
+        .unwrap_or_else(|| panic!("ListenersReady condition present, body = {body}"));
+    assert_eq!(ready["status"], "True", "body = {body}");
+    assert_eq!(ready["reason"], "Ready", "body = {body}");
+
+    let listeners = body["status"]["listeners"]
+        .as_array()
+        .unwrap_or_else(|| panic!("status.listeners array, body = {body}"));
+    assert_eq!(listeners.len(), 1, "body = {body}");
+    assert_eq!(listeners[0]["name"], "PLAIN", "body = {body}");
+    assert_eq!(listeners[0]["type"], "internal", "body = {body}");
+    assert_eq!(
+        listeners[0]["bootstrapServers"], "demo-broker-headless.y.svc.cluster.local:9092",
+        "body = {body}"
+    );
+
+    assert_eq!(state.remaining_rules(), 0);
+}
+
+/// Slice 25: a `spec.listeners` entry with `tls=true` is rejected at
+/// validation. The status PATCH must show `ListenersValid=False
+/// reason=TlsNotYetSupported` and `ListenersReady=False
+/// reason=ListenersInvalid`, and the `ConfigMap` PATCH must carry no
+/// `broker-*.toml` keys (no broker should boot with an invalid spec).
+#[tokio::test]
+async fn kafka_invalid_listener_tls_blocks_broker_configmap_and_sets_conditions() {
+    let items = vec![fake_pool_list_item("brokers", "y", "demo", 1, 1)];
+    let (ctx, state) = build_ctx("y", happy_path_rules("demo", "y", &items));
+    let mut kafka = kafka_cr("demo", "y");
+    kafka.spec.listeners = vec![Listener {
+        name: "PLAIN".into(),
+        port: 9092,
+        type_: ListenerType::Internal,
+        tls: true,
+        configuration: None,
+    }];
+
+    reconcile(Arc::new(kafka), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+
+    // The ConfigMap PATCH body must have no broker-* keys (validation
+    // failure path renders an empty `data` map).
+    let cm_patch = observed
+        .iter()
+        .find(|r| {
+            r.method() == Method::PATCH
+                && r.uri()
+                    .to_string()
+                    .contains("/configmaps/demo-broker-config")
+        })
+        .expect("configmap PATCH captured");
+    let cm_body: serde_json::Value =
+        serde_json::from_slice(cm_patch.body()).expect("CM body is JSON");
+    if let Some(data) = cm_body["data"].as_object() {
+        for key in data.keys() {
+            assert!(
+                !key.starts_with("broker-"),
+                "validation failure must produce no broker-*.toml keys; got {key:?}"
+            );
+        }
+    }
+
+    // Verify no per-broker / bootstrap external Services were rendered:
+    for r in &observed {
+        let uri = r.uri().to_string();
+        assert!(
+            !uri.contains("-bootstrap"),
+            "no bootstrap Service should be applied for invalid listeners: {uri}"
+        );
+    }
+
+    // Status conditions reflect the validation error.
+    let status_patch = observed
+        .iter()
+        .find(|r| {
+            r.method() == Method::PATCH && r.uri().to_string().contains("/kafkas/demo/status")
+        })
+        .expect("status PATCH captured");
+    let body: serde_json::Value =
+        serde_json::from_slice(status_patch.body()).expect("status body is JSON");
+    let conds = body["status"]["conditions"]
+        .as_array()
+        .expect("conditions array");
+
+    let valid = conds
+        .iter()
+        .find(|c| c["type"] == "ListenersValid")
+        .unwrap_or_else(|| panic!("ListenersValid present, body = {body}"));
+    assert_eq!(valid["status"], "False", "body = {body}");
+    assert_eq!(valid["reason"], "TlsNotYetSupported", "body = {body}");
+
+    let ready = conds
+        .iter()
+        .find(|c| c["type"] == "ListenersReady")
+        .unwrap_or_else(|| panic!("ListenersReady present, body = {body}"));
+    assert_eq!(ready["status"], "False", "body = {body}");
+    assert_eq!(ready["reason"], "ListenersInvalid", "body = {body}");
+
+    // status.listeners is empty on the validation-failure path.
+    assert!(
+        body["status"]["listeners"]
+            .as_array()
+            .is_none_or(Vec::is_empty),
+        "body = {body}"
+    );
 
     assert_eq!(state.remaining_rules(), 0);
 }
