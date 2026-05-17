@@ -2,6 +2,8 @@
 
 use std::time::Duration;
 
+use crabka_compression::CompressionType;
+
 /// Per-topic policy for what to do with old log segments.
 ///
 /// `Delete` (default): age- or size-based segment deletion via
@@ -47,6 +49,15 @@ pub struct LogConfig {
 
     /// Cleanup policy. Defaults to `Delete`. See [`CleanupPolicy`].
     pub cleanup_policy: CleanupPolicy,
+
+    /// Slice 67: broker-side recompression target. `None` is Kafka's
+    /// `compression.type=producer` (pass-through — store the batch
+    /// exactly as the producer sent it). `Some(c)` forces every batch
+    /// the broker accepts on this partition to be re-encoded to `c`
+    /// before write. Matches Kafka's per-topic `compression.type`
+    /// config: `gzip` / `snappy` / `lz4` / `zstd` / `uncompressed` map
+    /// to `Some(_)`; `producer` (the default) maps to `None`.
+    pub compression_type: Option<CompressionType>,
 }
 
 impl Default for LogConfig {
@@ -60,6 +71,10 @@ impl Default for LogConfig {
             flush_on_append: false,
             validate_on_open: true,
             cleanup_policy: CleanupPolicy::Delete,
+            // Pass-through: producers' compression choice wins. Kafka's
+            // default. Operators flip this to a specific codec on
+            // topics where they want broker-side enforcement.
+            compression_type: None,
         }
     }
 }
@@ -81,5 +96,11 @@ mod tests {
     fn default_cleanup_policy_is_delete() {
         let c = LogConfig::default();
         assert_eq!(c.cleanup_policy, CleanupPolicy::Delete);
+    }
+
+    #[test]
+    fn default_compression_is_producer_passthrough() {
+        let c = LogConfig::default();
+        assert_eq!(c.compression_type, None);
     }
 }

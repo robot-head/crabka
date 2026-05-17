@@ -827,6 +827,7 @@ dependencies = [
  "crabka-client-consumer",
  "crabka-client-core",
  "crabka-client-producer",
+ "crabka-compression",
  "crabka-log",
  "crabka-metadata",
  "crabka-protocol",
@@ -958,6 +959,7 @@ version = "0.1.1"
 dependencies = [
  "bytes",
  "codspeed-criterion-compat",
+ "crabka-compression",
  "crabka-protocol",
  "hex",
  "memmap2",

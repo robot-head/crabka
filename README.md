@@ -65,7 +65,7 @@ implements it today.
 | JVM Java client interoperability | ✅ |
 | Native Rust producer | ✅ |
 | Native Rust consumer | ✅ |
-| Broker-side recompression | ❌ |
+| Broker-side recompression (`compression.type` per topic) | ✅ |
 
 ### Storage
 

@@ -1,12 +1,11 @@
 //! Topic-config whitelist for `AlterConfigs` / `IncrementalAlterConfigs`.
 //!
-//! Eight keys are recognized. Four propagate live to `Log.config`
-//! (`retention.ms`, `retention.bytes`, `segment.bytes`, `cleanup.policy`).
-//! Two are accepted as no-op defaults for compatibility but reject
-//! non-default values: `compression.type` (only `producer`),
-//! `min.insync.replicas` (integers >= 1 accepted but not yet enforced —
-//! see the design spec for the rationale). Two are KIP-73 throttle keys
-//! (`leader.replication.throttled.replicas`,
+//! Eight keys are recognized. Five propagate live to `Log.config`
+//! (`retention.ms`, `retention.bytes`, `segment.bytes`,
+//! `cleanup.policy`, `compression.type`). One is accepted but not yet
+//! enforced: `min.insync.replicas` (integers >= 1 accepted but not yet
+//! enforced — see the design spec for the rationale). Two are KIP-73
+//! throttle keys (`leader.replication.throttled.replicas`,
 //! `follower.replication.throttled.replicas`) validated via
 //! `ThrottledReplicas::parse`.
 //!
@@ -41,21 +40,35 @@ pub(crate) fn validate_topic_config(key: &str, value: &str) -> Result<(), String
                 "cleanup.policy={value} not supported; expected `delete` or `compact`"
             )),
         },
-        COMPRESSION_TYPE => {
-            if value == "producer" {
-                Ok(())
-            } else {
-                Err(format!(
-                    "compression.type={value} not supported; only `producer` (broker pass-through) is currently honored"
-                ))
-            }
-        }
+        COMPRESSION_TYPE => parse_compression_type(value).map(|_| ()),
         MIN_INSYNC_REPLICAS => parse_i64_at_least(1, value).map(|_| ()),
         crate::throttle::LEADER_THROTTLED_REPLICAS_KEY
         | crate::throttle::FOLLOWER_THROTTLED_REPLICAS_KEY => {
             crate::throttle::ThrottledReplicas::parse(value).map(|_| ())
         }
         unknown => Err(format!("unrecognized config key `{unknown}`")),
+    }
+}
+
+/// Map the wire-side `compression.type` value to the matching
+/// [`LogConfig::compression_type`]. Returns `Ok(None)` for the special
+/// `producer` value (the Kafka default; no broker-side re-encoding).
+/// `Ok(Some(_))` for any concrete codec. `Err` for an unknown name.
+pub(crate) fn parse_compression_type(
+    value: &str,
+) -> Result<Option<crabka_compression::CompressionType>, String> {
+    use crabka_compression::CompressionType;
+    match value {
+        "producer" => Ok(None),
+        "uncompressed" | "none" => Ok(Some(CompressionType::None)),
+        "gzip" => Ok(Some(CompressionType::Gzip)),
+        "snappy" => Ok(Some(CompressionType::Snappy)),
+        "lz4" => Ok(Some(CompressionType::Lz4)),
+        "zstd" => Ok(Some(CompressionType::Zstd)),
+        other => Err(format!(
+            "compression.type=`{other}` not recognized; expected one of \
+             producer, uncompressed, gzip, snappy, lz4, zstd"
+        )),
     }
 }
 
@@ -141,6 +154,11 @@ pub(crate) fn apply_to_log_config(
                     crabka_log::CleanupPolicy::Delete
                 };
             }
+            COMPRESSION_TYPE => {
+                if let Ok(target) = parse_compression_type(v) {
+                    out.compression_type = target;
+                }
+            }
             // The remaining keys are recognized but no broker behavior is
             // wired to them yet (see module docs).
             _ => {}
@@ -187,14 +205,79 @@ mod tests {
     }
 
     #[test]
-    fn validate_compression_producer_accepted() {
-        assert!(validate_topic_config(COMPRESSION_TYPE, "producer").is_ok());
+    fn validate_compression_all_supported_values_accepted() {
+        for v in [
+            "producer",
+            "uncompressed",
+            "none",
+            "gzip",
+            "snappy",
+            "lz4",
+            "zstd",
+        ] {
+            assert!(
+                validate_topic_config(COMPRESSION_TYPE, v).is_ok(),
+                "compression.type={v} should be accepted",
+            );
+        }
     }
 
     #[test]
-    fn validate_compression_zstd_rejected() {
-        let err = validate_topic_config(COMPRESSION_TYPE, "zstd").unwrap_err();
-        assert!(err.contains("not supported"));
+    fn validate_compression_bogus_rejected() {
+        let err = validate_topic_config(COMPRESSION_TYPE, "bzip3").unwrap_err();
+        assert!(err.contains("compression.type"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_compression_type_maps_producer_to_none() {
+        assert_eq!(parse_compression_type("producer"), Ok(None));
+    }
+
+    #[test]
+    fn parse_compression_type_maps_codecs() {
+        use crabka_compression::CompressionType;
+        assert_eq!(
+            parse_compression_type("gzip"),
+            Ok(Some(CompressionType::Gzip))
+        );
+        assert_eq!(
+            parse_compression_type("snappy"),
+            Ok(Some(CompressionType::Snappy))
+        );
+        assert_eq!(
+            parse_compression_type("lz4"),
+            Ok(Some(CompressionType::Lz4))
+        );
+        assert_eq!(
+            parse_compression_type("zstd"),
+            Ok(Some(CompressionType::Zstd))
+        );
+        assert_eq!(
+            parse_compression_type("uncompressed"),
+            Ok(Some(CompressionType::None))
+        );
+    }
+
+    #[test]
+    fn apply_compression_type_zstd_propagates() {
+        use crabka_compression::CompressionType;
+        let mut o = BTreeMap::new();
+        o.insert(COMPRESSION_TYPE.into(), "zstd".into());
+        let out = apply_to_log_config(&o, &LogConfig::default());
+        assert_eq!(out.compression_type, Some(CompressionType::Zstd));
+    }
+
+    #[test]
+    fn apply_compression_type_producer_resets_to_none() {
+        use crabka_compression::CompressionType;
+        let base = LogConfig {
+            compression_type: Some(CompressionType::Lz4),
+            ..LogConfig::default()
+        };
+        let mut o = BTreeMap::new();
+        o.insert(COMPRESSION_TYPE.into(), "producer".into());
+        let out = apply_to_log_config(&o, &base);
+        assert_eq!(out.compression_type, None);
     }
 
     #[test]
