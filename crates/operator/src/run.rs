@@ -49,9 +49,13 @@ pub async fn run(config: OperatorConfig) -> anyhow::Result<()> {
     let ctx = Context::new(client, config, registry);
     health_state.mark_ready();
 
-    let controller_handle = tokio::spawn({
+    let kafka_handle = tokio::spawn({
         let ctx = ctx.clone();
         async move { controller::kafka::run(ctx).await }
+    });
+    let pool_handle = tokio::spawn({
+        let ctx = ctx.clone();
+        async move { controller::kafka_node_pool::run(ctx).await }
     });
 
     tokio::select! {
@@ -60,10 +64,15 @@ pub async fn run(config: OperatorConfig) -> anyhow::Result<()> {
             Ok(Err(e)) => tracing::error!(error = %e, "health server exited with error"),
             Err(e) => tracing::error!(error = %e, "health task panicked"),
         },
-        res = controller_handle => match res {
+        res = kafka_handle => match res {
             Ok(Ok(())) => {}
-            Ok(Err(e)) => tracing::error!(error = %e, "controller exited with error"),
-            Err(e) => tracing::error!(error = %e, "controller task panicked"),
+            Ok(Err(e)) => tracing::error!(error = %e, "Kafka controller exited with error"),
+            Err(e) => tracing::error!(error = %e, "Kafka controller task panicked"),
+        },
+        res = pool_handle => match res {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::error!(error = %e, "KafkaNodePool controller exited with error"),
+            Err(e) => tracing::error!(error = %e, "KafkaNodePool controller task panicked"),
         },
         () = shutdown_signal() => tracing::info!("shutdown signal received"),
     }

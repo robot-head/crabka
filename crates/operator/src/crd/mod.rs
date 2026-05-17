@@ -3,5 +3,7 @@
 //! CRD YAML manifest (see `gen_crds`).
 
 pub mod kafka;
+pub mod kafka_node_pool;
 
 pub use kafka::{Kafka, KafkaCondition, KafkaSpec, KafkaStatus};
+pub use kafka_node_pool::{KafkaNodePool, KafkaNodePoolSpec, KafkaNodePoolStatus, NodeRole};

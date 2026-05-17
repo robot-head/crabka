@@ -1,5 +1,7 @@
 //! Controllers (reconcilers) for Crabka CRDs. Each kind lives in its own
-//! submodule. Slice 17 only ships a placeholder Kafka controller that
-//! flips `Ready=True`; real workload reconciliation lands in slice 18.
+//! submodule and shares helpers via `common` (cluster-level rendering,
+//! SSA helpers, label / owner-ref builders, status derivation).
 
+pub mod common;
 pub mod kafka;
+pub mod kafka_node_pool;
