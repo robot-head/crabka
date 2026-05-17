@@ -174,8 +174,7 @@ mod tests {
     #[test]
     fn detect_bootstrap_when_metadata_dir_empty() {
         let dir = tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("__cluster_metadata").join("@metadata-0"))
-            .unwrap();
+        std::fs::create_dir_all(dir.path().join("__cluster_metadata").join("@metadata-0")).unwrap();
         // empty @metadata-0 dir is treated as no state (corner case:
         // crashed first start before any segment was written).
         assert_eq!(detect_bootstrap_mode(dir.path()), BootstrapMode::Bootstrap);
