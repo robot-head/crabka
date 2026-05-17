@@ -330,9 +330,14 @@ pub(crate) fn derive_status(
     }
 }
 
-/// SHA-256 hex digest of the given content. Used by slice 21 to detect
-/// `Kafka.spec.config` changes that the K8s `StatefulSet` controller
-/// can't see directly.
+/// Truncated SHA-256 hex digest (16 hex chars / 8 bytes of entropy)
+/// of the given content. Used by slice 21 to detect `Kafka.spec.config`
+/// changes that the K8s `StatefulSet` controller can't see directly.
+///
+/// The full sha256 is 64 hex chars, which exceeds the 63-char K8s
+/// label-value limit. 64 bits of entropy is more than enough for a
+/// drift detector — collisions for accidental config changes are
+/// astronomically unlikely.
 #[must_use]
 pub fn config_hash(content: &str) -> String {
     use std::fmt::Write;
@@ -341,8 +346,8 @@ pub fn config_hash(content: &str) -> String {
     let mut h = Sha256::new();
     h.update(content.as_bytes());
     let digest = h.finalize();
-    let mut out = String::with_capacity(digest.len() * 2);
-    for byte in digest {
+    let mut out = String::with_capacity(16);
+    for byte in digest.iter().take(8) {
         write!(&mut out, "{byte:02x}").expect("writing to a String never fails");
     }
     out
@@ -354,21 +359,28 @@ mod config_hash_tests {
     use crate::crd::KafkaSpec;
 
     #[test]
-    fn config_hash_is_sha256_hex() {
+    fn config_hash_is_truncated_sha256_hex() {
+        // First 16 hex chars (8 bytes) of sha256("hello"):
+        //   2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
+        //   ^^^^^^^^^^^^^^^^
         let h = config_hash("hello");
-        assert_eq!(
-            h,
-            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
-        );
+        assert_eq!(h, "2cf24dba5fb0a30e");
+        assert_eq!(h.len(), 16, "must fit within K8s 63-char label limit");
     }
 
     #[test]
     fn config_hash_empty_string() {
+        // First 16 hex chars of sha256("").
         let h = config_hash("");
-        assert_eq!(
-            h,
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-        );
+        assert_eq!(h, "e3b0c44298fc1c14");
+    }
+
+    #[test]
+    fn config_hash_fits_in_kubernetes_label_value() {
+        // K8s label values are limited to 63 characters. Our truncated
+        // hash must always fit; this test guards against future widening.
+        let h = config_hash("any content at all");
+        assert!(h.len() <= 63, "hash {h} exceeds K8s label limit");
     }
 
     #[test]
