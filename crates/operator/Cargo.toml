@@ -39,6 +39,7 @@ tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+async-trait = { workspace = true }
 base64 = { workspace = true }
 crabka-broker = { version = "0.1", path = "../broker" }
 http = "1"

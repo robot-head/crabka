@@ -19,6 +19,81 @@ pub use topics::{
     DeleteTopicOutcome, TopicMetadata, TopicMetadataEntry,
 };
 
+/// Test seam for `AdminClient`. The operator's reconcile only needs
+/// dynamic dispatch via this trait; production code wraps a concrete
+/// `AdminClient`, while tests substitute a fake.
+///
+/// Methods take `&mut self` because the underlying `AdminClient`'s
+/// `NOT_CONTROLLER` retry path reconnects the inner `Connection` in
+/// place, which requires unique access.
+#[async_trait::async_trait]
+pub trait AdminClientLike: Send {
+    async fn metadata(&mut self, topics: &[&str]) -> Result<TopicMetadata, AdminError>;
+    async fn create_topics(
+        &mut self,
+        specs: &[CreateTopicSpec],
+        timeout_ms: i32,
+    ) -> Result<Vec<CreateTopicOutcome>, AdminError>;
+    async fn delete_topics(
+        &mut self,
+        names: &[&str],
+        timeout_ms: i32,
+    ) -> Result<Vec<DeleteTopicOutcome>, AdminError>;
+    async fn create_partitions(
+        &mut self,
+        ops: &[CreatePartitionsOp],
+        timeout_ms: i32,
+    ) -> Result<Vec<CreatePartitionsOutcome>, AdminError>;
+    async fn describe_configs(
+        &mut self,
+        topics: &[&str],
+    ) -> Result<Vec<TopicConfigOverrides>, AdminError>;
+    async fn incremental_alter_configs(
+        &mut self,
+        ops: &[IncrementalAlterOp],
+    ) -> Result<Vec<AlterConfigsOutcome>, AdminError>;
+}
+
+#[async_trait::async_trait]
+impl AdminClientLike for AdminClient {
+    async fn metadata(&mut self, topics: &[&str]) -> Result<TopicMetadata, AdminError> {
+        AdminClient::metadata(self, topics).await
+    }
+    async fn create_topics(
+        &mut self,
+        specs: &[CreateTopicSpec],
+        timeout_ms: i32,
+    ) -> Result<Vec<CreateTopicOutcome>, AdminError> {
+        AdminClient::create_topics(self, specs, timeout_ms).await
+    }
+    async fn delete_topics(
+        &mut self,
+        names: &[&str],
+        timeout_ms: i32,
+    ) -> Result<Vec<DeleteTopicOutcome>, AdminError> {
+        AdminClient::delete_topics(self, names, timeout_ms).await
+    }
+    async fn create_partitions(
+        &mut self,
+        ops: &[CreatePartitionsOp],
+        timeout_ms: i32,
+    ) -> Result<Vec<CreatePartitionsOutcome>, AdminError> {
+        AdminClient::create_partitions(self, ops, timeout_ms).await
+    }
+    async fn describe_configs(
+        &mut self,
+        topics: &[&str],
+    ) -> Result<Vec<TopicConfigOverrides>, AdminError> {
+        AdminClient::describe_configs(self, topics).await
+    }
+    async fn incremental_alter_configs(
+        &mut self,
+        ops: &[IncrementalAlterOp],
+    ) -> Result<Vec<AlterConfigsOutcome>, AdminError> {
+        AdminClient::incremental_alter_configs(self, ops).await
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum AdminError {
     #[error("no bootstrap address was reachable: tried {tried}")]

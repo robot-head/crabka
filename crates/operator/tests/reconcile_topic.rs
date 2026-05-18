@@ -18,6 +18,7 @@ mod shared;
 use shared::{
     MockRule, MockState, fake_topic_body, fixture_ctx, json_response, mock_client, not_found_body,
 };
+use shared::fake_admin::{FakeAdminClient, RecordedCall, TopicState};
 
 /// JSON body shaped like a Ready Kafka with a single PLAIN internal
 /// listener. Used by the finalizer-add-path test below; the topic
@@ -234,4 +235,493 @@ async fn finalizer_add_path_patches_metadata_and_requeues_immediately() {
             .any(|r| r.uri().to_string().contains("/kafkatopics/foo/status")),
         "no /status patch is expected on the finalizer-add path",
     );
+}
+
+// ---- AdminClientLike-driven branch tests ----------------------------------
+//
+// These exercise the reconcile branches that need a live admin client:
+// happy-path create, no-op, partition increase, immutable-field rejection,
+// config diff, and delete-with/without-preserve. The fake `AdminClientLike`
+// is pre-inserted into `ctx.admin_clients["demo"]`, so the real connect path
+// is skipped — the reconcile just locks the cached handle and dispatches
+// dynamically.
+
+const CLUSTER: &str = "demo";
+const NS: &str = "y";
+const TOPIC_NAME: &str = "foo";
+
+/// Build a `KafkaTopic` with the cluster label, finalizer, and the requested
+/// partition/replicas/config values. Use this for branch tests; the
+/// `topic()` helper above intentionally omits the finalizer so the
+/// finalizer-add-path test works.
+#[allow(clippy::needless_pass_by_value)]
+fn topic_with_finalizer(
+    name: &str,
+    partitions: i32,
+    replicas: i32,
+    config: Option<std::collections::BTreeMap<String, String>>,
+) -> KafkaTopic {
+    let mut kt = KafkaTopic::new(
+        name,
+        KafkaTopicSpec {
+            topic_name: None,
+            partitions,
+            replicas,
+            config,
+            preserve_topic: false,
+        },
+    );
+    kt.metadata.namespace = Some(NS.into());
+    kt.metadata.uid = Some("topic-uid".into());
+    kt.metadata.generation = Some(1);
+    kt.metadata.finalizers = Some(vec!["crabka.io/topic-finalizer".into()]);
+    let mut labels = std::collections::BTreeMap::new();
+    labels.insert("crabka.io/cluster".into(), CLUSTER.into());
+    kt.metadata.labels = Some(labels);
+    kt
+}
+
+/// Wire a kube mock with the `GET kafkas/<cluster>` rule (returns a Ready
+/// cluster) and one `PATCH /kafkatopics/<name>/status` rule. The reconcile
+/// for the branch tests below issues exactly these two kube requests on
+/// the happy/no-op/partition/immutable/config paths.
+fn standard_kube_rules(topic_name: &str) -> Vec<MockRule> {
+    vec![
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/kafkas/{CLUSTER}"),
+            response: json_response(200, &ready_kafka_body(CLUSTER, NS)),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/kafkatopics/{topic_name}/status"),
+            response: json_response(200, &fake_topic_body(topic_name, NS)),
+        },
+    ]
+}
+
+/// Wire a kube mock for the delete path: `GET kafkas/<cluster>` plus
+/// `PATCH /kafkatopics/<name>` (finalizer removal — metadata patch, not
+/// /status).
+fn delete_kube_rules(topic_name: &str) -> Vec<MockRule> {
+    vec![
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/kafkas/{CLUSTER}"),
+            response: json_response(200, &ready_kafka_body(CLUSTER, NS)),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/kafkatopics/{topic_name}"),
+            response: json_response(200, &fake_topic_body(topic_name, NS)),
+        },
+    ]
+}
+
+/// Extract the body of the last `PATCH /kafkatopics/<name>/status` request
+/// observed by the kube mock.
+fn last_status_patch_body(
+    state: &Arc<MockState>,
+    topic_name: &str,
+) -> serde_json::Value {
+    let observed = state.take_observed();
+    let patch = observed
+        .iter()
+        .rev()
+        .find(|r| {
+            r.method() == Method::PATCH
+                && r.uri()
+                    .to_string()
+                    .contains(&format!("/kafkatopics/{topic_name}/status"))
+        })
+        .expect("status PATCH must have been captured");
+    serde_json::from_slice(patch.body()).expect("status body parses as JSON")
+}
+
+/// Slice 35: Kafka Ready, topic absent → one `CreateTopics` call,
+/// status `Ready=True topic_id=Some(...)`.
+#[tokio::test]
+async fn creates_topic_on_first_reconcile() {
+    let state = MockState::new(standard_kube_rules(TOPIC_NAME));
+    let client = mock_client(&state, NS);
+    let ctx = Arc::new(fixture_ctx(client, NS));
+
+    let fake = Arc::new(tokio::sync::Mutex::new(FakeAdminClient::new()));
+    let fake_for_assert = fake.clone();
+    ctx.insert_admin_client_for_test(CLUSTER, fake).await;
+
+    let kt = topic_with_finalizer(TOPIC_NAME, 3, 1, None);
+    reconcile(Arc::new(kt), ctx).await.unwrap();
+
+    let calls = fake_for_assert.lock().await.calls();
+    assert_eq!(
+        calls.len(),
+        2,
+        "expected Metadata + CreateTopics, got {calls:?}"
+    );
+    assert!(matches!(&calls[0], RecordedCall::Metadata(t) if t == &vec![TOPIC_NAME.to_string()]));
+    match &calls[1] {
+        RecordedCall::CreateTopics(specs) => {
+            assert_eq!(specs.len(), 1);
+            assert_eq!(specs[0].name, TOPIC_NAME);
+            assert_eq!(specs[0].partitions, 3);
+            assert_eq!(specs[0].replicas, 1);
+        }
+        other => panic!("expected CreateTopics, got {other:?}"),
+    }
+
+    let body = last_status_patch_body(&state, TOPIC_NAME);
+    let cond = &body["status"]["conditions"][0];
+    assert_eq!(cond["status"], "True");
+    assert_eq!(cond["reason"], "Ready");
+    assert!(
+        body["status"]["topicId"].is_string(),
+        "topicId should be a uuid string, got {:?}",
+        body["status"]["topicId"],
+    );
+}
+
+/// Slice 35: Kafka Ready, topic already matches spec exactly → no mutating
+/// admin calls, status `Ready=True`.
+#[tokio::test]
+async fn noop_when_spec_matches_cluster() {
+    let state = MockState::new(standard_kube_rules(TOPIC_NAME));
+    let client = mock_client(&state, NS);
+    let ctx = Arc::new(fixture_ctx(client, NS));
+
+    let fake = FakeAdminClient::new();
+    fake.add_topic(
+        TOPIC_NAME,
+        TopicState {
+            partitions: 3,
+            replicas: 1,
+            topic_id: Some(uuid::Uuid::nil()),
+            config_overrides: std::collections::BTreeMap::new(),
+        },
+    );
+    let fake = Arc::new(tokio::sync::Mutex::new(fake));
+    let fake_for_assert = fake.clone();
+    ctx.insert_admin_client_for_test(CLUSTER, fake).await;
+
+    let kt = topic_with_finalizer(TOPIC_NAME, 3, 1, None);
+    reconcile(Arc::new(kt), ctx).await.unwrap();
+
+    let calls = fake_for_assert.lock().await.calls();
+    for c in &calls {
+        assert!(
+            !matches!(
+                c,
+                RecordedCall::CreateTopics(_)
+                    | RecordedCall::DeleteTopics(_)
+                    | RecordedCall::CreatePartitions(_)
+                    | RecordedCall::IncrementalAlterConfigs(_)
+            ),
+            "no mutating admin calls expected on no-op path; got {c:?}",
+        );
+    }
+    // Metadata + DescribeConfigs (read-only) are expected.
+    assert!(
+        calls
+            .iter()
+            .any(|c| matches!(c, RecordedCall::Metadata(_))),
+        "expected a Metadata call",
+    );
+
+    let body = last_status_patch_body(&state, TOPIC_NAME);
+    let cond = &body["status"]["conditions"][0];
+    assert_eq!(cond["status"], "True");
+    assert_eq!(cond["reason"], "Ready");
+}
+
+/// Slice 35: current=3 partitions, spec=5 → one CreatePartitions(5) call,
+/// status Ready.
+#[tokio::test]
+async fn partition_increase_triggers_create_partitions() {
+    let state = MockState::new(standard_kube_rules(TOPIC_NAME));
+    let client = mock_client(&state, NS);
+    let ctx = Arc::new(fixture_ctx(client, NS));
+
+    let fake = FakeAdminClient::new();
+    fake.add_topic(
+        TOPIC_NAME,
+        TopicState {
+            partitions: 3,
+            replicas: 1,
+            topic_id: Some(uuid::Uuid::nil()),
+            config_overrides: std::collections::BTreeMap::new(),
+        },
+    );
+    let fake = Arc::new(tokio::sync::Mutex::new(fake));
+    let fake_for_assert = fake.clone();
+    ctx.insert_admin_client_for_test(CLUSTER, fake).await;
+
+    let kt = topic_with_finalizer(TOPIC_NAME, 5, 1, None);
+    reconcile(Arc::new(kt), ctx).await.unwrap();
+
+    let calls = fake_for_assert.lock().await.calls();
+    let cp = calls
+        .iter()
+        .find_map(|c| match c {
+            RecordedCall::CreatePartitions(ops) => Some(ops),
+            _ => None,
+        })
+        .expect("CreatePartitions call expected");
+    assert_eq!(cp.len(), 1);
+    assert_eq!(cp[0].name, TOPIC_NAME);
+    assert_eq!(cp[0].new_total_count, 5);
+
+    let body = last_status_patch_body(&state, TOPIC_NAME);
+    assert_eq!(body["status"]["conditions"][0]["status"], "True");
+    assert_eq!(body["status"]["conditions"][0]["reason"], "Ready");
+}
+
+/// Slice 35: current=5 partitions, spec=2 → no mutating admin calls,
+/// status `Ready=False reason=ImmutableFieldChanged`.
+#[tokio::test]
+async fn partition_decrease_sets_immutable_field_changed() {
+    let state = MockState::new(standard_kube_rules(TOPIC_NAME));
+    let client = mock_client(&state, NS);
+    let ctx = Arc::new(fixture_ctx(client, NS));
+
+    let fake = FakeAdminClient::new();
+    fake.add_topic(
+        TOPIC_NAME,
+        TopicState {
+            partitions: 5,
+            replicas: 1,
+            topic_id: Some(uuid::Uuid::nil()),
+            config_overrides: std::collections::BTreeMap::new(),
+        },
+    );
+    let fake = Arc::new(tokio::sync::Mutex::new(fake));
+    let fake_for_assert = fake.clone();
+    ctx.insert_admin_client_for_test(CLUSTER, fake).await;
+
+    let kt = topic_with_finalizer(TOPIC_NAME, 2, 1, None);
+    reconcile(Arc::new(kt), ctx).await.unwrap();
+
+    let calls = fake_for_assert.lock().await.calls();
+    for c in &calls {
+        assert!(
+            !matches!(
+                c,
+                RecordedCall::CreateTopics(_)
+                    | RecordedCall::DeleteTopics(_)
+                    | RecordedCall::CreatePartitions(_)
+                    | RecordedCall::IncrementalAlterConfigs(_)
+            ),
+            "no mutating admin calls expected on immutable path; got {c:?}",
+        );
+    }
+
+    let body = last_status_patch_body(&state, TOPIC_NAME);
+    let cond = &body["status"]["conditions"][0];
+    assert_eq!(cond["status"], "False");
+    assert_eq!(cond["reason"], "ImmutableFieldChanged");
+}
+
+/// Slice 35: `current.replication_factor=1`, spec=2 → no mutating admin
+/// calls, status `Ready=False reason=ImmutableFieldChanged`.
+#[tokio::test]
+async fn replicas_change_sets_immutable_field_changed() {
+    let state = MockState::new(standard_kube_rules(TOPIC_NAME));
+    let client = mock_client(&state, NS);
+    let ctx = Arc::new(fixture_ctx(client, NS));
+
+    let fake = FakeAdminClient::new();
+    fake.add_topic(
+        TOPIC_NAME,
+        TopicState {
+            partitions: 3,
+            replicas: 1,
+            topic_id: Some(uuid::Uuid::nil()),
+            config_overrides: std::collections::BTreeMap::new(),
+        },
+    );
+    let fake = Arc::new(tokio::sync::Mutex::new(fake));
+    let fake_for_assert = fake.clone();
+    ctx.insert_admin_client_for_test(CLUSTER, fake).await;
+
+    let kt = topic_with_finalizer(TOPIC_NAME, 3, 2, None);
+    reconcile(Arc::new(kt), ctx).await.unwrap();
+
+    let calls = fake_for_assert.lock().await.calls();
+    for c in &calls {
+        assert!(
+            !matches!(
+                c,
+                RecordedCall::CreateTopics(_)
+                    | RecordedCall::DeleteTopics(_)
+                    | RecordedCall::CreatePartitions(_)
+                    | RecordedCall::IncrementalAlterConfigs(_)
+            ),
+            "no mutating admin calls expected when replicas change; got {c:?}",
+        );
+    }
+
+    let body = last_status_patch_body(&state, TOPIC_NAME);
+    let cond = &body["status"]["conditions"][0];
+    assert_eq!(cond["status"], "False");
+    assert_eq!(cond["reason"], "ImmutableFieldChanged");
+}
+
+/// Slice 35: current overrides `{foo: 1}`, desired `{bar: 2}` →
+/// `IncrementalAlterConfigs` with Set(bar=2) and Delete(foo).
+#[tokio::test]
+async fn config_diff_sets_and_deletes() {
+    let state = MockState::new(standard_kube_rules(TOPIC_NAME));
+    let client = mock_client(&state, NS);
+    let ctx = Arc::new(fixture_ctx(client, NS));
+
+    let fake = FakeAdminClient::new();
+    fake.add_topic(
+        TOPIC_NAME,
+        TopicState {
+            partitions: 3,
+            replicas: 1,
+            topic_id: Some(uuid::Uuid::nil()),
+            config_overrides: std::collections::BTreeMap::from([
+                ("foo".to_string(), "1".to_string()),
+            ]),
+        },
+    );
+    let fake = Arc::new(tokio::sync::Mutex::new(fake));
+    let fake_for_assert = fake.clone();
+    ctx.insert_admin_client_for_test(CLUSTER, fake).await;
+
+    let desired = std::collections::BTreeMap::from([("bar".to_string(), "2".to_string())]);
+    let kt = topic_with_finalizer(TOPIC_NAME, 3, 1, Some(desired));
+    reconcile(Arc::new(kt), ctx).await.unwrap();
+
+    let calls = fake_for_assert.lock().await.calls();
+    let ops = calls
+        .iter()
+        .find_map(|c| match c {
+            RecordedCall::IncrementalAlterConfigs(ops) => Some(ops.clone()),
+            _ => None,
+        })
+        .expect("IncrementalAlterConfigs call expected");
+
+    let has_set_bar = ops.iter().any(|op| matches!(
+        op,
+        crabka_client_admin::IncrementalAlterOp::Set { topic, key, value }
+            if topic == TOPIC_NAME && key == "bar" && value == "2"
+    ));
+    let has_delete_foo = ops.iter().any(|op| matches!(
+        op,
+        crabka_client_admin::IncrementalAlterOp::Delete { topic, key }
+            if topic == TOPIC_NAME && key == "foo"
+    ));
+    assert!(has_set_bar, "expected SET bar=2, got {ops:?}");
+    assert!(has_delete_foo, "expected DELETE foo, got {ops:?}");
+
+    let body = last_status_patch_body(&state, TOPIC_NAME);
+    assert_eq!(body["status"]["conditions"][0]["status"], "True");
+    assert_eq!(body["status"]["conditions"][0]["reason"], "Ready");
+}
+
+/// Slice 35: deletionTimestamp set, preserveTopic=false → one `DeleteTopics`
+/// call + finalizer removed via metadata PATCH.
+#[tokio::test]
+async fn delete_with_finalizer_calls_delete_topics() {
+    let state = MockState::new(delete_kube_rules(TOPIC_NAME));
+    let client = mock_client(&state, NS);
+    let ctx = Arc::new(fixture_ctx(client, NS));
+
+    let fake = FakeAdminClient::new();
+    fake.add_topic(
+        TOPIC_NAME,
+        TopicState {
+            partitions: 3,
+            replicas: 1,
+            topic_id: Some(uuid::Uuid::nil()),
+            config_overrides: std::collections::BTreeMap::new(),
+        },
+    );
+    let fake = Arc::new(tokio::sync::Mutex::new(fake));
+    let fake_for_assert = fake.clone();
+    ctx.insert_admin_client_for_test(CLUSTER, fake).await;
+
+    let mut kt = topic_with_finalizer(TOPIC_NAME, 3, 1, None);
+    kt.metadata.deletion_timestamp = Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+        "2026-05-18T00:00:00Z".parse().unwrap(),
+    ));
+    reconcile(Arc::new(kt), ctx).await.unwrap();
+
+    let calls = fake_for_assert.lock().await.calls();
+    let dt = calls
+        .iter()
+        .find_map(|c| match c {
+            RecordedCall::DeleteTopics(names) => Some(names.clone()),
+            _ => None,
+        })
+        .expect("DeleteTopics call expected");
+    assert_eq!(dt, vec![TOPIC_NAME.to_string()]);
+
+    // Finalizer-removal patch: metadata.finalizers=[].
+    let observed = state.take_observed();
+    let metadata_patch = observed
+        .iter()
+        .find(|r| {
+            r.method() == Method::PATCH
+                && r.uri()
+                    .to_string()
+                    .contains(&format!("/kafkatopics/{TOPIC_NAME}"))
+                && !r.uri().to_string().contains("/status")
+        })
+        .expect("metadata PATCH for finalizer removal");
+    let body: serde_json::Value = serde_json::from_slice(metadata_patch.body()).unwrap();
+    assert_eq!(body["metadata"]["finalizers"], serde_json::json!([]));
+}
+
+/// Slice 35: deletionTimestamp set, preserveTopic=true → no `DeleteTopics`
+/// call, finalizer still removed.
+#[tokio::test]
+async fn delete_with_preserve_topic_skips_delete_topics() {
+    let state = MockState::new(delete_kube_rules(TOPIC_NAME));
+    let client = mock_client(&state, NS);
+    let ctx = Arc::new(fixture_ctx(client, NS));
+
+    let fake = FakeAdminClient::new();
+    fake.add_topic(
+        TOPIC_NAME,
+        TopicState {
+            partitions: 3,
+            replicas: 1,
+            topic_id: Some(uuid::Uuid::nil()),
+            config_overrides: std::collections::BTreeMap::new(),
+        },
+    );
+    let fake = Arc::new(tokio::sync::Mutex::new(fake));
+    let fake_for_assert = fake.clone();
+    ctx.insert_admin_client_for_test(CLUSTER, fake).await;
+
+    let mut kt = topic_with_finalizer(TOPIC_NAME, 3, 1, None);
+    kt.spec.preserve_topic = true;
+    kt.metadata.deletion_timestamp = Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+        "2026-05-18T00:00:00Z".parse().unwrap(),
+    ));
+    reconcile(Arc::new(kt), ctx).await.unwrap();
+
+    let calls = fake_for_assert.lock().await.calls();
+    assert!(
+        !calls
+            .iter()
+            .any(|c| matches!(c, RecordedCall::DeleteTopics(_))),
+        "preserveTopic=true must skip DeleteTopics; got {calls:?}",
+    );
+
+    let observed = state.take_observed();
+    let metadata_patch = observed
+        .iter()
+        .find(|r| {
+            r.method() == Method::PATCH
+                && r.uri()
+                    .to_string()
+                    .contains(&format!("/kafkatopics/{TOPIC_NAME}"))
+                && !r.uri().to_string().contains("/status")
+        })
+        .expect("metadata PATCH for finalizer removal");
+    let body: serde_json::Value = serde_json::from_slice(metadata_patch.body()).unwrap();
+    assert_eq!(body["metadata"]["finalizers"], serde_json::json!([]));
 }

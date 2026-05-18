@@ -13,6 +13,8 @@
 
 #![allow(dead_code)]
 
+pub mod fake_admin;
+
 use std::sync::Arc;
 use std::sync::Mutex;
 

@@ -1006,6 +1006,7 @@ dependencies = [
 name = "crabka-client-admin"
 version = "0.1.1"
 dependencies = [
+ "async-trait",
  "bytes",
  "crabka-broker",
  "crabka-client-core",
@@ -1136,6 +1137,7 @@ name = "crabka-operator"
 version = "0.1.1"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "base64",
  "chrono",

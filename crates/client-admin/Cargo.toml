@@ -13,6 +13,7 @@ workspace = true
 [dependencies]
 crabka-client-core = { version = "0.1", path = "../client-core" }
 crabka-protocol    = { version = "0.1", path = "../protocol", default-features = false }
+async-trait        = { workspace = true }
 bytes              = { workspace = true }
 thiserror          = { workspace = true }
 tokio              = { workspace = true, features = ["sync", "time", "net"] }
