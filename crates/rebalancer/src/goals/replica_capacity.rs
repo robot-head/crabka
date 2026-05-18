@@ -42,8 +42,7 @@ impl ReplicaCapacity {
     fn find_over_capacity(counts: &HashMap<i32, usize>, ctx: &GoalContext) -> Option<i32> {
         // Sort by broker_id ascending so ties on excess resolve
         // deterministically (lower broker_id wins).
-        let mut ordered: Vec<(i32, usize)> =
-            counts.iter().map(|(b, c)| (*b, *c)).collect();
+        let mut ordered: Vec<(i32, usize)> = counts.iter().map(|(b, c)| (*b, *c)).collect();
         ordered.sort_by_key(|(b, _)| *b);
 
         let mut over: Option<(i32, usize, u32)> = None;

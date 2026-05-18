@@ -107,12 +107,7 @@ mod tests {
     #[test]
     fn default_registry_order_matches_spec() {
         let r = GoalRegistry::default_registry();
-        let names: Vec<&str> = r
-            .select(&[])
-            .unwrap()
-            .iter()
-            .map(|g| g.name())
-            .collect();
+        let names: Vec<&str> = r.select(&[]).unwrap().iter().map(|g| g.name()).collect();
         assert_eq!(
             names,
             vec![
