@@ -19,6 +19,8 @@ pub enum CapacityError {
     UnsupportedVersion { found: u32, expected: u32 },
     #[error("negative cpu_cores ({0}) for broker {1}")]
     NegativeCpu(f64, i32),
+    #[error("cpu_cores ({0}) for broker {1} is not finite")]
+    NonFiniteCpu(f64, i32),
 }
 
 #[derive(Debug, Deserialize)]
@@ -37,12 +39,15 @@ pub fn load_from_path(path: &Path) -> Result<BrokerCapacities, CapacityError> {
             expected: SCHEMA_VERSION,
         });
     }
-    // Reject obvious operator typos: negative cpu_cores.
+    // Reject obvious operator typos: non-finite or negative cpu_cores.
     for (broker, cap) in &parsed.brokers {
-        if let Some(cpu) = cap.cpu_cores
-            && cpu < 0.0
-        {
-            return Err(CapacityError::NegativeCpu(cpu, *broker));
+        if let Some(cpu) = cap.cpu_cores {
+            if cpu.is_nan() || cpu.is_infinite() {
+                return Err(CapacityError::NonFiniteCpu(cpu, *broker));
+            }
+            if cpu < 0.0 {
+                return Err(CapacityError::NegativeCpu(cpu, *broker));
+            }
         }
     }
     Ok(BrokerCapacities {
@@ -93,8 +98,9 @@ brokers:
 
     #[test]
     fn load_errors_on_missing_file() {
-        let p = std::path::Path::new("/tmp/crabka-rebalancer-test-nonexistent-file");
-        let err = load_from_path(p).expect_err("missing file");
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let p = dir.path().join("nonexistent");
+        let err = load_from_path(&p).expect_err("missing file");
         assert!(matches!(err, CapacityError::Io(_)), "got {err:?}");
     }
 
@@ -147,5 +153,33 @@ brokers:
         );
         let err = load_from_path(f.path()).expect_err("negative cpu");
         assert!(matches!(err, CapacityError::NegativeCpu(_, 5)));
+    }
+
+    #[test]
+    fn load_rejects_nan_cpu_cores() {
+        let f = write_yaml(
+            r"
+version: 1
+brokers:
+  5:
+    cpu_cores: .nan
+",
+        );
+        let err = load_from_path(f.path()).expect_err("nan cpu");
+        assert!(matches!(err, CapacityError::NonFiniteCpu(c, 5) if c.is_nan()));
+    }
+
+    #[test]
+    fn load_rejects_infinity_cpu_cores() {
+        let f = write_yaml(
+            r"
+version: 1
+brokers:
+  5:
+    cpu_cores: .inf
+",
+        );
+        let err = load_from_path(f.path()).expect_err("infinity cpu");
+        assert!(matches!(err, CapacityError::NonFiniteCpu(c, 5) if c.is_infinite()));
     }
 }
