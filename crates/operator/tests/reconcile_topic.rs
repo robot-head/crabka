@@ -674,6 +674,267 @@ async fn delete_with_finalizer_calls_delete_topics() {
     assert_eq!(body["metadata"]["finalizers"], serde_json::json!([]));
 }
 
+// ---- Broker-error / transport-error reconcile tests ----------------------
+//
+// These cover the per-RPC failure branches inside the reconcile (T3-fix
+// eviction, BrokerError status mapping, finalizer-cleanup robustness when
+// DeleteTopics fails). Each test injects an error on a specific RPC via
+// the `FakeAdminClient` and asserts the status / requeue / eviction the
+// reconcile takes in response.
+
+/// Slice 35: Kafka Ready, topic absent, broker rejects `CreateTopics` with
+/// `TOPIC_ALREADY_EXISTS` → status `Ready=False reason=BrokerError`,
+/// message references the API + error name.
+#[tokio::test]
+async fn creates_topic_broker_error_surfaces_in_status() {
+    let state = MockState::new(standard_kube_rules(TOPIC_NAME));
+    let client = mock_client(&state, NS);
+    let ctx = Arc::new(fixture_ctx(client, NS));
+
+    let fake = FakeAdminClient::new();
+    fake.inject_create_topics_broker_error(36, "TOPIC_ALREADY_EXISTS", None);
+    let fake = Arc::new(tokio::sync::Mutex::new(fake));
+    ctx.insert_admin_client_for_test(CLUSTER, fake).await;
+
+    let kt = topic_with_finalizer(TOPIC_NAME, 3, 1, None);
+    reconcile(Arc::new(kt), ctx).await.unwrap();
+
+    let body = last_status_patch_body(&state, TOPIC_NAME);
+    let cond = &body["status"]["conditions"][0];
+    assert_eq!(cond["status"], "False");
+    assert_eq!(cond["reason"], "BrokerError");
+    let msg = cond["message"].as_str().unwrap();
+    assert!(msg.contains("CreateTopics"), "message {msg:?}");
+    assert!(msg.contains("TOPIC_ALREADY_EXISTS"), "message {msg:?}");
+}
+
+/// Slice 35: topic exists at 3 partitions, spec=5; broker rejects
+/// `CreatePartitions` with `INVALID_PARTITIONS` → status
+/// `Ready=False reason=BrokerError` referencing CreatePartitions.
+#[tokio::test]
+async fn create_partitions_broker_error_surfaces_in_status() {
+    let state = MockState::new(standard_kube_rules(TOPIC_NAME));
+    let client = mock_client(&state, NS);
+    let ctx = Arc::new(fixture_ctx(client, NS));
+
+    let fake = FakeAdminClient::new();
+    fake.add_topic(
+        TOPIC_NAME,
+        TopicState {
+            partitions: 3,
+            replicas: 1,
+            topic_id: Some(uuid::Uuid::nil()),
+            config_overrides: std::collections::BTreeMap::new(),
+        },
+    );
+    fake.inject_create_partitions_broker_error(37, "INVALID_PARTITIONS", None);
+    let fake = Arc::new(tokio::sync::Mutex::new(fake));
+    ctx.insert_admin_client_for_test(CLUSTER, fake).await;
+
+    let kt = topic_with_finalizer(TOPIC_NAME, 5, 1, None);
+    reconcile(Arc::new(kt), ctx).await.unwrap();
+
+    let body = last_status_patch_body(&state, TOPIC_NAME);
+    let cond = &body["status"]["conditions"][0];
+    assert_eq!(cond["status"], "False");
+    assert_eq!(cond["reason"], "BrokerError");
+    let msg = cond["message"].as_str().unwrap();
+    assert!(msg.contains("CreatePartitions"), "message {msg:?}");
+    assert!(msg.contains("INVALID_PARTITIONS"), "message {msg:?}");
+}
+
+/// Slice 35: topic matches spec but has a stale config override; broker
+/// rejects `IncrementalAlterConfigs` with `INVALID_CONFIG` → status
+/// `Ready=False reason=BrokerError`.
+#[tokio::test]
+async fn incremental_alter_configs_broker_error_surfaces_in_status() {
+    let state = MockState::new(standard_kube_rules(TOPIC_NAME));
+    let client = mock_client(&state, NS);
+    let ctx = Arc::new(fixture_ctx(client, NS));
+
+    let fake = FakeAdminClient::new();
+    fake.add_topic(
+        TOPIC_NAME,
+        TopicState {
+            partitions: 3,
+            replicas: 1,
+            topic_id: Some(uuid::Uuid::nil()),
+            // current has "foo=1", desired below has "bar=2" → both a SET
+            // and a DELETE op are emitted, exercising the diff path.
+            config_overrides: std::collections::BTreeMap::from([(
+                "foo".to_string(),
+                "1".to_string(),
+            )]),
+        },
+    );
+    fake.inject_incremental_alter_configs_broker_error(40, "INVALID_CONFIG", None);
+    let fake = Arc::new(tokio::sync::Mutex::new(fake));
+    ctx.insert_admin_client_for_test(CLUSTER, fake).await;
+
+    let desired = std::collections::BTreeMap::from([("bar".to_string(), "2".to_string())]);
+    let kt = topic_with_finalizer(TOPIC_NAME, 3, 1, Some(desired));
+    reconcile(Arc::new(kt), ctx).await.unwrap();
+
+    let body = last_status_patch_body(&state, TOPIC_NAME);
+    let cond = &body["status"]["conditions"][0];
+    assert_eq!(cond["status"], "False");
+    assert_eq!(cond["reason"], "BrokerError");
+    let msg = cond["message"].as_str().unwrap();
+    assert!(msg.contains("IncrementalAlterConfigs"), "message {msg:?}");
+    assert!(msg.contains("INVALID_CONFIG"), "message {msg:?}");
+}
+
+/// Slice 35: `describe_configs` returns `AdminError::Broker` → the
+/// reconcile logs + requeues 15s WITHOUT updating status.
+#[tokio::test]
+async fn describe_configs_broker_error_requeues_without_status_update() {
+    // Only the cluster GET is wired: a status PATCH here would surface as
+    // an unexpected request (404) and the reconcile would return an error,
+    // so the absence of any status patch is itself the assertion.
+    let rules = vec![MockRule {
+        method: Method::GET,
+        path_substr: format!("/kafkas/{CLUSTER}"),
+        response: json_response(200, &ready_kafka_body(CLUSTER, NS)),
+    }];
+    let state = MockState::new(rules);
+    let client = mock_client(&state, NS);
+    let ctx = Arc::new(fixture_ctx(client, NS));
+
+    let fake = FakeAdminClient::new();
+    fake.add_topic(
+        TOPIC_NAME,
+        TopicState {
+            partitions: 3,
+            replicas: 1,
+            topic_id: Some(uuid::Uuid::nil()),
+            config_overrides: std::collections::BTreeMap::new(),
+        },
+    );
+    fake.inject_describe_configs_broker_error(7, "REQUEST_TIMED_OUT", None);
+    let fake = Arc::new(tokio::sync::Mutex::new(fake));
+    ctx.insert_admin_client_for_test(CLUSTER, fake.clone()).await;
+
+    let kt = topic_with_finalizer(TOPIC_NAME, 3, 1, None);
+    let action = reconcile(Arc::new(kt), ctx.clone()).await.unwrap();
+    assert_eq!(action, Action::requeue(Duration::from_secs(15)));
+
+    // No /status PATCH observed.
+    let observed = state.take_observed();
+    assert!(
+        !observed
+            .iter()
+            .any(|r| r.uri()
+                .to_string()
+                .contains(&format!("/kafkatopics/{TOPIC_NAME}/status"))),
+        "describe_configs Broker error must NOT trigger a status patch",
+    );
+
+    // Broker (non-Transport) errors do NOT evict the cached admin client.
+    assert!(
+        ctx.admin_clients.lock().await.contains_key(CLUSTER),
+        "Broker error must not evict the cached admin client",
+    );
+}
+
+/// Slice 35: `DeleteTopics` fails during finalizer cleanup with a broker
+/// error → the finalizer is STILL removed (best-effort path); the
+/// `DeleteTopics` call is still observed in the fake's call log.
+#[tokio::test]
+async fn delete_topics_broker_error_during_finalizer_does_not_block_cleanup() {
+    let state = MockState::new(delete_kube_rules(TOPIC_NAME));
+    let client = mock_client(&state, NS);
+    let ctx = Arc::new(fixture_ctx(client, NS));
+
+    let fake = FakeAdminClient::new();
+    fake.add_topic(
+        TOPIC_NAME,
+        TopicState {
+            partitions: 3,
+            replicas: 1,
+            topic_id: Some(uuid::Uuid::nil()),
+            config_overrides: std::collections::BTreeMap::new(),
+        },
+    );
+    // Inject a generic broker failure on delete_topics; current code only
+    // logs and proceeds with finalizer removal regardless of outcome.
+    fake.inject_delete_topics_broker_error(3, "UNKNOWN_TOPIC_OR_PARTITION", None);
+    let fake = Arc::new(tokio::sync::Mutex::new(fake));
+    let fake_for_assert = fake.clone();
+    ctx.insert_admin_client_for_test(CLUSTER, fake).await;
+
+    let mut kt = topic_with_finalizer(TOPIC_NAME, 3, 1, None);
+    kt.metadata.deletion_timestamp = Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+        "2026-05-18T00:00:00Z".parse().unwrap(),
+    ));
+    reconcile(Arc::new(kt), ctx).await.unwrap();
+
+    // DeleteTopics WAS called (even though it failed).
+    let calls = fake_for_assert.lock().await.calls();
+    assert!(
+        calls
+            .iter()
+            .any(|c| matches!(c, RecordedCall::DeleteTopics(names) if names == &vec![TOPIC_NAME.to_string()])),
+        "DeleteTopics must have been attempted; got {calls:?}",
+    );
+
+    // Finalizer-removal patch still issued.
+    let observed = state.take_observed();
+    let metadata_patch = observed
+        .iter()
+        .find(|r| {
+            r.method() == Method::PATCH
+                && r.uri()
+                    .to_string()
+                    .contains(&format!("/kafkatopics/{TOPIC_NAME}"))
+                && !r.uri().to_string().contains("/status")
+        })
+        .expect("metadata PATCH for finalizer removal");
+    let body: serde_json::Value = serde_json::from_slice(metadata_patch.body()).unwrap();
+    assert_eq!(body["metadata"]["finalizers"], serde_json::json!([]));
+}
+
+/// Slice 35 (T3-fix): a Transport error on `metadata` → reconcile
+/// requeues 15s, issues NO status patch, and EVICTS the cached admin
+/// client (so the next reconcile reopens the connection).
+#[tokio::test]
+async fn metadata_transport_error_requeues_and_evicts_admin_client() {
+    let rules = vec![MockRule {
+        method: Method::GET,
+        path_substr: format!("/kafkas/{CLUSTER}"),
+        response: json_response(200, &ready_kafka_body(CLUSTER, NS)),
+    }];
+    let state = MockState::new(rules);
+    let client = mock_client(&state, NS);
+    let ctx = Arc::new(fixture_ctx(client, NS));
+
+    let fake = FakeAdminClient::new();
+    fake.inject_metadata_transport_error();
+    let fake = Arc::new(tokio::sync::Mutex::new(fake));
+    ctx.insert_admin_client_for_test(CLUSTER, fake).await;
+    // Sanity: cache primed before reconcile.
+    assert!(ctx.admin_clients.lock().await.contains_key(CLUSTER));
+
+    let kt = topic_with_finalizer(TOPIC_NAME, 3, 1, None);
+    let action = reconcile(Arc::new(kt), ctx.clone()).await.unwrap();
+    assert_eq!(action, Action::requeue(Duration::from_secs(15)));
+
+    let observed = state.take_observed();
+    assert!(
+        !observed
+            .iter()
+            .any(|r| r.uri()
+                .to_string()
+                .contains(&format!("/kafkatopics/{TOPIC_NAME}/status"))),
+        "transport error must NOT trigger a status patch",
+    );
+
+    // T3-fix: Transport errors evict the cached admin client.
+    assert!(
+        !ctx.admin_clients.lock().await.contains_key(CLUSTER),
+        "Transport error must evict the cached admin client",
+    );
+}
+
 /// Slice 35: deletionTimestamp set, preserveTopic=true → no `DeleteTopics`
 /// call, finalizer still removed.
 #[tokio::test]
