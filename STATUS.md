@@ -1119,3 +1119,160 @@ Kafka client for ApiVersions.
   via the CRD (broker pairs it with the `ip` entity, not `user`);
   Strimzi's user-quotas `Plugin` variant indirection (Crabka surfaces
   the typed shape directly).
+## Slice 43g — Rebalancer anomaly detector + self-healing proposals (2026-05-18)
+
+- New top-level `detector/` module:
+  - `anomaly` — `Anomaly`, `AnomalyKind` (`BrokerDeath` /
+    `UnderReplicatedPartitions` / `DiskPressure` / `SlowBroker`),
+    `AnomalyKey` (`Broker(id)` / `Partition { topic, partition }` /
+    `BrokerPartition { … }`), `AnomalySeverity` (`Warning` /
+    `Critical`).
+  - `store` — `AnomalyStore`: ring-buffered persistent store at
+    `{data_dir}/anomalies.json`, schema version 1, atomic
+    tempfile + rename, default capacity 200. `upsert_open`
+    returns `(id, is_new)` so the tick loop can fire
+    auto-trigger only on freshly-detected anomalies;
+    `mark_resolved` flips `resolved_at_ms`;
+    `set_triggered_proposal` tags an anomaly with its
+    auto-triggered proposal id + mute window.
+  - `rules/` — `Rule` trait + `RuleCtx`, with one file per kind.
+    `SnapshotHistory` (in-memory ring of the last ~10
+    snapshots' broker ids + partition ISR fingerprints) lets
+    sustained-condition rules answer "has X held for ≥N
+    seconds?". Not persisted; restart resets timers.
+  - `metrics` — `DetectorMetrics`: per-kind
+    `anomalies_detected_total`, `anomalies_resolved_total`,
+    `auto_trigger_fired_total`, `anomalies_open` gauges, plus
+    six `auto_trigger_skipped_total` reasons (`disabled`,
+    `executing`, `reassignments`, `muted`, `no_movements`,
+    `optimizer_error`). Shares the existing
+    `crabka_rebalancer_` registry and `/metrics` endpoint.
+  - `auto_trigger` — maps `AnomalyKind` to a minimal goal list
+    via `goals_for_kind`, runs `optimizer::optimize`, inserts
+    the resulting `Computed` proposal into `ProposalStore`,
+    and tags the anomaly with `triggered_proposal_id` +
+    `mute_until_ms`. Gated by `auto_trigger_enabled` and by
+    executor / cluster in-flight checks.
+- Four anomaly rules:
+  - **BrokerDeath** — broker id appears in some partition's
+    `replicas` but is missing from `snapshot.brokers` for
+    ≥ `broker_death_threshold` (default 60s). Confirmed
+    against `SnapshotHistory::oldest_since`. Severity:
+    `Critical`. Auto-trigger goals:
+    `PreferredLeaderIdempotency`, `RackAware`,
+    `ReplicaDistribution`, `TopicReplicaDistribution`.
+  - **UnderReplicatedPartitions** — `isr.len() <
+    replicas.len()` sustained ≥
+    `under_replicated_threshold` (default 120s), skipping
+    partitions already in
+    `snapshot.in_flight_reassignments` (transient ISR
+    shortfalls during rebalance are expected). Severity:
+    `Critical` when > 50% of a topic's partitions affected,
+    else `Warning`. Auto-trigger goals:
+    `PreferredLeaderIdempotency`, `ReplicaDistribution`.
+  - **DiskPressure** — per-broker `disk_bytes_avg / capacity
+    > disk_pressure_pct` (default 0.85). Severity:
+    `Critical` when `> disk_critical_pct` (default 0.95),
+    else `Warning`. Skips brokers with no
+    `capacity.disk_bytes` configured. Auto-trigger goals:
+    `DiskCapacity`, `DiskUsage`.
+  - **SlowBroker** — per-broker CPU cores > `max(
+    slow_broker_min_cores, slow_broker_multiplier ×
+    cluster_median)` with ≥ 3 brokers reporting CPU.
+    Severity: `Warning`. Auto-trigger goals: `CpuUsage`,
+    `LeaderBytesIn`. `min_cores` floor (0.5) prevents false
+    positives on idle clusters.
+- **Auto-trigger posture: detect on by default, auto-trigger
+  off by default.** Operators get observability for free via
+  `GetAnomalies` and `/metrics`; they must opt in to writes
+  via `--detector-auto-trigger-enabled`. When fired,
+  auto-trigger creates a `Computed` proposal — the operator
+  still runs `ExecuteProposal`. **No auto-execute in 43g.**
+- Auto-trigger gates: (1) `auto_trigger_enabled` master switch,
+  (2) skipped when `executor.in_flight` is occupied,
+  (3) skipped when `snapshot.in_flight_reassignments` is
+  non-empty, (4) per-anomaly `mute_until_ms` (default 15min
+  after a fire), (5) skipped when the optimizer produces an
+  empty movement list. Muted anomalies stay visible via
+  `GetAnomalies`.
+- New Connect-RPC method `GetAnomalies` at
+  `/crabka.rebalancer.v1.Rebalancer/GetAnomalies` (the
+  roadmap's `GET /api/v1/anomalies`). Request supports
+  `limit` + optional `include_resolved` (unset = `true` so
+  the surface includes resolved history). Proto adds two
+  enums (`AnomalyKind`, `AnomalySeverity`) and four messages
+  (`Anomaly`, `AnomalyKey`, `PartitionKey`,
+  `BrokerPartitionKey`).
+- `AppState` gains `anomaly_store: Arc<AnomalyStore>`. The
+  `goal_registry` field migrates from owned to `Arc<GoalRegistry>`
+  so the binary can share one instance between `AppState` and
+  `Detector`.
+- 10 new CLI flags + env vars:
+  `--detector-tick-interval-secs` (default 30; 0 disables),
+  `--detector-broker-death-threshold-secs` (60),
+  `--detector-under-replicated-threshold-secs` (120),
+  `--detector-disk-pressure-pct` (0.85),
+  `--detector-disk-critical-pct` (0.95),
+  `--detector-slow-broker-multiplier` (2.0),
+  `--detector-slow-broker-min-cores` (0.5),
+  `--detector-mute-window-secs` (900),
+  `--detector-auto-trigger-enabled` (`false`),
+  `--anomaly-ring-buffer-size` (200).
+- Helm chart picks up all ten env vars under a new
+  `detector:` block (plus top-level `anomalyRingBufferSize`).
+  Two new helm-unittest tests in `deployment_test.yaml`
+  (default values render correctly; `autoTriggerEnabled: true`
+  flips the env).
+- ~32 new unit tests across `detector::*` modules and ~4 new
+  integration tests in `tests/end_to_end.rs`
+  (`get_anomalies_returns_empty_when_detector_quiet`,
+  `anomaly_store_persists_and_get_anomalies_returns_it`,
+  `auto_trigger_skipped_when_executor_in_flight`,
+  `disk_pressure_anomaly_auto_triggers_proposal`), plus 2 new
+  helm-unittest cases.
+- Reference doc:
+  [`docs/superpowers/specs/2026-05-17-crabka-rebalancer-roadmap-design.md`]
+  (slice 43g closes the 43-series). No separate design doc;
+  the roadmap covers it.
+- Out of scope (deferred): auto-execute (the detector only
+  proposes — `ExecuteProposal` stays operator-driven);
+  per-kind mute window overrides (single global default);
+  persisted `SnapshotHistory` (restart resets
+  sustained-condition timers, briefly delaying re-detection
+  of pre-restart conditions — acceptable since anomalies are
+  derived signals); discovery of scrape targets via
+  `Metadata` (still operator-supplied); alertmanager
+  integration; operator `KafkaRebalance` CRD (slice 44).
+
+### Known risks
+- **Detector accumulates open anomalies during long-running
+  executions.** When a proposal is executing, auto-trigger
+  short-circuits on the in-flight gate; rules keep firing
+  and anomalies accumulate in the store but no action is
+  taken. Operators observing many open anomalies during a
+  long execution should not be alarmed — auto-trigger
+  resumes on the first post-execution tick. The
+  `auto_trigger_skipped_executing_total` counter makes this
+  case observable.
+- **Sustained-condition timers reset on restart.** A
+  rebalancer crash mid-detection means `SnapshotHistory` is
+  empty and the rule needs to re-observe the condition for
+  its threshold duration before re-firing. Acceptable
+  trade-off — the anomaly will fire again, just slightly
+  delayed.
+- **`AnomalyStore` persistence is best-effort.** Like
+  `ProposalStore`, a disk write failure logs a warning and
+  leaves the in-memory state ahead of disk. On restart the
+  rebalancer may forget the most-recent anomalies and which
+  proposal each triggered. Acceptable trade-off — anomalies
+  are derived signals, not source of truth.
+- **Auto-trigger goal lists may overlap with operator
+  manual-proposal flows.** Auto-trigger selects an explicit
+  small goal subset (e.g., DiskCapacity + DiskUsage for
+  DiskPressure); if the operator's parallel `CreateProposal`
+  request includes the same goals, both proposals could
+  produce overlapping movements. The optimizer's
+  last-writer-wins coalesce makes this safe (no double
+  application; one proposal wins per partition), but
+  operators should be aware of the interaction.
+

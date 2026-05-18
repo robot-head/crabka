@@ -9,6 +9,7 @@ service Rebalancer {
   rpc ListProposals(ListProposalsRequest) returns (ListProposalsResponse);
   rpc ExecuteProposal(ExecuteProposalRequest) returns (ExecuteProposalResponse);
   rpc CancelExecution(CancelExecutionRequest) returns (CancelExecutionResponse);
+  rpc GetAnomalies(GetAnomaliesRequest) returns (GetAnomaliesResponse);
 }
 
 message Broker {
@@ -101,3 +102,60 @@ message ExecuteProposalResponse { Proposal proposal = 1; }
 
 message CancelExecutionRequest { string id = 1; }
 message CancelExecutionResponse { Proposal proposal = 1; }
+
+// ─── Anomaly detector (slice 43g) ─────────────────────────────────────
+
+enum AnomalyKind {
+  ANOMALY_KIND_UNSPECIFIED = 0;
+  ANOMALY_KIND_BROKER_DEATH = 1;
+  ANOMALY_KIND_UNDER_REPLICATED_PARTITIONS = 2;
+  ANOMALY_KIND_DISK_PRESSURE = 3;
+  ANOMALY_KIND_SLOW_BROKER = 4;
+}
+
+enum AnomalySeverity {
+  ANOMALY_SEVERITY_UNSPECIFIED = 0;
+  ANOMALY_SEVERITY_WARNING = 1;
+  ANOMALY_SEVERITY_CRITICAL = 2;
+}
+
+message PartitionKey {
+  string topic = 1;
+  int32 partition = 2;
+}
+
+message BrokerPartitionKey {
+  int32 broker = 1;
+  string topic = 2;
+  int32 partition = 3;
+}
+
+message AnomalyKey {
+  oneof inner {
+    int32 broker = 1;
+    PartitionKey partition = 2;
+    BrokerPartitionKey broker_partition = 3;
+  }
+}
+
+message Anomaly {
+  string id = 1;
+  AnomalyKind kind = 2;
+  AnomalyKey key = 3;
+  AnomalySeverity severity = 4;
+  int64 detected_at_ms = 5;
+  int64 last_seen_at_ms = 6;
+  int64 resolved_at_ms = 7;
+  optional string triggered_proposal_id = 8;
+  int64 mute_until_ms = 9;
+  string details = 10;
+}
+
+message GetAnomaliesRequest {
+  int32 limit = 1;
+  optional bool include_resolved = 2;
+}
+
+message GetAnomaliesResponse {
+  repeated Anomaly anomalies = 1;
+}
