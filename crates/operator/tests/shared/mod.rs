@@ -13,6 +13,8 @@
 
 #![allow(dead_code)]
 
+pub mod fake_admin;
+
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -236,6 +238,30 @@ pub fn fake_kafka_body(name: &str, namespace: &str) -> serde_json::Value {
         "metadata": { "name": name, "namespace": namespace, "uid": "kafka-uid" },
         "spec": { "kafkaVersion": "0.1.1" },
         "status": { "conditions": [] }
+    })
+}
+
+/// Faked `KafkaTopic` body. kube-rs requires the body deserialize back
+/// into a `KafkaTopic`, so we echo a minimal-but-complete one.
+pub fn fake_topic_body(name: &str, namespace: &str) -> serde_json::Value {
+    serde_json::json!({
+        "apiVersion": "crabka.io/v1alpha1",
+        "kind": "KafkaTopic",
+        "metadata": {
+            "name": name,
+            "namespace": namespace,
+            "uid": "topic-uid",
+            "generation": 1,
+            "finalizers": ["crabka.io/topic-finalizer"],
+        },
+        "spec": {
+            "partitions": 3,
+            "replicas": 1,
+            "preserveTopic": false,
+        },
+        "status": {
+            "conditions": [],
+        }
     })
 }
 

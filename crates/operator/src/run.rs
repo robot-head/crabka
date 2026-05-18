@@ -57,6 +57,10 @@ pub async fn run(config: OperatorConfig) -> anyhow::Result<()> {
         let ctx = ctx.clone();
         async move { controller::kafka_node_pool::run(ctx).await }
     });
+    let topic_handle = tokio::spawn({
+        let ctx = ctx.clone();
+        async move { controller::topic::run(ctx).await }
+    });
 
     tokio::select! {
         res = health_handle => match res {
@@ -73,6 +77,11 @@ pub async fn run(config: OperatorConfig) -> anyhow::Result<()> {
             Ok(Ok(())) => {}
             Ok(Err(e)) => tracing::error!(error = %e, "KafkaNodePool controller exited with error"),
             Err(e) => tracing::error!(error = %e, "KafkaNodePool controller task panicked"),
+        },
+        res = topic_handle => match res {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::error!(error = %e, "KafkaTopic controller exited with error"),
+            Err(e) => tracing::error!(error = %e, "KafkaTopic controller task panicked"),
         },
         () = shutdown_signal() => tracing::info!("shutdown signal received"),
     }

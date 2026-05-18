@@ -1,0 +1,122 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: kafkatopics.crabka.io
+spec:
+  group: crabka.io
+  names:
+    categories: []
+    kind: KafkaTopic
+    plural: kafkatopics
+    shortNames:
+    - kt
+    singular: kafkatopic
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns: []
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Auto-generated derived type for KafkaTopicSpec via `CustomResource`
+        properties:
+          spec:
+            properties:
+              config:
+                additionalProperties:
+                  type: string
+                description: |-
+                  Opaque topic-level config (`retention.ms`, `cleanup.policy`,
+                  etc.). Reconciled via `IncrementalAlterConfigs` SET/DELETE diff
+                  against the cluster's current dynamic-topic overrides.
+                nullable: true
+                type: object
+              partitions:
+                description: |-
+                  Number of partitions. Increases honored via `CreatePartitions`;
+                  decreases rejected with `ImmutableFieldChanged`.
+                format: int32
+                maximum: 1000000.0
+                minimum: 1.0
+                type: integer
+              preserveTopic:
+                default: false
+                description: |-
+                  When `true`, CRD delete still removes the finalizer but skips
+                  the `DeleteTopics` call so the Kafka topic survives. Default
+                  `false`.
+                type: boolean
+              replicas:
+                description: |-
+                  Replication factor. Changes rejected with
+                  `ImmutableFieldChanged` until partition reassignment lands
+                  (slice 43+).
+                format: int32
+                maximum: 1000.0
+                minimum: 1.0
+                type: integer
+              topicName:
+                description: |-
+                  Optional override for the Kafka topic name. Defaults to
+                  `metadata.name`. Validated at reconcile time against Kafka's
+                  rules (length ≤ 249, chars `[A-Za-z0-9._-]`, not `.` or `..`).
+                nullable: true
+                type: string
+            required:
+            - partitions
+            - replicas
+            type: object
+          status:
+            nullable: true
+            properties:
+              conditions:
+                default: []
+                description: Standard Kubernetes-style condition list. Surfaces `Ready`.
+                items:
+                  properties:
+                    lastTransitionTime:
+                      description: RFC3339 timestamp.
+                      type: string
+                    message:
+                      description: Human-readable message.
+                      type: string
+                    reason:
+                      description: CamelCase machine reason.
+                      type: string
+                    status:
+                      description: '`True`, `False`, or `Unknown`.'
+                      type: string
+                    type:
+                      description: e.g. `Ready`.
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              observedGeneration:
+                description: |-
+                  `metadata.generation` of the last successfully-reconciled spec
+                  (i.e. last time we wrote `Ready=True reason=Ready`).
+                format: int64
+                nullable: true
+                type: integer
+              topicId:
+                description: Cluster-assigned topic UUID, populated once the topic exists.
+                nullable: true
+                type: string
+              topicName:
+                description: Effective topic name (defaulted if `spec.topicName` unset).
+                nullable: true
+                type: string
+            type: object
+        required:
+        - spec
+        title: KafkaTopic
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
