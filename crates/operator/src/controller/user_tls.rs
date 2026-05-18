@@ -340,4 +340,229 @@ mod tests {
             "notAfter delta {delta}s exceeds ±5s tolerance (parsed={parsed}, expected={expected})"
         );
     }
+
+    #[test]
+    fn cert_not_after_from_pem_returns_none_on_malformed_input() {
+        assert!(cert_not_after_from_pem("not a pem").is_none());
+        assert!(cert_not_after_from_pem("").is_none());
+        // Valid PEM framing, garbage body — exercises the parse_x509 failure
+        // branch.
+        assert!(
+            cert_not_after_from_pem("-----BEGIN CERTIFICATE-----\nQUFB\n-----END CERTIFICATE-----")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn read_pem_key_returns_some_when_present() {
+        let mut data = BTreeMap::new();
+        data.insert("ca.key".into(), ByteString(b"abc".to_vec()));
+        let s = Secret {
+            data: Some(data),
+            ..Default::default()
+        };
+        assert_eq!(read_pem_key(&s, "ca.key").as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn read_pem_key_returns_none_when_data_missing() {
+        let s = Secret::default();
+        assert!(read_pem_key(&s, "ca.key").is_none());
+    }
+
+    #[test]
+    fn read_pem_key_returns_none_when_key_missing() {
+        let mut data = BTreeMap::new();
+        data.insert("other".into(), ByteString(b"abc".to_vec()));
+        let s = Secret {
+            data: Some(data),
+            ..Default::default()
+        };
+        assert!(read_pem_key(&s, "ca.key").is_none());
+    }
+
+    #[test]
+    fn read_pem_key_returns_none_on_non_utf8() {
+        let mut data = BTreeMap::new();
+        data.insert("ca.key".into(), ByteString(vec![0xFF, 0xFE, 0xFD]));
+        let s = Secret {
+            data: Some(data),
+            ..Default::default()
+        };
+        assert!(read_pem_key(&s, "ca.key").is_none());
+    }
+
+    #[test]
+    fn read_user_cert_not_after_returns_none_when_user_crt_missing() {
+        let mut data = BTreeMap::new();
+        data.insert("user.key".into(), ByteString(b"junk".to_vec()));
+        let s = Secret {
+            data: Some(data),
+            ..Default::default()
+        };
+        assert!(read_user_cert_not_after(&s).is_none());
+    }
+
+    #[test]
+    fn format_rfc3339_round_trips() {
+        let t = OffsetDateTime::from_unix_timestamp(1_700_000_000).expect("unix ts");
+        let s = format_rfc3339(t).expect("formats");
+        assert_eq!(s, "2023-11-14T22:13:20Z");
+    }
+
+    fn dummy_kafka() -> Kafka {
+        let mut k = Kafka::new(
+            "demo",
+            crate::crd::KafkaSpec {
+                kafka_version: "0.1.1".into(),
+                config: None,
+                listeners: vec![],
+                inter_broker_listener_name: Some("PLAIN".into()),
+                metrics_config: None,
+                network_policy: None,
+            },
+        );
+        k.metadata.namespace = Some("ns".into());
+        k.metadata.uid = Some("kafka-uid".into());
+        k
+    }
+
+    fn dummy_ku() -> KafkaUser {
+        let mut ku = KafkaUser::new(
+            "alice",
+            crate::crd::KafkaUserSpec {
+                authentication: crate::crd::Authentication::Tls(TlsAuth::default()),
+                authorization: None,
+                quotas: None,
+            },
+        );
+        ku.metadata.namespace = Some("ns".into());
+        ku.metadata.uid = Some("user-uid".into());
+        let mut labels = BTreeMap::new();
+        labels.insert("crabka.io/cluster".into(), "demo".into());
+        ku.metadata.labels = Some(labels);
+        ku
+    }
+
+    #[test]
+    fn render_clients_ca_secret_owner_refs_kafka_and_carries_component_label() {
+        let kafka = dummy_kafka();
+        let secret = render_clients_ca_secret(
+            &kafka,
+            "demo-clients-ca",
+            "ca.key",
+            "PEM-BYTES",
+            "clients-ca-key",
+        )
+        .expect("renders");
+
+        assert_eq!(secret.metadata.name.as_deref(), Some("demo-clients-ca"));
+        assert_eq!(secret.metadata.namespace.as_deref(), Some("ns"));
+        let labels = secret.metadata.labels.as_ref().expect("labels");
+        assert_eq!(
+            labels
+                .get("app.kubernetes.io/managed-by")
+                .map(String::as_str),
+            Some("crabka-operator")
+        );
+        assert_eq!(
+            labels.get("crabka.io/cluster").map(String::as_str),
+            Some("demo")
+        );
+        assert_eq!(
+            labels.get("crabka.io/component").map(String::as_str),
+            Some("clients-ca-key")
+        );
+        let owners = secret.metadata.owner_references.as_ref().expect("owner");
+        assert_eq!(owners.len(), 1);
+        assert_eq!(owners[0].kind, "Kafka");
+        assert_eq!(owners[0].name, "demo");
+        assert_eq!(owners[0].uid, "kafka-uid");
+        assert_eq!(owners[0].controller, Some(true));
+        let data = secret.data.as_ref().expect("data");
+        assert_eq!(
+            data.get("ca.key").map(|bs| bs.0.as_slice()),
+            Some(b"PEM-BYTES".as_slice())
+        );
+        assert_eq!(secret.type_.as_deref(), Some("Opaque"));
+    }
+
+    #[test]
+    fn render_user_cert_secret_carries_three_keys_and_tls_auth_label() {
+        let ku = dummy_ku();
+        let user_cert = ca::UserCert {
+            cert_pem: "CERT".into(),
+            key_pem: "KEY".into(),
+            not_after: "2027-01-01T00:00:00Z".into(),
+        };
+        let secret = render_user_cert_secret(&ku, &user_cert, "CA-CERT").expect("renders");
+
+        assert_eq!(secret.metadata.name.as_deref(), Some("alice"));
+        assert_eq!(secret.metadata.namespace.as_deref(), Some("ns"));
+        let labels = secret.metadata.labels.as_ref().expect("labels");
+        assert_eq!(
+            labels.get("crabka.io/auth").map(String::as_str),
+            Some("tls")
+        );
+        assert_eq!(
+            labels.get("crabka.io/user").map(String::as_str),
+            Some("alice")
+        );
+        assert_eq!(
+            labels.get("crabka.io/cluster").map(String::as_str),
+            Some("demo")
+        );
+        let owners = secret.metadata.owner_references.as_ref().expect("owner");
+        assert_eq!(owners.len(), 1);
+        assert_eq!(owners[0].kind, "KafkaUser");
+        assert_eq!(owners[0].uid, "user-uid");
+        let data = secret.data.as_ref().expect("data");
+        assert_eq!(
+            data.get("user.crt").map(|bs| bs.0.as_slice()),
+            Some(b"CERT".as_slice())
+        );
+        assert_eq!(
+            data.get("user.key").map(|bs| bs.0.as_slice()),
+            Some(b"KEY".as_slice())
+        );
+        assert_eq!(
+            data.get("ca.crt").map(|bs| bs.0.as_slice()),
+            Some(b"CA-CERT".as_slice())
+        );
+    }
+
+    #[test]
+    fn render_user_cert_secret_omits_cluster_label_when_label_absent() {
+        let mut ku = dummy_ku();
+        ku.metadata.labels = None;
+        let user_cert = ca::UserCert {
+            cert_pem: "C".into(),
+            key_pem: "K".into(),
+            not_after: "2027-01-01T00:00:00Z".into(),
+        };
+        let secret = render_user_cert_secret(&ku, &user_cert, "CA").expect("renders");
+        let labels = secret.metadata.labels.as_ref().expect("labels");
+        assert!(!labels.contains_key("crabka.io/cluster"));
+    }
+
+    #[test]
+    fn user_owner_ref_errors_on_missing_uid() {
+        let mut ku = dummy_ku();
+        ku.metadata.uid = None;
+        assert!(matches!(
+            user_owner_ref(&ku),
+            Err(ReconcileError::MissingUid)
+        ));
+    }
+
+    #[test]
+    fn user_owner_ref_carries_block_owner_deletion() {
+        let ku = dummy_ku();
+        let owner = user_owner_ref(&ku).expect("owner ref");
+        assert_eq!(owner.kind, "KafkaUser");
+        assert_eq!(owner.name, "alice");
+        assert_eq!(owner.uid, "user-uid");
+        assert_eq!(owner.controller, Some(true));
+        assert_eq!(owner.block_owner_deletion, Some(true));
+    }
 }
