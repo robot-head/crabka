@@ -239,6 +239,30 @@ pub fn fake_kafka_body(name: &str, namespace: &str) -> serde_json::Value {
     })
 }
 
+/// Faked `KafkaTopic` body. kube-rs requires the body deserialize back
+/// into a `KafkaTopic`, so we echo a minimal-but-complete one.
+pub fn fake_topic_body(name: &str, namespace: &str) -> serde_json::Value {
+    serde_json::json!({
+        "apiVersion": "crabka.io/v1alpha1",
+        "kind": "KafkaTopic",
+        "metadata": {
+            "name": name,
+            "namespace": namespace,
+            "uid": "topic-uid",
+            "generation": 1,
+            "finalizers": ["crabka.io/topic-finalizer"],
+        },
+        "spec": {
+            "partitions": 3,
+            "replicas": 1,
+            "preserveTopic": false,
+        },
+        "status": {
+            "conditions": [],
+        }
+    })
+}
+
 /// Faked `KafkaNodePool` body (used as the GET response for pool/status
 /// PATCH responses). kube-rs requires the body deserialize back into a
 /// `KafkaNodePool`.

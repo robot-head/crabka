@@ -1141,6 +1141,7 @@ dependencies = [
  "chrono",
  "clap",
  "crabka-broker",
+ "crabka-client-admin",
  "futures",
  "http",
  "http-body-util",

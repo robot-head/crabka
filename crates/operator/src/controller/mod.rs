@@ -8,3 +8,4 @@ pub mod kafka_node_pool;
 pub(crate) mod listeners;
 pub(crate) mod metrics;
 pub(crate) mod network_policy;
+pub mod topic;
