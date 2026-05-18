@@ -104,8 +104,11 @@ impl FakeAdminClient {
         name: &'static str,
         message: Option<String>,
     ) {
-        self.injected.lock().unwrap().create_topics =
-            Some(InjectableError::Broker { code, name, message });
+        self.injected.lock().unwrap().create_topics = Some(InjectableError::Broker {
+            code,
+            name,
+            message,
+        });
     }
 
     pub fn inject_create_partitions_broker_error(
@@ -114,8 +117,11 @@ impl FakeAdminClient {
         name: &'static str,
         message: Option<String>,
     ) {
-        self.injected.lock().unwrap().create_partitions =
-            Some(InjectableError::Broker { code, name, message });
+        self.injected.lock().unwrap().create_partitions = Some(InjectableError::Broker {
+            code,
+            name,
+            message,
+        });
     }
 
     pub fn inject_incremental_alter_configs_broker_error(
@@ -124,8 +130,11 @@ impl FakeAdminClient {
         name: &'static str,
         message: Option<String>,
     ) {
-        self.injected.lock().unwrap().incremental_alter_configs =
-            Some(InjectableError::Broker { code, name, message });
+        self.injected.lock().unwrap().incremental_alter_configs = Some(InjectableError::Broker {
+            code,
+            name,
+            message,
+        });
     }
 
     pub fn inject_delete_topics_broker_error(
@@ -134,8 +143,11 @@ impl FakeAdminClient {
         name: &'static str,
         message: Option<String>,
     ) {
-        self.injected.lock().unwrap().delete_topics =
-            Some(InjectableError::Broker { code, name, message });
+        self.injected.lock().unwrap().delete_topics = Some(InjectableError::Broker {
+            code,
+            name,
+            message,
+        });
     }
 
     /// Inject a top-level `AdminError::Broker { .. }` for `describe_configs`.

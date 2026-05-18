@@ -812,7 +812,8 @@ async fn describe_configs_broker_error_requeues_without_status_update() {
     );
     fake.inject_describe_configs_broker_error(7, "REQUEST_TIMED_OUT", None);
     let fake = Arc::new(tokio::sync::Mutex::new(fake));
-    ctx.insert_admin_client_for_test(CLUSTER, fake.clone()).await;
+    ctx.insert_admin_client_for_test(CLUSTER, fake.clone())
+        .await;
 
     let kt = topic_with_finalizer(TOPIC_NAME, 3, 1, None);
     let action = reconcile(Arc::new(kt), ctx.clone()).await.unwrap();
@@ -821,11 +822,10 @@ async fn describe_configs_broker_error_requeues_without_status_update() {
     // No /status PATCH observed.
     let observed = state.take_observed();
     assert!(
-        !observed
-            .iter()
-            .any(|r| r.uri()
-                .to_string()
-                .contains(&format!("/kafkatopics/{TOPIC_NAME}/status"))),
+        !observed.iter().any(|r| r
+            .uri()
+            .to_string()
+            .contains(&format!("/kafkatopics/{TOPIC_NAME}/status"))),
         "describe_configs Broker error must NOT trigger a status patch",
     );
 
@@ -920,11 +920,10 @@ async fn metadata_transport_error_requeues_and_evicts_admin_client() {
 
     let observed = state.take_observed();
     assert!(
-        !observed
-            .iter()
-            .any(|r| r.uri()
-                .to_string()
-                .contains(&format!("/kafkatopics/{TOPIC_NAME}/status"))),
+        !observed.iter().any(|r| r
+            .uri()
+            .to_string()
+            .contains(&format!("/kafkatopics/{TOPIC_NAME}/status"))),
         "transport error must NOT trigger a status patch",
     );
 
