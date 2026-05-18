@@ -251,7 +251,10 @@ mod tests {
         };
         let json = serde_json::to_string(&l).unwrap();
         assert!(json.contains("\"networkPolicyPeers\""), "got: {json}");
-        assert!(json.contains("\"matchLabels\":{\"role\":\"client\"}"), "got: {json}");
+        assert!(
+            json.contains("\"matchLabels\":{\"role\":\"client\"}"),
+            "got: {json}"
+        );
         let back: Listener = serde_json::from_str(&json).unwrap();
         assert_eq!(back, l);
     }

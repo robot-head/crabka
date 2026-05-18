@@ -20,8 +20,8 @@
 use std::collections::BTreeMap;
 
 use k8s_openapi::api::networking::v1::{
-    NetworkPolicy, NetworkPolicyIngressRule, NetworkPolicyPeer as K8sPeer,
-    NetworkPolicyPort, NetworkPolicySpec as K8sNpSpec,
+    NetworkPolicy, NetworkPolicyIngressRule, NetworkPolicyPeer as K8sPeer, NetworkPolicyPort,
+    NetworkPolicySpec as K8sNpSpec,
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
@@ -259,9 +259,7 @@ mod tests {
                     .iter()
                     .filter(|r| {
                         r.ports.as_ref().is_some_and(|ps| {
-                            ps.iter().any(|p| {
-                                p.port == Some(IntOrString::Int(port))
-                            })
+                            ps.iter().any(|p| p.port == Some(IntOrString::Int(port)))
                         })
                     })
                     .collect()
@@ -279,8 +277,14 @@ mod tests {
         assert_eq!(from.len(), 1);
         let pod = from[0].pod_selector.as_ref().unwrap();
         let labels = pod.match_labels.as_ref().unwrap();
-        assert_eq!(labels.get("app.kubernetes.io/name").map(String::as_str), Some(APP_LABEL));
-        assert_eq!(labels.get("app.kubernetes.io/instance").map(String::as_str), Some("demo"));
+        assert_eq!(
+            labels.get("app.kubernetes.io/name").map(String::as_str),
+            Some(APP_LABEL)
+        );
+        assert_eq!(
+            labels.get("app.kubernetes.io/instance").map(String::as_str),
+            Some("demo")
+        );
     }
 
     #[test]
@@ -318,7 +322,10 @@ mod tests {
                 _ => panic!("expected int port"),
             })
             .collect();
-        assert!(ports.contains(&9092) && ports.contains(&9094), "ports={ports:?}");
+        assert!(
+            ports.contains(&9092) && ports.contains(&9094),
+            "ports={ports:?}"
+        );
     }
 
     #[test]
@@ -329,9 +336,9 @@ mod tests {
         let rules_on_9092 = rules_targeting_port(&np, 9092);
         // Expected rules on 9092: inter-broker self_peer, operator-allow, per-listener allow-all.
         // The per-listener allow-all has an empty `from`.
-        let allow_all = rules_on_9092.iter().find(|r| {
-            r.from.as_ref().is_some_and(std::vec::Vec::is_empty)
-        });
+        let allow_all = rules_on_9092
+            .iter()
+            .find(|r| r.from.as_ref().is_some_and(std::vec::Vec::is_empty));
         assert!(
             allow_all.is_some(),
             "expected an allow-all rule (empty `from`) on :9092"
@@ -348,9 +355,9 @@ mod tests {
         // The operator-allow has operator label; the inter-broker has the
         // pod selector with APP_LABEL. Count rules whose `from` is empty:
         // there should be zero (would indicate an allow-all rule slipped through).
-        let allow_all = rules_on_9092.iter().find(|r| {
-            r.from.as_ref().is_some_and(std::vec::Vec::is_empty)
-        });
+        let allow_all = rules_on_9092
+            .iter()
+            .find(|r| r.from.as_ref().is_some_and(std::vec::Vec::is_empty));
         assert!(
             allow_all.is_none(),
             "deny-all listener must not emit an allow-all (empty `from`) rule"
@@ -388,7 +395,10 @@ mod tests {
                 })
             })
         });
-        assert!(restricted.is_some(), "expected per-listener restricted rule");
+        assert!(
+            restricted.is_some(),
+            "expected per-listener restricted rule"
+        );
     }
 
     #[test]
@@ -411,7 +421,10 @@ mod tests {
         let listeners = vec![internal_listener("PLAIN", 9092, None)];
         let np = render_network_policy(&test_kafka(), &listeners, 9092, false).unwrap();
         let rules_on_9404 = rules_targeting_port(&np, METRICS_PORT);
-        assert!(rules_on_9404.is_empty(), "no metrics rule when metricsConfig unset");
+        assert!(
+            rules_on_9404.is_empty(),
+            "no metrics rule when metricsConfig unset"
+        );
     }
 
     #[test]
@@ -428,8 +441,14 @@ mod tests {
             .match_labels
             .as_ref()
             .unwrap();
-        assert_eq!(sel.get("app.kubernetes.io/name").map(String::as_str), Some(APP_LABEL));
-        assert_eq!(sel.get("app.kubernetes.io/instance").map(String::as_str), Some("demo"));
+        assert_eq!(
+            sel.get("app.kubernetes.io/name").map(String::as_str),
+            Some(APP_LABEL)
+        );
+        assert_eq!(
+            sel.get("app.kubernetes.io/instance").map(String::as_str),
+            Some("demo")
+        );
     }
 
     #[test]
@@ -437,7 +456,10 @@ mod tests {
         let listeners = vec![internal_listener("PLAIN", 9092, None)];
         let np = render_network_policy(&test_kafka(), &listeners, 9092, false).unwrap();
         let spec = np.spec.as_ref().unwrap();
-        assert_eq!(spec.policy_types.as_ref().unwrap(), &vec!["Ingress".to_string()]);
+        assert_eq!(
+            spec.policy_types.as_ref().unwrap(),
+            &vec!["Ingress".to_string()]
+        );
         assert!(spec.egress.is_none());
     }
 

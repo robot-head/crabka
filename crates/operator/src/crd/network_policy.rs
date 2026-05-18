@@ -48,13 +48,22 @@ mod tests {
         }"#;
         let p: NetworkPolicyPeer = serde_json::from_str(json).unwrap();
         let pod = p.pod_selector.as_ref().expect("podSelector present");
-        let ns = p.namespace_selector.as_ref().expect("namespaceSelector present");
+        let ns = p
+            .namespace_selector
+            .as_ref()
+            .expect("namespaceSelector present");
         assert_eq!(
-            pod.match_labels.as_ref().and_then(|m| m.get("role")).map(String::as_str),
+            pod.match_labels
+                .as_ref()
+                .and_then(|m| m.get("role"))
+                .map(String::as_str),
             Some("frontend"),
         );
         assert_eq!(
-            ns.match_labels.as_ref().and_then(|m| m.get("team")).map(String::as_str),
+            ns.match_labels
+                .as_ref()
+                .and_then(|m| m.get("team"))
+                .map(String::as_str),
             Some("platform"),
         );
         let back = serde_json::to_string(&p).unwrap();
