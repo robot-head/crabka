@@ -184,7 +184,7 @@ mod tests {
 
     #[test]
     fn transient_no_fire() {
-        let cfg = cfg(Duration::from_secs(120));
+        let cfg = cfg(Duration::from_mins(2));
         let usages = UsageStore::default();
         let capacities = BrokerCapacities::default();
         let snap = state(vec![part_under("t", 0, vec![1, 2, 3], vec![1, 2])], 1_000);
@@ -198,7 +198,7 @@ mod tests {
     fn sustained_fires() {
         // cutoff = 200_000 - 120_000 = 80_000; push a memo at the cutoff
         // so oldest_since(cutoff) returns a memo whose snapshot_at_ms <= cutoff.
-        let cfg = cfg(Duration::from_secs(120));
+        let cfg = cfg(Duration::from_mins(2));
         let usages = UsageStore::default();
         let capacities = BrokerCapacities::default();
         let old = state(vec![part_under("t", 0, vec![1, 2, 3], vec![1, 2])], 0);
@@ -216,7 +216,7 @@ mod tests {
     #[test]
     fn severity_warning_when_only_one_of_many_under() {
         // 4-partition topic, 1 under-replicated → 25%, below 50%, warning.
-        let cfg = cfg(Duration::from_secs(120));
+        let cfg = cfg(Duration::from_mins(2));
         let usages = UsageStore::default();
         let capacities = BrokerCapacities::default();
         let parts = vec![
@@ -241,7 +241,7 @@ mod tests {
     fn skip_in_flight_reassignment() {
         // Under-replicated *and* sustained, but partition is being
         // reassigned → suppress.
-        let cfg = cfg(Duration::from_secs(120));
+        let cfg = cfg(Duration::from_mins(2));
         let usages = UsageStore::default();
         let capacities = BrokerCapacities::default();
         let old = state(vec![part_under("t", 0, vec![1, 2, 3], vec![1, 2])], 0);

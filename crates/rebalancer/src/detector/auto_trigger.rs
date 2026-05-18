@@ -165,7 +165,7 @@ mod tests {
             resolved_at_ms: None,
             triggered_proposal_id: None,
             mute_until_ms: None,
-            details: "".into(),
+            details: String::new(),
         }
     }
 
@@ -249,14 +249,14 @@ mod tests {
             metrics,
             config: DetectorConfig {
                 auto_trigger_enabled,
-                default_mute_window: Duration::from_secs(900),
+                default_mute_window: Duration::from_mins(15),
                 ..DetectorConfig::default()
             },
             _dir: dir,
         }
     }
 
-    fn make_ctx<'a>(h: &'a Harness, now: i64) -> AutoTriggerCtx<'a> {
+    fn make_ctx(h: &Harness, now: i64) -> AutoTriggerCtx<'_> {
         AutoTriggerCtx {
             snapshot: h.snapshot.clone(),
             goal_registry: &h.goal_registry,

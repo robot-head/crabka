@@ -114,7 +114,7 @@ mod tests {
 
     #[test]
     fn fresh_absence_does_not_fire() {
-        let cfg = cfg(Duration::from_secs(60));
+        let cfg = cfg(Duration::from_mins(1));
         let snap = state(&[1, 2], vec![("t", 0, vec![1, 2, 3], 1)], 1_000);
         let mut hist = SnapshotHistory::new(10);
         hist.push(&snap);
@@ -133,7 +133,7 @@ mod tests {
 
     #[test]
     fn sustained_absence_fires_critical() {
-        let cfg = cfg(Duration::from_secs(60));
+        let cfg = cfg(Duration::from_mins(1));
         let usages = UsageStore::default();
         let capacities = BrokerCapacities::default();
         let mut hist = SnapshotHistory::new(10);
@@ -161,7 +161,7 @@ mod tests {
 
     #[test]
     fn reappearance_does_not_fire() {
-        let cfg = cfg(Duration::from_secs(60));
+        let cfg = cfg(Duration::from_mins(1));
         let usages = UsageStore::default();
         let capacities = BrokerCapacities::default();
         let mut hist = SnapshotHistory::new(10);

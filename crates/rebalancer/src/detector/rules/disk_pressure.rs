@@ -116,7 +116,7 @@ mod tests {
     fn store_with_disk(samples: Vec<(i32, &str, i32, f64)>) -> Arc<UsageStore> {
         let store = UsageStore::new(WindowConfig {
             scrape_interval: Duration::from_secs(30),
-            retention: Duration::from_secs(3600),
+            retention: Duration::from_hours(1),
         });
         for (broker, topic, partition, value) in samples {
             store.insert(

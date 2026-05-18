@@ -120,13 +120,13 @@ mod tests {
         }
     }
 
-    /// `samples`: (broker, topic, partition, v_t0, v_t1) — CPU counter is
-    /// monotonic; we feed two samples 1s apart so cpu_micros_rate has
+    /// `samples`: (broker, topic, partition, `v_t0`, `v_t1`) — CPU counter is
+    /// monotonic; we feed two samples 1s apart so `cpu_micros_rate` has
     /// at least one delta to compute.
     fn store_with_cpu(samples: Vec<(i32, &str, i32, f64, f64)>) -> Arc<UsageStore> {
         let store = UsageStore::new(WindowConfig {
             scrape_interval: Duration::from_secs(30),
-            retention: Duration::from_secs(3600),
+            retention: Duration::from_hours(1),
         });
         for (broker, topic, partition, v0, _) in &samples {
             store.insert(
