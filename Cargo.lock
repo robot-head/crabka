@@ -1105,6 +1105,7 @@ name = "crabka-metadata"
 version = "0.1.1"
 dependencies = [
  "bytes",
+ "codspeed-criterion-compat",
  "crabka-security",
  "proptest",
  "serde",
@@ -1237,6 +1238,7 @@ version = "0.1.1"
 dependencies = [
  "arc-swap",
  "base64",
+ "codspeed-criterion-compat",
  "hex",
  "hmac 0.13.0",
  "pbkdf2 0.13.0",

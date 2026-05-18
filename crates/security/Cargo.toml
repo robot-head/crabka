@@ -28,3 +28,8 @@ arc-swap.workspace = true
 [dev-dependencies]
 hex.workspace = true
 tempfile.workspace = true
+criterion = { version = "4.6.0", package = "codspeed-criterion-compat" }
+
+[[bench]]
+name = "scram"
+harness = false

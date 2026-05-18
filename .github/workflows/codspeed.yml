@@ -28,7 +28,13 @@ jobs:
         run: cargo install cargo-codspeed
 
       - name: Build the benchmark target(s)
-        run: cargo codspeed build --package crabka-protocol --package crabka-log
+        run: |
+          cargo codspeed build \
+            --package crabka-protocol \
+            --package crabka-log \
+            --package crabka-compression \
+            --package crabka-security \
+            --package crabka-metadata
 
       - name: Run the benchmarks
         uses: CodSpeedHQ/action@v4
