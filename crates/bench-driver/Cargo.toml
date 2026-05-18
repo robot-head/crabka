@@ -1,0 +1,45 @@
+[package]
+name = "crabka-bench-driver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Load driver + report aggregator for the Crabka vs Strimzi benchmark harness"
+
+[[bin]]
+name = "crabka-bench-driver"
+path = "src/main.rs"
+
+[[bin]]
+name = "crabka-bench-report"
+path = "src/report_main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+bytes = { workspace = true }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+clap = { workspace = true, features = ["env"] }
+crabka-client-admin = { version = "0.1", path = "../client-admin" }
+crabka-client-consumer = { version = "0.1", path = "../client-consumer" }
+crabka-client-core = { version = "0.1", path = "../client-core" }
+crabka-client-producer = { version = "0.1", path = "../client-producer" }
+hdrhistogram = { version = "7.5", default-features = false }
+k8s-openapi = { workspace = true }
+kube = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+rustls = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+serde_yaml = "0.9"
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "sync", "time", "fs"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }

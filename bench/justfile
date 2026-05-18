@@ -1,0 +1,121 @@
+# Crabka vs Strimzi benchmark recipes. Run from the repo root via
+# `just -f bench/justfile <recipe>`, or `just <recipe>` after a `cd bench`.
+#
+# Two modes:
+#   bench-ci       lightweight KinD-friendly: 1 broker RF=1, short scenarios.
+#                  builds the bench-driver image via melange/apko and loads
+#                  it into a `crabka-bench` kind cluster.
+#   bench-cluster  assumes kubeconfig points at a real cluster. Runs the
+#                  heavier matrix including 3-broker RF=3 and failover.
+#
+# Override the driver image with BENCH_DRIVER_IMAGE=... at the front.
+
+set shell := ["bash", "-euo", "pipefail", "-c"]
+
+repo_root := justfile_directory() / ".."
+results_dir := repo_root / "bench" / "results"
+
+# Default scenarios per mode (override by passing scenarios="a b c").
+ci_scenarios       := "small-msg-saturate fixed-rate-latency"
+cluster_scenarios  := "small-msg-saturate fixed-rate-latency large-msg fan-out mixed-acks failover"
+
+bench_driver_image := env_var_or_default("BENCH_DRIVER_IMAGE", "crabka-bench-driver:e2e")
+strimzi_version    := env_var_or_default("STRIMZI_VERSION", "0.46.0")
+
+# ── Top-level ──────────────────────────────────────────────────────────────
+
+default:
+    @just --list
+
+# Full CI smoke: build images, kind-up, install both operators, run CI
+# scenarios on both stacks, tear down.
+bench-ci: build-driver-image kind-up install-all
+    just _run-matrix "1broker-rf1" "{{ci_scenarios}}"
+    just bench-report
+
+# Full cluster matrix. Assumes a kubeconfig context is already set.
+bench-cluster: install-all
+    just _run-matrix "3broker-rf3" "{{cluster_scenarios}}"
+    just bench-report
+
+# Aggregate per-run JSON into a Markdown summary.
+bench-report:
+    cargo run --release -p crabka-bench-driver --bin crabka-bench-report -- \
+        --input-dir {{results_dir}} \
+        --out {{results_dir}}/SUMMARY.md
+
+# Tear down operators and namespaces created by `just install-all`.
+bench-clean:
+    -kubectl delete namespace monitoring --ignore-not-found
+    -kubectl delete namespace crabka-operator --ignore-not-found
+    -kubectl delete namespace strimzi-system --ignore-not-found
+    -bench/scripts/teardown.sh crabka
+    -bench/scripts/teardown.sh kafka
+
+# ── Building blocks (callable directly when iterating) ─────────────────────
+
+install-all: install-strimzi install-crabka install-prometheus
+
+install-strimzi:
+    STRIMZI_VERSION={{strimzi_version}} bench/scripts/install-strimzi.sh
+
+install-crabka:
+    bench/scripts/install-crabka.sh
+
+install-prometheus:
+    bench/scripts/install-prometheus.sh
+
+# Run one scenario × one stack. Useful for iteration:
+#   just run crabka small-msg-saturate 1broker-rf1
+run STACK SCENARIO TOPOLOGY="1broker-rf1":
+    BENCH_DRIVER_IMAGE={{bench_driver_image}} \
+        bench/scripts/run-scenario.sh {{STACK}} {{SCENARIO}} {{TOPOLOGY}}
+
+# Build the bench-driver OCI image via melange + apko (matches the
+# packaging pipeline for the broker / operator images).
+build-driver-image:
+    @echo "→ building crabka-bench-driver apk + OCI"
+    mkdir -p packages
+    test -f melange.rsa || melange keygen
+    melange build packaging/melange/bench-driver.yaml \
+        --source-dir . --signing-key melange.rsa \
+        --arch x86_64 --runner docker --out-dir packages/
+    apko build packaging/apko/bench-driver.yaml \
+        {{bench_driver_image}} crabka-bench-driver.tar \
+        --arch x86_64 \
+        --repository-append "$PWD/packages" \
+        --keyring-append "$PWD/melange.rsa.pub"
+
+# Bring up a local KinD cluster sized for the bench. No-op if one already
+# exists.
+kind-up:
+    @if kind get clusters 2>/dev/null | grep -q '^crabka-bench$'; then \
+      echo "kind cluster 'crabka-bench' already exists"; \
+    else \
+      kind create cluster --name crabka-bench --image kindest/node:v1.30.0 --wait 60s; \
+    fi
+    @echo "loading bench-driver image into kind"
+    docker load -i crabka-bench-driver.tar 2>&1 | tee /tmp/load.log
+    loaded=$(sed -n 's/^Loaded image: //p' /tmp/load.log | head -1); \
+        if [ "$loaded" != "{{bench_driver_image}}" ]; then \
+            docker tag "$loaded" "{{bench_driver_image}}"; \
+        fi; \
+        kind load docker-image "{{bench_driver_image}}" --name crabka-bench
+
+kind-down:
+    -kind delete cluster --name crabka-bench
+
+# ── Internal helpers ───────────────────────────────────────────────────────
+
+# Run a matrix of (stack × scenario) and append all outputs to results_dir.
+_run-matrix TOPOLOGY SCENARIOS:
+    mkdir -p {{results_dir}}
+    for scenario in {{SCENARIOS}}; do \
+      for stack in crabka kafka; do \
+        echo "═══ $stack / $scenario / {{TOPOLOGY}} ═══"; \
+        BENCH_DRIVER_IMAGE={{bench_driver_image}} \
+            bench/scripts/run-scenario.sh "$stack" "$scenario" "{{TOPOLOGY}}" \
+            || echo "WARN: $stack/$scenario failed (continuing)"; \
+        bench/scripts/teardown.sh "$stack"; \
+      done; \
+    done

@@ -1,0 +1,18 @@
+# Saturate the broker with small (100 B) records and a single producer.
+# Topline metric: producer msgs/sec and MB/sec.
+# Secondary metric: p99 producer-ack latency under saturation.
+name: small-msg-saturate
+mode_tag: ci
+msg_size_bytes: 100
+partitions: 6
+replication_factor: 1
+producers: 1
+consumers: 1
+mode:
+  kind: saturate
+acks: leader
+compression: none
+linger_ms: 5
+batch_size: 16384
+warmup_s: 10
+duration_s: 60

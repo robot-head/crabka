@@ -26,6 +26,9 @@ allow = [
     "Zlib",
     "CC0-1.0",
     "bzip2-1.0.6",
+    # webpki-roots ships the Mozilla NSS CA bundle (data, not code) under
+    # CDLA-Permissive-2.0. Pulled in transitively via reqwest + rustls.
+    "CDLA-Permissive-2.0",
 ]
 exceptions = []
 confidence-threshold = 0.93

@@ -1,0 +1,14 @@
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: bench-topic
+  namespace: default
+  labels:
+    strimzi.io/cluster: demo
+spec:
+  partitions: ${BENCH_PARTITIONS}
+  replicas: ${BENCH_REPLICATION_FACTOR}
+  config:
+    retention.ms: "3600000"
+    cleanup.policy: "delete"

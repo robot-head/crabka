@@ -1,0 +1,179 @@
+name: benchmark
+on:
+  workflow_dispatch:
+    inputs:
+      topology:
+        description: "Topology to run"
+        type: choice
+        default: "1broker-rf1"
+        options:
+          - "1broker-rf1"
+          - "3broker-rf3"
+      scenarios:
+        description: "Space-separated scenario file basenames (default: small-msg-saturate fixed-rate-latency)"
+        type: string
+        default: "small-msg-saturate fixed-rate-latency"
+  schedule:
+    # Weekly KinD smoke on Mondays at 06:00 UTC. Catches dependency drift
+    # in the Strimzi install bundle without spamming PR runs.
+    - cron: "0 6 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  kind-bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.95.0"
+      - uses: azure/setup-helm@v5
+        with:
+          version: v3.16.2
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+
+      - name: Install melange + apko
+        run: |
+          go install chainguard.dev/melange@latest
+          go install chainguard.dev/apko@latest
+          echo "$HOME/go/bin" >> "$GITHUB_PATH"
+
+      - name: Build crabka-operator + crabka-broker + bench-driver images
+        run: |
+          mkdir -p packages
+          melange keygen
+          for recipe in crabka-operator crabka-broker bench-driver; do
+            melange build "packaging/melange/${recipe}.yaml" \
+              --source-dir . --signing-key melange.rsa \
+              --arch x86_64 --runner docker --out-dir packages/
+            apko build "packaging/apko/${recipe}.yaml" \
+              "${recipe}:e2e" "${recipe}.tar" \
+              --arch x86_64 \
+              --repository-append "$PWD/packages" \
+              --keyring-append "$PWD/melange.rsa.pub"
+          done
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: crabka-bench
+          version: v0.24.0
+          node_image: kindest/node:v1.30.0
+
+      - name: Load images into kind
+        run: |
+          set -e
+          for recipe in crabka-operator crabka-broker bench-driver; do
+            docker load -i "${recipe}.tar" 2>&1 | tee /tmp/load.log
+            loaded=$(sed -n 's/^Loaded image: //p' /tmp/load.log | head -1)
+            want="${recipe}:e2e"
+            if [ "$loaded" != "$want" ]; then docker tag "$loaded" "$want"; fi
+            kind load docker-image "$want" --name crabka-bench
+          done
+
+      - name: Install Prometheus Operator CRDs (PodMonitor / ServiceMonitor)
+        run: |
+          # Strimzi's metricsConfig references the PodMonitor CRD. We
+          # don't run the prom-operator itself — our minimal Prometheus
+          # uses static SD — but Strimzi will refuse to render its CR
+          # otherwise.
+          # Renovate: datasource=github-tags depName=prometheus-operator/prometheus-operator
+          PROM_OP_TAG=v0.79.2
+          kubectl apply -f "https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/${PROM_OP_TAG}/example/prometheus-operator-crd/monitoring.coreos.com_podmonitors.yaml"
+          kubectl apply -f "https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/${PROM_OP_TAG}/example/prometheus-operator-crd/monitoring.coreos.com_servicemonitors.yaml"
+
+      - name: Install operators + Prometheus
+        env:
+          CRABKA_OPERATOR_IMAGE_REPO: crabka-operator
+          CRABKA_OPERATOR_IMAGE_TAG: e2e
+          CRABKA_BROKER_IMAGE_REPO: crabka-broker
+          CRABKA_BROKER_IMAGE_TAG: e2e
+          CRABKA_IMAGE_PULL_POLICY: IfNotPresent
+        run: |
+          just -f bench/justfile install-all
+
+      - name: Run benchmark matrix
+        env:
+          BENCH_DRIVER_IMAGE: bench-driver:e2e
+          BENCH_TOPOLOGY: ${{ github.event.inputs.topology || '1broker-rf1' }}
+          BENCH_SCENARIOS: ${{ github.event.inputs.scenarios || 'small-msg-saturate fixed-rate-latency' }}
+        run: |
+          mkdir -p bench/results
+          for scenario in $BENCH_SCENARIOS; do
+            for stack in crabka kafka; do
+              echo "═══ $stack / $scenario / $BENCH_TOPOLOGY ═══"
+              bench/scripts/run-scenario.sh "$stack" "$scenario" "$BENCH_TOPOLOGY" \
+                || echo "WARN: $stack/$scenario failed (continuing)"
+              bench/scripts/teardown.sh "$stack"
+            done
+          done
+
+      - name: Aggregate report
+        if: always()
+        run: |
+          cargo run --release -p crabka-bench-driver --bin crabka-bench-report -- \
+            --input-dir bench/results \
+            --out bench/results/SUMMARY.md
+          echo "──── SUMMARY ────"
+          cat bench/results/SUMMARY.md
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: bench-results
+          path: bench/results/
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Collect diagnostics on failure
+        if: failure()
+        run: |
+          set +e
+          mkdir -p /tmp/bench-diag
+          DIAG=/tmp/bench-diag/diagnostics.md
+          {
+            echo "## benchmark diagnostics (run ${GITHUB_RUN_ID})"
+            for section in \
+              "pods|kubectl get pods -A -o wide" \
+              "events|kubectl get events -A --sort-by=.lastTimestamp | tail -100" \
+              "crabka-operator logs|kubectl logs -n crabka-operator deploy/operator-crabka-operator --tail=300" \
+              "strimzi-operator logs|kubectl logs -n strimzi-system deploy/strimzi-cluster-operator --tail=300" \
+              "prometheus logs|kubectl logs -n monitoring deploy/prometheus --tail=200" \
+              "kafka CRs|kubectl get kafka.crabka.io,kafka.kafka.strimzi.io -A -o yaml" \
+              "broker pods|kubectl get pod -n default -o wide" \
+              "broker logs (crabka)|kubectl logs -n default demo-brokers-0 --tail=300 --all-containers" \
+              "broker logs (kafka)|kubectl logs -n default demo-kafka-0 --tail=300 --all-containers" \
+              "bench-driver Jobs|kubectl get jobs -A -o yaml" \
+              "bench-driver pod logs|for j in $(kubectl get jobs -A -l app.kubernetes.io/name=bench-driver -o name); do echo "─── $j"; kubectl logs $j --all-containers --tail=200; done"
+            do
+              title=${section%%|*}
+              cmd=${section#*|}
+              echo "### ${title}"
+              echo '```'
+              eval "$cmd" 2>&1
+              echo '```'
+              echo
+            done
+          } > "$DIAG"
+          echo "::group::diagnostics summary"
+          head -40 "$DIAG"
+          echo "..."
+          echo "::endgroup::"
+
+      - name: Upload diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: bench-diagnostics
+          path: /tmp/bench-diag/
+          retention-days: 14
+          if-no-files-found: ignore
