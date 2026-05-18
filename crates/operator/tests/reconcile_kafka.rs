@@ -47,6 +47,7 @@ fn kafka_cr(name: &str, namespace: &str) -> Kafka {
             listeners: vec![],
             inter_broker_listener_name: None,
             metrics_config: None,
+            network_policy: None,
         },
     );
     k.metadata.namespace = Some(namespace.into());
@@ -64,6 +65,7 @@ fn kafka_cr_with_metrics(name: &str, namespace: &str, metrics: Option<MetricsCon
             listeners: vec![],
             inter_broker_listener_name: None,
             metrics_config: metrics,
+            network_policy: None,
         },
     );
     k.metadata.namespace = Some(namespace.into());
@@ -87,6 +89,7 @@ fn kafka_cr_with_config(
             listeners: vec![],
             inter_broker_listener_name: None,
             metrics_config: None,
+            network_policy: None,
         },
     );
     k.metadata.namespace = Some(namespace.into());
@@ -480,6 +483,7 @@ async fn kafka_invalid_listener_tls_blocks_broker_configmap_and_sets_conditions(
         type_: ListenerType::Internal,
         tls: true,
         configuration: None,
+        network_policy_peers: None,
     }];
 
     reconcile(Arc::new(kafka), ctx).await.unwrap();

@@ -26,6 +26,17 @@ pub struct Listener {
     /// Optional listener-type-specific configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub configuration: Option<ListenerConfiguration>,
+    /// Slice 23: per-listener peer allow-list. Tri-state:
+    /// - `None` → no per-listener restriction (allow-all on this port).
+    /// - `Some(vec![])` → deny-all on this listener port (no per-listener
+    ///   rule emitted; default-deny applies).
+    /// - `Some(non_empty)` → only listed peers may reach this port.
+    ///
+    /// Only consulted when `Kafka.spec.networkPolicy` is set; otherwise
+    /// inert. The operator auto-allow rule still fires on this port even
+    /// for deny-all listeners so the operator can manage the cluster.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_policy_peers: Option<Vec<crate::crd::NetworkPolicyPeer>>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
@@ -129,6 +140,7 @@ mod tests {
             type_: ListenerType::Internal,
             tls: false,
             configuration: None,
+            network_policy_peers: None,
         };
         let json = serde_json::to_string(&l).unwrap();
         assert!(json.contains("\"type\":\"internal\""), "got: {json}");
@@ -156,6 +168,7 @@ mod tests {
                     ..Default::default()
                 }],
             }),
+            network_policy_peers: None,
         };
         let json = serde_json::to_string(&l).unwrap();
         assert!(
@@ -181,5 +194,65 @@ mod tests {
             json.contains("\"loadBalancerIP\":\"10.0.0.5\""),
             "got: {json}"
         );
+    }
+
+    #[test]
+    fn listener_without_peers_omits_field() {
+        let l = Listener {
+            name: "PLAIN".into(),
+            port: 9092,
+            type_: ListenerType::Internal,
+            tls: false,
+            configuration: None,
+            network_policy_peers: None,
+        };
+        let json = serde_json::to_string(&l).unwrap();
+        assert!(!json.contains("networkPolicyPeers"), "got: {json}");
+    }
+
+    #[test]
+    fn listener_with_empty_peers_round_trips() {
+        let l = Listener {
+            name: "PLAIN".into(),
+            port: 9092,
+            type_: ListenerType::Internal,
+            tls: false,
+            configuration: None,
+            network_policy_peers: Some(vec![]),
+        };
+        let json = serde_json::to_string(&l).unwrap();
+        assert!(json.contains("\"networkPolicyPeers\":[]"), "got: {json}");
+        let back: Listener = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, l);
+    }
+
+    #[test]
+    fn listener_with_named_peer_round_trips() {
+        use crate::crd::NetworkPolicyPeer;
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector;
+        use std::collections::BTreeMap;
+
+        let mut match_labels = BTreeMap::new();
+        match_labels.insert("role".to_string(), "client".to_string());
+        let peer = NetworkPolicyPeer {
+            pod_selector: Some(LabelSelector {
+                match_labels: Some(match_labels),
+                match_expressions: None,
+            }),
+            namespace_selector: None,
+        };
+        let l = Listener {
+            name: "PLAIN".into(),
+            port: 9092,
+            type_: ListenerType::Internal,
+            tls: false,
+            configuration: None,
+            network_policy_peers: Some(vec![peer]),
+        };
+        let json = serde_json::to_string(&l).unwrap();
+        assert!(json.contains("\"networkPolicyPeers\""), "got: {json}");
+        assert!(json.contains("\"matchLabels\":{\"role\":\"client\"}"), "got: {json}");
+        let back: Listener = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, l);
     }
 }

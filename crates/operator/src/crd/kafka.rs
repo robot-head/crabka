@@ -46,6 +46,12 @@ pub struct KafkaSpec {
     /// `pod_monitor` / `service_monitor` are SSA-applied.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metrics_config: Option<crate::crd::MetricsConfig>,
+    /// Slice 23: opt-in `NetworkPolicy` generation. When `None`, no
+    /// `NetworkPolicy` is generated. When `Some` (even `{}`), the operator
+    /// renders a cluster-level `NetworkPolicy` gating ingress to broker /
+    /// controller pods.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_policy: Option<crate::crd::NetworkPolicySpec>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
@@ -108,6 +114,7 @@ mod tests {
                 listeners: vec![],
                 inter_broker_listener_name: None,
                 metrics_config: None,
+                network_policy: None,
             },
         );
         let json = serde_json::to_string(&k).unwrap();
@@ -129,6 +136,7 @@ mod tests {
                 listeners: vec![],
                 inter_broker_listener_name: None,
                 metrics_config: None,
+                network_policy: None,
             },
         );
         let j = serde_json::to_string(&k.spec).unwrap();
@@ -210,5 +218,29 @@ mod tests {
         assert!(json.contains("\"bootstrapServers\""), "got: {json}");
         let back: KafkaStatus = serde_json::from_str(&json).unwrap();
         assert_eq!(back, status);
+    }
+
+    #[test]
+    fn spec_omits_network_policy_when_none() {
+        let k = Kafka::new(
+            "demo",
+            KafkaSpec {
+                kafka_version: "0.1.1".into(),
+                config: None,
+                listeners: vec![],
+                inter_broker_listener_name: None,
+                metrics_config: None,
+                network_policy: None,
+            },
+        );
+        let j = serde_json::to_string(&k.spec).unwrap();
+        assert!(!j.contains("networkPolicy"), "got: {j}");
+    }
+
+    #[test]
+    fn spec_carries_network_policy_when_set() {
+        let json = r#"{"kafkaVersion":"0.1.1","networkPolicy":{}}"#;
+        let spec: KafkaSpec = serde_json::from_str(json).unwrap();
+        assert!(spec.network_policy.is_some(), "networkPolicy parsed");
     }
 }
