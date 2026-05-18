@@ -276,3 +276,79 @@ async fn metrics_endpoint_serves_openmetrics_and_counters_tick() {
 
     handle.shutdown().await;
 }
+
+/// Slice 43e-core: confirm that per-partition counters land alongside
+/// topic-level ones, and that the disk-scanner gauge picks up
+/// non-zero values for materialized partitions.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn partition_level_metrics_and_disk_gauge_render() {
+    let log_dir = tempfile::tempdir().unwrap();
+    let mut cfg = BrokerConfig::for_tests(log_dir.path().to_path_buf());
+    cfg.listeners = vec![ListenerSpec {
+        name: "PLAINTEXT".into(),
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        advertised: "127.0.0.1:0".into(),
+        protocol: ListenerProtocol::Plaintext,
+    }];
+    cfg.inter_broker_listener_name = "PLAINTEXT".into();
+    cfg.metrics_listen_addr = Some("127.0.0.1:0".parse().unwrap());
+    // Enable the disk scanner with a 1s tick so the gauge gets a
+    // chance to populate within the test's wait window.
+    cfg.partition_disk_scan_interval_secs = 1;
+
+    let handle = Broker::start(cfg).await.unwrap();
+    let kafka_addr = handle.listen_addr();
+    let metrics_addr = handle
+        .metrics_addr()
+        .expect("metrics server should be bound");
+
+    // Create the topic + produce a record so the per-partition
+    // counters fire and the on-disk segment exists for the scanner.
+    create_topic(kafka_addr).await;
+    // Wait briefly for the partition writer to be ready.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    produce_one(kafka_addr).await;
+
+    // Wait for the disk scanner to tick at least once (configured 1s).
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+
+    let body = scrape(metrics_addr).await;
+
+    // Topic-level (slice 39) still present.
+    let topic_needle = format!("crabka_broker_topic_bytes_in_total{{topic=\"{TOPIC}\"}}");
+    assert!(
+        body.contains(&topic_needle),
+        "missing topic-level bytes_in in:\n{body}"
+    );
+
+    // Partition-level (slice 43e-core) present with non-zero value.
+    let partition_needle =
+        format!("crabka_broker_partition_bytes_in_total{{topic=\"{TOPIC}\",partition=\"0\"}}");
+    assert!(
+        body.contains(&partition_needle),
+        "missing partition-level bytes_in in:\n{body}"
+    );
+    // Confirm the value is non-zero.
+    let part_line = body
+        .lines()
+        .find(|l| l.starts_with(&partition_needle))
+        .expect("partition_bytes_in line present");
+    let value: u64 = part_line
+        .rsplit(' ')
+        .next()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    assert!(
+        value > 0,
+        "partition_bytes_in should be >0 after produce, got line: {part_line}"
+    );
+
+    // Disk gauge: emitted for at least one (topic, partition) of TOPIC.
+    let disk_prefix = format!("crabka_broker_partition_disk_bytes{{topic=\"{TOPIC}\"");
+    assert!(
+        body.contains(&disk_prefix),
+        "missing partition_disk_bytes for materialized partition in:\n{body}"
+    );
+
+    let _ = tokio::time::timeout(Duration::from_secs(10), handle.shutdown()).await;
+}
