@@ -279,7 +279,10 @@ mod tests {
     fn empty_usage_no_op() {
         let parts: Vec<_> = (0..3).map(|i| part("t", i, vec![1, 2], 1)).collect();
         let s = state_with(parts, vec![1, 2]);
-        let ctx = ctx_with(caps_with_disk(1, 1_000_000), Arc::new(UsageStore::default()));
+        let ctx = ctx_with(
+            caps_with_disk(1, 1_000_000),
+            Arc::new(UsageStore::default()),
+        );
         assert!(DiskCapacity.propose(&s, &ctx).is_empty());
         assert!(DiskCapacity.is_satisfied_with_ctx(&s, &ctx));
     }

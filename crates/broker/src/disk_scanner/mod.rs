@@ -25,7 +25,10 @@ pub struct DiskScanner {
 
 impl DiskScanner {
     pub async fn run(self) {
-        info!(interval_secs = self.interval.as_secs(), "disk scanner started");
+        info!(
+            interval_secs = self.interval.as_secs(),
+            "disk scanner started"
+        );
         let mut ticker = interval(self.interval);
         loop {
             tokio::select! {
@@ -94,11 +97,17 @@ mod tests {
 
         let g0 = metrics
             .partition_disk_bytes
-            .get_or_create(&PartitionLabel { topic: "t".into(), partition: 0 })
+            .get_or_create(&PartitionLabel {
+                topic: "t".into(),
+                partition: 0,
+            })
             .get();
         let g1 = metrics
             .partition_disk_bytes
-            .get_or_create(&PartitionLabel { topic: "t".into(), partition: 1 })
+            .get_or_create(&PartitionLabel {
+                topic: "t".into(),
+                partition: 1,
+            })
             .get();
         assert_eq!(g0, 1234);
         assert_eq!(g1, 5678);

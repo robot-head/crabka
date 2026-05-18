@@ -147,10 +147,7 @@ pub(crate) async fn handle(
         if !topic_name.is_empty() {
             let mut topic_bytes: u64 = 0;
             for p in &topic.partition_data {
-                let partition_bytes = p
-                    .records
-                    .as_ref()
-                    .map_or(0, |r| r.encoded_len() as u64);
+                let partition_bytes = p.records.as_ref().map_or(0, |r| r.encoded_len() as u64);
                 broker
                     .metrics
                     .record_partition_produce(&topic_name, p.index, partition_bytes);

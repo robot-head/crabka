@@ -310,12 +310,21 @@ mod tests {
             })
             .set(1_000_000);
 
-        let lbl_p0 = PartitionLabel { topic: "t".into(), partition: 0 };
-        let lbl_p1 = PartitionLabel { topic: "t".into(), partition: 1 };
+        let lbl_p0 = PartitionLabel {
+            topic: "t".into(),
+            partition: 0,
+        };
+        let lbl_p1 = PartitionLabel {
+            topic: "t".into(),
+            partition: 1,
+        };
         assert_eq!(m.partition_bytes_in.get_or_create(&lbl_p0).get(), 1024);
         assert_eq!(m.partition_bytes_in.get_or_create(&lbl_p1).get(), 512);
         assert_eq!(m.partition_bytes_out.get_or_create(&lbl_p0).get(), 2048);
-        assert_eq!(m.partition_disk_bytes.get_or_create(&lbl_p0).get(), 1_000_000);
+        assert_eq!(
+            m.partition_disk_bytes.get_or_create(&lbl_p0).get(),
+            1_000_000
+        );
     }
 
     #[test]
@@ -323,7 +332,10 @@ mod tests {
         let m = BrokerMetrics::new();
         m.record_partition_produce("t", 0, 0);
         m.record_partition_fetch("t", 0, 0);
-        let lbl = PartitionLabel { topic: "t".into(), partition: 0 };
+        let lbl = PartitionLabel {
+            topic: "t".into(),
+            partition: 0,
+        };
         // Counters still exist (get_or_create creates them) but at 0.
         assert_eq!(m.partition_bytes_in.get_or_create(&lbl).get(), 0);
         assert_eq!(m.partition_bytes_out.get_or_create(&lbl).get(), 0);

@@ -1202,9 +1202,7 @@ impl Broker {
         if config.partition_disk_scan_interval_secs > 0 {
             let scanner = crate::disk_scanner::DiskScanner {
                 log_dir: config.log_dir.clone(),
-                interval: std::time::Duration::from_secs(
-                    config.partition_disk_scan_interval_secs,
-                ),
+                interval: std::time::Duration::from_secs(config.partition_disk_scan_interval_secs),
                 metrics: metrics.clone(),
                 shutdown: supervisor_shutdown.child_token(),
             };

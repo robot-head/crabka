@@ -82,7 +82,11 @@ struct Args {
     metrics_scrape_targets: String,
 
     /// How often the scraper polls each target's /metrics endpoint.
-    #[arg(long, env = "CRABKA_METRICS_SCRAPE_INTERVAL_SECS", default_value_t = 30)]
+    #[arg(
+        long,
+        env = "CRABKA_METRICS_SCRAPE_INTERVAL_SECS",
+        default_value_t = 30
+    )]
     metrics_scrape_interval_secs: u64,
 
     /// How long to retain scraped samples in the rolling window

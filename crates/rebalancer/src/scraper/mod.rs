@@ -6,7 +6,7 @@ pub mod targets;
 pub mod window;
 
 pub use parse::{MetricKind, ParsedSample};
-pub use targets::{parse_targets, ScrapeTarget, TargetParseError};
+pub use targets::{ScrapeTarget, TargetParseError, parse_targets};
 pub use window::{UsageStore, Window, WindowConfig};
 
 use std::sync::Arc;

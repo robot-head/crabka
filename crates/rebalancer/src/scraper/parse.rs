@@ -56,7 +56,10 @@ fn parse_line(line: &str) -> Option<ParsedSample> {
     let mut partition: Option<i32> = None;
     for pair in labels.split(',') {
         let (k, v) = pair.split_once('=')?;
-        let v = v.trim().strip_prefix('"').and_then(|s| s.strip_suffix('"'))?;
+        let v = v
+            .trim()
+            .strip_prefix('"')
+            .and_then(|s| s.strip_suffix('"'))?;
         match k.trim() {
             "topic" => topic = Some(v.to_string()),
             "partition" => partition = v.parse().ok(),

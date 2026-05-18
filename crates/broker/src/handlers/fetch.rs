@@ -369,8 +369,7 @@ pub(crate) async fn handle(
         }
         let mut bytes: u64 = 0;
         for p in &topic_resp.partitions {
-            let partition_bytes =
-                p.records.as_ref().map_or(0, RecordBatch::encoded_len) as u64;
+            let partition_bytes = p.records.as_ref().map_or(0, RecordBatch::encoded_len) as u64;
             broker.metrics.record_partition_fetch(
                 &topic_resp.topic,
                 p.partition_index,
