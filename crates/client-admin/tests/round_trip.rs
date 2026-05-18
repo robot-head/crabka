@@ -136,8 +136,18 @@ async fn admin_round_trip_create_alter_delete() {
         .await
         .unwrap();
     assert!(outcomes[0].error.is_none());
+    // The broker may return either an empty Vec (no dynamic overrides remain
+    // for the resource) or a Vec with one entry whose overrides map lacks
+    // the deleted key. Both shapes indicate the DELETE landed. Iterate
+    // instead of indexing to handle both.
     let overrides = admin.describe_configs(&["foo"]).await.unwrap();
-    assert!(!overrides[0].overrides.contains_key("retention.ms"));
+    let still_has_retention = overrides
+        .iter()
+        .any(|t| t.overrides.contains_key("retention.ms"));
+    assert!(
+        !still_has_retention,
+        "retention.ms should be absent after DELETE; got {overrides:?}",
+    );
 
     // 8. Delete the topic.
     let outcomes = admin.delete_topics(&["foo"], 5_000).await.unwrap();
