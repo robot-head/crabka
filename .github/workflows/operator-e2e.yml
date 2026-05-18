@@ -893,3 +893,258 @@ jobs:
           path: /tmp/np-diag/
           retention-days: 14
           if-no-files-found: ignore
+
+  kind-kafkatopic:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.95.0"
+      - uses: azure/setup-helm@v5
+        with:
+          version: v3.16.2
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+
+      - name: Install melange and apko
+        run: |
+          go install chainguard.dev/melange@latest
+          go install chainguard.dev/apko@latest
+          echo "$HOME/go/bin" >> "$GITHUB_PATH"
+
+      - name: Build crabka-operator + crabka-broker images
+        run: |
+          mkdir -p packages
+          melange keygen
+          melange build packaging/melange/crabka-operator.yaml \
+            --source-dir . --signing-key melange.rsa \
+            --arch x86_64 --runner docker --out-dir packages/
+          apko build packaging/apko/crabka-operator.yaml \
+            crabka-operator:e2e crabka-operator.tar \
+            --arch x86_64 \
+            --repository-append "$PWD/packages" \
+            --keyring-append "$PWD/melange.rsa.pub"
+          melange build packaging/melange/crabka-broker.yaml \
+            --source-dir . --signing-key melange.rsa \
+            --arch x86_64 --runner docker --out-dir packages/
+          apko build packaging/apko/crabka-broker.yaml \
+            crabka-broker:e2e crabka-broker.tar \
+            --arch x86_64 \
+            --repository-append "$PWD/packages" \
+            --keyring-append "$PWD/melange.rsa.pub"
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: crabka-kt-e2e
+          version: v0.24.0
+          node_image: kindest/node:v1.30.0
+
+      - name: Load images into kind
+        run: |
+          set -e
+          for tar in crabka-operator.tar crabka-broker.tar; do
+            docker load -i "$tar" 2>&1 | tee /tmp/load.log
+            loaded=$(sed -n 's/^Loaded image: //p' /tmp/load.log | head -1)
+            want=$(basename "$tar" .tar):e2e
+            if [ "$loaded" != "$want" ]; then docker tag "$loaded" "$want"; fi
+            kind load docker-image "$want" --name crabka-kt-e2e
+          done
+
+      - name: Install CRDs + chart
+        run: |
+          set -e
+          kubectl apply -f deploy/crds/crabka.io_kafkas.yaml
+          kubectl apply -f deploy/crds/crabka.io_kafkanodepools.yaml
+          kubectl apply -f deploy/crds/crabka.io_kafkatopics.yaml
+          kubectl create namespace crabka-operator
+          helm install operator charts/crabka-operator \
+            --namespace crabka-operator \
+            --set image.repository=crabka-operator --set image.tag=e2e \
+            --set image.pullPolicy=IfNotPresent \
+            --set brokerImage.repository=crabka-broker --set brokerImage.tag=e2e \
+            --set brokerImage.pullPolicy=IfNotPresent
+          kubectl rollout status -n crabka-operator deploy/operator-crabka-operator --timeout=240s
+
+      - name: Apply Kafka cluster + wait Ready
+        run: |
+          set -e
+          cat <<'EOF' | kubectl apply -f -
+          apiVersion: crabka.io/v1alpha1
+          kind: Kafka
+          metadata: { name: demo, namespace: default }
+          spec:
+            kafkaVersion: "0.1.1"
+          ---
+          apiVersion: crabka.io/v1alpha1
+          kind: KafkaNodePool
+          metadata:
+            name: brokers
+            namespace: default
+            labels: { crabka.io/cluster: demo }
+          spec:
+            roles: [Controller, Broker]
+            replicas: 1
+            nodeIdStart: 0
+          EOF
+          for i in $(seq 1 60); do
+            s=$(kubectl get kafka demo -n default \
+              -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
+            echo "attempt $i: Ready=$s"
+            if [ "$s" = "True" ]; then break; fi
+            sleep 5
+          done
+          [ "$s" = "True" ] || { echo "::error::Kafka not Ready"; exit 1; }
+
+      - name: Apply KafkaTopic
+        run: |
+          set -e
+          cat <<'EOF' | kubectl apply -f -
+          apiVersion: crabka.io/v1alpha1
+          kind: KafkaTopic
+          metadata:
+            name: demo-topic
+            namespace: default
+            labels: { crabka.io/cluster: demo }
+          spec:
+            partitions: 3
+            replicas: 1
+            config:
+              retention.ms: "60000"
+          EOF
+
+      - name: Wait KafkaTopic Ready
+        run: |
+          for i in $(seq 1 30); do
+            s=$(kubectl get kafkatopic demo-topic -n default \
+              -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
+            r=$(kubectl get kafkatopic demo-topic -n default \
+              -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}' 2>/dev/null || true)
+            echo "attempt $i: status=$s reason=$r"
+            if [ "$s" = "True" ]; then exit 0; fi
+            sleep 5
+          done
+          echo "::error::KafkaTopic never Ready"
+          kubectl describe kafkatopic demo-topic -n default
+          kubectl logs -n crabka-operator deploy/operator-crabka-operator --tail=200 || true
+          exit 1
+
+      - name: Assert partition count + config via JVM kafka-topics
+        run: |
+          set -e
+          bootstrap="demo-broker-headless.default.svc.cluster.local:9092"
+          kubectl run kt-describe -n default --rm -i --restart=Never \
+            --image=apache/kafka:3.8.0 --command -- \
+            /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$bootstrap" \
+              --describe --topic demo-topic > /tmp/describe.txt
+          cat /tmp/describe.txt
+          grep -q "PartitionCount: 3" /tmp/describe.txt
+          grep -q "ReplicationFactor: 1" /tmp/describe.txt
+          kubectl run kt-configs -n default --rm -i --restart=Never \
+            --image=apache/kafka:3.8.0 --command -- \
+            /opt/kafka/bin/kafka-configs.sh --bootstrap-server "$bootstrap" \
+              --describe --entity-type topics --entity-name demo-topic > /tmp/configs.txt
+          cat /tmp/configs.txt
+          grep -q "retention.ms=60000" /tmp/configs.txt
+
+      - name: Patch to 5 partitions + wait Ready
+        run: |
+          set -e
+          kubectl patch kafkatopic demo-topic -n default --type=merge \
+            -p '{"spec":{"partitions":5}}'
+          for i in $(seq 1 30); do
+            s=$(kubectl get kafkatopic demo-topic -n default \
+              -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}')
+            g=$(kubectl get kafkatopic demo-topic -n default \
+              -o jsonpath='{.status.observedGeneration}')
+            gen=$(kubectl get kafkatopic demo-topic -n default \
+              -o jsonpath='{.metadata.generation}')
+            echo "attempt $i: status=$s observed=$g generation=$gen"
+            if [ "$s" = "True" ] && [ "$g" = "$gen" ]; then exit 0; fi
+            sleep 3
+          done
+          echo "::error::partition increase never settled"
+          exit 1
+
+      - name: Assert 5 partitions visible to JVM tools
+        run: |
+          set -e
+          bootstrap="demo-broker-headless.default.svc.cluster.local:9092"
+          kubectl run kt-describe2 -n default --rm -i --restart=Never \
+            --image=apache/kafka:3.8.0 --command -- \
+            /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$bootstrap" \
+              --describe --topic demo-topic > /tmp/describe2.txt
+          grep -q "PartitionCount: 5" /tmp/describe2.txt
+
+      - name: Patch to 2 partitions, expect ImmutableFieldChanged
+        run: |
+          set -e
+          kubectl patch kafkatopic demo-topic -n default --type=merge \
+            -p '{"spec":{"partitions":2}}'
+          for i in $(seq 1 20); do
+            r=$(kubectl get kafkatopic demo-topic -n default \
+              -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}' 2>/dev/null || true)
+            echo "attempt $i: reason=$r"
+            if [ "$r" = "ImmutableFieldChanged" ]; then exit 0; fi
+            sleep 3
+          done
+          echo "::error::partition decrease did not surface ImmutableFieldChanged"
+          kubectl describe kafkatopic demo-topic -n default
+          exit 1
+
+      - name: Restore partitions and delete CRD
+        run: |
+          set -e
+          kubectl patch kafkatopic demo-topic -n default --type=merge \
+            -p '{"spec":{"partitions":5}}'
+          # Wait for Ready=True after restore.
+          for i in $(seq 1 20); do
+            s=$(kubectl get kafkatopic demo-topic -n default \
+              -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}')
+            if [ "$s" = "True" ]; then break; fi
+            sleep 3
+          done
+          kubectl delete kafkatopic demo-topic -n default
+          # Wait for topic to actually disappear from Kafka.
+          bootstrap="demo-broker-headless.default.svc.cluster.local:9092"
+          for i in $(seq 1 20); do
+            kubectl run kt-list-$i -n default --rm -i --restart=Never \
+              --image=apache/kafka:3.8.0 --command -- \
+              /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$bootstrap" \
+                --list > /tmp/list.txt
+            if ! grep -q "demo-topic" /tmp/list.txt; then exit 0; fi
+            sleep 3
+          done
+          echo "::error::topic still present after CRD delete"
+          cat /tmp/list.txt
+          exit 1
+
+      - name: Collect diagnostics on failure
+        if: failure()
+        run: |
+          set +e
+          mkdir -p /tmp/kt-diag
+          {
+            echo "## kind-kafkatopic diagnostics"
+            kubectl get pods -A -o wide
+            echo "### operator logs"
+            kubectl logs -n crabka-operator deploy/operator-crabka-operator --tail=500
+            echo "### kafka"
+            kubectl get kafka demo -n default -o yaml
+            echo "### kafkatopic"
+            kubectl get kafkatopic demo-topic -n default -o yaml || true
+            echo "### broker logs"
+            kubectl logs -n default demo-brokers-0 --tail=200 --all-containers || true
+          } > /tmp/kt-diag/diagnostics.md
+
+      - name: Upload diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: operator-e2e-kafkatopic-diagnostics
+          path: /tmp/kt-diag/
+          retention-days: 14
+          if-no-files-found: ignore
