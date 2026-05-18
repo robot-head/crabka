@@ -515,3 +515,104 @@ async fn run_consumer(
         error,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scenario::{Acks, Compression, FailoverSpec, LoadMode, ModeTag};
+
+    fn cfg(broker_count: u32) -> DriverConfig {
+        DriverConfig {
+            bootstrap: "broker:9092".into(),
+            topic: "t".into(),
+            stack: Stack::Crabka,
+            namespace: "default".into(),
+            prometheus_url: None,
+            broker_count,
+            scenario_id: 0,
+        }
+    }
+
+    fn scenario(rf: i16) -> Scenario {
+        Scenario {
+            name: "x".into(),
+            mode_tag: ModeTag::Ci,
+            msg_size_bytes: 100,
+            key_size_bytes: 0,
+            partitions: 1,
+            replication_factor: rf,
+            producers: 1,
+            consumers: 1,
+            mode: LoadMode::Saturate,
+            acks: Acks::Leader,
+            compression: Compression::None,
+            linger_ms: 0,
+            batch_size: 16384,
+            duration_s: 1,
+            warmup_s: 0,
+            failover: None,
+        }
+    }
+
+    #[test]
+    fn bytes_to_mb_is_proper_mebibyte() {
+        assert!((bytes_to_mb(1_048_576) - 1.0).abs() < 1e-9);
+        assert!(bytes_to_mb(0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn empty_output_preserves_inputs() {
+        let s = scenario(1);
+        let c = cfg(1);
+        let out = empty_output(&s, &c, 42, vec!["a-note".into()], vec!["an-error".into()]);
+        assert_eq!(out.wallclock_start_unix_ms, 42);
+        assert_eq!(out.wallclock_end_unix_ms, 42);
+        assert_eq!(out.topology.broker_count, 1);
+        assert_eq!(out.notes, vec!["a-note"]);
+        assert_eq!(out.errors, vec!["an-error"]);
+        assert_eq!(out.first_ack_ms, 0);
+        assert!(out.disturbance.is_none());
+    }
+
+    // The state byte is shared across producer/consumer tasks; verify the
+    // three values are pairwise distinct so a flat AtomicU8 can encode them
+    // without ambiguity.
+    #[test]
+    fn state_constants_are_distinct() {
+        assert_ne!(STATE_RUN, STATE_MEASURING);
+        assert_ne!(STATE_MEASURING, STATE_STOP);
+        assert_ne!(STATE_RUN, STATE_STOP);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cluster_mode_rf3_with_one_broker_is_skipped() {
+        let mut s = scenario(3);
+        s.mode_tag = ModeTag::Cluster;
+        let out = run(s, cfg(1)).await.expect("run returned");
+        assert_eq!(out.throughput.msgs_produced, 0);
+        assert!(out.notes.iter().any(|n| n.contains("topology-mismatch")));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failover_request_without_rf3_records_skip_note() {
+        // Scenario asks for failover, but RF=1 + 1 broker → driver must
+        // record a skip note. duration_s=0/warmup_s=0 means the
+        // producer/consumer build loops exit immediately, so this is
+        // safe to run without a live broker.
+        let mut s = scenario(1);
+        s.failover = Some(FailoverSpec {
+            kill_at_s: 1,
+            target: "partition0_leader".into(),
+        });
+        s.warmup_s = 0;
+        s.duration_s = 0;
+        let out = run(s, cfg(1)).await.expect("run returned");
+        assert!(
+            out.notes
+                .iter()
+                .any(|n| n.contains("skipped:failover-needs-rf3")),
+            "expected failover skip note, got {:?}",
+            out.notes
+        );
+    }
+}

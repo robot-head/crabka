@@ -266,6 +266,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn stack_broker_pod_regex_distinguishes_stacks() {
+        assert_eq!(Stack::Crabka.broker_pod_regex(), "^demo-brokers-");
+        assert_eq!(Stack::Kafka.broker_pod_regex(), "^demo-kafka-");
+    }
+
+    #[test]
+    fn acks_map_to_producer_enum() {
+        use crabka_client_producer::Acks as P;
+        assert_eq!(Acks::None.into_producer(), P::Zero);
+        assert_eq!(Acks::Leader.into_producer(), P::One);
+        assert_eq!(Acks::All.into_producer(), P::All);
+    }
+
+    #[test]
+    fn compression_maps_to_producer_enum() {
+        use crabka_client_producer::Compression as PC;
+        assert_eq!(Compression::None.into_producer(), PC::None);
+        assert_eq!(Compression::Gzip.into_producer(), PC::Gzip);
+        assert_eq!(Compression::Snappy.into_producer(), PC::Snappy);
+        assert_eq!(Compression::Lz4.into_producer(), PC::Lz4);
+        assert_eq!(Compression::Zstd.into_producer(), PC::Zstd);
+    }
+
+    #[test]
+    fn compression_default_is_none() {
+        assert_eq!(Compression::default(), Compression::None);
+    }
+
+    #[test]
     fn scenario_yaml_round_trip() {
         let y = r"
 name: small-msg-saturate
