@@ -138,6 +138,13 @@ pub(crate) async fn handle(
     // reads (rather than just doing them inline) so we can re-read once
     // after a long-poll wake without re-decoding the request.
     let mut pending: Vec<PendingRead> = Vec::new();
+    // Slice 43f: stash per-(topic, partition) start times so the
+    // response-emit loop below can record handler-thread micros for
+    // the rebalancer's CpuUsage / CpuCapacity goals. Side map (rather
+    // than threading a field through PendingRead and the
+    // group_into_topic_responses transform) keeps the change local.
+    let mut cpu_starts: std::collections::HashMap<(String, i32), std::time::Instant> =
+        std::collections::HashMap::new();
     for topic in &req.topics {
         // v ≤ 12 sends the topic name; v ≥ 13 sends only topic_id and
         // we look it up. The client populates whichever the negotiated
@@ -171,6 +178,12 @@ pub(crate) async fn handle(
 
         for fp in &topic.partitions {
             let idx = fp.partition;
+            // Slice 43f: start the CPU clock for this (topic, partition)
+            // before any per-partition work. Consumed in the emit loop
+            // below alongside record_partition_fetch.
+            cpu_starts
+                .entry((topic_name.clone(), idx))
+                .or_insert_with(std::time::Instant::now);
             let fetch_offset = fp.fetch_offset;
             let max_bytes = fp.partition_max_bytes;
 
@@ -375,6 +388,16 @@ pub(crate) async fn handle(
                 p.partition_index,
                 partition_bytes,
             );
+            // Slice 43f: emit handler-thread micros for this partition,
+            // measured from the first-loop start time recorded above.
+            if let Some(start) = cpu_starts.get(&(topic_resp.topic.clone(), p.partition_index)) {
+                let micros = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
+                broker.metrics.record_partition_cpu_micros(
+                    &topic_resp.topic,
+                    p.partition_index,
+                    micros,
+                );
+            }
             bytes += partition_bytes;
         }
         broker.metrics.record_fetch(&topic_resp.topic, bytes);

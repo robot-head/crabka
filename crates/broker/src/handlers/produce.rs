@@ -27,6 +27,39 @@ use crate::codes;
 use crate::error::BrokerError;
 use crate::partition::{ProduceJob, WriterMessage};
 
+/// RAII guard that records handler-thread micros spent in the current
+/// per-partition loop iteration. Drop fires on every exit path
+/// (`continue`, `break`, fall-through) so each iteration contributes
+/// exactly once to `partition_cpu_micros_total`. Slice 43f.
+struct PartitionCpuTimer<'a> {
+    metrics: &'a crate::metrics::BrokerMetrics,
+    topic: String,
+    partition: i32,
+    start: std::time::Instant,
+}
+
+impl<'a> PartitionCpuTimer<'a> {
+    fn new(metrics: &'a crate::metrics::BrokerMetrics, topic: &str, partition: i32) -> Self {
+        Self {
+            metrics,
+            topic: topic.to_string(),
+            partition,
+            start: std::time::Instant::now(),
+        }
+    }
+}
+
+impl Drop for PartitionCpuTimer<'_> {
+    fn drop(&mut self) {
+        if self.topic.is_empty() {
+            return;
+        }
+        let micros = u64::try_from(self.start.elapsed().as_micros()).unwrap_or(u64::MAX);
+        self.metrics
+            .record_partition_cpu_micros(&self.topic, self.partition, micros);
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn handle(
     broker: &Broker,
@@ -169,6 +202,10 @@ pub(crate) async fn handle(
 
         for part_data in topic.partition_data {
             let idx = part_data.index;
+            // Slice 43f: time the per-partition handler work for the
+            // rebalancer's CpuUsage / CpuCapacity goals. Drop fires on
+            // every loop exit (continue / break / fall-through).
+            let _cpu_timer = PartitionCpuTimer::new(&broker.metrics, &topic_name, idx);
             let mut out = PartitionProduceResponse {
                 index: idx,
                 ..Default::default()

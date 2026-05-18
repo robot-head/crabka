@@ -328,6 +328,16 @@ async fn partition_level_metrics_and_disk_gauge_render() {
         body.contains(&partition_needle),
         "missing partition-level bytes_in in:\n{body}"
     );
+    // Slice 43f: per-partition CPU micros counter must be emitted with
+    // the topic/partition label set after the produce + fetch path
+    // runs. Value is timing-dependent (could be 0 if the handler was
+    // sub-microsecond), so we only assert presence of the series name,
+    // not a specific value.
+    let cpu_needle = format!("crabka_broker_partition_cpu_micros_total{{topic=\"{TOPIC}\"");
+    assert!(
+        body.contains(&cpu_needle),
+        "missing partition_cpu_micros_total in:\n{body}"
+    );
     // Confirm the value is non-zero.
     let part_line = body
         .lines()
