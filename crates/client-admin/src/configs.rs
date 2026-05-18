@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 
 use crabka_protocol::owned::{
     describe_configs_request::{DescribeConfigsRequest, DescribeConfigsResource},
+    describe_configs_response::DescribeConfigsResourceResult,
     incremental_alter_configs_request::{
         AlterConfigsResource, AlterableConfig, IncrementalAlterConfigsRequest,
     },
@@ -49,6 +50,29 @@ pub struct AlterConfigsOutcome {
     pub error: Option<KafkaError>,
 }
 
+/// Filter a `DescribeConfigsResult`'s entries down to dynamic-topic
+/// overrides only. Pure function, unit-tested in isolation.
+///
+/// Per KIP-226 / Kafka's `DescribeConfigs` semantics, only entries
+/// whose `config_source == DYNAMIC_TOPIC_CONFIG (1)` represent values
+/// the user has explicitly set on the topic; everything else (broker
+/// defaults, static config, etc.) is filtered out so the operator
+/// diffs `spec.config` against overrides only.
+pub(crate) fn filter_dynamic_overrides(
+    topic: String,
+    entries: impl IntoIterator<Item = DescribeConfigsResourceResult>,
+) -> TopicConfigOverrides {
+    let mut overrides = BTreeMap::new();
+    for entry in entries {
+        if entry.config_source == DYNAMIC_TOPIC_CONFIG_SOURCE
+            && let Some(value) = entry.value
+        {
+            overrides.insert(entry.name, value);
+        }
+    }
+    TopicConfigOverrides { topic, overrides }
+}
+
 impl AdminClient {
     pub async fn describe_configs(
         &mut self,
@@ -79,18 +103,7 @@ impl AdminClient {
                     message: r.error_message,
                 });
             }
-            let mut overrides = BTreeMap::new();
-            for entry in r.configs {
-                if entry.config_source == DYNAMIC_TOPIC_CONFIG_SOURCE
-                    && let Some(value) = entry.value
-                {
-                    overrides.insert(entry.name, value);
-                }
-            }
-            out.push(TopicConfigOverrides {
-                topic: r.resource_name,
-                overrides,
-            });
+            out.push(filter_dynamic_overrides(r.resource_name, r.configs));
         }
         Ok(out)
     }
@@ -174,5 +187,63 @@ mod tests {
     #[test]
     fn resource_type_topic_is_two() {
         assert_eq!(RESOURCE_TYPE_TOPIC, 2);
+    }
+
+    /// Spec test name: `describe_configs_filters_to_dynamic_topic`.
+    ///
+    /// Mixed `config_source` values: only entries with
+    /// `DYNAMIC_TOPIC_CONFIG (1)` survive; `STATIC_BROKER_CONFIG (4)`
+    /// and other sources are dropped. Also verifies entries with
+    /// `value: None` are filtered out.
+    #[test]
+    fn describe_configs_filters_to_dynamic_topic() {
+        let entries = vec![
+            DescribeConfigsResourceResult {
+                name: "retention.ms".into(),
+                value: Some("60000".into()),
+                config_source: 1, // DYNAMIC_TOPIC_CONFIG
+                ..Default::default()
+            },
+            DescribeConfigsResourceResult {
+                name: "log.dirs".into(),
+                value: Some("/data".into()),
+                config_source: 4, // STATIC_BROKER_CONFIG
+                ..Default::default()
+            },
+            DescribeConfigsResourceResult {
+                name: "cleanup.policy".into(),
+                value: Some("compact".into()),
+                config_source: 1,
+                ..Default::default()
+            },
+            // Dynamic-topic source but no value: should be dropped.
+            DescribeConfigsResourceResult {
+                name: "segment.bytes".into(),
+                value: None,
+                config_source: 1,
+                ..Default::default()
+            },
+            // Another non-dynamic source (DEFAULT_CONFIG = 5).
+            DescribeConfigsResourceResult {
+                name: "max.message.bytes".into(),
+                value: Some("1048576".into()),
+                config_source: 5,
+                ..Default::default()
+            },
+        ];
+        let r = filter_dynamic_overrides("foo".into(), entries);
+        assert_eq!(r.topic, "foo");
+        assert_eq!(r.overrides.len(), 2);
+        assert_eq!(
+            r.overrides.get("retention.ms").map(String::as_str),
+            Some("60000")
+        );
+        assert_eq!(
+            r.overrides.get("cleanup.policy").map(String::as_str),
+            Some("compact")
+        );
+        assert!(!r.overrides.contains_key("log.dirs"));
+        assert!(!r.overrides.contains_key("segment.bytes"));
+        assert!(!r.overrides.contains_key("max.message.bytes"));
     }
 }

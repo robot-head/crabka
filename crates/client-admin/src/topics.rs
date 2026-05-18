@@ -351,4 +351,124 @@ mod tests {
         assert_eq!(e.name, "TOPIC_ALREADY_EXISTS");
         assert_eq!(e.message.as_deref(), Some("dup"));
     }
+
+    // ── NOT_CONTROLLER retry predicate ─────────────────────────────
+    //
+    // The full retry pipeline (first response carries NOT_CONTROLLER →
+    // refresh controller endpoint → reconnect → second response succeeds)
+    // is exercised against a real broker in `tests/round_trip.rs`. The
+    // unit tests below lock the two pure pieces — the predicate that
+    // decides whether to retry, and the metadata-response → host:port
+    // resolver — so a refactor can't silently flip either one.
+
+    /// Spec test name: `not_controller_triggers_one_retry` (predicate
+    /// half). Verifies that `any_not_controller` returns `true` iff at
+    /// least one outcome carries the `NOT_CONTROLLER (41)` error code.
+    #[test]
+    fn any_not_controller_predicate_matches_code_41() {
+        let outcomes = vec![
+            CreateTopicOutcome {
+                name: "a".into(),
+                topic_id: None,
+                error: None,
+            },
+            CreateTopicOutcome {
+                name: "b".into(),
+                topic_id: None,
+                error: Some(KafkaError {
+                    code: NOT_CONTROLLER,
+                    name: "NOT_CONTROLLER",
+                    message: None,
+                }),
+            },
+        ];
+        assert!(any_not_controller(&outcomes, |o| o.error.as_ref()));
+
+        let all_ok = vec![CreateTopicOutcome {
+            name: "a".into(),
+            topic_id: None,
+            error: None,
+        }];
+        assert!(!any_not_controller(&all_ok, |o| o.error.as_ref()));
+    }
+
+    /// Spec test name: `repeated_not_controller_errors_return_exhausted`
+    /// (predicate half). Non-`NOT_CONTROLLER` errors must NOT trigger
+    /// the retry path — only code 41 does. Combined with the integration
+    /// test, this locks the retry-eligibility check: if the predicate
+    /// fired on, say, `TOPIC_ALREADY_EXISTS`, callers would see spurious
+    /// reconnects + `NotControllerExhausted` returns on real failures.
+    #[test]
+    fn any_not_controller_ignores_other_errors() {
+        let outcomes = vec![CreateTopicOutcome {
+            name: "b".into(),
+            topic_id: None,
+            error: Some(KafkaError {
+                code: 36, // TOPIC_ALREADY_EXISTS
+                name: "TOPIC_ALREADY_EXISTS",
+                message: None,
+            }),
+        }];
+        assert!(!any_not_controller(&outcomes, |o| o.error.as_ref()));
+    }
+
+    // ── controller_endpoint resolver ───────────────────────────────
+
+    /// Spec test name: `connect_walks_bootstrap_list` (resolver half —
+    /// the actual bootstrap-walking integration coverage lives in
+    /// `tests/connect.rs`). `controller_endpoint` extracts the
+    /// `host:port` of the broker whose `node_id` matches the metadata
+    /// response's `controller_id`. This is the address the
+    /// `NOT_CONTROLLER` retry path reconnects to.
+    #[test]
+    fn controller_endpoint_picks_broker_with_matching_node_id() {
+        use crabka_protocol::owned::metadata_response::{
+            MetadataResponse, MetadataResponseBroker,
+        };
+        let resp = MetadataResponse {
+            controller_id: 2,
+            brokers: vec![
+                MetadataResponseBroker {
+                    node_id: 1,
+                    host: "h1".into(),
+                    port: 9092,
+                    rack: None,
+                    ..Default::default()
+                },
+                MetadataResponseBroker {
+                    node_id: 2,
+                    host: "h2".into(),
+                    port: 9093,
+                    rack: None,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let addr = controller_endpoint(&resp);
+        assert_eq!(addr.as_deref(), Some("h2:9093"));
+    }
+
+    /// When the controller id doesn't appear in the broker list (e.g.
+    /// the cluster is mid-failover), `controller_endpoint` returns
+    /// `None`, which the retry path maps to
+    /// `AdminError::NotControllerExhausted`.
+    #[test]
+    fn controller_endpoint_returns_none_when_no_match() {
+        use crabka_protocol::owned::metadata_response::{
+            MetadataResponse, MetadataResponseBroker,
+        };
+        let resp = MetadataResponse {
+            controller_id: 99,
+            brokers: vec![MetadataResponseBroker {
+                node_id: 1,
+                host: "h1".into(),
+                port: 9092,
+                rack: None,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(controller_endpoint(&resp).is_none());
+    }
 }

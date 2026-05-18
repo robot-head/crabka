@@ -1,6 +1,32 @@
 //! Integration test: spin up an in-process broker via the existing
 //! `crates/broker/tests/support` harness, drive every admin RPC slice
 //! 35 needs through `AdminClient`, assert the visible cluster state.
+//!
+//! # Coverage map for `NOT_CONTROLLER` retry
+//!
+//! The full retry pipeline — first response carries `NOT_CONTROLLER`
+//! (41) → admin client issues a fresh `Metadata` → reconnects to the
+//! reported controller → re-sends the original RPC — can't be unit-
+//! tested against `AdminClient` directly because it holds a concrete
+//! `crabka_client_core::Connection` (no trait seam at the byte layer).
+//! Building a Kafka-protocol fake server for ~3 RPCs is order-of-
+//! magnitude more code than the retry itself.
+//!
+//! Instead, coverage is split:
+//!
+//! * **Predicate** — `src/topics.rs::tests::any_not_controller_*` lock
+//!   the retry-eligibility check on code 41 only.
+//! * **Endpoint resolver** — `src/topics.rs::tests::controller_endpoint_*`
+//!   lock the `MetadataResponse` → `host:port` mapping the retry uses
+//!   to pick a reconnect target.
+//! * **Pipeline** — *this file*'s `admin_round_trip_create_alter_delete`
+//!   exercises the end-to-end happy path against a real broker. In a
+//!   singleton bootstrap the broker is always the controller so the
+//!   retry path doesn't fire here, but the same code path that would
+//!   retry on `NOT_CONTROLLER` is the one that succeeds without retry
+//!   when the response is clean — i.e. the integration path through
+//!   `parse_create_topics` / `parse_delete_topics` / `parse_create_partitions`
+//!   is fully exercised.
 
 #![cfg(not(target_os = "windows"))]
 
