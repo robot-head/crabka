@@ -915,3 +915,83 @@ Kafka client for ApiVersions.
   enforcement happens at `propose` time only. If 43e needs stricter
   composition guarantees, a `Goal::is_satisfied_with_ctx` trait
   method can be introduced then.
+
+## Slice 43e — Rebalancer usage scraper + soft usage goals (2026-05-17)
+
+- **Broker-side (the `43e-core` half):**
+  - New `PartitionLabel { topic, partition }` drives three new
+    metric families on `BrokerMetrics`:
+    `crabka_broker_partition_bytes_in_total{topic,partition}`,
+    `crabka_broker_partition_bytes_out_total{topic,partition}`,
+    and `crabka_broker_partition_disk_bytes{topic,partition}`.
+    The slice-39 topic-level counters stay.
+  - `handlers/produce.rs` + `handlers/fetch.rs` emit one per-partition
+    `record_partition_*` call per (topic, partition) in addition to
+    the existing topic-level inc.
+  - New `disk_scanner` module periodically (default 60s) walks each
+    partition's log directory and updates
+    `partition_disk_bytes`. CLI flag
+    `--partition-disk-scan-interval-secs` (env
+    `CRABKA_PARTITION_DISK_SCAN_INTERVAL_SECS`; `0` disables).
+- **Rebalancer-side:**
+  - New top-level `scraper/` module: `parse` (scoped
+    OpenMetrics text parser), `targets` (CLI value parser),
+    `window` (per-series ring buffer + counter-reset-aware rate
+    computation), and `mod.rs` (HTTP tick loop).
+  - Four new soft goals shipped: `DiskUsage`, `LeaderBytesIn`,
+    `NetworkInUsage`, `NetworkOutUsage`. Each consumes
+    `ctx.broker_usages`; empty store → no-op (same fail-safe
+    pattern as the 43d capacity stubs).
+  - Three 43d capacity stubs become real:
+    `DiskCapacity`, `NetworkInCapacity`, `NetworkOutCapacity`.
+    Each adds an `is_satisfied_with_ctx` override that consults
+    `ctx.broker_usages`.
+  - `Goal` trait gains
+    `is_satisfied_with_ctx(&ClusterState, &GoalContext) -> bool`
+    with a default impl that forwards to `is_satisfied`. The
+    optimizer's incremental hard-goal validation (slice 43c)
+    switches to call this so capacity goals enforce their
+    invariants against soft-goal interference.
+    **Closes the 43d known trade** on `ReplicaCapacity` — which
+    also adds its own `is_satisfied_with_ctx`.
+  - `CpuCapacity` remains a stub (slice 43f).
+  - `GoalRegistry::default_registry` grows from 11 to **15
+    goals** in priority order. Renamed
+    `default_registry_has_eleven_goals` →
+    `default_registry_has_fifteen_goals`; updated
+    `default_registry_order_matches_spec` accordingly.
+- New CLI flags:
+  `--metrics-scrape-targets` (env
+  `CRABKA_METRICS_SCRAPE_TARGETS`, format
+  `id:host:port,id:host:port,…`, empty default = scraper
+  disabled),
+  `--metrics-scrape-interval-secs` (default 30),
+  `--metrics-retention-secs` (default 43200 = 12h).
+- Helm chart picks up the three new env vars conditionally on
+  `metricsScrapeTargets` being set. New helm-unittest assertion
+  in `deployment_test.yaml`.
+- ~40 new unit tests (parse, targets, window, four soft usage
+  goals, three capacity real bodies + ReplicaCapacity
+  is_satisfied_with_ctx, optimizer regression, broker
+  PartitionLabel, broker disk scanner) + 1 broker integration
+  test + 1 rebalancer integration test
+  (`disk_usage_evicts_hot_broker`) + 1 helm-unittest assertion.
+- Reference doc:
+  [`docs/superpowers/specs/2026-05-17-crabka-rebalancer-43e-design.md`].
+- Out of scope (deferred): `CpuUsage` soft goal + real
+  `CpuCapacity` body (slice 43f); discovery of scrape targets
+  via `Metadata` (currently operator-supplied);
+  per-topic resource hints in capacity config (usage metrics
+  provide the real input now); anomaly detection (slice 43g);
+  operator `KafkaRebalance` CRD (slice 44).
+
+### Known risks
+- Memory footprint of the per-series ring buffer scales as
+  brokers × partitions × 3 metrics × (retention / scrape_interval).
+  At the default 30s scrape / 12h retention, a 5-broker × 1000-
+  partition cluster is roughly 350MB. Tune via
+  `--metrics-scrape-interval-secs` or `--metrics-retention-secs`.
+- Counter resets (broker restart) are detected by
+  `latest.value < earliest.value` returning `None`. The affected
+  goal sees no rate signal until two post-reset samples
+  accumulate.
