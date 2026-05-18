@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use crabka_protocol::owned::{
     create_partitions_request::{CreatePartitionsRequest, CreatePartitionsTopic},
     create_topics_request::{CreatableTopic, CreatableTopicConfig, CreateTopicsRequest},
-    delete_topics_request::DeleteTopicsRequest,
+    delete_topics_request::{DeleteTopicState, DeleteTopicsRequest},
     metadata_request::{MetadataRequest, MetadataRequestTopic},
 };
 use crabka_protocol::primitives::uuid::Uuid as ProtoUuid;
@@ -100,9 +100,21 @@ impl AdminClient {
         names: &[&str],
         timeout_ms: i32,
     ) -> Result<Vec<DeleteTopicOutcome>, AdminError> {
+        // Populate BOTH fields so the request works regardless of the
+        // negotiated protocol version: `topic_names` is the legacy field
+        // (v0-v5) and `topics` is the v6+ replacement. The
+        // `ApiVersionTable`-driven encoder picks the version-relevant
+        // field and ignores the other.
         let build = || DeleteTopicsRequest {
             topic_names: names.iter().map(|s| (*s).to_string()).collect(),
-            topics: Vec::new(),
+            topics: names
+                .iter()
+                .map(|s| DeleteTopicState {
+                    name: Some((*s).to_string()),
+                    topic_id: ProtoUuid::ZERO,
+                    ..Default::default()
+                })
+                .collect(),
             timeout_ms,
             ..Default::default()
         };
