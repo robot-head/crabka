@@ -36,6 +36,7 @@ serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 serde_yaml.workspace = true
 async-trait.workspace = true
+reqwest = { version = "0.13", default-features = false, features = ["json"] }
 
 [build-dependencies]
 connectrpc-axum-build = { workspace = true, features = ["fetch-protoc"] }
@@ -44,4 +45,3 @@ connectrpc-axum-build = { workspace = true, features = ["fetch-protoc"] }
 crabka-broker = { version = "0.1", path = "../broker", features = ["test-helpers"] }
 tempfile.workspace = true
 tower.workspace = true
-reqwest = { version = "0.13", default-features = false, features = ["json"] }
