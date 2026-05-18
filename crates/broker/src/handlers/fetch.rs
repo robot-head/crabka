@@ -53,6 +53,13 @@ struct PendingRead {
     partition: Option<Arc<Partition>>,
     /// Per-partition output, mutated in place by `do_read`.
     out: PartitionData,
+    /// Slice 43f: accumulator for handler-thread on-CPU microseconds spent
+    /// polling this partition's `do_read` futures (first pass plus any
+    /// long-poll re-reads). Measured via `tokio_metrics::TaskMonitor` so we
+    /// charge only actual poll time, not wall-clock awaiting the writer or
+    /// the long-poll wake. Drained into the response-emit loop's
+    /// `record_partition_cpu_micros` call.
+    cpu_micros: u64,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -138,13 +145,6 @@ pub(crate) async fn handle(
     // reads (rather than just doing them inline) so we can re-read once
     // after a long-poll wake without re-decoding the request.
     let mut pending: Vec<PendingRead> = Vec::new();
-    // Slice 43f: stash per-(topic, partition) start times so the
-    // response-emit loop below can record handler-thread micros for
-    // the rebalancer's CpuUsage / CpuCapacity goals. Side map (rather
-    // than threading a field through PendingRead and the
-    // group_into_topic_responses transform) keeps the change local.
-    let mut cpu_starts: std::collections::HashMap<(String, i32), std::time::Instant> =
-        std::collections::HashMap::new();
     for topic in &req.topics {
         // v ≤ 12 sends the topic name; v ≥ 13 sends only topic_id and
         // we look it up. The client populates whichever the negotiated
@@ -178,12 +178,6 @@ pub(crate) async fn handle(
 
         for fp in &topic.partitions {
             let idx = fp.partition;
-            // Slice 43f: start the CPU clock for this (topic, partition)
-            // before any per-partition work. Consumed in the emit loop
-            // below alongside record_partition_fetch.
-            cpu_starts
-                .entry((topic_name.clone(), idx))
-                .or_insert_with(std::time::Instant::now);
             let fetch_offset = fp.fetch_offset;
             let max_bytes = fp.partition_max_bytes;
 
@@ -206,6 +200,7 @@ pub(crate) async fn handle(
                     is_follower_fetch,
                     partition: None,
                     out,
+                    cpu_micros: 0,
                 });
                 continue;
             }
@@ -237,6 +232,7 @@ pub(crate) async fn handle(
                         is_follower_fetch,
                         partition: None,
                         out,
+                        cpu_micros: 0,
                     });
                     continue;
                 }
@@ -274,6 +270,7 @@ pub(crate) async fn handle(
                     is_follower_fetch,
                     partition: None,
                     out,
+                    cpu_micros: 0,
                 });
                 continue;
             }
@@ -288,23 +285,30 @@ pub(crate) async fn handle(
                 is_follower_fetch,
                 partition: part_opt,
                 out,
+                cpu_micros: 0,
             });
         }
     }
 
-    // First read pass.
+    // First read pass. TaskMonitor charges per-partition on-CPU poll time
+    // into p.cpu_micros — skipping wall-time spent awaiting I/O.
     let mut total_bytes = 0_usize;
     for p in &mut pending {
         if let Some(part) = &p.partition {
-            total_bytes += do_read(
-                part,
-                p.fetch_offset,
-                p.max_bytes,
-                p.read_committed,
-                p.is_follower_fetch,
-                &mut p.out,
-            )
-            .await?;
+            let monitor = tokio_metrics::TaskMonitor::new();
+            total_bytes += monitor
+                .instrument(do_read(
+                    part,
+                    p.fetch_offset,
+                    p.max_bytes,
+                    p.read_committed,
+                    p.is_follower_fetch,
+                    &mut p.out,
+                ))
+                .await?;
+            let micros = u64::try_from(monitor.cumulative().total_poll_duration.as_micros())
+                .unwrap_or(u64::MAX);
+            p.cpu_micros = p.cpu_micros.saturating_add(micros);
         }
     }
 
@@ -314,6 +318,14 @@ pub(crate) async fn handle(
     if want_more && req.max_wait_ms > 0 {
         long_poll_then_reread(&mut pending, req.max_wait_ms).await?;
     }
+
+    // Slice 43f: drain per-partition cpu_micros accumulators before
+    // `group_into_topic_responses` consumes `pending`. Looked up in the
+    // response-emit loop below alongside `record_partition_fetch`.
+    let cpu_micros_map: std::collections::HashMap<(String, i32), u64> = pending
+        .iter()
+        .map(|p| ((p.topic_name.clone(), p.partition_index), p.cpu_micros))
+        .collect();
 
     let mut responses = group_into_topic_responses(pending);
 
@@ -388,10 +400,13 @@ pub(crate) async fn handle(
                 p.partition_index,
                 partition_bytes,
             );
-            // Slice 43f: emit handler-thread micros for this partition,
-            // measured from the first-loop start time recorded above.
-            if let Some(start) = cpu_starts.get(&(topic_resp.topic.clone(), p.partition_index)) {
-                let micros = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
+            // Slice 43f: drain the per-partition CPU accumulator. Tracks
+            // actual poll duration across both the first read pass and any
+            // long-poll re-reads, attributing only on-CPU time.
+            if let Some(micros) = cpu_micros_map
+                .get(&(topic_resp.topic.clone(), p.partition_index))
+                .copied()
+            {
                 broker.metrics.record_partition_cpu_micros(
                     &topic_resp.topic,
                     p.partition_index,
@@ -582,15 +597,22 @@ async fn long_poll_then_reread(
                 partition_index: p.partition_index,
                 ..Default::default()
             };
-            do_read(
-                part,
-                p.fetch_offset,
-                p.max_bytes,
-                p.read_committed,
-                p.is_follower_fetch,
-                &mut p.out,
-            )
-            .await?;
+            // Slice 43f: instrument the re-read so its poll time accumulates
+            // into the same per-partition CPU counter as the first pass.
+            let monitor = tokio_metrics::TaskMonitor::new();
+            monitor
+                .instrument(do_read(
+                    part,
+                    p.fetch_offset,
+                    p.max_bytes,
+                    p.read_committed,
+                    p.is_follower_fetch,
+                    &mut p.out,
+                ))
+                .await?;
+            let micros = u64::try_from(monitor.cumulative().total_poll_duration.as_micros())
+                .unwrap_or(u64::MAX);
+            p.cpu_micros = p.cpu_micros.saturating_add(micros);
         }
     }
     Ok(())
