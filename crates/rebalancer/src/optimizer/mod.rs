@@ -77,7 +77,8 @@ pub fn optimize(
             let mut tentative = working.clone();
             apply_movement(&mut tentative, &m);
             let hard_violated = ordered.iter().any(|(_, gg)| {
-                matches!(gg.priority(), GoalPriority::Hard) && !gg.is_satisfied(&tentative)
+                matches!(gg.priority(), GoalPriority::Hard)
+                    && !gg.is_satisfied_with_ctx(&tentative, ctx)
             });
             if hard_violated {
                 continue;
@@ -560,6 +561,133 @@ mod tests {
         assert!(
             out.proposal.movements.is_empty(),
             "soft movement that would re-create a rack collision must be dropped; got {:?}",
+            out.proposal.movements
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn soft_movement_that_violates_capacity_invariant_is_dropped() {
+        use crate::capacity::{BrokerCapacities, BrokerCapacity};
+        use crate::goals::disk_capacity::DiskCapacity;
+        use crate::goals::tests::FixedGoal;
+        use crate::model::BrokerView;
+        use crate::scraper::parse::ParsedSample;
+        use crate::scraper::{MetricKind, UsageStore, WindowConfig};
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        // Three brokers; broker 3 is small (disk_bytes: 1000).
+        // Broker 3 already hosts a replica of ("other", 0) sized at
+        // 900 bytes. A soft goal proposes moving a replica of ("t", 0)
+        // to broker 3 — but doing so would push broker 3 over its limit
+        // (the partition would contribute 600 bytes making broker 3's
+        // total 1500 > 1000). DiskCapacity::is_satisfied_with_ctx must
+        // catch this and the optimizer must drop the movement.
+        let state = ClusterState {
+            cluster_id: None,
+            snapshot_at_ms: 0,
+            brokers: vec![
+                BrokerView {
+                    id: 1,
+                    host: "h1".into(),
+                    port: 9092,
+                    rack: None,
+                },
+                BrokerView {
+                    id: 2,
+                    host: "h2".into(),
+                    port: 9092,
+                    rack: None,
+                },
+                BrokerView {
+                    id: 3,
+                    host: "h3".into(),
+                    port: 9092,
+                    rack: None,
+                },
+            ],
+            partitions: vec![
+                PartitionView {
+                    topic: "t".into(),
+                    partition: 0,
+                    replicas: vec![1, 2],
+                    leader: 1,
+                    isr: vec![1, 2],
+                },
+                PartitionView {
+                    topic: "other".into(),
+                    partition: 0,
+                    replicas: vec![3],
+                    leader: 3,
+                    isr: vec![3],
+                },
+            ],
+            in_flight_reassignments: vec![],
+        };
+        let mut by = std::collections::HashMap::new();
+        by.insert(
+            3,
+            BrokerCapacity {
+                disk_bytes: Some(1000),
+                ..Default::default()
+            },
+        );
+        let caps = BrokerCapacities { by_broker: by };
+
+        let store = UsageStore::new(WindowConfig {
+            scrape_interval: Duration::from_secs(30),
+            retention: Duration::from_hours(1),
+        });
+        // Broker 3 already at 900 disk_bytes from another partition (not
+        // in this state); the optimizer's tentative-apply will add the
+        // moved partition's 600 bytes, blowing the 1000 cap.
+        store.insert(
+            3,
+            vec![ParsedSample {
+                metric: MetricKind::DiskBytes,
+                topic: "other".into(),
+                partition: 0,
+                value: 900.0,
+            }],
+            0,
+        );
+        store.insert(
+            3,
+            vec![ParsedSample {
+                metric: MetricKind::DiskBytes,
+                topic: "t".into(),
+                partition: 0,
+                value: 600.0,
+            }],
+            0,
+        );
+        let ctx = GoalContext {
+            imbalance_threshold_pct: 10,
+            max_movements_per_proposal: 256,
+            min_topic_leaders_per_broker: 0,
+            broker_capacities: Arc::new(caps),
+            broker_usages: Arc::new(store),
+        };
+
+        let bad_soft = FixedGoal {
+            name: "bad_soft",
+            priority: GoalPriority::Soft,
+            movements: vec![Movement {
+                topic: "t".into(),
+                partition: 0,
+                old_replicas: vec![1, 2],
+                new_replicas: vec![1, 3], // moves replica from 2 to 3
+                old_leader: 1,
+                new_leader: 1,
+            }],
+        };
+
+        let goals: Vec<&dyn Goal> = vec![&DiskCapacity, &bad_soft];
+        let out = optimize(&state, &goals, &ctx).unwrap();
+        assert!(
+            out.proposal.movements.is_empty(),
+            "soft move that pushes broker 3 over disk cap must be dropped; got {:?}",
             out.proposal.movements
         );
     }
