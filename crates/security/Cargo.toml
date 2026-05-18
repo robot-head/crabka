@@ -19,10 +19,12 @@ pbkdf2.workspace = true
 hmac.workspace = true
 sha2.workspace = true
 ring.workspace = true
+rcgen.workspace = true
 subtle.workspace = true
+time = { version = "0.3", default-features = false, features = ["std", "formatting"] }
 base64.workspace = true
 tracing.workspace = true
-x509-parser.workspace = true
+x509-parser = { workspace = true, features = ["verify"] }
 arc-swap.workspace = true
 
 [dev-dependencies]

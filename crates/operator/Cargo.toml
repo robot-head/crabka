@@ -20,6 +20,7 @@ axum = { workspace = true }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 clap = { workspace = true, features = ["env"] }
 crabka-client-admin = { version = "0.1", path = "../client-admin" }
+crabka-security = { workspace = true }
 base64 = { workspace = true }
 futures = { workspace = true }
 ring = { workspace = true }
@@ -32,6 +33,7 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 serde_yaml = "0.9"
 sha2 = { workspace = true }
+time = { version = "0.3", default-features = false, features = ["macros", "parsing", "formatting"] }
 toml = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
@@ -39,6 +41,7 @@ tower = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
+x509-parser = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }

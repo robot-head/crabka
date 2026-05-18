@@ -7,11 +7,14 @@ use crabka_client_admin::{
     AclEntry, AclOperation, PatternType, PermissionType, QuotaOp, ResourceType, UserQuotaConfig,
 };
 use crabka_operator::controller::user::reconcile;
+use crabka_operator::crd::user::TlsAuth;
 use crabka_operator::crd::{
     AclOp, AclPatternType, AclPermission, AclResource, AclResourceKind, AclRule, Authentication,
     Authorization, KafkaUser, KafkaUserQuotas, KafkaUserSpec, ScramSha512Auth, SimpleAuthorization,
 };
+use crabka_security::ca;
 use http::{Method, Response};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
 use serde_json::json;
 
 #[path = "shared/mod.rs"]
@@ -125,6 +128,97 @@ fn rule_topic(name: &str, ops: &[AclOp]) -> AclRule {
         host: "*".into(),
         permission: AclPermission::Allow,
     }
+}
+
+/// `KafkaUser` with TLS authentication.
+fn ku_tls(name: &str, acls: Vec<AclRule>) -> KafkaUser {
+    ku_tls_full(name, acls, None, TlsAuth::default())
+}
+
+fn ku_tls_full(
+    name: &str,
+    acls: Vec<AclRule>,
+    quotas: Option<KafkaUserQuotas>,
+    tls_auth: TlsAuth,
+) -> KafkaUser {
+    let mut ku = KafkaUser::new(
+        name,
+        KafkaUserSpec {
+            authentication: Authentication::Tls(tls_auth),
+            authorization: if acls.is_empty() {
+                None
+            } else {
+                Some(Authorization::Simple(SimpleAuthorization { acls }))
+            },
+            quotas,
+        },
+    );
+    ku.metadata.namespace = Some(NS.into());
+    ku.metadata.uid = Some("user-uid".into());
+    ku.metadata.generation = Some(1);
+    ku.metadata.finalizers = Some(vec!["crabka.io/user-finalizer".into()]);
+    let mut labels = BTreeMap::new();
+    labels.insert("crabka.io/cluster".into(), CLUSTER.into());
+    ku.metadata.labels = Some(labels);
+    ku
+}
+
+fn tls_user_secret_body(
+    name: &str,
+    namespace: &str,
+    cert_pem: &str,
+    key_pem: &str,
+    ca_pem: &str,
+) -> serde_json::Value {
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    json!({
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": { "name": name, "namespace": namespace, "uid": "user-secret-uid" },
+        "type": "Opaque",
+        "data": {
+            "user.crt": b64.encode(cert_pem.as_bytes()),
+            "user.key": b64.encode(key_pem.as_bytes()),
+            "ca.crt": b64.encode(ca_pem.as_bytes()),
+        }
+    })
+}
+
+fn clients_ca_key_secret_body(cluster: &str, namespace: &str, key_pem: &str) -> serde_json::Value {
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    json!({
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {
+            "name": format!("{cluster}-clients-ca"),
+            "namespace": namespace,
+            "uid": "ca-key-uid",
+        },
+        "type": "Opaque",
+        "data": { "ca.key": b64.encode(key_pem.as_bytes()) }
+    })
+}
+
+fn clients_ca_cert_secret_body(
+    cluster: &str,
+    namespace: &str,
+    cert_pem: &str,
+) -> serde_json::Value {
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    json!({
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {
+            "name": format!("{cluster}-clients-ca-cert"),
+            "namespace": namespace,
+            "uid": "ca-cert-uid",
+        },
+        "type": "Opaque",
+        "data": { "ca.crt": b64.encode(cert_pem.as_bytes()) }
+    })
 }
 
 /// Slice 36: `KafkaUser` with cluster label, no Secret yet → reconcile
@@ -600,5 +694,454 @@ async fn empty_quotas_object_tombstones_everything() {
     assert!(
         ops.iter().all(|op| matches!(op, QuotaOp::Remove { .. })),
         "every op must be a Remove: {ops:?}",
+    );
+}
+
+// --- Slice 37: TLS auth reconcile tests ----------------------------------
+
+/// Slice 37: first reconcile of a TLS-auth `KafkaUser` provisions the
+/// clients CA (key + cert Secrets), the per-user cert Secret, and the
+/// ACLs by `User:CN=<name>` principal. No SCRAM call is made.
+#[allow(clippy::too_many_lines)] // straight-line fixture; splitting hurts more than it helps
+#[tokio::test]
+async fn first_reconcile_tls_provisions_certs_and_acls() {
+    let rules = vec![
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/kafkas/{CLUSTER}"),
+            response: json_response(200, &ready_kafka_body(CLUSTER, NS)),
+        },
+        // Clients-CA key Secret doesn't exist yet.
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{CLUSTER}-clients-ca"),
+            response: Response::builder()
+                .status(404)
+                .header("content-type", "application/json")
+                .body(not_found_body("not found"))
+                .expect("404 builds"),
+        },
+        // Clients-CA cert Secret doesn't exist yet.
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{CLUSTER}-clients-ca-cert"),
+            response: Response::builder()
+                .status(404)
+                .header("content-type", "application/json")
+                .body(not_found_body("not found"))
+                .expect("404 builds"),
+        },
+        // Per-user Secret doesn't exist yet.
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{USER}"),
+            response: Response::builder()
+                .status(404)
+                .header("content-type", "application/json")
+                .body(not_found_body("not found"))
+                .expect("404 builds"),
+        },
+        // Apply (create) the CA key Secret.
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/secrets/{CLUSTER}-clients-ca-cert"),
+            response: json_response(
+                200,
+                &clients_ca_cert_secret_body(
+                    CLUSTER,
+                    NS,
+                    "-----BEGIN CERTIFICATE-----\nx\n-----END CERTIFICATE-----\n",
+                ),
+            ),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/secrets/{CLUSTER}-clients-ca"),
+            response: json_response(
+                200,
+                &clients_ca_key_secret_body(
+                    CLUSTER,
+                    NS,
+                    "-----BEGIN PRIVATE KEY-----\nx\n-----END PRIVATE KEY-----\n",
+                ),
+            ),
+        },
+        // Apply (create) the per-user Secret.
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/secrets/{USER}"),
+            response: json_response(200, &tls_user_secret_body(USER, NS, "cert", "key", "ca")),
+        },
+        // Final status PATCH.
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/kafkausers/{USER}/status"),
+            response: json_response(200, &user_body(USER, NS)),
+        },
+    ];
+    let state = MockState::new(rules);
+    let client = mock_client(&state, NS);
+    let ctx = Arc::new(fixture_ctx(client, NS));
+
+    let fake = Arc::new(tokio::sync::Mutex::new(FakeAdminClient::new()));
+    let fake_for_assert = fake.clone();
+    ctx.insert_admin_client_for_test(CLUSTER, fake).await;
+
+    let ku = ku_tls(USER, vec![rule_topic("orders", &[AclOp::Read])]);
+    reconcile(Arc::new(ku), ctx).await.unwrap();
+
+    let calls = fake_for_assert.lock().await.calls();
+    // TLS path must NOT make SCRAM calls.
+    assert!(
+        !calls
+            .iter()
+            .any(|c| matches!(c, RecordedCall::AlterUserScramCredentials { .. })),
+        "TLS auth must skip SCRAM credentials: {calls:?}",
+    );
+    // ACL describe must use the CN= principal.
+    assert!(
+        calls.iter().any(|c| matches!(c,
+            RecordedCall::DescribeAcls(f) if f.principal.as_deref() == Some("User:CN=alice"))),
+        "expected DescribeAcls filtered by User:CN=alice, got {calls:?}",
+    );
+    // ACL create must use the CN= principal.
+    let create = calls
+        .iter()
+        .find_map(|c| match c {
+            RecordedCall::CreateAcls(v) => Some(v.clone()),
+            _ => None,
+        })
+        .expect("CreateAcls must have been issued");
+    assert_eq!(create.len(), 1);
+    assert_eq!(create[0].principal, "User:CN=alice");
+    assert_eq!(create[0].resource_type, ResourceType::Topic);
+    assert_eq!(create[0].resource_name, "orders");
+    assert_eq!(create[0].operation, AclOperation::Read);
+
+    // Verify all four PATCH paths landed.
+    let observed = state.take_observed();
+    let patches: Vec<String> = observed
+        .iter()
+        .filter(|r| r.method() == Method::PATCH)
+        .map(|r| r.uri().to_string())
+        .collect();
+    assert!(
+        patches
+            .iter()
+            .any(|u| u.contains(&format!("/secrets/{CLUSTER}-clients-ca-cert"))),
+        "expected PATCH on clients-ca-cert Secret: {patches:?}",
+    );
+    assert!(
+        patches.iter().any(
+            |u| u.contains(&format!("/secrets/{CLUSTER}-clients-ca")) && !u.contains("ca-cert")
+        ),
+        "expected PATCH on clients-ca key Secret: {patches:?}",
+    );
+    assert!(
+        patches
+            .iter()
+            .any(|u| u.contains(&format!("/secrets/{USER}"))),
+        "expected PATCH on per-user Secret: {patches:?}",
+    );
+    assert!(
+        patches
+            .iter()
+            .any(|u| u.contains(&format!("/kafkausers/{USER}/status"))),
+        "expected PATCH on KafkaUser status: {patches:?}",
+    );
+}
+
+/// Slice 37: TLS reconcile with an existing user Secret whose cert is
+/// well outside the renewal window reuses it — no PATCH on the user
+/// Secret is issued.
+#[tokio::test]
+async fn tls_reconcile_reuses_existing_cert_when_not_near_expiry() {
+    let ca = ca::generate_clients_ca("ca", 365).expect("ca");
+    let user = ca::issue_user_cert(&ca.cert_pem, &ca.key_pem, USER, 365).expect("user cert");
+
+    let rules = vec![
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/kafkas/{CLUSTER}"),
+            response: json_response(200, &ready_kafka_body(CLUSTER, NS)),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{CLUSTER}-clients-ca-cert"),
+            response: json_response(200, &clients_ca_cert_secret_body(CLUSTER, NS, &ca.cert_pem)),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{CLUSTER}-clients-ca"),
+            response: json_response(200, &clients_ca_key_secret_body(CLUSTER, NS, &ca.key_pem)),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{USER}"),
+            response: json_response(
+                200,
+                &tls_user_secret_body(USER, NS, &user.cert_pem, &user.key_pem, &ca.cert_pem),
+            ),
+        },
+        // Only the status PATCH is registered — no per-user Secret PATCH expected.
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/kafkausers/{USER}/status"),
+            response: json_response(200, &user_body(USER, NS)),
+        },
+    ];
+    let state = MockState::new(rules);
+    let client = mock_client(&state, NS);
+    let ctx = Arc::new(fixture_ctx(client, NS));
+
+    let fake = Arc::new(tokio::sync::Mutex::new(FakeAdminClient::new()));
+    ctx.insert_admin_client_for_test(CLUSTER, fake).await;
+
+    let ku = ku_tls(USER, vec![]);
+    reconcile(Arc::new(ku), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    let secret_patches: Vec<String> = observed
+        .iter()
+        .filter(|r| {
+            r.method() == Method::PATCH && r.uri().to_string().contains(&format!("/secrets/{USER}"))
+        })
+        .map(|r| r.uri().to_string())
+        .collect();
+    assert!(
+        secret_patches.is_empty(),
+        "cert should be reused — no PATCH on per-user Secret expected, got: {secret_patches:?}",
+    );
+    // Status patch should still fire.
+    assert!(
+        observed.iter().any(|r| r.method() == Method::PATCH
+            && r.uri()
+                .to_string()
+                .contains(&format!("/kafkausers/{USER}/status"))),
+        "status PATCH must still fire",
+    );
+}
+
+/// Slice 37: TLS reconcile with an existing cert inside the renewal
+/// window reissues — exactly one PATCH on the per-user Secret.
+#[tokio::test]
+async fn tls_reconcile_reissues_cert_near_expiry() {
+    let ca = ca::generate_clients_ca("ca", 365).expect("ca");
+    // 1-day validity: well inside the default 30-day renewal window.
+    let user = ca::issue_user_cert(&ca.cert_pem, &ca.key_pem, USER, 1).expect("user cert");
+
+    let rules = vec![
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/kafkas/{CLUSTER}"),
+            response: json_response(200, &ready_kafka_body(CLUSTER, NS)),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{CLUSTER}-clients-ca-cert"),
+            response: json_response(200, &clients_ca_cert_secret_body(CLUSTER, NS, &ca.cert_pem)),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{CLUSTER}-clients-ca"),
+            response: json_response(200, &clients_ca_key_secret_body(CLUSTER, NS, &ca.key_pem)),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{USER}"),
+            response: json_response(
+                200,
+                &tls_user_secret_body(USER, NS, &user.cert_pem, &user.key_pem, &ca.cert_pem),
+            ),
+        },
+        // Reissue PATCH.
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/secrets/{USER}"),
+            response: json_response(200, &tls_user_secret_body(USER, NS, "cert", "key", "ca")),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/kafkausers/{USER}/status"),
+            response: json_response(200, &user_body(USER, NS)),
+        },
+    ];
+    let state = MockState::new(rules);
+    let client = mock_client(&state, NS);
+    let ctx = Arc::new(fixture_ctx(client, NS));
+
+    let fake = Arc::new(tokio::sync::Mutex::new(FakeAdminClient::new()));
+    ctx.insert_admin_client_for_test(CLUSTER, fake).await;
+
+    let ku = ku_tls(USER, vec![]);
+    reconcile(Arc::new(ku), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    let secret_patches: Vec<String> = observed
+        .iter()
+        .filter(|r| {
+            r.method() == Method::PATCH && r.uri().to_string().contains(&format!("/secrets/{USER}"))
+        })
+        .map(|r| r.uri().to_string())
+        .collect();
+    assert_eq!(
+        secret_patches.len(),
+        1,
+        "near-expiry cert must be reissued exactly once: {secret_patches:?}",
+    );
+}
+
+/// Slice 37: TLS user finalizer cleanup filters ACL deletes by the
+/// `User:CN=<name>` principal (not the bare `User:<name>` SCRAM form).
+#[tokio::test]
+async fn tls_finalizer_filters_acls_by_dn() {
+    let rules = vec![
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/kafkas/{CLUSTER}"),
+            response: json_response(200, &ready_kafka_body(CLUSTER, NS)),
+        },
+        // Finalizer-removal PATCH on the KafkaUser itself.
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/kafkausers/{USER}"),
+            response: json_response(200, &user_body(USER, NS)),
+        },
+    ];
+    let state = MockState::new(rules);
+    let client = mock_client(&state, NS);
+    let ctx = Arc::new(fixture_ctx(client, NS));
+
+    let fake = Arc::new(tokio::sync::Mutex::new(FakeAdminClient::new()));
+    let fake_for_assert = fake.clone();
+    ctx.insert_admin_client_for_test(CLUSTER, fake).await;
+
+    let mut ku = ku_tls(USER, vec![]);
+    ku.metadata.deletion_timestamp = Some(Time("2026-05-18T00:00:00Z".parse().unwrap()));
+    reconcile(Arc::new(ku), ctx).await.unwrap();
+
+    let calls = fake_for_assert.lock().await.calls();
+    // TLS finalizer must NOT issue a SCRAM delete (gated on auth type).
+    assert!(
+        !calls
+            .iter()
+            .any(|c| matches!(c, RecordedCall::AlterUserScramCredentials { .. })),
+        "TLS finalizer must not call SCRAM delete: {calls:?}",
+    );
+    // ACL delete filter must use `User:CN=alice`.
+    let filters = calls
+        .iter()
+        .find_map(|c| match c {
+            RecordedCall::DeleteAcls(f) => Some(f.clone()),
+            _ => None,
+        })
+        .expect("DeleteAcls must have been issued");
+    assert!(!filters.is_empty(), "at least one filter expected");
+    assert_eq!(
+        filters[0].principal.as_deref(),
+        Some("User:CN=alice"),
+        "TLS finalizer must filter by CN= principal: {filters:?}",
+    );
+}
+
+/// Slice 37: TLS user with quotas keys broker quota calls by the
+/// DN (`CN=alice`), not the bare name.
+#[tokio::test]
+async fn tls_user_with_quotas_alters_quotas_by_dn() {
+    let rules = vec![
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/kafkas/{CLUSTER}"),
+            response: json_response(200, &ready_kafka_body(CLUSTER, NS)),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{CLUSTER}-clients-ca-cert"),
+            response: Response::builder()
+                .status(404)
+                .header("content-type", "application/json")
+                .body(not_found_body("not found"))
+                .expect("404 builds"),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{CLUSTER}-clients-ca"),
+            response: Response::builder()
+                .status(404)
+                .header("content-type", "application/json")
+                .body(not_found_body("not found"))
+                .expect("404 builds"),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{USER}"),
+            response: Response::builder()
+                .status(404)
+                .header("content-type", "application/json")
+                .body(not_found_body("not found"))
+                .expect("404 builds"),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/secrets/{CLUSTER}-clients-ca-cert"),
+            response: json_response(200, &clients_ca_cert_secret_body(CLUSTER, NS, "cert")),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/secrets/{CLUSTER}-clients-ca"),
+            response: json_response(200, &clients_ca_key_secret_body(CLUSTER, NS, "key")),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/secrets/{USER}"),
+            response: json_response(200, &tls_user_secret_body(USER, NS, "cert", "key", "ca")),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/kafkausers/{USER}/status"),
+            response: json_response(200, &user_body(USER, NS)),
+        },
+    ];
+    let state = MockState::new(rules);
+    let client = mock_client(&state, NS);
+    let ctx = Arc::new(fixture_ctx(client, NS));
+
+    let fake = Arc::new(tokio::sync::Mutex::new(FakeAdminClient::new()));
+    let fake_for_assert = fake.clone();
+    ctx.insert_admin_client_for_test(CLUSTER, fake).await;
+
+    let quotas = KafkaUserQuotas {
+        producer_byte_rate: Some(1_048_576),
+        ..Default::default()
+    };
+    let ku = ku_tls_full(USER, vec![], Some(quotas), TlsAuth::default());
+    reconcile(Arc::new(ku), ctx).await.unwrap();
+
+    let calls = fake_for_assert.lock().await.calls();
+    // DescribeUserQuotas must be keyed by `CN=alice`, not `alice`.
+    assert!(
+        calls
+            .iter()
+            .any(|c| matches!(c, RecordedCall::DescribeUserQuotas(u) if u == "CN=alice")),
+        "expected DescribeUserQuotas keyed by CN=alice, got {calls:?}",
+    );
+    // AlterUserQuotas must be keyed by `CN=alice` and carry the Set op.
+    let (username, ops) = calls
+        .iter()
+        .find_map(|c| match c {
+            RecordedCall::AlterUserQuotas { username, ops, .. } => {
+                Some((username.clone(), ops.clone()))
+            }
+            _ => None,
+        })
+        .expect("AlterUserQuotas must have been issued");
+    assert_eq!(username, "CN=alice", "must be keyed by DN, got {username}");
+    assert!(
+        ops.iter().any(|op| matches!(
+            op,
+            QuotaOp::Set { key, value }
+                if key == "producer_byte_rate" && (*value - 1_048_576.0).abs() < f64::EPSILON
+        )),
+        "expected Set producer_byte_rate=1048576, got {ops:?}",
     );
 }

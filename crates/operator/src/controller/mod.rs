@@ -10,3 +10,4 @@ pub(crate) mod metrics;
 pub(crate) mod network_policy;
 pub mod topic;
 pub mod user;
+pub mod user_tls;

@@ -51,6 +51,10 @@ pub enum ReconcileError {
     PrometheusOperatorCrdsMissing,
     #[error("malformed input: {0}")]
     Malformed(String),
+    #[error("CA: {0}")]
+    Ca(#[from] crabka_security::ca::CaError),
+    #[error("cert parse: {0}")]
+    CertParse(String),
 }
 
 /// Build a Kubernetes-style condition with `lastTransitionTime` set to

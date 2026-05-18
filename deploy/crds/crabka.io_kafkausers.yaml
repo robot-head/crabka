@@ -22,35 +22,42 @@ spec:
           spec:
             properties:
               authentication:
-                description: Tagged enum on `type`, mirroring Strimzi.
-                oneOf:
-                - required:
-                  - type
+                description: |-
+                  Tagged enum on `type`, mirroring Strimzi.
+
+                  The wire shape is flat (Strimzi-compatible): `type` is the
+                  discriminator and per-variant config fields are siblings of `type`.
+                  The custom `schema_with` hand-rolls a structural schema because
+                  kube-rs 3.x's `StructuralSchemaRewriter` panics when `oneOf`
+                  branches share a `type` property with differing `enum` values (the
+                  default schemars output for tagged-union enums). Same workaround as
+                  `Storage` in `kafka_node_pool.rs`. Cross-variant constraints (e.g.
+                  "`iterations` only valid when `type=scram-sha-512`") are enforced
+                  by the operator at reconcile time, not by the apiserver.
                 properties:
                   iterations:
-                    description: |-
-                      PBKDF2 iteration count. Defaults to 8192 on the controller side
-                      (matches `crabka_client_admin::DEFAULT_SCRAM_ITERATIONS`); the
-                      broker rejects values < 4096.
-                    format: int32
                     maximum: 1000000.0
                     minimum: 4096.0
-                    nullable: true
                     type: integer
                   passwordLength:
-                    description: |-
-                      Raw-password length (bytes) for the operator-generated secret.
-                      Defaults to 32 bytes (44 base64 chars). Ignored on reconcile if
-                      a Secret with key `password` already exists.
-                    format: uint16
                     maximum: 256.0
                     minimum: 16.0
-                    nullable: true
+                    type: integer
+                  renewalDays:
+                    maximum: 3650.0
+                    minimum: 1.0
                     type: integer
                   type:
                     enum:
                     - scram-sha-512
+                    - tls
                     type: string
+                  validityDays:
+                    maximum: 36500.0
+                    minimum: 1.0
+                    type: integer
+                required:
+                - type
                 type: object
               authorization:
                 description: |-
@@ -228,6 +235,26 @@ spec:
                 type: boolean
               secret:
                 description: Name of the Kubernetes Secret holding the user's password.
+                nullable: true
+                type: string
+              tls:
+                default: false
+                description: |-
+                  `true` once a TLS user has a current cert Secret. Mirrors
+                  `scram_sha512`.
+                type: boolean
+              tlsCertNotAfter:
+                description: |-
+                  RFC3339 timestamp of the user cert's `notAfter`. Present when
+                  `tls == true`.
+                nullable: true
+                type: string
+              tlsPrincipal:
+                description: |-
+                  The principal string the operator pinned in ACLs (e.g.
+                  `User:CN=alice` for TLS users, `User:alice` for SCRAM). Always
+                  populated when the user is provisioned. Load-bearing for
+                  debugging "why isn't my ACL matching" issues.
                 nullable: true
                 type: string
               username:

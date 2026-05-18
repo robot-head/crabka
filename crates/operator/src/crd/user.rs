@@ -1,6 +1,6 @@
-//! Slice 36: `KafkaUser` CRD. Strimzi-shaped — SCRAM-SHA-512
-//! authentication + simple ACL authorization in this slice. mTLS auth
-//! and quotas land in slices 37 and 38.
+//! `KafkaUser` CRD. Strimzi-shaped — SCRAM-SHA-512 + mTLS
+//! authentication (slices 36, 37), simple ACL authorization, and
+//! optional per-user quotas (slice 38).
 
 use kube::CustomResource;
 use schemars::JsonSchema;
@@ -66,11 +66,41 @@ pub struct KafkaUserQuotas {
 }
 
 /// Tagged enum on `type`, mirroring Strimzi.
+///
+/// The wire shape is flat (Strimzi-compatible): `type` is the
+/// discriminator and per-variant config fields are siblings of `type`.
+/// The custom `schema_with` hand-rolls a structural schema because
+/// kube-rs 3.x's `StructuralSchemaRewriter` panics when `oneOf`
+/// branches share a `type` property with differing `enum` values (the
+/// default schemars output for tagged-union enums). Same workaround as
+/// `Storage` in `kafka_node_pool.rs`. Cross-variant constraints (e.g.
+/// "`iterations` only valid when `type=scram-sha-512`") are enforced
+/// by the operator at reconcile time, not by the apiserver.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(tag = "type", rename_all = "kebab-case")]
+#[schemars(schema_with = "authentication_schema")]
 pub enum Authentication {
     #[serde(rename = "scram-sha-512")]
     ScramSha512(ScramSha512Auth),
+    #[serde(rename = "tls")]
+    Tls(TlsAuth),
+}
+
+fn authentication_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "object",
+        "required": ["type"],
+        "properties": {
+            "type": {
+                "type": "string",
+                "enum": ["scram-sha-512", "tls"],
+            },
+            "iterations": { "type": "integer", "minimum": 4096, "maximum": 1_000_000 },
+            "passwordLength": { "type": "integer", "minimum": 16, "maximum": 256 },
+            "validityDays": { "type": "integer", "minimum": 1, "maximum": 36500 },
+            "renewalDays": { "type": "integer", "minimum": 1, "maximum": 3650 },
+        },
+    })
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
@@ -89,6 +119,30 @@ pub struct ScramSha512Auth {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 16, max = 256))]
     pub password_length: Option<u16>,
+}
+
+/// mTLS authentication config. The operator generates an X.509 client
+/// cert signed by the per-cluster clients CA, stored in the
+/// per-user Secret under keys `user.crt`, `user.key`, `ca.crt`. The
+/// cert's Subject is the bare RDN `CN=<KafkaUser name>`; that DN is
+/// the ACL / quota principal.
+///
+/// **Validity & renewal.** The cert lives for `validity_days` (default
+/// 365). The reconciler reissues iff `not_after - now <= renewal_days`
+/// (default 30). Reissue replaces `user.crt` and `user.key`; consumers
+/// must reload their TLS client config to pick the new material up.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TlsAuth {
+    /// Cert lifetime in days. Default 365.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1, max = 36500))]
+    pub validity_days: Option<u32>,
+
+    /// Days before `notAfter` at which the operator reissues. Default 30.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1, max = 3650))]
+    pub renewal_days: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
@@ -215,6 +269,23 @@ pub struct KafkaUserStatus {
     /// is `None` (the operator does not touch broker quotas).
     #[serde(default)]
     pub quotas_in_sync: bool,
+
+    /// `true` once a TLS user has a current cert Secret. Mirrors
+    /// `scram_sha512`.
+    #[serde(default)]
+    pub tls: bool,
+
+    /// RFC3339 timestamp of the user cert's `notAfter`. Present when
+    /// `tls == true`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_cert_not_after: Option<String>,
+
+    /// The principal string the operator pinned in ACLs (e.g.
+    /// `User:CN=alice` for TLS users, `User:alice` for SCRAM). Always
+    /// populated when the user is provisioned. Load-bearing for
+    /// debugging "why isn't my ACL matching" issues.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_principal: Option<String>,
 }
 
 impl KafkaUserQuotas {
@@ -438,5 +509,76 @@ mod tests {
         let json = r#"{"authentication":{"type":"scram-sha-512"}}"#;
         let spec: KafkaUserSpec = serde_json::from_str(json).unwrap();
         assert!(spec.quotas.is_none());
+    }
+
+    #[test]
+    fn tls_auth_round_trips() {
+        let auth = Authentication::Tls(TlsAuth::default());
+        let v = serde_json::to_value(&auth).unwrap();
+        assert_eq!(v, serde_json::json!({"type": "tls"}));
+        let back: Authentication = serde_json::from_value(v).unwrap();
+        assert_eq!(back, auth);
+    }
+
+    #[test]
+    fn tls_auth_with_validity_days_round_trips() {
+        let auth = Authentication::Tls(TlsAuth {
+            validity_days: Some(180),
+            renewal_days: Some(14),
+        });
+        let v = serde_json::to_value(&auth).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({
+                "type": "tls",
+                "validityDays": 180,
+                "renewalDays": 14,
+            })
+        );
+        let back: Authentication = serde_json::from_value(v).unwrap();
+        assert_eq!(back, auth);
+    }
+
+    #[test]
+    fn authentication_scram_round_trips_unchanged() {
+        let auth = Authentication::ScramSha512(ScramSha512Auth::default());
+        let v = serde_json::to_value(&auth).unwrap();
+        assert_eq!(v, serde_json::json!({"type": "scram-sha-512"}));
+        let back: Authentication = serde_json::from_value(v).unwrap();
+        assert_eq!(back, auth);
+    }
+
+    #[test]
+    fn status_tls_fields_omit_when_unset() {
+        let status = KafkaUserStatus {
+            tls: false,
+            tls_cert_not_after: None,
+            tls_principal: None,
+            ..Default::default()
+        };
+        let j = serde_json::to_string(&status).unwrap();
+        assert!(!j.contains("tlsCertNotAfter"), "got: {j}");
+        assert!(!j.contains("tlsPrincipal"), "got: {j}");
+        assert!(j.contains("\"tls\":false"), "got: {j}");
+    }
+
+    #[test]
+    fn status_tls_fields_emit_when_set() {
+        let status = KafkaUserStatus {
+            tls: true,
+            tls_cert_not_after: Some("2027-05-19T00:00:00Z".into()),
+            tls_principal: Some("User:CN=alice".into()),
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&status).unwrap();
+        assert_eq!(v.get("tls"), Some(&serde_json::Value::Bool(true)));
+        assert_eq!(
+            v.get("tlsCertNotAfter").and_then(|x| x.as_str()),
+            Some("2027-05-19T00:00:00Z")
+        );
+        assert_eq!(
+            v.get("tlsPrincipal").and_then(|x| x.as_str()),
+            Some("User:CN=alice")
+        );
     }
 }
