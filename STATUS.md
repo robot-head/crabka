@@ -1276,3 +1276,68 @@ Kafka client for ApiVersions.
   application; one proposal wins per partition), but
   operators should be aware of the interaction.
 
+## Slice 37 — Operator: KafkaUser mTLS authentication (2026-05-19)
+
+- `crates/operator`: adds the `tls` variant to
+  `KafkaUser.spec.authentication` (Strimzi-shaped). Operator
+  generates a per-user X.509 client cert signed by a per-cluster
+  clients CA and exposes it via a `Secret` with keys `user.crt`,
+  `user.key`, `ca.crt` (PEM). `KafkaUserStatus` gains three
+  fields: `tls`, `tlsCertNotAfter`, `tlsPrincipal`.
+- `crates/security`: new `ca` module with pure rcgen helpers
+  `generate_clients_ca` and `issue_user_cert` (ECDSA P-256). No
+  kube types, no I/O — reusable by slice 30 (CA lifecycle) and
+  slice 33 (cert hot-reload tests). Leaf cert carries
+  `Subject = CN=<KafkaUser name>` (bare RDN — no `O`, no `OU`),
+  `EKU = clientAuth`, `KeyUsage = digitalSignature|keyEncipherment`.
+- `controller/user_tls.rs`: new module owning the clients-CA
+  Secret bootstrap (`<cluster>-clients-ca` for the private key,
+  `<cluster>-clients-ca-cert` for the public cert; both
+  owner-ref'd to the parent `Kafka`), the per-user cert
+  reuse/renew/issue decision, and the Secret render. Default 365d
+  validity, reissue when `not_after - now <= renewal_days`
+  (default 30). `controller/user.rs` dispatches on
+  `Authentication` at step 6 of the reconcile pipeline; the TLS
+  arm makes no broker call (the broker learns the identity from
+  the cert at mTLS handshake).
+- `principal_for(name, &Authentication)` is the single source of
+  truth: `User:<name>` for SCRAM, `User:CN=<name>` for TLS. Used
+  by ACL reconcile, ACL finalizer-delete, and quotas (with the
+  `User:` prefix stripped — the broker accepts any string as
+  `entity_name`, so quota slots cleanly partition between SCRAM
+  and TLS users sharing a name).
+- Requeue cadence relaxed to 6h for TLS users (vs 1m for SCRAM).
+  Cert renewal needs daily-ish heartbeat, not minutely; ACL drift
+  is still caught.
+- Design decisions: bare `CN=<name>` Subject DN (dodges RFC 2253
+  vs 4514 ordering ambiguity); per-user Secret carries `ca.crt`
+  so consumers build trust stores without separately mounting the
+  cluster-wide Secret; lazy CA bootstrap (slice 30 takes over the
+  full lifecycle).
+- Hand-rolled `Authentication` JSON schema via `schema_with`:
+  kube-rs 3.x's `StructuralSchemaRewriter` panics on multi-variant
+  tagged enums where the discriminator's `enum` values differ
+  across `oneOf` branches. Same workaround as `Storage` in
+  `kafka_node_pool.rs` (slice 19).
+- Out of scope (deferred): full CA rotation / renewal (slice 30);
+  listener-side mTLS so the broker requests client certs at
+  handshake (slice 31); PKCS#12 keystore bundle `user.p12` +
+  `user.password` (slice 37 follow-up if a JVM-client consumer
+  needs it); user-provided clients-CA (BYO-CA, slice 30).
+- Tests: +5 `crabka_security::ca` unit tests (CA round-trip,
+  CA-signed leaf, leaf DN matches `extract_principal_from_cert`,
+  leaf EKU is `clientAuth`, each generate is unique); +5
+  `crd::user` unit tests (`Tls(TlsAuth)` round-trip, with-fields
+  round-trip, SCRAM behaviour unchanged, status field omit, status
+  field emit); +1 `controller::user` test
+  (`principal_for_dispatches_on_auth_type`); +1 `controller::user_tls`
+  test (`is_cert_expiring_soon_boundary_cases`); reconcile-level
+  goes 8 → 13 tests (TLS first-reconcile, cert reuse, cert reissue,
+  finalizer ACL DN filter, quotas-by-DN). Totals land around 187
+  lib tests / 13 `reconcile_user` tests / 5 `security::ca` tests.
+- CRD YAML regenerated: `deploy/crds/crabka.io_kafkausers.yaml`
+  picks up the `tls` discriminator + `validityDays` / `renewalDays`
+  properties and `status.{tls,tlsCertNotAfter,tlsPrincipal}`.
+- Reference doc:
+  [`docs/superpowers/specs/2026-05-19-crabka-operator-kafkauser-37-design.md`].
+
