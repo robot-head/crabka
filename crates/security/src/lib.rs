@@ -20,6 +20,6 @@ pub use principal::{AuthError, AuthMethod, Principal};
 pub use reload::DynamicServerConfig;
 pub use scram::{
     ScramClientExchange, ScramCredential, ScramServerExchange, StepResult, derive_keys_from_salted,
-    hash_scram_password, scram_hash_len,
+    hash_scram_password, pbkdf2_salted, scram_hash_len,
 };
 pub use tls::{ClientAuthMode, TlsConfig, TlsError};

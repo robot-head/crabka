@@ -20,7 +20,9 @@ axum = { workspace = true }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 clap = { workspace = true, features = ["env"] }
 crabka-client-admin = { version = "0.1", path = "../client-admin" }
+base64 = { workspace = true }
 futures = { workspace = true }
+ring = { workspace = true }
 k8s-openapi = { workspace = true, features = ["schemars"] }
 kube = { workspace = true }
 prometheus-client = { workspace = true }
@@ -40,7 +42,6 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }
-base64 = { workspace = true }
 crabka-broker = { version = "0.1", path = "../broker" }
 crabka-client-core = { version = "0.1", path = "../client-core" }
 http = "1"

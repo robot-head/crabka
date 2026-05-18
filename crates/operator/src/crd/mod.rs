@@ -8,6 +8,7 @@ pub mod listener;
 pub mod metrics;
 pub mod network_policy;
 pub mod topic;
+pub mod user;
 
 pub use kafka::{Kafka, KafkaCondition, KafkaSpec, KafkaStatus};
 pub use kafka_node_pool::{
@@ -18,3 +19,7 @@ pub use listener::*;
 pub use metrics::{MetricsConfig, MetricsType, PodMonitorSpec, ServiceMonitorSpec};
 pub use network_policy::{NetworkPolicyPeer, NetworkPolicySpec};
 pub use topic::{KafkaTopic, KafkaTopicSpec, KafkaTopicStatus};
+pub use user::{
+    AclOp, AclPatternType, AclPermission, AclResource, AclResourceKind, AclRule, Authentication,
+    Authorization, KafkaUser, KafkaUserSpec, KafkaUserStatus, ScramSha512Auth, SimpleAuthorization,
+};

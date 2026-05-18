@@ -80,6 +80,38 @@ pub fn hash_scram_password_with_salt(
     }
 }
 
+/// Compute the PBKDF2 output ("salted password" in KIP-554 / RFC 5802
+/// language) for a given SCRAM mechanism. Output length matches
+/// [`scram_hash_len`]: 32 bytes for SHA-256, 64 bytes for SHA-512.
+///
+/// Used by `crabka-client-admin` to populate
+/// `AlterUserScramCredentialsRequest.upsertions[].salted_password`
+/// without leaking the broker-side `derive_keys_from_salted` machinery
+/// or the raw password into the operator. Panics on a non-SCRAM
+/// mechanism.
+#[must_use]
+pub fn pbkdf2_salted(
+    password: &[u8],
+    mechanism: SaslMechanism,
+    iterations: u32,
+    salt: &[u8],
+) -> Vec<u8> {
+    assert!(iterations > 0, "iterations must be > 0");
+    match mechanism {
+        SaslMechanism::ScramSha512 => {
+            let arr: [u8; 64] = pbkdf2::pbkdf2_hmac_array::<Sha512, 64>(password, salt, iterations);
+            arr.to_vec()
+        }
+        SaslMechanism::ScramSha256 => {
+            let arr: [u8; 32] = pbkdf2::pbkdf2_hmac_array::<Sha256, 32>(password, salt, iterations);
+            arr.to_vec()
+        }
+        SaslMechanism::Plain => {
+            panic!("pbkdf2_salted called with non-SCRAM mechanism PLAIN");
+        }
+    }
+}
+
 /// Reconstruct `(stored_key, server_key)` from the salted-password
 /// output the client sends in an `AlterUserScramCredentialsRequest`
 /// per KIP-554.
@@ -261,6 +293,38 @@ mod tests {
         assert_eq!(principal.auth_method, crate::AuthMethod::SaslScramSha256);
         let final_check = client.verify_server_final(&s2);
         assert!(final_check.is_ok(), "server signature must verify");
+    }
+
+    #[test]
+    fn pbkdf2_salted_matches_hash_scram_password_intermediate_sha512() {
+        // `pbkdf2_salted` exposes the PBKDF2 intermediate so the
+        // operator can produce the KIP-554 wire `salted_password`. It
+        // must equal the value `hash_scram_password_with_salt` feeds
+        // into `derive_keys_from_salted` internally.
+        let password = b"pencil";
+        let salt: Vec<u8> = (0..16).collect();
+        let cred =
+            hash_scram_password_with_salt(password, SaslMechanism::ScramSha512, 4096, salt.clone());
+        let salted = pbkdf2_salted(password, SaslMechanism::ScramSha512, 4096, &salt);
+        assert_eq!(salted.len(), 64);
+        // Re-derive keys from the helper output → must match the
+        // credential the slow path computed.
+        let (stored_key, server_key) = derive_keys_from_salted(SaslMechanism::ScramSha512, &salted);
+        assert_eq!(stored_key, cred.stored_key);
+        assert_eq!(server_key, cred.server_key);
+    }
+
+    #[test]
+    fn pbkdf2_salted_matches_hash_scram_password_intermediate_sha256() {
+        let password = b"pencil";
+        let salt: Vec<u8> = (0..16).collect();
+        let cred =
+            hash_scram_password_with_salt(password, SaslMechanism::ScramSha256, 4096, salt.clone());
+        let salted = pbkdf2_salted(password, SaslMechanism::ScramSha256, 4096, &salt);
+        assert_eq!(salted.len(), 32);
+        let (stored_key, server_key) = derive_keys_from_salted(SaslMechanism::ScramSha256, &salted);
+        assert_eq!(stored_key, cred.stored_key);
+        assert_eq!(server_key, cred.server_key);
     }
 
     #[test]
