@@ -26,3 +26,4 @@ pub mod ingest;
 pub mod metrics;
 pub mod model;
 pub mod optimizer;
+pub mod scraper;
