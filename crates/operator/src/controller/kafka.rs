@@ -37,6 +37,7 @@ use crate::controller::listeners::{
     render_bootstrap_service, render_broker_service, synthesized_default_listener,
     validate_listeners,
 };
+use crate::controller::network_policy;
 use crate::crd::{
     Kafka, KafkaNodePool, KafkaStatus, Listener, ListenerAddress, ListenerStatus, ListenerType,
 };
@@ -598,6 +599,45 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
         Some(Err(_)) => condition("MetricsReady", "False", "Error", "metrics reconcile failed"),
     };
 
+    // Slice 23: NetworkPolicy reconcile (opt-in via spec.networkPolicy).
+    // Inter-broker port: the listener whose name matches the effective
+    // inter-broker name. Falls back to the synthesized default's BROKER_PORT
+    // (defensive only; effective_listeners is always non-empty).
+    let inter_broker_port = effective_listeners
+        .iter()
+        .find(|l| l.name == inter_broker_name)
+        .map_or(common::BROKER_PORT, |l| l.port);
+
+    let np_outcome = network_policy::reconcile_network_policy(
+        &ctx,
+        &obj,
+        &name,
+        &ns,
+        &effective_listeners,
+        inter_broker_port,
+    )
+    .await;
+    let np_condition = match &np_outcome {
+        None => condition(
+            "NetworkPolicyReady",
+            "False",
+            "Disabled",
+            "spec.networkPolicy is not set",
+        ),
+        Some(Ok(())) => condition(
+            "NetworkPolicyReady",
+            "True",
+            "Available",
+            "network policy reconciled",
+        ),
+        Some(Err(_)) => condition(
+            "NetworkPolicyReady",
+            "False",
+            "Error",
+            "network policy reconcile failed",
+        ),
+    };
+
     // Aggregate + patch our own status.
     let rollup = aggregate_pool_status(pools.iter());
     let (ready, reason, message) = rollup_condition(&rollup);
@@ -619,6 +659,7 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
             listeners_valid_cond,
             listeners_ready_cond,
             metrics_condition,
+            np_condition,
         ],
         replicas: Some(rollup.replicas),
         ready_replicas: Some(rollup.ready_replicas),
@@ -636,6 +677,10 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
                 | ReconcileError::PrometheusOperatorCrdsMissing
         )
     {
+        return Err(e);
+    }
+
+    if let Some(Err(e)) = np_outcome {
         return Err(e);
     }
 

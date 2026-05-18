@@ -126,6 +126,88 @@ spec:
                         as the Kafka listener name; surfaces in `bootstrap.servers`-style
                         URLs.
                       type: string
+                    networkPolicyPeers:
+                      description: |-
+                        Slice 23: per-listener peer allow-list. Tri-state:
+                        - `None` → no per-listener restriction (allow-all on this port).
+                        - `Some(vec![])` → deny-all on this listener port (no per-listener
+                          rule emitted; default-deny applies).
+                        - `Some(non_empty)` → only listed peers may reach this port.
+
+                        Only consulted when `Kafka.spec.networkPolicy` is set; otherwise
+                        inert. The operator auto-allow rule still fires on this port even
+                        for deny-all listeners so the operator can manage the cluster.
+                      items:
+                        description: |-
+                          Subset of `networking.k8s.io/v1.NetworkPolicyPeer`. `ipBlock` is
+                          intentionally omitted; a future slice can add it if external CIDR
+                          allow-lists become a real need.
+                        properties:
+                          namespaceSelector:
+                            description: A label selector is a label query over a set of resources. The result of matchLabels and matchExpressions are ANDed. An empty label selector matches all objects. A null label selector matches no objects.
+                            nullable: true
+                            properties:
+                              matchExpressions:
+                                description: matchExpressions is a list of label selector requirements. The requirements are ANDed.
+                                items:
+                                  description: A label selector requirement is a selector that contains values, a key, and an operator that relates the key and values.
+                                  properties:
+                                    key:
+                                      description: key is the label key that the selector applies to.
+                                      type: string
+                                    operator:
+                                      description: operator represents a key's relationship to a set of values. Valid operators are In, NotIn, Exists and DoesNotExist.
+                                      type: string
+                                    values:
+                                      description: values is an array of string values. If the operator is In or NotIn, the values array must be non-empty. If the operator is Exists or DoesNotExist, the values array must be empty. This array is replaced during a strategic merge patch.
+                                      items:
+                                        type: string
+                                      type: array
+                                  required:
+                                  - key
+                                  - operator
+                                  type: object
+                                type: array
+                              matchLabels:
+                                additionalProperties:
+                                  type: string
+                                description: matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels map is equivalent to an element of matchExpressions, whose key field is "key", the operator is "In", and the values array contains only "value". The requirements are ANDed.
+                                type: object
+                            type: object
+                          podSelector:
+                            description: A label selector is a label query over a set of resources. The result of matchLabels and matchExpressions are ANDed. An empty label selector matches all objects. A null label selector matches no objects.
+                            nullable: true
+                            properties:
+                              matchExpressions:
+                                description: matchExpressions is a list of label selector requirements. The requirements are ANDed.
+                                items:
+                                  description: A label selector requirement is a selector that contains values, a key, and an operator that relates the key and values.
+                                  properties:
+                                    key:
+                                      description: key is the label key that the selector applies to.
+                                      type: string
+                                    operator:
+                                      description: operator represents a key's relationship to a set of values. Valid operators are In, NotIn, Exists and DoesNotExist.
+                                      type: string
+                                    values:
+                                      description: values is an array of string values. If the operator is In or NotIn, the values array must be non-empty. If the operator is Exists or DoesNotExist, the values array must be empty. This array is replaced during a strategic merge patch.
+                                      items:
+                                        type: string
+                                      type: array
+                                  required:
+                                  - key
+                                  - operator
+                                  type: object
+                                type: array
+                              matchLabels:
+                                additionalProperties:
+                                  type: string
+                                description: matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels map is equivalent to an element of matchExpressions, whose key field is "key", the operator is "In", and the values array contains only "value". The requirements are ANDed.
+                                type: object
+                            type: object
+                        type: object
+                      nullable: true
+                      type: array
                     port:
                       description: Container port the broker binds. Unique within the cluster.
                       format: int32
@@ -196,6 +278,14 @@ spec:
                     enum:
                     - prometheus
                     type: string
+                type: object
+              networkPolicy:
+                description: |-
+                  Slice 23: opt-in `NetworkPolicy` generation. When `None`, no
+                  `NetworkPolicy` is generated. When `Some` (even `{}`), the operator
+                  renders a cluster-level `NetworkPolicy` gating ingress to broker /
+                  controller pods.
+                nullable: true
                 type: object
             required:
             - kafkaVersion

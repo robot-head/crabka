@@ -345,6 +345,7 @@ mod service_rendering_tests {
                 listeners: vec![],
                 inter_broker_listener_name: None,
                 metrics_config: None,
+                network_policy: None,
             },
         );
         k.meta_mut().namespace = Some("default".into());
@@ -368,6 +369,7 @@ mod service_rendering_tests {
                     ..Default::default()
                 }],
             }),
+            network_policy_peers: None,
         };
         let svc = render_broker_service(&k, &listener, 0, "demo-pool-0").unwrap();
         assert_eq!(svc.metadata.name.as_deref(), Some("demo-external-0"));
@@ -398,6 +400,7 @@ mod service_rendering_tests {
                     ..Default::default()
                 }],
             }),
+            network_policy_peers: None,
         };
         let svc = render_broker_service(&k, &listener, 0, "demo-pool-0").unwrap();
         let spec = svc.spec.as_ref().unwrap();
@@ -420,6 +423,7 @@ mod service_rendering_tests {
                 }),
                 brokers: vec![],
             }),
+            network_policy_peers: None,
         };
         let svc = render_bootstrap_service(&k, &listener).unwrap();
         assert_eq!(
@@ -449,6 +453,7 @@ mod tests {
             type_: ListenerType::Internal,
             tls: false,
             configuration: None,
+            network_policy_peers: None,
         }
     }
 
@@ -459,6 +464,7 @@ mod tests {
             type_: ListenerType::Nodeport,
             tls: false,
             configuration: None,
+            network_policy_peers: None,
         }
     }
 
@@ -772,6 +778,7 @@ mod advertised_tests {
             type_: ListenerType::Internal,
             tls: false,
             configuration: None,
+            network_policy_peers: None,
         }
     }
     fn nodeport(name: &str, port: i32) -> Listener {
@@ -781,6 +788,7 @@ mod advertised_tests {
             type_: ListenerType::Nodeport,
             tls: false,
             configuration: None,
+            network_policy_peers: None,
         }
     }
     fn loadbalancer(name: &str, port: i32) -> Listener {
@@ -790,6 +798,7 @@ mod advertised_tests {
             type_: ListenerType::Loadbalancer,
             tls: false,
             configuration: None,
+            network_policy_peers: None,
         }
     }
 
@@ -1076,6 +1085,7 @@ pub fn synthesized_default_listener() -> Listener {
         type_: ListenerType::Internal,
         tls: false,
         configuration: None,
+        network_policy_peers: None,
     }
 }
 
@@ -1240,6 +1250,7 @@ mod intent_tests {
                     },
                 ],
             }),
+            network_policy_peers: None,
         }];
         let a = canonical_listener_intent(&l, Some("PLAIN"));
         let b = canonical_listener_intent(&l, Some("PLAIN"));

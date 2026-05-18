@@ -743,6 +743,7 @@ mod tests {
                 listeners: vec![],
                 inter_broker_listener_name: None,
                 metrics_config: None,
+                network_policy: None,
             },
         );
         k.metadata.namespace = Some("default".into());
