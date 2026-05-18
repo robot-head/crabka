@@ -181,7 +181,11 @@ mod tests {
     fn min_zero_is_no_op() {
         let parts: Vec<_> = (0..4).map(|i| part("t", i, vec![1, 2, 3], 1)).collect();
         let s = state_with(parts, vec![1, 2, 3]);
-        assert!(MinTopicLeadersPerBroker.propose(&s, &ctx_with(0)).is_empty());
+        assert!(
+            MinTopicLeadersPerBroker
+                .propose(&s, &ctx_with(0))
+                .is_empty()
+        );
     }
 
     #[test]
@@ -189,7 +193,11 @@ mod tests {
         let parts: Vec<_> = (0..3).map(|i| part("t", i, vec![1, 2, 3], 1)).collect();
         let s = state_with(parts, vec![1, 2, 3]);
         let mvs = MinTopicLeadersPerBroker.propose(&s, &ctx_with(1));
-        assert!(mvs.len() >= 2, "expected >=2 leader flips, got {}", mvs.len());
+        assert!(
+            mvs.len() >= 2,
+            "expected >=2 leader flips, got {}",
+            mvs.len()
+        );
         for m in &mvs {
             assert_eq!(m.old_replicas, m.new_replicas, "leader-only move");
         }

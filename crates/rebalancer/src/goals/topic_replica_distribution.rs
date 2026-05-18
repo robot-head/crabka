@@ -200,7 +200,10 @@ mod tests {
         let parts: Vec<_> = (0..9).map(|i| part("t", i, vec![1], 1)).collect();
         let s = state_with(parts, vec![1, 2, 3]);
         let mvs = TopicReplicaDistribution.propose(&s, &ctx());
-        assert!(!mvs.is_empty(), "expected swaps for hot-broker concentration");
+        assert!(
+            !mvs.is_empty(),
+            "expected swaps for hot-broker concentration"
+        );
         for m in &mvs {
             assert_eq!(m.old_replicas.len(), m.new_replicas.len());
         }
@@ -229,6 +232,10 @@ mod tests {
         let parts: Vec<_> = (0..20).map(|i| part("t", i, vec![1], 1)).collect();
         let s = state_with(parts, vec![1, 2, 3]);
         let mvs = TopicReplicaDistribution.propose(&s, &ctx_with(10, 2));
-        assert!(mvs.len() <= 2, "expected at most 2 movements per cap, got {}", mvs.len());
+        assert!(
+            mvs.len() <= 2,
+            "expected at most 2 movements per cap, got {}",
+            mvs.len()
+        );
     }
 }

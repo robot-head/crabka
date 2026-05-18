@@ -256,10 +256,7 @@ mod tests {
             broker(3, Some("b")),
             broker(4, Some("c")),
         ];
-        let parts = vec![
-            part("t", 0, vec![1, 2], 1),
-            part("t", 1, vec![1, 2], 1),
-        ];
+        let parts = vec![part("t", 0, vec![1, 2], 1), part("t", 1, vec![1, 2], 1)];
         let s = state_with(parts, brokers);
         let mvs = RackAware.propose(&s, &ctx());
         assert_eq!(mvs.len(), 2, "one movement per partition");
@@ -279,7 +276,11 @@ mod tests {
 
     #[test]
     fn rf_greater_than_rack_count_logs_warn_and_skips() {
-        let brokers = vec![broker(1, Some("a")), broker(2, Some("a")), broker(3, Some("b"))];
+        let brokers = vec![
+            broker(1, Some("a")),
+            broker(2, Some("a")),
+            broker(3, Some("b")),
+        ];
         let parts = vec![part("t", 0, vec![1, 2, 3], 1)];
         let s = state_with(parts, brokers);
         let mvs = RackAware.propose(&s, &ctx());

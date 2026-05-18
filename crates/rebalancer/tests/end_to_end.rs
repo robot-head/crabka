@@ -714,9 +714,24 @@ async fn rack_aware_eliminates_same_rack_collisions() {
         cluster_id: Some("c".into()),
         snapshot_at_ms: 0,
         brokers: vec![
-            BrokerView { id: 1, host: "h1".into(), port: 9092, rack: Some("A".into()) },
-            BrokerView { id: 2, host: "h2".into(), port: 9092, rack: Some("A".into()) },
-            BrokerView { id: 3, host: "h3".into(), port: 9092, rack: Some("B".into()) },
+            BrokerView {
+                id: 1,
+                host: "h1".into(),
+                port: 9092,
+                rack: Some("A".into()),
+            },
+            BrokerView {
+                id: 2,
+                host: "h2".into(),
+                port: 9092,
+                rack: Some("A".into()),
+            },
+            BrokerView {
+                id: 3,
+                host: "h3".into(),
+                port: 9092,
+                rack: Some("B".into()),
+            },
         ],
         partitions: vec![PartitionView {
             topic: "t".into(),
@@ -735,7 +750,11 @@ async fn rack_aware_eliminates_same_rack_collisions() {
     };
 
     let mvs: Vec<Movement> = RackAware.propose(&state, &ctx);
-    assert_eq!(mvs.len(), 1, "expected exactly one RackAware movement, got {mvs:?}");
+    assert_eq!(
+        mvs.len(),
+        1,
+        "expected exactly one RackAware movement, got {mvs:?}"
+    );
     let m = &mvs[0];
     assert_eq!(m.topic, "t");
     assert_eq!(m.partition, 0);
