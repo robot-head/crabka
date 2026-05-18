@@ -105,6 +105,37 @@ mod tests {
     }
 
     #[test]
+    fn default_registry_order_matches_spec() {
+        let r = GoalRegistry::default_registry();
+        let names: Vec<&str> = r
+            .select(&[])
+            .unwrap()
+            .iter()
+            .map(|g| g.name())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                // Hard goals (priority order matters for the optimizer's
+                // Hard-first ordering).
+                "PreferredLeaderIdempotency",
+                "RackAware",
+                "ReplicaCapacity",
+                "DiskCapacity",
+                "NetworkInCapacity",
+                "NetworkOutCapacity",
+                "CpuCapacity",
+                // Soft goals.
+                "ReplicaDistribution",
+                "LeaderDistribution",
+                "TopicReplicaDistribution",
+                "MinTopicLeadersPerBroker",
+            ],
+            "registry order must match the spec's documented priority"
+        );
+    }
+
+    #[test]
     fn select_by_name() {
         let r = GoalRegistry::default_registry();
         let one = r.select(&["ReplicaDistribution".into()]).unwrap();

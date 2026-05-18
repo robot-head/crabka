@@ -222,9 +222,12 @@ async fn main() -> anyhow::Result<()> {
             &args.broker_capacity_file,
         )) {
             Ok(c) => {
+                let mut broker_ids: Vec<i32> = c.by_broker.keys().copied().collect();
+                broker_ids.sort_unstable();
                 info!(
                     path = %args.broker_capacity_file,
                     broker_count = c.by_broker.len(),
+                    broker_ids = ?broker_ids,
                     "loaded broker capacity config"
                 );
                 std::sync::Arc::new(c)
