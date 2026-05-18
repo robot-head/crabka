@@ -211,6 +211,7 @@ async fn main() -> anyhow::Result<()> {
         goal_ctx: GoalContext {
             imbalance_threshold_pct: args.imbalance_threshold_pct,
             max_movements_per_proposal: args.max_movements_per_proposal,
+            min_topic_leaders_per_broker: 0,
         },
         metrics: metrics.clone(),
         executor: executor_state,
