@@ -60,6 +60,16 @@ struct Args {
         default_value = "0.0.0.0:9404"
     )]
     metrics_listen_addr: String,
+
+    /// Slice 43e: partition disk-usage scan cadence, in seconds. `0`
+    /// disables the scanner entirely. The rebalancer's usage scraper
+    /// reads the `partition_disk_bytes` gauge this populates.
+    #[arg(
+        long,
+        env = "CRABKA_PARTITION_DISK_SCAN_INTERVAL_SECS",
+        default_value_t = 60
+    )]
+    partition_disk_scan_interval_secs: u64,
 }
 
 #[tokio::main]
@@ -115,6 +125,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         bootstrap_mode: BootstrapMode::Bootstrap,
         cluster_id: args.cluster_id,
         metrics_listen_addr,
+        partition_disk_scan_interval_secs: args.partition_disk_scan_interval_secs,
         ..BrokerConfig::default()
     };
     if let Some(fc) = file_config {

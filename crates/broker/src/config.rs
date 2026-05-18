@@ -174,6 +174,14 @@ pub struct BrokerConfig {
     /// the JMX exporter uses for vanilla Kafka), `None` in
     /// `for_tests` so unit tests don't fight over port allocation.
     pub metrics_listen_addr: Option<SocketAddr>,
+
+    /// Slice 43e: partition disk-usage scan cadence, in seconds. `0`
+    /// disables the scanner entirely (no background task spawned).
+    /// Production default: 60s. The scanner walks every known
+    /// (topic, partition) under `log_dir` each tick, sums regular-file
+    /// sizes, and updates the `partition_disk_bytes` gauge consumed by
+    /// the rebalancer's usage scraper.
+    pub partition_disk_scan_interval_secs: u64,
 }
 
 impl BrokerConfig {
@@ -226,6 +234,10 @@ impl BrokerConfig {
             // setting this to `Some(127.0.0.1:0)`; sharing a default
             // port would race in parallel test runs.
             metrics_listen_addr: None,
+            // Disable the disk scanner by default in tests so the
+            // background task doesn't tick during short-lived fixtures.
+            // The dedicated 43e integration test enables it explicitly.
+            partition_disk_scan_interval_secs: 0,
         }
     }
 
@@ -360,6 +372,7 @@ impl Default for BrokerConfig {
             // sets that via env, so production deployments still get
             // metrics by default.
             metrics_listen_addr: None,
+            partition_disk_scan_interval_secs: 60,
         }
     }
 }

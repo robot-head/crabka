@@ -1196,6 +1196,21 @@ impl Broker {
             },
         ));
 
+        // Slice 43e: periodic per-partition disk-usage scanner. Walks
+        // the log dir each tick and updates `partition_disk_bytes` for
+        // the rebalancer's usage scraper. `0` disables entirely.
+        if config.partition_disk_scan_interval_secs > 0 {
+            let scanner = crate::disk_scanner::DiskScanner {
+                log_dir: config.log_dir.clone(),
+                interval: std::time::Duration::from_secs(
+                    config.partition_disk_scan_interval_secs,
+                ),
+                metrics: metrics.clone(),
+                shutdown: supervisor_shutdown.child_token(),
+            };
+            tokio::spawn(scanner.run());
+        }
+
         // 4g. Auto-rebalance background task (KIP-460). The task itself
         //     checks is_leader() on every tick so it is safe to run on
         //     every broker; only the raft leader will actually submit

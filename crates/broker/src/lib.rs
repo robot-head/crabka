@@ -128,6 +128,7 @@ mod codes;
 pub mod config;
 pub(crate) mod config_keys;
 mod coordinator;
+pub mod disk_scanner;
 mod error;
 pub mod file_config;
 mod handlers;
