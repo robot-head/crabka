@@ -347,21 +347,20 @@ New module `crates/operator/src/controller/topic.rs`.
 
 ```rust
 Controller::new(topic_api, watcher::Config::default())
-    .watches(kafka_api, watcher::Config::default(), |kafka| {
-        // Wake topic reconciles when their parent cluster's status changes.
-        let ns = kafka.meta().namespace.clone();
-        let name = kafka.meta().name.clone();
-        let (ns, name) = match (ns, name) { (Some(a), Some(b)) => (a, b), _ => return Vec::new().into_iter() };
-        list_topics_in_ns_with_cluster_label(&ns, &name)
-            .into_iter()
-            .map(|t| ObjectRef::<KafkaTopic>::new(&t.name).within(&t.namespace))
-            .collect::<Vec<_>>()
-            .into_iter()
+    // Kafka watch fires the controller's reconcile loop but the mapper
+    // returns empty: listing matching topics inside the sync `mapper`
+    // closure would require an async kube list call which the
+    // `watches` signature doesn't allow, and a `futures::executor::block_on`
+    // panics inside a tokio runtime. The 60-second periodic requeue on
+    // each `KafkaTopic` catches cluster Ready transitions in time for
+    // operator UX; sub-minute responsiveness is not a slice-35 goal.
+    .watches(kafka_api, watcher::Config::default(), |_kafka| {
+        Vec::<ObjectRef<KafkaTopic>>::new().into_iter()
     })
     .run(reconcile, error_policy, Arc::new(ctx))
 ```
 
-The mapper does a synchronous list of `KafkaTopic` resources via the reflector cache to avoid hammering the apiserver — the kube-rs `Controller` exposes a `Cache<KafkaTopic>` for this.
+The same approach is used in `controller::kafka::run` for its `Node` watch — see the comment in `crates/operator/src/controller/kafka.rs` for the precedent. Sub-minute wake-up on cluster readiness is deferred to a future slice that wires a reflector cache through `TopicContext`.
 
 ### Reconcile fn (full pseudocode)
 
