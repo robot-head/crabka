@@ -1003,6 +1003,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "crabka-client-admin"
+version = "0.1.1"
+dependencies = [
+ "bytes",
+ "crabka-broker",
+ "crabka-client-core",
+ "crabka-protocol",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "crabka-client-consumer"
 version = "0.1.1"
 dependencies = [

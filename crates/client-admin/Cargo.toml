@@ -1,0 +1,26 @@
+[package]
+name = "crabka-client-admin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Operator-side admin client for Crabka clusters"
+
+[lints]
+workspace = true
+
+[dependencies]
+crabka-client-core = { version = "0.1", path = "../client-core" }
+crabka-protocol    = { version = "0.1", path = "../protocol", default-features = false }
+bytes              = { workspace = true }
+thiserror          = { workspace = true }
+tokio              = { workspace = true, features = ["sync", "time", "net"] }
+tracing            = { workspace = true }
+uuid               = { workspace = true }
+
+[dev-dependencies]
+crabka-broker = { version = "0.1", path = "../broker" }
+tempfile      = { workspace = true }
+tokio         = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+tracing-subscriber = { workspace = true }
