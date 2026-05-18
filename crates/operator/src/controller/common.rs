@@ -389,6 +389,15 @@ pub fn combined_config_hash(spec: &crate::crd::KafkaSpec) -> String {
     } else {
         ""
     };
+    // Slice-24 compatibility: when neither listeners nor metricsConfig
+    // are set, the hash collapses to `config_hash(config_part)` —
+    // byte-identical to the slice-24 hash for the same `spec.config`.
+    // This is what makes an in-place upgrade from slice 24 not trigger
+    // a hash-driven roll (the unavoidable template-change roll fires
+    // separately and once).
+    if intent.is_empty() && metrics_part.is_empty() {
+        return config_hash(&config_part);
+    }
     let mut buf = String::with_capacity(config_part.len() + 2 + intent.len() + metrics_part.len());
     buf.push_str(&config_part);
     buf.push('\x1F'); // ASCII unit separator
@@ -531,6 +540,18 @@ mod config_hash_tests {
         let h = combined_config_hash(&spec_a);
         let h_again = combined_config_hash(&spec_a);
         assert_eq!(h, h_again);
+
+        // Slice-24 compat: the hash for empty listeners + no metrics MUST
+        // equal `config_hash(serialized broker-properties)`. That's what
+        // lets an in-place slice-24 -> slice-25 upgrade avoid a
+        // hash-driven roll (the e2e job `kind-upgrade` asserts this
+        // against a real slice-24 cluster).
+        let slice24_form = "log.retention.hours=24\n";
+        assert_eq!(
+            h,
+            config_hash(slice24_form),
+            "combined hash for empty listeners must equal slice-24 config_hash(spec.config)"
+        );
 
         let mut spec_b = spec_a.clone();
         spec_b.listeners = vec![crate::controller::listeners::synthesized_default_listener()];
