@@ -57,3 +57,27 @@ tests:
           content:
             name: CRABKA_MIN_TOPIC_LEADERS_PER_BROKER
             value: "2"
+
+  - it: passes brokerCapacityFile env when brokerCapacities is set
+    set:
+      brokerCapacities:
+        1:
+          max_replicas: 4096
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CRABKA_BROKER_CAPACITY_FILE
+            value: /etc/crabka-rebalancer/capacity.yaml
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: capacity-config
+            mountPath: /etc/crabka-rebalancer
+            readOnly: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: capacity-config
+            configMap:
+              name: demo-crabka-rebalancer-capacity

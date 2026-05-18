@@ -35,6 +35,11 @@ impl GoalRegistry {
                 // Hard goals (priority order matters for the optimizer's Hard-first ordering).
                 Box::new(crate::goals::preferred_leader_idempotency::PreferredLeaderIdempotency),
                 Box::new(crate::goals::rack_aware::RackAware),
+                Box::new(crate::goals::replica_capacity::ReplicaCapacity),
+                Box::new(crate::goals::disk_capacity::DiskCapacity),
+                Box::new(crate::goals::network_in_capacity::NetworkInCapacity),
+                Box::new(crate::goals::network_out_capacity::NetworkOutCapacity),
+                Box::new(crate::goals::cpu_capacity::CpuCapacity),
                 // Soft goals.
                 Box::new(crate::goals::replica_distribution::ReplicaDistribution),
                 Box::new(crate::goals::leader_distribution::LeaderDistribution),
@@ -93,10 +98,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_registry_has_six_goals() {
+    fn default_registry_has_eleven_goals() {
         let r = GoalRegistry::default_registry();
         let all = r.select(&[]).unwrap();
-        assert_eq!(all.len(), 6);
+        assert_eq!(all.len(), 11);
+    }
+
+    #[test]
+    fn default_registry_order_matches_spec() {
+        let r = GoalRegistry::default_registry();
+        let names: Vec<&str> = r.select(&[]).unwrap().iter().map(|g| g.name()).collect();
+        assert_eq!(
+            names,
+            vec![
+                // Hard goals (priority order matters for the optimizer's
+                // Hard-first ordering).
+                "PreferredLeaderIdempotency",
+                "RackAware",
+                "ReplicaCapacity",
+                "DiskCapacity",
+                "NetworkInCapacity",
+                "NetworkOutCapacity",
+                "CpuCapacity",
+                // Soft goals.
+                "ReplicaDistribution",
+                "LeaderDistribution",
+                "TopicReplicaDistribution",
+                "MinTopicLeadersPerBroker",
+            ],
+            "registry order must match the spec's documented priority"
+        );
     }
 
     #[test]

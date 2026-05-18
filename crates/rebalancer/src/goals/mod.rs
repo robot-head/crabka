@@ -1,12 +1,20 @@
 //! `Goal` trait and shared context. Concrete goals live in sibling
 //! modules.
 
+use std::sync::Arc;
+
+use crate::capacity::BrokerCapacities;
 use crate::model::{ClusterState, Movement};
 
+pub mod cpu_capacity;
+pub mod disk_capacity;
 pub mod leader_distribution;
 pub mod min_topic_leaders_per_broker;
+pub mod network_in_capacity;
+pub mod network_out_capacity;
 pub mod preferred_leader_idempotency;
 pub mod rack_aware;
+pub mod replica_capacity;
 pub mod replica_distribution;
 pub mod topic_replica_distribution;
 
@@ -22,7 +30,10 @@ pub enum GoalPriority {
     Soft,
 }
 
-#[derive(Debug, Clone, Copy)]
+/// Shared per-proposal context. No longer `Copy` — the
+/// `broker_capacities` `Arc` makes copying ambiguous; every existing
+/// caller already takes `&GoalContext`, so this is zero-friction.
+#[derive(Debug, Clone)]
 pub struct GoalContext {
     /// `(max - min) * 100 / total` must exceed this percentage for a
     /// soft goal to act. Hard goals ignore the threshold.
@@ -31,8 +42,12 @@ pub struct GoalContext {
     /// can produce. Truncation drops soft-goal movements first.
     pub max_movements_per_proposal: usize,
     /// Minimum leader count per (broker, topic) pair for the
-    /// `MinTopicLeadersPerBroker` goal. `0` (default) disables the goal.
+    /// `MinTopicLeadersPerBroker` goal. `0` disables the goal.
     pub min_topic_leaders_per_broker: u32,
+    /// Per-broker capacity limits for the five capacity goals
+    /// (`ReplicaCapacity` enforces today; the other four are stubs
+    /// until 43e's metric scraping arrives).
+    pub broker_capacities: Arc<BrokerCapacities>,
 }
 
 pub trait Goal: Send + Sync {

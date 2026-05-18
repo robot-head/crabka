@@ -47,6 +47,13 @@ spec:
               value: {{ .Values.reassignmentBatchSize | quote }}
             - name: CRABKA_MIN_TOPIC_LEADERS_PER_BROKER
               value: {{ .Values.minTopicLeadersPerBroker | quote }}
+            {{- if .Values.brokerCapacityFile }}
+            - name: CRABKA_BROKER_CAPACITY_FILE
+              value: {{ .Values.brokerCapacityFile | quote }}
+            {{- else if .Values.brokerCapacities }}
+            - name: CRABKA_BROKER_CAPACITY_FILE
+              value: /etc/crabka-rebalancer/capacity.yaml
+            {{- end }}
             - name: CRABKA_DATA_DIR
               value: /var/lib/crabka-rebalancer
           ports:
@@ -68,12 +75,22 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/crabka-rebalancer
+            {{- if and .Values.brokerCapacities (not .Values.brokerCapacityFile) }}
+            - name: capacity-config
+              mountPath: /etc/crabka-rebalancer
+              readOnly: true
+            {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
       volumes:
         - name: data
           persistentVolumeClaim:
             claimName: {{ include "rebalancer.fullname" . }}
+        {{- if and .Values.brokerCapacities (not .Values.brokerCapacityFile) }}
+        - name: capacity-config
+          configMap:
+            name: {{ include "rebalancer.fullname" . }}-capacity
+        {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
