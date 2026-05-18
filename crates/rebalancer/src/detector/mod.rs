@@ -7,10 +7,12 @@
 //! `{data_dir}/anomalies.json` and surfaced via `GetAnomalies`.
 
 pub mod anomaly;
+pub mod metrics;
 pub mod rules;
 pub mod store;
 
 pub use anomaly::{Anomaly, AnomalyKey, AnomalyKind, AnomalySeverity};
+pub use metrics::DetectorMetrics;
 pub use store::{AnomalyStore, StoreError};
 
 use std::collections::VecDeque;
