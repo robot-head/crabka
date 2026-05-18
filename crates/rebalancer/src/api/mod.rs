@@ -4,7 +4,7 @@
 //! `pb::rebalancer_connect::RebalancerServiceBuilder`. Each method on
 //! the builder registers an axum handler under the canonical Connect
 //! route (`/crabka.rebalancer.v1.Rebalancer/<Method>`). We feed it the
-//! six freestanding async fns from `handlers`.
+//! freestanding async fns from `handlers`.
 //!
 //! Per-server state is propagated through an `Extension(Arc<AppState>)`
 //! layer attached to the built router; the generated builder's typed
@@ -96,6 +96,7 @@ pub fn router(state: Arc<handlers::AppState>) -> axum::Router {
         .list_proposals(handlers::list_proposals)
         .execute_proposal(handlers::execute_proposal)
         .cancel_execution(handlers::cancel_execution)
+        .get_anomalies(handlers::get_anomalies)
         .build()
         .layer(axum::Extension(state))
 }

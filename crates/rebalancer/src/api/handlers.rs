@@ -31,12 +31,16 @@ use crate::pb;
 pub struct AppState {
     pub snapshot: SharedSnapshot,
     pub store: Arc<ProposalStore>,
-    pub goal_registry: super::GoalRegistry,
+    // Arc so the binary can share one registry instance between
+    // `AppState` and the `Detector` (which holds it for auto_trigger).
+    pub goal_registry: Arc<super::GoalRegistry>,
     pub goal_ctx: crate::goals::GoalContext,
     pub metrics: RebalancerMetrics,
     // new in 43b:
     pub executor: crate::executor::ExecutorState,
     pub client_facade: Arc<dyn crate::executor::phases::ClientFacade>,
+    // new in 43g:
+    pub anomaly_store: Arc<crate::detector::AnomalyStore>,
 }
 
 /// Convert a `ClusterState` into the proto `GetStateResponse`.
@@ -127,6 +131,66 @@ pub fn proposal_to_proto(p: &crate::model::Proposal) -> pb::Proposal {
         failure_reason: p.failure_reason.clone(),
         throttle_bytes_per_sec: p.throttle_bytes_per_sec,
     }
+}
+
+#[must_use]
+pub fn anomaly_to_proto(a: &crate::detector::Anomaly) -> pb::Anomaly {
+    pb::Anomaly {
+        id: a.id.clone(),
+        kind: i32::from(anomaly_kind_to_proto(a.kind)),
+        key: Some(anomaly_key_to_proto(&a.key)),
+        severity: i32::from(anomaly_severity_to_proto(a.severity)),
+        detected_at_ms: a.detected_at_ms,
+        last_seen_at_ms: a.last_seen_at_ms,
+        resolved_at_ms: a.resolved_at_ms.unwrap_or(0),
+        triggered_proposal_id: a.triggered_proposal_id.clone(),
+        mute_until_ms: a.mute_until_ms.unwrap_or(0),
+        details: a.details.clone(),
+    }
+}
+
+#[must_use]
+fn anomaly_kind_to_proto(k: crate::detector::AnomalyKind) -> pb::AnomalyKind {
+    match k {
+        crate::detector::AnomalyKind::BrokerDeath => pb::AnomalyKind::BrokerDeath,
+        crate::detector::AnomalyKind::UnderReplicatedPartitions => {
+            pb::AnomalyKind::UnderReplicatedPartitions
+        }
+        crate::detector::AnomalyKind::DiskPressure => pb::AnomalyKind::DiskPressure,
+        crate::detector::AnomalyKind::SlowBroker => pb::AnomalyKind::SlowBroker,
+    }
+}
+
+#[must_use]
+fn anomaly_severity_to_proto(s: crate::detector::AnomalySeverity) -> pb::AnomalySeverity {
+    match s {
+        crate::detector::AnomalySeverity::Warning => pb::AnomalySeverity::Warning,
+        crate::detector::AnomalySeverity::Critical => pb::AnomalySeverity::Critical,
+    }
+}
+
+#[must_use]
+fn anomaly_key_to_proto(k: &crate::detector::AnomalyKey) -> pb::AnomalyKey {
+    use pb::anomaly_key::Inner;
+    let inner = match k {
+        crate::detector::AnomalyKey::Broker(id) => Inner::Broker(*id),
+        crate::detector::AnomalyKey::Partition { topic, partition } => {
+            Inner::Partition(pb::PartitionKey {
+                topic: topic.clone(),
+                partition: *partition,
+            })
+        }
+        crate::detector::AnomalyKey::BrokerPartition {
+            broker,
+            topic,
+            partition,
+        } => Inner::BrokerPartition(pb::BrokerPartitionKey {
+            broker: *broker,
+            topic: topic.clone(),
+            partition: *partition,
+        }),
+    };
+    pb::AnomalyKey { inner: Some(inner) }
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -370,6 +434,24 @@ pub async fn cancel_execution(
     }
 }
 
+/// Read the anomaly history. `limit = 0` returns up to the
+/// `AnomalyStore`'s full capacity. `include_resolved` defaults to `true`
+/// when unset — the wire's default boolean false would be surprising;
+/// most callers want the full history surface.
+pub async fn get_anomalies(
+    Extension(state): Extension<Arc<AppState>>,
+    req: ConnectRequest<pb::GetAnomaliesRequest>,
+) -> Result<ConnectResponse<pb::GetAnomaliesResponse>, ConnectError> {
+    let inner = req.0;
+    let limit = usize::try_from(inner.limit).unwrap_or(0);
+    let include_resolved = inner.include_resolved.unwrap_or(true);
+    let items = state.anomaly_store.list(limit, include_resolved);
+    let proto: Vec<pb::Anomaly> = items.iter().map(anomaly_to_proto).collect();
+    Ok(ConnectResponse::new(pb::GetAnomaliesResponse {
+        anomalies: proto,
+    }))
+}
+
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -446,7 +528,7 @@ mod tests {
         Arc::new(AppState {
             snapshot: new_shared_snapshot(),
             store,
-            goal_registry: crate::api::GoalRegistry::default_registry(),
+            goal_registry: Arc::new(crate::api::GoalRegistry::default_registry()),
             goal_ctx: GoalContext {
                 imbalance_threshold_pct: 10,
                 max_movements_per_proposal: 256,
@@ -457,6 +539,7 @@ mod tests {
             metrics,
             executor,
             client_facade,
+            anomaly_store: Arc::new(crate::detector::AnomalyStore::new(20)),
         })
     }
 
@@ -568,6 +651,69 @@ mod tests {
         .await
         .expect_err("expected NotFound");
         assert_eq!(err.code(), Code::NotFound);
+    }
+
+    #[test]
+    fn anomaly_kind_to_proto_covers_all_variants() {
+        use crate::detector::AnomalyKind;
+        assert_eq!(
+            anomaly_kind_to_proto(AnomalyKind::BrokerDeath),
+            pb::AnomalyKind::BrokerDeath
+        );
+        assert_eq!(
+            anomaly_kind_to_proto(AnomalyKind::UnderReplicatedPartitions),
+            pb::AnomalyKind::UnderReplicatedPartitions
+        );
+        assert_eq!(
+            anomaly_kind_to_proto(AnomalyKind::DiskPressure),
+            pb::AnomalyKind::DiskPressure
+        );
+        assert_eq!(
+            anomaly_kind_to_proto(AnomalyKind::SlowBroker),
+            pb::AnomalyKind::SlowBroker
+        );
+    }
+
+    #[test]
+    fn anomaly_key_to_proto_roundtrips_each_variant() {
+        use crate::detector::AnomalyKey;
+        let b = anomaly_key_to_proto(&AnomalyKey::Broker(7));
+        assert!(matches!(b.inner, Some(pb::anomaly_key::Inner::Broker(7))));
+
+        let p = anomaly_key_to_proto(&AnomalyKey::Partition {
+            topic: "t".into(),
+            partition: 3,
+        });
+        assert!(matches!(
+            p.inner,
+            Some(pb::anomaly_key::Inner::Partition(_))
+        ));
+
+        let bp = anomaly_key_to_proto(&AnomalyKey::BrokerPartition {
+            broker: 1,
+            topic: "t".into(),
+            partition: 2,
+        });
+        assert!(matches!(
+            bp.inner,
+            Some(pb::anomaly_key::Inner::BrokerPartition(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn get_anomalies_returns_empty_when_store_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = build_app_state(dir.path());
+        let resp = get_anomalies(
+            Extension(state),
+            ConnectRequest(pb::GetAnomaliesRequest {
+                limit: 0,
+                include_resolved: None,
+            }),
+        )
+        .await
+        .expect("handler should succeed");
+        assert!(resp.0.anomalies.is_empty());
     }
 
     #[tokio::test]
