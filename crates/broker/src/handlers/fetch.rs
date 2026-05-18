@@ -367,11 +367,17 @@ pub(crate) async fn handle(
         if topic_resp.topic.is_empty() {
             continue;
         }
-        let bytes: u64 = topic_resp
-            .partitions
-            .iter()
-            .map(|p| p.records.as_ref().map_or(0, RecordBatch::encoded_len) as u64)
-            .sum();
+        let mut bytes: u64 = 0;
+        for p in &topic_resp.partitions {
+            let partition_bytes =
+                p.records.as_ref().map_or(0, RecordBatch::encoded_len) as u64;
+            broker.metrics.record_partition_fetch(
+                &topic_resp.topic,
+                p.partition_index,
+                partition_bytes,
+            );
+            bytes += partition_bytes;
+        }
         broker.metrics.record_fetch(&topic_resp.topic, bytes);
     }
 
