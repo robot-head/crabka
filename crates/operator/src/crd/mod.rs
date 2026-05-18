@@ -21,5 +21,6 @@ pub use network_policy::{NetworkPolicyPeer, NetworkPolicySpec};
 pub use topic::{KafkaTopic, KafkaTopicSpec, KafkaTopicStatus};
 pub use user::{
     AclOp, AclPatternType, AclPermission, AclResource, AclResourceKind, AclRule, Authentication,
-    Authorization, KafkaUser, KafkaUserSpec, KafkaUserStatus, ScramSha512Auth, SimpleAuthorization,
+    Authorization, KafkaUser, KafkaUserQuotas, KafkaUserSpec, KafkaUserStatus, ScramSha512Auth,
+    SimpleAuthorization,
 };

@@ -1078,3 +1078,44 @@ Kafka client for ApiVersions.
   `do_read` futures are. The setup is fast and synchronous;
   expected to be negligible compared to log read CPU.
 
+## Slice 38 — Operator: KafkaUser client quotas (2026-05-18)
+
+- `crates/operator`: `KafkaUser.spec.quotas` (Strimzi-shaped) lands as
+  an optional `KafkaUserQuotas` struct with four fields —
+  `producerByteRate` / `consumerByteRate` / `requestPercentage` (i32)
+  and `controllerMutationRate` (f64). Status gains `quotasInSync` bool.
+- `crates/client-admin`: new `quotas` module surfaces
+  `AdminClient::describe_user_quotas(&str) -> BTreeMap<String,f64>`
+  and `AdminClient::alter_user_quotas(&str, &[QuotaOp], validate_only)`,
+  wrapping `DescribeClientQuotas` (`api_key` 48, KIP-13/124/546) and
+  `AlterClientQuotas` (`api_key` 49, KIP-13/124/257). Pure
+  `diff_user_quotas(current, desired) -> Vec<QuotaOp>` produces the
+  minimal `(Set, Remove)` op stream the reconciler applies.
+- `controller/user.rs` extends the reconcile pipeline with one
+  additional step after ACL convergence: `describe → diff → alter` for
+  the `(user)` entity. `spec.quotas: null` skips quota reconciliation
+  (operator does not manage); `spec.quotas: {}` (empty object) wipes
+  every broker quota key for the user. Finalizer cleanup tombstones
+  whatever the broker has for the user.
+- `AdminClientLike` trait gains `describe_user_quotas` +
+  `alter_user_quotas`. The reconcile-test fake under
+  `tests/shared/fake_admin.rs` grows an in-memory
+  `BTreeMap<String, UserQuotaConfig>` store and serves the two new
+  RPCs.
+- Tests: 7 unit tests in `quotas.rs` (diff happy-path / add / change /
+  remove / mixed; wire-projection for `Set` and `Remove`), 6 unit
+  tests in `crd/user.rs` (status defaults, quota-map projection,
+  Strimzi-shape parse, `{}` vs absent semantics), 4 reconcile-level
+  integration tests in `tests/reconcile_user.rs` (omitted-quotas =
+  no broker call, first-reconcile sets every declared key,
+  no-op when in sync, drift removes orphaned keys), and 2 wire
+  round-trip tests in `tests/quotas_round_trip.rs` against a live
+  in-process broker (set + change + remove flow; `validate_only` does
+  not persist).
+- CRD YAML regenerated: `deploy/crds/crabka.io_kafkausers.yaml` picks
+  up `spec.quotas` (with min/max constraints) and `status.quotasInSync`.
+- Out of scope (deferred): per-`client-id` and per-`ip` quota entities;
+  tuple `(user, client-id)` quotas; surfacing `connection_creation_rate`
+  via the CRD (broker pairs it with the `ip` entity, not `user`);
+  Strimzi's user-quotas `Plugin` variant indirection (Crabka surfaces
+  the typed shape directly).

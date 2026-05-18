@@ -11,10 +11,12 @@ use crabka_client_core::{ClientError, Connection, ConnectionOptions};
 use thiserror::Error;
 
 pub mod configs;
+pub mod quotas;
 pub mod topics;
 pub mod users;
 
 pub use configs::{AlterConfigsOutcome, IncrementalAlterOp, TopicConfigOverrides};
+pub use quotas::{QuotaOp, UserQuotaConfig, diff_user_quotas};
 pub use topics::{
     CreatePartitionsOp, CreatePartitionsOutcome, CreateTopicOutcome, CreateTopicSpec,
     DeleteTopicOutcome, TopicMetadata, TopicMetadataEntry,
@@ -73,6 +75,14 @@ pub trait AdminClientLike: Send {
         &mut self,
         filters: &[AclEntryFilter],
     ) -> Result<Vec<DeleteAclFilterOutcome>, AdminError>;
+    async fn describe_user_quotas(&mut self, username: &str)
+    -> Result<UserQuotaConfig, AdminError>;
+    async fn alter_user_quotas(
+        &mut self,
+        username: &str,
+        ops: &[QuotaOp],
+        validate_only: bool,
+    ) -> Result<Option<KafkaError>, AdminError>;
 }
 
 #[async_trait::async_trait]
@@ -137,6 +147,20 @@ impl AdminClientLike for AdminClient {
         filters: &[AclEntryFilter],
     ) -> Result<Vec<DeleteAclFilterOutcome>, AdminError> {
         AdminClient::delete_acls(self, filters).await
+    }
+    async fn describe_user_quotas(
+        &mut self,
+        username: &str,
+    ) -> Result<UserQuotaConfig, AdminError> {
+        AdminClient::describe_user_quotas(self, username).await
+    }
+    async fn alter_user_quotas(
+        &mut self,
+        username: &str,
+        ops: &[QuotaOp],
+        validate_only: bool,
+    ) -> Result<Option<KafkaError>, AdminError> {
+        AdminClient::alter_user_quotas(self, username, ops, validate_only).await
     }
 }
 

@@ -107,22 +107,29 @@ async fn alter_configs_round_trip() {
 
     // Wait for the supervisor reconcile loop to push the new config into the
     // partition's log. The supervisor runs on every metadata-image update
-    // (typically within a few hundred ms).
+    // (typically within a few hundred ms). The partition is queryable
+    // immediately after `create_topic_helper` returns, carrying the broker's
+    // default retention; we poll until the supervisor swaps in the override
+    // (or until the deadline).
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        if let Some(Some(retention)) = broker.partition_retention_ms_for_test("t-alter", 0) {
-            assert_eq!(
-                retention,
-                Duration::from_millis(60_000),
-                "unexpected retention_ms after AlterConfigs"
-            );
-            break;
+    let want = Duration::from_millis(60_000);
+    let last = loop {
+        let cur = broker
+            .partition_retention_ms_for_test("t-alter", 0)
+            .and_then(|inner| inner);
+        if cur == Some(want) {
+            break cur;
         }
         if std::time::Instant::now() > deadline {
-            panic!("retention.ms did not converge within 10 s");
+            break cur;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    };
+    assert_eq!(
+        last,
+        Some(want),
+        "retention_ms did not converge within 10 s after AlterConfigs",
+    );
 }
 
 /// AlterConfigs rejects an unknown key with `error_code == 40` (INVALID_CONFIG)

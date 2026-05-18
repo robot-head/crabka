@@ -15,8 +15,9 @@ use std::sync::Mutex as StdMutex;
 use crabka_client_admin::{
     AclEntry, AclEntryFilter, AdminClientLike, AdminError, AlterConfigsOutcome, CreateAclOutcome,
     CreatePartitionsOp, CreatePartitionsOutcome, CreateTopicOutcome, CreateTopicSpec,
-    DeleteAclFilterOutcome, DeleteTopicOutcome, IncrementalAlterOp, KafkaError, ScramDeletion,
-    ScramUpsertion, ScramUserOutcome, TopicConfigOverrides, TopicMetadata, TopicMetadataEntry,
+    DeleteAclFilterOutcome, DeleteTopicOutcome, IncrementalAlterOp, KafkaError, QuotaOp,
+    ScramDeletion, ScramUpsertion, ScramUserOutcome, TopicConfigOverrides, TopicMetadata,
+    TopicMetadataEntry, UserQuotaConfig,
 };
 use crabka_client_core::ClientError;
 
@@ -69,6 +70,12 @@ pub enum RecordedCall {
     DescribeAcls(AclEntryFilter),
     CreateAcls(Vec<AclEntry>),
     DeleteAcls(Vec<AclEntryFilter>),
+    DescribeUserQuotas(String),
+    AlterUserQuotas {
+        username: String,
+        ops: Vec<QuotaOp>,
+        validate_only: bool,
+    },
 }
 
 /// Per-topic state held by the fake. Mirrors `TopicMetadataEntry` +
@@ -99,6 +106,9 @@ pub struct FakeAdminClient {
     /// happy-path only inspects the recorded-call log; this set lets
     /// future deletion-path tests check eviction.
     pub scram_users: StdMutex<BTreeSet<String>>,
+    /// In-memory client-quota store, keyed by username. Slice 38 reconcile
+    /// tests seed this when verifying convergence.
+    pub user_quotas: StdMutex<BTreeMap<String, UserQuotaConfig>>,
 }
 
 impl FakeAdminClient {
@@ -625,6 +635,53 @@ impl AdminClientLike for FakeAdminClient {
             });
         }
         Ok(out)
+    }
+
+    async fn describe_user_quotas(
+        &mut self,
+        username: &str,
+    ) -> Result<UserQuotaConfig, AdminError> {
+        self.recorded_calls
+            .lock()
+            .unwrap()
+            .push(RecordedCall::DescribeUserQuotas(username.into()));
+        let store = self.user_quotas.lock().unwrap();
+        Ok(store.get(username).cloned().unwrap_or_default())
+    }
+
+    async fn alter_user_quotas(
+        &mut self,
+        username: &str,
+        ops: &[QuotaOp],
+        validate_only: bool,
+    ) -> Result<Option<KafkaError>, AdminError> {
+        self.recorded_calls
+            .lock()
+            .unwrap()
+            .push(RecordedCall::AlterUserQuotas {
+                username: username.into(),
+                ops: ops.to_vec(),
+                validate_only,
+            });
+        if validate_only {
+            return Ok(None);
+        }
+        let mut store = self.user_quotas.lock().unwrap();
+        let entry = store.entry(username.into()).or_default();
+        for op in ops {
+            match op {
+                QuotaOp::Set { key, value } => {
+                    entry.insert(key.clone(), *value);
+                }
+                QuotaOp::Remove { key } => {
+                    entry.remove(key);
+                }
+            }
+        }
+        if entry.is_empty() {
+            store.remove(username);
+        }
+        Ok(None)
     }
 }
 
