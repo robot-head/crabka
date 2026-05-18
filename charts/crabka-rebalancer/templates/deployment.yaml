@@ -62,6 +62,26 @@ spec:
             - name: CRABKA_METRICS_RETENTION_SECS
               value: {{ .Values.metricsRetentionSecs | quote }}
             {{- end }}
+            - name: CRABKA_DETECTOR_TICK_INTERVAL_SECS
+              value: {{ .Values.detector.tickIntervalSecs | quote }}
+            - name: CRABKA_DETECTOR_BROKER_DEATH_THRESHOLD_SECS
+              value: {{ .Values.detector.brokerDeathThresholdSecs | quote }}
+            - name: CRABKA_DETECTOR_UNDER_REPLICATED_THRESHOLD_SECS
+              value: {{ .Values.detector.underReplicatedThresholdSecs | quote }}
+            - name: CRABKA_DETECTOR_DISK_PRESSURE_PCT
+              value: {{ .Values.detector.diskPressurePct | quote }}
+            - name: CRABKA_DETECTOR_DISK_CRITICAL_PCT
+              value: {{ .Values.detector.diskCriticalPct | quote }}
+            - name: CRABKA_DETECTOR_SLOW_BROKER_MULTIPLIER
+              value: {{ .Values.detector.slowBrokerMultiplier | quote }}
+            - name: CRABKA_DETECTOR_SLOW_BROKER_MIN_CORES
+              value: {{ .Values.detector.slowBrokerMinCores | quote }}
+            - name: CRABKA_DETECTOR_MUTE_WINDOW_SECS
+              value: {{ .Values.detector.muteWindowSecs | quote }}
+            - name: CRABKA_DETECTOR_AUTO_TRIGGER_ENABLED
+              value: {{ .Values.detector.autoTriggerEnabled | quote }}
+            - name: CRABKA_ANOMALY_RING_BUFFER_SIZE
+              value: {{ .Values.anomalyRingBufferSize | quote }}
             - name: CRABKA_DATA_DIR
               value: /var/lib/crabka-rebalancer
           ports:

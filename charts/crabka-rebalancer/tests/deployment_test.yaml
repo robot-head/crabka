@@ -103,3 +103,37 @@ tests:
           content:
             name: CRABKA_METRICS_RETENTION_SECS
             value: "3600"
+
+  - it: passes detector env vars with safe defaults
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CRABKA_DETECTOR_TICK_INTERVAL_SECS
+            value: "30"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CRABKA_DETECTOR_AUTO_TRIGGER_ENABLED
+            value: "false"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CRABKA_ANOMALY_RING_BUFFER_SIZE
+            value: "200"
+
+  - it: detector auto-trigger env flips when enabled
+    set:
+      detector.autoTriggerEnabled: true
+      detector.muteWindowSecs: 600
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CRABKA_DETECTOR_AUTO_TRIGGER_ENABLED
+            value: "true"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CRABKA_DETECTOR_MUTE_WINDOW_SECS
+            value: "600"

@@ -40,6 +40,24 @@ metricsScrapeIntervalSecs: 30
 # longest window the goals query.
 metricsRetentionSecs: 43200
 
+# Anomaly detector (slice 43g).
+# Set detector.tickIntervalSecs: 0 to disable the detector entirely.
+# autoTriggerEnabled toggles self-healing proposal auto-trigger; default
+# false — operators must opt in.
+detector:
+  tickIntervalSecs: 30
+  brokerDeathThresholdSecs: 60
+  underReplicatedThresholdSecs: 120
+  diskPressurePct: 0.85
+  diskCriticalPct: 0.95
+  slowBrokerMultiplier: 2.0
+  slowBrokerMinCores: 0.5
+  muteWindowSecs: 900
+  autoTriggerEnabled: false
+
+# Ring buffer capacity for {data_dir}/anomalies.json.
+anomalyRingBufferSize: 200
+
 maxMovementsPerProposal: 256
 proposalRingBufferSize: 20
 
