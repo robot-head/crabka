@@ -36,9 +36,18 @@ impl ReplicaCapacity {
     /// Find the broker with the largest excess over its configured
     /// `max_replicas`. Ignore brokers without an entry or without a
     /// `max_replicas` limit. Returns `None` when no broker is over.
+    /// Ties on excess resolve to the lowest `broker_id`, so the emitted
+    /// movement list is stable across runs for identical input
+    /// (`HashMap` iteration order is randomized).
     fn find_over_capacity(counts: &HashMap<i32, usize>, ctx: &GoalContext) -> Option<i32> {
+        // Sort by broker_id ascending so ties on excess resolve
+        // deterministically (lower broker_id wins).
+        let mut ordered: Vec<(i32, usize)> =
+            counts.iter().map(|(b, c)| (*b, *c)).collect();
+        ordered.sort_by_key(|(b, _)| *b);
+
         let mut over: Option<(i32, usize, u32)> = None;
-        for (broker, current) in counts {
+        for (broker, current) in &ordered {
             let Some(cap) = ctx.broker_capacities.for_broker(*broker) else {
                 continue;
             };
@@ -56,10 +65,14 @@ impl ReplicaCapacity {
         over.map(|(b, _, _)| b)
     }
 
-    /// Pick a destination broker. Prefer brokers with an entry whose
-    /// count is strictly below their limit; fall back to brokers
-    /// without an entry (unconstrained). Tie-break by current count
-    /// ascending, then broker id ascending for determinism.
+    /// Pick a destination broker for the next replica eviction. Scores
+    /// brokers by current replica count (lower = better) so the
+    /// emptiest broker wins. Brokers with `max_replicas` already at or
+    /// above their limit are pushed to the back (score = `usize::MAX`).
+    /// Brokers with **no** capacity entry — or no `max_replicas` field —
+    /// compete on equal footing with under-capacity entry brokers
+    /// (operator hasn't expressed a constraint → fair game). Tie-breaks
+    /// on `broker_id` ascending.
     fn pick_cold(
         broker_ids: &[i32],
         hot: i32,
@@ -298,5 +311,52 @@ mod tests {
         let s = state_with(parts, vec![1, 2, 3]);
         let mvs = ReplicaCapacity.propose(&s, &ctx_with(caps));
         assert!(mvs.is_empty(), "no max_replicas must no-op, got {mvs:?}");
+    }
+
+    #[test]
+    fn over_capacity_evict_choice_is_deterministic() {
+        // Two brokers (1, 2) each holding 5 replicas; max_replicas: 3.
+        // Both have equal excess (2). Without sort, HashMap order would
+        // pick either; with sort, broker 1 wins each run.
+        let mut by = std::collections::HashMap::new();
+        by.insert(
+            1,
+            BrokerCapacity {
+                max_replicas: Some(3),
+                ..Default::default()
+            },
+        );
+        by.insert(
+            2,
+            BrokerCapacity {
+                max_replicas: Some(3),
+                ..Default::default()
+            },
+        );
+        let caps = BrokerCapacities { by_broker: by };
+
+        // 5 partitions, all on brokers 1 and 2 (broker 3 is the destination).
+        let parts: Vec<_> = (0..5).map(|i| part("t", i, vec![1, 2], 1)).collect();
+        let s = state_with(parts, vec![1, 2, 3]);
+
+        // Run propose 5 times against fresh state; first movement's
+        // donor must be broker 1 each time (tie-broken by id).
+        for _ in 0..5 {
+            let mvs = ReplicaCapacity.propose(&s, &ctx_with(caps.clone()));
+            assert!(!mvs.is_empty(), "expected at least one movement");
+            let first = &mvs[0];
+            // The first movement evicts whichever broker find_over_capacity
+            // picked first. Determinism = same broker every run.
+            let evicted = first
+                .old_replicas
+                .iter()
+                .find(|r| !first.new_replicas.contains(r))
+                .copied()
+                .expect("a broker was evicted");
+            assert_eq!(
+                evicted, 1,
+                "tie should resolve to broker 1 (lowest id), got broker {evicted}"
+            );
+        }
     }
 }
