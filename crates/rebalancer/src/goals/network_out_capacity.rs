@@ -1,37 +1,167 @@
 //! Hard goal: enforce a per-broker `network_out_bytes_per_sec` limit
-//! from the capacity config.
-//!
-//! **Stub in slice 43d.** `propose` returns empty and `is_satisfied`
-//! returns true unconditionally — per-partition byte-out data is not
-//! available until slice 43e wires `metrics_scraper`. The struct,
-//! registry entry, and config-field reads ship now so 43e can replace
-//! the body mechanically.
+//! using the scraped `UsageStore::bytes_out_rate` summed across the
+//! broker's hosted partitions (all replica roles).
+
+use std::collections::HashMap;
 
 use crate::goals::{Goal, GoalContext, GoalPriority};
-use crate::model::{ClusterState, Movement};
+use crate::model::{ClusterState, Movement, PartitionView};
+use crate::scraper::Window;
 
 pub struct NetworkOutCapacity;
 
 impl NetworkOutCapacity {
     pub const NAME: &'static str = "NetworkOutCapacity";
+
+    fn totals(
+        partitions: &[PartitionView],
+        broker_ids: &[i32],
+        ctx: &GoalContext,
+    ) -> HashMap<i32, f64> {
+        let mut m: HashMap<i32, f64> = broker_ids.iter().map(|b| (*b, 0.0)).collect();
+        for p in partitions {
+            for replica in &p.replicas {
+                if let Some(rate) = ctx.broker_usages.bytes_out_rate(
+                    *replica,
+                    &p.topic,
+                    p.partition,
+                    Window::FiveMin,
+                ) {
+                    *m.entry(*replica).or_insert(0.0) += rate;
+                }
+            }
+        }
+        m
+    }
 }
 
 impl Goal for NetworkOutCapacity {
     fn name(&self) -> &'static str {
         Self::NAME
     }
-
     fn priority(&self) -> GoalPriority {
         GoalPriority::Hard
     }
+    #[allow(clippy::too_many_lines, clippy::cast_precision_loss)]
+    fn propose(&self, state: &ClusterState, ctx: &GoalContext) -> Vec<Movement> {
+        let broker_ids: Vec<i32> = state.brokers.iter().map(|b| b.id).collect();
+        let mut working: Vec<PartitionView> = state.partitions.clone();
+        let mut out: Vec<Movement> = Vec::new();
+        let original_replicas: HashMap<(String, i32), Vec<i32>> = state
+            .partitions
+            .iter()
+            .map(|p| ((p.topic.clone(), p.partition), p.replicas.clone()))
+            .collect();
+        let original_leader: HashMap<(String, i32), i32> = state
+            .partitions
+            .iter()
+            .map(|p| ((p.topic.clone(), p.partition), p.leader))
+            .collect();
 
-    fn propose(&self, _state: &ClusterState, _ctx: &GoalContext) -> Vec<Movement> {
-        // Stub: 43e wires per-partition byte-out data and the real logic.
-        Vec::new()
+        loop {
+            let totals = Self::totals(&working, &broker_ids, ctx);
+            let mut over: Option<(i32, f64, f64)> = None;
+            for (broker, current) in &totals {
+                let Some(cap) = ctx.broker_capacities.for_broker(*broker) else {
+                    continue;
+                };
+                let Some(limit) = cap.network_out_bytes_per_sec else {
+                    continue;
+                };
+                let limit_f = limit as f64;
+                if *current > limit_f {
+                    let excess = current - limit_f;
+                    let prior = over.map_or(0.0, |(_, c, l)| c - l);
+                    if excess > prior {
+                        over = Some((*broker, *current, limit_f));
+                    }
+                }
+            }
+            let Some((hot, _, _)) = over else {
+                break;
+            };
+
+            // Order candidate destination brokers by current load
+            // (lower first). Within ties, smaller broker_id wins.
+            let mut candidates: Vec<i32> =
+                broker_ids.iter().copied().filter(|b| *b != hot).collect();
+            candidates.sort_by(|a, b| {
+                let cur_a = totals.get(a).copied().unwrap_or(0.0);
+                let cur_b = totals.get(b).copied().unwrap_or(0.0);
+                cur_a
+                    .partial_cmp(&cur_b)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.cmp(b))
+            });
+
+            // Pick the first (cold, partition_idx) pair where cold isn't
+            // already a replica of the chosen partition on `hot`.
+            let mut chosen: Option<(i32, usize)> = None;
+            for cold in &candidates {
+                if let Some(idx) = working.iter().position(|p| {
+                    p.replicas.contains(&hot)
+                        && !p.replicas.contains(cold)
+                        && p.replicas.len() <= state.brokers.len()
+                }) {
+                    chosen = Some((*cold, idx));
+                    break;
+                }
+            }
+            let Some((cold, idx)) = chosen else {
+                break;
+            };
+            let p = &mut working[idx];
+            let key = (p.topic.clone(), p.partition);
+            let pos = p
+                .replicas
+                .iter()
+                .position(|r| *r == hot)
+                .expect("hot present");
+            p.replicas[pos] = cold;
+            let new_leader = if p.leader == hot {
+                *p.replicas
+                    .iter()
+                    .find(|r| p.isr.contains(r))
+                    .unwrap_or(&p.replicas[0])
+            } else {
+                p.leader
+            };
+            let old_replicas = original_replicas
+                .get(&key)
+                .cloned()
+                .unwrap_or_else(|| p.replicas.clone());
+            let old_leader = original_leader.get(&key).copied().unwrap_or(p.leader);
+            out.push(Movement {
+                topic: p.topic.clone(),
+                partition: p.partition,
+                old_replicas,
+                new_replicas: p.replicas.clone(),
+                old_leader,
+                new_leader,
+            });
+            p.leader = new_leader;
+            if out.len() >= ctx.max_movements_per_proposal {
+                break;
+            }
+        }
+        out
     }
 
-    fn is_satisfied(&self, _state: &ClusterState) -> bool {
-        // Stub: 43e replaces this with a real capacity-vs-usage check.
+    #[allow(clippy::cast_precision_loss)]
+    fn is_satisfied_with_ctx(&self, state: &ClusterState, ctx: &GoalContext) -> bool {
+        let broker_ids: Vec<i32> = state.brokers.iter().map(|b| b.id).collect();
+        let totals = Self::totals(&state.partitions, &broker_ids, ctx);
+        for (broker, current) in &totals {
+            let Some(cap) = ctx.broker_capacities.for_broker(*broker) else {
+                continue;
+            };
+            let Some(limit) = cap.network_out_bytes_per_sec else {
+                continue;
+            };
+            if *current > limit as f64 {
+                return false;
+            }
+        }
         true
     }
 }
@@ -40,49 +170,123 @@ impl Goal for NetworkOutCapacity {
 mod tests {
     use super::*;
     use crate::capacity::{BrokerCapacities, BrokerCapacity};
-    use crate::model::{BrokerView, PartitionView};
-    use crate::scraper::UsageStore;
+    use crate::model::BrokerView;
+    use crate::scraper::parse::ParsedSample;
+    use crate::scraper::{MetricKind, UsageStore, WindowConfig};
     use std::sync::Arc;
+    use std::time::Duration;
 
-    fn ctx() -> GoalContext {
-        let mut by = std::collections::HashMap::new();
-        by.insert(
-            1,
-            BrokerCapacity {
-                network_out_bytes_per_sec: Some(125_000_000),
-                ..Default::default()
-            },
-        );
+    fn ctx_with(caps: BrokerCapacities, store: Arc<UsageStore>) -> GoalContext {
         GoalContext {
             imbalance_threshold_pct: 10,
             max_movements_per_proposal: 256,
             min_topic_leaders_per_broker: 0,
-            broker_capacities: Arc::new(BrokerCapacities { by_broker: by }),
-            broker_usages: Arc::new(UsageStore::default()),
+            broker_capacities: Arc::new(caps),
+            broker_usages: store,
         }
     }
 
-    #[test]
-    fn stub_returns_empty_regardless_of_state() {
-        let state = ClusterState {
+    fn state_with(parts: Vec<PartitionView>, brokers: Vec<i32>) -> ClusterState {
+        ClusterState {
             cluster_id: None,
             snapshot_at_ms: 0,
-            brokers: vec![BrokerView {
-                id: 1,
-                host: "h1".into(),
-                port: 9092,
-                rack: None,
-            }],
-            partitions: vec![PartitionView {
-                topic: "t".into(),
-                partition: 0,
-                replicas: vec![1],
-                leader: 1,
-                isr: vec![1],
-            }],
+            brokers: brokers
+                .into_iter()
+                .map(|id| BrokerView {
+                    id,
+                    host: format!("h{id}"),
+                    port: 9092,
+                    rack: None,
+                })
+                .collect(),
+            partitions: parts,
             in_flight_reassignments: vec![],
-        };
-        assert!(NetworkOutCapacity.propose(&state, &ctx()).is_empty());
-        assert!(NetworkOutCapacity.is_satisfied(&state));
+        }
+    }
+
+    fn part(topic: &str, partition: i32, replicas: Vec<i32>, leader: i32) -> PartitionView {
+        let isr = replicas.clone();
+        PartitionView {
+            topic: topic.into(),
+            partition,
+            replicas,
+            leader,
+            isr,
+        }
+    }
+
+    fn store_with_counter_pair(samples: Vec<(i32, &str, i32, f64, f64)>) -> Arc<UsageStore> {
+        let store = UsageStore::new(WindowConfig {
+            scrape_interval: Duration::from_secs(30),
+            retention: Duration::from_hours(1),
+        });
+        for (broker, topic, partition, v_t0, _) in &samples {
+            store.insert(
+                *broker,
+                vec![ParsedSample {
+                    metric: MetricKind::BytesOut,
+                    topic: (*topic).into(),
+                    partition: *partition,
+                    value: *v_t0,
+                }],
+                0,
+            );
+        }
+        for (broker, topic, partition, _, v_t1) in samples {
+            store.insert(
+                broker,
+                vec![ParsedSample {
+                    metric: MetricKind::BytesOut,
+                    topic: topic.into(),
+                    partition,
+                    value: v_t1,
+                }],
+                1000,
+            );
+        }
+        Arc::new(store)
+    }
+
+    fn caps(broker: i32, bps: u64) -> BrokerCapacities {
+        let mut b = std::collections::HashMap::new();
+        b.insert(
+            broker,
+            BrokerCapacity {
+                network_out_bytes_per_sec: Some(bps),
+                ..Default::default()
+            },
+        );
+        BrokerCapacities { by_broker: b }
+    }
+
+    #[test]
+    fn empty_usage_no_op() {
+        let parts: Vec<_> = (0..3).map(|i| part("t", i, vec![1, 2], 1)).collect();
+        let s = state_with(parts, vec![1, 2]);
+        let ctx = ctx_with(caps(1, 1_000_000), Arc::new(UsageStore::default()));
+        assert!(NetworkOutCapacity.propose(&s, &ctx).is_empty());
+        assert!(NetworkOutCapacity.is_satisfied_with_ctx(&s, &ctx));
+    }
+
+    #[test]
+    fn over_capacity_emits_movement() {
+        let parts: Vec<_> = (0..3).map(|i| part("t", i, vec![1, 2], 1)).collect();
+        let s = state_with(parts, vec![1, 2, 3]);
+        // 3 partitions × 200kB/s rate = 600kB/s on broker 1; limit 500kB/s.
+        let samples: Vec<_> = (0..3).map(|i| (1, "t", i, 0.0, 200_000.0)).collect();
+        let store = store_with_counter_pair(samples);
+        let ctx = ctx_with(caps(1, 500_000), store);
+        let mvs = NetworkOutCapacity.propose(&s, &ctx);
+        assert!(!mvs.is_empty(), "expected eviction; got {mvs:?}");
+    }
+
+    #[test]
+    fn is_satisfied_with_ctx_returns_false_when_over() {
+        let parts: Vec<_> = (0..3).map(|i| part("t", i, vec![1, 2], 1)).collect();
+        let s = state_with(parts, vec![1, 2]);
+        let samples: Vec<_> = (0..3).map(|i| (1, "t", i, 0.0, 200_000.0)).collect();
+        let store = store_with_counter_pair(samples);
+        let ctx = ctx_with(caps(1, 500_000), store);
+        assert!(!NetworkOutCapacity.is_satisfied_with_ctx(&s, &ctx));
     }
 }

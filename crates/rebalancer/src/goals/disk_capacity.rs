@@ -1,19 +1,41 @@
-//! Hard goal: enforce a per-broker `disk_bytes` limit from the
-//! capacity config.
-//!
-//! **Stub in slice 43d.** `propose` returns empty and `is_satisfied`
-//! returns true unconditionally — per-partition disk-usage data is
-//! not available until slice 43e wires `metrics_scraper`. The struct,
-//! registry entry, and config-field reads ship now so 43e can replace
-//! the body mechanically.
+//! Hard goal: enforce a per-broker `disk_bytes` limit using the
+//! scraped `UsageStore::disk_bytes_avg` for each (broker, topic,
+//! partition) the broker hosts. Slice 43e wires the real body; the
+//! 43d stub returning empty Vec is replaced.
+
+use std::collections::HashMap;
 
 use crate::goals::{Goal, GoalContext, GoalPriority};
-use crate::model::{ClusterState, Movement};
+use crate::model::{ClusterState, Movement, PartitionView};
+use crate::scraper::Window;
 
 pub struct DiskCapacity;
 
 impl DiskCapacity {
     pub const NAME: &'static str = "DiskCapacity";
+
+    /// Disk-bytes total per broker (sum of partition `disk_bytes_avg`
+    /// for the 5-min window). Skips partitions with no usage data.
+    fn totals(
+        partitions: &[PartitionView],
+        broker_ids: &[i32],
+        ctx: &GoalContext,
+    ) -> HashMap<i32, f64> {
+        let mut m: HashMap<i32, f64> = broker_ids.iter().map(|b| (*b, 0.0)).collect();
+        for p in partitions {
+            for replica in &p.replicas {
+                if let Some(bytes) = ctx.broker_usages.disk_bytes_avg(
+                    *replica,
+                    &p.topic,
+                    p.partition,
+                    Window::FiveMin,
+                ) {
+                    *m.entry(*replica).or_insert(0.0) += bytes;
+                }
+            }
+        }
+        m
+    }
 }
 
 impl Goal for DiskCapacity {
@@ -25,13 +47,149 @@ impl Goal for DiskCapacity {
         GoalPriority::Hard
     }
 
-    fn propose(&self, _state: &ClusterState, _ctx: &GoalContext) -> Vec<Movement> {
-        // Stub: 43e wires per-partition disk usage and the real logic.
-        Vec::new()
+    #[allow(clippy::too_many_lines, clippy::cast_precision_loss)]
+    fn propose(&self, state: &ClusterState, ctx: &GoalContext) -> Vec<Movement> {
+        let broker_ids: Vec<i32> = state.brokers.iter().map(|b| b.id).collect();
+        let mut working: Vec<PartitionView> = state.partitions.clone();
+        let mut out: Vec<Movement> = Vec::new();
+
+        let original_replicas: HashMap<(String, i32), Vec<i32>> = state
+            .partitions
+            .iter()
+            .map(|p| ((p.topic.clone(), p.partition), p.replicas.clone()))
+            .collect();
+        let original_leader: HashMap<(String, i32), i32> = state
+            .partitions
+            .iter()
+            .map(|p| ((p.topic.clone(), p.partition), p.leader))
+            .collect();
+
+        loop {
+            let totals = Self::totals(&working, &broker_ids, ctx);
+            // Find a broker exceeding its capacity.
+            let mut over: Option<(i32, f64, f64)> = None;
+            for (broker, current) in &totals {
+                let Some(cap) = ctx.broker_capacities.for_broker(*broker) else {
+                    continue;
+                };
+                let Some(limit) = cap.disk_bytes else {
+                    continue;
+                };
+                let limit_f = limit as f64;
+                if *current > limit_f {
+                    let excess = current - limit_f;
+                    let prior_excess = over.map_or(0.0, |(_, c, l)| c - l);
+                    if excess > prior_excess {
+                        over = Some((*broker, *current, limit_f));
+                    }
+                }
+            }
+            let Some((hot, _, _)) = over else {
+                break;
+            };
+
+            // Order candidate destination brokers by disk headroom
+            // (more headroom = better). Brokers without a capacity entry
+            // fall back to lowest current-usage ordering. Within equal
+            // headroom, smaller broker_id wins for determinism.
+            let mut candidates: Vec<i32> =
+                broker_ids.iter().copied().filter(|b| *b != hot).collect();
+            candidates.sort_by(|a, b| {
+                let cur_a = totals.get(a).copied().unwrap_or(0.0);
+                let cur_b = totals.get(b).copied().unwrap_or(0.0);
+                let headroom_a = ctx
+                    .broker_capacities
+                    .for_broker(*a)
+                    .and_then(|c| c.disk_bytes)
+                    .map(|l| l as f64 - cur_a);
+                let headroom_b = ctx
+                    .broker_capacities
+                    .for_broker(*b)
+                    .and_then(|c| c.disk_bytes)
+                    .map(|l| l as f64 - cur_b);
+                match (headroom_a, headroom_b) {
+                    (Some(ha), Some(hb)) if ha > 0.0 && hb > 0.0 => hb
+                        .partial_cmp(&ha)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| a.cmp(b)),
+                    (Some(ha), _) if ha > 0.0 => std::cmp::Ordering::Less,
+                    (_, Some(hb)) if hb > 0.0 => std::cmp::Ordering::Greater,
+                    _ => cur_a
+                        .partial_cmp(&cur_b)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| a.cmp(b)),
+                }
+            });
+
+            // Pick the first (cold, partition_idx) pair where cold isn't
+            // already a replica of the chosen partition on `hot`.
+            let mut chosen: Option<(i32, usize)> = None;
+            for cold in &candidates {
+                if let Some(idx) = working.iter().position(|p| {
+                    p.replicas.contains(&hot)
+                        && !p.replicas.contains(cold)
+                        && p.replicas.len() <= state.brokers.len()
+                }) {
+                    chosen = Some((*cold, idx));
+                    break;
+                }
+            }
+            let Some((cold, idx)) = chosen else {
+                break;
+            };
+
+            let p = &mut working[idx];
+            let key = (p.topic.clone(), p.partition);
+            let pos = p
+                .replicas
+                .iter()
+                .position(|r| *r == hot)
+                .expect("hot present");
+            p.replicas[pos] = cold;
+            let new_leader = if p.leader == hot {
+                *p.replicas
+                    .iter()
+                    .find(|r| p.isr.contains(r))
+                    .unwrap_or(&p.replicas[0])
+            } else {
+                p.leader
+            };
+            let old_replicas = original_replicas
+                .get(&key)
+                .cloned()
+                .unwrap_or_else(|| p.replicas.clone());
+            let old_leader = original_leader.get(&key).copied().unwrap_or(p.leader);
+            out.push(Movement {
+                topic: p.topic.clone(),
+                partition: p.partition,
+                old_replicas,
+                new_replicas: p.replicas.clone(),
+                old_leader,
+                new_leader,
+            });
+            p.leader = new_leader;
+            if out.len() >= ctx.max_movements_per_proposal {
+                break;
+            }
+        }
+        out
     }
 
-    fn is_satisfied(&self, _state: &ClusterState) -> bool {
-        // Stub: 43e replaces this with a real capacity-vs-usage check.
+    #[allow(clippy::cast_precision_loss)]
+    fn is_satisfied_with_ctx(&self, state: &ClusterState, ctx: &GoalContext) -> bool {
+        let broker_ids: Vec<i32> = state.brokers.iter().map(|b| b.id).collect();
+        let totals = Self::totals(&state.partitions, &broker_ids, ctx);
+        for (broker, current) in &totals {
+            let Some(cap) = ctx.broker_capacities.for_broker(*broker) else {
+                continue;
+            };
+            let Some(limit) = cap.disk_bytes else {
+                continue;
+            };
+            if *current > limit as f64 {
+                return false;
+            }
+        }
         true
     }
 }
@@ -40,49 +198,116 @@ impl Goal for DiskCapacity {
 mod tests {
     use super::*;
     use crate::capacity::{BrokerCapacities, BrokerCapacity};
-    use crate::model::{BrokerView, PartitionView};
-    use crate::scraper::UsageStore;
+    use crate::model::BrokerView;
+    use crate::scraper::parse::ParsedSample;
+    use crate::scraper::{MetricKind, UsageStore, WindowConfig};
     use std::sync::Arc;
+    use std::time::Duration;
 
-    fn ctx() -> GoalContext {
-        let mut by = std::collections::HashMap::new();
-        by.insert(
-            1,
-            BrokerCapacity {
-                disk_bytes: Some(100),
-                ..Default::default()
-            },
-        );
+    fn ctx_with(caps: BrokerCapacities, store: Arc<UsageStore>) -> GoalContext {
         GoalContext {
             imbalance_threshold_pct: 10,
             max_movements_per_proposal: 256,
             min_topic_leaders_per_broker: 0,
-            broker_capacities: Arc::new(BrokerCapacities { by_broker: by }),
-            broker_usages: Arc::new(UsageStore::default()),
+            broker_capacities: Arc::new(caps),
+            broker_usages: store,
+        }
+    }
+
+    fn state_with(parts: Vec<PartitionView>, brokers: Vec<i32>) -> ClusterState {
+        ClusterState {
+            cluster_id: None,
+            snapshot_at_ms: 0,
+            brokers: brokers
+                .into_iter()
+                .map(|id| BrokerView {
+                    id,
+                    host: format!("h{id}"),
+                    port: 9092,
+                    rack: None,
+                })
+                .collect(),
+            partitions: parts,
+            in_flight_reassignments: vec![],
+        }
+    }
+
+    fn part(topic: &str, partition: i32, replicas: Vec<i32>, leader: i32) -> PartitionView {
+        let isr = replicas.clone();
+        PartitionView {
+            topic: topic.into(),
+            partition,
+            replicas,
+            leader,
+            isr,
+        }
+    }
+
+    fn store_with_disk(samples: Vec<(i32, &str, i32, f64)>) -> Arc<UsageStore> {
+        let store = UsageStore::new(WindowConfig {
+            scrape_interval: Duration::from_secs(30),
+            retention: Duration::from_hours(1),
+        });
+        for (broker, topic, partition, value) in samples {
+            store.insert(
+                broker,
+                vec![ParsedSample {
+                    metric: MetricKind::DiskBytes,
+                    topic: topic.into(),
+                    partition,
+                    value,
+                }],
+                0,
+            );
+        }
+        Arc::new(store)
+    }
+
+    fn caps_with_disk(broker: i32, disk_bytes: u64) -> BrokerCapacities {
+        let mut b = std::collections::HashMap::new();
+        b.insert(
+            broker,
+            BrokerCapacity {
+                disk_bytes: Some(disk_bytes),
+                ..Default::default()
+            },
+        );
+        BrokerCapacities { by_broker: b }
+    }
+
+    #[test]
+    fn empty_usage_no_op() {
+        let parts: Vec<_> = (0..3).map(|i| part("t", i, vec![1, 2], 1)).collect();
+        let s = state_with(parts, vec![1, 2]);
+        let ctx = ctx_with(caps_with_disk(1, 1_000_000), Arc::new(UsageStore::default()));
+        assert!(DiskCapacity.propose(&s, &ctx).is_empty());
+        assert!(DiskCapacity.is_satisfied_with_ctx(&s, &ctx));
+    }
+
+    #[test]
+    fn over_capacity_emits_movement() {
+        // Broker 1 has 3 partitions × 500 = 1500 disk; limit 1000.
+        let parts: Vec<_> = (0..3).map(|i| part("t", i, vec![1, 2], 1)).collect();
+        let s = state_with(parts, vec![1, 2, 3]);
+        let samples: Vec<_> = (0..3).map(|i| (1, "t", i, 500.0)).collect();
+        let store = store_with_disk(samples);
+        let ctx = ctx_with(caps_with_disk(1, 1000), store);
+        let mvs = DiskCapacity.propose(&s, &ctx);
+        assert!(!mvs.is_empty(), "expected eviction; got {mvs:?}");
+        for m in &mvs {
+            let before = m.old_replicas.iter().filter(|x| **x == 1).count();
+            let after = m.new_replicas.iter().filter(|x| **x == 1).count();
+            assert!(after < before, "movement must reduce broker 1's replicas");
         }
     }
 
     #[test]
-    fn stub_returns_empty_regardless_of_state() {
-        let state = ClusterState {
-            cluster_id: None,
-            snapshot_at_ms: 0,
-            brokers: vec![BrokerView {
-                id: 1,
-                host: "h1".into(),
-                port: 9092,
-                rack: None,
-            }],
-            partitions: vec![PartitionView {
-                topic: "t".into(),
-                partition: 0,
-                replicas: vec![1],
-                leader: 1,
-                isr: vec![1],
-            }],
-            in_flight_reassignments: vec![],
-        };
-        assert!(DiskCapacity.propose(&state, &ctx()).is_empty());
-        assert!(DiskCapacity.is_satisfied(&state));
+    fn is_satisfied_with_ctx_returns_false_when_over() {
+        let parts: Vec<_> = (0..3).map(|i| part("t", i, vec![1, 2], 1)).collect();
+        let s = state_with(parts, vec![1, 2]);
+        let samples: Vec<_> = (0..3).map(|i| (1, "t", i, 500.0)).collect();
+        let store = store_with_disk(samples);
+        let ctx = ctx_with(caps_with_disk(1, 1000), store);
+        assert!(!DiskCapacity.is_satisfied_with_ctx(&s, &ctx));
     }
 }

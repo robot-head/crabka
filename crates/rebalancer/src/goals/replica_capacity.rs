@@ -196,7 +196,25 @@ impl Goal for ReplicaCapacity {
         // ReplicaCapacity's invariant depends on GoalContext.broker_capacities
         // which is_satisfied doesn't see. Returns true so soft goals can
         // proceed; propose-time enforcement is the real safety. See
-        // slice 43d's design doc for the trade.
+        // slice 43d's design doc for the trade. The 43e
+        // `is_satisfied_with_ctx` override below closes that trade.
+        true
+    }
+
+    fn is_satisfied_with_ctx(&self, state: &ClusterState, ctx: &GoalContext) -> bool {
+        let broker_ids: Vec<i32> = state.brokers.iter().map(|b| b.id).collect();
+        let counts = Self::counts(&state.partitions, &broker_ids);
+        for (broker, current) in &counts {
+            let Some(cap) = ctx.broker_capacities.for_broker(*broker) else {
+                continue;
+            };
+            let Some(limit) = cap.max_replicas else {
+                continue;
+            };
+            if *current > limit as usize {
+                return false;
+            }
+        }
         true
     }
 }
@@ -359,5 +377,22 @@ mod tests {
                 "tie should resolve to broker 1 (lowest id), got broker {evicted}"
             );
         }
+    }
+
+    #[test]
+    fn is_satisfied_with_ctx_returns_false_when_over_capacity() {
+        // Broker 1 has 5 replicas but max_replicas: 3 → not satisfied.
+        let parts: Vec<_> = (0..5).map(|i| part("t", i, vec![1, 2], 1)).collect();
+        let s = state_with(parts, vec![1, 2, 3]);
+        let ctx = ctx_with(caps_with(1, 3));
+        assert!(!ReplicaCapacity.is_satisfied_with_ctx(&s, &ctx));
+    }
+
+    #[test]
+    fn is_satisfied_with_ctx_returns_true_when_within() {
+        let parts: Vec<_> = (0..3).map(|i| part("t", i, vec![1, 2], 1)).collect();
+        let s = state_with(parts, vec![1, 2]);
+        let ctx = ctx_with(caps_with(1, 10));
+        assert!(ReplicaCapacity.is_satisfied_with_ctx(&s, &ctx));
     }
 }
