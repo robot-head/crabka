@@ -42,15 +42,19 @@ mod tests {
         assert_eq!(sum_partition_dir(&missing).unwrap(), 0);
     }
 
+    fn write_file(path: &Path, bytes: &[u8]) {
+        let mut f = std::fs::File::create(path).unwrap();
+        f.write_all(bytes).unwrap();
+        // Drop closes the handle so Windows updates the directory metadata
+        // before `sum_partition_dir` walks it.
+    }
+
     #[test]
     fn sums_regular_files() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut f1 = std::fs::File::create(tmp.path().join("00000000000000000000.log")).unwrap();
-        f1.write_all(&[0u8; 1024]).unwrap();
-        let mut f2 = std::fs::File::create(tmp.path().join("00000000000000000000.index")).unwrap();
-        f2.write_all(&[0u8; 128]).unwrap();
-        let mut f3 = std::fs::File::create(tmp.path().join("leader-epoch-checkpoint")).unwrap();
-        f3.write_all(&[0u8; 32]).unwrap();
+        write_file(&tmp.path().join("00000000000000000000.log"), &[0u8; 1024]);
+        write_file(&tmp.path().join("00000000000000000000.index"), &[0u8; 128]);
+        write_file(&tmp.path().join("leader-epoch-checkpoint"), &[0u8; 32]);
         assert_eq!(sum_partition_dir(tmp.path()).unwrap(), 1024 + 128 + 32);
     }
 
@@ -58,11 +62,8 @@ mod tests {
     fn ignores_subdirectories() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir(tmp.path().join("subdir")).unwrap();
-        let mut f = std::fs::File::create(tmp.path().join("subdir/inner.log")).unwrap();
-        f.write_all(&[0u8; 999]).unwrap();
-        let mut top = std::fs::File::create(tmp.path().join("top.log")).unwrap();
-        top.write_all(&[0u8; 100]).unwrap();
-        // Only `top.log` counted; the subdir is not recursed.
+        write_file(&tmp.path().join("subdir/inner.log"), &[0u8; 999]);
+        write_file(&tmp.path().join("top.log"), &[0u8; 100]);
         assert_eq!(sum_partition_dir(tmp.path()).unwrap(), 100);
     }
 }

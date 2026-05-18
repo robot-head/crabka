@@ -81,10 +81,14 @@ mod tests {
         let p1 = tmp.path().join("t-1");
         std::fs::create_dir_all(&p0).unwrap();
         std::fs::create_dir_all(&p1).unwrap();
-        let mut f0 = std::fs::File::create(p0.join("00.log")).unwrap();
-        f0.write_all(&[0u8; 1234]).unwrap();
-        let mut f1 = std::fs::File::create(p1.join("00.log")).unwrap();
-        f1.write_all(&[0u8; 5678]).unwrap();
+        // Scope handles so they close before tick_once walks the dir
+        // (Windows reports stale dir metadata while files are still open).
+        {
+            let mut f0 = std::fs::File::create(p0.join("00.log")).unwrap();
+            f0.write_all(&[0u8; 1234]).unwrap();
+            let mut f1 = std::fs::File::create(p1.join("00.log")).unwrap();
+            f1.write_all(&[0u8; 5678]).unwrap();
+        }
 
         let metrics = BrokerMetrics::new();
         let scanner = DiskScanner {
