@@ -17,6 +17,39 @@ use crabka_client_admin::{
     CreateTopicOutcome, CreateTopicSpec, DeleteTopicOutcome, IncrementalAlterOp, KafkaError,
     TopicConfigOverrides, TopicMetadata, TopicMetadataEntry,
 };
+use crabka_client_core::ClientError;
+
+/// Per-RPC error to inject. `Broker` surfaces as a per-outcome error
+/// (matches how Kafka reports per-topic errors); `Transport` surfaces as
+/// `AdminError::Transport(_)` (the variant the reconcile T3-fix evicts
+/// the cached admin client on); `BrokerToplevel` surfaces as
+/// `AdminError::Broker { .. }` (the variant `describe_configs` returns
+/// when any result carries a non-zero error code).
+#[derive(Debug, Clone)]
+pub enum InjectableError {
+    Broker {
+        code: i16,
+        name: &'static str,
+        message: Option<String>,
+    },
+    BrokerToplevel {
+        api: &'static str,
+        code: i16,
+        name: &'static str,
+        message: Option<String>,
+    },
+    Transport,
+}
+
+#[derive(Debug, Default)]
+pub struct InjectedErrors {
+    pub on_create_topics: Option<InjectableError>,
+    pub on_delete_topics: Option<InjectableError>,
+    pub on_create_partitions: Option<InjectableError>,
+    pub on_describe_configs: Option<InjectableError>,
+    pub on_incremental_alter_configs: Option<InjectableError>,
+    pub on_metadata: Option<InjectableError>,
+}
 
 /// A single recorded admin call. Tests assert against the captured
 /// sequence to verify which RPCs were issued (and in what order).
@@ -49,6 +82,7 @@ pub struct TopicState {
 pub struct FakeAdminClient {
     pub recorded_calls: StdMutex<Vec<RecordedCall>>,
     pub topics: StdMutex<HashMap<String, TopicState>>,
+    pub injected: StdMutex<InjectedErrors>,
 }
 
 impl FakeAdminClient {
@@ -63,6 +97,73 @@ impl FakeAdminClient {
     pub fn calls(&self) -> Vec<RecordedCall> {
         self.recorded_calls.lock().unwrap().clone()
     }
+
+    pub fn inject_create_topics_broker_error(
+        &self,
+        code: i16,
+        name: &'static str,
+        message: Option<String>,
+    ) {
+        self.injected.lock().unwrap().on_create_topics =
+            Some(InjectableError::Broker { code, name, message });
+    }
+
+    pub fn inject_create_partitions_broker_error(
+        &self,
+        code: i16,
+        name: &'static str,
+        message: Option<String>,
+    ) {
+        self.injected.lock().unwrap().on_create_partitions =
+            Some(InjectableError::Broker { code, name, message });
+    }
+
+    pub fn inject_incremental_alter_configs_broker_error(
+        &self,
+        code: i16,
+        name: &'static str,
+        message: Option<String>,
+    ) {
+        self.injected.lock().unwrap().on_incremental_alter_configs =
+            Some(InjectableError::Broker { code, name, message });
+    }
+
+    pub fn inject_delete_topics_broker_error(
+        &self,
+        code: i16,
+        name: &'static str,
+        message: Option<String>,
+    ) {
+        self.injected.lock().unwrap().on_delete_topics =
+            Some(InjectableError::Broker { code, name, message });
+    }
+
+    /// Inject a top-level `AdminError::Broker { .. }` for `describe_configs`.
+    /// Matches the path the real `describe_configs` returns when any
+    /// per-resource result carries a non-zero error code.
+    pub fn inject_describe_configs_broker_error(
+        &self,
+        code: i16,
+        name: &'static str,
+        message: Option<String>,
+    ) {
+        self.injected.lock().unwrap().on_describe_configs = Some(InjectableError::BrokerToplevel {
+            api: "DescribeConfigs",
+            code,
+            name,
+            message,
+        });
+    }
+
+    /// Inject an `AdminError::Transport(_)` on the named RPC. The reconcile
+    /// loop evicts the cached admin client on this variant (the T3-fix path).
+    pub fn inject_metadata_transport_error(&self) {
+        self.injected.lock().unwrap().on_metadata = Some(InjectableError::Transport);
+    }
+}
+
+fn transport_error() -> AdminError {
+    AdminError::Transport(ClientError::Disconnected)
 }
 
 #[async_trait::async_trait]
@@ -74,6 +175,28 @@ impl AdminClientLike for FakeAdminClient {
             .push(RecordedCall::Metadata(
                 topics.iter().map(|s| (*s).to_string()).collect(),
             ));
+        if let Some(inj) = self.injected.lock().unwrap().on_metadata.clone() {
+            match inj {
+                InjectableError::Transport => return Err(transport_error()),
+                InjectableError::BrokerToplevel {
+                    api,
+                    code,
+                    name,
+                    message,
+                } => {
+                    return Err(AdminError::Broker {
+                        api,
+                        code,
+                        name,
+                        message,
+                    });
+                }
+                InjectableError::Broker { .. } => {
+                    // Metadata in the real client doesn't fail per-topic via
+                    // top-level error; tests don't use this path today.
+                }
+            }
+        }
         let stored = self.topics.lock().unwrap().clone();
         let entries: Vec<TopicMetadataEntry> = topics
             .iter()
@@ -113,6 +236,32 @@ impl AdminClientLike for FakeAdminClient {
             .lock()
             .unwrap()
             .push(RecordedCall::CreateTopics(specs.to_vec()));
+        if let Some(inj) = self.injected.lock().unwrap().on_create_topics.clone() {
+            match inj {
+                InjectableError::Transport => return Err(transport_error()),
+                InjectableError::Broker {
+                    code,
+                    name,
+                    message,
+                } => {
+                    return Ok(specs
+                        .iter()
+                        .map(|s| CreateTopicOutcome {
+                            name: s.name.clone(),
+                            topic_id: None,
+                            error: Some(KafkaError {
+                                code,
+                                name,
+                                message: message.clone(),
+                            }),
+                        })
+                        .collect());
+                }
+                InjectableError::BrokerToplevel { .. } => {
+                    // Not used for per-outcome RPCs; ignore.
+                }
+            }
+        }
         let mut store = self.topics.lock().unwrap();
         let outcomes = specs
             .iter()
@@ -148,6 +297,29 @@ impl AdminClientLike for FakeAdminClient {
             .push(RecordedCall::DeleteTopics(
                 names.iter().map(|s| (*s).to_string()).collect(),
             ));
+        if let Some(inj) = self.injected.lock().unwrap().on_delete_topics.clone() {
+            match inj {
+                InjectableError::Transport => return Err(transport_error()),
+                InjectableError::Broker {
+                    code,
+                    name,
+                    message,
+                } => {
+                    return Ok(names
+                        .iter()
+                        .map(|n| DeleteTopicOutcome {
+                            name: (*n).to_string(),
+                            error: Some(KafkaError {
+                                code,
+                                name,
+                                message: message.clone(),
+                            }),
+                        })
+                        .collect());
+                }
+                InjectableError::BrokerToplevel { .. } => {}
+            }
+        }
         let mut store = self.topics.lock().unwrap();
         let outcomes = names
             .iter()
@@ -171,6 +343,29 @@ impl AdminClientLike for FakeAdminClient {
             .lock()
             .unwrap()
             .push(RecordedCall::CreatePartitions(ops.to_vec()));
+        if let Some(inj) = self.injected.lock().unwrap().on_create_partitions.clone() {
+            match inj {
+                InjectableError::Transport => return Err(transport_error()),
+                InjectableError::Broker {
+                    code,
+                    name,
+                    message,
+                } => {
+                    return Ok(ops
+                        .iter()
+                        .map(|op| CreatePartitionsOutcome {
+                            name: op.name.clone(),
+                            error: Some(KafkaError {
+                                code,
+                                name,
+                                message: message.clone(),
+                            }),
+                        })
+                        .collect());
+                }
+                InjectableError::BrokerToplevel { .. } => {}
+            }
+        }
         let mut store = self.topics.lock().unwrap();
         let outcomes = ops
             .iter()
@@ -197,6 +392,36 @@ impl AdminClientLike for FakeAdminClient {
             .push(RecordedCall::DescribeConfigs(
                 topics.iter().map(|s| (*s).to_string()).collect(),
             ));
+        if let Some(inj) = self.injected.lock().unwrap().on_describe_configs.clone() {
+            match inj {
+                InjectableError::Transport => return Err(transport_error()),
+                InjectableError::BrokerToplevel {
+                    api,
+                    code,
+                    name,
+                    message,
+                } => {
+                    return Err(AdminError::Broker {
+                        api,
+                        code,
+                        name,
+                        message,
+                    });
+                }
+                InjectableError::Broker {
+                    code,
+                    name,
+                    message,
+                } => {
+                    return Err(AdminError::Broker {
+                        api: "DescribeConfigs",
+                        code,
+                        name,
+                        message,
+                    });
+                }
+            }
+        }
         let store = self.topics.lock().unwrap();
         Ok(topics
             .iter()
@@ -221,6 +446,44 @@ impl AdminClientLike for FakeAdminClient {
             .lock()
             .unwrap()
             .push(RecordedCall::IncrementalAlterConfigs(ops.to_vec()));
+        if let Some(inj) = self
+            .injected
+            .lock()
+            .unwrap()
+            .on_incremental_alter_configs
+            .clone()
+        {
+            match inj {
+                InjectableError::Transport => return Err(transport_error()),
+                InjectableError::Broker {
+                    code,
+                    name,
+                    message,
+                } => {
+                    let mut topics_touched: BTreeSet<String> = BTreeSet::new();
+                    for op in ops {
+                        match op {
+                            IncrementalAlterOp::Set { topic, .. }
+                            | IncrementalAlterOp::Delete { topic, .. } => {
+                                topics_touched.insert(topic.clone());
+                            }
+                        }
+                    }
+                    return Ok(topics_touched
+                        .into_iter()
+                        .map(|topic| AlterConfigsOutcome {
+                            topic,
+                            error: Some(KafkaError {
+                                code,
+                                name,
+                                message: message.clone(),
+                            }),
+                        })
+                        .collect());
+                }
+                InjectableError::BrokerToplevel { .. } => {}
+            }
+        }
         let mut store = self.topics.lock().unwrap();
         let mut topics_touched: BTreeSet<String> = BTreeSet::new();
         for op in ops {
