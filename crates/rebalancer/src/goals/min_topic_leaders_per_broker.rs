@@ -215,16 +215,17 @@ mod tests {
 
     #[test]
     fn under_served_not_in_isr_skipped() {
+        // Broker 2 is in every partition's replica set but never in ISR.
+        // The goal must not emit any movement because flipping leadership
+        // to a non-ISR broker would violate Kafka ISR invariants.
         let parts: Vec<_> = (0..3)
             .map(|i| part_with_isr("t", i, vec![1, 2], 1, vec![1]))
             .collect();
         let s = state_with(parts, vec![1, 2]);
         let mvs = MinTopicLeadersPerBroker.propose(&s, &ctx_with(1));
-        for m in &mvs {
-            assert_ne!(
-                m.new_leader, 2,
-                "broker 2 not in ISR; must not be promoted to leader"
-            );
-        }
+        assert!(
+            mvs.is_empty(),
+            "broker 2 not in ISR anywhere; expected no movements, got {mvs:?}"
+        );
     }
 }
