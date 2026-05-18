@@ -54,6 +54,14 @@ spec:
             - name: CRABKA_BROKER_CAPACITY_FILE
               value: /etc/crabka-rebalancer/capacity.yaml
             {{- end }}
+            {{- if .Values.metricsScrapeTargets }}
+            - name: CRABKA_METRICS_SCRAPE_TARGETS
+              value: {{ .Values.metricsScrapeTargets | quote }}
+            - name: CRABKA_METRICS_SCRAPE_INTERVAL_SECS
+              value: {{ .Values.metricsScrapeIntervalSecs | quote }}
+            - name: CRABKA_METRICS_RETENTION_SECS
+              value: {{ .Values.metricsRetentionSecs | quote }}
+            {{- end }}
             - name: CRABKA_DATA_DIR
               value: /var/lib/crabka-rebalancer
           ports:

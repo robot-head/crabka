@@ -31,6 +31,15 @@ brokerCapacities: {}
 # ConfigMap (operator is responsible for providing the file).
 brokerCapacityFile: ""
 
+# Per-broker /metrics scrape targets. Format:
+# "id:host:port,id:host:port,…". Empty = scraper disabled (usage-driven
+# goals are no-ops).
+metricsScrapeTargets: ""
+metricsScrapeIntervalSecs: 30
+# Retention for the rolling-window store. Default 12h matches the
+# longest window the goals query.
+metricsRetentionSecs: 43200
+
 maxMovementsPerProposal: 256
 proposalRingBufferSize: 20
 
