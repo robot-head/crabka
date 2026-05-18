@@ -710,7 +710,7 @@ async fn creates_topic_broker_error_surfaces_in_status() {
 
 /// Slice 35: topic exists at 3 partitions, spec=5; broker rejects
 /// `CreatePartitions` with `INVALID_PARTITIONS` → status
-/// `Ready=False reason=BrokerError` referencing CreatePartitions.
+/// `Ready=False reason=BrokerError` referencing `CreatePartitions`.
 #[tokio::test]
 async fn create_partitions_broker_error_surfaces_in_status() {
     let state = MockState::new(standard_kube_rules(TOPIC_NAME));

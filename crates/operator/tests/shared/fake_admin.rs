@@ -43,12 +43,12 @@ pub enum InjectableError {
 
 #[derive(Debug, Default)]
 pub struct InjectedErrors {
-    pub on_create_topics: Option<InjectableError>,
-    pub on_delete_topics: Option<InjectableError>,
-    pub on_create_partitions: Option<InjectableError>,
-    pub on_describe_configs: Option<InjectableError>,
-    pub on_incremental_alter_configs: Option<InjectableError>,
-    pub on_metadata: Option<InjectableError>,
+    pub create_topics: Option<InjectableError>,
+    pub delete_topics: Option<InjectableError>,
+    pub create_partitions: Option<InjectableError>,
+    pub describe_configs: Option<InjectableError>,
+    pub incremental_alter_configs: Option<InjectableError>,
+    pub metadata: Option<InjectableError>,
 }
 
 /// A single recorded admin call. Tests assert against the captured
@@ -104,7 +104,7 @@ impl FakeAdminClient {
         name: &'static str,
         message: Option<String>,
     ) {
-        self.injected.lock().unwrap().on_create_topics =
+        self.injected.lock().unwrap().create_topics =
             Some(InjectableError::Broker { code, name, message });
     }
 
@@ -114,7 +114,7 @@ impl FakeAdminClient {
         name: &'static str,
         message: Option<String>,
     ) {
-        self.injected.lock().unwrap().on_create_partitions =
+        self.injected.lock().unwrap().create_partitions =
             Some(InjectableError::Broker { code, name, message });
     }
 
@@ -124,7 +124,7 @@ impl FakeAdminClient {
         name: &'static str,
         message: Option<String>,
     ) {
-        self.injected.lock().unwrap().on_incremental_alter_configs =
+        self.injected.lock().unwrap().incremental_alter_configs =
             Some(InjectableError::Broker { code, name, message });
     }
 
@@ -134,7 +134,7 @@ impl FakeAdminClient {
         name: &'static str,
         message: Option<String>,
     ) {
-        self.injected.lock().unwrap().on_delete_topics =
+        self.injected.lock().unwrap().delete_topics =
             Some(InjectableError::Broker { code, name, message });
     }
 
@@ -147,7 +147,7 @@ impl FakeAdminClient {
         name: &'static str,
         message: Option<String>,
     ) {
-        self.injected.lock().unwrap().on_describe_configs = Some(InjectableError::BrokerToplevel {
+        self.injected.lock().unwrap().describe_configs = Some(InjectableError::BrokerToplevel {
             api: "DescribeConfigs",
             code,
             name,
@@ -158,7 +158,7 @@ impl FakeAdminClient {
     /// Inject an `AdminError::Transport(_)` on the named RPC. The reconcile
     /// loop evicts the cached admin client on this variant (the T3-fix path).
     pub fn inject_metadata_transport_error(&self) {
-        self.injected.lock().unwrap().on_metadata = Some(InjectableError::Transport);
+        self.injected.lock().unwrap().metadata = Some(InjectableError::Transport);
     }
 }
 
@@ -175,7 +175,7 @@ impl AdminClientLike for FakeAdminClient {
             .push(RecordedCall::Metadata(
                 topics.iter().map(|s| (*s).to_string()).collect(),
             ));
-        if let Some(inj) = self.injected.lock().unwrap().on_metadata.clone() {
+        if let Some(inj) = self.injected.lock().unwrap().metadata.clone() {
             match inj {
                 InjectableError::Transport => return Err(transport_error()),
                 InjectableError::BrokerToplevel {
@@ -236,7 +236,7 @@ impl AdminClientLike for FakeAdminClient {
             .lock()
             .unwrap()
             .push(RecordedCall::CreateTopics(specs.to_vec()));
-        if let Some(inj) = self.injected.lock().unwrap().on_create_topics.clone() {
+        if let Some(inj) = self.injected.lock().unwrap().create_topics.clone() {
             match inj {
                 InjectableError::Transport => return Err(transport_error()),
                 InjectableError::Broker {
@@ -297,7 +297,7 @@ impl AdminClientLike for FakeAdminClient {
             .push(RecordedCall::DeleteTopics(
                 names.iter().map(|s| (*s).to_string()).collect(),
             ));
-        if let Some(inj) = self.injected.lock().unwrap().on_delete_topics.clone() {
+        if let Some(inj) = self.injected.lock().unwrap().delete_topics.clone() {
             match inj {
                 InjectableError::Transport => return Err(transport_error()),
                 InjectableError::Broker {
@@ -343,7 +343,7 @@ impl AdminClientLike for FakeAdminClient {
             .lock()
             .unwrap()
             .push(RecordedCall::CreatePartitions(ops.to_vec()));
-        if let Some(inj) = self.injected.lock().unwrap().on_create_partitions.clone() {
+        if let Some(inj) = self.injected.lock().unwrap().create_partitions.clone() {
             match inj {
                 InjectableError::Transport => return Err(transport_error()),
                 InjectableError::Broker {
@@ -392,7 +392,7 @@ impl AdminClientLike for FakeAdminClient {
             .push(RecordedCall::DescribeConfigs(
                 topics.iter().map(|s| (*s).to_string()).collect(),
             ));
-        if let Some(inj) = self.injected.lock().unwrap().on_describe_configs.clone() {
+        if let Some(inj) = self.injected.lock().unwrap().describe_configs.clone() {
             match inj {
                 InjectableError::Transport => return Err(transport_error()),
                 InjectableError::BrokerToplevel {
@@ -450,7 +450,7 @@ impl AdminClientLike for FakeAdminClient {
             .injected
             .lock()
             .unwrap()
-            .on_incremental_alter_configs
+            .incremental_alter_configs
             .clone()
         {
             match inj {
