@@ -862,3 +862,56 @@ Kafka client for ApiVersions.
   best-effort variant of RackAware); per-proposal goal config
   (requires proto change); capacity / usage / CPU / anomaly goals
   (slices 43d–43g).
+
+## Slice 43d — Rebalancer capacity goals (2026-05-17)
+
+- Five new hard goals shipped under the existing `Goal` trait:
+  - `ReplicaCapacity` (fully functional): enforces per-broker
+    `max_replicas` from the operator-supplied capacity config.
+    Greedy hot→cold evict for any broker over its limit.
+  - `DiskCapacity` / `NetworkInCapacity` / `NetworkOutCapacity` /
+    `CpuCapacity` (stubs): structs + registry entries + config-field
+    reads ship now; `propose` returns empty and `is_satisfied`
+    returns true unconditionally until slice 43e wires per-partition
+    metrics. 43e replaces the bodies mechanically.
+- New top-level `capacity` module (parallel to `goals`/`model`/
+  `optimizer`) owns the `BrokerCapacities` + `BrokerCapacity` types
+  and the YAML loader. Sparse-by-design: missing field = no limit
+  for that resource on that broker; missing broker entry = no limits
+  at all.
+- New CLI flag `--broker-capacity-file` (env
+  `CRABKA_BROKER_CAPACITY_FILE`, default empty). When unset, all
+  five capacity goals are no-ops. When set, the binary loads + parses
+  the YAML at startup and threads an `Arc<BrokerCapacities>` into
+  the `AppState`'s `GoalContext`.
+- `GoalContext` gains `broker_capacities: Arc<BrokerCapacities>`.
+  The `Copy` bound is dropped (`Clone` is cheap via `Arc` bump;
+  verified: every existing caller takes `&GoalContext`, zero-friction).
+- `GoalRegistry::default_registry` now contains **11 goals** in
+  priority order: `PreferredLeaderIdempotency`, `RackAware`,
+  `ReplicaCapacity`, `DiskCapacity`, `NetworkInCapacity`,
+  `NetworkOutCapacity`, `CpuCapacity` (Hard); `ReplicaDistribution`,
+  `LeaderDistribution`, `TopicReplicaDistribution`,
+  `MinTopicLeadersPerBroker` (Soft).
+- Helm chart picks up an optional ConfigMap-based config: new
+  `brokerCapacities` (map) + `brokerCapacityFile` (override path)
+  in `values.yaml`; new `templates/configmap.yaml`; deployment
+  conditionally mounts the ConfigMap + sets the env var. New
+  `helm-unittest` suite `configmap_test.yaml` (3 tests) plus 1 new
+  assertion in `deployment_test.yaml`.
+- 14 new unit tests (6 capacity + 4 ReplicaCapacity + 4 stub) + 1
+  new integration test (`replica_capacity_evicts_over_capacity_broker`).
+- Reference doc:
+  [`docs/superpowers/specs/2026-05-17-crabka-rebalancer-43d-design.md`].
+- Out of scope (deferred): per-partition usage data + the four
+  metric-dependent capacity goals' real bodies (43e); `CpuUsage`
+  soft goal (43f); per-topic resource hints in the capacity config;
+  dynamic capacity discovery; capacity-aware leader election.
+
+### Known trade
+- `ReplicaCapacity::is_satisfied` returns `true` unconditionally
+  because the `Goal::is_satisfied(&ClusterState)` signature doesn't
+  expose `GoalContext` (added in 43c without ctx access). Capacity
+  enforcement happens at `propose` time only. If 43e needs stricter
+  composition guarantees, a `Goal::is_satisfied_with_ctx` trait
+  method can be introduced then.
