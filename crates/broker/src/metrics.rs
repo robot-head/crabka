@@ -56,6 +56,14 @@ pub struct BrokerMetrics {
     pub partition_bytes_in: Family<PartitionLabel, Counter>,
     pub partition_bytes_out: Family<PartitionLabel, Counter>,
     pub partition_disk_bytes: Family<PartitionLabel, Gauge>,
+    /// Cumulative handler-thread microseconds spent processing each
+    /// (topic, partition). Exported as
+    /// `crabka_broker_partition_cpu_micros_total`. Rebalancer takes
+    /// `rate(...)` to get micros/sec; dividing by `1_000_000` yields the
+    /// per-partition core occupancy. We track microseconds (integer
+    /// counter) rather than seconds (float) because `prometheus-client`
+    /// counters are `u64`.
+    pub partition_cpu_micros: Family<PartitionLabel, Counter>,
     pub partitions_led: Gauge,
     pub active_controller: Gauge,
     pub isr_shrinks_total: Counter,
@@ -77,6 +85,7 @@ impl BrokerMetrics {
         let partition_bytes_in: Family<PartitionLabel, Counter> = Family::default();
         let partition_bytes_out: Family<PartitionLabel, Counter> = Family::default();
         let partition_disk_bytes: Family<PartitionLabel, Gauge> = Family::default();
+        let partition_cpu_micros: Family<PartitionLabel, Counter> = Family::default();
         let partitions_led = Gauge::default();
         let active_controller = Gauge::default();
         let isr_shrinks_total = Counter::default();
@@ -149,6 +158,13 @@ impl BrokerMetrics {
              the broker's periodic disk scanner; suppress if scanner is disabled.",
             partition_disk_bytes.clone(),
         );
+        registry.register(
+            "partition_cpu_micros",
+            "Cumulative handler-thread microseconds spent processing each \
+             (topic, partition). Rebalancer-targeted; rate(...) divided by \
+             1_000_000 yields core occupancy.",
+            partition_cpu_micros.clone(),
+        );
 
         Self {
             registry: Arc::new(Mutex::new(registry)),
@@ -159,6 +175,7 @@ impl BrokerMetrics {
             partition_bytes_in,
             partition_bytes_out,
             partition_disk_bytes,
+            partition_cpu_micros,
             partitions_led,
             active_controller,
             isr_shrinks_total,
@@ -217,6 +234,21 @@ impl BrokerMetrics {
         };
         self.partition_bytes_out.get_or_create(&lbl).inc_by(bytes);
     }
+
+    /// Convenience: account handler-thread microseconds spent on a
+    /// partition. Called from the produce / fetch hot paths around the
+    /// per-partition work. No-ops on zero so we don't allocate a label
+    /// entry for trivial measurements.
+    pub fn record_partition_cpu_micros(&self, topic: &str, partition: i32, micros: u64) {
+        if micros == 0 {
+            return;
+        }
+        let lbl = PartitionLabel {
+            topic: topic.to_string(),
+            partition,
+        };
+        self.partition_cpu_micros.get_or_create(&lbl).inc_by(micros);
+    }
 }
 
 impl Default for BrokerMetrics {
@@ -236,6 +268,7 @@ mod tests {
         m.record_fetch("topic-a", 50);
         m.record_partition_produce("topic-a", 0, 100);
         m.record_partition_fetch("topic-a", 0, 50);
+        m.record_partition_cpu_micros("topic-a", 0, 250);
         m.partition_disk_bytes
             .get_or_create(&PartitionLabel {
                 topic: "topic-a".into(),
@@ -263,6 +296,7 @@ mod tests {
             "crabka_broker_partition_bytes_in_total",
             "crabka_broker_partition_bytes_out_total",
             "crabka_broker_partition_disk_bytes",
+            "crabka_broker_partition_cpu_micros_total",
         ] {
             assert!(buf.contains(needle), "missing {needle} in:\n{buf}");
         }
@@ -303,6 +337,7 @@ mod tests {
         m.record_partition_produce("t", 0, 1024);
         m.record_partition_produce("t", 1, 512);
         m.record_partition_fetch("t", 0, 2048);
+        m.record_partition_cpu_micros("t", 0, 500);
         m.partition_disk_bytes
             .get_or_create(&PartitionLabel {
                 topic: "t".into(),
@@ -321,6 +356,7 @@ mod tests {
         assert_eq!(m.partition_bytes_in.get_or_create(&lbl_p0).get(), 1024);
         assert_eq!(m.partition_bytes_in.get_or_create(&lbl_p1).get(), 512);
         assert_eq!(m.partition_bytes_out.get_or_create(&lbl_p0).get(), 2048);
+        assert_eq!(m.partition_cpu_micros.get_or_create(&lbl_p0).get(), 500);
         assert_eq!(
             m.partition_disk_bytes.get_or_create(&lbl_p0).get(),
             1_000_000
@@ -339,5 +375,17 @@ mod tests {
         // Counters still exist (get_or_create creates them) but at 0.
         assert_eq!(m.partition_bytes_in.get_or_create(&lbl).get(), 0);
         assert_eq!(m.partition_bytes_out.get_or_create(&lbl).get(), 0);
+    }
+
+    #[test]
+    fn zero_micros_no_op() {
+        let m = BrokerMetrics::new();
+        m.record_partition_cpu_micros("t", 0, 0);
+        let lbl = PartitionLabel {
+            topic: "t".into(),
+            partition: 0,
+        };
+        // Helper short-circuits at 0; the label entry isn't created.
+        assert_eq!(m.partition_cpu_micros.get_or_create(&lbl).get(), 0);
     }
 }

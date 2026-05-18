@@ -157,6 +157,29 @@ impl UsageStore {
         )
     }
 
+    /// Rate of CPU usage in microseconds per second within `window`.
+    /// Divide by `1_000_000` to get the equivalent number of CPU cores in
+    /// use. Returns `None` on insufficient samples, counter reset, or
+    /// stale data (same guards as `bytes_in_rate`).
+    #[must_use]
+    pub fn cpu_micros_rate(
+        &self,
+        broker_id: i32,
+        topic: &str,
+        partition: i32,
+        window: Window,
+        now_ms: i64,
+    ) -> Option<f64> {
+        self.counter_rate(
+            broker_id,
+            topic,
+            partition,
+            MetricKind::CpuMicros,
+            window,
+            now_ms,
+        )
+    }
+
     /// Average disk-bytes gauge over the window `[now_ms - W, now_ms]`.
     /// Returns `None` if no samples fall inside the window, or if the
     /// latest sample is older than `now_ms - W` (stale broker).
@@ -282,6 +305,27 @@ mod tests {
         // the latest sample is on the window's upper bound.
         let rate = s.bytes_in_rate(1, "t", 0, Window::FiveMin, 1000).unwrap();
         assert!((rate - 2000.0).abs() < 1e-6, "got {rate}");
+    }
+
+    #[test]
+    fn two_cpu_micros_samples_yield_rate() {
+        let s = UsageStore::default();
+        let now_ms = 1_000_000;
+        s.insert(
+            1,
+            vec![sample(MetricKind::CpuMicros, "t", 0, 100_000.0)],
+            now_ms - 1000,
+        );
+        s.insert(
+            1,
+            vec![sample(MetricKind::CpuMicros, "t", 0, 2_100_000.0)],
+            now_ms,
+        );
+        // (2_100_000 - 100_000) / 1.0s = 2_000_000 micros/sec.
+        let rate = s
+            .cpu_micros_rate(1, "t", 0, Window::FiveMin, now_ms)
+            .unwrap();
+        assert!((rate - 2_000_000.0).abs() < 1e-3, "got {rate}");
     }
 
     #[test]

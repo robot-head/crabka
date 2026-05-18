@@ -9,6 +9,7 @@ pub enum MetricKind {
     BytesIn,
     BytesOut,
     DiskBytes,
+    CpuMicros,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -49,6 +50,7 @@ fn parse_line(line: &str) -> Option<ParsedSample> {
         "crabka_broker_partition_bytes_in_total" => MetricKind::BytesIn,
         "crabka_broker_partition_bytes_out_total" => MetricKind::BytesOut,
         "crabka_broker_partition_disk_bytes" => MetricKind::DiskBytes,
+        "crabka_broker_partition_cpu_micros_total" => MetricKind::CpuMicros,
         _ => return None,
     };
 
@@ -115,11 +117,25 @@ crabka_broker_partition_bytes_in_total{topic="t",partition="0"} 1
 crabka_broker_topic_bytes_in_total{topic="t"} 999
 some_other_metric 7
 crabka_broker_partition_bytes_out_total{topic="t",partition="0"} 2
+crabka_broker_partition_cpu_micros_total{topic="t",partition="0"} 42
 "#;
         let out = parse(txt);
-        assert_eq!(out.len(), 2);
+        assert_eq!(out.len(), 3);
         assert_eq!(out[0].metric, MetricKind::BytesIn);
         assert_eq!(out[1].metric, MetricKind::BytesOut);
+        assert_eq!(out[2].metric, MetricKind::CpuMicros);
+    }
+
+    #[test]
+    fn parses_a_cpu_micros_counter() {
+        let txt = r#"crabka_broker_partition_cpu_micros_total{topic="t",partition="0"} 1024
+"#;
+        let out = parse(txt);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].metric, MetricKind::CpuMicros);
+        assert_eq!(out[0].topic, "t");
+        assert_eq!(out[0].partition, 0);
+        assert!((out[0].value - 1024.0).abs() < 1e-9);
     }
 
     #[test]

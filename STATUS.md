@@ -995,3 +995,86 @@ Kafka client for ApiVersions.
   `latest.value < earliest.value` returning `None`. The affected
   goal sees no rate signal until two post-reset samples
   accumulate.
+
+## Slice 43f — Rebalancer CPU usage + real CpuCapacity (2026-05-18)
+
+- **Broker-side:**
+  - New `partition_cpu_micros` metric family on `BrokerMetrics`,
+    exported as
+    `crabka_broker_partition_cpu_micros_total{topic,partition}`.
+    Counts on-CPU microseconds spent polling each (topic,
+    partition)'s work. Microseconds (`u64` counter) instead of
+    seconds (`f64`) because `prometheus-client` counters are
+    integer-valued; rate(...) / 1_000_000 = cores in use.
+  - `handlers/produce.rs` factors the per-partition loop body
+    into an `async fn process_partition(...)`. Each iteration
+    wraps the call with a fresh `tokio_metrics::TaskMonitor`;
+    `monitor.cumulative().total_poll_duration` is the per-
+    partition CPU charge. This is **actual on-CPU time**, not
+    wall-clock — blocked awaits (writer queue, HW-wait under
+    `acks=-1`, txn coordinator round-trip) don't inflate the
+    sample.
+  - `handlers/fetch.rs` adds a `cpu_micros: u64` accumulator on
+    `PendingRead`. Both `do_read` call sites (first pass + the
+    `long_poll_then_reread` re-pass) are instrumented with a
+    fresh `TaskMonitor` and their `total_poll_duration` is added
+    in. The response-emit loop drains a `(topic, partition) ->
+    cpu_micros` side map built just before `pending` is consumed
+    by `group_into_topic_responses`.
+- **Rebalancer-side:**
+  - `scraper::parse::MetricKind` gains `CpuMicros`; parser
+    recognizes the new family.
+  - `UsageStore::cpu_micros_rate(broker, topic, partition,
+    window, now_ms)` returns micros/sec with the same
+    counter-reset and stale-data guards as `bytes_in_rate`.
+  - New soft goal `CpuUsage` — balances per-broker CPU rate
+    summed across all replicas a broker hosts (CPU is consumed
+    by both leader-driven produce work and any-replica fetch /
+    replication work). Mirrors `DiskUsage` shape with greedy
+    hot→cold replica swap, threshold-gated by
+    `imbalance_threshold_pct`.
+  - `CpuCapacity` (hard) stub replaced with the real body and
+    `is_satisfied_with_ctx` override. Sums per-broker
+    `cpu_micros_rate / 1_000_000` to get cores-in-use; emits
+    movements off the most-over-capacity broker when the total
+    exceeds the operator-supplied `cpu_cores` limit. Non-finite
+    / non-positive `cpu_cores` is treated as "unlimited" — a
+    defensive no-op rather than a panic on operator typo.
+- `GoalRegistry::default_registry` grows from 15 to **16 goals**.
+  Renamed `default_registry_has_fifteen_goals` →
+  `default_registry_has_sixteen_goals`;
+  `default_registry_order_matches_spec` updated with `CpuUsage`
+  appended to the soft tier.
+- ~9 new unit tests (parse, window, `CpuUsage` x3, `CpuCapacity`
+  x5 covering empty / over-capacity / within / non-finite /
+  is_satisfied_with_ctx) plus updates to existing broker metrics
+  tests for the new counter family.
+- Reference: same scraper / window plumbing as slice 43e; no new
+  CLI flag, no new Helm value (operator-supplied scrape targets
+  already cover the new metric automatically).
+- Out of scope (deferred): per-process CPU attribution (we use
+  handler-thread wall-time as a proxy; producer ack-wait and the
+  writer task's append work are out of scope); discovery of
+  scrape targets via `Metadata` (still operator-supplied);
+  anomaly detection (slice 43g); operator `KafkaRebalance` CRD
+  (slice 44).
+
+### Known risks
+- **TaskMonitor overhead.** Each per-partition iteration creates
+  a fresh `tokio_metrics::TaskMonitor` and wraps the work in
+  `monitor.instrument(...)`. The wrapper adds per-poll
+  bookkeeping; at the per-request × per-partition granularity
+  this is small but non-zero. Measure under load before
+  declaring it free.
+- **CPU time is per-future-poll, not per-thread.** The
+  `total_poll_duration` excludes blocked awaits (the goal), but
+  also excludes time the runtime spent *scheduling* the task
+  between polls. On a saturated runtime that scheduling gap can
+  be material. Operators can compare `partition_cpu_micros`
+  against process-wide CPU to estimate the gap.
+- **Fetch first-pass setup not counted.** Per-partition
+  `PendingRead` construction in the first loop (epoch fence,
+  follower-fetch HW maintenance) isn't instrumented — only the
+  `do_read` futures are. The setup is fast and synchronous;
+  expected to be negligible compared to log read CPU.
+

@@ -41,6 +41,7 @@ zerocopy = { version = "0.8", features = ["derive"] }
 crc32c = "0.6"
 tokio = { version = "1", default-features = false }
 tokio-util = { version = "0.7", default-features = false }
+tokio-metrics = { version = "0.4", default-features = false }
 dashmap = "6"
 tracing = "0.1"
 memmap2 = "0.9"
