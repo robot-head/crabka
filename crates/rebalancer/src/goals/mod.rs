@@ -49,6 +49,16 @@ pub trait Goal: Send + Sync {
     /// validates and reconciles them across goals before producing
     /// the final proposal.
     fn propose(&self, state: &ClusterState, ctx: &GoalContext) -> Vec<Movement>;
+
+    /// Returns true if the goal's invariant holds against `state`.
+    /// Soft goals use the default (always true); hard goals override
+    /// to enforce their invariant during optimizer composition. The
+    /// optimizer calls this on every hard goal before accepting a
+    /// movement into the proposal — a soft goal that would break a
+    /// hard goal's invariant has its movement silently dropped.
+    fn is_satisfied(&self, _state: &ClusterState) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]

@@ -69,7 +69,20 @@ pub fn optimize(
                 // Silently drop — the goal will see the unchanged state next iter.
                 continue;
             }
-            // Apply to working state immediately.
+            // Tentatively apply the movement to a clone; if applying it would
+            // violate any hard goal's invariant, drop it. Hard goals run first,
+            // so when we're processing soft movements, all hard goals are
+            // already satisfied at this point — the check prevents the soft
+            // goal from re-breaking that invariant.
+            let mut tentative = working.clone();
+            apply_movement(&mut tentative, &m);
+            let hard_violated = ordered.iter().any(|(_, gg)| {
+                matches!(gg.priority(), GoalPriority::Hard) && !gg.is_satisfied(&tentative)
+            });
+            if hard_violated {
+                continue;
+            }
+            // Apply to working state.
             apply_movement(&mut working, &m);
             let key = (m.topic.clone(), m.partition);
             accum.insert(key, (m, prio));
@@ -467,6 +480,79 @@ mod tests {
         assert_eq!(z_count, 2, "both hard ('z', _) movements must be kept");
         // Exactly one soft movement fits in the remaining slot.
         assert_eq!(a_count, 1, "exactly one soft ('a', _) movement should fit");
+    }
+
+    #[test]
+    fn soft_movement_that_violates_hard_invariant_is_dropped() {
+        use crate::goals::rack_aware::RackAware;
+
+        // Three brokers in racks A, A, B. Partition replicas [1, 3] is
+        // rack-diverse (A on broker 1, B on broker 3). RackAware emits
+        // nothing because there's no collision.
+        let state = ClusterState {
+            cluster_id: None,
+            snapshot_at_ms: 0,
+            brokers: vec![
+                BrokerView {
+                    id: 1,
+                    host: "h1".into(),
+                    port: 9092,
+                    rack: Some("A".into()),
+                },
+                BrokerView {
+                    id: 2,
+                    host: "h2".into(),
+                    port: 9092,
+                    rack: Some("A".into()),
+                },
+                BrokerView {
+                    id: 3,
+                    host: "h3".into(),
+                    port: 9092,
+                    rack: Some("B".into()),
+                },
+            ],
+            partitions: vec![PartitionView {
+                topic: "t".into(),
+                partition: 0,
+                replicas: vec![1, 3],
+                leader: 1,
+                isr: vec![1, 3],
+            }],
+            in_flight_reassignments: vec![],
+        };
+
+        // A malicious soft goal that emits a movement which would
+        // recreate a rack-A collision by swapping broker 3 (rack B) for
+        // broker 2 (rack A).
+        let bad_soft = FixedGoal {
+            name: "bad_soft",
+            priority: GoalPriority::Soft,
+            movements: vec![Movement {
+                topic: "t".into(),
+                partition: 0,
+                old_replicas: vec![1, 3],
+                new_replicas: vec![1, 2],
+                old_leader: 1,
+                new_leader: 1,
+            }],
+        };
+
+        let goals: Vec<&dyn Goal> = vec![&RackAware, &bad_soft];
+        let ctx = GoalContext {
+            imbalance_threshold_pct: 10,
+            max_movements_per_proposal: 256,
+            min_topic_leaders_per_broker: 0,
+        };
+
+        let out = optimize(&state, &goals, &ctx).unwrap();
+        // The bad_soft movement must be dropped because it would violate
+        // RackAware's invariant.
+        assert!(
+            out.proposal.movements.is_empty(),
+            "soft movement that would re-create a rack collision must be dropped; got {:?}",
+            out.proposal.movements
+        );
     }
 
     #[test]

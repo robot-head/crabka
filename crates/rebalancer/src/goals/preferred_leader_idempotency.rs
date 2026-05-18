@@ -44,6 +44,22 @@ impl Goal for PreferredLeaderIdempotency {
         }
         out
     }
+
+    fn is_satisfied(&self, state: &ClusterState) -> bool {
+        for p in &state.partitions {
+            // Preferred = first replica. PLI is satisfied if the leader
+            // matches the preferred whenever the preferred is alive + in ISR.
+            let Some(preferred) = p.replicas.first().copied() else {
+                continue;
+            };
+            let preferred_alive = state.brokers.iter().any(|b| b.id == preferred);
+            let preferred_in_isr = p.isr.contains(&preferred);
+            if preferred_alive && preferred_in_isr && p.leader != preferred {
+                return false;
+            }
+        }
+        true
+    }
 }
 
 #[cfg(test)]

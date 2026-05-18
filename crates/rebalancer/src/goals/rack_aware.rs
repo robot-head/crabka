@@ -8,7 +8,7 @@
 //! goal never produces `HardGoalUnsatisfied`. Operators with
 //! RF > rack-count get a no-op rather than a failed proposal.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use tracing::warn;
 
@@ -52,8 +52,16 @@ impl Goal for RackAware {
             .map(|p| ((p.topic.clone(), p.partition), p.leader))
             .collect();
 
+        let mut warned_partitions: HashSet<(String, i32)> = HashSet::new();
+
         loop {
-            let chosen = pick_swap(state, &working, &rack_of, distinct_rack_count);
+            let chosen = pick_swap(
+                state,
+                &working,
+                &rack_of,
+                distinct_rack_count,
+                &mut warned_partitions,
+            );
             let Some((idx, donor, target)) = chosen else {
                 break;
             };
@@ -98,6 +106,47 @@ impl Goal for RackAware {
 
         out
     }
+
+    fn is_satisfied(&self, state: &ClusterState) -> bool {
+        // Build the same per-broker rack map propose() uses, so the
+        // satisfied-check matches the goal's own model.
+        let rack_of: HashMap<i32, String> = state
+            .brokers
+            .iter()
+            .map(|b| {
+                let tag = b
+                    .rack
+                    .clone()
+                    .unwrap_or_else(|| format!("__no_rack_{}", b.id));
+                (b.id, tag)
+            })
+            .collect();
+
+        let distinct_rack_count: usize = state
+            .brokers
+            .iter()
+            .map(|b| rack_of.get(&b.id).cloned().unwrap_or_default())
+            .collect::<BTreeSet<_>>()
+            .len();
+
+        for p in &state.partitions {
+            if p.replicas.len() > distinct_rack_count {
+                // Infeasible partition — RackAware self-limits, so we
+                // accept its current state as "satisfied" for composition
+                // purposes (the goal's propose would emit nothing).
+                continue;
+            }
+            let mut racks_seen = BTreeSet::new();
+            for r in &p.replicas {
+                if let Some(rack) = rack_of.get(r)
+                    && !racks_seen.insert(rack.clone())
+                {
+                    return false;
+                }
+            }
+        }
+        true
+    }
 }
 
 /// Per-broker rack tag, treating None as a per-broker unique pseudo-rack.
@@ -125,17 +174,14 @@ fn pick_swap(
     working: &[PartitionView],
     rack_of: &HashMap<i32, String>,
     distinct_rack_count: usize,
+    warned_partitions: &mut HashSet<(String, i32)>,
 ) -> Option<(usize, i32, i32)> {
     for (idx, p) in working.iter().enumerate() {
         if p.replicas.len() > distinct_rack_count {
-            // Only log once: check the original state, not the working
-            // copy, so we don't double-log after a swap.
-            if state
-                .partitions
-                .iter()
-                .find(|orig| orig.topic == p.topic && orig.partition == p.partition)
-                .is_none_or(|orig| orig.replicas.len() > distinct_rack_count)
-            {
+            // Dedupe by (topic, partition) so each infeasible partition
+            // warns at most once per propose() call.
+            let key = (p.topic.clone(), p.partition);
+            if warned_partitions.insert(key) {
                 warn!(
                     topic = %p.topic,
                     partition = p.partition,
