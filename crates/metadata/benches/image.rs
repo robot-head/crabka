@@ -97,7 +97,9 @@ fn image_with_acls(num_literal: usize, num_prefixed: usize) -> MetadataImage {
 fn bench_apply(c: &mut Criterion) {
     let mut group = c.benchmark_group("metadata_image/apply");
 
-    let topics: Vec<MetadataRecord> = (0..100).map(|i| topic_record(&format!("t-{i}"), 8)).collect();
+    let topics: Vec<MetadataRecord> = (0..100)
+        .map(|i| topic_record(&format!("t-{i}"), 8))
+        .collect();
     let partitions: Vec<MetadataRecord> = (0..100)
         .flat_map(|t| (0..8).map(move |p| partition_record(&format!("t-{t}"), p)))
         .collect();

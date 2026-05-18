@@ -32,7 +32,9 @@ fn payload_random(size: usize) -> Bytes {
     let mut state: u64 = 0xDEAD_BEEF_CAFE_BABE;
     let mut v = Vec::with_capacity(size);
     for _ in 0..size {
-        state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
         #[allow(clippy::cast_possible_truncation)]
         v.push((state >> 56) as u8);
     }
