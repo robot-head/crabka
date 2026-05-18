@@ -3,7 +3,7 @@
 //! Covers the hot paths for the Raft state machine and for request handlers:
 //!
 //! - `MetadataImage::apply` for the common record kinds.
-//! - `MetadataImage::matching_acls` — called per authorize().
+//! - `MetadataImage::matching_acls` — called per `authorize()`.
 //! - `MetadataRecord` serialize/deserialize via wincode.
 
 use crabka_metadata::{
