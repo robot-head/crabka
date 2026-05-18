@@ -995,3 +995,77 @@ Kafka client for ApiVersions.
   `latest.value < earliest.value` returning `None`. The affected
   goal sees no rate signal until two post-reset samples
   accumulate.
+
+## Slice 43f — Rebalancer CPU usage + real CpuCapacity (2026-05-18)
+
+- **Broker-side:**
+  - New `partition_cpu_micros` metric family on `BrokerMetrics`,
+    exported as
+    `crabka_broker_partition_cpu_micros_total{topic,partition}`.
+    Counts handler-thread microseconds spent processing each
+    (topic, partition). Microseconds (`u64` counter) instead of
+    seconds (`f64`) because `prometheus-client` counters are
+    integer-valued; rate(...) / 1_000_000 = cores in use.
+  - `handlers/produce.rs` instruments the per-partition loop with
+    a private `PartitionCpuTimer` RAII guard. Drop fires on every
+    exit path (continue / break / fall-through), so all the
+    early-exit error branches are covered.
+  - `handlers/fetch.rs` uses a side `cpu_starts: HashMap<(String,
+    i32), Instant>` populated in the `PendingRead` loop; consumed
+    in the response-emit loop alongside the existing
+    `record_partition_fetch` call. Captures the full per-partition
+    work span across both the initial setup pass and `do_read`.
+- **Rebalancer-side:**
+  - `scraper::parse::MetricKind` gains `CpuMicros`; parser
+    recognizes the new family.
+  - `UsageStore::cpu_micros_rate(broker, topic, partition,
+    window, now_ms)` returns micros/sec with the same
+    counter-reset and stale-data guards as `bytes_in_rate`.
+  - New soft goal `CpuUsage` — balances per-broker CPU rate
+    summed across all replicas a broker hosts (CPU is consumed
+    by both leader-driven produce work and any-replica fetch /
+    replication work). Mirrors `DiskUsage` shape with greedy
+    hot→cold replica swap, threshold-gated by
+    `imbalance_threshold_pct`.
+  - `CpuCapacity` (hard) stub replaced with the real body and
+    `is_satisfied_with_ctx` override. Sums per-broker
+    `cpu_micros_rate / 1_000_000` to get cores-in-use; emits
+    movements off the most-over-capacity broker when the total
+    exceeds the operator-supplied `cpu_cores` limit. Non-finite
+    / non-positive `cpu_cores` is treated as "unlimited" — a
+    defensive no-op rather than a panic on operator typo.
+- `GoalRegistry::default_registry` grows from 15 to **16 goals**.
+  Renamed `default_registry_has_fifteen_goals` →
+  `default_registry_has_sixteen_goals`;
+  `default_registry_order_matches_spec` updated with `CpuUsage`
+  appended to the soft tier.
+- ~9 new unit tests (parse, window, `CpuUsage` x3, `CpuCapacity`
+  x5 covering empty / over-capacity / within / non-finite /
+  is_satisfied_with_ctx) plus updates to existing broker metrics
+  tests for the new counter family.
+- Reference: same scraper / window plumbing as slice 43e; no new
+  CLI flag, no new Helm value (operator-supplied scrape targets
+  already cover the new metric automatically).
+- Out of scope (deferred): per-process CPU attribution (we use
+  handler-thread wall-time as a proxy; producer ack-wait and the
+  writer task's append work are out of scope); discovery of
+  scrape targets via `Metadata` (still operator-supplied);
+  anomaly detection (slice 43g); operator `KafkaRebalance` CRD
+  (slice 44).
+
+### Known risks
+- **Wall-time vs CPU-time.** `Instant::elapsed()` measures
+  wall-clock, not actual CPU consumption. A handler thread
+  blocked on the writer queue's `ack_rx.await` counts toward
+  that partition's "CPU" — overcounts on contended brokers,
+  but the ranking across brokers still reflects load. A future
+  refinement could swap to `process::cpu_time` or per-thread
+  CPU counters at the cost of OS-specific code.
+- **Producer ack-wait dominates measurement.** For `acks=-1`,
+  the per-partition timer spans the HW-wait loop. On a slow
+  follower this inflates the partition's "CPU" sample. Acceptable
+  for the soft goal (still reflects bottlenecked partitions);
+  acceptable for the hard goal because the operator sets
+  `cpu_cores` based on observed steady-state and over-counting
+  is the conservative direction.
+

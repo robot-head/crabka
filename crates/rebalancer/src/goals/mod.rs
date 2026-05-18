@@ -22,6 +22,7 @@ pub fn now_ms() -> i64 {
 }
 
 pub mod cpu_capacity;
+pub mod cpu_usage;
 pub mod disk_capacity;
 pub mod disk_usage;
 pub mod leader_bytes_in;

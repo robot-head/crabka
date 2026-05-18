@@ -50,6 +50,8 @@ impl GoalRegistry {
                 Box::new(crate::goals::leader_bytes_in::LeaderBytesIn),
                 Box::new(crate::goals::network_in_usage::NetworkInUsage),
                 Box::new(crate::goals::network_out_usage::NetworkOutUsage),
+                // New in 43f:
+                Box::new(crate::goals::cpu_usage::CpuUsage),
             ],
         }
     }
@@ -103,10 +105,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_registry_has_fifteen_goals() {
+    fn default_registry_has_sixteen_goals() {
         let r = GoalRegistry::default_registry();
         let all = r.select(&[]).unwrap();
-        assert_eq!(all.len(), 15);
+        assert_eq!(all.len(), 16);
     }
 
     #[test]
@@ -135,6 +137,8 @@ mod tests {
                 "LeaderBytesIn",
                 "NetworkInUsage",
                 "NetworkOutUsage",
+                // New in 43f:
+                "CpuUsage",
             ],
             "registry order must match the spec's documented priority"
         );
