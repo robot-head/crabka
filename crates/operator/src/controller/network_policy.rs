@@ -185,9 +185,16 @@ pub async fn reconcile_network_policy(
                 .any(|c| c.type_ == "NetworkPolicyReady" && c.reason == "Available")
         });
         if was_rendered {
-            let _ = np_api
+            match np_api
                 .delete(&format!("{name}-broker-policy"), &DeleteParams::default())
-                .await;
+                .await
+            {
+                Ok(_) => {}
+                Err(kube::Error::Api(status)) if status.code == 404 => {}
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to delete orphaned NetworkPolicy");
+                }
+            }
         }
         return None;
     }
