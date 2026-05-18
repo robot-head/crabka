@@ -3,6 +3,16 @@
 //! against the open set in `AnomalyStore` to compute new vs. updated
 //! vs. resolved transitions.
 
+pub mod broker_death;
+pub mod disk_pressure;
+pub mod slow_broker;
+pub mod under_replicated;
+
+pub use broker_death::BrokerDeath;
+pub use disk_pressure::DiskPressure;
+pub use slow_broker::SlowBroker;
+pub use under_replicated::UnderReplicatedPartitions;
+
 use crate::capacity::BrokerCapacities;
 use crate::detector::{AnomalyKey, AnomalyKind, AnomalySeverity, SnapshotHistory};
 use crate::model::ClusterState;
