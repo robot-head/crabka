@@ -1002,19 +1002,25 @@ Kafka client for ApiVersions.
   - New `partition_cpu_micros` metric family on `BrokerMetrics`,
     exported as
     `crabka_broker_partition_cpu_micros_total{topic,partition}`.
-    Counts handler-thread microseconds spent processing each
-    (topic, partition). Microseconds (`u64` counter) instead of
+    Counts on-CPU microseconds spent polling each (topic,
+    partition)'s work. Microseconds (`u64` counter) instead of
     seconds (`f64`) because `prometheus-client` counters are
     integer-valued; rate(...) / 1_000_000 = cores in use.
-  - `handlers/produce.rs` instruments the per-partition loop with
-    a private `PartitionCpuTimer` RAII guard. Drop fires on every
-    exit path (continue / break / fall-through), so all the
-    early-exit error branches are covered.
-  - `handlers/fetch.rs` uses a side `cpu_starts: HashMap<(String,
-    i32), Instant>` populated in the `PendingRead` loop; consumed
-    in the response-emit loop alongside the existing
-    `record_partition_fetch` call. Captures the full per-partition
-    work span across both the initial setup pass and `do_read`.
+  - `handlers/produce.rs` factors the per-partition loop body
+    into an `async fn process_partition(...)`. Each iteration
+    wraps the call with a fresh `tokio_metrics::TaskMonitor`;
+    `monitor.cumulative().total_poll_duration` is the per-
+    partition CPU charge. This is **actual on-CPU time**, not
+    wall-clock — blocked awaits (writer queue, HW-wait under
+    `acks=-1`, txn coordinator round-trip) don't inflate the
+    sample.
+  - `handlers/fetch.rs` adds a `cpu_micros: u64` accumulator on
+    `PendingRead`. Both `do_read` call sites (first pass + the
+    `long_poll_then_reread` re-pass) are instrumented with a
+    fresh `TaskMonitor` and their `total_poll_duration` is added
+    in. The response-emit loop drains a `(topic, partition) ->
+    cpu_micros` side map built just before `pending` is consumed
+    by `group_into_topic_responses`.
 - **Rebalancer-side:**
   - `scraper::parse::MetricKind` gains `CpuMicros`; parser
     recognizes the new family.
@@ -1054,18 +1060,21 @@ Kafka client for ApiVersions.
   (slice 44).
 
 ### Known risks
-- **Wall-time vs CPU-time.** `Instant::elapsed()` measures
-  wall-clock, not actual CPU consumption. A handler thread
-  blocked on the writer queue's `ack_rx.await` counts toward
-  that partition's "CPU" — overcounts on contended brokers,
-  but the ranking across brokers still reflects load. A future
-  refinement could swap to `process::cpu_time` or per-thread
-  CPU counters at the cost of OS-specific code.
-- **Producer ack-wait dominates measurement.** For `acks=-1`,
-  the per-partition timer spans the HW-wait loop. On a slow
-  follower this inflates the partition's "CPU" sample. Acceptable
-  for the soft goal (still reflects bottlenecked partitions);
-  acceptable for the hard goal because the operator sets
-  `cpu_cores` based on observed steady-state and over-counting
-  is the conservative direction.
+- **TaskMonitor overhead.** Each per-partition iteration creates
+  a fresh `tokio_metrics::TaskMonitor` and wraps the work in
+  `monitor.instrument(...)`. The wrapper adds per-poll
+  bookkeeping; at the per-request × per-partition granularity
+  this is small but non-zero. Measure under load before
+  declaring it free.
+- **CPU time is per-future-poll, not per-thread.** The
+  `total_poll_duration` excludes blocked awaits (the goal), but
+  also excludes time the runtime spent *scheduling* the task
+  between polls. On a saturated runtime that scheduling gap can
+  be material. Operators can compare `partition_cpu_micros`
+  against process-wide CPU to estimate the gap.
+- **Fetch first-pass setup not counted.** Per-partition
+  `PendingRead` construction in the first loop (epoch fence,
+  follower-fetch HW maintenance) isn't instrumented — only the
+  `do_read` futures are. The setup is fast and synchronous;
+  expected to be negligible compared to log read CPU.
 
