@@ -73,6 +73,46 @@ pub(crate) fn filter_dynamic_overrides(
     TopicConfigOverrides { topic, overrides }
 }
 
+/// Pure helper: take one `DescribeConfigsResult` (one resource's slice
+/// of the response) and either return its dynamic-topic-config
+/// overrides or surface its broker error. Extracted so both the success
+/// and error branches can be unit-tested without standing up a broker.
+pub(crate) fn parse_describe_configs_resource(
+    r: crabka_protocol::owned::describe_configs_response::DescribeConfigsResult,
+) -> Result<TopicConfigOverrides, AdminError> {
+    if r.error_code != 0 {
+        return Err(AdminError::Broker {
+            api: "DescribeConfigs",
+            code: r.error_code,
+            name: kafka_error_name(r.error_code),
+            message: r.error_message,
+        });
+    }
+    Ok(filter_dynamic_overrides(r.resource_name, r.configs))
+}
+
+/// Pure helper: project an `IncrementalAlterConfigsResponse` into the
+/// per-topic outcome list the operator consumes.
+pub(crate) fn parse_incremental_alter_outcomes(
+    resp: <IncrementalAlterConfigsRequest as crabka_protocol::ProtocolRequest>::Response,
+) -> Vec<AlterConfigsOutcome> {
+    resp.responses
+        .into_iter()
+        .map(|r| AlterConfigsOutcome {
+            topic: r.resource_name,
+            error: if r.error_code == 0 {
+                None
+            } else {
+                Some(KafkaError {
+                    code: r.error_code,
+                    name: kafka_error_name(r.error_code),
+                    message: r.error_message,
+                })
+            },
+        })
+        .collect()
+}
+
 impl AdminClient {
     pub async fn describe_configs(
         &mut self,
@@ -95,15 +135,7 @@ impl AdminClient {
         let resp = self.conn.send(req).await?;
         let mut out = Vec::with_capacity(resp.results.len());
         for r in resp.results {
-            if r.error_code != 0 {
-                return Err(AdminError::Broker {
-                    api: "DescribeConfigs",
-                    code: r.error_code,
-                    name: kafka_error_name(r.error_code),
-                    message: r.error_message,
-                });
-            }
-            out.push(filter_dynamic_overrides(r.resource_name, r.configs));
+            out.push(parse_describe_configs_resource(r)?);
         }
         Ok(out)
     }
@@ -154,22 +186,7 @@ impl AdminClient {
             ..Default::default()
         };
         let resp = self.conn.send(req).await?;
-        Ok(resp
-            .responses
-            .into_iter()
-            .map(|r| AlterConfigsOutcome {
-                topic: r.resource_name,
-                error: if r.error_code == 0 {
-                    None
-                } else {
-                    Some(KafkaError {
-                        code: r.error_code,
-                        name: kafka_error_name(r.error_code),
-                        message: r.error_message,
-                    })
-                },
-            })
-            .collect())
+        Ok(parse_incremental_alter_outcomes(resp))
     }
 }
 
@@ -245,5 +262,121 @@ mod tests {
         assert!(!r.overrides.contains_key("log.dirs"));
         assert!(!r.overrides.contains_key("segment.bytes"));
         assert!(!r.overrides.contains_key("max.message.bytes"));
+    }
+
+    // ── parse_describe_configs_resource ────────────────────────────────
+    //
+    // The success / error variants of the per-resource parser used by
+    // `describe_configs`. The full `describe_configs` RPC short-circuits
+    // on the first error_code != 0 entry; these tests lock that decision
+    // point so a refactor can't silently drop the error mapping or the
+    // dynamic-config filtering.
+
+    #[test]
+    fn parse_describe_configs_resource_returns_overrides_on_success() {
+        use crabka_protocol::owned::describe_configs_response::DescribeConfigsResult;
+        let r = DescribeConfigsResult {
+            error_code: 0,
+            error_message: None,
+            resource_type: RESOURCE_TYPE_TOPIC,
+            resource_name: "foo".into(),
+            configs: vec![DescribeConfigsResourceResult {
+                name: "retention.ms".into(),
+                value: Some("60000".into()),
+                config_source: 1,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let parsed = parse_describe_configs_resource(r).expect("Ok branch");
+        assert_eq!(parsed.topic, "foo");
+        assert_eq!(
+            parsed.overrides.get("retention.ms").map(String::as_str),
+            Some("60000")
+        );
+    }
+
+    #[test]
+    fn parse_describe_configs_resource_returns_broker_error_when_error_code_set() {
+        use crabka_protocol::owned::describe_configs_response::DescribeConfigsResult;
+        let r = DescribeConfigsResult {
+            error_code: 3, // UNKNOWN_TOPIC_OR_PARTITION
+            error_message: Some("nope".into()),
+            resource_type: RESOURCE_TYPE_TOPIC,
+            resource_name: "missing".into(),
+            configs: Vec::new(),
+            ..Default::default()
+        };
+        let err = parse_describe_configs_resource(r).expect_err("Err branch");
+        match err {
+            AdminError::Broker {
+                api,
+                code,
+                name,
+                message,
+            } => {
+                assert_eq!(api, "DescribeConfigs");
+                assert_eq!(code, 3);
+                assert_eq!(name, "UNKNOWN_TOPIC_OR_PARTITION");
+                assert_eq!(message.as_deref(), Some("nope"));
+            }
+            other => panic!("expected Broker, got {other:?}"),
+        }
+    }
+
+    // ── parse_incremental_alter_outcomes ───────────────────────────────
+
+    #[test]
+    fn parse_incremental_alter_outcomes_success() {
+        use crabka_protocol::owned::incremental_alter_configs_response::{
+            AlterConfigsResourceResponse, IncrementalAlterConfigsResponse,
+        };
+        let resp = IncrementalAlterConfigsResponse {
+            responses: vec![AlterConfigsResourceResponse {
+                error_code: 0,
+                error_message: None,
+                resource_type: RESOURCE_TYPE_TOPIC,
+                resource_name: "foo".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let outs = parse_incremental_alter_outcomes(resp);
+        assert_eq!(outs.len(), 1);
+        assert_eq!(outs[0].topic, "foo");
+        assert!(outs[0].error.is_none());
+    }
+
+    #[test]
+    fn parse_incremental_alter_outcomes_carries_errors() {
+        use crabka_protocol::owned::incremental_alter_configs_response::{
+            AlterConfigsResourceResponse, IncrementalAlterConfigsResponse,
+        };
+        let resp = IncrementalAlterConfigsResponse {
+            responses: vec![
+                AlterConfigsResourceResponse {
+                    error_code: 0,
+                    error_message: None,
+                    resource_type: RESOURCE_TYPE_TOPIC,
+                    resource_name: "ok".into(),
+                    ..Default::default()
+                },
+                AlterConfigsResourceResponse {
+                    error_code: 40, // INVALID_CONFIG
+                    error_message: Some("bad value".into()),
+                    resource_type: RESOURCE_TYPE_TOPIC,
+                    resource_name: "bad".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let outs = parse_incremental_alter_outcomes(resp);
+        assert_eq!(outs.len(), 2);
+        assert!(outs[0].error.is_none());
+        let err = outs[1].error.as_ref().expect("error expected");
+        assert_eq!(err.code, 40);
+        assert_eq!(err.name, "INVALID_CONFIG");
+        assert_eq!(err.message.as_deref(), Some("bad value"));
     }
 }
