@@ -22,6 +22,7 @@ use crabka_rebalancer::ingest::{Ingester, new_shared_snapshot};
 use crabka_rebalancer::metrics::RebalancerMetrics;
 use crabka_rebalancer::model::proposal::ProposalStatus;
 use crabka_rebalancer::model::store::ProposalStore;
+use crabka_rebalancer::scraper::UsageStore;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -250,6 +251,7 @@ async fn main() -> anyhow::Result<()> {
             max_movements_per_proposal: args.max_movements_per_proposal,
             min_topic_leaders_per_broker: args.min_topic_leaders_per_broker,
             broker_capacities: broker_capacities.clone(),
+            broker_usages: Arc::new(UsageStore::default()),
         },
         metrics: metrics.clone(),
         executor: executor_state,

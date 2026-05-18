@@ -41,6 +41,7 @@ mod tests {
     use super::*;
     use crate::capacity::{BrokerCapacities, BrokerCapacity};
     use crate::model::{BrokerView, PartitionView};
+    use crate::scraper::UsageStore;
     use std::sync::Arc;
 
     fn ctx() -> GoalContext {
@@ -57,6 +58,7 @@ mod tests {
             max_movements_per_proposal: 256,
             min_topic_leaders_per_broker: 0,
             broker_capacities: Arc::new(BrokerCapacities { by_broker: by }),
+            broker_usages: Arc::new(UsageStore::default()),
         }
     }
 

@@ -241,6 +241,7 @@ mod tests {
     use crate::capacity::BrokerCapacities;
     use crate::goals::tests::FixedGoal;
     use crate::model::{BrokerView, PartitionView};
+    use crate::scraper::UsageStore;
     use std::sync::Arc;
 
     fn ctx() -> GoalContext {
@@ -249,6 +250,7 @@ mod tests {
             max_movements_per_proposal: 256,
             min_topic_leaders_per_broker: 0,
             broker_capacities: Arc::new(BrokerCapacities::default()),
+            broker_usages: Arc::new(UsageStore::default()),
         }
     }
 
@@ -463,6 +465,7 @@ mod tests {
             max_movements_per_proposal: 3,
             min_topic_leaders_per_broker: 0,
             broker_capacities: Arc::new(BrokerCapacities::default()),
+            broker_usages: Arc::new(UsageStore::default()),
         };
         let goals: Vec<&dyn Goal> = vec![&hard, &soft];
         let out = optimize(&s, &goals, &ctx).unwrap();
@@ -548,6 +551,7 @@ mod tests {
             max_movements_per_proposal: 256,
             min_topic_leaders_per_broker: 0,
             broker_capacities: Arc::new(BrokerCapacities::default()),
+            broker_usages: Arc::new(UsageStore::default()),
         };
 
         let out = optimize(&state, &goals, &ctx).unwrap();
@@ -595,6 +599,7 @@ mod tests {
             max_movements_per_proposal: 3,
             min_topic_leaders_per_broker: 0,
             broker_capacities: Arc::new(BrokerCapacities::default()),
+            broker_usages: Arc::new(UsageStore::default()),
         };
         let goals: Vec<&dyn Goal> = vec![&bulk];
         let err = optimize(&s, &goals, &ctx).unwrap_err();

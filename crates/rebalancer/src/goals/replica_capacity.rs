@@ -206,6 +206,7 @@ mod tests {
     use super::*;
     use crate::capacity::{BrokerCapacities, BrokerCapacity};
     use crate::model::BrokerView;
+    use crate::scraper::UsageStore;
     use std::sync::Arc;
 
     fn ctx_with(caps: BrokerCapacities) -> GoalContext {
@@ -214,6 +215,7 @@ mod tests {
             max_movements_per_proposal: 256,
             min_topic_leaders_per_broker: 0,
             broker_capacities: Arc::new(caps),
+            broker_usages: Arc::new(UsageStore::default()),
         }
     }
 

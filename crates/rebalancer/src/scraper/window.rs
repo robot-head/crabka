@@ -63,6 +63,7 @@ struct RingBuffer {
     samples: VecDeque<Sample>,
 }
 
+#[derive(Debug)]
 pub struct UsageStore {
     inner: RwLock<HashMap<SeriesKey, RingBuffer>>,
     config: WindowConfig,
