@@ -1,0 +1,38 @@
+---
+# JMX prometheus exporter rule set referenced by Kafka.spec.kafka.metricsConfig
+# above. Reproduces the upstream Strimzi sample rules; trimmed to the ones the
+# benchmark actually reads (jvm_memory_bytes_used) so the PodMonitor target
+# stays light.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: strimzi-kafka-jmx-exporter
+  namespace: default
+data:
+  kafka-metrics-config.yml: |
+    lowercaseOutputName: true
+    rules:
+      # Standard JVM metrics (heap, non-heap, GC, threads). The benchmark
+      # reads `jvm_memory_bytes_used{area=...}` for the Kafka memory split.
+      - pattern: "java.lang<type=Memory><(HeapMemoryUsage|NonHeapMemoryUsage)>(\\w+)"
+        name: jvm_memory_bytes_$3
+        type: GAUGE
+        labels:
+          area: "$1"
+        attrNameSnakeCase: false
+        valueFactor: 1
+      - pattern: "java.lang<type=GarbageCollector, name=(.+)><>(\\w+)"
+        name: jvm_gc_$2
+        type: COUNTER
+        labels:
+          gc: "$1"
+      - pattern: "java.lang<type=Threading><>ThreadCount"
+        name: jvm_threads_current
+        type: GAUGE
+      # Bytes-in/out per topic for the broker — handy as a sanity-check
+      # against the driver's own counters.
+      - pattern: "kafka.server<type=BrokerTopicMetrics, name=(BytesInPerSec|BytesOutPerSec), topic=(.+)><>OneMinuteRate"
+        name: kafka_server_brokertopicmetrics_$1_one_minute_rate
+        type: GAUGE
+        labels:
+          topic: "$2"

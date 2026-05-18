@@ -1,0 +1,36 @@
+---
+apiVersion: crabka.io/v1alpha1
+kind: Kafka
+metadata:
+  name: demo
+  namespace: default
+spec:
+  kafkaVersion: "0.1.1"
+  config:
+    log.retention.hours: "24"
+  metricsConfig:
+    podMonitor:
+      interval: 15s
+---
+apiVersion: crabka.io/v1alpha1
+kind: KafkaNodePool
+metadata:
+  name: brokers
+  namespace: default
+  labels:
+    crabka.io/cluster: demo
+spec:
+  roles: [Controller, Broker]
+  replicas: 1
+  nodeIdStart: 0
+  storage:
+    type: PersistentClaim
+    size: 1Gi
+    deleteClaim: true
+  resources:
+    requests:
+      cpu: "500m"
+      memory: 512Mi
+    limits:
+      cpu: "2000m"
+      memory: 2Gi

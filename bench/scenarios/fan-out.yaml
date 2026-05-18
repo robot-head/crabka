@@ -1,0 +1,18 @@
+# Many partitions + many producers/consumers. Tests partition
+# distribution and group-rebalance correctness. If Crabka's consumer
+# rebalance has any bugs they tend to surface here as stalled msgs/s.
+name: fan-out
+mode_tag: cluster
+msg_size_bytes: 1024
+partitions: 24
+replication_factor: 1
+producers: 4
+consumers: 4
+mode:
+  kind: saturate
+acks: leader
+compression: none
+linger_ms: 5
+batch_size: 16384
+warmup_s: 15
+duration_s: 120

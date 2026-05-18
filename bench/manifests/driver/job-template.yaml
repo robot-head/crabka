@@ -1,0 +1,72 @@
+---
+# Template — `run-scenario.sh` substitutes ${...} via `envsubst` before apply.
+#
+# Required env vars:
+#   BENCH_STACK            crabka | kafka
+#   BENCH_SCENARIO_NAME    short scenario id (matches a file under bench/scenarios/)
+#   BENCH_BOOTSTRAP        <service-dns>:9092
+#   BENCH_BROKER_COUNT     1 or 3
+#   BENCH_DRIVER_IMAGE     crabka-bench-driver:e2e (or :0.1.1)
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: bench-driver-${BENCH_STACK}-${BENCH_SCENARIO_NAME}
+  namespace: default
+  labels:
+    app.kubernetes.io/name: bench-driver
+    bench/stack: ${BENCH_STACK}
+    bench/scenario: ${BENCH_SCENARIO_NAME}
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: bench-driver
+        bench/stack: ${BENCH_STACK}
+        bench/scenario: ${BENCH_SCENARIO_NAME}
+    spec:
+      serviceAccountName: bench-driver
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
+      containers:
+        - name: driver
+          image: ${BENCH_DRIVER_IMAGE}
+          imagePullPolicy: IfNotPresent
+          command:
+            - /usr/bin/crabka-bench-driver
+          env:
+            - name: BENCH_SCENARIO_PATH
+              value: /etc/crabka-bench/scenarios/${BENCH_SCENARIO_NAME}.yaml
+            - name: BENCH_BOOTSTRAP_SERVERS
+              value: ${BENCH_BOOTSTRAP}
+            - name: BENCH_STACK
+              value: ${BENCH_STACK}
+            - name: BENCH_TOPIC
+              value: bench-topic
+            - name: BENCH_NAMESPACE
+              value: default
+            - name: BENCH_PROMETHEUS_URL
+              value: http://prometheus.monitoring.svc.cluster.local:9090
+            - name: BENCH_BROKER_COUNT
+              value: "${BENCH_BROKER_COUNT}"
+            - name: BENCH_OUTPUT_PATH
+              value: /results/run.json
+            - name: RUST_LOG
+              value: info
+          volumeMounts:
+            - name: results
+              mountPath: /results
+          resources:
+            requests:
+              cpu: "500m"
+              memory: 256Mi
+            limits:
+              cpu: "2"
+              memory: 1Gi
+      volumes:
+        - name: results
+          emptyDir: {}
