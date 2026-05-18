@@ -36,6 +36,13 @@ use crate::crd::{
     Storage,
 };
 
+/// Slice 40: container port the broker binds for Prometheus `/metrics`
+/// when `Kafka.spec.metricsConfig` is `Some`. Kept here next to
+/// `BROKER_PORT` so the pod-template renderer has both numbers in one
+/// place; referenced by `controller::metrics` to build the
+/// `PodMonitor` / `ServiceMonitor` endpoints.
+pub(crate) const METRICS_PORT: i32 = 9404;
+
 /// Validation errors for a `KafkaNodePool`. Each variant maps to a
 /// distinct condition reason; the operator surfaces the variant as
 /// `Ready=False` and does not attempt further reconcile until the spec
@@ -110,16 +117,48 @@ if [ ! -f /var/lib/crabka/data/.formatted ]; then\n\
 fi\n\
 printf '%s' \"$NODE_ID\" > /var/lib/crabka/data/.node-id\n";
 
-// Main script: copy the per-broker TOML from the ConfigMap volume into a
-// writable tmpfs path (the root FS is read-only), then exec the broker
-// with `--config-file` so it picks up advertised listeners and all other
-// per-broker config from the rendered TOML.
-// `/run/crabka` is backed by an emptyDir volume (see `render_storage`)
-// so it's writable even with `readOnlyRootFilesystem: true`.
+// Main script (zero-metrics variant). Retained as a const so the
+// `build_main_script_disabled_matches_slice_25_constant` test gives a
+// loud failure if the upgrade-stability contract breaks.
+//
+// Copies the per-broker TOML from the ConfigMap volume into a writable
+// tmpfs path (the root FS is read-only), then execs the broker with
+// `--config-file` so it picks up advertised listeners and all other
+// per-broker config from the rendered TOML. `/run/crabka` is backed by
+// an emptyDir volume (see `render_storage`) so it's writable even with
+// `readOnlyRootFilesystem: true`.
 const MAIN_SCRIPT: &str = "set -eu\n\
 NODE_ID=\"$(cat /var/lib/crabka/data/.node-id)\"\n\
 cp /etc/crabka/config/broker-${NODE_ID}.toml /run/crabka/broker.toml\n\
 exec /usr/bin/crabka-broker \\\n  --config-file=/run/crabka/broker.toml \\\n  --broker-id=\"${NODE_ID}\"\n";
+
+/// Build the broker container's main shell script. The disabled variant
+/// returns `MAIN_SCRIPT` byte-for-byte so an upgrade from slice-25 with
+/// `metrics_config: None` produces a byte-identical pod template (the
+/// pod-template-hash stays put, so no broker pod rolls). The enabled
+/// variant appends `--metrics-listen-addr=0.0.0.0:9404` so the broker
+/// binds its Prometheus endpoint.
+///
+/// The enabled variant is a separate string literal (no `format!`) so a
+/// test failure shows the full expected text inline rather than a
+/// templated fragment.
+fn build_main_script(metrics_enabled: bool) -> String {
+    if !metrics_enabled {
+        return MAIN_SCRIPT.to_string();
+    }
+    // NB: the enabled-variant body intentionally duplicates the disabled
+    // one. See the `build_main_script_disabled_matches_slice_25_constant`
+    // test — keeping the literals separate is the upgrade-stability
+    // contract. Don't refactor to a `format!`.
+    "set -eu\n\
+     NODE_ID=\"$(cat /var/lib/crabka/data/.node-id)\"\n\
+     cp /etc/crabka/config/broker-${NODE_ID}.toml /run/crabka/broker.toml\n\
+     exec /usr/bin/crabka-broker \\\n  \
+       --config-file=/run/crabka/broker.toml \\\n  \
+       --broker-id=\"${NODE_ID}\" \\\n  \
+       --metrics-listen-addr=0.0.0.0:9404\n"
+        .to_string()
+}
 
 fn render_init_container(
     broker_image: &str,
@@ -148,18 +187,28 @@ fn render_broker_container(
     broker_image: &str,
     secret_name: &str,
     resources: &ResourceRequirements,
+    metrics_enabled: bool,
 ) -> serde_json::Value {
+    let mut ports = vec![json!({
+        "containerPort": BROKER_PORT, "name": "kafka-internal", "protocol": "TCP"
+    })];
+    if metrics_enabled {
+        ports.push(json!({
+            "containerPort": METRICS_PORT, "name": "metrics", "protocol": "TCP"
+        }));
+    }
+    let main_script = build_main_script(metrics_enabled);
     json!({
         "name": "broker",
         "image": broker_image,
         "command": ["/bin/sh", "-c"],
-        "args": [MAIN_SCRIPT],
+        "args": [main_script],
         "env": [
             { "name": "POD_NAME", "valueFrom": { "fieldRef": { "fieldPath": "metadata.name" } } },
             { "name": "POD_NAMESPACE", "valueFrom": { "fieldRef": { "fieldPath": "metadata.namespace" } } },
             { "name": "CRABKA_CLUSTER_ID", "valueFrom": { "secretKeyRef": { "name": secret_name, "key": "clusterId" } } }
         ],
-        "ports": [{ "containerPort": BROKER_PORT, "name": "kafka-internal", "protocol": "TCP" }],
+        "ports": ports,
         "readinessProbe": {
             "tcpSocket": { "port": BROKER_PORT },
             "initialDelaySeconds": 2,
@@ -296,7 +345,8 @@ pub(crate) fn render_statefulset(
     let sts_name = format!("{parent_name}-{pool_name}");
 
     let init = render_init_container(broker_image, &secret_name, pool.spec.node_id_start);
-    let main = render_broker_container(broker_image, &secret_name, &resources);
+    let metrics_enabled = parent.spec.metrics_config.is_some();
+    let main = render_broker_container(broker_image, &secret_name, &resources, metrics_enabled);
 
     // Merge user-provided pod metadata under operator-owned labels.
     // Operator labels win collisions; user labels fill in the rest.
@@ -692,6 +742,7 @@ mod tests {
                 config: None,
                 listeners: vec![],
                 inter_broker_listener_name: None,
+                metrics_config: None,
             },
         );
         k.metadata.namespace = Some("default".into());
@@ -1268,5 +1319,59 @@ mod tests {
         pool.spec.storage = Some(pc("banana", None));
         let err = validate(&pool).unwrap_err();
         assert!(matches!(err, PoolValidationError::StorageSizeInvalid(_, _)));
+    }
+
+    #[test]
+    fn build_main_script_disabled_matches_slice_25_constant() {
+        // Upgrade-stability contract: clusters with metrics_config=None
+        // must get a byte-identical pod template post-slice-40.
+        assert_eq!(build_main_script(false), MAIN_SCRIPT);
+    }
+
+    #[test]
+    fn build_main_script_enabled_appends_metrics_flag() {
+        let s = build_main_script(true);
+        assert!(
+            s.contains("--metrics-listen-addr=0.0.0.0:9404"),
+            "got: {s:?}"
+        );
+        assert!(s.contains("--config-file=/run/crabka/broker.toml"));
+        assert!(s.ends_with('\n'));
+    }
+
+    #[test]
+    fn render_statefulset_metrics_off_no_port() {
+        let parent = parent_fixture("demo");
+        assert!(parent.spec.metrics_config.is_none());
+        let pool = pool_fixture("brokers", "demo", 1);
+        let sts = render_statefulset(&parent, &pool, "img:latest").unwrap();
+        let ports = sts.spec.unwrap().template.spec.unwrap().containers[0]
+            .ports
+            .clone()
+            .unwrap();
+        assert_eq!(ports.len(), 1);
+        assert_eq!(ports[0].name.as_deref(), Some("kafka-internal"));
+    }
+
+    #[test]
+    fn render_statefulset_metrics_on_adds_port() {
+        use crate::crd::{MetricsConfig, PodMonitorSpec};
+        let mut parent = parent_fixture("demo");
+        parent.spec.metrics_config = Some(MetricsConfig {
+            pod_monitor: Some(PodMonitorSpec::default()),
+            ..Default::default()
+        });
+        let pool = pool_fixture("brokers", "demo", 1);
+        let sts = render_statefulset(&parent, &pool, "img:latest").unwrap();
+        let ports = sts.spec.unwrap().template.spec.unwrap().containers[0]
+            .ports
+            .clone()
+            .unwrap();
+        assert_eq!(ports.len(), 2);
+        assert!(
+            ports
+                .iter()
+                .any(|p| p.name.as_deref() == Some("metrics") && p.container_port == 9404)
+        );
     }
 }

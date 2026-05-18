@@ -5,6 +5,7 @@
 pub mod kafka;
 pub mod kafka_node_pool;
 pub mod listener;
+pub mod metrics;
 
 pub use kafka::{Kafka, KafkaCondition, KafkaSpec, KafkaStatus};
 pub use kafka_node_pool::{
@@ -12,3 +13,4 @@ pub use kafka_node_pool::{
     PersistentClaimSpec, PodTemplate, Storage,
 };
 pub use listener::*;
+pub use metrics::{MetricsConfig, MetricsType, PodMonitorSpec, ServiceMonitorSpec};

@@ -31,4 +31,7 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "watch"]
+  - apiGroups: ["monitoring.coreos.com"]
+    resources: ["podmonitors", "servicemonitors"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 {{- end }}

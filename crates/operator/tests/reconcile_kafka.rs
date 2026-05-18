@@ -23,7 +23,9 @@
 use std::sync::Arc;
 
 use crabka_operator::controller::kafka::reconcile;
-use crabka_operator::crd::{Kafka, KafkaSpec, Listener, ListenerType};
+use crabka_operator::crd::{
+    Kafka, KafkaSpec, Listener, ListenerType, MetricsConfig, PodMonitorSpec, ServiceMonitorSpec,
+};
 use http::{Method, Response};
 use serde_json::json;
 
@@ -44,6 +46,24 @@ fn kafka_cr(name: &str, namespace: &str) -> Kafka {
             config: None,
             listeners: vec![],
             inter_broker_listener_name: None,
+            metrics_config: None,
+        },
+    );
+    k.metadata.namespace = Some(namespace.into());
+    k.metadata.uid = Some("kafka-uid".into());
+    k
+}
+
+/// Variant carrying a `spec.metricsConfig` for slice-40 tests.
+fn kafka_cr_with_metrics(name: &str, namespace: &str, metrics: Option<MetricsConfig>) -> Kafka {
+    let mut k = Kafka::new(
+        name,
+        KafkaSpec {
+            kafka_version: "0.1.1".into(),
+            config: None,
+            listeners: vec![],
+            inter_broker_listener_name: None,
+            metrics_config: metrics,
         },
     );
     k.metadata.namespace = Some(namespace.into());
@@ -66,6 +86,7 @@ fn kafka_cr_with_config(
             config: Some(config),
             listeners: vec![],
             inter_broker_listener_name: None,
+            metrics_config: None,
         },
     );
     k.metadata.namespace = Some(namespace.into());
@@ -522,6 +543,350 @@ async fn kafka_invalid_listener_tls_blocks_broker_configmap_and_sets_conditions(
         body["status"]["listeners"]
             .as_array()
             .is_none_or(Vec::is_empty),
+        "body = {body}"
+    );
+
+    assert_eq!(state.remaining_rules(), 0);
+}
+
+/// Helper: pull the `MetricsReady` condition out of a status PATCH body.
+fn metrics_ready_cond(body: &serde_json::Value) -> &serde_json::Value {
+    body["status"]["conditions"]
+        .as_array()
+        .expect("conditions array")
+        .iter()
+        .find(|c| c["type"] == "MetricsReady")
+        .unwrap_or_else(|| panic!("MetricsReady condition present, body = {body}"))
+}
+
+/// Slice 40: `metricsConfig` absent. No dynamic monitoring resources may
+/// be applied, and the status carries `MetricsReady=False reason=Disabled`.
+#[tokio::test]
+async fn metrics_disabled_no_dynamic_apply() {
+    let items = vec![fake_pool_list_item("brokers", "y", "demo", 1, 1)];
+    let (ctx, state) = build_ctx("y", happy_path_rules("demo", "y", &items));
+    let kafka = kafka_cr("demo", "y");
+
+    reconcile(Arc::new(kafka), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    for r in &observed {
+        let uri = r.uri().to_string();
+        assert!(
+            !uri.contains("/apis/monitoring.coreos.com/"),
+            "metricsConfig=None must not touch monitoring.coreos.com: {uri}"
+        );
+        assert!(
+            !uri.contains("/services/demo-broker-metrics"),
+            "metricsConfig=None must not touch the metrics Service: {uri}"
+        );
+    }
+
+    let status_patch = observed
+        .iter()
+        .find(|r| {
+            r.method() == Method::PATCH && r.uri().to_string().contains("/kafkas/demo/status")
+        })
+        .expect("status PATCH captured");
+    let body: serde_json::Value =
+        serde_json::from_slice(status_patch.body()).expect("status body is JSON");
+    let cond = metrics_ready_cond(&body);
+    assert_eq!(cond["status"], "False", "body = {body}");
+    assert_eq!(cond["reason"], "Disabled", "body = {body}");
+
+    assert_eq!(state.remaining_rules(), 0);
+}
+
+/// Faked apply-patch response that echoes a minimal `PodMonitor` body.
+fn fake_pod_monitor_body(name: &str, namespace: &str) -> serde_json::Value {
+    json!({
+        "apiVersion": "monitoring.coreos.com/v1",
+        "kind": "PodMonitor",
+        "metadata": { "name": name, "namespace": namespace, "uid": "pm-uid" },
+        "spec": { "selector": { "matchLabels": {} }, "podMetricsEndpoints": [] }
+    })
+}
+
+/// Faked apply-patch response that echoes a minimal `ServiceMonitor` body.
+fn fake_service_monitor_body(name: &str, namespace: &str) -> serde_json::Value {
+    json!({
+        "apiVersion": "monitoring.coreos.com/v1",
+        "kind": "ServiceMonitor",
+        "metadata": { "name": name, "namespace": namespace, "uid": "sm-uid" },
+        "spec": { "selector": { "matchLabels": {} }, "endpoints": [] }
+    })
+}
+
+/// Slice 40: `podMonitor` set. Reconcile applies exactly one `PodMonitor`
+/// via SSA against `monitoring.coreos.com/v1`, then best-effort deletes
+/// the abandoned `ServiceMonitor` + metrics `Service`. The status surfaces
+/// `MetricsReady=True reason=Available`.
+#[tokio::test]
+async fn pod_monitor_path_applies_one_resource() {
+    let items = vec![fake_pool_list_item("brokers", "y", "demo", 1, 1)];
+    let mut rules = happy_path_rules("demo", "y", &items);
+    // Insert metrics rules before the trailing status PATCH so the FIFO
+    // matcher consumes them in encounter order. The status PATCH rule is
+    // the last entry produced by happy_path_rules.
+    let status_rule = rules.pop().expect("status rule present");
+    rules.push(MockRule {
+        method: Method::PATCH,
+        path_substr: "/apis/monitoring.coreos.com/v1/namespaces/y/podmonitors/demo-broker".into(),
+        response: json_response(200, &fake_pod_monitor_body("demo-broker", "y")),
+    });
+    rules.push(MockRule {
+        method: Method::DELETE,
+        path_substr: "/apis/monitoring.coreos.com/v1/namespaces/y/servicemonitors/demo-broker"
+            .into(),
+        response: Response::builder()
+            .status(404)
+            .header("content-type", "application/json")
+            .body(not_found_body("servicemonitor not found"))
+            .expect("404 builds"),
+    });
+    rules.push(MockRule {
+        method: Method::DELETE,
+        path_substr: "/api/v1/namespaces/y/services/demo-broker-metrics".into(),
+        response: Response::builder()
+            .status(404)
+            .header("content-type", "application/json")
+            .body(not_found_body("service not found"))
+            .expect("404 builds"),
+    });
+    rules.push(status_rule);
+
+    let (ctx, state) = build_ctx("y", rules);
+    let metrics = MetricsConfig {
+        pod_monitor: Some(PodMonitorSpec::default()),
+        ..Default::default()
+    };
+    let kafka = kafka_cr_with_metrics("demo", "y", Some(metrics));
+
+    reconcile(Arc::new(kafka), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    let pm_patches: Vec<&http::Request<hyper::body::Bytes>> = observed
+        .iter()
+        .filter(|r| {
+            r.method() == Method::PATCH && r.uri().to_string().contains("/podmonitors/demo-broker")
+        })
+        .collect();
+    assert_eq!(pm_patches.len(), 1, "expected exactly one PodMonitor PATCH");
+    let uri = pm_patches[0].uri().to_string();
+    assert!(
+        uri.contains("fieldManager=crabka-operator"),
+        "PATCH must carry the operator's field manager: {uri}"
+    );
+    assert!(
+        uri.contains("force=true"),
+        "PATCH must force-takeover: {uri}"
+    );
+
+    // No ServiceMonitor PATCH.
+    assert!(
+        !observed.iter().any(|r| {
+            r.method() == Method::PATCH
+                && r.uri().to_string().contains("/servicemonitors/demo-broker")
+        }),
+        "pod_monitor path must not PATCH a ServiceMonitor"
+    );
+
+    let status_patch = observed
+        .iter()
+        .find(|r| {
+            r.method() == Method::PATCH && r.uri().to_string().contains("/kafkas/demo/status")
+        })
+        .expect("status PATCH captured");
+    let body: serde_json::Value =
+        serde_json::from_slice(status_patch.body()).expect("status body is JSON");
+    let cond = metrics_ready_cond(&body);
+    assert_eq!(cond["status"], "True", "body = {body}");
+    assert_eq!(cond["reason"], "Available", "body = {body}");
+
+    assert_eq!(state.remaining_rules(), 0);
+}
+
+/// Slice 40: `serviceMonitor` set. Reconcile applies the headless metrics
+/// `Service` and then the `ServiceMonitor`. The abandoned `PodMonitor` is
+/// best-effort deleted. Status surfaces `MetricsReady=True reason=Available`.
+#[tokio::test]
+async fn service_monitor_path_applies_service_and_servicemonitor() {
+    let items = vec![fake_pool_list_item("brokers", "y", "demo", 1, 1)];
+    let mut rules = happy_path_rules("demo", "y", &items);
+    let status_rule = rules.pop().expect("status rule present");
+    rules.push(MockRule {
+        method: Method::PATCH,
+        path_substr: "/api/v1/namespaces/y/services/demo-broker-metrics".into(),
+        response: json_response(200, &fake_service_body("demo-broker-metrics", "y")),
+    });
+    rules.push(MockRule {
+        method: Method::PATCH,
+        path_substr: "/apis/monitoring.coreos.com/v1/namespaces/y/servicemonitors/demo-broker"
+            .into(),
+        response: json_response(200, &fake_service_monitor_body("demo-broker", "y")),
+    });
+    rules.push(MockRule {
+        method: Method::DELETE,
+        path_substr: "/apis/monitoring.coreos.com/v1/namespaces/y/podmonitors/demo-broker".into(),
+        response: Response::builder()
+            .status(404)
+            .header("content-type", "application/json")
+            .body(not_found_body("podmonitor not found"))
+            .expect("404 builds"),
+    });
+    rules.push(status_rule);
+
+    let (ctx, state) = build_ctx("y", rules);
+    let metrics = MetricsConfig {
+        service_monitor: Some(ServiceMonitorSpec::default()),
+        ..Default::default()
+    };
+    let kafka = kafka_cr_with_metrics("demo", "y", Some(metrics));
+
+    reconcile(Arc::new(kafka), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    let svc_patches: Vec<&http::Request<hyper::body::Bytes>> = observed
+        .iter()
+        .filter(|r| {
+            r.method() == Method::PATCH
+                && r.uri()
+                    .to_string()
+                    .contains("/services/demo-broker-metrics")
+        })
+        .collect();
+    assert_eq!(
+        svc_patches.len(),
+        1,
+        "expected exactly one metrics Service PATCH"
+    );
+
+    let sm_patches: Vec<&http::Request<hyper::body::Bytes>> = observed
+        .iter()
+        .filter(|r| {
+            r.method() == Method::PATCH
+                && r.uri().to_string().contains("/servicemonitors/demo-broker")
+        })
+        .collect();
+    assert_eq!(
+        sm_patches.len(),
+        1,
+        "expected exactly one ServiceMonitor PATCH"
+    );
+
+    // No PodMonitor PATCH.
+    assert!(
+        !observed.iter().any(|r| {
+            r.method() == Method::PATCH && r.uri().to_string().contains("/podmonitors/demo-broker")
+        }),
+        "service_monitor path must not PATCH a PodMonitor"
+    );
+
+    let status_patch = observed
+        .iter()
+        .find(|r| {
+            r.method() == Method::PATCH && r.uri().to_string().contains("/kafkas/demo/status")
+        })
+        .expect("status PATCH captured");
+    let body: serde_json::Value =
+        serde_json::from_slice(status_patch.body()).expect("status body is JSON");
+    let cond = metrics_ready_cond(&body);
+    assert_eq!(cond["status"], "True", "body = {body}");
+    assert_eq!(cond["reason"], "Available", "body = {body}");
+
+    assert_eq!(state.remaining_rules(), 0);
+}
+
+/// Slice 40: both `podMonitor` and `serviceMonitor` set. Reconcile must
+/// short-circuit before any dynamic apply and surface
+/// `MetricsReady=False reason=MutuallyExclusive`. No request to the
+/// monitoring API may be issued — the harness's fallback 404 would itself
+/// fail the assertion below.
+#[tokio::test]
+async fn mutually_exclusive_sets_condition_and_skips_apply() {
+    let items = vec![fake_pool_list_item("brokers", "y", "demo", 1, 1)];
+    let (ctx, state) = build_ctx("y", happy_path_rules("demo", "y", &items));
+    let metrics = MetricsConfig {
+        pod_monitor: Some(PodMonitorSpec::default()),
+        service_monitor: Some(ServiceMonitorSpec::default()),
+        ..Default::default()
+    };
+    let kafka = kafka_cr_with_metrics("demo", "y", Some(metrics));
+
+    reconcile(Arc::new(kafka), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    for r in &observed {
+        let uri = r.uri().to_string();
+        assert!(
+            !uri.contains("/apis/monitoring.coreos.com/"),
+            "mutually-exclusive must not touch monitoring.coreos.com: {uri}"
+        );
+        assert!(
+            !uri.contains("/services/demo-broker-metrics"),
+            "mutually-exclusive must not touch the metrics Service: {uri}"
+        );
+    }
+
+    let status_patch = observed
+        .iter()
+        .find(|r| {
+            r.method() == Method::PATCH && r.uri().to_string().contains("/kafkas/demo/status")
+        })
+        .expect("status PATCH captured");
+    let body: serde_json::Value =
+        serde_json::from_slice(status_patch.body()).expect("status body is JSON");
+    let cond = metrics_ready_cond(&body);
+    assert_eq!(cond["status"], "False", "body = {body}");
+    assert_eq!(cond["reason"], "MutuallyExclusive", "body = {body}");
+
+    assert_eq!(state.remaining_rules(), 0);
+}
+
+/// Slice 40: the Prometheus Operator CRDs are not installed — the dynamic
+/// PATCH against `monitoring.coreos.com/v1` 404s. Reconcile must surface
+/// `MetricsReady=False reason=PrometheusOperatorCrdsMissing` rather than
+/// fail; the status patch still lands.
+#[tokio::test]
+async fn prom_operator_missing_sets_condition() {
+    let items = vec![fake_pool_list_item("brokers", "y", "demo", 1, 1)];
+    let mut rules = happy_path_rules("demo", "y", &items);
+    let status_rule = rules.pop().expect("status rule present");
+    rules.push(MockRule {
+        method: Method::PATCH,
+        path_substr: "/apis/monitoring.coreos.com/v1/namespaces/y/podmonitors/demo-broker".into(),
+        response: Response::builder()
+            .status(404)
+            .header("content-type", "application/json")
+            .body(not_found_body(
+                "the server could not find the requested resource",
+            ))
+            .expect("404 builds"),
+    });
+    rules.push(status_rule);
+
+    let (ctx, state) = build_ctx("y", rules);
+    let metrics = MetricsConfig {
+        pod_monitor: Some(PodMonitorSpec::default()),
+        ..Default::default()
+    };
+    let kafka = kafka_cr_with_metrics("demo", "y", Some(metrics));
+
+    reconcile(Arc::new(kafka), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    let status_patch = observed
+        .iter()
+        .find(|r| {
+            r.method() == Method::PATCH && r.uri().to_string().contains("/kafkas/demo/status")
+        })
+        .expect("status PATCH captured");
+    let body: serde_json::Value =
+        serde_json::from_slice(status_patch.body()).expect("status body is JSON");
+    let cond = metrics_ready_cond(&body);
+    assert_eq!(cond["status"], "False", "body = {body}");
+    assert_eq!(
+        cond["reason"], "PrometheusOperatorCrdsMissing",
         "body = {body}"
     );
 
