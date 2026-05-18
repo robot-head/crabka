@@ -94,6 +94,80 @@ struct Args {
     #[arg(long, env = "CRABKA_METRICS_RETENTION_SECS", default_value_t = 43_200)]
     metrics_retention_secs: u64,
 
+    /// How often the detector evaluates anomaly rules. `0` disables
+    /// the detector entirely (no anomaly recording, no auto-trigger).
+    #[arg(long, env = "CRABKA_DETECTOR_TICK_INTERVAL_SECS", default_value_t = 30)]
+    detector_tick_interval_secs: u64,
+
+    /// How long a broker must be absent from cluster snapshots before
+    /// `BrokerDeath` fires.
+    #[arg(
+        long,
+        env = "CRABKA_DETECTOR_BROKER_DEATH_THRESHOLD_SECS",
+        default_value_t = 60
+    )]
+    detector_broker_death_threshold_secs: u64,
+
+    /// How long ISR < replicas must persist before `UnderReplicatedPartitions` fires.
+    #[arg(
+        long,
+        env = "CRABKA_DETECTOR_UNDER_REPLICATED_THRESHOLD_SECS",
+        default_value_t = 120
+    )]
+    detector_under_replicated_threshold_secs: u64,
+
+    /// Disk usage fraction (0.0..1.0) above which `DiskPressure` fires Warning.
+    #[arg(
+        long,
+        env = "CRABKA_DETECTOR_DISK_PRESSURE_PCT",
+        default_value_t = 0.85
+    )]
+    detector_disk_pressure_pct: f64,
+
+    /// Disk usage fraction above which `DiskPressure` escalates to Critical.
+    #[arg(
+        long,
+        env = "CRABKA_DETECTOR_DISK_CRITICAL_PCT",
+        default_value_t = 0.95
+    )]
+    detector_disk_critical_pct: f64,
+
+    /// `SlowBroker` multiplier (× cluster median CPU cores).
+    #[arg(
+        long,
+        env = "CRABKA_DETECTOR_SLOW_BROKER_MULTIPLIER",
+        default_value_t = 2.0
+    )]
+    detector_slow_broker_multiplier: f64,
+
+    /// `SlowBroker` absolute minimum cores floor. Prevents false-positives
+    /// on idle clusters where the multiplier threshold is near zero.
+    #[arg(
+        long,
+        env = "CRABKA_DETECTOR_SLOW_BROKER_MIN_CORES",
+        default_value_t = 0.5
+    )]
+    detector_slow_broker_min_cores: f64,
+
+    /// Default mute window applied after an anomaly auto-triggers a proposal.
+    #[arg(long, env = "CRABKA_DETECTOR_MUTE_WINDOW_SECS", default_value_t = 900)]
+    detector_mute_window_secs: u64,
+
+    /// Master switch on auto-trigger. When false, the detector still
+    /// records + surfaces anomalies but never creates a proposal.
+    /// Default false — operators must opt in.
+    #[arg(
+        long,
+        env = "CRABKA_DETECTOR_AUTO_TRIGGER_ENABLED",
+        default_value_t = false
+    )]
+    detector_auto_trigger_enabled: bool,
+
+    /// In-memory + on-disk ring buffer size for anomaly history at
+    /// `{data_dir}/anomalies.json`.
+    #[arg(long, env = "CRABKA_ANOMALY_RING_BUFFER_SIZE", default_value_t = 200)]
+    anomaly_ring_buffer_size: usize,
+
     /// Default KIP-73 throttle (bytes/sec, per broker direction) when
     /// `ExecuteProposalRequest.throttle_bytes_per_sec` is unset.
     #[arg(
@@ -153,6 +227,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mut registry = new_registry();
     let metrics = RebalancerMetrics::register(&mut registry);
+    let detector_metrics = crabka_rebalancer::detector::DetectorMetrics::register(&mut registry);
     let registry = Arc::new(Mutex::new(registry));
 
     let store = Arc::new(ProposalStore::open(
@@ -292,20 +367,67 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    let goal_registry = Arc::new(GoalRegistry::default_registry());
+
+    let anomaly_store = Arc::new(crabka_rebalancer::detector::AnomalyStore::open(
+        &args.data_dir,
+        args.anomaly_ring_buffer_size,
+    )?);
+
+    let goal_ctx = GoalContext {
+        imbalance_threshold_pct: args.imbalance_threshold_pct,
+        max_movements_per_proposal: args.max_movements_per_proposal,
+        min_topic_leaders_per_broker: args.min_topic_leaders_per_broker,
+        broker_capacities: broker_capacities.clone(),
+        broker_usages: usage_store.clone(),
+    };
+
+    if args.detector_tick_interval_secs > 0 {
+        let detector_cfg = crabka_rebalancer::detector::DetectorConfig {
+            tick_interval: Duration::from_secs(args.detector_tick_interval_secs),
+            broker_death_threshold: Duration::from_secs(args.detector_broker_death_threshold_secs),
+            under_replicated_threshold: Duration::from_secs(
+                args.detector_under_replicated_threshold_secs,
+            ),
+            disk_pressure_pct: args.detector_disk_pressure_pct,
+            disk_critical_pct: args.detector_disk_critical_pct,
+            slow_broker_multiplier: args.detector_slow_broker_multiplier,
+            slow_broker_min_cores: args.detector_slow_broker_min_cores,
+            default_mute_window: Duration::from_secs(args.detector_mute_window_secs),
+            auto_trigger_enabled: args.detector_auto_trigger_enabled,
+            history_capacity: 10,
+        };
+        info!(
+            tick_secs = args.detector_tick_interval_secs,
+            auto_trigger = args.detector_auto_trigger_enabled,
+            broker_death_threshold_secs = args.detector_broker_death_threshold_secs,
+            "starting detector"
+        );
+        let detector = crabka_rebalancer::detector::Detector::new(
+            detector_cfg,
+            snapshot.clone(),
+            usage_store.clone(),
+            broker_capacities.clone(),
+            anomaly_store.clone(),
+            store.clone(),
+            executor_state.clone(),
+            goal_registry.clone(),
+            goal_ctx.clone(),
+            detector_metrics,
+            shutdown.clone(),
+        );
+        tokio::spawn(detector.run());
+    }
+
     let app_state = Arc::new(AppState {
         snapshot: snapshot.clone(),
         store,
-        goal_registry: GoalRegistry::default_registry(),
-        goal_ctx: GoalContext {
-            imbalance_threshold_pct: args.imbalance_threshold_pct,
-            max_movements_per_proposal: args.max_movements_per_proposal,
-            min_topic_leaders_per_broker: args.min_topic_leaders_per_broker,
-            broker_capacities: broker_capacities.clone(),
-            broker_usages: usage_store.clone(),
-        },
+        goal_registry: goal_registry.clone(),
+        goal_ctx,
         metrics: metrics.clone(),
         executor: executor_state,
         client_facade: live_client,
+        anomaly_store: anomaly_store.clone(),
     });
 
     let connect_router = crabka_rebalancer::api::router(app_state);
