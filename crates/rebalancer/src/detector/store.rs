@@ -140,12 +140,7 @@ impl AnomalyStore {
         flipped
     }
 
-    pub fn set_triggered_proposal(
-        &self,
-        id: &str,
-        proposal_id: String,
-        mute_until_ms: i64,
-    ) {
+    pub fn set_triggered_proposal(&self, id: &str, proposal_id: String, mute_until_ms: i64) {
         let updated = {
             let mut q = self.inner.lock().expect("AnomalyStore mutex poisoned");
             if let Some(a) = q.iter_mut().find(|a| a.id == id) {
@@ -371,6 +366,9 @@ mod tests {
             1,
         );
         s.mark_resolved(AnomalyKind::SlowBroker, &AnomalyKey::Broker(5), 2);
-        assert!(s.find_open(AnomalyKind::SlowBroker, &AnomalyKey::Broker(5)).is_none());
+        assert!(
+            s.find_open(AnomalyKind::SlowBroker, &AnomalyKey::Broker(5))
+                .is_none()
+        );
     }
 }

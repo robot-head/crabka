@@ -42,8 +42,12 @@ impl Rule for DiskPressure {
         let mut sorted: Vec<(i32, f64)> = per_broker.into_iter().collect();
         sorted.sort_by_key(|(id, _)| *id);
         for (id, total) in sorted {
-            let Some(cap) = ctx.capacities.for_broker(id) else { continue };
-            let Some(cap_bytes) = cap.disk_bytes else { continue };
+            let Some(cap) = ctx.capacities.for_broker(id) else {
+                continue;
+            };
+            let Some(cap_bytes) = cap.disk_bytes else {
+                continue;
+            };
             if cap_bytes == 0 {
                 continue;
             }
@@ -86,7 +90,12 @@ mod tests {
             cluster_id: None,
             snapshot_at_ms: 0,
             brokers: (1..=3)
-                .map(|id| BrokerView { id, host: format!("h{id}"), port: 9092, rack: None })
+                .map(|id| BrokerView {
+                    id,
+                    host: format!("h{id}"),
+                    port: 9092,
+                    rack: None,
+                })
                 .collect(),
             partitions: parts,
             in_flight_reassignments: vec![],
@@ -128,7 +137,10 @@ mod tests {
         let mut by = std::collections::HashMap::new();
         by.insert(
             broker,
-            BrokerCapacity { disk_bytes: Some(disk_bytes), ..Default::default() },
+            BrokerCapacity {
+                disk_bytes: Some(disk_bytes),
+                ..Default::default()
+            },
         );
         BrokerCapacities { by_broker: by }
     }

@@ -32,8 +32,8 @@ impl Rule for BrokerDeath {
             return Vec::new();
         }
 
-        let threshold_ms = i64::try_from(ctx.cfg.broker_death_threshold.as_millis())
-            .unwrap_or(i64::MAX);
+        let threshold_ms =
+            i64::try_from(ctx.cfg.broker_death_threshold.as_millis()).unwrap_or(i64::MAX);
         let cutoff = ctx.now_ms.saturating_sub(threshold_ms);
         // Need at least one memo old enough to confirm the absence is
         // sustained — guards against snapshot lag firing on a single tick.
@@ -71,7 +71,11 @@ mod tests {
     use crate::model::{BrokerView, ClusterState, PartitionView};
     use crate::scraper::UsageStore;
 
-    fn state(brokers: &[i32], partitions: Vec<(&str, i32, Vec<i32>, i32)>, now: i64) -> ClusterState {
+    fn state(
+        brokers: &[i32],
+        partitions: Vec<(&str, i32, Vec<i32>, i32)>,
+        now: i64,
+    ) -> ClusterState {
         ClusterState {
             cluster_id: None,
             snapshot_at_ms: now,

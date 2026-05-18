@@ -42,8 +42,8 @@ impl Rule for UnderReplicatedPartitions {
             return Vec::new();
         }
 
-        let threshold_ms = i64::try_from(ctx.cfg.under_replicated_threshold.as_millis())
-            .unwrap_or(i64::MAX);
+        let threshold_ms =
+            i64::try_from(ctx.cfg.under_replicated_threshold.as_millis()).unwrap_or(i64::MAX);
         let cutoff = ctx.now_ms.saturating_sub(threshold_ms);
         let Some(memo) = ctx.history.oldest_since(cutoff) else {
             return Vec::new(); // no history old enough
@@ -67,8 +67,10 @@ impl Rule for UnderReplicatedPartitions {
         for p in &now_under {
             // Sustained check: in the oldest memo within the threshold,
             // was the same partition also under-replicated?
-            let Some((rep_then, isr_then)) =
-                memo.partition_isr.get(&(p.topic.clone(), p.partition)).copied()
+            let Some((rep_then, isr_then)) = memo
+                .partition_isr
+                .get(&(p.topic.clone(), p.partition))
+                .copied()
             else {
                 continue; // didn't exist back then; not sustained
             };
@@ -88,18 +90,20 @@ impl Rule for UnderReplicatedPartitions {
                     partition: p.partition,
                 },
                 severity,
-                details: format!(
-                    "isr={}/{} for >={secs}s",
-                    p.isr.len(),
-                    p.replicas.len()
-                ),
+                details: format!("isr={}/{} for >={secs}s", p.isr.len(), p.replicas.len()),
             });
         }
         // Stable order for tests + consumer.
         hits.sort_by(|a, b| match (&a.key, &b.key) {
             (
-                AnomalyKey::Partition { topic: at, partition: ap },
-                AnomalyKey::Partition { topic: bt, partition: bp },
+                AnomalyKey::Partition {
+                    topic: at,
+                    partition: ap,
+                },
+                AnomalyKey::Partition {
+                    topic: bt,
+                    partition: bp,
+                },
             ) => at.cmp(bt).then(ap.cmp(bp)),
             _ => std::cmp::Ordering::Equal,
         });

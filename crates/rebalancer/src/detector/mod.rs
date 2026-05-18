@@ -94,7 +94,12 @@ impl SnapshotHistory {
             partition_isr: state
                 .partitions
                 .iter()
-                .map(|p| ((p.topic.clone(), p.partition), (p.replicas.len(), p.isr.len())))
+                .map(|p| {
+                    (
+                        (p.topic.clone(), p.partition),
+                        (p.replicas.len(), p.isr.len()),
+                    )
+                })
                 .collect(),
         };
         if self.inner.len() == self.capacity {

@@ -97,7 +97,12 @@ mod tests {
             snapshot_at_ms: 0,
             brokers: brokers
                 .iter()
-                .map(|id| BrokerView { id: *id, host: format!("h{id}"), port: 9092, rack: None })
+                .map(|id| BrokerView {
+                    id: *id,
+                    host: format!("h{id}"),
+                    port: 9092,
+                    rack: None,
+                })
                 .collect(),
             partitions: parts,
             in_flight_reassignments: vec![],

@@ -33,7 +33,10 @@ pub enum AnomalySeverity {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AnomalyKey {
     Broker(i32),
-    Partition { topic: String, partition: i32 },
+    Partition {
+        topic: String,
+        partition: i32,
+    },
     BrokerPartition {
         broker: i32,
         topic: String,
@@ -71,12 +74,15 @@ mod tests {
             AnomalyKind::SlowBroker,
         ];
         let strs: Vec<&'static str> = kinds.iter().map(|k| k.as_str()).collect();
-        assert_eq!(strs, vec![
-            "BrokerDeath",
-            "UnderReplicatedPartitions",
-            "DiskPressure",
-            "SlowBroker",
-        ]);
+        assert_eq!(
+            strs,
+            vec![
+                "BrokerDeath",
+                "UnderReplicatedPartitions",
+                "DiskPressure",
+                "SlowBroker",
+            ]
+        );
         let mut sorted = strs.clone();
         sorted.sort_unstable();
         sorted.dedup();
