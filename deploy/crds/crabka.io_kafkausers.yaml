@@ -1,0 +1,199 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: kafkausers.crabka.io
+spec:
+  group: crabka.io
+  names:
+    categories: []
+    kind: KafkaUser
+    plural: kafkausers
+    shortNames:
+    - ku
+    singular: kafkauser
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns: []
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Auto-generated derived type for KafkaUserSpec via `CustomResource`
+        properties:
+          spec:
+            properties:
+              authentication:
+                description: Tagged enum on `type`, mirroring Strimzi.
+                oneOf:
+                - required:
+                  - type
+                properties:
+                  iterations:
+                    description: |-
+                      PBKDF2 iteration count. Defaults to 8192 on the controller side
+                      (matches `crabka_client_admin::DEFAULT_SCRAM_ITERATIONS`); the
+                      broker rejects values < 4096.
+                    format: int32
+                    maximum: 1000000.0
+                    minimum: 4096.0
+                    nullable: true
+                    type: integer
+                  passwordLength:
+                    description: |-
+                      Raw-password length (bytes) for the operator-generated secret.
+                      Defaults to 32 bytes (44 base64 chars). Ignored on reconcile if
+                      a Secret with key `password` already exists.
+                    format: uint16
+                    maximum: 256.0
+                    minimum: 16.0
+                    nullable: true
+                    type: integer
+                  type:
+                    enum:
+                    - scram-sha-512
+                    type: string
+                type: object
+              authorization:
+                description: |-
+                  Authorization is optional — a user with no ACLs can still
+                  authenticate. When absent, ACL reconciliation is skipped.
+                nullable: true
+                oneOf:
+                - required:
+                  - type
+                properties:
+                  acls:
+                    default: []
+                    items:
+                      description: |-
+                        One rule from `spec.authorization.acls`. Expanded into one
+                        `(resource, operation, host, type)` tuple per `operations` entry
+                        at reconcile time.
+                      properties:
+                        host:
+                          description: |-
+                            Source-address pattern; `"*"` is the wildcard. Defaults to
+                            `"*"` when omitted.
+                          type: string
+                        operations:
+                          description: |-
+                            Non-empty list — the reconciler refuses an empty `operations`
+                            with `Ready=False reason=InvalidSpec`.
+                          items:
+                            description: |-
+                              All 11 Kafka ACL operations. Matches the discriminants in
+                              `org.apache.kafka.common.acl.AclOperation`.
+                            enum:
+                            - All
+                            - Read
+                            - Write
+                            - Create
+                            - Delete
+                            - Alter
+                            - Describe
+                            - ClusterAction
+                            - DescribeConfigs
+                            - AlterConfigs
+                            - IdempotentWrite
+                            type: string
+                          type: array
+                        resource:
+                          properties:
+                            name:
+                              type: string
+                            patternType:
+                              default: literal
+                              description: |-
+                                `literal` (exact match) or `prefixed` (resources whose name
+                                starts with `name`). Defaults to `literal`.
+                              enum:
+                              - literal
+                              - prefixed
+                              type: string
+                            type:
+                              enum:
+                              - topic
+                              - group
+                              - cluster
+                              - transactional-id
+                              type: string
+                          required:
+                          - name
+                          - type
+                          type: object
+                        type:
+                          default: allow
+                          description: '`allow` or `deny`; defaults to `allow`.'
+                          enum:
+                          - allow
+                          - deny
+                          type: string
+                      required:
+                      - operations
+                      - resource
+                      type: object
+                    type: array
+                  type:
+                    enum:
+                    - simple
+                    type: string
+                type: object
+            required:
+            - authentication
+            type: object
+          status:
+            nullable: true
+            properties:
+              conditions:
+                default: []
+                description: Standard Kubernetes-style condition list. Surfaces `Ready`.
+                items:
+                  properties:
+                    lastTransitionTime:
+                      description: RFC3339 timestamp.
+                      type: string
+                    message:
+                      description: Human-readable message.
+                      type: string
+                    reason:
+                      description: CamelCase machine reason.
+                      type: string
+                    status:
+                      description: '`True`, `False`, or `Unknown`.'
+                      type: string
+                    type:
+                      description: e.g. `Ready`.
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              observedGeneration:
+                description: '`metadata.generation` of the last successfully-reconciled spec.'
+                format: int64
+                nullable: true
+                type: integer
+              scramSha512:
+                default: false
+                description: True once SCRAM-SHA-512 credentials are provisioned.
+                type: boolean
+              secret:
+                description: Name of the Kubernetes Secret holding the user's password.
+                nullable: true
+                type: string
+              username:
+                description: Effective Kafka principal name (matches `metadata.name`).
+                nullable: true
+                type: string
+            type: object
+        required:
+        - spec
+        title: KafkaUser
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

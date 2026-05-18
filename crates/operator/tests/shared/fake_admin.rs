@@ -13,9 +13,10 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Mutex as StdMutex;
 
 use crabka_client_admin::{
-    AdminClientLike, AdminError, AlterConfigsOutcome, CreatePartitionsOp, CreatePartitionsOutcome,
-    CreateTopicOutcome, CreateTopicSpec, DeleteTopicOutcome, IncrementalAlterOp, KafkaError,
-    TopicConfigOverrides, TopicMetadata, TopicMetadataEntry,
+    AclEntry, AclEntryFilter, AdminClientLike, AdminError, AlterConfigsOutcome, CreateAclOutcome,
+    CreatePartitionsOp, CreatePartitionsOutcome, CreateTopicOutcome, CreateTopicSpec,
+    DeleteAclFilterOutcome, DeleteTopicOutcome, IncrementalAlterOp, KafkaError, ScramDeletion,
+    ScramUpsertion, ScramUserOutcome, TopicConfigOverrides, TopicMetadata, TopicMetadataEntry,
 };
 use crabka_client_core::ClientError;
 
@@ -61,6 +62,13 @@ pub enum RecordedCall {
     CreatePartitions(Vec<CreatePartitionsOp>),
     DescribeConfigs(Vec<String>),
     IncrementalAlterConfigs(Vec<IncrementalAlterOp>),
+    AlterUserScramCredentials {
+        upsertions: Vec<ScramUpsertion>,
+        deletions: Vec<ScramDeletion>,
+    },
+    DescribeAcls(AclEntryFilter),
+    CreateAcls(Vec<AclEntry>),
+    DeleteAcls(Vec<AclEntryFilter>),
 }
 
 /// Per-topic state held by the fake. Mirrors `TopicMetadataEntry` +
@@ -83,6 +91,14 @@ pub struct FakeAdminClient {
     pub recorded_calls: StdMutex<Vec<RecordedCall>>,
     pub topics: StdMutex<HashMap<String, TopicState>>,
     pub injected: StdMutex<InjectedErrors>,
+    /// In-memory ACL store, keyed on the full tuple. Slice 36 reconcile
+    /// tests pre-seed this when verifying convergence; the trait
+    /// implementations below diff against the live set.
+    pub acls: StdMutex<BTreeSet<AclEntry>>,
+    /// SCRAM users that have been upserted at least once. The reconcile
+    /// happy-path only inspects the recorded-call log; this set lets
+    /// future deletion-path tests check eviction.
+    pub scram_users: StdMutex<BTreeSet<String>>,
 }
 
 impl FakeAdminClient {
@@ -519,4 +535,109 @@ impl AdminClientLike for FakeAdminClient {
             .map(|topic| AlterConfigsOutcome { topic, error: None })
             .collect())
     }
+
+    async fn alter_user_scram_credentials_sha512(
+        &mut self,
+        upsertions: &[ScramUpsertion],
+        deletions: &[ScramDeletion],
+    ) -> Result<Vec<ScramUserOutcome>, AdminError> {
+        self.recorded_calls
+            .lock()
+            .unwrap()
+            .push(RecordedCall::AlterUserScramCredentials {
+                upsertions: upsertions.to_vec(),
+                deletions: deletions.to_vec(),
+            });
+        let mut users = self.scram_users.lock().unwrap();
+        let mut out = Vec::with_capacity(upsertions.len() + deletions.len());
+        for u in upsertions {
+            users.insert(u.username.clone());
+            out.push(ScramUserOutcome {
+                username: u.username.clone(),
+                error: None,
+            });
+        }
+        for d in deletions {
+            users.remove(&d.username);
+            out.push(ScramUserOutcome {
+                username: d.username.clone(),
+                error: None,
+            });
+        }
+        Ok(out)
+    }
+
+    async fn describe_acls(
+        &mut self,
+        filter: &AclEntryFilter,
+    ) -> Result<Vec<AclEntry>, AdminError> {
+        self.recorded_calls
+            .lock()
+            .unwrap()
+            .push(RecordedCall::DescribeAcls(filter.clone()));
+        let store = self.acls.lock().unwrap();
+        Ok(store
+            .iter()
+            .filter(|e| matches_filter(filter, e))
+            .cloned()
+            .collect())
+    }
+
+    async fn create_acls(
+        &mut self,
+        creations: &[AclEntry],
+    ) -> Result<Vec<CreateAclOutcome>, AdminError> {
+        self.recorded_calls
+            .lock()
+            .unwrap()
+            .push(RecordedCall::CreateAcls(creations.to_vec()));
+        let mut store = self.acls.lock().unwrap();
+        let mut out = Vec::with_capacity(creations.len());
+        for e in creations {
+            store.insert(e.clone());
+            out.push(CreateAclOutcome { error: None });
+        }
+        Ok(out)
+    }
+
+    async fn delete_acls(
+        &mut self,
+        filters: &[AclEntryFilter],
+    ) -> Result<Vec<DeleteAclFilterOutcome>, AdminError> {
+        self.recorded_calls
+            .lock()
+            .unwrap()
+            .push(RecordedCall::DeleteAcls(filters.to_vec()));
+        let mut store = self.acls.lock().unwrap();
+        let mut out = Vec::with_capacity(filters.len());
+        for f in filters {
+            let matched: Vec<AclEntry> = store
+                .iter()
+                .filter(|e| matches_filter(f, e))
+                .cloned()
+                .collect();
+            for e in &matched {
+                store.remove(e);
+            }
+            out.push(DeleteAclFilterOutcome {
+                error: None,
+                matched,
+            });
+        }
+        Ok(out)
+    }
+}
+
+/// True if every populated axis of `filter` matches `entry`. Matches
+/// the broker's `AclEntryFilter::matches` semantics.
+fn matches_filter(f: &AclEntryFilter, e: &AclEntry) -> bool {
+    f.resource_type.is_none_or(|rt| rt == e.resource_type)
+        && f.resource_name
+            .as_ref()
+            .is_none_or(|n| n == &e.resource_name)
+        && f.pattern_type.is_none_or(|pt| pt == e.pattern_type)
+        && f.principal.as_ref().is_none_or(|p| p == &e.principal)
+        && f.host.as_ref().is_none_or(|h| h == &e.host)
+        && f.operation.is_none_or(|op| op == e.operation)
+        && f.permission_type.is_none_or(|p| p == e.permission_type)
 }

@@ -12,11 +12,17 @@ use thiserror::Error;
 
 pub mod configs;
 pub mod topics;
+pub mod users;
 
 pub use configs::{AlterConfigsOutcome, IncrementalAlterOp, TopicConfigOverrides};
 pub use topics::{
     CreatePartitionsOp, CreatePartitionsOutcome, CreateTopicOutcome, CreateTopicSpec,
     DeleteTopicOutcome, TopicMetadata, TopicMetadataEntry,
+};
+pub use users::{
+    AclEntry, AclEntryFilter, AclOperation, CreateAclOutcome, DEFAULT_SCRAM_ITERATIONS,
+    DeleteAclFilterOutcome, PatternType, PermissionType, ResourceType, ScramDeletion,
+    ScramUpsertion, ScramUserOutcome,
 };
 
 /// Test seam for `AdminClient`. The operator's reconcile only needs
@@ -52,6 +58,21 @@ pub trait AdminClientLike: Send {
         &mut self,
         ops: &[IncrementalAlterOp],
     ) -> Result<Vec<AlterConfigsOutcome>, AdminError>;
+    async fn alter_user_scram_credentials_sha512(
+        &mut self,
+        upsertions: &[ScramUpsertion],
+        deletions: &[ScramDeletion],
+    ) -> Result<Vec<ScramUserOutcome>, AdminError>;
+    async fn describe_acls(&mut self, filter: &AclEntryFilter)
+    -> Result<Vec<AclEntry>, AdminError>;
+    async fn create_acls(
+        &mut self,
+        creations: &[AclEntry],
+    ) -> Result<Vec<CreateAclOutcome>, AdminError>;
+    async fn delete_acls(
+        &mut self,
+        filters: &[AclEntryFilter],
+    ) -> Result<Vec<DeleteAclFilterOutcome>, AdminError>;
 }
 
 #[async_trait::async_trait]
@@ -91,6 +112,31 @@ impl AdminClientLike for AdminClient {
         ops: &[IncrementalAlterOp],
     ) -> Result<Vec<AlterConfigsOutcome>, AdminError> {
         AdminClient::incremental_alter_configs(self, ops).await
+    }
+    async fn alter_user_scram_credentials_sha512(
+        &mut self,
+        upsertions: &[ScramUpsertion],
+        deletions: &[ScramDeletion],
+    ) -> Result<Vec<ScramUserOutcome>, AdminError> {
+        AdminClient::alter_user_scram_credentials_sha512(self, upsertions, deletions).await
+    }
+    async fn describe_acls(
+        &mut self,
+        filter: &AclEntryFilter,
+    ) -> Result<Vec<AclEntry>, AdminError> {
+        AdminClient::describe_acls(self, filter).await
+    }
+    async fn create_acls(
+        &mut self,
+        creations: &[AclEntry],
+    ) -> Result<Vec<CreateAclOutcome>, AdminError> {
+        AdminClient::create_acls(self, creations).await
+    }
+    async fn delete_acls(
+        &mut self,
+        filters: &[AclEntryFilter],
+    ) -> Result<Vec<DeleteAclFilterOutcome>, AdminError> {
+        AdminClient::delete_acls(self, filters).await
     }
 }
 
