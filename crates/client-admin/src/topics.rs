@@ -477,4 +477,188 @@ mod tests {
         };
         assert!(controller_endpoint(&resp).is_none());
     }
+
+    // ── parse_metadata ─────────────────────────────────────────────────
+    //
+    // `parse_metadata` is the pure response→`TopicMetadata` transformer
+    // the live `metadata` RPC delegates to. The tests below feed it
+    // synthetic responses and assert the per-topic fields are projected
+    // correctly. Covers the error-mapping, uuid-zeroing, and
+    // partition/replication-factor count paths.
+
+    #[test]
+    fn parse_metadata_carries_through_per_topic_errors() {
+        use crabka_protocol::owned::metadata_response::{MetadataResponse, MetadataResponseTopic};
+        let resp = MetadataResponse {
+            topics: vec![
+                MetadataResponseTopic {
+                    name: Some("ok-topic".into()),
+                    error_code: 0,
+                    ..Default::default()
+                },
+                MetadataResponseTopic {
+                    name: Some("missing".into()),
+                    error_code: 3, // UNKNOWN_TOPIC_OR_PARTITION
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let md = parse_metadata(resp);
+        assert_eq!(md.topics.len(), 2);
+        assert_eq!(md.topics[0].name, "ok-topic");
+        assert!(md.topics[0].error.is_none());
+        assert_eq!(md.topics[1].name, "missing");
+        let err = md.topics[1].error.as_ref().expect("error expected");
+        assert_eq!(err.code, 3);
+        assert_eq!(err.name, "UNKNOWN_TOPIC_OR_PARTITION");
+    }
+
+    #[test]
+    fn parse_metadata_zero_uuid_becomes_none() {
+        use crabka_protocol::owned::metadata_response::{MetadataResponse, MetadataResponseTopic};
+        let resp = MetadataResponse {
+            topics: vec![MetadataResponseTopic {
+                name: Some("foo".into()),
+                topic_id: ProtoUuid::ZERO,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let md = parse_metadata(resp);
+        assert!(md.topics[0].topic_id.is_none());
+    }
+
+    #[test]
+    fn parse_metadata_computes_partition_count_and_replication_factor() {
+        use crabka_protocol::owned::metadata_response::{
+            MetadataResponse, MetadataResponsePartition, MetadataResponseTopic,
+        };
+        let part = MetadataResponsePartition {
+            replica_nodes: vec![1, 2],
+            ..Default::default()
+        };
+        let resp = MetadataResponse {
+            topics: vec![MetadataResponseTopic {
+                name: Some("foo".into()),
+                partitions: vec![part.clone(), part.clone(), part],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let md = parse_metadata(resp);
+        assert_eq!(md.topics[0].partition_count, 3);
+        assert_eq!(md.topics[0].replication_factor, 2);
+    }
+
+    // ── parse_create_topics ────────────────────────────────────────────
+
+    #[test]
+    fn parse_create_topics_per_topic_error() {
+        use crabka_protocol::owned::create_topics_response::{
+            CreatableTopicResult, CreateTopicsResponse,
+        };
+        let resp = CreateTopicsResponse {
+            topics: vec![
+                CreatableTopicResult {
+                    name: "ok".into(),
+                    topic_id: ProtoUuid([7; 16]),
+                    error_code: 0,
+                    error_message: None,
+                    ..Default::default()
+                },
+                CreatableTopicResult {
+                    name: "dup".into(),
+                    error_code: 36, // TOPIC_ALREADY_EXISTS
+                    error_message: Some("already there".into()),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let outcomes = parse_create_topics(resp);
+        assert_eq!(outcomes.len(), 2);
+        assert_eq!(outcomes[0].name, "ok");
+        assert!(outcomes[0].error.is_none());
+        assert!(
+            outcomes[0].topic_id.is_some(),
+            "non-zero uuid should map to Some"
+        );
+
+        assert_eq!(outcomes[1].name, "dup");
+        let err = outcomes[1].error.as_ref().expect("error expected");
+        assert_eq!(err.code, 36);
+        assert_eq!(err.name, "TOPIC_ALREADY_EXISTS");
+        assert_eq!(err.message.as_deref(), Some("already there"));
+    }
+
+    // ── parse_delete_topics ────────────────────────────────────────────
+
+    #[test]
+    fn parse_delete_topics_handles_missing_name() {
+        use crabka_protocol::owned::delete_topics_response::{
+            DeletableTopicResult, DeleteTopicsResponse,
+        };
+        let resp = DeleteTopicsResponse {
+            responses: vec![
+                DeletableTopicResult {
+                    name: None,
+                    error_code: 0,
+                    ..Default::default()
+                },
+                DeletableTopicResult {
+                    name: Some("named".into()),
+                    error_code: 3,
+                    error_message: Some("nope".into()),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let outs = parse_delete_topics(resp);
+        assert_eq!(outs.len(), 2);
+        // `name: None` falls through to `unwrap_or_default()` → empty string.
+        assert_eq!(outs[0].name, String::new());
+        assert!(outs[0].error.is_none());
+        assert_eq!(outs[1].name, "named");
+        let err = outs[1].error.as_ref().expect("error expected");
+        assert_eq!(err.code, 3);
+        assert_eq!(err.name, "UNKNOWN_TOPIC_OR_PARTITION");
+        assert_eq!(err.message.as_deref(), Some("nope"));
+    }
+
+    // ── parse_create_partitions ────────────────────────────────────────
+
+    #[test]
+    fn parse_create_partitions_per_topic_error() {
+        use crabka_protocol::owned::create_partitions_response::{
+            CreatePartitionsResponse, CreatePartitionsTopicResult,
+        };
+        let resp = CreatePartitionsResponse {
+            results: vec![
+                CreatePartitionsTopicResult {
+                    name: "ok".into(),
+                    error_code: 0,
+                    error_message: None,
+                    ..Default::default()
+                },
+                CreatePartitionsTopicResult {
+                    name: "bad".into(),
+                    error_code: 37,
+                    error_message: Some("bad count".into()),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let outs = parse_create_partitions(resp);
+        assert_eq!(outs.len(), 2);
+        assert_eq!(outs[0].name, "ok");
+        assert!(outs[0].error.is_none());
+        assert_eq!(outs[1].name, "bad");
+        let err = outs[1].error.as_ref().expect("error expected");
+        assert_eq!(err.code, 37);
+        assert_eq!(err.name, "INVALID_PARTITIONS");
+        assert_eq!(err.message.as_deref(), Some("bad count"));
+    }
 }
