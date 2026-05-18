@@ -90,7 +90,7 @@ mod tests {
         assert_eq!(out[0].metric, MetricKind::BytesIn);
         assert_eq!(out[0].topic, "t");
         assert_eq!(out[0].partition, 0);
-        assert_eq!(out[0].value, 1024.0);
+        assert!((out[0].value - 1024.0).abs() < 1e-9);
     }
 
     #[test]
@@ -101,7 +101,7 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].metric, MetricKind::DiskBytes);
         assert_eq!(out[0].partition, 5);
-        assert_eq!(out[0].value, 1_234_567.0);
+        assert!((out[0].value - 1_234_567.0).abs() < 1e-3);
     }
 
     #[test]
