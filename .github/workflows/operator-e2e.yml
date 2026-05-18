@@ -622,3 +622,274 @@ jobs:
           retention-days: 14
           if-no-files-found: ignore
 
+  kind-network-policy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.95.0"
+      - uses: azure/setup-helm@v5
+        with:
+          version: v3.16.2
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+
+      - name: Install melange and apko
+        run: |
+          go install chainguard.dev/melange@latest
+          go install chainguard.dev/apko@latest
+          echo "$HOME/go/bin" >> "$GITHUB_PATH"
+
+      - name: Build crabka-operator + crabka-broker images
+        run: |
+          mkdir -p packages
+          melange keygen
+          melange build packaging/melange/crabka-operator.yaml \
+            --source-dir . --signing-key melange.rsa \
+            --arch x86_64 --runner docker --out-dir packages/
+          apko build packaging/apko/crabka-operator.yaml \
+            crabka-operator:e2e crabka-operator.tar \
+            --arch x86_64 \
+            --repository-append "$PWD/packages" \
+            --keyring-append "$PWD/melange.rsa.pub"
+          melange build packaging/melange/crabka-broker.yaml \
+            --source-dir . --signing-key melange.rsa \
+            --arch x86_64 --runner docker --out-dir packages/
+          apko build packaging/apko/crabka-broker.yaml \
+            crabka-broker:e2e crabka-broker.tar \
+            --arch x86_64 \
+            --repository-append "$PWD/packages" \
+            --keyring-append "$PWD/melange.rsa.pub"
+
+      - name: Create kind cluster (Calico, no default CNI)
+        run: |
+          cat <<EOF > /tmp/kind-config.yaml
+          kind: Cluster
+          apiVersion: kind.x-k8s.io/v1alpha4
+          name: crabka-np-e2e
+          networking:
+            disableDefaultCNI: true
+            podSubnet: "192.168.0.0/16"
+          nodes:
+          - role: control-plane
+          EOF
+          kind create cluster --config /tmp/kind-config.yaml \
+            --image kindest/node:v1.30.0 \
+            --wait 60s || true
+
+      - name: Install Calico
+        run: |
+          set -e
+          # Pinned to a known-good release; renovate can keep this fresh.
+          # Renovate: datasource=github-tags depName=projectcalico/calico
+          CALICO_TAG=v3.28.2
+          kubectl apply --server-side --force-conflicts \
+            -f "https://raw.githubusercontent.com/projectcalico/calico/${CALICO_TAG}/manifests/tigera-operator.yaml"
+          # Wait for the tigera-operator deployment to come up so the
+          # `Installation` CRD is admitted.
+          kubectl rollout status -n tigera-operator deploy/tigera-operator --timeout=180s
+
+          cat <<EOF | kubectl apply -f -
+          apiVersion: operator.tigera.io/v1
+          kind: Installation
+          metadata:
+            name: default
+          spec:
+            calicoNetwork:
+              ipPools:
+              - blockSize: 26
+                cidr: 192.168.0.0/16
+                encapsulation: VXLANCrossSubnet
+          EOF
+
+          # Wait for calico-node DaemonSet to be ready on every node.
+          for i in $(seq 1 60); do
+            ready=$(kubectl get ds -n calico-system calico-node \
+              -o jsonpath='{.status.numberReady}' 2>/dev/null || echo 0)
+            desired=$(kubectl get ds -n calico-system calico-node \
+              -o jsonpath='{.status.desiredNumberScheduled}' 2>/dev/null || echo 1)
+            echo "calico-node ready=$ready desired=$desired"
+            if [ "$ready" != "0" ] && [ "$ready" = "$desired" ]; then exit 0; fi
+            sleep 5
+          done
+          echo "::error::calico-node never became Ready"
+          kubectl get pods -n calico-system
+          exit 1
+
+      - name: Load operator + broker images into kind
+        run: |
+          set -e
+          for tar in crabka-operator.tar crabka-broker.tar; do
+            docker load -i "$tar" 2>&1 | tee /tmp/load.log
+            loaded=$(sed -n 's/^Loaded image: //p' /tmp/load.log | head -1)
+            want=$(basename "$tar" .tar):e2e
+            if [ "$loaded" != "$want" ]; then docker tag "$loaded" "$want"; fi
+            kind load docker-image "$want" --name crabka-np-e2e
+          done
+
+      - name: Install CRDs + chart
+        run: |
+          set -e
+          kubectl apply -f deploy/crds/crabka.io_kafkas.yaml
+          kubectl apply -f deploy/crds/crabka.io_kafkanodepools.yaml
+          kubectl create namespace crabka-operator
+          helm install operator charts/crabka-operator \
+            --namespace crabka-operator \
+            --set image.repository=crabka-operator --set image.tag=e2e \
+            --set image.pullPolicy=IfNotPresent \
+            --set brokerImage.repository=crabka-broker --set brokerImage.tag=e2e \
+            --set brokerImage.pullPolicy=IfNotPresent
+          kubectl rollout status -n crabka-operator deploy/operator-crabka-operator --timeout=240s
+
+      - name: Create labeled and unlabeled client namespaces
+        run: |
+          set -e
+          kubectl create namespace clients
+          kubectl label namespace clients role=clients
+          # `default` is already present and unlabeled.
+
+      - name: Apply Kafka with networkPolicy + peer-restricted listener
+        run: |
+          set -e
+          cat <<'EOF' | kubectl apply -f -
+          apiVersion: crabka.io/v1alpha1
+          kind: Kafka
+          metadata: { name: demo, namespace: default }
+          spec:
+            kafkaVersion: "0.1.1"
+            listeners:
+            - name: PLAIN
+              port: 9092
+              type: internal
+              tls: false
+              networkPolicyPeers:
+              - namespaceSelector:
+                  matchLabels:
+                    role: clients
+            interBrokerListenerName: PLAIN
+            networkPolicy: {}
+          ---
+          apiVersion: crabka.io/v1alpha1
+          kind: KafkaNodePool
+          metadata:
+            name: brokers
+            namespace: default
+            labels: { crabka.io/cluster: demo }
+          spec:
+            roles: [Controller, Broker]
+            replicas: 1
+            nodeIdStart: 0
+          EOF
+
+      - name: Wait NetworkPolicyReady=True
+        run: |
+          for i in $(seq 1 60); do
+            s=$(kubectl get kafka demo -n default \
+              -o jsonpath='{.status.conditions[?(@.type=="NetworkPolicyReady")].status}' 2>/dev/null || true)
+            echo "attempt $i: NetworkPolicyReady=$s"
+            if [ "$s" = "True" ]; then exit 0; fi
+            sleep 5
+          done
+          echo "::error::NetworkPolicyReady never True"
+          kubectl describe kafka demo -n default
+          kubectl logs -n crabka-operator deploy/operator-crabka-operator --tail=200 || true
+          exit 1
+
+      - name: Verify the NetworkPolicy is present
+        run: |
+          set -e
+          kubectl get networkpolicy demo-broker-policy -n default
+          kubectl get networkpolicy demo-broker-policy -n default -o yaml
+
+      - name: Wait for broker Ready
+        run: |
+          for i in $(seq 1 60); do
+            phase=$(kubectl get pod demo-brokers-0 -n default \
+              -o jsonpath='{.status.phase}' 2>/dev/null || true)
+            cond=$(kubectl get pod demo-brokers-0 -n default \
+              -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
+            echo "attempt $i: phase=$phase ready=$cond"
+            if [ "$cond" = "True" ]; then exit 0; fi
+            sleep 5
+          done
+          echo "::error::broker pod never became Ready"
+          kubectl describe pod demo-brokers-0 -n default
+          exit 1
+
+      - name: Probe from a LABELED namespace (must succeed)
+        run: |
+          set -e
+          kubectl run nc-allowed -n clients --image=alpine:3 --restart=Never -- \
+            sh -c 'apk add --no-cache busybox-extras > /dev/null && \
+                   nc -zv -w 5 demo-broker-headless.default.svc.cluster.local 9092'
+          # Wait for completion; expect exit 0.
+          for i in $(seq 1 30); do
+            status=$(kubectl get pod nc-allowed -n clients -o jsonpath='{.status.phase}')
+            echo "nc-allowed status=$status"
+            if [ "$status" = "Succeeded" ]; then exit 0; fi
+            if [ "$status" = "Failed" ]; then
+              kubectl logs -n clients nc-allowed
+              echo "::error::labeled-ns client should have reached broker"
+              exit 1
+            fi
+            sleep 3
+          done
+          echo "::error::nc-allowed never completed"
+          kubectl logs -n clients nc-allowed
+          exit 1
+
+      - name: Probe from an UNLABELED namespace (must fail)
+        run: |
+          set -e
+          # Run with a short connect timeout so the probe terminates cleanly.
+          kubectl run nc-denied -n default --image=alpine:3 --restart=Never -- \
+            sh -c 'apk add --no-cache busybox-extras > /dev/null && \
+                   nc -zv -w 5 demo-broker-headless.default.svc.cluster.local 9092; echo exit=$?'
+          for i in $(seq 1 30); do
+            status=$(kubectl get pod nc-denied -n default -o jsonpath='{.status.phase}')
+            echo "nc-denied status=$status"
+            if [ "$status" = "Succeeded" ] || [ "$status" = "Failed" ]; then break; fi
+            sleep 3
+          done
+          logs=$(kubectl logs -n default nc-denied)
+          echo "$logs"
+          # Calico drops the SYN: nc reports "Connection timed out" and the
+          # `exit=` line is non-zero (commonly 1).
+          if echo "$logs" | grep -q 'exit=0'; then
+            echo "::error::unlabeled-ns client unexpectedly connected"
+            exit 1
+          fi
+
+      - name: Collect diagnostics on failure
+        if: failure()
+        run: |
+          set +e
+          mkdir -p /tmp/np-diag
+          {
+            echo "## kind-network-policy diagnostics"
+            kubectl get pods -A -o wide
+            echo "### operator logs"
+            kubectl logs -n crabka-operator deploy/operator-crabka-operator --tail=500
+            echo "### kafka CR"
+            kubectl get kafka demo -n default -o yaml
+            echo "### NetworkPolicy"
+            kubectl get networkpolicy demo-broker-policy -n default -o yaml
+            echo "### broker logs"
+            kubectl logs -n default demo-brokers-0 --tail=200 --all-containers
+            echo "### nc-allowed logs"
+            kubectl logs -n clients nc-allowed
+            echo "### nc-denied logs"
+            kubectl logs -n default nc-denied
+          } > /tmp/np-diag/diagnostics.md
+
+      - name: Upload diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: operator-e2e-network-policy-diagnostics
+          path: /tmp/np-diag/
+          retention-days: 14
+          if-no-files-found: ignore
