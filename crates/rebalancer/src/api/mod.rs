@@ -32,9 +32,14 @@ impl GoalRegistry {
     pub fn default_registry() -> Self {
         Self {
             goals: vec![
+                // Hard goals (priority order matters for the optimizer's Hard-first ordering).
                 Box::new(crate::goals::preferred_leader_idempotency::PreferredLeaderIdempotency),
+                Box::new(crate::goals::rack_aware::RackAware),
+                // Soft goals.
                 Box::new(crate::goals::replica_distribution::ReplicaDistribution),
                 Box::new(crate::goals::leader_distribution::LeaderDistribution),
+                Box::new(crate::goals::topic_replica_distribution::TopicReplicaDistribution),
+                Box::new(crate::goals::min_topic_leaders_per_broker::MinTopicLeadersPerBroker),
             ],
         }
     }
@@ -88,10 +93,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_registry_has_three_goals() {
+    fn default_registry_has_six_goals() {
         let r = GoalRegistry::default_registry();
         let all = r.select(&[]).unwrap();
-        assert_eq!(all.len(), 3);
+        assert_eq!(all.len(), 6);
     }
 
     #[test]

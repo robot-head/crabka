@@ -47,3 +47,13 @@ tests:
       - equal:
           path: spec.template.spec.volumes[0].persistentVolumeClaim.claimName
           value: demo-crabka-rebalancer
+
+  - it: passes minTopicLeadersPerBroker env var
+    set:
+      minTopicLeadersPerBroker: 2
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CRABKA_MIN_TOPIC_LEADERS_PER_BROKER
+            value: "2"
