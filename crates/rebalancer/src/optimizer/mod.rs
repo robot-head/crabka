@@ -639,6 +639,9 @@ mod tests {
             scrape_interval: Duration::from_secs(30),
             retention: Duration::from_hours(1),
         });
+        // Insert at "now" so DiskCapacity::is_satisfied_with_ctx sees
+        // the samples as fresh (its now_ms() comes from wall clock).
+        let sample_at = crate::goals::now_ms();
         // Broker 3 already at 900 disk_bytes from another partition (not
         // in this state); the optimizer's tentative-apply will add the
         // moved partition's 600 bytes, blowing the 1000 cap.
@@ -650,7 +653,7 @@ mod tests {
                 partition: 0,
                 value: 900.0,
             }],
-            0,
+            sample_at,
         );
         store.insert(
             3,
@@ -660,7 +663,7 @@ mod tests {
                 partition: 0,
                 value: 600.0,
             }],
-            0,
+            sample_at,
         );
         let ctx = GoalContext {
             imbalance_threshold_pct: 10,

@@ -5,10 +5,18 @@
 //! Samples older than `config.retention` are dropped on each insert.
 //! Counter-reset detection: if `latest.value < earliest.value`, the
 //! rate query returns `None` (broker restarted; goals should ignore).
+//!
+//! Stale-data protection: every query method takes `now_ms` (the
+//! caller's wall-clock) and treats the window as `[now_ms - W,
+//! now_ms]`. If the latest sample is older than `now_ms - W` the
+//! method returns `None`, so a broker that stops emitting (crash,
+//! network partition) doesn't keep producing stable results from its
+//! last few samples forever.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::RwLock;
 use std::time::Duration;
+
+use parking_lot::RwLock;
 
 use crate::scraper::parse::{MetricKind, ParsedSample};
 
@@ -63,7 +71,10 @@ struct RingBuffer {
     samples: VecDeque<Sample>,
 }
 
-#[derive(Debug)]
+// `#[derive(Default)]` works here because every field has a `Default`
+// impl: `parking_lot::RwLock<T>: Default` when `T: Default`, and
+// `WindowConfig` has its own `Default` impl above.
+#[derive(Debug, Default)]
 pub struct UsageStore {
     inner: RwLock<HashMap<SeriesKey, RingBuffer>>,
     config: WindowConfig,
@@ -83,7 +94,7 @@ impl UsageStore {
     /// older than `config.retention`.
     pub fn insert(&self, broker_id: i32, samples: Vec<ParsedSample>, at_ms: i64) {
         let cutoff = at_ms - i64::try_from(self.config.retention.as_millis()).unwrap_or(i64::MAX);
-        let mut map = self.inner.write().unwrap();
+        let mut map = self.inner.write();
         for s in samples {
             let key = SeriesKey {
                 broker_id,
@@ -104,8 +115,10 @@ impl UsageStore {
 
     /// Rate of `BytesIn` (bytes/sec) within `window`, derived from the
     /// earliest + latest samples in the window. Returns `None` if
-    /// there are fewer than 2 samples in the window or if a counter
-    /// reset is detected (latest.value < earliest.value).
+    /// there are fewer than 2 samples in the window, a counter reset
+    /// is detected (`latest.value < earliest.value`), or the latest
+    /// sample is older than `now_ms - window` (data is too stale to
+    /// represent the requested window).
     #[must_use]
     pub fn bytes_in_rate(
         &self,
@@ -113,8 +126,16 @@ impl UsageStore {
         topic: &str,
         partition: i32,
         window: Window,
+        now_ms: i64,
     ) -> Option<f64> {
-        self.counter_rate(broker_id, topic, partition, MetricKind::BytesIn, window)
+        self.counter_rate(
+            broker_id,
+            topic,
+            partition,
+            MetricKind::BytesIn,
+            window,
+            now_ms,
+        )
     }
 
     #[must_use]
@@ -124,12 +145,21 @@ impl UsageStore {
         topic: &str,
         partition: i32,
         window: Window,
+        now_ms: i64,
     ) -> Option<f64> {
-        self.counter_rate(broker_id, topic, partition, MetricKind::BytesOut, window)
+        self.counter_rate(
+            broker_id,
+            topic,
+            partition,
+            MetricKind::BytesOut,
+            window,
+            now_ms,
+        )
     }
 
-    /// Average disk-bytes gauge over `window`. Returns `None` if no
-    /// samples in window.
+    /// Average disk-bytes gauge over the window `[now_ms - W, now_ms]`.
+    /// Returns `None` if no samples fall inside the window, or if the
+    /// latest sample is older than `now_ms - W` (stale broker).
     #[must_use]
     pub fn disk_bytes_avg(
         &self,
@@ -137,6 +167,7 @@ impl UsageStore {
         topic: &str,
         partition: i32,
         window: Window,
+        now_ms: i64,
     ) -> Option<f64> {
         let key = SeriesKey {
             broker_id,
@@ -144,14 +175,22 @@ impl UsageStore {
             partition,
             metric: MetricKind::DiskBytes,
         };
-        let map = self.inner.read().unwrap();
+        let map = self.inner.read();
         let buf = map.get(&key)?;
-        let now_ms = buf.samples.back()?.at_ms;
-        let lower = now_ms - i64::try_from(window.as_duration().as_millis()).unwrap_or(i64::MAX);
+        let window_ms = i64::try_from(window.as_duration().as_millis()).unwrap_or(i64::MAX);
+        let lower = now_ms - window_ms;
+        // Stale-data guard: if the freshest sample predates the window,
+        // we have no data for the requested interval — return None
+        // rather than averaging old samples that happen to still be in
+        // retention.
+        let latest = buf.samples.back()?;
+        if latest.at_ms < lower {
+            return None;
+        }
         let mut sum = 0.0f64;
         let mut count = 0u64;
         for s in &buf.samples {
-            if s.at_ms >= lower {
+            if s.at_ms >= lower && s.at_ms <= now_ms {
                 sum += s.value;
                 count += 1;
             }
@@ -171,6 +210,7 @@ impl UsageStore {
         partition: i32,
         metric: MetricKind,
         window: Window,
+        now_ms: i64,
     ) -> Option<f64> {
         let key = SeriesKey {
             broker_id,
@@ -178,16 +218,27 @@ impl UsageStore {
             partition,
             metric,
         };
-        let map = self.inner.read().unwrap();
+        let map = self.inner.read();
         let buf = map.get(&key)?;
         if buf.samples.len() < 2 {
             return None;
         }
+        let window_ms = i64::try_from(window.as_duration().as_millis()).unwrap_or(i64::MAX);
+        let lower = now_ms - window_ms;
         let latest = *buf.samples.back()?;
-        let lower =
-            latest.at_ms - i64::try_from(window.as_duration().as_millis()).unwrap_or(i64::MAX);
-        // Earliest sample within the window.
-        let earliest = buf.samples.iter().find(|s| s.at_ms >= lower).copied()?;
+        // Stale-data guard: a long-since-dead broker would otherwise
+        // keep producing a stable rate from its last two samples.
+        if latest.at_ms < lower {
+            return None;
+        }
+        // Earliest sample within the window. We also clamp at `now_ms`
+        // on the upper bound so a future-dated sample (clock skew)
+        // doesn't dominate.
+        let earliest = buf
+            .samples
+            .iter()
+            .find(|s| s.at_ms >= lower && s.at_ms <= now_ms)
+            .copied()?;
         if latest.at_ms == earliest.at_ms {
             return None;
         }
@@ -199,12 +250,6 @@ impl UsageStore {
         let dt_ms = (latest.at_ms - earliest.at_ms) as f64;
         let dv = latest.value - earliest.value;
         Some(dv * 1000.0 / dt_ms)
-    }
-}
-
-impl Default for UsageStore {
-    fn default() -> Self {
-        Self::new(WindowConfig::default())
     }
 }
 
@@ -224,8 +269,8 @@ mod tests {
     #[test]
     fn empty_store_returns_none() {
         let s = UsageStore::default();
-        assert!(s.bytes_in_rate(1, "t", 0, Window::FiveMin).is_none());
-        assert!(s.disk_bytes_avg(1, "t", 0, Window::FiveMin).is_none());
+        assert!(s.bytes_in_rate(1, "t", 0, Window::FiveMin, 0).is_none());
+        assert!(s.disk_bytes_avg(1, "t", 0, Window::FiveMin, 0).is_none());
     }
 
     #[test]
@@ -233,8 +278,9 @@ mod tests {
         let s = UsageStore::default();
         s.insert(1, vec![sample(MetricKind::BytesIn, "t", 0, 1000.0)], 0);
         s.insert(1, vec![sample(MetricKind::BytesIn, "t", 0, 3000.0)], 1000);
-        // (3000 - 1000) / 1.0s = 2000 bytes/sec
-        let rate = s.bytes_in_rate(1, "t", 0, Window::FiveMin).unwrap();
+        // (3000 - 1000) / 1.0s = 2000 bytes/sec. Query at now_ms=1000 so
+        // the latest sample is on the window's upper bound.
+        let rate = s.bytes_in_rate(1, "t", 0, Window::FiveMin, 1000).unwrap();
         assert!((rate - 2000.0).abs() < 1e-6, "got {rate}");
     }
 
@@ -243,7 +289,7 @@ mod tests {
         let s = UsageStore::default();
         s.insert(1, vec![sample(MetricKind::BytesIn, "t", 0, 5000.0)], 0);
         s.insert(1, vec![sample(MetricKind::BytesIn, "t", 0, 100.0)], 1000);
-        assert!(s.bytes_in_rate(1, "t", 0, Window::FiveMin).is_none());
+        assert!(s.bytes_in_rate(1, "t", 0, Window::FiveMin, 1000).is_none());
     }
 
     #[test]
@@ -252,7 +298,8 @@ mod tests {
         s.insert(1, vec![sample(MetricKind::DiskBytes, "t", 0, 100.0)], 0);
         s.insert(1, vec![sample(MetricKind::DiskBytes, "t", 0, 200.0)], 1000);
         s.insert(1, vec![sample(MetricKind::DiskBytes, "t", 0, 300.0)], 2000);
-        let avg = s.disk_bytes_avg(1, "t", 0, Window::FiveMin).unwrap();
+        // Query at now_ms=2000 (latest sample). Average of [100, 200, 300] = 200.
+        let avg = s.disk_bytes_avg(1, "t", 0, Window::FiveMin, 2000).unwrap();
         assert!((avg - 200.0).abs() < 1e-6, "got {avg}");
     }
 
@@ -267,9 +314,45 @@ mod tests {
         s.insert(1, vec![sample(MetricKind::BytesIn, "t", 0, 300.0)], 90_000);
         // First sample (t=0) was 90s ago, beyond the 60s retention; dropped.
         // Only samples at 30_000 and 90_000 remain.
-        // The 5-min window includes both. Rate = (300-200)/60s = ~1.67/sec
-        let rate = s.bytes_in_rate(1, "t", 0, Window::FiveMin).unwrap();
+        // The 5-min window includes both. Rate = (300-200)/60s = ~1.67/sec.
+        let rate = s.bytes_in_rate(1, "t", 0, Window::FiveMin, 90_000).unwrap();
         assert!((rate - 100.0 / 60.0).abs() < 1e-3, "got {rate}");
+    }
+
+    /// Regression: a broker that stops emitting must not keep producing
+    /// a stable rate from its last two samples once `now_ms` advances
+    /// past the window boundary.
+    #[test]
+    fn counter_rate_returns_none_when_latest_sample_predates_window() {
+        let s = UsageStore::default();
+        // Insert two samples at t=0 and t=1000.
+        s.insert(1, vec![sample(MetricKind::BytesIn, "t", 0, 1000.0)], 0);
+        s.insert(1, vec![sample(MetricKind::BytesIn, "t", 0, 3000.0)], 1000);
+        // Query with now_ms beyond a 5-min window after the latest sample.
+        // 5min = 300_000ms; latest sample is at 1000; query at 1_000_000
+        // means latest is 999_000ms (≈16.6 min) old — well past the
+        // 5-min window. Must return None.
+        let now_ms = 1_000_000;
+        assert!(
+            s.bytes_in_rate(1, "t", 0, Window::FiveMin, now_ms)
+                .is_none(),
+            "stale broker must not keep producing a rate"
+        );
+    }
+
+    /// Regression: same stale-data guard for the gauge path.
+    #[test]
+    fn disk_bytes_avg_returns_none_when_latest_sample_predates_window() {
+        let s = UsageStore::default();
+        s.insert(1, vec![sample(MetricKind::DiskBytes, "t", 0, 100.0)], 1000);
+        // 5 minutes = 300_000ms. now_ms=10_000_000 means latest sample
+        // is ~166 minutes old — well past the window. Returns None.
+        let now_ms = 10_000_000;
+        assert!(
+            s.disk_bytes_avg(1, "t", 0, Window::FiveMin, now_ms)
+                .is_none(),
+            "stale broker must not keep producing a disk average"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -290,7 +373,7 @@ mod tests {
             let reader_store = store.clone();
             handles.push(tokio::spawn(async move {
                 for _ in 0..100 {
-                    let _ = reader_store.bytes_in_rate(i, "t", 0, Window::FiveMin);
+                    let _ = reader_store.bytes_in_rate(i, "t", 0, Window::FiveMin, 100_000);
                 }
             }));
         }
@@ -299,6 +382,6 @@ mod tests {
         }
         // Reaching here means no deadlock; sanity-check that at least
         // one rate is queryable.
-        let _ = store.bytes_in_rate(0, "t", 0, Window::FiveMin);
+        let _ = store.bytes_in_rate(0, "t", 0, Window::FiveMin, 100_000);
     }
 }

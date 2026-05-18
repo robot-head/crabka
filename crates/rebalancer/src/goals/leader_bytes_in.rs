@@ -21,13 +21,17 @@ impl LeaderBytesIn {
         partitions: &[PartitionView],
         broker_ids: &[i32],
         ctx: &GoalContext,
+        now_ms: i64,
     ) -> HashMap<i32, f64> {
         let mut m: HashMap<i32, f64> = broker_ids.iter().map(|b| (*b, 0.0)).collect();
         for p in partitions {
-            if let Some(rate) =
-                ctx.broker_usages
-                    .bytes_in_rate(p.leader, &p.topic, p.partition, Window::FiveMin)
-            {
+            if let Some(rate) = ctx.broker_usages.bytes_in_rate(
+                p.leader,
+                &p.topic,
+                p.partition,
+                Window::FiveMin,
+                now_ms,
+            ) {
                 *m.entry(p.leader).or_insert(0.0) += rate;
             }
         }
@@ -61,6 +65,7 @@ impl Goal for LeaderBytesIn {
         // For LeaderBytesIn, the lever is *leader election*, not replica
         // movement: shift leadership from hot brokers to cold ones.
         // Mirrors the LeaderDistribution goal's shape (leader-only swap).
+        let now_ms = crate::goals::now_ms();
         let broker_ids: Vec<i32> = state.brokers.iter().map(|b| b.id).collect();
         let mut working: Vec<PartitionView> = state.partitions.clone();
         let mut out: Vec<Movement> = Vec::new();
@@ -83,7 +88,7 @@ impl Goal for LeaderBytesIn {
             .collect();
 
         loop {
-            let totals = Self::totals(&working, &broker_ids, ctx);
+            let totals = Self::totals(&working, &broker_ids, ctx, now_ms);
             if totals.values().all(|v| *v == 0.0) {
                 break;
             }
@@ -188,11 +193,14 @@ mod tests {
 
     fn store_with_counter_pair(samples: Vec<(i32, &str, i32, f64, f64)>) -> Arc<UsageStore> {
         // Each entry: (broker, topic, partition, v_t0, v_t1).
-        // Inserts at t=0 and t=1000 so rate = (v_t1 - v_t0)/sec.
+        // Inserts at t=now-1000 and t=now so rate = (v_t1 - v_t0)/sec
+        // and both samples sit inside the 5-min stale-data guard window.
         let store = UsageStore::new(WindowConfig {
             scrape_interval: Duration::from_secs(30),
             retention: Duration::from_hours(1),
         });
+        let now_ms = crate::goals::now_ms();
+        let t0 = now_ms - 1000;
         for (broker, topic, partition, v_t0, _) in &samples {
             store.insert(
                 *broker,
@@ -202,7 +210,7 @@ mod tests {
                     partition: *partition,
                     value: *v_t0,
                 }],
-                0,
+                t0,
             );
         }
         for (broker, topic, partition, _, v_t1) in samples {
@@ -214,7 +222,7 @@ mod tests {
                     partition,
                     value: v_t1,
                 }],
-                1000,
+                now_ms,
             );
         }
         Arc::new(store)

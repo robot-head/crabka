@@ -17,6 +17,7 @@ impl NetworkInCapacity {
         partitions: &[PartitionView],
         broker_ids: &[i32],
         ctx: &GoalContext,
+        now_ms: i64,
     ) -> HashMap<i32, f64> {
         let mut m: HashMap<i32, f64> = broker_ids.iter().map(|b| (*b, 0.0)).collect();
         for p in partitions {
@@ -26,6 +27,7 @@ impl NetworkInCapacity {
                     &p.topic,
                     p.partition,
                     Window::FiveMin,
+                    now_ms,
                 ) {
                     *m.entry(*replica).or_insert(0.0) += rate;
                 }
@@ -44,6 +46,7 @@ impl Goal for NetworkInCapacity {
     }
     #[allow(clippy::too_many_lines, clippy::cast_precision_loss)]
     fn propose(&self, state: &ClusterState, ctx: &GoalContext) -> Vec<Movement> {
+        let now_ms = crate::goals::now_ms();
         let broker_ids: Vec<i32> = state.brokers.iter().map(|b| b.id).collect();
         let mut working: Vec<PartitionView> = state.partitions.clone();
         let mut out: Vec<Movement> = Vec::new();
@@ -59,7 +62,7 @@ impl Goal for NetworkInCapacity {
             .collect();
 
         loop {
-            let totals = Self::totals(&working, &broker_ids, ctx);
+            let totals = Self::totals(&working, &broker_ids, ctx, now_ms);
             let mut over: Option<(i32, f64, f64)> = None;
             for (broker, current) in &totals {
                 let Some(cap) = ctx.broker_capacities.for_broker(*broker) else {
@@ -149,8 +152,9 @@ impl Goal for NetworkInCapacity {
 
     #[allow(clippy::cast_precision_loss)]
     fn is_satisfied_with_ctx(&self, state: &ClusterState, ctx: &GoalContext) -> bool {
+        let now_ms = crate::goals::now_ms();
         let broker_ids: Vec<i32> = state.brokers.iter().map(|b| b.id).collect();
-        let totals = Self::totals(&state.partitions, &broker_ids, ctx);
+        let totals = Self::totals(&state.partitions, &broker_ids, ctx, now_ms);
         for (broker, current) in &totals {
             let Some(cap) = ctx.broker_capacities.for_broker(*broker) else {
                 continue;
@@ -220,6 +224,11 @@ mod tests {
             scrape_interval: Duration::from_secs(30),
             retention: Duration::from_hours(1),
         });
+        // Insert at "now-1000" and "now" so the 1-second delta still
+        // yields the same rate and both samples are inside the 5-min
+        // stale-data guard window.
+        let now_ms = crate::goals::now_ms();
+        let t0 = now_ms - 1000;
         for (broker, topic, partition, v_t0, _) in &samples {
             store.insert(
                 *broker,
@@ -229,7 +238,7 @@ mod tests {
                     partition: *partition,
                     value: *v_t0,
                 }],
-                0,
+                t0,
             );
         }
         for (broker, topic, partition, _, v_t1) in samples {
@@ -241,7 +250,7 @@ mod tests {
                     partition,
                     value: v_t1,
                 }],
-                1000,
+                now_ms,
             );
         }
         Arc::new(store)

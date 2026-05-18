@@ -20,6 +20,7 @@ impl DiskCapacity {
         partitions: &[PartitionView],
         broker_ids: &[i32],
         ctx: &GoalContext,
+        now_ms: i64,
     ) -> HashMap<i32, f64> {
         let mut m: HashMap<i32, f64> = broker_ids.iter().map(|b| (*b, 0.0)).collect();
         for p in partitions {
@@ -29,6 +30,7 @@ impl DiskCapacity {
                     &p.topic,
                     p.partition,
                     Window::FiveMin,
+                    now_ms,
                 ) {
                     *m.entry(*replica).or_insert(0.0) += bytes;
                 }
@@ -49,6 +51,7 @@ impl Goal for DiskCapacity {
 
     #[allow(clippy::too_many_lines, clippy::cast_precision_loss)]
     fn propose(&self, state: &ClusterState, ctx: &GoalContext) -> Vec<Movement> {
+        let now_ms = crate::goals::now_ms();
         let broker_ids: Vec<i32> = state.brokers.iter().map(|b| b.id).collect();
         let mut working: Vec<PartitionView> = state.partitions.clone();
         let mut out: Vec<Movement> = Vec::new();
@@ -65,7 +68,7 @@ impl Goal for DiskCapacity {
             .collect();
 
         loop {
-            let totals = Self::totals(&working, &broker_ids, ctx);
+            let totals = Self::totals(&working, &broker_ids, ctx, now_ms);
             // Find a broker exceeding its capacity.
             let mut over: Option<(i32, f64, f64)> = None;
             for (broker, current) in &totals {
@@ -177,8 +180,9 @@ impl Goal for DiskCapacity {
 
     #[allow(clippy::cast_precision_loss)]
     fn is_satisfied_with_ctx(&self, state: &ClusterState, ctx: &GoalContext) -> bool {
+        let now_ms = crate::goals::now_ms();
         let broker_ids: Vec<i32> = state.brokers.iter().map(|b| b.id).collect();
-        let totals = Self::totals(&state.partitions, &broker_ids, ctx);
+        let totals = Self::totals(&state.partitions, &broker_ids, ctx, now_ms);
         for (broker, current) in &totals {
             let Some(cap) = ctx.broker_capacities.for_broker(*broker) else {
                 continue;
@@ -248,6 +252,10 @@ mod tests {
             scrape_interval: Duration::from_secs(30),
             retention: Duration::from_hours(1),
         });
+        // Insert at "now" so the stale-data guard in UsageStore (which
+        // compares against the goal's wall-clock `now_ms()`) sees the
+        // sample as recent.
+        let now_ms = crate::goals::now_ms();
         for (broker, topic, partition, value) in samples {
             store.insert(
                 broker,
@@ -257,7 +265,7 @@ mod tests {
                     partition,
                     value,
                 }],
-                0,
+                now_ms,
             );
         }
         Arc::new(store)

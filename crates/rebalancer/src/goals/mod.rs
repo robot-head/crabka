@@ -2,10 +2,24 @@
 //! modules.
 
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::capacity::BrokerCapacities;
 use crate::model::{ClusterState, Movement};
 use crate::scraper::UsageStore;
+
+/// Wall-clock millis since the Unix epoch. Goals that read usage data
+/// pass this to `UsageStore` queries so stale-broker samples are
+/// excluded from the window. Saturates to 0 / `i64::MAX` on overflow.
+#[must_use]
+pub fn now_ms() -> i64 {
+    i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis()),
+    )
+    .unwrap_or(i64::MAX)
+}
 
 pub mod cpu_capacity;
 pub mod disk_capacity;

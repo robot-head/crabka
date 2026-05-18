@@ -933,6 +933,14 @@ async fn disk_usage_evicts_hot_broker() {
         scrape_interval: Duration::from_secs(30),
         retention: Duration::from_secs(3600),
     });
+    // Insert at wall-clock "now" so DiskUsage's now_ms()-anchored
+    // stale-data guard sees the samples as fresh.
+    let sample_at = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis()),
+    )
+    .unwrap_or(i64::MAX);
     // Broker 1: 500 disk_bytes per partition × 5 partitions = 2500.
     for i in 0..5 {
         store.insert(
@@ -943,7 +951,7 @@ async fn disk_usage_evicts_hot_broker() {
                 partition: i,
                 value: 500.0,
             }],
-            0,
+            sample_at,
         );
     }
     // Broker 2: 100 disk_bytes per partition × 5 partitions = 500.
@@ -956,7 +964,7 @@ async fn disk_usage_evicts_hot_broker() {
                 partition: i,
                 value: 100.0,
             }],
-            0,
+            sample_at,
         );
     }
 
