@@ -827,3 +827,38 @@ Kafka client for ApiVersions.
   scraping for usage goals (43e), rack-aware / capacity / usage /
   CPU / anomaly goals (43c–43g), operator `KafkaRebalance` CRD
   (slice 44), pause/step-through, adaptive throttle.
+
+## Slice 43c — Rebalancer topology goals (2026-05-17)
+
+- Three new goals shipped under the existing `Goal` trait:
+  - `RackAware` (hard): no two replicas of the same partition share a
+    rack tag (`BrokerView.rack`). Brokers with `rack: None` each
+    count as their own pseudo-rack (matches Kafka KIP-36). Strict
+    mode: if RF > distinct rack count for any partition, the goal
+    logs `warn!` and emits no movements for that partition — never
+    produces `HardGoalUnsatisfied`.
+  - `TopicReplicaDistribution` (soft): per-topic replica balance.
+    Distinct from the existing cluster-wide `ReplicaDistribution`;
+    catches the case where a single topic is concentrated on one
+    broker even though cluster-wide counts look balanced.
+  - `MinTopicLeadersPerBroker` (soft, default off): every broker
+    that holds at least one replica of a topic should also lead at
+    least `N` partitions of that topic. `N` comes from the new
+    `--min-topic-leaders-per-broker` CLI flag (env
+    `CRABKA_MIN_TOPIC_LEADERS_PER_BROKER`, default 0). At default
+    config the goal is a no-op; operators opt in by setting N > 0.
+- `GoalRegistry::default_registry` now contains six goals in
+  priority order: `PreferredLeaderIdempotency`, `RackAware`
+  (Hard); `ReplicaDistribution`, `LeaderDistribution`,
+  `TopicReplicaDistribution`, `MinTopicLeadersPerBroker` (Soft).
+- 13 new unit tests (5 + 4 + 4) across the three new goal files,
+  plus 1 new integration test
+  (`rack_aware_eliminates_same_rack_collisions`).
+- No proto changes, no persistence changes, no executor changes.
+  Slice 43c is goal-only.
+- Reference doc:
+  [`docs/superpowers/specs/2026-05-17-crabka-rebalancer-43c-design.md`].
+- Out of scope (deferred): `RackAwareDistributionGoal` (soft,
+  best-effort variant of RackAware); per-proposal goal config
+  (requires proto change); capacity / usage / CPU / anomaly goals
+  (slices 43d–43g).
