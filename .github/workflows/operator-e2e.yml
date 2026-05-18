@@ -621,3 +621,297 @@ jobs:
           path: /tmp/operator-e2e-diag/
           retention-days: 14
           if-no-files-found: ignore
+
+  # Slice 25/15: install the operator at the slice-24 commit, apply a
+  # Kafka with `spec.config` (the slice-19/20/24 shape — no listeners),
+  # wait Ready, then `helm upgrade` to the current chart. Asserts:
+  #   * the broker pod rolls exactly once (pod template change from
+  #     `--listen-addr` to `--config-file=...` is unavoidable)
+  #   * after the roll settles, NO subsequent rolls happen
+  #   * the `crabka.io/config-hash` annotation on the pool's
+  #     StatefulSet pod-template is unchanged across the upgrade —
+  #     proving `combined_config_hash` equals the slice-24 hash for
+  #     the same `spec.config` when `spec.listeners` is empty
+  kind-upgrade:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      # Slice 24 commit (last commit before slice-25 work began).
+      SLICE_24_REF: 84c1cfd74b9d998c0c14ce2342ab5faba2cfee3b
+    steps:
+      - name: Check out HEAD (slice-25)
+        uses: actions/checkout@v6
+        with:
+          path: head
+          fetch-depth: 0
+
+      - name: Check out slice-24
+        uses: actions/checkout@v6
+        with:
+          ref: 84c1cfd74b9d998c0c14ce2342ab5faba2cfee3b
+          path: slice24
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.95.0"
+      - uses: azure/setup-helm@v5
+        with:
+          version: v3.16.2
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+
+      - name: Install melange + apko
+        run: |
+          go install chainguard.dev/melange@latest
+          go install chainguard.dev/apko@latest
+          echo "$HOME/go/bin" >> "$GITHUB_PATH"
+
+      # Build slice-24 images first. Reusing the same melange keyring
+      # for both versions keeps the apko build step simple.
+      - name: Build slice-24 operator + broker images
+        working-directory: slice24
+        run: |
+          set -e
+          mkdir -p packages
+          melange keygen
+          melange build packaging/melange/crabka-operator.yaml \
+            --source-dir . --signing-key melange.rsa --arch x86_64 \
+            --runner docker --out-dir packages/
+          apko build packaging/apko/crabka-operator.yaml \
+            crabka-operator:slice24 ../crabka-operator-slice24.tar \
+            --arch x86_64 --repository-append "$PWD/packages" \
+            --keyring-append "$PWD/melange.rsa.pub"
+          melange build packaging/melange/crabka-broker.yaml \
+            --source-dir . --signing-key melange.rsa --arch x86_64 \
+            --runner docker --out-dir packages/
+          apko build packaging/apko/crabka-broker.yaml \
+            crabka-broker:slice24 ../crabka-broker-slice24.tar \
+            --arch x86_64 --repository-append "$PWD/packages" \
+            --keyring-append "$PWD/melange.rsa.pub"
+
+      - name: Build slice-25 (HEAD) operator + broker images
+        working-directory: head
+        run: |
+          set -e
+          mkdir -p packages
+          melange keygen
+          melange build packaging/melange/crabka-operator.yaml \
+            --source-dir . --signing-key melange.rsa --arch x86_64 \
+            --runner docker --out-dir packages/
+          apko build packaging/apko/crabka-operator.yaml \
+            crabka-operator:slice25 ../crabka-operator-slice25.tar \
+            --arch x86_64 --repository-append "$PWD/packages" \
+            --keyring-append "$PWD/melange.rsa.pub"
+          melange build packaging/melange/crabka-broker.yaml \
+            --source-dir . --signing-key melange.rsa --arch x86_64 \
+            --runner docker --out-dir packages/
+          apko build packaging/apko/crabka-broker.yaml \
+            crabka-broker:slice25 ../crabka-broker-slice25.tar \
+            --arch x86_64 --repository-append "$PWD/packages" \
+            --keyring-append "$PWD/melange.rsa.pub"
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: crabka-upgrade-e2e
+          version: v0.24.0
+          node_image: kindest/node:v1.30.0
+
+      - name: Load both image sets into kind
+        run: |
+          set -e
+          for tar in crabka-operator-slice24.tar crabka-broker-slice24.tar \
+                     crabka-operator-slice25.tar crabka-broker-slice25.tar; do
+            docker load -i "$tar" 2>&1 | tee /tmp/load.log
+            loaded=$(sed -n 's/^Loaded image: //p' /tmp/load.log | head -1)
+            # apko writes archives tagged with an arch suffix (`...:slice24-amd64`);
+            # retag to the bare `:slice24` / `:slice25` form the chart needs.
+            want=$(basename "$tar" .tar | sed 's/^crabka-/crabka-/; s/-slice/:slice/')
+            if [ "$loaded" != "$want" ]; then docker tag "$loaded" "$want"; fi
+            kind load docker-image "$want" --name crabka-upgrade-e2e
+          done
+
+      - name: Install slice-24 CRDs + chart
+        run: |
+          set -e
+          kubectl apply -f slice24/deploy/crds/crabka.io_kafkas.yaml
+          kubectl apply -f slice24/deploy/crds/crabka.io_kafkanodepools.yaml
+          kubectl create namespace crabka-operator
+          helm install operator slice24/charts/crabka-operator \
+            --namespace crabka-operator \
+            --set image.repository=crabka-operator --set image.tag=slice24 \
+            --set image.pullPolicy=IfNotPresent \
+            --set brokerImage.repository=crabka-broker --set brokerImage.tag=slice24 \
+            --set brokerImage.pullPolicy=IfNotPresent
+          kubectl rollout status -n crabka-operator deploy/operator-crabka-operator --timeout=240s
+
+      - name: Apply slice-24-shape Kafka + KafkaNodePool
+        run: |
+          set -e
+          cat <<EOF | kubectl apply -f -
+          apiVersion: crabka.io/v1alpha1
+          kind: Kafka
+          metadata: { name: demo, namespace: default }
+          spec:
+            kafkaVersion: "0.1.1"
+            config:
+              log.retention.hours: "24"
+          ---
+          apiVersion: crabka.io/v1alpha1
+          kind: KafkaNodePool
+          metadata:
+            name: brokers
+            namespace: default
+            labels: { crabka.io/cluster: demo }
+          spec:
+            roles: [Controller, Broker]
+            replicas: 1
+            nodeIdStart: 0
+            storage: { type: PersistentClaim, size: 1Gi, deleteClaim: true }
+          EOF
+
+      - name: Wait Ready on slice-24 install
+        run: |
+          for i in $(seq 1 60); do
+            status=$(kubectl get kafka demo -n default -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
+            echo "attempt $i: Ready=$status"
+            if [ "$status" = "True" ]; then exit 0; fi
+            sleep 5
+          done
+          echo "::error::slice-24 cluster never became Ready"
+          kubectl describe kafka demo -n default
+          kubectl describe sts demo-brokers -n default
+          kubectl logs -n crabka-operator deploy/operator-crabka-operator --tail=200 || true
+          exit 1
+
+      - name: Capture pre-upgrade state
+        id: pre
+        run: |
+          set -e
+          uid=$(kubectl get pod demo-brokers-0 -n default -o jsonpath='{.metadata.uid}')
+          rev=$(kubectl get sts demo-brokers -n default -o jsonpath='{.status.currentRevision}')
+          # The pool's config-hash label is propagated into the pod-template
+          # annotation by the pool reconciler. Read the annotation directly
+          # from the StatefulSet (more stable than reading the pod, which
+          # rolls during the upgrade).
+          hash=$(kubectl get sts demo-brokers -n default -o jsonpath='{.spec.template.metadata.annotations.crabka\.io/config-hash}')
+          echo "uid=$uid"
+          echo "rev=$rev"
+          echo "hash=$hash"
+          echo "uid=$uid" >> "$GITHUB_OUTPUT"
+          echo "rev=$rev" >> "$GITHUB_OUTPUT"
+          echo "hash=$hash" >> "$GITHUB_OUTPUT"
+
+      - name: Apply slice-25 CRDs + helm upgrade chart
+        run: |
+          set -e
+          # New schema fields (listeners, interBrokerListenerName, status.listeners).
+          kubectl apply -f head/deploy/crds/crabka.io_kafkas.yaml
+          kubectl apply -f head/deploy/crds/crabka.io_kafkanodepools.yaml
+          helm upgrade operator head/charts/crabka-operator \
+            --namespace crabka-operator \
+            --set image.repository=crabka-operator --set image.tag=slice25 \
+            --set image.pullPolicy=IfNotPresent \
+            --set brokerImage.repository=crabka-broker --set brokerImage.tag=slice25 \
+            --set brokerImage.pullPolicy=IfNotPresent
+          kubectl rollout status -n crabka-operator deploy/operator-crabka-operator --timeout=240s
+
+      - name: Wait for the one-time pod roll (template change) then Ready
+        run: |
+          set -e
+          # The pod template changes (MAIN_SCRIPT --listen-addr -> --config-file,
+          # new volume mounts) so a roll is unavoidable. Wait up to 180s for
+          # the pod UID to change.
+          initial_uid='${{ steps.pre.outputs.uid }}'
+          deadline=$(( $(date +%s) + 180 ))
+          while [ "$(date +%s)" -lt "$deadline" ]; do
+            current=$(kubectl get pod demo-brokers-0 -n default -o jsonpath='{.metadata.uid}' 2>/dev/null || true)
+            if [ -n "$current" ] && [ "$current" != "$initial_uid" ]; then
+              echo "pod rolled: $initial_uid -> $current"
+              break
+            fi
+            sleep 3
+          done
+          if [ "$current" = "$initial_uid" ]; then
+            echo "::error::pod did not roll within 180s of helm upgrade"
+            kubectl describe pod demo-brokers-0 -n default
+            exit 1
+          fi
+          # New pod must reach Ready (broker boots in Rejoin mode against
+          # the slice-24 PVC data using slice-25 --config-file flow).
+          if ! kubectl wait --for=condition=Ready -n default pod/demo-brokers-0 --timeout=180s; then
+            echo "::error::rolled pod failed to reach Ready"
+            kubectl describe pod demo-brokers-0 -n default
+            kubectl logs -n default demo-brokers-0 -c format --tail=200 || true
+            kubectl logs -n default demo-brokers-0 -c broker --tail=200 || true
+            kubectl logs -n default demo-brokers-0 -c broker --previous --tail=200 || true
+            kubectl get cm demo-broker-config -n default -o yaml || true
+            exit 1
+          fi
+
+      - name: Verify hash stability + no second roll
+        run: |
+          set -e
+          rolled_uid=$(kubectl get pod demo-brokers-0 -n default -o jsonpath='{.metadata.uid}')
+          rolled_hash=$(kubectl get sts demo-brokers -n default -o jsonpath='{.spec.template.metadata.annotations.crabka\.io/config-hash}')
+          echo "rolled_uid=$rolled_uid"
+          echo "rolled_hash=$rolled_hash"
+
+          # Hash unchanged: empty `spec.listeners` produces empty
+          # `canonical_listener_intent`, so `combined_config_hash` matches
+          # the slice-24 `config_hash(serialize_broker_properties)`.
+          if [ "$rolled_hash" != "${{ steps.pre.outputs.hash }}" ]; then
+            echo "::error::config-hash changed across upgrade: ${{ steps.pre.outputs.hash }} -> $rolled_hash"
+            echo "(this means combined_config_hash isn't slice-24-compat for empty listeners)"
+            exit 1
+          fi
+
+          # Settle: wait three full reconcile intervals (~90s) and assert
+          # the pod did NOT roll a second time.
+          sleep 90
+          final_uid=$(kubectl get pod demo-brokers-0 -n default -o jsonpath='{.metadata.uid}')
+          if [ "$final_uid" != "$rolled_uid" ]; then
+            echo "::error::pod rolled a SECOND time after upgrade settled (uid $rolled_uid -> $final_uid)"
+            kubectl describe sts demo-brokers -n default
+            exit 1
+          fi
+          echo "upgrade stable: one roll, no second roll, hash preserved"
+
+      - name: Collect diagnostics on failure
+        if: failure()
+        run: |
+          set +e
+          mkdir -p /tmp/upgrade-diag
+          {
+            echo "## kind-upgrade diagnostics"
+            kubectl get pods -A -o wide
+            echo
+            echo "### operator logs"
+            kubectl logs -n crabka-operator deploy/operator-crabka-operator --tail=500
+            echo "### operator logs (previous)"
+            kubectl logs -n crabka-operator deploy/operator-crabka-operator --tail=500 --previous
+            echo "### kafka CR"
+            kubectl get kafka demo -n default -o yaml
+            echo "### sts"
+            kubectl get sts demo-brokers -n default -o yaml
+            echo "### pod"
+            kubectl describe pod demo-brokers-0 -n default
+            echo "### broker logs"
+            kubectl logs -n default demo-brokers-0 -c broker --tail=500
+            echo "### broker logs (previous)"
+            kubectl logs -n default demo-brokers-0 -c broker --tail=500 --previous
+            echo "### init logs"
+            kubectl logs -n default demo-brokers-0 -c format --tail=500
+            echo "### configmap"
+            kubectl get cm demo-broker-config -n default -o yaml
+          } > /tmp/upgrade-diag/diagnostics.md
+
+      - name: Upload diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: operator-e2e-upgrade-diagnostics
+          path: /tmp/upgrade-diag/
+          retention-days: 14
+          if-no-files-found: ignore
