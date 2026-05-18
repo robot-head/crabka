@@ -7,11 +7,13 @@
 //! `{data_dir}/anomalies.json` and surfaced via `GetAnomalies`.
 
 pub mod anomaly;
+pub mod auto_trigger;
 pub mod metrics;
 pub mod rules;
 pub mod store;
 
 pub use anomaly::{Anomaly, AnomalyKey, AnomalyKind, AnomalySeverity};
+pub use auto_trigger::{AutoTriggerError, goals_for_kind, maybe_trigger};
 pub use metrics::DetectorMetrics;
 pub use store::{AnomalyStore, StoreError};
 
@@ -21,7 +23,7 @@ use std::time::Duration;
 
 use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::capacity::BrokerCapacities;
 use crate::executor::ExecutorState;
@@ -132,7 +134,6 @@ impl SnapshotHistory {
     }
 }
 
-#[allow(dead_code)] // Fields wired in T9.
 pub struct Detector {
     cfg: DetectorConfig,
     snapshot: SharedSnapshot,
@@ -143,6 +144,7 @@ pub struct Detector {
     executor_state: ExecutorState,
     goal_registry: Arc<crate::api::GoalRegistry>,
     goal_ctx: crate::goals::GoalContext,
+    metrics: DetectorMetrics,
     shutdown: CancellationToken,
     history: AsyncMutex<SnapshotHistory>,
 }
@@ -160,6 +162,7 @@ impl Detector {
         executor_state: ExecutorState,
         goal_registry: Arc<crate::api::GoalRegistry>,
         goal_ctx: crate::goals::GoalContext,
+        metrics: DetectorMetrics,
         shutdown: CancellationToken,
     ) -> Self {
         let history_capacity = cfg.history_capacity;
@@ -173,6 +176,7 @@ impl Detector {
             executor_state,
             goal_registry,
             goal_ctx,
+            metrics,
             shutdown,
             history: AsyncMutex::new(SnapshotHistory::new(history_capacity)),
         }
@@ -197,10 +201,17 @@ impl Detector {
         }
     }
 
-    /// One detector pass over the current snapshot. T9 wires this to the
-    /// real rule evaluators + `auto_trigger`; this stub records history
-    /// only and is intentionally inert.
+    /// One detector pass over the current snapshot. Pushes the current
+    /// snapshot to history, runs all four rules, reconciles open
+    /// anomalies (mark resolved + upsert new), updates per-kind open
+    /// gauges, and fires auto-trigger on freshly-detected anomalies.
     pub async fn tick_once(&self, now_ms: i64) {
+        use crate::detector::rules::{
+            BrokerDeath, DiskPressure, Rule, RuleCtx, RuleHit, SlowBroker,
+            UnderReplicatedPartitions,
+        };
+        use std::collections::HashMap;
+
         let g = self.snapshot.load();
         let Some(state) = (*g).as_ref() else {
             debug!("detector tick: no snapshot yet");
@@ -210,13 +221,101 @@ impl Detector {
             let mut hist = self.history.lock().await;
             hist.push(state);
         }
-        let _ = (state, now_ms);
-        let _ = evaluate_all();
-    }
-}
 
-fn evaluate_all() -> Vec<()> {
-    Vec::new()
+        let rules: Vec<(AnomalyKind, Box<dyn Rule>)> = vec![
+            (AnomalyKind::BrokerDeath, Box::new(BrokerDeath)),
+            (
+                AnomalyKind::UnderReplicatedPartitions,
+                Box::new(UnderReplicatedPartitions),
+            ),
+            (AnomalyKind::DiskPressure, Box::new(DiskPressure)),
+            (AnomalyKind::SlowBroker, Box::new(SlowBroker)),
+        ];
+
+        // Evaluate all rules under one lock; release before any awaits.
+        let mut all_hits: HashMap<AnomalyKind, Vec<RuleHit>> = HashMap::new();
+        {
+            let history_guard = self.history.lock().await;
+            for (kind, rule) in &rules {
+                let ctx = RuleCtx {
+                    snapshot: state,
+                    history: &history_guard,
+                    usages: &self.usage_store,
+                    capacities: &self.capacities,
+                    now_ms,
+                    cfg: &self.cfg,
+                };
+                all_hits.insert(*kind, rule.evaluate(&ctx));
+            }
+        }
+
+        // Reconcile each kind's hits against open anomalies; collect
+        // newly-detected anomalies for auto-trigger.
+        let mut to_trigger: Vec<Anomaly> = Vec::new();
+        for (kind, hits) in &all_hits {
+            let active_keys: std::collections::HashSet<_> =
+                hits.iter().map(|h| h.key.clone()).collect();
+
+            // 1. Mark as resolved any open (kind, key) not in this tick's hits.
+            for open in self.anomaly_store.list(0, false) {
+                if open.kind == *kind
+                    && !active_keys.contains(&open.key)
+                    && self.anomaly_store.mark_resolved(*kind, &open.key, now_ms)
+                {
+                    self.metrics.record_resolved(*kind);
+                }
+            }
+
+            // 2. Upsert each active hit; new records are candidates for auto-trigger.
+            for hit in hits {
+                let (id, is_new) = self.anomaly_store.upsert_open(
+                    *kind,
+                    hit.key.clone(),
+                    hit.severity,
+                    hit.details.clone(),
+                    now_ms,
+                );
+                if is_new {
+                    self.metrics.record_detected(*kind);
+                    if let Some(a) = self.anomaly_store.get(&id) {
+                        to_trigger.push(a);
+                    }
+                }
+            }
+        }
+
+        // 3. Update open-count gauges (per kind).
+        let all_open = self.anomaly_store.list(0, false);
+        for kind in [
+            AnomalyKind::BrokerDeath,
+            AnomalyKind::UnderReplicatedPartitions,
+            AnomalyKind::DiskPressure,
+            AnomalyKind::SlowBroker,
+        ] {
+            let n = all_open.iter().filter(|a| a.kind == kind).count();
+            self.metrics
+                .set_open_count(kind, i64::try_from(n).unwrap_or(i64::MAX));
+        }
+
+        // 4. Auto-trigger on each newly-detected anomaly. Errors are logged
+        //    and swallowed — the tick loop continues.
+        for a in to_trigger {
+            let ctx = crate::detector::auto_trigger::AutoTriggerCtx {
+                snapshot: self.snapshot.clone(),
+                goal_registry: &self.goal_registry,
+                goal_ctx: &self.goal_ctx,
+                proposal_store: &self.proposal_store,
+                anomaly_store: &self.anomaly_store,
+                executor_state: &self.executor_state,
+                config: &self.cfg,
+                metrics: &self.metrics,
+                now_ms,
+            };
+            if let Err(e) = crate::detector::auto_trigger::maybe_trigger(&a, &ctx).await {
+                warn!(anomaly_id = %a.id, error = %e, "auto_trigger errored");
+            }
+        }
+    }
 }
 
 fn now_ms() -> i64 {
