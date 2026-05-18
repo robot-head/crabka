@@ -71,6 +71,11 @@ struct Args {
     )]
     data_dir: PathBuf,
 
+    /// Optional path to a per-broker capacity YAML file. When unset,
+    /// all five capacity goals are no-ops.
+    #[arg(long, env = "CRABKA_BROKER_CAPACITY_FILE", default_value = "")]
+    broker_capacity_file: String,
+
     /// Default KIP-73 throttle (bytes/sec, per broker direction) when
     /// `ExecuteProposalRequest.throttle_bytes_per_sec` is unset.
     #[arg(
@@ -209,6 +214,30 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Load broker capacity config (optional).
+    let broker_capacities = if args.broker_capacity_file.is_empty() {
+        std::sync::Arc::new(crabka_rebalancer::capacity::BrokerCapacities::default())
+    } else {
+        match crabka_rebalancer::capacity::load::load_from_path(
+            std::path::Path::new(&args.broker_capacity_file),
+        ) {
+            Ok(c) => {
+                info!(
+                    path = %args.broker_capacity_file,
+                    broker_count = c.by_broker.len(),
+                    "loaded broker capacity config"
+                );
+                std::sync::Arc::new(c)
+            }
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "failed to load broker capacity file `{}`: {e}",
+                    args.broker_capacity_file
+                ));
+            }
+        }
+    };
+
     let app_state = Arc::new(AppState {
         snapshot: snapshot.clone(),
         store,
@@ -217,9 +246,7 @@ async fn main() -> anyhow::Result<()> {
             imbalance_threshold_pct: args.imbalance_threshold_pct,
             max_movements_per_proposal: args.max_movements_per_proposal,
             min_topic_leaders_per_broker: args.min_topic_leaders_per_broker,
-            broker_capacities: std::sync::Arc::new(
-                crabka_rebalancer::capacity::BrokerCapacities::default(),
-            ),
+            broker_capacities: broker_capacities.clone(),
         },
         metrics: metrics.clone(),
         executor: executor_state,
