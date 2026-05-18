@@ -3,11 +3,13 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crabka_client_admin::{AclEntry, AclOperation, PatternType, PermissionType, ResourceType};
+use crabka_client_admin::{
+    AclEntry, AclOperation, PatternType, PermissionType, QuotaOp, ResourceType, UserQuotaConfig,
+};
 use crabka_operator::controller::user::reconcile;
 use crabka_operator::crd::{
     AclOp, AclPatternType, AclPermission, AclResource, AclResourceKind, AclRule, Authentication,
-    Authorization, KafkaUser, KafkaUserSpec, ScramSha512Auth, SimpleAuthorization,
+    Authorization, KafkaUser, KafkaUserQuotas, KafkaUserSpec, ScramSha512Auth, SimpleAuthorization,
 };
 use http::{Method, Response};
 use serde_json::json;
@@ -82,6 +84,14 @@ fn secret_body(name: &str, namespace: &str, password: &str) -> serde_json::Value
 }
 
 fn ku_with_finalizer(name: &str, acls: Vec<AclRule>) -> KafkaUser {
+    ku_full(name, acls, None)
+}
+
+fn ku_full(
+    name: &str,
+    acls: Vec<AclRule>,
+    quotas: Option<crabka_operator::crd::KafkaUserQuotas>,
+) -> KafkaUser {
     let mut ku = KafkaUser::new(
         name,
         KafkaUserSpec {
@@ -91,6 +101,7 @@ fn ku_with_finalizer(name: &str, acls: Vec<AclRule>) -> KafkaUser {
             } else {
                 Some(Authorization::Simple(SimpleAuthorization { acls }))
             },
+            quotas,
         },
     );
     ku.metadata.namespace = Some(NS.into());
@@ -344,5 +355,250 @@ async fn deletes_orphan_acls() {
     assert!(
         store.is_empty(),
         "delete should have removed every ACL, got: {store:?}",
+    );
+}
+
+fn quota_rules() -> Vec<MockRule> {
+    vec![
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/kafkas/{CLUSTER}"),
+            response: json_response(200, &ready_kafka_body(CLUSTER, NS)),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{USER}"),
+            response: json_response(200, &secret_body(USER, NS, "fake-password")),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/kafkausers/{USER}/status"),
+            response: json_response(200, &user_body(USER, NS)),
+        },
+    ]
+}
+
+/// Slice 38: `spec.quotas` absent ⇒ reconciler never calls Describe /
+/// `AlterClientQuotas`. Status carries `quotasInSync: false`.
+#[tokio::test]
+async fn omitted_quotas_skips_broker_call() {
+    let state = MockState::new(quota_rules());
+    let client = mock_client(&state, NS);
+    let ctx = Arc::new(fixture_ctx(client, NS));
+
+    let fake = Arc::new(tokio::sync::Mutex::new(FakeAdminClient::new()));
+    let fake_for_assert = fake.clone();
+    ctx.insert_admin_client_for_test(CLUSTER, fake).await;
+
+    let ku = ku_full(USER, vec![], None);
+    reconcile(Arc::new(ku), ctx).await.unwrap();
+
+    let calls = fake_for_assert.lock().await.calls();
+    assert!(
+        !calls
+            .iter()
+            .any(|c| matches!(c, RecordedCall::DescribeUserQuotas(_))),
+        "no DescribeClientQuotas expected when spec.quotas is None: {calls:?}",
+    );
+    assert!(
+        !calls
+            .iter()
+            .any(|c| matches!(c, RecordedCall::AlterUserQuotas { .. })),
+        "no AlterClientQuotas expected when spec.quotas is None: {calls:?}",
+    );
+
+    let observed = state.take_observed();
+    let status = observed
+        .iter()
+        .rev()
+        .find(|r| {
+            r.method() == Method::PATCH && r.uri().to_string().contains("/kafkausers/alice/status")
+        })
+        .expect("status PATCH must have been captured");
+    let body: serde_json::Value = serde_json::from_slice(status.body()).unwrap();
+    assert_eq!(body["status"]["quotasInSync"], false);
+}
+
+/// Slice 38: spec.quotas declares per-user limits, broker has nothing →
+/// reconciler issues `AlterClientQuotas` with one `Set` per declared key.
+#[tokio::test]
+async fn first_reconcile_sets_declared_quotas() {
+    let state = MockState::new(quota_rules());
+    let client = mock_client(&state, NS);
+    let ctx = Arc::new(fixture_ctx(client, NS));
+
+    let fake = Arc::new(tokio::sync::Mutex::new(FakeAdminClient::new()));
+    let fake_for_assert = fake.clone();
+    ctx.insert_admin_client_for_test(CLUSTER, fake).await;
+
+    let quotas = KafkaUserQuotas {
+        producer_byte_rate: Some(1_048_576),
+        consumer_byte_rate: Some(2_097_152),
+        request_percentage: Some(55),
+        controller_mutation_rate: Some(10.0),
+    };
+    let ku = ku_full(USER, vec![], Some(quotas));
+    reconcile(Arc::new(ku), ctx).await.unwrap();
+
+    let calls = fake_for_assert.lock().await.calls();
+    let describe = calls
+        .iter()
+        .find(|c| matches!(c, RecordedCall::DescribeUserQuotas(u) if u == USER));
+    assert!(describe.is_some(), "expected DescribeUserQuotas: {calls:?}");
+
+    let alter = calls
+        .iter()
+        .find_map(|c| match c {
+            RecordedCall::AlterUserQuotas {
+                username,
+                ops,
+                validate_only,
+            } if username == USER => Some((ops.clone(), *validate_only)),
+            _ => None,
+        })
+        .expect("AlterUserQuotas must have been issued");
+    let (ops, validate_only) = alter;
+    assert!(!validate_only, "production reconcile must commit");
+    assert_eq!(ops.len(), 4, "every set field becomes one Set op: {ops:?}");
+    for key in [
+        "producer_byte_rate",
+        "consumer_byte_rate",
+        "request_percentage",
+        "controller_mutation_rate",
+    ] {
+        assert!(
+            ops.iter()
+                .any(|op| matches!(op, QuotaOp::Set { key: k, .. } if k == key)),
+            "missing Set for {key}: {ops:?}",
+        );
+    }
+
+    // Final status: quotasInSync=true.
+    let observed = state.take_observed();
+    let status = observed
+        .iter()
+        .rev()
+        .find(|r| {
+            r.method() == Method::PATCH && r.uri().to_string().contains("/kafkausers/alice/status")
+        })
+        .expect("status PATCH must have been captured");
+    let body: serde_json::Value = serde_json::from_slice(status.body()).unwrap();
+    assert_eq!(body["status"]["quotasInSync"], true);
+}
+
+/// Slice 38: broker matches spec exactly → no `AlterClientQuotas` is
+/// issued. Describe still runs (the diff input source).
+#[tokio::test]
+async fn noop_when_quotas_already_match() {
+    let state = MockState::new(quota_rules());
+    let client = mock_client(&state, NS);
+    let ctx = Arc::new(fixture_ctx(client, NS));
+
+    let fake = FakeAdminClient::new();
+    {
+        let mut store = fake.user_quotas.lock().unwrap();
+        let mut cfg = UserQuotaConfig::new();
+        cfg.insert("producer_byte_rate".into(), 1_048_576.0);
+        cfg.insert("request_percentage".into(), 25.0);
+        store.insert(USER.into(), cfg);
+    }
+    let fake = Arc::new(tokio::sync::Mutex::new(fake));
+    let fake_for_assert = fake.clone();
+    ctx.insert_admin_client_for_test(CLUSTER, fake).await;
+
+    let quotas = KafkaUserQuotas {
+        producer_byte_rate: Some(1_048_576),
+        request_percentage: Some(25),
+        ..Default::default()
+    };
+    let ku = ku_full(USER, vec![], Some(quotas));
+    reconcile(Arc::new(ku), ctx).await.unwrap();
+
+    let calls = fake_for_assert.lock().await.calls();
+    assert!(
+        !calls
+            .iter()
+            .any(|c| matches!(c, RecordedCall::AlterUserQuotas { .. })),
+        "no AlterClientQuotas expected when quotas already match: {calls:?}",
+    );
+}
+
+/// Slice 38: broker has a quota the spec doesn't declare → reconciler
+/// issues a `Remove` for it. (The CRD wins.)
+#[tokio::test]
+async fn drift_remove_path_emits_remove_op() {
+    let state = MockState::new(quota_rules());
+    let client = mock_client(&state, NS);
+    let ctx = Arc::new(fixture_ctx(client, NS));
+
+    let fake = FakeAdminClient::new();
+    {
+        let mut store = fake.user_quotas.lock().unwrap();
+        let mut cfg = UserQuotaConfig::new();
+        cfg.insert("producer_byte_rate".into(), 1.0);
+        cfg.insert("consumer_byte_rate".into(), 2.0); // out-of-band
+        store.insert(USER.into(), cfg);
+    }
+    let fake = Arc::new(tokio::sync::Mutex::new(fake));
+    let fake_for_assert = fake.clone();
+    ctx.insert_admin_client_for_test(CLUSTER, fake).await;
+
+    let quotas = KafkaUserQuotas {
+        producer_byte_rate: Some(1),
+        ..Default::default()
+    };
+    let ku = ku_full(USER, vec![], Some(quotas));
+    reconcile(Arc::new(ku), ctx).await.unwrap();
+
+    let calls = fake_for_assert.lock().await.calls();
+    let ops = calls
+        .iter()
+        .find_map(|c| match c {
+            RecordedCall::AlterUserQuotas { ops, .. } => Some(ops.clone()),
+            _ => None,
+        })
+        .expect("AlterUserQuotas must have been issued");
+    assert_eq!(ops.len(), 1, "only one drift op expected: {ops:?}");
+    assert!(matches!(
+        &ops[0],
+        QuotaOp::Remove { key } if key == "consumer_byte_rate"
+    ));
+}
+
+/// Slice 38: `spec.quotas: {}` (empty object) wipes the broker's quota
+/// state for this user. Different from `spec.quotas: null` (=skip).
+#[tokio::test]
+async fn empty_quotas_object_tombstones_everything() {
+    let state = MockState::new(quota_rules());
+    let client = mock_client(&state, NS);
+    let ctx = Arc::new(fixture_ctx(client, NS));
+
+    let fake = FakeAdminClient::new();
+    {
+        let mut store = fake.user_quotas.lock().unwrap();
+        let mut cfg = UserQuotaConfig::new();
+        cfg.insert("producer_byte_rate".into(), 1.0);
+        cfg.insert("consumer_byte_rate".into(), 2.0);
+        store.insert(USER.into(), cfg);
+    }
+    let fake = Arc::new(tokio::sync::Mutex::new(fake));
+    let fake_for_assert = fake.clone();
+    ctx.insert_admin_client_for_test(CLUSTER, fake).await;
+
+    let ku = ku_full(USER, vec![], Some(KafkaUserQuotas::default()));
+    reconcile(Arc::new(ku), ctx).await.unwrap();
+
+    let calls = fake_for_assert.lock().await.calls();
+    let ops = calls
+        .iter()
+        .find_map(|c| match c {
+            RecordedCall::AlterUserQuotas { ops, .. } => Some(ops.clone()),
+            _ => None,
+        })
+        .expect("AlterUserQuotas must have been issued");
+    assert_eq!(ops.len(), 2, "two existing keys tombstoned: {ops:?}");
+    assert!(
+        ops.iter().all(|op| matches!(op, QuotaOp::Remove { .. })),
+        "every op must be a Remove: {ops:?}",
     );
 }

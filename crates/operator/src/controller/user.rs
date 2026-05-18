@@ -67,6 +67,10 @@ pub async fn reconcile(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Action,
     let ns = obj.namespace().unwrap_or_else(|| "default".into());
     let name = obj.name_any();
     let user_api: Api<KafkaUser> = Api::namespaced(ctx.client.clone(), &ns);
+    // Failure paths below preserve whatever `quotasInSync` was already
+    // published — they haven't touched broker state, so the prior value
+    // is still the truth.
+    let prior_quotas_in_sync = obj.status.as_ref().is_some_and(|s| s.quotas_in_sync);
 
     // 1. Cluster label
     let cluster = obj
@@ -84,6 +88,7 @@ pub async fn reconcile(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Action,
             "metadata.labels[\"crabka.io/cluster\"] is required",
             false,
             false,
+            prior_quotas_in_sync,
         )
         .await?;
         return Ok(Action::requeue(Duration::from_mins(1)));
@@ -100,6 +105,7 @@ pub async fn reconcile(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Action,
             &msg,
             false,
             false,
+            prior_quotas_in_sync,
         )
         .await?;
         return Ok(Action::requeue(Duration::from_mins(5)));
@@ -119,6 +125,7 @@ pub async fn reconcile(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Action,
             &format!("Kafka/{cluster} not Ready or no internal listener"),
             false,
             false,
+            prior_quotas_in_sync,
         )
         .await?;
         return Ok(Action::requeue(Duration::from_secs(30)));
@@ -150,6 +157,25 @@ pub async fn reconcile(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Action,
             match admin.delete_acls(&[filter]).await {
                 Ok(_) => {}
                 Err(e) => tracing::warn!(error = %e, %name, "acl delete during finalizer failed"),
+            }
+            // Quotas: best-effort tombstone every key the broker
+            // currently has for this user. Same posture as the SCRAM
+            // and ACL paths above — log on error, never block the
+            // finalizer.
+            match admin.describe_user_quotas(&name).await {
+                Ok(cur) if !cur.is_empty() => {
+                    let ops: Vec<_> = cur
+                        .into_keys()
+                        .map(|key| crabka_client_admin::QuotaOp::Remove { key })
+                        .collect();
+                    if let Err(e) = admin.alter_user_quotas(&name, &ops, false).await {
+                        tracing::warn!(error = %e, %name, "quota delete during finalizer failed");
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(error = %e, %name, "quota describe during finalizer failed");
+                }
             }
         }
         remove_finalizer(&user_api, &name).await?;
@@ -221,6 +247,7 @@ pub async fn reconcile(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Action,
             &format!("AlterUserScramCredentials: {} ({})", err.name, err.code),
             false,
             false,
+            prior_quotas_in_sync,
         )
         .await?;
         return Ok(Action::requeue(Duration::from_secs(15)));
@@ -270,6 +297,42 @@ pub async fn reconcile(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Action,
         return user_broker_error(&user_api, &name, &obj, e, "DeleteAcls").await;
     }
 
+    // 9. Reconcile quotas (slice 38). `spec.quotas == None` leaves the
+    // broker's quota state untouched — a deliberate opt-in posture
+    // matching Strimzi (the quotas section being absent ≠ "wipe all
+    // quotas"). To clear quotas via the CRD, set `quotas: {}` (empty
+    // object) — that desired-state map is empty and the diff
+    // tombstones whatever the broker has.
+    let quotas_in_sync = if let Some(spec_quotas) = obj.spec.quotas.as_ref() {
+        let desired = spec_quotas.to_quota_map();
+        let current = match admin.describe_user_quotas(&name).await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %e, "DescribeClientQuotas failure");
+                let is_transport = matches!(e, AdminError::Transport(_));
+                drop(admin);
+                if is_transport {
+                    ctx.drop_admin_client(&cluster).await;
+                }
+                return Ok(Action::requeue(Duration::from_secs(15)));
+            }
+        };
+        let ops = crabka_client_admin::diff_user_quotas(&current, &desired);
+        if !ops.is_empty()
+            && let Err(e) = apply_alter_user_quotas(&mut admin, &name, &ops).await
+        {
+            let is_transport = matches!(e, AdminError::Transport(_));
+            drop(admin);
+            if is_transport {
+                ctx.drop_admin_client(&cluster).await;
+            }
+            return user_broker_error(&user_api, &name, &obj, e, "AlterClientQuotas").await;
+        }
+        true
+    } else {
+        false
+    };
+
     patch_status(
         &user_api,
         &name,
@@ -279,9 +342,26 @@ pub async fn reconcile(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Action,
         "user in sync",
         true,
         true,
+        quotas_in_sync,
     )
     .await?;
     Ok(Action::requeue(Duration::from_mins(1)))
+}
+
+async fn apply_alter_user_quotas(
+    admin: &mut tokio::sync::MutexGuard<'_, dyn crabka_client_admin::AdminClientLike + Send>,
+    username: &str,
+    ops: &[crabka_client_admin::QuotaOp],
+) -> Result<(), AdminError> {
+    if let Some(err) = admin.alter_user_quotas(username, ops, false).await? {
+        return Err(AdminError::Broker {
+            api: "AlterClientQuotas",
+            code: err.code,
+            name: err.name,
+            message: err.message,
+        });
+    }
+    Ok(())
 }
 
 async fn apply_create_acls(
@@ -328,6 +408,7 @@ async fn user_broker_error(
         AdminError::Broker { code, name, .. } => format!("{op}: {name} ({code})"),
         other => format!("{op}: {other}"),
     };
+    let prior_qis = obj.status.as_ref().is_some_and(|s| s.quotas_in_sync);
     patch_status(
         api,
         name,
@@ -337,6 +418,7 @@ async fn user_broker_error(
         &detail,
         false,
         false,
+        prior_qis,
     )
     .await?;
     Ok(Action::requeue(Duration::from_secs(15)))
@@ -594,6 +676,7 @@ async fn patch_status(
     message: &str,
     scram_sha512: bool,
     advance_generation: bool,
+    quotas_in_sync: bool,
 ) -> Result<(), ReconcileError> {
     let conditions = vec![condition("Ready", status, reason, message)];
     let observed_generation = if advance_generation {
@@ -614,6 +697,7 @@ async fn patch_status(
             "username": name,
             "secret": secret_name,
             "scramSha512": scram_sha512 || obj.status.as_ref().is_some_and(|s| s.scram_sha512),
+            "quotasInSync": quotas_in_sync,
         }
     });
     let params = PatchParams {
@@ -764,6 +848,7 @@ mod tests {
                     permission: AclPermission::Allow,
                 }],
             })),
+            quotas: None,
         };
         let err = validate_spec(&spec).unwrap_err();
         assert!(err.contains("operations is empty"), "got: {err}");
@@ -776,6 +861,7 @@ mod tests {
             authorization: Some(Authorization::Simple(SimpleAuthorization {
                 acls: vec![rule(AclResourceKind::Topic, "", &[AclOp::Read])],
             })),
+            quotas: None,
         };
         let err = validate_spec(&spec).unwrap_err();
         assert!(err.contains("resource.name is empty"), "got: {err}");

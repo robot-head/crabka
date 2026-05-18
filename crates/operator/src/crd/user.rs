@@ -26,6 +26,43 @@ pub struct KafkaUserSpec {
     /// authenticate. When absent, ACL reconciliation is skipped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authorization: Option<Authorization>,
+
+    /// Slice 38: optional per-user client quotas (KIP-13/124/257).
+    /// Maps onto Kafka's `(user)` quota entity via `AlterClientQuotas`
+    /// (`api_key` 49). Absent → operator does not touch the broker's
+    /// quota state; present → the operator drives the broker's quota
+    /// keys for `User:<name>` toward the spec (sets configured fields,
+    /// tombstones omitted ones).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quotas: Option<KafkaUserQuotas>,
+}
+
+/// Strimzi-shaped `KafkaUserQuotas`. Field names + JSON types match
+/// `kafka.strimzi.io/v1beta2`; values flow to the broker as `f64`
+/// (Kafka's wire type for client-quota values).
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct KafkaUserQuotas {
+    /// Maximum produce-side bytes/sec. Backed by `producer_byte_rate`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0))]
+    pub producer_byte_rate: Option<i32>,
+
+    /// Maximum consume-side bytes/sec. Backed by `consumer_byte_rate`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0))]
+    pub consumer_byte_rate: Option<i32>,
+
+    /// Maximum percentage of a request-handler thread's time the user
+    /// may consume (0..=100). Backed by `request_percentage`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0, max = 100))]
+    pub request_percentage: Option<i32>,
+
+    /// KIP-599 controller-mutation rate (creates/deletes/sec).
+    /// Backed by `controller_mutation_rate`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub controller_mutation_rate: Option<f64>,
 }
 
 /// Tagged enum on `type`, mirroring Strimzi.
@@ -172,6 +209,36 @@ pub struct KafkaUserStatus {
     /// True once SCRAM-SHA-512 credentials are provisioned.
     #[serde(default)]
     pub scram_sha512: bool,
+
+    /// True once the spec's `quotas` (if any) have been reflected in the
+    /// broker's `(user)` client-quota state. False when `spec.quotas`
+    /// is `None` (the operator does not touch broker quotas).
+    #[serde(default)]
+    pub quotas_in_sync: bool,
+}
+
+impl KafkaUserQuotas {
+    /// Project the typed spec onto the wire key→value map the admin
+    /// client consumes. `producerByteRate=null` etc. are skipped — the
+    /// reconciler's diff then tombstones any broker key not present
+    /// here.
+    #[must_use]
+    pub fn to_quota_map(&self) -> std::collections::BTreeMap<String, f64> {
+        let mut out = std::collections::BTreeMap::new();
+        if let Some(v) = self.producer_byte_rate {
+            out.insert("producer_byte_rate".into(), f64::from(v));
+        }
+        if let Some(v) = self.consumer_byte_rate {
+            out.insert("consumer_byte_rate".into(), f64::from(v));
+        }
+        if let Some(v) = self.request_percentage {
+            out.insert("request_percentage".into(), f64::from(v));
+        }
+        if let Some(v) = self.controller_mutation_rate {
+            out.insert("controller_mutation_rate".into(), v);
+        }
+        out
+    }
 }
 
 #[cfg(test)]
@@ -218,6 +285,12 @@ mod tests {
                         permission: AclPermission::Allow,
                     }],
                 })),
+                quotas: Some(KafkaUserQuotas {
+                    producer_byte_rate: Some(1_048_576),
+                    consumer_byte_rate: Some(2_097_152),
+                    request_percentage: Some(55),
+                    controller_mutation_rate: Some(10.0),
+                }),
             },
         );
         let json = serde_json::to_string(&ku).unwrap();
@@ -294,7 +367,76 @@ mod tests {
         assert!(!j.contains("observedGeneration"), "got: {j}");
         assert!(!j.contains("username"), "got: {j}");
         assert!(!j.contains("secret"), "got: {j}");
-        // `scramSha512` is a plain bool — serde emits it.
+        // `scramSha512` + `quotasInSync` are plain bools — serde emits them.
         assert!(j.contains("\"scramSha512\":false"), "got: {j}");
+        assert!(j.contains("\"quotasInSync\":false"), "got: {j}");
+    }
+
+    #[test]
+    fn quotas_empty_serializes_as_empty_object() {
+        let q = KafkaUserQuotas::default();
+        let j = serde_json::to_string(&q).unwrap();
+        assert_eq!(j, "{}");
+        assert!(q.to_quota_map().is_empty());
+    }
+
+    #[test]
+    fn quotas_to_map_only_emits_set_fields() {
+        let q = KafkaUserQuotas {
+            producer_byte_rate: Some(1_048_576),
+            consumer_byte_rate: None,
+            request_percentage: Some(25),
+            controller_mutation_rate: None,
+        };
+        let m = q.to_quota_map();
+        assert_eq!(m.len(), 2);
+        assert!((m["producer_byte_rate"] - 1_048_576.0).abs() < f64::EPSILON);
+        assert!((m["request_percentage"] - 25.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn quotas_to_map_carries_controller_mutation_rate_as_double() {
+        let q = KafkaUserQuotas {
+            controller_mutation_rate: Some(2.5),
+            ..Default::default()
+        };
+        let m = q.to_quota_map();
+        assert_eq!(m.len(), 1);
+        assert!((m["controller_mutation_rate"] - 2.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn quotas_parse_from_strimzi_shape() {
+        let json = r#"{
+            "producerByteRate": 1048576,
+            "consumerByteRate": 2097152,
+            "requestPercentage": 55,
+            "controllerMutationRate": 10.5
+        }"#;
+        let q: KafkaUserQuotas = serde_json::from_str(json).unwrap();
+        assert_eq!(q.producer_byte_rate, Some(1_048_576));
+        assert_eq!(q.consumer_byte_rate, Some(2_097_152));
+        assert_eq!(q.request_percentage, Some(55));
+        assert_eq!(q.controller_mutation_rate, Some(10.5));
+    }
+
+    #[test]
+    fn empty_quotas_object_parses_and_is_a_clear_signal() {
+        // `spec.quotas: {}` is the "wipe broker quotas" signal — the
+        // reconciler diffs against an empty desired map and tombstones
+        // every key the broker has for this user.
+        let json = r#"{"authentication":{"type":"scram-sha-512"},"quotas":{}}"#;
+        let spec: KafkaUserSpec = serde_json::from_str(json).unwrap();
+        let q = spec.quotas.expect("quotas section present");
+        assert!(q.to_quota_map().is_empty());
+    }
+
+    #[test]
+    fn omitted_quotas_means_operator_does_not_manage() {
+        // `spec.quotas` absent => `spec.quotas == None` => the
+        // reconciler skips quota reconciliation entirely.
+        let json = r#"{"authentication":{"type":"scram-sha-512"}}"#;
+        let spec: KafkaUserSpec = serde_json::from_str(json).unwrap();
+        assert!(spec.quotas.is_none());
     }
 }

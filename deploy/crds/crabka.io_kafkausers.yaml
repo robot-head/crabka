@@ -137,6 +137,45 @@ spec:
                     - simple
                     type: string
                 type: object
+              quotas:
+                description: |-
+                  Slice 38: optional per-user client quotas (KIP-13/124/257).
+                  Maps onto Kafka's `(user)` quota entity via `AlterClientQuotas`
+                  (`api_key` 49). Absent → operator does not touch the broker's
+                  quota state; present → the operator drives the broker's quota
+                  keys for `User:<name>` toward the spec (sets configured fields,
+                  tombstones omitted ones).
+                nullable: true
+                properties:
+                  consumerByteRate:
+                    description: Maximum consume-side bytes/sec. Backed by `consumer_byte_rate`.
+                    format: int32
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  controllerMutationRate:
+                    description: |-
+                      KIP-599 controller-mutation rate (creates/deletes/sec).
+                      Backed by `controller_mutation_rate`.
+                    format: double
+                    nullable: true
+                    type: number
+                  producerByteRate:
+                    description: Maximum produce-side bytes/sec. Backed by `producer_byte_rate`.
+                    format: int32
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  requestPercentage:
+                    description: |-
+                      Maximum percentage of a request-handler thread's time the user
+                      may consume (0..=100). Backed by `request_percentage`.
+                    format: int32
+                    maximum: 100.0
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                type: object
             required:
             - authentication
             type: object
@@ -176,6 +215,13 @@ spec:
                 format: int64
                 nullable: true
                 type: integer
+              quotasInSync:
+                default: false
+                description: |-
+                  True once the spec's `quotas` (if any) have been reflected in the
+                  broker's `(user)` client-quota state. False when `spec.quotas`
+                  is `None` (the operator does not touch broker quotas).
+                type: boolean
               scramSha512:
                 default: false
                 description: True once SCRAM-SHA-512 credentials are provisioned.
