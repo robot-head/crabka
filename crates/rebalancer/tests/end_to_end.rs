@@ -877,3 +877,119 @@ async fn replica_capacity_evicts_over_capacity_broker() {
         "broker 1 still has {final_broker_1_count} replicas after eviction"
     );
 }
+
+/// Synthetic three-broker ClusterState with broker 1 holding 5× more
+/// disk than broker 2. The UsageStore is pre-populated with disk_bytes
+/// gauge samples. DiskUsage.propose must emit movements that reduce
+/// broker 1's total.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disk_usage_evicts_hot_broker() {
+    use crabka_rebalancer::goals::disk_usage::DiskUsage;
+    use crabka_rebalancer::goals::{Goal, GoalContext};
+    use crabka_rebalancer::model::{BrokerView, ClusterState, Movement, PartitionView};
+    use crabka_rebalancer::scraper::parse::ParsedSample;
+    use crabka_rebalancer::scraper::{MetricKind, UsageStore, WindowConfig};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    let parts: Vec<_> = (0..5)
+        .map(|i| PartitionView {
+            topic: "t".into(),
+            partition: i,
+            replicas: vec![1, 2],
+            leader: 1,
+            isr: vec![1, 2],
+        })
+        .collect();
+
+    let state = ClusterState {
+        cluster_id: Some("c".into()),
+        snapshot_at_ms: 0,
+        brokers: vec![
+            BrokerView {
+                id: 1,
+                host: "h1".into(),
+                port: 9092,
+                rack: None,
+            },
+            BrokerView {
+                id: 2,
+                host: "h2".into(),
+                port: 9092,
+                rack: None,
+            },
+            BrokerView {
+                id: 3,
+                host: "h3".into(),
+                port: 9092,
+                rack: None,
+            },
+        ],
+        partitions: parts,
+        in_flight_reassignments: vec![],
+    };
+
+    let store = UsageStore::new(WindowConfig {
+        scrape_interval: Duration::from_secs(30),
+        retention: Duration::from_secs(3600),
+    });
+    // Broker 1: 500 disk_bytes per partition × 5 partitions = 2500.
+    for i in 0..5 {
+        store.insert(
+            1,
+            vec![ParsedSample {
+                metric: MetricKind::DiskBytes,
+                topic: "t".into(),
+                partition: i,
+                value: 500.0,
+            }],
+            0,
+        );
+    }
+    // Broker 2: 100 disk_bytes per partition × 5 partitions = 500.
+    for i in 0..5 {
+        store.insert(
+            2,
+            vec![ParsedSample {
+                metric: MetricKind::DiskBytes,
+                topic: "t".into(),
+                partition: i,
+                value: 100.0,
+            }],
+            0,
+        );
+    }
+
+    let ctx = GoalContext {
+        imbalance_threshold_pct: 10,
+        max_movements_per_proposal: 256,
+        min_topic_leaders_per_broker: 0,
+        broker_capacities: Arc::new(crabka_rebalancer::capacity::BrokerCapacities::default()),
+        broker_usages: Arc::new(store),
+    };
+
+    let mvs: Vec<Movement> = DiskUsage.propose(&state, &ctx);
+    assert!(
+        !mvs.is_empty(),
+        "expected disk-eviction movements; got {mvs:?}"
+    );
+
+    // Apply movements; broker 1's post-state total must shrink.
+    let mut working = state.partitions.clone();
+    for m in &mvs {
+        if let Some(p) = working
+            .iter_mut()
+            .find(|p| p.topic == m.topic && p.partition == m.partition)
+        {
+            p.replicas = m.new_replicas.clone();
+        }
+    }
+    let broker_1_count = working
+        .iter()
+        .map(|p| p.replicas.iter().filter(|x| **x == 1).count())
+        .sum::<usize>();
+    assert!(
+        broker_1_count < 5,
+        "broker 1 still hosts all replicas after eviction"
+    );
+}
