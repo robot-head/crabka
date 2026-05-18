@@ -218,9 +218,9 @@ async fn main() -> anyhow::Result<()> {
     let broker_capacities = if args.broker_capacity_file.is_empty() {
         std::sync::Arc::new(crabka_rebalancer::capacity::BrokerCapacities::default())
     } else {
-        match crabka_rebalancer::capacity::load::load_from_path(
-            std::path::Path::new(&args.broker_capacity_file),
-        ) {
+        match crabka_rebalancer::capacity::load::load_from_path(std::path::Path::new(
+            &args.broker_capacity_file,
+        )) {
             Ok(c) => {
                 info!(
                     path = %args.broker_capacity_file,

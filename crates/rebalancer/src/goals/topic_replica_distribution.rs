@@ -147,9 +147,7 @@ mod tests {
             imbalance_threshold_pct: threshold,
             max_movements_per_proposal: cap,
             min_topic_leaders_per_broker: 0,
-            broker_capacities: std::sync::Arc::new(
-                crate::capacity::BrokerCapacities::default(),
-            ),
+            broker_capacities: std::sync::Arc::new(crate::capacity::BrokerCapacities::default()),
         }
     }
 

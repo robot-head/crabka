@@ -65,7 +65,12 @@ mod tests {
         let state = ClusterState {
             cluster_id: None,
             snapshot_at_ms: 0,
-            brokers: vec![BrokerView { id: 1, host: "h1".into(), port: 9092, rack: None }],
+            brokers: vec![BrokerView {
+                id: 1,
+                host: "h1".into(),
+                port: 9092,
+                rack: None,
+            }],
             partitions: vec![PartitionView {
                 topic: "t".into(),
                 partition: 0,

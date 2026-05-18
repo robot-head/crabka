@@ -45,7 +45,9 @@ pub fn load_from_path(path: &Path) -> Result<BrokerCapacities, CapacityError> {
             return Err(CapacityError::NegativeCpu(cpu, *broker));
         }
     }
-    Ok(BrokerCapacities { by_broker: parsed.brokers })
+    Ok(BrokerCapacities {
+        by_broker: parsed.brokers,
+    })
 }
 
 #[cfg(test)]
@@ -126,7 +128,10 @@ brokers: {}
         let err = load_from_path(f.path()).expect_err("bad version");
         assert!(matches!(
             err,
-            CapacityError::UnsupportedVersion { found: 999, expected: 1 }
+            CapacityError::UnsupportedVersion {
+                found: 999,
+                expected: 1
+            }
         ));
     }
 
