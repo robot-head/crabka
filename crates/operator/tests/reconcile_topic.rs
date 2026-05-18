@@ -5,10 +5,12 @@
 //! integration test in `crates/client-admin/tests/round_trip.rs`.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use crabka_operator::controller::topic::reconcile;
 use crabka_operator::crd::{KafkaTopic, KafkaTopicSpec};
 use http::{Method, Response};
+use kube::runtime::controller::Action;
 
 #[path = "shared/mod.rs"]
 mod shared;
@@ -16,6 +18,38 @@ mod shared;
 use shared::{
     MockRule, MockState, fake_topic_body, fixture_ctx, json_response, mock_client, not_found_body,
 };
+
+/// JSON body shaped like a Ready Kafka with a single PLAIN internal
+/// listener. Used by the finalizer-add-path test below; the topic
+/// reconciler reads the Ready condition + listener bootstrap off this.
+fn ready_kafka_body(name: &str, namespace: &str) -> serde_json::Value {
+    serde_json::json!({
+        "apiVersion": "crabka.io/v1alpha1",
+        "kind": "Kafka",
+        "metadata": { "name": name, "namespace": namespace, "uid": "kafka-uid" },
+        "spec": {
+            "kafkaVersion": "0.1.1",
+            "interBrokerListenerName": "PLAIN",
+        },
+        "status": {
+            "conditions": [{
+                "type": "Ready",
+                "status": "True",
+                "reason": "Available",
+                "message": "",
+                "lastTransitionTime": "2026-05-17T00:00:00Z",
+            }],
+            "listeners": [{
+                "name": "PLAIN",
+                "type": "internal",
+                "bootstrapServers": format!(
+                    "{name}-broker-headless.{namespace}.svc.cluster.local:9092"
+                ),
+                "addresses": [],
+            }],
+        }
+    })
+}
 
 fn topic(name: &str, ns: &str, cluster: Option<&str>) -> KafkaTopic {
     let mut kt = KafkaTopic::new(
@@ -141,4 +175,63 @@ async fn invalid_topic_name_sets_status() {
     let cond = &body["status"]["conditions"][0];
     assert_eq!(cond["status"], "False");
     assert_eq!(cond["reason"], "InvalidTopicName");
+}
+
+/// Slice 35: a `KafkaTopic` referencing a Ready Kafka but with no
+/// finalizer set must PATCH `/kafkatopics/<name>` adding the finalizer
+/// and request an immediate re-enter (`Action::requeue(Duration::ZERO)`).
+/// No admin RPCs are issued — the finalizer-add path returns before any
+/// connection.
+#[tokio::test]
+async fn finalizer_add_path_patches_metadata_and_requeues_immediately() {
+    let rules = vec![
+        MockRule {
+            method: Method::GET,
+            path_substr: "/kafkas/demo".into(),
+            response: json_response(200, &ready_kafka_body("demo", "y")),
+        },
+        MockRule {
+            method: Method::PATCH,
+            // Resource PATCH (not /status).
+            path_substr: "/kafkatopics/foo".into(),
+            response: json_response(200, &fake_topic_body("foo", "y")),
+        },
+    ];
+    let state = MockState::new(rules);
+    let client = mock_client(&state, "y");
+    let ctx = Arc::new(fixture_ctx(client, "y"));
+
+    let kt = topic("foo", "y", Some("demo"));
+    let action = reconcile(Arc::new(kt), ctx).await.unwrap();
+    assert_eq!(
+        action,
+        Action::requeue(Duration::ZERO),
+        "finalizer add re-enters immediately",
+    );
+
+    let observed = state.take_observed();
+    let finalizer_patch = observed
+        .iter()
+        .find(|r| {
+            r.method() == Method::PATCH
+                && r.uri().to_string().contains("/kafkatopics/foo")
+                && !r.uri().to_string().contains("/status")
+        })
+        .expect("finalizer PATCH must have been captured");
+    let body: serde_json::Value = serde_json::from_slice(finalizer_patch.body()).unwrap();
+    let finalizers = &body["metadata"]["finalizers"];
+    assert_eq!(
+        finalizers,
+        &serde_json::json!(["crabka.io/topic-finalizer"]),
+        "patch must add the topic finalizer",
+    );
+
+    // No /status PATCH — the finalizer-add path bails before any status
+    // patch happens.
+    assert!(
+        !observed
+            .iter()
+            .any(|r| r.uri().to_string().contains("/kafkatopics/foo/status")),
+        "no /status patch is expected on the finalizer-add path",
+    );
 }

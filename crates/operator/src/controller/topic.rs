@@ -157,8 +157,11 @@ pub async fn reconcile(obj: Arc<KafkaTopic>, ctx: Arc<Context>) -> Result<Action
         Ok(m) => m,
         Err(e) => {
             tracing::warn!(error = %e, %topic_name, "Metadata failed");
+            let is_transport = matches!(e, crabka_client_admin::AdminError::Transport(_));
             drop(admin);
-            ctx.drop_admin_client(&cluster).await;
+            if is_transport {
+                ctx.drop_admin_client(&cluster).await;
+            }
             return Ok(Action::requeue(Duration::from_secs(15)));
         }
     };
@@ -187,6 +190,11 @@ pub async fn reconcile(obj: Arc<KafkaTopic>, ctx: Arc<Context>) -> Result<Action
                 Ok(mut v) => v.pop().expect("one spec → one outcome"),
                 Err(e) => {
                     tracing::warn!(error = %e, "CreateTopics transport failure");
+                    let is_transport = matches!(e, crabka_client_admin::AdminError::Transport(_));
+                    drop(admin);
+                    if is_transport {
+                        ctx.drop_admin_client(&cluster).await;
+                    }
                     return Ok(Action::requeue(Duration::from_secs(15)));
                 }
             };
@@ -279,6 +287,12 @@ pub async fn reconcile(obj: Arc<KafkaTopic>, ctx: Arc<Context>) -> Result<Action
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "CreatePartitions transport failure");
+                        let is_transport =
+                            matches!(e, crabka_client_admin::AdminError::Transport(_));
+                        drop(admin);
+                        if is_transport {
+                            ctx.drop_admin_client(&cluster).await;
+                        }
                         return Ok(Action::requeue(Duration::from_secs(15)));
                     }
                 }
@@ -294,6 +308,11 @@ pub async fn reconcile(obj: Arc<KafkaTopic>, ctx: Arc<Context>) -> Result<Action
                     .unwrap_or_default(),
                 Err(e) => {
                     tracing::warn!(error = %e, "DescribeConfigs failed");
+                    let is_transport = matches!(e, crabka_client_admin::AdminError::Transport(_));
+                    drop(admin);
+                    if is_transport {
+                        ctx.drop_admin_client(&cluster).await;
+                    }
                     return Ok(Action::requeue(Duration::from_secs(15)));
                 }
             };
@@ -321,6 +340,12 @@ pub async fn reconcile(obj: Arc<KafkaTopic>, ctx: Arc<Context>) -> Result<Action
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "IncrementalAlterConfigs failure");
+                        let is_transport =
+                            matches!(e, crabka_client_admin::AdminError::Transport(_));
+                        drop(admin);
+                        if is_transport {
+                            ctx.drop_admin_client(&cluster).await;
+                        }
                         return Ok(Action::requeue(Duration::from_secs(15)));
                     }
                 }
