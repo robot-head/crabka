@@ -24,7 +24,8 @@ use std::sync::Arc;
 
 use crabka_operator::controller::kafka::reconcile;
 use crabka_operator::crd::{
-    Kafka, KafkaSpec, Listener, ListenerType, MetricsConfig, PodMonitorSpec, ServiceMonitorSpec,
+    Kafka, KafkaSpec, Listener, ListenerType, MetricsConfig, NetworkPolicySpec, PodMonitorSpec,
+    ServiceMonitorSpec,
 };
 use http::{Method, Response};
 use serde_json::json;
@@ -66,6 +67,28 @@ fn kafka_cr_with_metrics(name: &str, namespace: &str, metrics: Option<MetricsCon
             inter_broker_listener_name: None,
             metrics_config: metrics,
             network_policy: None,
+        },
+    );
+    k.metadata.namespace = Some(namespace.into());
+    k.metadata.uid = Some("kafka-uid".into());
+    k
+}
+
+/// Variant carrying `spec.networkPolicy` for slice-23 tests.
+fn kafka_cr_with_network_policy(
+    name: &str,
+    namespace: &str,
+    network_policy: Option<NetworkPolicySpec>,
+) -> Kafka {
+    let mut k = Kafka::new(
+        name,
+        KafkaSpec {
+            kafka_version: "0.1.1".into(),
+            config: None,
+            listeners: vec![],
+            inter_broker_listener_name: None,
+            metrics_config: None,
+            network_policy,
         },
     );
     k.metadata.namespace = Some(namespace.into());
@@ -895,4 +918,249 @@ async fn prom_operator_missing_sets_condition() {
     );
 
     assert_eq!(state.remaining_rules(), 0);
+}
+
+/// Slice 23: `spec.networkPolicy=None` (the default in `kafka_cr`)
+/// must not touch `/networkpolicies/` at all and must surface
+/// `NetworkPolicyReady=False reason=Disabled`.
+#[tokio::test]
+async fn network_policy_disabled_no_apply() {
+    let items = vec![fake_pool_list_item("brokers", "y", "demo", 1, 1)];
+    let (ctx, state) = build_ctx("y", happy_path_rules("demo", "y", &items));
+    let kafka = kafka_cr("demo", "y");
+    reconcile(Arc::new(kafka), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    for r in &observed {
+        let uri = r.uri().to_string();
+        assert!(
+            !uri.contains("/networkpolicies/"),
+            "networkPolicy=None must not touch /networkpolicies/: {uri}",
+        );
+    }
+
+    // NetworkPolicyReady=False reason=Disabled present.
+    let status = observed
+        .iter()
+        .find(|r| {
+            r.method() == Method::PATCH && r.uri().to_string().contains("/kafkas/demo/status")
+        })
+        .expect("status PATCH must have been captured");
+    let body: serde_json::Value = serde_json::from_slice(status.body()).unwrap();
+    let cond = body["status"]["conditions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["type"] == "NetworkPolicyReady")
+        .expect("NetworkPolicyReady condition present");
+    assert_eq!(cond["status"], "False", "body = {body}");
+    assert_eq!(cond["reason"], "Disabled", "body = {body}");
+}
+
+/// Slice 23: `spec.networkPolicy=Some(NetworkPolicySpec::default())`
+/// applies exactly one `NetworkPolicy` via SSA and surfaces
+/// `NetworkPolicyReady=True reason=Available`.
+#[tokio::test]
+async fn network_policy_enabled_applies_one_resource() {
+    let items = vec![fake_pool_list_item("brokers", "y", "demo", 1, 1)];
+    // Insert the NetworkPolicy apply rule before the trailing status PATCH.
+    let mut rules = happy_path_rules("demo", "y", &items);
+    let last_idx = rules.len() - 1;
+    rules.insert(
+        last_idx,
+        MockRule {
+            method: Method::PATCH,
+            path_substr: "/networkpolicies/demo-broker-policy".into(),
+            response: json_response(
+                200,
+                &serde_json::json!({
+                    "apiVersion": "networking.k8s.io/v1",
+                    "kind": "NetworkPolicy",
+                    "metadata": {"name": "demo-broker-policy", "namespace": "y"},
+                }),
+            ),
+        },
+    );
+    let (ctx, state) = build_ctx("y", rules);
+
+    let kafka = kafka_cr_with_network_policy(
+        "demo",
+        "y",
+        Some(crabka_operator::crd::NetworkPolicySpec::default()),
+    );
+    reconcile(Arc::new(kafka), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    let apply_count = observed
+        .iter()
+        .filter(|r| {
+            r.method() == Method::PATCH
+                && r.uri()
+                    .to_string()
+                    .contains("/networkpolicies/demo-broker-policy")
+        })
+        .count();
+    assert_eq!(apply_count, 1, "exactly one NetworkPolicy PATCH");
+
+    let status = observed
+        .iter()
+        .find(|r| {
+            r.method() == Method::PATCH && r.uri().to_string().contains("/kafkas/demo/status")
+        })
+        .expect("status PATCH");
+    let body: serde_json::Value = serde_json::from_slice(status.body()).unwrap();
+    let cond = body["status"]["conditions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["type"] == "NetworkPolicyReady")
+        .expect("NetworkPolicyReady present");
+    assert_eq!(cond["status"], "True", "body = {body}");
+    assert_eq!(cond["reason"], "Available", "body = {body}");
+    assert_eq!(state.remaining_rules(), 0);
+}
+
+/// Slice 23: a Kafka CR with `status.conditions[NetworkPolicyReady].reason
+/// = "Available"` and `spec.networkPolicy = None` issues exactly one
+/// DELETE on `<name>-broker-policy` (orphan cleanup).
+#[tokio::test]
+async fn network_policy_transition_deletes_on_disable() {
+    let items = vec![fake_pool_list_item("brokers", "y", "demo", 1, 1)];
+    let mut rules = happy_path_rules("demo", "y", &items);
+    let last_idx = rules.len() - 1;
+    rules.insert(
+        last_idx,
+        MockRule {
+            method: Method::DELETE,
+            path_substr: "/networkpolicies/demo-broker-policy".into(),
+            response: json_response(
+                200,
+                &serde_json::json!({
+                    "kind": "Status", "apiVersion": "v1", "status": "Success",
+                }),
+            ),
+        },
+    );
+    let (ctx, state) = build_ctx("y", rules);
+
+    // Build a Kafka whose cached status already carries
+    // NetworkPolicyReady=Available.
+    let mut kafka = kafka_cr("demo", "y");
+    kafka.status = Some(crabka_operator::crd::KafkaStatus {
+        conditions: vec![crabka_operator::crd::KafkaCondition {
+            type_: "NetworkPolicyReady".into(),
+            status: "True".into(),
+            reason: "Available".into(),
+            message: "previously rendered".into(),
+            last_transition_time: "2026-05-17T00:00:00Z".into(),
+        }],
+        replicas: Some(1),
+        ready_replicas: Some(1),
+        listeners: vec![],
+    });
+
+    reconcile(Arc::new(kafka), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    let deletes: Vec<_> = observed
+        .iter()
+        .filter(|r| {
+            r.method() == Method::DELETE
+                && r.uri()
+                    .to_string()
+                    .contains("/networkpolicies/demo-broker-policy")
+        })
+        .collect();
+    assert_eq!(deletes.len(), 1, "exactly one DELETE call on transition");
+}
+
+/// Slice 23: cold disable (no prior `NetworkPolicyReady=Available`) must
+/// not call DELETE at all — avoids gratuitous API calls for clusters that
+/// never opted into `NetworkPolicy`.
+#[tokio::test]
+async fn network_policy_cold_disable_no_delete() {
+    let items = vec![fake_pool_list_item("brokers", "y", "demo", 1, 1)];
+    let (ctx, state) = build_ctx("y", happy_path_rules("demo", "y", &items));
+    let kafka = kafka_cr("demo", "y"); // no status, no networkPolicy
+    reconcile(Arc::new(kafka), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    let deletes_or_patches: Vec<_> = observed
+        .iter()
+        .filter(|r| r.uri().to_string().contains("/networkpolicies/"))
+        .collect();
+    assert!(
+        deletes_or_patches.is_empty(),
+        "cold disable must not touch /networkpolicies/",
+    );
+}
+
+/// Slice 23: when one listener has `network_policy_peers=Some(vec![])`,
+/// the rendered `NetworkPolicy` body sent on the PATCH must NOT contain a
+/// per-listener rule with empty `from` for that listener's port. (The
+/// operator-allow rule for that port is still present.)
+#[tokio::test]
+async fn network_policy_listener_deny_all_skips_port_rule() {
+    let items = vec![fake_pool_list_item("brokers", "y", "demo", 1, 1)];
+    let mut rules = happy_path_rules("demo", "y", &items);
+    let last_idx = rules.len() - 1;
+    rules.insert(
+        last_idx,
+        MockRule {
+            method: Method::PATCH,
+            path_substr: "/networkpolicies/demo-broker-policy".into(),
+            response: json_response(
+                200,
+                &serde_json::json!({
+                    "apiVersion": "networking.k8s.io/v1",
+                    "kind": "NetworkPolicy",
+                    "metadata": {"name": "demo-broker-policy", "namespace": "y"},
+                }),
+            ),
+        },
+    );
+    let (ctx, state) = build_ctx("y", rules);
+
+    let mut kafka = kafka_cr_with_network_policy("demo", "y", Some(NetworkPolicySpec::default()));
+    kafka.spec.listeners = vec![Listener {
+        name: "PLAIN".into(),
+        port: 9092,
+        type_: ListenerType::Internal,
+        tls: false,
+        configuration: None,
+        network_policy_peers: Some(vec![]),
+    }];
+    kafka.spec.inter_broker_listener_name = Some("PLAIN".into());
+
+    reconcile(Arc::new(kafka), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    let np_patch = observed
+        .iter()
+        .find(|r| {
+            r.method() == Method::PATCH
+                && r.uri()
+                    .to_string()
+                    .contains("/networkpolicies/demo-broker-policy")
+        })
+        .expect("NetworkPolicy PATCH captured");
+    let body: serde_json::Value = serde_json::from_slice(np_patch.body()).unwrap();
+    let ingress = body["spec"]["ingress"].as_array().expect("ingress array");
+
+    // Count rules targeting :9092 with an empty `from` (would indicate
+    // allow-all sneaking through for the deny-all listener).
+    let allow_alls: Vec<_> = ingress
+        .iter()
+        .filter(|r| {
+            let ports_match = r["ports"]
+                .as_array()
+                .is_some_and(|ps| ps.iter().any(|p| p["port"].as_i64() == Some(9092)));
+            let from_empty = r["from"].as_array().is_some_and(Vec::is_empty);
+            ports_match && from_empty
+        })
+        .collect();
+    assert!(
+        allow_alls.is_empty(),
+        "deny-all listener (peers=[]) must not emit an allow-all rule, body = {body}",
+    );
 }

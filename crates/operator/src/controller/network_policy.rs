@@ -39,7 +39,7 @@ const OPERATOR_LABEL: &str = "crabka-operator";
 
 /// Render the `NetworkPolicy`. Pure function of the Kafka CR + effective
 /// listeners + inter-broker listener port + metrics-enabled bit.
-pub fn render_network_policy(
+pub(crate) fn render_network_policy(
     owner: &Kafka,
     effective_listeners: &[Listener],
     inter_broker_port: i32,
@@ -168,7 +168,7 @@ fn to_k8s_peer(p: &NetworkPolicyPeer) -> K8sPeer {
 /// `status.conditions[NetworkPolicyReady].reason == "Available"`,
 /// DELETEs the resource once (404-tolerant). On the next reconcile the
 /// status will carry `reason=Disabled` so the delete won't repeat.
-pub async fn reconcile_network_policy(
+pub(crate) async fn reconcile_network_policy(
     ctx: &Context,
     owner: &Kafka,
     name: &str,
