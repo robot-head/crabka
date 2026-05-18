@@ -81,3 +81,25 @@ tests:
             name: capacity-config
             configMap:
               name: demo-crabka-rebalancer-capacity
+
+  - it: passes metrics scrape env vars when metricsScrapeTargets is set
+    set:
+      metricsScrapeTargets: "1:broker1:9100,2:broker2:9100"
+      metricsScrapeIntervalSecs: 15
+      metricsRetentionSecs: 3600
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CRABKA_METRICS_SCRAPE_TARGETS
+            value: "1:broker1:9100,2:broker2:9100"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CRABKA_METRICS_SCRAPE_INTERVAL_SECS
+            value: "15"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CRABKA_METRICS_RETENTION_SECS
+            value: "3600"

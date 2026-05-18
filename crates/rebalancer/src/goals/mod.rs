@@ -2,16 +2,35 @@
 //! modules.
 
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::capacity::BrokerCapacities;
 use crate::model::{ClusterState, Movement};
+use crate::scraper::UsageStore;
+
+/// Wall-clock millis since the Unix epoch. Goals that read usage data
+/// pass this to `UsageStore` queries so stale-broker samples are
+/// excluded from the window. Saturates to 0 / `i64::MAX` on overflow.
+#[must_use]
+pub fn now_ms() -> i64 {
+    i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis()),
+    )
+    .unwrap_or(i64::MAX)
+}
 
 pub mod cpu_capacity;
 pub mod disk_capacity;
+pub mod disk_usage;
+pub mod leader_bytes_in;
 pub mod leader_distribution;
 pub mod min_topic_leaders_per_broker;
 pub mod network_in_capacity;
+pub mod network_in_usage;
 pub mod network_out_capacity;
+pub mod network_out_usage;
 pub mod preferred_leader_idempotency;
 pub mod rack_aware;
 pub mod replica_capacity;
@@ -30,9 +49,6 @@ pub enum GoalPriority {
     Soft,
 }
 
-/// Shared per-proposal context. No longer `Copy` — the
-/// `broker_capacities` `Arc` makes copying ambiguous; every existing
-/// caller already takes `&GoalContext`, so this is zero-friction.
 #[derive(Debug, Clone)]
 pub struct GoalContext {
     /// `(max - min) * 100 / total` must exceed this percentage for a
@@ -44,35 +60,42 @@ pub struct GoalContext {
     /// Minimum leader count per (broker, topic) pair for the
     /// `MinTopicLeadersPerBroker` goal. `0` disables the goal.
     pub min_topic_leaders_per_broker: u32,
-    /// Per-broker capacity limits for the five capacity goals
-    /// (`ReplicaCapacity` enforces today; the other four are stubs
-    /// until 43e's metric scraping arrives).
+    /// Per-broker capacity limits for the five capacity goals.
     pub broker_capacities: Arc<BrokerCapacities>,
+    /// Per-partition usage data (counters + gauges) from the metric
+    /// scraper. Empty default = usage-driven goals see no data and
+    /// return empty `Vec<Movement>` (same self-limiting pattern as
+    /// the capacity stubs in 43d).
+    pub broker_usages: Arc<UsageStore>,
 }
 
 pub trait Goal: Send + Sync {
-    /// Stable identifier surfaced in `Proposal::goals_applied`. Must
-    /// match the user-facing name accepted in
-    /// `CreateProposalRequest::goals`.
+    /// Stable identifier surfaced in `Proposal::goals_applied`.
     fn name(&self) -> &'static str;
 
     fn priority(&self) -> GoalPriority;
 
-    /// Inspect `state` and return an ordered list of movements that
-    /// improve (or satisfy) this goal. An empty `Vec` means the goal
-    /// is already satisfied. Movements are intent; the optimizer
-    /// validates and reconciles them across goals before producing
-    /// the final proposal.
+    /// Inspect `state` and return movements that satisfy or improve
+    /// this goal. The optimizer validates each movement against the
+    /// post-application state (slice 43c) before accepting it.
     fn propose(&self, state: &ClusterState, ctx: &GoalContext) -> Vec<Movement>;
 
-    /// Returns true if the goal's invariant holds against `state`.
-    /// Soft goals use the default (always true); hard goals override
-    /// to enforce their invariant during optimizer composition. The
-    /// optimizer calls this on every hard goal before accepting a
-    /// movement into the proposal — a soft goal that would break a
-    /// hard goal's invariant has its movement silently dropped.
+    /// Returns true if the goal's invariant holds against `state`
+    /// alone (no `GoalContext` access). Soft goals use the default
+    /// (always true); hard goals that don't depend on context (e.g.
+    /// `PreferredLeaderIdempotency`, `RackAware`) override.
     fn is_satisfied(&self, _state: &ClusterState) -> bool {
         true
+    }
+
+    /// Same as `is_satisfied` but with `GoalContext` access. The
+    /// optimizer's incremental hard-goal validation calls this so
+    /// capacity goals can consult `broker_capacities` /
+    /// `broker_usages` when deciding whether a tentative movement
+    /// keeps their invariant intact. Default forwards to
+    /// `is_satisfied`.
+    fn is_satisfied_with_ctx(&self, state: &ClusterState, _ctx: &GoalContext) -> bool {
+        self.is_satisfied(state)
     }
 }
 

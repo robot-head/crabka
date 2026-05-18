@@ -145,11 +145,14 @@ pub(crate) async fn handle(
         // paths since the produce *request* arrived; that mirrors
         // Kafka's BrokerTopicMetrics semantics.
         if !topic_name.is_empty() {
-            let topic_bytes: u64 = topic
-                .partition_data
-                .iter()
-                .map(|p| p.records.as_ref().map_or(0, |r| r.encoded_len() as u64))
-                .sum();
+            let mut topic_bytes: u64 = 0;
+            for p in &topic.partition_data {
+                let partition_bytes = p.records.as_ref().map_or(0, |r| r.encoded_len() as u64);
+                broker
+                    .metrics
+                    .record_partition_produce(&topic_name, p.index, partition_bytes);
+                topic_bytes += partition_bytes;
+            }
             broker.metrics.record_produce(&topic_name, topic_bytes);
         }
 

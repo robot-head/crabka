@@ -1,6 +1,6 @@
-//! Hard goal: enforce a per-broker `network_out_bytes_per_sec` limit
-//! using the scraped `UsageStore::bytes_out_rate` summed across the
-//! broker's hosted partitions (all replica roles).
+//! Soft goal: balance per-broker total bytes-out rate, summed across
+//! every replica role (leaders serve consumers; followers serve
+//! replication). Use `LeaderDistribution` for a leader-only view.
 
 use std::collections::HashMap;
 
@@ -8,10 +8,10 @@ use crate::goals::{Goal, GoalContext, GoalPriority};
 use crate::model::{ClusterState, Movement, PartitionView};
 use crate::scraper::Window;
 
-pub struct NetworkOutCapacity;
+pub struct NetworkOutUsage;
 
-impl NetworkOutCapacity {
-    pub const NAME: &'static str = "NetworkOutCapacity";
+impl NetworkOutUsage {
+    pub const NAME: &'static str = "NetworkOutUsage";
 
     fn totals(
         partitions: &[PartitionView],
@@ -35,21 +35,36 @@ impl NetworkOutCapacity {
         }
         m
     }
+
+    fn imbalance_pct(totals: &HashMap<i32, f64>) -> u32 {
+        let vals: Vec<f64> = totals.values().copied().collect();
+        let total: f64 = vals.iter().sum();
+        if total <= 0.0 {
+            return 0;
+        }
+        let max = vals.iter().fold(0.0f64, |a, b| a.max(*b));
+        let min = vals.iter().fold(f64::INFINITY, |a, b| a.min(*b));
+        let pct = ((max - min) * 100.0 / total).clamp(0.0, f64::from(u32::MAX));
+        // Saturating cast: pct is clamped to [0, u32::MAX] above.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let out = pct as u32;
+        out
+    }
 }
 
-impl Goal for NetworkOutCapacity {
+impl Goal for NetworkOutUsage {
     fn name(&self) -> &'static str {
         Self::NAME
     }
     fn priority(&self) -> GoalPriority {
-        GoalPriority::Hard
+        GoalPriority::Soft
     }
-    #[allow(clippy::too_many_lines, clippy::cast_precision_loss)]
     fn propose(&self, state: &ClusterState, ctx: &GoalContext) -> Vec<Movement> {
         let now_ms = crate::goals::now_ms();
         let broker_ids: Vec<i32> = state.brokers.iter().map(|b| b.id).collect();
         let mut working: Vec<PartitionView> = state.partitions.clone();
         let mut out: Vec<Movement> = Vec::new();
+
         let original_replicas: HashMap<(String, i32), Vec<i32>> = state
             .partitions
             .iter()
@@ -63,54 +78,26 @@ impl Goal for NetworkOutCapacity {
 
         loop {
             let totals = Self::totals(&working, &broker_ids, ctx, now_ms);
-            let mut over: Option<(i32, f64, f64)> = None;
-            for (broker, current) in &totals {
-                let Some(cap) = ctx.broker_capacities.for_broker(*broker) else {
-                    continue;
-                };
-                let Some(limit) = cap.network_out_bytes_per_sec else {
-                    continue;
-                };
-                let limit_f = limit as f64;
-                if *current > limit_f {
-                    let excess = current - limit_f;
-                    let prior = over.map_or(0.0, |(_, c, l)| c - l);
-                    if excess > prior {
-                        over = Some((*broker, *current, limit_f));
-                    }
-                }
-            }
-            let Some((hot, _, _)) = over else {
+            if totals.values().all(|v| *v == 0.0) {
                 break;
-            };
-
-            // Order candidate destination brokers by current load
-            // (lower first). Within ties, smaller broker_id wins.
-            let mut candidates: Vec<i32> =
-                broker_ids.iter().copied().filter(|b| *b != hot).collect();
-            candidates.sort_by(|a, b| {
-                let cur_a = totals.get(a).copied().unwrap_or(0.0);
-                let cur_b = totals.get(b).copied().unwrap_or(0.0);
-                cur_a
-                    .partial_cmp(&cur_b)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| a.cmp(b))
-            });
-
-            // Pick the first (cold, partition_idx) pair where cold isn't
-            // already a replica of the chosen partition on `hot`.
-            let mut chosen: Option<(i32, usize)> = None;
-            for cold in &candidates {
-                if let Some(idx) = working.iter().position(|p| {
-                    p.replicas.contains(&hot)
-                        && !p.replicas.contains(cold)
-                        && p.replicas.len() <= state.brokers.len()
-                }) {
-                    chosen = Some((*cold, idx));
-                    break;
-                }
             }
-            let Some((cold, idx)) = chosen else {
+            if Self::imbalance_pct(&totals) <= ctx.imbalance_threshold_pct {
+                break;
+            }
+            let mut by_load: Vec<(i32, f64)> = totals.into_iter().collect();
+            by_load.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            let (hot, _) = by_load.first().copied().unwrap_or((0, 0.0));
+            let (cold, _) = by_load.last().copied().unwrap_or((0, 0.0));
+            if hot == cold {
+                break;
+            }
+
+            let idx = working.iter().position(|p| {
+                p.replicas.contains(&hot)
+                    && !p.replicas.contains(&cold)
+                    && p.replicas.len() < state.brokers.len()
+            });
+            let Some(idx) = idx else {
                 break;
             };
             let p = &mut working[idx];
@@ -129,11 +116,13 @@ impl Goal for NetworkOutCapacity {
             } else {
                 p.leader
             };
+
             let old_replicas = original_replicas
                 .get(&key)
                 .cloned()
                 .unwrap_or_else(|| p.replicas.clone());
             let old_leader = original_leader.get(&key).copied().unwrap_or(p.leader);
+
             out.push(Movement {
                 topic: p.topic.clone(),
                 partition: p.partition,
@@ -143,49 +132,30 @@ impl Goal for NetworkOutCapacity {
                 new_leader,
             });
             p.leader = new_leader;
+
             if out.len() >= ctx.max_movements_per_proposal {
                 break;
             }
         }
         out
     }
-
-    #[allow(clippy::cast_precision_loss)]
-    fn is_satisfied_with_ctx(&self, state: &ClusterState, ctx: &GoalContext) -> bool {
-        let now_ms = crate::goals::now_ms();
-        let broker_ids: Vec<i32> = state.brokers.iter().map(|b| b.id).collect();
-        let totals = Self::totals(&state.partitions, &broker_ids, ctx, now_ms);
-        for (broker, current) in &totals {
-            let Some(cap) = ctx.broker_capacities.for_broker(*broker) else {
-                continue;
-            };
-            let Some(limit) = cap.network_out_bytes_per_sec else {
-                continue;
-            };
-            if *current > limit as f64 {
-                return false;
-            }
-        }
-        true
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::capacity::{BrokerCapacities, BrokerCapacity};
     use crate::model::BrokerView;
     use crate::scraper::parse::ParsedSample;
     use crate::scraper::{MetricKind, UsageStore, WindowConfig};
     use std::sync::Arc;
     use std::time::Duration;
 
-    fn ctx_with(caps: BrokerCapacities, store: Arc<UsageStore>) -> GoalContext {
+    fn ctx_with(store: Arc<UsageStore>) -> GoalContext {
         GoalContext {
             imbalance_threshold_pct: 10,
             max_movements_per_proposal: 256,
             min_topic_leaders_per_broker: 0,
-            broker_capacities: Arc::new(caps),
+            broker_capacities: Arc::new(crate::capacity::BrokerCapacities::default()),
             broker_usages: store,
         }
     }
@@ -256,46 +226,25 @@ mod tests {
         Arc::new(store)
     }
 
-    fn caps(broker: i32, bps: u64) -> BrokerCapacities {
-        let mut b = std::collections::HashMap::new();
-        b.insert(
-            broker,
-            BrokerCapacity {
-                network_out_bytes_per_sec: Some(bps),
-                ..Default::default()
-            },
-        );
-        BrokerCapacities { by_broker: b }
-    }
-
     #[test]
-    fn empty_usage_no_op() {
+    fn empty_usage_store_no_op() {
         let parts: Vec<_> = (0..3).map(|i| part("t", i, vec![1, 2], 1)).collect();
         let s = state_with(parts, vec![1, 2]);
-        let ctx = ctx_with(caps(1, 1_000_000), Arc::new(UsageStore::default()));
-        assert!(NetworkOutCapacity.propose(&s, &ctx).is_empty());
-        assert!(NetworkOutCapacity.is_satisfied_with_ctx(&s, &ctx));
+        let ctx = ctx_with(Arc::new(UsageStore::default()));
+        assert!(NetworkOutUsage.propose(&s, &ctx).is_empty());
     }
 
     #[test]
-    fn over_capacity_emits_movement() {
-        let parts: Vec<_> = (0..3).map(|i| part("t", i, vec![1, 2], 1)).collect();
+    fn hot_broker_triggers_swaps() {
+        let parts: Vec<_> = (0..5).map(|i| part("t", i, vec![1, 2], 1)).collect();
         let s = state_with(parts, vec![1, 2, 3]);
-        // 3 partitions × 200kB/s rate = 600kB/s on broker 1; limit 500kB/s.
-        let samples: Vec<_> = (0..3).map(|i| (1, "t", i, 0.0, 200_000.0)).collect();
+        let samples = (0..5)
+            .map(|i| (1, "t", i, 0.0, 100_000.0))
+            .chain((0..5).map(|i| (2, "t", i, 0.0, 1.0)))
+            .collect();
         let store = store_with_counter_pair(samples);
-        let ctx = ctx_with(caps(1, 500_000), store);
-        let mvs = NetworkOutCapacity.propose(&s, &ctx);
-        assert!(!mvs.is_empty(), "expected eviction; got {mvs:?}");
-    }
-
-    #[test]
-    fn is_satisfied_with_ctx_returns_false_when_over() {
-        let parts: Vec<_> = (0..3).map(|i| part("t", i, vec![1, 2], 1)).collect();
-        let s = state_with(parts, vec![1, 2]);
-        let samples: Vec<_> = (0..3).map(|i| (1, "t", i, 0.0, 200_000.0)).collect();
-        let store = store_with_counter_pair(samples);
-        let ctx = ctx_with(caps(1, 500_000), store);
-        assert!(!NetworkOutCapacity.is_satisfied_with_ctx(&s, &ctx));
+        let ctx = ctx_with(store);
+        let mvs = NetworkOutUsage.propose(&s, &ctx);
+        assert!(!mvs.is_empty(), "expected swaps");
     }
 }

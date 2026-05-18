@@ -387,6 +387,7 @@ mod tests {
     use crate::ingest::new_shared_snapshot;
     use crate::metrics::RebalancerMetrics;
     use crate::model::proposal::{Movement, Proposal, ProposalSummary};
+    use crate::scraper::UsageStore;
     use async_trait::async_trait;
     use std::sync::Arc;
     use std::time::Duration;
@@ -451,6 +452,7 @@ mod tests {
                 max_movements_per_proposal: 256,
                 min_topic_leaders_per_broker: 0,
                 broker_capacities: Arc::new(BrokerCapacities::default()),
+                broker_usages: Arc::new(UsageStore::default()),
             },
             metrics,
             executor,

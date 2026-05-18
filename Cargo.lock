@@ -1238,6 +1238,7 @@ dependencies = [
  "crabka-client-core",
  "crabka-metadata",
  "crabka-protocol",
+ "parking_lot",
  "pbjson",
  "prometheus-client",
  "prost",

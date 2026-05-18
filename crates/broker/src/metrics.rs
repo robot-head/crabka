@@ -35,6 +35,14 @@ pub struct TopicLabel {
     pub topic: String,
 }
 
+/// Per-partition label set, paired with the new `partition_*` metric
+/// families. Slice 43e — consumed by the rebalancer's metric scraper.
+#[derive(Debug, Clone, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct PartitionLabel {
+    pub topic: String,
+    pub partition: i32,
+}
+
 /// Cheaply-clonable bundle of counter / gauge handles. Construct once
 /// in `Broker::start`; hand out clones (each clone is a single
 /// `Arc::clone`) to every subsystem that emits.
@@ -45,6 +53,9 @@ pub struct BrokerMetrics {
     pub topic_bytes_out: Family<TopicLabel, Counter>,
     pub topic_produce_requests: Family<TopicLabel, Counter>,
     pub topic_fetch_requests: Family<TopicLabel, Counter>,
+    pub partition_bytes_in: Family<PartitionLabel, Counter>,
+    pub partition_bytes_out: Family<PartitionLabel, Counter>,
+    pub partition_disk_bytes: Family<PartitionLabel, Gauge>,
     pub partitions_led: Gauge,
     pub active_controller: Gauge,
     pub isr_shrinks_total: Counter,
@@ -63,6 +74,9 @@ impl BrokerMetrics {
         let topic_bytes_out: Family<TopicLabel, Counter> = Family::default();
         let topic_produce_requests: Family<TopicLabel, Counter> = Family::default();
         let topic_fetch_requests: Family<TopicLabel, Counter> = Family::default();
+        let partition_bytes_in: Family<PartitionLabel, Counter> = Family::default();
+        let partition_bytes_out: Family<PartitionLabel, Counter> = Family::default();
+        let partition_disk_bytes: Family<PartitionLabel, Gauge> = Family::default();
         let partitions_led = Gauge::default();
         let active_controller = Gauge::default();
         let isr_shrinks_total = Counter::default();
@@ -117,6 +131,24 @@ impl BrokerMetrics {
              ISR-maintenance loop.",
             isr_expands_total.clone(),
         );
+        registry.register(
+            "partition_bytes_in",
+            "Bytes received from producers, per partition (cumulative). \
+             Rebalancer-targeted; rate(...) for throughput.",
+            partition_bytes_in.clone(),
+        );
+        registry.register(
+            "partition_bytes_out",
+            "Bytes served to consumers, per partition (cumulative). \
+             Rebalancer-targeted; rate(...) for throughput.",
+            partition_bytes_out.clone(),
+        );
+        registry.register(
+            "partition_disk_bytes",
+            "On-disk size of a partition's log directory (gauge). Updated by \
+             the broker's periodic disk scanner; suppress if scanner is disabled.",
+            partition_disk_bytes.clone(),
+        );
 
         Self {
             registry: Arc::new(Mutex::new(registry)),
@@ -124,6 +156,9 @@ impl BrokerMetrics {
             topic_bytes_out,
             topic_produce_requests,
             topic_fetch_requests,
+            partition_bytes_in,
+            partition_bytes_out,
+            partition_disk_bytes,
             partitions_led,
             active_controller,
             isr_shrinks_total,
@@ -156,6 +191,32 @@ impl BrokerMetrics {
             self.topic_bytes_out.get_or_create(&lbl).inc_by(bytes);
         }
     }
+
+    /// Convenience: account a partition's slice of a Produce request.
+    /// Called once per partition by the request handler (alongside the
+    /// existing topic-level `record_produce`).
+    pub fn record_partition_produce(&self, topic: &str, partition: i32, bytes: u64) {
+        if bytes == 0 {
+            return;
+        }
+        let lbl = PartitionLabel {
+            topic: topic.to_string(),
+            partition,
+        };
+        self.partition_bytes_in.get_or_create(&lbl).inc_by(bytes);
+    }
+
+    /// Convenience: account a partition's slice of a Fetch response.
+    pub fn record_partition_fetch(&self, topic: &str, partition: i32, bytes: u64) {
+        if bytes == 0 {
+            return;
+        }
+        let lbl = PartitionLabel {
+            topic: topic.to_string(),
+            partition,
+        };
+        self.partition_bytes_out.get_or_create(&lbl).inc_by(bytes);
+    }
 }
 
 impl Default for BrokerMetrics {
@@ -173,6 +234,14 @@ mod tests {
         let m = BrokerMetrics::new();
         m.record_produce("topic-a", 100);
         m.record_fetch("topic-a", 50);
+        m.record_partition_produce("topic-a", 0, 100);
+        m.record_partition_fetch("topic-a", 0, 50);
+        m.partition_disk_bytes
+            .get_or_create(&PartitionLabel {
+                topic: "topic-a".into(),
+                partition: 0,
+            })
+            .set(42);
         m.partitions_led.set(7);
         m.active_controller.set(1);
         m.isr_shrinks_total.inc();
@@ -191,6 +260,9 @@ mod tests {
             "crabka_broker_active_controller",
             "crabka_broker_isr_shrinks_total",
             "crabka_broker_isr_expands_total",
+            "crabka_broker_partition_bytes_in_total",
+            "crabka_broker_partition_bytes_out_total",
+            "crabka_broker_partition_disk_bytes",
         ] {
             assert!(buf.contains(needle), "missing {needle} in:\n{buf}");
         }
@@ -223,5 +295,49 @@ mod tests {
         m.record_produce("t", 2048);
         assert_eq!(m.topic_produce_requests.get_or_create(&lbl).get(), 2);
         assert_eq!(m.topic_bytes_in.get_or_create(&lbl).get(), 3072);
+    }
+
+    #[test]
+    fn partition_helpers_increment_the_right_family() {
+        let m = BrokerMetrics::new();
+        m.record_partition_produce("t", 0, 1024);
+        m.record_partition_produce("t", 1, 512);
+        m.record_partition_fetch("t", 0, 2048);
+        m.partition_disk_bytes
+            .get_or_create(&PartitionLabel {
+                topic: "t".into(),
+                partition: 0,
+            })
+            .set(1_000_000);
+
+        let lbl_p0 = PartitionLabel {
+            topic: "t".into(),
+            partition: 0,
+        };
+        let lbl_p1 = PartitionLabel {
+            topic: "t".into(),
+            partition: 1,
+        };
+        assert_eq!(m.partition_bytes_in.get_or_create(&lbl_p0).get(), 1024);
+        assert_eq!(m.partition_bytes_in.get_or_create(&lbl_p1).get(), 512);
+        assert_eq!(m.partition_bytes_out.get_or_create(&lbl_p0).get(), 2048);
+        assert_eq!(
+            m.partition_disk_bytes.get_or_create(&lbl_p0).get(),
+            1_000_000
+        );
+    }
+
+    #[test]
+    fn zero_bytes_no_op_on_partition_helpers() {
+        let m = BrokerMetrics::new();
+        m.record_partition_produce("t", 0, 0);
+        m.record_partition_fetch("t", 0, 0);
+        let lbl = PartitionLabel {
+            topic: "t".into(),
+            partition: 0,
+        };
+        // Counters still exist (get_or_create creates them) but at 0.
+        assert_eq!(m.partition_bytes_in.get_or_create(&lbl).get(), 0);
+        assert_eq!(m.partition_bytes_out.get_or_create(&lbl).get(), 0);
     }
 }

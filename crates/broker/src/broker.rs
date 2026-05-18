@@ -38,6 +38,12 @@ pub struct Broker {
     pub(crate) txn_coordinator: Arc<crate::txn::coordinator::TxnCoordinator>,
     pub(crate) supervisor_shutdown: tokio_util::sync::CancellationToken,
     pub(crate) supervisor_handle: tokio::sync::Mutex<Option<JoinHandle<()>>>,
+    /// Slice 43e: handle for the periodic disk-usage scanner spawned when
+    /// `BrokerConfig::partition_disk_scan_interval_secs > 0`. Retained on
+    /// the struct so [`BrokerHandle::shutdown`] can await it after
+    /// cancelling `supervisor_shutdown`. `None` when the scanner is
+    /// disabled (interval = 0, typical in tests).
+    pub(crate) disk_scanner_handle: tokio::sync::Mutex<Option<JoinHandle<()>>>,
     pub(crate) liveness: Arc<crate::heartbeat::controller_state::ControllerLivenessState>,
     /// `Some` when `BrokerConfig::tls_config` is set. Per-listener
     /// accept loops snapshot the current `Arc<ServerConfig>` via
@@ -609,6 +615,14 @@ impl BrokerHandle {
         // rather than a torn-down metadata-watch channel.
         self._broker.supervisor_shutdown.cancel();
         if let Some(h) = self._broker.supervisor_handle.lock().await.take() {
+            let _ = h.await;
+        }
+        // Slice 43e: drain the disk-usage scanner if it was spawned.
+        // The scanner observes the same `supervisor_shutdown` cancellation
+        // its sibling tasks do; awaiting the handle here ensures the
+        // background tick is fully wound down before we tear the rest
+        // of the broker apart.
+        if let Some(h) = self._broker.disk_scanner_handle.lock().await.take() {
             let _ = h.await;
         }
         self.shutdown.cancel();
@@ -1196,6 +1210,23 @@ impl Broker {
             },
         ));
 
+        // Slice 43e: periodic per-partition disk-usage scanner. Walks
+        // the log dir each tick and updates `partition_disk_bytes` for
+        // the rebalancer's usage scraper. `0` disables entirely. The
+        // `JoinHandle` is retained on the `Broker` so shutdown can drain
+        // the task after cancelling `supervisor_shutdown`.
+        let disk_scanner_handle = if config.partition_disk_scan_interval_secs > 0 {
+            let scanner = crate::disk_scanner::DiskScanner {
+                log_dir: config.log_dir.clone(),
+                interval: std::time::Duration::from_secs(config.partition_disk_scan_interval_secs),
+                metrics: metrics.clone(),
+                shutdown: supervisor_shutdown.child_token(),
+            };
+            Some(tokio::spawn(scanner.run()))
+        } else {
+            None
+        };
+
         // 4g. Auto-rebalance background task (KIP-460). The task itself
         //     checks is_leader() on every tick so it is safe to run on
         //     every broker; only the raft leader will actually submit
@@ -1344,6 +1375,7 @@ impl Broker {
             txn_coordinator,
             supervisor_shutdown,
             supervisor_handle: tokio::sync::Mutex::new(Some(supervisor_handle)),
+            disk_scanner_handle: tokio::sync::Mutex::new(disk_scanner_handle),
             liveness: liveness.clone(),
             tls_dynamic: tls_dynamic.clone(),
             inter_broker_client,
