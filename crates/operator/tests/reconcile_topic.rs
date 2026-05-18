@@ -15,10 +15,10 @@ use kube::runtime::controller::Action;
 #[path = "shared/mod.rs"]
 mod shared;
 
+use shared::fake_admin::{FakeAdminClient, RecordedCall, TopicState};
 use shared::{
     MockRule, MockState, fake_topic_body, fixture_ctx, json_response, mock_client, not_found_body,
 };
-use shared::fake_admin::{FakeAdminClient, RecordedCall, TopicState};
 
 /// JSON body shaped like a Ready Kafka with a single PLAIN internal
 /// listener. Used by the finalizer-add-path test below; the topic
@@ -320,10 +320,7 @@ fn delete_kube_rules(topic_name: &str) -> Vec<MockRule> {
 
 /// Extract the body of the last `PATCH /kafkatopics/<name>/status` request
 /// observed by the kube mock.
-fn last_status_patch_body(
-    state: &Arc<MockState>,
-    topic_name: &str,
-) -> serde_json::Value {
+fn last_status_patch_body(state: &Arc<MockState>, topic_name: &str) -> serde_json::Value {
     let observed = state.take_observed();
     let patch = observed
         .iter()
@@ -421,9 +418,7 @@ async fn noop_when_spec_matches_cluster() {
     }
     // Metadata + DescribeConfigs (read-only) are expected.
     assert!(
-        calls
-            .iter()
-            .any(|c| matches!(c, RecordedCall::Metadata(_))),
+        calls.iter().any(|c| matches!(c, RecordedCall::Metadata(_))),
         "expected a Metadata call",
     );
 
@@ -580,9 +575,10 @@ async fn config_diff_sets_and_deletes() {
             partitions: 3,
             replicas: 1,
             topic_id: Some(uuid::Uuid::nil()),
-            config_overrides: std::collections::BTreeMap::from([
-                ("foo".to_string(), "1".to_string()),
-            ]),
+            config_overrides: std::collections::BTreeMap::from([(
+                "foo".to_string(),
+                "1".to_string(),
+            )]),
         },
     );
     let fake = Arc::new(tokio::sync::Mutex::new(fake));
@@ -602,16 +598,20 @@ async fn config_diff_sets_and_deletes() {
         })
         .expect("IncrementalAlterConfigs call expected");
 
-    let has_set_bar = ops.iter().any(|op| matches!(
-        op,
-        crabka_client_admin::IncrementalAlterOp::Set { topic, key, value }
-            if topic == TOPIC_NAME && key == "bar" && value == "2"
-    ));
-    let has_delete_foo = ops.iter().any(|op| matches!(
-        op,
-        crabka_client_admin::IncrementalAlterOp::Delete { topic, key }
-            if topic == TOPIC_NAME && key == "foo"
-    ));
+    let has_set_bar = ops.iter().any(|op| {
+        matches!(
+            op,
+            crabka_client_admin::IncrementalAlterOp::Set { topic, key, value }
+                if topic == TOPIC_NAME && key == "bar" && value == "2"
+        )
+    });
+    let has_delete_foo = ops.iter().any(|op| {
+        matches!(
+            op,
+            crabka_client_admin::IncrementalAlterOp::Delete { topic, key }
+                if topic == TOPIC_NAME && key == "foo"
+        )
+    });
     assert!(has_set_bar, "expected SET bar=2, got {ops:?}");
     assert!(has_delete_foo, "expected DELETE foo, got {ops:?}");
 

@@ -327,10 +327,7 @@ pub async fn reconcile(obj: Arc<KafkaTopic>, ctx: Arc<Context>) -> Result<Action
                                 &obj,
                                 "False",
                                 "BrokerError",
-                                &format!(
-                                    "IncrementalAlterConfigs: {} ({})",
-                                    err.name, err.code
-                                ),
+                                &format!("IncrementalAlterConfigs: {} ({})", err.name, err.code),
                                 cur.topic_id.map(|u| u.to_string()),
                                 false,
                             )
@@ -504,7 +501,8 @@ async fn patch_status(
         field_manager: Some(FIELD_MANAGER.into()),
         ..Default::default()
     };
-    api.patch_status(name, &params, &Patch::Merge(&body)).await?;
+    api.patch_status(name, &params, &Patch::Merge(&body))
+        .await?;
     Ok(())
 }
 
@@ -584,10 +582,8 @@ mod tests {
         let desired = BTreeMap::from([("retention.ms".to_string(), "60000".to_string())]);
         let ops = diff_configs(&current, &desired, "foo");
         assert_eq!(ops.len(), 1);
-        assert!(
-            matches!(&ops[0], IncrementalAlterOp::Set { key, value, .. }
-            if key == "retention.ms" && value == "60000")
-        );
+        assert!(matches!(&ops[0], IncrementalAlterOp::Set { key, value, .. }
+            if key == "retention.ms" && value == "60000"));
     }
 
     #[test]
@@ -605,7 +601,9 @@ mod tests {
         let desired = BTreeMap::new();
         let ops = diff_configs(&current, &desired, "foo");
         assert_eq!(ops.len(), 1);
-        assert!(matches!(&ops[0], IncrementalAlterOp::Delete { key, .. } if key == "cleanup.policy"));
+        assert!(
+            matches!(&ops[0], IncrementalAlterOp::Delete { key, .. } if key == "cleanup.policy")
+        );
     }
 
     #[test]

@@ -261,11 +261,9 @@ fn parse_metadata(
         .into_iter()
         .map(|t| {
             let partition_count = i32::try_from(t.partitions.len()).unwrap_or(i32::MAX);
-            let replication_factor = i32::from(
-                t.partitions
-                    .first()
-                    .map_or(0, |p| i16::try_from(p.replica_nodes.len()).unwrap_or(i16::MAX)),
-            );
+            let replication_factor = i32::from(t.partitions.first().map_or(0, |p| {
+                i16::try_from(p.replica_nodes.len()).unwrap_or(i16::MAX)
+            }));
             TopicMetadataEntry {
                 name: t.name.unwrap_or_default(),
                 topic_id: proto_uuid_to_opt(t.topic_id),
@@ -422,9 +420,7 @@ mod tests {
     /// `NOT_CONTROLLER` retry path reconnects to.
     #[test]
     fn controller_endpoint_picks_broker_with_matching_node_id() {
-        use crabka_protocol::owned::metadata_response::{
-            MetadataResponse, MetadataResponseBroker,
-        };
+        use crabka_protocol::owned::metadata_response::{MetadataResponse, MetadataResponseBroker};
         let resp = MetadataResponse {
             controller_id: 2,
             brokers: vec![
@@ -455,9 +451,7 @@ mod tests {
     /// `AdminError::NotControllerExhausted`.
     #[test]
     fn controller_endpoint_returns_none_when_no_match() {
-        use crabka_protocol::owned::metadata_response::{
-            MetadataResponse, MetadataResponseBroker,
-        };
+        use crabka_protocol::owned::metadata_response::{MetadataResponse, MetadataResponseBroker};
         let resp = MetadataResponse {
             controller_id: 99,
             brokers: vec![MetadataResponseBroker {

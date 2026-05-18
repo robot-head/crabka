@@ -101,7 +101,10 @@ async fn admin_round_trip_create_alter_delete() {
     let overrides = admin.describe_configs(&["foo"]).await.unwrap();
     assert_eq!(overrides.len(), 1);
     assert_eq!(
-        overrides[0].overrides.get("retention.ms").map(String::as_str),
+        overrides[0]
+            .overrides
+            .get("retention.ms")
+            .map(String::as_str),
         Some("60000"),
     );
 

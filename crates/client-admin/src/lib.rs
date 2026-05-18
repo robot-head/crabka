@@ -167,7 +167,9 @@ impl AdminClient {
         let addr = addrs
             .next()
             .ok_or_else(|| AdminError::Protocol(format!("no addresses for {host_port}")))?;
-        Connection::connect(addr, opts).await.map_err(AdminError::from)
+        Connection::connect(addr, opts)
+            .await
+            .map_err(AdminError::from)
     }
 
     /// Replace the underlying connection. Used internally by the
