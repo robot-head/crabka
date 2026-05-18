@@ -770,3 +770,88 @@ async fn rack_aware_eliminates_same_rack_collisions() {
         "movement must add the rack-B broker (3); got {m:?}"
     );
 }
+
+/// Synthetic three-broker ClusterState where broker 1 holds 10
+/// replicas with `max_replicas: 5`. ReplicaCapacity must propose
+/// movements that reduce broker 1's load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replica_capacity_evicts_over_capacity_broker() {
+    use crabka_rebalancer::capacity::{BrokerCapacities, BrokerCapacity};
+    use crabka_rebalancer::goals::replica_capacity::ReplicaCapacity;
+    use crabka_rebalancer::goals::{Goal, GoalContext};
+    use crabka_rebalancer::model::{BrokerView, ClusterState, Movement, PartitionView};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    let parts: Vec<_> = (0..10)
+        .map(|i| PartitionView {
+            topic: "t".into(),
+            partition: i,
+            replicas: vec![1, 2],
+            leader: 1,
+            isr: vec![1, 2],
+        })
+        .collect();
+
+    let state = ClusterState {
+        cluster_id: Some("c".into()),
+        snapshot_at_ms: 0,
+        brokers: vec![
+            BrokerView { id: 1, host: "h1".into(), port: 9092, rack: None },
+            BrokerView { id: 2, host: "h2".into(), port: 9092, rack: None },
+            BrokerView { id: 3, host: "h3".into(), port: 9092, rack: None },
+        ],
+        partitions: parts,
+        in_flight_reassignments: vec![],
+    };
+
+    let mut by_broker = HashMap::new();
+    by_broker.insert(
+        1,
+        BrokerCapacity {
+            max_replicas: Some(5),
+            ..Default::default()
+        },
+    );
+    let caps = BrokerCapacities { by_broker };
+
+    let ctx = GoalContext {
+        imbalance_threshold_pct: 10,
+        max_movements_per_proposal: 256,
+        min_topic_leaders_per_broker: 0,
+        broker_capacities: Arc::new(caps),
+    };
+
+    let mvs: Vec<Movement> = ReplicaCapacity.propose(&state, &ctx);
+    assert!(!mvs.is_empty(), "expected movements to evict broker 1; got {mvs:?}");
+
+    // Every movement must reduce broker 1's replica count.
+    for m in &mvs {
+        let before = m.old_replicas.iter().filter(|x| **x == 1).count();
+        let after = m.new_replicas.iter().filter(|x| **x == 1).count();
+        assert!(
+            after < before,
+            "movement {m:?} doesn't reduce broker 1's replicas"
+        );
+    }
+
+    // Apply movements to a working copy and verify broker 1's
+    // post-state replica count is at or below 5.
+    let mut working = state.partitions.clone();
+    for m in &mvs {
+        if let Some(p) = working
+            .iter_mut()
+            .find(|p| p.topic == m.topic && p.partition == m.partition)
+        {
+            p.replicas = m.new_replicas.clone();
+        }
+    }
+    let final_broker_1_count: usize = working
+        .iter()
+        .map(|p| p.replicas.iter().filter(|x| **x == 1).count())
+        .sum();
+    assert!(
+        final_broker_1_count <= 5,
+        "broker 1 still has {final_broker_1_count} replicas after eviction"
+    );
+}
