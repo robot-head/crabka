@@ -1,12 +1,14 @@
 //! `Goal` trait and shared context. Concrete goals live in sibling
-//! modules (`preferred_leader_idempotency`, `replica_distribution`,
-//! `leader_distribution`).
+//! modules.
 
 use crate::model::{ClusterState, Movement};
 
 pub mod leader_distribution;
+pub mod min_topic_leaders_per_broker;
 pub mod preferred_leader_idempotency;
+pub mod rack_aware;
 pub mod replica_distribution;
+pub mod topic_replica_distribution;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GoalPriority {
@@ -28,6 +30,9 @@ pub struct GoalContext {
     /// Safety cap on the total number of movements a single proposal
     /// can produce. Truncation drops soft-goal movements first.
     pub max_movements_per_proposal: usize,
+    /// Minimum leader count per (broker, topic) pair for the
+    /// `MinTopicLeadersPerBroker` goal. `0` (default) disables the goal.
+    pub min_topic_leaders_per_broker: u32,
 }
 
 pub trait Goal: Send + Sync {
@@ -44,6 +49,16 @@ pub trait Goal: Send + Sync {
     /// validates and reconciles them across goals before producing
     /// the final proposal.
     fn propose(&self, state: &ClusterState, ctx: &GoalContext) -> Vec<Movement>;
+
+    /// Returns true if the goal's invariant holds against `state`.
+    /// Soft goals use the default (always true); hard goals override
+    /// to enforce their invariant during optimizer composition. The
+    /// optimizer calls this on every hard goal before accepting a
+    /// movement into the proposal — a soft goal that would break a
+    /// hard goal's invariant has its movement silently dropped.
+    fn is_satisfied(&self, _state: &ClusterState) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]

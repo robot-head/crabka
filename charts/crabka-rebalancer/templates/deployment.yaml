@@ -45,6 +45,8 @@ spec:
               value: {{ .Values.reassignmentPollIntervalSecs | quote }}
             - name: CRABKA_REASSIGNMENT_BATCH_SIZE
               value: {{ .Values.reassignmentBatchSize | quote }}
+            - name: CRABKA_MIN_TOPIC_LEADERS_PER_BROKER
+              value: {{ .Values.minTopicLeadersPerBroker | quote }}
             - name: CRABKA_DATA_DIR
               value: /var/lib/crabka-rebalancer
           ports:

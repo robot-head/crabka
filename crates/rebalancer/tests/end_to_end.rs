@@ -138,6 +138,7 @@ fn build_state(snapshot: SharedSnapshot) -> (Arc<AppState>, Registry) {
         goal_ctx: GoalContext {
             imbalance_threshold_pct: 10,
             max_movements_per_proposal: 256,
+            min_topic_leaders_per_broker: 0,
         },
         metrics,
         executor,
@@ -696,4 +697,73 @@ async fn restart_resumes_in_flight_plan() {
     tokio::time::timeout(Duration::from_secs(30), broker.shutdown())
         .await
         .expect("broker shutdown within 30s");
+}
+
+/// Synthetic ClusterState with three brokers in rack labels [A, A, B]
+/// and a partition with replicas on the two rack-A brokers. The
+/// RackAware goal must propose moving one off to a non-A rack. We
+/// drive the goal directly (no real broker needed) since this test
+/// is purely about goal interaction.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rack_aware_eliminates_same_rack_collisions() {
+    use crabka_rebalancer::goals::rack_aware::RackAware;
+    use crabka_rebalancer::goals::{Goal, GoalContext};
+    use crabka_rebalancer::model::{BrokerView, ClusterState, Movement, PartitionView};
+
+    let state = ClusterState {
+        cluster_id: Some("c".into()),
+        snapshot_at_ms: 0,
+        brokers: vec![
+            BrokerView {
+                id: 1,
+                host: "h1".into(),
+                port: 9092,
+                rack: Some("A".into()),
+            },
+            BrokerView {
+                id: 2,
+                host: "h2".into(),
+                port: 9092,
+                rack: Some("A".into()),
+            },
+            BrokerView {
+                id: 3,
+                host: "h3".into(),
+                port: 9092,
+                rack: Some("B".into()),
+            },
+        ],
+        partitions: vec![PartitionView {
+            topic: "t".into(),
+            partition: 0,
+            replicas: vec![1, 2],
+            leader: 1,
+            isr: vec![1, 2],
+        }],
+        in_flight_reassignments: vec![],
+    };
+
+    let ctx = GoalContext {
+        imbalance_threshold_pct: 10,
+        max_movements_per_proposal: 256,
+        min_topic_leaders_per_broker: 0,
+    };
+
+    let mvs: Vec<Movement> = RackAware.propose(&state, &ctx);
+    assert_eq!(
+        mvs.len(),
+        1,
+        "expected exactly one RackAware movement, got {mvs:?}"
+    );
+    let m = &mvs[0];
+    assert_eq!(m.topic, "t");
+    assert_eq!(m.partition, 0);
+    assert!(
+        !m.new_replicas.contains(&1) || !m.new_replicas.contains(&2),
+        "movement must remove one of the rack-A brokers; got {m:?}"
+    );
+    assert!(
+        m.new_replicas.contains(&3),
+        "movement must add the rack-B broker (3); got {m:?}"
+    );
 }

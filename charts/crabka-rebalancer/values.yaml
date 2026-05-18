@@ -11,6 +11,7 @@ bootstrapServers: ""
 listenAddr: "0.0.0.0:9300"
 scrapeIntervalSecs: 10
 imbalanceThresholdPct: 10
+minTopicLeadersPerBroker: 0
 maxMovementsPerProposal: 256
 proposalRingBufferSize: 20
 

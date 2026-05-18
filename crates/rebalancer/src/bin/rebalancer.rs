@@ -50,6 +50,11 @@ struct Args {
     #[arg(long, env = "CRABKA_IMBALANCE_THRESHOLD_PCT", default_value_t = 10)]
     imbalance_threshold_pct: u32,
 
+    /// Minimum leader count per (broker, topic) pair for the
+    /// `MinTopicLeadersPerBroker` goal. `0` (default) disables it.
+    #[arg(long, env = "CRABKA_MIN_TOPIC_LEADERS_PER_BROKER", default_value_t = 0)]
+    min_topic_leaders_per_broker: u32,
+
     /// Safety cap on the total number of movements per proposal.
     #[arg(long, env = "CRABKA_MAX_MOVEMENTS_PER_PROPOSAL", default_value_t = 256)]
     max_movements_per_proposal: usize,
@@ -211,6 +216,7 @@ async fn main() -> anyhow::Result<()> {
         goal_ctx: GoalContext {
             imbalance_threshold_pct: args.imbalance_threshold_pct,
             max_movements_per_proposal: args.max_movements_per_proposal,
+            min_topic_leaders_per_broker: args.min_topic_leaders_per_broker,
         },
         metrics: metrics.clone(),
         executor: executor_state,
