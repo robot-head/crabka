@@ -1,0 +1,44 @@
+suite: capacity configmap
+templates:
+  - configmap.yaml
+release:
+  name: demo
+set:
+  bootstrapServers: kafka-bootstrap:9092
+tests:
+  - it: not rendered when brokerCapacities is empty
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: rendered with broker entries when brokerCapacities is non-empty
+    set:
+      brokerCapacities:
+        1:
+          max_replicas: 4096
+          disk_bytes: 1099511627776
+    asserts:
+      - hasDocuments:
+          count: 1
+      - equal:
+          path: kind
+          value: ConfigMap
+      - equal:
+          path: metadata.name
+          value: demo-crabka-rebalancer-capacity
+      - matchRegex:
+          path: data["capacity.yaml"]
+          pattern: 'version:\s*1'
+      - matchRegex:
+          path: data["capacity.yaml"]
+          pattern: 'max_replicas:\s*4096'
+
+  - it: not rendered when brokerCapacityFile overrides
+    set:
+      brokerCapacities:
+        1:
+          max_replicas: 4096
+      brokerCapacityFile: /custom/path/capacity.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
