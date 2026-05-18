@@ -16,9 +16,7 @@ use serde_json::json;
 mod shared;
 
 use shared::fake_admin::{FakeAdminClient, RecordedCall};
-use shared::{
-    MockRule, MockState, fixture_ctx, json_response, mock_client, not_found_body,
-};
+use shared::{MockRule, MockState, fixture_ctx, json_response, mock_client, not_found_body};
 
 const CLUSTER: &str = "demo";
 const NS: &str = "y";
@@ -159,17 +157,20 @@ async fn first_reconcile_provisions_scram_and_acls() {
     let fake_for_assert = fake.clone();
     ctx.insert_admin_client_for_test(CLUSTER, fake).await;
 
-    let ku = ku_with_finalizer(USER, vec![rule_topic("orders", &[AclOp::Read, AclOp::Describe])]);
+    let ku = ku_with_finalizer(
+        USER,
+        vec![rule_topic("orders", &[AclOp::Read, AclOp::Describe])],
+    );
     reconcile(Arc::new(ku), ctx).await.unwrap();
 
     let calls = fake_for_assert.lock().await.calls();
     // Expected sequence: AlterUserScramCredentials (upsert) -> DescribeAcls -> CreateAcls.
     assert!(
-        calls
-            .iter()
-            .any(|c| matches!(c, RecordedCall::AlterUserScramCredentials { upsertions, deletions }
+        calls.iter().any(
+            |c| matches!(c, RecordedCall::AlterUserScramCredentials { upsertions, deletions }
                 if upsertions.len() == 1 && deletions.is_empty()
-                && upsertions[0].username == USER)),
+                && upsertions[0].username == USER)
+        ),
         "expected an AlterUserScramCredentials upsert for {USER}, got {calls:?}",
     );
     assert!(
