@@ -22,6 +22,7 @@ use crabka_client_core::Client;
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
 use crabka_rebalancer::api::GoalRegistry;
 use crabka_rebalancer::api::handlers::{self, AppState};
+use crabka_rebalancer::capacity::BrokerCapacities;
 use crabka_rebalancer::executor::phases::{ClientFacade, ConfigOp, PhaseError};
 use crabka_rebalancer::executor::throttle::ThrottleTargets;
 use crabka_rebalancer::executor::{ExecutorConfig, ExecutorState};
@@ -139,6 +140,7 @@ fn build_state(snapshot: SharedSnapshot) -> (Arc<AppState>, Registry) {
             imbalance_threshold_pct: 10,
             max_movements_per_proposal: 256,
             min_topic_leaders_per_broker: 0,
+            broker_capacities: Arc::new(BrokerCapacities::default()),
         },
         metrics,
         executor,
@@ -747,6 +749,7 @@ async fn rack_aware_eliminates_same_rack_collisions() {
         imbalance_threshold_pct: 10,
         max_movements_per_proposal: 256,
         min_topic_leaders_per_broker: 0,
+        broker_capacities: Arc::new(BrokerCapacities::default()),
     };
 
     let mvs: Vec<Movement> = RackAware.propose(&state, &ctx);

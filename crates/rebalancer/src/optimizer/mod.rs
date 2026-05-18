@@ -238,14 +238,17 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::capacity::BrokerCapacities;
     use crate::goals::tests::FixedGoal;
     use crate::model::{BrokerView, PartitionView};
+    use std::sync::Arc;
 
     fn ctx() -> GoalContext {
         GoalContext {
             imbalance_threshold_pct: 10,
             max_movements_per_proposal: 256,
             min_topic_leaders_per_broker: 0,
+            broker_capacities: Arc::new(BrokerCapacities::default()),
         }
     }
 
@@ -459,6 +462,7 @@ mod tests {
             imbalance_threshold_pct: 10,
             max_movements_per_proposal: 3,
             min_topic_leaders_per_broker: 0,
+            broker_capacities: Arc::new(BrokerCapacities::default()),
         };
         let goals: Vec<&dyn Goal> = vec![&hard, &soft];
         let out = optimize(&s, &goals, &ctx).unwrap();
@@ -543,6 +547,7 @@ mod tests {
             imbalance_threshold_pct: 10,
             max_movements_per_proposal: 256,
             min_topic_leaders_per_broker: 0,
+            broker_capacities: Arc::new(BrokerCapacities::default()),
         };
 
         let out = optimize(&state, &goals, &ctx).unwrap();
@@ -589,6 +594,7 @@ mod tests {
             imbalance_threshold_pct: 10,
             max_movements_per_proposal: 3,
             min_topic_leaders_per_broker: 0,
+            broker_capacities: Arc::new(BrokerCapacities::default()),
         };
         let goals: Vec<&dyn Goal> = vec![&bulk];
         let err = optimize(&s, &goals, &ctx).unwrap_err();

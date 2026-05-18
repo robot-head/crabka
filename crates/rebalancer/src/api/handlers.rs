@@ -379,6 +379,7 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::capacity::BrokerCapacities;
     use crate::executor::phases::{ClientFacade, ConfigOp, PhaseError};
     use crate::executor::throttle::ThrottleTargets;
     use crate::executor::{ExecutorConfig, ExecutorState};
@@ -449,6 +450,7 @@ mod tests {
                 imbalance_threshold_pct: 10,
                 max_movements_per_proposal: 256,
                 min_topic_leaders_per_broker: 0,
+                broker_capacities: Arc::new(BrokerCapacities::default()),
             },
             metrics,
             executor,
