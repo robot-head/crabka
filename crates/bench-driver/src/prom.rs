@@ -53,7 +53,9 @@ impl PromClient {
                 body.error
             ));
         }
-        let Some(data) = body.data else { return Ok(None) };
+        let Some(data) = body.data else {
+            return Ok(None);
+        };
         if data.result.is_empty() {
             return Ok(None);
         }
@@ -61,10 +63,11 @@ impl PromClient {
         let mut had = false;
         for r in &data.result {
             if let Some((_, v)) = r.value.as_ref()
-                && let Ok(parsed) = v.parse::<f64>() {
-                    sum += parsed;
-                    had = true;
-                }
+                && let Ok(parsed) = v.parse::<f64>()
+            {
+                sum += parsed;
+                had = true;
+            }
         }
         Ok(had.then_some(sum))
     }

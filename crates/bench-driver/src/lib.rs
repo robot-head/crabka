@@ -1,12 +1,18 @@
 // Benchmark drivers do a lot of `as u64` on Unix nanos / millis where
 // precision loss past i64::MAX is irrelevant; silence pedantic casts
-// at the crate root rather than at each call site.
+// at the crate root rather than at each call site. Likewise,
+// `format!(...)` appended to a building Markdown string reads more
+// linearly than the equivalent `write!(out, ...).unwrap()` chain, and
+// the orchestrator function in `workload::run` is intentionally one
+// long top-to-bottom narrative.
 #![allow(
     clippy::cast_sign_loss,
     clippy::cast_possible_truncation,
     clippy::cast_precision_loss,
     clippy::cast_possible_wrap,
-    clippy::similar_names
+    clippy::similar_names,
+    clippy::format_push_string,
+    clippy::too_many_lines
 )]
 
 //! Load driver + report aggregator for the Crabka vs Strimzi benchmark

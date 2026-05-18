@@ -144,7 +144,6 @@ pub struct Scenario {
     pub failover: Option<FailoverSpec>,
 }
 
-
 fn default_mode_tag() -> ModeTag {
     ModeTag::Ci
 }
@@ -268,7 +267,7 @@ mod tests {
 
     #[test]
     fn scenario_yaml_round_trip() {
-        let y = r#"
+        let y = r"
 name: small-msg-saturate
 mode_tag: ci
 msg_size_bytes: 100
@@ -284,7 +283,7 @@ linger_ms: 5
 batch_size: 16384
 duration_s: 60
 warmup_s: 10
-"#;
+";
         let s: Scenario = serde_yaml::from_str(y).expect("parse");
         assert_eq!(s.name, "small-msg-saturate");
         assert_eq!(s.partitions, 6);
@@ -293,14 +292,19 @@ warmup_s: 10
 
     #[test]
     fn fixed_rate_yaml_parses() {
-        let y = r#"
+        let y = r"
 name: fixed-rate
 mode:
   kind: fixed_rate
   msgs_per_sec: 20000
-"#;
+";
         let s: Scenario = serde_yaml::from_str(y).unwrap();
-        assert!(matches!(s.mode, LoadMode::FixedRate { msgs_per_sec: 20000 }));
+        assert!(matches!(
+            s.mode,
+            LoadMode::FixedRate {
+                msgs_per_sec: 20000
+            }
+        ));
     }
 
     #[test]

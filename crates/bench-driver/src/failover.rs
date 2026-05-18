@@ -13,8 +13,8 @@
 
 use anyhow::{Context, Result, anyhow};
 use k8s_openapi::api::core::v1::Pod;
-use kube::api::{Api, DeleteParams, ListParams};
 use kube::Client;
+use kube::api::{Api, DeleteParams, ListParams};
 
 use crate::scenario::Stack;
 

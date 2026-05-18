@@ -4,7 +4,7 @@
 //! per-task histograms into the public `LatencyPercentiles` shape.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -48,9 +48,8 @@ pub async fn run(scenario: Scenario, cfg: DriverConfig) -> Result<RunOutput> {
     let mut errors: Vec<String> = Vec::new();
 
     // Failover scenarios need RF >= 3; otherwise mark skipped.
-    let failover_active = scenario.failover.is_some()
-        && scenario.replication_factor >= 3
-        && cfg.broker_count >= 3;
+    let failover_active =
+        scenario.failover.is_some() && scenario.replication_factor >= 3 && cfg.broker_count >= 3;
     if scenario.failover.is_some() && !failover_active {
         notes.push("skipped:failover-needs-rf3".into());
     }
@@ -63,7 +62,13 @@ pub async fn run(scenario: Scenario, cfg: DriverConfig) -> Result<RunOutput> {
             "skipped:topology-mismatch (rf={} brokers={})",
             scenario.replication_factor, cfg.broker_count
         ));
-        return Ok(empty_output(scenario, &cfg, wallclock_start, notes, errors));
+        return Ok(empty_output(
+            &scenario,
+            &cfg,
+            wallclock_start,
+            notes,
+            errors,
+        ));
     }
 
     // ── Producer workloads ──────────────────────────────────────────────────
@@ -273,7 +278,7 @@ fn bytes_to_mb(bytes: u64) -> f64 {
 }
 
 fn empty_output(
-    scenario: Scenario,
+    scenario: &Scenario,
     cfg: &DriverConfig,
     start: i64,
     notes: Vec<String>,
@@ -290,8 +295,8 @@ fn empty_output(
         wallclock_start_unix_ms: start,
         wallclock_end_unix_ms: start,
         throughput: Throughput::default(),
-        producer_latency_ms: Default::default(),
-        consumer_e2e_latency_ms: Default::default(),
+        producer_latency_ms: crate::scenario::LatencyPercentiles::default(),
+        consumer_e2e_latency_ms: crate::scenario::LatencyPercentiles::default(),
         resource: Resource::default(),
         disturbance: None,
         startup_ms: None,
@@ -392,12 +397,8 @@ async fn run_producer(
                 }
                 if first_ack.load(Ordering::Relaxed) == 0 {
                     let now_ms = Utc::now().timestamp_millis() as u64;
-                    let _ = first_ack.compare_exchange(
-                        0,
-                        now_ms,
-                        Ordering::SeqCst,
-                        Ordering::Relaxed,
-                    );
+                    let _ =
+                        first_ack.compare_exchange(0, now_ms, Ordering::SeqCst, Ordering::Relaxed);
                 }
             }
             Ok(Err(e)) => {

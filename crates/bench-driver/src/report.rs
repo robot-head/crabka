@@ -19,8 +19,8 @@ pub fn render_markdown(input_dir: &Path, strict: bool) -> Result<String> {
         if path.extension().and_then(|s| s.to_str()) != Some("json") {
             continue;
         }
-        let body = std::fs::read_to_string(&path)
-            .with_context(|| format!("read {}", path.display()))?;
+        let body =
+            std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
         match serde_json::from_str::<RunOutput>(&body) {
             Ok(r) => runs.push((path, r)),
             Err(e) => {
@@ -35,7 +35,10 @@ pub fn render_markdown(input_dir: &Path, strict: bool) -> Result<String> {
     // Group by scenario name.
     let mut by_scenario: BTreeMap<String, Vec<RunOutput>> = BTreeMap::new();
     for (_p, r) in runs {
-        by_scenario.entry(r.scenario.name.clone()).or_default().push(r);
+        by_scenario
+            .entry(r.scenario.name.clone())
+            .or_default()
+            .push(r);
     }
 
     let mut out = String::new();
@@ -66,33 +69,78 @@ pub fn render_markdown(input_dir: &Path, strict: bool) -> Result<String> {
         // ── Topline table ───────────────────────────────────────────────────
         out.push_str("| metric | crabka | kafka | ratio |\n");
         out.push_str("|---|---|---|---|\n");
-        row_throughput(&mut out, "producer msgs/s (higher better)", crabka, kafka, |t| {
-            t.throughput.producer_msgs_per_sec
-        }, true);
-        row_throughput(&mut out, "consumer msgs/s (higher better)", crabka, kafka, |t| {
-            t.throughput.consumer_msgs_per_sec
-        }, true);
-        row_throughput(&mut out, "producer MB/s (higher better)", crabka, kafka, |t| {
-            t.throughput.mb_in / (t.scenario.duration_s.max(1) as f64)
-        }, true);
-        row_throughput(&mut out, "p99 producer ack ms (lower better)", crabka, kafka, |t| {
-            t.producer_latency_ms.p99_ms
-        }, false);
-        row_throughput(&mut out, "p99 consumer e2e ms (lower better)", crabka, kafka, |t| {
-            t.consumer_e2e_latency_ms.p99_ms
-        }, false);
-        row_throughput(&mut out, "msgs/s per CPU-core (higher better)", crabka, kafka, |t| {
-            t.resource.msgs_per_cpu_core
-        }, true);
-        row_throughput(&mut out, "cgroup working-set MB (lower better)", crabka, kafka, |t| {
-            t.resource.mem_cgroup_working_set_bytes as f64 / 1_048_576.0
-        }, false);
-        row_throughput(&mut out, "startup ms (CR-apply → Ready) (lower better)", crabka, kafka, |t| {
-            t.startup_ms.unwrap_or(0) as f64
-        }, false);
-        row_throughput(&mut out, "first-ack ms (Ready → first ack) (lower better)", crabka, kafka, |t| {
-            t.first_ack_ms as f64
-        }, false);
+        row_throughput(
+            &mut out,
+            "producer msgs/s (higher better)",
+            crabka,
+            kafka,
+            |t| t.throughput.producer_msgs_per_sec,
+            true,
+        );
+        row_throughput(
+            &mut out,
+            "consumer msgs/s (higher better)",
+            crabka,
+            kafka,
+            |t| t.throughput.consumer_msgs_per_sec,
+            true,
+        );
+        row_throughput(
+            &mut out,
+            "producer MB/s (higher better)",
+            crabka,
+            kafka,
+            |t| t.throughput.mb_in / (t.scenario.duration_s.max(1) as f64),
+            true,
+        );
+        row_throughput(
+            &mut out,
+            "p99 producer ack ms (lower better)",
+            crabka,
+            kafka,
+            |t| t.producer_latency_ms.p99_ms,
+            false,
+        );
+        row_throughput(
+            &mut out,
+            "p99 consumer e2e ms (lower better)",
+            crabka,
+            kafka,
+            |t| t.consumer_e2e_latency_ms.p99_ms,
+            false,
+        );
+        row_throughput(
+            &mut out,
+            "msgs/s per CPU-core (higher better)",
+            crabka,
+            kafka,
+            |t| t.resource.msgs_per_cpu_core,
+            true,
+        );
+        row_throughput(
+            &mut out,
+            "cgroup working-set MB (lower better)",
+            crabka,
+            kafka,
+            |t| t.resource.mem_cgroup_working_set_bytes as f64 / 1_048_576.0,
+            false,
+        );
+        row_throughput(
+            &mut out,
+            "startup ms (CR-apply → Ready) (lower better)",
+            crabka,
+            kafka,
+            |t| t.startup_ms.unwrap_or(0) as f64,
+            false,
+        );
+        row_throughput(
+            &mut out,
+            "first-ack ms (Ready → first ack) (lower better)",
+            crabka,
+            kafka,
+            |t| t.first_ack_ms as f64,
+            false,
+        );
         out.push('\n');
 
         // ── Latency percentiles ────────────────────────────────────────────
@@ -120,16 +168,17 @@ pub fn render_markdown(input_dir: &Path, strict: bool) -> Result<String> {
                 k.resource.jvm_heap_used_bytes,
                 k.resource.jvm_nonheap_used_bytes,
                 k.resource.kafka_page_cache_approx_bytes,
-            ) {
-                out.push_str("**Kafka memory split (MiB):**\n\n");
-                out.push_str(&format!(
+            )
+        {
+            out.push_str("**Kafka memory split (MiB):**\n\n");
+            out.push_str(&format!(
                     "- JVM heap used: {:.1}\n- JVM non-heap used: {:.1}\n- Page-cache (approx, working-set − heap − non-heap): {:.1}\n- cgroup working-set (limit-relevant): {:.1}\n\n",
                     heap as f64 / 1_048_576.0,
                     nonheap as f64 / 1_048_576.0,
                     pc as f64 / 1_048_576.0,
                     k.resource.mem_cgroup_working_set_bytes as f64 / 1_048_576.0,
                 ));
-            }
+        }
 
         // ── Failover disturbance ────────────────────────────────────────────
         for r in runs {
@@ -178,8 +227,9 @@ fn truncate_list(items: &[String], n: usize) -> String {
     }
 }
 
-fn latency_percentiles_pairs(
-) -> [(&'static str, fn(&crate::scenario::LatencyPercentiles) -> f64); 6] {
+type LatencySelector = fn(&crate::scenario::LatencyPercentiles) -> f64;
+
+fn latency_percentiles_pairs() -> [(&'static str, LatencySelector); 6] {
     [
         ("p50", |p| p.p50_ms),
         ("p95", |p| p.p95_ms),
@@ -217,9 +267,7 @@ fn row_throughput(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scenario::{
-        Acks, Compression, LoadMode, ModeTag, Scenario, Throughput, Topology,
-    };
+    use crate::scenario::{Acks, Compression, LoadMode, ModeTag, Scenario, Throughput, Topology};
     use tempfile::tempdir;
 
     fn fake_run(stack: Stack, msgs: u64) -> RunOutput {
@@ -293,9 +341,9 @@ mod tests {
                 wallclock_start_unix_ms: 0,
                 wallclock_end_unix_ms: 0,
                 throughput: Throughput::default(),
-                producer_latency_ms: Default::default(),
-                consumer_e2e_latency_ms: Default::default(),
-                resource: Default::default(),
+                producer_latency_ms: crate::scenario::LatencyPercentiles::default(),
+                consumer_e2e_latency_ms: crate::scenario::LatencyPercentiles::default(),
+                resource: crate::scenario::Resource::default(),
                 disturbance: None,
                 startup_ms: None,
                 first_ack_ms: 0,
