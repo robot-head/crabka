@@ -22,7 +22,6 @@ use crabka_rebalancer::ingest::{Ingester, new_shared_snapshot};
 use crabka_rebalancer::metrics::RebalancerMetrics;
 use crabka_rebalancer::model::proposal::ProposalStatus;
 use crabka_rebalancer::model::store::ProposalStore;
-use crabka_rebalancer::scraper::UsageStore;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -76,6 +75,20 @@ struct Args {
     /// all five capacity goals are no-ops.
     #[arg(long, env = "CRABKA_BROKER_CAPACITY_FILE", default_value = "")]
     broker_capacity_file: String,
+
+    /// Per-broker metric scrape targets. Format: "id:host:port,id:host:port,…".
+    /// Empty = scraper disabled (usage-driven goals are no-ops).
+    #[arg(long, env = "CRABKA_METRICS_SCRAPE_TARGETS", default_value = "")]
+    metrics_scrape_targets: String,
+
+    /// How often the scraper polls each target's /metrics endpoint.
+    #[arg(long, env = "CRABKA_METRICS_SCRAPE_INTERVAL_SECS", default_value_t = 30)]
+    metrics_scrape_interval_secs: u64,
+
+    /// How long to retain scraped samples in the rolling window
+    /// store. Default 12h matches the longest window (`TwelveHour`).
+    #[arg(long, env = "CRABKA_METRICS_RETENTION_SECS", default_value_t = 43_200)]
+    metrics_retention_secs: u64,
 
     /// Default KIP-73 throttle (bytes/sec, per broker direction) when
     /// `ExecuteProposalRequest.throttle_bytes_per_sec` is unset.
@@ -242,6 +255,39 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    let usage_store = std::sync::Arc::new(crabka_rebalancer::scraper::UsageStore::new(
+        crabka_rebalancer::scraper::WindowConfig {
+            scrape_interval: std::time::Duration::from_secs(args.metrics_scrape_interval_secs),
+            retention: std::time::Duration::from_secs(args.metrics_retention_secs),
+        },
+    ));
+
+    if !args.metrics_scrape_targets.is_empty() {
+        match crabka_rebalancer::scraper::parse_targets(&args.metrics_scrape_targets) {
+            Ok(targets) => {
+                info!(
+                    target_count = targets.len(),
+                    scrape_interval_secs = args.metrics_scrape_interval_secs,
+                    retention_secs = args.metrics_retention_secs,
+                    "starting metrics scraper"
+                );
+                let scraper = crabka_rebalancer::scraper::Scraper::new(
+                    targets,
+                    std::time::Duration::from_secs(args.metrics_scrape_interval_secs),
+                    usage_store.clone(),
+                    shutdown.clone(),
+                );
+                tokio::spawn(scraper.run());
+            }
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "failed to parse --metrics-scrape-targets `{}`: {e}",
+                    args.metrics_scrape_targets
+                ));
+            }
+        }
+    }
+
     let app_state = Arc::new(AppState {
         snapshot: snapshot.clone(),
         store,
@@ -251,7 +297,7 @@ async fn main() -> anyhow::Result<()> {
             max_movements_per_proposal: args.max_movements_per_proposal,
             min_topic_leaders_per_broker: args.min_topic_leaders_per_broker,
             broker_capacities: broker_capacities.clone(),
-            broker_usages: Arc::new(UsageStore::default()),
+            broker_usages: usage_store.clone(),
         },
         metrics: metrics.clone(),
         executor: executor_state,
