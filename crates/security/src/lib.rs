@@ -3,6 +3,7 @@
 //! No I/O, no async, no networking. The broker plumbs streams in; this
 //! crate produces verifiers, hashes, and TLS configs.
 
+pub mod ca;
 mod listener;
 mod mechanism;
 mod mtls;
