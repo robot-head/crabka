@@ -469,7 +469,7 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
         Ok(())
     };
 
-    let cfg_hash = common::combined_config_hash(&obj.spec);
+    let cfg_hash = common::combined_config_hash(&obj.spec, None);
 
     let secret_api: Api<Secret> = Api::namespaced(ctx.client.clone(), &ns);
     let _cluster_id = ensure_cluster_id_secret(&secret_api, &obj).await?;

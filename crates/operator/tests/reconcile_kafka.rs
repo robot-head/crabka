@@ -384,7 +384,8 @@ async fn kafka_patches_pool_label_with_config_hash() {
     let items = vec![fake_pool_list_item("brokers", "y", "demo", 1, 1)];
     let (ctx, state) = build_ctx("y", happy_path_rules("demo", "y", &items));
     let kafka = kafka_cr_with_config("demo", "y", cfg);
-    let expected_hash = crabka_operator::controller::common::combined_config_hash(&kafka.spec);
+    let expected_hash =
+        crabka_operator::controller::common::combined_config_hash(&kafka.spec, None);
 
     reconcile(Arc::new(kafka), ctx).await.unwrap();
 

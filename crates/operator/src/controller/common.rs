@@ -372,7 +372,8 @@ pub fn config_hash(content: &str) -> String {
 }
 
 /// Slice 25 (+ slice 40): combined hash over user `spec.config`, the
-/// canonical listener intent, and a `metrics_config.is_some()` bit.
+/// canonical listener intent, a `metrics_config.is_some()` bit, and
+/// (slice 30) the cluster CA cert PEM.
 /// Empty listeners produce empty intent and metrics-unset produces an
 /// empty third segment, so the combined hash is identical to the
 /// slice-24 hash for an unchanged `spec.config` with neither listeners
@@ -385,8 +386,15 @@ pub fn config_hash(content: &str) -> String {
 /// `StatefulSet`). Sub-field changes (interval, scrape labels) affect
 /// only the `PodMonitor`/`ServiceMonitor` objects, not the broker pod,
 /// and do not need a roll.
+///
+/// `cluster_ca_cert_pem` — when `Some`, the cluster CA cert PEM is
+/// included as a fourth segment. Rotating the cluster CA forces a
+/// cluster roll; leaf renewal does not (slice 33 hot-reload handles it).
 #[must_use]
-pub fn combined_config_hash(spec: &crate::crd::KafkaSpec) -> String {
+pub fn combined_config_hash(
+    spec: &crate::crd::KafkaSpec,
+    cluster_ca_cert_pem: Option<&str>,
+) -> String {
     let config_part = spec
         .config
         .as_ref()
@@ -410,21 +418,26 @@ pub fn combined_config_hash(spec: &crate::crd::KafkaSpec) -> String {
     } else {
         ""
     };
+    let ca_part = cluster_ca_cert_pem.unwrap_or("");
     // Slice-24 compatibility: when neither listeners nor metricsConfig
     // are set, the hash collapses to `config_hash(config_part)` —
     // byte-identical to the slice-24 hash for the same `spec.config`.
     // This is what makes an in-place upgrade from slice 24 not trigger
     // a hash-driven roll (the unavoidable template-change roll fires
     // separately and once).
-    if intent.is_empty() && metrics_part.is_empty() {
+    if intent.is_empty() && metrics_part.is_empty() && ca_part.is_empty() {
         return config_hash(&config_part);
     }
-    let mut buf = String::with_capacity(config_part.len() + 2 + intent.len() + metrics_part.len());
+    let mut buf = String::with_capacity(
+        config_part.len() + 3 + intent.len() + metrics_part.len() + ca_part.len(),
+    );
     buf.push_str(&config_part);
     buf.push('\x1F'); // ASCII unit separator
     buf.push_str(&intent);
     buf.push('\x1F');
     buf.push_str(metrics_part);
+    buf.push('\x1F');
+    buf.push_str(ca_part);
     config_hash(&buf)
 }
 
@@ -561,8 +574,8 @@ mod config_hash_tests {
             cluster_ca: None,
             clients_ca: None,
         };
-        let h = combined_config_hash(&spec_a);
-        let h_again = combined_config_hash(&spec_a);
+        let h = combined_config_hash(&spec_a, None);
+        let h_again = combined_config_hash(&spec_a, None);
         assert_eq!(h, h_again);
 
         // Slice-24 compat: the hash for empty listeners + no metrics MUST
@@ -580,7 +593,7 @@ mod config_hash_tests {
         let mut spec_b = spec_a.clone();
         spec_b.listeners = vec![crate::controller::listeners::synthesized_default_listener()];
         spec_b.inter_broker_listener_name = Some("PLAIN".into());
-        let h_with_listener = combined_config_hash(&spec_b);
+        let h_with_listener = combined_config_hash(&spec_b, None);
         assert_ne!(
             h, h_with_listener,
             "non-empty listener intent must change hash"
@@ -601,14 +614,14 @@ mod config_hash_tests {
             cluster_ca: None,
             clients_ca: None,
         };
-        let h_off = combined_config_hash(&spec_off);
+        let h_off = combined_config_hash(&spec_off, None);
 
         let mut spec_on = spec_off.clone();
         spec_on.metrics_config = Some(MetricsConfig {
             pod_monitor: Some(PodMonitorSpec::default()),
             ..Default::default()
         });
-        let h_on = combined_config_hash(&spec_on);
+        let h_on = combined_config_hash(&spec_on, None);
         assert_ne!(
             h_off, h_on,
             "enabling metrics_config must bump the hash (triggers pool reconcile + StatefulSet re-render)"
@@ -626,9 +639,55 @@ mod config_hash_tests {
         }
         assert_eq!(
             h_on,
-            combined_config_hash(&spec_on_diff_interval),
+            combined_config_hash(&spec_on_diff_interval, None),
             "PodMonitor interval change must NOT roll the broker pod",
         );
+    }
+
+    #[test]
+    fn combined_hash_changes_when_cluster_ca_cert_changes() {
+        let spec = crate::crd::KafkaSpec {
+            kafka_version: "0.1.1".into(),
+            config: None,
+            listeners: vec![],
+            inter_broker_listener_name: None,
+            metrics_config: None,
+            network_policy: None,
+            cluster_ca: None,
+            clients_ca: None,
+        };
+        let h_none = combined_config_hash(&spec, None);
+        let h_a = combined_config_hash(
+            &spec,
+            Some("-----BEGIN CERTIFICATE-----\nA\n-----END CERTIFICATE-----\n"),
+        );
+        let h_b = combined_config_hash(
+            &spec,
+            Some("-----BEGIN CERTIFICATE-----\nB\n-----END CERTIFICATE-----\n"),
+        );
+        assert_ne!(h_none, h_a, "absent vs present CA must differ");
+        assert_ne!(h_a, h_b, "different CA PEM must differ");
+    }
+
+    #[test]
+    fn combined_hash_stable_under_broker_keystore_changes() {
+        // The keystore Secret's contents are never inputs to
+        // combined_config_hash (slice 33 hot-reload handles leaf renewal).
+        // This test guards against a future regression where someone wires
+        // a keystore digest into the hash.
+        let spec = crate::crd::KafkaSpec {
+            kafka_version: "0.1.1".into(),
+            config: None,
+            listeners: vec![],
+            inter_broker_listener_name: None,
+            metrics_config: None,
+            network_policy: None,
+            cluster_ca: None,
+            clients_ca: None,
+        };
+        let h1 = combined_config_hash(&spec, Some("ca-pem"));
+        let h2 = combined_config_hash(&spec, Some("ca-pem"));
+        assert_eq!(h1, h2);
     }
 
     #[test]
