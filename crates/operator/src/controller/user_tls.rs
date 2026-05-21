@@ -1,7 +1,6 @@
 //! Slice 37: TLS-auth helpers for the `KafkaUser` reconciler.
 //!
 //! Owns:
-//! - the per-cluster clients CA (Secret bootstrap, lazy create),
 //! - per-user X.509 cert issuance + renewal,
 //! - the per-user TLS-credential Secret render.
 //!
@@ -19,18 +18,14 @@ use kube::{Resource, ResourceExt as _};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-use crate::controller::common::{FIELD_MANAGER, ReconcileError, owner_ref};
+use crate::controller::common::{FIELD_MANAGER, ReconcileError, read_pem_key};
+use crate::crd::KafkaUser;
 use crate::crd::user::TlsAuth;
-use crate::crd::{Kafka, KafkaUser};
 
 /// Default cert lifetime (days) when `TlsAuth::validity_days` is absent.
 pub(crate) const DEFAULT_VALIDITY_DAYS: u32 = 365;
 /// Default renewal window (days) when `TlsAuth::renewal_days` is absent.
 pub(crate) const DEFAULT_RENEWAL_DAYS: u32 = 30;
-/// Suffix on the per-cluster clients-CA private-key Secret.
-pub(crate) const CLIENTS_CA_KEY_SUFFIX: &str = "-clients-ca";
-/// Suffix on the per-cluster clients-CA public-cert Secret.
-pub(crate) const CLIENTS_CA_CERT_SUFFIX: &str = "-clients-ca-cert";
 
 /// Outcome of `ensure_user_cert_secret`. Drives the status update.
 #[derive(Debug, Clone)]
@@ -40,65 +35,6 @@ pub(crate) struct UserCertStatus {
     /// Whether the operator issued a new cert this reconcile.
     /// Pure observability; not load-bearing.
     pub issued_new: bool,
-}
-
-/// Get-or-create both clients-CA Secrets for the given cluster.
-/// Both Secrets are owner-ref'd to the parent `Kafka`. Returns the CA
-/// PEM material so the caller can use it to sign user certs.
-///
-/// When the private-key Secret exists but the cert Secret doesn't (or
-/// vice-versa, e.g., a partial hand-edit), the operator treats it as
-/// "regenerate both". Slice 30 will replace this with full
-/// rotation/renewal semantics.
-pub(crate) async fn ensure_clients_ca(
-    secret_api: &Api<Secret>,
-    kafka: &Kafka,
-) -> Result<CaMaterial, ReconcileError> {
-    let cluster = kafka.name_any();
-    let key_name = format!("{cluster}{CLIENTS_CA_KEY_SUFFIX}");
-    let cert_name = format!("{cluster}{CLIENTS_CA_CERT_SUFFIX}");
-
-    let existing_key = secret_api.get_opt(&key_name).await?;
-    let existing_cert = secret_api.get_opt(&cert_name).await?;
-
-    if let (Some(k), Some(c)) = (&existing_key, &existing_cert)
-        && let (Some(key_pem), Some(cert_pem)) =
-            (read_pem_key(k, "ca.key"), read_pem_key(c, "ca.crt"))
-    {
-        return Ok(CaMaterial { cert_pem, key_pem });
-    }
-
-    // Either Secret missing or malformed → regenerate both.
-    let cn = format!("{cluster}-clients-ca");
-    let material = ca::generate_clients_ca(&cn, 10 * 365).map_err(ReconcileError::Ca)?;
-
-    let key_secret = render_clients_ca_secret(
-        kafka,
-        &key_name,
-        "ca.key",
-        &material.key_pem,
-        "clients-ca-key",
-    )?;
-    let cert_secret = render_clients_ca_secret(
-        kafka,
-        &cert_name,
-        "ca.crt",
-        &material.cert_pem,
-        "clients-ca-cert",
-    )?;
-
-    let params = PatchParams {
-        field_manager: Some(FIELD_MANAGER.into()),
-        force: true,
-        ..Default::default()
-    };
-    secret_api
-        .patch(&key_name, &params, &Patch::Apply(&key_secret))
-        .await?;
-    secret_api
-        .patch(&cert_name, &params, &Patch::Apply(&cert_secret))
-        .await?;
-    Ok(material)
 }
 
 /// Get-or-create the per-user cert Secret. Idempotent: if the existing
@@ -168,12 +104,6 @@ fn format_rfc3339(t: OffsetDateTime) -> Result<String, ReconcileError> {
         .map_err(|e| ReconcileError::CertParse(format!("rfc3339 format: {e}")))
 }
 
-fn read_pem_key(secret: &Secret, key: &str) -> Option<String> {
-    let data = secret.data.as_ref()?;
-    let bs = data.get(key)?;
-    std::str::from_utf8(&bs.0).ok().map(str::to_string)
-}
-
 /// Parse `user.crt` PEM out of an existing user Secret and return
 /// the cert's `notAfter` as a `time::OffsetDateTime`. Returns `None`
 /// if the key is missing, the PEM is malformed, or the cert won't
@@ -189,38 +119,6 @@ fn cert_not_after_from_pem(pem: &str) -> Option<OffsetDateTime> {
     let cert = p.parse_x509().ok()?;
     let ts = cert.validity().not_after.timestamp();
     OffsetDateTime::from_unix_timestamp(ts).ok()
-}
-
-fn render_clients_ca_secret(
-    kafka: &Kafka,
-    name: &str,
-    key: &str,
-    value_pem: &str,
-    component: &str,
-) -> Result<Secret, ReconcileError> {
-    let mut labels: BTreeMap<String, String> = BTreeMap::new();
-    labels.insert(
-        "app.kubernetes.io/managed-by".into(),
-        "crabka-operator".into(),
-    );
-    labels.insert("crabka.io/cluster".into(), kafka.name_any());
-    labels.insert("crabka.io/component".into(), component.into());
-
-    let mut data: BTreeMap<String, ByteString> = BTreeMap::new();
-    data.insert(key.into(), ByteString(value_pem.as_bytes().to_vec()));
-
-    Ok(Secret {
-        metadata: ObjectMeta {
-            name: Some(name.into()),
-            namespace: kafka.meta().namespace.clone(),
-            labels: Some(labels),
-            owner_references: Some(vec![owner_ref::<Kafka>(kafka)?]),
-            ..Default::default()
-        },
-        type_: Some("Opaque".into()),
-        data: Some(data),
-        ..Default::default()
-    })
 }
 
 fn render_user_cert_secret(
@@ -410,23 +308,6 @@ mod tests {
         assert_eq!(s, "2023-11-14T22:13:20Z");
     }
 
-    fn dummy_kafka() -> Kafka {
-        let mut k = Kafka::new(
-            "demo",
-            crate::crd::KafkaSpec {
-                kafka_version: "0.1.1".into(),
-                config: None,
-                listeners: vec![],
-                inter_broker_listener_name: Some("PLAIN".into()),
-                metrics_config: None,
-                network_policy: None,
-            },
-        );
-        k.metadata.namespace = Some("ns".into());
-        k.metadata.uid = Some("kafka-uid".into());
-        k
-    }
-
     fn dummy_ku() -> KafkaUser {
         let mut ku = KafkaUser::new(
             "alice",
@@ -442,49 +323,6 @@ mod tests {
         labels.insert("crabka.io/cluster".into(), "demo".into());
         ku.metadata.labels = Some(labels);
         ku
-    }
-
-    #[test]
-    fn render_clients_ca_secret_owner_refs_kafka_and_carries_component_label() {
-        let kafka = dummy_kafka();
-        let secret = render_clients_ca_secret(
-            &kafka,
-            "demo-clients-ca",
-            "ca.key",
-            "PEM-BYTES",
-            "clients-ca-key",
-        )
-        .expect("renders");
-
-        assert_eq!(secret.metadata.name.as_deref(), Some("demo-clients-ca"));
-        assert_eq!(secret.metadata.namespace.as_deref(), Some("ns"));
-        let labels = secret.metadata.labels.as_ref().expect("labels");
-        assert_eq!(
-            labels
-                .get("app.kubernetes.io/managed-by")
-                .map(String::as_str),
-            Some("crabka-operator")
-        );
-        assert_eq!(
-            labels.get("crabka.io/cluster").map(String::as_str),
-            Some("demo")
-        );
-        assert_eq!(
-            labels.get("crabka.io/component").map(String::as_str),
-            Some("clients-ca-key")
-        );
-        let owners = secret.metadata.owner_references.as_ref().expect("owner");
-        assert_eq!(owners.len(), 1);
-        assert_eq!(owners[0].kind, "Kafka");
-        assert_eq!(owners[0].name, "demo");
-        assert_eq!(owners[0].uid, "kafka-uid");
-        assert_eq!(owners[0].controller, Some(true));
-        let data = secret.data.as_ref().expect("data");
-        assert_eq!(
-            data.get("ca.key").map(|bs| bs.0.as_slice()),
-            Some(b"PEM-BYTES".as_slice())
-        );
-        assert_eq!(secret.type_.as_deref(), Some("Opaque"));
     }
 
     #[test]

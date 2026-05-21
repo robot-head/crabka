@@ -25,6 +25,67 @@ spec:
               broker pods are described by sibling `KafkaNodePool`s labeled
               `crabka.io/cluster=<this name>`.
             properties:
+              clientsCa:
+                description: |-
+                  Slice 30: per-cluster CA used to sign `KafkaUser` TLS certs (slice
+                  37). Absent → fully-defaulted `CertificateAuthority`.
+                nullable: true
+                properties:
+                  generateCertificateAuthority:
+                    default: true
+                    description: |-
+                      When `true` (default), the operator generates and renews this CA.
+                      When `false`, the operator expects the CA `Secret` pair to be
+                      pre-created by the cluster admin and refuses to overwrite them.
+                      Renewal of BYO CAs is the admin's responsibility; the `CronJob`
+                      skips them and emits an Event when they're nearing expiry.
+                    type: boolean
+                  renewalDays:
+                    default: 30
+                    description: |-
+                      Window before `notAfter` in which the renewal `CronJob` will
+                      reissue leaf certs. Default 30.
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                  validityDays:
+                    default: 365
+                    description: Cert validity in days. Default 365.
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                type: object
+              clusterCa:
+                description: |-
+                  Slice 30: per-cluster CA used for inter-broker mTLS + broker certs.
+                  Absent → fully-defaulted `CertificateAuthority` (operator-generated,
+                  365/30 days).
+                nullable: true
+                properties:
+                  generateCertificateAuthority:
+                    default: true
+                    description: |-
+                      When `true` (default), the operator generates and renews this CA.
+                      When `false`, the operator expects the CA `Secret` pair to be
+                      pre-created by the cluster admin and refuses to overwrite them.
+                      Renewal of BYO CAs is the admin's responsibility; the `CronJob`
+                      skips them and emits an Event when they're nearing expiry.
+                    type: boolean
+                  renewalDays:
+                    default: 30
+                    description: |-
+                      Window before `notAfter` in which the renewal `CronJob` will
+                      reissue leaf certs. Default 30.
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                  validityDays:
+                    default: 365
+                    description: Cert validity in days. Default 365.
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                type: object
               config:
                 additionalProperties:
                   type: string
@@ -293,6 +354,42 @@ spec:
           status:
             nullable: true
             properties:
+              clientsCa:
+                description: |-
+                  Status surface for a single CA. Populated by the reconciler from the
+                  parsed CA cert + the CRD spec.
+                nullable: true
+                properties:
+                  generated:
+                    description: |-
+                      `true` when the operator generated this CA (i.e.
+                      `generateCertificateAuthority == true`); `false` for BYO.
+                    type: boolean
+                  notAfter:
+                    description: RFC3339 `notAfter` of the current CA cert.
+                    type: string
+                required:
+                - generated
+                - notAfter
+                type: object
+              clusterCa:
+                description: |-
+                  Status surface for a single CA. Populated by the reconciler from the
+                  parsed CA cert + the CRD spec.
+                nullable: true
+                properties:
+                  generated:
+                    description: |-
+                      `true` when the operator generated this CA (i.e.
+                      `generateCertificateAuthority == true`); `false` for BYO.
+                    type: boolean
+                  notAfter:
+                    description: RFC3339 `notAfter` of the current CA cert.
+                    type: string
+                required:
+                - generated
+                - notAfter
+                type: object
               conditions:
                 default: []
                 description: |-

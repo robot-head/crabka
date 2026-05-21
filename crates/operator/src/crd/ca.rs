@@ -1,0 +1,93 @@
+//! Slice 30: `Kafka.spec.clusterCa` + `Kafka.spec.clientsCa` schema.
+
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+/// Per-CA declarative config. Strimzi-shaped.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CertificateAuthority {
+    /// When `true` (default), the operator generates and renews this CA.
+    /// When `false`, the operator expects the CA `Secret` pair to be
+    /// pre-created by the cluster admin and refuses to overwrite them.
+    /// Renewal of BYO CAs is the admin's responsibility; the `CronJob`
+    /// skips them and emits an Event when they're nearing expiry.
+    #[serde(default = "default_generate")]
+    pub generate_certificate_authority: bool,
+
+    /// Cert validity in days. Default 365.
+    #[serde(default = "default_validity_days")]
+    pub validity_days: u32,
+
+    /// Window before `notAfter` in which the renewal `CronJob` will
+    /// reissue leaf certs. Default 30.
+    #[serde(default = "default_renewal_days")]
+    pub renewal_days: u32,
+}
+
+#[must_use]
+const fn default_generate() -> bool {
+    true
+}
+#[must_use]
+const fn default_validity_days() -> u32 {
+    365
+}
+#[must_use]
+const fn default_renewal_days() -> u32 {
+    30
+}
+
+impl Default for CertificateAuthority {
+    fn default() -> Self {
+        Self {
+            generate_certificate_authority: default_generate(),
+            validity_days: default_validity_days(),
+            renewal_days: default_renewal_days(),
+        }
+    }
+}
+
+/// Status surface for a single CA. Populated by the reconciler from the
+/// parsed CA cert + the CRD spec.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CertificateAuthorityStatus {
+    /// RFC3339 `notAfter` of the current CA cert.
+    pub not_after: String,
+    /// `true` when the operator generated this CA (i.e.
+    /// `generateCertificateAuthority == true`); `false` for BYO.
+    pub generated: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_match_strimzi() {
+        let d = CertificateAuthority::default();
+        assert!(d.generate_certificate_authority);
+        assert_eq!(d.validity_days, 365);
+        assert_eq!(d.renewal_days, 30);
+    }
+
+    #[test]
+    fn deserialize_empty_object_uses_defaults() {
+        let v: CertificateAuthority = serde_json::from_value(serde_json::json!({})).expect("parse");
+        assert_eq!(v, CertificateAuthority::default());
+    }
+
+    #[test]
+    fn byo_round_trips() {
+        let v: CertificateAuthority = serde_json::from_value(serde_json::json!({
+            "generateCertificateAuthority": false,
+            "validityDays": 90,
+            "renewalDays": 7,
+        }))
+        .expect("parse");
+        assert!(!v.generate_certificate_authority);
+        assert_eq!(v.validity_days, 90);
+        assert_eq!(v.renewal_days, 7);
+    }
+}

@@ -1341,3 +1341,46 @@ Kafka client for ApiVersions.
 - Reference doc:
   [`docs/superpowers/specs/2026-05-19-crabka-operator-kafkauser-37-design.md`].
 
+## Slice 30 — Operator: Cluster CA + clients CA generation (2026-05-21)
+
+- New `Kafka.spec.clusterCa` + `Kafka.spec.clientsCa`: Strimzi-shaped
+  `CertificateAuthority { generateCertificateAuthority, validityDays,
+  renewalDays }`, default `(true, 365, 30)`. `clientsCa` replaces the
+  slice-37 lazy-bootstrap path (deleted outright — greenfield).
+- Operator generates and rotates per-broker keystore
+  (`<cluster>-kafka-brokers`) signed by the cluster CA. Inter-broker
+  mTLS on by default: the broker controller listener terminates TLS
+  with `client_auth=Required` and the cluster CA cert as the
+  truststore. Renewal of leaf certs is handled by a new CronJob
+  (`crabka-operator ca-renewal-check`) shipped in the Helm chart with
+  a dedicated ServiceAccount + narrower RBAC.
+- BYO CAs (`generateCertificateAuthority: false`) — operator validates
+  pre-existing Secret pair and refuses to overwrite; CronJob emits
+  `ByoCaExpiringSoon` Events when nearing expiry.
+- CA-itself expiry handled disruptively in this slice:
+  `CaRotationRequired=True` status condition + Event, no
+  auto-rotation. Slice 34 owns the multi-generation trust bundle +
+  zero-downtime rotation.
+- Slice-21 config-hash gains a fourth segment (cluster CA cert PEM)
+  so CA changes force a cluster roll. Leaf cert renewal piggybacks on
+  slice 33's cert hot-reload — no restart.
+- New `crabka-operator ca-renewal-check` CLI subcommand + Helm-chart
+  CronJob with daily schedule (`0 2 * * *`).
+- Per-broker keystore is a single per-cluster Secret with `<id>.crt` +
+  `<id>.key` entries; broker container picks its own by node id at
+  mount time. Pruned on replica scale-down, appended on scale-up,
+  reused (never reissued) on steady-state reconciles.
+- 11 new operator unit tests (CA crd schema, cluster_ca module,
+  combined_config_hash) + 11 new integration tests across three
+  files (`reconcile_ca.rs`, `reconcile_inter_broker_mtls.rs`,
+  `ca_renewal_cronjob.rs`). 4 of the 7 planned `reconcile_ca` tests
+  landed; scale-up/down + chain-verify are deferred to a follow-up
+  due to the FIFO-mock harness's lack of stateful Secret simulation.
+- Helm chart additions: `cronjob-ca-renewal.yaml`,
+  `serviceaccount-renewal.yaml`, `clusterrole-renewal.yaml`,
+  `clusterrolebinding-renewal.yaml`, plus `caRenewal.*` values stanza.
+  kind-e2e workflow asserts the new Secrets exist + the broker pod
+  mounts them at `/etc/crabka/{cluster-ca,broker-tls}`.
+- Out of scope: data-plane listener TLS (slice 31), non-disruptive CA
+  rotation (slice 34), PKCS#12 keystore output, MaintenanceTimeWindows.
+

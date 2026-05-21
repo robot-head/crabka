@@ -60,3 +60,16 @@ containerSecurityContext:
   readOnlyRootFilesystem: true
   capabilities:
     drop: [ALL]
+
+caRenewal:
+  enabled: true
+  schedule: "0 2 * * *"
+  startingDeadlineSeconds: 600
+  logFilter: "info,kube_client::client::builder=warn"
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi

@@ -302,13 +302,19 @@ pub async fn reconcile(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Action,
             let kafka_ref = kafka
                 .as_ref()
                 .expect("bootstrap presence implies Kafka resource is Some");
-            let ca = match user_tls::ensure_clients_ca(&secret_api, kafka_ref).await {
-                Ok(m) => m,
+            let ca_outcome = match crate::controller::cluster_ca::ensure_clients_ca(
+                &secret_api,
+                kafka_ref,
+            )
+            .await
+            {
+                Ok(o) => o,
                 Err(e) => {
                     tracing::warn!(error = %e, %cluster, "ensure_clients_ca failed");
                     return Ok(Action::requeue(Duration::from_secs(15)));
                 }
             };
+            let ca = ca_outcome.material;
             let cert_status =
                 match user_tls::ensure_user_cert_secret(&secret_api, &obj, &ca, tls_auth).await {
                     Ok(s) => s,

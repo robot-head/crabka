@@ -223,7 +223,10 @@ fn render_broker_container(
         "volumeMounts": [
             { "name": "data", "mountPath": "/var/lib/crabka/data" },
             { "name": "broker-config", "mountPath": "/etc/crabka/config", "readOnly": true },
-            { "name": "broker-runtime", "mountPath": "/run/crabka" }
+            { "name": "broker-runtime", "mountPath": "/run/crabka" },
+            { "name": "cluster-ca-cert", "mountPath": "/etc/crabka/cluster-ca", "readOnly": true },
+            { "name": "broker-tls", "mountPath": "/etc/crabka/broker-tls", "readOnly": true },
+            { "name": "clients-ca-cert", "mountPath": "/etc/crabka/clients-ca", "readOnly": true }
         ],
         "securityContext": {
             "allowPrivilegeEscalation": false,
@@ -255,12 +258,37 @@ fn render_storage(
     // assembly. The container runs `readOnlyRootFilesystem: true`, so
     // `mkdir /run/crabka` would fail without an explicit mount.
     let runtime_vol = json!({ "name": "broker-runtime", "emptyDir": {} });
+    // CA + broker keystore Secrets mounted read-only into broker pods.
+    let cluster_ca_cert_vol = json!({
+        "name": "cluster-ca-cert",
+        "secret": {
+            "secretName": format!("{parent_name}-cluster-ca-cert"),
+            "defaultMode": 0o400_i32,
+        }
+    });
+    let broker_tls_vol = json!({
+        "name": "broker-tls",
+        "secret": {
+            "secretName": format!("{parent_name}-kafka-brokers"),
+            "defaultMode": 0o400_i32,
+        }
+    });
+    let clients_ca_cert_vol = json!({
+        "name": "clients-ca-cert",
+        "secret": {
+            "secretName": format!("{parent_name}-clients-ca-cert"),
+            "defaultMode": 0o400_i32,
+        }
+    });
     match storage {
         None | Some(Storage::Ephemeral) => {
             let volumes = json!([
                 { "name": "data", "emptyDir": {} },
                 broker_config_vol,
                 runtime_vol,
+                cluster_ca_cert_vol,
+                broker_tls_vol,
+                clients_ca_cert_vol,
             ]);
             (volumes, None)
         }
@@ -280,7 +308,16 @@ fn render_storage(
             if let Some(class) = pc.class.as_ref() {
                 template["spec"]["storageClassName"] = serde_json::Value::String(class.clone());
             }
-            (json!([broker_config_vol, runtime_vol]), Some(template))
+            (
+                json!([
+                    broker_config_vol,
+                    runtime_vol,
+                    cluster_ca_cert_vol,
+                    broker_tls_vol,
+                    clients_ca_cert_vol,
+                ]),
+                Some(template),
+            )
         }
     }
 }
@@ -744,6 +781,8 @@ mod tests {
                 inter_broker_listener_name: None,
                 metrics_config: None,
                 network_policy: None,
+                cluster_ca: None,
+                clients_ca: None,
             },
         );
         k.metadata.namespace = Some("default".into());
@@ -1338,6 +1377,65 @@ mod tests {
         );
         assert!(s.contains("--config-file=/run/crabka/broker.toml"));
         assert!(s.ends_with('\n'));
+    }
+
+    #[test]
+    fn render_statefulset_mounts_cluster_ca_and_broker_tls_secrets() {
+        let parent = parent_fixture("mycluster");
+        let pool = pool_fixture("brokers", "mycluster", 1);
+        let ss = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE).expect("render");
+        let pod_spec = ss.spec.unwrap().template.spec.unwrap();
+        let mounts: Vec<&str> = pod_spec.containers[0]
+            .volume_mounts
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|m| m.mount_path.as_str())
+            .collect();
+        assert!(
+            mounts.contains(&"/etc/crabka/cluster-ca"),
+            "missing /etc/crabka/cluster-ca; got {mounts:?}"
+        );
+        assert!(
+            mounts.contains(&"/etc/crabka/broker-tls"),
+            "missing /etc/crabka/broker-tls; got {mounts:?}"
+        );
+        assert!(
+            mounts.contains(&"/etc/crabka/clients-ca"),
+            "missing /etc/crabka/clients-ca; got {mounts:?}"
+        );
+    }
+
+    #[test]
+    fn render_statefulset_volume_secret_names_match_cluster() {
+        let parent = parent_fixture("mycluster");
+        let pool = pool_fixture("brokers", "mycluster", 1);
+        let cluster = parent.metadata.name.clone().unwrap();
+        let ss = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE).expect("render");
+        let volumes = ss
+            .spec
+            .unwrap()
+            .template
+            .spec
+            .unwrap()
+            .volumes
+            .unwrap_or_default();
+        let names: Vec<String> = volumes
+            .iter()
+            .filter_map(|v| v.secret.as_ref().and_then(|s| s.secret_name.clone()))
+            .collect();
+        assert!(
+            names.contains(&format!("{cluster}-cluster-ca-cert")),
+            "missing {cluster}-cluster-ca-cert; got {names:?}"
+        );
+        assert!(
+            names.contains(&format!("{cluster}-kafka-brokers")),
+            "missing {cluster}-kafka-brokers; got {names:?}"
+        );
+        assert!(
+            names.contains(&format!("{cluster}-clients-ca-cert")),
+            "missing {cluster}-clients-ca-cert; got {names:?}"
+        );
     }
 
     #[test]

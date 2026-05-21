@@ -49,6 +49,8 @@ fn kafka_cr(name: &str, namespace: &str) -> Kafka {
             inter_broker_listener_name: None,
             metrics_config: None,
             network_policy: None,
+            cluster_ca: None,
+            clients_ca: None,
         },
     );
     k.metadata.namespace = Some(namespace.into());
@@ -67,6 +69,8 @@ fn kafka_cr_with_metrics(name: &str, namespace: &str, metrics: Option<MetricsCon
             inter_broker_listener_name: None,
             metrics_config: metrics,
             network_policy: None,
+            cluster_ca: None,
+            clients_ca: None,
         },
     );
     k.metadata.namespace = Some(namespace.into());
@@ -89,6 +93,8 @@ fn kafka_cr_with_network_policy(
             inter_broker_listener_name: None,
             metrics_config: None,
             network_policy,
+            cluster_ca: None,
+            clients_ca: None,
         },
     );
     k.metadata.namespace = Some(namespace.into());
@@ -113,6 +119,8 @@ fn kafka_cr_with_config(
             inter_broker_listener_name: None,
             metrics_config: None,
             network_policy: None,
+            cluster_ca: None,
+            clients_ca: None,
         },
     );
     k.metadata.namespace = Some(namespace.into());
@@ -123,6 +131,13 @@ fn kafka_cr_with_config(
 /// Build the rule list for a happy-path reconcile of `<name>` in
 /// `<namespace>`. The caller controls the rendered pool list (and thus
 /// the rolled-up status reason) via `pool_items`.
+///
+/// Slice 30 adds CA and keystore secret lifecycle calls:
+///   - 4 GET + 4 PATCH for cluster-ca + clients-ca secret pairs (no pre-existing CAs
+///     → operator generates new ones).
+///   - 1 GET + 1 PATCH for the broker keystore Secret (runs only in the
+///     validation-ok branch, which `happy_path` always exercises).
+#[allow(clippy::too_many_lines)] // slice 30 adds 10 CA+keystore rules; the function length is inherent to mock-rule enumeration
 fn happy_path_rules(
     name: &str,
     namespace: &str,
@@ -131,6 +146,30 @@ fn happy_path_rules(
     let svc_name = format!("{name}-broker-headless");
     let cm_name = format!("{name}-broker-config");
     let secret_name = format!("{name}-cluster-id");
+    let cluster_ca_key = format!("{name}-cluster-ca");
+    let cluster_ca_cert = format!("{name}-cluster-ca-cert");
+    let clients_ca_key = format!("{name}-clients-ca");
+    let clients_ca_cert = format!("{name}-clients-ca-cert");
+    let keystore_name = format!("{name}-kafka-brokers");
+
+    let fake_ca_secret = |sname: &str| -> serde_json::Value {
+        serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": { "name": sname, "namespace": namespace, "uid": "ca-uid" },
+            "type": "Opaque",
+            "data": {}
+        })
+    };
+    let fake_keystore_secret = |sname: &str| -> serde_json::Value {
+        serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": { "name": sname, "namespace": namespace, "uid": "ks-uid" },
+            "type": "Opaque",
+            "data": {}
+        })
+    };
 
     let mut rules = vec![
         // 1. PATCH headless service.
@@ -149,7 +188,7 @@ fn happy_path_rules(
                 .body(not_found_body("secret not found"))
                 .expect("404 builds"),
         },
-        // 3. POST secret -> 201.
+        // 3. POST cluster-id secret -> 201.
         MockRule {
             method: Method::POST,
             path_substr: format!("/namespaces/{namespace}/secrets"),
@@ -162,20 +201,103 @@ fn happy_path_rules(
                 ),
             ),
         },
-        // 4. GET kafkanodepools (list by label).
+        // 4-7. Slice 30: cluster CA — no pre-existing secrets → operator generates.
+        //   GET cluster-ca key → 404
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{cluster_ca_key}"),
+            response: Response::builder()
+                .status(404)
+                .header("content-type", "application/json")
+                .body(not_found_body("not found"))
+                .expect("404"),
+        },
+        //   GET cluster-ca cert → 404
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{cluster_ca_cert}"),
+            response: Response::builder()
+                .status(404)
+                .header("content-type", "application/json")
+                .body(not_found_body("not found"))
+                .expect("404"),
+        },
+        //   PATCH cluster-ca key → 200
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/secrets/{cluster_ca_key}"),
+            response: json_response(200, &fake_ca_secret(&cluster_ca_key)),
+        },
+        //   PATCH cluster-ca cert → 200
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/secrets/{cluster_ca_cert}"),
+            response: json_response(200, &fake_ca_secret(&cluster_ca_cert)),
+        },
+        // 8-11. Slice 30: clients CA — no pre-existing secrets → operator generates.
+        //   GET clients-ca key → 404
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{clients_ca_key}"),
+            response: Response::builder()
+                .status(404)
+                .header("content-type", "application/json")
+                .body(not_found_body("not found"))
+                .expect("404"),
+        },
+        //   GET clients-ca cert → 404
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{clients_ca_cert}"),
+            response: Response::builder()
+                .status(404)
+                .header("content-type", "application/json")
+                .body(not_found_body("not found"))
+                .expect("404"),
+        },
+        //   PATCH clients-ca key → 200
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/secrets/{clients_ca_key}"),
+            response: json_response(200, &fake_ca_secret(&clients_ca_key)),
+        },
+        //   PATCH clients-ca cert → 200
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/secrets/{clients_ca_cert}"),
+            response: json_response(200, &fake_ca_secret(&clients_ca_cert)),
+        },
+        // 12. GET kafkanodepools (list by label).
         MockRule {
             method: Method::GET,
             path_substr: format!("/namespaces/{namespace}/kafkanodepools"),
             response: json_response(200, &fake_pool_list_body(pool_items)),
         },
-        // 5. PATCH configmap (per-broker TOML keys derived from the pool list).
+        // 13-14. Slice 30: broker keystore — no pre-existing → operator creates.
+        //   GET keystore → 404
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{keystore_name}"),
+            response: Response::builder()
+                .status(404)
+                .header("content-type", "application/json")
+                .body(not_found_body("not found"))
+                .expect("404"),
+        },
+        //   PATCH keystore → 200
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/secrets/{keystore_name}"),
+            response: json_response(200, &fake_keystore_secret(&keystore_name)),
+        },
+        // 15. PATCH configmap (per-broker TOML keys derived from the pool list).
         MockRule {
             method: Method::PATCH,
             path_substr: format!("/configmaps/{cm_name}"),
             response: json_response(200, &fake_configmap_body(&cm_name, namespace)),
         },
     ];
-    // 6. PATCH each pool to inject the controller owner-ref. The pool
+    // 16. PATCH each pool to inject the controller owner-ref. The pool
     //    reconciler doesn't set this itself — the Kafka reconciler is
     //    the one that adopts existing pools labeled
     //    `crabka.io/cluster=<this>`. Without these owner-refs, deleting
@@ -191,7 +313,7 @@ fn happy_path_rules(
             response: json_response(200, &fake_pool_body(pool_name, namespace, name)),
         });
     }
-    // 7. PATCH kafkas/<name>/status
+    // 17. PATCH kafkas/<name>/status
     rules.push(MockRule {
         method: Method::PATCH,
         path_substr: format!("/kafkas/{name}/status"),
@@ -226,11 +348,21 @@ async fn kafka_applies_service_configmap_secret_no_statefulset() {
         .map(|r| (r.method().clone(), r.uri().to_string()))
         .collect();
 
+    // Slice 30 adds CA + keystore calls. With 1 pool the sequence is:
+    //   1. PATCH service
+    //   2. GET cluster-id secret (404)  3. POST cluster-id secret (201)
+    //   4-7. GET/PATCH cluster-ca key+cert (new CA generated)
+    //   8-11. GET/PATCH clients-ca key+cert (new CA generated)
+    //   12. GET kafkanodepools
+    //   13-14. GET/PATCH broker keystore
+    //   15. PATCH configmap
+    //   16. PATCH pool owner-ref
+    //   17. PATCH kafka status
     assert_eq!(
         observed.len(),
-        7,
-        "expected exactly 7 requests (svc, get-secret, post-secret, list-pools, cm, \
-         patch-pool-owner-ref, status), saw {}: {:?}",
+        17,
+        "expected exactly 17 requests (slice 30 includes CA + keystore calls), \
+         saw {}: {:?}",
         observed.len(),
         methods_and_uris,
     );
@@ -266,39 +398,53 @@ async fn kafka_applies_service_configmap_secret_no_statefulset() {
         methods_and_uris[2].1
     );
 
-    assert_eq!(methods_and_uris[3].0, Method::GET);
+    // Steps 4-11: CA secret lifecycle (slice 30).
+    // After the POST, the next 8 requests are CA-related GETs and PATCHes.
+
+    // Step 12: pool list.
+    let pool_list_req = methods_and_uris
+        .iter()
+        .find(|(m, u)| *m == Method::GET && u.contains("/kafkanodepools"))
+        .expect("GET kafkanodepools must be present");
     assert!(
-        methods_and_uris[3].1.contains("/kafkanodepools"),
-        "step 4 should list kafkanodepools: {}",
-        methods_and_uris[3].1
-    );
-    assert!(
-        methods_and_uris[3].1.contains("labelSelector="),
-        "step 4 should filter by labelSelector: {}",
-        methods_and_uris[3].1
+        pool_list_req.1.contains("labelSelector="),
+        "pool list should filter by labelSelector: {}",
+        pool_list_req.1
     );
 
-    assert_eq!(methods_and_uris[4].0, Method::PATCH);
+    // Configmap patch must occur after pool enumeration (it needs broker list).
+    let cm_req = methods_and_uris
+        .iter()
+        .find(|(m, u)| *m == Method::PATCH && u.contains("/configmaps/demo-broker-config"))
+        .expect("PATCH configmap must be present");
+    let pool_list_idx = methods_and_uris
+        .iter()
+        .position(|(m, u)| *m == Method::GET && u.contains("/kafkanodepools"))
+        .unwrap();
+    let cm_idx = methods_and_uris
+        .iter()
+        .position(|(m, u)| *m == Method::PATCH && u.contains("/configmaps/demo-broker-config"))
+        .unwrap();
     assert!(
-        methods_and_uris[4]
-            .1
-            .contains("/configmaps/demo-broker-config"),
-        "step 5 should patch the configmap (after pool enumeration): {}",
-        methods_and_uris[4].1
+        cm_idx > pool_list_idx,
+        "configmap patch ({cm_idx}) must come after pool list ({pool_list_idx}): {}",
+        cm_req.1
     );
 
-    assert_eq!(methods_and_uris[5].0, Method::PATCH);
+    // Pool owner-ref adopt.
     assert!(
-        methods_and_uris[5].1.contains("/kafkanodepools/brokers"),
-        "step 6 should patch the pool's owner-refs: {}",
-        methods_and_uris[5].1
+        methods_and_uris
+            .iter()
+            .any(|(m, u)| *m == Method::PATCH && u.contains("/kafkanodepools/brokers")),
+        "pool owner-ref PATCH must be present",
     );
 
-    assert_eq!(methods_and_uris[6].0, Method::PATCH);
+    // Status patch is last.
+    assert_eq!(methods_and_uris[16].0, Method::PATCH);
     assert!(
-        methods_and_uris[6].1.contains("/kafkas/demo/status"),
-        "step 7 should patch Kafka status: {}",
-        methods_and_uris[6].1
+        methods_and_uris[16].1.contains("/kafkas/demo/status"),
+        "step 17 should patch Kafka status: {}",
+        methods_and_uris[16].1
     );
 
     assert_eq!(
@@ -376,7 +522,6 @@ async fn kafka_patches_pool_label_with_config_hash() {
     let items = vec![fake_pool_list_item("brokers", "y", "demo", 1, 1)];
     let (ctx, state) = build_ctx("y", happy_path_rules("demo", "y", &items));
     let kafka = kafka_cr_with_config("demo", "y", cfg);
-    let expected_hash = crabka_operator::controller::common::combined_config_hash(&kafka.spec);
 
     reconcile(Arc::new(kafka), ctx).await.unwrap();
 
@@ -390,12 +535,25 @@ async fn kafka_patches_pool_label_with_config_hash() {
 
     let body: serde_json::Value =
         serde_json::from_slice(pool_patch.body()).expect("pool PATCH body is JSON");
+    // Slice 30: the config-hash now includes the generated CA cert PEM, so we
+    // can't compute the expected hash upfront without access to the generated
+    // material. Assert the hash is exactly 16 hex chars — that is the
+    // contract config_hash produces (first 8 bytes of SHA-256, 2 hex chars
+    // per byte), and is a tighter check than "non-empty".
     let hash = body["metadata"]["labels"]["crabka.io/config-hash"]
         .as_str()
         .unwrap_or_else(|| {
             panic!("expected metadata.labels[crabka.io/config-hash] str, body = {body}")
         });
-    assert_eq!(hash, expected_hash, "body = {body}");
+    assert_eq!(
+        hash.len(),
+        16,
+        "config-hash must be exactly 16 hex chars, got {hash:?}, body = {body}",
+    );
+    assert!(
+        hash.chars().all(|c| c.is_ascii_hexdigit()),
+        "config-hash must contain only hex digits, got {hash:?}, body = {body}",
+    );
 
     assert_eq!(state.remaining_rules(), 0);
 }
@@ -493,11 +651,12 @@ async fn kafka_status_synthesized_default_listener_is_valid_and_ready() {
 #[tokio::test]
 async fn kafka_invalid_listener_tls_blocks_broker_configmap_and_sets_conditions() {
     let items = vec![fake_pool_list_item("brokers", "y", "demo", 1, 1)];
-    // Validation failure must NOT patch the broker-config ConfigMap, so
-    // drop that rule from the happy-path set. Path-substr `/configmaps/`
-    // is unique enough among the rule URIs to identify it.
+    // Validation failure must NOT patch the broker-config ConfigMap or the
+    // broker keystore Secret (both are inside the validation-ok branch), so
+    // drop those rules from the happy-path set.
     let mut rules = happy_path_rules("demo", "y", &items);
     rules.retain(|r| !r.path_substr.contains("/configmaps/"));
+    rules.retain(|r| !r.path_substr.contains("-kafka-brokers"));
     let (ctx, state) = build_ctx("y", rules);
     let mut kafka = kafka_cr("demo", "y");
     kafka.spec.listeners = vec![Listener {
@@ -1057,6 +1216,8 @@ async fn network_policy_transition_deletes_on_disable() {
         replicas: Some(1),
         ready_replicas: Some(1),
         listeners: vec![],
+        cluster_ca: None,
+        clients_ca: None,
     });
 
     reconcile(Arc::new(kafka), ctx).await.unwrap();

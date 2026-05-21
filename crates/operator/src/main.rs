@@ -16,12 +16,23 @@ enum Command {
     Run(RunArgs),
     /// Emit CRD YAML manifests to a directory.
     GenCrds { out_dir: std::path::PathBuf },
+    /// Slice 30: scan all (or one namespace's) Kafka CRs and reissue any
+    /// broker leaf certs within renewalDays of expiry. Designed to be
+    /// driven by the `CronJob` shipped in the operator Helm chart.
+    CaRenewalCheck(CaRenewalCheckArgs),
 }
 
 #[derive(Debug, clap::Args)]
 struct RunArgs {
     #[command(flatten)]
     config: OperatorConfig,
+}
+
+#[derive(Debug, clap::Args)]
+struct CaRenewalCheckArgs {
+    /// Run scoped to a single namespace. Default: cluster-scoped.
+    #[arg(long, env = "WATCH_NAMESPACE")]
+    namespace: Option<String>,
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -38,5 +49,43 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Command::Run(args) => run::run(args.config).await,
         Command::GenCrds { out_dir } => gen_crds::write_all(&out_dir),
+        Command::CaRenewalCheck(args) => {
+            tracing_subscriber::fmt::init();
+            let client = kube::Client::try_default().await?;
+            crabka_operator::controller::cluster_ca::run_renewal_check(
+                client,
+                args.namespace.as_deref(),
+            )
+            .await
+            .map_err(anyhow::Error::from)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn ca_renewal_check_parses() {
+        let cli = Cli::parse_from(["bin", "ca-renewal-check", "--namespace", "demo"]);
+        match cli.command {
+            Command::CaRenewalCheck(args) => {
+                assert_eq!(args.namespace.as_deref(), Some("demo"));
+            }
+            _ => panic!("expected CaRenewalCheck variant"),
+        }
+    }
+
+    #[test]
+    fn ca_renewal_check_parses_no_namespace() {
+        let cli = Cli::parse_from(["bin", "ca-renewal-check"]);
+        match cli.command {
+            Command::CaRenewalCheck(args) => {
+                assert!(args.namespace.is_none());
+            }
+            _ => panic!("expected CaRenewalCheck variant"),
+        }
     }
 }
