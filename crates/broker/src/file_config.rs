@@ -26,6 +26,34 @@ pub struct FileConfig {
     pub listeners: Vec<FileListener>,
     #[serde(default)]
     pub server_properties: std::collections::BTreeMap<String, String>,
+
+    /// Slice 30: controller listener security protocol. When `Some(Ssl)`
+    /// the controller listener terminates TLS using `tls_config`.
+    #[serde(default)]
+    pub controller_listener_protocol: Option<ListenerProtocol>,
+
+    /// Slice 30: TLS material for the controller listener (and any
+    /// listener whose `protocol` is TLS-bearing).
+    #[serde(default)]
+    pub tls_config: Option<FileTlsConfig>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct FileTlsConfig {
+    pub cert_path: std::path::PathBuf,
+    pub key_path: std::path::PathBuf,
+    #[serde(default)]
+    pub client_ca_path: Option<std::path::PathBuf>,
+    #[serde(default)]
+    pub client_auth: FileClientAuthMode,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+pub enum FileClientAuthMode {
+    #[default]
+    Disabled,
+    Optional,
+    Required,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -73,6 +101,27 @@ impl FileConfig {
             cfg.inter_broker_listener_name = name;
         }
         // `[server_properties]` is intentionally ignored in slice 25a.
+        if let Some(proto) = self.controller_listener_protocol
+            && cfg.controller_listener_protocol == defaults.controller_listener_protocol
+        {
+            cfg.controller_listener_protocol = proto;
+        }
+        if let Some(tls) = self.tls_config
+            && cfg.tls_config.is_none()
+        {
+            use crabka_security::{ClientAuthMode, TlsConfig as BrokerTlsConfig};
+            cfg.tls_config = Some(BrokerTlsConfig {
+                cert_chain_path: tls.cert_path,
+                private_key_path: tls.key_path,
+                trust_roots_path: None,
+                client_ca_path: tls.client_ca_path,
+                client_auth: match tls.client_auth {
+                    FileClientAuthMode::Disabled => ClientAuthMode::Disabled,
+                    FileClientAuthMode::Optional => ClientAuthMode::Optional,
+                    FileClientAuthMode::Required => ClientAuthMode::Required,
+                },
+            });
+        }
     }
 }
 
@@ -241,6 +290,66 @@ protocol = "Plaintext"
         file.apply_to(&mut cfg);
 
         assert_eq!(cfg.broker_id, 42);
+    }
+
+    #[test]
+    fn tls_keys_round_trip() {
+        let src = r#"
+controller_listener_protocol = "Ssl"
+
+[tls_config]
+cert_path = "/etc/crabka/broker-tls/0.crt"
+key_path  = "/etc/crabka/broker-tls/0.key"
+client_ca_path = "/etc/crabka/cluster-ca/ca.crt"
+client_auth = "Required"
+"#;
+        let cfg: FileConfig = toml::from_str(src).expect("parse TLS config");
+        assert_eq!(
+            cfg.controller_listener_protocol,
+            Some(ListenerProtocol::Ssl)
+        );
+        let tls = cfg.tls_config.expect("tls_config present");
+        assert_eq!(
+            tls.cert_path,
+            std::path::PathBuf::from("/etc/crabka/broker-tls/0.crt")
+        );
+        assert_eq!(tls.client_auth, FileClientAuthMode::Required);
+    }
+
+    #[test]
+    fn tls_keys_absent_round_trips() {
+        let src = r#"
+broker_id = 0
+[[listeners]]
+name = "PLAIN"
+bind_addr = "0.0.0.0:9092"
+advertised = "demo-0:9092"
+protocol = "Plaintext"
+"#;
+        let cfg: FileConfig = toml::from_str(src).expect("parse no-TLS");
+        assert_eq!(cfg.controller_listener_protocol, None);
+        assert!(cfg.tls_config.is_none());
+    }
+
+    #[test]
+    fn apply_to_propagates_tls_config() {
+        let src = r#"
+controller_listener_protocol = "Ssl"
+[tls_config]
+cert_path = "/c"
+key_path = "/k"
+client_ca_path = "/ca"
+client_auth = "Required"
+"#;
+        let file: FileConfig = toml::from_str(src).expect("parse");
+        let mut cfg = crate::config::BrokerConfig::default();
+        file.apply_to(&mut cfg);
+        assert_eq!(
+            cfg.controller_listener_protocol,
+            crabka_security::ListenerProtocol::Ssl
+        );
+        let tls = cfg.tls_config.expect("tls_config propagated");
+        assert_eq!(tls.cert_chain_path, std::path::PathBuf::from("/c"));
     }
 
     #[test]
