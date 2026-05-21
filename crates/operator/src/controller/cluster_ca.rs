@@ -23,7 +23,7 @@ use kube::{Resource, ResourceExt as _};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-use crate::controller::common::{FIELD_MANAGER, ReconcileError, owner_ref};
+use crate::controller::common::{FIELD_MANAGER, ReconcileError, owner_ref, read_pem_key};
 use crate::crd::{CertificateAuthority, Kafka};
 
 pub(crate) const CLUSTER_CA_KEY_SUFFIX: &str = "-cluster-ca";
@@ -66,6 +66,7 @@ pub(crate) enum CaAction {
     AdoptedByo,
 }
 
+#[derive(Debug, Clone)]
 pub(crate) struct CaOutcome {
     pub material: CaMaterial,
     #[allow(dead_code)]
@@ -97,11 +98,9 @@ impl WhichCa {
     }
 }
 
-fn read_pem_key(secret: &Secret, key: &str) -> Option<String> {
-    let data = secret.data.as_ref()?;
-    let bytes = &data.get(key)?.0;
-    String::from_utf8(bytes.clone()).ok()
-}
+const SECRET_TYPE_CA_KEY: &str = "ca-key";
+const SECRET_TYPE_CA_CERT: &str = "ca-cert";
+const SECRET_TYPE_BROKER_KEYSTORE: &str = "broker-keystore";
 
 pub(crate) fn cert_not_after(pem: &str) -> Result<OffsetDateTime, ReconcileError> {
     use rustls::pki_types::CertificateDer;
@@ -171,8 +170,20 @@ pub(crate) async fn ensure_ca(
         WhichCa::Clients => generate_clients_ca(&cn, CA_VALIDITY_DAYS)?,
     };
 
-    let key_secret = render_ca_secret(kafka, &key_name, "ca.key", &material.key_pem, "ca-key")?;
-    let cert_secret = render_ca_secret(kafka, &cert_name, "ca.crt", &material.cert_pem, "ca-cert")?;
+    let key_secret = render_ca_secret(
+        kafka,
+        &key_name,
+        "ca.key",
+        &material.key_pem,
+        SECRET_TYPE_CA_KEY,
+    )?;
+    let cert_secret = render_ca_secret(
+        kafka,
+        &cert_name,
+        "ca.crt",
+        &material.cert_pem,
+        SECRET_TYPE_CA_CERT,
+    )?;
     let params = PatchParams {
         field_manager: Some(FIELD_MANAGER.into()),
         force: true,
@@ -260,23 +271,48 @@ pub(crate) struct BrokerKeystoreStatus {
     pub pruned: Vec<i32>,
 }
 
-fn broker_sans(cluster: &str, namespace: &str, broker_id: i32) -> Vec<SubjectAltName> {
-    let pod = format!("{cluster}-broker-{broker_id}");
-    let pod_fqdn = format!("{pod}.{cluster}-broker.{namespace}.svc.cluster.local");
-    let headless = format!("{cluster}-broker.{namespace}.svc.cluster.local");
+/// Build the default SANs for a broker given its pool name, ordinal, namespace,
+/// and cluster name. Used by `renew_broker_leafs` when re-issuing from an
+/// x509-parsed CN/SAN, and can also serve as a reference implementation for
+/// the T8 reconciler wiring that passes `BrokerCertRequest` directly.
+///
+/// Real pod name follows `{cluster}-{pool_name}-{ordinal}` as rendered by
+/// `render_statefulset`; the headless service is `{cluster}-broker-headless`
+/// (see `render_service` in `common.rs`).
+#[allow(dead_code)] // used by T8 (kafka.rs reconciler wiring)
+pub(crate) fn broker_sans(
+    cluster: &str,
+    pool_name: &str,
+    ordinal: i32,
+    namespace: &str,
+) -> Vec<SubjectAltName> {
+    let pod = format!("{cluster}-{pool_name}-{ordinal}");
+    let headless_svc = format!("{cluster}-broker-headless");
+    let pod_fqdn = format!("{pod}.{headless_svc}.{namespace}.svc.cluster.local");
+    let headless_fqdn = format!("{headless_svc}.{namespace}.svc.cluster.local");
     vec![
         SubjectAltName::Dns(pod_fqdn),
         SubjectAltName::Dns(pod),
-        SubjectAltName::Dns(headless),
+        SubjectAltName::Dns(headless_fqdn),
         SubjectAltName::Ip(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
     ]
+}
+
+/// Per-broker cert request. Caller supplies the CN and SAN list that must match
+/// what peer brokers will actually dial (i.e., real pod FQDN derived from the
+/// `StatefulSet` name `{cluster}-{pool_name}` and ordinal).
+#[derive(Debug, Clone)]
+pub(crate) struct BrokerCertRequest {
+    pub broker_id: i32,
+    pub cn: String,
+    pub sans: Vec<SubjectAltName>,
 }
 
 #[allow(dead_code)]
 pub(crate) async fn ensure_broker_keystore(
     secret_api: &Api<Secret>,
     kafka: &Kafka,
-    broker_ids: &[i32],
+    requests: &[BrokerCertRequest],
     cluster_ca: &CaMaterial,
 ) -> Result<BrokerKeystoreStatus, ReconcileError> {
     let cluster = kafka.name_any();
@@ -298,20 +334,19 @@ pub(crate) async fn ensure_broker_keystore(
     let mut issued = Vec::new();
     let mut reused = Vec::new();
 
-    for &id in broker_ids {
+    for req in requests {
+        let id = req.broker_id;
         let crt_key = format!("{id}.crt");
         let key_key = format!("{id}.key");
         if data.contains_key(&crt_key) && data.contains_key(&key_key) {
             reused.push(id);
             continue;
         }
-        let cn = format!("{cluster}-broker-{id}");
-        let sans = broker_sans(&cluster, &namespace, id);
         let leaf = issue_broker_cert(
             &cluster_ca.cert_pem,
             &cluster_ca.key_pem,
-            &cn,
-            &sans,
+            &req.cn,
+            &req.sans,
             validity,
         )?;
         data.insert(crt_key, ByteString(leaf.cert_pem.into_bytes()));
@@ -319,9 +354,12 @@ pub(crate) async fn ensure_broker_keystore(
         issued.push(id);
     }
 
-    let want_keys: std::collections::HashSet<String> = broker_ids
+    let want_keys: std::collections::HashSet<String> = requests
         .iter()
-        .flat_map(|id| [format!("{id}.crt"), format!("{id}.key")])
+        .flat_map(|req| {
+            let id = req.broker_id;
+            [format!("{id}.crt"), format!("{id}.key")]
+        })
         .collect();
     let mut pruned_ids = std::collections::BTreeSet::new();
     data.retain(|k, _| {
@@ -339,7 +377,10 @@ pub(crate) async fn ensure_broker_keystore(
     let pruned: Vec<i32> = pruned_ids.into_iter().collect();
 
     let mut labels = BTreeMap::new();
-    labels.insert("crabka.io/secret-type".into(), "broker-keystore".into());
+    labels.insert(
+        "crabka.io/secret-type".into(),
+        SECRET_TYPE_BROKER_KEYSTORE.into(),
+    );
     labels.insert("crabka.io/cluster".into(), cluster.clone());
 
     let secret = Secret {
@@ -444,17 +485,15 @@ async fn renew_one(client: &kube::Client, kafka: &Kafka) -> Result<(), Reconcile
     )
     .await?;
 
-    if cluster_ca_spec.generate_certificate_authority {
-        renew_broker_leafs(
-            client,
-            kafka,
-            &cluster_ca,
-            cluster_ca_spec.renewal_days,
-            cluster_ca_spec.validity_days,
-            now,
-        )
-        .await?;
-    }
+    renew_broker_leafs(
+        client,
+        kafka,
+        &cluster_ca,
+        cluster_ca_spec.renewal_days,
+        cluster_ca_spec.validity_days,
+        now,
+    )
+    .await?;
     Ok(())
 }
 
@@ -467,14 +506,20 @@ async fn read_existing_ca(
         WhichCa::Cluster => (cluster_ca_key_name(cluster), cluster_ca_cert_name(cluster)),
         WhichCa::Clients => (clients_ca_key_name(cluster), clients_ca_cert_name(cluster)),
     };
-    let key_secret = secret_api
-        .get_opt(&key_name)
-        .await?
-        .ok_or_else(|| ReconcileError::CertParse(format!("Secret {key_name} missing")))?;
-    let cert_secret = secret_api
-        .get_opt(&cert_name)
-        .await?
-        .ok_or_else(|| ReconcileError::CertParse(format!("Secret {cert_name} missing")))?;
+    let key_secret =
+        secret_api
+            .get_opt(&key_name)
+            .await?
+            .ok_or_else(|| ReconcileError::CaSecretMissing {
+                name: key_name.clone(),
+            })?;
+    let cert_secret =
+        secret_api
+            .get_opt(&cert_name)
+            .await?
+            .ok_or_else(|| ReconcileError::CaSecretMissing {
+                name: cert_name.clone(),
+            })?;
     let key_pem = read_pem_key(&key_secret, "ca.key")
         .ok_or_else(|| ReconcileError::CertParse(format!("{key_name} ca.key unreadable")))?;
     let cert_pem = read_pem_key(&cert_secret, "ca.crt")
@@ -494,28 +539,149 @@ async fn flag_ca_if_expiring(
         return Ok(());
     }
     let ns = kafka.meta().namespace.clone().unwrap_or_default();
-    let reason = if spec.generate_certificate_authority {
-        "CaRotationRequired"
+    if spec.generate_certificate_authority {
+        // Operator-managed CA: emit a Warning event AND patch the status
+        // condition so controllers watching the CR can react.
+        let which_str = match which {
+            WhichCa::Cluster => "Cluster",
+            WhichCa::Clients => "Clients",
+        };
+        let reason = format!("{which_str}CaExpiringSoon");
+        let message = format!(
+            "CA {} is expiring within renewalDays; \
+             automatic rotation not yet implemented; \
+             replace the Secret pair manually if needed",
+            which.condition_name()
+        );
+        emit_event(
+            client,
+            &ns,
+            kafka,
+            "Warning",
+            "CaRotationRequired",
+            &message,
+        )
+        .await?;
+
+        // Patch the Kafka CR status with CaRotationRequired=True.
+        // Read existing conditions first so we don't wipe other condition types.
+        let kafka_api: Api<Kafka> = Api::namespaced(client.clone(), &ns);
+        let existing = kafka_api.get_status(&kafka.name_any()).await?;
+        let mut conditions: Vec<serde_json::Value> = existing
+            .status
+            .as_ref()
+            .map(|s| {
+                s.conditions
+                    .iter()
+                    .filter(|c| c.type_ != "CaRotationRequired")
+                    .map(|c| {
+                        serde_json::json!({
+                            "type": c.type_,
+                            "status": c.status,
+                            "reason": c.reason,
+                            "message": c.message,
+                            "lastTransitionTime": c.last_transition_time,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        conditions.push(serde_json::json!({
+            "type": "CaRotationRequired",
+            "status": "True",
+            "reason": reason,
+            "message": message,
+            "lastTransitionTime": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        }));
+        let patch = serde_json::json!({ "status": { "conditions": conditions } });
+        kafka_api
+            .patch_status(
+                &kafka.name_any(),
+                &PatchParams::default(),
+                &Patch::Merge(&patch),
+            )
+            .await?;
     } else {
-        "ByoCaExpiringSoon"
-    };
-    emit_event(
-        client,
-        &ns,
-        kafka,
-        "Warning",
-        reason,
-        &format!(
-            "CA {} is expiring within renewalDays; rotation is {}",
-            which.condition_name(),
-            if spec.generate_certificate_authority {
-                "deferred until slice 34"
-            } else {
-                "the cluster admin's responsibility (BYO)"
-            }
-        ),
-    )
-    .await
+        // BYO CA: event only, no status condition (spec: BYO emits only the Event).
+        emit_event(
+            client,
+            &ns,
+            kafka,
+            "Warning",
+            "ByoCaExpiringSoon",
+            &format!(
+                "CA {} is expiring within renewalDays; \
+                 rotation is the cluster admin's responsibility (BYO)",
+                which.condition_name()
+            ),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// Extract the CN (from the subject) and the SAN list (from the SAN extension)
+/// out of an existing broker leaf cert PEM. Used by `renew_broker_leafs` so the
+/// renewal `CronJob` preserves the exact identity originally issued by the reconciler
+/// rather than reconstructing it from scratch (which would be fragile w.r.t. pool
+/// names and ordinals the `CronJob` doesn't have access to).
+fn read_existing_cn_and_sans(
+    cert_pem: &str,
+) -> Result<(String, Vec<SubjectAltName>), ReconcileError> {
+    use rustls::pki_types::CertificateDer;
+    use rustls::pki_types::pem::PemObject;
+    use x509_parser::extensions::GeneralName;
+    use x509_parser::prelude::{FromDer, X509Certificate};
+
+    let der = CertificateDer::pem_slice_iter(cert_pem.as_bytes())
+        .next()
+        .ok_or_else(|| ReconcileError::CertParse("no PEM block in broker cert".into()))?
+        .map_err(|e| ReconcileError::CertParse(e.to_string()))?;
+    let (_, cert) = X509Certificate::from_der(der.as_ref())
+        .map_err(|e| ReconcileError::CertParse(e.to_string()))?;
+
+    // Extract CN from subject.
+    let cn = cert
+        .subject()
+        .iter_common_name()
+        .next()
+        .and_then(|attr| attr.as_str().ok())
+        .ok_or_else(|| ReconcileError::CertParse("broker cert has no CN in subject".into()))?
+        .to_string();
+
+    // Extract SANs from the SubjectAltName extension.
+    let sans: Vec<SubjectAltName> = cert
+        .subject_alternative_name()
+        .map_err(|e| ReconcileError::CertParse(e.to_string()))?
+        .map(|san_ext| {
+            san_ext
+                .value
+                .general_names
+                .iter()
+                .filter_map(|gn| match gn {
+                    GeneralName::DNSName(s) => Some(SubjectAltName::Dns(s.to_string())),
+                    GeneralName::IPAddress(bytes) => {
+                        // x509_parser gives raw bytes: 4 bytes = IPv4, 16 = IPv6.
+                        let bytes: &[u8] = bytes;
+                        match bytes.len() {
+                            4 => {
+                                let arr: [u8; 4] = bytes.try_into().ok()?;
+                                Some(SubjectAltName::Ip(IpAddr::V4(arr.into())))
+                            }
+                            16 => {
+                                let arr: [u8; 16] = bytes.try_into().ok()?;
+                                Some(SubjectAltName::Ip(IpAddr::V6(arr.into())))
+                            }
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok((cn, sans))
 }
 
 async fn renew_broker_leafs(
@@ -563,8 +729,18 @@ async fn renew_broker_leafs(
         if !renew_if_expiring(cert_pem, renewal_days, now)? {
             continue;
         }
-        let cn = format!("{cluster}-broker-{id}");
-        let sans = broker_sans(&cluster, &ns, id);
+        let (cn, sans) = match read_existing_cn_and_sans(cert_pem) {
+            Ok(pair) => pair,
+            Err(e) => {
+                tracing::warn!(
+                    cluster = %cluster,
+                    broker_id = id,
+                    error = %e,
+                    "ca-renewal-check: could not parse CN/SANs from existing broker cert; skipping renewal"
+                );
+                continue;
+            }
+        };
         let leaf = issue_broker_cert(
             &cluster_ca.cert_pem,
             &cluster_ca.key_pem,

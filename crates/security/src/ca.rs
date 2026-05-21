@@ -27,6 +27,7 @@ pub enum CaError {
 }
 
 /// Self-signed clients-CA material.
+#[derive(Debug, Clone)]
 pub struct CaMaterial {
     pub cert_pem: String,
     pub key_pem: String,

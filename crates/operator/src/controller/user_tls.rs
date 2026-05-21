@@ -1,7 +1,6 @@
 //! Slice 37: TLS-auth helpers for the `KafkaUser` reconciler.
 //!
 //! Owns:
-//! - the per-cluster clients CA (Secret bootstrap, lazy create),
 //! - per-user X.509 cert issuance + renewal,
 //! - the per-user TLS-credential Secret render.
 //!
@@ -19,7 +18,7 @@ use kube::{Resource, ResourceExt as _};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-use crate::controller::common::{FIELD_MANAGER, ReconcileError};
+use crate::controller::common::{FIELD_MANAGER, ReconcileError, read_pem_key};
 use crate::crd::KafkaUser;
 use crate::crd::user::TlsAuth;
 
@@ -103,12 +102,6 @@ pub(crate) fn is_cert_expiring_soon(
 fn format_rfc3339(t: OffsetDateTime) -> Result<String, ReconcileError> {
     t.format(&Rfc3339)
         .map_err(|e| ReconcileError::CertParse(format!("rfc3339 format: {e}")))
-}
-
-fn read_pem_key(secret: &Secret, key: &str) -> Option<String> {
-    let data = secret.data.as_ref()?;
-    let bs = data.get(key)?;
-    std::str::from_utf8(&bs.0).ok().map(str::to_string)
 }
 
 /// Parse `user.crt` PEM out of an existing user Secret and return

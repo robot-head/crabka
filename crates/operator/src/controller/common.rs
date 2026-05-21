@@ -59,9 +59,11 @@ pub enum ReconcileError {
         "BYO CA missing: {which} requires pre-existing Secret pair (generateCertificateAuthority=false)"
     )]
     ByoCaMissing { which: String },
-    #[allow(dead_code)]
+    #[allow(dead_code)] // reserved for T8/T10: surface BYO CA parse failures at reconcile time
     #[error("BYO CA malformed: {which}: {reason}")]
     ByoCaMalformed { which: String, reason: String },
+    #[error("CA Secret missing: {name}")]
+    CaSecretMissing { name: String },
 }
 
 /// Build a Kubernetes-style condition with `lastTransitionTime` set to
@@ -279,6 +281,14 @@ pub(crate) fn uuid_from_secret(secret: &Secret) -> Result<Uuid, ReconcileError> 
         .map_err(|e| ReconcileError::MalformedSecret(format!("clusterId not UTF-8: {e}")))?;
     Uuid::parse_str(s)
         .map_err(|e| ReconcileError::MalformedSecret(format!("clusterId not a UUID: {e}")))
+}
+
+/// Read a PEM string from a Secret's data field. Returns `None` if the key is
+/// absent, the data map is missing, or the bytes are not valid UTF-8.
+pub(crate) fn read_pem_key(secret: &Secret, key: &str) -> Option<String> {
+    let data = secret.data.as_ref()?;
+    let bytes = &data.get(key)?.0;
+    String::from_utf8(bytes.clone()).ok()
 }
 
 /// Get-or-create the cluster-id Secret. Returns the parsed UUID.
