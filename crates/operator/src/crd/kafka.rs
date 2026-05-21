@@ -52,6 +52,15 @@ pub struct KafkaSpec {
     /// controller pods.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network_policy: Option<crate::crd::NetworkPolicySpec>,
+    /// Slice 30: per-cluster CA used for inter-broker mTLS + broker certs.
+    /// Absent → fully-defaulted `CertificateAuthority` (operator-generated,
+    /// 365/30 days).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cluster_ca: Option<crate::crd::CertificateAuthority>,
+    /// Slice 30: per-cluster CA used to sign `KafkaUser` TLS certs (slice
+    /// 37). Absent → fully-defaulted `CertificateAuthority`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clients_ca: Option<crate::crd::CertificateAuthority>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
@@ -71,6 +80,10 @@ pub struct KafkaStatus {
     /// `ListenersReady=True`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub listeners: Vec<crate::crd::ListenerStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cluster_ca: Option<crate::crd::CertificateAuthorityStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clients_ca: Option<crate::crd::CertificateAuthorityStatus>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
@@ -115,6 +128,8 @@ mod tests {
                 inter_broker_listener_name: None,
                 metrics_config: None,
                 network_policy: None,
+                cluster_ca: None,
+                clients_ca: None,
             },
         );
         let json = serde_json::to_string(&k).unwrap();
@@ -137,6 +152,8 @@ mod tests {
                 inter_broker_listener_name: None,
                 metrics_config: None,
                 network_policy: None,
+                cluster_ca: None,
+                clients_ca: None,
             },
         );
         let j = serde_json::to_string(&k.spec).unwrap();
@@ -213,6 +230,8 @@ mod tests {
                     port: 9092,
                 }],
             }],
+            cluster_ca: None,
+            clients_ca: None,
         };
         let json = serde_json::to_string(&status).unwrap();
         assert!(json.contains("\"bootstrapServers\""), "got: {json}");
@@ -231,6 +250,8 @@ mod tests {
                 inter_broker_listener_name: None,
                 metrics_config: None,
                 network_policy: None,
+                cluster_ca: None,
+                clients_ca: None,
             },
         );
         let j = serde_json::to_string(&k.spec).unwrap();
@@ -242,5 +263,32 @@ mod tests {
         let json = r#"{"kafkaVersion":"0.1.1","networkPolicy":{}}"#;
         let spec: KafkaSpec = serde_json::from_str(json).unwrap();
         assert!(spec.network_policy.is_some(), "networkPolicy parsed");
+    }
+
+    #[test]
+    fn kafka_spec_parses_without_ca_fields() {
+        let v: KafkaSpec = serde_json::from_value(serde_json::json!({
+            "kafkaVersion": "3.7.0",
+        }))
+        .expect("parse minimal spec");
+        assert!(v.cluster_ca.is_none());
+        assert!(v.clients_ca.is_none());
+    }
+
+    #[test]
+    fn kafka_spec_parses_with_ca_fields() {
+        let v: KafkaSpec = serde_json::from_value(serde_json::json!({
+            "kafkaVersion": "3.7.0",
+            "clusterCa": { "validityDays": 30 },
+            "clientsCa": { "generateCertificateAuthority": false },
+        }))
+        .expect("parse with CAs");
+        assert_eq!(v.cluster_ca.as_ref().unwrap().validity_days, 30);
+        assert!(
+            !v.clients_ca
+                .as_ref()
+                .unwrap()
+                .generate_certificate_authority
+        );
     }
 }

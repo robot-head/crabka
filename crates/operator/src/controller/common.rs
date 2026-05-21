@@ -541,6 +541,8 @@ mod config_hash_tests {
             inter_broker_listener_name: None,
             metrics_config: None,
             network_policy: None,
+            cluster_ca: None,
+            clients_ca: None,
         };
         let h = combined_config_hash(&spec_a);
         let h_again = combined_config_hash(&spec_a);
@@ -579,6 +581,8 @@ mod config_hash_tests {
             inter_broker_listener_name: None,
             metrics_config: None,
             network_policy: None,
+            cluster_ca: None,
+            clients_ca: None,
         };
         let h_off = combined_config_hash(&spec_off);
 
@@ -624,6 +628,8 @@ mod config_hash_tests {
                 inter_broker_listener_name: None,
                 metrics_config: None,
                 network_policy: None,
+                cluster_ca: None,
+                clients_ca: None,
             },
         );
         k.meta_mut().namespace = Some("default".into());

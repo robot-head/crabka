@@ -49,6 +49,8 @@ fn kafka_cr(name: &str, namespace: &str) -> Kafka {
             inter_broker_listener_name: None,
             metrics_config: None,
             network_policy: None,
+            cluster_ca: None,
+            clients_ca: None,
         },
     );
     k.metadata.namespace = Some(namespace.into());
@@ -67,6 +69,8 @@ fn kafka_cr_with_metrics(name: &str, namespace: &str, metrics: Option<MetricsCon
             inter_broker_listener_name: None,
             metrics_config: metrics,
             network_policy: None,
+            cluster_ca: None,
+            clients_ca: None,
         },
     );
     k.metadata.namespace = Some(namespace.into());
@@ -89,6 +93,8 @@ fn kafka_cr_with_network_policy(
             inter_broker_listener_name: None,
             metrics_config: None,
             network_policy,
+            cluster_ca: None,
+            clients_ca: None,
         },
     );
     k.metadata.namespace = Some(namespace.into());
@@ -113,6 +119,8 @@ fn kafka_cr_with_config(
             inter_broker_listener_name: None,
             metrics_config: None,
             network_policy: None,
+            cluster_ca: None,
+            clients_ca: None,
         },
     );
     k.metadata.namespace = Some(namespace.into());
@@ -1057,6 +1065,8 @@ async fn network_policy_transition_deletes_on_disable() {
         replicas: Some(1),
         ready_replicas: Some(1),
         listeners: vec![],
+        cluster_ca: None,
+        clients_ca: None,
     });
 
     reconcile(Arc::new(kafka), ctx).await.unwrap();

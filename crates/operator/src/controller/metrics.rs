@@ -277,6 +277,8 @@ mod tests {
                 inter_broker_listener_name: None,
                 metrics_config: None,
                 network_policy: None,
+                cluster_ca: None,
+                clients_ca: None,
             },
         );
         k.metadata.namespace = Some("default".into());

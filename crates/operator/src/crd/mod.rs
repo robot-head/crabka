@@ -2,6 +2,7 @@
 //! single source of truth for both the runtime types and the generated
 //! CRD YAML manifest (see `gen_crds`).
 
+pub mod ca;
 pub mod kafka;
 pub mod kafka_node_pool;
 pub mod listener;
@@ -10,6 +11,7 @@ pub mod network_policy;
 pub mod topic;
 pub mod user;
 
+pub use ca::{CertificateAuthority, CertificateAuthorityStatus};
 pub use kafka::{Kafka, KafkaCondition, KafkaSpec, KafkaStatus};
 pub use kafka_node_pool::{
     KafkaNodePool, KafkaNodePoolSpec, KafkaNodePoolStatus, MetadataTemplate, NodeRole,
