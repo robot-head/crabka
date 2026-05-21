@@ -40,7 +40,8 @@ use crate::controller::listeners::{
 };
 use crate::controller::network_policy;
 use crate::crd::{
-    Kafka, KafkaNodePool, KafkaStatus, Listener, ListenerAddress, ListenerStatus, ListenerType,
+    Kafka, KafkaCondition, KafkaNodePool, KafkaStatus, Listener, ListenerAddress, ListenerStatus,
+    ListenerType,
 };
 
 /// Rolled-up view of a cluster's pools. Computed by
@@ -421,6 +422,30 @@ fn resolve_addresses_per_broker(
     Ok(out)
 }
 
+/// Read-modify-write the `Kafka` status conditions: fetch the current
+/// status, replace any existing condition with the same `type_` as
+/// `new_cond`, push `new_cond`, and patch. Preserves all other status
+/// fields (replicas, `cluster_ca`, etc.) so a BYO-CA early-return does
+/// not wipe conditions that were written by a previous reconcile pass.
+async fn patch_status_with_condition(
+    kafka_api: &Api<Kafka>,
+    name: &str,
+    new_cond: KafkaCondition,
+) -> Result<(), ReconcileError> {
+    let current = kafka_api.get_status(name).await?.status.unwrap_or_default();
+    let mut conditions: Vec<KafkaCondition> = current
+        .conditions
+        .into_iter()
+        .filter(|c| c.type_ != new_cond.type_)
+        .collect();
+    conditions.push(new_cond);
+    let status = KafkaStatus {
+        conditions,
+        ..current
+    };
+    patch_status::<Kafka, KafkaStatus>(kafka_api, name, status).await
+}
+
 #[allow(clippy::too_many_lines)] // linear pipeline; the three branches (invalid / pending / ready) need direct condition + status binding
 pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, ReconcileError> {
     let ns = obj.namespace().unwrap_or_else(|| "default".into());
@@ -477,13 +502,12 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
                     "ByoCaMissing",
                     "spec.clusterCa.generateCertificateAuthority=false but the CA Secret pair is absent",
                 );
-                // Patch minimal status and requeue.
+                // Read-modify-write: preserve any existing conditions (e.g.
+                // ListenersReady, NpReady) written by a prior reconcile pass.
+                // JSON Merge Patch on an array replaces the whole array, so we
+                // must fetch the current status and upsert rather than clobber.
                 let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), &ns);
-                let status = KafkaStatus {
-                    conditions: vec![cond],
-                    ..Default::default()
-                };
-                patch_status::<Kafka, KafkaStatus>(&kafka_api, &name, status).await?;
+                patch_status_with_condition(&kafka_api, &name, cond).await?;
                 return Ok(Action::requeue(Duration::from_mins(1)));
             }
             Err(e) => return Err(e),
@@ -498,12 +522,9 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
                     "ByoCaMissing",
                     "spec.clientsCa.generateCertificateAuthority=false but the CA Secret pair is absent",
                 );
+                // Read-modify-write: same reasoning as the cluster-CA arm above.
                 let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), &ns);
-                let status = KafkaStatus {
-                    conditions: vec![cond],
-                    ..Default::default()
-                };
-                patch_status::<Kafka, KafkaStatus>(&kafka_api, &name, status).await?;
+                patch_status_with_condition(&kafka_api, &name, cond).await?;
                 return Ok(Action::requeue(Duration::from_mins(1)));
             }
             Err(e) => return Err(e),
@@ -574,7 +595,9 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
                 }
             })
             .collect();
-        let _keystore_status = cluster_ca::ensure_broker_keystore(
+        // Slice 30: keystore status fields (issued/reused/pruned) are reserved
+        // for a future status surface; ignored for now.
+        cluster_ca::ensure_broker_keystore(
             &secret_api,
             &obj,
             &keystore_requests,

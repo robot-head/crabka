@@ -537,15 +537,22 @@ async fn kafka_patches_pool_label_with_config_hash() {
         serde_json::from_slice(pool_patch.body()).expect("pool PATCH body is JSON");
     // Slice 30: the config-hash now includes the generated CA cert PEM, so we
     // can't compute the expected hash upfront without access to the generated
-    // material. Assert the hash is present and non-empty.
+    // material. Assert the hash is exactly 16 hex chars — that is the
+    // contract config_hash produces (first 8 bytes of SHA-256, 2 hex chars
+    // per byte), and is a tighter check than "non-empty".
     let hash = body["metadata"]["labels"]["crabka.io/config-hash"]
         .as_str()
         .unwrap_or_else(|| {
             panic!("expected metadata.labels[crabka.io/config-hash] str, body = {body}")
         });
+    assert_eq!(
+        hash.len(),
+        16,
+        "config-hash must be exactly 16 hex chars, got {hash:?}, body = {body}",
+    );
     assert!(
-        !hash.is_empty(),
-        "config-hash must be non-empty, body = {body}"
+        hash.chars().all(|c| c.is_ascii_hexdigit()),
+        "config-hash must contain only hex digits, got {hash:?}, body = {body}",
     );
 
     assert_eq!(state.remaining_rules(), 0);
