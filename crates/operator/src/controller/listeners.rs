@@ -1030,6 +1030,26 @@ mod advertised_tests {
     }
 }
 
+/// Slice 30: inputs to render the broker config-file's TLS block for a
+/// single broker. The operator builds this once per reconcile and feeds
+/// it into every per-broker TOML — only the leaf cert paths differ per
+/// broker (the cert files are addressed by broker id inside the same
+/// mount).
+#[derive(Debug, Clone)]
+pub struct BrokerTlsRender {
+    /// e.g. `"Ssl"` or `"SaslSsl"`. Written as the
+    /// `controller_listener_protocol = "<v>"` line.
+    pub controller_listener_protocol: String,
+    /// Path to the broker's own cert (e.g. `/etc/crabka/broker-tls/0.crt`).
+    pub cert_path: String,
+    /// Path to the broker's own private key.
+    pub key_path: String,
+    /// Path to the cluster CA cert used to verify peer client certs.
+    pub client_ca_path: String,
+    /// `"Required"` for inter-broker mTLS.
+    pub client_auth: String,
+}
+
 /// Render the complete TOML for one broker (cluster-wide content +
 /// this broker's advertised addresses). Deterministic — same input
 /// always produces byte-identical output so the slice-21 config-hash
@@ -1041,6 +1061,7 @@ pub fn render_broker_toml(
     addresses_per_listener: &std::collections::BTreeMap<String, AdvertisedAddress>,
     inter_broker_listener_name: &str,
     server_properties: &std::collections::BTreeMap<String, String>,
+    tls: Option<&BrokerTlsRender>,
 ) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
@@ -1050,6 +1071,18 @@ pub fn render_broker_toml(
         out,
         "inter_broker_listener_name = \"{inter_broker_listener_name}\""
     );
+
+    // Emit top-level scalar TLS fields before any [[listeners]] blocks.
+    // TOML requires all top-level keys to appear before array-of-tables
+    // headers; a bare key after [[listeners]] would be parsed as belonging
+    // to that last array entry rather than the root table.
+    if let Some(tls) = tls {
+        let _ = writeln!(
+            out,
+            "controller_listener_protocol = \"{}\"",
+            tls.controller_listener_protocol
+        );
+    }
     out.push('\n');
 
     for l in listeners {
@@ -1070,6 +1103,15 @@ pub fn render_broker_toml(
         for (k, v) in server_properties {
             let _ = writeln!(out, "\"{k}\" = \"{v}\"");
         }
+        out.push('\n');
+    }
+
+    if let Some(tls) = tls {
+        let _ = writeln!(out, "[tls_config]");
+        let _ = writeln!(out, "cert_path = \"{}\"", tls.cert_path);
+        let _ = writeln!(out, "key_path = \"{}\"", tls.key_path);
+        let _ = writeln!(out, "client_ca_path = \"{}\"", tls.client_ca_path);
+        let _ = writeln!(out, "client_auth = \"{}\"", tls.client_auth);
     }
 
     out
@@ -1107,7 +1149,7 @@ mod toml_rendering_tests {
         );
         let listeners = vec![synthesized_default_listener()];
         let props = std::collections::BTreeMap::new();
-        let toml_str = render_broker_toml(0, &listeners, &addrs, "PLAIN", &props);
+        let toml_str = render_broker_toml(0, &listeners, &addrs, "PLAIN", &props, None);
 
         // Sanity: parses cleanly with the broker's FileConfig.
         let parsed: crabka_broker::file_config::FileConfig =
@@ -1133,8 +1175,8 @@ mod toml_rendering_tests {
         p.insert("z.last".into(), "1".into());
         p.insert("a.first".into(), "0".into());
 
-        let t1 = render_broker_toml(0, &l, &addrs, "PLAIN", &p);
-        let t2 = render_broker_toml(0, &l, &addrs, "PLAIN", &p);
+        let t1 = render_broker_toml(0, &l, &addrs, "PLAIN", &p, None);
+        let t2 = render_broker_toml(0, &l, &addrs, "PLAIN", &p, None);
         assert_eq!(t1, t2);
         // Sorted property keys (BTreeMap iteration).
         let a_pos = t1.find("a.first").unwrap();
@@ -1158,8 +1200,60 @@ mod toml_rendering_tests {
             &addrs,
             "PLAIN",
             &std::collections::BTreeMap::new(),
+            None,
         );
         assert!(!t.contains("[server_properties]"), "got:\n{t}");
+    }
+
+    #[test]
+    fn render_with_tls_block_round_trips_with_broker_fileconfig() {
+        let mut addrs = std::collections::BTreeMap::new();
+        addrs.insert(
+            "PLAIN".into(),
+            AdvertisedAddress {
+                host: "demo-0.svc.local".into(),
+                port: 9092,
+            },
+        );
+        let listeners = vec![synthesized_default_listener()];
+        let props = std::collections::BTreeMap::new();
+        let tls = BrokerTlsRender {
+            controller_listener_protocol: "Ssl".into(),
+            cert_path: "/etc/crabka/broker-tls/0.crt".into(),
+            key_path: "/etc/crabka/broker-tls/0.key".into(),
+            client_ca_path: "/etc/crabka/cluster-ca/ca.crt".into(),
+            client_auth: "Required".into(),
+        };
+        let toml_str = render_broker_toml(0, &listeners, &addrs, "PLAIN", &props, Some(&tls));
+
+        let parsed: crabka_broker::file_config::FileConfig =
+            toml::from_str(&toml_str).expect("rendered TOML must parse with broker FileConfig");
+        assert_eq!(
+            parsed.controller_listener_protocol,
+            Some(crabka_security::ListenerProtocol::Ssl)
+        );
+        let parsed_tls = parsed.tls_config.expect("tls_config emitted");
+        assert_eq!(
+            parsed_tls.cert_path,
+            std::path::PathBuf::from("/etc/crabka/broker-tls/0.crt")
+        );
+    }
+
+    #[test]
+    fn render_without_tls_omits_tls_block() {
+        let mut addrs = std::collections::BTreeMap::new();
+        addrs.insert(
+            "PLAIN".into(),
+            AdvertisedAddress {
+                host: "h".into(),
+                port: 9092,
+            },
+        );
+        let listeners = vec![synthesized_default_listener()];
+        let props = std::collections::BTreeMap::new();
+        let toml_str = render_broker_toml(0, &listeners, &addrs, "PLAIN", &props, None);
+        assert!(!toml_str.contains("[tls_config]"));
+        assert!(!toml_str.contains("controller_listener_protocol"));
     }
 }
 

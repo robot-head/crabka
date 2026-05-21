@@ -220,6 +220,7 @@ pub(crate) fn render_configmap(
             addrs,
             inter_broker_listener_name,
             &server_properties,
+            None, // T8 supplies BrokerTlsRender once cluster_ca lands in the pipeline
         );
         data.insert(format!("broker-{broker_id}.toml"), toml);
     }
