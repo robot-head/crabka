@@ -2,6 +2,7 @@
 //! submodule and shares helpers via `common` (cluster-level rendering,
 //! SSA helpers, label / owner-ref builders, status derivation).
 
+pub mod cluster_ca;
 pub mod common;
 pub mod kafka;
 pub mod kafka_node_pool;

@@ -55,6 +55,13 @@ pub enum ReconcileError {
     Ca(#[from] crabka_security::ca::CaError),
     #[error("cert parse: {0}")]
     CertParse(String),
+    #[error(
+        "BYO CA missing: {which} requires pre-existing Secret pair (generateCertificateAuthority=false)"
+    )]
+    ByoCaMissing { which: String },
+    #[allow(dead_code)]
+    #[error("BYO CA malformed: {which}: {reason}")]
+    ByoCaMalformed { which: String, reason: String },
 }
 
 /// Build a Kubernetes-style condition with `lastTransitionTime` set to
