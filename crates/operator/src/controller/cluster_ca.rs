@@ -32,8 +32,6 @@ pub(crate) const CLIENTS_CA_KEY_SUFFIX: &str = "-clients-ca";
 pub(crate) const CLIENTS_CA_CERT_SUFFIX: &str = "-clients-ca-cert";
 pub(crate) const BROKER_KEYSTORE_SUFFIX: &str = "-kafka-brokers";
 
-const CA_VALIDITY_DAYS: u32 = 10 * 365;
-
 #[must_use]
 pub(crate) fn cluster_ca_key_name(cluster: &str) -> String {
     format!("{cluster}{CLUSTER_CA_KEY_SUFFIX}")
@@ -71,9 +69,7 @@ pub(crate) struct CaOutcome {
     pub material: CaMaterial,
     #[allow(dead_code)]
     pub action: CaAction,
-    #[allow(dead_code)]
     pub not_after: String,
-    #[allow(dead_code)]
     pub generated: bool,
 }
 
@@ -166,8 +162,8 @@ pub(crate) async fn ensure_ca(
 
     let cn = format!("{cluster}{}", which.cn_suffix());
     let material = match which {
-        WhichCa::Cluster => generate_cluster_ca(&cn, CA_VALIDITY_DAYS)?,
-        WhichCa::Clients => generate_clients_ca(&cn, CA_VALIDITY_DAYS)?,
+        WhichCa::Cluster => generate_cluster_ca(&cn, spec.validity_days)?,
+        WhichCa::Clients => generate_clients_ca(&cn, spec.validity_days)?,
     };
 
     let key_secret = render_ca_secret(
@@ -242,7 +238,6 @@ fn render_ca_secret(
 // Public ensure_cluster_ca + ensure_clients_ca
 // ---------------------------------------------------------------------------
 
-#[allow(dead_code)]
 pub(crate) async fn ensure_cluster_ca(
     secret_api: &Api<Secret>,
     kafka: &Kafka,
@@ -269,33 +264,6 @@ pub(crate) struct BrokerKeystoreStatus {
     pub issued: Vec<i32>,
     pub reused: Vec<i32>,
     pub pruned: Vec<i32>,
-}
-
-/// Build the default SANs for a broker given its pool name, ordinal, namespace,
-/// and cluster name. Used by `renew_broker_leafs` when re-issuing from an
-/// x509-parsed CN/SAN, and can also serve as a reference implementation for
-/// the T8 reconciler wiring that passes `BrokerCertRequest` directly.
-///
-/// Real pod name follows `{cluster}-{pool_name}-{ordinal}` as rendered by
-/// `render_statefulset`; the headless service is `{cluster}-broker-headless`
-/// (see `render_service` in `common.rs`).
-#[allow(dead_code)] // used by T8 (kafka.rs reconciler wiring)
-pub(crate) fn broker_sans(
-    cluster: &str,
-    pool_name: &str,
-    ordinal: i32,
-    namespace: &str,
-) -> Vec<SubjectAltName> {
-    let pod = format!("{cluster}-{pool_name}-{ordinal}");
-    let headless_svc = format!("{cluster}-broker-headless");
-    let pod_fqdn = format!("{pod}.{headless_svc}.{namespace}.svc.cluster.local");
-    let headless_fqdn = format!("{headless_svc}.{namespace}.svc.cluster.local");
-    vec![
-        SubjectAltName::Dns(pod_fqdn),
-        SubjectAltName::Dns(pod),
-        SubjectAltName::Dns(headless_fqdn),
-        SubjectAltName::Ip(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
-    ]
 }
 
 /// Per-broker cert request. Caller supplies the CN and SAN list that must match
@@ -827,7 +795,31 @@ async fn emit_event(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crabka_security::ca::{generate_clients_ca, issue_user_cert};
+    use crabka_security::ca::{generate_clients_ca, generate_cluster_ca, issue_user_cert};
+
+    /// A CA generated with `validity_days = 30` must have `notAfter` within
+    /// [29, 31] days of now (allowing for a second of clock skew in CI).
+    #[test]
+    fn ca_validity_days_is_honored() {
+        use rustls::pki_types::CertificateDer;
+        use rustls::pki_types::pem::PemObject;
+        use x509_parser::prelude::{FromDer, X509Certificate};
+
+        let ca = generate_cluster_ca("test-cluster-ca", 30).expect("CA");
+        let der = CertificateDer::pem_slice_iter(ca.cert_pem.as_bytes())
+            .next()
+            .expect("PEM block")
+            .expect("valid PEM");
+        let (_, cert) = X509Certificate::from_der(der.as_ref()).expect("valid DER");
+        let not_after = OffsetDateTime::from_unix_timestamp(cert.validity().not_after.timestamp())
+            .expect("valid timestamp");
+        let now = OffsetDateTime::now_utc();
+        let days_remaining = (not_after - now).whole_days();
+        assert!(
+            (29..=31).contains(&days_remaining),
+            "expected ~30 days remaining, got {days_remaining}"
+        );
+    }
 
     #[test]
     fn renews_when_within_window() {
