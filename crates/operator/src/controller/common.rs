@@ -207,6 +207,9 @@ pub(crate) fn render_configmap(
         std::collections::BTreeMap<String, crate::controller::listeners::AdvertisedAddress>,
     >,
     inter_broker_listener_name: &str,
+    tls_per_broker: Option<
+        &std::collections::BTreeMap<i32, crate::controller::listeners::BrokerTlsRender>,
+    >,
 ) -> Result<ConfigMap, ReconcileError> {
     let name = owner.meta().name.clone().unwrap_or_default();
     let labels = common_labels(&name, &owner.spec.kafka_version, None);
@@ -214,13 +217,14 @@ pub(crate) fn render_configmap(
     let mut data = BTreeMap::new();
     let server_properties = owner.spec.config.clone().unwrap_or_default();
     for (broker_id, addrs) in addresses_per_broker {
+        let tls_for_broker = tls_per_broker.and_then(|m| m.get(broker_id));
         let toml = crate::controller::listeners::render_broker_toml(
             *broker_id,
             listeners,
             addrs,
             inter_broker_listener_name,
             &server_properties,
-            None, // T8 supplies BrokerTlsRender once cluster_ca lands in the pipeline
+            tls_for_broker,
         );
         data.insert(format!("broker-{broker_id}.toml"), toml);
     }
@@ -733,7 +737,7 @@ mod config_hash_tests {
         per_broker.insert(0i32, addrs0);
         per_broker.insert(1i32, addrs1);
 
-        let cm = render_configmap(&k, &listeners, &per_broker, "PLAIN").unwrap();
+        let cm = render_configmap(&k, &listeners, &per_broker, "PLAIN", None).unwrap();
         let data = cm.data.unwrap();
         assert!(data.contains_key("broker-0.toml"));
         assert!(data.contains_key("broker-1.toml"));

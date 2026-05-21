@@ -28,6 +28,7 @@ use kube::{Resource, ResourceExt as _};
 use serde_json::json;
 
 use crate::context::Context;
+use crate::controller::cluster_ca;
 use crate::controller::common::{
     self, FIELD_MANAGER, ReconcileError, apply_object, condition, ensure_cluster_id_secret,
     owner_ref, patch_status, render_service,
@@ -458,21 +459,72 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
 
     let cm_api: Api<ConfigMap> = Api::namespaced(ctx.client.clone(), &ns);
 
-    // Helper to render+apply a ConfigMap with the supplied address map.
-    // Reused on the validation-fail / pending-external paths (empty map)
-    // and the happy path (full map).
-    let apply_cm = async |listeners_for_cm: &[Listener],
-                          addresses: &BTreeMap<i32, BTreeMap<String, AdvertisedAddress>>|
-           -> Result<(), ReconcileError> {
-        let cm = common::render_configmap(&obj, listeners_for_cm, addresses, &inter_broker_name)?;
-        apply_object(&cm_api, &cm_name(&name), &cm).await?;
-        Ok(())
-    };
-
-    let cfg_hash = common::combined_config_hash(&obj.spec, None);
-
     let secret_api: Api<Secret> = Api::namespaced(ctx.client.clone(), &ns);
     let _cluster_id = ensure_cluster_id_secret(&secret_api, &obj).await?;
+
+    // Slice 30: Ensure cluster CA + clients CA. On BYO-missing, surface
+    // a False condition and requeue rather than crashing. Both CAs must
+    // succeed before we proceed; a failure here skips the ConfigMap and
+    // keystore steps (they depend on the CA material).
+    let (cluster_ca_outcome, clients_ca_outcome, cluster_ca_cond, clients_ca_cond) = {
+        let cluster_result = cluster_ca::ensure_cluster_ca(&secret_api, &obj).await;
+        let cluster_outcome = match cluster_result {
+            Ok(o) => o,
+            Err(ReconcileError::ByoCaMissing { ref which }) => {
+                let cond = condition(
+                    which,
+                    "False",
+                    "ByoCaMissing",
+                    "spec.clusterCa.generateCertificateAuthority=false but the CA Secret pair is absent",
+                );
+                // Patch minimal status and requeue.
+                let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), &ns);
+                let status = KafkaStatus {
+                    conditions: vec![cond],
+                    ..Default::default()
+                };
+                patch_status::<Kafka, KafkaStatus>(&kafka_api, &name, status).await?;
+                return Ok(Action::requeue(Duration::from_mins(1)));
+            }
+            Err(e) => return Err(e),
+        };
+        let clients_result = cluster_ca::ensure_clients_ca(&secret_api, &obj).await;
+        let clients_outcome = match clients_result {
+            Ok(o) => o,
+            Err(ReconcileError::ByoCaMissing { ref which }) => {
+                let cond = condition(
+                    which,
+                    "False",
+                    "ByoCaMissing",
+                    "spec.clientsCa.generateCertificateAuthority=false but the CA Secret pair is absent",
+                );
+                let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), &ns);
+                let status = KafkaStatus {
+                    conditions: vec![cond],
+                    ..Default::default()
+                };
+                patch_status::<Kafka, KafkaStatus>(&kafka_api, &name, status).await?;
+                return Ok(Action::requeue(Duration::from_mins(1)));
+            }
+            Err(e) => return Err(e),
+        };
+        let cc = condition(
+            "ClusterCaReady",
+            "True",
+            "CaReady",
+            "cluster CA Secret pair present and parseable",
+        );
+        let clic = condition(
+            "ClientsCaReady",
+            "True",
+            "CaReady",
+            "clients CA Secret pair present and parseable",
+        );
+        (cluster_outcome, clients_outcome, cc, clic)
+    };
+
+    let cfg_hash =
+        common::combined_config_hash(&obj.spec, Some(&cluster_ca_outcome.material.cert_pem));
 
     let pool_api: Api<KafkaNodePool> = Api::namespaced(ctx.client.clone(), &ns);
     let lp = ListParams::default().labels(&format!("crabka.io/cluster={name}"));
@@ -498,6 +550,74 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
         // but listeners are still "valid" (just no consumers yet).
         let pool_items: Vec<KafkaNodePool> = pools.items.clone();
         let brokers = enumerate_brokers(&name, &ns, &pool_items);
+
+        // Slice 30: issue per-broker leaf certs into the broker-keystore Secret.
+        let keystore_requests: Vec<cluster_ca::BrokerCertRequest> = brokers
+            .iter()
+            .map(|b| {
+                let id = b.broker_id;
+                let cn = b.pod_name.clone();
+                let sans = vec![
+                    crabka_security::ca::SubjectAltName::Dns(b.pod_fqdn.clone()),
+                    crabka_security::ca::SubjectAltName::Dns(b.pod_name.clone()),
+                    crabka_security::ca::SubjectAltName::Dns(format!(
+                        "{name}-broker-headless.{ns}.svc.cluster.local"
+                    )),
+                    crabka_security::ca::SubjectAltName::Ip(std::net::IpAddr::V4(
+                        std::net::Ipv4Addr::LOCALHOST,
+                    )),
+                ];
+                cluster_ca::BrokerCertRequest {
+                    broker_id: id,
+                    cn,
+                    sans,
+                }
+            })
+            .collect();
+        let _keystore_status = cluster_ca::ensure_broker_keystore(
+            &secret_api,
+            &obj,
+            &keystore_requests,
+            &cluster_ca_outcome.material,
+        )
+        .await?;
+
+        // Slice 30: build per-broker TLS render map (paths inside the
+        // mounted broker-tls volume).
+        let tls_per_broker: std::collections::BTreeMap<i32, listeners::BrokerTlsRender> = brokers
+            .iter()
+            .map(|b| {
+                let id = b.broker_id;
+                (
+                    id,
+                    listeners::BrokerTlsRender {
+                        controller_listener_protocol: "Ssl".into(),
+                        cert_path: format!("/etc/crabka/broker-tls/{id}.crt"),
+                        key_path: format!("/etc/crabka/broker-tls/{id}.key"),
+                        client_ca_path: "/etc/crabka/cluster-ca/ca.crt".into(),
+                        client_auth: "Required".into(),
+                    },
+                )
+            })
+            .collect();
+
+        // Helper to render+apply a ConfigMap with the supplied address map.
+        // Defined here (inside the validation-ok branch) so it can capture
+        // `tls_per_broker`. On the validation-fail path there is no `apply_cm`
+        // call, so we don't need it there.
+        let apply_cm = async |listeners_for_cm: &[Listener],
+                              addresses: &BTreeMap<i32, BTreeMap<String, AdvertisedAddress>>|
+               -> Result<(), ReconcileError> {
+            let cm = common::render_configmap(
+                &obj,
+                listeners_for_cm,
+                addresses,
+                &inter_broker_name,
+                Some(&tls_per_broker),
+            )?;
+            apply_object(&cm_api, &cm_name(&name), &cm).await?;
+            Ok(())
+        };
 
         // Optimization: when `spec.listeners` is empty, the synthesized
         // default is internal-only — `compute_advertised` for internal
@@ -660,12 +780,20 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
             listeners_ready_cond,
             metrics_condition,
             np_condition,
+            cluster_ca_cond,
+            clients_ca_cond,
         ],
         replicas: Some(rollup.replicas),
         ready_replicas: Some(rollup.ready_replicas),
         listeners: listener_status,
-        cluster_ca: None,
-        clients_ca: None,
+        cluster_ca: Some(crate::crd::CertificateAuthorityStatus {
+            not_after: cluster_ca_outcome.not_after.clone(),
+            generated: cluster_ca_outcome.generated,
+        }),
+        clients_ca: Some(crate::crd::CertificateAuthorityStatus {
+            not_after: clients_ca_outcome.not_after.clone(),
+            generated: clients_ca_outcome.generated,
+        }),
     };
     let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), &ns);
     patch_status::<Kafka, KafkaStatus>(&kafka_api, &name, status).await?;
