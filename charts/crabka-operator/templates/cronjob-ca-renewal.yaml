@@ -1,0 +1,35 @@
+{{- if .Values.caRenewal.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "crabka-operator.fullname" . }}-ca-renewal
+  labels: {{- include "crabka-operator.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.caRenewal.schedule | quote }}
+  startingDeadlineSeconds: {{ .Values.caRenewal.startingDeadlineSeconds }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        metadata:
+          labels: {{- include "crabka-operator.selectorLabels" . | nindent 12 }}
+        spec:
+          serviceAccountName: {{ include "crabka-operator.fullname" . }}-ca-renewal
+          restartPolicy: Never
+          containers:
+            - name: ca-renewal-check
+              image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              args: ["ca-renewal-check"]
+              env:
+                - name: RUST_LOG
+                  value: {{ .Values.caRenewal.logFilter | quote }}
+                - name: POD_NAME
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.name
+              resources: {{- toYaml .Values.caRenewal.resources | nindent 16 }}
+{{- end }}

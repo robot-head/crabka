@@ -230,6 +230,11 @@ jobs:
           kubectl logs -n default demo-brokers-0 -c broker --tail=200 || true
           exit 1
 
+      - name: Assert CA + broker keystore Secrets exist
+        run: |
+          kubectl get secret demo-cluster-ca-cert demo-clients-ca-cert demo-kafka-brokers -n default
+          kubectl exec -n default demo-brokers-0 -c broker -- ls /etc/crabka/cluster-ca /etc/crabka/broker-tls
+
       - name: Smoke — broker binary launched in pod
         run: |
           kubectl exec -n default demo-brokers-0 -c broker -- /usr/bin/crabka-broker --version

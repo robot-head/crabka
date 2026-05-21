@@ -1,0 +1,17 @@
+{{- if and .Values.caRenewal.enabled .Values.rbac.create -}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "crabka-operator.fullname" . }}-ca-renewal
+  labels: {{- include "crabka-operator.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["crabka.io"]
+    resources: ["kafkas", "kafkas/status"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+{{- end }}
