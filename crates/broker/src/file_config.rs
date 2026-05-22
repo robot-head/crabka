@@ -51,20 +51,9 @@ pub struct FileTlsConfig {
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
 pub enum FileClientAuthMode {
     #[default]
-    #[serde(alias = "None")]
     Disabled,
     Optional,
     Required,
-}
-
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
-pub struct FileListenerTlsConfig {
-    pub cert_path: std::path::PathBuf,
-    pub key_path: std::path::PathBuf,
-    #[serde(default)]
-    pub client_ca_path: Option<std::path::PathBuf>,
-    #[serde(default)]
-    pub client_auth: FileClientAuthMode,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -97,7 +86,7 @@ pub struct FileListener {
     pub advertised: String,
     pub protocol: ListenerProtocol,
     #[serde(default)]
-    pub tls_config: Option<FileListenerTlsConfig>,
+    pub tls_config: Option<FileTlsConfig>,
     #[serde(default)]
     pub sasl_config: Option<FileListenerSaslConfig>,
 }
@@ -172,21 +161,18 @@ impl FileListener {
             bind_addr: self.bind_addr,
             advertised: self.advertised,
             protocol: self.protocol,
-            tls_config: self.tls_config.as_ref().map(|t| BrokerTlsConfig {
-                cert_chain_path: t.cert_path.clone(),
-                private_key_path: t.key_path.clone(),
+            tls_config: self.tls_config.map(|t| BrokerTlsConfig {
+                cert_chain_path: t.cert_path,
+                private_key_path: t.key_path,
                 trust_roots_path: None,
-                client_ca_path: t.client_ca_path.clone(),
+                client_ca_path: t.client_ca_path,
                 client_auth: match t.client_auth {
                     FileClientAuthMode::Disabled => ClientAuthMode::Disabled,
                     FileClientAuthMode::Optional => ClientAuthMode::Optional,
                     FileClientAuthMode::Required => ClientAuthMode::Required,
                 },
             }),
-            sasl_mechanisms: self
-                .sasl_config
-                .as_ref()
-                .map(|s| s.enabled_mechanisms.clone()),
+            sasl_mechanisms: self.sasl_config.map(|s| s.enabled_mechanisms),
         }
     }
 }
@@ -246,7 +232,7 @@ name = "scram"
 bind_addr = "0.0.0.0:9094"
 advertised = "localhost:9094"
 protocol = "SaslSsl"
-tls_config = { cert_path = "/tls/c", key_path = "/tls/k", client_auth = "None" }
+tls_config = { cert_path = "/tls/c", key_path = "/tls/k", client_auth = "Disabled" }
 sasl_config = { enabled_mechanisms = ["SCRAM-SHA-512"] }
 "#;
         let cfg: FileConfig = toml::from_str(toml).unwrap();
