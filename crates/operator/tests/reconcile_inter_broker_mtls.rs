@@ -316,7 +316,7 @@ async fn rendered_broker_config_carries_controller_listener_protocol_ssl_and_tls
 
 // ── test 2: tls=true, authentication=None listener reconciles (anonymous TLS) ──
 
-/// Slice 31 (Task 4): a `Listener` with `tls: true` and no authentication
+/// A `Listener` with `tls: true` and no authentication
 /// is now valid — it represents anonymous-over-TLS. Reconcile must succeed
 /// and the rendered broker TOML must contain `protocol = "Ssl"` for that
 /// listener.

@@ -1168,7 +1168,7 @@ mod advertised_tests {
     }
 }
 
-/// Slice 30: inputs to render the broker config-file's TLS block for a
+/// Inputs to render the broker config-file's TLS block for a
 /// single broker. The operator builds this once per reconcile and feeds
 /// it into every per-broker TOML — only the leaf cert paths differ per
 /// broker (the cert files are addressed by broker id inside the same
@@ -1252,6 +1252,9 @@ pub fn render_broker_toml(
                 "Disabled"
             };
             if needs_client_ca {
+                // The clients-CA volume is mounted at /etc/crabka/clients-ca/ca.crt
+                // (slice 30). The clients_ca_paths_per_broker map will override per-broker
+                // when Task 6 wires it up; until then this fallback is correct.
                 let client_ca = clients_ca_paths_per_broker
                     .get(&broker_id)
                     .cloned()

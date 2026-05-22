@@ -643,7 +643,7 @@ async fn kafka_status_synthesized_default_listener_is_valid_and_ready() {
     assert_eq!(state.remaining_rules(), 0);
 }
 
-/// Slice 31: a listener with `authentication=Tls` (mTLS) but `tls=false`
+/// A listener with `authentication=Tls` (mTLS) but `tls=false`
 /// (no transport TLS) is invalid. The status PATCH must show
 /// `ListenersValid=False reason=ListenerMtlsRequiresTransportTls` and
 /// `ListenersReady=False reason=ListenersInvalid`, and the `ConfigMap`
