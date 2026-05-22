@@ -13,6 +13,10 @@ permissions:
   contents: read
   id-token: write
 
+concurrency:
+  group: codspeed-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   codspeed:
     name: Run benchmarks
@@ -24,8 +28,14 @@ jobs:
         with:
           toolchain: "1.95.0"
 
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: codspeed
+
       - name: Install cargo-codspeed
-        run: cargo install cargo-codspeed
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-codspeed
 
       - name: Build the benchmark target(s)
         run: |
