@@ -20,6 +20,7 @@ use std::time::Duration;
 
 use futures::StreamExt as _;
 use k8s_openapi::api::core::v1::{ConfigMap, Node, Pod, Secret, Service};
+use k8s_openapi::api::networking::v1::Ingress;
 use kube::api::{Api, ListParams, Patch, PatchParams};
 use kube::runtime::controller::{Action, Controller};
 use kube::runtime::reflector::ObjectRef;
@@ -30,13 +31,14 @@ use serde_json::json;
 use crate::context::Context;
 use crate::controller::cluster_ca;
 use crate::controller::common::{
-    self, FIELD_MANAGER, ReconcileError, apply_object, condition, ensure_cluster_id_secret,
-    owner_ref, patch_status, render_service,
+    self, FIELD_MANAGER, ReconcileError, apply_dynamic, apply_object, condition,
+    ensure_cluster_id_secret, owner_ref, patch_status, render_service,
 };
 use crate::controller::listeners::{
-    self, AdvertisedAddress, compute_advertised, effective_inter_broker_listener_name,
-    render_bootstrap_service, render_broker_service, synthesized_default_listener,
-    validate_listeners,
+    self, AdvertisedAddress, INGRESS_PORT, compute_advertised,
+    effective_inter_broker_listener_name, ingress_bootstrap_host, render_bootstrap_ingress,
+    render_bootstrap_route, render_bootstrap_service, render_broker_ingress, render_broker_route,
+    render_broker_service, synthesized_default_listener, validate_listeners,
 };
 use crate::controller::network_policy;
 use crate::crd::{
@@ -302,24 +304,37 @@ fn resolve_bootstrap_servers(
             let host = ingress.hostname.clone().or_else(|| ingress.ip.clone())?;
             Some(format!("{host}:{}", listener.port))
         }
-        ListenerType::Ingress | ListenerType::Route => None,
+        ListenerType::Ingress | ListenerType::Route => {
+            // The bootstrap hostname comes from config; clients reach it on the
+            // ingress controller / router port (443).
+            let host = ingress_bootstrap_host(listener)?;
+            Some(format!("{host}:{INGRESS_PORT}"))
+        }
     }
 }
 
-/// Apply both the bootstrap and per-broker Services for each external
-/// (`nodeport` / `loadbalancer`) listener. Internal listeners don't
-/// need any Service objects beyond the cluster-wide headless one.
+/// Apply the bootstrap and per-broker objects for each external listener.
+/// Internal listeners need no objects beyond the cluster-wide headless Service.
+///
+/// - `nodeport` / `loadbalancer`: a `NodePort` / `LoadBalancer` Service each.
+/// - `ingress` / `route`: a `ClusterIP` backend Service each, plus an `Ingress`
+///   (typed) or `OpenShift` `Route` (dynamic) routing the configured hostname to
+///   that backend over TLS passthrough.
 async fn apply_external_services(
+    ctx: &Context,
     svc_api: &Api<Service>,
     owner: &Kafka,
+    namespace: &str,
     cluster_name: &str,
     effective_listeners: &[Listener],
     brokers: &[BrokerInfo],
 ) -> Result<(), ReconcileError> {
+    let ingress_api: Api<Ingress> = Api::namespaced(ctx.client.clone(), namespace);
     for l in effective_listeners
         .iter()
-        .filter(|l| matches!(l.type_, ListenerType::Nodeport | ListenerType::Loadbalancer))
+        .filter(|l| l.type_ != ListenerType::Internal)
     {
+        // Backend Services for every external listener type.
         let bs = render_bootstrap_service(owner, l)?;
         let bs_name = format!("{cluster_name}-{}-bootstrap", l.name);
         apply_object(svc_api, &bs_name, &bs).await?;
@@ -328,8 +343,58 @@ async fn apply_external_services(
             let per_name = format!("{cluster_name}-{}-{}", l.name, b.broker_id);
             apply_object(svc_api, &per_name, &per).await?;
         }
+
+        // Ingress / Route objects layered on top of the ClusterIP backends.
+        match l.type_ {
+            ListenerType::Ingress => {
+                if let Some(host) = ingress_bootstrap_host(l) {
+                    let ing = render_bootstrap_ingress(owner, l, &host)?;
+                    apply_object(&ingress_api, &bs_name, &ing).await?;
+                }
+                for b in brokers {
+                    if let Some(host) = listeners::ingress_broker_host(l, b.broker_id) {
+                        let ing = render_broker_ingress(owner, l, b.broker_id, &host)?;
+                        let per_name = format!("{cluster_name}-{}-{}", l.name, b.broker_id);
+                        apply_object(&ingress_api, &per_name, &ing).await?;
+                    }
+                }
+            }
+            ListenerType::Route => {
+                if let Some(host) = ingress_bootstrap_host(l) {
+                    let body = render_bootstrap_route(owner, l, &host)?;
+                    apply_route(ctx, namespace, &bs_name, &body).await?;
+                }
+                for b in brokers {
+                    if let Some(host) = listeners::ingress_broker_host(l, b.broker_id) {
+                        let body = render_broker_route(owner, l, b.broker_id, &host)?;
+                        let per_name = format!("{cluster_name}-{}-{}", l.name, b.broker_id);
+                        apply_route(ctx, namespace, &per_name, &body).await?;
+                    }
+                }
+            }
+            _ => {}
+        }
     }
     Ok(())
+}
+
+/// Apply one `OpenShift` `Route` via the dynamic-object path.
+async fn apply_route(
+    ctx: &Context,
+    namespace: &str,
+    name: &str,
+    body: &serde_json::Value,
+) -> Result<(), ReconcileError> {
+    apply_dynamic(
+        &ctx.client,
+        namespace,
+        "route.openshift.io/v1",
+        "Route",
+        "routes",
+        name,
+        body,
+    )
+    .await
 }
 
 /// Read back the cluster Nodes, broker Pods, and per-listener Services
@@ -356,21 +421,31 @@ async fn read_external_state(
     ),
     ReconcileError,
 > {
-    let node_api: Api<Node> = Api::all(ctx.client.clone());
-    let mut nodes = HashMap::new();
-    for n in node_api.list(&ListParams::default()).await?.items {
-        if let Some(nname) = n.metadata.name.clone() {
-            nodes.insert(nname, n);
-        }
-    }
+    // Node + Pod state is only needed to resolve NodePort advertised hosts (the
+    // node's external IP) / LoadBalancer scheduling. ingress/route advertised
+    // hosts come from config, so an ingress/route-only cluster issues no
+    // Node/Pod LISTs.
+    let needs_node_pod = effective_listeners
+        .iter()
+        .any(|l| matches!(l.type_, ListenerType::Nodeport | ListenerType::Loadbalancer));
 
-    let pod_api: Api<Pod> = Api::namespaced(ctx.client.clone(), namespace);
-    let pod_lp =
-        ListParams::default().labels(&format!("app.kubernetes.io/instance={cluster_name}"));
+    let mut nodes = HashMap::new();
     let mut pods_by_name = HashMap::new();
-    for p in pod_api.list(&pod_lp).await?.items {
-        if let Some(pname) = p.metadata.name.clone() {
-            pods_by_name.insert(pname, p);
+    if needs_node_pod {
+        let node_api: Api<Node> = Api::all(ctx.client.clone());
+        for n in node_api.list(&ListParams::default()).await?.items {
+            if let Some(nname) = n.metadata.name.clone() {
+                nodes.insert(nname, n);
+            }
+        }
+
+        let pod_api: Api<Pod> = Api::namespaced(ctx.client.clone(), namespace);
+        let pod_lp =
+            ListParams::default().labels(&format!("app.kubernetes.io/instance={cluster_name}"));
+        for p in pod_api.list(&pod_lp).await?.items {
+            if let Some(pname) = p.metadata.name.clone() {
+                pods_by_name.insert(pname, p);
+            }
         }
     }
 
@@ -700,18 +775,26 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
             Ok(())
         };
 
-        // Optimization: when `spec.listeners` is empty, the synthesized
-        // default is internal-only — `compute_advertised` for internal
-        // listeners only needs `pod_fqdn`, computable from `BrokerInfo`
-        // alone, so we can skip the Pod/Node list and per-broker
-        // Service rendering entirely. This preserves the slice-24
-        // request sequence exactly.
+        // Optimization: when every effective listener is internal (e.g. the
+        // synthesized slice-19 default), `compute_advertised` only needs
+        // `pod_fqdn` (from `BrokerInfo`), so we skip per-broker object
+        // rendering and the Pod/Node/Service reads entirely. This preserves
+        // the slice-24 request sequence exactly.
         let has_external = effective_listeners
             .iter()
-            .any(|l| matches!(l.type_, ListenerType::Nodeport | ListenerType::Loadbalancer));
+            .any(|l| l.type_ != ListenerType::Internal);
 
         let (nodes, pods_by_name, bootstrap_services, broker_services) = if has_external {
-            apply_external_services(&svc_api, &obj, &name, &effective_listeners, &brokers).await?;
+            apply_external_services(
+                &ctx,
+                &svc_api,
+                &obj,
+                &ns,
+                &name,
+                &effective_listeners,
+                &brokers,
+            )
+            .await?;
             read_external_state(&ctx, &svc_api, &ns, &name, &effective_listeners, &brokers).await?
         } else {
             (

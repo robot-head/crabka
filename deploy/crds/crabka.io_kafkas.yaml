@@ -196,6 +196,13 @@ spec:
                             - broker
                             type: object
                           type: array
+                        class:
+                          description: |-
+                            `ingress` only (slice 27): the `spec.ingressClassName` set on every
+                            generated `Ingress`. Strimzi-shaped `configuration.class`. Inert for
+                            other listener types.
+                          nullable: true
+                          type: string
                       type: object
                     name:
                       description: |-
