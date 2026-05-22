@@ -9,6 +9,7 @@ pub mod kafka_node_pool;
 pub(crate) mod listeners;
 pub(crate) mod metrics;
 pub(crate) mod network_policy;
+pub mod rebalance;
 pub mod topic;
 pub mod user;
 pub mod user_tls;

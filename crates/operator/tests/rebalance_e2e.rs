@@ -1,0 +1,193 @@
+//! Slice 44 end-to-end: drive the operator's real `ConnectRebalancerClient`
+//! over HTTP against the real `crabka-rebalancer` Connect-RPC router,
+//! served in-process against a real single-broker Crabka.
+//!
+//! This is the wire-compatibility contract for the slice: it proves the
+//! operator's hand-rolled Connect/JSON request shaping and response
+//! decoding (enum-name parsing, camelCase fields, nested `proposal`
+//! unwrapping, Connect error → `RebalancerError::Rpc`) actually match what
+//! the rebalancer's prost/pbjson codegen emits — something the unit tests
+//! can only assume.
+
+#![cfg(not(target_os = "windows"))]
+#![allow(clippy::pedantic)]
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use async_trait::async_trait;
+use crabka_broker::{Broker, BrokerConfig};
+use crabka_client_admin::{AdminClient, CreateTopicSpec};
+use crabka_client_core::Client;
+use crabka_operator::rebalancer_client::{
+    ConnectRebalancerClient, ProposalStatus, RebalancerClientLike, RebalancerError,
+};
+use crabka_rebalancer::api::GoalRegistry;
+use crabka_rebalancer::api::handlers::AppState;
+use crabka_rebalancer::capacity::BrokerCapacities;
+use crabka_rebalancer::executor::phases::{ClientFacade, ConfigOp, PhaseError};
+use crabka_rebalancer::executor::throttle::ThrottleTargets;
+use crabka_rebalancer::executor::{ExecutorConfig, ExecutorState};
+use crabka_rebalancer::goals::GoalContext;
+use crabka_rebalancer::health::new_registry;
+use crabka_rebalancer::ingest::{SharedSnapshot, new_shared_snapshot, snapshot_once};
+use crabka_rebalancer::metrics::RebalancerMetrics;
+use crabka_rebalancer::model::{Movement, ProposalStore};
+use crabka_rebalancer::scraper::UsageStore;
+
+/// Stand-in for the executor's client facade — slice 44 only exercises
+/// CreateProposal / GetProposal / (failed) ExecuteProposal, never the
+/// reassignment path, so every method is a no-op.
+struct NoopClient;
+
+#[async_trait]
+impl ClientFacade for NoopClient {
+    async fn alter_throttle_configs(
+        &self,
+        _op: ConfigOp,
+        _targets: &ThrottleTargets,
+        _throttle_bytes_per_sec: i64,
+    ) -> Result<(), PhaseError> {
+        Ok(())
+    }
+    async fn submit_reassignments(&self, _movements: &[Movement]) -> Result<(), PhaseError> {
+        Ok(())
+    }
+    async fn cancel_reassignments(&self, _partitions: &[(String, i32)]) -> Result<(), PhaseError> {
+        Ok(())
+    }
+    async fn list_in_flight(
+        &self,
+        _of_interest: &[(String, i32)],
+    ) -> Result<Vec<(String, i32)>, PhaseError> {
+        Ok(vec![])
+    }
+}
+
+/// Build the `AppState` the rebalancer binary mounts behind its router.
+/// Mirrors `crates/rebalancer/tests/end_to_end.rs::build_state`.
+fn build_state(snapshot: SharedSnapshot) -> Arc<AppState> {
+    let mut registry = new_registry();
+    let metrics = RebalancerMetrics::register(&mut registry);
+    let store = Arc::new(ProposalStore::new(20));
+    let client_facade: Arc<dyn ClientFacade> = Arc::new(NoopClient);
+    let executor = ExecutorState {
+        store: store.clone(),
+        config: ExecutorConfig {
+            data_dir: std::env::temp_dir().join("crabka-operator-rebalance-e2e"),
+            default_throttle_bytes_per_sec: 50_000_000,
+            poll_interval: Duration::from_millis(50),
+            execute_deadline: Duration::from_secs(30),
+            batch_size: 200,
+        },
+        metrics: metrics.clone(),
+        in_flight: Arc::new(tokio::sync::Mutex::new(None)),
+    };
+    Arc::new(AppState {
+        snapshot,
+        store,
+        goal_registry: Arc::new(GoalRegistry::default_registry()),
+        goal_ctx: GoalContext {
+            imbalance_threshold_pct: 10,
+            max_movements_per_proposal: 256,
+            min_topic_leaders_per_broker: 0,
+            broker_capacities: Arc::new(BrokerCapacities::default()),
+            broker_usages: Arc::new(UsageStore::default()),
+        },
+        metrics,
+        executor,
+        client_facade,
+        anomaly_store: Arc::new(crabka_rebalancer::detector::AnomalyStore::new(200)),
+    })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn operator_client_round_trips_against_real_rebalancer() {
+    // 1. Boot a single-broker Crabka and seed a topic.
+    let dir = tempfile::tempdir().unwrap();
+    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+        .await
+        .unwrap();
+    let bootstrap = broker.listen_addr().to_string();
+
+    let mut admin = AdminClient::connect(std::slice::from_ref(&bootstrap))
+        .await
+        .unwrap();
+    admin
+        .create_topics(
+            &[CreateTopicSpec {
+                name: "e2e-topic".into(),
+                partitions: 3,
+                replicas: 1,
+                configs: Default::default(),
+            }],
+            5_000,
+        )
+        .await
+        .unwrap();
+
+    // 2. Take one snapshot (what the ingester ticker would write) and
+    //    mount the rebalancer router over real HTTP.
+    let snap_client = Client::builder()
+        .bootstrap(bootstrap.as_str())
+        .client_id("op-rebalance-e2e")
+        .build()
+        .await
+        .unwrap();
+    let snap = snapshot_once(&snap_client).await.unwrap();
+    let shared = new_shared_snapshot();
+    shared.store(Arc::new(Some(snap)));
+    let state = build_state(shared);
+
+    let app = crabka_rebalancer::api::router(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let _server = tokio::spawn(async move { axum::serve(listener, app).await });
+
+    // 3. Drive the operator's production client at it.
+    let client = ConnectRebalancerClient::new(&format!("http://{addr}"));
+
+    // CreateProposal — single-broker cluster ⇒ Computed (likely zero
+    // movements). The point is the wire round-trip + enum decode.
+    let proposal = client.create_proposal(&[]).await.expect("create_proposal");
+    assert_eq!(
+        proposal.status,
+        ProposalStatus::Computed,
+        "CreateProposal must decode to Computed"
+    );
+    assert!(!proposal.id.is_empty(), "proposal must carry an id");
+
+    // GetProposal round-trips the same proposal back by id.
+    let fetched = client
+        .get_proposal(&proposal.id)
+        .await
+        .expect("get_proposal");
+    assert_eq!(fetched.id, proposal.id);
+    assert_eq!(fetched.status, ProposalStatus::Computed);
+
+    // GetProposal on an unknown id surfaces a Connect error mapped to Rpc.
+    match client.get_proposal("does-not-exist").await {
+        Err(RebalancerError::Rpc { code, .. }) => {
+            assert!(
+                !code.is_empty(),
+                "unknown-proposal error must carry a Connect code"
+            );
+        }
+        other => panic!("expected Rpc error for unknown proposal, got {other:?}"),
+    }
+
+    // ExecuteProposal on a zero-movement proposal is rejected with a
+    // Connect FailedPrecondition — verifies the error decode path.
+    match client.execute_proposal(&proposal.id, Some(1_000_000)).await {
+        Err(RebalancerError::Rpc { code, .. }) => {
+            assert!(!code.is_empty(), "execute rejection must carry a code");
+        }
+        // If the optimizer happened to produce movements (it shouldn't on
+        // a single broker) execution would start instead; accept that too.
+        Ok(p) => assert_eq!(p.status, ProposalStatus::Executing),
+        other => panic!("unexpected execute outcome: {other:?}"),
+    }
+
+    let _ = tokio::time::timeout(Duration::from_secs(30), broker.shutdown()).await;
+    std::mem::forget(dir);
+}

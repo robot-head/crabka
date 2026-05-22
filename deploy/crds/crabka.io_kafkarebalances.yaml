@@ -1,0 +1,146 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: kafkarebalances.crabka.io
+spec:
+  group: crabka.io
+  names:
+    categories: []
+    kind: KafkaRebalance
+    plural: kafkarebalances
+    shortNames:
+    - kr
+    singular: kafkarebalance
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns: []
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Auto-generated derived type for KafkaRebalanceSpec via `CustomResource`
+        properties:
+          spec:
+            properties:
+              endpoint:
+                description: |-
+                  Connect-RPC base URL of the `crabka-rebalancer` service, e.g.
+                  `http://my-cluster-rebalancer.kafka.svc:9300`. When omitted the
+                  operator derives `http://<cluster>-rebalancer.<namespace>.svc.cluster.local:9300`
+                  from the `crabka.io/cluster` label.
+                nullable: true
+                type: string
+              goals:
+                description: |-
+                  Optimization goals to apply, by name (e.g. `RackAware`,
+                  `ReplicaDistribution`). When omitted or empty the rebalancer uses
+                  its full default goal registry in priority order.
+                items:
+                  type: string
+                nullable: true
+                type: array
+              throttleBytesPerSec:
+                description: |-
+                  Replication throttle (bytes/sec) applied while the proposal
+                  executes (KIP-73). When omitted the rebalancer falls back to its
+                  own `--default-throttle-bytes-per-sec`.
+                format: int64
+                minimum: 1.0
+                nullable: true
+                type: integer
+            type: object
+          status:
+            nullable: true
+            properties:
+              conditions:
+                default: []
+                description: |-
+                  Kubernetes-style condition list. The active condition's `type`
+                  carries the rebalance state: one of `PendingProposal`,
+                  `ProposalReady`, `Rebalancing`, `Ready`, `NotReady`, `Stopped`.
+                items:
+                  properties:
+                    lastTransitionTime:
+                      description: RFC3339 timestamp.
+                      type: string
+                    message:
+                      description: Human-readable message.
+                      type: string
+                    reason:
+                      description: CamelCase machine reason.
+                      type: string
+                    status:
+                      description: '`True`, `False`, or `Unknown`.'
+                      type: string
+                    type:
+                      description: e.g. `Ready`.
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              observedGeneration:
+                description: |-
+                  `metadata.generation` of the last spec that produced the current
+                  proposal (advanced when a fresh proposal is computed).
+                format: int64
+                nullable: true
+                type: integer
+              optimizationResult:
+                description: Summary of the most recently computed proposal.
+                nullable: true
+                properties:
+                  goals:
+                    description: The goals the rebalancer actually applied (post-selection).
+                    items:
+                      type: string
+                    type: array
+                  leaderMovements:
+                    default: 0
+                    description: Number of leadership changes in the proposal.
+                    format: int32
+                    type: integer
+                  maxLeadersAfter:
+                    default: 0
+                    description: Max partitions led by any one broker after the proposal applies.
+                    format: int32
+                    type: integer
+                  maxLeadersBefore:
+                    default: 0
+                    description: Max partitions led by any one broker before the proposal applies.
+                    format: int32
+                    type: integer
+                  maxReplicasAfter:
+                    default: 0
+                    description: Max replicas on any one broker after the proposal applies.
+                    format: int32
+                    type: integer
+                  maxReplicasBefore:
+                    default: 0
+                    description: Max replicas on any one broker before the proposal applies.
+                    format: int32
+                    type: integer
+                  replicaMovements:
+                    default: 0
+                    description: Number of partition replica reassignments in the proposal.
+                    format: int32
+                    type: integer
+                type: object
+              sessionId:
+                description: |-
+                  Rebalancer-assigned proposal id. Stored so `approve` / `stop` /
+                  poll operations target the same proposal across reconciles.
+                nullable: true
+                type: string
+            type: object
+        required:
+        - spec
+        title: KafkaRebalance
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

@@ -14,6 +14,7 @@
 #![allow(dead_code)]
 
 pub mod fake_admin;
+pub mod fake_rebalancer;
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -262,6 +263,23 @@ pub fn fake_topic_body(name: &str, namespace: &str) -> serde_json::Value {
         "status": {
             "conditions": [],
         }
+    })
+}
+
+/// Faked `KafkaRebalance` body. kube-rs requires PATCH responses
+/// deserialize back into a `KafkaRebalance`, so we echo a minimal one.
+pub fn fake_rebalance_body(name: &str, namespace: &str) -> serde_json::Value {
+    serde_json::json!({
+        "apiVersion": "crabka.io/v1alpha1",
+        "kind": "KafkaRebalance",
+        "metadata": {
+            "name": name,
+            "namespace": namespace,
+            "uid": "rebalance-uid",
+            "generation": 1,
+        },
+        "spec": {},
+        "status": { "conditions": [] }
     })
 }
 
