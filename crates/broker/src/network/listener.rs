@@ -1,10 +1,4 @@
-/// Per-listener TLS and SASL resolution helpers.
-///
-/// The broker supports a single top-level `tls_config` and a global list of
-/// `enabled_sasl_mechanisms`, but individual listeners can override both via
-/// `ListenerSpec::tls_config` and `ListenerSpec::sasl_mechanisms`. These
-/// helpers centralise the "per-listener wins, fall back to broker-wide"
-/// resolution so the accept loop doesn't need to inline the logic.
+//! Per-listener TLS and SASL resolution helpers.
 use crabka_security::{SaslMechanism, TlsConfig};
 
 use crate::config::ListenerSpec;
@@ -18,6 +12,7 @@ use crate::error::BrokerError;
 ///
 /// Returns an error when neither is set, because a TLS-protocol listener
 /// cannot proceed without certificate material.
+#[allow(dead_code)] // retained for callers that need a borrowed &TlsConfig (e.g. future validation paths)
 pub(crate) fn resolve_tls_for_listener<'a>(
     spec: &'a ListenerSpec,
     top_level: Option<&'a TlsConfig>,

@@ -48,43 +48,28 @@ pub async fn serve_connection_on_listener(
         SocketAddr::from(([0u8, 0, 0, 0], 0))
     });
     if spec.protocol.requires_tls() {
-        let tls_cfg = match crate::network::listener::resolve_tls_for_listener(
-            &spec,
-            broker.config.tls_config.as_ref(),
-        ) {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::error!(listener = %spec.name, error = %e, "cannot resolve TLS config");
-                return;
-            }
-        };
-        // When the listener carries its own tls_config, build a ServerConfig
-        // directly from that material. When falling back to the broker-wide
-        // config, use the DynamicServerConfig so cert hot-reload (slice 33)
-        // keeps working for the common case.
-        let acceptor = if spec.tls_config.is_some() {
-            match tls_cfg.build_server_config() {
+        let acceptor = if let Some(per_tls) = spec.tls_config.as_ref() {
+            match per_tls.build_server_config() {
                 Ok(sc) => tokio_rustls::TlsAcceptor::from(sc),
                 Err(e) => {
                     tracing::error!(
                         listener = %spec.name,
                         error = %e,
-                        "failed to build TLS ServerConfig for per-listener tls_config"
+                        "failed to build TlsAcceptor from per-listener tls_config"
                     );
                     return;
                 }
             }
         } else {
+            // Use DynamicServerConfig so hot-reload keeps working.
             let Some(dynamic) = broker.tls_dynamic.as_ref() else {
                 tracing::error!(
                     listener = %spec.name,
-                    "TLS listener configured but broker has no TlsAcceptor"
+                    "TLS listener without per-listener tls_config and no broker-wide tls_dynamic"
                 );
                 return;
             };
-            // Snapshot the current ServerConfig per accept. Slice 33's
-            // reload swaps the inner Arc atomically; an in-flight
-            // handshake keeps the snapshot it captured here.
+            // Snapshot per accept; an in-flight handshake keeps its captured config.
             tokio_rustls::TlsAcceptor::from(dynamic.current())
         };
         match acceptor.accept(stream).await {
