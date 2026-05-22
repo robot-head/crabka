@@ -412,7 +412,10 @@ pub(crate) async fn ensure_broker_keystore(
 /// Used to detect when the SAN list for a broker has changed vs the
 /// cert currently stored in the Secret, triggering a reissue.
 #[must_use]
-pub fn compute_san_digest(base_sans: &[SubjectAltName], extras: &[SubjectAltName]) -> String {
+pub fn compute_san_digest(
+    base_sans: &[SubjectAltName],
+    extras: &[SubjectAltName],
+) -> String {
     use sha2::{Digest, Sha256};
     use std::fmt::Write as _;
     let mut all: Vec<&SubjectAltName> = base_sans.iter().chain(extras.iter()).collect();
@@ -778,6 +781,8 @@ async fn renew_broker_leafs(
         )?;
         data.insert(crt_key.clone(), ByteString(leaf.cert_pem.into_bytes()));
         data.insert(format!("{id}.key"), ByteString(leaf.key_pem.into_bytes()));
+        let digest = compute_san_digest(&sans, &[]);
+        data.insert(format!("{id}.sans-digest"), ByteString(digest.into_bytes()));
         renewed_ids.push(id);
     }
     if renewed_ids.is_empty() {
