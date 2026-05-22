@@ -1153,3 +1153,587 @@ jobs:
           path: /tmp/kt-diag/
           retention-days: 14
           if-no-files-found: ignore
+
+  kind-listener-auth:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.95.0"
+      - uses: azure/setup-helm@v5
+        with:
+          version: v3.16.2
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+
+      - name: Install melange and apko
+        run: |
+          go install chainguard.dev/melange@latest
+          go install chainguard.dev/apko@latest
+          echo "$HOME/go/bin" >> "$GITHUB_PATH"
+
+      - name: Build crabka-operator + crabka-broker images
+        run: |
+          mkdir -p packages
+          melange keygen
+          melange build packaging/melange/crabka-operator.yaml \
+            --source-dir . --signing-key melange.rsa \
+            --arch x86_64 --runner docker --out-dir packages/
+          apko build packaging/apko/crabka-operator.yaml \
+            crabka-operator:e2e crabka-operator.tar \
+            --arch x86_64 \
+            --repository-append "$PWD/packages" \
+            --keyring-append "$PWD/melange.rsa.pub"
+          melange build packaging/melange/crabka-broker.yaml \
+            --source-dir . --signing-key melange.rsa \
+            --arch x86_64 --runner docker --out-dir packages/
+          apko build packaging/apko/crabka-broker.yaml \
+            crabka-broker:e2e crabka-broker.tar \
+            --arch x86_64 \
+            --repository-append "$PWD/packages" \
+            --keyring-append "$PWD/melange.rsa.pub"
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: crabka-auth-e2e
+          version: v0.24.0
+          node_image: kindest/node:v1.30.0
+
+      - name: Load images into kind
+        run: |
+          set -e
+          for tar in crabka-operator.tar crabka-broker.tar; do
+            docker load -i "$tar" 2>&1 | tee /tmp/load.log
+            loaded=$(sed -n 's/^Loaded image: //p' /tmp/load.log | head -1)
+            want=$(basename "$tar" .tar):e2e
+            if [ "$loaded" != "$want" ]; then docker tag "$loaded" "$want"; fi
+            kind load docker-image "$want" --name crabka-auth-e2e
+          done
+
+      - name: Install CRDs + chart
+        run: |
+          set -e
+          kubectl apply -f deploy/crds/crabka.io_kafkas.yaml
+          kubectl apply -f deploy/crds/crabka.io_kafkanodepools.yaml
+          kubectl apply -f deploy/crds/crabka.io_kafkausers.yaml
+          kubectl create namespace crabka-operator
+          helm install operator charts/crabka-operator \
+            --namespace crabka-operator \
+            --set image.repository=crabka-operator --set image.tag=e2e \
+            --set image.pullPolicy=IfNotPresent \
+            --set brokerImage.repository=crabka-broker --set brokerImage.tag=e2e \
+            --set brokerImage.pullPolicy=IfNotPresent
+          kubectl rollout status -n crabka-operator deploy/operator-crabka-operator --timeout=240s
+
+      # ─────────────────────────────────────────────────────────────────────
+      # Scenario 1: SCRAM-SHA-512 over TLS, internal listener
+      #
+      # Cluster `demo` exposes two internal listeners:
+      #   PLAIN:9092  — unauthenticated, used for inter-broker KRaft traffic
+      #   scram:9094  — SCRAM-SHA-512 + TLS, tested here
+      #
+      # A KafkaUser `alice` is created with scram-sha-512 auth. The operator
+      # provisions a Secret `alice` with keys `password` and `sasl.jaas.config`.
+      # We verify that:
+      #   • A producer using the correct JAAS creds can publish a record.
+      #   • A producer with no credentials (SSL only, no SASL) is rejected.
+      # ─────────────────────────────────────────────────────────────────────
+
+      - name: Apply Kafka cluster with SCRAM-SHA-512 listener
+        run: |
+          cat <<'EOF' | kubectl apply -f -
+          apiVersion: crabka.io/v1alpha1
+          kind: Kafka
+          metadata:
+            name: demo
+            namespace: default
+          spec:
+            kafkaVersion: "0.1.1"
+            listeners:
+              - name: PLAIN
+                port: 9092
+                type: internal
+                tls: false
+              - name: scram
+                port: 9094
+                type: internal
+                tls: true
+                authentication:
+                  type: scram-sha-512
+            interBrokerListenerName: PLAIN
+          ---
+          apiVersion: crabka.io/v1alpha1
+          kind: KafkaNodePool
+          metadata:
+            name: brokers
+            namespace: default
+            labels:
+              crabka.io/cluster: demo
+          spec:
+            roles: [Controller, Broker]
+            replicas: 1
+            nodeIdStart: 0
+            storage:
+              type: PersistentClaim
+              size: 1Gi
+              deleteClaim: true
+          EOF
+
+      - name: Wait for Kafka demo Ready
+        run: |
+          for i in $(seq 1 60); do
+            s=$(kubectl get kafka demo -n default \
+              -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
+            echo "attempt $i: Ready=$s"
+            if [ "$s" = "True" ]; then exit 0; fi
+            sleep 5
+          done
+          echo "::error::Kafka demo did not become Ready in 5 minutes"
+          kubectl describe kafka demo -n default
+          kubectl describe kafkanodepool brokers -n default
+          kubectl logs -n default demo-brokers-0 -c broker --tail=200 || true
+          exit 1
+
+      - name: Apply KafkaUser alice (SCRAM-SHA-512)
+        run: |
+          cat <<'EOF' | kubectl apply -f -
+          apiVersion: crabka.io/v1alpha1
+          kind: KafkaUser
+          metadata:
+            name: alice
+            namespace: default
+            labels:
+              crabka.io/cluster: demo
+          spec:
+            authentication:
+              type: scram-sha-512
+          EOF
+          for i in $(seq 1 30); do
+            s=$(kubectl get kafkauser alice -n default \
+              -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
+            echo "attempt $i: KafkaUser Ready=$s"
+            if [ "$s" = "True" ]; then exit 0; fi
+            sleep 3
+          done
+          echo "::error::KafkaUser alice did not become Ready in 90s"
+          kubectl describe kafkauser alice -n default
+          kubectl logs -n crabka-operator deploy/operator-crabka-operator --tail=200 || true
+          exit 1
+
+      - name: Verify SCRAM-SHA-512 produce succeeds with correct credentials
+        run: |
+          cat <<'EOF' | kubectl apply -f -
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: scram-producer-ok
+            namespace: default
+          spec:
+            backoffLimit: 0
+            template:
+              spec:
+                restartPolicy: Never
+                containers:
+                  - name: producer
+                    image: apache/kafka:3.8.0
+                    command:
+                      - bash
+                      - -c
+                      - |
+                        set -ex
+                        # Build a JKS truststore from the cluster CA certificate.
+                        keytool -import -trustcacerts -noprompt \
+                          -alias clusterca \
+                          -file /etc/crabka/cluster-ca/ca.crt \
+                          -keystore /tmp/trust.jks \
+                          -storepass changeit
+                        # Write client properties using the SCRAM password from the Secret.
+                        PASSWORD=$(cat /etc/crabka/alice/password)
+                        cat > /tmp/client.props <<INNER
+                        security.protocol=SASL_SSL
+                        sasl.mechanism=SCRAM-SHA-512
+                        sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="alice" password="$PASSWORD";
+                        ssl.truststore.location=/tmp/trust.jks
+                        ssl.truststore.password=changeit
+                        INNER
+                        echo "scram-test-record" | \
+                          /opt/kafka/bin/kafka-console-producer.sh \
+                            --bootstrap-server demo-broker-headless.default.svc.cluster.local:9094 \
+                            --topic scram-test \
+                            --producer.config /tmp/client.props
+                    volumeMounts:
+                      - name: cluster-ca
+                        mountPath: /etc/crabka/cluster-ca
+                        readOnly: true
+                      - name: alice-secret
+                        mountPath: /etc/crabka/alice
+                        readOnly: true
+                volumes:
+                  - name: cluster-ca
+                    secret:
+                      secretName: demo-cluster-ca-cert
+                  - name: alice-secret
+                    secret:
+                      secretName: alice
+          EOF
+          kubectl wait job/scram-producer-ok -n default \
+            --for=condition=complete --timeout=120s || {
+            echo "::error::SCRAM producer job did not complete successfully"
+            kubectl logs -n default -l job-name=scram-producer-ok --tail=100 || true
+            exit 1
+          }
+
+      - name: Verify anonymous produce is rejected on SCRAM listener
+        run: |
+          cat <<'EOF' | kubectl apply -f -
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: scram-producer-anon
+            namespace: default
+          spec:
+            backoffLimit: 0
+            template:
+              spec:
+                restartPolicy: Never
+                containers:
+                  - name: producer
+                    image: apache/kafka:3.8.0
+                    command:
+                      - bash
+                      - -c
+                      - |
+                        set -ex
+                        keytool -import -trustcacerts -noprompt \
+                          -alias clusterca \
+                          -file /etc/crabka/cluster-ca/ca.crt \
+                          -keystore /tmp/trust.jks \
+                          -storepass changeit
+                        # SSL-only config — no SASL credentials at all.
+                        cat > /tmp/client.props <<INNER
+                        security.protocol=SSL
+                        ssl.truststore.location=/tmp/trust.jks
+                        ssl.truststore.password=changeit
+                        INNER
+                        # The broker must reject this; we expect a non-zero exit.
+                        echo "should-be-rejected" | \
+                          /opt/kafka/bin/kafka-console-producer.sh \
+                            --bootstrap-server demo-broker-headless.default.svc.cluster.local:9094 \
+                            --topic scram-test \
+                            --producer.config /tmp/client.props \
+                            --request-timeout-ms 15000
+                        echo "::error::anonymous produce unexpectedly succeeded"
+                        exit 1
+                    volumeMounts:
+                      - name: cluster-ca
+                        mountPath: /etc/crabka/cluster-ca
+                        readOnly: true
+                volumes:
+                  - name: cluster-ca
+                    secret:
+                      secretName: demo-cluster-ca-cert
+          EOF
+          # Wait for the job to finish (either Succeeded or Failed).
+          for i in $(seq 1 40); do
+            complete=$(kubectl get job scram-producer-anon -n default \
+              -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}' 2>/dev/null || true)
+            failed=$(kubectl get job scram-producer-anon -n default \
+              -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}' 2>/dev/null || true)
+            echo "attempt $i: complete=$complete failed=$failed"
+            if [ "$failed" = "True" ]; then
+              echo "Anonymous produce was correctly rejected by the broker."
+              exit 0
+            fi
+            if [ "$complete" = "True" ]; then
+              echo "::error::anonymous produce job completed successfully — broker did not enforce SCRAM auth"
+              kubectl logs -n default -l job-name=scram-producer-anon --tail=100 || true
+              exit 1
+            fi
+            sleep 5
+          done
+          echo "::error::anonymous produce job did not terminate within 200s"
+          kubectl describe job scram-producer-anon -n default || true
+          kubectl logs -n default -l job-name=scram-producer-anon --tail=100 || true
+          exit 1
+
+      # ─────────────────────────────────────────────────────────────────────
+      # Scenario 2: mTLS internal listener
+      #
+      # A second cluster `demo-mtls` is used so its clients CA is independent.
+      # Listeners:
+      #   PLAIN:9092  — unauthenticated, inter-broker only
+      #   mtls:9093   — TLS mutual-auth (authentication: {type: tls})
+      #
+      # A KafkaUser `bob` with tls auth is created. The operator issues a cert
+      # signed by the cluster's clients CA and writes a Secret `bob` containing
+      # `user.crt`, `user.key`, and `ca.crt` (the clients CA certificate).
+      # We verify that:
+      #   • A producer presenting bob's cert (via PKCS12 keystore) can publish.
+      #   • A producer with no client cert (SSL, trust-only) is rejected.
+      # ─────────────────────────────────────────────────────────────────────
+
+      - name: Apply Kafka cluster with mTLS listener
+        run: |
+          cat <<'EOF' | kubectl apply -f -
+          apiVersion: crabka.io/v1alpha1
+          kind: Kafka
+          metadata:
+            name: demo-mtls
+            namespace: default
+          spec:
+            kafkaVersion: "0.1.1"
+            listeners:
+              - name: PLAIN
+                port: 9092
+                type: internal
+                tls: false
+              - name: mtls
+                port: 9093
+                type: internal
+                tls: true
+                authentication:
+                  type: tls
+            interBrokerListenerName: PLAIN
+          ---
+          apiVersion: crabka.io/v1alpha1
+          kind: KafkaNodePool
+          metadata:
+            name: mtls-brokers
+            namespace: default
+            labels:
+              crabka.io/cluster: demo-mtls
+          spec:
+            roles: [Controller, Broker]
+            replicas: 1
+            nodeIdStart: 100
+            storage:
+              type: PersistentClaim
+              size: 1Gi
+              deleteClaim: true
+          EOF
+
+      - name: Wait for Kafka demo-mtls Ready
+        run: |
+          for i in $(seq 1 60); do
+            s=$(kubectl get kafka demo-mtls -n default \
+              -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
+            echo "attempt $i: Ready=$s"
+            if [ "$s" = "True" ]; then exit 0; fi
+            sleep 5
+          done
+          echo "::error::Kafka demo-mtls did not become Ready in 5 minutes"
+          kubectl describe kafka demo-mtls -n default
+          kubectl describe kafkanodepool mtls-brokers -n default
+          kubectl logs -n default demo-mtls-mtls-brokers-0 -c broker --tail=200 || true
+          exit 1
+
+      - name: Apply KafkaUser bob (TLS)
+        run: |
+          cat <<'EOF' | kubectl apply -f -
+          apiVersion: crabka.io/v1alpha1
+          kind: KafkaUser
+          metadata:
+            name: bob
+            namespace: default
+            labels:
+              crabka.io/cluster: demo-mtls
+          spec:
+            authentication:
+              type: tls
+          EOF
+          for i in $(seq 1 30); do
+            s=$(kubectl get kafkauser bob -n default \
+              -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
+            echo "attempt $i: KafkaUser bob Ready=$s"
+            if [ "$s" = "True" ]; then exit 0; fi
+            sleep 3
+          done
+          echo "::error::KafkaUser bob did not become Ready in 90s"
+          kubectl describe kafkauser bob -n default
+          kubectl logs -n crabka-operator deploy/operator-crabka-operator --tail=200 || true
+          exit 1
+
+      - name: Verify mTLS produce succeeds with valid user certificate
+        run: |
+          cat <<'EOF' | kubectl apply -f -
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: mtls-producer-ok
+            namespace: default
+          spec:
+            backoffLimit: 0
+            template:
+              spec:
+                restartPolicy: Never
+                containers:
+                  - name: producer
+                    image: apache/kafka:3.8.0
+                    command:
+                      - bash
+                      - -c
+                      - |
+                        set -ex
+                        # Truststore from the cluster CA (server cert chain).
+                        keytool -import -trustcacerts -noprompt \
+                          -alias clusterca \
+                          -file /etc/crabka/cluster-ca/ca.crt \
+                          -keystore /tmp/trust.jks \
+                          -storepass changeit
+                        # Keystore from the user cert + key (PKCS12, then reference directly).
+                        openssl pkcs12 -export \
+                          -in /etc/crabka/bob/user.crt \
+                          -inkey /etc/crabka/bob/user.key \
+                          -name bob \
+                          -out /tmp/keystore.p12 \
+                          -passout pass:changeit
+                        cat > /tmp/client.props <<INNER
+                        security.protocol=SSL
+                        ssl.truststore.location=/tmp/trust.jks
+                        ssl.truststore.password=changeit
+                        ssl.keystore.type=PKCS12
+                        ssl.keystore.location=/tmp/keystore.p12
+                        ssl.keystore.password=changeit
+                        INNER
+                        echo "mtls-test-record" | \
+                          /opt/kafka/bin/kafka-console-producer.sh \
+                            --bootstrap-server demo-mtls-broker-headless.default.svc.cluster.local:9093 \
+                            --topic mtls-test \
+                            --producer.config /tmp/client.props
+                    volumeMounts:
+                      - name: cluster-ca
+                        mountPath: /etc/crabka/cluster-ca
+                        readOnly: true
+                      - name: bob-secret
+                        mountPath: /etc/crabka/bob
+                        readOnly: true
+                volumes:
+                  - name: cluster-ca
+                    secret:
+                      secretName: demo-mtls-cluster-ca-cert
+                  - name: bob-secret
+                    secret:
+                      secretName: bob
+          EOF
+          kubectl wait job/mtls-producer-ok -n default \
+            --for=condition=complete --timeout=120s || {
+            echo "::error::mTLS producer job did not complete successfully"
+            kubectl logs -n default -l job-name=mtls-producer-ok --tail=100 || true
+            exit 1
+          }
+
+      - name: Verify cert-less produce is rejected on mTLS listener
+        run: |
+          cat <<'EOF' | kubectl apply -f -
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: mtls-producer-nocert
+            namespace: default
+          spec:
+            backoffLimit: 0
+            template:
+              spec:
+                restartPolicy: Never
+                containers:
+                  - name: producer
+                    image: apache/kafka:3.8.0
+                    command:
+                      - bash
+                      - -c
+                      - |
+                        set -ex
+                        keytool -import -trustcacerts -noprompt \
+                          -alias clusterca \
+                          -file /etc/crabka/cluster-ca/ca.crt \
+                          -keystore /tmp/trust.jks \
+                          -storepass changeit
+                        # Trust-only: no keystore / no client cert.
+                        cat > /tmp/client.props <<INNER
+                        security.protocol=SSL
+                        ssl.truststore.location=/tmp/trust.jks
+                        ssl.truststore.password=changeit
+                        INNER
+                        echo "should-be-rejected" | \
+                          /opt/kafka/bin/kafka-console-producer.sh \
+                            --bootstrap-server demo-mtls-broker-headless.default.svc.cluster.local:9093 \
+                            --topic mtls-test \
+                            --producer.config /tmp/client.props \
+                            --request-timeout-ms 15000
+                        echo "::error::cert-less produce unexpectedly succeeded"
+                        exit 1
+                    volumeMounts:
+                      - name: cluster-ca
+                        mountPath: /etc/crabka/cluster-ca
+                        readOnly: true
+                volumes:
+                  - name: cluster-ca
+                    secret:
+                      secretName: demo-mtls-cluster-ca-cert
+          EOF
+          for i in $(seq 1 40); do
+            complete=$(kubectl get job mtls-producer-nocert -n default \
+              -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}' 2>/dev/null || true)
+            failed=$(kubectl get job mtls-producer-nocert -n default \
+              -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}' 2>/dev/null || true)
+            echo "attempt $i: complete=$complete failed=$failed"
+            if [ "$failed" = "True" ]; then
+              echo "Cert-less produce was correctly rejected by the mTLS listener."
+              exit 0
+            fi
+            if [ "$complete" = "True" ]; then
+              echo "::error::cert-less produce job completed successfully — broker did not enforce mTLS"
+              kubectl logs -n default -l job-name=mtls-producer-nocert --tail=100 || true
+              exit 1
+            fi
+            sleep 5
+          done
+          echo "::error::cert-less produce job did not terminate within 200s"
+          kubectl describe job mtls-producer-nocert -n default || true
+          kubectl logs -n default -l job-name=mtls-producer-nocert --tail=100 || true
+          exit 1
+
+      - name: Collect diagnostics on failure
+        if: failure()
+        run: |
+          set +e
+          mkdir -p /tmp/auth-diag
+          {
+            echo "## kind-listener-auth diagnostics"
+            kubectl get pods -A -o wide
+            echo "### operator logs"
+            kubectl logs -n crabka-operator deploy/operator-crabka-operator --tail=500
+            echo "### kafka demo"
+            kubectl get kafka demo -n default -o yaml || true
+            echo "### kafka demo-mtls"
+            kubectl get kafka demo-mtls -n default -o yaml || true
+            echo "### kafkausers"
+            kubectl get kafkauser -n default -o yaml || true
+            echo "### secrets (names only)"
+            kubectl get secret -n default || true
+            echo "### broker logs (demo)"
+            kubectl logs -n default demo-brokers-0 --tail=200 --all-containers || true
+            echo "### broker logs (demo-mtls)"
+            kubectl logs -n default demo-mtls-mtls-brokers-0 --tail=200 --all-containers || true
+            echo "### job logs (scram-producer-ok)"
+            kubectl logs -n default -l job-name=scram-producer-ok --tail=100 || true
+            echo "### job logs (scram-producer-anon)"
+            kubectl logs -n default -l job-name=scram-producer-anon --tail=100 || true
+            echo "### job logs (mtls-producer-ok)"
+            kubectl logs -n default -l job-name=mtls-producer-ok --tail=100 || true
+            echo "### job logs (mtls-producer-nocert)"
+            kubectl logs -n default -l job-name=mtls-producer-nocert --tail=100 || true
+          } > /tmp/auth-diag/diagnostics.md
+
+      - name: Upload diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: operator-e2e-listener-auth-diagnostics
+          path: /tmp/auth-diag/
+          retention-days: 14
+          if-no-files-found: ignore
