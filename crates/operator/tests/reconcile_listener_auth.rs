@@ -24,6 +24,7 @@ fn kafka_cr_with_listeners(name: &str, namespace: &str, listeners: Vec<Listener>
         name,
         KafkaSpec {
             kafka_version: "0.1.1".into(),
+            metadata_version: None,
             config: None,
             listeners,
             inter_broker_listener_name: None,

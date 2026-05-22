@@ -35,6 +35,7 @@ fn kafka_cr(name: &str, namespace: &str) -> Kafka {
         name,
         KafkaSpec {
             kafka_version: "0.1.1".into(),
+            metadata_version: None,
             config: None,
             listeners: vec![],
             inter_broker_listener_name: None,
@@ -59,6 +60,7 @@ fn kafka_cr_byo(name: &str, namespace: &str) -> Kafka {
         name,
         KafkaSpec {
             kafka_version: "0.1.1".into(),
+            metadata_version: None,
             config: None,
             listeners: vec![],
             inter_broker_listener_name: None,

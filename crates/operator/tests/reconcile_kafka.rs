@@ -44,6 +44,7 @@ fn kafka_cr(name: &str, namespace: &str) -> Kafka {
         name,
         KafkaSpec {
             kafka_version: "0.1.1".into(),
+            metadata_version: None,
             config: None,
             listeners: vec![],
             inter_broker_listener_name: None,
@@ -64,6 +65,7 @@ fn kafka_cr_with_metrics(name: &str, namespace: &str, metrics: Option<MetricsCon
         name,
         KafkaSpec {
             kafka_version: "0.1.1".into(),
+            metadata_version: None,
             config: None,
             listeners: vec![],
             inter_broker_listener_name: None,
@@ -88,6 +90,7 @@ fn kafka_cr_with_network_policy(
         name,
         KafkaSpec {
             kafka_version: "0.1.1".into(),
+            metadata_version: None,
             config: None,
             listeners: vec![],
             inter_broker_listener_name: None,
@@ -114,6 +117,7 @@ fn kafka_cr_with_config(
         name,
         KafkaSpec {
             kafka_version: "0.1.1".into(),
+            metadata_version: None,
             config: Some(config),
             listeners: vec![],
             inter_broker_listener_name: None,
@@ -553,6 +557,148 @@ async fn kafka_patches_pool_label_with_config_hash() {
     assert!(
         hash.chars().all(|c| c.is_ascii_hexdigit()),
         "config-hash must contain only hex digits, got {hash:?}, body = {body}",
+    );
+
+    assert_eq!(state.remaining_rules(), 0);
+}
+
+/// Variant carrying explicit `spec.kafkaVersion` + `spec.metadataVersion`
+/// for slice-28 version tests.
+fn kafka_cr_with_versions(
+    name: &str,
+    namespace: &str,
+    kafka_version: &str,
+    metadata_version: Option<&str>,
+) -> Kafka {
+    let mut k = Kafka::new(
+        name,
+        KafkaSpec {
+            kafka_version: kafka_version.into(),
+            metadata_version: metadata_version.map(str::to_string),
+            config: None,
+            listeners: vec![],
+            inter_broker_listener_name: None,
+            metrics_config: None,
+            network_policy: None,
+            cluster_ca: None,
+            clients_ca: None,
+        },
+    );
+    k.metadata.namespace = Some(namespace.into());
+    k.metadata.uid = Some("kafka-uid".into());
+    k
+}
+
+/// Find the broker-config `ConfigMap` PATCH and return its serialized data
+/// map (`{ "broker-0.toml": "...", ... }`).
+fn configmap_data<B: AsRef<[u8]>>(observed: &[http::Request<B>]) -> serde_json::Value {
+    let cm_patch = observed
+        .iter()
+        .find(|r| {
+            r.method() == Method::PATCH
+                && r.uri()
+                    .to_string()
+                    .contains("/configmaps/demo-broker-config")
+        })
+        .expect("configmap PATCH must have been captured");
+    let body: serde_json::Value =
+        serde_json::from_slice(cm_patch.body().as_ref()).expect("configmap PATCH body is JSON");
+    body["data"].clone()
+}
+
+/// Slice 28: a valid cluster echoes `kafkaVersion`, finalizes
+/// `metadataVersion`, surfaces `KafkaVersionValid=True`, and injects
+/// `metadata.version` into the rendered broker TOML.
+#[tokio::test]
+async fn kafka_status_and_configmap_carry_metadata_version() {
+    let items = vec![fake_pool_list_item("brokers", "y", "demo", 1, 1)];
+    let (ctx, state) = build_ctx("y", happy_path_rules("demo", "y", &items));
+    let kafka = kafka_cr_with_versions("demo", "y", "3.7.0", None);
+
+    reconcile(Arc::new(kafka), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+
+    // ConfigMap carries the defaulted metadata.version (3.7 tracks 3.7.0).
+    let data = configmap_data(&observed);
+    let toml = data["broker-0.toml"].as_str().expect("broker-0.toml str");
+    assert!(
+        toml.contains("\"metadata.version\" = \"3.7\""),
+        "expected metadata.version in broker TOML, got:\n{toml}"
+    );
+
+    // Status echoes the versions and reports validity.
+    let status_patch = observed
+        .iter()
+        .find(|r| {
+            r.method() == Method::PATCH && r.uri().to_string().contains("/kafkas/demo/status")
+        })
+        .expect("status PATCH must have been captured");
+    let body: serde_json::Value =
+        serde_json::from_slice(status_patch.body()).expect("status PATCH body is JSON");
+    assert_eq!(
+        body["status"]["kafkaVersion"],
+        json!("3.7.0"),
+        "body = {body}"
+    );
+    assert_eq!(
+        body["status"]["metadataVersion"],
+        json!("3.7"),
+        "body = {body}"
+    );
+    let conds = body["status"]["conditions"]
+        .as_array()
+        .expect("conditions array");
+    let vcond = conds
+        .iter()
+        .find(|c| c["type"] == "KafkaVersionValid")
+        .unwrap_or_else(|| panic!("KafkaVersionValid present, body = {body}"));
+    assert_eq!(vcond["status"], "True", "body = {body}");
+
+    assert_eq!(state.remaining_rules(), 0);
+}
+
+/// Slice 28: a metadata version newer than the binary is rejected — no
+/// roll, `metadata.version` not injected, finalized version not advanced.
+#[tokio::test]
+async fn kafka_metadata_version_too_high_blocks() {
+    let items = vec![fake_pool_list_item("brokers", "y", "demo", 1, 1)];
+    let (ctx, state) = build_ctx("y", happy_path_rules("demo", "y", &items));
+    let kafka = kafka_cr_with_versions("demo", "y", "3.6.0", Some("3.7"));
+
+    reconcile(Arc::new(kafka), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+
+    // ConfigMap renders, but without the (rejected) metadata.version.
+    let data = configmap_data(&observed);
+    let toml = data["broker-0.toml"].as_str().expect("broker-0.toml str");
+    assert!(
+        !toml.contains("metadata.version"),
+        "rejected metadata.version must not be injected, got:\n{toml}"
+    );
+
+    let status_patch = observed
+        .iter()
+        .find(|r| {
+            r.method() == Method::PATCH && r.uri().to_string().contains("/kafkas/demo/status")
+        })
+        .expect("status PATCH must have been captured");
+    let body: serde_json::Value =
+        serde_json::from_slice(status_patch.body()).expect("status PATCH body is JSON");
+    let conds = body["status"]["conditions"]
+        .as_array()
+        .expect("conditions array");
+    let vcond = conds
+        .iter()
+        .find(|c| c["type"] == "KafkaVersionValid")
+        .unwrap_or_else(|| panic!("KafkaVersionValid present, body = {body}"));
+    assert_eq!(vcond["status"], "False", "body = {body}");
+    assert_eq!(vcond["reason"], "MetadataVersionTooHigh", "body = {body}");
+    // Finalized metadata version is not advanced (was never set).
+    assert!(
+        body["status"]["metadataVersion"].is_null(),
+        "metadataVersion must not be finalized on rejection, body = {body}"
     );
 
     assert_eq!(state.remaining_rules(), 0);
@@ -1222,6 +1368,8 @@ async fn network_policy_transition_deletes_on_disable() {
         listeners: vec![],
         cluster_ca: None,
         clients_ca: None,
+        kafka_version: None,
+        metadata_version: None,
     });
 
     reconcile(Arc::new(kafka), ctx).await.unwrap();

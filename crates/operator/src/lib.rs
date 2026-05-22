@@ -14,3 +14,4 @@ pub mod leader_election;
 pub mod rebalancer_client;
 pub mod run;
 pub mod telemetry;
+pub mod version;

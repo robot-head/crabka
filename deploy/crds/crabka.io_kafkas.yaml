@@ -322,6 +322,16 @@ spec:
                   - type
                   type: object
                 type: array
+              metadataVersion:
+                description: |-
+                  `KRaft` metadata version (the runtime analog of
+                  `inter.broker.protocol.version`). When unset, tracks
+                  `kafkaVersion`'s `major.minor`; when set, pins the metadata version
+                  for the safe two-step upgrade. Validated against `kafkaVersion` and
+                  the finalized `status.metadataVersion` (slice 28) — an invalid value
+                  surfaces `KafkaVersionValid=False` and blocks the roll.
+                nullable: true
+                type: string
               metricsConfig:
                 description: |-
                   Slice 40: Prometheus scrape configuration. When `None`, brokers do
@@ -445,6 +455,10 @@ spec:
                   - type
                   type: object
                 type: array
+              kafkaVersion:
+                description: 'Slice 28: echo of `spec.kafkaVersion`, for observability.'
+                nullable: true
+                type: string
               listeners:
                 description: |-
                   Slice 25: per-listener resolved addresses. Populated once
@@ -484,6 +498,13 @@ spec:
                   - type
                   type: object
                 type: array
+              metadataVersion:
+                description: |-
+                  Slice 28: the operator-finalized metadata version. Advances only
+                  when version validation passes; drives the downgrade-window check on
+                  the next reconcile.
+                nullable: true
+                type: string
               readyReplicas:
                 description: Mirrors `StatefulSet.status.readyReplicas`.
                 format: int32

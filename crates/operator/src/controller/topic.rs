@@ -516,6 +516,7 @@ mod tests {
             name,
             KafkaSpec {
                 kafka_version: "0.1.1".into(),
+                metadata_version: None,
                 config: None,
                 listeners: vec![],
                 inter_broker_listener_name: Some("PLAIN".into()),
@@ -546,6 +547,8 @@ mod tests {
             }],
             cluster_ca: None,
             clients_ca: None,
+            kafka_version: None,
+            metadata_version: None,
         });
         k
     }

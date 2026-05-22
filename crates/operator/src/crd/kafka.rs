@@ -22,6 +22,14 @@ pub struct KafkaSpec {
     /// Crabka version label, propagated to all pool pods via the
     /// `app.kubernetes.io/version` label.
     pub kafka_version: String,
+    /// `KRaft` metadata version (the runtime analog of
+    /// `inter.broker.protocol.version`). When unset, tracks
+    /// `kafkaVersion`'s `major.minor`; when set, pins the metadata version
+    /// for the safe two-step upgrade. Validated against `kafkaVersion` and
+    /// the finalized `status.metadataVersion` (slice 28) — an invalid value
+    /// surfaces `KafkaVersionValid=False` and blocks the roll.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata_version: Option<String>,
     /// Opaque broker properties (`server.properties`-style key/value
     /// pairs). Slice 25 passes these through to the broker's
     /// `[server_properties]` TOML table; the broker currently treats
@@ -84,6 +92,14 @@ pub struct KafkaStatus {
     pub cluster_ca: Option<crate::crd::CertificateAuthorityStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clients_ca: Option<crate::crd::CertificateAuthorityStatus>,
+    /// Slice 28: echo of `spec.kafkaVersion`, for observability.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kafka_version: Option<String>,
+    /// Slice 28: the operator-finalized metadata version. Advances only
+    /// when version validation passes; drives the downgrade-window check on
+    /// the next reconcile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata_version: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
@@ -123,6 +139,7 @@ mod tests {
             "demo",
             KafkaSpec {
                 kafka_version: "0.1.1".into(),
+                metadata_version: None,
                 config: None,
                 listeners: vec![],
                 inter_broker_listener_name: None,
@@ -147,6 +164,7 @@ mod tests {
             "demo",
             KafkaSpec {
                 kafka_version: "0.1.1".into(),
+                metadata_version: None,
                 config: None,
                 listeners: vec![],
                 inter_broker_listener_name: None,
@@ -232,9 +250,51 @@ mod tests {
             }],
             cluster_ca: None,
             clients_ca: None,
+            kafka_version: None,
+            metadata_version: None,
         };
         let json = serde_json::to_string(&status).unwrap();
         assert!(json.contains("\"bootstrapServers\""), "got: {json}");
+        let back: KafkaStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, status);
+    }
+
+    #[test]
+    fn spec_carries_metadata_version() {
+        let json = r#"{"kafkaVersion":"3.7.0","metadataVersion":"3.6"}"#;
+        let spec: KafkaSpec = serde_json::from_str(json).unwrap();
+        assert_eq!(spec.metadata_version.as_deref(), Some("3.6"));
+    }
+
+    #[test]
+    fn spec_omits_metadata_version_when_none() {
+        let k = Kafka::new(
+            "demo",
+            KafkaSpec {
+                kafka_version: "3.7.0".into(),
+                metadata_version: None,
+                config: None,
+                listeners: vec![],
+                inter_broker_listener_name: None,
+                metrics_config: None,
+                network_policy: None,
+                cluster_ca: None,
+                clients_ca: None,
+            },
+        );
+        let j = serde_json::to_string(&k.spec).unwrap();
+        assert!(!j.contains("metadataVersion"), "got: {j}");
+    }
+
+    #[test]
+    fn status_carries_version_fields() {
+        let status = KafkaStatus {
+            kafka_version: Some("3.7.0".into()),
+            metadata_version: Some("3.7".into()),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&status).unwrap();
+        assert!(json.contains("\"metadataVersion\":\"3.7\""), "got: {json}");
         let back: KafkaStatus = serde_json::from_str(&json).unwrap();
         assert_eq!(back, status);
     }
@@ -245,6 +305,7 @@ mod tests {
             "demo",
             KafkaSpec {
                 kafka_version: "0.1.1".into(),
+                metadata_version: None,
                 config: None,
                 listeners: vec![],
                 inter_broker_listener_name: None,
