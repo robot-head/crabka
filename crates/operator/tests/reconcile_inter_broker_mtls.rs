@@ -314,20 +314,18 @@ async fn rendered_broker_config_carries_controller_listener_protocol_ssl_and_tls
     );
 }
 
-// ── test 2: listeners[].tls=true still rejected ───────────────────────────────
+// ── test 2: tls=true, authentication=None listener reconciles (anonymous TLS) ──
 
-/// Slice 30 (T11 test 2): a `Listener` with `tls: true` must cause the
-/// reconciler to surface `ListenersValid=False reason=TlsNotYetSupported`.
-/// No `ConfigMap` PATCH or keystore PATCH may be issued.
+/// Slice 31 (Task 4): a `Listener` with `tls: true` and no authentication
+/// is now valid — it represents anonymous-over-TLS. Reconcile must succeed
+/// and the rendered broker TOML must contain `protocol = "Ssl"` for that
+/// listener.
 #[tokio::test]
-async fn data_plane_tls_listener_still_rejected_in_slice_30() {
+async fn data_plane_tls_listener_anonymous_now_reconciles() {
     let items = vec![fake_pool_list_item("brokers", "y", "c1", 1, 1)];
-    // Validation failure bypasses the ConfigMap PATCH and broker keystore
-    // PATCH — drop those rules to ensure the mock does not consume them.
-    let mut rules = happy_path_rules("c1", "y", &items);
-    rules.retain(|r| !r.path_substr.contains("/configmaps/"));
-    rules.retain(|r| !r.path_substr.contains("-kafka-brokers"));
-    let (ctx, state) = build_ctx("y", rules);
+    // This is a valid listener now — use the full happy-path rules including
+    // the ConfigMap PATCH and broker keystore PATCH.
+    let (ctx, state) = build_ctx("y", happy_path_rules("c1", "y", &items));
 
     let mut kafka = kafka_cr("c1", "y");
     kafka.spec.listeners = vec![Listener {
@@ -344,34 +342,55 @@ async fn data_plane_tls_listener_still_rejected_in_slice_30() {
 
     let observed = state.take_observed();
 
-    // No ConfigMap PATCH.
-    let cm_patch = observed.iter().find(|r| {
-        r.method() == Method::PATCH && r.uri().to_string().contains("/configmaps/c1-broker-config")
-    });
+    // ConfigMap PATCH must be present — reconcile succeeded.
+    let cm_patch = observed
+        .iter()
+        .find(|r| {
+            r.method() == Method::PATCH
+                && r.uri().to_string().contains("/configmaps/c1-broker-config")
+        })
+        .expect("ConfigMap PATCH must be captured for a valid TLS listener");
+
+    let body: serde_json::Value =
+        serde_json::from_slice(cm_patch.body()).expect("ConfigMap PATCH body is JSON");
+    let data = body
+        .get("data")
+        .and_then(|d| d.as_object())
+        .unwrap_or_else(|| panic!("ConfigMap body must have data object; body = {body}"));
+
+    let toml_str = data
+        .get("broker-0.toml")
+        .and_then(|v| v.as_str())
+        .unwrap_or_else(|| {
+            panic!(
+                "broker-0.toml key missing; data keys = {:?}",
+                data.keys().collect::<Vec<_>>()
+            )
+        });
+
+    // The anonymous-TLS listener must render as protocol = "Ssl".
     assert!(
-        cm_patch.is_none(),
-        "validation failure must NOT patch the broker-config ConfigMap: {:?}",
-        cm_patch.map(|p| p.uri().to_string())
+        toml_str.contains("protocol = \"Ssl\""),
+        "anonymous TLS listener must render protocol = \"Ssl\";\n{toml_str}"
     );
 
-    // Status conditions reflect the TLS validation error.
+    // Status conditions must reflect success.
     let status_patch = observed
         .iter()
         .find(|r| r.method() == Method::PATCH && r.uri().to_string().contains("/kafkas/c1/status"))
         .expect("status PATCH captured");
 
-    let body: serde_json::Value =
+    let sbody: serde_json::Value =
         serde_json::from_slice(status_patch.body()).expect("status body is JSON");
-    let conds = body["status"]["conditions"]
+    let conds = sbody["status"]["conditions"]
         .as_array()
         .expect("conditions array");
 
     let valid = conds
         .iter()
         .find(|c| c["type"] == "ListenersValid")
-        .unwrap_or_else(|| panic!("ListenersValid present; body = {body}"));
-    assert_eq!(valid["status"], "False", "body = {body}");
-    assert_eq!(valid["reason"], "TlsNotYetSupported", "body = {body}");
+        .unwrap_or_else(|| panic!("ListenersValid present; body = {sbody}"));
+    assert_eq!(valid["status"], "True", "body = {sbody}");
 
     assert_eq!(state.remaining_rules(), 0);
 }
