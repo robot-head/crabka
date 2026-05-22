@@ -713,6 +713,7 @@ async fn reconciler_does_not_renew_valid_leaf_certs() {
         &[crabka_security::ca::SubjectAltName::Dns(format!(
             "c7-brokers-0.c7-broker-headless.{ns}.svc.cluster.local"
         ))],
+        &[],
         5,
     )
     .expect("leaf cert gen");

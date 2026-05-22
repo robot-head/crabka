@@ -129,6 +129,7 @@ async fn cronjob_reissues_aging_broker_leafs() {
         &ca.key_pem,
         "c1-brokers-0",
         &sans,
+        &[],
         5, // 5 days → within 30-day renewal window
     )
     .expect("broker leaf");

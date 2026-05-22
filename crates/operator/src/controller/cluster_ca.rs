@@ -315,6 +315,7 @@ pub(crate) async fn ensure_broker_keystore(
             &cluster_ca.key_pem,
             &req.cn,
             &req.sans,
+            &[],
             validity,
         )?;
         data.insert(crt_key, ByteString(leaf.cert_pem.into_bytes()));
@@ -714,6 +715,7 @@ async fn renew_broker_leafs(
             &cluster_ca.key_pem,
             &cn,
             &sans,
+            &[],
             validity_days,
         )?;
         data.insert(crt_key.clone(), ByteString(leaf.cert_pem.into_bytes()));
@@ -843,5 +845,95 @@ mod tests {
         let user = issue_user_cert(&ca.cert_pem, &ca.key_pem, "alice", 1).expect("leaf");
         let now = OffsetDateTime::now_utc() + time::Duration::days(10);
         assert!(renew_if_expiring(&user.cert_pem, 30, now).expect("predicate"));
+    }
+}
+
+#[cfg(test)]
+mod san_tests {
+    use crabka_security::ca::{SubjectAltName, generate_cluster_ca, issue_broker_cert};
+    use rustls::pki_types::CertificateDer;
+    use rustls::pki_types::pem::PemObject;
+    use x509_parser::extensions::GeneralName;
+    use x509_parser::prelude::{FromDer, X509Certificate};
+
+    fn generate_test_ca_for_san_tests() -> crabka_security::ca::CaMaterial {
+        generate_cluster_ca("test-san-ca", 365).expect("test CA")
+    }
+
+    fn parse_cert_sans(cert_pem: &str) -> Vec<String> {
+        let der = CertificateDer::pem_slice_iter(cert_pem.as_bytes())
+            .next()
+            .expect("PEM block")
+            .expect("valid PEM");
+        let (_, cert) = X509Certificate::from_der(der.as_ref()).expect("valid DER");
+        cert.subject_alternative_name()
+            .expect("SAN parse")
+            .map(|san_ext| {
+                san_ext
+                    .value
+                    .general_names
+                    .iter()
+                    .map(|gn| match gn {
+                        GeneralName::DNSName(s) => format!("DNS:{s}"),
+                        GeneralName::IPAddress(bytes) => {
+                            let bytes: &[u8] = bytes;
+                            match bytes.len() {
+                                4 => {
+                                    let arr: [u8; 4] = bytes.try_into().expect("4 bytes");
+                                    format!("IP:{}", std::net::IpAddr::V4(arr.into()))
+                                }
+                                16 => {
+                                    let arr: [u8; 16] = bytes.try_into().expect("16 bytes");
+                                    format!("IP:{}", std::net::IpAddr::V6(arr.into()))
+                                }
+                                _ => "IP:unknown".to_string(),
+                            }
+                        }
+                        other => format!("{other:?}"),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn issue_broker_cert_includes_extra_sans_in_leaf() {
+        let cluster_ca = generate_test_ca_for_san_tests();
+        let extra = vec![
+            SubjectAltName::Dns("broker-0.example.com".into()),
+            SubjectAltName::Ip("203.0.113.10".parse().unwrap()),
+        ];
+        let internal_sans = vec![SubjectAltName::Dns("internal.svc".into())];
+        let leaf = issue_broker_cert(
+            &cluster_ca.cert_pem,
+            &cluster_ca.key_pem,
+            "broker-0",
+            &internal_sans,
+            &extra,
+            365,
+        )
+        .unwrap();
+        let parsed_sans = parse_cert_sans(&leaf.cert_pem);
+        assert!(parsed_sans.iter().any(|s| s == "DNS:internal.svc"));
+        assert!(parsed_sans.iter().any(|s| s == "DNS:broker-0.example.com"));
+        assert!(parsed_sans.iter().any(|s| s == "IP:203.0.113.10"));
+    }
+
+    #[test]
+    fn issue_broker_cert_with_empty_extra_sans_matches_slice30_behavior() {
+        let cluster_ca = generate_test_ca_for_san_tests();
+        let internal_sans = vec![SubjectAltName::Dns("internal.svc".into())];
+        let leaf = issue_broker_cert(
+            &cluster_ca.cert_pem,
+            &cluster_ca.key_pem,
+            "broker-0",
+            &internal_sans,
+            &[],
+            365,
+        )
+        .unwrap();
+        let parsed = parse_cert_sans(&leaf.cert_pem);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0], "DNS:internal.svc");
     }
 }
