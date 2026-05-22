@@ -8,7 +8,30 @@ use k8s_openapi::api::core::v1::{Node, Service};
 use kube::Resource as _;
 
 use crate::controller::common::{APP_LABEL, ReconcileError, owner_ref};
-use crate::crd::{Kafka, Listener, ListenerType};
+use crate::crd::{Kafka, Listener, ListenerAuthentication, ListenerType};
+use crabka_security::{ListenerProtocol, SaslMechanism};
+
+pub(crate) fn listener_protocol(l: &Listener) -> ListenerProtocol {
+    use ListenerAuthentication::{ScramSha256, ScramSha512, Tls};
+    match (l.tls, l.authentication) {
+        (false, None) => ListenerProtocol::Plaintext,
+        (true, None | Some(Tls)) => ListenerProtocol::Ssl,
+        (false, Some(ScramSha512 | ScramSha256)) => ListenerProtocol::SaslPlaintext,
+        (true, Some(ScramSha512 | ScramSha256)) => ListenerProtocol::SaslSsl,
+        (false, Some(Tls)) => unreachable!(
+            "validation rejects mTLS without transport TLS; saw listener '{}'",
+            l.name
+        ),
+    }
+}
+
+fn sasl_mechanism(auth: ListenerAuthentication) -> Option<SaslMechanism> {
+    match auth {
+        ListenerAuthentication::ScramSha512 => Some(SaslMechanism::ScramSha512),
+        ListenerAuthentication::ScramSha256 => Some(SaslMechanism::ScramSha256),
+        ListenerAuthentication::Tls => None,
+    }
+}
 
 /// Reason values for the `ListenersValid` status condition.
 /// Stable strings — consumed by `kubectl wait --for=condition=…` and
@@ -18,13 +41,13 @@ use crate::crd::{Kafka, Listener, ListenerType};
 pub enum ValidationError {
     DuplicateListenerName(String),
     DuplicateListenerPort(i32),
-    TlsNotYetSupported(String),
     IngressDeferred(String),
     RouteDeferred(String),
     DuplicateBrokerOverride { listener: String, broker: i32 },
     InterBrokerListenerMissing(String),
     InterBrokerListenerNotInternal(String),
     NoInternalListener,
+    ListenerMtlsRequiresTransportTls(String),
 }
 
 #[allow(dead_code)]
@@ -33,13 +56,13 @@ impl ValidationError {
         match self {
             Self::DuplicateListenerName(_) => "DuplicateListenerName",
             Self::DuplicateListenerPort(_) => "DuplicateListenerPort",
-            Self::TlsNotYetSupported(_) => "TlsNotYetSupported",
             Self::IngressDeferred(_) => "IngressDeferred",
             Self::RouteDeferred(_) => "RouteDeferred",
             Self::DuplicateBrokerOverride { .. } => "DuplicateBrokerOverride",
             Self::InterBrokerListenerMissing(_) => "InterBrokerListenerMissing",
             Self::InterBrokerListenerNotInternal(_) => "InterBrokerListenerNotInternal",
             Self::NoInternalListener => "NoInternalListener",
+            Self::ListenerMtlsRequiresTransportTls(_) => "ListenerMtlsRequiresTransportTls",
         }
     }
 
@@ -50,9 +73,6 @@ impl ValidationError {
             }
             Self::DuplicateListenerPort(p) => {
                 format!("listener port {p} is used more than once")
-            }
-            Self::TlsNotYetSupported(n) => {
-                format!("listener '{n}' has tls=true; TLS arrives in Phase 4")
             }
             Self::IngressDeferred(n) => {
                 format!("listener '{n}' has type=ingress; reconcile is deferred until slice 27")
@@ -71,6 +91,9 @@ impl ValidationError {
             }
             Self::NoInternalListener => {
                 "spec.listeners is non-empty but contains no internal-type listener".into()
+            }
+            Self::ListenerMtlsRequiresTransportTls(n) => {
+                format!("listener '{n}': authentication.type=tls requires tls: true")
             }
         }
     }
@@ -99,8 +122,10 @@ pub fn validate_listeners(
 
     // Per-listener type/tls/override checks.
     for l in listeners {
-        if l.tls {
-            return Err(ValidationError::TlsNotYetSupported(l.name.clone()));
+        if matches!(l.authentication, Some(ListenerAuthentication::Tls)) && !l.tls {
+            return Err(ValidationError::ListenerMtlsRequiresTransportTls(
+                l.name.clone(),
+            ));
         }
         match l.type_ {
             ListenerType::Ingress => {
@@ -502,16 +527,6 @@ mod tests {
     }
 
     #[test]
-    fn tls_true_is_rejected() {
-        let mut l = internal("PLAIN", 9092);
-        l.tls = true;
-        assert_eq!(
-            validate_listeners(&[l], None).unwrap_err().reason(),
-            "TlsNotYetSupported"
-        );
-    }
-
-    #[test]
     fn ingress_is_deferred() {
         let mut l = internal("ing", 9094);
         l.type_ = ListenerType::Ingress;
@@ -595,6 +610,121 @@ mod tests {
     #[test]
     fn effective_name_empty_defaults_to_plain() {
         assert_eq!(effective_inter_broker_listener_name(&[], None), "PLAIN");
+    }
+
+    #[test]
+    fn validate_listeners_rejects_mtls_without_transport_tls() {
+        let listeners = vec![Listener {
+            name: "bad".into(),
+            port: 9094,
+            type_: ListenerType::Internal,
+            tls: false,
+            authentication: Some(crate::crd::ListenerAuthentication::Tls),
+            configuration: None,
+            network_policy_peers: None,
+        }];
+        let err = validate_listeners(&listeners, None).unwrap_err();
+        assert!(
+            matches!(err, ValidationError::ListenerMtlsRequiresTransportTls(ref n) if n == "bad")
+        );
+    }
+
+    #[test]
+    fn validate_listeners_accepts_scram_without_tls() {
+        let listeners = vec![Listener {
+            name: "scram".into(),
+            port: 9094,
+            type_: ListenerType::Internal,
+            tls: false,
+            authentication: Some(crate::crd::ListenerAuthentication::ScramSha512),
+            configuration: None,
+            network_policy_peers: None,
+        }];
+        validate_listeners(&listeners, None).unwrap();
+    }
+
+    #[test]
+    fn validate_listeners_accepts_tls_without_auth() {
+        let listeners = vec![Listener {
+            name: "tls".into(),
+            port: 9093,
+            type_: ListenerType::Internal,
+            tls: true,
+            authentication: None,
+            configuration: None,
+            network_policy_peers: None,
+        }];
+        validate_listeners(&listeners, None).unwrap();
+    }
+
+    #[test]
+    fn validate_listeners_accepts_mtls_with_tls() {
+        let listeners = vec![Listener {
+            name: "mtls".into(),
+            port: 9095,
+            type_: ListenerType::Internal,
+            tls: true,
+            authentication: Some(crate::crd::ListenerAuthentication::Tls),
+            configuration: None,
+            network_policy_peers: None,
+        }];
+        validate_listeners(&listeners, None).unwrap();
+    }
+
+    #[test]
+    fn validate_listeners_accepts_scram_with_tls() {
+        let listeners = vec![Listener {
+            name: "scram".into(),
+            port: 9094,
+            type_: ListenerType::Internal,
+            tls: true,
+            authentication: Some(crate::crd::ListenerAuthentication::ScramSha256),
+            configuration: None,
+            network_policy_peers: None,
+        }];
+        validate_listeners(&listeners, None).unwrap();
+    }
+
+    #[test]
+    fn listener_protocol_table_all_legal_tuples() {
+        use crabka_security::ListenerProtocol::*;
+        let cases = [
+            (false, None, Plaintext),
+            (true, None, Ssl),
+            (
+                false,
+                Some(crate::crd::ListenerAuthentication::ScramSha512),
+                SaslPlaintext,
+            ),
+            (
+                false,
+                Some(crate::crd::ListenerAuthentication::ScramSha256),
+                SaslPlaintext,
+            ),
+            (
+                true,
+                Some(crate::crd::ListenerAuthentication::ScramSha512),
+                SaslSsl,
+            ),
+            (
+                true,
+                Some(crate::crd::ListenerAuthentication::ScramSha256),
+                SaslSsl,
+            ),
+            (true, Some(crate::crd::ListenerAuthentication::Tls), Ssl),
+        ];
+        for (tls, auth, expected) in cases {
+            let l = Listener {
+                name: "x".into(),
+                port: 1,
+                type_: ListenerType::Internal,
+                tls,
+                authentication: auth,
+                configuration: None,
+                network_policy_peers: None,
+            };
+            assert_eq!(listener_protocol(&l), expected, "tls={tls}, auth={auth:?}");
+        }
     }
 }
 
@@ -1070,6 +1200,7 @@ pub fn render_broker_toml(
     inter_broker_listener_name: &str,
     server_properties: &std::collections::BTreeMap<String, String>,
     tls: Option<&BrokerTlsRender>,
+    clients_ca_paths_per_broker: &std::collections::BTreeMap<i32, String>,
 ) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
@@ -1098,11 +1229,55 @@ pub fn render_broker_toml(
             .get(&l.name)
             .map(|a| format!("{}:{}", a.host, a.port))
             .unwrap_or_default();
+        let proto = listener_protocol(l);
+        let proto_str = match proto {
+            ListenerProtocol::Plaintext => "Plaintext",
+            ListenerProtocol::Ssl => "Ssl",
+            ListenerProtocol::SaslPlaintext => "SaslPlaintext",
+            ListenerProtocol::SaslSsl => "SaslSsl",
+        };
         let _ = writeln!(out, "[[listeners]]");
         let _ = writeln!(out, "name = \"{}\"", l.name);
         let _ = writeln!(out, "bind_addr = \"0.0.0.0:{}\"", l.port);
         let _ = writeln!(out, "advertised = \"{adv}\"");
-        let _ = writeln!(out, "protocol = \"Plaintext\"");
+        let _ = writeln!(out, "protocol = \"{proto_str}\"");
+
+        if l.tls {
+            let cert_path = format!("/etc/crabka/broker-tls/{broker_id}.crt");
+            let key_path = format!("/etc/crabka/broker-tls/{broker_id}.key");
+            let needs_client_ca = matches!(l.authentication, Some(ListenerAuthentication::Tls));
+            let client_auth = if needs_client_ca {
+                "Required"
+            } else {
+                "Disabled"
+            };
+            if needs_client_ca {
+                let client_ca = clients_ca_paths_per_broker
+                    .get(&broker_id)
+                    .cloned()
+                    .unwrap_or_else(|| "/etc/crabka/clients-ca/ca.crt".into());
+                let _ = writeln!(
+                    out,
+                    "tls_config = {{ cert_path = \"{cert_path}\", key_path = \"{key_path}\", client_ca_path = \"{client_ca}\", client_auth = \"{client_auth}\" }}"
+                );
+            } else {
+                let _ = writeln!(
+                    out,
+                    "tls_config = {{ cert_path = \"{cert_path}\", key_path = \"{key_path}\", client_auth = \"{client_auth}\" }}"
+                );
+            }
+        }
+
+        if let Some(auth) = l.authentication
+            && let Some(mech) = sasl_mechanism(auth)
+        {
+            let _ = writeln!(
+                out,
+                "sasl_config = {{ enabled_mechanisms = [\"{}\"] }}",
+                mech.wire_name()
+            );
+        }
+
         out.push('\n');
     }
 
@@ -1158,7 +1333,15 @@ mod toml_rendering_tests {
         );
         let listeners = vec![synthesized_default_listener()];
         let props = std::collections::BTreeMap::new();
-        let toml_str = render_broker_toml(0, &listeners, &addrs, "PLAIN", &props, None);
+        let toml_str = render_broker_toml(
+            0,
+            &listeners,
+            &addrs,
+            "PLAIN",
+            &props,
+            None,
+            &std::collections::BTreeMap::new(),
+        );
 
         // Sanity: parses cleanly with the broker's FileConfig.
         let parsed: crabka_broker::file_config::FileConfig =
@@ -1184,8 +1367,24 @@ mod toml_rendering_tests {
         p.insert("z.last".into(), "1".into());
         p.insert("a.first".into(), "0".into());
 
-        let t1 = render_broker_toml(0, &l, &addrs, "PLAIN", &p, None);
-        let t2 = render_broker_toml(0, &l, &addrs, "PLAIN", &p, None);
+        let t1 = render_broker_toml(
+            0,
+            &l,
+            &addrs,
+            "PLAIN",
+            &p,
+            None,
+            &std::collections::BTreeMap::new(),
+        );
+        let t2 = render_broker_toml(
+            0,
+            &l,
+            &addrs,
+            "PLAIN",
+            &p,
+            None,
+            &std::collections::BTreeMap::new(),
+        );
         assert_eq!(t1, t2);
         // Sorted property keys (BTreeMap iteration).
         let a_pos = t1.find("a.first").unwrap();
@@ -1210,6 +1409,7 @@ mod toml_rendering_tests {
             "PLAIN",
             &std::collections::BTreeMap::new(),
             None,
+            &std::collections::BTreeMap::new(),
         );
         assert!(!t.contains("[server_properties]"), "got:\n{t}");
     }
@@ -1233,7 +1433,15 @@ mod toml_rendering_tests {
             client_ca_path: "/etc/crabka/cluster-ca/ca.crt".into(),
             client_auth: "Required".into(),
         };
-        let toml_str = render_broker_toml(0, &listeners, &addrs, "PLAIN", &props, Some(&tls));
+        let toml_str = render_broker_toml(
+            0,
+            &listeners,
+            &addrs,
+            "PLAIN",
+            &props,
+            Some(&tls),
+            &std::collections::BTreeMap::new(),
+        );
 
         let parsed: crabka_broker::file_config::FileConfig =
             toml::from_str(&toml_str).expect("rendered TOML must parse with broker FileConfig");
@@ -1260,9 +1468,94 @@ mod toml_rendering_tests {
         );
         let listeners = vec![synthesized_default_listener()];
         let props = std::collections::BTreeMap::new();
-        let toml_str = render_broker_toml(0, &listeners, &addrs, "PLAIN", &props, None);
+        let toml_str = render_broker_toml(
+            0,
+            &listeners,
+            &addrs,
+            "PLAIN",
+            &props,
+            None,
+            &std::collections::BTreeMap::new(),
+        );
         assert!(!toml_str.contains("[tls_config]"));
         assert!(!toml_str.contains("controller_listener_protocol"));
+    }
+
+    #[test]
+    fn render_broker_toml_emits_scram_ssl_listener_with_inline_configs() {
+        use std::collections::BTreeMap;
+        let listeners = vec![Listener {
+            name: "scram".into(),
+            port: 9094,
+            type_: ListenerType::Internal,
+            tls: true,
+            authentication: Some(crate::crd::ListenerAuthentication::ScramSha512),
+            configuration: None,
+            network_policy_peers: None,
+        }];
+        let mut addrs = BTreeMap::new();
+        addrs.insert(
+            "scram".to_string(),
+            AdvertisedAddress {
+                host: "broker-0".into(),
+                port: 9094,
+            },
+        );
+        let toml = render_broker_toml(
+            0,
+            &listeners,
+            &addrs,
+            "scram",
+            &BTreeMap::new(),
+            Some(&BrokerTlsRender {
+                controller_listener_protocol: "Ssl".into(),
+                cert_path: "/etc/crabka/broker-tls/0.crt".into(),
+                key_path: "/etc/crabka/broker-tls/0.key".into(),
+                client_ca_path: "/etc/crabka/cluster-ca/ca.crt".into(),
+                client_auth: "Required".into(),
+            }),
+            &BTreeMap::new(),
+        );
+        assert!(toml.contains("protocol = \"SaslSsl\""), "TOML: {toml}");
+        assert!(toml.contains("tls_config = { cert_path = \"/etc/crabka/broker-tls/0.crt\""));
+        assert!(toml.contains("sasl_config = { enabled_mechanisms = [\"SCRAM-SHA-512\"] }"));
+        assert!(toml.contains("[tls_config]"));
+    }
+
+    #[test]
+    fn render_broker_toml_emits_mtls_listener_with_client_auth_required() {
+        use std::collections::BTreeMap;
+        let listeners = vec![Listener {
+            name: "mtls".into(),
+            port: 9095,
+            type_: ListenerType::Internal,
+            tls: true,
+            authentication: Some(crate::crd::ListenerAuthentication::Tls),
+            configuration: None,
+            network_policy_peers: None,
+        }];
+        let mut addrs = BTreeMap::new();
+        addrs.insert(
+            "mtls".to_string(),
+            AdvertisedAddress {
+                host: "broker-0".into(),
+                port: 9095,
+            },
+        );
+        let mut clients_ca_per_broker = BTreeMap::new();
+        clients_ca_per_broker.insert(0, "/etc/crabka/clients-ca/ca.crt".to_string());
+        let toml = render_broker_toml(
+            0,
+            &listeners,
+            &addrs,
+            "mtls",
+            &BTreeMap::new(),
+            None,
+            &clients_ca_per_broker,
+        );
+        assert!(toml.contains("protocol = \"Ssl\""));
+        assert!(toml.contains("client_ca_path = \"/etc/crabka/clients-ca/ca.crt\""));
+        assert!(toml.contains("client_auth = \"Required\""));
     }
 }
 

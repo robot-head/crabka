@@ -637,6 +637,7 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
                 addresses,
                 &inter_broker_name,
                 Some(&tls_per_broker),
+                &std::collections::BTreeMap::new(),
             )?;
             apply_object(&cm_api, &cm_name(&name), &cm).await?;
             Ok(())

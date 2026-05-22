@@ -210,6 +210,7 @@ pub(crate) fn render_configmap(
     tls_per_broker: Option<
         &std::collections::BTreeMap<i32, crate::controller::listeners::BrokerTlsRender>,
     >,
+    clients_ca_paths_per_broker: &std::collections::BTreeMap<i32, String>,
 ) -> Result<ConfigMap, ReconcileError> {
     let name = owner.meta().name.clone().unwrap_or_default();
     let labels = common_labels(&name, &owner.spec.kafka_version, None);
@@ -225,6 +226,7 @@ pub(crate) fn render_configmap(
             inter_broker_listener_name,
             &server_properties,
             tls_for_broker,
+            clients_ca_paths_per_broker,
         );
         data.insert(format!("broker-{broker_id}.toml"), toml);
     }
@@ -737,7 +739,15 @@ mod config_hash_tests {
         per_broker.insert(0i32, addrs0);
         per_broker.insert(1i32, addrs1);
 
-        let cm = render_configmap(&k, &listeners, &per_broker, "PLAIN", None).unwrap();
+        let cm = render_configmap(
+            &k,
+            &listeners,
+            &per_broker,
+            "PLAIN",
+            None,
+            &std::collections::BTreeMap::new(),
+        )
+        .unwrap();
         let data = cm.data.unwrap();
         assert!(data.contains_key("broker-0.toml"));
         assert!(data.contains_key("broker-1.toml"));
