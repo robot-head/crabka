@@ -856,10 +856,6 @@ mod san_tests {
     use x509_parser::extensions::GeneralName;
     use x509_parser::prelude::{FromDer, X509Certificate};
 
-    fn generate_test_ca_for_san_tests() -> crabka_security::ca::CaMaterial {
-        generate_cluster_ca("test-san-ca", 365).expect("test CA")
-    }
-
     fn parse_cert_sans(cert_pem: &str) -> Vec<String> {
         let der = CertificateDer::pem_slice_iter(cert_pem.as_bytes())
             .next()
@@ -898,7 +894,7 @@ mod san_tests {
 
     #[test]
     fn issue_broker_cert_includes_extra_sans_in_leaf() {
-        let cluster_ca = generate_test_ca_for_san_tests();
+        let cluster_ca = generate_cluster_ca("test-san-ca", 365).expect("test CA");
         let extra = vec![
             SubjectAltName::Dns("broker-0.example.com".into()),
             SubjectAltName::Ip("203.0.113.10".parse().unwrap()),
@@ -920,8 +916,8 @@ mod san_tests {
     }
 
     #[test]
-    fn issue_broker_cert_with_empty_extra_sans_matches_slice30_behavior() {
-        let cluster_ca = generate_test_ca_for_san_tests();
+    fn issue_broker_cert_empty_extra_sans_yields_base_sans_only() {
+        let cluster_ca = generate_cluster_ca("test-san-ca", 365).expect("test CA");
         let internal_sans = vec![SubjectAltName::Dns("internal.svc".into())];
         let leaf = issue_broker_cert(
             &cluster_ca.cert_pem,

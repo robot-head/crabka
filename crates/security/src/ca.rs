@@ -42,7 +42,7 @@ pub struct UserCert {
 
 /// SAN entry for a leaf cert. ECDSA leaf certs accept any mix of DNS
 /// names and IP addresses; the broker-cert path uses a mix.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SubjectAltName {
     Dns(String),
     Ip(IpAddr),
@@ -125,9 +125,9 @@ pub fn generate_cluster_ca(cn: &str, validity_days: u32) -> Result<CaMaterial, C
 /// keyEncipherment). SANs accept a mix of DNS names and IPs. ECDSA
 /// P-256.
 ///
-/// `base_sans` are the internal pod DNS SANs; `extra_sans` are
-/// additional entries (e.g. external advertised addresses for `NodePort`
-/// or `LoadBalancer` listeners). Duplicates are silently dropped.
+/// Merges `base_sans` and `extra_sans` (e.g. external advertised addresses
+/// for `NodePort` or `LoadBalancer` listeners) into a single SAN list;
+/// duplicates are silently dropped.
 pub fn issue_broker_cert(
     ca_cert_pem: &str,
     ca_key_pem: &str,
