@@ -102,6 +102,8 @@ async fn bootstrap_records_provisions_scram_user() {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         advertised: "127.0.0.1:0".into(),
         protocol: ListenerProtocol::SaslPlaintext,
+        tls_config: None,
+        sasl_mechanisms: None,
     }];
     cfg.inter_broker_listener_name = "SASL_PLAINTEXT".into();
     cfg.enabled_sasl_mechanisms = vec![SaslMechanism::ScramSha512];

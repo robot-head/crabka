@@ -363,3 +363,187 @@ pub fn fixture_ctx(client: kube::Client, namespace: &str) -> Context {
         Arc::new(AsyncMutex::new(new_registry())),
     )
 }
+
+// ---------------------------------------------------------------------------
+// CA / keystore helpers shared across reconcile_ca, reconcile_inter_broker_mtls,
+// and reconcile_listener_auth.
+// ---------------------------------------------------------------------------
+
+/// Minimal CA Secret body (empty data). Returned by PATCH responses for both
+/// the cluster-CA and clients-CA Secret pairs.
+pub fn fake_ca_secret(sname: &str, namespace: &str) -> serde_json::Value {
+    serde_json::json!({
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": { "name": sname, "namespace": namespace, "uid": "ca-uid" },
+        "type": "Opaque",
+        "data": {}
+    })
+}
+
+/// Minimal broker keystore Secret body (empty data). Returned by PATCH
+/// responses for the `<cluster>-kafka-brokers` Secret.
+pub fn fake_keystore_secret(sname: &str, namespace: &str) -> serde_json::Value {
+    serde_json::json!({
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": { "name": sname, "namespace": namespace, "uid": "ks-uid" },
+        "type": "Opaque",
+        "data": {}
+    })
+}
+
+/// Full happy-path FIFO rule list for a Kafka reconcile of cluster `name` in
+/// `namespace`. Covers headless-service, cluster-id, cluster-CA, clients-CA,
+/// pool-list, broker-keystore, config-map, pool owner-ref, and status PATCH.
+#[allow(clippy::too_many_lines)]
+pub fn happy_path_rules(
+    name: &str,
+    namespace: &str,
+    pool_items: &[serde_json::Value],
+) -> Vec<MockRule> {
+    let svc_name = format!("{name}-broker-headless");
+    let cm_name = format!("{name}-broker-config");
+    let secret_name = format!("{name}-cluster-id");
+    let cluster_ca_key = format!("{name}-cluster-ca");
+    let cluster_ca_cert = format!("{name}-cluster-ca-cert");
+    let clients_ca_key = format!("{name}-clients-ca");
+    let clients_ca_cert = format!("{name}-clients-ca-cert");
+    let keystore_name = format!("{name}-kafka-brokers");
+
+    let mut rules = vec![
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/services/{svc_name}"),
+            response: json_response(200, &fake_service_body(&svc_name, namespace)),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{secret_name}"),
+            response: Response::builder()
+                .status(404)
+                .header("content-type", "application/json")
+                .body(not_found_body("not found"))
+                .expect("404"),
+        },
+        MockRule {
+            method: Method::POST,
+            path_substr: format!("/namespaces/{namespace}/secrets"),
+            response: json_response(
+                201,
+                &fake_secret_body(
+                    &secret_name,
+                    namespace,
+                    "00000000-0000-0000-0000-000000000000",
+                ),
+            ),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{cluster_ca_key}"),
+            response: Response::builder()
+                .status(404)
+                .header("content-type", "application/json")
+                .body(not_found_body("not found"))
+                .expect("404"),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{cluster_ca_cert}"),
+            response: Response::builder()
+                .status(404)
+                .header("content-type", "application/json")
+                .body(not_found_body("not found"))
+                .expect("404"),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/secrets/{cluster_ca_key}"),
+            response: json_response(200, &fake_ca_secret(&cluster_ca_key, namespace)),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/secrets/{cluster_ca_cert}"),
+            response: json_response(200, &fake_ca_secret(&cluster_ca_cert, namespace)),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{clients_ca_key}"),
+            response: Response::builder()
+                .status(404)
+                .header("content-type", "application/json")
+                .body(not_found_body("not found"))
+                .expect("404"),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{clients_ca_cert}"),
+            response: Response::builder()
+                .status(404)
+                .header("content-type", "application/json")
+                .body(not_found_body("not found"))
+                .expect("404"),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/secrets/{clients_ca_key}"),
+            response: json_response(200, &fake_ca_secret(&clients_ca_key, namespace)),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/secrets/{clients_ca_cert}"),
+            response: json_response(200, &fake_ca_secret(&clients_ca_cert, namespace)),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/namespaces/{namespace}/kafkanodepools"),
+            response: json_response(200, &fake_pool_list_body(pool_items)),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{keystore_name}"),
+            response: Response::builder()
+                .status(404)
+                .header("content-type", "application/json")
+                .body(not_found_body("not found"))
+                .expect("404"),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/secrets/{keystore_name}"),
+            response: json_response(200, &fake_keystore_secret(&keystore_name, namespace)),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/configmaps/{cm_name}"),
+            response: json_response(200, &fake_configmap_body(&cm_name, namespace)),
+        },
+    ];
+
+    for item in pool_items {
+        let pool_name = item["metadata"]["name"]
+            .as_str()
+            .expect("pool item has metadata.name");
+        rules.push(MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/kafkanodepools/{pool_name}?"),
+            response: json_response(200, &fake_pool_body(pool_name, namespace, name)),
+        });
+    }
+    rules.push(MockRule {
+        method: Method::PATCH,
+        path_substr: format!("/kafkas/{name}/status"),
+        response: json_response(200, &fake_kafka_body(name, namespace)),
+    });
+    rules
+}
+
+/// Build a `Context` + `MockState` pair wired to the FIFO mock transport.
+pub fn build_ctx(
+    namespace: &str,
+    rules: Vec<MockRule>,
+) -> (Arc<crabka_operator::context::Context>, Arc<MockState>) {
+    let state = MockState::new(rules);
+    let client = mock_client(&state, namespace);
+    (Arc::new(fixture_ctx(client, namespace)), state)
+}

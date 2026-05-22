@@ -24,6 +24,12 @@ pub struct ListenerSpec {
     pub advertised: String,
     /// Wire protocol (Plaintext / Ssl / `SaslPlaintext` / `SaslSsl`).
     pub protocol: ListenerProtocol,
+    /// Per-listener TLS material. When `Some`, overrides the top-level
+    /// `BrokerConfig::tls_config` for this listener's accept loop.
+    pub tls_config: Option<TlsConfig>,
+    /// SASL mechanisms enabled on this listener. When `Some`, overrides
+    /// the top-level `BrokerConfig::enabled_sasl_mechanisms`.
+    pub sasl_mechanisms: Option<Vec<SaslMechanism>>,
 }
 
 /// Credentials the broker uses when connecting *to* other brokers.
@@ -278,12 +284,19 @@ impl BrokerConfig {
             });
         }
 
-        // Every SASL listener requires at least one mechanism.
+        // Every SASL listener requires at least one mechanism. Per-listener
+        // sasl_mechanisms (slice 31) wins over the broker-wide default.
         for l in &listeners {
-            if l.protocol.requires_sasl() && self.enabled_sasl_mechanisms.is_empty() {
-                return Err(BrokerError::SaslListenerNoMechanisms {
-                    name: l.name.clone(),
-                });
+            if l.protocol.requires_sasl() {
+                let mechanisms = l
+                    .sasl_mechanisms
+                    .as_deref()
+                    .unwrap_or(&self.enabled_sasl_mechanisms);
+                if mechanisms.is_empty() {
+                    return Err(BrokerError::SaslListenerNoMechanisms {
+                        name: l.name.clone(),
+                    });
+                }
             }
         }
 
@@ -327,6 +340,8 @@ impl BrokerConfig {
             bind_addr: self.listen_addr,
             advertised: self.advertised_listener.clone(),
             protocol: ListenerProtocol::Plaintext,
+            tls_config: None,
+            sasl_mechanisms: None,
         }]
     }
 }
@@ -392,12 +407,16 @@ mod tests {
                     bind_addr: "127.0.0.1:9093".parse().unwrap(),
                     advertised: "127.0.0.1:9093".to_string(),
                     protocol: ListenerProtocol::Plaintext,
+                    tls_config: None,
+                    sasl_mechanisms: None,
                 },
                 ListenerSpec {
                     name: "EXTERNAL".to_string(),
                     bind_addr: "0.0.0.0:9092".parse().unwrap(),
                     advertised: "host.docker.internal:9092".to_string(),
                     protocol: ListenerProtocol::SaslSsl,
+                    tls_config: None,
+                    sasl_mechanisms: None,
                 },
             ],
             inter_broker_listener_name: "INTERNAL".to_string(),
@@ -515,6 +534,35 @@ mod tests {
         BrokerConfig::default()
             .validate()
             .expect("legacy default validates");
+    }
+
+    #[test]
+    fn per_listener_sasl_mechanisms_satisfy_validation_without_broker_default() {
+        let tls = TlsConfig {
+            cert_chain_path: std::path::PathBuf::from("/tls/c"),
+            private_key_path: std::path::PathBuf::from("/tls/k"),
+            trust_roots_path: None,
+            client_ca_path: None,
+            client_auth: crabka_security::ClientAuthMode::Disabled,
+        };
+        let listener = ListenerSpec {
+            name: "scram".into(),
+            bind_addr: "0.0.0.0:9094".parse().unwrap(),
+            advertised: "broker-0:9094".into(),
+            protocol: ListenerProtocol::SaslSsl,
+            tls_config: Some(tls.clone()),
+            sasl_mechanisms: Some(vec![SaslMechanism::ScramSha512]),
+        };
+        let c = BrokerConfig {
+            listeners: vec![listener],
+            inter_broker_listener_name: "scram".into(),
+            enabled_sasl_mechanisms: vec![],
+            tls_config: Some(tls),
+            controller_listener_protocol: ListenerProtocol::Plaintext,
+            ..BrokerConfig::default()
+        };
+        c.validate()
+            .expect("per-listener mechanisms satisfy SASL validation");
     }
 
     #[test]

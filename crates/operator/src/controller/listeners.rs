@@ -3,12 +3,37 @@
 //! growing further.
 
 use std::collections::BTreeMap;
+use std::net::IpAddr;
 
 use k8s_openapi::api::core::v1::{Node, Service};
 use kube::Resource as _;
 
 use crate::controller::common::{APP_LABEL, ReconcileError, owner_ref};
-use crate::crd::{Kafka, Listener, ListenerType};
+use crate::crd::{Kafka, Listener, ListenerAuthentication, ListenerType};
+use crabka_security::ca::SubjectAltName;
+use crabka_security::{ListenerProtocol, SaslMechanism};
+
+pub(crate) fn listener_protocol(l: &Listener) -> ListenerProtocol {
+    use ListenerAuthentication::{ScramSha256, ScramSha512, Tls};
+    match (l.tls, l.authentication) {
+        (false, None) => ListenerProtocol::Plaintext,
+        (true, None | Some(Tls)) => ListenerProtocol::Ssl,
+        (false, Some(ScramSha512 | ScramSha256)) => ListenerProtocol::SaslPlaintext,
+        (true, Some(ScramSha512 | ScramSha256)) => ListenerProtocol::SaslSsl,
+        (false, Some(Tls)) => unreachable!(
+            "validation rejects mTLS without transport TLS; saw listener '{}'",
+            l.name
+        ),
+    }
+}
+
+fn sasl_mechanism(auth: ListenerAuthentication) -> Option<SaslMechanism> {
+    match auth {
+        ListenerAuthentication::ScramSha512 => Some(SaslMechanism::ScramSha512),
+        ListenerAuthentication::ScramSha256 => Some(SaslMechanism::ScramSha256),
+        ListenerAuthentication::Tls => None,
+    }
+}
 
 /// Reason values for the `ListenersValid` status condition.
 /// Stable strings — consumed by `kubectl wait --for=condition=…` and
@@ -18,13 +43,13 @@ use crate::crd::{Kafka, Listener, ListenerType};
 pub enum ValidationError {
     DuplicateListenerName(String),
     DuplicateListenerPort(i32),
-    TlsNotYetSupported(String),
     IngressDeferred(String),
     RouteDeferred(String),
     DuplicateBrokerOverride { listener: String, broker: i32 },
     InterBrokerListenerMissing(String),
     InterBrokerListenerNotInternal(String),
     NoInternalListener,
+    ListenerMtlsRequiresTransportTls(String),
 }
 
 #[allow(dead_code)]
@@ -33,13 +58,13 @@ impl ValidationError {
         match self {
             Self::DuplicateListenerName(_) => "DuplicateListenerName",
             Self::DuplicateListenerPort(_) => "DuplicateListenerPort",
-            Self::TlsNotYetSupported(_) => "TlsNotYetSupported",
             Self::IngressDeferred(_) => "IngressDeferred",
             Self::RouteDeferred(_) => "RouteDeferred",
             Self::DuplicateBrokerOverride { .. } => "DuplicateBrokerOverride",
             Self::InterBrokerListenerMissing(_) => "InterBrokerListenerMissing",
             Self::InterBrokerListenerNotInternal(_) => "InterBrokerListenerNotInternal",
             Self::NoInternalListener => "NoInternalListener",
+            Self::ListenerMtlsRequiresTransportTls(_) => "ListenerMtlsRequiresTransportTls",
         }
     }
 
@@ -50,9 +75,6 @@ impl ValidationError {
             }
             Self::DuplicateListenerPort(p) => {
                 format!("listener port {p} is used more than once")
-            }
-            Self::TlsNotYetSupported(n) => {
-                format!("listener '{n}' has tls=true; TLS arrives in Phase 4")
             }
             Self::IngressDeferred(n) => {
                 format!("listener '{n}' has type=ingress; reconcile is deferred until slice 27")
@@ -71,6 +93,9 @@ impl ValidationError {
             }
             Self::NoInternalListener => {
                 "spec.listeners is non-empty but contains no internal-type listener".into()
+            }
+            Self::ListenerMtlsRequiresTransportTls(n) => {
+                format!("listener '{n}': authentication.type=tls requires tls: true")
             }
         }
     }
@@ -99,8 +124,10 @@ pub fn validate_listeners(
 
     // Per-listener type/tls/override checks.
     for l in listeners {
-        if l.tls {
-            return Err(ValidationError::TlsNotYetSupported(l.name.clone()));
+        if matches!(l.authentication, Some(ListenerAuthentication::Tls)) && !l.tls {
+            return Err(ValidationError::ListenerMtlsRequiresTransportTls(
+                l.name.clone(),
+            ));
         }
         match l.type_ {
             ListenerType::Ingress => {
@@ -142,6 +169,31 @@ pub fn validate_listeners(
     }
 
     Ok(())
+}
+
+/// Return one warning string per listener that has SCRAM authentication
+/// without transport TLS. These are not hard errors — SCRAM itself is
+/// cryptographically safe — but the SCRAM exchange does traverse the
+/// network before the authentication is complete, so credentials can be
+/// observed by a passive eavesdropper on a plaintext connection.
+pub(crate) fn weak_auth_warnings(listeners: &[Listener]) -> Vec<String> {
+    listeners
+        .iter()
+        .filter(|l| {
+            !l.tls
+                && matches!(
+                    l.authentication,
+                    Some(ListenerAuthentication::ScramSha512 | ListenerAuthentication::ScramSha256)
+                )
+        })
+        .map(|l| {
+            format!(
+                "listener '{}' has SCRAM auth without transport TLS; credentials traverse \
+                 the network in cleartext during the SCRAM exchange. Consider tls: true.",
+                l.name
+            )
+        })
+        .collect()
 }
 
 /// Pick the inter-broker listener name. Honors an explicit override;
@@ -363,6 +415,7 @@ mod service_rendering_tests {
             port: 9094,
             type_: ListenerType::Nodeport,
             tls: false,
+            authentication: None,
             configuration: Some(ListenerConfiguration {
                 bootstrap: None,
                 brokers: vec![BrokerOverride {
@@ -394,6 +447,7 @@ mod service_rendering_tests {
             port: 9094,
             type_: ListenerType::Loadbalancer,
             tls: false,
+            authentication: None,
             configuration: Some(ListenerConfiguration {
                 bootstrap: None,
                 brokers: vec![BrokerOverride {
@@ -418,6 +472,7 @@ mod service_rendering_tests {
             port: 9094,
             type_: ListenerType::Nodeport,
             tls: false,
+            authentication: None,
             configuration: Some(ListenerConfiguration {
                 bootstrap: Some(BootstrapConfig {
                     node_port: Some(32099),
@@ -454,6 +509,7 @@ mod tests {
             port,
             type_: ListenerType::Internal,
             tls: false,
+            authentication: None,
             configuration: None,
             network_policy_peers: None,
         }
@@ -465,6 +521,7 @@ mod tests {
             port,
             type_: ListenerType::Nodeport,
             tls: false,
+            authentication: None,
             configuration: None,
             network_policy_peers: None,
         }
@@ -494,16 +551,6 @@ mod tests {
         let ls = [internal("A", 9092), nodeport("B", 9092)];
         let err = validate_listeners(&ls, None).unwrap_err();
         assert!(matches!(err, ValidationError::DuplicateListenerPort(9092)));
-    }
-
-    #[test]
-    fn tls_true_is_rejected() {
-        let mut l = internal("PLAIN", 9092);
-        l.tls = true;
-        assert_eq!(
-            validate_listeners(&[l], None).unwrap_err().reason(),
-            "TlsNotYetSupported"
-        );
     }
 
     #[test]
@@ -590,6 +637,121 @@ mod tests {
     #[test]
     fn effective_name_empty_defaults_to_plain() {
         assert_eq!(effective_inter_broker_listener_name(&[], None), "PLAIN");
+    }
+
+    #[test]
+    fn validate_listeners_rejects_mtls_without_transport_tls() {
+        let listeners = vec![Listener {
+            name: "bad".into(),
+            port: 9094,
+            type_: ListenerType::Internal,
+            tls: false,
+            authentication: Some(crate::crd::ListenerAuthentication::Tls),
+            configuration: None,
+            network_policy_peers: None,
+        }];
+        let err = validate_listeners(&listeners, None).unwrap_err();
+        assert!(
+            matches!(err, ValidationError::ListenerMtlsRequiresTransportTls(ref n) if n == "bad")
+        );
+    }
+
+    #[test]
+    fn validate_listeners_accepts_scram_without_tls() {
+        let listeners = vec![Listener {
+            name: "scram".into(),
+            port: 9094,
+            type_: ListenerType::Internal,
+            tls: false,
+            authentication: Some(crate::crd::ListenerAuthentication::ScramSha512),
+            configuration: None,
+            network_policy_peers: None,
+        }];
+        validate_listeners(&listeners, None).unwrap();
+    }
+
+    #[test]
+    fn validate_listeners_accepts_tls_without_auth() {
+        let listeners = vec![Listener {
+            name: "tls".into(),
+            port: 9093,
+            type_: ListenerType::Internal,
+            tls: true,
+            authentication: None,
+            configuration: None,
+            network_policy_peers: None,
+        }];
+        validate_listeners(&listeners, None).unwrap();
+    }
+
+    #[test]
+    fn validate_listeners_accepts_mtls_with_tls() {
+        let listeners = vec![Listener {
+            name: "mtls".into(),
+            port: 9095,
+            type_: ListenerType::Internal,
+            tls: true,
+            authentication: Some(crate::crd::ListenerAuthentication::Tls),
+            configuration: None,
+            network_policy_peers: None,
+        }];
+        validate_listeners(&listeners, None).unwrap();
+    }
+
+    #[test]
+    fn validate_listeners_accepts_scram_with_tls() {
+        let listeners = vec![Listener {
+            name: "scram".into(),
+            port: 9094,
+            type_: ListenerType::Internal,
+            tls: true,
+            authentication: Some(crate::crd::ListenerAuthentication::ScramSha256),
+            configuration: None,
+            network_policy_peers: None,
+        }];
+        validate_listeners(&listeners, None).unwrap();
+    }
+
+    #[test]
+    fn listener_protocol_table_all_legal_tuples() {
+        use crabka_security::ListenerProtocol::*;
+        let cases = [
+            (false, None, Plaintext),
+            (true, None, Ssl),
+            (
+                false,
+                Some(crate::crd::ListenerAuthentication::ScramSha512),
+                SaslPlaintext,
+            ),
+            (
+                false,
+                Some(crate::crd::ListenerAuthentication::ScramSha256),
+                SaslPlaintext,
+            ),
+            (
+                true,
+                Some(crate::crd::ListenerAuthentication::ScramSha512),
+                SaslSsl,
+            ),
+            (
+                true,
+                Some(crate::crd::ListenerAuthentication::ScramSha256),
+                SaslSsl,
+            ),
+            (true, Some(crate::crd::ListenerAuthentication::Tls), Ssl),
+        ];
+        for (tls, auth, expected) in cases {
+            let l = Listener {
+                name: "x".into(),
+                port: 1,
+                type_: ListenerType::Internal,
+                tls,
+                authentication: auth,
+                configuration: None,
+                network_policy_peers: None,
+            };
+            assert_eq!(listener_protocol(&l), expected, "tls={tls}, auth={auth:?}");
+        }
     }
 }
 
@@ -779,6 +941,7 @@ mod advertised_tests {
             port,
             type_: ListenerType::Internal,
             tls: false,
+            authentication: None,
             configuration: None,
             network_policy_peers: None,
         }
@@ -789,6 +952,7 @@ mod advertised_tests {
             port,
             type_: ListenerType::Nodeport,
             tls: false,
+            authentication: None,
             configuration: None,
             network_policy_peers: None,
         }
@@ -799,6 +963,7 @@ mod advertised_tests {
             port,
             type_: ListenerType::Loadbalancer,
             tls: false,
+            authentication: None,
             configuration: None,
             network_policy_peers: None,
         }
@@ -1030,7 +1195,7 @@ mod advertised_tests {
     }
 }
 
-/// Slice 30: inputs to render the broker config-file's TLS block for a
+/// Inputs to render the broker config-file's TLS block for a
 /// single broker. The operator builds this once per reconcile and feeds
 /// it into every per-broker TOML — only the leaf cert paths differ per
 /// broker (the cert files are addressed by broker id inside the same
@@ -1062,6 +1227,7 @@ pub fn render_broker_toml(
     inter_broker_listener_name: &str,
     server_properties: &std::collections::BTreeMap<String, String>,
     tls: Option<&BrokerTlsRender>,
+    clients_ca_path: Option<&str>,
 ) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
@@ -1090,11 +1256,53 @@ pub fn render_broker_toml(
             .get(&l.name)
             .map(|a| format!("{}:{}", a.host, a.port))
             .unwrap_or_default();
+        let proto = listener_protocol(l);
+        let proto_str = match proto {
+            ListenerProtocol::Plaintext => "Plaintext",
+            ListenerProtocol::Ssl => "Ssl",
+            ListenerProtocol::SaslPlaintext => "SaslPlaintext",
+            ListenerProtocol::SaslSsl => "SaslSsl",
+        };
         let _ = writeln!(out, "[[listeners]]");
         let _ = writeln!(out, "name = \"{}\"", l.name);
         let _ = writeln!(out, "bind_addr = \"0.0.0.0:{}\"", l.port);
         let _ = writeln!(out, "advertised = \"{adv}\"");
-        let _ = writeln!(out, "protocol = \"Plaintext\"");
+        let _ = writeln!(out, "protocol = \"{proto_str}\"");
+
+        if l.tls {
+            let cert_path = format!("/etc/crabka/broker-tls/{broker_id}.crt");
+            let key_path = format!("/etc/crabka/broker-tls/{broker_id}.key");
+            let needs_client_ca = matches!(l.authentication, Some(ListenerAuthentication::Tls));
+            let client_auth = if needs_client_ca {
+                "Required"
+            } else {
+                "Disabled"
+            };
+            if needs_client_ca {
+                // Mounted at /etc/crabka/clients-ca/ca.crt by the broker pod template.
+                let client_ca = clients_ca_path.unwrap_or("/etc/crabka/clients-ca/ca.crt");
+                let _ = writeln!(
+                    out,
+                    "tls_config = {{ cert_path = \"{cert_path}\", key_path = \"{key_path}\", client_ca_path = \"{client_ca}\", client_auth = \"{client_auth}\" }}"
+                );
+            } else {
+                let _ = writeln!(
+                    out,
+                    "tls_config = {{ cert_path = \"{cert_path}\", key_path = \"{key_path}\", client_auth = \"{client_auth}\" }}"
+                );
+            }
+        }
+
+        if let Some(auth) = l.authentication
+            && let Some(mech) = sasl_mechanism(auth)
+        {
+            let _ = writeln!(
+                out,
+                "sasl_config = {{ enabled_mechanisms = [\"{}\"] }}",
+                mech.wire_name()
+            );
+        }
+
         out.push('\n');
     }
 
@@ -1128,6 +1336,7 @@ pub fn synthesized_default_listener() -> Listener {
         port: 9092,
         type_: ListenerType::Internal,
         tls: false,
+        authentication: None,
         configuration: None,
         network_policy_peers: None,
     }
@@ -1149,7 +1358,7 @@ mod toml_rendering_tests {
         );
         let listeners = vec![synthesized_default_listener()];
         let props = std::collections::BTreeMap::new();
-        let toml_str = render_broker_toml(0, &listeners, &addrs, "PLAIN", &props, None);
+        let toml_str = render_broker_toml(0, &listeners, &addrs, "PLAIN", &props, None, None);
 
         // Sanity: parses cleanly with the broker's FileConfig.
         let parsed: crabka_broker::file_config::FileConfig =
@@ -1175,8 +1384,8 @@ mod toml_rendering_tests {
         p.insert("z.last".into(), "1".into());
         p.insert("a.first".into(), "0".into());
 
-        let t1 = render_broker_toml(0, &l, &addrs, "PLAIN", &p, None);
-        let t2 = render_broker_toml(0, &l, &addrs, "PLAIN", &p, None);
+        let t1 = render_broker_toml(0, &l, &addrs, "PLAIN", &p, None, None);
+        let t2 = render_broker_toml(0, &l, &addrs, "PLAIN", &p, None, None);
         assert_eq!(t1, t2);
         // Sorted property keys (BTreeMap iteration).
         let a_pos = t1.find("a.first").unwrap();
@@ -1201,6 +1410,7 @@ mod toml_rendering_tests {
             "PLAIN",
             &std::collections::BTreeMap::new(),
             None,
+            None,
         );
         assert!(!t.contains("[server_properties]"), "got:\n{t}");
     }
@@ -1224,7 +1434,7 @@ mod toml_rendering_tests {
             client_ca_path: "/etc/crabka/cluster-ca/ca.crt".into(),
             client_auth: "Required".into(),
         };
-        let toml_str = render_broker_toml(0, &listeners, &addrs, "PLAIN", &props, Some(&tls));
+        let toml_str = render_broker_toml(0, &listeners, &addrs, "PLAIN", &props, Some(&tls), None);
 
         let parsed: crabka_broker::file_config::FileConfig =
             toml::from_str(&toml_str).expect("rendered TOML must parse with broker FileConfig");
@@ -1251,9 +1461,84 @@ mod toml_rendering_tests {
         );
         let listeners = vec![synthesized_default_listener()];
         let props = std::collections::BTreeMap::new();
-        let toml_str = render_broker_toml(0, &listeners, &addrs, "PLAIN", &props, None);
+        let toml_str = render_broker_toml(0, &listeners, &addrs, "PLAIN", &props, None, None);
         assert!(!toml_str.contains("[tls_config]"));
         assert!(!toml_str.contains("controller_listener_protocol"));
+    }
+
+    #[test]
+    fn render_broker_toml_emits_scram_ssl_listener_with_inline_configs() {
+        use std::collections::BTreeMap;
+        let listeners = vec![Listener {
+            name: "scram".into(),
+            port: 9094,
+            type_: ListenerType::Internal,
+            tls: true,
+            authentication: Some(crate::crd::ListenerAuthentication::ScramSha512),
+            configuration: None,
+            network_policy_peers: None,
+        }];
+        let mut addrs = BTreeMap::new();
+        addrs.insert(
+            "scram".to_string(),
+            AdvertisedAddress {
+                host: "broker-0".into(),
+                port: 9094,
+            },
+        );
+        let toml = render_broker_toml(
+            0,
+            &listeners,
+            &addrs,
+            "scram",
+            &BTreeMap::new(),
+            Some(&BrokerTlsRender {
+                controller_listener_protocol: "Ssl".into(),
+                cert_path: "/etc/crabka/broker-tls/0.crt".into(),
+                key_path: "/etc/crabka/broker-tls/0.key".into(),
+                client_ca_path: "/etc/crabka/cluster-ca/ca.crt".into(),
+                client_auth: "Required".into(),
+            }),
+            None,
+        );
+        assert!(toml.contains("protocol = \"SaslSsl\""), "TOML: {toml}");
+        assert!(toml.contains("tls_config = { cert_path = \"/etc/crabka/broker-tls/0.crt\""));
+        assert!(toml.contains("sasl_config = { enabled_mechanisms = [\"SCRAM-SHA-512\"] }"));
+        assert!(toml.contains("[tls_config]"));
+    }
+
+    #[test]
+    fn render_broker_toml_emits_mtls_listener_with_client_auth_required() {
+        use std::collections::BTreeMap;
+        let listeners = vec![Listener {
+            name: "mtls".into(),
+            port: 9095,
+            type_: ListenerType::Internal,
+            tls: true,
+            authentication: Some(crate::crd::ListenerAuthentication::Tls),
+            configuration: None,
+            network_policy_peers: None,
+        }];
+        let mut addrs = BTreeMap::new();
+        addrs.insert(
+            "mtls".to_string(),
+            AdvertisedAddress {
+                host: "broker-0".into(),
+                port: 9095,
+            },
+        );
+        let toml = render_broker_toml(
+            0,
+            &listeners,
+            &addrs,
+            "mtls",
+            &BTreeMap::new(),
+            None,
+            Some("/etc/crabka/clients-ca/ca.crt"),
+        );
+        assert!(toml.contains("protocol = \"Ssl\""));
+        assert!(toml.contains("client_ca_path = \"/etc/crabka/clients-ca/ca.crt\""));
+        assert!(toml.contains("client_auth = \"Required\""));
     }
 }
 
@@ -1331,6 +1616,7 @@ mod intent_tests {
             port: 9092,
             type_: ListenerType::Internal,
             tls: false,
+            authentication: None,
             configuration: Some(crate::crd::ListenerConfiguration {
                 bootstrap: None,
                 brokers: vec![
@@ -1355,5 +1641,364 @@ mod intent_tests {
         let h0 = a.find("broker0.advertisedHost").unwrap();
         let h1 = a.find("broker1.advertisedHost").unwrap();
         assert!(h0 < h1);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SAN computation for external listeners
+// ---------------------------------------------------------------------------
+
+/// Observed addresses from the Kubernetes API for external listeners.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ListenerObservedAddresses {
+    /// External node addresses for `NodePort` listeners.
+    pub nodeport_node_addresses: Vec<NodeAddress>,
+    /// Per-broker `LoadBalancer` ingress entries (keyed by broker id).
+    pub lb_per_broker: BTreeMap<i32, Vec<LbIngress>>,
+    /// Bootstrap Service `LoadBalancer` ingress entries.
+    pub lb_bootstrap: Vec<LbIngress>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum NodeAddress {
+    ExternalIp(IpAddr),
+    ExternalDns(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LbIngress {
+    Ip(IpAddr),
+    Hostname(String),
+}
+
+#[derive(Debug, thiserror::Error, PartialEq)]
+pub(crate) enum SanComputationError {
+    #[error("LoadBalancer ingress not ready for broker {broker_id} on listener '{listener}'")]
+    SansNotReady { broker_id: i32, listener: String },
+}
+
+/// Compute the extra SANs needed for external TLS listeners for one broker.
+///
+/// Pure function — no I/O. Returns `Err(SansNotReady)` when a
+/// `LoadBalancer` listener has TLS but the per-broker ingress isn't
+/// provisioned yet; callers skip cert issuance for that broker and
+/// requeue.
+pub(crate) fn compute_extra_sans(
+    broker_id: i32,
+    listeners: &[Listener],
+    observed: &ListenerObservedAddresses,
+) -> Result<Vec<SubjectAltName>, SanComputationError> {
+    let mut sans: Vec<SubjectAltName> = Vec::new();
+    for l in listeners {
+        if !l.tls {
+            continue;
+        }
+        match l.type_ {
+            ListenerType::Internal | ListenerType::Ingress | ListenerType::Route => {}
+            ListenerType::Nodeport => {
+                for addr in &observed.nodeport_node_addresses {
+                    match addr {
+                        NodeAddress::ExternalIp(ip) => sans.push(SubjectAltName::Ip(*ip)),
+                        NodeAddress::ExternalDns(d) => sans.push(SubjectAltName::Dns(d.clone())),
+                    }
+                }
+                if let Some(cfg) = &l.configuration {
+                    for ovr in &cfg.brokers {
+                        if ovr.broker == broker_id
+                            && let Some(h) = &ovr.advertised_host
+                        {
+                            sans.push(SubjectAltName::Dns(h.clone()));
+                        }
+                    }
+                }
+            }
+            ListenerType::Loadbalancer => {
+                let per_broker = observed.lb_per_broker.get(&broker_id);
+                let bootstrap = &observed.lb_bootstrap;
+                let Some(entries) = per_broker else {
+                    return Err(SanComputationError::SansNotReady {
+                        broker_id,
+                        listener: l.name.clone(),
+                    });
+                };
+                if entries.is_empty() {
+                    return Err(SanComputationError::SansNotReady {
+                        broker_id,
+                        listener: l.name.clone(),
+                    });
+                }
+                for ingress in entries.iter().chain(bootstrap.iter()) {
+                    match ingress {
+                        LbIngress::Ip(ip) => sans.push(SubjectAltName::Ip(*ip)),
+                        LbIngress::Hostname(h) => sans.push(SubjectAltName::Dns(h.clone())),
+                    }
+                }
+            }
+        }
+    }
+    sans.sort();
+    sans.dedup();
+    Ok(sans)
+}
+
+/// Observe external addresses needed for SAN extension from the Kubernetes API.
+///
+/// Reads `Node.status.addresses` for `NodePort` listeners and
+/// `Service.status.loadBalancer.ingress` for `LoadBalancer` listeners.
+pub(crate) async fn observe_listener_addresses(
+    ctx: &crate::context::Context,
+    namespace: &str,
+    cluster_name: &str,
+    listeners: &[Listener],
+    broker_ids: &[i32],
+) -> Result<ListenerObservedAddresses, ReconcileError> {
+    use kube::Api;
+    use kube::api::ListParams;
+
+    let mut out = ListenerObservedAddresses::default();
+    let svc_api: Api<Service> = Api::namespaced(ctx.client.clone(), namespace);
+
+    let needs_node_addrs = listeners
+        .iter()
+        .any(|l| l.type_ == ListenerType::Nodeport && l.tls);
+    if needs_node_addrs {
+        let node_api: Api<Node> = Api::all(ctx.client.clone());
+        let nodes = node_api.list(&ListParams::default()).await?;
+        for node in &nodes {
+            if let Some(status) = &node.status
+                && let Some(addresses) = &status.addresses
+            {
+                for addr in addresses {
+                    match addr.type_.as_str() {
+                        "ExternalIP" => {
+                            if let Ok(ip) = addr.address.parse() {
+                                out.nodeport_node_addresses
+                                    .push(NodeAddress::ExternalIp(ip));
+                            }
+                        }
+                        "ExternalDNS" | "Hostname" => {
+                            out.nodeport_node_addresses
+                                .push(NodeAddress::ExternalDns(addr.address.clone()));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    for l in listeners {
+        if l.type_ != ListenerType::Loadbalancer || !l.tls {
+            continue;
+        }
+        for &broker_id in broker_ids {
+            let svc_name = format!("{cluster_name}-{}-{broker_id}", l.name);
+            if let Ok(svc) = svc_api.get(&svc_name).await
+                && let Some(status) = svc.status
+                && let Some(lb) = status.load_balancer
+                && let Some(ingresses) = lb.ingress
+            {
+                for ingress in ingresses {
+                    if let Some(ip) = ingress.ip.and_then(|s| s.parse().ok()) {
+                        out.lb_per_broker
+                            .entry(broker_id)
+                            .or_default()
+                            .push(LbIngress::Ip(ip));
+                    }
+                    if let Some(hn) = ingress.hostname {
+                        out.lb_per_broker
+                            .entry(broker_id)
+                            .or_default()
+                            .push(LbIngress::Hostname(hn));
+                    }
+                }
+            }
+        }
+        let bootstrap_svc_name = format!("{cluster_name}-{}-bootstrap", l.name);
+        if let Ok(svc) = svc_api.get(&bootstrap_svc_name).await
+            && let Some(status) = svc.status
+            && let Some(lb) = status.load_balancer
+            && let Some(ingresses) = lb.ingress
+        {
+            for ingress in ingresses {
+                if let Some(ip) = ingress.ip.and_then(|s| s.parse().ok()) {
+                    out.lb_bootstrap.push(LbIngress::Ip(ip));
+                }
+                if let Some(hn) = ingress.hostname {
+                    out.lb_bootstrap.push(LbIngress::Hostname(hn));
+                }
+            }
+        }
+    }
+
+    Ok(out)
+}
+
+#[cfg(test)]
+mod san_tests {
+    use super::*;
+
+    fn internal_tls(name: &str, port: i32) -> Listener {
+        Listener {
+            name: name.into(),
+            port,
+            type_: ListenerType::Internal,
+            tls: true,
+            authentication: None,
+            configuration: None,
+            network_policy_peers: None,
+        }
+    }
+
+    #[test]
+    fn compute_extra_sans_internal_only_returns_empty() {
+        let listeners = vec![Listener {
+            name: "internal".into(),
+            port: 9092,
+            type_: ListenerType::Internal,
+            tls: false,
+            authentication: None,
+            configuration: None,
+            network_policy_peers: None,
+        }];
+        let observed = ListenerObservedAddresses::default();
+        let sans = compute_extra_sans(0, &listeners, &observed).unwrap();
+        assert!(sans.is_empty());
+    }
+
+    #[test]
+    fn compute_extra_sans_internal_tls_returns_empty() {
+        let listeners = vec![internal_tls("internal", 9093)];
+        let observed = ListenerObservedAddresses::default();
+        let sans = compute_extra_sans(0, &listeners, &observed).unwrap();
+        assert!(sans.is_empty());
+    }
+
+    #[test]
+    fn compute_extra_sans_nodeport_includes_node_external_addrs() {
+        let listeners = vec![Listener {
+            name: "ext".into(),
+            port: 9094,
+            type_: ListenerType::Nodeport,
+            tls: true,
+            authentication: None,
+            configuration: None,
+            network_policy_peers: None,
+        }];
+        let observed = ListenerObservedAddresses {
+            nodeport_node_addresses: vec![
+                NodeAddress::ExternalIp("203.0.113.10".parse().unwrap()),
+                NodeAddress::ExternalDns("node1.example.com".into()),
+            ],
+            ..Default::default()
+        };
+        let sans = compute_extra_sans(0, &listeners, &observed).unwrap();
+        assert!(sans.contains(&SubjectAltName::Ip("203.0.113.10".parse().unwrap())));
+        assert!(sans.contains(&SubjectAltName::Dns("node1.example.com".into())));
+    }
+
+    #[test]
+    fn compute_extra_sans_loadbalancer_includes_per_broker_and_bootstrap_ips() {
+        let listeners = vec![Listener {
+            name: "lb".into(),
+            port: 9094,
+            type_: ListenerType::Loadbalancer,
+            tls: true,
+            authentication: None,
+            configuration: None,
+            network_policy_peers: None,
+        }];
+        let mut observed = ListenerObservedAddresses::default();
+        observed
+            .lb_per_broker
+            .insert(0, vec![LbIngress::Ip("203.0.113.20".parse().unwrap())]);
+        observed.lb_bootstrap = vec![LbIngress::Ip("203.0.113.30".parse().unwrap())];
+        let sans = compute_extra_sans(0, &listeners, &observed).unwrap();
+        assert!(sans.contains(&SubjectAltName::Ip("203.0.113.20".parse().unwrap())));
+        assert!(sans.contains(&SubjectAltName::Ip("203.0.113.30".parse().unwrap())));
+    }
+
+    #[test]
+    fn compute_extra_sans_loadbalancer_pending_returns_sans_not_ready() {
+        let listeners = vec![Listener {
+            name: "lb".into(),
+            port: 9094,
+            type_: ListenerType::Loadbalancer,
+            tls: true,
+            authentication: None,
+            configuration: None,
+            network_policy_peers: None,
+        }];
+        let observed = ListenerObservedAddresses::default();
+        let result = compute_extra_sans(0, &listeners, &observed);
+        assert!(matches!(
+            result,
+            Err(SanComputationError::SansNotReady { broker_id: 0, .. })
+        ));
+    }
+}
+
+#[cfg(test)]
+mod weak_auth_tests {
+    use super::*;
+
+    #[test]
+    fn weak_auth_warnings_emitted_for_scram_without_tls() {
+        let listeners = vec![Listener {
+            name: "scram-plain".into(),
+            port: 9094,
+            type_: ListenerType::Internal,
+            tls: false,
+            authentication: Some(ListenerAuthentication::ScramSha512),
+            configuration: None,
+            network_policy_peers: None,
+        }];
+        let warnings = weak_auth_warnings(&listeners);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("scram-plain"));
+        assert!(warnings[0].contains("cleartext") || warnings[0].contains("TLS"));
+    }
+
+    #[test]
+    fn weak_auth_warnings_empty_for_scram_with_tls() {
+        let listeners = vec![Listener {
+            name: "scram-tls".into(),
+            port: 9094,
+            type_: ListenerType::Internal,
+            tls: true,
+            authentication: Some(ListenerAuthentication::ScramSha512),
+            configuration: None,
+            network_policy_peers: None,
+        }];
+        let warnings = weak_auth_warnings(&listeners);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn weak_auth_warnings_empty_for_no_auth() {
+        let listeners = vec![Listener {
+            name: "plain".into(),
+            port: 9092,
+            type_: ListenerType::Internal,
+            tls: false,
+            authentication: None,
+            configuration: None,
+            network_policy_peers: None,
+        }];
+        assert!(weak_auth_warnings(&listeners).is_empty());
+    }
+
+    #[test]
+    fn weak_auth_warnings_emitted_for_scram_256_without_tls() {
+        let listeners = vec![Listener {
+            name: "scram256-plain".into(),
+            port: 9094,
+            type_: ListenerType::Internal,
+            tls: false,
+            authentication: Some(ListenerAuthentication::ScramSha256),
+            configuration: None,
+            network_policy_peers: None,
+        }];
+        assert_eq!(weak_auth_warnings(&listeners).len(), 1);
     }
 }

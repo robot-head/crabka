@@ -56,12 +56,39 @@ pub enum FileClientAuthMode {
     Required,
 }
 
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct FileListenerSaslConfig {
+    #[serde(default, deserialize_with = "deserialize_sasl_mechanisms")]
+    pub enabled_mechanisms: Vec<crabka_security::SaslMechanism>,
+}
+
+fn deserialize_sasl_mechanisms<'de, D>(
+    deserializer: D,
+) -> Result<Vec<crabka_security::SaslMechanism>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    let names: Vec<String> = Vec::deserialize(deserializer)?;
+    names
+        .into_iter()
+        .map(|s| {
+            crabka_security::SaslMechanism::from_wire(&s)
+                .ok_or_else(|| D::Error::custom(format!("unknown SASL mechanism: {s}")))
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct FileListener {
     pub name: String,
     pub bind_addr: SocketAddr,
     pub advertised: String,
     pub protocol: ListenerProtocol,
+    #[serde(default)]
+    pub tls_config: Option<FileTlsConfig>,
+    #[serde(default)]
+    pub sasl_config: Option<FileListenerSaslConfig>,
 }
 
 impl FileConfig {
@@ -128,12 +155,117 @@ impl FileConfig {
 impl FileListener {
     #[must_use]
     pub fn into_spec(self) -> ListenerSpec {
+        use crabka_security::{ClientAuthMode, TlsConfig as BrokerTlsConfig};
         ListenerSpec {
             name: self.name,
             bind_addr: self.bind_addr,
             advertised: self.advertised,
             protocol: self.protocol,
+            tls_config: self.tls_config.map(|t| BrokerTlsConfig {
+                cert_chain_path: t.cert_path,
+                private_key_path: t.key_path,
+                trust_roots_path: None,
+                client_ca_path: t.client_ca_path,
+                client_auth: match t.client_auth {
+                    FileClientAuthMode::Disabled => ClientAuthMode::Disabled,
+                    FileClientAuthMode::Optional => ClientAuthMode::Optional,
+                    FileClientAuthMode::Required => ClientAuthMode::Required,
+                },
+            }),
+            sasl_mechanisms: self.sasl_config.map(|s| s.enabled_mechanisms),
         }
+    }
+}
+
+#[cfg(test)]
+mod listener_auth_tests {
+    use super::*;
+
+    #[test]
+    fn file_listener_parses_per_listener_tls_config_inline() {
+        let toml = r#"
+broker_id = 0
+log_dir = "/tmp"
+inter_broker_listener_name = "internal"
+
+[[listeners]]
+name = "internal"
+bind_addr = "0.0.0.0:9092"
+advertised = "localhost:9092"
+protocol = "Plaintext"
+
+[[listeners]]
+name = "data"
+bind_addr = "0.0.0.0:9094"
+advertised = "localhost:9094"
+protocol = "Ssl"
+tls_config = { cert_path = "/tls/broker.crt", key_path = "/tls/broker.key", client_ca_path = "/tls/clients-ca.crt", client_auth = "Required" }
+"#;
+        let cfg: FileConfig = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.listeners.len(), 2);
+        assert!(cfg.listeners[0].tls_config.is_none());
+        let data_tls = cfg.listeners[1].tls_config.as_ref().unwrap();
+        assert_eq!(
+            data_tls.cert_path,
+            std::path::PathBuf::from("/tls/broker.crt")
+        );
+        assert_eq!(
+            data_tls.key_path,
+            std::path::PathBuf::from("/tls/broker.key")
+        );
+        assert_eq!(
+            data_tls.client_ca_path.as_deref(),
+            Some(std::path::Path::new("/tls/clients-ca.crt"))
+        );
+        assert_eq!(data_tls.client_auth, FileClientAuthMode::Required);
+    }
+
+    #[test]
+    fn file_listener_parses_per_listener_sasl_config_inline() {
+        let toml = r#"
+broker_id = 0
+log_dir = "/tmp"
+inter_broker_listener_name = "internal"
+
+[[listeners]]
+name = "scram"
+bind_addr = "0.0.0.0:9094"
+advertised = "localhost:9094"
+protocol = "SaslSsl"
+tls_config = { cert_path = "/tls/c", key_path = "/tls/k", client_auth = "Disabled" }
+sasl_config = { enabled_mechanisms = ["SCRAM-SHA-512"] }
+"#;
+        let cfg: FileConfig = toml::from_str(toml).unwrap();
+        let sasl = cfg.listeners[0].sasl_config.as_ref().unwrap();
+        assert_eq!(
+            sasl.enabled_mechanisms,
+            vec![crabka_security::SaslMechanism::ScramSha512]
+        );
+    }
+
+    #[test]
+    fn top_level_tls_config_still_parses_back_compat() {
+        let toml = r#"
+broker_id = 0
+log_dir = "/tmp"
+inter_broker_listener_name = "internal"
+controller_listener_protocol = "Ssl"
+
+[[listeners]]
+name = "internal"
+bind_addr = "0.0.0.0:9092"
+advertised = "localhost:9092"
+protocol = "Plaintext"
+
+[tls_config]
+cert_path = "/tls/c"
+key_path = "/tls/k"
+client_ca_path = "/tls/clients-ca"
+client_auth = "Required"
+"#;
+        let cfg: FileConfig = toml::from_str(toml).unwrap();
+        assert!(cfg.tls_config.is_some());
+        assert!(cfg.listeners[0].tls_config.is_none());
     }
 }
 
@@ -231,6 +363,8 @@ protocol = "Plaintext"
             bind_addr: "0.0.0.0:9094".parse().unwrap(),
             advertised: "h:9094".into(),
             protocol: ListenerProtocol::Plaintext,
+            tls_config: None,
+            sasl_config: None,
         };
         let spec = fl.into_spec();
         assert_eq!(spec.name, "X");
@@ -363,6 +497,8 @@ client_auth = "Required"
                 bind_addr: "0.0.0.0:9094".parse().unwrap(),
                 advertised: "h:9094".into(),
                 protocol: crabka_security::ListenerProtocol::Plaintext,
+                tls_config: None,
+                sasl_mechanisms: None,
             }],
             ..BrokerConfig::default()
         };

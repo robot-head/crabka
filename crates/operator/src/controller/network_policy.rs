@@ -247,6 +247,7 @@ mod tests {
             port,
             type_: ListenerType::Internal,
             tls: false,
+            authentication: None,
             configuration: None,
             network_policy_peers: peers,
         }

@@ -20,9 +20,10 @@ use crabka_operator::crd::{CertificateAuthority, Kafka, KafkaSpec};
 use http::{Method, Response};
 use serde_json::json;
 
+use crabka_operator::controller::cluster_ca::compute_san_digest;
 use shared::{
-    MockRule, MockState, fake_configmap_body, fake_kafka_body, fake_pool_list_body,
-    fake_service_body, fixture_ctx, json_response, mock_client, not_found_body,
+    MockRule, build_ctx, fake_ca_secret, fake_configmap_body, fake_kafka_body,
+    fake_keystore_secret, fake_pool_list_body, fake_service_body, json_response, not_found_body,
 };
 
 // ---------------------------------------------------------------------------
@@ -72,38 +73,11 @@ fn kafka_cr_byo(name: &str, namespace: &str) -> Kafka {
     k
 }
 
-fn build_ctx(
-    namespace: &str,
-    rules: Vec<MockRule>,
-) -> (Arc<crabka_operator::context::Context>, Arc<MockState>) {
-    let state = MockState::new(rules);
-    let client = mock_client(&state, namespace);
-    (Arc::new(fixture_ctx(client, namespace)), state)
-}
+// build_ctx, fake_ca_secret, fake_keystore_secret are in shared/mod.rs.
 
 // ---------------------------------------------------------------------------
-// Shared mock-body helpers (mirrored from reconcile_kafka.rs)
+// Local mock-body helpers
 // ---------------------------------------------------------------------------
-
-fn fake_ca_secret(name: &str, namespace: &str) -> serde_json::Value {
-    json!({
-        "apiVersion": "v1",
-        "kind": "Secret",
-        "metadata": { "name": name, "namespace": namespace, "uid": "ca-uid" },
-        "type": "Opaque",
-        "data": {}
-    })
-}
-
-fn fake_keystore_secret(name: &str, namespace: &str) -> serde_json::Value {
-    json!({
-        "apiVersion": "v1",
-        "kind": "Secret",
-        "metadata": { "name": name, "namespace": namespace, "uid": "ks-uid" },
-        "type": "Opaque",
-        "data": {}
-    })
-}
 
 /// Minimal `Secret` body with ca.key and ca.crt populated (base64-encoded
 /// PEM content). Used for BYO tests where the operator must read existing
@@ -713,19 +687,38 @@ async fn reconciler_does_not_renew_valid_leaf_certs() {
         &[crabka_security::ca::SubjectAltName::Dns(format!(
             "c7-brokers-0.c7-broker-headless.{ns}.svc.cluster.local"
         ))],
+        &[],
         5,
     )
     .expect("leaf cert gen");
     let crt_b64 = base64::engine::general_purpose::STANDARD.encode(leaf.cert_pem.as_bytes());
     let key_b64 = base64::engine::general_purpose::STANDARD.encode(leaf.key_pem.as_bytes());
 
-    // Pre-seeded keystore Secret with broker 0's cert already present.
+    // Compute the SAN digest that the reconciler will derive for broker 0.
+    // SANs match what kafka.rs builds: pod_fqdn, pod_name, headless-svc FQDN, localhost.
+    let broker_sans = vec![
+        crabka_security::ca::SubjectAltName::Dns(format!(
+            "c7-brokers-0.c7-broker-headless.{ns}.svc.cluster.local"
+        )),
+        crabka_security::ca::SubjectAltName::Dns("c7-brokers-0".into()),
+        crabka_security::ca::SubjectAltName::Dns(format!(
+            "c7-broker-headless.{ns}.svc.cluster.local"
+        )),
+        crabka_security::ca::SubjectAltName::Ip(std::net::IpAddr::V4(
+            std::net::Ipv4Addr::LOCALHOST,
+        )),
+    ];
+    let digest = compute_san_digest(&broker_sans, &[]);
+    let digest_b64 = base64::engine::general_purpose::STANDARD.encode(digest.as_bytes());
+
+    // Pre-seeded keystore Secret with broker 0's cert and digest present.
+    // The digest matches what the reconciler will compute, so the cert is reused.
     let pre_seeded_keystore = json!({
         "apiVersion": "v1",
         "kind": "Secret",
         "metadata": { "name": &keystore_name, "namespace": ns, "uid": "ks-uid" },
         "type": "Opaque",
-        "data": { "0.crt": crt_b64, "0.key": key_b64 }
+        "data": { "0.crt": crt_b64, "0.key": key_b64, "0.sans-digest": digest_b64 }
     });
 
     // One pool with nodeIdStart=0 (broker id 0) so the reconciler's

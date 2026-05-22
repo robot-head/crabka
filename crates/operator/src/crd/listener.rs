@@ -19,10 +19,17 @@ pub struct Listener {
     /// accepted by the schema but rejected at reconcile until slice 27.
     #[serde(rename = "type")]
     pub type_: ListenerType,
-    /// Must be `false` in this slice; reconcile rejects `true` until
-    /// Phase 4 (slices 30/31) wires up TLS.
+    /// Transport-level TLS. When `true`, the listener uses the per-broker
+    /// keystore signed by the cluster CA (slice 30) and clients must speak
+    /// TLS to connect. Independent of `authentication` — a `tls: true`
+    /// listener with no `authentication` is anonymous over TLS.
     #[serde(default)]
     pub tls: bool,
+    /// Per-listener authentication mechanism. Absent means anonymous (no
+    /// client identity required). When set to `type: tls`, the listener
+    /// must also have `tls: true` — enforced at reconcile time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authentication: Option<ListenerAuthentication>,
     /// Optional listener-type-specific configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub configuration: Option<ListenerConfiguration>,
@@ -109,6 +116,36 @@ pub struct BrokerOverride {
     pub host: Option<String>,
 }
 
+/// Per-listener authentication mechanism.
+///
+/// The `schema_with` workaround avoids a kube-rs 3.x `StructuralSchemaRewriter`
+/// panic when `oneOf` branches share a `type` discriminator with differing `enum`
+/// values — same pattern as `Authentication` in `user.rs`.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(tag = "type")]
+#[schemars(schema_with = "listener_authentication_schema")]
+pub enum ListenerAuthentication {
+    #[serde(rename = "tls")]
+    Tls,
+    #[serde(rename = "scram-sha-512")]
+    ScramSha512,
+    #[serde(rename = "scram-sha-256")]
+    ScramSha256,
+}
+
+fn listener_authentication_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "object",
+        "required": ["type"],
+        "properties": {
+            "type": {
+                "type": "string",
+                "enum": ["tls", "scram-sha-512", "scram-sha-256"],
+            },
+        },
+    })
+}
+
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ListenerStatus {
@@ -129,6 +166,90 @@ pub struct ListenerAddress {
 }
 
 #[cfg(test)]
+mod auth_tests {
+    use super::*;
+
+    #[test]
+    fn listener_deserializes_tls_authentication() {
+        let l: Listener = serde_yaml::from_str(
+            r"
+name: mtls
+port: 9095
+type: internal
+tls: true
+authentication:
+  type: tls
+",
+        )
+        .unwrap();
+        assert_eq!(l.authentication, Some(ListenerAuthentication::Tls));
+    }
+
+    #[test]
+    fn listener_deserializes_scram_sha_512_authentication() {
+        let l: Listener = serde_yaml::from_str(
+            r"
+name: scram
+port: 9094
+type: internal
+tls: true
+authentication:
+  type: scram-sha-512
+",
+        )
+        .unwrap();
+        assert_eq!(l.authentication, Some(ListenerAuthentication::ScramSha512));
+    }
+
+    #[test]
+    fn listener_deserializes_scram_sha_256_authentication() {
+        let l: Listener = serde_yaml::from_str(
+            r"
+name: scram256
+port: 9094
+type: internal
+tls: true
+authentication:
+  type: scram-sha-256
+",
+        )
+        .unwrap();
+        assert_eq!(l.authentication, Some(ListenerAuthentication::ScramSha256));
+    }
+
+    #[test]
+    fn listener_deserializes_without_authentication() {
+        let l: Listener = serde_yaml::from_str(
+            r"
+name: plain
+port: 9092
+type: internal
+",
+        )
+        .unwrap();
+        assert!(l.authentication.is_none());
+    }
+
+    #[test]
+    fn unknown_authentication_type_rejected() {
+        let err = serde_yaml::from_str::<Listener>(
+            r"
+name: bad
+port: 9092
+type: internal
+authentication:
+  type: oauth
+",
+        )
+        .err();
+        assert!(
+            err.is_some(),
+            "unknown auth type should fail to deserialize"
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -139,6 +260,7 @@ mod tests {
             port: 9092,
             type_: ListenerType::Internal,
             tls: false,
+            authentication: None,
             configuration: None,
             network_policy_peers: None,
         };
@@ -156,6 +278,7 @@ mod tests {
             port: 9094,
             type_: ListenerType::Nodeport,
             tls: false,
+            authentication: None,
             configuration: Some(ListenerConfiguration {
                 bootstrap: Some(BootstrapConfig {
                     node_port: Some(32099),
@@ -203,6 +326,7 @@ mod tests {
             port: 9092,
             type_: ListenerType::Internal,
             tls: false,
+            authentication: None,
             configuration: None,
             network_policy_peers: None,
         };
@@ -217,6 +341,7 @@ mod tests {
             port: 9092,
             type_: ListenerType::Internal,
             tls: false,
+            authentication: None,
             configuration: None,
             network_policy_peers: Some(vec![]),
         };
@@ -246,6 +371,7 @@ mod tests {
             port: 9092,
             type_: ListenerType::Internal,
             tls: false,
+            authentication: None,
             configuration: None,
             network_policy_peers: Some(vec![peer]),
         };

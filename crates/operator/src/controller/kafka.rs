@@ -40,8 +40,8 @@ use crate::controller::listeners::{
 };
 use crate::controller::network_policy;
 use crate::crd::{
-    Kafka, KafkaCondition, KafkaNodePool, KafkaStatus, Listener, ListenerAddress, ListenerStatus,
-    ListenerType,
+    Kafka, KafkaCondition, KafkaNodePool, KafkaStatus, Listener, ListenerAddress,
+    ListenerAuthentication, ListenerStatus, ListenerType,
 };
 
 /// Rolled-up view of a cluster's pools. Computed by
@@ -482,6 +482,13 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
         obj.spec.inter_broker_listener_name.as_deref(),
     );
 
+    // Emit a Warning event for each SCRAM listener that lacks transport TLS.
+    for msg in listeners::weak_auth_warnings(&effective_listeners) {
+        emit_weak_auth_event(&ctx.client, &ns, &obj, &msg)
+            .await
+            .ok();
+    }
+
     let cm_api: Api<ConfigMap> = Api::namespaced(ctx.client.clone(), &ns);
 
     let secret_api: Api<Secret> = Api::namespaced(ctx.client.clone(), &ns);
@@ -559,6 +566,7 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
     // (invalid) intent, but no roll fires until the user fixes the spec.
     let listener_status: Vec<ListenerStatus>;
     let (listeners_valid_cond, listeners_ready_cond);
+    let mut lb_pending: Vec<(i32, String)> = Vec::new();
     if let Err(e) = validation {
         adopt_pools(&pool_api, &obj, pools.iter(), &cfg_hash).await?;
         listener_status = vec![];
@@ -572,7 +580,45 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
         let pool_items: Vec<KafkaNodePool> = pools.items.clone();
         let brokers = enumerate_brokers(&name, &ns, &pool_items);
 
-        // Slice 30: issue per-broker leaf certs into the broker-keystore Secret.
+        // Observe external listener addresses for SAN extension.
+        let broker_ids: Vec<i32> = brokers.iter().map(|b| b.broker_id).collect();
+        let observed = listeners::observe_listener_addresses(
+            &ctx,
+            &ns,
+            &name,
+            &effective_listeners,
+            &broker_ids,
+        )
+        .await?;
+
+        // Brokers whose LB ingress isn't ready yet are skipped; a status condition will surface this.
+        let extra_sans_per_broker: BTreeMap<i32, Vec<crabka_security::ca::SubjectAltName>> =
+            brokers
+                .iter()
+                .filter_map(|b| {
+                    match listeners::compute_extra_sans(
+                        b.broker_id,
+                        &effective_listeners,
+                        &observed,
+                    ) {
+                        Ok(sans) => Some((b.broker_id, sans)),
+                        Err(listeners::SanComputationError::SansNotReady {
+                            broker_id,
+                            listener,
+                        }) => {
+                            tracing::warn!(
+                                broker_id,
+                                %listener,
+                                "LB ingress not ready; skipping cert SAN extension for this broker"
+                            );
+                            lb_pending.push((broker_id, listener));
+                            None
+                        }
+                    }
+                })
+                .collect();
+
+        // Issue per-broker leaf certs into the broker-keystore Secret.
         let keystore_requests: Vec<cluster_ca::BrokerCertRequest> = brokers
             .iter()
             .map(|b| {
@@ -588,14 +634,16 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
                         std::net::Ipv4Addr::LOCALHOST,
                     )),
                 ];
+                let extra = extra_sans_per_broker.get(&id).cloned().unwrap_or_default();
                 cluster_ca::BrokerCertRequest {
                     broker_id: id,
                     cn,
                     sans,
+                    extra_sans: extra,
                 }
             })
             .collect();
-        // Slice 30: keystore status fields (issued/reused/pruned) are reserved
+        // Keystore status fields (issued/reused/pruned) are reserved
         // for a future status surface; ignored for now.
         cluster_ca::ensure_broker_keystore(
             &secret_api,
@@ -624,10 +672,19 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
             })
             .collect();
 
+        let clients_ca_path: Option<&str> = if effective_listeners
+            .iter()
+            .any(|l| matches!(l.authentication, Some(ListenerAuthentication::Tls)))
+        {
+            Some("/etc/crabka/clients-ca/ca.crt")
+        } else {
+            None
+        };
+
         // Helper to render+apply a ConfigMap with the supplied address map.
         // Defined here (inside the validation-ok branch) so it can capture
-        // `tls_per_broker`. On the validation-fail path there is no `apply_cm`
-        // call, so we don't need it there.
+        // `tls_per_broker` and `clients_ca_path`. On the
+        // validation-fail path there is no `apply_cm` call.
         let apply_cm = async |listeners_for_cm: &[Listener],
                               addresses: &BTreeMap<i32, BTreeMap<String, AdvertisedAddress>>|
                -> Result<(), ReconcileError> {
@@ -637,6 +694,7 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
                 addresses,
                 &inter_broker_name,
                 Some(&tls_per_broker),
+                clients_ca_path,
             )?;
             apply_object(&cm_api, &cm_name(&name), &cm).await?;
             Ok(())
@@ -785,27 +843,52 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
     let rollup = aggregate_pool_status(pools.iter());
     let (ready, reason, message) = rollup_condition(&rollup);
     let (rolling, rolling_reason, rolling_message) = rolling_condition_from_rollup(&rollup);
+    let mut conditions = vec![
+        condition(
+            "Ready",
+            if ready { "True" } else { "False" },
+            reason,
+            &message,
+        ),
+        condition(
+            "Rolling",
+            if rolling { "True" } else { "False" },
+            rolling_reason,
+            &rolling_message,
+        ),
+        listeners_valid_cond,
+        listeners_ready_cond,
+        metrics_condition,
+        np_condition,
+        cluster_ca_cond,
+        clients_ca_cond,
+    ];
+    let has_lb_tls_listener = effective_listeners
+        .iter()
+        .any(|l| l.type_ == ListenerType::Loadbalancer && l.tls);
+    if has_lb_tls_listener {
+        if lb_pending.is_empty() {
+            conditions.push(condition(
+                "WaitingForLoadBalancerIp",
+                "False",
+                "LoadBalancerReady",
+                "all broker LB ingress addresses assigned",
+            ));
+        } else {
+            let detail: Vec<String> = lb_pending
+                .iter()
+                .map(|(id, l)| format!("broker {id} listener '{l}'"))
+                .collect();
+            conditions.push(condition(
+                "WaitingForLoadBalancerIp",
+                "True",
+                "LoadBalancerPending",
+                &format!("LB ingress not ready for: {}", detail.join(", ")),
+            ));
+        }
+    }
     let status = KafkaStatus {
-        conditions: vec![
-            condition(
-                "Ready",
-                if ready { "True" } else { "False" },
-                reason,
-                &message,
-            ),
-            condition(
-                "Rolling",
-                if rolling { "True" } else { "False" },
-                rolling_reason,
-                &rolling_message,
-            ),
-            listeners_valid_cond,
-            listeners_ready_cond,
-            metrics_condition,
-            np_condition,
-            cluster_ca_cond,
-            clients_ca_cond,
-        ],
+        conditions,
         replicas: Some(rollup.replicas),
         ready_replicas: Some(rollup.ready_replicas),
         listeners: listener_status,
@@ -880,6 +963,30 @@ async fn adopt_pools<'a>(
 pub fn error_policy(_obj: Arc<Kafka>, err: &ReconcileError, _ctx: Arc<Context>) -> Action {
     tracing::warn!(error = %err, "reconcile error, requeueing");
     Action::requeue(Duration::from_secs(15))
+}
+
+/// Emit a `Warning` Kubernetes Event on the `Kafka` object for a listener
+/// that carries SCRAM authentication without transport TLS. Fire-and-forget
+/// (the caller `.ok()`-s the result) — a transient API error should not
+/// block the rest of the reconcile.
+async fn emit_weak_auth_event(
+    client: &kube::Client,
+    namespace: &str,
+    kafka: &Kafka,
+    message: &str,
+) -> Result<(), ReconcileError> {
+    crate::controller::cluster_ca::emit_event(
+        client,
+        namespace,
+        kafka,
+        "Warning",
+        "WeakAuth",
+        message,
+        "crabka-listener-auth-",
+        "ListenerValidation",
+        "crabka-operator/listener-auth-check",
+    )
+    .await
 }
 
 fn svc_name(kafka: &str) -> String {

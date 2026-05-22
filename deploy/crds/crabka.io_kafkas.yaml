@@ -116,6 +116,22 @@ spec:
                   compatibility default).
                 items:
                   properties:
+                    authentication:
+                      description: |-
+                        Per-listener authentication mechanism. Absent means anonymous (no
+                        client identity required). When set to `type: tls`, the listener
+                        must also have `tls: true` — enforced at reconcile time.
+                      nullable: true
+                      properties:
+                        type:
+                          enum:
+                          - tls
+                          - scram-sha-512
+                          - scram-sha-256
+                          type: string
+                      required:
+                      - type
+                      type: object
                     configuration:
                       description: Optional listener-type-specific configuration.
                       nullable: true
@@ -276,8 +292,10 @@ spec:
                     tls:
                       default: false
                       description: |-
-                        Must be `false` in this slice; reconcile rejects `true` until
-                        Phase 4 (slices 30/31) wires up TLS.
+                        Transport-level TLS. When `true`, the listener uses the per-broker
+                        keystore signed by the cluster CA (slice 30) and clients must speak
+                        TLS to connect. Independent of `authentication` — a `tls: true`
+                        listener with no `authentication` is anonymous over TLS.
                       type: boolean
                     type:
                       description: |-

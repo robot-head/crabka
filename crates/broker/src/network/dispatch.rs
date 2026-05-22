@@ -48,17 +48,30 @@ pub async fn serve_connection_on_listener(
         SocketAddr::from(([0u8, 0, 0, 0], 0))
     });
     if spec.protocol.requires_tls() {
-        let Some(dynamic) = broker.tls_dynamic.as_ref() else {
-            tracing::error!(
-                listener = %spec.name,
-                "TLS listener configured but broker has no TlsAcceptor"
-            );
-            return;
+        let acceptor = if let Some(per_tls) = spec.tls_config.as_ref() {
+            match per_tls.build_server_config() {
+                Ok(sc) => tokio_rustls::TlsAcceptor::from(sc),
+                Err(e) => {
+                    tracing::error!(
+                        listener = %spec.name,
+                        error = %e,
+                        "failed to build TlsAcceptor from per-listener tls_config"
+                    );
+                    return;
+                }
+            }
+        } else {
+            // Use DynamicServerConfig so hot-reload keeps working.
+            let Some(dynamic) = broker.tls_dynamic.as_ref() else {
+                tracing::error!(
+                    listener = %spec.name,
+                    "TLS listener without per-listener tls_config and no broker-wide tls_dynamic"
+                );
+                return;
+            };
+            // Snapshot per accept; an in-flight handshake keeps its captured config.
+            tokio_rustls::TlsAcceptor::from(dynamic.current())
         };
-        // Snapshot the current ServerConfig per accept. Slice 33's
-        // reload swaps the inner Arc atomically; an in-flight
-        // handshake keeps the snapshot it captured here.
-        let acceptor = tokio_rustls::TlsAcceptor::from(dynamic.current());
         match acceptor.accept(stream).await {
             Ok(tls_stream) => {
                 // Slice 29: derive a Principal from the peer cert
@@ -120,6 +133,11 @@ async fn serve_connection_stream<S>(
 {
     let mut framed: Framed<S, _> = Framed::new(stream, codec::codec());
     let is_sasl_listener = spec.protocol.requires_sasl();
+    let sasl_mechanisms = crate::network::listener::resolve_sasl_mechanisms_for_listener(
+        &spec,
+        &broker.config.enabled_sasl_mechanisms,
+    )
+    .to_owned();
     // Per-connection auth state. Mutated by the SASL handlers in T13/T14;
     // T12 only uses it to gate non-allowlisted api_keys before auth completes.
     // Slice 29: when an mTLS client cert was presented (verified by the TLS
@@ -190,7 +208,7 @@ async fn serve_connection_stream<S>(
         // table because handlers receive only `&Broker` and have no way to
         // touch `auth`. Returning `Some(SaslFrameOutcome)` short-circuits
         // the normal dispatch_one() path for that frame.
-        if let Some(outcome) = try_handle_sasl_frame(&broker, &frame, &mut auth) {
+        if let Some(outcome) = try_handle_sasl_frame(&broker, &frame, &mut auth, &sasl_mechanisms) {
             let SaslFrameOutcome {
                 response_bytes,
                 close_after,
@@ -917,12 +935,19 @@ fn try_handle_sasl_frame(
     broker: &Broker,
     frame: &[u8],
     auth: &mut crate::network::auth::ConnectionAuth,
+    sasl_mechanisms: &[crabka_security::SaslMechanism],
 ) -> Option<Result<SaslFrameOutcome, BrokerError>> {
     let api_key = peek_api_key(frame).ok()?;
     if api_key != 17 && api_key != 36 {
         return None;
     }
-    Some(handle_sasl_frame(broker, frame, auth, api_key))
+    Some(handle_sasl_frame(
+        broker,
+        frame,
+        auth,
+        api_key,
+        sasl_mechanisms,
+    ))
 }
 
 fn handle_sasl_frame(
@@ -930,6 +955,7 @@ fn handle_sasl_frame(
     frame: &[u8],
     auth: &mut crate::network::auth::ConnectionAuth,
     api_key: i16,
+    sasl_mechanisms: &[crabka_security::SaslMechanism],
 ) -> Result<SaslFrameOutcome, BrokerError> {
     use crabka_protocol::{Decode, Encode};
 
@@ -944,11 +970,7 @@ fn handle_sasl_frame(
                 &mut cur,
                 api_version,
             )?;
-            let resp = crate::network::auth::handle_handshake(
-                &req,
-                auth,
-                &broker.config.enabled_sasl_mechanisms,
-            );
+            let resp = crate::network::auth::handle_handshake(&req, auth, sasl_mechanisms);
             let mut buf = BytesMut::with_capacity(resp.encoded_len(api_version));
             resp.encode(&mut buf, api_version)?;
             (buf.freeze(), false)

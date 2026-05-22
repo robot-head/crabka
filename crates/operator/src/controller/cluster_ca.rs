@@ -274,9 +274,12 @@ pub(crate) struct BrokerCertRequest {
     pub broker_id: i32,
     pub cn: String,
     pub sans: Vec<SubjectAltName>,
+    /// Extra SANs for external listeners (e.g. `NodePort` node addresses,
+    /// `LoadBalancer` IPs). Empty when no external TLS listeners are configured.
+    pub extra_sans: Vec<SubjectAltName>,
 }
 
-#[allow(dead_code)]
+#[allow(dead_code, clippy::too_many_lines)]
 pub(crate) async fn ensure_broker_keystore(
     secret_api: &Api<Secret>,
     kafka: &Kafka,
@@ -306,7 +309,22 @@ pub(crate) async fn ensure_broker_keystore(
         let id = req.broker_id;
         let crt_key = format!("{id}.crt");
         let key_key = format!("{id}.key");
-        if data.contains_key(&crt_key) && data.contains_key(&key_key) {
+        let digest_key = format!("{id}.sans-digest");
+
+        let requested_digest = compute_san_digest(&req.sans, &req.extra_sans);
+
+        let has_cert = data.contains_key(&crt_key) && data.contains_key(&key_key);
+        let stored_digest = data.get(&digest_key).and_then(|b| {
+            std::str::from_utf8(&b.0)
+                .ok()
+                .map(std::borrow::ToOwned::to_owned)
+        });
+
+        let needs_reissue = !has_cert
+            || stored_digest.is_none()
+            || stored_digest.as_deref() != Some(&requested_digest);
+
+        if !needs_reissue {
             reused.push(id);
             continue;
         }
@@ -315,10 +333,12 @@ pub(crate) async fn ensure_broker_keystore(
             &cluster_ca.key_pem,
             &req.cn,
             &req.sans,
+            &req.extra_sans,
             validity,
         )?;
         data.insert(crt_key, ByteString(leaf.cert_pem.into_bytes()));
         data.insert(key_key, ByteString(leaf.key_pem.into_bytes()));
+        data.insert(digest_key, ByteString(requested_digest.into_bytes()));
         issued.push(id);
     }
 
@@ -326,7 +346,11 @@ pub(crate) async fn ensure_broker_keystore(
         .iter()
         .flat_map(|req| {
             let id = req.broker_id;
-            [format!("{id}.crt"), format!("{id}.key")]
+            [
+                format!("{id}.crt"),
+                format!("{id}.key"),
+                format!("{id}.sans-digest"),
+            ]
         })
         .collect();
     let mut pruned_ids = std::collections::BTreeSet::new();
@@ -377,6 +401,41 @@ pub(crate) async fn ensure_broker_keystore(
         issued,
         reused,
         pruned,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// SAN-list digest
+// ---------------------------------------------------------------------------
+
+/// SHA-256 digest of the canonical-form SAN list (sorted, deduped).
+/// Used to detect when the SAN list for a broker has changed vs the
+/// cert currently stored in the Secret, triggering a reissue.
+#[must_use]
+pub fn compute_san_digest(base_sans: &[SubjectAltName], extras: &[SubjectAltName]) -> String {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write as _;
+    let mut all: Vec<&SubjectAltName> = base_sans.iter().chain(extras.iter()).collect();
+    all.sort();
+    all.dedup();
+    let mut h = Sha256::new();
+    for s in all {
+        match s {
+            SubjectAltName::Dns(d) => {
+                h.update(b"DNS:");
+                h.update(d.as_bytes());
+            }
+            SubjectAltName::Ip(ip) => {
+                h.update(b"IP:");
+                h.update(ip.to_string().as_bytes());
+            }
+        }
+        h.update(b"\n");
+    }
+    let result = h.finalize();
+    result.iter().fold(String::with_capacity(64), |mut s, b| {
+        let _ = write!(s, "{b:02x}");
+        s
     })
 }
 
@@ -528,6 +587,9 @@ async fn flag_ca_if_expiring(
             "Warning",
             "CaRotationRequired",
             &message,
+            "crabka-ca-renewal-",
+            "RenewalCheck",
+            "crabka-operator/ca-renewal-check",
         )
         .await?;
 
@@ -582,6 +644,9 @@ async fn flag_ca_if_expiring(
                  rotation is the cluster admin's responsibility (BYO)",
                 which.condition_name()
             ),
+            "crabka-ca-renewal-",
+            "RenewalCheck",
+            "crabka-operator/ca-renewal-check",
         )
         .await?;
     }
@@ -714,10 +779,13 @@ async fn renew_broker_leafs(
             &cluster_ca.key_pem,
             &cn,
             &sans,
+            &[],
             validity_days,
         )?;
         data.insert(crt_key.clone(), ByteString(leaf.cert_pem.into_bytes()));
         data.insert(format!("{id}.key"), ByteString(leaf.key_pem.into_bytes()));
+        let digest = compute_san_digest(&sans, &[]);
+        data.insert(format!("{id}.sans-digest"), ByteString(digest.into_bytes()));
         renewed_ids.push(id);
     }
     if renewed_ids.is_empty() {
@@ -741,26 +809,33 @@ async fn renew_broker_leafs(
             "Normal",
             "BrokerCertRenewed",
             &format!("broker={id} reissued by ca-renewal-check"),
+            "crabka-ca-renewal-",
+            "RenewalCheck",
+            "crabka-operator/ca-renewal-check",
         )
         .await?;
     }
     Ok(())
 }
 
-async fn emit_event(
+#[allow(clippy::too_many_arguments)] // shared event helper; arity reflects the K8s Event fields
+pub(crate) async fn emit_event(
     client: &kube::Client,
     namespace: &str,
     kafka: &Kafka,
     type_: &str,
     reason: &str,
     message: &str,
+    generate_name: &str,
+    action: &str,
+    reporting_component: &str,
 ) -> Result<(), ReconcileError> {
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::MicroTime;
     use k8s_openapi::jiff::Timestamp;
     let now = Timestamp::now();
     let event = Event {
         metadata: ObjectMeta {
-            generate_name: Some("crabka-ca-renewal-".into()),
+            generate_name: Some(generate_name.into()),
             namespace: Some(namespace.into()),
             ..Default::default()
         },
@@ -776,8 +851,8 @@ async fn emit_event(
             ..Default::default()
         },
         event_time: Some(MicroTime(now)),
-        action: Some("RenewalCheck".into()),
-        reporting_component: Some("crabka-operator/ca-renewal-check".into()),
+        action: Some(action.into()),
+        reporting_component: Some(reporting_component.into()),
         reporting_instance: Some(
             std::env::var("POD_NAME").unwrap_or_else(|_| "crabka-operator-renewal".into()),
         ),
@@ -843,5 +918,131 @@ mod tests {
         let user = issue_user_cert(&ca.cert_pem, &ca.key_pem, "alice", 1).expect("leaf");
         let now = OffsetDateTime::now_utc() + time::Duration::days(10);
         assert!(renew_if_expiring(&user.cert_pem, 30, now).expect("predicate"));
+    }
+}
+
+#[cfg(test)]
+mod reissue_tests {
+    use super::compute_san_digest;
+    use crabka_security::ca::SubjectAltName;
+
+    #[test]
+    fn san_digest_changes_when_extras_differ() {
+        let base = vec![SubjectAltName::Dns("internal.svc".into())];
+        let no_extras = compute_san_digest(&base, &[]);
+        let with_extras =
+            compute_san_digest(&base, &[SubjectAltName::Dns("broker-0.example.com".into())]);
+        assert_ne!(no_extras, with_extras);
+    }
+
+    #[test]
+    fn san_digest_stable_for_same_inputs_in_different_order() {
+        let a = vec![
+            SubjectAltName::Dns("a.example.com".into()),
+            SubjectAltName::Dns("b.example.com".into()),
+        ];
+        let b = vec![
+            SubjectAltName::Dns("b.example.com".into()),
+            SubjectAltName::Dns("a.example.com".into()),
+        ];
+        assert_eq!(compute_san_digest(&a, &[]), compute_san_digest(&b, &[]));
+    }
+
+    #[test]
+    fn san_digest_dedupes_overlap_between_base_and_extras() {
+        let base = vec![SubjectAltName::Dns("internal.svc".into())];
+        let extras = vec![SubjectAltName::Dns("internal.svc".into())];
+        let single = compute_san_digest(&base, &[]);
+        let with_dup_extra = compute_san_digest(&base, &extras);
+        assert_eq!(
+            single, with_dup_extra,
+            "duplicate extras should not change digest"
+        );
+    }
+}
+
+#[cfg(test)]
+mod san_tests {
+    use crabka_security::ca::{SubjectAltName, generate_cluster_ca, issue_broker_cert};
+    use rustls::pki_types::CertificateDer;
+    use rustls::pki_types::pem::PemObject;
+    use x509_parser::extensions::GeneralName;
+    use x509_parser::prelude::{FromDer, X509Certificate};
+
+    fn parse_cert_sans(cert_pem: &str) -> Vec<String> {
+        let der = CertificateDer::pem_slice_iter(cert_pem.as_bytes())
+            .next()
+            .expect("PEM block")
+            .expect("valid PEM");
+        let (_, cert) = X509Certificate::from_der(der.as_ref()).expect("valid DER");
+        cert.subject_alternative_name()
+            .expect("SAN parse")
+            .map(|san_ext| {
+                san_ext
+                    .value
+                    .general_names
+                    .iter()
+                    .map(|gn| match gn {
+                        GeneralName::DNSName(s) => format!("DNS:{s}"),
+                        GeneralName::IPAddress(bytes) => {
+                            let bytes: &[u8] = bytes;
+                            match bytes.len() {
+                                4 => {
+                                    let arr: [u8; 4] = bytes.try_into().expect("4 bytes");
+                                    format!("IP:{}", std::net::IpAddr::V4(arr.into()))
+                                }
+                                16 => {
+                                    let arr: [u8; 16] = bytes.try_into().expect("16 bytes");
+                                    format!("IP:{}", std::net::IpAddr::V6(arr.into()))
+                                }
+                                _ => "IP:unknown".to_string(),
+                            }
+                        }
+                        other => format!("{other:?}"),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn issue_broker_cert_includes_extra_sans_in_leaf() {
+        let cluster_ca = generate_cluster_ca("test-san-ca", 365).expect("test CA");
+        let extra = vec![
+            SubjectAltName::Dns("broker-0.example.com".into()),
+            SubjectAltName::Ip("203.0.113.10".parse().unwrap()),
+        ];
+        let internal_sans = vec![SubjectAltName::Dns("internal.svc".into())];
+        let leaf = issue_broker_cert(
+            &cluster_ca.cert_pem,
+            &cluster_ca.key_pem,
+            "broker-0",
+            &internal_sans,
+            &extra,
+            365,
+        )
+        .unwrap();
+        let parsed_sans = parse_cert_sans(&leaf.cert_pem);
+        assert!(parsed_sans.iter().any(|s| s == "DNS:internal.svc"));
+        assert!(parsed_sans.iter().any(|s| s == "DNS:broker-0.example.com"));
+        assert!(parsed_sans.iter().any(|s| s == "IP:203.0.113.10"));
+    }
+
+    #[test]
+    fn issue_broker_cert_empty_extra_sans_yields_base_sans_only() {
+        let cluster_ca = generate_cluster_ca("test-san-ca", 365).expect("test CA");
+        let internal_sans = vec![SubjectAltName::Dns("internal.svc".into())];
+        let leaf = issue_broker_cert(
+            &cluster_ca.cert_pem,
+            &cluster_ca.key_pem,
+            "broker-0",
+            &internal_sans,
+            &[],
+            365,
+        )
+        .unwrap();
+        let parsed = parse_cert_sans(&leaf.cert_pem);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0], "DNS:internal.svc");
     }
 }

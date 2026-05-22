@@ -24,8 +24,8 @@ use std::sync::Arc;
 
 use crabka_operator::controller::kafka::reconcile;
 use crabka_operator::crd::{
-    Kafka, KafkaSpec, Listener, ListenerType, MetricsConfig, NetworkPolicySpec, PodMonitorSpec,
-    ServiceMonitorSpec,
+    Kafka, KafkaSpec, Listener, ListenerAuthentication, ListenerType, MetricsConfig,
+    NetworkPolicySpec, PodMonitorSpec, ServiceMonitorSpec,
 };
 use http::{Method, Response};
 use serde_json::json;
@@ -643,13 +643,13 @@ async fn kafka_status_synthesized_default_listener_is_valid_and_ready() {
     assert_eq!(state.remaining_rules(), 0);
 }
 
-/// Slice 25: a `spec.listeners` entry with `tls=true` is rejected at
-/// validation. The status PATCH must show `ListenersValid=False
-/// reason=TlsNotYetSupported` and `ListenersReady=False
-/// reason=ListenersInvalid`, and the `ConfigMap` PATCH must carry no
-/// `broker-*.toml` keys (no broker should boot with an invalid spec).
+/// A listener with `authentication=Tls` (mTLS) but `tls=false`
+/// (no transport TLS) is invalid. The status PATCH must show
+/// `ListenersValid=False reason=ListenerMtlsRequiresTransportTls` and
+/// `ListenersReady=False reason=ListenersInvalid`, and the `ConfigMap`
+/// PATCH must be skipped (no broker should boot with an invalid spec).
 #[tokio::test]
-async fn kafka_invalid_listener_tls_blocks_broker_configmap_and_sets_conditions() {
+async fn kafka_mtls_without_tls_blocks_broker_configmap_and_sets_conditions() {
     let items = vec![fake_pool_list_item("brokers", "y", "demo", 1, 1)];
     // Validation failure must NOT patch the broker-config ConfigMap or the
     // broker keystore Secret (both are inside the validation-ok branch), so
@@ -663,7 +663,8 @@ async fn kafka_invalid_listener_tls_blocks_broker_configmap_and_sets_conditions(
         name: "PLAIN".into(),
         port: 9092,
         type_: ListenerType::Internal,
-        tls: true,
+        tls: false,
+        authentication: Some(ListenerAuthentication::Tls),
         configuration: None,
         network_policy_peers: None,
     }];
@@ -715,7 +716,10 @@ async fn kafka_invalid_listener_tls_blocks_broker_configmap_and_sets_conditions(
         .find(|c| c["type"] == "ListenersValid")
         .unwrap_or_else(|| panic!("ListenersValid present, body = {body}"));
     assert_eq!(valid["status"], "False", "body = {body}");
-    assert_eq!(valid["reason"], "TlsNotYetSupported", "body = {body}");
+    assert_eq!(
+        valid["reason"], "ListenerMtlsRequiresTransportTls",
+        "body = {body}"
+    );
 
     let ready = conds
         .iter()
@@ -1288,6 +1292,7 @@ async fn network_policy_listener_deny_all_skips_port_rule() {
         port: 9092,
         type_: ListenerType::Internal,
         tls: false,
+        authentication: None,
         configuration: None,
         network_policy_peers: Some(vec![]),
     }];

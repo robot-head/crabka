@@ -11,12 +11,13 @@ use http::{Method, Response};
 mod shared;
 
 use shared::{
-    MockRule, MockState, fake_configmap_body, fake_kafka_body, fake_pool_body, fake_pool_list_body,
-    fake_pool_list_item, fake_secret_body, fake_service_body, fixture_ctx, json_response,
-    mock_client, not_found_body,
+    MockRule, build_ctx, fake_pool_body, fake_pool_list_item, happy_path_rules, json_response,
+    not_found_body,
 };
 
 // ── helpers ──────────────────────────────────────────────────────────────────
+
+// fake_ca_secret, fake_keystore_secret, happy_path_rules, build_ctx are in shared/mod.rs.
 
 fn kafka_cr(name: &str, namespace: &str) -> Kafka {
     let mut k = Kafka::new(
@@ -35,196 +36,6 @@ fn kafka_cr(name: &str, namespace: &str) -> Kafka {
     k.metadata.namespace = Some(namespace.into());
     k.metadata.uid = Some("kafka-uid".into());
     k
-}
-
-fn fake_ca_secret(sname: &str, namespace: &str) -> serde_json::Value {
-    serde_json::json!({
-        "apiVersion": "v1",
-        "kind": "Secret",
-        "metadata": { "name": sname, "namespace": namespace, "uid": "ca-uid" },
-        "type": "Opaque",
-        "data": {}
-    })
-}
-
-fn fake_keystore_secret(sname: &str, namespace: &str) -> serde_json::Value {
-    serde_json::json!({
-        "apiVersion": "v1",
-        "kind": "Secret",
-        "metadata": { "name": sname, "namespace": namespace, "uid": "ks-uid" },
-        "type": "Opaque",
-        "data": {}
-    })
-}
-
-/// Build the full happy-path rule list for cluster `name` in `namespace`.
-/// Mirrors the `happy_path_rules` function in `reconcile_kafka.rs`.
-#[allow(clippy::too_many_lines)]
-fn happy_path_rules(
-    name: &str,
-    namespace: &str,
-    pool_items: &[serde_json::Value],
-) -> Vec<MockRule> {
-    let svc_name = format!("{name}-broker-headless");
-    let cm_name = format!("{name}-broker-config");
-    let secret_name = format!("{name}-cluster-id");
-    let cluster_ca_key = format!("{name}-cluster-ca");
-    let cluster_ca_cert = format!("{name}-cluster-ca-cert");
-    let clients_ca_key = format!("{name}-clients-ca");
-    let clients_ca_cert = format!("{name}-clients-ca-cert");
-    let keystore_name = format!("{name}-kafka-brokers");
-
-    let mut rules = vec![
-        // 1. PATCH headless service.
-        MockRule {
-            method: Method::PATCH,
-            path_substr: format!("/services/{svc_name}"),
-            response: json_response(200, &fake_service_body(&svc_name, namespace)),
-        },
-        // 2. GET cluster-id secret -> 404.
-        MockRule {
-            method: Method::GET,
-            path_substr: format!("/secrets/{secret_name}"),
-            response: Response::builder()
-                .status(404)
-                .header("content-type", "application/json")
-                .body(not_found_body("secret not found"))
-                .expect("404 builds"),
-        },
-        // 3. POST cluster-id secret -> 201.
-        MockRule {
-            method: Method::POST,
-            path_substr: format!("/namespaces/{namespace}/secrets"),
-            response: json_response(
-                201,
-                &fake_secret_body(
-                    &secret_name,
-                    namespace,
-                    "00000000-0000-0000-0000-000000000000",
-                ),
-            ),
-        },
-        // 4. GET cluster-ca key -> 404.
-        MockRule {
-            method: Method::GET,
-            path_substr: format!("/secrets/{cluster_ca_key}"),
-            response: Response::builder()
-                .status(404)
-                .header("content-type", "application/json")
-                .body(not_found_body("not found"))
-                .expect("404"),
-        },
-        // 5. GET cluster-ca cert -> 404.
-        MockRule {
-            method: Method::GET,
-            path_substr: format!("/secrets/{cluster_ca_cert}"),
-            response: Response::builder()
-                .status(404)
-                .header("content-type", "application/json")
-                .body(not_found_body("not found"))
-                .expect("404"),
-        },
-        // 6. PATCH cluster-ca key -> 200.
-        MockRule {
-            method: Method::PATCH,
-            path_substr: format!("/secrets/{cluster_ca_key}"),
-            response: json_response(200, &fake_ca_secret(&cluster_ca_key, namespace)),
-        },
-        // 7. PATCH cluster-ca cert -> 200.
-        MockRule {
-            method: Method::PATCH,
-            path_substr: format!("/secrets/{cluster_ca_cert}"),
-            response: json_response(200, &fake_ca_secret(&cluster_ca_cert, namespace)),
-        },
-        // 8. GET clients-ca key -> 404.
-        MockRule {
-            method: Method::GET,
-            path_substr: format!("/secrets/{clients_ca_key}"),
-            response: Response::builder()
-                .status(404)
-                .header("content-type", "application/json")
-                .body(not_found_body("not found"))
-                .expect("404"),
-        },
-        // 9. GET clients-ca cert -> 404.
-        MockRule {
-            method: Method::GET,
-            path_substr: format!("/secrets/{clients_ca_cert}"),
-            response: Response::builder()
-                .status(404)
-                .header("content-type", "application/json")
-                .body(not_found_body("not found"))
-                .expect("404"),
-        },
-        // 10. PATCH clients-ca key -> 200.
-        MockRule {
-            method: Method::PATCH,
-            path_substr: format!("/secrets/{clients_ca_key}"),
-            response: json_response(200, &fake_ca_secret(&clients_ca_key, namespace)),
-        },
-        // 11. PATCH clients-ca cert -> 200.
-        MockRule {
-            method: Method::PATCH,
-            path_substr: format!("/secrets/{clients_ca_cert}"),
-            response: json_response(200, &fake_ca_secret(&clients_ca_cert, namespace)),
-        },
-        // 12. GET kafkanodepools (list by label).
-        MockRule {
-            method: Method::GET,
-            path_substr: format!("/namespaces/{namespace}/kafkanodepools"),
-            response: json_response(200, &fake_pool_list_body(pool_items)),
-        },
-        // 13. GET broker keystore -> 404 (first reconcile).
-        MockRule {
-            method: Method::GET,
-            path_substr: format!("/secrets/{keystore_name}"),
-            response: Response::builder()
-                .status(404)
-                .header("content-type", "application/json")
-                .body(not_found_body("not found"))
-                .expect("404"),
-        },
-        // 14. PATCH broker keystore -> 200.
-        MockRule {
-            method: Method::PATCH,
-            path_substr: format!("/secrets/{keystore_name}"),
-            response: json_response(200, &fake_keystore_secret(&keystore_name, namespace)),
-        },
-        // 15. PATCH configmap (per-broker TOML).
-        MockRule {
-            method: Method::PATCH,
-            path_substr: format!("/configmaps/{cm_name}"),
-            response: json_response(200, &fake_configmap_body(&cm_name, namespace)),
-        },
-    ];
-
-    // 16. PATCH each pool with owner-ref.
-    for item in pool_items {
-        let pool_name = item["metadata"]["name"]
-            .as_str()
-            .expect("fake pool item has metadata.name");
-        rules.push(MockRule {
-            method: Method::PATCH,
-            path_substr: format!("/kafkanodepools/{pool_name}?"),
-            response: json_response(200, &fake_pool_body(pool_name, namespace, name)),
-        });
-    }
-    // 17. PATCH kafkas/<name>/status.
-    rules.push(MockRule {
-        method: Method::PATCH,
-        path_substr: format!("/kafkas/{name}/status"),
-        response: json_response(200, &fake_kafka_body(name, namespace)),
-    });
-    rules
-}
-
-fn build_ctx(
-    namespace: &str,
-    rules: Vec<MockRule>,
-) -> (Arc<crabka_operator::context::Context>, Arc<MockState>) {
-    let state = MockState::new(rules);
-    let client = mock_client(&state, namespace);
-    (Arc::new(fixture_ctx(client, namespace)), state)
 }
 
 // ── test 1: TLS block in broker TOML ─────────────────────────────────────────
@@ -314,20 +125,18 @@ async fn rendered_broker_config_carries_controller_listener_protocol_ssl_and_tls
     );
 }
 
-// ── test 2: listeners[].tls=true still rejected ───────────────────────────────
+// ── test 2: tls=true, authentication=None listener reconciles (anonymous TLS) ──
 
-/// Slice 30 (T11 test 2): a `Listener` with `tls: true` must cause the
-/// reconciler to surface `ListenersValid=False reason=TlsNotYetSupported`.
-/// No `ConfigMap` PATCH or keystore PATCH may be issued.
+/// A `Listener` with `tls: true` and no authentication
+/// is now valid — it represents anonymous-over-TLS. Reconcile must succeed
+/// and the rendered broker TOML must contain `protocol = "Ssl"` for that
+/// listener.
 #[tokio::test]
-async fn data_plane_tls_listener_still_rejected_in_slice_30() {
+async fn data_plane_tls_listener_anonymous_now_reconciles() {
     let items = vec![fake_pool_list_item("brokers", "y", "c1", 1, 1)];
-    // Validation failure bypasses the ConfigMap PATCH and broker keystore
-    // PATCH — drop those rules to ensure the mock does not consume them.
-    let mut rules = happy_path_rules("c1", "y", &items);
-    rules.retain(|r| !r.path_substr.contains("/configmaps/"));
-    rules.retain(|r| !r.path_substr.contains("-kafka-brokers"));
-    let (ctx, state) = build_ctx("y", rules);
+    // This is a valid listener now — use the full happy-path rules including
+    // the ConfigMap PATCH and broker keystore PATCH.
+    let (ctx, state) = build_ctx("y", happy_path_rules("c1", "y", &items));
 
     let mut kafka = kafka_cr("c1", "y");
     kafka.spec.listeners = vec![Listener {
@@ -335,6 +144,7 @@ async fn data_plane_tls_listener_still_rejected_in_slice_30() {
         port: 9092,
         type_: ListenerType::Internal,
         tls: true,
+        authentication: None,
         configuration: None,
         network_policy_peers: None,
     }];
@@ -343,34 +153,55 @@ async fn data_plane_tls_listener_still_rejected_in_slice_30() {
 
     let observed = state.take_observed();
 
-    // No ConfigMap PATCH.
-    let cm_patch = observed.iter().find(|r| {
-        r.method() == Method::PATCH && r.uri().to_string().contains("/configmaps/c1-broker-config")
-    });
+    // ConfigMap PATCH must be present — reconcile succeeded.
+    let cm_patch = observed
+        .iter()
+        .find(|r| {
+            r.method() == Method::PATCH
+                && r.uri().to_string().contains("/configmaps/c1-broker-config")
+        })
+        .expect("ConfigMap PATCH must be captured for a valid TLS listener");
+
+    let body: serde_json::Value =
+        serde_json::from_slice(cm_patch.body()).expect("ConfigMap PATCH body is JSON");
+    let data = body
+        .get("data")
+        .and_then(|d| d.as_object())
+        .unwrap_or_else(|| panic!("ConfigMap body must have data object; body = {body}"));
+
+    let toml_str = data
+        .get("broker-0.toml")
+        .and_then(|v| v.as_str())
+        .unwrap_or_else(|| {
+            panic!(
+                "broker-0.toml key missing; data keys = {:?}",
+                data.keys().collect::<Vec<_>>()
+            )
+        });
+
+    // The anonymous-TLS listener must render as protocol = "Ssl".
     assert!(
-        cm_patch.is_none(),
-        "validation failure must NOT patch the broker-config ConfigMap: {:?}",
-        cm_patch.map(|p| p.uri().to_string())
+        toml_str.contains("protocol = \"Ssl\""),
+        "anonymous TLS listener must render protocol = \"Ssl\";\n{toml_str}"
     );
 
-    // Status conditions reflect the TLS validation error.
+    // Status conditions must reflect success.
     let status_patch = observed
         .iter()
         .find(|r| r.method() == Method::PATCH && r.uri().to_string().contains("/kafkas/c1/status"))
         .expect("status PATCH captured");
 
-    let body: serde_json::Value =
+    let sbody: serde_json::Value =
         serde_json::from_slice(status_patch.body()).expect("status body is JSON");
-    let conds = body["status"]["conditions"]
+    let conds = sbody["status"]["conditions"]
         .as_array()
         .expect("conditions array");
 
     let valid = conds
         .iter()
         .find(|c| c["type"] == "ListenersValid")
-        .unwrap_or_else(|| panic!("ListenersValid present; body = {body}"));
-    assert_eq!(valid["status"], "False", "body = {body}");
-    assert_eq!(valid["reason"], "TlsNotYetSupported", "body = {body}");
+        .unwrap_or_else(|| panic!("ListenersValid present; body = {sbody}"));
+    assert_eq!(valid["status"], "True", "body = {sbody}");
 
     assert_eq!(state.remaining_rules(), 0);
 }

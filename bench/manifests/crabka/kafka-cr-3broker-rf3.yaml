@@ -6,6 +6,14 @@ metadata:
   namespace: default
 spec:
   kafkaVersion: "0.1.1"
+  # Per-listener auth shape (not active here; benchmark assumes plaintext):
+  # listeners:
+  #   - name: internal
+  #     port: 9092
+  #     type: internal
+  #     tls: true
+  #     authentication:
+  #       type: scram-sha-512  # or: tls (mTLS), or: scram-sha-256
   config:
     log.retention.hours: "24"
     default.replication.factor: "3"

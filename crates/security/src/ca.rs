@@ -42,7 +42,7 @@ pub struct UserCert {
 
 /// SAN entry for a leaf cert. ECDSA leaf certs accept any mix of DNS
 /// names and IP addresses; the broker-cert path uses a mix.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SubjectAltName {
     Dns(String),
     Ip(IpAddr),
@@ -124,13 +124,25 @@ pub fn generate_cluster_ca(cn: &str, validity_days: u32) -> Result<CaMaterial, C
 /// (EKU = serverAuth + clientAuth, KU = digitalSignature +
 /// keyEncipherment). SANs accept a mix of DNS names and IPs. ECDSA
 /// P-256.
+///
+/// Merges `base_sans` and `extra_sans` (e.g. external advertised addresses
+/// for `NodePort` or `LoadBalancer` listeners) into a single SAN list;
+/// duplicates are silently dropped.
 pub fn issue_broker_cert(
     ca_cert_pem: &str,
     ca_key_pem: &str,
     cn: &str,
-    sans: &[SubjectAltName],
+    base_sans: &[SubjectAltName],
+    extra_sans: &[SubjectAltName],
     validity_days: u32,
 ) -> Result<BrokerCert, CaError> {
+    let mut all_sans: Vec<SubjectAltName> = base_sans.to_vec();
+    for s in extra_sans {
+        if !all_sans.contains(s) {
+            all_sans.push(s.clone());
+        }
+    }
+
     let ca_key = KeyPair::from_pem(ca_key_pem)?;
     let ca_issuer = Issuer::from_ca_cert_pem(ca_cert_pem, ca_key)?;
 
@@ -154,7 +166,7 @@ pub fn issue_broker_cert(
         ExtendedKeyUsagePurpose::ServerAuth,
         ExtendedKeyUsagePurpose::ClientAuth,
     ];
-    params.subject_alt_names = sans
+    params.subject_alt_names = all_sans
         .iter()
         .map(|s| match s {
             SubjectAltName::Dns(d) => SanType::DnsName(d.parse().expect("valid Ia5String")),
@@ -347,7 +359,7 @@ mod tests {
             SubjectAltName::Dns("c1-broker-0".into()),
             SubjectAltName::Ip(IpAddr::V4(Ipv4Addr::LOCALHOST)),
         ];
-        let b = issue_broker_cert(&ca.cert_pem, &ca.key_pem, "c1-broker-0", &sans, 365)
+        let b = issue_broker_cert(&ca.cert_pem, &ca.key_pem, "c1-broker-0", &sans, &[], 365)
             .expect("issue broker cert");
 
         let der = pem_to_der(&b.cert_pem);
@@ -380,8 +392,8 @@ mod tests {
     fn issue_broker_cert_chains_to_cluster_ca() {
         let ca = generate_cluster_ca("c1", 365).expect("CA");
         let sans = vec![SubjectAltName::Dns("c1-broker-0".into())];
-        let b =
-            issue_broker_cert(&ca.cert_pem, &ca.key_pem, "c1-broker-0", &sans, 365).expect("leaf");
+        let b = issue_broker_cert(&ca.cert_pem, &ca.key_pem, "c1-broker-0", &sans, &[], 365)
+            .expect("leaf");
 
         let leaf_der = pem_to_der(&b.cert_pem);
         let (_, leaf) = X509Certificate::from_der(leaf_der.as_ref()).expect("parse leaf");

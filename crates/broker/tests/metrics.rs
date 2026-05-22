@@ -193,6 +193,8 @@ async fn metrics_endpoint_serves_openmetrics_and_counters_tick() {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         advertised: "127.0.0.1:0".into(),
         protocol: ListenerProtocol::Plaintext,
+        tls_config: None,
+        sasl_mechanisms: None,
     }];
     cfg.inter_broker_listener_name = "PLAINTEXT".into();
     cfg.metrics_listen_addr = Some("127.0.0.1:0".parse().unwrap());
@@ -289,6 +291,8 @@ async fn partition_level_metrics_and_disk_gauge_render() {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         advertised: "127.0.0.1:0".into(),
         protocol: ListenerProtocol::Plaintext,
+        tls_config: None,
+        sasl_mechanisms: None,
     }];
     cfg.inter_broker_listener_name = "PLAINTEXT".into();
     cfg.metrics_listen_addr = Some("127.0.0.1:0".parse().unwrap());
