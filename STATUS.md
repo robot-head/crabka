@@ -1384,3 +1384,53 @@ Kafka client for ApiVersions.
 - Out of scope: data-plane listener TLS (slice 31), non-disruptive CA
   rotation (slice 34), PKCS#12 keystore output, MaintenanceTimeWindows.
 
+## Slice 31 — Operator: Listener auth wiring (TLS + SCRAM) (2026-05-22)
+
+- New `Kafka.spec.listeners[].authentication`: Strimzi-shape
+  `{ type: tls | scram-sha-512 | scram-sha-256 }`. mTLS (`type: tls`)
+  requires `tls: true` on the listener; validation rejects otherwise
+  with `ListenerMtlsRequiresTransportTls` reason on
+  `ListenersValid=False`.
+- Operator emits per-listener inline TOML `tls_config = { ... }` /
+  `sasl_config = { enabled_mechanisms = [...] }` blocks inside each
+  `[[listeners]]` entry. Slice-30 top-level `[tls_config]` (controller
+  / inter-broker) is preserved as a fallback.
+- Broker `file_config.rs` parses the new per-listener blocks; accept
+  loop resolves TLS material and SASL mechanisms per listener with
+  fallback to broker-wide defaults. Inter-broker continues to read
+  the top-level config; no slice-30 regression.
+- Per-broker cert SAN list extended at issuance time with external
+  advertised addresses computed from observed NodePort (`Node.status.addresses`
+  with type `ExternalIP`/`ExternalDNS`/`Hostname`) and LoadBalancer
+  (`Service.status.loadBalancer.ingress[]`) state. `issue_broker_cert`
+  gains `extra_sans` parameter. Cert reissue triggered via SHA-256
+  digest of the SAN list stored in the `<cluster>-kafka-brokers`
+  Secret (`{id}.sans-digest` key alongside `{id}.crt` / `{id}.key`).
+- Validation: `tls: false + auth: tls` →
+  `ListenerMtlsRequiresTransportTls`, blocks ConfigMap render +
+  StatefulSet bump. SCRAM without TLS is accepted but produces a
+  `WeakAuth` Warning Event each reconcile.
+- LB ingress pending: per-broker cert issuance for affected brokers
+  skipped this reconcile (issued with internal SANs only) and
+  `WaitingForLoadBalancerIp=True` surfaced; reconcile requeues.
+  Steady state (LB ingress assigned) sets the condition to `False`
+  with reason `LoadBalancerReady`.
+- Listener-auth changes flow through slice-21's config-hash → ordered
+  rolling restart. Free — the rendered TOML is already in the hash.
+- 9 new operator unit-test files / inline modules updated, 1 new
+  integration file (`reconcile_listener_auth.rs` — 7 scenarios). The
+  shared test harness (`tests/shared/mod.rs`) absorbs four previously
+  duplicated helpers (`fake_ca_secret`, `fake_keystore_secret`,
+  `happy_path_rules`, `build_ctx`).
+- Broker: 5 new unit tests for TLS/SASL resolver fallback in the
+  accept loop.
+- kind e2e: 2 new scenarios in a new `kind-listener-auth` job —
+  SCRAM-SHA-512 over TLS (internal) and mTLS (internal). NodePort SAN
+  validation deferred (operator-side wiring is covered by the
+  `nodeport_listener_external_san_added_to_per_broker_cert`
+  integration test).
+- Out of scope: BYO server cert (`brokerCertChainAndKey`), OAuth/OIDC
+  listener auth (slice 49), custom authentication plugin,
+  Ingress/Route listener TLS (slice 27), non-disruptive auth
+  hot-reload, PKCS#12 user keystore bundle (slice-37 follow-up).
+
