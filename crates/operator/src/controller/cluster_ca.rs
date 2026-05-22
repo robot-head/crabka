@@ -412,10 +412,7 @@ pub(crate) async fn ensure_broker_keystore(
 /// Used to detect when the SAN list for a broker has changed vs the
 /// cert currently stored in the Secret, triggering a reissue.
 #[must_use]
-pub fn compute_san_digest(
-    base_sans: &[SubjectAltName],
-    extras: &[SubjectAltName],
-) -> String {
+pub fn compute_san_digest(base_sans: &[SubjectAltName], extras: &[SubjectAltName]) -> String {
     use sha2::{Digest, Sha256};
     use std::fmt::Write as _;
     let mut all: Vec<&SubjectAltName> = base_sans.iter().chain(extras.iter()).collect();

@@ -19,8 +19,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt as _;
-use k8s_openapi::api::core::v1::{ConfigMap, Node, Pod, Secret, Service};
-use kube::api::{Api, ListParams, Patch, PatchParams};
+use k8s_openapi::api::core::v1::{ConfigMap, Event, Node, Pod, Secret, Service};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::MicroTime;
+use kube::api::{Api, ListParams, Patch, PatchParams, PostParams};
 use kube::runtime::controller::{Action, Controller};
 use kube::runtime::reflector::ObjectRef;
 use kube::runtime::watcher;
@@ -482,6 +483,13 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
         obj.spec.inter_broker_listener_name.as_deref(),
     );
 
+    // Emit a Warning event for each SCRAM listener that lacks transport TLS.
+    for msg in listeners::weak_auth_warnings(&effective_listeners) {
+        emit_weak_auth_event(&ctx.client, &ns, &obj, &msg)
+            .await
+            .ok();
+    }
+
     let cm_api: Api<ConfigMap> = Api::namespaced(ctx.client.clone(), &ns);
 
     let secret_api: Api<Secret> = Api::namespaced(ctx.client.clone(), &ns);
@@ -559,6 +567,7 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
     // (invalid) intent, but no roll fires until the user fixes the spec.
     let listener_status: Vec<ListenerStatus>;
     let (listeners_valid_cond, listeners_ready_cond);
+    let mut lb_pending_global: Vec<(i32, String)> = Vec::new();
     if let Err(e) = validation {
         adopt_pools(&pool_api, &obj, pools.iter(), &cfg_hash).await?;
         listener_status = vec![];
@@ -603,6 +612,7 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
                                 %listener,
                                 "LB ingress not ready; skipping cert SAN extension for this broker"
                             );
+                            lb_pending_global.push((broker_id, listener));
                             None
                         }
                     }
@@ -834,27 +844,40 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
     let rollup = aggregate_pool_status(pools.iter());
     let (ready, reason, message) = rollup_condition(&rollup);
     let (rolling, rolling_reason, rolling_message) = rolling_condition_from_rollup(&rollup);
+    let mut conditions = vec![
+        condition(
+            "Ready",
+            if ready { "True" } else { "False" },
+            reason,
+            &message,
+        ),
+        condition(
+            "Rolling",
+            if rolling { "True" } else { "False" },
+            rolling_reason,
+            &rolling_message,
+        ),
+        listeners_valid_cond,
+        listeners_ready_cond,
+        metrics_condition,
+        np_condition,
+        cluster_ca_cond,
+        clients_ca_cond,
+    ];
+    if !lb_pending_global.is_empty() {
+        let detail: Vec<String> = lb_pending_global
+            .iter()
+            .map(|(id, l)| format!("broker {id} listener '{l}'"))
+            .collect();
+        conditions.push(condition(
+            "WaitingForLoadBalancerIp",
+            "True",
+            "LoadBalancerPending",
+            &format!("LB ingress not ready for: {}", detail.join(", ")),
+        ));
+    }
     let status = KafkaStatus {
-        conditions: vec![
-            condition(
-                "Ready",
-                if ready { "True" } else { "False" },
-                reason,
-                &message,
-            ),
-            condition(
-                "Rolling",
-                if rolling { "True" } else { "False" },
-                rolling_reason,
-                &rolling_message,
-            ),
-            listeners_valid_cond,
-            listeners_ready_cond,
-            metrics_condition,
-            np_condition,
-            cluster_ca_cond,
-            clients_ca_cond,
-        ],
+        conditions,
         replicas: Some(rollup.replicas),
         ready_replicas: Some(rollup.ready_replicas),
         listeners: listener_status,
@@ -929,6 +952,48 @@ async fn adopt_pools<'a>(
 pub fn error_policy(_obj: Arc<Kafka>, err: &ReconcileError, _ctx: Arc<Context>) -> Action {
     tracing::warn!(error = %err, "reconcile error, requeueing");
     Action::requeue(Duration::from_secs(15))
+}
+
+/// Emit a `Warning` Kubernetes Event on the `Kafka` object for a listener
+/// that carries SCRAM authentication without transport TLS. Fire-and-forget
+/// (the caller `.ok()`-s the result) — a transient API error should not
+/// block the rest of the reconcile.
+async fn emit_weak_auth_event(
+    client: &kube::Client,
+    namespace: &str,
+    kafka: &Kafka,
+    message: &str,
+) -> Result<(), ReconcileError> {
+    use k8s_openapi::jiff::Timestamp;
+    let now = Timestamp::now();
+    let event = Event {
+        metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+            generate_name: Some("crabka-listener-auth-".into()),
+            namespace: Some(namespace.into()),
+            ..Default::default()
+        },
+        type_: Some("Warning".into()),
+        reason: Some("WeakAuth".into()),
+        message: Some(message.into()),
+        involved_object: k8s_openapi::api::core::v1::ObjectReference {
+            api_version: Some("crabka.io/v1alpha1".into()),
+            kind: Some("Kafka".into()),
+            name: Some(kafka.name_any()),
+            namespace: Some(namespace.into()),
+            uid: kafka.meta().uid.clone(),
+            ..Default::default()
+        },
+        event_time: Some(MicroTime(now)),
+        action: Some("ListenerValidation".into()),
+        reporting_component: Some("crabka-operator/listener-auth-check".into()),
+        reporting_instance: Some(
+            std::env::var("POD_NAME").unwrap_or_else(|_| "crabka-operator".into()),
+        ),
+        ..Default::default()
+    };
+    let api: Api<Event> = Api::namespaced(client.clone(), namespace);
+    api.create(&PostParams::default(), &event).await?;
+    Ok(())
 }
 
 fn svc_name(kafka: &str) -> String {

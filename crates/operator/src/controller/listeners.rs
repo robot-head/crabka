@@ -171,6 +171,31 @@ pub fn validate_listeners(
     Ok(())
 }
 
+/// Return one warning string per listener that has SCRAM authentication
+/// without transport TLS. These are not hard errors — SCRAM itself is
+/// cryptographically safe — but the SCRAM exchange does traverse the
+/// network before the authentication is complete, so credentials can be
+/// observed by a passive eavesdropper on a plaintext connection.
+pub(crate) fn weak_auth_warnings(listeners: &[Listener]) -> Vec<String> {
+    listeners
+        .iter()
+        .filter(|l| {
+            !l.tls
+                && matches!(
+                    l.authentication,
+                    Some(ListenerAuthentication::ScramSha512 | ListenerAuthentication::ScramSha256)
+                )
+        })
+        .map(|l| {
+            format!(
+                "listener '{}' has SCRAM auth without transport TLS; credentials traverse \
+                 the network in cleartext during the SCRAM exchange. Consider tls: true.",
+                l.name
+            )
+        })
+        .collect()
+}
+
 /// Pick the inter-broker listener name. Honors an explicit override;
 /// otherwise picks the first `internal` listener. Returns the synthesized
 /// default name (`"PLAIN"`) when `listeners` is empty (the slice-19
@@ -1910,5 +1935,70 @@ mod san_tests {
             result,
             Err(SanComputationError::SansNotReady { broker_id: 0, .. })
         ));
+    }
+}
+
+#[cfg(test)]
+mod weak_auth_tests {
+    use super::*;
+
+    #[test]
+    fn weak_auth_warnings_emitted_for_scram_without_tls() {
+        let listeners = vec![Listener {
+            name: "scram-plain".into(),
+            port: 9094,
+            type_: ListenerType::Internal,
+            tls: false,
+            authentication: Some(ListenerAuthentication::ScramSha512),
+            configuration: None,
+            network_policy_peers: None,
+        }];
+        let warnings = weak_auth_warnings(&listeners);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("scram-plain"));
+        assert!(warnings[0].contains("cleartext") || warnings[0].contains("TLS"));
+    }
+
+    #[test]
+    fn weak_auth_warnings_empty_for_scram_with_tls() {
+        let listeners = vec![Listener {
+            name: "scram-tls".into(),
+            port: 9094,
+            type_: ListenerType::Internal,
+            tls: true,
+            authentication: Some(ListenerAuthentication::ScramSha512),
+            configuration: None,
+            network_policy_peers: None,
+        }];
+        let warnings = weak_auth_warnings(&listeners);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn weak_auth_warnings_empty_for_no_auth() {
+        let listeners = vec![Listener {
+            name: "plain".into(),
+            port: 9092,
+            type_: ListenerType::Internal,
+            tls: false,
+            authentication: None,
+            configuration: None,
+            network_policy_peers: None,
+        }];
+        assert!(weak_auth_warnings(&listeners).is_empty());
+    }
+
+    #[test]
+    fn weak_auth_warnings_emitted_for_scram_256_without_tls() {
+        let listeners = vec![Listener {
+            name: "scram256-plain".into(),
+            port: 9094,
+            type_: ListenerType::Internal,
+            tls: false,
+            authentication: Some(ListenerAuthentication::ScramSha256),
+            configuration: None,
+            network_policy_peers: None,
+        }];
+        assert_eq!(weak_auth_warnings(&listeners).len(), 1);
     }
 }
