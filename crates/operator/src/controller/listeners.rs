@@ -3,12 +3,14 @@
 //! growing further.
 
 use std::collections::BTreeMap;
+use std::net::IpAddr;
 
 use k8s_openapi::api::core::v1::{Node, Service};
 use kube::Resource as _;
 
 use crate::controller::common::{APP_LABEL, ReconcileError, owner_ref};
 use crate::crd::{Kafka, Listener, ListenerAuthentication, ListenerType};
+use crabka_security::ca::SubjectAltName;
 use crabka_security::{ListenerProtocol, SaslMechanism};
 
 pub(crate) fn listener_protocol(l: &Listener) -> ListenerProtocol {
@@ -1661,5 +1663,293 @@ mod intent_tests {
         let h0 = a.find("broker0.advertisedHost").unwrap();
         let h1 = a.find("broker1.advertisedHost").unwrap();
         assert!(h0 < h1);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SAN computation for external listeners
+// ---------------------------------------------------------------------------
+
+/// Observed addresses from the Kubernetes API for external listeners.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ListenerObservedAddresses {
+    /// External node addresses for `NodePort` listeners.
+    pub nodeport_node_addresses: Vec<NodeAddress>,
+    /// Per-broker `LoadBalancer` ingress entries (keyed by broker id).
+    pub lb_per_broker: BTreeMap<i32, Vec<LbIngress>>,
+    /// Bootstrap Service `LoadBalancer` ingress entries.
+    pub lb_bootstrap: Vec<LbIngress>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum NodeAddress {
+    ExternalIp(IpAddr),
+    ExternalDns(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LbIngress {
+    Ip(IpAddr),
+    Hostname(String),
+}
+
+#[derive(Debug, thiserror::Error, PartialEq)]
+pub(crate) enum SanComputationError {
+    #[error("LoadBalancer ingress not ready for broker {broker_id} on listener '{listener}'")]
+    SansNotReady { broker_id: i32, listener: String },
+}
+
+/// Compute the extra SANs needed for external TLS listeners for one broker.
+///
+/// Pure function — no I/O. Returns `Err(SansNotReady)` when a
+/// `LoadBalancer` listener has TLS but the per-broker ingress isn't
+/// provisioned yet; callers skip cert issuance for that broker and
+/// requeue (Task 8 will surface a status condition for this).
+pub(crate) fn compute_extra_sans(
+    broker_id: i32,
+    listeners: &[Listener],
+    observed: &ListenerObservedAddresses,
+) -> Result<Vec<SubjectAltName>, SanComputationError> {
+    let mut sans: Vec<SubjectAltName> = Vec::new();
+    for l in listeners {
+        if !l.tls {
+            continue;
+        }
+        match l.type_ {
+            ListenerType::Internal | ListenerType::Ingress | ListenerType::Route => {}
+            ListenerType::Nodeport => {
+                for addr in &observed.nodeport_node_addresses {
+                    match addr {
+                        NodeAddress::ExternalIp(ip) => sans.push(SubjectAltName::Ip(*ip)),
+                        NodeAddress::ExternalDns(d) => sans.push(SubjectAltName::Dns(d.clone())),
+                    }
+                }
+                if let Some(cfg) = &l.configuration {
+                    for ovr in &cfg.brokers {
+                        if ovr.broker == broker_id
+                            && let Some(h) = &ovr.advertised_host
+                        {
+                            sans.push(SubjectAltName::Dns(h.clone()));
+                        }
+                    }
+                }
+            }
+            ListenerType::Loadbalancer => {
+                let per_broker = observed.lb_per_broker.get(&broker_id);
+                let bootstrap = &observed.lb_bootstrap;
+                if per_broker.is_none_or(Vec::is_empty) {
+                    return Err(SanComputationError::SansNotReady {
+                        broker_id,
+                        listener: l.name.clone(),
+                    });
+                }
+                for ingress in per_broker.unwrap().iter().chain(bootstrap.iter()) {
+                    match ingress {
+                        LbIngress::Ip(ip) => sans.push(SubjectAltName::Ip(*ip)),
+                        LbIngress::Hostname(h) => sans.push(SubjectAltName::Dns(h.clone())),
+                    }
+                }
+            }
+        }
+    }
+    sans.sort();
+    sans.dedup();
+    Ok(sans)
+}
+
+/// Observe external addresses needed for SAN extension from the Kubernetes API.
+///
+/// Reads `Node.status.addresses` for `NodePort` listeners and
+/// `Service.status.loadBalancer.ingress` for `LoadBalancer` listeners.
+pub(crate) async fn observe_listener_addresses(
+    ctx: &crate::context::Context,
+    namespace: &str,
+    cluster_name: &str,
+    listeners: &[Listener],
+    broker_ids: &[i32],
+) -> Result<ListenerObservedAddresses, ReconcileError> {
+    use kube::Api;
+    use kube::api::ListParams;
+
+    let mut out = ListenerObservedAddresses::default();
+    let svc_api: Api<Service> = Api::namespaced(ctx.client.clone(), namespace);
+
+    let needs_node_addrs = listeners
+        .iter()
+        .any(|l| l.type_ == ListenerType::Nodeport && l.tls);
+    if needs_node_addrs {
+        let node_api: Api<Node> = Api::all(ctx.client.clone());
+        let nodes = node_api.list(&ListParams::default()).await?;
+        for node in &nodes {
+            if let Some(status) = &node.status
+                && let Some(addresses) = &status.addresses
+            {
+                for addr in addresses {
+                    match addr.type_.as_str() {
+                        "ExternalIP" => {
+                            if let Ok(ip) = addr.address.parse() {
+                                out.nodeport_node_addresses
+                                    .push(NodeAddress::ExternalIp(ip));
+                            }
+                        }
+                        "ExternalDNS" | "Hostname" => {
+                            out.nodeport_node_addresses
+                                .push(NodeAddress::ExternalDns(addr.address.clone()));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    for l in listeners {
+        if l.type_ != ListenerType::Loadbalancer || !l.tls {
+            continue;
+        }
+        for &broker_id in broker_ids {
+            let svc_name = format!("{cluster_name}-{}-{broker_id}", l.name);
+            if let Ok(svc) = svc_api.get(&svc_name).await
+                && let Some(status) = svc.status
+                && let Some(lb) = status.load_balancer
+                && let Some(ingresses) = lb.ingress
+            {
+                for ingress in ingresses {
+                    if let Some(ip) = ingress.ip.and_then(|s| s.parse().ok()) {
+                        out.lb_per_broker
+                            .entry(broker_id)
+                            .or_default()
+                            .push(LbIngress::Ip(ip));
+                    }
+                    if let Some(hn) = ingress.hostname {
+                        out.lb_per_broker
+                            .entry(broker_id)
+                            .or_default()
+                            .push(LbIngress::Hostname(hn));
+                    }
+                }
+            }
+        }
+        let bootstrap_svc_name = format!("{cluster_name}-{}-bootstrap", l.name);
+        if let Ok(svc) = svc_api.get(&bootstrap_svc_name).await
+            && let Some(status) = svc.status
+            && let Some(lb) = status.load_balancer
+            && let Some(ingresses) = lb.ingress
+        {
+            for ingress in ingresses {
+                if let Some(ip) = ingress.ip.and_then(|s| s.parse().ok()) {
+                    out.lb_bootstrap.push(LbIngress::Ip(ip));
+                }
+                if let Some(hn) = ingress.hostname {
+                    out.lb_bootstrap.push(LbIngress::Hostname(hn));
+                }
+            }
+        }
+    }
+
+    Ok(out)
+}
+
+#[cfg(test)]
+mod san_tests {
+    use super::*;
+
+    fn internal_tls(name: &str, port: i32) -> Listener {
+        Listener {
+            name: name.into(),
+            port,
+            type_: ListenerType::Internal,
+            tls: true,
+            authentication: None,
+            configuration: None,
+            network_policy_peers: None,
+        }
+    }
+
+    #[test]
+    fn compute_extra_sans_internal_only_returns_empty() {
+        let listeners = vec![Listener {
+            name: "internal".into(),
+            port: 9092,
+            type_: ListenerType::Internal,
+            tls: false,
+            authentication: None,
+            configuration: None,
+            network_policy_peers: None,
+        }];
+        let observed = ListenerObservedAddresses::default();
+        let sans = compute_extra_sans(0, &listeners, &observed).unwrap();
+        assert!(sans.is_empty());
+    }
+
+    #[test]
+    fn compute_extra_sans_internal_tls_returns_empty() {
+        let listeners = vec![internal_tls("internal", 9093)];
+        let observed = ListenerObservedAddresses::default();
+        let sans = compute_extra_sans(0, &listeners, &observed).unwrap();
+        assert!(sans.is_empty());
+    }
+
+    #[test]
+    fn compute_extra_sans_nodeport_includes_node_external_addrs() {
+        let listeners = vec![Listener {
+            name: "ext".into(),
+            port: 9094,
+            type_: ListenerType::Nodeport,
+            tls: true,
+            authentication: None,
+            configuration: None,
+            network_policy_peers: None,
+        }];
+        let observed = ListenerObservedAddresses {
+            nodeport_node_addresses: vec![
+                NodeAddress::ExternalIp("203.0.113.10".parse().unwrap()),
+                NodeAddress::ExternalDns("node1.example.com".into()),
+            ],
+            ..Default::default()
+        };
+        let sans = compute_extra_sans(0, &listeners, &observed).unwrap();
+        assert!(sans.contains(&SubjectAltName::Ip("203.0.113.10".parse().unwrap())));
+        assert!(sans.contains(&SubjectAltName::Dns("node1.example.com".into())));
+    }
+
+    #[test]
+    fn compute_extra_sans_loadbalancer_includes_per_broker_and_bootstrap_ips() {
+        let listeners = vec![Listener {
+            name: "lb".into(),
+            port: 9094,
+            type_: ListenerType::Loadbalancer,
+            tls: true,
+            authentication: None,
+            configuration: None,
+            network_policy_peers: None,
+        }];
+        let mut observed = ListenerObservedAddresses::default();
+        observed
+            .lb_per_broker
+            .insert(0, vec![LbIngress::Ip("203.0.113.20".parse().unwrap())]);
+        observed.lb_bootstrap = vec![LbIngress::Ip("203.0.113.30".parse().unwrap())];
+        let sans = compute_extra_sans(0, &listeners, &observed).unwrap();
+        assert!(sans.contains(&SubjectAltName::Ip("203.0.113.20".parse().unwrap())));
+        assert!(sans.contains(&SubjectAltName::Ip("203.0.113.30".parse().unwrap())));
+    }
+
+    #[test]
+    fn compute_extra_sans_loadbalancer_pending_returns_sans_not_ready() {
+        let listeners = vec![Listener {
+            name: "lb".into(),
+            port: 9094,
+            type_: ListenerType::Loadbalancer,
+            tls: true,
+            authentication: None,
+            configuration: None,
+            network_policy_peers: None,
+        }];
+        let observed = ListenerObservedAddresses::default();
+        let result = compute_extra_sans(0, &listeners, &observed);
+        assert!(matches!(
+            result,
+            Err(SanComputationError::SansNotReady { broker_id: 0, .. })
+        ));
     }
 }

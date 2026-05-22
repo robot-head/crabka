@@ -274,6 +274,9 @@ pub(crate) struct BrokerCertRequest {
     pub broker_id: i32,
     pub cn: String,
     pub sans: Vec<SubjectAltName>,
+    /// Extra SANs for external listeners (e.g. `NodePort` node addresses,
+    /// `LoadBalancer` IPs). Empty when no external TLS listeners are configured.
+    pub extra_sans: Vec<SubjectAltName>,
 }
 
 #[allow(dead_code)]
@@ -315,7 +318,7 @@ pub(crate) async fn ensure_broker_keystore(
             &cluster_ca.key_pem,
             &req.cn,
             &req.sans,
-            &[],
+            &req.extra_sans,
             validity,
         )?;
         data.insert(crt_key, ByteString(leaf.cert_pem.into_bytes()));

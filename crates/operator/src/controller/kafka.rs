@@ -40,8 +40,8 @@ use crate::controller::listeners::{
 };
 use crate::controller::network_policy;
 use crate::crd::{
-    Kafka, KafkaCondition, KafkaNodePool, KafkaStatus, Listener, ListenerAddress, ListenerStatus,
-    ListenerType,
+    Kafka, KafkaCondition, KafkaNodePool, KafkaStatus, Listener, ListenerAddress,
+    ListenerAuthentication, ListenerStatus, ListenerType,
 };
 
 /// Rolled-up view of a cluster's pools. Computed by
@@ -572,7 +572,45 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
         let pool_items: Vec<KafkaNodePool> = pools.items.clone();
         let brokers = enumerate_brokers(&name, &ns, &pool_items);
 
-        // Slice 30: issue per-broker leaf certs into the broker-keystore Secret.
+        // Observe external listener addresses for SAN extension.
+        let broker_ids: Vec<i32> = brokers.iter().map(|b| b.broker_id).collect();
+        let observed = listeners::observe_listener_addresses(
+            &ctx,
+            &ns,
+            &name,
+            &effective_listeners,
+            &broker_ids,
+        )
+        .await?;
+
+        // Per-broker extra SANs; brokers whose LB ingress isn't ready yet are
+        // skipped (Task 8 will surface a WaitingForLoadBalancerIp condition).
+        let extra_sans_per_broker: BTreeMap<i32, Vec<crabka_security::ca::SubjectAltName>> =
+            brokers
+                .iter()
+                .filter_map(|b| {
+                    match listeners::compute_extra_sans(
+                        b.broker_id,
+                        &effective_listeners,
+                        &observed,
+                    ) {
+                        Ok(sans) => Some((b.broker_id, sans)),
+                        Err(listeners::SanComputationError::SansNotReady {
+                            broker_id,
+                            listener,
+                        }) => {
+                            tracing::info!(
+                                broker_id,
+                                %listener,
+                                "LB ingress not ready; skipping cert SAN extension for this broker"
+                            );
+                            None
+                        }
+                    }
+                })
+                .collect();
+
+        // Issue per-broker leaf certs into the broker-keystore Secret.
         let keystore_requests: Vec<cluster_ca::BrokerCertRequest> = brokers
             .iter()
             .map(|b| {
@@ -588,14 +626,16 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
                         std::net::Ipv4Addr::LOCALHOST,
                     )),
                 ];
+                let extra = extra_sans_per_broker.get(&id).cloned().unwrap_or_default();
                 cluster_ca::BrokerCertRequest {
                     broker_id: id,
                     cn,
                     sans,
+                    extra_sans: extra,
                 }
             })
             .collect();
-        // Slice 30: keystore status fields (issued/reused/pruned) are reserved
+        // Keystore status fields (issued/reused/pruned) are reserved
         // for a future status surface; ignored for now.
         cluster_ca::ensure_broker_keystore(
             &secret_api,
@@ -624,10 +664,26 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
             })
             .collect();
 
+        // Populate the clients-CA path for every broker when at least one
+        // listener requires mTLS (authentication.type: tls). All brokers get
+        // the same standard mount path; per-broker overrides are not needed
+        // at this slice.
+        let clients_ca_paths_per_broker: BTreeMap<i32, String> = if effective_listeners
+            .iter()
+            .any(|l| matches!(l.authentication, Some(ListenerAuthentication::Tls)))
+        {
+            brokers
+                .iter()
+                .map(|b| (b.broker_id, "/etc/crabka/clients-ca/ca.crt".to_string()))
+                .collect()
+        } else {
+            BTreeMap::new()
+        };
+
         // Helper to render+apply a ConfigMap with the supplied address map.
         // Defined here (inside the validation-ok branch) so it can capture
-        // `tls_per_broker`. On the validation-fail path there is no `apply_cm`
-        // call, so we don't need it there.
+        // `tls_per_broker` and `clients_ca_paths_per_broker`. On the
+        // validation-fail path there is no `apply_cm` call.
         let apply_cm = async |listeners_for_cm: &[Listener],
                               addresses: &BTreeMap<i32, BTreeMap<String, AdvertisedAddress>>|
                -> Result<(), ReconcileError> {
@@ -637,7 +693,7 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
                 addresses,
                 &inter_broker_name,
                 Some(&tls_per_broker),
-                &std::collections::BTreeMap::new(),
+                &clients_ca_paths_per_broker,
             )?;
             apply_object(&cm_api, &cm_name(&name), &cm).await?;
             Ok(())

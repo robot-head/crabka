@@ -42,7 +42,7 @@ pub struct UserCert {
 
 /// SAN entry for a leaf cert. ECDSA leaf certs accept any mix of DNS
 /// names and IP addresses; the broker-cert path uses a mix.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SubjectAltName {
     Dns(String),
     Ip(IpAddr),
