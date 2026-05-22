@@ -19,9 +19,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt as _;
-use k8s_openapi::api::core::v1::{ConfigMap, Event, Node, Pod, Secret, Service};
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::MicroTime;
-use kube::api::{Api, ListParams, Patch, PatchParams, PostParams};
+use k8s_openapi::api::core::v1::{ConfigMap, Node, Pod, Secret, Service};
+use kube::api::{Api, ListParams, Patch, PatchParams};
 use kube::runtime::controller::{Action, Controller};
 use kube::runtime::reflector::ObjectRef;
 use kube::runtime::watcher;
@@ -567,7 +566,7 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
     // (invalid) intent, but no roll fires until the user fixes the spec.
     let listener_status: Vec<ListenerStatus>;
     let (listeners_valid_cond, listeners_ready_cond);
-    let mut lb_pending_global: Vec<(i32, String)> = Vec::new();
+    let mut lb_pending: Vec<(i32, String)> = Vec::new();
     if let Err(e) = validation {
         adopt_pools(&pool_api, &obj, pools.iter(), &cfg_hash).await?;
         listener_status = vec![];
@@ -612,7 +611,7 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
                                 %listener,
                                 "LB ingress not ready; skipping cert SAN extension for this broker"
                             );
-                            lb_pending_global.push((broker_id, listener));
+                            lb_pending.push((broker_id, listener));
                             None
                         }
                     }
@@ -864,17 +863,29 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
         cluster_ca_cond,
         clients_ca_cond,
     ];
-    if !lb_pending_global.is_empty() {
-        let detail: Vec<String> = lb_pending_global
-            .iter()
-            .map(|(id, l)| format!("broker {id} listener '{l}'"))
-            .collect();
-        conditions.push(condition(
-            "WaitingForLoadBalancerIp",
-            "True",
-            "LoadBalancerPending",
-            &format!("LB ingress not ready for: {}", detail.join(", ")),
-        ));
+    let has_lb_tls_listener = effective_listeners
+        .iter()
+        .any(|l| l.type_ == ListenerType::Loadbalancer && l.tls);
+    if has_lb_tls_listener {
+        if lb_pending.is_empty() {
+            conditions.push(condition(
+                "WaitingForLoadBalancerIp",
+                "False",
+                "LoadBalancerReady",
+                "all broker LB ingress addresses assigned",
+            ));
+        } else {
+            let detail: Vec<String> = lb_pending
+                .iter()
+                .map(|(id, l)| format!("broker {id} listener '{l}'"))
+                .collect();
+            conditions.push(condition(
+                "WaitingForLoadBalancerIp",
+                "True",
+                "LoadBalancerPending",
+                &format!("LB ingress not ready for: {}", detail.join(", ")),
+            ));
+        }
     }
     let status = KafkaStatus {
         conditions,
@@ -964,36 +975,18 @@ async fn emit_weak_auth_event(
     kafka: &Kafka,
     message: &str,
 ) -> Result<(), ReconcileError> {
-    use k8s_openapi::jiff::Timestamp;
-    let now = Timestamp::now();
-    let event = Event {
-        metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
-            generate_name: Some("crabka-listener-auth-".into()),
-            namespace: Some(namespace.into()),
-            ..Default::default()
-        },
-        type_: Some("Warning".into()),
-        reason: Some("WeakAuth".into()),
-        message: Some(message.into()),
-        involved_object: k8s_openapi::api::core::v1::ObjectReference {
-            api_version: Some("crabka.io/v1alpha1".into()),
-            kind: Some("Kafka".into()),
-            name: Some(kafka.name_any()),
-            namespace: Some(namespace.into()),
-            uid: kafka.meta().uid.clone(),
-            ..Default::default()
-        },
-        event_time: Some(MicroTime(now)),
-        action: Some("ListenerValidation".into()),
-        reporting_component: Some("crabka-operator/listener-auth-check".into()),
-        reporting_instance: Some(
-            std::env::var("POD_NAME").unwrap_or_else(|_| "crabka-operator".into()),
-        ),
-        ..Default::default()
-    };
-    let api: Api<Event> = Api::namespaced(client.clone(), namespace);
-    api.create(&PostParams::default(), &event).await?;
-    Ok(())
+    crate::controller::cluster_ca::emit_event(
+        client,
+        namespace,
+        kafka,
+        "Warning",
+        "WeakAuth",
+        message,
+        "crabka-listener-auth-",
+        "ListenerValidation",
+        "crabka-operator/listener-auth-check",
+    )
+    .await
 }
 
 fn svc_name(kafka: &str) -> String {

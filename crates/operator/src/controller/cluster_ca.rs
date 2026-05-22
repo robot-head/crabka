@@ -587,6 +587,9 @@ async fn flag_ca_if_expiring(
             "Warning",
             "CaRotationRequired",
             &message,
+            "crabka-ca-renewal-",
+            "RenewalCheck",
+            "crabka-operator/ca-renewal-check",
         )
         .await?;
 
@@ -641,6 +644,9 @@ async fn flag_ca_if_expiring(
                  rotation is the cluster admin's responsibility (BYO)",
                 which.condition_name()
             ),
+            "crabka-ca-renewal-",
+            "RenewalCheck",
+            "crabka-operator/ca-renewal-check",
         )
         .await?;
     }
@@ -803,26 +809,33 @@ async fn renew_broker_leafs(
             "Normal",
             "BrokerCertRenewed",
             &format!("broker={id} reissued by ca-renewal-check"),
+            "crabka-ca-renewal-",
+            "RenewalCheck",
+            "crabka-operator/ca-renewal-check",
         )
         .await?;
     }
     Ok(())
 }
 
-async fn emit_event(
+#[allow(clippy::too_many_arguments)] // shared event helper; arity reflects the K8s Event fields
+pub(crate) async fn emit_event(
     client: &kube::Client,
     namespace: &str,
     kafka: &Kafka,
     type_: &str,
     reason: &str,
     message: &str,
+    generate_name: &str,
+    action: &str,
+    reporting_component: &str,
 ) -> Result<(), ReconcileError> {
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::MicroTime;
     use k8s_openapi::jiff::Timestamp;
     let now = Timestamp::now();
     let event = Event {
         metadata: ObjectMeta {
-            generate_name: Some("crabka-ca-renewal-".into()),
+            generate_name: Some(generate_name.into()),
             namespace: Some(namespace.into()),
             ..Default::default()
         },
@@ -838,8 +851,8 @@ async fn emit_event(
             ..Default::default()
         },
         event_time: Some(MicroTime(now)),
-        action: Some("RenewalCheck".into()),
-        reporting_component: Some("crabka-operator/ca-renewal-check".into()),
+        action: Some(action.into()),
+        reporting_component: Some(reporting_component.into()),
         reporting_instance: Some(
             std::env::var("POD_NAME").unwrap_or_else(|_| "crabka-operator-renewal".into()),
         ),
