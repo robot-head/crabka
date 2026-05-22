@@ -6,7 +6,7 @@ metadata:
   namespace: default
 spec:
   kafkaVersion: "0.1.1"
-  # New in slice 31 — per-listener auth shape (not active here; benchmark assumes plaintext):
+  # Per-listener auth shape (not active here; benchmark assumes plaintext):
   # listeners:
   #   - name: internal
   #     port: 9092
