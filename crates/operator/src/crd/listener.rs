@@ -25,8 +25,9 @@ pub struct Listener {
     /// listener with no `authentication` is anonymous over TLS.
     #[serde(default)]
     pub tls: bool,
-    /// Slice 31 — per-listener authentication. Absent = anonymous.
-    /// `type: tls` requires `tls: true`.
+    /// Per-listener authentication mechanism. Absent means anonymous (no
+    /// client identity required). When set to `type: tls`, the listener
+    /// must also have `tls: true` — enforced at reconcile time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authentication: Option<ListenerAuthentication>,
     /// Optional listener-type-specific configuration.
@@ -115,15 +116,7 @@ pub struct BrokerOverride {
     pub host: Option<String>,
 }
 
-/// Per-listener authentication. Optional. Absent means anonymous (combined
-/// with `tls: bool` controls whether transport is encrypted but no client
-/// identity is required).
-///
-/// - `Tls`: mutual TLS — client must present a cert signed by the clients CA.
-///   Requires `Listener.tls = true`. Principal becomes `User:CN=<cert subject CN>`.
-/// - `ScramSha512`: SASL/SCRAM-SHA-512. Credentials provisioned by `KafkaUser`
-///   (slice 36). Principal becomes `User:<username>`.
-/// - `ScramSha256`: SASL/SCRAM-SHA-256, same shape.
+/// Per-listener authentication mechanism.
 ///
 /// The `schema_with` workaround avoids a kube-rs 3.x `StructuralSchemaRewriter`
 /// panic when `oneOf` branches share a `type` discriminator with differing `enum`
@@ -177,7 +170,7 @@ mod auth_tests {
     use super::*;
 
     #[test]
-    fn listener_round_trips_with_tls_authentication() {
+    fn listener_deserializes_tls_authentication() {
         let l: Listener = serde_yaml::from_str(
             r"
 name: mtls
@@ -193,7 +186,7 @@ authentication:
     }
 
     #[test]
-    fn listener_round_trips_with_scram_sha_512_authentication() {
+    fn listener_deserializes_scram_sha_512_authentication() {
         let l: Listener = serde_yaml::from_str(
             r"
 name: scram
@@ -209,7 +202,7 @@ authentication:
     }
 
     #[test]
-    fn listener_round_trips_with_scram_sha_256_authentication() {
+    fn listener_deserializes_scram_sha_256_authentication() {
         let l: Listener = serde_yaml::from_str(
             r"
 name: scram256
@@ -225,7 +218,7 @@ authentication:
     }
 
     #[test]
-    fn listener_round_trips_with_no_authentication() {
+    fn listener_deserializes_without_authentication() {
         let l: Listener = serde_yaml::from_str(
             r"
 name: plain
