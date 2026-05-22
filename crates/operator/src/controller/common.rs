@@ -15,7 +15,8 @@ use k8s_openapi::api::apps::v1::StatefulSet;
 use k8s_openapi::api::core::v1::{ConfigMap, Secret, Service};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference};
 use kube::Resource;
-use kube::api::{Api, Patch, PatchParams, PostParams};
+use kube::api::{Api, DynamicObject, Patch, PatchParams, PostParams};
+use kube::core::{ApiResource, GroupVersionKind};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::json;
@@ -92,6 +93,31 @@ where
         ..Default::default()
     };
     api.patch(name, &params, &Patch::Apply(obj)).await?;
+    Ok(())
+}
+
+/// Server-side apply an arbitrary object that is not in `k8s-openapi` (e.g. an
+/// `OpenShift` `Route`), given its GVK + plural and a JSON body. Errors —
+/// including a 404 when the CRD's API is not served (a non-`OpenShift` cluster)
+/// — propagate to the caller.
+pub(crate) async fn apply_dynamic(
+    client: &kube::Client,
+    namespace: &str,
+    api_version: &str,
+    kind: &str,
+    plural: &str,
+    name: &str,
+    body: &serde_json::Value,
+) -> Result<(), ReconcileError> {
+    let (group, version) = api_version
+        .split_once('/')
+        .ok_or_else(|| ReconcileError::Malformed("apiVersion missing '/'".into()))?;
+    let gvk = GroupVersionKind::gvk(group, version, kind);
+    let ar = ApiResource::from_gvk_with_plural(&gvk, plural);
+    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, &ar);
+    let obj: DynamicObject = serde_json::from_value(body.clone())?;
+    let pp = PatchParams::apply(FIELD_MANAGER).force();
+    api.patch(name, &pp, &Patch::Apply(&obj)).await?;
     Ok(())
 }
 

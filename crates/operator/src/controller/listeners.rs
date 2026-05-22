@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use std::net::IpAddr;
 
 use k8s_openapi::api::core::v1::{Node, Service};
+use k8s_openapi::api::networking::v1::Ingress;
 use kube::Resource as _;
 
 use crate::controller::common::{APP_LABEL, ReconcileError, owner_ref};
@@ -43,9 +44,16 @@ fn sasl_mechanism(auth: ListenerAuthentication) -> Option<SaslMechanism> {
 pub enum ValidationError {
     DuplicateListenerName(String),
     DuplicateListenerPort(i32),
-    IngressDeferred(String),
-    RouteDeferred(String),
-    DuplicateBrokerOverride { listener: String, broker: i32 },
+    /// `ingress` / `route` listener with `tls: false`. SNI-passthrough routing
+    /// requires TLS — the controller routes by the TLS `ClientHello` SNI.
+    ListenerIngressRequiresTls(String),
+    /// `ingress` / `route` listener with no `configuration.bootstrap.host`.
+    /// There is no way to derive a bootstrap hostname; the user must supply one.
+    ListenerIngressBootstrapHostMissing(String),
+    DuplicateBrokerOverride {
+        listener: String,
+        broker: i32,
+    },
     InterBrokerListenerMissing(String),
     InterBrokerListenerNotInternal(String),
     NoInternalListener,
@@ -58,8 +66,8 @@ impl ValidationError {
         match self {
             Self::DuplicateListenerName(_) => "DuplicateListenerName",
             Self::DuplicateListenerPort(_) => "DuplicateListenerPort",
-            Self::IngressDeferred(_) => "IngressDeferred",
-            Self::RouteDeferred(_) => "RouteDeferred",
+            Self::ListenerIngressRequiresTls(_) => "ListenerIngressRequiresTls",
+            Self::ListenerIngressBootstrapHostMissing(_) => "ListenerIngressBootstrapHostMissing",
             Self::DuplicateBrokerOverride { .. } => "DuplicateBrokerOverride",
             Self::InterBrokerListenerMissing(_) => "InterBrokerListenerMissing",
             Self::InterBrokerListenerNotInternal(_) => "InterBrokerListenerNotInternal",
@@ -76,11 +84,11 @@ impl ValidationError {
             Self::DuplicateListenerPort(p) => {
                 format!("listener port {p} is used more than once")
             }
-            Self::IngressDeferred(n) => {
-                format!("listener '{n}' has type=ingress; reconcile is deferred until slice 27")
-            }
-            Self::RouteDeferred(n) => {
-                format!("listener '{n}' has type=route; reconcile is deferred until slice 27")
+            Self::ListenerIngressRequiresTls(n) => format!(
+                "listener '{n}': type=ingress/route requires tls: true (SNI-passthrough routing needs TLS)"
+            ),
+            Self::ListenerIngressBootstrapHostMissing(n) => {
+                format!("listener '{n}': type=ingress/route requires configuration.bootstrap.host")
             }
             Self::DuplicateBrokerOverride { listener, broker } => format!(
                 "listener '{listener}' has duplicate configuration.brokers entries for broker {broker}"
@@ -129,14 +137,21 @@ pub fn validate_listeners(
                 l.name.clone(),
             ));
         }
-        match l.type_ {
-            ListenerType::Ingress => {
-                return Err(ValidationError::IngressDeferred(l.name.clone()));
+        if matches!(l.type_, ListenerType::Ingress | ListenerType::Route) {
+            if !l.tls {
+                return Err(ValidationError::ListenerIngressRequiresTls(l.name.clone()));
             }
-            ListenerType::Route => {
-                return Err(ValidationError::RouteDeferred(l.name.clone()));
+            let has_bootstrap_host = l
+                .configuration
+                .as_ref()
+                .and_then(|c| c.bootstrap.as_ref())
+                .and_then(|b| b.host.as_ref())
+                .is_some();
+            if !has_bootstrap_host {
+                return Err(ValidationError::ListenerIngressBootstrapHostMissing(
+                    l.name.clone(),
+                ));
             }
-            _ => {}
         }
         if let Some(cfg) = &l.configuration {
             let mut seen = std::collections::HashSet::new();
@@ -226,10 +241,13 @@ pub fn effective_inter_broker_listener_name(
 /// `pod_name` is the StatefulSet-allocated pod name (e.g.
 /// `demo-controller-0`). Caller computes it from pool+ordinal.
 ///
+/// `nodeport`/`loadbalancer` emit `NodePort`/`LoadBalancer`; `ingress`/`route`
+/// emit a `ClusterIP` Service used as the Ingress/Route backend.
+///
 /// # Panics
 ///
-/// Panics if called with `internal`, `ingress`, or `route` listener
-/// types. Callers must filter to `nodeport`/`loadbalancer` first.
+/// Panics if called with the `internal` listener type — internal listeners use
+/// the cluster-wide headless Service and never get a per-broker Service.
 #[allow(dead_code)]
 pub fn render_broker_service(
     owner: &Kafka,
@@ -256,7 +274,8 @@ pub fn render_broker_service(
     let service_type = match listener.type_ {
         ListenerType::Nodeport => "NodePort",
         ListenerType::Loadbalancer => "LoadBalancer",
-        _ => panic!(
+        ListenerType::Ingress | ListenerType::Route => "ClusterIP",
+        ListenerType::Internal => panic!(
             "render_broker_service called with non-external type {:?}",
             listener.type_
         ),
@@ -300,9 +319,12 @@ pub fn render_broker_service(
 /// Render the bootstrap Service for the given external listener. Its
 /// selector matches every broker pod of the cluster.
 ///
+/// `nodeport`/`loadbalancer` emit `NodePort`/`LoadBalancer`; `ingress`/`route`
+/// emit a `ClusterIP` Service used as the bootstrap Ingress/Route backend.
+///
 /// # Panics
 ///
-/// Panics if called with `internal`, `ingress`, or `route` listener types.
+/// Panics if called with the `internal` listener type.
 #[allow(dead_code)]
 pub fn render_bootstrap_service(
     owner: &Kafka,
@@ -342,7 +364,8 @@ pub fn render_bootstrap_service(
     let service_type = match listener.type_ {
         ListenerType::Nodeport => "NodePort",
         ListenerType::Loadbalancer => "LoadBalancer",
-        _ => panic!(
+        ListenerType::Ingress | ListenerType::Route => "ClusterIP",
+        ListenerType::Internal => panic!(
             "render_bootstrap_service called with non-external type {:?}",
             listener.type_
         ),
@@ -381,6 +404,237 @@ pub fn render_bootstrap_service(
         "spec": spec,
     }))?;
     Ok(svc)
+}
+
+// ---------------------------------------------------------------------------
+// Ingress / Route external listeners (slice 27)
+// ---------------------------------------------------------------------------
+
+/// Advertised port for `ingress` / `route` listeners — the standard HTTPS port
+/// the ingress controller / `OpenShift` router terminates on. Overridable per
+/// broker via `configuration.brokers[].advertisedPort`.
+pub(crate) const INGRESS_PORT: i32 = 443;
+
+/// The de-facto annotation that tells the (nginx) ingress controller to forward
+/// the raw TLS stream — SNI-routed — to the backend rather than terminating
+/// TLS. Harmless on controllers that ignore it; required for Kafka-over-Ingress.
+const SSL_PASSTHROUGH_ANNOTATION: &str = "nginx.ingress.kubernetes.io/ssl-passthrough";
+
+/// Resolve the externally-resolvable hostname for one (ingress/route, broker).
+/// `advertisedHost` override wins over the `host` field. Returns `None` when
+/// neither is set (a configuration error surfaced at advertised-address time).
+#[must_use]
+pub(crate) fn ingress_broker_host(listener: &Listener, broker_id: i32) -> Option<String> {
+    let o = listener
+        .configuration
+        .as_ref()?
+        .brokers
+        .iter()
+        .find(|b| b.broker == broker_id)?;
+    o.advertised_host.clone().or_else(|| o.host.clone())
+}
+
+/// Resolve the bootstrap hostname for an ingress/route listener. Validation
+/// guarantees this is `Some` for a listener that passed `validate_listeners`.
+#[must_use]
+pub(crate) fn ingress_bootstrap_host(listener: &Listener) -> Option<String> {
+    listener
+        .configuration
+        .as_ref()
+        .and_then(|c| c.bootstrap.as_ref())
+        .and_then(|b| b.host.clone())
+}
+
+fn ingress_labels(cluster_name: &str, listener: &Listener) -> BTreeMap<String, String> {
+    let mut labels: BTreeMap<String, String> = BTreeMap::new();
+    labels.insert("app.kubernetes.io/name".into(), APP_LABEL.into());
+    labels.insert(
+        "app.kubernetes.io/instance".into(),
+        cluster_name.to_string(),
+    );
+    labels.insert("crabka.io/listener".into(), listener.name.clone());
+    labels
+}
+
+/// Render one `Ingress` (networking.k8s.io/v1) that routes `host` to
+/// `service_name:listener.port` over TLS passthrough (SNI). Used for both the
+/// per-broker and bootstrap Ingress objects.
+fn build_ingress(
+    owner: &Kafka,
+    listener: &Listener,
+    object_name: &str,
+    host: &str,
+    service_name: &str,
+    mut labels: BTreeMap<String, String>,
+    extra_annotations: &BTreeMap<String, String>,
+) -> Result<Ingress, ReconcileError> {
+    let namespace = owner.meta().namespace.clone();
+    labels
+        .entry("app.kubernetes.io/name".into())
+        .or_insert_with(|| APP_LABEL.into());
+
+    let mut annotations: BTreeMap<String, String> = BTreeMap::new();
+    annotations.insert(SSL_PASSTHROUGH_ANNOTATION.into(), "true".into());
+    for (k, v) in extra_annotations {
+        annotations.insert(k.clone(), v.clone());
+    }
+
+    let mut spec = serde_json::json!({
+        "tls": [{ "hosts": [host] }],
+        "rules": [{
+            "host": host,
+            "http": {
+                "paths": [{
+                    "path": "/",
+                    "pathType": "Prefix",
+                    "backend": {
+                        "service": {
+                            "name": service_name,
+                            "port": { "number": listener.port },
+                        }
+                    }
+                }]
+            }
+        }],
+    });
+    if let Some(class) = listener
+        .configuration
+        .as_ref()
+        .and_then(|c| c.ingress_class.as_ref())
+    {
+        spec["ingressClassName"] = serde_json::json!(class);
+    }
+
+    let ingress: Ingress = serde_json::from_value(serde_json::json!({
+        "metadata": {
+            "name": object_name,
+            "namespace": namespace,
+            "labels": labels,
+            "annotations": annotations,
+            "ownerReferences": [owner_ref::<Kafka>(owner)?],
+        },
+        "spec": spec,
+    }))?;
+    Ok(ingress)
+}
+
+/// Per-broker Ingress: `<cluster>-<listener>-<broker>` routing the broker's
+/// hostname to its `ClusterIP` backend Service.
+#[allow(dead_code)]
+pub fn render_broker_ingress(
+    owner: &Kafka,
+    listener: &Listener,
+    broker_id: i32,
+    host: &str,
+) -> Result<Ingress, ReconcileError> {
+    let cluster_name = owner.meta().name.clone().unwrap_or_default();
+    let object_name = format!("{cluster_name}-{}-{broker_id}", listener.name);
+    let service_name = object_name.clone();
+    let mut labels = ingress_labels(&cluster_name, listener);
+    labels.insert("crabka.io/broker".into(), broker_id.to_string());
+    build_ingress(
+        owner,
+        listener,
+        &object_name,
+        host,
+        &service_name,
+        labels,
+        &BTreeMap::new(),
+    )
+}
+
+/// Bootstrap Ingress: `<cluster>-<listener>-bootstrap` routing the bootstrap
+/// hostname to the all-pods bootstrap Service.
+#[allow(dead_code)]
+pub fn render_bootstrap_ingress(
+    owner: &Kafka,
+    listener: &Listener,
+    host: &str,
+) -> Result<Ingress, ReconcileError> {
+    let cluster_name = owner.meta().name.clone().unwrap_or_default();
+    let object_name = format!("{cluster_name}-{}-bootstrap", listener.name);
+    let service_name = object_name.clone();
+    let mut labels = ingress_labels(&cluster_name, listener);
+    labels.insert("crabka.io/role".into(), "bootstrap".into());
+    let extra = listener
+        .configuration
+        .as_ref()
+        .and_then(|c| c.bootstrap.as_ref())
+        .map(|b| b.annotations.clone())
+        .unwrap_or_default();
+    build_ingress(
+        owner,
+        listener,
+        &object_name,
+        host,
+        &service_name,
+        labels,
+        &extra,
+    )
+}
+
+/// Render one `OpenShift` `Route` (`route.openshift.io/v1`) as a JSON body,
+/// applied dynamically (the type is not in `k8s-openapi`). Passthrough TLS
+/// termination makes the router SNI-route the raw TLS stream to the broker.
+fn build_route(
+    owner: &Kafka,
+    listener: &Listener,
+    object_name: &str,
+    host: &str,
+    service_name: &str,
+    mut labels: BTreeMap<String, String>,
+) -> Result<serde_json::Value, ReconcileError> {
+    let namespace = owner.meta().namespace.clone().unwrap_or_default();
+    labels
+        .entry("app.kubernetes.io/name".into())
+        .or_insert_with(|| APP_LABEL.into());
+    Ok(serde_json::json!({
+        "apiVersion": "route.openshift.io/v1",
+        "kind": "Route",
+        "metadata": {
+            "name": object_name,
+            "namespace": namespace,
+            "labels": labels,
+            "ownerReferences": [owner_ref::<Kafka>(owner)?],
+        },
+        "spec": {
+            "host": host,
+            "port": { "targetPort": listener.port },
+            "tls": { "termination": "passthrough" },
+            "to": { "kind": "Service", "name": service_name, "weight": 100 },
+        }
+    }))
+}
+
+/// Per-broker Route: `<cluster>-<listener>-<broker>`.
+#[allow(dead_code)]
+pub fn render_broker_route(
+    owner: &Kafka,
+    listener: &Listener,
+    broker_id: i32,
+    host: &str,
+) -> Result<serde_json::Value, ReconcileError> {
+    let cluster_name = owner.meta().name.clone().unwrap_or_default();
+    let object_name = format!("{cluster_name}-{}-{broker_id}", listener.name);
+    let service_name = object_name.clone();
+    let mut labels = ingress_labels(&cluster_name, listener);
+    labels.insert("crabka.io/broker".into(), broker_id.to_string());
+    build_route(owner, listener, &object_name, host, &service_name, labels)
+}
+
+/// Bootstrap Route: `<cluster>-<listener>-bootstrap`.
+#[allow(dead_code)]
+pub fn render_bootstrap_route(
+    owner: &Kafka,
+    listener: &Listener,
+    host: &str,
+) -> Result<serde_json::Value, ReconcileError> {
+    let cluster_name = owner.meta().name.clone().unwrap_or_default();
+    let object_name = format!("{cluster_name}-{}-bootstrap", listener.name);
+    let service_name = object_name.clone();
+    let mut labels = ingress_labels(&cluster_name, listener);
+    labels.insert("crabka.io/role".into(), "bootstrap".into());
+    build_route(owner, listener, &object_name, host, &service_name, labels)
 }
 
 #[cfg(test)]
@@ -423,6 +677,7 @@ mod service_rendering_tests {
                     node_port: Some(32100),
                     ..Default::default()
                 }],
+                ingress_class: None,
             }),
             network_policy_peers: None,
         };
@@ -455,6 +710,7 @@ mod service_rendering_tests {
                     load_balancer_ip: Some("10.0.0.5".into()),
                     ..Default::default()
                 }],
+                ingress_class: None,
             }),
             network_policy_peers: None,
         };
@@ -479,6 +735,7 @@ mod service_rendering_tests {
                     ..Default::default()
                 }),
                 brokers: vec![],
+                ingress_class: None,
             }),
             network_policy_peers: None,
         };
@@ -495,6 +752,118 @@ mod service_rendering_tests {
         );
         assert!(sel.get("statefulset.kubernetes.io/pod-name").is_none());
         assert_eq!(spec.ports.as_ref().unwrap()[0].node_port, Some(32099));
+    }
+
+    fn ingress_listener(type_: ListenerType) -> Listener {
+        Listener {
+            name: "ext".into(),
+            port: 9094,
+            type_,
+            tls: true,
+            authentication: None,
+            configuration: Some(ListenerConfiguration {
+                bootstrap: Some(BootstrapConfig {
+                    host: Some("bootstrap.kafka.example.com".into()),
+                    ..Default::default()
+                }),
+                brokers: vec![BrokerOverride {
+                    broker: 0,
+                    host: Some("broker-0.kafka.example.com".into()),
+                    ..Default::default()
+                }],
+                ingress_class: Some("nginx".into()),
+            }),
+            network_policy_peers: None,
+        }
+    }
+
+    #[test]
+    fn ingress_broker_backend_service_is_clusterip() {
+        let k = kafka("demo");
+        let l = ingress_listener(ListenerType::Ingress);
+        let svc = render_broker_service(&k, &l, 0, "demo-pool-0").unwrap();
+        let spec = svc.spec.as_ref().unwrap();
+        assert_eq!(spec.type_.as_deref(), Some("ClusterIP"));
+        assert_eq!(
+            spec.selector
+                .as_ref()
+                .unwrap()
+                .get("statefulset.kubernetes.io/pod-name"),
+            Some(&"demo-pool-0".to_string())
+        );
+    }
+
+    #[test]
+    fn route_bootstrap_backend_service_is_clusterip() {
+        let k = kafka("demo");
+        let l = ingress_listener(ListenerType::Route);
+        let svc = render_bootstrap_service(&k, &l).unwrap();
+        assert_eq!(
+            svc.spec.as_ref().unwrap().type_.as_deref(),
+            Some("ClusterIP")
+        );
+    }
+
+    #[test]
+    fn render_broker_ingress_shape() {
+        let k = kafka("demo");
+        let l = ingress_listener(ListenerType::Ingress);
+        let ing = render_broker_ingress(&k, &l, 0, "broker-0.kafka.example.com").unwrap();
+        assert_eq!(ing.metadata.name.as_deref(), Some("demo-ext-0"));
+        let ann = ing.metadata.annotations.as_ref().unwrap();
+        assert_eq!(
+            ann.get("nginx.ingress.kubernetes.io/ssl-passthrough"),
+            Some(&"true".to_string())
+        );
+        let spec = ing.spec.as_ref().unwrap();
+        assert_eq!(spec.ingress_class_name.as_deref(), Some("nginx"));
+        let rule = &spec.rules.as_ref().unwrap()[0];
+        assert_eq!(rule.host.as_deref(), Some("broker-0.kafka.example.com"));
+        let path = &rule.http.as_ref().unwrap().paths[0];
+        let backend = path.backend.service.as_ref().unwrap();
+        assert_eq!(backend.name, "demo-ext-0");
+        assert_eq!(backend.port.as_ref().unwrap().number, Some(9094));
+        let tls = &spec.tls.as_ref().unwrap()[0];
+        assert_eq!(
+            tls.hosts.as_ref().unwrap()[0],
+            "broker-0.kafka.example.com".to_string()
+        );
+        assert!(tls.secret_name.is_none(), "passthrough has no secretName");
+    }
+
+    #[test]
+    fn render_bootstrap_ingress_uses_bootstrap_host() {
+        let k = kafka("demo");
+        let l = ingress_listener(ListenerType::Ingress);
+        let ing = render_bootstrap_ingress(&k, &l, "bootstrap.kafka.example.com").unwrap();
+        assert_eq!(ing.metadata.name.as_deref(), Some("demo-ext-bootstrap"));
+        let rule = &ing.spec.as_ref().unwrap().rules.as_ref().unwrap()[0];
+        assert_eq!(rule.host.as_deref(), Some("bootstrap.kafka.example.com"));
+    }
+
+    #[test]
+    fn render_broker_route_is_passthrough() {
+        let k = kafka("demo");
+        let l = ingress_listener(ListenerType::Route);
+        let route = render_broker_route(&k, &l, 0, "broker-0.kafka.example.com").unwrap();
+        assert_eq!(route["apiVersion"], "route.openshift.io/v1");
+        assert_eq!(route["kind"], "Route");
+        assert_eq!(route["metadata"]["name"], "demo-ext-0");
+        assert_eq!(route["spec"]["host"], "broker-0.kafka.example.com");
+        assert_eq!(route["spec"]["tls"]["termination"], "passthrough");
+        assert_eq!(route["spec"]["port"]["targetPort"], 9094);
+        assert_eq!(route["spec"]["to"]["kind"], "Service");
+        assert_eq!(route["spec"]["to"]["name"], "demo-ext-0");
+    }
+
+    #[test]
+    fn render_bootstrap_route_uses_bootstrap_host() {
+        let k = kafka("demo");
+        let l = ingress_listener(ListenerType::Route);
+        let route = render_bootstrap_route(&k, &l, "bootstrap.kafka.example.com").unwrap();
+        assert_eq!(route["metadata"]["name"], "demo-ext-bootstrap");
+        assert_eq!(route["spec"]["host"], "bootstrap.kafka.example.com");
+        assert_eq!(route["spec"]["to"]["name"], "demo-ext-bootstrap");
     }
 }
 
@@ -554,23 +923,55 @@ mod tests {
     }
 
     #[test]
-    fn ingress_is_deferred() {
+    fn ingress_without_tls_is_rejected() {
+        // An ingress listener needs an internal listener too (NoInternalListener
+        // would otherwise fire first), so validate it in isolation by giving it tls.
         let mut l = internal("ing", 9094);
         l.type_ = ListenerType::Ingress;
+        l.tls = false;
         assert_eq!(
             validate_listeners(&[l], None).unwrap_err().reason(),
-            "IngressDeferred"
+            "ListenerIngressRequiresTls"
         );
     }
 
     #[test]
-    fn route_is_deferred() {
+    fn route_without_tls_is_rejected() {
         let mut l = internal("rt", 9094);
         l.type_ = ListenerType::Route;
+        l.tls = false;
         assert_eq!(
             validate_listeners(&[l], None).unwrap_err().reason(),
-            "RouteDeferred"
+            "ListenerIngressRequiresTls"
         );
+    }
+
+    #[test]
+    fn ingress_without_bootstrap_host_is_rejected() {
+        let mut l = internal("ing", 9094);
+        l.type_ = ListenerType::Ingress;
+        l.tls = true;
+        assert_eq!(
+            validate_listeners(&[l], None).unwrap_err().reason(),
+            "ListenerIngressBootstrapHostMissing"
+        );
+    }
+
+    #[test]
+    fn ingress_with_tls_and_bootstrap_host_and_internal_is_valid() {
+        let internal_l = internal("PLAIN", 9092);
+        let mut ing = internal("ext", 9094);
+        ing.type_ = ListenerType::Ingress;
+        ing.tls = true;
+        ing.configuration = Some(ListenerConfiguration {
+            bootstrap: Some(crate::crd::BootstrapConfig {
+                host: Some("bootstrap.kafka.example.com".into()),
+                ..Default::default()
+            }),
+            brokers: vec![],
+            ingress_class: Some("nginx".into()),
+        });
+        validate_listeners(&[internal_l, ing], None).unwrap();
     }
 
     #[test]
@@ -588,6 +989,7 @@ mod tests {
                     ..Default::default()
                 },
             ],
+            ingress_class: None,
         });
         let err = validate_listeners(&[l], None).unwrap_err();
         assert_eq!(err.reason(), "DuplicateBrokerOverride");
@@ -774,6 +1176,7 @@ pub enum AdvertisedError {
     ServiceMissing { broker: i32, service_name: String },
     NodePortNotAllocated { broker: i32 },
     LoadBalancerPending { broker: i32, service_name: String },
+    IngressBrokerHostMissing { broker: i32, listener: String },
 }
 
 #[allow(dead_code)]
@@ -804,6 +1207,10 @@ impl AdvertisedError {
             } => {
                 format!("loadBalancer for service {service_name} (broker {broker}) not provisioned")
             }
+            Self::IngressBrokerHostMissing { broker, listener } => format!(
+                "listener '{listener}' broker {broker} has no configuration.brokers[].host \
+                 (or advertisedHost); ingress/route listeners require a hostname per broker"
+            ),
         }
     }
 }
@@ -816,10 +1223,8 @@ impl AdvertisedError {
 /// per-broker Service the operator just rendered+applied (None until
 /// the apiserver returns it).
 ///
-/// # Panics
-///
-/// Panics if called with `Ingress` or `Route` listener types — validation
-/// short-circuits those.
+/// `ingress` / `route` listeners resolve their host from config (no Node/Pod
+/// lookup) and advertise on port 443.
 #[allow(dead_code)]
 pub fn compute_advertised(
     listener: &Listener,
@@ -918,10 +1323,19 @@ pub fn compute_advertised(
             Ok(AdvertisedAddress { host, port })
         }
         ListenerType::Ingress | ListenerType::Route => {
-            unreachable!(
-                "compute_advertised called with deferred type {:?}",
-                listener.type_
-            )
+            // Host comes from config (override advertisedHost, else the broker's
+            // `host`). The advertised port is always 443 — the ingress
+            // controller / router terminates there — unless overridden.
+            let host = ingress_broker_host(listener, broker_id).ok_or_else(|| {
+                AdvertisedError::IngressBrokerHostMissing {
+                    broker: broker_id,
+                    listener: listener.name.clone(),
+                }
+            })?;
+            let port = override_
+                .and_then(|o| o.advertised_port)
+                .unwrap_or(INGRESS_PORT);
+            Ok(AdvertisedAddress { host, port })
         }
     }
 }
@@ -1172,6 +1586,7 @@ mod advertised_tests {
                 advertised_host: Some("public.host".into()),
                 ..Default::default()
             }],
+            ingress_class: None,
         });
         let nodes = HashMap::new();
         let svc = Service {
@@ -1192,6 +1607,75 @@ mod advertised_tests {
         let a = compute_advertised(&l, 0, "pod", None, &nodes, Some(&svc)).unwrap();
         assert_eq!(a.host, "public.host");
         assert_eq!(a.port, 32100);
+    }
+
+    fn ingress(name: &str, port: i32, broker_host: Option<&str>) -> Listener {
+        Listener {
+            name: name.into(),
+            port,
+            type_: ListenerType::Ingress,
+            tls: true,
+            authentication: None,
+            configuration: broker_host.map(|h| crate::crd::ListenerConfiguration {
+                bootstrap: Some(crate::crd::BootstrapConfig {
+                    host: Some("bootstrap.example.com".into()),
+                    ..Default::default()
+                }),
+                brokers: vec![crate::crd::BrokerOverride {
+                    broker: 0,
+                    host: Some(h.into()),
+                    ..Default::default()
+                }],
+                ingress_class: None,
+            }),
+            network_policy_peers: None,
+        }
+    }
+
+    #[test]
+    fn ingress_uses_config_host_and_port_443() {
+        let l = ingress("ext", 9094, Some("broker-0.example.com"));
+        let nodes = HashMap::new();
+        let a = compute_advertised(&l, 0, "pod", None, &nodes, None).unwrap();
+        assert_eq!(
+            a,
+            AdvertisedAddress {
+                host: "broker-0.example.com".into(),
+                port: 443,
+            }
+        );
+    }
+
+    #[test]
+    fn route_uses_config_host_and_port_443() {
+        let mut l = ingress("ext", 9094, Some("broker-0.example.com"));
+        l.type_ = ListenerType::Route;
+        let nodes = HashMap::new();
+        let a = compute_advertised(&l, 0, "pod", None, &nodes, None).unwrap();
+        assert_eq!(a.host, "broker-0.example.com");
+        assert_eq!(a.port, 443);
+    }
+
+    #[test]
+    fn ingress_advertised_port_override_wins_over_443() {
+        let mut l = ingress("ext", 9094, Some("broker-0.example.com"));
+        if let Some(cfg) = l.configuration.as_mut() {
+            cfg.brokers[0].advertised_port = Some(8443);
+        }
+        let nodes = HashMap::new();
+        let a = compute_advertised(&l, 0, "pod", None, &nodes, None).unwrap();
+        assert_eq!(a.port, 8443);
+    }
+
+    #[test]
+    fn ingress_missing_broker_host_errors() {
+        let l = ingress("ext", 9094, None);
+        let nodes = HashMap::new();
+        let err = compute_advertised(&l, 0, "pod", None, &nodes, None).unwrap_err();
+        assert!(matches!(
+            err,
+            AdvertisedError::IngressBrokerHostMissing { broker: 0, .. }
+        ));
     }
 }
 
@@ -1631,6 +2115,7 @@ mod intent_tests {
                         ..Default::default()
                     },
                 ],
+                ingress_class: None,
             }),
             network_policy_peers: None,
         }];
@@ -1694,7 +2179,17 @@ pub(crate) fn compute_extra_sans(
             continue;
         }
         match l.type_ {
-            ListenerType::Internal | ListenerType::Ingress | ListenerType::Route => {}
+            ListenerType::Internal => {}
+            ListenerType::Ingress | ListenerType::Route => {
+                // SNI routing means the client presents the broker's external
+                // hostname in the TLS ClientHello; the broker cert must carry it.
+                if let Some(h) = ingress_broker_host(l, broker_id) {
+                    sans.push(SubjectAltName::Dns(h));
+                }
+                if let Some(h) = ingress_bootstrap_host(l) {
+                    sans.push(SubjectAltName::Dns(h));
+                }
+            }
             ListenerType::Nodeport => {
                 for addr in &observed.nodeport_node_addresses {
                     match addr {
@@ -1935,6 +2430,62 @@ mod san_tests {
             result,
             Err(SanComputationError::SansNotReady { broker_id: 0, .. })
         ));
+    }
+
+    #[test]
+    fn compute_extra_sans_ingress_includes_config_hostnames() {
+        let listeners = vec![Listener {
+            name: "ext".into(),
+            port: 9094,
+            type_: ListenerType::Ingress,
+            tls: true,
+            authentication: None,
+            configuration: Some(crate::crd::ListenerConfiguration {
+                bootstrap: Some(crate::crd::BootstrapConfig {
+                    host: Some("bootstrap.kafka.example.com".into()),
+                    ..Default::default()
+                }),
+                brokers: vec![crate::crd::BrokerOverride {
+                    broker: 0,
+                    host: Some("broker-0.kafka.example.com".into()),
+                    ..Default::default()
+                }],
+                ingress_class: None,
+            }),
+            network_policy_peers: None,
+        }];
+        let observed = ListenerObservedAddresses::default();
+        let sans = compute_extra_sans(0, &listeners, &observed).unwrap();
+        assert!(sans.contains(&SubjectAltName::Dns("broker-0.kafka.example.com".into())));
+        assert!(sans.contains(&SubjectAltName::Dns("bootstrap.kafka.example.com".into())));
+    }
+
+    #[test]
+    fn compute_extra_sans_route_includes_config_hostnames() {
+        let listeners = vec![Listener {
+            name: "ext".into(),
+            port: 9094,
+            type_: ListenerType::Route,
+            tls: true,
+            authentication: None,
+            configuration: Some(crate::crd::ListenerConfiguration {
+                bootstrap: Some(crate::crd::BootstrapConfig {
+                    host: Some("bootstrap.kafka.example.com".into()),
+                    ..Default::default()
+                }),
+                brokers: vec![crate::crd::BrokerOverride {
+                    broker: 0,
+                    host: Some("broker-0.kafka.example.com".into()),
+                    ..Default::default()
+                }],
+                ingress_class: None,
+            }),
+            network_policy_peers: None,
+        }];
+        let observed = ListenerObservedAddresses::default();
+        let sans = compute_extra_sans(0, &listeners, &observed).unwrap();
+        assert!(sans.contains(&SubjectAltName::Dns("broker-0.kafka.example.com".into())));
+        assert!(sans.contains(&SubjectAltName::Dns("bootstrap.kafka.example.com".into())));
     }
 }
 

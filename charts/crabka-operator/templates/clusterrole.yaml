@@ -43,4 +43,12 @@ rules:
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Slice 27: external listeners of type=ingress generate Ingress objects;
+  # type=route generates OpenShift Routes.
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["route.openshift.io"]
+    resources: ["routes"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 {{- end }}

@@ -64,6 +64,11 @@ pub struct ListenerConfiguration {
     pub bootstrap: Option<BootstrapConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub brokers: Vec<BrokerOverride>,
+    /// `ingress` only (slice 27): the `spec.ingressClassName` set on every
+    /// generated `Ingress`. Strimzi-shaped `configuration.class`. Inert for
+    /// other listener types.
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "class")]
+    pub ingress_class: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
@@ -290,6 +295,7 @@ mod tests {
                     node_port: Some(32100),
                     ..Default::default()
                 }],
+                ingress_class: None,
             }),
             network_policy_peers: None,
         };
@@ -311,6 +317,7 @@ mod tests {
                 ..Default::default()
             }),
             brokers: vec![],
+            ingress_class: None,
         };
         let json = serde_json::to_string(&cfg).unwrap();
         assert!(

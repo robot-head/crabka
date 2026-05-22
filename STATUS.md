@@ -1434,3 +1434,66 @@ Kafka client for ApiVersions.
   Ingress/Route listener TLS (slice 27), non-disruptive auth
   hot-reload, PKCS#12 user keystore bundle (slice-37 follow-up).
 
+## Slice 27 — Operator: Ingress / Route external listeners (2026-05-22)
+
+- Implements the `type: ingress` and `type: route` external listener
+  reconcile that slice 25 deferred (the schema landed forward-stable
+  then; slice 27 lights up the reconcile now that Phase 4's listener TLS
+  exists). Kafka-over-Ingress requires SNI-passthrough routing, so both
+  types **require `tls: true`** — the ingress controller / OpenShift
+  router inspects the TLS `ClientHello` SNI and forwards the raw TLS
+  stream to the matching broker; the broker terminates TLS.
+- Each broker advertises a distinct config-supplied hostname
+  (`configuration.brokers[].host`, `advertisedHost` override wins) on
+  **port 443** (`configuration.brokers[].advertisedPort` overrides). The
+  bootstrap advertises `configuration.bootstrap.host:443`.
+- New schema field: `ListenerConfiguration.class` (`ingress_class`,
+  Strimzi-shaped) → `spec.ingressClassName` on generated Ingresses. The
+  `host` fields on bootstrap/broker config were already present from
+  slice 25.
+- Validation (replaces slice-25 `IngressDeferred`/`RouteDeferred`
+  placeholders): `ListenerIngressRequiresTls` (ingress/route without
+  TLS), `ListenerIngressBootstrapHostMissing` (no bootstrap host).
+  Per-broker host absence surfaces at advertised time as
+  `ListenersReady=False reason=PendingExternalAddresses` with an
+  `IngressBrokerHostMissing` message.
+- Objects rendered (owner-ref'd to the `Kafka`): per-broker + bootstrap
+  **ClusterIP backend Services** (`render_broker_service` /
+  `render_bootstrap_service` now emit `ClusterIP` for ingress/route);
+  per-broker + bootstrap **Ingress** (`networking.k8s.io/v1`, typed) with
+  `nginx.ingress.kubernetes.io/ssl-passthrough: "true"`,
+  `spec.ingressClassName`, `spec.tls[].hosts` (no `secretName`), and a
+  host→backend rule; per-broker + bootstrap **Route**
+  (`route.openshift.io/v1`, applied as a `DynamicObject` via a new shared
+  `common::apply_dynamic`) with `spec.tls.termination: passthrough` and
+  `spec.to` → backend Service.
+- SAN extension: `compute_extra_sans` now adds the config ingress/route
+  hostnames (broker + bootstrap) as DNS SANs to each per-broker server
+  cert so the SNI hostname validates. No "not ready" SAN gating (hosts
+  are config-deterministic, unlike LB ingress).
+- Reconcile wiring: `apply_external_services` handles ingress/route
+  (ClusterIP backends + Ingress/Route objects); the Node/Pod LIST inside
+  `read_external_state` is now gated on a NodePort/LoadBalancer listener
+  being present, so an ingress/route-only cluster issues no Node/Pod
+  reads. Listener-intent changes flow through slice-21's config-hash →
+  rolling restart for free (advertised `host:443` is in the hash).
+- RBAC: ClusterRole gains `networking.k8s.io/ingresses` and
+  `route.openshift.io/routes`.
+- Tests: +13 unit (validation ×4, ClusterIP backend ×2, ingress/route
+  render ×4, `compute_advertised` ingress/route ×4, SAN ingress/route
+  ×2) and +3 integration (`reconcile_listener_ingress.rs`: ingress
+  renders objects + advertises 443 + `ListenersReady=True`; route renders
+  passthrough objects; ingress-without-tls validation error). Operator
+  lib tests 253; full operator suite green; clippy + fmt clean; CRD
+  regenerated (only the `class` field added).
+- Out of scope (deferred): OpenShift-assigned Route hosts (slice 27
+  requires an explicit `host`, symmetric with ingress; reading
+  `Route.status.ingress[].host` back + requeue is a follow-up needing a
+  live OpenShift API to validate); BYO per-listener server cert; non-SNI
+  ingress controllers (Kafka-over-Ingress fundamentally needs raw TLS
+  passthrough); per-listener connection limits. kind-e2e for ingress
+  (MetalLB + nginx ssl-passthrough) is a CI follow-up; operator-side
+  wiring is covered by the integration tests.
+- Reference doc:
+  [`docs/superpowers/specs/2026-05-22-crabka-operator-listener-ingress-route-27-design.md`].
+
