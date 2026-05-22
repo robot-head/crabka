@@ -1570,6 +1570,27 @@ jobs:
             template:
               spec:
                 restartPolicy: Never
+                initContainers:
+                  - name: pem-to-pkcs12
+                    image: alpine:3.20
+                    command:
+                      - sh
+                      - -c
+                      - |
+                        set -ex
+                        apk add --no-cache openssl
+                        openssl pkcs12 -export \
+                          -in /etc/crabka/bob/user.crt \
+                          -inkey /etc/crabka/bob/user.key \
+                          -name bob \
+                          -out /shared/keystore.p12 \
+                          -passout pass:changeit
+                    volumeMounts:
+                      - name: bob-secret
+                        mountPath: /etc/crabka/bob
+                        readOnly: true
+                      - name: shared
+                        mountPath: /shared
                 containers:
                   - name: producer
                     image: apache/kafka:3.8.0
@@ -1578,27 +1599,17 @@ jobs:
                       - -c
                       - |
                         set -ex
-                        # apache/kafka:3.8.0 (Ubuntu-based) ships without openssl.
-                        apt-get update -qq && apt-get install -y -qq --no-install-recommends openssl
-                        # Truststore from the cluster CA (server cert chain).
                         keytool -import -trustcacerts -noprompt \
                           -alias clusterca \
                           -file /etc/crabka/cluster-ca/ca.crt \
                           -keystore /tmp/trust.jks \
                           -storepass changeit
-                        # Keystore from the user cert + key (PKCS12, then reference directly).
-                        openssl pkcs12 -export \
-                          -in /etc/crabka/bob/user.crt \
-                          -inkey /etc/crabka/bob/user.key \
-                          -name bob \
-                          -out /tmp/keystore.p12 \
-                          -passout pass:changeit
                         cat > /tmp/client.props <<INNER
                         security.protocol=SSL
                         ssl.truststore.location=/tmp/trust.jks
                         ssl.truststore.password=changeit
                         ssl.keystore.type=PKCS12
-                        ssl.keystore.location=/tmp/keystore.p12
+                        ssl.keystore.location=/shared/keystore.p12
                         ssl.keystore.password=changeit
                         INNER
                         echo "mtls-test-record" | \
@@ -1610,8 +1621,8 @@ jobs:
                       - name: cluster-ca
                         mountPath: /etc/crabka/cluster-ca
                         readOnly: true
-                      - name: bob-secret
-                        mountPath: /etc/crabka/bob
+                      - name: shared
+                        mountPath: /shared
                         readOnly: true
                 volumes:
                   - name: cluster-ca
@@ -1620,11 +1631,13 @@ jobs:
                   - name: bob-secret
                     secret:
                       secretName: bob
+                  - name: shared
+                    emptyDir: {}
           EOF
           kubectl wait job/mtls-producer-ok -n default \
             --for=condition=complete --timeout=120s || {
             echo "::error::mTLS producer job did not complete successfully"
-            kubectl logs -n default -l job-name=mtls-producer-ok --tail=100 || true
+            kubectl logs -n default -l job-name=mtls-producer-ok --all-containers --tail=100 || true
             exit 1
           }
 
