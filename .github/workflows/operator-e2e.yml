@@ -1578,6 +1578,8 @@ jobs:
                       - -c
                       - |
                         set -ex
+                        # apache/kafka:3.8.0 (Ubuntu-based) ships without openssl.
+                        apt-get update -qq && apt-get install -y -qq --no-install-recommends openssl
                         # Truststore from the cluster CA (server cert chain).
                         keytool -import -trustcacerts -noprompt \
                           -alias clusterca \
