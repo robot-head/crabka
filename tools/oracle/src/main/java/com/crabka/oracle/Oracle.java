@@ -224,8 +224,8 @@ public final class Oracle {
         String tsType = value.get("timestamp_type").asText(); // "CreateTime" or "LogAppendTime"
         String codecName = value.get("compression").asText(); // "NONE" / "GZIP" / "SNAPPY" / "LZ4" / "ZSTD"
 
-        org.apache.kafka.common.record.CompressionType compressionType =
-            org.apache.kafka.common.record.CompressionType.valueOf(codecName);
+        org.apache.kafka.common.record.internal.CompressionType compressionType =
+            org.apache.kafka.common.record.internal.CompressionType.valueOf(codecName);
         org.apache.kafka.common.compress.Compression compression =
             org.apache.kafka.common.compress.Compression.of(compressionType).build();
 
@@ -235,10 +235,10 @@ public final class Oracle {
             org.apache.kafka.common.record.TimestampType.valueOf(tsName);
 
         java.nio.ByteBuffer buffer = java.nio.ByteBuffer.allocate(1024 * 1024);
-        org.apache.kafka.common.record.MemoryRecordsBuilder mrb =
-            org.apache.kafka.common.record.MemoryRecords.builder(
+        org.apache.kafka.common.record.internal.MemoryRecordsBuilder mrb =
+            org.apache.kafka.common.record.internal.MemoryRecords.builder(
                 buffer,
-                org.apache.kafka.common.record.RecordBatch.CURRENT_MAGIC_VALUE,
+                org.apache.kafka.common.record.internal.RecordBatch.CURRENT_MAGIC_VALUE,
                 compression,
                 timestampType,
                 baseOffset,
@@ -273,7 +273,7 @@ public final class Oracle {
                 headers.toArray(new org.apache.kafka.common.header.Header[0]));
         }
 
-        org.apache.kafka.common.record.MemoryRecords mr = mrb.build();
+        org.apache.kafka.common.record.internal.MemoryRecords mr = mrb.build();
         java.nio.ByteBuffer out = mr.buffer();
         byte[] bytes = new byte[out.remaining()];
         out.duplicate().get(bytes);
@@ -285,10 +285,10 @@ public final class Oracle {
     }
 
     private static ObjectNode decodeRecordBatch(byte[] bytes) throws Exception {
-        org.apache.kafka.common.record.MemoryRecords mr =
-            org.apache.kafka.common.record.MemoryRecords.readableRecords(
+        org.apache.kafka.common.record.internal.MemoryRecords mr =
+            org.apache.kafka.common.record.internal.MemoryRecords.readableRecords(
                 java.nio.ByteBuffer.wrap(bytes));
-        java.util.Iterator<org.apache.kafka.common.record.MutableRecordBatch> it =
+        java.util.Iterator<org.apache.kafka.common.record.internal.MutableRecordBatch> it =
             mr.batches().iterator();
         if (!it.hasNext()) {
             ObjectNode err = M.createObjectNode();
@@ -296,10 +296,10 @@ public final class Oracle {
             err.put("error", "no batch in input");
             return err;
         }
-        org.apache.kafka.common.record.MutableRecordBatch b = it.next();
+        org.apache.kafka.common.record.internal.MutableRecordBatch b = it.next();
         // DefaultRecordBatch exposes baseTimestamp(); cast to access it.
-        org.apache.kafka.common.record.DefaultRecordBatch db =
-            (org.apache.kafka.common.record.DefaultRecordBatch) b;
+        org.apache.kafka.common.record.internal.DefaultRecordBatch db =
+            (org.apache.kafka.common.record.internal.DefaultRecordBatch) b;
 
         ObjectNode value = M.createObjectNode();
         value.put("base_offset", b.baseOffset());
@@ -317,7 +317,7 @@ public final class Oracle {
         value.put("base_sequence", b.baseSequence());
 
         com.fasterxml.jackson.databind.node.ArrayNode recordsArr = value.putArray("records");
-        for (org.apache.kafka.common.record.Record r : b) {
+        for (org.apache.kafka.common.record.internal.Record r : b) {
             ObjectNode rj = recordsArr.addObject();
             rj.put("offset_delta", (int)(r.offset() - b.baseOffset()));
             rj.put("timestamp_delta", r.timestamp() - db.baseTimestamp());
