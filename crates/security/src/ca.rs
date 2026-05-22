@@ -10,7 +10,7 @@ use std::net::IpAddr;
 
 use rcgen::{
     BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa,
-    KeyPair, KeyUsagePurpose, PKCS_ECDSA_P256_SHA256, SanType,
+    Issuer, KeyPair, KeyUsagePurpose, PKCS_ECDSA_P256_SHA256, SanType,
 };
 use thiserror::Error;
 use time::format_description::well_known::Rfc3339;
@@ -132,8 +132,7 @@ pub fn issue_broker_cert(
     validity_days: u32,
 ) -> Result<BrokerCert, CaError> {
     let ca_key = KeyPair::from_pem(ca_key_pem)?;
-    let ca_params = CertificateParams::from_ca_cert_pem(ca_cert_pem)?;
-    let ca_cert = ca_params.self_signed(&ca_key)?;
+    let ca_issuer = Issuer::from_ca_cert_pem(ca_cert_pem, ca_key)?;
 
     let leaf_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)?;
 
@@ -163,7 +162,7 @@ pub fn issue_broker_cert(
         })
         .collect();
 
-    let leaf = params.signed_by(&leaf_key, &ca_cert, &ca_key)?;
+    let leaf = params.signed_by(&leaf_key, &ca_issuer)?;
     let not_after_str = not_after.format(&Rfc3339)?;
 
     Ok(BrokerCert {
@@ -184,8 +183,7 @@ pub fn issue_user_cert(
     validity_days: u32,
 ) -> Result<UserCert, CaError> {
     let ca_key = KeyPair::from_pem(ca_key_pem)?;
-    let ca_params = CertificateParams::from_ca_cert_pem(ca_cert_pem)?;
-    let ca_cert = ca_params.self_signed(&ca_key)?;
+    let ca_issuer = Issuer::from_ca_cert_pem(ca_cert_pem, ca_key)?;
 
     let leaf_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)?;
 
@@ -205,7 +203,7 @@ pub fn issue_user_cert(
     ];
     params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
 
-    let leaf = params.signed_by(&leaf_key, &ca_cert, &ca_key)?;
+    let leaf = params.signed_by(&leaf_key, &ca_issuer)?;
     let not_after_str = not_after.format(&Rfc3339)?;
 
     Ok(UserCert {
