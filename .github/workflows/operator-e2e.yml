@@ -7,65 +7,75 @@ on:
 permissions:
   contents: read
 
+# Cancel superseded PR runs; let pushes to main run to completion.
+concurrency:
+  group: operator-e2e-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  kind:
+  # Build the operator + broker OCI images once and share them with every
+  # kind job below via an artifact. melange/apko compile the Rust binaries
+  # inside a docker build container (`--runner docker`), so the host Rust
+  # toolchain and a host-side build cache would not be exercised here —
+  # deduplicating the build across the four e2e jobs is the real win.
+  build-images:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.95.0"
-      - uses: azure/setup-helm@v5
-        with:
-          version: v3.16.2
-
       - uses: actions/setup-go@v6
         with:
           go-version: stable
-
       - name: Install melange and apko
         run: |
           go install chainguard.dev/melange@latest
           go install chainguard.dev/apko@latest
           echo "$HOME/go/bin" >> "$GITHUB_PATH"
-
       - name: Verify melange + apko on PATH
         run: |
           melange version
           apko version
-
-      - name: Build crabka-operator apk + OCI image
+      - name: Build crabka-operator + crabka-broker apk + OCI images
         run: |
           mkdir -p packages
           melange keygen
-          melange build packaging/melange/crabka-operator.yaml \
-            --source-dir . \
-            --signing-key melange.rsa \
-            --arch x86_64 \
-            --runner docker \
-            --out-dir packages/
-          apko build packaging/apko/crabka-operator.yaml \
-            crabka-operator:e2e \
-            crabka-operator.tar \
-            --arch x86_64 \
-            --repository-append "$PWD/packages" \
-            --keyring-append "$PWD/melange.rsa.pub"
+          for recipe in crabka-operator crabka-broker; do
+            melange build "packaging/melange/${recipe}.yaml" \
+              --source-dir . \
+              --signing-key melange.rsa \
+              --arch x86_64 \
+              --runner docker \
+              --out-dir packages/
+            apko build "packaging/apko/${recipe}.yaml" \
+              "${recipe}:e2e" \
+              "${recipe}.tar" \
+              --arch x86_64 \
+              --repository-append "$PWD/packages" \
+              --keyring-append "$PWD/melange.rsa.pub"
+          done
+      - name: Upload image tarballs
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-images
+          path: |
+            crabka-operator.tar
+            crabka-broker.tar
+          retention-days: 1
+          if-no-files-found: error
 
-      - name: Build crabka-broker apk + OCI image
-        run: |
-          melange build packaging/melange/crabka-broker.yaml \
-            --source-dir . \
-            --signing-key melange.rsa \
-            --arch x86_64 \
-            --runner docker \
-            --out-dir packages/
-          apko build packaging/apko/crabka-broker.yaml \
-            crabka-broker:e2e \
-            crabka-broker.tar \
-            --arch x86_64 \
-            --repository-append "$PWD/packages" \
-            --keyring-append "$PWD/melange.rsa.pub"
+  kind:
+    needs: build-images
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: azure/setup-helm@v5
+        with:
+          version: v3.16.2
+      - name: Download prebuilt image tarballs
+        uses: actions/download-artifact@v7
+        with:
+          name: e2e-images
 
       - name: Create kind cluster
         uses: helm/kind-action@v1
@@ -628,46 +638,18 @@ jobs:
           if-no-files-found: ignore
 
   kind-network-policy:
+    needs: build-images
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.95.0"
       - uses: azure/setup-helm@v5
         with:
           version: v3.16.2
-      - uses: actions/setup-go@v6
+      - name: Download prebuilt image tarballs
+        uses: actions/download-artifact@v7
         with:
-          go-version: stable
-
-      - name: Install melange and apko
-        run: |
-          go install chainguard.dev/melange@latest
-          go install chainguard.dev/apko@latest
-          echo "$HOME/go/bin" >> "$GITHUB_PATH"
-
-      - name: Build crabka-operator + crabka-broker images
-        run: |
-          mkdir -p packages
-          melange keygen
-          melange build packaging/melange/crabka-operator.yaml \
-            --source-dir . --signing-key melange.rsa \
-            --arch x86_64 --runner docker --out-dir packages/
-          apko build packaging/apko/crabka-operator.yaml \
-            crabka-operator:e2e crabka-operator.tar \
-            --arch x86_64 \
-            --repository-append "$PWD/packages" \
-            --keyring-append "$PWD/melange.rsa.pub"
-          melange build packaging/melange/crabka-broker.yaml \
-            --source-dir . --signing-key melange.rsa \
-            --arch x86_64 --runner docker --out-dir packages/
-          apko build packaging/apko/crabka-broker.yaml \
-            crabka-broker:e2e crabka-broker.tar \
-            --arch x86_64 \
-            --repository-append "$PWD/packages" \
-            --keyring-append "$PWD/melange.rsa.pub"
+          name: e2e-images
 
       - name: Create kind cluster (Calico, no default CNI)
         run: |
@@ -900,46 +882,18 @@ jobs:
           if-no-files-found: ignore
 
   kind-kafkatopic:
+    needs: build-images
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.95.0"
       - uses: azure/setup-helm@v5
         with:
           version: v3.16.2
-      - uses: actions/setup-go@v6
+      - name: Download prebuilt image tarballs
+        uses: actions/download-artifact@v7
         with:
-          go-version: stable
-
-      - name: Install melange and apko
-        run: |
-          go install chainguard.dev/melange@latest
-          go install chainguard.dev/apko@latest
-          echo "$HOME/go/bin" >> "$GITHUB_PATH"
-
-      - name: Build crabka-operator + crabka-broker images
-        run: |
-          mkdir -p packages
-          melange keygen
-          melange build packaging/melange/crabka-operator.yaml \
-            --source-dir . --signing-key melange.rsa \
-            --arch x86_64 --runner docker --out-dir packages/
-          apko build packaging/apko/crabka-operator.yaml \
-            crabka-operator:e2e crabka-operator.tar \
-            --arch x86_64 \
-            --repository-append "$PWD/packages" \
-            --keyring-append "$PWD/melange.rsa.pub"
-          melange build packaging/melange/crabka-broker.yaml \
-            --source-dir . --signing-key melange.rsa \
-            --arch x86_64 --runner docker --out-dir packages/
-          apko build packaging/apko/crabka-broker.yaml \
-            crabka-broker:e2e crabka-broker.tar \
-            --arch x86_64 \
-            --repository-append "$PWD/packages" \
-            --keyring-append "$PWD/melange.rsa.pub"
+          name: e2e-images
 
       - name: Create kind cluster
         uses: helm/kind-action@v1
@@ -1155,46 +1109,18 @@ jobs:
           if-no-files-found: ignore
 
   kind-listener-auth:
+    needs: build-images
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.95.0"
       - uses: azure/setup-helm@v5
         with:
           version: v3.16.2
-      - uses: actions/setup-go@v6
+      - name: Download prebuilt image tarballs
+        uses: actions/download-artifact@v7
         with:
-          go-version: stable
-
-      - name: Install melange and apko
-        run: |
-          go install chainguard.dev/melange@latest
-          go install chainguard.dev/apko@latest
-          echo "$HOME/go/bin" >> "$GITHUB_PATH"
-
-      - name: Build crabka-operator + crabka-broker images
-        run: |
-          mkdir -p packages
-          melange keygen
-          melange build packaging/melange/crabka-operator.yaml \
-            --source-dir . --signing-key melange.rsa \
-            --arch x86_64 --runner docker --out-dir packages/
-          apko build packaging/apko/crabka-operator.yaml \
-            crabka-operator:e2e crabka-operator.tar \
-            --arch x86_64 \
-            --repository-append "$PWD/packages" \
-            --keyring-append "$PWD/melange.rsa.pub"
-          melange build packaging/melange/crabka-broker.yaml \
-            --source-dir . --signing-key melange.rsa \
-            --arch x86_64 --runner docker --out-dir packages/
-          apko build packaging/apko/crabka-broker.yaml \
-            crabka-broker:e2e crabka-broker.tar \
-            --arch x86_64 \
-            --repository-append "$PWD/packages" \
-            --keyring-append "$PWD/melange.rsa.pub"
+          name: e2e-images
 
       - name: Create kind cluster
         uses: helm/kind-action@v1
