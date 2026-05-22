@@ -335,6 +335,7 @@ async fn data_plane_tls_listener_still_rejected_in_slice_30() {
         port: 9092,
         type_: ListenerType::Internal,
         tls: true,
+        authentication: None,
         configuration: None,
         network_policy_peers: None,
     }];

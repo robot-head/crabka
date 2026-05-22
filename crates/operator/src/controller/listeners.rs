@@ -363,6 +363,7 @@ mod service_rendering_tests {
             port: 9094,
             type_: ListenerType::Nodeport,
             tls: false,
+            authentication: None,
             configuration: Some(ListenerConfiguration {
                 bootstrap: None,
                 brokers: vec![BrokerOverride {
@@ -394,6 +395,7 @@ mod service_rendering_tests {
             port: 9094,
             type_: ListenerType::Loadbalancer,
             tls: false,
+            authentication: None,
             configuration: Some(ListenerConfiguration {
                 bootstrap: None,
                 brokers: vec![BrokerOverride {
@@ -418,6 +420,7 @@ mod service_rendering_tests {
             port: 9094,
             type_: ListenerType::Nodeport,
             tls: false,
+            authentication: None,
             configuration: Some(ListenerConfiguration {
                 bootstrap: Some(BootstrapConfig {
                     node_port: Some(32099),
@@ -454,6 +457,7 @@ mod tests {
             port,
             type_: ListenerType::Internal,
             tls: false,
+            authentication: None,
             configuration: None,
             network_policy_peers: None,
         }
@@ -465,6 +469,7 @@ mod tests {
             port,
             type_: ListenerType::Nodeport,
             tls: false,
+            authentication: None,
             configuration: None,
             network_policy_peers: None,
         }
@@ -779,6 +784,7 @@ mod advertised_tests {
             port,
             type_: ListenerType::Internal,
             tls: false,
+            authentication: None,
             configuration: None,
             network_policy_peers: None,
         }
@@ -789,6 +795,7 @@ mod advertised_tests {
             port,
             type_: ListenerType::Nodeport,
             tls: false,
+            authentication: None,
             configuration: None,
             network_policy_peers: None,
         }
@@ -799,6 +806,7 @@ mod advertised_tests {
             port,
             type_: ListenerType::Loadbalancer,
             tls: false,
+            authentication: None,
             configuration: None,
             network_policy_peers: None,
         }
@@ -1128,6 +1136,7 @@ pub fn synthesized_default_listener() -> Listener {
         port: 9092,
         type_: ListenerType::Internal,
         tls: false,
+        authentication: None,
         configuration: None,
         network_policy_peers: None,
     }
@@ -1331,6 +1340,7 @@ mod intent_tests {
             port: 9092,
             type_: ListenerType::Internal,
             tls: false,
+            authentication: None,
             configuration: Some(crate::crd::ListenerConfiguration {
                 bootstrap: None,
                 brokers: vec![

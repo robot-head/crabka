@@ -664,6 +664,7 @@ async fn kafka_invalid_listener_tls_blocks_broker_configmap_and_sets_conditions(
         port: 9092,
         type_: ListenerType::Internal,
         tls: true,
+        authentication: None,
         configuration: None,
         network_policy_peers: None,
     }];
@@ -1288,6 +1289,7 @@ async fn network_policy_listener_deny_all_skips_port_rule() {
         port: 9092,
         type_: ListenerType::Internal,
         tls: false,
+        authentication: None,
         configuration: None,
         network_policy_peers: Some(vec![]),
     }];
