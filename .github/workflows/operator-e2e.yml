@@ -1466,7 +1466,7 @@ jobs:
       # A second cluster `demo-mtls` is used so its clients CA is independent.
       # Listeners:
       #   PLAIN:9092  — unauthenticated, inter-broker only
-      #   mtls:9093   — TLS mutual-auth (authentication: {type: tls})
+      #   mtls:9095   — TLS mutual-auth (authentication: {type: tls})
       #
       # A KafkaUser `bob` with tls auth is created. The operator issues a cert
       # signed by the cluster's clients CA and writes a Secret `bob` containing
@@ -1492,7 +1492,7 @@ jobs:
                 type: internal
                 tls: false
               - name: mtls
-                port: 9093
+                port: 9095
                 type: internal
                 tls: true
                 authentication:
@@ -1601,7 +1601,7 @@ jobs:
                         INNER
                         echo "mtls-test-record" | \
                           /opt/kafka/bin/kafka-console-producer.sh \
-                            --bootstrap-server demo-mtls-broker-headless.default.svc.cluster.local:9093 \
+                            --bootstrap-server demo-mtls-broker-headless.default.svc.cluster.local:9095 \
                             --topic mtls-test \
                             --producer.config /tmp/client.props
                     volumeMounts:
@@ -1660,7 +1660,7 @@ jobs:
                         INNER
                         echo "should-be-rejected" | \
                           /opt/kafka/bin/kafka-console-producer.sh \
-                            --bootstrap-server demo-mtls-broker-headless.default.svc.cluster.local:9093 \
+                            --bootstrap-server demo-mtls-broker-headless.default.svc.cluster.local:9095 \
                             --topic mtls-test \
                             --producer.config /tmp/client.props \
                             --request-timeout-ms 15000
