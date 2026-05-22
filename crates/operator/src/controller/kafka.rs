@@ -583,8 +583,7 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
         )
         .await?;
 
-        // Per-broker extra SANs; brokers whose LB ingress isn't ready yet are
-        // skipped (Task 8 will surface a WaitingForLoadBalancerIp condition).
+        // Brokers whose LB ingress isn't ready yet are skipped; a status condition will surface this.
         let extra_sans_per_broker: BTreeMap<i32, Vec<crabka_security::ca::SubjectAltName>> =
             brokers
                 .iter()
@@ -599,7 +598,7 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
                             broker_id,
                             listener,
                         }) => {
-                            tracing::info!(
+                            tracing::warn!(
                                 broker_id,
                                 %listener,
                                 "LB ingress not ready; skipping cert SAN extension for this broker"
@@ -664,25 +663,18 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
             })
             .collect();
 
-        // Populate the clients-CA path for every broker when at least one
-        // listener requires mTLS (authentication.type: tls). All brokers get
-        // the same standard mount path; per-broker overrides are not needed
-        // at this slice.
-        let clients_ca_paths_per_broker: BTreeMap<i32, String> = if effective_listeners
+        let clients_ca_path: Option<&str> = if effective_listeners
             .iter()
             .any(|l| matches!(l.authentication, Some(ListenerAuthentication::Tls)))
         {
-            brokers
-                .iter()
-                .map(|b| (b.broker_id, "/etc/crabka/clients-ca/ca.crt".to_string()))
-                .collect()
+            Some("/etc/crabka/clients-ca/ca.crt")
         } else {
-            BTreeMap::new()
+            None
         };
 
         // Helper to render+apply a ConfigMap with the supplied address map.
         // Defined here (inside the validation-ok branch) so it can capture
-        // `tls_per_broker` and `clients_ca_paths_per_broker`. On the
+        // `tls_per_broker` and `clients_ca_path`. On the
         // validation-fail path there is no `apply_cm` call.
         let apply_cm = async |listeners_for_cm: &[Listener],
                               addresses: &BTreeMap<i32, BTreeMap<String, AdvertisedAddress>>|
@@ -693,7 +685,7 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
                 addresses,
                 &inter_broker_name,
                 Some(&tls_per_broker),
-                &clients_ca_paths_per_broker,
+                clients_ca_path,
             )?;
             apply_object(&cm_api, &cm_name(&name), &cm).await?;
             Ok(())

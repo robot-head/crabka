@@ -1202,7 +1202,7 @@ pub fn render_broker_toml(
     inter_broker_listener_name: &str,
     server_properties: &std::collections::BTreeMap<String, String>,
     tls: Option<&BrokerTlsRender>,
-    clients_ca_paths_per_broker: &std::collections::BTreeMap<i32, String>,
+    clients_ca_path: Option<&str>,
 ) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
@@ -1254,13 +1254,8 @@ pub fn render_broker_toml(
                 "Disabled"
             };
             if needs_client_ca {
-                // The clients-CA volume is mounted at /etc/crabka/clients-ca/ca.crt
-                // (slice 30). The clients_ca_paths_per_broker map will override per-broker
-                // when Task 6 wires it up; until then this fallback is correct.
-                let client_ca = clients_ca_paths_per_broker
-                    .get(&broker_id)
-                    .cloned()
-                    .unwrap_or_else(|| "/etc/crabka/clients-ca/ca.crt".into());
+                // Mounted at /etc/crabka/clients-ca/ca.crt by the broker pod template.
+                let client_ca = clients_ca_path.unwrap_or("/etc/crabka/clients-ca/ca.crt");
                 let _ = writeln!(
                     out,
                     "tls_config = {{ cert_path = \"{cert_path}\", key_path = \"{key_path}\", client_ca_path = \"{client_ca}\", client_auth = \"{client_auth}\" }}"
@@ -1338,15 +1333,7 @@ mod toml_rendering_tests {
         );
         let listeners = vec![synthesized_default_listener()];
         let props = std::collections::BTreeMap::new();
-        let toml_str = render_broker_toml(
-            0,
-            &listeners,
-            &addrs,
-            "PLAIN",
-            &props,
-            None,
-            &std::collections::BTreeMap::new(),
-        );
+        let toml_str = render_broker_toml(0, &listeners, &addrs, "PLAIN", &props, None, None);
 
         // Sanity: parses cleanly with the broker's FileConfig.
         let parsed: crabka_broker::file_config::FileConfig =
@@ -1372,24 +1359,8 @@ mod toml_rendering_tests {
         p.insert("z.last".into(), "1".into());
         p.insert("a.first".into(), "0".into());
 
-        let t1 = render_broker_toml(
-            0,
-            &l,
-            &addrs,
-            "PLAIN",
-            &p,
-            None,
-            &std::collections::BTreeMap::new(),
-        );
-        let t2 = render_broker_toml(
-            0,
-            &l,
-            &addrs,
-            "PLAIN",
-            &p,
-            None,
-            &std::collections::BTreeMap::new(),
-        );
+        let t1 = render_broker_toml(0, &l, &addrs, "PLAIN", &p, None, None);
+        let t2 = render_broker_toml(0, &l, &addrs, "PLAIN", &p, None, None);
         assert_eq!(t1, t2);
         // Sorted property keys (BTreeMap iteration).
         let a_pos = t1.find("a.first").unwrap();
@@ -1414,7 +1385,7 @@ mod toml_rendering_tests {
             "PLAIN",
             &std::collections::BTreeMap::new(),
             None,
-            &std::collections::BTreeMap::new(),
+            None,
         );
         assert!(!t.contains("[server_properties]"), "got:\n{t}");
     }
@@ -1438,15 +1409,7 @@ mod toml_rendering_tests {
             client_ca_path: "/etc/crabka/cluster-ca/ca.crt".into(),
             client_auth: "Required".into(),
         };
-        let toml_str = render_broker_toml(
-            0,
-            &listeners,
-            &addrs,
-            "PLAIN",
-            &props,
-            Some(&tls),
-            &std::collections::BTreeMap::new(),
-        );
+        let toml_str = render_broker_toml(0, &listeners, &addrs, "PLAIN", &props, Some(&tls), None);
 
         let parsed: crabka_broker::file_config::FileConfig =
             toml::from_str(&toml_str).expect("rendered TOML must parse with broker FileConfig");
@@ -1473,15 +1436,7 @@ mod toml_rendering_tests {
         );
         let listeners = vec![synthesized_default_listener()];
         let props = std::collections::BTreeMap::new();
-        let toml_str = render_broker_toml(
-            0,
-            &listeners,
-            &addrs,
-            "PLAIN",
-            &props,
-            None,
-            &std::collections::BTreeMap::new(),
-        );
+        let toml_str = render_broker_toml(0, &listeners, &addrs, "PLAIN", &props, None, None);
         assert!(!toml_str.contains("[tls_config]"));
         assert!(!toml_str.contains("controller_listener_protocol"));
     }
@@ -1519,7 +1474,7 @@ mod toml_rendering_tests {
                 client_ca_path: "/etc/crabka/cluster-ca/ca.crt".into(),
                 client_auth: "Required".into(),
             }),
-            &BTreeMap::new(),
+            None,
         );
         assert!(toml.contains("protocol = \"SaslSsl\""), "TOML: {toml}");
         assert!(toml.contains("tls_config = { cert_path = \"/etc/crabka/broker-tls/0.crt\""));
@@ -1547,8 +1502,6 @@ mod toml_rendering_tests {
                 port: 9095,
             },
         );
-        let mut clients_ca_per_broker = BTreeMap::new();
-        clients_ca_per_broker.insert(0, "/etc/crabka/clients-ca/ca.crt".to_string());
         let toml = render_broker_toml(
             0,
             &listeners,
@@ -1556,7 +1509,7 @@ mod toml_rendering_tests {
             "mtls",
             &BTreeMap::new(),
             None,
-            &clients_ca_per_broker,
+            Some("/etc/crabka/clients-ca/ca.crt"),
         );
         assert!(toml.contains("protocol = \"Ssl\""));
         assert!(toml.contains("client_ca_path = \"/etc/crabka/clients-ca/ca.crt\""));
@@ -1704,7 +1657,7 @@ pub(crate) enum SanComputationError {
 /// Pure function — no I/O. Returns `Err(SansNotReady)` when a
 /// `LoadBalancer` listener has TLS but the per-broker ingress isn't
 /// provisioned yet; callers skip cert issuance for that broker and
-/// requeue (Task 8 will surface a status condition for this).
+/// requeue.
 pub(crate) fn compute_extra_sans(
     broker_id: i32,
     listeners: &[Listener],
@@ -1737,13 +1690,19 @@ pub(crate) fn compute_extra_sans(
             ListenerType::Loadbalancer => {
                 let per_broker = observed.lb_per_broker.get(&broker_id);
                 let bootstrap = &observed.lb_bootstrap;
-                if per_broker.is_none_or(Vec::is_empty) {
+                let Some(entries) = per_broker else {
+                    return Err(SanComputationError::SansNotReady {
+                        broker_id,
+                        listener: l.name.clone(),
+                    });
+                };
+                if entries.is_empty() {
                     return Err(SanComputationError::SansNotReady {
                         broker_id,
                         listener: l.name.clone(),
                     });
                 }
-                for ingress in per_broker.unwrap().iter().chain(bootstrap.iter()) {
+                for ingress in entries.iter().chain(bootstrap.iter()) {
                     match ingress {
                         LbIngress::Ip(ip) => sans.push(SubjectAltName::Ip(*ip)),
                         LbIngress::Hostname(h) => sans.push(SubjectAltName::Dns(h.clone())),
