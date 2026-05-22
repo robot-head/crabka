@@ -279,7 +279,7 @@ pub(crate) struct BrokerCertRequest {
     pub extra_sans: Vec<SubjectAltName>,
 }
 
-#[allow(dead_code)]
+#[allow(dead_code, clippy::too_many_lines)]
 pub(crate) async fn ensure_broker_keystore(
     secret_api: &Api<Secret>,
     kafka: &Kafka,
@@ -309,7 +309,22 @@ pub(crate) async fn ensure_broker_keystore(
         let id = req.broker_id;
         let crt_key = format!("{id}.crt");
         let key_key = format!("{id}.key");
-        if data.contains_key(&crt_key) && data.contains_key(&key_key) {
+        let digest_key = format!("{id}.sans-digest");
+
+        let requested_digest = compute_san_digest(&req.sans, &req.extra_sans);
+
+        let has_cert = data.contains_key(&crt_key) && data.contains_key(&key_key);
+        let stored_digest = data.get(&digest_key).and_then(|b| {
+            std::str::from_utf8(&b.0)
+                .ok()
+                .map(std::borrow::ToOwned::to_owned)
+        });
+
+        let needs_reissue = !has_cert
+            || stored_digest.is_none()
+            || stored_digest.as_deref() != Some(&requested_digest);
+
+        if !needs_reissue {
             reused.push(id);
             continue;
         }
@@ -323,6 +338,7 @@ pub(crate) async fn ensure_broker_keystore(
         )?;
         data.insert(crt_key, ByteString(leaf.cert_pem.into_bytes()));
         data.insert(key_key, ByteString(leaf.key_pem.into_bytes()));
+        data.insert(digest_key, ByteString(requested_digest.into_bytes()));
         issued.push(id);
     }
 
@@ -330,7 +346,11 @@ pub(crate) async fn ensure_broker_keystore(
         .iter()
         .flat_map(|req| {
             let id = req.broker_id;
-            [format!("{id}.crt"), format!("{id}.key")]
+            [
+                format!("{id}.crt"),
+                format!("{id}.key"),
+                format!("{id}.sans-digest"),
+            ]
         })
         .collect();
     let mut pruned_ids = std::collections::BTreeSet::new();
@@ -381,6 +401,41 @@ pub(crate) async fn ensure_broker_keystore(
         issued,
         reused,
         pruned,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// SAN-list digest
+// ---------------------------------------------------------------------------
+
+/// SHA-256 digest of the canonical-form SAN list (sorted, deduped).
+/// Used to detect when the SAN list for a broker has changed vs the
+/// cert currently stored in the Secret, triggering a reissue.
+#[must_use]
+pub fn compute_san_digest(base_sans: &[SubjectAltName], extras: &[SubjectAltName]) -> String {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write as _;
+    let mut all: Vec<&SubjectAltName> = base_sans.iter().chain(extras.iter()).collect();
+    all.sort();
+    all.dedup();
+    let mut h = Sha256::new();
+    for s in all {
+        match s {
+            SubjectAltName::Dns(d) => {
+                h.update(b"DNS:");
+                h.update(d.as_bytes());
+            }
+            SubjectAltName::Ip(ip) => {
+                h.update(b"IP:");
+                h.update(ip.to_string().as_bytes());
+            }
+        }
+        h.update(b"\n");
+    }
+    let result = h.finalize();
+    result.iter().fold(String::with_capacity(64), |mut s, b| {
+        let _ = write!(s, "{b:02x}");
+        s
     })
 }
 
@@ -848,6 +903,46 @@ mod tests {
         let user = issue_user_cert(&ca.cert_pem, &ca.key_pem, "alice", 1).expect("leaf");
         let now = OffsetDateTime::now_utc() + time::Duration::days(10);
         assert!(renew_if_expiring(&user.cert_pem, 30, now).expect("predicate"));
+    }
+}
+
+#[cfg(test)]
+mod reissue_tests {
+    use super::compute_san_digest;
+    use crabka_security::ca::SubjectAltName;
+
+    #[test]
+    fn san_digest_changes_when_extras_differ() {
+        let base = vec![SubjectAltName::Dns("internal.svc".into())];
+        let no_extras = compute_san_digest(&base, &[]);
+        let with_extras =
+            compute_san_digest(&base, &[SubjectAltName::Dns("broker-0.example.com".into())]);
+        assert_ne!(no_extras, with_extras);
+    }
+
+    #[test]
+    fn san_digest_stable_for_same_inputs_in_different_order() {
+        let a = vec![
+            SubjectAltName::Dns("a.example.com".into()),
+            SubjectAltName::Dns("b.example.com".into()),
+        ];
+        let b = vec![
+            SubjectAltName::Dns("b.example.com".into()),
+            SubjectAltName::Dns("a.example.com".into()),
+        ];
+        assert_eq!(compute_san_digest(&a, &[]), compute_san_digest(&b, &[]));
+    }
+
+    #[test]
+    fn san_digest_dedupes_overlap_between_base_and_extras() {
+        let base = vec![SubjectAltName::Dns("internal.svc".into())];
+        let extras = vec![SubjectAltName::Dns("internal.svc".into())];
+        let single = compute_san_digest(&base, &[]);
+        let with_dup_extra = compute_san_digest(&base, &extras);
+        assert_eq!(
+            single, with_dup_extra,
+            "duplicate extras should not change digest"
+        );
     }
 }
 
