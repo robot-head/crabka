@@ -6,12 +6,19 @@ use kube::Client;
 use tokio::sync::Mutex;
 
 use crate::config::OperatorConfig;
+use crate::rebalancer_client::{ConnectRebalancerClient, RebalancerClientLike};
 use crate::telemetry::SharedRegistry;
 
 /// Boxed-dyn admin client handle: tests substitute a fake here without
 /// opening a TCP connection, while production code wraps a real
 /// `AdminClient`.
 pub type AdminClientHandle = Arc<Mutex<dyn AdminClientLike + Send>>;
+
+/// Boxed-dyn rebalancer client handle (slice 44). Production wraps a
+/// [`ConnectRebalancerClient`]; reconcile tests substitute a fake. No
+/// `Mutex` — the client's methods take `&self` and the inner HTTP client
+/// is a shareable connection pool.
+pub type RebalancerClientHandle = Arc<dyn RebalancerClientLike>;
 
 /// Shared per-reconciler context. Cheap to clone (all fields Arc /
 /// shared via interior mutability).
@@ -23,6 +30,10 @@ pub struct Context {
     /// Per-cluster admin-client cache. Keyed by `Kafka` resource name.
     /// Broken connections are replaced lazily on next use.
     pub admin_clients: Arc<Mutex<HashMap<String, AdminClientHandle>>>,
+    /// Per-endpoint rebalancer-client cache (slice 44). Keyed by the
+    /// resolved Connect base URL. Dropped + re-created lazily on
+    /// transport failure.
+    pub rebalancer_clients: Arc<Mutex<HashMap<String, RebalancerClientHandle>>>,
 }
 
 impl Context {
@@ -33,6 +44,7 @@ impl Context {
             config: Arc::new(config),
             registry,
             admin_clients: Arc::new(Mutex::new(HashMap::new())),
+            rebalancer_clients: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -75,5 +87,38 @@ impl Context {
             .lock()
             .await
             .insert(cluster.to_string(), admin);
+    }
+
+    /// Look up or build a rebalancer client for `endpoint` (a Connect base
+    /// URL like `http://host:9300`). Construction is infallible (no
+    /// connection is opened until the first RPC), so this returns the
+    /// handle directly.
+    pub async fn rebalancer_client_for(&self, endpoint: &str) -> RebalancerClientHandle {
+        let mut map = self.rebalancer_clients.lock().await;
+        if let Some(client) = map.get(endpoint) {
+            return client.clone();
+        }
+        let client: RebalancerClientHandle = Arc::new(ConnectRebalancerClient::new(endpoint));
+        map.insert(endpoint.to_string(), client.clone());
+        client
+    }
+
+    /// Drop the cached rebalancer client for `endpoint` (used by reconcile
+    /// after a transport error — the next call rebuilds it).
+    pub async fn drop_rebalancer_client(&self, endpoint: &str) {
+        self.rebalancer_clients.lock().await.remove(endpoint);
+    }
+
+    /// Test-only: pre-populate the rebalancer-client cache with a fake.
+    /// Mirrors [`Self::insert_admin_client_for_test`].
+    pub async fn insert_rebalancer_client_for_test(
+        &self,
+        endpoint: &str,
+        client: RebalancerClientHandle,
+    ) {
+        self.rebalancer_clients
+            .lock()
+            .await
+            .insert(endpoint.to_string(), client);
     }
 }

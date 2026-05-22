@@ -1,0 +1,159 @@
+//! In-memory `RebalancerClientLike` for `KafkaRebalance` reconcile tests
+//! (slice 44).
+//!
+//! Records every Connect-RPC the reconcile issues and serves a scripted
+//! response per method, so the controller's state machine can be exercised
+//! without a live `crabka-rebalancer` process. Mirrors the `FakeAdminClient`
+//! pattern: `std::sync::Mutex` interior mutability behind the `&self`
+//! trait methods.
+
+#![allow(dead_code)]
+
+use std::sync::Mutex as StdMutex;
+
+use crabka_operator::rebalancer_client::{
+    ProposalStatus, ProposalSummary, RebalancerClientLike, RebalancerError, RebalancerProposal,
+};
+
+/// One recorded Connect-RPC.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RebalCall {
+    CreateProposal(Vec<String>),
+    GetProposal(String),
+    ExecuteProposal { id: String, throttle: Option<i64> },
+    CancelExecution(String),
+}
+
+/// A scripted reply for one method. `Clone` so the fake can serve it on
+/// repeated calls (`RebalancerError` isn't `Clone`, so we model the two
+/// error flavors structurally and rebuild a fresh error each call).
+#[derive(Debug, Clone)]
+pub enum FakeResp {
+    Ok(RebalancerProposal),
+    Rpc { code: String, message: String },
+    Transport(String),
+}
+
+impl FakeResp {
+    fn into_result(self) -> Result<RebalancerProposal, RebalancerError> {
+        match self {
+            Self::Ok(p) => Ok(p),
+            Self::Rpc { code, message } => Err(RebalancerError::Rpc { code, message }),
+            Self::Transport(m) => Err(RebalancerError::Transport(m)),
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct FakeRebalancerClient {
+    pub calls: StdMutex<Vec<RebalCall>>,
+    pub create: StdMutex<Option<FakeResp>>,
+    pub get: StdMutex<Option<FakeResp>>,
+    pub execute: StdMutex<Option<FakeResp>>,
+    pub cancel: StdMutex<Option<FakeResp>>,
+}
+
+impl FakeRebalancerClient {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub fn with_create(self, r: FakeResp) -> Self {
+        *self.create.lock().unwrap() = Some(r);
+        self
+    }
+
+    #[must_use]
+    pub fn with_get(self, r: FakeResp) -> Self {
+        *self.get.lock().unwrap() = Some(r);
+        self
+    }
+
+    #[must_use]
+    pub fn with_execute(self, r: FakeResp) -> Self {
+        *self.execute.lock().unwrap() = Some(r);
+        self
+    }
+
+    #[must_use]
+    pub fn with_cancel(self, r: FakeResp) -> Self {
+        *self.cancel.lock().unwrap() = Some(r);
+        self
+    }
+
+    pub fn calls(&self) -> Vec<RebalCall> {
+        self.calls.lock().unwrap().clone()
+    }
+
+    fn serve(slot: &StdMutex<Option<FakeResp>>) -> Result<RebalancerProposal, RebalancerError> {
+        slot.lock()
+            .unwrap()
+            .clone()
+            .expect("fake rebalancer: no scripted response for this method")
+            .into_result()
+    }
+}
+
+/// Convenience builder for a scripted proposal.
+#[must_use]
+pub fn fake_proposal(id: &str, status: ProposalStatus) -> RebalancerProposal {
+    RebalancerProposal {
+        id: id.into(),
+        status,
+        summary: ProposalSummary {
+            replica_movements: 2,
+            leader_movements: 1,
+            max_replicas_before: 8,
+            max_replicas_after: 5,
+            max_leaders_before: 4,
+            max_leaders_after: 2,
+        },
+        goals_applied: vec!["ReplicaDistribution".into()],
+        movement_count: 2,
+        failure_reason: None,
+    }
+}
+
+#[async_trait::async_trait]
+impl RebalancerClientLike for FakeRebalancerClient {
+    async fn create_proposal(
+        &self,
+        goals: &[String],
+    ) -> Result<RebalancerProposal, RebalancerError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(RebalCall::CreateProposal(goals.to_vec()));
+        Self::serve(&self.create)
+    }
+
+    async fn get_proposal(&self, id: &str) -> Result<RebalancerProposal, RebalancerError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(RebalCall::GetProposal(id.into()));
+        Self::serve(&self.get)
+    }
+
+    async fn execute_proposal(
+        &self,
+        id: &str,
+        throttle_bytes_per_sec: Option<i64>,
+    ) -> Result<RebalancerProposal, RebalancerError> {
+        self.calls.lock().unwrap().push(RebalCall::ExecuteProposal {
+            id: id.into(),
+            throttle: throttle_bytes_per_sec,
+        });
+        Self::serve(&self.execute)
+    }
+
+    async fn cancel_execution(&self, id: &str) -> Result<RebalancerProposal, RebalancerError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(RebalCall::CancelExecution(id.into()));
+        Self::serve(&self.cancel)
+    }
+}

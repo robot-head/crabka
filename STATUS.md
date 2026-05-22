@@ -1497,3 +1497,56 @@ Kafka client for ApiVersions.
 - Reference doc:
   [`docs/superpowers/specs/2026-05-22-crabka-operator-listener-ingress-route-27-design.md`].
 
+## Slice 44 — Operator: `KafkaRebalance` CRD (2026-05-22)
+
+- Closes Phase 7 of the operator roadmap: the standalone
+  `crabka-rebalancer` service (slices 43a–43g) was fully built but had no
+  operator front-end. Slice 44 adds the `KafkaRebalance` CRD and a
+  controller that translates it into Connect-RPC calls against the
+  rebalancer and reflects the proposal lifecycle into `status`. Pure
+  operator work — no Crabka-core dependency.
+- New CRD `crabka.io/v1alpha1` kind `KafkaRebalance` (short `kr`),
+  Strimzi-shaped: `spec.goals` (→ `CreateProposal.goals`),
+  `spec.throttleBytesPerSec` (→ `ExecuteProposal` KIP-73 throttle),
+  `spec.endpoint` (rebalancer Connect base URL; defaults to
+  `http://<cluster>-rebalancer.<ns>.svc.cluster.local:9300` derived from
+  the `crabka.io/cluster` label). `status` carries `conditions` (active
+  state in the condition `type`), `sessionId` (proposal id),
+  `observedGeneration`, and a typed `optimizationResult`.
+- Annotation-driven state machine (Strimzi-shaped): `crabka.io/rebalance`
+  ∈ `{approve, refresh, stop}`, consumed (merge-null deleted) once acted
+  on. States `New → ProposalReady → Rebalancing → Ready/NotReady`, plus
+  `Stopped`. `approve` executes a ready proposal; `refresh` recomputes;
+  `stop` cancels an in-flight execution. The decision core is a pure
+  `decide(state, command, has_session) -> RebalanceAction` (unit-tested in
+  isolation); reconcile does only I/O. `Rebalancing` polls at 10s, other
+  states requeue at 5min (the watch wakes on annotation changes).
+- New `crabka_operator::rebalancer_client`: a `reqwest`-backed Connect/JSON
+  client (`ConnectRebalancerClient`) + `RebalancerClientLike` trait test
+  seam (mirrors `AdminClientLike`). Hand-rolled serde DTOs keep the
+  operator decoupled from the rebalancer's prost/pbjson codegen. Decode
+  tolerates pbjson's proto3-JSON shape (camelCase, enum-name strings,
+  int64-as-string, default-omission); Connect errors → `RebalancerError::Rpc`;
+  transport errors leave status untouched and retry. `Context` caches one
+  client per endpoint, evicted on transport failure.
+- `Cargo.toml`: `async-trait` promoted to a runtime dep; `reqwest` 0.13
+  (`default-features = false, features = ["json"]`, plain HTTP) added;
+  `crabka-rebalancer` added as a dev-dep for the e2e wire test.
+  ClusterRole gains `kafkarebalances` + `/status`.
+- ~44 new lib unit tests (CRD round-trip; Connect-JSON decode; full
+  `decide` matrix; outcome mapping; `current_state` / `read_command` /
+  `resolve_endpoint`), 7 reconcile integration tests
+  (`tests/reconcile_rebalance.rs`) over a faked rebalancer + FIFO mock
+  kube transport, and 1 end-to-end wire test (`tests/rebalance_e2e.rs`)
+  driving the *real* `ConnectRebalancerClient` over HTTP against the *real*
+  rebalancer Connect router served in-process against a real broker
+  (verifies create/get round-trips, `not_found`, and zero-movement
+  `failed_precondition`). Operator lib tests land at 290; full operator
+  suite green; clippy + fmt clean; CRD YAML regenerated.
+- Out of scope (deferred): `spec.mode`/`spec.brokers` (needs
+  rebalancer-side broker-scoped modes); `DryRunProposal` surfacing;
+  delete-cancels-rebalance finalizer; auto-approval / scheduling; kind-e2e
+  (CI follow-up — operator wiring covered by the in-process wire test).
+- Reference doc:
+  [`docs/superpowers/specs/2026-05-22-crabka-operator-kafkarebalance-44-design.md`].
+
