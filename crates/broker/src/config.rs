@@ -284,12 +284,19 @@ impl BrokerConfig {
             });
         }
 
-        // Every SASL listener requires at least one mechanism.
+        // Every SASL listener requires at least one mechanism. Per-listener
+        // sasl_mechanisms (slice 31) wins over the broker-wide default.
         for l in &listeners {
-            if l.protocol.requires_sasl() && self.enabled_sasl_mechanisms.is_empty() {
-                return Err(BrokerError::SaslListenerNoMechanisms {
-                    name: l.name.clone(),
-                });
+            if l.protocol.requires_sasl() {
+                let mechanisms = l
+                    .sasl_mechanisms
+                    .as_deref()
+                    .unwrap_or(&self.enabled_sasl_mechanisms);
+                if mechanisms.is_empty() {
+                    return Err(BrokerError::SaslListenerNoMechanisms {
+                        name: l.name.clone(),
+                    });
+                }
             }
         }
 
@@ -527,6 +534,35 @@ mod tests {
         BrokerConfig::default()
             .validate()
             .expect("legacy default validates");
+    }
+
+    #[test]
+    fn per_listener_sasl_mechanisms_satisfy_validation_without_broker_default() {
+        let tls = TlsConfig {
+            cert_chain_path: std::path::PathBuf::from("/tls/c"),
+            private_key_path: std::path::PathBuf::from("/tls/k"),
+            trust_roots_path: None,
+            client_ca_path: None,
+            client_auth: crabka_security::ClientAuthMode::Disabled,
+        };
+        let listener = ListenerSpec {
+            name: "scram".into(),
+            bind_addr: "0.0.0.0:9094".parse().unwrap(),
+            advertised: "broker-0:9094".into(),
+            protocol: ListenerProtocol::SaslSsl,
+            tls_config: Some(tls.clone()),
+            sasl_mechanisms: Some(vec![SaslMechanism::ScramSha512]),
+        };
+        let c = BrokerConfig {
+            listeners: vec![listener],
+            inter_broker_listener_name: "scram".into(),
+            enabled_sasl_mechanisms: vec![],
+            tls_config: Some(tls),
+            controller_listener_protocol: ListenerProtocol::Plaintext,
+            ..BrokerConfig::default()
+        };
+        c.validate()
+            .expect("per-listener mechanisms satisfy SASL validation");
     }
 
     #[test]
