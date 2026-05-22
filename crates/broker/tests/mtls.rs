@@ -164,6 +164,8 @@ async fn mtls_principal_is_cert_dn_and_super_user_bypass_works() {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         advertised: "127.0.0.1:0".to_string(),
         protocol: ListenerProtocol::Ssl,
+        tls_config: None,
+        sasl_mechanisms: None,
     }];
     cfg.inter_broker_listener_name = "SSL".to_string();
     cfg.tls_config = Some(TlsConfig {

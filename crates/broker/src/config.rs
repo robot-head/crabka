@@ -24,6 +24,12 @@ pub struct ListenerSpec {
     pub advertised: String,
     /// Wire protocol (Plaintext / Ssl / `SaslPlaintext` / `SaslSsl`).
     pub protocol: ListenerProtocol,
+    /// Per-listener TLS material. When `Some`, overrides the top-level
+    /// `BrokerConfig::tls_config` for this listener's accept loop.
+    pub tls_config: Option<TlsConfig>,
+    /// SASL mechanisms enabled on this listener. When `Some`, overrides
+    /// the top-level `BrokerConfig::enabled_sasl_mechanisms`.
+    pub sasl_mechanisms: Option<Vec<SaslMechanism>>,
 }
 
 /// Credentials the broker uses when connecting *to* other brokers.
@@ -327,6 +333,8 @@ impl BrokerConfig {
             bind_addr: self.listen_addr,
             advertised: self.advertised_listener.clone(),
             protocol: ListenerProtocol::Plaintext,
+            tls_config: None,
+            sasl_mechanisms: None,
         }]
     }
 }
@@ -392,12 +400,16 @@ mod tests {
                     bind_addr: "127.0.0.1:9093".parse().unwrap(),
                     advertised: "127.0.0.1:9093".to_string(),
                     protocol: ListenerProtocol::Plaintext,
+                    tls_config: None,
+                    sasl_mechanisms: None,
                 },
                 ListenerSpec {
                     name: "EXTERNAL".to_string(),
                     bind_addr: "0.0.0.0:9092".parse().unwrap(),
                     advertised: "host.docker.internal:9092".to_string(),
                     protocol: ListenerProtocol::SaslSsl,
+                    tls_config: None,
+                    sasl_mechanisms: None,
                 },
             ],
             inter_broker_listener_name: "INTERNAL".to_string(),

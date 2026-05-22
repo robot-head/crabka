@@ -69,6 +69,8 @@ async fn tls_listener_accepts_tls_handshake_only() {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         advertised: "127.0.0.1:0".to_string(),
         protocol: ListenerProtocol::Ssl,
+        tls_config: None,
+        sasl_mechanisms: None,
     }];
     cfg.inter_broker_listener_name = "SSL".to_string();
     cfg.tls_config = Some(TlsConfig {
@@ -217,12 +219,16 @@ async fn metadata_response_carries_listener_endpoints() {
             bind_addr: plaintext_bind,
             advertised: plaintext_bind.to_string(),
             protocol: ListenerProtocol::Plaintext,
+            tls_config: None,
+            sasl_mechanisms: None,
         },
         ListenerSpec {
             name: "SSL".to_string(),
             bind_addr: ssl_bind,
             advertised: ssl_bind.to_string(),
             protocol: ListenerProtocol::Ssl,
+            tls_config: None,
+            sasl_mechanisms: None,
         },
     ];
     cfg.inter_broker_listener_name = "PLAINTEXT".to_string();
@@ -314,6 +320,8 @@ async fn sasl_plain_happy_path() {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         advertised: "127.0.0.1:0".to_string(),
         protocol: ListenerProtocol::SaslPlaintext,
+        tls_config: None,
+        sasl_mechanisms: None,
     }];
     cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
     cfg.enabled_sasl_mechanisms = vec![SaslMechanism::Plain];
@@ -341,6 +349,8 @@ async fn sasl_plain_wrong_password_closes_connection() {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         advertised: "127.0.0.1:0".to_string(),
         protocol: ListenerProtocol::SaslPlaintext,
+        tls_config: None,
+        sasl_mechanisms: None,
     }];
     cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
     cfg.enabled_sasl_mechanisms = vec![SaslMechanism::Plain];
@@ -473,6 +483,8 @@ async fn sasl_scram_sha512_happy_path() {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         advertised: "127.0.0.1:0".to_string(),
         protocol: ListenerProtocol::SaslPlaintext,
+        tls_config: None,
+        sasl_mechanisms: None,
     }];
     cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
     cfg.enabled_sasl_mechanisms = vec![SaslMechanism::ScramSha512];
@@ -518,6 +530,8 @@ async fn sasl_scram_sha512_wrong_password_closes_connection() {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         advertised: "127.0.0.1:0".to_string(),
         protocol: ListenerProtocol::SaslPlaintext,
+        tls_config: None,
+        sasl_mechanisms: None,
     }];
     cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
     cfg.enabled_sasl_mechanisms = vec![SaslMechanism::ScramSha512];
@@ -563,6 +577,8 @@ async fn sasl_scram_sha256_happy_path() {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         advertised: "127.0.0.1:0".to_string(),
         protocol: ListenerProtocol::SaslPlaintext,
+        tls_config: None,
+        sasl_mechanisms: None,
     }];
     cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
     cfg.enabled_sasl_mechanisms = vec![SaslMechanism::ScramSha256];
@@ -603,6 +619,8 @@ async fn sasl_scram_sha256_wrong_password_closes_connection() {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         advertised: "127.0.0.1:0".to_string(),
         protocol: ListenerProtocol::SaslPlaintext,
+        tls_config: None,
+        sasl_mechanisms: None,
     }];
     cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
     cfg.enabled_sasl_mechanisms = vec![SaslMechanism::ScramSha256];
@@ -834,6 +852,8 @@ async fn alter_scram_creds_super_user_can_provision() {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         advertised: "127.0.0.1:0".to_string(),
         protocol: ListenerProtocol::SaslPlaintext,
+        tls_config: None,
+        sasl_mechanisms: None,
     }];
     cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
     cfg.enabled_sasl_mechanisms = vec![SaslMechanism::Plain, SaslMechanism::ScramSha512];
@@ -903,6 +923,8 @@ async fn alter_scram_creds_super_user_can_provision_sha256() {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         advertised: "127.0.0.1:0".to_string(),
         protocol: ListenerProtocol::SaslPlaintext,
+        tls_config: None,
+        sasl_mechanisms: None,
     }];
     cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
     cfg.enabled_sasl_mechanisms = vec![SaslMechanism::Plain, SaslMechanism::ScramSha256];
@@ -967,6 +989,8 @@ async fn alter_scram_creds_non_super_user_rejected() {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         advertised: "127.0.0.1:0".to_string(),
         protocol: ListenerProtocol::SaslPlaintext,
+        tls_config: None,
+        sasl_mechanisms: None,
     }];
     cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
     cfg.enabled_sasl_mechanisms = vec![SaslMechanism::Plain];
@@ -1013,6 +1037,8 @@ async fn alter_scram_creds_low_iterations_rejected() {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         advertised: "127.0.0.1:0".to_string(),
         protocol: ListenerProtocol::SaslPlaintext,
+        tls_config: None,
+        sasl_mechanisms: None,
     }];
     cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
     cfg.enabled_sasl_mechanisms = vec![SaslMechanism::Plain];
@@ -1061,6 +1087,8 @@ async fn alter_scram_creds_duplicate_resource_rejected() {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         advertised: "127.0.0.1:0".to_string(),
         protocol: ListenerProtocol::SaslPlaintext,
+        tls_config: None,
+        sasl_mechanisms: None,
     }];
     cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
     cfg.enabled_sasl_mechanisms = vec![SaslMechanism::Plain];
@@ -1209,6 +1237,8 @@ async fn api_versions_reachable_pre_auth_on_sasl_listener() {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         advertised: "127.0.0.1:0".to_string(),
         protocol: ListenerProtocol::SaslPlaintext,
+        tls_config: None,
+        sasl_mechanisms: None,
     }];
     cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
     cfg.enabled_sasl_mechanisms = vec![SaslMechanism::Plain];
@@ -1261,6 +1291,8 @@ async fn metadata_rejected_pre_auth_on_sasl_listener() {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         advertised: "127.0.0.1:0".to_string(),
         protocol: ListenerProtocol::SaslPlaintext,
+        tls_config: None,
+        sasl_mechanisms: None,
     }];
     cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
     cfg.enabled_sasl_mechanisms = vec![SaslMechanism::Plain];
@@ -1317,6 +1349,8 @@ async fn unsupported_mechanism_rejected_but_handshake_retryable() {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         advertised: "127.0.0.1:0".to_string(),
         protocol: ListenerProtocol::SaslPlaintext,
+        tls_config: None,
+        sasl_mechanisms: None,
     }];
     cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
     cfg.enabled_sasl_mechanisms = vec![SaslMechanism::Plain];
@@ -1393,6 +1427,8 @@ async fn inter_broker_client_authenticates_via_plain() {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         advertised: "127.0.0.1:0".to_string(),
         protocol: ListenerProtocol::SaslPlaintext,
+        tls_config: None,
+        sasl_mechanisms: None,
     }];
     cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
     cfg.enabled_sasl_mechanisms = vec![SaslMechanism::Plain];
@@ -1535,12 +1571,16 @@ mod two_broker_sasl {
                 bind_addr: listen,
                 advertised: listen.to_string(),
                 protocol: ListenerProtocol::Plaintext,
+                tls_config: None,
+                sasl_mechanisms: None,
             },
             ListenerSpec {
                 name: "SASL_PLAINTEXT".to_string(),
                 bind_addr: sasl,
                 advertised: sasl.to_string(),
                 protocol: ListenerProtocol::SaslPlaintext,
+                tls_config: None,
+                sasl_mechanisms: None,
             },
         ];
         cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();

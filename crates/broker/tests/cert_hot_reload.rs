@@ -146,6 +146,8 @@ async fn reload_tls_swaps_served_cert() {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         advertised: "127.0.0.1:0".into(),
         protocol: ListenerProtocol::Ssl,
+        tls_config: None,
+        sasl_mechanisms: None,
     }];
     cfg.inter_broker_listener_name = "SSL".into();
     cfg.tls_config = Some(TlsConfig {
@@ -215,6 +217,8 @@ async fn periodic_watcher_reloads_on_mtime_change() {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         advertised: "127.0.0.1:0".into(),
         protocol: ListenerProtocol::Ssl,
+        tls_config: None,
+        sasl_mechanisms: None,
     }];
     cfg.inter_broker_listener_name = "SSL".into();
     cfg.tls_config = Some(TlsConfig {

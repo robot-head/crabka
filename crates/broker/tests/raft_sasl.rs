@@ -55,6 +55,8 @@ fn sasl_broker_config(
         bind_addr: data_addr,
         advertised: data_addr.to_string(),
         protocol: ListenerProtocol::SaslPlaintext,
+        tls_config: None,
+        sasl_mechanisms: None,
     }];
     cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
     cfg.controller_listener_protocol = ctrl;
