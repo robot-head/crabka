@@ -1585,6 +1585,7 @@ jobs:
                           -name bob \
                           -out /shared/keystore.p12 \
                           -passout pass:changeit
+                        chmod 0644 /shared/keystore.p12
                     volumeMounts:
                       - name: bob-secret
                         mountPath: /etc/crabka/bob
