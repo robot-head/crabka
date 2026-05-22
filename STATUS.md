@@ -1550,3 +1550,70 @@ Kafka client for ApiVersions.
 - Reference doc:
   [`docs/superpowers/specs/2026-05-22-crabka-operator-kafkarebalance-44-design.md`].
 
+## Slice 28 — Operator: Version upgrades (2026-05-22)
+
+- Closes the Phase-3 "Version upgrades" roadmap item. Pure operator work:
+  the broker has no runtime `metadata.version` feature (the `UpdateFeatures`
+  codec exists but no handler consumes it), so the resolved metadata
+  version is rendered into the broker's inert `[server_properties]` table
+  (same broker-inert-config pattern as slices 21/25). All upgrade safety
+  lives in the operator.
+- New `Kafka.spec.metadataVersion: Option<String>` (Strimzi-shaped). Crabka
+  is KRaft-only, so this is the *only* feature-level knob — the runtime
+  analog of the ZK-era `inter.broker.protocol.version`; there is no
+  `inter.broker.protocol.version` / `log.message.format.version` lineage.
+  When unset it tracks `kafkaVersion`'s `major.minor`; when set it pins the
+  metadata version for the safe two-step upgrade.
+- New `crabka_operator::version` module: `KafkaVersion::parse` (tolerates
+  `X`, `X.Y`, `X.Y.Z`, and `X.Y-IVn` IBP suffixes), `(major,minor)`
+  metadata-key comparison, and `evaluate(kafka_version, spec_metadata,
+  finalized_metadata)`. Invariant on success: `binary >= resolved metadata
+  >= finalized metadata` — the two inequalities are the downgrade window.
+  Reasons: `InvalidVersion`, `MetadataVersionTooHigh` (metadata newer than
+  binary), `MetadataVersionDowngrade` (metadata below the finalized value,
+  incl. a binary downgrade that drags a default-tracked metadata below
+  finalized). `finalized` is read from `status.metadataVersion` on the
+  watched object — no extra API request.
+- New `KafkaVersionValid` status condition + `KafkaStatus.kafkaVersion`
+  (echo) and `KafkaStatus.metadataVersion` (operator-finalized; advances
+  only when valid, holds the last value on rejection — drives the
+  downgrade-window check next reconcile). On a validation failure the
+  operator does not inject the new metadata version, does not advance the
+  config hash, and does not finalize — "surface the error and wait".
+- `metadata.version` is injected into each `broker-{id}.toml`
+  `[server_properties]` (operator-owned key; operator value wins). An
+  *explicit* `spec.metadataVersion` pin participates in the slice-21 config
+  hash (so a pin change rolls); a *defaulted* metadata version does not (a
+  binary bump rolls via the pod-template image change), which preserves the
+  slice-24 empty-hash collapse.
+- **Ordered, one-node-at-a-time rollout** across pools via a new pure
+  `common::plan_rollout(pools_in_order, desired) -> per-pool target hash`.
+  `adopt_pools` now sorts pools by `(node_id_start, name)`, reads each
+  pool's `crabka.io/config-hash` label + `ready_replicas` (already in the
+  listed objects — no new API requests), and advances one pool at a time
+  gated on the prior pool reaching Ready. Initial bring-up / non-uniform
+  state still applies the hash to every pool in parallel — a KRaft
+  controller quorum needs all controllers up together, so gating initial
+  creation would deadlock. The owner-ref is still patched to every pool
+  every reconcile, so the request shape is identical to slice 21.
+- Tests: 17 new `version` unit tests; 8 new `plan_rollout` unit tests; 3
+  new CRD round-trip tests; 2 new `combined_config_hash`/`render_configmap`
+  unit tests; 2 new `reconcile_kafka` integration tests (metadata.version
+  rendered + status/condition echo; too-high pin rejected without injecting
+  or finalizing). Operator suite green (lib 319); clippy `-D warnings`
+  clean; fmt clean; CRD YAML regenerated.
+- kind-e2e: a new probe in the `kind` job asserts the default
+  `metadata.version` is rendered into the broker config, then that an
+  invalid (too-high) `metadataVersion` pin surfaces
+  `KafkaVersionValid=False reason=MetadataVersionTooHigh` without writing
+  the rejected value or rolling the pod.
+- Out of scope (deferred): broker-side `metadata.version` feature-level
+  enforcement (`UpdateFeatures` handler) — a Crabka-core slice; a
+  `kafkaVersion` → image-tag mapping (image stays `pool.spec.image >
+  operator default > built-in`); draining each node via slice-22
+  `ControlledShutdown` before its roll (the gate orders + waits for Ready
+  but does not pre-drain); multi-replica pools.
+- Reference docs:
+  [`docs/superpowers/specs/2026-05-22-crabka-operator-version-upgrades-28-design.md`],
+  [`docs/superpowers/plans/2026-05-22-crabka-operator-version-upgrades-28.md`].
+

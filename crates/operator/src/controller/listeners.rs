@@ -647,6 +647,7 @@ mod service_rendering_tests {
             name,
             KafkaSpec {
                 kafka_version: "0.1.1".into(),
+                metadata_version: None,
                 config: None,
                 listeners: vec![],
                 inter_broker_listener_name: None,

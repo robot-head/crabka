@@ -28,6 +28,7 @@ fn kafka_cr(name: &str, namespace: &str, listeners: Vec<Listener>) -> Kafka {
         name,
         KafkaSpec {
             kafka_version: "0.1.1".into(),
+            metadata_version: None,
             config: None,
             listeners,
             inter_broker_listener_name: None,

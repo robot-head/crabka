@@ -237,12 +237,20 @@ pub(crate) fn render_configmap(
         &std::collections::BTreeMap<i32, crate::controller::listeners::BrokerTlsRender>,
     >,
     clients_ca_path: Option<&str>,
+    metadata_version: Option<&str>,
 ) -> Result<ConfigMap, ReconcileError> {
     let name = owner.meta().name.clone().unwrap_or_default();
     let labels = common_labels(&name, &owner.spec.kafka_version, None);
 
     let mut data = BTreeMap::new();
-    let server_properties = owner.spec.config.clone().unwrap_or_default();
+    let mut server_properties = owner.spec.config.clone().unwrap_or_default();
+    // Slice 28: the operator owns `metadata.version` — the KRaft analog of
+    // `inter.broker.protocol.version`. Rendered into the broker's inert
+    // `[server_properties]` table (the broker has no runtime feature-level
+    // enforcement yet). Operator value wins over any user-supplied key.
+    if let Some(mv) = metadata_version {
+        server_properties.insert("metadata.version".to_string(), mv.to_string());
+    }
     for (broker_id, addrs) in addresses_per_broker {
         let tls_for_broker = tls_per_broker.and_then(|m| m.get(broker_id));
         let toml = crate::controller::listeners::render_broker_toml(
@@ -423,10 +431,17 @@ pub fn config_hash(content: &str) -> String {
 /// `cluster_ca_cert_pem` — when `Some`, the cluster CA cert PEM is
 /// included as a fourth segment. Rotating the cluster CA forces a
 /// cluster roll; leaf renewal does not (slice 33 hot-reload handles it).
+///
+/// `metadata_version_pin` (slice 28) — when `Some`, an *explicit*
+/// `spec.metadataVersion` pin is included as a fifth segment, so changing
+/// the pin rolls the cluster. A *defaulted* metadata version is passed as
+/// `None` here (a binary bump already rolls via the pod-template image
+/// change), which preserves the slice-24 empty-hash collapse.
 #[must_use]
 pub fn combined_config_hash(
     spec: &crate::crd::KafkaSpec,
     cluster_ca_cert_pem: Option<&str>,
+    metadata_version_pin: Option<&str>,
 ) -> String {
     let config_part = spec
         .config
@@ -452,17 +467,27 @@ pub fn combined_config_hash(
         ""
     };
     let ca_part = cluster_ca_cert_pem.unwrap_or("");
-    // Slice-24 compatibility: when neither listeners nor metricsConfig
-    // are set, the hash collapses to `config_hash(config_part)` —
-    // byte-identical to the slice-24 hash for the same `spec.config`.
-    // This is what makes an in-place upgrade from slice 24 not trigger
-    // a hash-driven roll (the unavoidable template-change roll fires
-    // separately and once).
-    if intent.is_empty() && metrics_part.is_empty() && ca_part.is_empty() {
+    let metadata_part = metadata_version_pin.unwrap_or("");
+    // Slice-24 compatibility: when listeners, metricsConfig, the CA cert,
+    // and an explicit metadataVersion pin are all absent, the hash
+    // collapses to `config_hash(config_part)` — byte-identical to the
+    // slice-24 hash for the same `spec.config`. This is what makes an
+    // in-place upgrade from slice 24 not trigger a hash-driven roll (the
+    // unavoidable template-change roll fires separately and once).
+    if intent.is_empty()
+        && metrics_part.is_empty()
+        && ca_part.is_empty()
+        && metadata_part.is_empty()
+    {
         return config_hash(&config_part);
     }
     let mut buf = String::with_capacity(
-        config_part.len() + 3 + intent.len() + metrics_part.len() + ca_part.len(),
+        config_part.len()
+            + 4
+            + intent.len()
+            + metrics_part.len()
+            + ca_part.len()
+            + metadata_part.len(),
     );
     buf.push_str(&config_part);
     buf.push('\x1F'); // ASCII unit separator
@@ -471,7 +496,79 @@ pub fn combined_config_hash(
     buf.push_str(metrics_part);
     buf.push('\x1F');
     buf.push_str(ca_part);
+    buf.push('\x1F');
+    buf.push_str(metadata_part);
     config_hash(&buf)
+}
+
+/// One pool's observed state, fed to [`plan_rollout`]. `current_hash` is
+/// the pool's `crabka.io/config-hash` label (`None` if never stamped);
+/// `ready` is whether the pool's single broker has reached Ready.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PoolRolloutState {
+    pub name: String,
+    pub current_hash: Option<String>,
+    pub ready: bool,
+}
+
+/// Slice 28: decide the config-hash to write to each pool for an ordered,
+/// one-node-at-a-time rollout. `pools` must be pre-sorted into the desired
+/// roll order (by `(node_id_start, name)`). Returns the target hash per
+/// pool name, in the same order.
+///
+/// - **Bring-up / recovery** — if any pool has no current hash, or there
+///   is more than one distinct *non-desired* hash among pools, every pool
+///   gets `desired` (parallel). This is required so a `KRaft` controller
+///   quorum can form: gating initial creation one-at-a-time would deadlock
+///   (a single controller can't reach Ready without quorum). Also the
+///   single-pool first-reconcile path.
+/// - **Steady state** — if every pool already carries `desired`, all stay
+///   `desired` (no-op).
+/// - **Established roll** — otherwise the cluster is uniform on one old
+///   hash (or mid-roll between `{old, desired}`) and transitioning. Walk
+///   pools in order; a pool is *converged* when it already carries
+///   `desired` AND is Ready. Advance the first non-converged pool to
+///   `desired`; every later pool keeps its current hash until the earlier
+///   pools converge.
+pub(crate) fn plan_rollout(pools: &[PoolRolloutState], desired: &str) -> Vec<(String, String)> {
+    let all_have_hash = pools.iter().all(|p| p.current_hash.is_some());
+    let distinct_non_desired: std::collections::BTreeSet<&str> = pools
+        .iter()
+        .filter_map(|p| p.current_hash.as_deref())
+        .filter(|h| *h != desired)
+        .collect();
+
+    // Bring-up / recovery / messy state → everyone gets `desired`.
+    if !all_have_hash || distinct_non_desired.len() > 1 {
+        return pools
+            .iter()
+            .map(|p| (p.name.clone(), desired.to_string()))
+            .collect();
+    }
+
+    // Established cluster: advance one pool at a time, gated on readiness.
+    let mut gate_open = true;
+    let mut out = Vec::with_capacity(pools.len());
+    for p in pools {
+        if gate_open {
+            let converged = p.current_hash.as_deref() == Some(desired) && p.ready;
+            // This pool advances to (or already holds) `desired`.
+            out.push((p.name.clone(), desired.to_string()));
+            if !converged {
+                // Hold every later pool at its current hash until this one
+                // converges.
+                gate_open = false;
+            }
+        } else {
+            // Keep the existing hash; `all_have_hash` guarantees `Some`.
+            let keep = p
+                .current_hash
+                .clone()
+                .unwrap_or_else(|| desired.to_string());
+            out.push((p.name.clone(), keep));
+        }
+    }
+    out
 }
 
 /// Parse a K8s `Quantity` string into a comparable byte count.
@@ -595,6 +692,7 @@ mod config_hash_tests {
 
         let spec_a = KafkaSpec {
             kafka_version: "0.1.1".into(),
+            metadata_version: None,
             config: Some({
                 let mut m = std::collections::BTreeMap::new();
                 m.insert("log.retention.hours".into(), "24".into());
@@ -607,8 +705,8 @@ mod config_hash_tests {
             cluster_ca: None,
             clients_ca: None,
         };
-        let h = combined_config_hash(&spec_a, None);
-        let h_again = combined_config_hash(&spec_a, None);
+        let h = combined_config_hash(&spec_a, None, None);
+        let h_again = combined_config_hash(&spec_a, None, None);
         assert_eq!(h, h_again);
 
         // Slice-24 compat: the hash for empty listeners + no metrics MUST
@@ -626,7 +724,7 @@ mod config_hash_tests {
         let mut spec_b = spec_a.clone();
         spec_b.listeners = vec![crate::controller::listeners::synthesized_default_listener()];
         spec_b.inter_broker_listener_name = Some("PLAIN".into());
-        let h_with_listener = combined_config_hash(&spec_b, None);
+        let h_with_listener = combined_config_hash(&spec_b, None, None);
         assert_ne!(
             h, h_with_listener,
             "non-empty listener intent must change hash"
@@ -639,6 +737,7 @@ mod config_hash_tests {
 
         let spec_off = KafkaSpec {
             kafka_version: "0.1.1".into(),
+            metadata_version: None,
             config: None,
             listeners: vec![],
             inter_broker_listener_name: None,
@@ -647,14 +746,14 @@ mod config_hash_tests {
             cluster_ca: None,
             clients_ca: None,
         };
-        let h_off = combined_config_hash(&spec_off, None);
+        let h_off = combined_config_hash(&spec_off, None, None);
 
         let mut spec_on = spec_off.clone();
         spec_on.metrics_config = Some(MetricsConfig {
             pod_monitor: Some(PodMonitorSpec::default()),
             ..Default::default()
         });
-        let h_on = combined_config_hash(&spec_on, None);
+        let h_on = combined_config_hash(&spec_on, None, None);
         assert_ne!(
             h_off, h_on,
             "enabling metrics_config must bump the hash (triggers pool reconcile + StatefulSet re-render)"
@@ -672,7 +771,7 @@ mod config_hash_tests {
         }
         assert_eq!(
             h_on,
-            combined_config_hash(&spec_on_diff_interval, None),
+            combined_config_hash(&spec_on_diff_interval, None, None),
             "PodMonitor interval change must NOT roll the broker pod",
         );
     }
@@ -681,6 +780,7 @@ mod config_hash_tests {
     fn combined_hash_changes_when_cluster_ca_cert_changes() {
         let spec = crate::crd::KafkaSpec {
             kafka_version: "0.1.1".into(),
+            metadata_version: None,
             config: None,
             listeners: vec![],
             inter_broker_listener_name: None,
@@ -689,14 +789,16 @@ mod config_hash_tests {
             cluster_ca: None,
             clients_ca: None,
         };
-        let h_none = combined_config_hash(&spec, None);
+        let h_none = combined_config_hash(&spec, None, None);
         let h_a = combined_config_hash(
             &spec,
             Some("-----BEGIN CERTIFICATE-----\nA\n-----END CERTIFICATE-----\n"),
+            None,
         );
         let h_b = combined_config_hash(
             &spec,
             Some("-----BEGIN CERTIFICATE-----\nB\n-----END CERTIFICATE-----\n"),
+            None,
         );
         assert_ne!(h_none, h_a, "absent vs present CA must differ");
         assert_ne!(h_a, h_b, "different CA PEM must differ");
@@ -710,6 +812,7 @@ mod config_hash_tests {
         // a keystore digest into the hash.
         let spec = crate::crd::KafkaSpec {
             kafka_version: "0.1.1".into(),
+            metadata_version: None,
             config: None,
             listeners: vec![],
             inter_broker_listener_name: None,
@@ -718,8 +821,8 @@ mod config_hash_tests {
             cluster_ca: None,
             clients_ca: None,
         };
-        let h1 = combined_config_hash(&spec, Some("ca-pem"));
-        let h2 = combined_config_hash(&spec, Some("ca-pem"));
+        let h1 = combined_config_hash(&spec, Some("ca-pem"), None);
+        let h2 = combined_config_hash(&spec, Some("ca-pem"), None);
         assert_eq!(h1, h2);
     }
 
@@ -732,6 +835,7 @@ mod config_hash_tests {
             "demo",
             KafkaSpec {
                 kafka_version: "0.1.1".into(),
+                metadata_version: None,
                 config: None,
                 listeners: vec![],
                 inter_broker_listener_name: None,
@@ -765,7 +869,7 @@ mod config_hash_tests {
         per_broker.insert(0i32, addrs0);
         per_broker.insert(1i32, addrs1);
 
-        let cm = render_configmap(&k, &listeners, &per_broker, "PLAIN", None, None).unwrap();
+        let cm = render_configmap(&k, &listeners, &per_broker, "PLAIN", None, None, None).unwrap();
         let data = cm.data.unwrap();
         assert!(data.contains_key("broker-0.toml"));
         assert!(data.contains_key("broker-1.toml"));
@@ -774,6 +878,196 @@ mod config_hash_tests {
         // Slice 25 drops the old broker.env / broker.properties keys.
         assert!(!data.contains_key("broker.env"));
         assert!(!data.contains_key("broker.properties"));
+    }
+
+    #[test]
+    fn combined_hash_changes_when_metadata_version_pin_set() {
+        use crate::crd::KafkaSpec;
+
+        let spec = KafkaSpec {
+            kafka_version: "3.7.0".into(),
+            metadata_version: None,
+            config: None,
+            listeners: vec![],
+            inter_broker_listener_name: None,
+            metrics_config: None,
+            network_policy: None,
+            cluster_ca: None,
+            clients_ca: None,
+        };
+        // No explicit pin => slice-24 collapse preserved (== config_hash of
+        // the empty config part).
+        let h_default = combined_config_hash(&spec, None, None);
+        assert_eq!(h_default, config_hash(""));
+
+        // An explicit pin enters the hash and changes it.
+        let h_pin = combined_config_hash(&spec, None, Some("3.6"));
+        assert_ne!(h_default, h_pin, "explicit metadata pin must change hash");
+        // A different pin differs again.
+        let h_pin2 = combined_config_hash(&spec, None, Some("3.7"));
+        assert_ne!(h_pin, h_pin2, "different metadata pin must differ");
+    }
+
+    #[test]
+    fn configmap_injects_metadata_version_into_server_properties() {
+        use crate::controller::listeners::{AdvertisedAddress, synthesized_default_listener};
+        use crate::crd::KafkaSpec;
+
+        let mut k = Kafka::new(
+            "demo",
+            KafkaSpec {
+                kafka_version: "3.7.0".into(),
+                metadata_version: Some("3.6".into()),
+                config: None,
+                listeners: vec![],
+                inter_broker_listener_name: None,
+                metrics_config: None,
+                network_policy: None,
+                cluster_ca: None,
+                clients_ca: None,
+            },
+        );
+        k.meta_mut().namespace = Some("default".into());
+        k.meta_mut().uid = Some("uid".into());
+
+        let listeners = vec![synthesized_default_listener()];
+        let mut per_broker = std::collections::BTreeMap::new();
+        let mut addrs0 = std::collections::BTreeMap::new();
+        addrs0.insert(
+            "PLAIN".into(),
+            AdvertisedAddress {
+                host: "demo-0.svc".into(),
+                port: 9092,
+            },
+        );
+        per_broker.insert(0i32, addrs0);
+
+        let cm = render_configmap(
+            &k,
+            &listeners,
+            &per_broker,
+            "PLAIN",
+            None,
+            None,
+            Some("3.6"),
+        )
+        .unwrap();
+        let toml = &cm.data.unwrap()["broker-0.toml"];
+        assert!(
+            toml.contains("[server_properties]"),
+            "expected a server_properties table, got:\n{toml}"
+        );
+        assert!(
+            toml.contains("\"metadata.version\" = \"3.6\""),
+            "expected metadata.version injected, got:\n{toml}"
+        );
+
+        // Absent when not supplied.
+        let cm_none =
+            render_configmap(&k, &listeners, &per_broker, "PLAIN", None, None, None).unwrap();
+        let toml_none = &cm_none.data.unwrap()["broker-0.toml"];
+        assert!(
+            !toml_none.contains("metadata.version"),
+            "metadata.version must be absent when not supplied, got:\n{toml_none}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod rollout_tests {
+    use super::{PoolRolloutState, plan_rollout};
+
+    fn st(name: &str, hash: Option<&str>, ready: bool) -> PoolRolloutState {
+        PoolRolloutState {
+            name: name.into(),
+            current_hash: hash.map(str::to_string),
+            ready,
+        }
+    }
+
+    fn targets(plan: &[(String, String)]) -> Vec<(&str, &str)> {
+        plan.iter().map(|(n, h)| (n.as_str(), h.as_str())).collect()
+    }
+
+    #[test]
+    fn bring_up_all_get_desired_when_no_hash() {
+        // Initial creation: no pool has a hash yet -> all get `desired`
+        // (parallel) so a KRaft controller quorum can form.
+        let pools = vec![
+            st("a", None, false),
+            st("b", None, false),
+            st("c", None, false),
+        ];
+        let plan = plan_rollout(&pools, "H1");
+        assert_eq!(targets(&plan), vec![("a", "H1"), ("b", "H1"), ("c", "H1")]);
+    }
+
+    #[test]
+    fn single_pool_first_reconcile_gets_desired() {
+        let pools = vec![st("only", None, false)];
+        assert_eq!(targets(&plan_rollout(&pools, "H1")), vec![("only", "H1")]);
+    }
+
+    #[test]
+    fn single_pool_roll_advances() {
+        // Established single pool moving to a new hash.
+        let pools = vec![st("only", Some("H0"), true)];
+        assert_eq!(targets(&plan_rollout(&pools, "H1")), vec![("only", "H1")]);
+    }
+
+    #[test]
+    fn steady_state_all_desired_is_noop() {
+        let pools = vec![st("a", Some("H1"), true), st("b", Some("H1"), true)];
+        assert_eq!(
+            targets(&plan_rollout(&pools, "H1")),
+            vec![("a", "H1"), ("b", "H1")]
+        );
+    }
+
+    #[test]
+    fn established_roll_advances_first_pool_only() {
+        // Uniform on H0; first reconcile after the change advances only
+        // pool `a`, holding `b` and `c` at H0.
+        let pools = vec![
+            st("a", Some("H0"), true),
+            st("b", Some("H0"), true),
+            st("c", Some("H0"), true),
+        ];
+        let plan = plan_rollout(&pools, "H1");
+        assert_eq!(targets(&plan), vec![("a", "H1"), ("b", "H0"), ("c", "H0")]);
+    }
+
+    #[test]
+    fn established_roll_holds_later_pools_until_first_ready() {
+        // `a` already moved to H1 but is not Ready yet -> `b`, `c` wait.
+        let pools = vec![
+            st("a", Some("H1"), false),
+            st("b", Some("H0"), true),
+            st("c", Some("H0"), true),
+        ];
+        let plan = plan_rollout(&pools, "H1");
+        assert_eq!(targets(&plan), vec![("a", "H1"), ("b", "H0"), ("c", "H0")]);
+    }
+
+    #[test]
+    fn established_roll_advances_next_after_prefix_converges() {
+        // `a` converged (H1 + ready); advance `b`, hold `c`.
+        let pools = vec![
+            st("a", Some("H1"), true),
+            st("b", Some("H0"), true),
+            st("c", Some("H0"), true),
+        ];
+        let plan = plan_rollout(&pools, "H1");
+        assert_eq!(targets(&plan), vec![("a", "H1"), ("b", "H1"), ("c", "H0")]);
+    }
+
+    #[test]
+    fn messy_multiple_old_hashes_falls_back_to_all_desired() {
+        // More than one distinct non-desired hash -> not a clean ordered
+        // roll; apply `desired` to all (recovery).
+        let pools = vec![st("a", Some("H0"), true), st("b", Some("HX"), true)];
+        let plan = plan_rollout(&pools, "H1");
+        assert_eq!(targets(&plan), vec![("a", "H1"), ("b", "H1")]);
     }
 }
 

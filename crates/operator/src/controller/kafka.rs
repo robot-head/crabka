@@ -626,8 +626,53 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
         (cluster_outcome, clients_outcome, cc, clic)
     };
 
-    let cfg_hash =
-        common::combined_config_hash(&obj.spec, Some(&cluster_ca_outcome.material.cert_pem));
+    // Slice 28: evaluate the declared versions against the operator-
+    // finalized metadata version (read from the watched object's status —
+    // no extra API request). On a failure we surface KafkaVersionValid=
+    // False, do not inject the new metadata version, and do not advance the
+    // config hash or the finalized version — "surface the error and wait".
+    let finalized_metadata = obj
+        .status
+        .as_ref()
+        .and_then(|s| s.metadata_version.as_deref());
+    let version_outcome = crate::version::evaluate(
+        &obj.spec.kafka_version,
+        obj.spec.metadata_version.as_deref(),
+        finalized_metadata,
+    );
+    let (version_cond, resolved_metadata): (KafkaCondition, Option<String>) = match &version_outcome
+    {
+        crate::version::VersionOutcome::Valid { resolved_metadata } => (
+            condition(
+                "KafkaVersionValid",
+                "True",
+                "Valid",
+                &format!(
+                    "kafkaVersion {} metadata.version {resolved_metadata}",
+                    obj.spec.kafka_version
+                ),
+            ),
+            Some(resolved_metadata.clone()),
+        ),
+        crate::version::VersionOutcome::Invalid { reason, message } => (
+            condition("KafkaVersionValid", "False", reason.as_str(), message),
+            None,
+        ),
+    };
+    // Only an explicit, valid pin enters the config hash (a defaulted
+    // metadata version rolls via the pod-template image change instead,
+    // and including it would break the slice-24 empty-hash collapse).
+    let explicit_pin: Option<&str> = if resolved_metadata.is_some() {
+        obj.spec.metadata_version.as_deref()
+    } else {
+        None
+    };
+
+    let cfg_hash = common::combined_config_hash(
+        &obj.spec,
+        Some(&cluster_ca_outcome.material.cert_pem),
+        explicit_pin,
+    );
 
     let pool_api: Api<KafkaNodePool> = Api::namespaced(ctx.client.clone(), &ns);
     let lp = ListParams::default().labels(&format!("crabka.io/cluster={name}"));
@@ -770,6 +815,7 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
                 &inter_broker_name,
                 Some(&tls_per_broker),
                 clients_ca_path,
+                resolved_metadata.as_deref(),
             )?;
             apply_object(&cm_api, &cm_name(&name), &cm).await?;
             Ok(())
@@ -945,6 +991,7 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
         np_condition,
         cluster_ca_cond,
         clients_ca_cond,
+        version_cond,
     ];
     let has_lb_tls_listener = effective_listeners
         .iter()
@@ -983,6 +1030,12 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
             not_after: clients_ca_outcome.not_after.clone(),
             generated: clients_ca_outcome.generated,
         }),
+        kafka_version: Some(obj.spec.kafka_version.clone()),
+        // Advance the finalized metadata version when valid; hold the
+        // previous value on a validation failure.
+        metadata_version: resolved_metadata
+            .clone()
+            .or_else(|| finalized_metadata.map(str::to_string)),
     };
     let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), &ns);
     patch_status::<Kafka, KafkaStatus>(&kafka_api, &name, status).await?;
@@ -1007,10 +1060,18 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
 }
 
 /// For every pool labeled `crabka.io/cluster=<this Kafka>`, patch
-/// `metadata.ownerReferences` so the Kafka is the controlling owner
-/// AND `metadata.labels["crabka.io/config-hash"]` so the pool reconciler
+/// `metadata.ownerReferences` so the Kafka is the controlling owner AND
+/// `metadata.labels["crabka.io/config-hash"]` so the pool reconciler
 /// observes config drift. Uses a server-side apply with the operator's
 /// field manager so the patch wins over any out-of-band manual edits.
+///
+/// Slice 28: the per-pool hash is planned by [`common::plan_rollout`] so an
+/// established multi-pool cluster rolls one node at a time (ordered by
+/// `(node_id_start, name)`, gated on each pool reaching Ready) rather than
+/// rolling every pool at once. Initial bring-up still applies the hash to
+/// every pool in parallel — a `KRaft` controller quorum needs all controllers
+/// up together. The owner-ref is applied to every pool every reconcile
+/// regardless, so the request count is unchanged from the slice-21 form.
 async fn adopt_pools<'a>(
     pool_api: &Api<KafkaNodePool>,
     parent: &Kafka,
@@ -1023,19 +1084,47 @@ async fn adopt_pools<'a>(
         force: true,
         ..Default::default()
     };
-    // SSA needs apiVersion + kind on the patch payload. The patch
-    // *target* is a KafkaNodePool, so the payload's apiVersion/kind
-    // match the pool, not the parent Kafka.
-    let patch_body = json!({
-        "apiVersion": KafkaNodePool::api_version(&()),
-        "kind": KafkaNodePool::kind(&()),
-        "metadata": {
-            "ownerReferences": [owner],
-            "labels": { "crabka.io/config-hash": config_hash },
-        }
+
+    // Order pools deterministically and capture each one's observed hash +
+    // readiness so the rollout planner can gate advancement.
+    let mut ordered: Vec<&KafkaNodePool> = pools.into_iter().collect();
+    ordered.sort_by(|a, b| {
+        a.spec
+            .node_id_start
+            .cmp(&b.spec.node_id_start)
+            .then_with(|| a.name_any().cmp(&b.name_any()))
     });
-    for pool in pools {
-        let pool_name = pool.name_any();
+    let states: Vec<common::PoolRolloutState> = ordered
+        .iter()
+        .map(|p| common::PoolRolloutState {
+            name: p.name_any(),
+            current_hash: p
+                .metadata
+                .labels
+                .as_ref()
+                .and_then(|l| l.get("crabka.io/config-hash").cloned()),
+            ready: p
+                .status
+                .as_ref()
+                .and_then(|s| s.ready_replicas)
+                .unwrap_or(0)
+                >= 1,
+        })
+        .collect();
+    let plan = common::plan_rollout(&states, config_hash);
+
+    for (pool_name, target_hash) in plan {
+        // SSA needs apiVersion + kind on the patch payload. The patch
+        // *target* is a KafkaNodePool, so the payload's apiVersion/kind
+        // match the pool, not the parent Kafka.
+        let patch_body = json!({
+            "apiVersion": KafkaNodePool::api_version(&()),
+            "kind": KafkaNodePool::kind(&()),
+            "metadata": {
+                "ownerReferences": [owner],
+                "labels": { "crabka.io/config-hash": target_hash },
+            }
+        });
         pool_api
             .patch(&pool_name, &params, &Patch::Apply(&patch_body))
             .await?;
