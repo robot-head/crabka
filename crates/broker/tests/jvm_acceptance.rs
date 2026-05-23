@@ -2438,7 +2438,8 @@ async fn jvm_sasl_oauthbearer_produce_consume() {
         "security.protocol=SASL_PLAINTEXT\n\
          sasl.mechanism=OAUTHBEARER\n\
          sasl.login.callback.handler.class=\
-         org.apache.kafka.common.security.oauthbearer.OAuthBearerUnsecuredLoginCallbackHandler\n\
+         org.apache.kafka.common.security.oauthbearer.internals.unsecured.\
+         OAuthBearerUnsecuredLoginCallbackHandler\n\
          sasl.jaas.config={}\n",
         oauthbearer_jaas(USER),
     );
