@@ -105,7 +105,23 @@ spec:
                     enum:
                     - Ephemeral
                     - PersistentClaim
+                    - Jbod
                     type: string
+                  volumes:
+                    items:
+                      properties:
+                        class:
+                          type: string
+                        id:
+                          format: int32
+                          type: integer
+                        size:
+                          type: string
+                      required:
+                      - id
+                      - size
+                      type: object
+                    type: array
                 required:
                 - type
                 type: object

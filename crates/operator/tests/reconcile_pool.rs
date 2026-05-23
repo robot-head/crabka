@@ -486,6 +486,128 @@ async fn pool_storage_shrink_is_rejected() {
     assert_eq!(state.remaining_rules(), 0);
 }
 
+/// Slice 46: a JBOD pool renders one `volumeClaimTemplate` per disk
+/// (`data` + `data-{id}`), a set-wide retention policy, and the broker
+/// container's `CRABKA_EXTRA_LOG_DIRS` env listing every non-primary disk.
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn pool_jbod_renders_multiple_volume_claim_templates() {
+    use crabka_operator::crd::{JbodSpec, JbodVolume, Storage};
+
+    let parent = "demo";
+    let pool_name = "brokers";
+    let ns = "y";
+    let sts_name = format!("{parent}-{pool_name}");
+
+    let rules = vec![
+        // 1. GET parent Kafka.
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/kafkas/{parent}"),
+            response: json_response(200, &fake_parent_kafka_body(parent, ns)),
+        },
+        // 2. Pre-apply GET: no live STS (first reconcile).
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/statefulsets/{sts_name}"),
+            response: Response::builder()
+                .status(404)
+                .header("content-type", "application/json")
+                .body(not_found_body("first reconcile, no live STS"))
+                .expect("404 builds"),
+        },
+        // 3. PATCH STS (SSA-apply).
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/statefulsets/{sts_name}"),
+            response: json_response(200, &fake_sts_body(&sts_name, ns, 1, Some(1))),
+        },
+        // 4. Post-apply GET (status read).
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/statefulsets/{sts_name}"),
+            response: json_response(200, &fake_sts_body(&sts_name, ns, 1, Some(1))),
+        },
+        // 5. PATCH pool status.
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/kafkanodepools/{pool_name}/status"),
+            response: json_response(200, &fake_pool_body(pool_name, ns, parent)),
+        },
+    ];
+
+    let (ctx, state) = build_ctx(ns, rules);
+    let mut pool = pool_cr(pool_name, ns, Some(parent), 1);
+    pool.spec.storage = Some(Storage::Jbod(JbodSpec {
+        volumes: vec![
+            JbodVolume {
+                id: 0,
+                size: "1Gi".into(),
+                class: None,
+            },
+            JbodVolume {
+                id: 1,
+                size: "2Gi".into(),
+                class: Some("fast".into()),
+            },
+        ],
+        delete_claim: true,
+    }));
+
+    reconcile(Arc::new(pool), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    let sts_patch = observed
+        .iter()
+        .find(|r| {
+            r.method() == Method::PATCH
+                && r.uri()
+                    .to_string()
+                    .contains(&format!("/statefulsets/{sts_name}"))
+        })
+        .expect("STS PATCH was captured");
+    let body: serde_json::Value =
+        serde_json::from_slice(sts_patch.body()).expect("STS PATCH body is JSON");
+
+    // One PVC template per disk: primary `data` + `data-1`.
+    let vct = body["spec"]["volumeClaimTemplates"]
+        .as_array()
+        .unwrap_or_else(|| panic!("volumeClaimTemplates present; body = {body}"));
+    assert_eq!(vct.len(), 2, "body = {body}");
+    assert_eq!(vct[0]["metadata"]["name"], "data", "body = {body}");
+    assert_eq!(vct[1]["metadata"]["name"], "data-1", "body = {body}");
+    assert_eq!(
+        vct[0]["spec"]["resources"]["requests"]["storage"], "1Gi",
+        "body = {body}"
+    );
+    assert_eq!(
+        vct[1]["spec"]["resources"]["requests"]["storage"], "2Gi",
+        "body = {body}"
+    );
+    assert_eq!(vct[1]["spec"]["storageClassName"], "fast", "body = {body}");
+
+    // Set-wide retention honors the JBOD-level deleteClaim.
+    assert_eq!(
+        body["spec"]["persistentVolumeClaimRetentionPolicy"]["whenDeleted"], "Delete",
+        "body = {body}"
+    );
+
+    // Broker container learns the extra disk via CRABKA_EXTRA_LOG_DIRS.
+    let containers = body["spec"]["template"]["spec"]["containers"]
+        .as_array()
+        .unwrap_or_else(|| panic!("containers present; body = {body}"));
+    let env = containers[0]["env"]
+        .as_array()
+        .unwrap_or_else(|| panic!("broker env present; body = {body}"));
+    let extra = env
+        .iter()
+        .find(|e| e["name"] == "CRABKA_EXTRA_LOG_DIRS")
+        .unwrap_or_else(|| panic!("CRABKA_EXTRA_LOG_DIRS env present; body = {body}"));
+    assert_eq!(extra["value"], "/var/lib/crabka/data-1", "body = {body}");
+
+    assert_eq!(state.remaining_rules(), 0);
+}
+
 /// Slice 25/10: the rendered `StatefulSet` must:
 ///   1. Include a `broker-config` `ConfigMap` volume in the pod template.
 ///   2. Pass `--config-file=/run/crabka/broker.toml` in the broker container args.

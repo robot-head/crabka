@@ -276,6 +276,76 @@ jobs:
           instance_label=$(kubectl get pvc data-demo-brokers-0 -n default -o jsonpath='{.metadata.labels.app\.kubernetes\.io/instance}')
           [ "$instance_label" = "demo" ] || { echo "::error::PVC missing instance label: '$instance_label'"; exit 1; }
 
+      - name: Smoke — JBOD multi-disk pool (slice 46)
+        run: |
+          set -e
+          # Isolated cluster in its own namespace so it doesn't perturb the
+          # `demo` flow or the GC probe. The operator is cluster-scoped, so it
+          # reconciles `jbod` too. Two 1Gi disks -> two PVCs per pod.
+          kubectl create namespace jbod
+          cat <<EOF | kubectl apply -f -
+          apiVersion: crabka.io/v1alpha1
+          kind: Kafka
+          metadata:
+            name: jdemo
+            namespace: jbod
+          spec:
+            kafkaVersion: "0.1.1"
+          ---
+          apiVersion: crabka.io/v1alpha1
+          kind: KafkaNodePool
+          metadata:
+            name: brokers
+            namespace: jbod
+            labels:
+              crabka.io/cluster: jdemo
+          spec:
+            roles: [Controller, Broker]
+            replicas: 1
+            nodeIdStart: 0
+            storage:
+              type: Jbod
+              deleteClaim: true
+              volumes:
+                - id: 0
+                  size: 1Gi
+                - id: 1
+                  size: 1Gi
+          EOF
+
+          for i in $(seq 1 60); do
+            status=$(kubectl get kafka jdemo -n jbod -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
+            echo "attempt $i: jbod status=$status"
+            [ "$status" = "True" ] && break
+            sleep 5
+          done
+          if [ "$status" != "True" ]; then
+            echo "::error::JBOD Kafka 'jdemo' did not become Ready"
+            kubectl describe kafka jdemo -n jbod || true
+            kubectl describe kafkanodepool brokers -n jbod || true
+            kubectl describe sts jdemo-brokers -n jbod || true
+            kubectl logs -n jbod jdemo-brokers-0 -c broker --tail=200 || true
+            exit 1
+          fi
+
+          # Both PVCs bind. Pattern: <vct-name>-<sts>-<ordinal>.
+          for pvc in data-jdemo-brokers-0 data-1-jdemo-brokers-0; do
+            phase=$(kubectl get pvc "$pvc" -n jbod -o jsonpath='{.status.phase}')
+            [ "$phase" = "Bound" ] || { echo "::error::PVC $pvc not Bound: $phase"; kubectl get pvc -n jbod; exit 1; }
+            echo "PVC $pvc Bound"
+          done
+
+          # Both disks are mounted in the broker container, and the broker is
+          # told about the extra disk via CRABKA_EXTRA_LOG_DIRS.
+          kubectl exec -n jbod jdemo-brokers-0 -c broker -- ls -d /var/lib/crabka/data /var/lib/crabka/data-1
+          envval=$(kubectl get pod jdemo-brokers-0 -n jbod -o jsonpath='{.spec.containers[?(@.name=="broker")].env[?(@.name=="CRABKA_EXTRA_LOG_DIRS")].value}')
+          [ "$envval" = "/var/lib/crabka/data-1" ] || { echo "::error::CRABKA_EXTRA_LOG_DIRS='$envval' (want /var/lib/crabka/data-1)"; exit 1; }
+          echo "JBOD wiring verified: extra log dir = $envval"
+
+          # Tear down so the second broker pod frees resources before the rest
+          # of the job (the kind cluster is shared across steps).
+          kubectl delete namespace jbod --wait=false || true
+
       - name: Smoke — config change rolls broker pod
         run: |
           set -e

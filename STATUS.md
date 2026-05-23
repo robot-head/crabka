@@ -1877,3 +1877,56 @@ Kafka client for ApiVersions.
 - Reference doc:
   [`docs/superpowers/specs/2026-05-23-crabka-jbod-multi-log-dir-45-design.md`].
 
+## Slice 46 — Operator: JBOD in `KafkaNodePool.spec.storage` (2026-05-23)
+
+- Surfaces slice 45's broker-side JBOD through the operator: a
+  `KafkaNodePool` can now back its pods with **multiple PVCs**, one per
+  JBOD disk, and the broker spreads partition data across all of them.
+  Phase 8, the operator half of the slice-45 core work.
+- **CRD:** new `Storage::Jbod(JbodSpec)` variant (alongside `Ephemeral`
+  / `PersistentClaim`). `JbodSpec { volumes: Vec<JbodVolume>, delete_claim
+  }`; `JbodVolume { id, size, class }`. Flat tagged wire shape
+  (`type: Jbod`, sibling `volumes` array + `deleteClaim`). The hand-rolled
+  `storage_schema` gains the `Jbod` enum value and the `volumes` array
+  (kube-rs 3.x can't emit the schemars tagged-union schema). JBOD requires
+  **>= 2 disks** — a single-disk JBOD is just a `PersistentClaim` and would
+  render an identical one-PVC StatefulSet, making the storage kind
+  ambiguous on re-reconcile (the observed kind is derived from the live
+  STS's `volumeClaimTemplates` count: 0 = Ephemeral, 1 = PersistentClaim,
+  >= 2 = Jbod).
+- **Layout (zero broker / init-script / main-script / cluster-TOML
+  change):** the **lowest-id disk is primary** — it keeps the slice-24 PVC
+  name `data` / mount `/var/lib/crabka/data`, so the `__cluster_metadata`
+  raft log, the init container (`crabka format --log-dir
+  /var/lib/crabka/data`), and the cluster-level broker TOML (`log_dir =
+  "/var/lib/crabka/data"`) are all untouched. Every other disk `id = N`
+  gets PVC `data-{N}` mounted at `/var/lib/crabka/data-{N}`, an extra
+  broker-container `volumeMount`, and is handed to the broker via the
+  existing `CRABKA_EXTRA_LOG_DIRS` env (slice 45) — comma-joined, sorted by
+  id, primary excluded. Disks are sorted by id before rendering so the pod
+  template is deterministic regardless of YAML order. Non-JBOD pools render
+  byte-identically (no env, no extra mounts).
+- **Retention:** a `StatefulSet`'s
+  `persistentVolumeClaimRetentionPolicy.whenDeleted` is set-wide (K8s has
+  no per-template retention), so JBOD exposes a single `deleteClaim`
+  covering all disks (diverging from Strimzi's per-volume flag — Crabka is
+  Strimzi-shaped, not -compatible, and delegates PVC GC to K8s).
+- **Validation:** static — non-empty, >= 2 disks, unique ids, every `size`
+  a positive `Quantity`. Monotonic (vs the live STS's templates) — rejects
+  storage-type switches, per-disk `class` change + size shrink, and JBOD
+  disk-set changes (add/remove/primary-reassign deferred until KIP-113
+  intra-broker moves land, slice 45b). Disks match by identity: `data` ↔
+  desired primary (lowest id), `data-{N}` ↔ desired id N.
+- Tests: +2 CRD round-trip, +19 controller unit (render/validate/monotonic),
+  +1 reconcile integration (`pool_jbod_renders_multiple_volume_claim_templates`
+  — asserts two PVC templates, set-wide retention, and the env in the SSA
+  body). CRD YAML regenerated. operator-e2e gains an isolated JBOD smoke
+  step (2×1Gi pool in its own namespace: both PVCs `Bound`, both disks
+  mounted, `CRABKA_EXTRA_LOG_DIRS` set). Full operator suite + clippy
+  `-D warnings` + fmt clean.
+- Out of scope (deferred): adding/removing JBOD disks on a live pool
+  (needs `AlterReplicaLogDirs`, slice 45b); per-disk `deleteClaim`;
+  ephemeral disks inside a JBOD set; `KafkaNodePool.status.storage` mirror.
+- Reference doc:
+  [`docs/superpowers/specs/2026-05-23-crabka-operator-jbod-storage-46-design.md`].
+
