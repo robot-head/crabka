@@ -7,6 +7,7 @@ pub mod ca;
 mod listener;
 mod mechanism;
 mod mtls;
+mod oauthbearer;
 mod plain;
 mod principal;
 mod reload;
@@ -16,6 +17,9 @@ mod tls;
 pub use listener::ListenerProtocol;
 pub use mechanism::SaslMechanism;
 pub use mtls::extract_principal_from_cert;
+pub use oauthbearer::{
+    ClientInitialResponse, UnsecuredJwsValidator, invalid_token_json, parse_client_initial_response,
+};
 pub use plain::verify_plain;
 pub use principal::{AuthError, AuthMethod, Principal};
 pub use reload::DynamicServerConfig;

@@ -20,6 +20,8 @@ pub enum AuthMethod {
     SaslScramSha256,
     /// SASL/SCRAM-SHA-512 (slice 12).
     SaslScramSha512,
+    /// SASL/OAUTHBEARER (slice 49).
+    SaslOAuthBearer,
     /// mTLS client-cert verified against the listener's
     /// `client_ca_path` (slice 29).
     MTls,
@@ -33,6 +35,7 @@ impl AuthMethod {
             SaslMechanism::Plain => Self::SaslPlain,
             SaslMechanism::ScramSha256 => Self::SaslScramSha256,
             SaslMechanism::ScramSha512 => Self::SaslScramSha512,
+            SaslMechanism::OAuthBearer => Self::SaslOAuthBearer,
         }
     }
 }
@@ -55,6 +58,11 @@ pub enum AuthError {
     MalformedMessage,
     #[error("unsupported mechanism")]
     UnsupportedMechanism,
+    /// OAUTHBEARER token failed validation (expired, bad claims, signed token
+    /// rejected by the unsecured validator, missing principal, …). Maps to the
+    /// RFC 7628 `invalid_token` server error status (slice 49).
+    #[error("invalid token")]
+    InvalidToken,
 }
 
 #[cfg(test)]
@@ -74,6 +82,10 @@ mod tests {
         assert_eq!(
             AuthMethod::from_sasl(SaslMechanism::ScramSha512),
             AuthMethod::SaslScramSha512
+        );
+        assert_eq!(
+            AuthMethod::from_sasl(SaslMechanism::OAuthBearer),
+            AuthMethod::SaslOAuthBearer
         );
     }
 }

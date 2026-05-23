@@ -2357,6 +2357,182 @@ async fn jvm_sasl_plain_produce_consume() {
     broker.shutdown().await;
 }
 
+/// JAAS config for the JVM `OAuthBearerLoginModule` built-in *unsecured*
+/// token issuer (slice 49). `unsecuredLoginStringClaim_sub` mints an
+/// `alg:none` JWS with `sub=<user>`, `iat=now`, `exp=now+3600s` — exactly the
+/// token shape Crabka's [`crabka_security::UnsecuredJwsValidator`] accepts.
+/// Pairs with `OAuthBearerUnsecuredLoginCallbackHandler` on the client.
+fn oauthbearer_jaas(sub: &str) -> String {
+    format!(
+        "org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule required \
+         unsecuredLoginStringClaim_sub=\"{sub}\";",
+    )
+}
+
+/// Spawn a single `SASL_PLAINTEXT` broker that enables **only** OAUTHBEARER.
+/// The broker validates the JVM client's unsecured JWS with the default
+/// validator (principal claim `sub`). Mirrors [`start_sasl_plaintext_broker`].
+async fn start_oauthbearer_broker() -> (crabka_broker::BrokerHandle, tempfile::TempDir) {
+    use crabka_broker::config::ListenerSpec;
+    use crabka_security::{ListenerProtocol, SaslMechanism};
+
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("crabka_broker=debug,info")),
+        )
+        .with_test_writer()
+        .try_init();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let listen_addr: std::net::SocketAddr = LISTEN.parse().expect("static addr");
+    let controller_addr: std::net::SocketAddr = "0.0.0.0:9093".parse().expect("static addr");
+    let config = BrokerConfig {
+        broker_id: 1,
+        listen_addr,
+        advertised_listener: BOOTSTRAP.into(),
+        log_dir: dir.path().to_path_buf(),
+        log_config: LogConfig::default(),
+        node_id: 1,
+        controller_listen_addr: controller_addr,
+        controller_quorum_voters: vec![(1, controller_addr)],
+        heartbeat_interval_ms: 3_000,
+        heartbeat_timeout_ms: 9_000,
+        replica_lag_time_max_ms: 30_000,
+        controller_election_timeout: std::time::Duration::from_secs(5),
+        controller_heartbeat_interval: std::time::Duration::from_millis(500),
+        bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
+        listeners: vec![ListenerSpec {
+            name: "SASL_PLAINTEXT".to_string(),
+            bind_addr: listen_addr,
+            advertised: BOOTSTRAP.to_string(),
+            protocol: ListenerProtocol::SaslPlaintext,
+            tls_config: None,
+            sasl_mechanisms: None,
+        }],
+        inter_broker_listener_name: "SASL_PLAINTEXT".to_string(),
+        enabled_sasl_mechanisms: vec![SaslMechanism::OAuthBearer],
+        ..BrokerConfig::default()
+    };
+    let handle = Broker::start(config)
+        .await
+        .expect("start oauthbearer broker");
+    eprintln!("CRABKA[test] oauthbearer broker started listen={LISTEN} advertised={BOOTSTRAP}");
+    (handle, dir)
+}
+
+/// End-to-end `SASL_PLAINTEXT` + OAUTHBEARER drive of the JVM
+/// `kafka-topics` / `kafka-console-producer` / `kafka-console-consumer`
+/// tools (slice 49). The JVM client uses the built-in unsecured login module
+/// to mint an `alg:none` JWS for `sub=admin`; Crabka parses the RFC 7628
+/// client initial response and validates the token, deriving `User:admin`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Docker"]
+async fn jvm_sasl_oauthbearer_produce_consume() {
+    const TOPIC: &str = "crabka-sasl-oauthbearer-itest";
+    const USER: &str = "admin";
+
+    let (broker, _dir) = start_oauthbearer_broker().await;
+    nc_check_connectivity();
+
+    let props = format!(
+        "security.protocol=SASL_PLAINTEXT\n\
+         sasl.mechanism=OAUTHBEARER\n\
+         sasl.login.callback.handler.class=\
+         org.apache.kafka.common.security.oauthbearer.OAuthBearerUnsecuredLoginCallbackHandler\n\
+         sasl.jaas.config={}\n",
+        oauthbearer_jaas(USER),
+    );
+    let props_file = write_client_props(&props);
+    let mount = props_file.mount_str();
+
+    docker_run_kafka_tool_with_mount(
+        &mount,
+        &[
+            "kafka-topics",
+            "--create",
+            "--if-not-exists",
+            "--topic",
+            TOPIC,
+            "--partitions",
+            "1",
+            "--replication-factor",
+            "1",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--command-config",
+            "/client.properties",
+        ],
+    );
+
+    let mut child = Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "-i",
+            "-v",
+            &mount,
+            "--add-host=host.docker.internal:host-gateway",
+            KAFKA_IMAGE,
+            "kafka-console-producer",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--topic",
+            TOPIC,
+            "--producer.config",
+            "/client.properties",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn producer");
+    let payload: String = (0..10)
+        .map(|i| format!("msg-{i}\n"))
+        .collect::<Vec<_>>()
+        .concat();
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(payload.as_bytes())
+        .expect("write stdin");
+    drop(child.stdin.take());
+    let producer_out = child.wait_with_output().expect("wait producer");
+    assert!(
+        producer_out.status.success(),
+        "producer failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&producer_out.stdout),
+        String::from_utf8_lossy(&producer_out.stderr)
+    );
+
+    let consumer_out = docker_run_kafka_tool_with_mount(
+        &mount,
+        &[
+            "kafka-console-consumer",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--topic",
+            TOPIC,
+            "--partition",
+            "0",
+            "--from-beginning",
+            "--max-messages",
+            "10",
+            "--timeout-ms",
+            "20000",
+            "--consumer.config",
+            "/client.properties",
+        ],
+    );
+    let s = String::from_utf8_lossy(&consumer_out.stdout);
+    for i in 0..10 {
+        let needle = format!("msg-{i}");
+        assert!(s.contains(&needle), "consumer missing {needle}: {s:?}");
+    }
+
+    broker.shutdown().await;
+}
+
 /// End-to-end `SASL_PLAINTEXT` + SCRAM-SHA-512 drive of the JVM tools
 /// against a Rust broker. Exercises two distinct authentication paths in a
 /// single run:

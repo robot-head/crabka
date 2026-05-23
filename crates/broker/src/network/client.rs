@@ -187,6 +187,11 @@ where
             )
             .await
         }
+        // OAUTHBEARER inter-broker auth would require an outbound token source;
+        // not supported as an inter-broker mechanism this slice (slice 49).
+        SaslMechanism::OAuthBearer => Err(InterBrokerError::Sasl(
+            "OAUTHBEARER is not supported for inter-broker authentication".to_string(),
+        )),
     }
 }
 

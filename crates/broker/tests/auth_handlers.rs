@@ -831,6 +831,216 @@ async fn round_trip(
 }
 
 // ────────────────────────────────────────────────────────────────────────
+// Slice 49: SASL/OAUTHBEARER (KIP-255 / RFC 7628) end-to-end (no Docker).
+// ────────────────────────────────────────────────────────────────────────
+
+/// Build an unsecured JWS (`alg:none`) bearer token with a `sub` principal and
+/// an `exp` (Unix seconds). Empty signature segment — matches what the JVM
+/// `OAuthBearerUnsecuredLoginCallbackHandler` produces.
+fn unsecured_jws(sub: &str, exp_unix_secs: i64) -> String {
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
+    let header = B64.encode(b"{\"alg\":\"none\"}");
+    let claims = B64.encode(format!("{{\"sub\":\"{sub}\",\"exp\":{exp_unix_secs}}}").as_bytes());
+    format!("{header}.{claims}.")
+}
+
+/// RFC 7628 client initial response carrying `token` (empty authzid).
+fn oauthbearer_initial(token: &str) -> bytes::Bytes {
+    bytes::Bytes::from(format!("n,,\u{1}auth=Bearer {token}\u{1}\u{1}").into_bytes())
+}
+
+fn now_unix_secs() -> i64 {
+    i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_secs(),
+    )
+    .expect("seconds fit in i64")
+}
+
+/// Start a single `SASL_PLAINTEXT` broker that enables only OAUTHBEARER, with
+/// the supplied validator.
+async fn start_oauthbearer_broker(
+    log_dir: &std::path::Path,
+    validator: crabka_security::UnsecuredJwsValidator,
+) -> crabka_broker::BrokerHandle {
+    let mut cfg = BrokerConfig::for_tests(log_dir.to_path_buf());
+    cfg.listeners = vec![ListenerSpec {
+        name: "SASL_PLAINTEXT".to_string(),
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        advertised: "127.0.0.1:0".to_string(),
+        // Inter-broker traffic can't speak OAUTHBEARER, so keep the
+        // controller/inter-broker path plaintext and only gate the client
+        // listener on SASL.
+        protocol: ListenerProtocol::SaslPlaintext,
+        tls_config: None,
+        sasl_mechanisms: None,
+    }];
+    cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
+    cfg.enabled_sasl_mechanisms = vec![SaslMechanism::OAuthBearer];
+    cfg.oauthbearer_validator = validator;
+    Broker::start(cfg).await.expect("broker must start")
+}
+
+/// `ApiVersions` (pre-auth) + `SaslHandshake`(OAUTHBEARER); asserts the broker
+/// advertises OAUTHBEARER and the handshake succeeds.
+async fn oauthbearer_handshake(stream: &mut TcpStream, corr: &mut i32) -> Result<(), io::Error> {
+    let av_req = ApiVersionsRequest::default();
+    let mut av_body = BytesMut::new();
+    av_req
+        .encode(&mut av_body, 0)
+        .map_err(|e| io::Error::other(format!("ApiVersions encode: {e}")))?;
+    let av = round_trip(stream, 18, 0, *corr, false, &av_body).await?;
+    *corr += 1;
+    let mut cur: &[u8] = &av;
+    ApiVersionsResponse::decode(&mut cur, 0)
+        .map_err(|e| io::Error::other(format!("ApiVersions decode: {e}")))?;
+
+    let sh_req = SaslHandshakeRequest {
+        mechanism: "OAUTHBEARER".to_string(),
+        ..Default::default()
+    };
+    let mut sh_body = BytesMut::new();
+    sh_req
+        .encode(&mut sh_body, 1)
+        .map_err(|e| io::Error::other(format!("SaslHandshake encode: {e}")))?;
+    let sh = round_trip(stream, 17, 1, *corr, false, &sh_body).await?;
+    *corr += 1;
+    let mut cur: &[u8] = &sh;
+    let sh_resp = SaslHandshakeResponse::decode(&mut cur, 1)
+        .map_err(|e| io::Error::other(format!("SaslHandshake decode: {e}")))?;
+    if sh_resp.error_code != 0 {
+        return Err(io::Error::other(format!(
+            "SaslHandshake failed: error_code={}",
+            sh_resp.error_code
+        )));
+    }
+    if !sh_resp.mechanisms.iter().any(|m| m == "OAUTHBEARER") {
+        return Err(io::Error::other("OAUTHBEARER not advertised"));
+    }
+    Ok(())
+}
+
+/// Send one `SaslAuthenticate v2` with `auth_bytes`, returning the decoded
+/// response.
+async fn oauthbearer_authenticate(
+    stream: &mut TcpStream,
+    corr: &mut i32,
+    auth_bytes: bytes::Bytes,
+) -> Result<SaslAuthenticateResponse, io::Error> {
+    let req = SaslAuthenticateRequest {
+        auth_bytes,
+        ..Default::default()
+    };
+    let mut body = BytesMut::new();
+    req.encode(&mut body, 2)
+        .map_err(|e| io::Error::other(format!("SaslAuthenticate encode: {e}")))?;
+    let resp_bytes = round_trip(stream, 36, 2, *corr, true, &body).await?;
+    *corr += 1;
+    let mut cur: &[u8] = &resp_bytes;
+    SaslAuthenticateResponse::decode(&mut cur, 2)
+        .map_err(|e| io::Error::other(format!("SaslAuthenticate decode: {e}")))
+}
+
+/// Happy path: a valid unsecured token authenticates in a single round, and a
+/// post-auth Metadata round-trip proves the connection survived and the
+/// principal was accepted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sasl_oauthbearer_happy_path() {
+    let log_dir = tempfile::tempdir().unwrap();
+    let handle = start_oauthbearer_broker(
+        log_dir.path(),
+        crabka_security::UnsecuredJwsValidator::default(),
+    )
+    .await;
+    let addr = handle.listen_addr();
+
+    let result: Result<(), io::Error> = async {
+        let mut stream = TcpStream::connect(addr).await?;
+        let mut corr = 1;
+        oauthbearer_handshake(&mut stream, &mut corr).await?;
+
+        let token = unsecured_jws("svc-account", now_unix_secs() + 3600);
+        let auth =
+            oauthbearer_authenticate(&mut stream, &mut corr, oauthbearer_initial(&token)).await?;
+        if auth.error_code != 0 {
+            return Err(io::Error::other(format!(
+                "authenticate failed: code={} msg={:?}",
+                auth.error_code, auth.error_message
+            )));
+        }
+        if !auth.auth_bytes.is_empty() {
+            return Err(io::Error::other(
+                "unexpected challenge — token was rejected",
+            ));
+        }
+
+        let md_req = MetadataRequest::default();
+        let mut md_body = BytesMut::new();
+        md_req
+            .encode(&mut md_body, 12)
+            .map_err(|e| io::Error::other(format!("Metadata encode: {e}")))?;
+        let md = round_trip(&mut stream, 3, 12, corr, true, &md_body).await?;
+        let mut cur: &[u8] = &md;
+        let md_resp = MetadataResponse::decode(&mut cur, 12)
+            .map_err(|e| io::Error::other(format!("Metadata decode: {e}")))?;
+        if md_resp.brokers.is_empty() {
+            return Err(io::Error::other("Metadata carried no brokers"));
+        }
+        Ok(())
+    }
+    .await;
+
+    handle.shutdown().await;
+    result.expect("OAUTHBEARER session must succeed end-to-end");
+}
+
+/// Failure path: an expired token triggers the RFC 7628 two-round failure
+/// handshake — round 1 returns the `invalid_token` JSON with `error_code = 0`
+/// (connection open), round 2 (the client's `\x01` dummy) returns
+/// `SASL_AUTHENTICATION_FAILED` (58).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sasl_oauthbearer_invalid_token_two_round_failure() {
+    let log_dir = tempfile::tempdir().unwrap();
+    let validator = crabka_security::UnsecuredJwsValidator {
+        allowable_clock_skew_ms: 0,
+        ..Default::default()
+    };
+    let handle = start_oauthbearer_broker(log_dir.path(), validator).await;
+    let addr = handle.listen_addr();
+
+    let result: Result<(), io::Error> = async {
+        let mut stream = TcpStream::connect(addr).await?;
+        let mut corr = 1;
+        oauthbearer_handshake(&mut stream, &mut corr).await?;
+
+        // Expired token (exp an hour in the past, zero skew).
+        let token = unsecured_jws("admin", now_unix_secs() - 3600);
+        let round1 =
+            oauthbearer_authenticate(&mut stream, &mut corr, oauthbearer_initial(&token)).await?;
+        assert_eq!(round1.error_code, 0, "round 1 must not close yet");
+        assert_eq!(
+            &round1.auth_bytes[..],
+            br#"{"status":"invalid_token"}"#,
+            "round 1 must carry the RFC 7628 error JSON"
+        );
+
+        // The client's `\x01` dummy → SASL_AUTHENTICATION_FAILED (58).
+        let round2 =
+            oauthbearer_authenticate(&mut stream, &mut corr, bytes::Bytes::from_static(&[1u8]))
+                .await?;
+        assert_eq!(round2.error_code, 58, "round 2 must fail the connection");
+        Ok(())
+    }
+    .await;
+
+    handle.shutdown().await;
+    result.expect("OAUTHBEARER failure handshake must complete");
+}
+
+// ────────────────────────────────────────────────────────────────────────
 // Task 15: AlterUserScramCredentials (api_key 51, KIP-554).
 // ────────────────────────────────────────────────────────────────────────
 

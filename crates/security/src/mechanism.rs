@@ -5,6 +5,9 @@ pub enum SaslMechanism {
     Plain,
     ScramSha256,
     ScramSha512,
+    /// SASL/OAUTHBEARER (KIP-255 / RFC 7628). The bearer token is validated
+    /// by the broker's configured token validator (slice 49).
+    OAuthBearer,
 }
 
 impl SaslMechanism {
@@ -14,6 +17,7 @@ impl SaslMechanism {
             Self::Plain => "PLAIN",
             Self::ScramSha256 => "SCRAM-SHA-256",
             Self::ScramSha512 => "SCRAM-SHA-512",
+            Self::OAuthBearer => "OAUTHBEARER",
         }
     }
 
@@ -23,6 +27,7 @@ impl SaslMechanism {
             "PLAIN" => Some(Self::Plain),
             "SCRAM-SHA-256" => Some(Self::ScramSha256),
             "SCRAM-SHA-512" => Some(Self::ScramSha512),
+            "OAUTHBEARER" => Some(Self::OAuthBearer),
             _ => None,
         }
     }
@@ -46,6 +51,7 @@ mod tests {
             SaslMechanism::Plain,
             SaslMechanism::ScramSha256,
             SaslMechanism::ScramSha512,
+            SaslMechanism::OAuthBearer,
         ] {
             assert_eq!(SaslMechanism::from_wire(m.wire_name()), Some(m));
         }
@@ -54,8 +60,18 @@ mod tests {
     #[test]
     fn from_wire_unknown_returns_none() {
         assert_eq!(SaslMechanism::from_wire("SCRAM-SHA-128"), None);
-        assert_eq!(SaslMechanism::from_wire("OAUTHBEARER"), None);
+        assert_eq!(SaslMechanism::from_wire("OAUTH"), None);
         assert_eq!(SaslMechanism::from_wire(""), None);
+    }
+
+    #[test]
+    fn oauthbearer_wire_round_trip() {
+        assert_eq!(
+            SaslMechanism::from_wire("OAUTHBEARER"),
+            Some(SaslMechanism::OAuthBearer)
+        );
+        assert_eq!(SaslMechanism::OAuthBearer.wire_name(), "OAUTHBEARER");
+        assert!(!SaslMechanism::OAuthBearer.is_scram());
     }
 
     #[test]

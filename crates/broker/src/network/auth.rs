@@ -53,6 +53,14 @@ pub enum SaslExchange {
     Plain,
     ScramPending,
     Scram(ScramServerExchange),
+    /// OAUTHBEARER, post-handshake / pre-token. The bearer token arrives in
+    /// the first (and on success only) `SaslAuthenticate`.
+    OAuthBearer,
+    /// OAUTHBEARER token validation failed: the broker has returned the RFC
+    /// 7628 error JSON (with `error_code = 0`, connection still open) and is
+    /// awaiting the client's single-`\x01` final message before failing the
+    /// connection with `SASL_AUTHENTICATION_FAILED`.
+    OAuthBearerFailed,
 }
 
 impl ConnectionAuth {
@@ -118,6 +126,9 @@ pub fn handle_handshake(
                 SaslMechanism::ScramSha256 | SaslMechanism::ScramSha512 => {
                     SaslExchange::ScramPending
                 }
+                // The token arrives in the first SaslAuthenticate; no
+                // pre-built state needed (slice 49).
+                SaslMechanism::OAuthBearer => SaslExchange::OAuthBearer,
             };
             *auth = ConnectionAuth::Negotiating {
                 mechanism: m,
@@ -276,6 +287,91 @@ pub fn handle_authenticate_scram(
     }
 }
 
+/// SASL/OAUTHBEARER `SaslAuthenticate` handler (KIP-255 / RFC 7628).
+///
+/// Round 1 (client initial response):
+///   - `auth_bytes` = `n,,\x01auth=Bearer <token>\x01\x01`. We parse the
+///     bearer token and validate it with `validator` against `now_ms`. On
+///     success `auth` transitions to `Authenticated` and the response carries
+///     empty `auth_bytes` with `error_code = 0` (single-round success).
+///   - On any parse / validation failure we return the RFC 7628
+///     `{"status":"invalid_token"}` JSON in `auth_bytes` with `error_code = 0`
+///     (the connection stays open) and move to `OAuthBearerFailed`.
+///
+/// Round 2 (failure only): the JVM client replies to the error JSON with a
+/// single `\x01`. We return `SASL_AUTHENTICATION_FAILED` (58); the dispatcher
+/// closes the connection.
+pub fn handle_authenticate_oauthbearer(
+    req: &SaslAuthenticateRequest,
+    auth: &mut ConnectionAuth,
+    validator: &crabka_security::UnsecuredJwsValidator,
+    now_ms: i64,
+) -> SaslAuthenticateResponse {
+    match auth {
+        ConnectionAuth::Negotiating {
+            exchange: SaslExchange::OAuthBearer,
+            mechanism,
+        } => {
+            let mech = *mechanism;
+            match validate_bearer(&req.auth_bytes, validator, now_ms) {
+                Ok(principal) => {
+                    *auth = ConnectionAuth::Authenticated { principal };
+                    SaslAuthenticateResponse {
+                        error_code: 0,
+                        error_message: None,
+                        auth_bytes: bytes::Bytes::new(),
+                        session_lifetime_ms: 0,
+                        ..Default::default()
+                    }
+                }
+                Err(reason) => {
+                    tracing::debug!(reason, "OAUTHBEARER token rejected");
+                    *auth = ConnectionAuth::Negotiating {
+                        mechanism: mech,
+                        exchange: SaslExchange::OAuthBearerFailed,
+                    };
+                    SaslAuthenticateResponse {
+                        error_code: 0,
+                        error_message: None,
+                        auth_bytes: bytes::Bytes::from(
+                            crabka_security::invalid_token_json().into_bytes(),
+                        ),
+                        session_lifetime_ms: 0,
+                        ..Default::default()
+                    }
+                }
+            }
+        }
+        // The client's `\x01` final message after a rejected token: complete
+        // the RFC 7628 failure handshake by closing with code 58.
+        ConnectionAuth::Negotiating {
+            exchange: SaslExchange::OAuthBearerFailed,
+            ..
+        } => fail_authenticate("oauthbearer token rejected"),
+        _ => fail_authenticate("not in oauthbearer negotiation"),
+    }
+}
+
+/// Parse + validate an OAUTHBEARER client initial response. The authzid, when
+/// present, must equal the token principal (RFC 7628 / Kafka behaviour).
+fn validate_bearer(
+    auth_bytes: &[u8],
+    validator: &crabka_security::UnsecuredJwsValidator,
+    now_ms: i64,
+) -> Result<Principal, &'static str> {
+    let parsed = crabka_security::parse_client_initial_response(auth_bytes)
+        .map_err(|_| "malformed OAUTHBEARER client response")?;
+    let principal = validator
+        .validate(&parsed.token, now_ms)
+        .map_err(|_| "token validation failed")?;
+    if let Some(authzid) = parsed.authzid
+        && authzid != principal.name
+    {
+        return Err("authzid does not match token principal");
+    }
+    Ok(principal)
+}
+
 /// Parse the username from a SCRAM client-first message.
 ///
 /// Format (RFC 5802): `n,,n=<user>,r=<nonce>[,extensions...]`. The leading
@@ -351,6 +447,142 @@ mod tests {
         };
         assert!(!a.is_authenticated());
         assert!(a.principal().is_none());
+    }
+
+    fn unsecured_token(sub: &str, exp_s: i64) -> String {
+        use base64::Engine;
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
+        format!(
+            "{}.{}.",
+            B64.encode(b"{\"alg\":\"none\"}"),
+            B64.encode(format!("{{\"sub\":\"{sub}\",\"exp\":{exp_s}}}").as_bytes())
+        )
+    }
+
+    fn oauthbearer_client_response(token: &str) -> SaslAuthenticateRequest {
+        SaslAuthenticateRequest {
+            auth_bytes: bytes::Bytes::from(
+                format!("n,,\u{1}auth=Bearer {token}\u{1}\u{1}").into_bytes(),
+            ),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn handshake_oauthbearer_transitions_to_negotiating() {
+        let mut auth = ConnectionAuth::Anonymous;
+        let req = SaslHandshakeRequest {
+            mechanism: "OAUTHBEARER".to_string(),
+            ..Default::default()
+        };
+        let resp = handle_handshake(&req, &mut auth, &[SaslMechanism::OAuthBearer]);
+        assert_eq!(resp.error_code, 0);
+        assert!(matches!(
+            auth,
+            ConnectionAuth::Negotiating {
+                mechanism: SaslMechanism::OAuthBearer,
+                exchange: SaslExchange::OAuthBearer,
+            }
+        ));
+    }
+
+    #[test]
+    fn oauthbearer_valid_token_authenticates() {
+        let validator = crabka_security::UnsecuredJwsValidator::default();
+        let now_ms = 1_000_000_000_000;
+        let token = unsecured_token("svc-account", 1_000_000_900); // exp seconds → future of now
+        let mut auth = ConnectionAuth::Negotiating {
+            mechanism: SaslMechanism::OAuthBearer,
+            exchange: SaslExchange::OAuthBearer,
+        };
+        let resp = handle_authenticate_oauthbearer(
+            &oauthbearer_client_response(&token),
+            &mut auth,
+            &validator,
+            now_ms,
+        );
+        assert_eq!(resp.error_code, 0);
+        assert!(resp.auth_bytes.is_empty());
+        let p = auth.principal().expect("authenticated");
+        assert_eq!(p.name, "svc-account");
+        assert_eq!(p.auth_method, crabka_security::AuthMethod::SaslOAuthBearer);
+    }
+
+    #[test]
+    fn oauthbearer_invalid_token_returns_error_json_then_fails_on_dummy() {
+        let validator = crabka_security::UnsecuredJwsValidator {
+            allowable_clock_skew_ms: 0,
+            ..Default::default()
+        };
+        let now_ms = 5_000_000_000_000;
+        // exp far in the past → expired.
+        let token = unsecured_token("admin", 1_000_000_000);
+        let mut auth = ConnectionAuth::Negotiating {
+            mechanism: SaslMechanism::OAuthBearer,
+            exchange: SaslExchange::OAuthBearer,
+        };
+        // Round 1: rejected → error JSON, error_code 0, connection stays open.
+        let resp = handle_authenticate_oauthbearer(
+            &oauthbearer_client_response(&token),
+            &mut auth,
+            &validator,
+            now_ms,
+        );
+        assert_eq!(resp.error_code, 0);
+        assert_eq!(&resp.auth_bytes[..], br#"{"status":"invalid_token"}"#);
+        assert!(matches!(
+            auth,
+            ConnectionAuth::Negotiating {
+                exchange: SaslExchange::OAuthBearerFailed,
+                ..
+            }
+        ));
+        // Round 2: the client's `\x01` dummy → SASL_AUTHENTICATION_FAILED (58).
+        let dummy = SaslAuthenticateRequest {
+            auth_bytes: bytes::Bytes::from_static(&[1u8]),
+            ..Default::default()
+        };
+        let resp2 = handle_authenticate_oauthbearer(&dummy, &mut auth, &validator, now_ms);
+        assert_eq!(resp2.error_code, SASL_AUTHENTICATION_FAILED);
+        assert!(!auth.is_authenticated());
+    }
+
+    #[test]
+    fn oauthbearer_malformed_response_returns_error_json() {
+        let validator = crabka_security::UnsecuredJwsValidator::default();
+        let mut auth = ConnectionAuth::Negotiating {
+            mechanism: SaslMechanism::OAuthBearer,
+            exchange: SaslExchange::OAuthBearer,
+        };
+        let req = SaslAuthenticateRequest {
+            auth_bytes: bytes::Bytes::from_static(b"not-a-valid-gs2-message"),
+            ..Default::default()
+        };
+        let resp = handle_authenticate_oauthbearer(&req, &mut auth, &validator, 1_000_000_000_000);
+        assert_eq!(resp.error_code, 0);
+        assert_eq!(&resp.auth_bytes[..], br#"{"status":"invalid_token"}"#);
+    }
+
+    #[test]
+    fn oauthbearer_authzid_mismatch_fails() {
+        let validator = crabka_security::UnsecuredJwsValidator::default();
+        let now_ms = 1_000_000_000_000;
+        let token = unsecured_token("alice", 1_000_000_900);
+        let mut auth = ConnectionAuth::Negotiating {
+            mechanism: SaslMechanism::OAuthBearer,
+            exchange: SaslExchange::OAuthBearer,
+        };
+        // authzid "bob" != token principal "alice".
+        let req = SaslAuthenticateRequest {
+            auth_bytes: bytes::Bytes::from(
+                format!("n,a=bob,\u{1}auth=Bearer {token}\u{1}\u{1}").into_bytes(),
+            ),
+            ..Default::default()
+        };
+        let resp = handle_authenticate_oauthbearer(&req, &mut auth, &validator, now_ms);
+        assert_eq!(resp.error_code, 0);
+        assert_eq!(&resp.auth_bytes[..], br#"{"status":"invalid_token"}"#);
+        assert!(!auth.is_authenticated());
     }
 
     #[test]
