@@ -303,11 +303,15 @@ async fn process_partition(
                 out.error_code = codes::INVALID_PRODUCER_ID_MAPPING;
                 return Ok(out);
             };
-            if txn_coordinator.is_coordinator_for(&tid).await {
-                let Some(entry_mutex) = txn_coordinator.get(&tid) else {
-                    out.error_code = codes::INVALID_PRODUCER_ID_MAPPING;
-                    return Ok(out);
-                };
+            // Holding the tid's entry locally is the authoritative signal
+            // that we coordinate it. Gating on `is_coordinator_for` instead
+            // is racy on a freshly-booted broker: `leader_partitions` is
+            // recomputed on every metadata change and is transiently empty
+            // while raft leadership settles, so a transactional Produce could
+            // arrive while the check returns false and silently skip the
+            // inline AddPartitionsToTxn — leaving the txn `Empty` so the
+            // following EndTxn fails with INVALID_TXN_STATE.
+            if let Some(entry_mutex) = txn_coordinator.get(&tid) {
                 let mut entry = entry_mutex.lock().await;
                 if entry.producer_epoch != epoch_txn {
                     out.error_code = codes::INVALID_PRODUCER_EPOCH;
@@ -358,10 +362,10 @@ async fn process_partition(
                 }
                 // else: partition already registered in an active txn — fall through.
             }
-            // else: not the coordinator for this tid (slice-9 MVP).
-            // Trust the producer to have called AddPartitionsToTxn
-            // through the correct coordinator. Inter-broker v2
-            // auto-add is deferred (slice 10+).
+            // else: we don't hold this tid's state — not our coordinator.
+            // Trust the producer to have called AddPartitionsToTxn through the
+            // correct coordinator. Inter-broker v2 auto-add is deferred
+            // (slice 10+).
         }
     }
 
