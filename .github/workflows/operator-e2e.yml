@@ -1470,6 +1470,106 @@ jobs:
           exit 1
 
       # ─────────────────────────────────────────────────────────────────────
+      # Slice 34: cluster-CA key-rotation orchestration
+      #
+      # The `demo` cluster brought up above is TLS-enabled, so it already has
+      # the cluster CA Secrets — reuse it rather than spinning up another. Its
+      # SCRAM scenario is finished by this point, so rolling the broker here is
+      # safe (the mTLS scenario below uses the independent `demo-mtls` cluster).
+      #
+      # Annotating the Kafka CR with `crabka.io/force-replace-ca-key` triggers a
+      # staged, zero-downtime key replacement: the `demo-cluster-ca-cert` trust
+      # bundle (key `ca.crt`) transits 1 cert -> 2 certs (distributing-trust) ->
+      # 1 cert, the `demo-cluster-ca` key Secret's `crabka.io/ca-key-generation`
+      # annotation increments by one, the broker StatefulSet rolls, and the
+      # cluster returns to Ready=True with CaRotation back at status=False/Idle.
+      # The operator reconciles on a 30s requeue and advances one roll per
+      # phase, so the whole rotation takes a few minutes.
+      # ─────────────────────────────────────────────────────────────────────
+
+      - name: CA key rotation — assert initial single-cert trust bundle
+        run: |
+          set -e
+          # Count BEGIN CERTIFICATE blocks in the base64-decoded ca.crt bundle.
+          init_certs=$(kubectl get secret demo-cluster-ca-cert -n default \
+            -o jsonpath='{.data.ca\.crt}' | base64 -d | grep -c 'BEGIN CERTIFICATE')
+          echo "initial trust-bundle cert count: $init_certs"
+          [ "$init_certs" = "1" ] || {
+            echo "::error::expected exactly 1 CA cert in demo-cluster-ca-cert before rotation, got $init_certs"
+            exit 1
+          }
+
+          # Record the starting key generation from the key Secret's annotation.
+          init_gen=$(kubectl get secret demo-cluster-ca -n default \
+            -o jsonpath='{.metadata.annotations.crabka\.io/ca-key-generation}' 2>/dev/null || true)
+          echo "initial ca-key-generation: '$init_gen'"
+          [ -n "$init_gen" ] || {
+            echo "::error::demo-cluster-ca Secret missing crabka.io/ca-key-generation annotation"
+            kubectl get secret demo-cluster-ca -n default -o yaml || true
+            exit 1
+          }
+          # Persist for the assertion step.
+          echo "INIT_CA_KEY_GEN=$init_gen" >> "$GITHUB_ENV"
+
+      - name: CA key rotation — trigger force-replace-ca-key
+        run: |
+          set -e
+          kubectl annotate kafka demo -n default \
+            crabka.io/force-replace-ca-key=true --overwrite
+
+      - name: CA key rotation — wait for staged rotation to settle
+        run: |
+          set -e
+          # Best-effort: observe the trust bundle widen to 2 certs during the
+          # distributing-trust phase. The intermediate window can be missed if a
+          # reconcile lands between polls, so this is informational only — the
+          # end-state assertions below are authoritative.
+          saw_two=0
+          # End-state: key generation incremented AND bundle back to 1 cert AND
+          # CaRotation status=False/reason=Idle AND Ready=True. Generous timeout
+          # (~8 min) to cover the multi-phase, one-roll-per-reconcile rollout.
+          settled=0
+          for i in $(seq 1 96); do
+            certs=$(kubectl get secret demo-cluster-ca-cert -n default \
+              -o jsonpath='{.data.ca\.crt}' 2>/dev/null | base64 -d 2>/dev/null | grep -c 'BEGIN CERTIFICATE' || echo 0)
+            gen=$(kubectl get secret demo-cluster-ca -n default \
+              -o jsonpath='{.metadata.annotations.crabka\.io/ca-key-generation}' 2>/dev/null || true)
+            phase=$(kubectl get secret demo-cluster-ca-cert -n default \
+              -o jsonpath='{.metadata.annotations.crabka\.io/ca-rotation-phase}' 2>/dev/null || true)
+            rot=$(kubectl get kafka demo -n default \
+              -o jsonpath='{.status.conditions[?(@.type=="CaRotation")].status}' 2>/dev/null || true)
+            rot_reason=$(kubectl get kafka demo -n default \
+              -o jsonpath='{.status.conditions[?(@.type=="CaRotation")].reason}' 2>/dev/null || true)
+            ready=$(kubectl get kafka demo -n default \
+              -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
+            echo "attempt $i: certs=$certs gen=$gen (init=$INIT_CA_KEY_GEN) phase='$phase' CaRotation=$rot/$rot_reason Ready=$ready"
+            if [ "$certs" = "2" ]; then saw_two=1; fi
+            if [ -n "$gen" ] && [ "$gen" != "$INIT_CA_KEY_GEN" ] \
+              && [ "$certs" = "1" ] \
+              && [ "$rot" = "False" ] && [ "$rot_reason" = "Idle" ] \
+              && [ "$ready" = "True" ]; then
+              settled=1
+              break
+            fi
+            sleep 5
+          done
+
+          if [ "$saw_two" = "1" ]; then
+            echo "observed distributing-trust phase (trust bundle reached 2 certs)"
+          else
+            echo "note: did not catch the 2-cert window (intermediate phase may have elapsed between polls)"
+          fi
+
+          if [ "$settled" != "1" ]; then
+            echo "::error::CA key rotation did not settle within ~8 minutes"
+            kubectl describe kafka demo -n default || true
+            kubectl get secret demo-cluster-ca demo-cluster-ca-cert -n default -o yaml || true
+            kubectl logs -n crabka-operator deploy/operator-crabka-operator --tail=200 || true
+            exit 1
+          fi
+          echo "CA key rotation settled: gen $INIT_CA_KEY_GEN -> $gen, bundle back to 1 cert, CaRotation=False/Idle, Ready=True"
+
+      # ─────────────────────────────────────────────────────────────────────
       # Scenario 2: mTLS internal listener
       #
       # A second cluster `demo-mtls` is used so its clients CA is independent.

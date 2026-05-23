@@ -53,11 +53,26 @@ impl Default for CertificateAuthority {
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct CertificateAuthorityStatus {
-    /// RFC3339 `notAfter` of the current CA cert.
+    /// RFC3339 `notAfter` of the current (signing) CA cert.
     pub not_after: String,
     /// `true` when the operator generated this CA (i.e.
     /// `generateCertificateAuthority == true`); `false` for BYO.
     pub generated: bool,
+    /// Slice 34: monotonic generation of the active signing cert (bumped on
+    /// same-key renewal and on key promotion).
+    #[serde(default)]
+    pub cert_generation: u64,
+    /// Slice 34: monotonic generation of the active signing key (bumped only on
+    /// key replacement).
+    #[serde(default)]
+    pub key_generation: u64,
+    /// Slice 34: staged key-replacement phase
+    /// (`idle` | `key-replace-trust` | `key-replace-promote`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotation_phase: Option<String>,
+    /// Slice 34: number of CA certs currently in the trust bundle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trust_anchors: Option<usize>,
 }
 
 #[cfg(test)]

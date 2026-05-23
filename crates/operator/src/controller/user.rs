@@ -302,19 +302,26 @@ pub async fn reconcile(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Action,
             let kafka_ref = kafka
                 .as_ref()
                 .expect("bootstrap presence implies Kafka resource is Some");
-            let ca_outcome = match crate::controller::cluster_ca::ensure_clients_ca(
+            let ca_outcome = match crate::controller::cluster_ca::reconcile_ca(
                 &secret_api,
                 kafka_ref,
+                crate::controller::cluster_ca::WhichCa::Clients,
+                false,
+                false,
+                true,
+                time::OffsetDateTime::now_utc(),
             )
             .await
             {
                 Ok(o) => o,
                 Err(e) => {
-                    tracing::warn!(error = %e, %cluster, "ensure_clients_ca failed");
+                    tracing::warn!(error = %e, %cluster, "clients CA reconcile failed");
                     return Ok(Action::requeue(Duration::from_secs(15)));
                 }
             };
-            let ca = ca_outcome.material;
+            // Sign user certs with the clients CA's active signer (slice 34: the
+            // first block of the trust bundle, paired with the active key).
+            let ca = ca_outcome.signing_material;
             let cert_status =
                 match user_tls::ensure_user_cert_secret(&secret_api, &obj, &ca, tls_auth).await {
                     Ok(s) => s,

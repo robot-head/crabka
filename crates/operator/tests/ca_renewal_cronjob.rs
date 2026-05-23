@@ -312,10 +312,11 @@ async fn cronjob_reissues_aging_broker_leafs() {
 // ---------------------------------------------------------------------------
 
 /// Seed a cluster CA with `notAfter = now + 25 days` (< 30-day renewal
-/// window). `run_renewal_check` must:
-///   1. NOT PATCH the cluster-ca Secret (no rotation).
-///   2. POST a `Warning` Event with reason `CaRotationRequired`.
-///   3. GET Kafka CR status + PATCH it with `CaRotationRequired=True` condition.
+/// window). Slice 34: the `CronJob` no longer flags rotation disruptively — it
+/// nudges the reconciler. `run_renewal_check` must:
+///   1. NOT PATCH the cluster-ca Secret (the reconciler owns rotation).
+///   2. PATCH the Kafka CR metadata stamping `crabka.io/ca-renew-after`.
+///   3. POST a `Normal` Event with reason `CaRenewalScheduled`.
 ///
 /// Clients CA and broker keystore are fresh / absent so they don't trigger
 /// additional paths.
@@ -389,27 +390,21 @@ async fn cronjob_flags_expiring_cluster_ca_without_rotating() {
                 ),
             ),
         },
-        // 6. flag_ca_if_expiring for cluster CA → expiring:
-        //    POST Warning event (CaRotationRequired)
+        // 6. flag_ca_if_expiring (slice 34): stamp the ca-renew-after annotation
+        //    on the Kafka CR (nudges the reconciler to run a same-key renewal).
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/kafkas/{cluster}"),
+            response: json_response(200, &kafka_status_body(cluster, ns)),
+        },
+        // 7. POST a Normal CaRenewalScheduled event.
         MockRule {
             method: Method::POST,
             path_substr: format!("/namespaces/{ns}/events"),
             response: json_response(201, &fake_event_body(ns)),
         },
-        // 7. GET Kafka status (to merge existing conditions)
-        MockRule {
-            method: Method::GET,
-            path_substr: format!("/kafkas/{cluster}/status"),
-            response: json_response(200, &kafka_status_body(cluster, ns)),
-        },
-        // 8. PATCH Kafka status with CaRotationRequired=True
-        MockRule {
-            method: Method::PATCH,
-            path_substr: format!("/kafkas/{cluster}/status"),
-            response: json_response(200, &kafka_status_body(cluster, ns)),
-        },
-        // 9. clients CA not expiring → no event.
-        // 10. GET broker keystore → absent (early return from renew_broker_leafs)
+        // 8. clients CA not expiring → no event.
+        // 9. GET broker keystore → absent (early return from renew_broker_leafs)
         MockRule {
             method: Method::GET,
             path_substr: format!("/secrets/{cluster}-kafka-brokers"),
@@ -448,7 +443,7 @@ async fn cronjob_flags_expiring_cluster_ca_without_rotating() {
         "cluster-ca Secret must NOT be patched (no rotation); requests: {methods_uris:?}",
     );
 
-    // Must have emitted a CaRotationRequired Warning event.
+    // Must have emitted a Normal CaRenewalScheduled event.
     let event_post = observed.iter().find(|r| {
         r.method() == Method::POST
             && r.uri()
@@ -463,39 +458,31 @@ async fn cronjob_flags_expiring_cluster_ca_without_rotating() {
         serde_json::from_slice(event_post.unwrap().body()).expect("event body is JSON");
     assert_eq!(
         event_body["reason"].as_str().unwrap_or(""),
-        "CaRotationRequired",
-        "event reason must be CaRotationRequired; body = {event_body}",
+        "CaRenewalScheduled",
+        "event reason must be CaRenewalScheduled; body = {event_body}",
     );
     assert_eq!(
         event_body["type"].as_str().unwrap_or(""),
-        "Warning",
-        "event type must be Warning; body = {event_body}",
+        "Normal",
+        "event type must be Normal; body = {event_body}",
     );
 
-    // Must have PATCHed the Kafka status with CaRotationRequired=True.
-    let status_patch = observed.iter().find(|r| {
+    // Must have PATCHed the Kafka CR metadata with the ca-renew-after annotation
+    // (the nudge), NOT the status with CaRotationRequired.
+    let meta_patch = observed.iter().find(|r| {
         r.method() == Method::PATCH
-            && r.uri()
-                .to_string()
-                .contains(&format!("/kafkas/{cluster}/status"))
+            && r.uri().to_string().contains(&format!("/kafkas/{cluster}"))
+            && !r.uri().to_string().contains("/status")
     });
     assert!(
-        status_patch.is_some(),
-        "expected PATCH to /kafkas/{cluster}/status; requests: {methods_uris:?}",
+        meta_patch.is_some(),
+        "expected metadata PATCH to /kafkas/{cluster}; requests: {methods_uris:?}",
     );
-    let status_body: serde_json::Value =
-        serde_json::from_slice(status_patch.unwrap().body()).expect("status PATCH body is JSON");
-    let conditions = status_body["status"]["conditions"]
-        .as_array()
-        .expect("conditions array in status PATCH");
-    let rotation_cond = conditions
-        .iter()
-        .find(|c| c["type"] == "CaRotationRequired")
-        .expect("CaRotationRequired condition present in status PATCH");
-    assert_eq!(
-        rotation_cond["status"].as_str().unwrap_or(""),
-        "True",
-        "CaRotationRequired condition status must be True; body = {status_body}",
+    let meta_body: serde_json::Value =
+        serde_json::from_slice(meta_patch.unwrap().body()).expect("metadata PATCH body is JSON");
+    assert!(
+        meta_body["metadata"]["annotations"]["crabka.io/ca-renew-after"].is_string(),
+        "metadata PATCH must stamp crabka.io/ca-renew-after; body = {meta_body}",
     );
 
     assert_eq!(state.remaining_rules(), 0, "all rules consumed");

@@ -570,63 +570,6 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
     let secret_api: Api<Secret> = Api::namespaced(ctx.client.clone(), &ns);
     let _cluster_id = ensure_cluster_id_secret(&secret_api, &obj).await?;
 
-    // Slice 30: Ensure cluster CA + clients CA. On BYO-missing, surface
-    // a False condition and requeue rather than crashing. Both CAs must
-    // succeed before we proceed; a failure here skips the ConfigMap and
-    // keystore steps (they depend on the CA material).
-    let (cluster_ca_outcome, clients_ca_outcome, cluster_ca_cond, clients_ca_cond) = {
-        let cluster_result = cluster_ca::ensure_cluster_ca(&secret_api, &obj).await;
-        let cluster_outcome = match cluster_result {
-            Ok(o) => o,
-            Err(ReconcileError::ByoCaMissing { ref which }) => {
-                let cond = condition(
-                    which,
-                    "False",
-                    "ByoCaMissing",
-                    "spec.clusterCa.generateCertificateAuthority=false but the CA Secret pair is absent",
-                );
-                // Read-modify-write: preserve any existing conditions (e.g.
-                // ListenersReady, NpReady) written by a prior reconcile pass.
-                // JSON Merge Patch on an array replaces the whole array, so we
-                // must fetch the current status and upsert rather than clobber.
-                let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), &ns);
-                patch_status_with_condition(&kafka_api, &name, cond).await?;
-                return Ok(Action::requeue(Duration::from_mins(1)));
-            }
-            Err(e) => return Err(e),
-        };
-        let clients_result = cluster_ca::ensure_clients_ca(&secret_api, &obj).await;
-        let clients_outcome = match clients_result {
-            Ok(o) => o,
-            Err(ReconcileError::ByoCaMissing { ref which }) => {
-                let cond = condition(
-                    which,
-                    "False",
-                    "ByoCaMissing",
-                    "spec.clientsCa.generateCertificateAuthority=false but the CA Secret pair is absent",
-                );
-                // Read-modify-write: same reasoning as the cluster-CA arm above.
-                let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), &ns);
-                patch_status_with_condition(&kafka_api, &name, cond).await?;
-                return Ok(Action::requeue(Duration::from_mins(1)));
-            }
-            Err(e) => return Err(e),
-        };
-        let cc = condition(
-            "ClusterCaReady",
-            "True",
-            "CaReady",
-            "cluster CA Secret pair present and parseable",
-        );
-        let clic = condition(
-            "ClientsCaReady",
-            "True",
-            "CaReady",
-            "clients CA Secret pair present and parseable",
-        );
-        (cluster_outcome, clients_outcome, cc, clic)
-    };
-
     // Slice 28: evaluate the declared versions against the operator-
     // finalized metadata version (read from the watched object's status —
     // no extra API request). On a failure we surface KafkaVersionValid=
@@ -678,16 +621,140 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
     let logging_filter = logging_outcome.filter().map(str::to_string);
     let logging_condition = logging::condition_for(&logging_outcome);
 
-    let cfg_hash = common::combined_config_hash(
-        &obj.spec,
-        Some(&cluster_ca_outcome.material.cert_pem),
-        explicit_pin,
-        logging_filter.as_deref(),
-    );
-
+    // Pool list — needed up front for the slice-34 CA rotation convergence
+    // check (whether the previous rotation step's roll has finished), and
+    // reused below for status rollup + owner-ref adoption.
     let pool_api: Api<KafkaNodePool> = Api::namespaced(ctx.client.clone(), &ns);
     let lp = ListParams::default().labels(&format!("crabka.io/cluster={name}"));
     let pools = pool_api.list(&lp).await?;
+    let rollout_converged = pools_converged(pools.iter());
+
+    // Slice 34: reconcile both CAs with rotation. The cluster CA drives the
+    // staged key-replacement machine + the config-hash; the clients CA only
+    // creates / same-key-renews (its truststore is hot-reloaded). force-* and
+    // CronJob `ca-renew-after` annotations target the cluster CA. On
+    // BYO-missing, surface a False condition and requeue (slice-30 behaviour).
+    let cr_anns = obj.meta().annotations.clone().unwrap_or_default();
+    let force_renew = cr_anns.contains_key(cluster_ca::ANN_FORCE_RENEW)
+        || cr_anns.contains_key(cluster_ca::ANN_RENEW_AFTER);
+    let force_replace_key = cr_anns.contains_key(cluster_ca::ANN_FORCE_REPLACE_KEY);
+    let now = time::OffsetDateTime::now_utc();
+
+    let (cluster_ca_outcome, clients_ca_outcome, cluster_ca_cond, clients_ca_cond) = {
+        let cluster_result = cluster_ca::reconcile_ca(
+            &secret_api,
+            &obj,
+            cluster_ca::WhichCa::Cluster,
+            force_renew,
+            force_replace_key,
+            rollout_converged,
+            now,
+        )
+        .await;
+        let cluster_outcome = match cluster_result {
+            Ok(o) => o,
+            Err(ReconcileError::ByoCaMissing { ref which }) => {
+                let cond = condition(
+                    which,
+                    "False",
+                    "ByoCaMissing",
+                    "spec.clusterCa.generateCertificateAuthority=false but the CA Secret pair is absent",
+                );
+                let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), &ns);
+                patch_status_with_condition(&kafka_api, &name, cond).await?;
+                return Ok(Action::requeue(Duration::from_mins(1)));
+            }
+            Err(e) => return Err(e),
+        };
+        // Clients CA never enters the staged machine and takes no force flags.
+        let clients_result = cluster_ca::reconcile_ca(
+            &secret_api,
+            &obj,
+            cluster_ca::WhichCa::Clients,
+            false,
+            false,
+            true,
+            now,
+        )
+        .await;
+        let clients_outcome = match clients_result {
+            Ok(o) => o,
+            Err(ReconcileError::ByoCaMissing { ref which }) => {
+                let cond = condition(
+                    which,
+                    "False",
+                    "ByoCaMissing",
+                    "spec.clientsCa.generateCertificateAuthority=false but the CA Secret pair is absent",
+                );
+                let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), &ns);
+                patch_status_with_condition(&kafka_api, &name, cond).await?;
+                return Ok(Action::requeue(Duration::from_mins(1)));
+            }
+            Err(e) => return Err(e),
+        };
+        let cc = condition(
+            "ClusterCaReady",
+            "True",
+            "CaReady",
+            "cluster CA Secret pair present and parseable",
+        );
+        let clic = condition(
+            "ClientsCaReady",
+            "True",
+            "CaReady",
+            "clients CA Secret pair present and parseable",
+        );
+        (cluster_outcome, clients_outcome, cc, clic)
+    };
+
+    // Strip the one-shot rotation-trigger annotations once consumed (force
+    // renew/replace + CronJob nudge are all acted on this pass).
+    let strip_keys: Vec<&str> = [
+        cluster_ca::ANN_FORCE_RENEW,
+        cluster_ca::ANN_FORCE_REPLACE_KEY,
+        cluster_ca::ANN_RENEW_AFTER,
+    ]
+    .into_iter()
+    .filter(|k| cr_anns.contains_key(*k))
+    .collect();
+    if !strip_keys.is_empty() {
+        let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), &ns);
+        strip_annotations(&kafka_api, &name, &strip_keys).await?;
+    }
+
+    // A forced rotation the operator can't honor (BYO / clients-CA key
+    // replace) surfaces a Warning Event; the condition explains it too.
+    if cluster_ca_outcome.refused.is_some() {
+        emit_ca_rotation_refused_event(
+            &ctx.client,
+            &ns,
+            &obj,
+            &cluster_ca_outcome.rotation_message,
+        )
+        .await
+        .ok();
+    }
+
+    let ca_rotation_cond = condition(
+        "CaRotation",
+        if cluster_ca_outcome.rotation_in_progress {
+            "True"
+        } else {
+            "False"
+        },
+        cluster_ca_outcome.rotation_reason,
+        &cluster_ca_outcome.rotation_message,
+    );
+
+    // Slice 34: the config-hash covers the cluster-CA *trust bundle* (not just
+    // the signing cert), so adding / promoting / pruning a trust anchor rolls
+    // the cluster, while same-key leaf renewal (slice-33 hot-reload) does not.
+    let cfg_hash = common::combined_config_hash(
+        &obj.spec,
+        Some(&cluster_ca_outcome.trust_bundle_pem),
+        explicit_pin,
+        logging_filter.as_deref(),
+    );
 
     // If validation failed, leave the existing ConfigMap untouched —
     // per the spec, "existing objects are not deleted; surface the
@@ -780,7 +847,8 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
             &secret_api,
             &obj,
             &keystore_requests,
-            &cluster_ca_outcome.material,
+            &cluster_ca_outcome.signing_material,
+            cluster_ca_outcome.force_reissue_leafs,
         )
         .await?;
 
@@ -1003,6 +1071,7 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
         np_condition,
         cluster_ca_cond,
         clients_ca_cond,
+        ca_rotation_cond,
         version_cond,
         logging_condition,
     ];
@@ -1038,10 +1107,18 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
         cluster_ca: Some(crate::crd::CertificateAuthorityStatus {
             not_after: cluster_ca_outcome.not_after.clone(),
             generated: cluster_ca_outcome.generated,
+            cert_generation: cluster_ca_outcome.cert_generation,
+            key_generation: cluster_ca_outcome.key_generation,
+            rotation_phase: Some(cluster_ca_outcome.phase.as_str().to_string()),
+            trust_anchors: Some(cluster_ca_outcome.trust_anchors),
         }),
         clients_ca: Some(crate::crd::CertificateAuthorityStatus {
             not_after: clients_ca_outcome.not_after.clone(),
             generated: clients_ca_outcome.generated,
+            cert_generation: clients_ca_outcome.cert_generation,
+            key_generation: clients_ca_outcome.key_generation,
+            rotation_phase: Some(clients_ca_outcome.phase.as_str().to_string()),
+            trust_anchors: Some(clients_ca_outcome.trust_anchors),
         }),
         kafka_version: Some(obj.spec.kafka_version.clone()),
         // Advance the finalized metadata version when valid; hold the
@@ -1172,6 +1249,75 @@ async fn emit_weak_auth_event(
         "crabka-operator/listener-auth-check",
     )
     .await
+}
+
+/// Slice 34: Warning Event when a forced CA rotation can't be honored (BYO CA
+/// or clients-CA key replacement). Fire-and-forget at the call site.
+async fn emit_ca_rotation_refused_event(
+    client: &kube::Client,
+    namespace: &str,
+    kafka: &Kafka,
+    message: &str,
+) -> Result<(), ReconcileError> {
+    crate::controller::cluster_ca::emit_event(
+        client,
+        namespace,
+        kafka,
+        "Warning",
+        "CaRotationRefused",
+        message,
+        "crabka-ca-rotation-",
+        "CaRotation",
+        "crabka-operator/ca-rotation",
+    )
+    .await
+}
+
+/// Slice 34: "no roll in flight" — every pool carries the same (non-empty)
+/// `crabka.io/config-hash` label and every pool's broker is Ready. The CA
+/// rotation state machine advances a staged phase only when this holds, so
+/// trust distribution finishes before the new key is promoted (and promotion
+/// finishes before the old anchor is pruned). Empty pool list ⇒ converged.
+pub(crate) fn pools_converged<'a>(pools: impl IntoIterator<Item = &'a KafkaNodePool>) -> bool {
+    let mut hashes = std::collections::BTreeSet::new();
+    let mut all_ready = true;
+    let mut any = false;
+    for p in pools {
+        any = true;
+        let h = p
+            .metadata
+            .labels
+            .as_ref()
+            .and_then(|l| l.get("crabka.io/config-hash").cloned());
+        hashes.insert(h);
+        if p.status
+            .as_ref()
+            .and_then(|s| s.ready_replicas)
+            .unwrap_or(0)
+            < 1
+        {
+            all_ready = false;
+        }
+    }
+    !any || (hashes.len() == 1 && !hashes.contains(&None) && all_ready)
+}
+
+/// Slice 34: remove one-shot rotation-trigger annotations from the `Kafka` CR
+/// (JSON Merge Patch with `null` values deletes the keys).
+async fn strip_annotations(
+    kafka_api: &Api<Kafka>,
+    name: &str,
+    keys: &[&str],
+) -> Result<(), ReconcileError> {
+    let mut ann = serde_json::Map::new();
+    for k in keys {
+        ann.insert((*k).to_string(), serde_json::Value::Null);
+    }
+    let patch = json!({ "metadata": { "annotations": serde_json::Value::Object(ann) } });
+    kafka_api
+        .patch(name, &PatchParams::default(), &Patch::Merge(&patch))
+        .await?;
+    Ok(())
 }
 
 fn svc_name(kafka: &str) -> String {

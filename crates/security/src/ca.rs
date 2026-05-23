@@ -120,6 +120,49 @@ pub fn generate_cluster_ca(cn: &str, validity_days: u32) -> Result<CaMaterial, C
     })
 }
 
+/// Re-sign a cluster CA cert reusing an existing key (same-key renewal).
+///
+/// Generates a fresh self-signed cert with the SAME subject DN (`CN=<cn>,
+/// O=crabka, OU=cluster`), `CA:TRUE`, `KU keyCertSign|cRLSign`, and a new
+/// `validityDays` window, but keyed by `key_pem` rather than a freshly
+/// generated key. Because the public key (SPKI) and subject DN are identical to
+/// the cert this replaces, leaf certs issued under the old cert still chain to
+/// the renewed one — the renewal is non-disruptive. Returns the cert PEM only;
+/// the caller already holds the key.
+pub fn renew_cluster_ca(key_pem: &str, cn: &str, validity_days: u32) -> Result<String, CaError> {
+    renew_ca(key_pem, cn, validity_days, true)
+}
+
+/// Re-sign a clients CA cert reusing an existing key (same-key renewal).
+/// Like [`renew_cluster_ca`] but with the clients-CA subject DN (no
+/// `OU=cluster`).
+pub fn renew_clients_ca(key_pem: &str, cn: &str, validity_days: u32) -> Result<String, CaError> {
+    renew_ca(key_pem, cn, validity_days, false)
+}
+
+fn renew_ca(key_pem: &str, cn: &str, validity_days: u32, cluster: bool) -> Result<String, CaError> {
+    let key = KeyPair::from_pem(key_pem)?;
+
+    let mut params = CertificateParams::new(Vec::<String>::new())?;
+    let (not_before, not_after) = validity_window(validity_days)?;
+    params.not_before = not_before;
+    params.not_after = not_after;
+
+    let mut dn = DistinguishedName::new();
+    dn.push(DnType::CommonName, cn);
+    dn.push(DnType::OrganizationName, "crabka");
+    if cluster {
+        dn.push(DnType::OrganizationalUnitName, "cluster");
+    }
+    params.distinguished_name = dn;
+
+    params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+
+    let cert = params.self_signed(&key)?;
+    Ok(cert.pem())
+}
+
 /// Sign a broker leaf cert: server cert + client cert in one
 /// (EKU = serverAuth + clientAuth, KU = digitalSignature +
 /// keyEncipherment). SANs accept a mix of DNS names and IPs. ECDSA
@@ -385,6 +428,92 @@ mod tests {
             general_names
                 .iter()
                 .any(|gn| matches!(gn, x509_parser::extensions::GeneralName::IPAddress(_)))
+        );
+    }
+
+    fn spki_der(cert_pem: &str) -> Vec<u8> {
+        let der = pem_to_der(cert_pem);
+        let (_, cert) = X509Certificate::from_der(der.as_ref()).expect("parse");
+        cert.public_key().raw.to_vec()
+    }
+
+    #[test]
+    fn renew_cluster_ca_reuses_key_and_preserves_subject() {
+        let orig = generate_cluster_ca("c1-cluster-ca", 30).expect("CA");
+        let renewed_pem = renew_cluster_ca(&orig.key_pem, "c1-cluster-ca", 365).expect("renew");
+
+        // Same public key (same SPKI) — the renewal reuses the key.
+        assert_eq!(
+            spki_der(&orig.cert_pem),
+            spki_der(&renewed_pem),
+            "renewed cert must carry the same public key"
+        );
+
+        // Same subject DN, including OU=cluster.
+        let der = pem_to_der(&renewed_pem);
+        let (_, cert) = X509Certificate::from_der(der.as_ref()).expect("parse renewed");
+        let subject = cert.subject().to_string();
+        assert!(subject.contains("CN=c1-cluster-ca"), "subject={subject}");
+        assert!(subject.contains("O=crabka"), "subject={subject}");
+        assert!(subject.contains("OU=cluster"), "subject={subject}");
+        assert!(
+            cert.basic_constraints()
+                .expect("BC")
+                .expect("BC present")
+                .value
+                .ca,
+            "renewed cert must still be a CA"
+        );
+    }
+
+    #[test]
+    fn renew_cluster_ca_extends_validity() {
+        let orig = generate_cluster_ca("c1-cluster-ca", 30).expect("CA");
+        let renewed_pem = renew_cluster_ca(&orig.key_pem, "c1-cluster-ca", 365).expect("renew");
+
+        let span = |pem: &str| {
+            let der = pem_to_der(pem);
+            let (_, c) = X509Certificate::from_der(der.as_ref()).expect("parse");
+            c.validity().not_after.timestamp() - c.validity().not_before.timestamp()
+        };
+        assert!(
+            span(&renewed_pem) > span(&orig.cert_pem),
+            "renewed validity window must be longer"
+        );
+    }
+
+    #[test]
+    fn leaf_under_old_cert_verifies_against_renewed_cert() {
+        // A leaf issued by the ORIGINAL cluster CA must verify against the
+        // RENEWED cert's public key — this is what makes same-key renewal
+        // non-disruptive (existing broker leafs keep chaining).
+        let orig = generate_cluster_ca("c1-cluster-ca", 30).expect("CA");
+        let sans = vec![SubjectAltName::Dns("c1-broker-0".into())];
+        let leaf = issue_broker_cert(&orig.cert_pem, &orig.key_pem, "c1-broker-0", &sans, &[], 30)
+            .expect("leaf");
+        let renewed_pem = renew_cluster_ca(&orig.key_pem, "c1-cluster-ca", 365).expect("renew");
+
+        let leaf_der = pem_to_der(&leaf.cert_pem);
+        let (_, leaf_x509) = X509Certificate::from_der(leaf_der.as_ref()).expect("parse leaf");
+        let renewed_der = pem_to_der(&renewed_pem);
+        let (_, renewed_ca) =
+            X509Certificate::from_der(renewed_der.as_ref()).expect("parse renewed");
+
+        leaf_x509
+            .verify_signature(Some(renewed_ca.public_key()))
+            .expect("leaf must verify against the renewed CA public key");
+    }
+
+    #[test]
+    fn renew_clients_ca_has_no_ou_cluster() {
+        let orig = generate_clients_ca("c1-clients-ca", 30).expect("CA");
+        let renewed_pem = renew_clients_ca(&orig.key_pem, "c1-clients-ca", 365).expect("renew");
+        assert_eq!(spki_der(&orig.cert_pem), spki_der(&renewed_pem));
+        let der = pem_to_der(&renewed_pem);
+        let (_, cert) = X509Certificate::from_der(der.as_ref()).expect("parse");
+        assert!(
+            !cert.subject().to_string().contains("OU=cluster"),
+            "clients CA must not carry OU=cluster"
         );
     }
 

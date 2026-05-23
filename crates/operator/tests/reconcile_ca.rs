@@ -562,6 +562,13 @@ async fn byo_mode_without_pre_existing_secrets_errors_gracefully() {
             path_substr: format!("/namespaces/{ns}/secrets"),
             response: json_response(201, &fake_secret_body_cluster_id(&secret_name, ns)),
         },
+        // 3b. Slice 34: pools are listed before the CA reconcile (rollout
+        // convergence check), so the BYO-missing early-out now sees a pool LIST.
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/namespaces/{ns}/kafkanodepools"),
+            response: json_response(200, &fake_pool_list_body(&[])),
+        },
         // 4. GET cluster-ca key → 404 (BYO Secret missing)
         secret_rule_404(Method::GET, format!("/secrets/{cluster_ca_key}")),
         // 5. GET cluster-ca cert → 404 (BYO Secret missing)
