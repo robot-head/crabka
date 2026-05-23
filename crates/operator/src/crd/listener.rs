@@ -503,8 +503,8 @@ authentication:
         // object schema goes away and we silently lose the `oauth`
         // discriminator + its sibling property keys. This test invokes
         // the schema function directly and pins both.
-        let mut gen = schemars::SchemaGenerator::default();
-        let schema = listener_authentication_schema(&mut gen);
+        let mut generator = schemars::SchemaGenerator::default();
+        let schema = listener_authentication_schema(&mut generator);
         let v = serde_json::to_value(&schema).unwrap();
 
         // Discriminator enum contains all four variants.
