@@ -51,6 +51,12 @@ futures-util = { version = "0.3", features = ["sink"] }
 clap = { version = "4", features = ["derive"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+# Slice 42: OTLP distributed tracing. opentelemetry-otlp 0.32 lines up with
+# the tonic 0.14 / prost 0.14 / reqwest 0.13 stack already in the dep graph.
+opentelemetry = { version = "0.32", default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "0.32", default-features = false, features = ["trace"] }
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "grpc-tonic", "http-proto", "reqwest-blocking-client"] }
+tracing-opentelemetry = { version = "0.33", default-features = false }
 bon = "3"
 # wincode + serde-wincode replace bincode for serde-derived wire shapes.
 # Pinned to 0.4: serde-wincode 0.1.0 depends on wincode ^0.4, so a 0.5

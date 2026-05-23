@@ -1675,3 +1675,74 @@ Kafka client for ApiVersions.
 - Reference doc:
   [`docs/superpowers/specs/2026-05-23-crabka-operator-logging-41-design.md`].
 
+## Slice 42 — Crabka core: OTLP distributed tracing (2026-05-23)
+
+- Continues Phase 6 (observability) after 39/40/41. Crabka-core slice: the
+  broker gains an OpenTelemetry tracing pipeline that batch-exports spans
+  over OTLP (gRPC `:4317` or HTTP/protobuf `:4318`). **Off by default** and
+  driven entirely by env — a broker with no OTLP env behaves exactly as
+  before. The operator-surfacing follow-up (`Kafka.spec.tracing`) is a
+  later slice.
+- New `crabka_broker::telemetry` module owns the whole pipeline:
+  - `OtlpConfig::from_env(get, instance_id, version) -> Option<Self>` — a
+    pure, injectable env resolver (the `get` closure is the only I/O);
+    `None` means disabled. CRABKA vars win over the standard OTel vars:
+    enable via `CRABKA_OTLP_ENDPOINT` / any `OTEL_EXPORTER_OTLP*ENDPOINT` /
+    `CRABKA_OTLP_ENABLED`; `OTEL_SDK_DISABLED=true` force-disables. Protocol
+    (`CRABKA_OTLP_PROTOCOL` / `OTEL_EXPORTER_OTLP_PROTOCOL`, default `grpc`),
+    sample ratio (`CRABKA_OTLP_SAMPLE_RATIO` / `OTEL_TRACES_SAMPLER_ARG`,
+    clamped to `[0,1]`), `OTEL_SERVICE_NAME`, export timeout.
+  - `init(otlp, default_filter) -> TelemetryGuard` — installs the global
+    subscriber: always a stdout `fmt` layer (the existing `RUST_LOG`
+    behaviour), plus a `tracing-opentelemetry` batch-export layer when OTLP
+    is on. Resource attrs `service.name` / `service.version` (crate version)
+    / `service.instance.id` (broker id); sampler
+    `ParentBased(TraceIdRatioBased(ratio))`. The guard's `shutdown()`
+    flushes the final batch before exit.
+  - `request_span(...)` + `api_name(api_key)`.
+- **Per-request span on a dedicated `DEBUG` target** (`crabka_broker::request`):
+  the `fmt` layer's default `info` filter never enables it (no stdout spam,
+  zero cost on a no-OTLP broker), while the OTLP layer carries its own
+  per-layer filter (`info,crabka_broker::request=debug,crabka_log=info`,
+  overridable via `CRABKA_OTLP_FILTER`) that does. Span name = API name via
+  `otel.name`; `otel.kind=server`; OTel-semconv attributes
+  (`messaging.system`, `kafka.api_key`, `kafka.api_version`,
+  `kafka.correlation_id`, `messaging.kafka.client_id`,
+  `network.peer.address`).
+- Dispatch instrumentation is uniform + additive: the span is built once per
+  loop iteration (guarded by `tracing::enabled!` so the extra header parse
+  only runs when OTLP is on) and attached to every handler future via
+  `.instrument(req_span.clone())` — all 30 inline `handle_*_frame` arms and
+  the generic `dispatch_one` fallback — plus `req_span.in_scope(..)` for the
+  sync SASL path. No control-flow change; no api_key coverage gap.
+- **Why broker-side root spans:** the Kafka request header carries no trace
+  context (`RequestHeader` is non-flexible), and ecosystem tracing
+  propagates `traceparent` via *record headers*, not the RPC. So requests
+  start root server spans here; linking to a producing client's trace
+  (record-header `traceparent` extraction in Produce/Fetch) is deferred to a
+  follow-up that builds on this pipeline.
+- **Runtime note:** the batch processor exports on a dedicated thread via
+  `futures_executor::block_on`; the gRPC (tonic) exporter therefore needs
+  the provider built inside a tokio runtime to capture the handle —
+  `telemetry::init` is called from the broker `#[tokio::main]`, satisfying
+  it. HTTP/protobuf uses the blocking reqwest client (no such requirement).
+- New broker workspace deps: `opentelemetry` 0.32, `opentelemetry_sdk` 0.32,
+  `opentelemetry-otlp` 0.32 (`grpc-tonic` + `http-proto` +
+  `reqwest-blocking-client`), `tracing-opentelemetry` 0.33. The 0.32 line
+  lines up with the tonic 0.14 / prost 0.14 / reqwest 0.13 stack already in
+  the graph — the lockfile grows by only 7 crates (all Apache-2.0 / MIT).
+- Tests: +11 lib unit (`telemetry`): env resolution paths, endpoint
+  precedence, `OTEL_SDK_DISABLED`, protocol parse/defaults, sample-ratio
+  parse+clamp, service-name/timeout overrides, the `api_name` table, and a
+  `request_span` test driving a capturing `tracing` `Layer` (scoped via
+  `with_default`) to assert `otel.name`/`otel.kind`/`kafka.api_key`. Broker
+  lib tests at 330; full broker suite green (the instrumented dispatch path
+  is exercised unchanged with spans disabled). clippy `-D warnings` + fmt
+  clean.
+- Out of scope (deferred): record-header `traceparent` extraction (the
+  cross-process link); OTLP metrics/logs signals (metrics stay on the
+  slice-39 Prometheus endpoint); operator `Kafka.spec.tracing` surfacing;
+  per-response error-code span attributes.
+- Reference doc:
+  [`docs/superpowers/specs/2026-05-23-crabka-broker-otlp-tracing-42-design.md`].
+

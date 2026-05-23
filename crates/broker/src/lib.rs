@@ -150,6 +150,7 @@ pub(crate) mod reassignment;
 pub(crate) mod replica_state;
 mod replicator;
 mod replicator_supervisor;
+pub mod telemetry;
 pub mod throttle;
 pub(crate) mod tls_reload;
 mod txn;

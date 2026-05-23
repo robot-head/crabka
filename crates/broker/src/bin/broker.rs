@@ -74,14 +74,19 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "crabka_broker=info,crabka_log=info,info".into()),
-        )
-        .init();
-
     let args = Args::parse();
+
+    // Slice 42: install the tracing subscriber — stdout `fmt` plus an
+    // optional OTLP export layer. OTLP stays off unless the environment
+    // opts in (see `crabka_broker::telemetry`). Built here, inside the
+    // tokio runtime, so the gRPC exporter captures the runtime handle.
+    let otlp = crabka_broker::telemetry::OtlpConfig::from_env(
+        |k| std::env::var(k).ok(),
+        &args.broker_id.to_string(),
+        env!("CARGO_PKG_VERSION"),
+    );
+    let telemetry =
+        crabka_broker::telemetry::init(otlp, "crabka_broker=info,crabka_log=info,info")?;
     let file_config: Option<crabka_broker::file_config::FileConfig> =
         match args.config_file.as_ref() {
             Some(p) => {
@@ -149,6 +154,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("shutdown signal received");
     handle.shutdown().await;
     tracing::info!("crabka-broker stopped");
+    telemetry.shutdown();
     Ok(())
 }
 

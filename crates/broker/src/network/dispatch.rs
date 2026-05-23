@@ -21,6 +21,7 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio_util::codec::Framed;
+use tracing::Instrument as _;
 
 use crate::broker::Broker;
 use crate::codes;
@@ -172,6 +173,29 @@ async fn serve_connection_stream<S>(
                 break;
             }
         };
+        // Per-request server span (slice 42). The `enabled!` guard keeps
+        // this a single disabled-level check on a broker without OTLP —
+        // only the OTLP layer turns on `REQUEST_TARGET` at DEBUG, so the
+        // extra header parse below never runs in the common case. Each
+        // handler `.await` is `.instrument`ed with this span so handler
+        // events nest under it and export as one OTLP server span.
+        let req_span = if tracing::enabled!(target: crate::telemetry::REQUEST_TARGET, tracing::Level::DEBUG)
+        {
+            match parse_request_header(&frame) {
+                Ok((api_key, api_version, correlation_id, _body)) => {
+                    crate::telemetry::request_span(
+                        api_key,
+                        api_version,
+                        correlation_id,
+                        peek_client_id(&frame),
+                        &peer,
+                    )
+                }
+                Err(_) => tracing::Span::none(),
+            }
+        } else {
+            tracing::Span::none()
+        };
         // Pre-auth gate: on SASL listeners, before the connection is
         // authenticated, only api_keys on the allowlist (17/36/18) are
         // permitted. Anything else gets ILLEGAL_SASL_STATE (34).
@@ -208,7 +232,9 @@ async fn serve_connection_stream<S>(
         // table because handlers receive only `&Broker` and have no way to
         // touch `auth`. Returning `Some(SaslFrameOutcome)` short-circuits
         // the normal dispatch_one() path for that frame.
-        if let Some(outcome) = try_handle_sasl_frame(&broker, &frame, &mut auth, &sasl_mechanisms) {
+        if let Some(outcome) = req_span
+            .in_scope(|| try_handle_sasl_frame(&broker, &frame, &mut auth, &sasl_mechanisms))
+        {
             let SaslFrameOutcome {
                 response_bytes,
                 close_after,
@@ -237,7 +263,10 @@ async fn serve_connection_stream<S>(
         // Returning `Some` short-circuits the normal `dispatch_one()` path
         // for this frame.
         if peek_api_key(&frame).ok() == Some(51) {
-            match handle_alter_user_scram_credentials_frame(&broker, &frame, &auth, &peer).await {
+            match handle_alter_user_scram_credentials_frame(&broker, &frame, &auth, &peer)
+                .instrument(req_span.clone())
+                .await
+            {
                 Ok(bytes) => {
                     if let Err(e) = framed.send(bytes).await {
                         tracing::warn!(error = %e, "framed.send error during AUSCR, closing");
@@ -259,7 +288,10 @@ async fn serve_connection_stream<S>(
         // table signature can't carry that context, so this api_key
         // intercepts inline.
         if peek_api_key(&frame).ok() == Some(0) {
-            match handle_produce_frame(&broker, &frame, &auth, &peer).await {
+            match handle_produce_frame(&broker, &frame, &auth, &peer)
+                .instrument(req_span.clone())
+                .await
+            {
                 Ok(bytes) => {
                     if let Err(e) = framed.send(bytes).await {
                         tracing::warn!(error = %e, "framed.send error during Produce, closing");
@@ -281,7 +313,10 @@ async fn serve_connection_stream<S>(
         // signature can't carry that context, so this api_key intercepts
         // inline.
         if peek_api_key(&frame).ok() == Some(1) {
-            match handle_fetch_frame(&broker, &frame, &auth, &peer).await {
+            match handle_fetch_frame(&broker, &frame, &auth, &peer)
+                .instrument(req_span.clone())
+                .await
+            {
                 Ok(bytes) => {
                     if let Err(e) = framed.send(bytes).await {
                         tracing::warn!(error = %e, "framed.send error during Fetch, closing");
@@ -304,7 +339,10 @@ async fn serve_connection_stream<S>(
         // `&Broker`-only handler table signature can't carry the
         // principal+peer context, so this api_key intercepts inline.
         if peek_api_key(&frame).ok() == Some(3) {
-            match handle_metadata_frame(&broker, &frame, &auth, &peer).await {
+            match handle_metadata_frame(&broker, &frame, &auth, &peer)
+                .instrument(req_span.clone())
+                .await
+            {
                 Ok(bytes) => {
                     if let Err(e) = framed.send(bytes).await {
                         tracing::warn!(error = %e, "framed.send error during Metadata, closing");
@@ -325,7 +363,10 @@ async fn serve_connection_stream<S>(
         // `&Broker`-only handler table signature can't carry that context,
         // so this api_key intercepts inline.
         if peek_api_key(&frame).ok() == Some(19) {
-            match handle_create_topics_frame(&broker, &frame, &auth, &peer).await {
+            match handle_create_topics_frame(&broker, &frame, &auth, &peer)
+                .instrument(req_span.clone())
+                .await
+            {
                 Ok(bytes) => {
                     if let Err(e) = framed.send(bytes).await {
                         tracing::warn!(error = %e, "framed.send error during CreateTopics, closing");
@@ -346,7 +387,10 @@ async fn serve_connection_stream<S>(
         // `&Broker`-only handler table signature can't carry that context,
         // so this api_key intercepts inline.
         if peek_api_key(&frame).ok() == Some(20) {
-            match handle_delete_topics_frame(&broker, &frame, &auth, &peer).await {
+            match handle_delete_topics_frame(&broker, &frame, &auth, &peer)
+                .instrument(req_span.clone())
+                .await
+            {
                 Ok(bytes) => {
                     if let Err(e) = framed.send(bytes).await {
                         tracing::warn!(error = %e, "framed.send error during DeleteTopics, closing");
@@ -368,7 +412,10 @@ async fn serve_connection_stream<S>(
         // against `Cluster("kafka-cluster")` and emit
         // CLUSTER_AUTHORIZATION_FAILED on Deny.
         if peek_api_key(&frame).ok() == Some(33) {
-            match handle_alter_configs_frame(&broker, &frame, &auth, &peer).await {
+            match handle_alter_configs_frame(&broker, &frame, &auth, &peer)
+                .instrument(req_span.clone())
+                .await
+            {
                 Ok(bytes) => {
                     if let Err(e) = framed.send(bytes).await {
                         tracing::warn!(error = %e, "framed.send error during AlterConfigs, closing");
@@ -386,7 +433,10 @@ async fn serve_connection_stream<S>(
         // AlterConfigs: needs both the authenticated principal and the peer
         // `SocketAddr` for per-resource ACL enforcement.
         if peek_api_key(&frame).ok() == Some(44) {
-            match handle_incremental_alter_configs_frame(&broker, &frame, &auth, &peer).await {
+            match handle_incremental_alter_configs_frame(&broker, &frame, &auth, &peer)
+                .instrument(req_span.clone())
+                .await
+            {
                 Ok(bytes) => {
                     if let Err(e) = framed.send(bytes).await {
                         tracing::warn!(
@@ -414,7 +464,10 @@ async fn serve_connection_stream<S>(
         // signature can't carry that context, so this api_key intercepts
         // inline.
         if peek_api_key(&frame).ok() == Some(21) {
-            match handle_delete_records_frame(&broker, &frame, &auth, &peer).await {
+            match handle_delete_records_frame(&broker, &frame, &auth, &peer)
+                .instrument(req_span.clone())
+                .await
+            {
                 Ok(bytes) => {
                     if let Err(e) = framed.send(bytes).await {
                         tracing::warn!(error = %e, "framed.send error during DeleteRecords, closing");
@@ -435,7 +488,10 @@ async fn serve_connection_stream<S>(
         // comes back `Deny`. The `&Broker`-only handler table signature
         // can't carry that context, so this api_key intercepts inline.
         if peek_api_key(&frame).ok() == Some(37) {
-            match handle_create_partitions_frame(&broker, &frame, &auth, &peer).await {
+            match handle_create_partitions_frame(&broker, &frame, &auth, &peer)
+                .instrument(req_span.clone())
+                .await
+            {
                 Ok(bytes) => {
                     if let Err(e) = framed.send(bytes).await {
                         tracing::warn!(error = %e, "framed.send error during CreatePartitions, closing");
@@ -456,7 +512,10 @@ async fn serve_connection_stream<S>(
         // `&Broker`-only handler table signature can't carry that context,
         // so this api_key intercepts inline.
         if peek_api_key(&frame).ok() == Some(15) {
-            match handle_describe_groups_frame(&broker, &frame, &auth, &peer).await {
+            match handle_describe_groups_frame(&broker, &frame, &auth, &peer)
+                .instrument(req_span.clone())
+                .await
+            {
                 Ok(bytes) => {
                     if let Err(e) = framed.send(bytes).await {
                         tracing::warn!(error = %e, "framed.send error during DescribeGroups, closing");
@@ -476,7 +535,10 @@ async fn serve_connection_stream<S>(
         // `&Broker`-only handler table signature can't carry that context,
         // so this api_key intercepts inline.
         if peek_api_key(&frame).ok() == Some(16) {
-            match handle_list_groups_frame(&broker, &frame, &auth, &peer).await {
+            match handle_list_groups_frame(&broker, &frame, &auth, &peer)
+                .instrument(req_span.clone())
+                .await
+            {
                 Ok(bytes) => {
                     if let Err(e) = framed.send(bytes).await {
                         tracing::warn!(error = %e, "framed.send error during ListGroups, closing");
@@ -497,7 +559,10 @@ async fn serve_connection_stream<S>(
         // `&Broker`-only handler table signature can't carry that context,
         // so this api_key intercepts inline.
         if peek_api_key(&frame).ok() == Some(42) {
-            match handle_delete_groups_frame(&broker, &frame, &auth, &peer).await {
+            match handle_delete_groups_frame(&broker, &frame, &auth, &peer)
+                .instrument(req_span.clone())
+                .await
+            {
                 Ok(bytes) => {
                     if let Err(e) = framed.send(bytes).await {
                         tracing::warn!(error = %e, "framed.send error during DeleteGroups, closing");
@@ -518,7 +583,10 @@ async fn serve_connection_stream<S>(
         // `&Broker`-only handler table signature can't carry that context,
         // so this api_key intercepts inline.
         if peek_api_key(&frame).ok() == Some(11) {
-            match handle_join_group_frame(&broker, &frame, &auth, &peer).await {
+            match handle_join_group_frame(&broker, &frame, &auth, &peer)
+                .instrument(req_span.clone())
+                .await
+            {
                 Ok(bytes) => {
                     if let Err(e) = framed.send(bytes).await {
                         tracing::warn!(error = %e, "framed.send error during JoinGroup, closing");
@@ -540,7 +608,10 @@ async fn serve_connection_stream<S>(
         // table signature can't carry that context, so this api_key
         // intercepts inline.
         if peek_api_key(&frame).ok() == Some(8) {
-            match handle_offset_commit_frame(&broker, &frame, &auth, &peer).await {
+            match handle_offset_commit_frame(&broker, &frame, &auth, &peer)
+                .instrument(req_span.clone())
+                .await
+            {
                 Ok(bytes) => {
                     if let Err(e) = framed.send(bytes).await {
                         tracing::warn!(error = %e, "framed.send error during OffsetCommit, closing");
@@ -563,7 +634,10 @@ async fn serve_connection_stream<S>(
         // topics. The `&Broker`-only handler table signature can't carry that
         // context, so this api_key intercepts inline.
         if peek_api_key(&frame).ok() == Some(9) {
-            match handle_offset_fetch_frame(&broker, &frame, &auth, &peer).await {
+            match handle_offset_fetch_frame(&broker, &frame, &auth, &peer)
+                .instrument(req_span.clone())
+                .await
+            {
                 Ok(bytes) => {
                     if let Err(e) = framed.send(bytes).await {
                         tracing::warn!(error = %e, "framed.send error during OffsetFetch, closing");
@@ -584,7 +658,10 @@ async fn serve_connection_stream<S>(
         // `&Broker`-only handler table signature can't carry that context,
         // so this api_key intercepts inline.
         if peek_api_key(&frame).ok() == Some(60) {
-            match handle_describe_cluster_frame(&broker, &frame, &auth, &peer).await {
+            match handle_describe_cluster_frame(&broker, &frame, &auth, &peer)
+                .instrument(req_span.clone())
+                .await
+            {
                 Ok(bytes) => {
                     if let Err(e) = framed.send(bytes).await {
                         tracing::warn!(error = %e, "framed.send error during DescribeCluster, closing");
@@ -603,7 +680,10 @@ async fn serve_connection_stream<S>(
         // matching; neither is reachable from the `&Broker`-only handler
         // table signature, so it intercepts inline.
         if peek_api_key(&frame).ok() == Some(29) {
-            match handle_describe_acls_frame(&broker, &frame, &auth, &peer).await {
+            match handle_describe_acls_frame(&broker, &frame, &auth, &peer)
+                .instrument(req_span.clone())
+                .await
+            {
                 Ok(bytes) => {
                     if let Err(e) = framed.send(bytes).await {
                         tracing::warn!(error = %e, "framed.send error during DescribeAcls, closing");
@@ -621,7 +701,10 @@ async fn serve_connection_stream<S>(
         // both the authenticated principal and the peer `SocketAddr` for
         // host-based ACL matching on the `Alter` cluster gate.
         if peek_api_key(&frame).ok() == Some(30) {
-            match handle_create_acls_frame(&broker, &frame, &auth, &peer).await {
+            match handle_create_acls_frame(&broker, &frame, &auth, &peer)
+                .instrument(req_span.clone())
+                .await
+            {
                 Ok(bytes) => {
                     if let Err(e) = framed.send(bytes).await {
                         tracing::warn!(error = %e, "framed.send error during CreateAcls, closing");
@@ -639,7 +722,10 @@ async fn serve_connection_stream<S>(
         // both the authenticated principal and the peer `SocketAddr` for
         // host-based ACL matching on the `Alter` cluster gate.
         if peek_api_key(&frame).ok() == Some(31) {
-            match handle_delete_acls_frame(&broker, &frame, &auth, &peer).await {
+            match handle_delete_acls_frame(&broker, &frame, &auth, &peer)
+                .instrument(req_span.clone())
+                .await
+            {
                 Ok(bytes) => {
                     if let Err(e) = framed.send(bytes).await {
                         tracing::warn!(error = %e, "framed.send error during DeleteAcls, closing");
@@ -660,7 +746,10 @@ async fn serve_connection_stream<S>(
         // The `&Broker`-only handler table signature can't carry that
         // context, so this api_key intercepts inline.
         if peek_api_key(&frame).ok() == Some(43) {
-            match handle_elect_leaders_frame(&broker, &frame, &auth, &peer).await {
+            match handle_elect_leaders_frame(&broker, &frame, &auth, &peer)
+                .instrument(req_span.clone())
+                .await
+            {
                 Ok(bytes) => {
                     if let Err(e) = framed.send(bytes).await {
                         tracing::warn!(error = %e, "framed.send error during ElectLeaders, closing");
@@ -680,7 +769,10 @@ async fn serve_connection_stream<S>(
         // CLUSTER_AUTHORIZATION_FAILED. The `&Broker`-only handler table
         // signature can't carry that context, so this api_key intercepts inline.
         if peek_api_key(&frame).ok() == Some(45) {
-            match handle_alter_partition_reassignments_frame(&broker, &frame, &auth, &peer).await {
+            match handle_alter_partition_reassignments_frame(&broker, &frame, &auth, &peer)
+                .instrument(req_span.clone())
+                .await
+            {
                 Ok(bytes) => {
                     if let Err(e) = framed.send(bytes).await {
                         tracing::warn!(error = %e, "framed.send error during AlterPartitionReassignments, closing");
@@ -700,7 +792,10 @@ async fn serve_connection_stream<S>(
         // CLUSTER_AUTHORIZATION_FAILED. The `&Broker`-only handler table
         // signature can't carry that context, so this api_key intercepts inline.
         if peek_api_key(&frame).ok() == Some(46) {
-            match handle_list_partition_reassignments_frame(&broker, &frame, &auth, &peer).await {
+            match handle_list_partition_reassignments_frame(&broker, &frame, &auth, &peer)
+                .instrument(req_span.clone())
+                .await
+            {
                 Ok(bytes) => {
                     if let Err(e) = framed.send(bytes).await {
                         tracing::warn!(error = %e, "framed.send error during ListPartitionReassignments, closing");
@@ -720,7 +815,10 @@ async fn serve_connection_stream<S>(
         // CLUSTER_AUTHORIZATION_FAILED. The `&Broker`-only handler table
         // signature can't carry that context, so this api_key intercepts inline.
         if peek_api_key(&frame).ok() == Some(48) {
-            match handle_describe_client_quotas_frame(&broker, &frame, &auth, &peer).await {
+            match handle_describe_client_quotas_frame(&broker, &frame, &auth, &peer)
+                .instrument(req_span.clone())
+                .await
+            {
                 Ok(bytes) => {
                     if let Err(e) = framed.send(bytes).await {
                         tracing::warn!(error = %e, "framed.send error during DescribeClientQuotas, closing");
@@ -740,7 +838,10 @@ async fn serve_connection_stream<S>(
         // CLUSTER_AUTHORIZATION_FAILED. The `&Broker`-only handler table
         // signature can't carry that context, so this api_key intercepts inline.
         if peek_api_key(&frame).ok() == Some(49) {
-            match handle_alter_client_quotas_frame(&broker, &frame, &auth, &peer).await {
+            match handle_alter_client_quotas_frame(&broker, &frame, &auth, &peer)
+                .instrument(req_span.clone())
+                .await
+            {
                 Ok(bytes) => {
                     if let Err(e) = framed.send(bytes).await {
                         tracing::warn!(error = %e, "framed.send error during AlterClientQuotas, closing");
@@ -760,7 +861,9 @@ async fn serve_connection_stream<S>(
         // CLUSTER_AUTHORIZATION_FAILED. The `&Broker`-only handler table
         // signature can't carry that context, so this api_key intercepts inline.
         if peek_api_key(&frame).ok() == Some(50) {
-            match handle_describe_user_scram_credentials_frame(&broker, &frame, &auth, &peer).await
+            match handle_describe_user_scram_credentials_frame(&broker, &frame, &auth, &peer)
+                .instrument(req_span.clone())
+                .await
             {
                 Ok(bytes) => {
                     if let Err(e) = framed.send(bytes).await {
@@ -781,7 +884,10 @@ async fn serve_connection_stream<S>(
         // `IdempotentWrite` on `Cluster` (idempotent-only path). On Deny
         // the handler returns a whole-response error_code = 53 or 31.
         if peek_api_key(&frame).ok() == Some(22) {
-            match handle_init_producer_id_frame(&broker, &frame, &auth, &peer).await {
+            match handle_init_producer_id_frame(&broker, &frame, &auth, &peer)
+                .instrument(req_span.clone())
+                .await
+            {
                 Ok(bytes) => {
                     if let Err(e) = framed.send(bytes).await {
                         tracing::warn!(error = %e, "framed.send error during InitProducerId, closing");
@@ -801,7 +907,10 @@ async fn serve_connection_stream<S>(
         // TRANSACTIONAL_ID_AUTHORIZATION_FAILED) and per-topic `Write` on
         // `Topic` (per-row deny = TOPIC_AUTHORIZATION_FAILED).
         if peek_api_key(&frame).ok() == Some(24) {
-            match handle_add_partitions_to_txn_frame(&broker, &frame, &auth, &peer).await {
+            match handle_add_partitions_to_txn_frame(&broker, &frame, &auth, &peer)
+                .instrument(req_span.clone())
+                .await
+            {
                 Ok(bytes) => {
                     if let Err(e) = framed.send(bytes).await {
                         tracing::warn!(error = %e, "framed.send error during AddPartitionsToTxn, closing");
@@ -820,7 +929,10 @@ async fn serve_connection_stream<S>(
         // `Write` on `TransactionalId`. On Deny → whole-response
         // TRANSACTIONAL_ID_AUTHORIZATION_FAILED.
         if peek_api_key(&frame).ok() == Some(26) {
-            match handle_end_txn_frame(&broker, &frame, &auth, &peer).await {
+            match handle_end_txn_frame(&broker, &frame, &auth, &peer)
+                .instrument(req_span.clone())
+                .await
+            {
                 Ok(bytes) => {
                     if let Err(e) = framed.send(bytes).await {
                         tracing::warn!(error = %e, "framed.send error during EndTxn, closing");
@@ -839,7 +951,10 @@ async fn serve_connection_stream<S>(
         // authorize `Write` on `TransactionalId` + `Read` on `Group` +
         // per-topic `Read` on `Topic`.
         if peek_api_key(&frame).ok() == Some(28) {
-            match handle_txn_offset_commit_frame(&broker, &frame, &auth, &peer).await {
+            match handle_txn_offset_commit_frame(&broker, &frame, &auth, &peer)
+                .instrument(req_span.clone())
+                .await
+            {
                 Ok(bytes) => {
                     if let Err(e) = framed.send(bytes).await {
                         tracing::warn!(error = %e, "framed.send error during TxnOffsetCommit, closing");
@@ -860,7 +975,10 @@ async fn serve_connection_stream<S>(
         // request_percentage throttling here. Admin RPCs are low-frequency operator
         // traffic; the exemption is documented in STATUS.md.
         let started = std::time::Instant::now();
-        let response_bytes = match dispatch_one(&broker, &frame).await {
+        let response_bytes = match dispatch_one(&broker, &frame)
+            .instrument(req_span.clone())
+            .await
+        {
             Ok(b) => b,
             Err(e) => {
                 tracing::warn!(error = %e, "dispatch error, closing connection");
