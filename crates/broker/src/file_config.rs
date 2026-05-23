@@ -21,6 +21,10 @@ use crate::config::ListenerSpec;
 pub struct FileConfig {
     pub broker_id: Option<i32>,
     pub log_dir: Option<String>,
+    /// Additional JBOD data directories (KIP-113). Maps to
+    /// [`crate::BrokerConfig::extra_log_dirs`].
+    #[serde(default)]
+    pub extra_log_dirs: Vec<String>,
     pub inter_broker_listener_name: Option<String>,
     #[serde(default)]
     pub listeners: Vec<FileListener>,
@@ -116,6 +120,13 @@ impl FileConfig {
             && cfg.log_dir == defaults.log_dir
         {
             cfg.log_dir = std::path::PathBuf::from(ld);
+        }
+        if !self.extra_log_dirs.is_empty() && cfg.extra_log_dirs.is_empty() {
+            cfg.extra_log_dirs = self
+                .extra_log_dirs
+                .into_iter()
+                .map(std::path::PathBuf::from)
+                .collect();
         }
         if !self.listeners.is_empty() {
             cfg.listeners = self

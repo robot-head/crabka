@@ -69,6 +69,7 @@ fn supported_apis() -> Vec<ApiVersion> {
         v!(write_txn_markers_request),
         v!(txn_offset_commit_request),
         v!(describe_configs_request),
+        v!(describe_log_dirs_request),
         v!(describe_groups_request),
         v!(list_groups_request),
         v!(alter_configs_request),

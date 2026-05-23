@@ -102,7 +102,7 @@ pub(crate) async fn handle(
     let req_bytes = req_bytes.to_vec();
     let controller = broker.controller.clone();
     let node_id = broker.config.node_id;
-    let log_dir = broker.config.log_dir.clone();
+    let log_dirs = broker.config.all_log_dirs();
     let log_config = broker.config.log_config.clone();
     let partitions_map = broker.partitions.clone();
 
@@ -248,7 +248,7 @@ pub(crate) async fn handle(
                             &partitions_map,
                             &name,
                             p_i32,
-                            &log_dir,
+                            &log_dirs,
                             &log_config,
                         ) {
                             tracing::error!(

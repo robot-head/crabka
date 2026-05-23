@@ -35,7 +35,8 @@ pub async fn bootstrap(
     partitions: &Arc<dashmap::DashMap<(String, i32), Arc<Partition>>>,
     group_manager: &GroupManager,
 ) -> Result<(), BrokerError> {
-    let topic_dir = log_dir::partition_dir(&config.log_dir, OFFSETS_TOPIC, OFFSETS_PARTITION);
+    let topic_dir =
+        log_dir::place_partition_dir(&config.all_log_dirs(), OFFSETS_TOPIC, OFFSETS_PARTITION);
     std::fs::create_dir_all(&topic_dir)?;
     let log = crabka_log::Log::open(&topic_dir, config.log_config.clone())?;
 

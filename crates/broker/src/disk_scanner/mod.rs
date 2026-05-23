@@ -17,7 +17,7 @@ use crate::log_dir;
 use crate::metrics::{BrokerMetrics, PartitionLabel};
 
 pub struct DiskScanner {
-    pub log_dir: PathBuf,
+    pub log_dirs: Vec<PathBuf>,
     pub interval: Duration,
     pub metrics: BrokerMetrics,
     pub shutdown: CancellationToken,
@@ -43,15 +43,15 @@ impl DiskScanner {
     }
 
     fn tick_once(&self) {
-        let partitions = match log_dir::scan(&self.log_dir) {
+        let partitions = match log_dir::scan_all(&self.log_dirs) {
             Ok(p) => p,
             Err(e) => {
-                warn!(error = %e, "disk scanner: log_dir::scan failed; skipping tick");
+                warn!(error = %e, "disk scanner: log_dir::scan_all failed; skipping tick");
                 return;
             }
         };
-        for (topic, partition) in partitions {
-            let path = log_dir::partition_dir(&self.log_dir, &topic, partition);
+        for (topic, partition, owning_dir) in partitions {
+            let path = log_dir::partition_dir(&owning_dir, &topic, partition);
             match scan::sum_partition_dir(&path) {
                 Ok(bytes) => {
                     let lbl = PartitionLabel { topic, partition };
@@ -92,7 +92,7 @@ mod tests {
 
         let metrics = BrokerMetrics::new();
         let scanner = DiskScanner {
-            log_dir: tmp.path().to_path_buf(),
+            log_dirs: vec![tmp.path().to_path_buf()],
             interval: Duration::from_mins(1),
             metrics: metrics.clone(),
             shutdown: CancellationToken::new(),

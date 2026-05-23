@@ -55,6 +55,87 @@ pub fn scan(log_dir: &Path) -> Result<Vec<(String, i32)>, BrokerError> {
     Ok(out)
 }
 
+/// Count the partition subdirectories (`<topic>-<partition>/`) directly
+/// under `dir`. Used for least-loaded JBOD placement. A missing directory
+/// counts as zero. Non-partition entries (e.g. `__cluster_metadata`,
+/// stray files) are ignored.
+#[must_use]
+pub fn count_partitions(dir: &Path) -> usize {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    rd.filter_map(Result::ok)
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|name| parse_partition_dir(name).is_some())
+        .count()
+}
+
+/// Resolve the directory a `(topic, partition)` should live in across a
+/// JBOD set of `log_dirs` (KIP-113 placement), returning the full
+/// `<dir>/<topic>-<partition>` path.
+///
+/// - If the partition directory already exists under one of `log_dirs`,
+///   that existing location wins (idempotent — handles restart, recovery,
+///   and concurrent re-materialization).
+/// - Otherwise it is placed in the least-loaded directory (fewest
+///   partition subdirs), ties broken by `log_dirs` order. This mirrors
+///   Kafka's `LogManager` round-robin-by-count default.
+///
+/// `log_dirs` must be non-empty; the caller guarantees this via
+/// [`crate::BrokerConfig::all_log_dirs`], which always includes the
+/// primary `log_dir`.
+#[must_use]
+pub fn place_partition_dir(log_dirs: &[PathBuf], topic: &str, partition: i32) -> PathBuf {
+    debug_assert!(!log_dirs.is_empty(), "log_dirs must be non-empty");
+    let leaf = format!("{topic}-{partition}");
+
+    // Existing location wins.
+    for dir in log_dirs {
+        let candidate = dir.join(&leaf);
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+
+    // Least-loaded placement, ties broken by order.
+    let chosen = log_dirs
+        .iter()
+        .min_by_key(|dir| count_partitions(dir))
+        .unwrap_or(&log_dirs[0]);
+    chosen.join(&leaf)
+}
+
+/// Scan every directory in `log_dirs` and return each discovered
+/// `(topic, partition, owning_dir)`. If the same partition appears in more
+/// than one directory (a misconfiguration) the first occurrence wins and a
+/// warning is logged. Results are sorted by `(topic, partition)`.
+pub fn scan_all(log_dirs: &[PathBuf]) -> Result<Vec<(String, i32, PathBuf)>, BrokerError> {
+    use std::collections::HashMap;
+    let mut seen: HashMap<(String, i32), PathBuf> = HashMap::new();
+    for dir in log_dirs {
+        for (topic, partition) in scan(dir)? {
+            match seen.entry((topic.clone(), partition)) {
+                std::collections::hash_map::Entry::Occupied(existing) => {
+                    tracing::warn!(
+                        topic = %topic, partition,
+                        first = %existing.get().display(),
+                        duplicate = %dir.display(),
+                        "partition present in multiple log dirs; ignoring duplicate"
+                    );
+                }
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(dir.clone());
+                }
+            }
+        }
+    }
+    let mut out: Vec<(String, i32, PathBuf)> =
+        seen.into_iter().map(|((t, p), dir)| (t, p, dir)).collect();
+    out.sort_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,5 +193,73 @@ mod tests {
             out,
             vec![("bar".into(), 0), ("foo".into(), 0), ("foo".into(), 1),]
         );
+    }
+
+    #[test]
+    fn count_partitions_ignores_non_partition_entries() {
+        let dir = tempdir().expect("tempdir");
+        std::fs::create_dir(dir.path().join("foo-0")).unwrap();
+        std::fs::create_dir(dir.path().join("foo-1")).unwrap();
+        std::fs::create_dir(dir.path().join("__cluster_metadata")).unwrap();
+        std::fs::write(dir.path().join("bootstrap.json"), b"{}").unwrap();
+        assert_eq!(count_partitions(dir.path()), 2);
+    }
+
+    #[test]
+    fn count_partitions_missing_dir_is_zero() {
+        let dir = tempdir().expect("tempdir");
+        assert_eq!(count_partitions(&dir.path().join("nope")), 0);
+    }
+
+    #[test]
+    fn place_reuses_existing_location() {
+        let a = tempdir().unwrap();
+        let b = tempdir().unwrap();
+        let dirs = vec![a.path().to_path_buf(), b.path().to_path_buf()];
+        // Pre-create the partition in the *second* dir.
+        std::fs::create_dir(b.path().join("t-0")).unwrap();
+        let placed = place_partition_dir(&dirs, "t", 0);
+        assert_eq!(placed, b.path().join("t-0"));
+    }
+
+    #[test]
+    fn place_picks_least_loaded_then_order() {
+        let a = tempdir().unwrap();
+        let b = tempdir().unwrap();
+        let dirs = vec![a.path().to_path_buf(), b.path().to_path_buf()];
+        // Empty cluster: tie → first dir.
+        assert_eq!(place_partition_dir(&dirs, "t", 0), a.path().join("t-0"));
+        // Load `a` with two partitions; next placement should go to `b`.
+        std::fs::create_dir(a.path().join("t-0")).unwrap();
+        std::fs::create_dir(a.path().join("t-1")).unwrap();
+        assert_eq!(place_partition_dir(&dirs, "t", 2), b.path().join("t-2"));
+    }
+
+    #[test]
+    fn scan_all_merges_dirs_and_sorts() {
+        let a = tempdir().unwrap();
+        let b = tempdir().unwrap();
+        std::fs::create_dir(a.path().join("foo-0")).unwrap();
+        std::fs::create_dir(b.path().join("bar-1")).unwrap();
+        let dirs = vec![a.path().to_path_buf(), b.path().to_path_buf()];
+        let out = scan_all(&dirs).expect("scan_all ok");
+        assert_eq!(
+            out,
+            vec![
+                ("bar".to_string(), 1, b.path().to_path_buf()),
+                ("foo".to_string(), 0, a.path().to_path_buf()),
+            ]
+        );
+    }
+
+    #[test]
+    fn scan_all_first_dir_wins_on_duplicate() {
+        let a = tempdir().unwrap();
+        let b = tempdir().unwrap();
+        std::fs::create_dir(a.path().join("foo-0")).unwrap();
+        std::fs::create_dir(b.path().join("foo-0")).unwrap();
+        let dirs = vec![a.path().to_path_buf(), b.path().to_path_buf()];
+        let out = scan_all(&dirs).expect("scan_all ok");
+        assert_eq!(out, vec![("foo".to_string(), 0, a.path().to_path_buf())]);
     }
 }

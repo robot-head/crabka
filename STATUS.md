@@ -1819,3 +1819,61 @@ Kafka client for ApiVersions.
 - Reference doc:
   [`docs/superpowers/specs/2026-05-23-crabka-operator-ca-rotation-34-design.md`].
 
+## Slice 45 — Crabka core: JBOD / multi-log-dir + DescribeLogDirs (KIP-113) (2026-05-23)
+
+- Opens Phase 8 (storage gaps). The broker becomes a real JBOD broker:
+  partition data spreads across multiple on-disk log directories on one
+  broker, and `kafka-log-dirs --describe` works. This is the read +
+  placement half of KIP-113; the intra-broker replica *move*
+  (`AlterReplicaLogDirs`, api 34) is deferred to slice 45b.
+- **Config:** `BrokerConfig.extra_log_dirs: Vec<PathBuf>` (default empty) +
+  `all_log_dirs()` → `[log_dir] + extra_log_dirs`, deduped, primary first.
+  `log_dir` keeps its meaning (primary + `__cluster_metadata` + default data
+  dir), so the ~100 existing config sites that build via `..default()` /
+  `for_tests` are untouched — only the two constructors gain the field. CLI
+  `--log-dirs a,b` (env `CRABKA_EXTRA_LOG_DIRS`); TOML `extra_log_dirs`.
+- **Placement** (`crates/broker/src/log_dir.rs`): stateless
+  `place_partition_dir(log_dirs, topic, partition)` — existing on-disk
+  location wins (idempotent across restart / re-materialize), else the dir
+  with the fewest `topic-partition` subdirs (`count_partitions`), ties by
+  order. Matches Kafka's default round-robin-by-count. It runs inside
+  `materialize_partition`'s `DashMap::entry` arm, so two concurrent
+  materializations of one partition can never split across dirs. `scan_all`
+  discovers `(topic, partition, owning_dir)` across all dirs (first dir wins
+  on duplicate, logged).
+- **Threading:** every materialization site funnels through `all_log_dirs()`
+  + `place_partition_dir` — startup recovery (`scan_all`), the replicator
+  supervisor (`materialize_partition` now takes `&[PathBuf]`), the follower
+  replicator (`Config.log_dirs` + `ensure_local_partition`),
+  `__consumer_offsets` bootstrap, and the `CreateTopics` / `CreatePartitions`
+  / `InitProducerId` handlers. `DeleteTopics` resolves the real dir before
+  `remove_dir_all`. The slice-43e disk scanner walks all dirs.
+  `__cluster_metadata` is unaffected — always on the primary `log_dir`;
+  bootstrap detection unchanged. Log-dir assignment is broker-local, not in
+  cluster metadata (exactly like Kafka — no per-replica field in
+  `PartitionRecord`).
+- **`DescribeLogDirs` handler** (api 35, v1–5): one `Results` entry per
+  configured dir (canonical absolute path), listing the partitions
+  physically present with `partition_size` (sum of file bytes) and
+  `offset_lag` (`max(0, LEO − HW)` for the loaded current log).
+  `is_future_key=false` (no future logs this slice); `total_bytes` /
+  `usable_bytes` keep the generated `-1` ("unknown"). Reflects the
+  filesystem (scans per request) so it can't drift. Registered in the
+  handler table, advertised in `ApiVersions`, and added to
+  `handler_body_flexible` (api 35) so the flexible request/response headers
+  are framed correctly. No protocol regeneration — the KIP-113 message types
+  were already generated from the Kafka 4.3.0 schemas.
+- Tests: +7 lib unit (`log_dir`: count/place/scan_all) +3 (`describe_log_dirs`
+  filter); broker integration `tests/jbod.rs`
+  (`partitions_spread_across_dirs_and_describe_log_dirs_reports_them` — 2-dir
+  broker, 6-partition topic, asserts on-disk spread + wire `DescribeLogDirs`
+  v4 union); JVM acceptance `jvm_kafka_log_dirs_describe_reports_jbod_spread`
+  (`#[ignore]`, `kafka-log-dirs --describe` against a two-dir host broker).
+  Full broker suite green; clippy `-D warnings` + fmt clean.
+- Out of scope (deferred to 45b): `AlterReplicaLogDirs` move + future-log
+  catch-up; `total_bytes` / `usable_bytes` via statvfs;
+  `kafka-reassign-partitions` per-replica `log_dirs`; offline-dir /
+  `KAFKA_STORAGE_ERROR` handling. Operator JBOD surface is slice 46.
+- Reference doc:
+  [`docs/superpowers/specs/2026-05-23-crabka-jbod-multi-log-dir-45-design.md`].
+

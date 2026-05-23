@@ -81,7 +81,7 @@ pub(crate) fn materialize_partition(
     partitions: &DashMap<(String, i32), Arc<Partition>>,
     topic: &str,
     partition: i32,
-    log_dir: &std::path::Path,
+    log_dirs: &[PathBuf],
     log_config: &LogConfig,
 ) -> Result<(), String> {
     use dashmap::mapref::entry::Entry;
@@ -90,11 +90,13 @@ pub(crate) fn materialize_partition(
     // duration of the closure — only one thread can be inside
     // `or_try_insert_with` for a given key at a time, eliminating the
     // TOCTOU race that existed with the old `contains_key` + `insert`
-    // pattern.
+    // pattern. JBOD placement (KIP-113) happens under this lock too, so
+    // two concurrent materializations of the same partition can never
+    // pick two different log dirs.
     match partitions.entry((topic.to_string(), partition)) {
         Entry::Occupied(_) => Ok(()),
         Entry::Vacant(slot) => {
-            let dir = log_dir.join(format!("{topic}-{partition}"));
+            let dir = crate::log_dir::place_partition_dir(log_dirs, topic, partition);
             std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
             let log = Log::open(&dir, log_config.clone()).map_err(|e| format!("Log::open: {e}"))?;
             let part = spawn_partition(topic.to_string(), partition, log);
@@ -135,7 +137,7 @@ pub(crate) struct ReplicatorSupervisor {
     node_id: NodeId,
     controller: Arc<ControllerHandle>,
     partitions: Arc<DashMap<(String, i32), Arc<Partition>>>,
-    log_dir: PathBuf,
+    log_dirs: Vec<PathBuf>,
     log_config: LogConfig,
     client_id: String,
     tasks: DashMap<(String, i32), CancellationToken>,
@@ -165,7 +167,7 @@ impl ReplicatorSupervisor {
         node_id: NodeId,
         controller: Arc<ControllerHandle>,
         partitions: Arc<DashMap<(String, i32), Arc<Partition>>>,
-        log_dir: PathBuf,
+        log_dirs: Vec<PathBuf>,
         log_config: LogConfig,
         client_id: String,
         shutdown: CancellationToken,
@@ -179,7 +181,7 @@ impl ReplicatorSupervisor {
             node_id,
             controller,
             partitions,
-            log_dir,
+            log_dirs,
             log_config,
             client_id,
             tasks: DashMap::new(),
@@ -324,7 +326,7 @@ impl ReplicatorSupervisor {
                 leader_host,
                 leader_port,
                 partitions: self.partitions.clone(),
-                log_dir: self.log_dir.clone(),
+                log_dirs: self.log_dirs.clone(),
                 log_config: self.log_config.clone(),
                 client_id: self.client_id.clone(),
                 shutdown: token,
@@ -350,7 +352,7 @@ impl ReplicatorSupervisor {
             &self.partitions,
             topic,
             partition,
-            &self.log_dir,
+            &self.log_dirs,
             &self.log_config,
         )
     }
@@ -471,8 +473,14 @@ mod tests {
 
         let dir = tempdir().expect("tempdir");
         let partitions = Arc::new(DashMap::new());
-        materialize_partition(&partitions, "t", 0, dir.path(), &LogConfig::default())
-            .expect("materialize");
+        materialize_partition(
+            &partitions,
+            "t",
+            0,
+            &[dir.path().to_path_buf()],
+            &LogConfig::default(),
+        )
+        .expect("materialize");
         let part = partitions
             .get(&("t".to_string(), 0))
             .expect("part")
@@ -575,8 +583,14 @@ mod tests {
         // Materialize the partition on disk.
         let dir = tempdir().expect("tempdir");
         let partitions = Arc::new(DashMap::new());
-        materialize_partition(&partitions, "t", 0, dir.path(), &LogConfig::default())
-            .expect("materialize");
+        materialize_partition(
+            &partitions,
+            "t",
+            0,
+            &[dir.path().to_path_buf()],
+            &LogConfig::default(),
+        )
+        .expect("materialize");
 
         // Call push_topic_configs directly.
         let mut desired = HashSet::new();
@@ -623,8 +637,14 @@ mod tests {
 
         let dir = tempdir().expect("tempdir");
         let partitions = Arc::new(DashMap::new());
-        materialize_partition(&partitions, "t", 0, dir.path(), &LogConfig::default())
-            .expect("materialize");
+        materialize_partition(
+            &partitions,
+            "t",
+            0,
+            &[dir.path().to_path_buf()],
+            &LogConfig::default(),
+        )
+        .expect("materialize");
 
         let mut desired = HashSet::new();
         desired.insert(("t".to_string(), 0));
