@@ -406,7 +406,7 @@ authentication:
     }
 
     #[test]
-    fn oauth_with_custom_claim_check_round_trips() {
+    fn oauth_with_custom_claim_check_deserializes() {
         let l: Listener = serde_yaml::from_str(
             r"
 name: oauth-scope
@@ -493,6 +493,50 @@ authentication:
         };
         assert_eq!(oauth.valid_issuer_uri, "https://issuer.example.com/");
         assert_eq!(oauth.jwks_endpoint_uri, "https://issuer.example.com/jwks");
+    }
+
+    #[test]
+    fn listener_authentication_schema_contains_oauth_discriminator_and_sibling_keys() {
+        // Regression guard: if someone drops the
+        // `#[schemars(schema_with = "listener_authentication_schema")]`
+        // attribute on `ListenerAuthentication`, the hand-rolled flat
+        // object schema goes away and we silently lose the `oauth`
+        // discriminator + its sibling property keys. This test invokes
+        // the schema function directly and pins both.
+        let mut gen = schemars::SchemaGenerator::default();
+        let schema = listener_authentication_schema(&mut gen);
+        let v = serde_json::to_value(&schema).unwrap();
+
+        // Discriminator enum contains all four variants.
+        let type_enum = v
+            .pointer("/properties/type/enum")
+            .and_then(|x| x.as_array())
+            .expect("schema must have properties.type.enum array");
+        let names: Vec<&str> = type_enum.iter().filter_map(|x| x.as_str()).collect();
+        for want in ["tls", "scram-sha-512", "scram-sha-256", "oauth"] {
+            assert!(names.contains(&want), "missing {want} in {names:?}");
+        }
+
+        // OAuth sibling property keys are present at the top level
+        // (the schema is a flat object with all variants' fields as
+        // siblings of `type` — see the kube-rs 3.x oneOf workaround
+        // comment on ListenerAuthentication).
+        let props = v
+            .pointer("/properties")
+            .and_then(|x| x.as_object())
+            .expect("schema must have properties object");
+        for want in [
+            "validIssuerUri",
+            "jwksEndpointUri",
+            "validAudience",
+            "userNameClaim",
+            "customClaimCheck",
+            "jwksRefreshSeconds",
+            "maxClockSkewSeconds",
+            "enableOauthBearer",
+        ] {
+            assert!(props.contains_key(want), "missing property {want}");
+        }
     }
 }
 
