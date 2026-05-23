@@ -2078,15 +2078,20 @@ Kafka client for ApiVersions.
   `enableOauthBearer: false`; cross-field rules (`tls: true` required) live in
   the reconciler.
 - **`crates/operator` (`controller/listeners.rs`):**
-  reconciler validates the OAuth arm (URIs are HTTPS, listener is `tls:
-  true`, JWKS refresh / clock-skew non-negative, claim names non-empty),
-  renders the listener-scoped `[oauthbearer]` TOML block consumed by the
-  49b broker (`jwks_endpoint_uri`, `valid_issuer_uri`, `expected_audience`,
-  `jwks_refresh_interval_ms`, `clock_skew_ms`, principal/scope claim,
-  required scope), and writes `OAUTHBEARER` into the listener's enabled SASL
-  mechanism list so the broker's handshake advertises it. Field ordering in
-  the rendered TOML is pinned for byte-stable output (so reconcile is a no-op
-  when nothing changed); a divergence test fires per-field.
+  reconciler validates the OAuth arm (listener is `tls: true`, `validIssuerUri`
+  non-empty, `jwksEndpointUri` is `http://` or `https://`, `jwksRefreshSeconds
+  >= 30` when set, `customClaimCheck.scope` non-empty when present) plus the
+  cross-listener constraint that all OAuth listeners share one canonical
+  config (because the broker's `[oauthbearer]` section is global until 49h),
+  renders the broker-global `[oauthbearer]` TOML block consumed by the 49b
+  broker (`jwks_endpoint_uri`, `valid_issuer_uri`, `expected_audience`,
+  `principal_claim_name`, `scope_claim_name`, `required_scope`,
+  `jwks_refresh_interval_ms`, `allowable_clock_skew_ms`), and writes
+  `OAUTHBEARER` into the listener's enabled SASL mechanism list so the
+  broker's handshake advertises it. Field ordering in the rendered TOML is
+  pinned for byte-stable output (so reconcile is a no-op when nothing
+  changed); a divergence test fires per-field. An `http://` `jwksEndpointUri`
+  is accepted but emits a `WeakAuth` Event (mirroring SCRAM-without-TLS).
 - **`crates/operator` (`crd/user.rs` + `controller/user.rs`):**
   `KafkaUserAuthType::TlsExternal` is a no-credential variant — the operator
   never mints a key/cert, never writes a Secret, never owns the principal,
@@ -2097,7 +2102,7 @@ Kafka client for ApiVersions.
   short-circuits the Secret-management path entirely; ACL reconciliation is
   reused unchanged.
 - **`crates/operator/sample/oauth-listener.yaml`:** end-to-end sample wiring
-  an external OAuth listener on `:9094` (TLS + OAUTHBEARER, JWKS endpoint
+  an external OAuth listener on `:9096` (TLS + OAUTHBEARER, JWKS endpoint
   placeholder) plus a `tls-external` `KafkaUser` with topic ACLs — what a
   user copies to bootstrap an OAuth deployment.
 - **`deploy/crds/*.yaml`:** regenerated. `crabka.io_kafkas.yaml` gains the
@@ -2105,16 +2110,19 @@ Kafka client for ApiVersions.
   `listeners[].authentication`; `crabka.io_kafkausers.yaml` gains
   `tls-external` to the `type` enum and a `status.external: boolean` with a
   description. No other CRDs touched.
-- **`.github/workflows/operator-e2e.yml`:** Keycloak e2e job — stands up a
-  kind cluster + a real Keycloak, applies the OAuth sample, runs a JVM
-  producer/consumer against the listener with a real RS256 access token from
-  Keycloak's `/token` endpoint, asserts SASL success + ACL enforcement. Runs
-  on PRs that touch the operator OAuth surface; `if: false` gated until the
-  CI runner image has kind preinstalled.
+- **`.github/workflows/operator-e2e.yml`:** new `kind-oauth` job — stands
+  up a kind cluster + a real Keycloak (Bitnami chart pinned at `25.2.0`,
+  TLS off because broker→IdP HTTPS with custom trust is 49c territory),
+  bootstraps a `kafka` realm via `kcadm.sh`, applies the OAuth sample,
+  runs two `apache/kafka:3.8.0` Jobs — one with a scoped client-credentials
+  token (asserts SASL+ACL success) and one with a no-scope client (asserts
+  SaslAuthenticationException). Asserts the `WeakAuth` Event for the
+  in-cluster `http://` JWKS URL. Gated on `push: main` or PRs labeled
+  `e2e-oauth` to keep CI latency under control on unrelated PRs.
 - Tests: +35 operator unit (CRD parse / validation / schema regression
   across `crd/listener.rs` +7, `crd/user.rs` +5, reconciler `controller/
   listeners.rs` +20 incl. happy-path render, per-field divergence, TLS-not-
-  enabled rejection, bad-URI rejection, claim-name rejection, byte-stable
+  enabled rejection, bad-URI scheme rejection, empty-scope rejection, byte-stable
   ordering; `controller/user.rs` +3 for TlsExternal arm + status.external
   flip); +18 integration (`tests/reconcile_listener_oauth.rs` +12 driving
   the full OAuth listener reconcile loop, `tests/reconcile_user_tls_external
