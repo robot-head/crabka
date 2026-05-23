@@ -72,11 +72,7 @@ mod tests {
     // where Utils is org.apache.kafka.common.utils.Utils.
     #[test]
     fn matches_jvm_for_canonical_tids() {
-        let cases: &[(&str, i32)] = &[
-            ("my-tid", 43),
-            ("producer-1", 45),
-            ("tx-orders-prod", 26),
-        ];
+        let cases: &[(&str, i32)] = &[("my-tid", 43), ("producer-1", 45), ("tx-orders-prod", 26)];
         for (tid, expected) in cases {
             assert_eq!(
                 partition_for_tid(tid, 50),
