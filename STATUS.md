@@ -2054,3 +2054,82 @@ Kafka client for ApiVersions.
 - Reference doc:
   [`docs/superpowers/specs/2026-05-23-crabka-sasl-oauthbearer-jwks-49b-design.md`].
 
+## Slice 50 — Operator: Listener OAuth + `KafkaUser` tls-external (2026-05-23)
+
+- Surfaces the broker-side OAUTHBEARER work from slices 49 + 49b through the
+  operator: `Kafka.spec.listeners[].authentication.type: oauth` is now a valid
+  discriminator (with the Strimzi `KafkaListenerAuthenticationOAuth` v1 field
+  shape — issuer URI, JWKS endpoint, refresh / clock-skew, audience, principal
+  + scope claims, single `customClaimCheck`), and `KafkaUser.spec.type:
+  tls-external` declares an OAuth-/external-CA-owned principal whose
+  credentials the operator deliberately does **not** manage. Together this is
+  the minimum surface needed to run an end-to-end OAUTHBEARER deployment
+  through the operator; the rest of Strimzi's listener-OAuth knobs follow as
+  the umbrella's 50b–50f sub-slices.
+- **`crates/operator` (`crd/listener.rs`):**
+  `KafkaListenerAuthentication::OAuth` arm holds `valid_issuer_uri`,
+  `jwks_endpoint_uri` (both `MinLength = 1`), `jwks_refresh_seconds`,
+  `max_clock_skew_seconds`, `user_name_claim` (default `sub`),
+  `valid_audience`, `enable_oauth_bearer`, and a single
+  `custom_claim_check: Option<CustomClaimCheck { scope, scope_claim }>`. All
+  sibling fields are flattened into the `authentication` object — schemars
+  emits them as peers of `type` rather than nested under a `oauth:` object,
+  matching Strimzi's JSON shape. CRD-only validation rejects bad URIs and
+  `enableOauthBearer: false`; cross-field rules (`tls: true` required) live in
+  the reconciler.
+- **`crates/operator` (`controller/listeners.rs`):**
+  reconciler validates the OAuth arm (URIs are HTTPS, listener is `tls:
+  true`, JWKS refresh / clock-skew non-negative, claim names non-empty),
+  renders the listener-scoped `[oauthbearer]` TOML block consumed by the
+  49b broker (`jwks_endpoint_uri`, `valid_issuer_uri`, `expected_audience`,
+  `jwks_refresh_interval_ms`, `clock_skew_ms`, principal/scope claim,
+  required scope), and writes `OAUTHBEARER` into the listener's enabled SASL
+  mechanism list so the broker's handshake advertises it. Field ordering in
+  the rendered TOML is pinned for byte-stable output (so reconcile is a no-op
+  when nothing changed); a divergence test fires per-field.
+- **`crates/operator` (`crd/user.rs` + `controller/user.rs`):**
+  `KafkaUserAuthType::TlsExternal` is a no-credential variant — the operator
+  never mints a key/cert, never writes a Secret, never owns the principal,
+  but still reconciles ACLs and renders status. New
+  `KafkaUserStatus.external: bool` (default `false`) flips to `true` when a
+  `tls-external` user has been observed, so `kubectl describe ku` shows at a
+  glance that credentials live outside the cluster. The TlsExternal arm
+  short-circuits the Secret-management path entirely; ACL reconciliation is
+  reused unchanged.
+- **`crates/operator/sample/oauth-listener.yaml`:** end-to-end sample wiring
+  an external OAuth listener on `:9094` (TLS + OAUTHBEARER, JWKS endpoint
+  placeholder) plus a `tls-external` `KafkaUser` with topic ACLs — what a
+  user copies to bootstrap an OAuth deployment.
+- **`deploy/crds/*.yaml`:** regenerated. `crabka.io_kafkas.yaml` gains the
+  `oauth` discriminator value + 8 sibling OAuth fields under
+  `listeners[].authentication`; `crabka.io_kafkausers.yaml` gains
+  `tls-external` to the `type` enum and a `status.external: boolean` with a
+  description. No other CRDs touched.
+- **`.github/workflows/operator-e2e.yml`:** Keycloak e2e job — stands up a
+  kind cluster + a real Keycloak, applies the OAuth sample, runs a JVM
+  producer/consumer against the listener with a real RS256 access token from
+  Keycloak's `/token` endpoint, asserts SASL success + ACL enforcement. Runs
+  on PRs that touch the operator OAuth surface; `if: false` gated until the
+  CI runner image has kind preinstalled.
+- Tests: +35 operator unit (CRD parse / validation / schema regression
+  across `crd/listener.rs` +7, `crd/user.rs` +5, reconciler `controller/
+  listeners.rs` +20 incl. happy-path render, per-field divergence, TLS-not-
+  enabled rejection, bad-URI rejection, claim-name rejection, byte-stable
+  ordering; `controller/user.rs` +3 for TlsExternal arm + status.external
+  flip); +18 integration (`tests/reconcile_listener_oauth.rs` +12 driving
+  the full OAuth listener reconcile loop, `tests/reconcile_user_tls_external
+  .rs` +6 covering no-Secret-created, ACL-only reconcile, status.external
+  flip on first observe). Workspace clippy `-D warnings` + fmt clean.
+- Out of scope (deferred to the OAUTHBEARER-parity umbrella): listener
+  `tlsTrustedCertificates` for custom CA trust to the IdP (49c + 50b);
+  opaque-token introspection (49d + 50c); KIP-368 re-authentication
+  (`maxSecondsWithoutReauthentication`, 49e + 50d); PLAIN-with-OAuth-token
+  + `tokenEndpointUri` (49f + 50e); the remaining Strimzi long-tail —
+  `groupsClaim`, fallback-username chain, `validTokenType`, multi-rule
+  `customClaimCheck`, JWKS refresh policy knobs, `jwksIgnoreKeyUse`
+  (49g + 50f).
+- Reference docs:
+  [`docs/superpowers/specs/2026-05-23-crabka-operator-listener-user-oauth-50-design.md`],
+  [`docs/superpowers/specs/2026-05-23-crabka-oauth-parity-roadmap-design.md`],
+  [`docs/superpowers/plans/2026-05-23-crabka-operator-listener-user-oauth-50.md`].
+
