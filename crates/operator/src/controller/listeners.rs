@@ -1404,21 +1404,97 @@ mod tests {
     }
 
     #[test]
-    fn validate_listeners_rejects_two_oauth_listeners_with_divergent_config() {
-        let mut a = oauth_cfg_minimal();
-        a.valid_audience = Some("kafka-a".into());
-        let mut b = oauth_cfg_minimal();
-        b.valid_audience = Some("kafka-b".into());
-        let listeners = vec![
-            oauth_listener("oauth-a", 9095, true, a),
-            oauth_listener("oauth-b", 9096, true, b),
+    fn validate_listeners_rejects_two_oauth_listeners_with_divergent_config_in_any_canonical_field()
+    {
+        // Walk every field in `oauth_canonical`'s output (i.e. every
+        // field except `enable_oauth_bearer`, which is intentionally
+        // masked). For each, build a base full-config OAuth listener
+        // plus a sibling that differs only in that one field, and
+        // assert the validator rejects the pair with
+        // ConflictingOAuthListenerConfig. This guards against a future
+        // `oauth_canonical` refactor that accidentally masks too much
+        // and would otherwise let divergent broker-global OAuth config
+        // through unnoticed.
+        let base = crate::crd::ListenerAuthenticationOAuth {
+            valid_issuer_uri: "https://issuer.example.com/".into(),
+            jwks_endpoint_uri: "https://issuer.example.com/jwks".into(),
+            valid_audience: Some("kafka".into()),
+            user_name_claim: Some("preferred_username".into()),
+            custom_claim_check: Some(crate::crd::OAuthCustomClaimCheck {
+                scope: "kafka.write".into(),
+                scope_claim: Some("scope".into()),
+            }),
+            jwks_refresh_seconds: Some(300),
+            max_clock_skew_seconds: Some(30),
+            enable_oauth_bearer: true,
+        };
+        let perturbations: Vec<(&str, crate::crd::ListenerAuthenticationOAuth)> = vec![
+            (
+                "valid_issuer_uri",
+                crate::crd::ListenerAuthenticationOAuth {
+                    valid_issuer_uri: "https://other.example.com/".into(),
+                    ..base.clone()
+                },
+            ),
+            (
+                "jwks_endpoint_uri",
+                crate::crd::ListenerAuthenticationOAuth {
+                    jwks_endpoint_uri: "https://other.example.com/jwks".into(),
+                    ..base.clone()
+                },
+            ),
+            (
+                "valid_audience",
+                crate::crd::ListenerAuthenticationOAuth {
+                    valid_audience: Some("other-kafka".into()),
+                    ..base.clone()
+                },
+            ),
+            (
+                "user_name_claim",
+                crate::crd::ListenerAuthenticationOAuth {
+                    user_name_claim: Some("sub".into()),
+                    ..base.clone()
+                },
+            ),
+            (
+                "custom_claim_check",
+                crate::crd::ListenerAuthenticationOAuth {
+                    custom_claim_check: Some(crate::crd::OAuthCustomClaimCheck {
+                        scope: "kafka.read".into(),
+                        scope_claim: Some("scope".into()),
+                    }),
+                    ..base.clone()
+                },
+            ),
+            (
+                "jwks_refresh_seconds",
+                crate::crd::ListenerAuthenticationOAuth {
+                    jwks_refresh_seconds: Some(600),
+                    ..base.clone()
+                },
+            ),
+            (
+                "max_clock_skew_seconds",
+                crate::crd::ListenerAuthenticationOAuth {
+                    max_clock_skew_seconds: Some(120),
+                    ..base.clone()
+                },
+            ),
         ];
-        let err = validate_listeners(&listeners, None).unwrap_err();
-        assert_eq!(err.reason(), "ConflictingOAuthConfig");
-        assert!(matches!(
-            err,
-            ValidationError::ConflictingOAuthListenerConfig
-        ));
+        for (field, perturbed) in perturbations {
+            let listeners = vec![
+                oauth_listener("oauth-a", 9095, true, base.clone()),
+                oauth_listener("oauth-b", 9096, true, perturbed),
+            ];
+            let err = validate_listeners(&listeners, None).expect_err(&format!(
+                "expected ConflictingOAuthListenerConfig when only `{field}` differs"
+            ));
+            assert!(
+                matches!(err, ValidationError::ConflictingOAuthListenerConfig),
+                "field {field}: got {err:?}"
+            );
+        }
     }
 
     #[test]
@@ -2588,6 +2664,53 @@ mod toml_rendering_tests {
             None,
         );
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn render_broker_toml_oauthbearer_block_emits_keys_in_canonical_order() {
+        // Pin the exact byte sequence of the `[oauthbearer]` block. The
+        // config hash that drives StatefulSet rollouts is taken over the
+        // rendered TOML bytes, so a key reorder here is a silent
+        // behavioural change. Use fixture values that are unique enough
+        // that no other section of the TOML could accidentally contain
+        // this substring.
+        use std::collections::BTreeMap;
+        let cfg = crate::crd::ListenerAuthenticationOAuth {
+            valid_issuer_uri: "https://idp.example/realms/kafka".into(),
+            jwks_endpoint_uri: "https://idp.example/certs".into(),
+            valid_audience: Some("kafka-broker".into()),
+            user_name_claim: Some("preferred_username".into()),
+            custom_claim_check: Some(crate::crd::OAuthCustomClaimCheck {
+                scope: "kafka.write".into(),
+                scope_claim: Some("scope".into()),
+            }),
+            jwks_refresh_seconds: Some(300),
+            max_clock_skew_seconds: Some(60),
+            enable_oauth_bearer: true,
+        };
+        let listeners = vec![oauth_listener_for_render("oauth", 9095, true, cfg)];
+        let toml = render_broker_toml(
+            0,
+            &listeners,
+            &addrs_for("oauth", 9095),
+            "oauth",
+            &BTreeMap::new(),
+            Some(&render_tls()),
+            None,
+        );
+        let expected = "[oauthbearer]\n\
+            jwks_endpoint_uri = \"https://idp.example/certs\"\n\
+            valid_issuer_uri = \"https://idp.example/realms/kafka\"\n\
+            expected_audience = \"kafka-broker\"\n\
+            principal_claim_name = \"preferred_username\"\n\
+            scope_claim_name = \"scope\"\n\
+            required_scope = \"kafka.write\"\n\
+            jwks_refresh_interval_ms = 300000\n\
+            allowable_clock_skew_ms = 60000\n";
+        assert!(
+            toml.contains(expected),
+            "expected canonical [oauthbearer] block not found.\n--- expected ---\n{expected}\n--- got ---\n{toml}"
+        );
     }
 
     #[test]
