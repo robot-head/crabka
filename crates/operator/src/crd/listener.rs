@@ -182,6 +182,8 @@ pub struct ListenerAuthenticationOAuth {
 fn default_true() -> bool {
     true
 }
+// serde's `skip_serializing_if` predicate signature requires `&T`.
+#[allow(clippy::trivially_copy_pass_by_ref)]
 fn is_default_true(b: &bool) -> bool {
     *b
 }
