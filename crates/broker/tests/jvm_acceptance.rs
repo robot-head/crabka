@@ -6659,3 +6659,104 @@ async fn jvm_kafka_console_consumer_sees_compacted_topic_end_to_end() {
 
     broker.shutdown().await;
 }
+
+/// Like [`start_host_broker`] but configures a second JBOD data directory
+/// (KIP-113). Returns the two host-side log dirs alongside the handle so
+/// the test can assert which absolute paths `DescribeLogDirs` reports.
+async fn start_host_broker_jbod() -> (
+    crabka_broker::BrokerHandle,
+    tempfile::TempDir,
+    tempfile::TempDir,
+) {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("crabka_broker=debug,info")),
+        )
+        .with_test_writer()
+        .try_init();
+    let primary = tempfile::tempdir().expect("tempdir");
+    let extra = tempfile::tempdir().expect("tempdir");
+    let listen_addr: std::net::SocketAddr = LISTEN.parse().expect("static addr");
+    let controller_addr: std::net::SocketAddr = "0.0.0.0:9093".parse().expect("static addr");
+    let config = BrokerConfig {
+        broker_id: 1,
+        listen_addr,
+        advertised_listener: BOOTSTRAP.into(),
+        log_dir: primary.path().to_path_buf(),
+        extra_log_dirs: vec![extra.path().to_path_buf()],
+        log_config: LogConfig::default(),
+        node_id: 1,
+        controller_listen_addr: controller_addr,
+        controller_quorum_voters: vec![(1, controller_addr)],
+        heartbeat_interval_ms: 3_000,
+        heartbeat_timeout_ms: 9_000,
+        replica_lag_time_max_ms: 30_000,
+        controller_election_timeout: std::time::Duration::from_secs(5),
+        controller_heartbeat_interval: std::time::Duration::from_millis(500),
+        bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
+        ..BrokerConfig::default()
+    };
+    let handle = Broker::start(config).await.expect("start broker");
+    (handle, primary, extra)
+}
+
+/// Slice 45 — KIP-113: `kafka-log-dirs --describe` against a two-directory
+/// JBOD broker. Asserts the JVM tool sees both configured log directories
+/// and that the created topic's partitions are spread across them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Docker"]
+async fn jvm_kafka_log_dirs_describe_reports_jbod_spread() {
+    let (broker, primary, extra) = start_host_broker_jbod().await;
+    nc_check_connectivity();
+
+    docker_run_kafka_tool(&[
+        "kafka-topics",
+        "--create",
+        "--topic",
+        "jbodtopic",
+        "--partitions",
+        "6",
+        "--replication-factor",
+        "1",
+        "--bootstrap-server",
+        BOOTSTRAP,
+    ]);
+
+    // Give the supervisor a moment to materialize every partition on disk.
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+    let out = docker_run_kafka_tool(&[
+        "kafka-log-dirs",
+        "--describe",
+        "--bootstrap-server",
+        BOOTSTRAP,
+        "--broker-list",
+        "1",
+    ]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    // The broker reports canonical absolute host paths; canonicalize the
+    // expected dirs so the substring match is robust to /tmp symlinks.
+    let primary_path =
+        std::fs::canonicalize(primary.path()).unwrap_or_else(|_| primary.path().to_path_buf());
+    let extra_path =
+        std::fs::canonicalize(extra.path()).unwrap_or_else(|_| extra.path().to_path_buf());
+
+    assert!(
+        stdout.contains(&primary_path.display().to_string()),
+        "kafka-log-dirs output missing primary dir {}; got: {stdout}",
+        primary_path.display()
+    );
+    assert!(
+        stdout.contains(&extra_path.display().to_string()),
+        "kafka-log-dirs output missing extra dir {}; got: {stdout}",
+        extra_path.display()
+    );
+    assert!(
+        stdout.contains("jbodtopic"),
+        "kafka-log-dirs output missing topic partitions; got: {stdout}"
+    );
+
+    broker.shutdown().await;
+}

@@ -2652,6 +2652,7 @@ fn handler_body_flexible(api_key: i16, version: i16) -> bool {
         31 => version >= owned::delete_acls_request::FLEXIBLE_MIN,
         32 => version >= owned::describe_configs_request::FLEXIBLE_MIN,
         33 => version >= owned::alter_configs_request::FLEXIBLE_MIN,
+        35 => version >= owned::describe_log_dirs_request::FLEXIBLE_MIN,
         36 => version >= owned::sasl_authenticate_request::FLEXIBLE_MIN,
         37 => version >= owned::create_partitions_request::FLEXIBLE_MIN,
         42 => version >= owned::delete_groups_request::FLEXIBLE_MIN,

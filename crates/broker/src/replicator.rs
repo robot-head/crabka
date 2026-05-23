@@ -57,7 +57,7 @@ pub(crate) struct Config {
     pub leader_host: String,
     pub leader_port: u16,
     pub partitions: Arc<DashMap<(String, i32), Arc<Partition>>>,
-    pub log_dir: PathBuf,
+    pub log_dirs: Vec<PathBuf>,
     pub log_config: LogConfig,
     pub client_id: String,
     pub shutdown: CancellationToken,
@@ -108,7 +108,7 @@ fn ensure_local_partition(cfg: &Config) -> Result<(), String> {
     {
         return Ok(());
     }
-    let dir = cfg.log_dir.join(format!("{}-{}", cfg.topic, cfg.partition));
+    let dir = crate::log_dir::place_partition_dir(&cfg.log_dirs, &cfg.topic, cfg.partition);
     std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
     let log = Log::open(&dir, cfg.log_config.clone()).map_err(|e| format!("Log::open: {e}"))?;
     let part = spawn_partition(cfg.topic.clone(), cfg.partition, log);

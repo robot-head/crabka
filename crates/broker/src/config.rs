@@ -56,9 +56,19 @@ pub struct BrokerConfig {
     /// advertised endpoint. Defaults to `listen_addr`'s string form.
     pub advertised_listener: String,
 
-    /// Directory containing one `<topic>-<partition>/` per partition.
-    /// Created on startup if missing. Default: `./crabka-data`.
+    /// Primary log directory. Holds the `__cluster_metadata` raft log and
+    /// is used for bootstrap-mode detection. Also a data directory: when
+    /// [`extra_log_dirs`][Self::extra_log_dirs] is empty this is the only
+    /// place partition data lives. Created on startup if missing.
+    /// Default: `./crabka-data`.
     pub log_dir: PathBuf,
+
+    /// Additional JBOD data directories (KIP-113). When non-empty, new
+    /// partitions are spread across `[log_dir] + extra_log_dirs` by
+    /// least-loaded placement; `__cluster_metadata` always stays on
+    /// [`log_dir`][Self::log_dir]. Maps to Kafka's `log.dirs` having more
+    /// than one entry. Default: empty (single-directory broker).
+    pub extra_log_dirs: Vec<PathBuf>,
 
     /// Per-log configuration applied to every partition this broker hosts.
     pub log_config: LogConfig,
@@ -202,6 +212,7 @@ impl BrokerConfig {
             listen_addr,
             advertised_listener: "127.0.0.1:0".into(),
             log_dir,
+            extra_log_dirs: Vec::new(),
             log_config: LogConfig::default(),
             node_id: 1,
             controller_listen_addr: controller_addr,
@@ -324,6 +335,21 @@ impl BrokerConfig {
         Ok(())
     }
 
+    /// All log directories this broker stores partition data in, primary
+    /// first, de-duplicated. This is the placement + `DescribeLogDirs`
+    /// surface (KIP-113). `__cluster_metadata` is excluded — it lives on
+    /// [`log_dir`][Self::log_dir] only.
+    #[must_use]
+    pub fn all_log_dirs(&self) -> Vec<PathBuf> {
+        let mut out = vec![self.log_dir.clone()];
+        for d in &self.extra_log_dirs {
+            if !out.contains(d) {
+                out.push(d.clone());
+            }
+        }
+        out
+    }
+
     /// Returns the effective listener list.
     ///
     /// When [`listeners`][Self::listeners] is empty (the pre-Task-7 default),
@@ -355,6 +381,7 @@ impl Default for BrokerConfig {
             listen_addr: addr,
             advertised_listener: addr.to_string(),
             log_dir: PathBuf::from("./crabka-data"),
+            extra_log_dirs: Vec::new(),
             log_config: LogConfig::default(),
             node_id: 1,
             controller_listen_addr: controller_addr,

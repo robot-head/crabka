@@ -959,8 +959,8 @@ impl Broker {
         //    a local-disk concern; the metadata image is sourced from
         //    `controller.current_image()` whenever a handler needs it.
         let partitions: Arc<DashMap<(String, i32), Arc<Partition>>> = Arc::new(DashMap::new());
-        for (topic, partition_id) in log_dir::scan(&config.log_dir)? {
-            let dir = log_dir::partition_dir(&config.log_dir, &topic, partition_id);
+        for (topic, partition_id, owning_dir) in log_dir::scan_all(&config.all_log_dirs())? {
+            let dir = log_dir::partition_dir(&owning_dir, &topic, partition_id);
             let log = crabka_log::Log::open(&dir, config.log_config.clone())?;
             let part = spawn_partition(topic.clone(), partition_id, log);
             partitions.insert((topic.clone(), partition_id), part);
@@ -1013,7 +1013,7 @@ impl Broker {
             config.node_id,
             controller.clone(),
             partitions.clone(),
-            config.log_dir.clone(),
+            config.all_log_dirs(),
             config.log_config.clone(),
             format!("crabka-broker-{}-replicator", config.broker_id),
             supervisor_shutdown.clone(),
@@ -1217,7 +1217,7 @@ impl Broker {
         // the task after cancelling `supervisor_shutdown`.
         let disk_scanner_handle = if config.partition_disk_scan_interval_secs > 0 {
             let scanner = crate::disk_scanner::DiskScanner {
-                log_dir: config.log_dir.clone(),
+                log_dirs: config.all_log_dirs(),
                 interval: std::time::Duration::from_secs(config.partition_disk_scan_interval_secs),
                 metrics: metrics.clone(),
                 shutdown: supervisor_shutdown.child_token(),

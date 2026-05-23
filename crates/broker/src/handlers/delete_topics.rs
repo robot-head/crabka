@@ -25,7 +25,7 @@ pub(crate) async fn handle(
 ) -> Result<Bytes, BrokerError> {
     let controller = &broker.controller;
     let partitions = broker.partitions.clone();
-    let log_dir_path = broker.config.log_dir.clone();
+    let log_dirs = broker.config.all_log_dirs();
 
     let mut cur: &[u8] = req_bytes;
     let req = DeleteTopicsRequest::decode(&mut cur, version)?;
@@ -129,7 +129,9 @@ pub(crate) async fn handle(
                     .collect();
                 for k in keys {
                     partitions.remove(&k);
-                    let dir = log_dir::partition_dir(&log_dir_path, &k.0, k.1);
+                    // JBOD: the partition may live in any log dir; resolve
+                    // its actual location (existing-location wins).
+                    let dir = log_dir::place_partition_dir(&log_dirs, &k.0, k.1);
                     let _ = std::fs::remove_dir_all(dir);
                 }
                 codes::NONE

@@ -43,7 +43,7 @@ pub(crate) async fn handle(
     let producer_ids = broker.producer_ids.clone();
     let coord = broker.txn_coordinator.clone();
     let controller = broker.controller.clone();
-    let log_dir = broker.config.log_dir.clone();
+    let log_dirs = broker.config.all_log_dirs();
     let log_config = broker.config.log_config.clone();
 
     let mut cur: &[u8] = req_bytes;
@@ -120,7 +120,7 @@ pub(crate) async fn handle(
                     &coord.partitions,
                     crate::txn::bootstrap::TOPIC,
                     txn_partition,
-                    &log_dir,
+                    &log_dirs,
                     &log_config,
                 )
                 .map_err(BrokerError::Txn)?;

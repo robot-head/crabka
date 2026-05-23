@@ -77,7 +77,8 @@ implements it today.
 | Transaction index (`.txnindex`) per segment | ✅ |
 | Log compaction (`cleanup.policy=compact`) | ✅ |
 | Tiered storage (KIP-405) | ❌ |
-| Multiple log directories / KIP-113 log-dir reassignment | ❌ |
+| Multiple log directories (JBOD) + `DescribeLogDirs` (KIP-113) | ✅ |
+| KIP-113 intra-broker log-dir reassignment (`AlterReplicaLogDirs`) | ❌ |
 
 ### Producer
 

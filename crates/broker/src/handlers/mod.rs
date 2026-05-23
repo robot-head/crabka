@@ -66,6 +66,7 @@ pub(crate) mod describe_client_quotas;
 pub(crate) mod describe_cluster;
 pub(crate) mod describe_configs;
 pub(crate) mod describe_groups;
+pub(crate) mod describe_log_dirs;
 pub(crate) mod describe_user_scram_credentials;
 pub(crate) mod elect_leaders;
 pub(crate) mod fetch;
@@ -180,6 +181,7 @@ pub(crate) fn build_table() -> HandlerTable {
     // 28 (TxnOffsetCommit) intercepted inline — see comment above.
     t.register(32, describe_configs::handle);
     // 33 (AlterConfigs) intercepted inline — see comment above.
+    t.register(35, describe_log_dirs::handle);
     // 37 (CreatePartitions) intercepted inline — see comment above.
     // 42 (DeleteGroups) intercepted inline — see comment above.
     // 44 (IncrementalAlterConfigs) intercepted inline — see comment above.

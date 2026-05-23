@@ -36,9 +36,22 @@ struct Args {
     #[arg(long)]
     config_file: Option<PathBuf>,
 
-    /// Directory containing per-partition log dirs.
+    /// Primary log directory. Holds the cluster-metadata raft log and is
+    /// the default partition data directory.
     #[arg(long, default_value = "./crabka-data")]
     log_dir: PathBuf,
+
+    /// Additional JBOD data directories (KIP-113), comma-separated. New
+    /// partitions are spread across `--log-dir` plus these by least-loaded
+    /// placement. The cluster-metadata log always stays on `--log-dir`.
+    /// Maps to Kafka's `log.dirs` having more than one entry.
+    #[arg(
+        long,
+        env = "CRABKA_EXTRA_LOG_DIRS",
+        value_delimiter = ',',
+        num_args = 0..
+    )]
+    extra_log_dirs: Vec<PathBuf>,
 
     /// Numeric broker id.
     #[arg(long, default_value_t = 1)]
@@ -117,6 +130,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         listen_addr: args.listen_addr,
         advertised_listener: advertised,
         log_dir: args.log_dir,
+        extra_log_dirs: args.extra_log_dirs,
         log_config: LogConfig::default(),
         node_id,
         controller_listen_addr: controller_addr,
