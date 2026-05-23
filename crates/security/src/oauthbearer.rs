@@ -16,6 +16,7 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use serde_json::Value;
 
+use crate::jwks::JwksHandle;
 use crate::{AuthError, AuthMethod, Principal};
 
 /// Parsed RFC 7628 client initial response.
@@ -187,14 +188,34 @@ impl UnsecuredJwsValidator {
     /// be a space-delimited string or a JSON array of strings (both per
     /// Kafka's `OAuthBearerUnsecuredJws`).
     fn scope_contains(&self, claims: &Value, required: &str) -> bool {
-        match claims.get(&self.scope_claim_name) {
-            Some(Value::String(s)) => s.split_whitespace().any(|sc| sc == required),
-            Some(Value::Array(items)) => items
-                .iter()
-                .filter_map(Value::as_str)
-                .any(|sc| sc == required),
-            _ => false,
-        }
+        scope_claim_contains(claims, &self.scope_claim_name, required)
+    }
+}
+
+/// Whether the `scope_claim_name` claim of `claims` contains `required`. The
+/// scope claim may be a space-delimited string or a JSON array of strings.
+/// Shared by the unsecured and signed validators.
+fn scope_claim_contains(claims: &Value, scope_claim_name: &str, required: &str) -> bool {
+    match claims.get(scope_claim_name) {
+        Some(Value::String(s)) => s.split_whitespace().any(|sc| sc == required),
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|sc| sc == required),
+        _ => false,
+    }
+}
+
+/// Whether the JWT `aud` claim contains `expected`. `aud` is a single string
+/// or an array of strings (RFC 7519 §4.1.3).
+fn audience_contains(claims: &Value, expected: &str) -> bool {
+    match claims.get("aud") {
+        Some(Value::String(s)) => s == expected,
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|a| a == expected),
+        _ => false,
     }
 }
 
@@ -229,6 +250,187 @@ fn numeric_date_ms(claims: &Value, key: &str) -> Option<i64> {
 #[must_use]
 pub fn invalid_token_json() -> String {
     "{\"status\":\"invalid_token\"}".to_string()
+}
+
+/// Validates a *signed* JWS bearer token (`RS256` / `ES256`) against a JWKS
+/// key set fetched from the identity provider, then checks the standard JWT
+/// claims and derives the connection principal (slice 49b).
+///
+/// The key set lives behind a [`JwksHandle`] so the broker's background
+/// refresher can rotate keys without restarting the broker or taking a lock;
+/// each [`validate`](Self::validate) reads the current set.
+#[derive(Debug, Clone)]
+pub struct SignedJwsValidator {
+    /// Claim whose string value becomes the principal name. Default `sub`.
+    pub principal_claim_name: String,
+    /// Claim carrying the token scope (string or array). Default `scope`.
+    pub scope_claim_name: String,
+    /// When set, the token scope must contain this value.
+    pub required_scope: Option<String>,
+    /// Tolerance, in milliseconds, applied to `exp` / `iat` / `nbf`.
+    pub allowable_clock_skew_ms: i64,
+    /// When set, the token `iss` claim must equal this exactly.
+    pub valid_issuer: Option<String>,
+    /// When set, the token `aud` claim must contain this value.
+    pub expected_audience: Option<String>,
+    /// The live JWKS, swapped in by the broker's refresher.
+    keys: JwksHandle,
+}
+
+impl SignedJwsValidator {
+    /// A validator backed by `keys`, with the same claim/skew defaults as the
+    /// unsecured validator and no issuer / audience constraint.
+    #[must_use]
+    pub fn new(keys: JwksHandle) -> Self {
+        Self {
+            principal_claim_name: "sub".to_string(),
+            scope_claim_name: "scope".to_string(),
+            required_scope: None,
+            allowable_clock_skew_ms: 30_000,
+            valid_issuer: None,
+            expected_audience: None,
+            keys,
+        }
+    }
+
+    /// The shared key-set handle, so the broker can hand the same cell to its
+    /// JWKS refresher task.
+    #[must_use]
+    pub fn key_handle(&self) -> JwksHandle {
+        self.keys.clone()
+    }
+
+    /// Validate a signed bearer token against `now_ms` (Unix epoch ms).
+    ///
+    /// # Errors
+    ///
+    /// [`AuthError::InvalidToken`] for any structural, signature, temporal,
+    /// issuer, audience, scope, or principal-claim failure.
+    pub fn validate(&self, token: &str, now_ms: i64) -> Result<Principal, AuthError> {
+        // JWS compact serialization: header.payload.signature, all non-empty.
+        let mut segs = token.split('.');
+        let header_b64 = segs.next().ok_or(AuthError::InvalidToken)?;
+        let payload_b64 = segs.next().ok_or(AuthError::InvalidToken)?;
+        let sig_b64 = segs.next().ok_or(AuthError::InvalidToken)?;
+        if segs.next().is_some() || sig_b64.is_empty() {
+            return Err(AuthError::InvalidToken);
+        }
+
+        let header: Value = decode_json_segment(header_b64)?;
+        let alg = header
+            .get("alg")
+            .and_then(Value::as_str)
+            .ok_or(AuthError::InvalidToken)?;
+        if alg != "RS256" && alg != "ES256" {
+            return Err(AuthError::InvalidToken);
+        }
+        let kid = header.get("kid").and_then(Value::as_str);
+
+        let signing_input = format!("{header_b64}.{payload_b64}");
+        let sig = B64URL
+            .decode(sig_b64)
+            .map_err(|_| AuthError::InvalidToken)?;
+        self.keys
+            .load()
+            .verify(kid, alg, signing_input.as_bytes(), &sig)?;
+
+        let claims: Value = decode_json_segment(payload_b64)?;
+        self.check_claims(&claims, now_ms)
+    }
+
+    /// Apply the claim policy (temporal, issuer, audience, scope, principal) to
+    /// already-signature-verified `claims`. Split out so the policy is
+    /// unit-testable without minting signed tokens.
+    fn check_claims(&self, claims: &Value, now_ms: i64) -> Result<Principal, AuthError> {
+        // `exp` required and in the future (within skew).
+        let exp_ms = numeric_date_ms(claims, "exp").ok_or(AuthError::InvalidToken)?;
+        if exp_ms + self.allowable_clock_skew_ms <= now_ms {
+            return Err(AuthError::InvalidToken);
+        }
+        // `iat` optional: must not be in the future (within skew).
+        if let Some(iat_ms) = numeric_date_ms(claims, "iat")
+            && iat_ms - self.allowable_clock_skew_ms > now_ms
+        {
+            return Err(AuthError::InvalidToken);
+        }
+        // `nbf` optional: token not valid before it (within skew).
+        if let Some(nbf_ms) = numeric_date_ms(claims, "nbf")
+            && nbf_ms - self.allowable_clock_skew_ms > now_ms
+        {
+            return Err(AuthError::InvalidToken);
+        }
+
+        if let Some(expected) = &self.valid_issuer
+            && claims.get("iss").and_then(Value::as_str) != Some(expected.as_str())
+        {
+            return Err(AuthError::InvalidToken);
+        }
+
+        if let Some(expected) = &self.expected_audience
+            && !audience_contains(claims, expected)
+        {
+            return Err(AuthError::InvalidToken);
+        }
+
+        if let Some(required) = &self.required_scope
+            && !scope_claim_contains(claims, &self.scope_claim_name, required)
+        {
+            return Err(AuthError::InvalidToken);
+        }
+
+        let name = claims
+            .get(&self.principal_claim_name)
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .ok_or(AuthError::InvalidToken)?
+            .to_string();
+
+        Ok(Principal {
+            name,
+            auth_method: AuthMethod::SaslOAuthBearer,
+        })
+    }
+}
+
+/// The broker's configured OAUTHBEARER token validator: either the
+/// development-only unsecured-JWS path (slice 49) or production signed-JWT
+/// validation against a JWKS endpoint (slice 49b). Defaults to unsecured.
+#[derive(Debug, Clone)]
+pub enum OAuthBearerValidator {
+    /// Unsecured JWS (`alg:none`) — development / testing only.
+    Unsecured(UnsecuredJwsValidator),
+    /// Signed JWS verified against a JWKS key set.
+    Signed(SignedJwsValidator),
+}
+
+impl Default for OAuthBearerValidator {
+    fn default() -> Self {
+        Self::Unsecured(UnsecuredJwsValidator::default())
+    }
+}
+
+impl OAuthBearerValidator {
+    /// Validate `token` against `now_ms`, dispatching to the configured path.
+    ///
+    /// # Errors
+    ///
+    /// [`AuthError::InvalidToken`] when the token fails validation.
+    pub fn validate(&self, token: &str, now_ms: i64) -> Result<Principal, AuthError> {
+        match self {
+            Self::Unsecured(v) => v.validate(token, now_ms),
+            Self::Signed(v) => v.validate(token, now_ms),
+        }
+    }
+
+    /// The JWKS handle when this is a signed validator, so the broker can wire
+    /// a refresher to the same key cell. `None` for the unsecured path.
+    #[must_use]
+    pub fn jwks_handle(&self) -> Option<JwksHandle> {
+        match self {
+            Self::Unsecured(_) => None,
+            Self::Signed(v) => Some(v.key_handle()),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -414,5 +616,209 @@ mod tests {
     #[test]
     fn invalid_token_json_is_rfc7628_shape() {
         assert_eq!(invalid_token_json(), "{\"status\":\"invalid_token\"}");
+    }
+
+    // ---- SignedJwsValidator (slice 49b) -------------------------------------
+
+    use crate::jwks::{Jwks, JwksHandle, mint_es256, mint_rs256};
+
+    /// Build a `SignedJwsValidator` whose key set is populated from `jwks_json`.
+    fn signed(jwks_json: &str) -> (SignedJwsValidator, JwksHandle) {
+        let handle = JwksHandle::new(Jwks::from_json(jwks_json).unwrap());
+        (SignedJwsValidator::new(handle.clone()), handle)
+    }
+
+    #[test]
+    fn signed_accepts_fresh_rs256_token() {
+        let (token, jwks) = mint_rs256("k1", "{\"sub\":\"admin\",\"exp\":9999999999}");
+        let (v, _h) = signed(&jwks);
+        let p = v.validate(&token, 1_000_000_000_000).unwrap();
+        assert_eq!(p.name, "admin");
+        assert_eq!(p.auth_method, AuthMethod::SaslOAuthBearer);
+    }
+
+    #[test]
+    fn signed_rejects_unsecured_alg_none() {
+        // An `alg:none` token must never pass the signed validator even if a
+        // key happens to be present.
+        let (_token, jwks) = mint_rs256("k1", "{\"sub\":\"a\",\"exp\":9999999999}");
+        let (v, _h) = signed(&jwks);
+        let unsecured = jws("{\"alg\":\"none\"}", "{\"sub\":\"a\",\"exp\":9999999999}");
+        assert_eq!(
+            v.validate(&unsecured, 1_000_000_000_000),
+            Err(AuthError::InvalidToken)
+        );
+    }
+
+    #[test]
+    fn signed_rejects_expired() {
+        let (token, jwks) = mint_rs256("k1", "{\"sub\":\"a\",\"exp\":1000}");
+        let (mut v, _h) = signed(&jwks);
+        v.allowable_clock_skew_ms = 0;
+        // now (ms) far past exp (1000 s).
+        assert_eq!(
+            v.validate(&token, 5_000_000_000_000),
+            Err(AuthError::InvalidToken)
+        );
+    }
+
+    #[test]
+    fn signed_rejects_future_nbf() {
+        let (token, jwks) = mint_rs256(
+            "k1",
+            "{\"sub\":\"a\",\"exp\":9999999999,\"nbf\":5000000000}",
+        );
+        let (mut v, _h) = signed(&jwks);
+        v.allowable_clock_skew_ms = 0;
+        // now = 1e12 ms = 1e9 s, which is before nbf (5e9 s).
+        assert_eq!(
+            v.validate(&token, 1_000_000_000_000),
+            Err(AuthError::InvalidToken)
+        );
+    }
+
+    #[test]
+    fn signed_honors_issuer() {
+        let (token, jwks) = mint_rs256(
+            "k1",
+            "{\"sub\":\"a\",\"exp\":9999999999,\"iss\":\"https://idp\"}",
+        );
+        let (mut v, _h) = signed(&jwks);
+        v.valid_issuer = Some("https://idp".to_string());
+        assert!(v.validate(&token, 1_000_000_000_000).is_ok());
+        v.valid_issuer = Some("https://other".to_string());
+        assert_eq!(
+            v.validate(&token, 1_000_000_000_000),
+            Err(AuthError::InvalidToken)
+        );
+    }
+
+    #[test]
+    fn signed_rejects_missing_issuer_when_required() {
+        let (token, jwks) = mint_rs256("k1", "{\"sub\":\"a\",\"exp\":9999999999}");
+        let (mut v, _h) = signed(&jwks);
+        v.valid_issuer = Some("https://idp".to_string());
+        assert_eq!(
+            v.validate(&token, 1_000_000_000_000),
+            Err(AuthError::InvalidToken)
+        );
+    }
+
+    #[test]
+    fn signed_honors_audience_string_and_array() {
+        let (tok_str, jwks) =
+            mint_rs256("k1", "{\"sub\":\"a\",\"exp\":9999999999,\"aud\":\"kafka\"}");
+        let (mut v, _h) = signed(&jwks);
+        v.expected_audience = Some("kafka".to_string());
+        assert!(v.validate(&tok_str, 1_000_000_000_000).is_ok());
+
+        let (tok_arr, jwks2) = mint_rs256(
+            "k1",
+            "{\"sub\":\"a\",\"exp\":9999999999,\"aud\":[\"other\",\"kafka\"]}",
+        );
+        let (mut v2, _h2) = signed(&jwks2);
+        v2.expected_audience = Some("kafka".to_string());
+        assert!(v2.validate(&tok_arr, 1_000_000_000_000).is_ok());
+
+        let (tok_bad, jwks3) =
+            mint_rs256("k1", "{\"sub\":\"a\",\"exp\":9999999999,\"aud\":\"web\"}");
+        let (mut v3, _h3) = signed(&jwks3);
+        v3.expected_audience = Some("kafka".to_string());
+        assert_eq!(
+            v3.validate(&tok_bad, 1_000_000_000_000),
+            Err(AuthError::InvalidToken)
+        );
+    }
+
+    #[test]
+    fn signed_honors_required_scope() {
+        let (token, jwks) = mint_rs256(
+            "k1",
+            "{\"sub\":\"a\",\"exp\":9999999999,\"scope\":\"read kafka\"}",
+        );
+        let (mut v, _h) = signed(&jwks);
+        v.required_scope = Some("kafka".to_string());
+        assert!(v.validate(&token, 1_000_000_000_000).is_ok());
+        v.required_scope = Some("admin".to_string());
+        assert_eq!(
+            v.validate(&token, 1_000_000_000_000),
+            Err(AuthError::InvalidToken)
+        );
+    }
+
+    #[test]
+    fn signed_rejects_missing_principal() {
+        let (token, jwks) = mint_rs256("k1", "{\"exp\":9999999999}");
+        let (v, _h) = signed(&jwks);
+        assert_eq!(
+            v.validate(&token, 1_000_000_000_000),
+            Err(AuthError::InvalidToken)
+        );
+    }
+
+    #[test]
+    fn signed_custom_principal_claim() {
+        let (token, jwks) = mint_rs256("k1", "{\"client_id\":\"svc-1\",\"exp\":9999999999}");
+        let (mut v, _h) = signed(&jwks);
+        v.principal_claim_name = "client_id".to_string();
+        assert_eq!(v.validate(&token, 1_000_000_000_000).unwrap().name, "svc-1");
+    }
+
+    #[test]
+    fn signed_key_rotation_via_handle() {
+        // Token A verifies under key set A. ES256 with a fresh key per mint, so
+        // set B is a genuinely different key (RS256's fixed test key can't be).
+        let (token_a, jwks_a) = mint_es256("k1", "{\"sub\":\"a\",\"exp\":9999999999}");
+        let (v, handle) = signed(&jwks_a);
+        assert!(v.validate(&token_a, 1_000_000_000_000).is_ok());
+
+        // Rotate to a fresh key set (same kid, new key). Token A no longer
+        // verifies; a token under the new key does. Same validator instance.
+        let (token_b, jwks_b) = mint_es256("k1", "{\"sub\":\"b\",\"exp\":9999999999}");
+        handle.store(Jwks::from_json(&jwks_b).unwrap());
+        assert_eq!(
+            v.validate(&token_a, 1_000_000_000_000),
+            Err(AuthError::InvalidToken)
+        );
+        assert_eq!(v.validate(&token_b, 1_000_000_000_000).unwrap().name, "b");
+    }
+
+    #[test]
+    fn signed_rejects_when_keyset_empty() {
+        let (token, _jwks) = mint_rs256("k1", "{\"sub\":\"a\",\"exp\":9999999999}");
+        let v = SignedJwsValidator::new(JwksHandle::default());
+        assert_eq!(
+            v.validate(&token, 1_000_000_000_000),
+            Err(AuthError::InvalidToken)
+        );
+    }
+
+    #[test]
+    fn enum_dispatches_unsecured_and_signed() {
+        // Unsecured default.
+        let unsecured = OAuthBearerValidator::default();
+        assert!(unsecured.jwks_handle().is_none());
+        let tok = unsecured_token("admin", 999_999_000, 9_999_999_999);
+        assert!(unsecured.validate(&tok, 1_000_000_000_000).is_ok());
+
+        // Signed.
+        let (token, jwks) = mint_rs256("k1", "{\"sub\":\"x\",\"exp\":9999999999}");
+        let (sv, _h) = signed(&jwks);
+        let signed_enum = OAuthBearerValidator::Signed(sv);
+        assert!(signed_enum.jwks_handle().is_some());
+        assert_eq!(
+            signed_enum
+                .validate(&token, 1_000_000_000_000)
+                .unwrap()
+                .name,
+            "x"
+        );
+    }
+
+    fn unsecured_token(sub: &str, iat_s: i64, exp_s: i64) -> String {
+        jws(
+            "{\"alg\":\"none\"}",
+            &format!("{{\"sub\":\"{sub}\",\"iat\":{iat_s},\"exp\":{exp_s}}}"),
+        )
     }
 }

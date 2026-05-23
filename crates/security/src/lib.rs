@@ -4,6 +4,7 @@
 //! crate produces verifiers, hashes, and TLS configs.
 
 pub mod ca;
+mod jwks;
 mod listener;
 mod mechanism;
 mod mtls;
@@ -14,11 +15,13 @@ mod reload;
 pub mod scram;
 mod tls;
 
+pub use jwks::{Jwks, JwksHandle};
 pub use listener::ListenerProtocol;
 pub use mechanism::SaslMechanism;
 pub use mtls::extract_principal_from_cert;
 pub use oauthbearer::{
-    ClientInitialResponse, UnsecuredJwsValidator, invalid_token_json, parse_client_initial_response,
+    ClientInitialResponse, OAuthBearerValidator, SignedJwsValidator, UnsecuredJwsValidator,
+    invalid_token_json, parse_client_initial_response,
 };
 pub use plain::verify_plain;
 pub use principal::{AuthError, AuthMethod, Principal};

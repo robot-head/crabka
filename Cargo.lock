@@ -1045,6 +1045,8 @@ dependencies = [
  "opentelemetry_sdk",
  "pbkdf2 0.13.0",
  "prometheus-client",
+ "reqwest 0.13.3",
+ "ring",
  "rustls",
  "rustls-pki-types",
  "serde",

@@ -304,7 +304,7 @@ pub fn handle_authenticate_scram(
 pub fn handle_authenticate_oauthbearer(
     req: &SaslAuthenticateRequest,
     auth: &mut ConnectionAuth,
-    validator: &crabka_security::UnsecuredJwsValidator,
+    validator: &crabka_security::OAuthBearerValidator,
     now_ms: i64,
 ) -> SaslAuthenticateResponse {
     match auth {
@@ -356,7 +356,7 @@ pub fn handle_authenticate_oauthbearer(
 /// present, must equal the token principal (RFC 7628 / Kafka behaviour).
 fn validate_bearer(
     auth_bytes: &[u8],
-    validator: &crabka_security::UnsecuredJwsValidator,
+    validator: &crabka_security::OAuthBearerValidator,
     now_ms: i64,
 ) -> Result<Principal, &'static str> {
     let parsed = crabka_security::parse_client_initial_response(auth_bytes)
@@ -488,7 +488,7 @@ mod tests {
 
     #[test]
     fn oauthbearer_valid_token_authenticates() {
-        let validator = crabka_security::UnsecuredJwsValidator::default();
+        let validator = crabka_security::OAuthBearerValidator::default();
         let now_ms = 1_000_000_000_000;
         let token = unsecured_token("svc-account", 1_000_000_900); // exp seconds → future of now
         let mut auth = ConnectionAuth::Negotiating {
@@ -510,10 +510,12 @@ mod tests {
 
     #[test]
     fn oauthbearer_invalid_token_returns_error_json_then_fails_on_dummy() {
-        let validator = crabka_security::UnsecuredJwsValidator {
-            allowable_clock_skew_ms: 0,
-            ..Default::default()
-        };
+        let validator = crabka_security::OAuthBearerValidator::Unsecured(
+            crabka_security::UnsecuredJwsValidator {
+                allowable_clock_skew_ms: 0,
+                ..Default::default()
+            },
+        );
         let now_ms = 5_000_000_000_000;
         // exp far in the past → expired.
         let token = unsecured_token("admin", 1_000_000_000);
@@ -549,7 +551,7 @@ mod tests {
 
     #[test]
     fn oauthbearer_malformed_response_returns_error_json() {
-        let validator = crabka_security::UnsecuredJwsValidator::default();
+        let validator = crabka_security::OAuthBearerValidator::default();
         let mut auth = ConnectionAuth::Negotiating {
             mechanism: SaslMechanism::OAuthBearer,
             exchange: SaslExchange::OAuthBearer,
@@ -565,7 +567,7 @@ mod tests {
 
     #[test]
     fn oauthbearer_authzid_mismatch_fails() {
-        let validator = crabka_security::UnsecuredJwsValidator::default();
+        let validator = crabka_security::OAuthBearerValidator::default();
         let now_ms = 1_000_000_000_000;
         let token = unsecured_token("alice", 1_000_000_900);
         let mut auth = ConnectionAuth::Negotiating {

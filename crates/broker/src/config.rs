@@ -154,11 +154,21 @@ pub struct BrokerConfig {
     /// Which SASL mechanisms are enabled. Empty → no SASL.
     pub enabled_sasl_mechanisms: Vec<SaslMechanism>,
 
-    /// Slice 49: validator for SASL/OAUTHBEARER bearer tokens. Only consulted
-    /// when `OAuthBearer` is in `enabled_sasl_mechanisms` (the handshake won't
-    /// advertise it otherwise). Defaults to the unsecured-JWS validator with
-    /// principal claim `sub`.
-    pub oauthbearer_validator: crabka_security::UnsecuredJwsValidator,
+    /// Slice 49 / 49b: validator for SASL/OAUTHBEARER bearer tokens. Only
+    /// consulted when `OAuthBearer` is in `enabled_sasl_mechanisms` (the
+    /// handshake won't advertise it otherwise). Defaults to the unsecured-JWS
+    /// validator with principal claim `sub`; configuring a JWKS endpoint
+    /// (`[oauthbearer].jwks_endpoint_uri`) selects the signed-JWT validator.
+    pub oauthbearer_validator: crabka_security::OAuthBearerValidator,
+
+    /// Slice 49b: JWKS endpoint to fetch OAUTHBEARER signing keys from. `Some`
+    /// only when `oauthbearer_validator` is the signed variant. When set,
+    /// `Broker::start` spawns a background refresher that fetches this URL and
+    /// rotates the validator's key set on `oauthbearer_jwks_refresh_interval`.
+    pub oauthbearer_jwks_endpoint: Option<String>,
+
+    /// Slice 49b: how often to re-fetch the JWKS. Default 5 minutes.
+    pub oauthbearer_jwks_refresh_interval: std::time::Duration,
 
     /// KIP-460 auto preferred-replica election. When true, a background
     /// task on the controller leader periodically scans partitions and
@@ -245,7 +255,9 @@ impl BrokerConfig {
             super_users: std::collections::HashSet::new(),
             tls_config: None,
             enabled_sasl_mechanisms: vec![],
-            oauthbearer_validator: crabka_security::UnsecuredJwsValidator::default(),
+            oauthbearer_validator: crabka_security::OAuthBearerValidator::default(),
+            oauthbearer_jwks_endpoint: None,
+            oauthbearer_jwks_refresh_interval: std::time::Duration::from_mins(5),
             auto_leader_rebalance_enable: false, // tests opt in explicitly
             leader_imbalance_check_interval_secs: 300,
             leader_imbalance_per_broker_percentage: 10,
@@ -408,7 +420,9 @@ impl Default for BrokerConfig {
             super_users: std::collections::HashSet::new(),
             tls_config: None,
             enabled_sasl_mechanisms: vec![],
-            oauthbearer_validator: crabka_security::UnsecuredJwsValidator::default(),
+            oauthbearer_validator: crabka_security::OAuthBearerValidator::default(),
+            oauthbearer_jwks_endpoint: None,
+            oauthbearer_jwks_refresh_interval: std::time::Duration::from_mins(5),
             auto_leader_rebalance_enable: true,
             leader_imbalance_check_interval_secs: 300,
             leader_imbalance_per_broker_percentage: 10,
