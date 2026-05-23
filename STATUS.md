@@ -1746,3 +1746,76 @@ Kafka client for ApiVersions.
 - Reference doc:
   [`docs/superpowers/specs/2026-05-23-crabka-broker-otlp-tracing-42-design.md`].
 
+## Slice 34 — Operator: CA rotation orchestration (2026-05-23)
+
+- Closes Phase 4 (security & certificate management). Turns slice-30's
+  *disruptive* CA-expiry path (which only set a `CaRotationRequired=True`
+  condition + Event) into hands-off, zero-downtime rotation, building on
+  slice-33 cert/truststore hot-reload + slice-21/28 ordered rolling
+  restart.
+- The cluster-CA and clients-CA cert Secret (`<cluster>-cluster-ca-cert`
+  / `-clients-ca-cert`, key `ca.crt`) is now a multi-generation PEM
+  **trust bundle**, signing cert first. Steady state is a single cert
+  (byte-identical to slice 30). The broker's `client_ca_path` already
+  loads all blocks from the file (slice 33), so a bundle "just works" as
+  a truststore; the signing path (`issue_broker_cert`, `cert_not_after`)
+  reads the first block.
+- Two rotation modes, both zero-downtime:
+  - **Same-key cert renewal** (automatic on expiry, or
+    `crabka.io/force-renew-ca`): re-sign the CA cert reusing the existing
+    key with a fresh `validityDays`, prepend it to the bundle, prune
+    expired anchors. One ordered roll distributes the new bundle; broker
+    leafs are untouched (same key → same SPKI → existing leafs still
+    chain). New `crabka_security::ca::renew_cluster_ca` /
+    `renew_clients_ca`.
+  - **Cluster-CA key replacement** (`crabka.io/force-replace-ca-key`): a
+    staged three-phase machine — `key-replace-trust` (generate new
+    key+cert, add the new cert to the bundle as trust-only, stage the new
+    key under `ca.key.next`/`ca.crt.next`, roll to distribute trust) →
+    `key-replace-promote` (promote the staged key to signer, move the new
+    cert to the front, reissue every broker leaf with the new key, roll)
+    → prune the old anchor (roll back to a single-cert bundle, `idle`).
+    Each phase advances only once the prior roll has converged.
+- The whole decision is a pure function `plan_ca_rotation(state, inputs)`
+  (mirrors `version::evaluate` / `logging::resolve_logging`), so the
+  staged machine is exhaustively unit-testable despite the FIFO
+  integration mock. The reconciler executes the returned plan via
+  `apply_ca_rotation`.
+- "No roll in flight" (the convergence gate) is computed from pool state
+  alone: every `KafkaNodePool` carries the same non-empty
+  `crabka.io/config-hash` label AND is Ready.
+- The config-hash already hashes `ca.crt`; making it a bundle means the
+  hash now covers the whole cluster-CA trust set for free — adding /
+  promoting / pruning an anchor rolls the cluster, while same-key leaf
+  renewal (slice-33 hot-reload) does not. (Clients-CA cert is NOT in the
+  hash; its truststore is hot-reloaded.)
+- Triggers are one-shot `Kafka` CR annotations (`force-renew-ca`,
+  `force-replace-ca-key`), stripped after they're consumed. The slice-30
+  `ca-renewal-check` CronJob no longer sets `CaRotationRequired`; for an
+  operator-managed CA within `renewalDays` it now stamps a one-shot
+  `crabka.io/ca-renew-after` annotation that nudges the reconciler, and
+  emits a Normal `CaRenewalScheduled` Event. BYO CAs are still never
+  rotated (a forced rotation is refused with a `CaRotation` condition +
+  Warning Event).
+- New `CaRotation` status condition (driven by the cluster CA):
+  `False/Idle`, `True/RenewingCert`, `True/DistributingTrust`,
+  `True/PromotingKey`, `False/ByoCaImmutable`,
+  `False/ClientsCaKeyReplaceUnsupported`. `CertificateAuthorityStatus`
+  gains `certGeneration`, `keyGeneration`, `rotationPhase`,
+  `trustAnchors`.
+- Clients-CA *key* replacement is deferred (it additionally needs
+  re-signing every KafkaUser mTLS cert, owned by the slice-37
+  controller); the clients CA gets the bundle + same-key renewal +
+  auto-prune only.
+- Tests: +4 `crabka_security::ca` unit tests (renew reuses key,
+  preserves subject incl. `OU=cluster`, extends validity, leaf-still-
+  chains) + 16 `controller::cluster_ca` rotation unit tests (bundle
+  helpers, full `plan_ca_rotation` decision table, same-key renewal
+  chaining) + new `reconcile_ca_rotation` integration tests; slice-30 BYO
+  test + the `ca_renewal_cronjob` flag test updated for the new nudge
+  behaviour. Operator lib tests, full operator suite, security suite
+  green; clippy `-D warnings` + fmt clean; CRD YAML regenerated (only the
+  new status fields).
+- Reference doc:
+  [`docs/superpowers/specs/2026-05-23-crabka-operator-ca-rotation-34-design.md`].
+

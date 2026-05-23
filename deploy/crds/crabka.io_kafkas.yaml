@@ -442,14 +442,42 @@ spec:
                   parsed CA cert + the CRD spec.
                 nullable: true
                 properties:
+                  certGeneration:
+                    default: 0
+                    description: |-
+                      Slice 34: monotonic generation of the active signing cert (bumped on
+                      same-key renewal and on key promotion).
+                    format: uint64
+                    minimum: 0.0
+                    type: integer
                   generated:
                     description: |-
                       `true` when the operator generated this CA (i.e.
                       `generateCertificateAuthority == true`); `false` for BYO.
                     type: boolean
+                  keyGeneration:
+                    default: 0
+                    description: |-
+                      Slice 34: monotonic generation of the active signing key (bumped only on
+                      key replacement).
+                    format: uint64
+                    minimum: 0.0
+                    type: integer
                   notAfter:
-                    description: RFC3339 `notAfter` of the current CA cert.
+                    description: RFC3339 `notAfter` of the current (signing) CA cert.
                     type: string
+                  rotationPhase:
+                    description: |-
+                      Slice 34: staged key-replacement phase
+                      (`idle` | `key-replace-trust` | `key-replace-promote`).
+                    nullable: true
+                    type: string
+                  trustAnchors:
+                    description: 'Slice 34: number of CA certs currently in the trust bundle.'
+                    format: uint
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
                 required:
                 - generated
                 - notAfter
@@ -460,14 +488,42 @@ spec:
                   parsed CA cert + the CRD spec.
                 nullable: true
                 properties:
+                  certGeneration:
+                    default: 0
+                    description: |-
+                      Slice 34: monotonic generation of the active signing cert (bumped on
+                      same-key renewal and on key promotion).
+                    format: uint64
+                    minimum: 0.0
+                    type: integer
                   generated:
                     description: |-
                       `true` when the operator generated this CA (i.e.
                       `generateCertificateAuthority == true`); `false` for BYO.
                     type: boolean
+                  keyGeneration:
+                    default: 0
+                    description: |-
+                      Slice 34: monotonic generation of the active signing key (bumped only on
+                      key replacement).
+                    format: uint64
+                    minimum: 0.0
+                    type: integer
                   notAfter:
-                    description: RFC3339 `notAfter` of the current CA cert.
+                    description: RFC3339 `notAfter` of the current (signing) CA cert.
                     type: string
+                  rotationPhase:
+                    description: |-
+                      Slice 34: staged key-replacement phase
+                      (`idle` | `key-replace-trust` | `key-replace-promote`).
+                    nullable: true
+                    type: string
+                  trustAnchors:
+                    description: 'Slice 34: number of CA certs currently in the trust bundle.'
+                    format: uint
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
                 required:
                 - generated
                 - notAfter
