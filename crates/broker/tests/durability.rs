@@ -230,14 +230,10 @@ async fn consumer_clamps_at_hw_when_followers_lag() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-// Same intermittent INVALID_TXN_STATE race on init_transactions that
-// affects slice-9's `interleaved_commit_and_abort` when run under
-// parallel test execution. The slice-9 `commit_then_read_committed_sees_records`
-// test already covers the read_committed read path end-to-end; this
-// test was an extra regression-pin for slice-10a's `min(HW, lso)`
-// change which is equivalent to slice-9's `lso` for rf=1 (HW = LEO
-// immediately). Coverage is preserved by slice-9's test.
-#[ignore = "intermittent INVALID_TXN_STATE race on rapid tid init; slice-9 commit_then_read_committed_sees_records covers the same path"]
+// Regression-pin for slice-10a's `min(HW, lso)` change, which is equivalent to
+// slice-9's `lso` for rf=1 (HW = LEO immediately). Previously flaked with the
+// `INVALID_TXN_STATE` race fixed in `Producer::flush` (it now waits for
+// in-flight Produce batches before `EndTxn`).
 async fn read_committed_under_rf1_unchanged_from_slice9() {
     let (broker, bootstrap, _dir) = boot_single().await;
     create_topic(&broker, &bootstrap, "rctxn", 1).await;

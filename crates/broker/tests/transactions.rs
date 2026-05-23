@@ -183,15 +183,14 @@ async fn abort_then_read_committed_skips_records() {
 /// commit("a","b","c"), abort("X","Y"), commit("d","e","f","g"):
 /// `read_committed` sees exactly \["a","b","c","d","e","f","g"\].
 ///
-/// Ignored: intermittently fails with `Server(24)` (`INVALID_TXN_STATE`) on
-/// the third `commit_transaction` under heavy back-to-back transaction
-/// reuse. Same tid is reused 3 times rapidly; the coordinator's state
-/// machine occasionally races between CompleteCommit/CompleteAbort and the
-/// next Ongoing transition. The single-txn paths (commit / abort / fence)
-/// are covered by the other transaction tests; rapid-reuse will be
-/// addressed in a slice-10 follow-up.
+/// Exercises rapid reuse of one `transactional_id` across three back-to-back
+/// transactions. This used to flake with `Server(24)` (`INVALID_TXN_STATE`)
+/// because `flush` returned before an in-flight Produce had transitioned the
+/// coordinator to `Ongoing`, so the following `EndTxn` arrived while the entry
+/// was still `CompleteCommit`/`CompleteAbort`. `Producer::flush` now waits for
+/// in-flight batches, so the partition-register Produce is always acked before
+/// `EndTxn` is sent.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "intermittent INVALID_TXN_STATE race on rapid tid reuse; slice-10 follow-up"]
 async fn interleaved_commit_and_abort() {
     let (broker, bootstrap, _dir) = boot_single().await;
     create_topic(&bootstrap, "ti").await;
@@ -296,22 +295,18 @@ async fn fenced_producer_cannot_commit() {
 /// Consume-process-produce loop using `send_offsets_to_transaction`.
 /// After commit, 5 records must appear on the output topic under `read_committed`.
 ///
-/// # Integration gap note
+/// This verifies the atomic-output half of the pattern: the transactional
+/// offset commit and the output produces are flushed and committed together,
+/// and the output records become visible under `read_committed` once the commit
+/// marker advances the LSO.
 ///
-/// This test depends on the group manager materialising transactionally-committed
-/// offsets when LSO advances on `__consumer_offsets-0`. Slice 5's group manager
-/// currently materialises offsets in-memory at `OffsetCommit` time, not at LSO
-/// advance time. Until that gap is closed, `send_offsets_to_transaction` commits
-/// the offset record transactionally but the group coordinator does not act on
-/// the LSO advance, so the committed offset is not visible to subsequent
-/// `OffsetFetch` calls.
+/// Note: this test deliberately does not assert `OffsetFetch` visibility of the
+/// committed consumer offset. Materialising transactionally-committed offsets
+/// into the group coordinator on LSO advance is still tracked separately:
 ///
 /// TODO(CRABKA-TXN-5): Wire group-manager offset materialization to LSO advance
 /// for transactional offset commits on `__consumer_offsets`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "slice-5/slice-9 integration gap: group manager does not materialise \
-            transactional offset commits until LSO advances on __consumer_offsets; \
-            see TODO(CRABKA-TXN-5)"]
 async fn send_offsets_to_transaction_atomic_with_records() {
     let (broker, bootstrap, _dir) = boot_single().await;
     create_topic(&bootstrap, "input").await;

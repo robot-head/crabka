@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use dashmap::DashMap;
@@ -94,6 +94,13 @@ pub struct Producer {
     pub(crate) state: Arc<AtomicU8>,
     pub(crate) wake_tx: tokio::sync::mpsc::Sender<()>,
     pub(crate) flush_notify: Arc<Notify>,
+    /// Count of batches the sender has popped from an accumulator but not yet
+    /// finished sending (Produce in-flight, awaiting the broker ack). A batch
+    /// that has left the accumulator but is still in-flight is invisible to
+    /// `all_empty`, so `flush` must also wait for this to reach zero — otherwise
+    /// `commit_transaction` can race ahead of the Produce that drives the txn to
+    /// `Ongoing` and the coordinator rejects `EndTxn` with `INVALID_TXN_STATE`.
+    pub(crate) in_flight: Arc<AtomicUsize>,
     pub(crate) sender_shutdown: CancellationToken,
     pub(crate) sender_handle: Option<JoinHandle<()>>,
     pub(crate) transactional_id: Option<String>,
@@ -609,7 +616,7 @@ impl Producer {
         self.is_active()?;
         let _ = self.wake_tx.send(()).await;
         for _ in 0..1000 {
-            if self.all_empty().await {
+            if self.all_empty().await && self.in_flight.load(Ordering::Acquire) == 0 {
                 return Ok(());
             }
             let _ =

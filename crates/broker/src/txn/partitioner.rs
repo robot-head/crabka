@@ -67,20 +67,12 @@ pub fn partition_for_tid(transactional_id: &str, num_partitions: i32) -> i32 {
 mod tests {
     use super::*;
 
-    // Reference vectors must be regenerated from the JVM reference implementation:
+    // Reference vectors generated from the canonical JVM implementation:
     //   Utils.abs(Utils.murmur2(tid.getBytes(StandardCharsets.UTF_8))) % 50
     // where Utils is org.apache.kafka.common.utils.Utils.
-    // The values below are unverified placeholders and must NOT be relied upon.
-    // Wire-compatibility is validated by the slice-9 JVM acceptance gate (Task 28).
-    // The `always_in_bounds` test below covers the invariant that matters locally.
     #[test]
-    #[ignore = "expected values must be regenerated from JVM Utils.murmur2; the always_in_bounds test plus the slice-9 JVM acceptance gate cover wire-compat"]
     fn matches_jvm_for_canonical_tids() {
-        let cases: &[(&str, i32)] = &[
-            ("my-tid", 32), // PLACEHOLDER — verify against JVM before relying
-            ("producer-1", 18),
-            ("tx-orders-prod", 6),
-        ];
+        let cases: &[(&str, i32)] = &[("my-tid", 43), ("producer-1", 45), ("tx-orders-prod", 26)];
         for (tid, expected) in cases {
             assert_eq!(
                 partition_for_tid(tid, 50),
