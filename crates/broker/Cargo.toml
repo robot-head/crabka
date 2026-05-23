@@ -53,6 +53,9 @@ uuid = { workspace = true }
 futures-util = { workspace = true }
 prometheus-client.workspace = true
 axum.workspace = true
+# Slice 49b: fetch the OAUTHBEARER JWKS over HTTP(S). The `rustls` feature
+# reuses the rustls + aws-lc-rs crypto stack already in the workspace dep graph.
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 
 [dev-dependencies]
 crabka-broker = { version = "0.1", path = ".", features = ["test-helpers"] }
@@ -70,3 +73,6 @@ pbkdf2 = { workspace = true }
 sha2 = { workspace = true }
 # Slice 39 metrics tests: exercise the axum Router::oneshot helper.
 tower.workspace = true
+# Slice 49b: mint ES256 tokens + build the matching JWK for the signed
+# OAUTHBEARER wire test.
+ring.workspace = true

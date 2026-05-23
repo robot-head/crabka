@@ -1990,3 +1990,67 @@ Kafka client for ApiVersions.
 - Reference doc:
   [`docs/superpowers/specs/2026-05-23-crabka-sasl-oauthbearer-49-design.md`].
 
+## Slice 49b — Crabka core: SASL/OAUTHBEARER JWKS / signed-JWT validation (2026-05-23)
+
+- Promotes OAUTHBEARER from the slice-49 development-only *unsecured JWS*
+  (`alg:none`) validator to production **signed-JWT validation against a JWKS
+  endpoint**. Clients now present real OAuth 2.0 access tokens (a JWS signed by
+  the identity provider); the broker verifies the signature against the IdP's
+  published JSON Web Key Set, checks the standard JWT claims, and derives the
+  principal from a configured claim. Unblocks the production path for operator
+  slice 50 (`KafkaUser` OAuth + listener OAuth config). The RFC 7628 wire state
+  machine (handshake, single-round success / two-round failure, authzid match)
+  is reused unchanged — only the validator behind it changed.
+- **`crates/security` (pure logic, no I/O):**
+  - New `jwks.rs`: `Jwks` (RFC 7517 key set parsed from JSON; RSA `n`/`e` and
+    EC P-256 `x`/`y` keys indexed by `kid`; encryption-use / unsupported `kty` /
+    non-P-256 keys skipped, not fatal) + `Jwks::verify(kid, alg, signing_input,
+    sig)` for `RS256` (RSASSA-PKCS1-v1_5+SHA-256) and `ES256` (ECDSA
+    P-256+SHA-256) via `ring` — no JWT crate, no second crypto backend, and
+    `now_ms` stays injectable. `JwksHandle` = `Arc<ArcSwap<Jwks>>` (mirrors
+    slice 33's `DynamicServerConfig`) for lock-free key rotation.
+  - `oauthbearer.rs`: `SignedJwsValidator` (config: principal/scope claim,
+    required scope, clock skew, expected issuer, expected audience + a
+    `JwksHandle`) — `validate` checks 3-segment JWS with non-empty signature,
+    `alg ∈ {RS256, ES256}`, signature, then `exp` (required) / `iat` / `nbf`
+    (skew-tolerant), `iss`, `aud` (string or array), scope, principal.
+    `OAuthBearerValidator` enum = `Unsecured | Signed` (default `Unsecured`);
+    the broker holds one and the `SaslAuthenticate` handler dispatches on it.
+- **`crates/broker`:**
+  - New `oauth_jwks.rs`: `JwksRefresher` background task (`reqwest`, rustls)
+    fetches the JWKS endpoint and `store`s the parsed key set into the shared
+    handle on an interval; the first fetch fires immediately, fetch failures
+    log a warning and keep the previous set (a transient IdP outage never
+    crashes the broker). `BrokerConfig.oauthbearer_validator` is now the enum;
+    new `oauthbearer_jwks_endpoint` + `oauthbearer_jwks_refresh_interval`
+    (default 5 min). `[oauthbearer]` TOML gains `jwks_endpoint_uri`,
+    `valid_issuer_uri`, `expected_audience`, `jwks_refresh_interval_ms` —
+    setting `jwks_endpoint_uri` selects the signed validator and
+    `Broker::start` spawns the refresher (sharing the validator's key handle).
+- Tests: +13 security unit (`jwks`: parse mixed RSA+EC, skip enc/unsupported,
+  reject non-JSON; verify RS256/ES256; reject tampered sig / unknown kid /
+  ambiguous-missing-kid / wrong key / alg-key mismatch; handle round-trip) +12
+  security unit (`oauthbearer`: signed accept, reject unsecured-alg-none /
+  expired / future-nbf, issuer + audience string&array + required-scope honor,
+  missing principal, custom claim, key rotation via handle, empty keyset,
+  enum dispatch); +2 broker `file_config` (jwks→Signed, no-jwks→Unsecured); +3
+  broker `oauth_jwks` (fetch served keyset, error on dead endpoint, refresher
+  populates handle then stops); +2 broker wire integration in
+  `auth_handlers.rs` (signed-token happy path + wrong-key two-round failure,
+  no Docker). Workspace clippy `-D warnings` + fmt clean.
+- RSA test tokens are minted at runtime from a static embedded RSA-2048 PKCS#8
+  key (`ring` can't generate RSA); ES256 keys are generated fresh per test.
+  Production never touches a private key — it reads `n`/`e` (RSA) and `x`/`y`
+  (EC) from the IdP's JWKS JSON.
+- Out of scope (deferred): KIP-368 token re-authentication +
+  `session_lifetime_ms` connection expiry (49c); opaque-token introspection
+  (RFC 7662); custom CA trust / mTLS to the JWKS endpoint (webpki/Mozilla roots
+  only); RS384/512, ES384/512, PS256; OAUTHBEARER for inter-broker / controller
+  listeners; `KafkaUser` OAuth + `Kafka.spec` listener OAuth config (slice 50).
+- No JVM acceptance test: the JVM unsecured login module mints only `alg:none`
+  tokens, and a signed-token JVM test needs a live OAuth server; the slice-49
+  unsecured JVM test still covers the wire handshake, and the signature path is
+  covered by the Rust integration tests above.
+- Reference doc:
+  [`docs/superpowers/specs/2026-05-23-crabka-sasl-oauthbearer-jwks-49b-design.md`].
+

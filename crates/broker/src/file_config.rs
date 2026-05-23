@@ -41,14 +41,16 @@ pub struct FileConfig {
     #[serde(default)]
     pub tls_config: Option<FileTlsConfig>,
 
-    /// Slice 49: SASL/OAUTHBEARER unsecured-JWS validator tuning. Only
-    /// relevant when a listener enables the `OAUTHBEARER` mechanism.
+    /// Slice 49 / 49b: SASL/OAUTHBEARER validator tuning. Only relevant when a
+    /// listener enables the `OAUTHBEARER` mechanism.
     #[serde(default)]
     pub oauthbearer: Option<FileOAuthBearerConfig>,
 }
 
 /// TOML shape of `[oauthbearer]`. Maps to
-/// [`crabka_security::UnsecuredJwsValidator`].
+/// [`crabka_security::OAuthBearerValidator`]. Setting `jwks_endpoint_uri`
+/// selects the signed-JWT validator (slice 49b); otherwise the unsecured-JWS
+/// validator (slice 49, development only) is used.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 pub struct FileOAuthBearerConfig {
     /// Claim whose value becomes the principal name. Default `sub`.
@@ -60,9 +62,29 @@ pub struct FileOAuthBearerConfig {
     /// When set, the token scope must contain this value.
     #[serde(default)]
     pub required_scope: Option<String>,
-    /// Clock-skew tolerance, in milliseconds, for `exp` / `iat`. Default 30000.
+    /// Clock-skew tolerance, in milliseconds, for `exp` / `iat` / `nbf`.
+    /// Default 30000.
     #[serde(default)]
     pub allowable_clock_skew_ms: Option<i64>,
+
+    /// Slice 49b: JWKS endpoint URL. When set, tokens are validated as signed
+    /// JWTs (RS256 / ES256) against the keys fetched from this URL, and the
+    /// broker spawns a background refresher. When unset, the unsecured-JWS
+    /// (`alg:none`) development validator is used.
+    #[serde(default)]
+    pub jwks_endpoint_uri: Option<String>,
+    /// Slice 49b: when set, the token `iss` claim must equal this. Signed
+    /// validator only.
+    #[serde(default)]
+    pub valid_issuer_uri: Option<String>,
+    /// Slice 49b: when set, the token `aud` claim must contain this. Signed
+    /// validator only.
+    #[serde(default)]
+    pub expected_audience: Option<String>,
+    /// Slice 49b: JWKS re-fetch interval, in milliseconds. Default 300000
+    /// (5 minutes). Signed validator only.
+    #[serde(default)]
+    pub jwks_refresh_interval_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -184,18 +206,47 @@ impl FileConfig {
             });
         }
         if let Some(oauth) = self.oauthbearer {
-            let v = &mut cfg.oauthbearer_validator;
-            if let Some(name) = oauth.principal_claim_name {
-                v.principal_claim_name = name;
-            }
-            if let Some(name) = oauth.scope_claim_name {
-                v.scope_claim_name = name;
-            }
-            if oauth.required_scope.is_some() {
-                v.required_scope = oauth.required_scope;
-            }
-            if let Some(skew) = oauth.allowable_clock_skew_ms {
-                v.allowable_clock_skew_ms = skew;
+            if let Some(jwks_uri) = oauth.jwks_endpoint_uri {
+                // Signed-JWT validation (slice 49b). The empty key handle is
+                // populated by the refresher `Broker::start` spawns.
+                let mut v = crabka_security::SignedJwsValidator::new(
+                    crabka_security::JwksHandle::default(),
+                );
+                if let Some(name) = oauth.principal_claim_name {
+                    v.principal_claim_name = name;
+                }
+                if let Some(name) = oauth.scope_claim_name {
+                    v.scope_claim_name = name;
+                }
+                if oauth.required_scope.is_some() {
+                    v.required_scope = oauth.required_scope;
+                }
+                if let Some(skew) = oauth.allowable_clock_skew_ms {
+                    v.allowable_clock_skew_ms = skew;
+                }
+                v.valid_issuer = oauth.valid_issuer_uri;
+                v.expected_audience = oauth.expected_audience;
+                cfg.oauthbearer_validator = crabka_security::OAuthBearerValidator::Signed(v);
+                cfg.oauthbearer_jwks_endpoint = Some(jwks_uri);
+                if let Some(ms) = oauth.jwks_refresh_interval_ms {
+                    cfg.oauthbearer_jwks_refresh_interval = std::time::Duration::from_millis(ms);
+                }
+            } else {
+                // Unsecured-JWS validation (slice 49, development only).
+                let mut v = crabka_security::UnsecuredJwsValidator::default();
+                if let Some(name) = oauth.principal_claim_name {
+                    v.principal_claim_name = name;
+                }
+                if let Some(name) = oauth.scope_claim_name {
+                    v.scope_claim_name = name;
+                }
+                if oauth.required_scope.is_some() {
+                    v.required_scope = oauth.required_scope;
+                }
+                if let Some(skew) = oauth.allowable_clock_skew_ms {
+                    v.allowable_clock_skew_ms = skew;
+                }
+                cfg.oauthbearer_validator = crabka_security::OAuthBearerValidator::Unsecured(v);
             }
         }
     }
@@ -533,6 +584,60 @@ client_auth = "Required"
         );
         let tls = cfg.tls_config.expect("tls_config propagated");
         assert_eq!(tls.cert_chain_path, std::path::PathBuf::from("/c"));
+    }
+
+    #[test]
+    fn apply_to_oauthbearer_jwks_selects_signed_validator() {
+        let src = r#"
+[oauthbearer]
+jwks_endpoint_uri = "https://idp.example/jwks"
+valid_issuer_uri = "https://idp.example"
+expected_audience = "kafka"
+principal_claim_name = "client_id"
+jwks_refresh_interval_ms = 60000
+"#;
+        let file: FileConfig = toml::from_str(src).expect("parse");
+        let mut cfg = crate::config::BrokerConfig::default();
+        file.apply_to(&mut cfg);
+        assert_eq!(
+            cfg.oauthbearer_jwks_endpoint.as_deref(),
+            Some("https://idp.example/jwks")
+        );
+        assert_eq!(
+            cfg.oauthbearer_jwks_refresh_interval,
+            std::time::Duration::from_mins(1)
+        );
+        match cfg.oauthbearer_validator {
+            crabka_security::OAuthBearerValidator::Signed(v) => {
+                assert_eq!(v.valid_issuer.as_deref(), Some("https://idp.example"));
+                assert_eq!(v.expected_audience.as_deref(), Some("kafka"));
+                assert_eq!(v.principal_claim_name, "client_id");
+            }
+            crabka_security::OAuthBearerValidator::Unsecured(_) => {
+                panic!("jwks_endpoint_uri must select the Signed validator")
+            }
+        }
+    }
+
+    #[test]
+    fn apply_to_oauthbearer_without_jwks_stays_unsecured() {
+        let src = r#"
+[oauthbearer]
+principal_claim_name = "sub"
+allowable_clock_skew_ms = 5000
+"#;
+        let file: FileConfig = toml::from_str(src).expect("parse");
+        let mut cfg = crate::config::BrokerConfig::default();
+        file.apply_to(&mut cfg);
+        assert!(cfg.oauthbearer_jwks_endpoint.is_none());
+        match cfg.oauthbearer_validator {
+            crabka_security::OAuthBearerValidator::Unsecured(v) => {
+                assert_eq!(v.allowable_clock_skew_ms, 5000);
+            }
+            crabka_security::OAuthBearerValidator::Signed(_) => {
+                panic!("no jwks_endpoint_uri must keep the unsecured validator")
+            }
+        }
     }
 
     #[test]

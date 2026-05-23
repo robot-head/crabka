@@ -1227,6 +1227,23 @@ impl Broker {
             None
         };
 
+        // Slice 49b: OAUTHBEARER JWKS refresher. Spawned only when a JWKS
+        // endpoint is configured (signed-token validation). It shares the
+        // validator's key handle, so a successful fetch rotates the keys the
+        // SaslAuthenticate path reads — no restart, no lock. The first fetch
+        // fires immediately on spawn. Child token of supervisor_shutdown.
+        if let Some(endpoint) = config.oauthbearer_jwks_endpoint.clone()
+            && let Some(handle) = config.oauthbearer_validator.jwks_handle()
+        {
+            let refresher = crate::oauth_jwks::JwksRefresher {
+                endpoint,
+                handle,
+                interval: config.oauthbearer_jwks_refresh_interval,
+                shutdown: supervisor_shutdown.child_token(),
+            };
+            tokio::spawn(refresher.run());
+        }
+
         // 4g. Auto-rebalance background task (KIP-460). The task itself
         //     checks is_leader() on every tick so it is safe to run on
         //     every broker; only the raft leader will actually submit
