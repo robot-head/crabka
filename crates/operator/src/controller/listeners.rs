@@ -10,17 +10,19 @@ use k8s_openapi::api::networking::v1::Ingress;
 use kube::Resource as _;
 
 use crate::controller::common::{APP_LABEL, ReconcileError, owner_ref};
-use crate::crd::{Kafka, Listener, ListenerAuthentication, ListenerType};
+use crate::crd::{
+    Kafka, Listener, ListenerAuthentication, ListenerAuthenticationOAuth, ListenerType,
+};
 use crabka_security::ca::SubjectAltName;
 use crabka_security::{ListenerProtocol, SaslMechanism};
 
 pub(crate) fn listener_protocol(l: &Listener) -> ListenerProtocol {
-    use ListenerAuthentication::{ScramSha256, ScramSha512, Tls};
-    match (l.tls, l.authentication) {
+    use ListenerAuthentication::{OAuth, ScramSha256, ScramSha512, Tls};
+    match (l.tls, &l.authentication) {
         (false, None) => ListenerProtocol::Plaintext,
         (true, None | Some(Tls)) => ListenerProtocol::Ssl,
-        (false, Some(ScramSha512 | ScramSha256)) => ListenerProtocol::SaslPlaintext,
-        (true, Some(ScramSha512 | ScramSha256)) => ListenerProtocol::SaslSsl,
+        (false, Some(ScramSha512 | ScramSha256 | OAuth(_))) => ListenerProtocol::SaslPlaintext,
+        (true, Some(ScramSha512 | ScramSha256 | OAuth(_))) => ListenerProtocol::SaslSsl,
         (false, Some(Tls)) => unreachable!(
             "validation rejects mTLS without transport TLS; saw listener '{}'",
             l.name
@@ -28,10 +30,17 @@ pub(crate) fn listener_protocol(l: &Listener) -> ListenerProtocol {
     }
 }
 
-fn sasl_mechanism(auth: ListenerAuthentication) -> Option<SaslMechanism> {
+fn sasl_mechanism(auth: &ListenerAuthentication) -> Option<SaslMechanism> {
     match auth {
         ListenerAuthentication::ScramSha512 => Some(SaslMechanism::ScramSha512),
         ListenerAuthentication::ScramSha256 => Some(SaslMechanism::ScramSha256),
+        ListenerAuthentication::OAuth(cfg) => {
+            if cfg.enable_oauth_bearer {
+                Some(SaslMechanism::OAuthBearer)
+            } else {
+                None
+            }
+        }
         ListenerAuthentication::Tls => None,
     }
 }
@@ -58,6 +67,27 @@ pub enum ValidationError {
     InterBrokerListenerNotInternal(String),
     NoInternalListener,
     ListenerMtlsRequiresTransportTls(String),
+    /// `authentication: oauth` listener with `tls: false`. The signed-JWT
+    /// validator requires bearer-token confidentiality; without TLS the
+    /// access token leaks on the wire.
+    ListenerOauthRequiresTransportTls(String),
+    /// `authentication.oauth.validIssuerUri` empty / unset.
+    ListenerOauthIssuerUriEmpty(String),
+    /// `authentication.oauth.jwksEndpointUri` doesn't start with
+    /// `http://` or `https://`.
+    ListenerOauthJwksUriBadScheme(String),
+    /// `authentication.oauth.jwksRefreshSeconds` set below the 30-second
+    /// floor (would hammer the IdP).
+    ListenerOauthJwksRefreshTooSmall {
+        listener: String,
+        got: u32,
+    },
+    /// `authentication.oauth.customClaimCheck.scope` is an empty string.
+    ListenerOauthCustomClaimCheckScopeEmpty(String),
+    /// Two or more OAuth listeners declare differing configs. The broker
+    /// `[oauthbearer]` block is broker-global (slice 49b), so per-listener
+    /// OAuth divergence is not representable.
+    ConflictingOAuthListenerConfig,
 }
 
 #[allow(dead_code)]
@@ -73,6 +103,12 @@ impl ValidationError {
             Self::InterBrokerListenerNotInternal(_) => "InterBrokerListenerNotInternal",
             Self::NoInternalListener => "NoInternalListener",
             Self::ListenerMtlsRequiresTransportTls(_) => "ListenerMtlsRequiresTransportTls",
+            Self::ListenerOauthRequiresTransportTls(_) => "ListenerOauthRequiresTransportTls",
+            Self::ListenerOauthIssuerUriEmpty(_) => "ListenerOauthInvalidUri",
+            Self::ListenerOauthJwksUriBadScheme(_) => "ListenerOauthInvalidUri",
+            Self::ListenerOauthJwksRefreshTooSmall { .. } => "ListenerOauthInvalidRefresh",
+            Self::ListenerOauthCustomClaimCheckScopeEmpty(_) => "ListenerOauthInvalidScope",
+            Self::ConflictingOAuthListenerConfig => "ConflictingOAuthConfig",
         }
     }
 
@@ -105,8 +141,46 @@ impl ValidationError {
             Self::ListenerMtlsRequiresTransportTls(n) => {
                 format!("listener '{n}': authentication.type=tls requires tls: true")
             }
+            Self::ListenerOauthRequiresTransportTls(n) => {
+                format!("listener '{n}': authentication.type=oauth requires tls: true")
+            }
+            Self::ListenerOauthIssuerUriEmpty(n) => {
+                format!("listener '{n}': authentication.oauth.validIssuerUri is required")
+            }
+            Self::ListenerOauthJwksUriBadScheme(n) => {
+                format!(
+                    "listener '{n}': authentication.oauth.jwksEndpointUri must be http:// or https://"
+                )
+            }
+            Self::ListenerOauthJwksRefreshTooSmall { listener, got } => {
+                format!(
+                    "listener '{listener}': authentication.oauth.jwksRefreshSeconds must be >= 30 (got {got})"
+                )
+            }
+            Self::ListenerOauthCustomClaimCheckScopeEmpty(n) => {
+                format!(
+                    "listener '{n}': authentication.oauth.customClaimCheck.scope must be non-empty"
+                )
+            }
+            Self::ConflictingOAuthListenerConfig => {
+                "all OAuth listeners must share identical config (per-listener OAuth is a future broker slice)".to_string()
+            }
         }
     }
+}
+
+/// Return a "canonical" form of an OAuth listener config used for
+/// cross-listener conflict detection. The broker `[oauthbearer]` block
+/// is broker-global, so the only field a per-listener OAuth config may
+/// differ in without contradicting the global block is
+/// `enable_oauth_bearer` (which only gates the per-listener
+/// `sasl_mechanisms`). Mask that bit to a constant so two listeners
+/// differing only in it dedup to the same canonical value.
+#[must_use]
+fn oauth_canonical(cfg: &ListenerAuthenticationOAuth) -> ListenerAuthenticationOAuth {
+    let mut out = cfg.clone();
+    out.enable_oauth_bearer = true;
+    out
 }
 
 /// Validate `spec.listeners` + `spec.interBrokerListenerName`. Returns
@@ -137,6 +211,38 @@ pub fn validate_listeners(
                 l.name.clone(),
             ));
         }
+        if let Some(ListenerAuthentication::OAuth(cfg)) = &l.authentication {
+            if !l.tls {
+                return Err(ValidationError::ListenerOauthRequiresTransportTls(
+                    l.name.clone(),
+                ));
+            }
+            if cfg.valid_issuer_uri.is_empty() {
+                return Err(ValidationError::ListenerOauthIssuerUriEmpty(l.name.clone()));
+            }
+            if !cfg.jwks_endpoint_uri.starts_with("http://")
+                && !cfg.jwks_endpoint_uri.starts_with("https://")
+            {
+                return Err(ValidationError::ListenerOauthJwksUriBadScheme(
+                    l.name.clone(),
+                ));
+            }
+            if let Some(s) = cfg.jwks_refresh_seconds
+                && s < 30
+            {
+                return Err(ValidationError::ListenerOauthJwksRefreshTooSmall {
+                    listener: l.name.clone(),
+                    got: s,
+                });
+            }
+            if let Some(c) = &cfg.custom_claim_check
+                && c.scope.is_empty()
+            {
+                return Err(ValidationError::ListenerOauthCustomClaimCheckScopeEmpty(
+                    l.name.clone(),
+                ));
+            }
+        }
         if matches!(l.type_, ListenerType::Ingress | ListenerType::Route) {
             if !l.tls {
                 return Err(ValidationError::ListenerIngressRequiresTls(l.name.clone()));
@@ -166,6 +272,34 @@ pub fn validate_listeners(
         }
     }
 
+    // Cross-listener OAuth conflict check. The broker `[oauthbearer]` block is
+    // broker-global (slice 49b), so two OAuth listeners with diverging configs
+    // (different issuer, audience, JWKS, claim names, …) can't be honored
+    // simultaneously. Listeners that differ ONLY in whether they advertise
+    // OAUTHBEARER on the wire (`enable_oauth_bearer`) are fine — the global
+    // validator config is the same; the per-listener bit just gates whether the
+    // mechanism appears in this listener's `sasl_mechanisms`.
+    let oauth_canonicals: Vec<ListenerAuthenticationOAuth> = listeners
+        .iter()
+        .filter_map(|l| match &l.authentication {
+            Some(ListenerAuthentication::OAuth(cfg)) => Some(oauth_canonical(cfg)),
+            _ => None,
+        })
+        .collect();
+    let mut deduped = oauth_canonicals;
+    deduped.dedup();
+    // dedup() only removes adjacent duplicates; sort+dedup gives a true set.
+    // But ListenerAuthenticationOAuth isn't Ord. Do an O(n²) distinct count:
+    let mut distinct: Vec<ListenerAuthenticationOAuth> = Vec::new();
+    for c in deduped {
+        if !distinct.iter().any(|d| d == &c) {
+            distinct.push(c);
+        }
+    }
+    if distinct.len() > 1 {
+        return Err(ValidationError::ConflictingOAuthListenerConfig);
+    }
+
     // Inter-broker listener resolution.
     if !listeners.is_empty() {
         let has_internal = listeners.iter().any(|l| l.type_ == ListenerType::Internal);
@@ -192,7 +326,7 @@ pub fn validate_listeners(
 /// network before the authentication is complete, so credentials can be
 /// observed by a passive eavesdropper on a plaintext connection.
 pub(crate) fn weak_auth_warnings(listeners: &[Listener]) -> Vec<String> {
-    listeners
+    let mut warnings: Vec<String> = listeners
         .iter()
         .filter(|l| {
             !l.tls
@@ -208,7 +342,18 @@ pub(crate) fn weak_auth_warnings(listeners: &[Listener]) -> Vec<String> {
                 l.name
             )
         })
-        .collect()
+        .collect();
+    for l in listeners {
+        if let Some(ListenerAuthentication::OAuth(cfg)) = &l.authentication
+            && cfg.jwks_endpoint_uri.starts_with("http://")
+        {
+            warnings.push(format!(
+                "listener '{}' has http:// JWKS endpoint; key material traverses the network in cleartext. Consider https.",
+                l.name
+            ));
+        }
+    }
+    warnings
 }
 
 /// Pick the inter-broker listener name. Honors an explicit override;
@@ -1116,6 +1261,166 @@ mod tests {
         validate_listeners(&listeners, None).unwrap();
     }
 
+    // ---------------------------------------------------------------------
+    // OAuth listener validation
+    // ---------------------------------------------------------------------
+
+    fn oauth_cfg_minimal() -> crate::crd::ListenerAuthenticationOAuth {
+        crate::crd::ListenerAuthenticationOAuth {
+            valid_issuer_uri: "https://issuer.example.com/".into(),
+            jwks_endpoint_uri: "https://issuer.example.com/jwks".into(),
+            valid_audience: None,
+            user_name_claim: None,
+            custom_claim_check: None,
+            jwks_refresh_seconds: None,
+            max_clock_skew_seconds: None,
+            enable_oauth_bearer: true,
+        }
+    }
+
+    fn oauth_listener(
+        name: &str,
+        port: i32,
+        tls: bool,
+        cfg: crate::crd::ListenerAuthenticationOAuth,
+    ) -> Listener {
+        Listener {
+            name: name.into(),
+            port,
+            type_: ListenerType::Internal,
+            tls,
+            authentication: Some(crate::crd::ListenerAuthentication::OAuth(cfg)),
+            configuration: None,
+            network_policy_peers: None,
+        }
+    }
+
+    #[test]
+    fn validate_listeners_rejects_oauth_without_tls() {
+        let listeners = vec![oauth_listener("oauth", 9095, false, oauth_cfg_minimal())];
+        let err = validate_listeners(&listeners, None).unwrap_err();
+        assert_eq!(err.reason(), "ListenerOauthRequiresTransportTls");
+        assert!(matches!(
+            err,
+            ValidationError::ListenerOauthRequiresTransportTls(ref n) if n == "oauth"
+        ));
+    }
+
+    #[test]
+    fn validate_listeners_accepts_oauth_with_http_jwks_uri() {
+        let mut cfg = oauth_cfg_minimal();
+        cfg.jwks_endpoint_uri = "http://issuer.example.com/jwks".into();
+        let listeners = vec![oauth_listener("oauth", 9095, true, cfg)];
+        validate_listeners(&listeners, None).unwrap();
+    }
+
+    #[test]
+    fn validate_listeners_rejects_oauth_with_ftp_jwks_uri() {
+        let mut cfg = oauth_cfg_minimal();
+        cfg.jwks_endpoint_uri = "ftp://issuer.example.com/jwks".into();
+        let listeners = vec![oauth_listener("oauth", 9095, true, cfg)];
+        let err = validate_listeners(&listeners, None).unwrap_err();
+        assert_eq!(err.reason(), "ListenerOauthInvalidUri");
+        assert!(matches!(
+            err,
+            ValidationError::ListenerOauthJwksUriBadScheme(ref n) if n == "oauth"
+        ));
+    }
+
+    #[test]
+    fn validate_listeners_rejects_oauth_with_empty_issuer_uri() {
+        let mut cfg = oauth_cfg_minimal();
+        cfg.valid_issuer_uri = String::new();
+        let listeners = vec![oauth_listener("oauth", 9095, true, cfg)];
+        let err = validate_listeners(&listeners, None).unwrap_err();
+        assert_eq!(err.reason(), "ListenerOauthInvalidUri");
+        assert!(matches!(
+            err,
+            ValidationError::ListenerOauthIssuerUriEmpty(ref n) if n == "oauth"
+        ));
+    }
+
+    #[test]
+    fn validate_listeners_accepts_oauth_with_non_uri_issuer_string() {
+        // The broker compares the `iss` claim as a literal string. The CRD does
+        // not require `validIssuerUri` to parse as a URL — Keycloak deployments
+        // commonly use e.g. `kafka-cluster` as the issuer.
+        let mut cfg = oauth_cfg_minimal();
+        cfg.valid_issuer_uri = "kafka-cluster".into();
+        let listeners = vec![oauth_listener("oauth", 9095, true, cfg)];
+        validate_listeners(&listeners, None).unwrap();
+    }
+
+    #[test]
+    fn validate_listeners_rejects_oauth_with_short_jwks_refresh() {
+        let mut cfg = oauth_cfg_minimal();
+        cfg.jwks_refresh_seconds = Some(29);
+        let listeners = vec![oauth_listener("oauth", 9095, true, cfg)];
+        let err = validate_listeners(&listeners, None).unwrap_err();
+        assert_eq!(err.reason(), "ListenerOauthInvalidRefresh");
+        assert!(matches!(
+            err,
+            ValidationError::ListenerOauthJwksRefreshTooSmall { ref listener, got: 29 } if listener == "oauth"
+        ));
+    }
+
+    #[test]
+    fn validate_listeners_rejects_oauth_custom_claim_check_with_empty_scope() {
+        let mut cfg = oauth_cfg_minimal();
+        cfg.custom_claim_check = Some(crate::crd::OAuthCustomClaimCheck {
+            scope: String::new(),
+            scope_claim: None,
+        });
+        let listeners = vec![oauth_listener("oauth", 9095, true, cfg)];
+        let err = validate_listeners(&listeners, None).unwrap_err();
+        assert_eq!(err.reason(), "ListenerOauthInvalidScope");
+        assert!(matches!(
+            err,
+            ValidationError::ListenerOauthCustomClaimCheckScopeEmpty(ref n) if n == "oauth"
+        ));
+    }
+
+    #[test]
+    fn validate_listeners_accepts_two_oauth_listeners_with_identical_config() {
+        let cfg = oauth_cfg_minimal();
+        let listeners = vec![
+            oauth_listener("oauth-a", 9095, true, cfg.clone()),
+            oauth_listener("oauth-b", 9096, true, cfg),
+        ];
+        validate_listeners(&listeners, None).unwrap();
+    }
+
+    #[test]
+    fn validate_listeners_accepts_two_oauth_listeners_differing_only_in_enable_oauth_bearer() {
+        let mut a = oauth_cfg_minimal();
+        a.enable_oauth_bearer = true;
+        let mut b = oauth_cfg_minimal();
+        b.enable_oauth_bearer = false;
+        let listeners = vec![
+            oauth_listener("oauth-a", 9095, true, a),
+            oauth_listener("oauth-b", 9096, true, b),
+        ];
+        validate_listeners(&listeners, None).unwrap();
+    }
+
+    #[test]
+    fn validate_listeners_rejects_two_oauth_listeners_with_divergent_config() {
+        let mut a = oauth_cfg_minimal();
+        a.valid_audience = Some("kafka-a".into());
+        let mut b = oauth_cfg_minimal();
+        b.valid_audience = Some("kafka-b".into());
+        let listeners = vec![
+            oauth_listener("oauth-a", 9095, true, a),
+            oauth_listener("oauth-b", 9096, true, b),
+        ];
+        let err = validate_listeners(&listeners, None).unwrap_err();
+        assert_eq!(err.reason(), "ConflictingOAuthConfig");
+        assert!(matches!(
+            err,
+            ValidationError::ConflictingOAuthListenerConfig
+        ));
+    }
+
     #[test]
     fn listener_protocol_table_all_legal_tuples() {
         use crabka_security::ListenerProtocol::*;
@@ -1150,7 +1455,7 @@ mod tests {
                 port: 1,
                 type_: ListenerType::Internal,
                 tls,
-                authentication: auth,
+                authentication: auth.clone(),
                 configuration: None,
                 network_policy_peers: None,
             };
@@ -1779,7 +2084,7 @@ pub fn render_broker_toml(
             }
         }
 
-        if let Some(auth) = l.authentication
+        if let Some(auth) = &l.authentication
             && let Some(mech) = sasl_mechanism(auth)
         {
             let _ = writeln!(
@@ -1796,6 +2101,44 @@ pub fn render_broker_toml(
         let _ = writeln!(out, "[server_properties]");
         for (k, v) in server_properties {
             let _ = writeln!(out, "\"{k}\" = \"{v}\"");
+        }
+        out.push('\n');
+    }
+
+    // Broker-global [oauthbearer] block (slice 49b TOML shape). Emitted
+    // when any listener declares `authentication: oauth`. Per-listener OAuth
+    // divergence is rejected by `validate_listeners`, so picking the first
+    // OAuth listener's config is unambiguous when we reach this point.
+    if let Some(oauth_cfg) = listeners.iter().find_map(|l| match &l.authentication {
+        Some(ListenerAuthentication::OAuth(c)) => Some(c),
+        _ => None,
+    }) {
+        let _ = writeln!(out, "[oauthbearer]");
+        let _ = writeln!(
+            out,
+            "jwks_endpoint_uri = \"{}\"",
+            oauth_cfg.jwks_endpoint_uri
+        );
+        let _ = writeln!(out, "valid_issuer_uri = \"{}\"", oauth_cfg.valid_issuer_uri);
+        if let Some(aud) = &oauth_cfg.valid_audience {
+            let _ = writeln!(out, "expected_audience = \"{aud}\"");
+        }
+        if let Some(claim) = &oauth_cfg.user_name_claim {
+            let _ = writeln!(out, "principal_claim_name = \"{claim}\"");
+        }
+        if let Some(ccc) = &oauth_cfg.custom_claim_check
+            && let Some(sc) = &ccc.scope_claim
+        {
+            let _ = writeln!(out, "scope_claim_name = \"{sc}\"");
+        }
+        if let Some(ccc) = &oauth_cfg.custom_claim_check {
+            let _ = writeln!(out, "required_scope = \"{}\"", ccc.scope);
+        }
+        if let Some(s) = oauth_cfg.jwks_refresh_seconds {
+            let _ = writeln!(out, "jwks_refresh_interval_ms = {}", u64::from(s) * 1000);
+        }
+        if let Some(s) = oauth_cfg.max_clock_skew_seconds {
+            let _ = writeln!(out, "allowable_clock_skew_ms = {}", i64::from(s) * 1000);
         }
         out.push('\n');
     }
@@ -1991,6 +2334,260 @@ mod toml_rendering_tests {
         assert!(toml.contains("tls_config = { cert_path = \"/etc/crabka/broker-tls/0.crt\""));
         assert!(toml.contains("sasl_config = { enabled_mechanisms = [\"SCRAM-SHA-512\"] }"));
         assert!(toml.contains("[tls_config]"));
+    }
+
+    fn oauth_full_cfg() -> crate::crd::ListenerAuthenticationOAuth {
+        crate::crd::ListenerAuthenticationOAuth {
+            valid_issuer_uri: "https://kc.example.com/realms/kafka".into(),
+            jwks_endpoint_uri: "https://kc.example.com/realms/kafka/protocol/openid-connect/certs"
+                .into(),
+            valid_audience: Some("kafka".into()),
+            user_name_claim: Some("preferred_username".into()),
+            custom_claim_check: Some(crate::crd::OAuthCustomClaimCheck {
+                scope: "kafka-broker".into(),
+                scope_claim: Some("scope".into()),
+            }),
+            jwks_refresh_seconds: Some(300),
+            max_clock_skew_seconds: Some(30),
+            enable_oauth_bearer: true,
+        }
+    }
+
+    fn oauth_listener_for_render(
+        name: &str,
+        port: i32,
+        tls: bool,
+        cfg: crate::crd::ListenerAuthenticationOAuth,
+    ) -> Listener {
+        Listener {
+            name: name.into(),
+            port,
+            type_: ListenerType::Internal,
+            tls,
+            authentication: Some(crate::crd::ListenerAuthentication::OAuth(cfg)),
+            configuration: None,
+            network_policy_peers: None,
+        }
+    }
+
+    fn addrs_for(name: &str, port: i32) -> std::collections::BTreeMap<String, AdvertisedAddress> {
+        let mut m = std::collections::BTreeMap::new();
+        m.insert(
+            name.to_string(),
+            AdvertisedAddress {
+                host: "broker-0".into(),
+                port,
+            },
+        );
+        m
+    }
+
+    fn render_tls() -> BrokerTlsRender {
+        BrokerTlsRender {
+            controller_listener_protocol: "Ssl".into(),
+            cert_path: "/etc/crabka/broker-tls/0.crt".into(),
+            key_path: "/etc/crabka/broker-tls/0.key".into(),
+            client_ca_path: "/etc/crabka/cluster-ca/ca.crt".into(),
+            client_auth: "Required".into(),
+        }
+    }
+
+    #[test]
+    fn render_broker_toml_emits_oauthbearer_block_for_oauth_listener() {
+        use std::collections::BTreeMap;
+        let listeners = vec![oauth_listener_for_render(
+            "oauth",
+            9095,
+            true,
+            oauth_full_cfg(),
+        )];
+        let toml = render_broker_toml(
+            0,
+            &listeners,
+            &addrs_for("oauth", 9095),
+            "oauth",
+            &BTreeMap::new(),
+            Some(&render_tls()),
+            None,
+        );
+        assert!(toml.contains("[oauthbearer]"), "TOML: {toml}");
+        assert!(
+            toml.contains("jwks_endpoint_uri = \"https://kc.example.com/realms/kafka/protocol/openid-connect/certs\""),
+            "TOML: {toml}"
+        );
+        assert!(
+            toml.contains("valid_issuer_uri = \"https://kc.example.com/realms/kafka\""),
+            "TOML: {toml}"
+        );
+        assert!(toml.contains("expected_audience = \"kafka\""));
+        assert!(toml.contains("principal_claim_name = \"preferred_username\""));
+        assert!(toml.contains("scope_claim_name = \"scope\""));
+        assert!(toml.contains("required_scope = \"kafka-broker\""));
+        assert!(toml.contains("jwks_refresh_interval_ms = 300000"));
+        assert!(toml.contains("allowable_clock_skew_ms = 30000"));
+    }
+
+    #[test]
+    fn render_broker_toml_omits_oauthbearer_optional_keys_when_unset() {
+        use std::collections::BTreeMap;
+        let cfg = crate::crd::ListenerAuthenticationOAuth {
+            valid_issuer_uri: "https://issuer.example.com/".into(),
+            jwks_endpoint_uri: "https://issuer.example.com/jwks".into(),
+            valid_audience: None,
+            user_name_claim: None,
+            custom_claim_check: None,
+            jwks_refresh_seconds: None,
+            max_clock_skew_seconds: None,
+            enable_oauth_bearer: true,
+        };
+        let listeners = vec![oauth_listener_for_render("oauth", 9095, true, cfg)];
+        let toml = render_broker_toml(
+            0,
+            &listeners,
+            &addrs_for("oauth", 9095),
+            "oauth",
+            &BTreeMap::new(),
+            Some(&render_tls()),
+            None,
+        );
+        assert!(toml.contains("[oauthbearer]"));
+        assert!(toml.contains("jwks_endpoint_uri = \"https://issuer.example.com/jwks\""));
+        assert!(toml.contains("valid_issuer_uri = \"https://issuer.example.com/\""));
+        assert!(!toml.contains("expected_audience"), "TOML: {toml}");
+        assert!(!toml.contains("principal_claim_name"));
+        assert!(!toml.contains("scope_claim_name"));
+        assert!(!toml.contains("required_scope"));
+        assert!(!toml.contains("jwks_refresh_interval_ms"));
+        assert!(!toml.contains("allowable_clock_skew_ms"));
+    }
+
+    #[test]
+    fn render_broker_toml_appends_oauthbearer_to_listener_sasl_mechanisms() {
+        use std::collections::BTreeMap;
+        let listeners = vec![oauth_listener_for_render(
+            "oauth",
+            9095,
+            true,
+            oauth_full_cfg(),
+        )];
+        let toml = render_broker_toml(
+            0,
+            &listeners,
+            &addrs_for("oauth", 9095),
+            "oauth",
+            &BTreeMap::new(),
+            Some(&render_tls()),
+            None,
+        );
+        assert!(
+            toml.contains("sasl_config = { enabled_mechanisms = [\"OAUTHBEARER\"] }"),
+            "TOML: {toml}"
+        );
+        assert!(toml.contains("protocol = \"SaslSsl\""));
+    }
+
+    #[test]
+    fn render_broker_toml_with_enable_false_keeps_oauthbearer_block_but_omits_mechanism() {
+        use std::collections::BTreeMap;
+        let mut cfg = oauth_full_cfg();
+        cfg.enable_oauth_bearer = false;
+        let listeners = vec![oauth_listener_for_render("oauth", 9095, true, cfg)];
+        let toml = render_broker_toml(
+            0,
+            &listeners,
+            &addrs_for("oauth", 9095),
+            "oauth",
+            &BTreeMap::new(),
+            Some(&render_tls()),
+            None,
+        );
+        assert!(toml.contains("[oauthbearer]"), "TOML: {toml}");
+        assert!(!toml.contains("sasl_config"), "TOML: {toml}");
+    }
+
+    #[test]
+    fn render_broker_toml_does_not_emit_oauthbearer_block_when_no_oauth_listener() {
+        use std::collections::BTreeMap;
+        let toml = render_broker_toml(
+            0,
+            &[synthesized_default_listener()],
+            &addrs_for("PLAIN", 9092),
+            "PLAIN",
+            &BTreeMap::new(),
+            None,
+            None,
+        );
+        assert!(!toml.contains("[oauthbearer]"), "TOML: {toml}");
+    }
+
+    #[test]
+    fn render_broker_toml_oauthbearer_block_parses_with_broker_file_config() {
+        use std::collections::BTreeMap;
+        let listeners = vec![oauth_listener_for_render(
+            "oauth",
+            9095,
+            true,
+            oauth_full_cfg(),
+        )];
+        let toml = render_broker_toml(
+            0,
+            &listeners,
+            &addrs_for("oauth", 9095),
+            "oauth",
+            &BTreeMap::new(),
+            Some(&render_tls()),
+            None,
+        );
+        let parsed: crabka_broker::file_config::FileConfig =
+            toml::from_str(&toml).expect("rendered TOML must parse with broker FileConfig");
+        let ob = parsed.oauthbearer.expect("oauthbearer block emitted");
+        assert_eq!(
+            ob.jwks_endpoint_uri.as_deref(),
+            Some("https://kc.example.com/realms/kafka/protocol/openid-connect/certs")
+        );
+        assert_eq!(
+            ob.valid_issuer_uri.as_deref(),
+            Some("https://kc.example.com/realms/kafka")
+        );
+        assert_eq!(ob.expected_audience.as_deref(), Some("kafka"));
+        assert_eq!(
+            ob.principal_claim_name.as_deref(),
+            Some("preferred_username")
+        );
+        assert_eq!(ob.scope_claim_name.as_deref(), Some("scope"));
+        assert_eq!(ob.required_scope.as_deref(), Some("kafka-broker"));
+        assert_eq!(ob.jwks_refresh_interval_ms, Some(300_000));
+        assert_eq!(ob.allowable_clock_skew_ms, Some(30_000));
+    }
+
+    #[test]
+    fn render_broker_toml_oauthbearer_render_is_deterministic() {
+        use std::collections::BTreeMap;
+        let listeners = vec![oauth_listener_for_render(
+            "oauth",
+            9095,
+            true,
+            oauth_full_cfg(),
+        )];
+        let a = render_broker_toml(
+            0,
+            &listeners,
+            &addrs_for("oauth", 9095),
+            "oauth",
+            &BTreeMap::new(),
+            Some(&render_tls()),
+            None,
+        );
+        let b = render_broker_toml(
+            0,
+            &listeners,
+            &addrs_for("oauth", 9095),
+            "oauth",
+            &BTreeMap::new(),
+            Some(&render_tls()),
+            None,
+        );
+        assert_eq!(a, b);
     }
 
     #[test]
@@ -2553,5 +3150,44 @@ mod weak_auth_tests {
             network_policy_peers: None,
         }];
         assert_eq!(weak_auth_warnings(&listeners).len(), 1);
+    }
+
+    fn oauth_listener(name: &str, jwks: &str) -> Listener {
+        Listener {
+            name: name.into(),
+            port: 9095,
+            type_: ListenerType::Internal,
+            tls: true,
+            authentication: Some(ListenerAuthentication::OAuth(
+                crate::crd::ListenerAuthenticationOAuth {
+                    valid_issuer_uri: "https://issuer.example.com/".into(),
+                    jwks_endpoint_uri: jwks.into(),
+                    valid_audience: None,
+                    user_name_claim: None,
+                    custom_claim_check: None,
+                    jwks_refresh_seconds: None,
+                    max_clock_skew_seconds: None,
+                    enable_oauth_bearer: true,
+                },
+            )),
+            configuration: None,
+            network_policy_peers: None,
+        }
+    }
+
+    #[test]
+    fn weak_auth_warnings_emitted_for_oauth_with_http_jwks_uri() {
+        let listeners = vec![oauth_listener("oauth", "http://idp/jwks")];
+        let warnings = weak_auth_warnings(&listeners);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("oauth"));
+        assert!(warnings[0].contains("http://"));
+        assert!(warnings[0].contains("https"));
+    }
+
+    #[test]
+    fn weak_auth_warnings_empty_for_oauth_with_https_jwks_uri() {
+        let listeners = vec![oauth_listener("oauth", "https://idp/jwks")];
+        assert!(weak_auth_warnings(&listeners).is_empty());
     }
 }
