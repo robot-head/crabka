@@ -1,0 +1,59 @@
+apiVersion: crabka.io/v1alpha1
+kind: Kafka
+metadata:
+  name: demo
+  namespace: default
+spec:
+  kafkaVersion: "0.1.1"
+  listeners:
+    - name: PLAIN
+      port: 9092
+      type: internal
+      tls: false
+    - name: oauth
+      port: 9096
+      type: internal
+      tls: true
+      authentication:
+        type: oauth
+        validIssuerUri: https://keycloak.example/realms/kafka
+        jwksEndpointUri: https://keycloak.example/realms/kafka/protocol/openid-connect/certs
+        validAudience: kafka-broker
+        userNameClaim: preferred_username
+        customClaimCheck:
+          scope: kafka.write
+  interBrokerListenerName: PLAIN
+---
+apiVersion: crabka.io/v1alpha1
+kind: KafkaNodePool
+metadata:
+  name: brokers
+  namespace: default
+  labels:
+    crabka.io/cluster: demo
+spec:
+  roles: [Controller, Broker]
+  replicas: 1
+  nodeIdStart: 0
+  storage:
+    type: PersistentClaim
+    size: 1Gi
+    deleteClaim: true
+---
+apiVersion: crabka.io/v1alpha1
+kind: KafkaUser
+metadata:
+  name: alice
+  namespace: default
+  labels:
+    crabka.io/cluster: demo
+spec:
+  authentication:
+    type: tls-external
+  authorization:
+    type: simple
+    acls:
+      - resource:
+          type: topic
+          name: e2e
+        operations: [Read, Describe, Write]
