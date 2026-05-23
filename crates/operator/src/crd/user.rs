@@ -84,6 +84,13 @@ pub enum Authentication {
     ScramSha512(ScramSha512Auth),
     #[serde(rename = "tls")]
     Tls(TlsAuth),
+    /// Slice 50: credential-less user. The operator provisions ACLs +
+    /// quotas under `User:<metadata.name>` but does not create a Secret
+    /// or issue a cert — credentials are managed out-of-band (e.g. an
+    /// OIDC provider for SASL/OAUTHBEARER, or a CA outside Crabka for
+    /// mTLS). Mirrors Strimzi's `tls-external`.
+    #[serde(rename = "tls-external")]
+    TlsExternal,
 }
 
 fn authentication_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
@@ -93,7 +100,7 @@ fn authentication_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema 
         "properties": {
             "type": {
                 "type": "string",
-                "enum": ["scram-sha-512", "tls"],
+                "enum": ["scram-sha-512", "tls", "tls-external"],
             },
             "iterations": { "type": "integer", "minimum": 4096, "maximum": 1_000_000 },
             "passwordLength": { "type": "integer", "minimum": 16, "maximum": 256 },
@@ -274,6 +281,13 @@ pub struct KafkaUserStatus {
     /// `scram_sha512`.
     #[serde(default)]
     pub tls: bool,
+
+    /// Slice 50: `true` once a credential-less user
+    /// (`type: tls-external`) has been reconciled. Surfaces in
+    /// `kubectl describe ku` so operators can tell at a glance that
+    /// the operator does not own this user's credentials.
+    #[serde(default)]
+    pub external: bool,
 
     /// RFC3339 timestamp of the user cert's `notAfter`. Present when
     /// `tls == true`.
@@ -579,6 +593,80 @@ mod tests {
         assert_eq!(
             v.get("tlsPrincipal").and_then(|x| x.as_str()),
             Some("User:CN=alice")
+        );
+    }
+
+    #[test]
+    fn tls_external_round_trips() {
+        let auth = Authentication::TlsExternal;
+        let j = serde_json::to_string(&auth).unwrap();
+        assert_eq!(j, r#"{"type":"tls-external"}"#);
+        let back: Authentication = serde_json::from_str(&j).unwrap();
+        assert_eq!(back, auth);
+    }
+
+    #[test]
+    fn tls_external_with_quotas_and_acls_round_trips() {
+        let spec = KafkaUserSpec {
+            authentication: Authentication::TlsExternal,
+            authorization: Some(Authorization::Simple(SimpleAuthorization {
+                acls: vec![AclRule {
+                    resource: AclResource {
+                        kind: AclResourceKind::Topic,
+                        name: "orders".into(),
+                        pattern_type: AclPatternType::Literal,
+                    },
+                    operations: vec![AclOp::Read],
+                    host: "*".into(),
+                    permission: AclPermission::Allow,
+                }],
+            })),
+            quotas: Some(KafkaUserQuotas {
+                producer_byte_rate: Some(1_048_576),
+                ..Default::default()
+            }),
+        };
+        let j = serde_json::to_string(&spec).unwrap();
+        assert!(j.contains("\"type\":\"tls-external\""), "got: {j}");
+        assert!(j.contains("\"name\":\"orders\""), "got: {j}");
+        assert!(j.contains("\"producerByteRate\":1048576"), "got: {j}");
+        let back: KafkaUserSpec = serde_json::from_str(&j).unwrap();
+        assert_eq!(back, spec);
+    }
+
+    #[test]
+    fn tls_external_minimum_spec_parses() {
+        let json = r#"{"authentication":{"type":"tls-external"}}"#;
+        let spec: KafkaUserSpec = serde_json::from_str(json).unwrap();
+        assert_eq!(spec.authentication, Authentication::TlsExternal);
+        assert!(spec.authorization.is_none());
+        assert!(spec.quotas.is_none());
+    }
+
+    #[test]
+    fn status_external_field_emits_when_true() {
+        let status = KafkaUserStatus {
+            external: true,
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&status).unwrap();
+        assert_eq!(v.get("external"), Some(&serde_json::Value::Bool(true)));
+    }
+
+    #[test]
+    fn status_external_field_emits_default_false() {
+        let status = KafkaUserStatus::default();
+        let j = serde_json::to_string(&status).unwrap();
+        assert!(j.contains("\"external\":false"), "got: {j}");
+    }
+
+    #[test]
+    fn status_default_does_not_have_external_field_omitted() {
+        let status = KafkaUserStatus::default();
+        let j = serde_json::to_string(&status).unwrap();
+        assert!(
+            j.contains("external"),
+            "external field must always be emitted (no skip_serializing_if): {j}",
         );
     }
 }
