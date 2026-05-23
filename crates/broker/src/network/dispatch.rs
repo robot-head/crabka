@@ -1126,6 +1126,17 @@ fn handle_sasl_frame(
                             &broker.controller,
                         )
                     }
+                    crabka_security::SaslMechanism::OAuthBearer => {
+                        let now_ms = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
+                        crate::network::auth::handle_authenticate_oauthbearer(
+                            &req,
+                            auth,
+                            &broker.config.oauthbearer_validator,
+                            now_ms,
+                        )
+                    }
                 }
             } else {
                 crabka_protocol::owned::sasl_authenticate_response::SaslAuthenticateResponse {

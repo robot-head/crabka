@@ -151,7 +151,7 @@ impl ScramServerExchange {
                 &proof,
                 auth_message.as_bytes(),
             ),
-            SaslMechanism::Plain => {
+            SaslMechanism::Plain | SaslMechanism::OAuthBearer => {
                 return StepResult::Failed(AuthError::MalformedMessage);
             }
         };

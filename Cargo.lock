@@ -1025,6 +1025,7 @@ version = "0.1.1"
 dependencies = [
  "async-trait",
  "axum",
+ "base64",
  "bytes",
  "clap",
  "crabka-broker",
@@ -1359,6 +1360,7 @@ dependencies = [
  "rustls-pki-types",
  "rustls-webpki",
  "serde",
+ "serde_json",
  "sha2 0.11.0",
  "subtle",
  "tempfile",

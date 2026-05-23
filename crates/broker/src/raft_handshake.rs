@@ -161,6 +161,14 @@ async fn run_inbound_sasl(
                         })?;
                         handle_authenticate_scram(&req, &mut auth, controller.as_ref())
                     }
+                    // The controller listener authenticates peer brokers, not
+                    // token-bearing clients; OAUTHBEARER is a client mechanism
+                    // and is not offered for inter-broker auth (slice 49).
+                    SaslMechanism::OAuthBearer => {
+                        return Err(RaftHandshakeError::Sasl(
+                            "OAUTHBEARER is not supported on the controller listener".into(),
+                        ));
+                    }
                 };
                 let error_code = resp.error_code;
                 write_response(stream, api_key, api_version, corr_id, &resp).await?;

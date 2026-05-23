@@ -1930,3 +1930,63 @@ Kafka client for ApiVersions.
 - Reference doc:
   [`docs/superpowers/specs/2026-05-23-crabka-operator-jbod-storage-46-design.md`].
 
+## Slice 49 — Crabka core: SASL/OAUTHBEARER (KIP-255 / RFC 7628) (2026-05-23)
+
+- Adds `OAUTHBEARER` as a fourth broker-side SASL mechanism alongside
+  `PLAIN`, `SCRAM-SHA-256`, and `SCRAM-SHA-512`. A client presents a bearer
+  token in an RFC 7628 SASL exchange; the broker validates it and derives the
+  connection principal from a token claim. Phase 9 (auth extensions) core
+  work — unblocks operator slice 50 (`KafkaUser` OAuth + listener OAuth
+  config).
+- **Validator:** the concrete validator is Kafka's **unsecured JWS**
+  (`alg:none`) path — the built-in, no-external-dependency mode the JVM
+  `OAuthBearerLoginModule` / `OAuthBearerUnsecuredValidatorCallbackHandler`
+  use for dev/test. Signed-token validation against a JWKS endpoint
+  (RS256/ES256 signature, issuer/audience, key rotation) is deferred to
+  slice 49b. The mechanism plumbing (handshake, RFC 7628 parse, two-round
+  failure handshake, principal extraction) is validator-agnostic and reused
+  unchanged by 49b.
+- **`crates/security`:** `SaslMechanism::OAuthBearer` (wire `OAUTHBEARER`);
+  `AuthMethod::SaslOAuthBearer`; `AuthError::InvalidToken`. New
+  `oauthbearer.rs` (pure logic): `parse_client_initial_response` (RFC 7628
+  GS2 + kvpair parse → bearer token + optional authzid),
+  `UnsecuredJwsValidator` (validates `alg:none`, required `exp`, optional
+  `iat`, optional required scope; principal from a configurable claim,
+  default `sub`), and `invalid_token_json`. `serde_json` added as a dep.
+- **`crates/broker` (`network/auth.rs`):** `SaslExchange::OAuthBearer` +
+  `OAuthBearerFailed`; `handle_authenticate_oauthbearer` implements the
+  Kafka state machine — **single round on success** (empty `auth_bytes`,
+  `error_code 0`, `Authenticated`); **two rounds on failure**
+  (`{"status":"invalid_token"}` JSON in `auth_bytes` with `error_code 0`, the
+  connection stays open; the client's `\x01` dummy then yields `error_code 58`
+  + close). The dispatcher's existing `close = error_code != 0` rule produces
+  the correct close timing for both rounds with no special-casing. A
+  non-empty client authzid must equal the token principal.
+- **Wiring:** `dispatch.rs` routes `OAUTHBEARER` (computing `now_ms` from
+  `SystemTime`); `BrokerConfig.oauthbearer_validator` (default unsecured,
+  `sub`, 30s skew) is consulted only when `OAUTHBEARER` is in
+  `enabled_sasl_mechanisms` (handshake won't advertise it otherwise);
+  `[oauthbearer]` TOML section in `FileConfig` (principal/scope claim names,
+  required scope, clock-skew ms). Outbound paths (`network/client.rs`
+  inter-broker, `raft_handshake.rs` controller listener) return an explicit
+  "OAUTHBEARER not supported" error — it is a client mechanism, not an
+  inter-broker one. The SCRAM-only credential-byte helpers fold the
+  non-SCRAM mechanism into the `UNKNOWN` (0) arm.
+- Tests: +13 security unit (parser happy/malformed, validator
+  accept/expired/future-iat/signed/missing-exp/missing-principal/
+  required-scope string+array/custom-claim, error JSON shape); +6 broker
+  `network::auth` unit (handshake advertise, authenticate success, two-round
+  failure, malformed, authzid mismatch); +2 broker wire integration in
+  `auth_handlers.rs` (no Docker): full `ApiVersions` → `SaslHandshake` →
+  `SaslAuthenticate` → Metadata happy path, and the expired-token two-round
+  `invalid_token` → 58 failure handshake; +1 `#[ignore]` JVM acceptance
+  (`jvm_sasl_oauthbearer_produce_consume`) driving
+  `kafka-console-producer`/`-consumer` with the unsecured login module.
+  Workspace clippy `-D warnings` + fmt clean.
+- Out of scope (deferred): JWKS / signed-JWT validation (49b); token
+  re-authentication + `session_lifetime_ms` expiry, KIP-368 (49b);
+  OAUTHBEARER for inter-broker / controller listeners; `KafkaUser` OAuth +
+  `Kafka.spec` listener OAuth config (operator slice 50).
+- Reference doc:
+  [`docs/superpowers/specs/2026-05-23-crabka-sasl-oauthbearer-49-design.md`].
+

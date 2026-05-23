@@ -40,6 +40,29 @@ pub struct FileConfig {
     /// listener whose `protocol` is TLS-bearing).
     #[serde(default)]
     pub tls_config: Option<FileTlsConfig>,
+
+    /// Slice 49: SASL/OAUTHBEARER unsecured-JWS validator tuning. Only
+    /// relevant when a listener enables the `OAUTHBEARER` mechanism.
+    #[serde(default)]
+    pub oauthbearer: Option<FileOAuthBearerConfig>,
+}
+
+/// TOML shape of `[oauthbearer]`. Maps to
+/// [`crabka_security::UnsecuredJwsValidator`].
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct FileOAuthBearerConfig {
+    /// Claim whose value becomes the principal name. Default `sub`.
+    #[serde(default)]
+    pub principal_claim_name: Option<String>,
+    /// Claim carrying the token scope. Default `scope`.
+    #[serde(default)]
+    pub scope_claim_name: Option<String>,
+    /// When set, the token scope must contain this value.
+    #[serde(default)]
+    pub required_scope: Option<String>,
+    /// Clock-skew tolerance, in milliseconds, for `exp` / `iat`. Default 30000.
+    #[serde(default)]
+    pub allowable_clock_skew_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -159,6 +182,21 @@ impl FileConfig {
                     FileClientAuthMode::Required => ClientAuthMode::Required,
                 },
             });
+        }
+        if let Some(oauth) = self.oauthbearer {
+            let v = &mut cfg.oauthbearer_validator;
+            if let Some(name) = oauth.principal_claim_name {
+                v.principal_claim_name = name;
+            }
+            if let Some(name) = oauth.scope_claim_name {
+                v.scope_claim_name = name;
+            }
+            if oauth.required_scope.is_some() {
+                v.required_scope = oauth.required_scope;
+            }
+            if let Some(skew) = oauth.allowable_clock_skew_ms {
+                v.allowable_clock_skew_ms = skew;
+            }
         }
     }
 }

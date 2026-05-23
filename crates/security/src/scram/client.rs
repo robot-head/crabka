@@ -105,7 +105,9 @@ impl ScramClientExchange {
             SaslMechanism::ScramSha256 => {
                 compute_proof_sha256(&self.password, &salt, iters, auth_message.as_bytes())?
             }
-            SaslMechanism::Plain => return Err(AuthError::MalformedMessage),
+            SaslMechanism::Plain | SaslMechanism::OAuthBearer => {
+                return Err(AuthError::MalformedMessage);
+            }
         };
 
         let client_final = format!("{client_final_no_proof},p={}", B64.encode(&proof));
@@ -140,7 +142,9 @@ impl ScramClientExchange {
                 mac.update(auth_message.as_bytes());
                 mac.finalize().into_bytes().to_vec()
             }
-            SaslMechanism::Plain => return Err(AuthError::MalformedMessage),
+            SaslMechanism::Plain | SaslMechanism::OAuthBearer => {
+                return Err(AuthError::MalformedMessage);
+            }
         };
         if expected.ct_eq(&v).unwrap_u8() != 1 {
             return Err(AuthError::BadProof);
