@@ -655,6 +655,7 @@ mod service_rendering_tests {
                 network_policy: None,
                 cluster_ca: None,
                 clients_ca: None,
+                logging: None,
             },
         );
         k.meta_mut().namespace = Some("default".into());

@@ -32,6 +32,7 @@ fn kafka_cr(name: &str, namespace: &str) -> Kafka {
             network_policy: None,
             cluster_ca: None,
             clients_ca: None,
+            logging: None,
         },
     );
     k.metadata.namespace = Some(namespace.into());

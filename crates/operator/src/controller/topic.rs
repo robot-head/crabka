@@ -524,6 +524,7 @@ mod tests {
                 network_policy: None,
                 cluster_ca: None,
                 clients_ca: None,
+                logging: None,
             },
         );
         k.metadata.namespace = Some(namespace.into());

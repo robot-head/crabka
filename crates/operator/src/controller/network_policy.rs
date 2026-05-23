@@ -235,6 +235,7 @@ mod tests {
                 network_policy: Some(NetworkPolicySpec::default()),
                 cluster_ca: None,
                 clients_ca: None,
+                logging: None,
             },
         );
         k.metadata.namespace = Some("default".into());

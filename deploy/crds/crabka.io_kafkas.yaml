@@ -322,6 +322,53 @@ spec:
                   - type
                   type: object
                 type: array
+              logging:
+                description: |-
+                  Slice 41: broker log configuration. When `None`, brokers use their
+                  built-in default `RUST_LOG` filter. When `Some`, the operator
+                  composes (inline) or reads (external) a `tracing` env-filter string,
+                  renders it into the broker `ConfigMap` (`rust.log` key), wires it
+                  into each broker pod's `RUST_LOG` env, and rolls the cluster on
+                  change via the slice-21 config hash.
+                nullable: true
+                properties:
+                  loggers:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      Inline loggers: tracing target → level. The key `root`
+                      (case-insensitive) sets the global default level (a bare env-filter
+                      directive); any other key is a tracing target (a Rust module path,
+                      e.g. `crabka_broker`). Levels are `trace|debug|info|warn|error|off`
+                      (case-insensitive; `fatal` is accepted as an alias for `error`).
+                    type: object
+                  type:
+                    default: inline
+                    enum:
+                    - inline
+                    - external
+                    type: string
+                  valueFrom:
+                    description: |-
+                      External logging source. Required when `type: external`; the
+                      referenced `ConfigMap` key's value is used verbatim as the broker's
+                      `RUST_LOG` filter.
+                    nullable: true
+                    properties:
+                      configMapKeyRef:
+                        properties:
+                          key:
+                            type: string
+                          name:
+                            type: string
+                        required:
+                        - key
+                        - name
+                        type: object
+                    required:
+                    - configMapKeyRef
+                    type: object
+                type: object
               metadataVersion:
                 description: |-
                   `KRaft` metadata version (the runtime analog of

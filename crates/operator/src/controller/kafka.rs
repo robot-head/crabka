@@ -40,6 +40,7 @@ use crate::controller::listeners::{
     render_bootstrap_route, render_bootstrap_service, render_broker_ingress, render_broker_route,
     render_broker_service, synthesized_default_listener, validate_listeners,
 };
+use crate::controller::logging;
 use crate::controller::network_policy;
 use crate::crd::{
     Kafka, KafkaCondition, KafkaNodePool, KafkaStatus, Listener, ListenerAddress,
@@ -668,10 +669,20 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
         None
     };
 
+    // Slice 41: resolve spec.logging into a RUST_LOG env-filter (inline
+    // composed in-process, external read from a user ConfigMap). A transient
+    // API error propagates and requeues; a user error (bad level, missing
+    // ConfigMap/key) surfaces LoggingReady=False without rolling and leaves
+    // the broker on its built-in default filter.
+    let logging_outcome = logging::resolve_logging(&ctx, &obj, &ns).await?;
+    let logging_filter = logging_outcome.filter().map(str::to_string);
+    let logging_condition = logging::condition_for(&logging_outcome);
+
     let cfg_hash = common::combined_config_hash(
         &obj.spec,
         Some(&cluster_ca_outcome.material.cert_pem),
         explicit_pin,
+        logging_filter.as_deref(),
     );
 
     let pool_api: Api<KafkaNodePool> = Api::namespaced(ctx.client.clone(), &ns);
@@ -816,6 +827,7 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
                 Some(&tls_per_broker),
                 clients_ca_path,
                 resolved_metadata.as_deref(),
+                logging_filter.as_deref(),
             )?;
             apply_object(&cm_api, &cm_name(&name), &cm).await?;
             Ok(())
@@ -992,6 +1004,7 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
         cluster_ca_cond,
         clients_ca_cond,
         version_cond,
+        logging_condition,
     ];
     let has_lb_tls_listener = effective_listeners
         .iter()

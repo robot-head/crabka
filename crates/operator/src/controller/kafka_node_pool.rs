@@ -186,8 +186,10 @@ fn render_init_container(
 fn render_broker_container(
     broker_image: &str,
     secret_name: &str,
+    cm_name: &str,
     resources: &ResourceRequirements,
     metrics_enabled: bool,
+    logging_enabled: bool,
 ) -> serde_json::Value {
     let mut ports = vec![json!({
         "containerPort": BROKER_PORT, "name": "kafka-internal", "protocol": "TCP"
@@ -197,17 +199,33 @@ fn render_broker_container(
             "containerPort": METRICS_PORT, "name": "metrics", "protocol": "TCP"
         }));
     }
+    let mut env = vec![
+        json!({ "name": "POD_NAME", "valueFrom": { "fieldRef": { "fieldPath": "metadata.name" } } }),
+        json!({ "name": "POD_NAMESPACE", "valueFrom": { "fieldRef": { "fieldPath": "metadata.namespace" } } }),
+        json!({ "name": "CRABKA_CLUSTER_ID", "valueFrom": { "secretKeyRef": { "name": secret_name, "key": "clusterId" } } }),
+    ];
+    // Slice 41: when spec.logging is set, point RUST_LOG at the broker
+    // ConfigMap's `rust.log` key (rendered by `common::render_configmap`).
+    // `optional: true` keeps the pod bootable if the key is briefly absent
+    // (e.g. external-ConfigMap resolution pending) — the broker then falls
+    // back to its built-in default filter. The env entry is gated on
+    // `logging_enabled` so logging-off clusters keep a byte-identical pod
+    // template (no spurious roll).
+    if logging_enabled {
+        env.push(json!({
+            "name": "RUST_LOG",
+            "valueFrom": {
+                "configMapKeyRef": { "name": cm_name, "key": "rust.log", "optional": true }
+            }
+        }));
+    }
     let main_script = build_main_script(metrics_enabled);
     json!({
         "name": "broker",
         "image": broker_image,
         "command": ["/bin/sh", "-c"],
         "args": [main_script],
-        "env": [
-            { "name": "POD_NAME", "valueFrom": { "fieldRef": { "fieldPath": "metadata.name" } } },
-            { "name": "POD_NAMESPACE", "valueFrom": { "fieldRef": { "fieldPath": "metadata.namespace" } } },
-            { "name": "CRABKA_CLUSTER_ID", "valueFrom": { "secretKeyRef": { "name": secret_name, "key": "clusterId" } } }
-        ],
+        "env": env,
         "ports": ports,
         "readinessProbe": {
             "tcpSocket": { "port": BROKER_PORT },
@@ -352,6 +370,7 @@ fn pod_spec_with_data_volume(
 /// `<parent>-broker-headless`. Owner-ref points to the pool, not the
 /// parent — `kubectl delete knp <pool>` deletes the `StatefulSet`
 /// directly.
+#[allow(clippy::too_many_lines)] // linear render pipeline: pod template + storage + per-feature wiring
 pub(crate) fn render_statefulset(
     parent: &Kafka,
     pool: &KafkaNodePool,
@@ -383,7 +402,16 @@ pub(crate) fn render_statefulset(
 
     let init = render_init_container(broker_image, &secret_name, pool.spec.node_id_start);
     let metrics_enabled = parent.spec.metrics_config.is_some();
-    let main = render_broker_container(broker_image, &secret_name, &resources, metrics_enabled);
+    let logging_enabled = parent.spec.logging.is_some();
+    let cm_name = format!("{parent_name}-broker-config");
+    let main = render_broker_container(
+        broker_image,
+        &secret_name,
+        &cm_name,
+        &resources,
+        metrics_enabled,
+        logging_enabled,
+    );
 
     // Merge user-provided pod metadata under operator-owned labels.
     // Operator labels win collisions; user labels fill in the rest.
@@ -784,6 +812,7 @@ mod tests {
                 network_policy: None,
                 cluster_ca: None,
                 clients_ca: None,
+                logging: None,
             },
         );
         k.metadata.namespace = Some("default".into());
@@ -1451,6 +1480,50 @@ mod tests {
             .unwrap();
         assert_eq!(ports.len(), 1);
         assert_eq!(ports[0].name.as_deref(), Some("kafka-internal"));
+    }
+
+    #[test]
+    fn render_statefulset_logging_off_no_rust_log_env() {
+        let parent = parent_fixture("demo");
+        assert!(parent.spec.logging.is_none());
+        let pool = pool_fixture("brokers", "demo", 1);
+        let sts = render_statefulset(&parent, &pool, "img:latest").unwrap();
+        let env = sts.spec.unwrap().template.spec.unwrap().containers[0]
+            .env
+            .clone()
+            .unwrap();
+        assert!(
+            env.iter().all(|e| e.name != "RUST_LOG"),
+            "logging-off cluster must not set RUST_LOG; got {env:?}"
+        );
+    }
+
+    #[test]
+    fn render_statefulset_logging_on_adds_rust_log_env_from_configmap() {
+        use crate::crd::Logging;
+        let mut parent = parent_fixture("demo");
+        parent.spec.logging = Some(Logging::default());
+        let pool = pool_fixture("brokers", "demo", 1);
+        let sts = render_statefulset(&parent, &pool, "img:latest").unwrap();
+        let env = sts.spec.unwrap().template.spec.unwrap().containers[0]
+            .env
+            .clone()
+            .unwrap();
+        let rust_log = env
+            .iter()
+            .find(|e| e.name == "RUST_LOG")
+            .expect("RUST_LOG env present when logging set");
+        let cm_ref = rust_log
+            .value_from
+            .as_ref()
+            .and_then(|vf| vf.config_map_key_ref.as_ref())
+            .expect("RUST_LOG sourced from configMapKeyRef");
+        assert_eq!(cm_ref.name, "demo-broker-config");
+        assert_eq!(cm_ref.key, "rust.log");
+        assert_eq!(cm_ref.optional, Some(true));
+        // Value must be sourced (not literal) so a ConfigMap update + config
+        // hash roll re-reads it.
+        assert!(rust_log.value.is_none());
     }
 
     #[test]

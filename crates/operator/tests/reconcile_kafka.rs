@@ -24,8 +24,9 @@ use std::sync::Arc;
 
 use crabka_operator::controller::kafka::reconcile;
 use crabka_operator::crd::{
-    Kafka, KafkaSpec, Listener, ListenerAuthentication, ListenerType, MetricsConfig,
-    NetworkPolicySpec, PodMonitorSpec, ServiceMonitorSpec,
+    ConfigMapKeyRef, ExternalLoggingSource, Kafka, KafkaSpec, Listener, ListenerAuthentication,
+    ListenerType, Logging, LoggingType, MetricsConfig, NetworkPolicySpec, PodMonitorSpec,
+    ServiceMonitorSpec,
 };
 use http::{Method, Response};
 use serde_json::json;
@@ -52,6 +53,7 @@ fn kafka_cr(name: &str, namespace: &str) -> Kafka {
             network_policy: None,
             cluster_ca: None,
             clients_ca: None,
+            logging: None,
         },
     );
     k.metadata.namespace = Some(namespace.into());
@@ -73,6 +75,7 @@ fn kafka_cr_with_metrics(name: &str, namespace: &str, metrics: Option<MetricsCon
             network_policy: None,
             cluster_ca: None,
             clients_ca: None,
+            logging: None,
         },
     );
     k.metadata.namespace = Some(namespace.into());
@@ -98,6 +101,7 @@ fn kafka_cr_with_network_policy(
             network_policy,
             cluster_ca: None,
             clients_ca: None,
+            logging: None,
         },
     );
     k.metadata.namespace = Some(namespace.into());
@@ -125,6 +129,7 @@ fn kafka_cr_with_config(
             network_policy: None,
             cluster_ca: None,
             clients_ca: None,
+            logging: None,
         },
     );
     k.metadata.namespace = Some(namespace.into());
@@ -582,11 +587,195 @@ fn kafka_cr_with_versions(
             network_policy: None,
             cluster_ca: None,
             clients_ca: None,
+            logging: None,
         },
     );
     k.metadata.namespace = Some(namespace.into());
     k.metadata.uid = Some("kafka-uid".into());
     k
+}
+
+/// Slice 41 variant carrying `spec.logging`.
+fn kafka_cr_with_logging(name: &str, namespace: &str, logging: Option<Logging>) -> Kafka {
+    let mut k = Kafka::new(
+        name,
+        KafkaSpec {
+            kafka_version: "0.1.1".into(),
+            metadata_version: None,
+            config: None,
+            listeners: vec![],
+            inter_broker_listener_name: None,
+            metrics_config: None,
+            network_policy: None,
+            cluster_ca: None,
+            clients_ca: None,
+            logging,
+        },
+    );
+    k.metadata.namespace = Some(namespace.into());
+    k.metadata.uid = Some("kafka-uid".into());
+    k
+}
+
+/// Pull the `LoggingReady` condition out of a status PATCH body.
+fn logging_condition<B: AsRef<[u8]>>(observed: &[http::Request<B>]) -> serde_json::Value {
+    let status_patch = observed
+        .iter()
+        .find(|r| {
+            r.method() == Method::PATCH && r.uri().to_string().contains("/kafkas/demo/status")
+        })
+        .expect("status PATCH must have been captured");
+    let body: serde_json::Value =
+        serde_json::from_slice(status_patch.body().as_ref()).expect("status PATCH body is JSON");
+    body["status"]["conditions"]
+        .as_array()
+        .expect("conditions array")
+        .iter()
+        .find(|c| c["type"] == "LoggingReady")
+        .cloned()
+        .unwrap_or_else(|| panic!("LoggingReady present, body = {body}"))
+}
+
+/// Slice 41: inline logging composes a sorted `RUST_LOG` filter into the
+/// broker `ConfigMap`'s `rust.log` key and surfaces `LoggingReady=True`.
+#[tokio::test]
+async fn kafka_inline_logging_renders_rust_log_key() {
+    let items = vec![fake_pool_list_item("brokers", "y", "demo", 1, 1)];
+    let (ctx, state) = build_ctx("y", happy_path_rules("demo", "y", &items));
+    let logging = Logging {
+        r#type: LoggingType::Inline,
+        loggers: [
+            ("root".to_string(), "info".to_string()),
+            ("crabka_broker".to_string(), "debug".to_string()),
+        ]
+        .into(),
+        value_from: None,
+    };
+    let kafka = kafka_cr_with_logging("demo", "y", Some(logging));
+
+    reconcile(Arc::new(kafka), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    let data = configmap_data(&observed);
+    assert_eq!(
+        data["rust.log"].as_str(),
+        Some("crabka_broker=debug,info"),
+        "rust.log must carry the composed filter, data = {data}"
+    );
+
+    let cond = logging_condition(&observed);
+    assert_eq!(cond["status"], "True");
+    assert_eq!(cond["reason"], "Available");
+    assert_eq!(state.remaining_rules(), 0);
+}
+
+/// Slice 41: a logging-unset cluster surfaces `LoggingReady=False/Disabled`
+/// and renders no `rust.log` key.
+#[tokio::test]
+async fn kafka_no_logging_omits_rust_log_key() {
+    let items = vec![fake_pool_list_item("brokers", "y", "demo", 1, 1)];
+    let (ctx, state) = build_ctx("y", happy_path_rules("demo", "y", &items));
+    let kafka = kafka_cr_with_logging("demo", "y", None);
+
+    reconcile(Arc::new(kafka), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    let data = configmap_data(&observed);
+    assert!(
+        data.get("rust.log").is_none(),
+        "rust.log must be absent when logging unset, data = {data}"
+    );
+    let cond = logging_condition(&observed);
+    assert_eq!(cond["status"], "False");
+    assert_eq!(cond["reason"], "Disabled");
+}
+
+/// Slice 41: external logging reads the referenced `ConfigMap` key and uses it
+/// verbatim as the `RUST_LOG` filter.
+#[tokio::test]
+async fn kafka_external_logging_reads_user_configmap() {
+    let items = vec![fake_pool_list_item("brokers", "y", "demo", 1, 1)];
+    let mut rules = happy_path_rules("demo", "y", &items);
+    // The reconcile GETs the user-managed logging ConfigMap before rendering.
+    rules.push(MockRule {
+        method: Method::GET,
+        path_substr: "/configmaps/my-log-cm".into(),
+        response: json_response(
+            200,
+            &json!({
+                "apiVersion": "v1",
+                "kind": "ConfigMap",
+                "metadata": { "name": "my-log-cm", "namespace": "y", "uid": "ext-cm" },
+                "data": { "rust.log": "crabka_raft=trace,warn" }
+            }),
+        ),
+    });
+    let (ctx, state) = build_ctx("y", rules);
+    let logging = Logging {
+        r#type: LoggingType::External,
+        loggers: std::collections::BTreeMap::default(),
+        value_from: Some(ExternalLoggingSource {
+            config_map_key_ref: ConfigMapKeyRef {
+                name: "my-log-cm".into(),
+                key: "rust.log".into(),
+            },
+        }),
+    };
+    let kafka = kafka_cr_with_logging("demo", "y", Some(logging));
+
+    reconcile(Arc::new(kafka), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    let data = configmap_data(&observed);
+    assert_eq!(
+        data["rust.log"].as_str(),
+        Some("crabka_raft=trace,warn"),
+        "rust.log must mirror the external ConfigMap value, data = {data}"
+    );
+    let cond = logging_condition(&observed);
+    assert_eq!(cond["status"], "True");
+}
+
+/// Slice 41: an external logging reference to a missing `ConfigMap` surfaces
+/// `LoggingReady=False` and renders no `rust.log` key (the broker keeps its
+/// built-in default filter).
+#[tokio::test]
+async fn kafka_external_logging_missing_configmap_surfaces_condition() {
+    let items = vec![fake_pool_list_item("brokers", "y", "demo", 1, 1)];
+    let mut rules = happy_path_rules("demo", "y", &items);
+    rules.push(MockRule {
+        method: Method::GET,
+        path_substr: "/configmaps/absent-cm".into(),
+        response: Response::builder()
+            .status(404)
+            .header("content-type", "application/json")
+            .body(not_found_body("configmap not found"))
+            .expect("404 builds"),
+    });
+    let (ctx, state) = build_ctx("y", rules);
+    let logging = Logging {
+        r#type: LoggingType::External,
+        loggers: std::collections::BTreeMap::default(),
+        value_from: Some(ExternalLoggingSource {
+            config_map_key_ref: ConfigMapKeyRef {
+                name: "absent-cm".into(),
+                key: "rust.log".into(),
+            },
+        }),
+    };
+    let kafka = kafka_cr_with_logging("demo", "y", Some(logging));
+
+    reconcile(Arc::new(kafka), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    let data = configmap_data(&observed);
+    assert!(
+        data.get("rust.log").is_none(),
+        "rust.log must be absent when external CM missing, data = {data}"
+    );
+    let cond = logging_condition(&observed);
+    assert_eq!(cond["status"], "False");
+    assert_eq!(cond["reason"], "LoggingConfigMapNotFound");
 }
 
 /// Find the broker-config `ConfigMap` PATCH and return its serialized data

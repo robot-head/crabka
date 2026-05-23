@@ -43,6 +43,7 @@ fn kafka_cr(name: &str, namespace: &str) -> Kafka {
             network_policy: None,
             cluster_ca: None,
             clients_ca: None,
+            logging: None,
         },
     );
     k.metadata.namespace = Some(namespace.into());
@@ -68,6 +69,7 @@ fn kafka_cr_byo(name: &str, namespace: &str) -> Kafka {
             network_policy: None,
             cluster_ca: Some(byo.clone()),
             clients_ca: Some(byo),
+            logging: None,
         },
     );
     k.metadata.namespace = Some(namespace.into());
