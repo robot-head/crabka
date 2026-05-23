@@ -1932,3 +1932,579 @@ jobs:
           path: /tmp/auth-diag/
           retention-days: 14
           if-no-files-found: ignore
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Slice 50: OAUTHBEARER listener + tls-external KafkaUser
+  #
+  # Stands up Bitnami Keycloak in-cluster (HTTP only — broker → IdP HTTPS
+  # with a custom trust store is a 49c/50b problem), bootstraps a `kafka`
+  # realm with a confidential client-credentials client (`kafka-client`,
+  # granted scope `kafka.write`) and a second client without that scope
+  # (`kafka-client-noscope`). Applies a `Kafka` CR with an OAuth listener
+  # pointed at the in-cluster Keycloak Service, a `KafkaUser` named
+  # `kafka-client` with `authentication.type: tls-external` (the operator
+  # provisions ACLs only — no credentials), and a `KafkaTopic` `e2e`.
+  #
+  # Two Apache Kafka JVM `kafka-console-producer.sh` Jobs verify:
+  #   • `kafka-client` (token carries `aud=kafka-broker` + `scope=kafka.write`)
+  #     produces successfully to topic `e2e`.
+  #   • `kafka-client-noscope` (token lacks `kafka.write`) is rejected with
+  #     a SaslAuthenticationException at SASL-handshake time.
+  #
+  # Also asserts the operator emitted a `WeakAuth` Warning Event on the
+  # `Kafka` resource, because the JWKS endpoint is `http://`.
+  #
+  # Gated to `push: main` + PRs labeled `e2e-oauth` so PRs that don't touch
+  # OAuth code don't pay the multi-minute Keycloak rollout cost.
+  # ─────────────────────────────────────────────────────────────────────────
+  kind-oauth:
+    needs: build-images
+    if: ${{ github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'e2e-oauth') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v6
+      - uses: azure/setup-helm@v5
+        with:
+          version: v3.16.2
+      - name: Download prebuilt image tarballs
+        uses: actions/download-artifact@v8
+        with:
+          name: e2e-images
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: crabka-oauth-e2e
+          version: v0.24.0
+          node_image: kindest/node:v1.30.0
+
+      - name: Load images into kind
+        run: |
+          set -e
+          for tar in crabka-operator.tar crabka-broker.tar; do
+            docker load -i "$tar" 2>&1 | tee /tmp/load.log
+            loaded=$(sed -n 's/^Loaded image: //p' /tmp/load.log | head -1)
+            want=$(basename "$tar" .tar):e2e
+            if [ "$loaded" != "$want" ]; then docker tag "$loaded" "$want"; fi
+            kind load docker-image "$want" --name crabka-oauth-e2e
+          done
+
+      - name: Install CRDs + chart
+        run: |
+          set -e
+          kubectl apply -f deploy/crds/crabka.io_kafkas.yaml
+          kubectl apply -f deploy/crds/crabka.io_kafkanodepools.yaml
+          kubectl apply -f deploy/crds/crabka.io_kafkausers.yaml
+          kubectl apply -f deploy/crds/crabka.io_kafkatopics.yaml
+          kubectl create namespace crabka-operator
+          helm install operator charts/crabka-operator \
+            --namespace crabka-operator \
+            --set image.repository=crabka-operator --set image.tag=e2e \
+            --set image.pullPolicy=IfNotPresent \
+            --set brokerImage.repository=crabka-broker --set brokerImage.tag=e2e \
+            --set brokerImage.pullPolicy=IfNotPresent
+          kubectl rollout status -n crabka-operator deploy/operator-crabka-operator --timeout=240s
+
+      # ─────────────────────────────────────────────────────────────────────
+      # Install Bitnami Keycloak chart.
+      #
+      # Pinned to chart `25.2.0` (Keycloak app version `26.3.3`), the latest
+      # stable Bitnami release on the day this slice shipped (2026-05-23).
+      # Bump the pin in a follow-up if/when the chart's defaults change
+      # incompatibly with the kcadm bootstrap script below.
+      #
+      # `tls.enabled=false` — broker → IdP HTTPS-with-custom-trust is a 49c
+      # problem; in-cluster HTTP is fine for CI and intentionally exercises
+      # the operator's `WeakAuth` Event path (the listener's `http://` JWKS
+      # URL triggers the warning, asserted below).
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Install Bitnami Keycloak chart
+        run: |
+          set -e
+          helm repo add bitnami https://charts.bitnami.com/bitnami
+          helm repo update bitnami
+          helm install kc bitnami/keycloak \
+            --namespace keycloak --create-namespace \
+            --version 25.2.0 \
+            --set auth.adminUser=admin \
+            --set auth.adminPassword=admin \
+            --set service.type=ClusterIP \
+            --set tls.enabled=false \
+            --set production=false \
+            --set proxy=edge \
+            --wait --timeout=600s
+          kubectl rollout status -n keycloak statefulset/kc-keycloak --timeout=600s
+
+      # ─────────────────────────────────────────────────────────────────────
+      # Bootstrap the `kafka` realm via kcadm.sh.
+      #
+      # The script is rendered to /tmp on the runner, then `kubectl cp`'d
+      # into the keycloak pod and exec'd — a single `kubectl exec -- bash
+      # -c '…'` invocation with a multi-hundred-line script is fragile
+      # (quoting around inner $VAR references in particular).
+      #
+      # Token claims:
+      #   • aud:   set to "kafka-broker" via an audience protocol-mapper on
+      #            the `kafka.write` client-scope (broker's
+      #            `validAudience` = "kafka-broker").
+      #   • scope: includes "kafka.write" because the scope is assigned as
+      #            a default-scope to the kafka-client (and absent from
+      #            kafka-client-noscope, used by the negative-test job).
+      #   • client_id: emitted automatically by Keycloak on client-credentials
+      #                grants — the broker's `userNameClaim: client_id`
+      #                maps this to the principal `User:kafka-client`.
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Bootstrap Keycloak realm + clients
+        run: |
+          set -e
+          cat > /tmp/realm-bootstrap.sh <<'BOOTSTRAP'
+          #!/bin/bash
+          set -ex
+          KCADM=/opt/bitnami/keycloak/bin/kcadm.sh
+          $KCADM config credentials \
+            --server http://localhost:8080/ \
+            --realm master --user admin --password admin
+
+          # Realm
+          $KCADM create realms -s realm=kafka -s enabled=true
+
+          # Audience client — broker is its own "kafka-broker" client; not
+          # used for issuing tokens, only as the audience value in `aud`.
+          $KCADM create clients -r kafka \
+            -s clientId=kafka-broker \
+            -s publicClient=true \
+            -s standardFlowEnabled=false \
+            -s directAccessGrantsEnabled=false
+
+          # Client scope `kafka.write` with an audience mapper that adds
+          # "kafka-broker" to the `aud` claim of any access token whose
+          # client has this scope assigned.
+          $KCADM create client-scopes -r kafka \
+            -s name=kafka.write \
+            -s protocol=openid-connect \
+            -s 'attributes."include.in.token.scope"=true'
+          SCOPE_ID=$($KCADM get client-scopes -r kafka -q name=kafka.write \
+            --fields id --format csv --noquotes | tail -1)
+          $KCADM create "client-scopes/$SCOPE_ID/protocol-mappers/models" -r kafka \
+            -s name=aud-kafka-broker \
+            -s protocol=openid-connect \
+            -s protocolMapper=oidc-audience-mapper \
+            -s 'config."included.client.audience"=kafka-broker' \
+            -s 'config."id.token.claim"=false' \
+            -s 'config."access.token.claim"=true'
+
+          # Token-issuing client #1 — service-account / client-credentials,
+          # holds the `kafka.write` scope. Principal: kafka-client.
+          $KCADM create clients -r kafka \
+            -s clientId=kafka-client \
+            -s publicClient=false \
+            -s serviceAccountsEnabled=true \
+            -s standardFlowEnabled=false \
+            -s directAccessGrantsEnabled=false \
+            -s 'attributes."client_credentials.use_refresh_token"=false'
+          CID=$($KCADM get clients -r kafka -q clientId=kafka-client \
+            --fields id --format csv --noquotes | tail -1)
+          $KCADM update "clients/$CID/default-client-scopes/$SCOPE_ID" -r kafka
+          SECRET=$($KCADM get "clients/$CID/client-secret" -r kafka \
+            --fields value --format csv --noquotes | tail -1)
+
+          # Token-issuing client #2 — same shape, but NO `kafka.write` scope.
+          # Used by the negative-test producer; broker rejects at scope-check
+          # time before principal authorization is even consulted.
+          $KCADM create clients -r kafka \
+            -s clientId=kafka-client-noscope \
+            -s publicClient=false \
+            -s serviceAccountsEnabled=true \
+            -s standardFlowEnabled=false \
+            -s directAccessGrantsEnabled=false \
+            -s 'attributes."client_credentials.use_refresh_token"=false'
+          CID2=$($KCADM get clients -r kafka -q clientId=kafka-client-noscope \
+            --fields id --format csv --noquotes | tail -1)
+          SECRET2=$($KCADM get "clients/$CID2/client-secret" -r kafka \
+            --fields value --format csv --noquotes | tail -1)
+
+          # Stash both secrets where they're readable by the script that
+          # creates the Kubernetes Secret (next step on the runner).
+          mkdir -p /tmp/kc-out
+          echo -n "$SECRET"  > /tmp/kc-out/kafka-client-secret
+          echo -n "$SECRET2" > /tmp/kc-out/kafka-client-noscope-secret
+          BOOTSTRAP
+          chmod +x /tmp/realm-bootstrap.sh
+
+          kubectl cp /tmp/realm-bootstrap.sh keycloak/kc-keycloak-0:/tmp/realm-bootstrap.sh -c keycloak
+          kubectl exec -n keycloak kc-keycloak-0 -c keycloak -- bash /tmp/realm-bootstrap.sh
+
+          mkdir -p /tmp/kc-out
+          kubectl cp keycloak/kc-keycloak-0:/tmp/kc-out/kafka-client-secret /tmp/kc-out/kafka-client-secret -c keycloak
+          kubectl cp keycloak/kc-keycloak-0:/tmp/kc-out/kafka-client-noscope-secret /tmp/kc-out/kafka-client-noscope-secret -c keycloak
+
+          # Materialize the secrets into a Kubernetes Secret in `default`
+          # so the producer Jobs can mount them.
+          kubectl create secret generic keycloak-test-creds -n default \
+            --from-file=kafka-client-secret=/tmp/kc-out/kafka-client-secret \
+            --from-file=kafka-client-noscope-secret=/tmp/kc-out/kafka-client-noscope-secret
+
+      # ─────────────────────────────────────────────────────────────────────
+      # Apply the Kafka cluster + OAuth listener + KafkaUser + KafkaTopic.
+      #
+      # Listener config mirrors crates/operator/sample/oauth-listener.yaml
+      # but URIs point at the in-cluster Keycloak Service. `userNameClaim:
+      # client_id` means the broker derives the principal from the OAuth
+      # `client_id` claim — emitted automatically by Keycloak on
+      # client-credentials grants — so the KafkaUser's `metadata.name` must
+      # match the OAuth `clientId` (here, `kafka-client`).
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Apply Kafka cluster with OAUTHBEARER listener
+        run: |
+          cat <<'EOF' | kubectl apply -f -
+          apiVersion: crabka.io/v1alpha1
+          kind: Kafka
+          metadata:
+            name: demo
+            namespace: default
+          spec:
+            kafkaVersion: "0.1.1"
+            listeners:
+              - name: PLAIN
+                port: 9092
+                type: internal
+                tls: false
+              - name: oauth
+                port: 9096
+                type: internal
+                tls: true
+                authentication:
+                  type: oauth
+                  validIssuerUri: http://kc-keycloak.keycloak.svc.cluster.local:8080/realms/kafka
+                  jwksEndpointUri: http://kc-keycloak.keycloak.svc.cluster.local:8080/realms/kafka/protocol/openid-connect/certs
+                  validAudience: kafka-broker
+                  userNameClaim: client_id
+                  customClaimCheck:
+                    scope: kafka.write
+            interBrokerListenerName: PLAIN
+          ---
+          apiVersion: crabka.io/v1alpha1
+          kind: KafkaNodePool
+          metadata:
+            name: brokers
+            namespace: default
+            labels:
+              crabka.io/cluster: demo
+          spec:
+            roles: [Controller, Broker]
+            replicas: 1
+            nodeIdStart: 0
+            storage:
+              type: PersistentClaim
+              size: 1Gi
+              deleteClaim: true
+          EOF
+
+      - name: Wait for Kafka demo Ready
+        run: |
+          for i in $(seq 1 60); do
+            s=$(kubectl get kafka demo -n default \
+              -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
+            echo "attempt $i: Ready=$s"
+            if [ "$s" = "True" ]; then exit 0; fi
+            sleep 5
+          done
+          echo "::error::Kafka demo did not become Ready in 5 minutes"
+          kubectl describe kafka demo -n default
+          kubectl describe kafkanodepool brokers -n default
+          kubectl logs -n default demo-brokers-0 -c broker --tail=200 || true
+          exit 1
+
+      - name: Apply KafkaUser kafka-client (tls-external) + KafkaTopic e2e
+        run: |
+          cat <<'EOF' | kubectl apply -f -
+          apiVersion: crabka.io/v1alpha1
+          kind: KafkaUser
+          metadata:
+            name: kafka-client
+            namespace: default
+            labels:
+              crabka.io/cluster: demo
+          spec:
+            authentication:
+              type: tls-external
+            authorization:
+              type: simple
+              acls:
+                - resource:
+                    type: topic
+                    name: e2e
+                  operations: [Read, Describe, Write]
+          ---
+          apiVersion: crabka.io/v1alpha1
+          kind: KafkaTopic
+          metadata:
+            name: e2e
+            namespace: default
+            labels:
+              crabka.io/cluster: demo
+          spec:
+            partitions: 1
+            replicas: 1
+          EOF
+          for i in $(seq 1 30); do
+            us=$(kubectl get kafkauser kafka-client -n default \
+              -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
+            ts=$(kubectl get kafkatopic e2e -n default \
+              -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
+            echo "attempt $i: KafkaUser=$us KafkaTopic=$ts"
+            if [ "$us" = "True" ] && [ "$ts" = "True" ]; then exit 0; fi
+            sleep 3
+          done
+          echo "::error::KafkaUser kafka-client or KafkaTopic e2e did not become Ready in 90s"
+          kubectl describe kafkauser kafka-client -n default
+          kubectl describe kafkatopic e2e -n default
+          kubectl logs -n crabka-operator deploy/operator-crabka-operator --tail=200 || true
+          exit 1
+
+      # ─────────────────────────────────────────────────────────────────────
+      # Assert the WeakAuth Warning Event was emitted on the Kafka resource.
+      #
+      # The operator's listener-reconciler fires this Event whenever an
+      # OAuth listener's `jwksEndpointUri` starts with `http://` (see
+      # crates/operator/src/controller/listeners.rs::weak_auth_warnings).
+      # We use http:// for the in-cluster Keycloak URL, so the Event must
+      # exist by the time the cluster is Ready.
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Assert WeakAuth Event for http:// JWKS endpoint
+        run: |
+          set -e
+          for i in $(seq 1 12); do
+            count=$(kubectl get events -n default \
+              --field-selector reason=WeakAuth,involvedObject.name=demo,involvedObject.kind=Kafka \
+              -o json | jq '.items | length' || echo 0)
+            echo "attempt $i: WeakAuth event count=$count"
+            if [ "$count" -ge 1 ]; then
+              kubectl get events -n default \
+                --field-selector reason=WeakAuth,involvedObject.name=demo,involvedObject.kind=Kafka \
+                -o jsonpath='{range .items[*]}{.message}{"\n"}{end}'
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::no WeakAuth Event was emitted on Kafka/demo within 60s"
+          kubectl get events -n default --sort-by=.lastTimestamp || true
+          exit 1
+
+      # ─────────────────────────────────────────────────────────────────────
+      # Producer-OK: kafka-client holds the kafka.write scope, so its token
+      # carries `aud=kafka-broker` and `scope=kafka.write`; the broker
+      # accepts the SASL handshake and routes the produce.
+      #
+      # Apache Kafka 3.8.0's `OAuthBearerLoginCallbackHandler` (KIP-768,
+      # released in 3.1) handles the client-credentials OAuth2 flow purely
+      # from JAAS config — given `sasl.oauthbearer.token.endpoint.url`
+      # plus `clientId="…" clientSecret="…" scope="…"` on the
+      # OAuthBearerLoginModule, it POSTs to Keycloak's token endpoint and
+      # passes the resulting JWT to the broker. No callback-handler code
+      # of our own required.
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Verify OAUTHBEARER produce succeeds with valid token
+        run: |
+          cat <<'EOF' | kubectl apply -f -
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: oauth-producer-ok
+            namespace: default
+          spec:
+            backoffLimit: 0
+            template:
+              spec:
+                restartPolicy: Never
+                containers:
+                  - name: producer
+                    image: apache/kafka:3.8.0
+                    command:
+                      - bash
+                      - -c
+                      - |
+                        set -ex
+                        # Build a JKS truststore from the cluster CA cert.
+                        keytool -import -trustcacerts -noprompt \
+                          -alias clusterca \
+                          -file /etc/crabka/cluster-ca/ca.crt \
+                          -keystore /tmp/trust.jks \
+                          -storepass changeit
+                        SECRET=$(cat /etc/crabka/kc/kafka-client-secret)
+                        cat > /tmp/client.props <<INNER
+                        security.protocol=SASL_SSL
+                        sasl.mechanism=OAUTHBEARER
+                        sasl.login.callback.handler.class=org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginCallbackHandler
+                        sasl.oauthbearer.token.endpoint.url=http://kc-keycloak.keycloak.svc.cluster.local:8080/realms/kafka/protocol/openid-connect/token
+                        sasl.jaas.config=org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule required clientId="kafka-client" clientSecret="$SECRET" scope="kafka.write";
+                        ssl.truststore.location=/tmp/trust.jks
+                        ssl.truststore.password=changeit
+                        INNER
+                        echo "oauth-test-record" | \
+                          /opt/kafka/bin/kafka-console-producer.sh \
+                            --bootstrap-server demo-broker-headless.default.svc.cluster.local:9096 \
+                            --topic e2e \
+                            --producer.config /tmp/client.props
+                    volumeMounts:
+                      - name: cluster-ca
+                        mountPath: /etc/crabka/cluster-ca
+                        readOnly: true
+                      - name: kc-creds
+                        mountPath: /etc/crabka/kc
+                        readOnly: true
+                volumes:
+                  - name: cluster-ca
+                    secret:
+                      secretName: demo-cluster-ca-cert
+                  - name: kc-creds
+                    secret:
+                      secretName: keycloak-test-creds
+          EOF
+          kubectl wait job/oauth-producer-ok -n default \
+            --for=condition=complete --timeout=180s || {
+            echo "::error::OAUTHBEARER producer job did not complete successfully"
+            kubectl logs -n default -l job-name=oauth-producer-ok --tail=200 || true
+            kubectl describe job oauth-producer-ok -n default || true
+            exit 1
+          }
+
+      # ─────────────────────────────────────────────────────────────────────
+      # Producer-Reject: kafka-client-noscope is a valid OAuth client and
+      # gets a signed JWT from Keycloak, but the JWT lacks `kafka.write` in
+      # its `scope` claim. The broker's `customClaimCheck { scope: kafka.write }`
+      # rejects it at SASL-handshake time, surfacing as a
+      # SaslAuthenticationException on the JVM client → non-zero exit on
+      # the producer process → Job Failed condition.
+      #
+      # Polling pattern mirrors `mtls-producer-nocert` in kind-listener-auth.
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Verify OAUTHBEARER produce is rejected without kafka.write scope
+        run: |
+          cat <<'EOF' | kubectl apply -f -
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: oauth-producer-noscope
+            namespace: default
+          spec:
+            backoffLimit: 0
+            template:
+              spec:
+                restartPolicy: Never
+                containers:
+                  - name: producer
+                    image: apache/kafka:3.8.0
+                    command:
+                      - bash
+                      - -c
+                      - |
+                        set -ex
+                        keytool -import -trustcacerts -noprompt \
+                          -alias clusterca \
+                          -file /etc/crabka/cluster-ca/ca.crt \
+                          -keystore /tmp/trust.jks \
+                          -storepass changeit
+                        SECRET=$(cat /etc/crabka/kc/kafka-client-noscope-secret)
+                        # No `scope=` requested → token's scope claim won't
+                        # include kafka.write → broker's customClaimCheck
+                        # rejects → SASL handshake fails.
+                        cat > /tmp/client.props <<INNER
+                        security.protocol=SASL_SSL
+                        sasl.mechanism=OAUTHBEARER
+                        sasl.login.callback.handler.class=org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginCallbackHandler
+                        sasl.oauthbearer.token.endpoint.url=http://kc-keycloak.keycloak.svc.cluster.local:8080/realms/kafka/protocol/openid-connect/token
+                        sasl.jaas.config=org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule required clientId="kafka-client-noscope" clientSecret="$SECRET";
+                        ssl.truststore.location=/tmp/trust.jks
+                        ssl.truststore.password=changeit
+                        INNER
+                        echo "should-be-rejected" | \
+                          /opt/kafka/bin/kafka-console-producer.sh \
+                            --bootstrap-server demo-broker-headless.default.svc.cluster.local:9096 \
+                            --topic e2e \
+                            --producer.config /tmp/client.props \
+                            --request-timeout-ms 15000
+                        echo "::error::OAUTHBEARER produce unexpectedly succeeded without kafka.write scope"
+                        exit 1
+                    volumeMounts:
+                      - name: cluster-ca
+                        mountPath: /etc/crabka/cluster-ca
+                        readOnly: true
+                      - name: kc-creds
+                        mountPath: /etc/crabka/kc
+                        readOnly: true
+                volumes:
+                  - name: cluster-ca
+                    secret:
+                      secretName: demo-cluster-ca-cert
+                  - name: kc-creds
+                    secret:
+                      secretName: keycloak-test-creds
+          EOF
+          for i in $(seq 1 48); do
+            complete=$(kubectl get job oauth-producer-noscope -n default \
+              -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}' 2>/dev/null || true)
+            failed=$(kubectl get job oauth-producer-noscope -n default \
+              -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}' 2>/dev/null || true)
+            echo "attempt $i: complete=$complete failed=$failed"
+            if [ "$failed" = "True" ]; then
+              echo "Produce without kafka.write scope was correctly rejected."
+              # Sanity-check the rejection was authentication-related, not
+              # e.g. a network error masquerading as failure.
+              kubectl logs -n default -l job-name=oauth-producer-noscope --tail=200 | \
+                grep -E 'SaslAuthenticationException|sasl|authentication failed' -i || {
+                echo "::warning::producer logs don't mention SASL/authentication failure — rejection cause unclear"
+              }
+              exit 0
+            fi
+            if [ "$complete" = "True" ]; then
+              echo "::error::no-scope produce job completed successfully — broker did not enforce customClaimCheck"
+              kubectl logs -n default -l job-name=oauth-producer-noscope --tail=200 || true
+              exit 1
+            fi
+            sleep 5
+          done
+          echo "::error::no-scope produce job did not terminate within 240s"
+          kubectl describe job oauth-producer-noscope -n default || true
+          kubectl logs -n default -l job-name=oauth-producer-noscope --tail=200 || true
+          exit 1
+
+      - name: Collect diagnostics on failure
+        if: failure()
+        run: |
+          set +e
+          mkdir -p /tmp/oauth-diag
+          {
+            echo "## kind-oauth diagnostics"
+            kubectl get pods -A -o wide
+            echo "### operator logs"
+            kubectl logs -n crabka-operator deploy/operator-crabka-operator --tail=500
+            echo "### kafka demo"
+            kubectl get kafka demo -n default -o yaml || true
+            echo "### kafkauser kafka-client"
+            kubectl get kafkauser kafka-client -n default -o yaml || true
+            echo "### kafkatopic e2e"
+            kubectl get kafkatopic e2e -n default -o yaml || true
+            echo "### events (default ns)"
+            kubectl get events -n default --sort-by=.lastTimestamp || true
+            echo "### keycloak pod logs"
+            kubectl logs -n keycloak kc-keycloak-0 -c keycloak --tail=300 || true
+            echo "### keycloak postgresql logs"
+            kubectl logs -n keycloak -l app.kubernetes.io/name=postgresql --tail=100 || true
+            echo "### broker logs (demo)"
+            kubectl logs -n default demo-brokers-0 --tail=300 --all-containers || true
+            echo "### job logs (oauth-producer-ok)"
+            kubectl logs -n default -l job-name=oauth-producer-ok --tail=200 || true
+            echo "### job logs (oauth-producer-noscope)"
+            kubectl logs -n default -l job-name=oauth-producer-noscope --tail=200 || true
+          } > /tmp/oauth-diag/diagnostics.md
+
+      - name: Upload diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: operator-e2e-oauth-diagnostics
+          path: /tmp/oauth-diag/
+          retention-days: 14
+          if-no-files-found: ignore
