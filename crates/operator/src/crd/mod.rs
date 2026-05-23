@@ -16,8 +16,8 @@ pub mod user;
 pub use ca::{CertificateAuthority, CertificateAuthorityStatus};
 pub use kafka::{Kafka, KafkaCondition, KafkaSpec, KafkaStatus};
 pub use kafka_node_pool::{
-    KafkaNodePool, KafkaNodePoolSpec, KafkaNodePoolStatus, MetadataTemplate, NodeRole,
-    PersistentClaimSpec, PodTemplate, Storage,
+    JbodSpec, JbodVolume, KafkaNodePool, KafkaNodePoolSpec, KafkaNodePoolStatus, MetadataTemplate,
+    NodeRole, PersistentClaimSpec, PodTemplate, Storage,
 };
 pub use listener::*;
 pub use logging::{ConfigMapKeyRef, ExternalLoggingSource, Logging, LoggingType};

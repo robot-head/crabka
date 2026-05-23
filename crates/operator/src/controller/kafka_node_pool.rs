@@ -32,8 +32,7 @@ use crate::controller::common::{
     common_labels, condition, derive_status, owner_ref,
 };
 use crate::crd::{
-    Kafka, KafkaCondition, KafkaNodePool, KafkaNodePoolStatus, NodeRole, PersistentClaimSpec,
-    Storage,
+    JbodVolume, Kafka, KafkaCondition, KafkaNodePool, KafkaNodePoolStatus, NodeRole, Storage,
 };
 
 /// Slice 40: container port the broker binds for Prometheus `/metrics`
@@ -71,6 +70,14 @@ pub enum PoolValidationError {
     },
     #[error("spec.storage.size decrease from {current} to {desired}: shrink not allowed")]
     StorageShrinkNotAllowed { current: String, desired: String },
+    #[error(
+        "spec.storage.volumes must list at least 2 disks for Jbod (use PersistentClaim for one disk)"
+    )]
+    JbodNeedsTwoVolumes(usize),
+    #[error("spec.storage.volumes has a duplicate id {0}")]
+    JbodDuplicateVolumeId(i32),
+    #[error("spec.storage.volumes set changed: adding/removing JBOD disks is not yet supported")]
+    JbodVolumesImmutable,
 }
 
 /// Validate a `KafkaNodePool` spec against slice-20 invariants.
@@ -90,11 +97,73 @@ pub(crate) fn validate(pool: &KafkaNodePool) -> Result<(), PoolValidationError> 
             pool.spec.node_id_start,
         ));
     }
-    if let Some(Storage::PersistentClaim(pc)) = pool.spec.storage.as_ref() {
-        common::parse_quantity(&pc.size)
-            .map_err(|why| PoolValidationError::StorageSizeInvalid(pc.size.clone(), why))?;
+    match pool.spec.storage.as_ref() {
+        Some(Storage::PersistentClaim(pc)) => {
+            common::parse_quantity(&pc.size)
+                .map_err(|why| PoolValidationError::StorageSizeInvalid(pc.size.clone(), why))?;
+        }
+        Some(Storage::Jbod(j)) => {
+            // A single-disk "JBOD" is just a PersistentClaim and would render
+            // an identical one-PVC StatefulSet, making the storage kind
+            // ambiguous on re-reconcile. Require >= 2 disks; the count is the
+            // observed-kind discriminator (see `observed_storage_kind`).
+            if j.volumes.len() < 2 {
+                return Err(PoolValidationError::JbodNeedsTwoVolumes(j.volumes.len()));
+            }
+            let mut seen = HashSet::new();
+            for v in &j.volumes {
+                if !seen.insert(v.id) {
+                    return Err(PoolValidationError::JbodDuplicateVolumeId(v.id));
+                }
+                common::parse_quantity(&v.size)
+                    .map_err(|why| PoolValidationError::StorageSizeInvalid(v.size.clone(), why))?;
+            }
+        }
+        None | Some(Storage::Ephemeral) => {}
     }
     Ok(())
+}
+
+/// JBOD volumes sorted ascending by id. Empty for non-JBOD storage.
+/// Sorting makes the rendered `StatefulSet` deterministic regardless of
+/// the order disks are listed in the spec.
+fn jbod_volumes_sorted(storage: Option<&Storage>) -> Vec<JbodVolume> {
+    match storage {
+        Some(Storage::Jbod(j)) => {
+            let mut v = j.volumes.clone();
+            v.sort_by_key(|vol| vol.id);
+            v
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// PVC-template name + pod mount path for one JBOD disk. The primary
+/// (lowest-id) disk reuses the slice-24 `data` / `/var/lib/crabka/data`
+/// so the metadata raft log, the init container, and the cluster-level
+/// broker TOML (`log_dir = "/var/lib/crabka/data"`) are all unchanged.
+/// Every other disk `id = N` lives at `data-{N}` / `/var/lib/crabka/data-{N}`.
+fn jbod_mount(volume_id: i32, is_primary: bool) -> (String, String) {
+    if is_primary {
+        ("data".to_string(), "/var/lib/crabka/data".to_string())
+    } else {
+        (
+            format!("data-{volume_id}"),
+            format!("/var/lib/crabka/data-{volume_id}"),
+        )
+    }
+}
+
+/// `(name, mount_path)` for every non-primary JBOD disk, sorted by id.
+/// Empty for non-JBOD storage. These become the broker container's extra
+/// `volumeMounts` and the `CRABKA_EXTRA_LOG_DIRS` env value.
+fn jbod_extra_mounts(storage: Option<&Storage>) -> Vec<(String, String)> {
+    jbod_volumes_sorted(storage)
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != 0)
+        .map(|(_, v)| jbod_mount(v.id, false))
+        .collect()
 }
 
 // Init script: derive ORDINAL from $HOSTNAME (StatefulSet pods are
@@ -190,6 +259,7 @@ fn render_broker_container(
     resources: &ResourceRequirements,
     metrics_enabled: bool,
     logging_enabled: bool,
+    jbod_extra_mounts: &[(String, String)],
 ) -> serde_json::Value {
     let mut ports = vec![json!({
         "containerPort": BROKER_PORT, "name": "kafka-internal", "protocol": "TCP"
@@ -219,7 +289,32 @@ fn render_broker_container(
             }
         }));
     }
+    // Slice 46: when storage is JBOD, tell the broker about the extra data
+    // disks via `CRABKA_EXTRA_LOG_DIRS` (slice 45 reads this env, splits on
+    // commas, and spreads partitions across `[log_dir] + extras`). The
+    // primary disk stays the broker's `log_dir` (`/var/lib/crabka/data`), so
+    // it's excluded here. The env is omitted entirely for non-JBOD pools, so
+    // their pod template is byte-identical to the pre-slice-46 render.
+    if !jbod_extra_mounts.is_empty() {
+        let value = jbod_extra_mounts
+            .iter()
+            .map(|(_, path)| path.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        env.push(json!({ "name": "CRABKA_EXTRA_LOG_DIRS", "value": value }));
+    }
     let main_script = build_main_script(metrics_enabled);
+    let mut volume_mounts = vec![
+        json!({ "name": "data", "mountPath": "/var/lib/crabka/data" }),
+        json!({ "name": "broker-config", "mountPath": "/etc/crabka/config", "readOnly": true }),
+        json!({ "name": "broker-runtime", "mountPath": "/run/crabka" }),
+        json!({ "name": "cluster-ca-cert", "mountPath": "/etc/crabka/cluster-ca", "readOnly": true }),
+        json!({ "name": "broker-tls", "mountPath": "/etc/crabka/broker-tls", "readOnly": true }),
+        json!({ "name": "clients-ca-cert", "mountPath": "/etc/crabka/clients-ca", "readOnly": true }),
+    ];
+    for (name, path) in jbod_extra_mounts {
+        volume_mounts.push(json!({ "name": name, "mountPath": path }));
+    }
     json!({
         "name": "broker",
         "image": broker_image,
@@ -238,14 +333,7 @@ fn render_broker_container(
             "periodSeconds": 10
         },
         "resources": resources,
-        "volumeMounts": [
-            { "name": "data", "mountPath": "/var/lib/crabka/data" },
-            { "name": "broker-config", "mountPath": "/etc/crabka/config", "readOnly": true },
-            { "name": "broker-runtime", "mountPath": "/run/crabka" },
-            { "name": "cluster-ca-cert", "mountPath": "/etc/crabka/cluster-ca", "readOnly": true },
-            { "name": "broker-tls", "mountPath": "/etc/crabka/broker-tls", "readOnly": true },
-            { "name": "clients-ca-cert", "mountPath": "/etc/crabka/clients-ca", "readOnly": true }
-        ],
+        "volumeMounts": volume_mounts,
         "securityContext": {
             "allowPrivilegeEscalation": false,
             "readOnlyRootFilesystem": true,
@@ -254,20 +342,48 @@ fn render_broker_container(
     })
 }
 
-/// Build the `StatefulSet`'s pod-volume entries and (optionally) its
+/// Build one `volumeClaimTemplate` for a single PVC: `accessModes`,
+/// requested `size`, optional `storageClassName`, and inherited pod
+/// labels (so the slice-20 GC selector matches the bound PVC).
+fn pvc_template(
+    name: &str,
+    size: &str,
+    class: Option<&str>,
+    pod_labels: &BTreeMap<String, String>,
+) -> serde_json::Value {
+    let mut template = json!({
+        "metadata": {
+            "name": name,
+            "labels": pod_labels,
+        },
+        "spec": {
+            "accessModes": ["ReadWriteOnce"],
+            "resources": {
+                "requests": { "storage": size }
+            }
+        }
+    });
+    if let Some(class) = class {
+        template["spec"]["storageClassName"] = serde_json::Value::String(class.to_string());
+    }
+    template
+}
+
+/// Build the `StatefulSet`'s pod-volume entries and its
 /// `volumeClaimTemplates` based on the pool's `Storage` setting.
-/// Returns `(pod_volumes_json, volume_claim_templates_json_or_none)`.
+/// Returns `(pod_volumes_json, volume_claim_templates)`. An empty
+/// templates vec means "no PVCs" (the `Ephemeral` path).
 ///
 /// The returned `volumes` array always includes the `broker-config`
-/// `ConfigMap` volume (unconditional). For `PersistentClaim` the `data`
-/// volume entry is omitted: the `StatefulSet` controller mounts the
-/// PVC into the pod under the same name as the template automatically,
-/// so an explicit pod-volume entry would conflict.
+/// `ConfigMap` volume (unconditional). For `PersistentClaim` / `Jbod` the
+/// `data` (and `data-{id}`) volume entries are omitted: the `StatefulSet`
+/// controller mounts each PVC into the pod under the template name
+/// automatically, so an explicit pod-volume entry would conflict.
 fn render_storage(
     storage: Option<&Storage>,
     pod_labels: &BTreeMap<String, String>,
     parent_name: &str,
-) -> (serde_json::Value, Option<serde_json::Value>) {
+) -> (serde_json::Value, Vec<serde_json::Value>) {
     let broker_config_vol = json!({
         "name": "broker-config",
         "configMap": { "name": format!("{parent_name}-broker-config") }
@@ -308,24 +424,10 @@ fn render_storage(
                 broker_tls_vol,
                 clients_ca_cert_vol,
             ]);
-            (volumes, None)
+            (volumes, Vec::new())
         }
         Some(Storage::PersistentClaim(pc)) => {
-            let mut template = json!({
-                "metadata": {
-                    "name": "data",
-                    "labels": pod_labels,
-                },
-                "spec": {
-                    "accessModes": ["ReadWriteOnce"],
-                    "resources": {
-                        "requests": { "storage": pc.size }
-                    }
-                }
-            });
-            if let Some(class) = pc.class.as_ref() {
-                template["spec"]["storageClassName"] = serde_json::Value::String(class.clone());
-            }
+            let template = pvc_template("data", &pc.size, pc.class.as_deref(), pod_labels);
             (
                 json!([
                     broker_config_vol,
@@ -334,7 +436,30 @@ fn render_storage(
                     broker_tls_vol,
                     clients_ca_cert_vol,
                 ]),
-                Some(template),
+                vec![template],
+            )
+        }
+        Some(Storage::Jbod(_)) => {
+            // One PVC template per disk: the lowest-id disk is `data`
+            // (primary / metadata), the rest are `data-{id}`.
+            let volumes = jbod_volumes_sorted(storage);
+            let templates = volumes
+                .iter()
+                .enumerate()
+                .map(|(i, v)| {
+                    let (name, _) = jbod_mount(v.id, i == 0);
+                    pvc_template(&name, &v.size, v.class.as_deref(), pod_labels)
+                })
+                .collect();
+            (
+                json!([
+                    broker_config_vol,
+                    runtime_vol,
+                    cluster_ca_cert_vol,
+                    broker_tls_vol,
+                    clients_ca_cert_vol,
+                ]),
+                templates,
             )
         }
     }
@@ -344,13 +469,17 @@ fn render_storage(
 /// block when storage is `PersistentClaim`. Returns `None` for
 /// `Ephemeral` (no PVCs to retain).
 fn render_pvc_retention_policy(storage: Option<&Storage>) -> Option<serde_json::Value> {
-    match storage {
-        Some(Storage::PersistentClaim(pc)) => Some(json!({
-            "whenDeleted": if pc.delete_claim { "Delete" } else { "Retain" },
-            "whenScaled": "Retain",
-        })),
-        _ => None,
-    }
+    // A StatefulSet's retention policy applies set-wide to every
+    // volumeClaimTemplate, so JBOD's single `delete_claim` covers all disks.
+    let delete_claim = match storage {
+        Some(Storage::PersistentClaim(pc)) => pc.delete_claim,
+        Some(Storage::Jbod(j)) => j.delete_claim,
+        _ => return None,
+    };
+    Some(json!({
+        "whenDeleted": if delete_claim { "Delete" } else { "Retain" },
+        "whenScaled": "Retain",
+    }))
 }
 
 /// Overwrite `pod_spec`'s `volumes` field with the rendered
@@ -404,6 +533,7 @@ pub(crate) fn render_statefulset(
     let metrics_enabled = parent.spec.metrics_config.is_some();
     let logging_enabled = parent.spec.logging.is_some();
     let cm_name = format!("{parent_name}-broker-config");
+    let jbod_extra = jbod_extra_mounts(pool.spec.storage.as_ref());
     let main = render_broker_container(
         broker_image,
         &secret_name,
@@ -411,6 +541,7 @@ pub(crate) fn render_statefulset(
         &resources,
         metrics_enabled,
         logging_enabled,
+        &jbod_extra,
     );
 
     // Merge user-provided pod metadata under operator-owned labels.
@@ -489,8 +620,8 @@ pub(crate) fn render_statefulset(
             "spec": pod_spec_with_data_volume(pod_spec, pod_volumes),
         }
     });
-    if let Some(vct) = volume_claim_templates {
-        sts_spec["volumeClaimTemplates"] = json!([vct]);
+    if !volume_claim_templates.is_empty() {
+        sts_spec["volumeClaimTemplates"] = serde_json::Value::Array(volume_claim_templates);
     }
     if let Some(policy) = retention_policy {
         sts_spec["persistentVolumeClaimRetentionPolicy"] = policy;
@@ -523,35 +654,32 @@ fn default_resources() -> ResourceRequirements {
 }
 
 /// Monotonic validation of `spec.storage` against the live
-/// `StatefulSet`'s observed `volumeClaimTemplates`. Returns `Ok(())`
-/// when no live `StatefulSet` exists (first reconcile — any spec is
-/// acceptable) or when desired and observed agree on the immutable
-/// fields.
+/// `StatefulSet`'s observed `volumeClaimTemplates`. `observed` is
+/// `None` when no live `StatefulSet` exists yet (first reconcile — any
+/// spec is acceptable) and `Some(templates)` (possibly empty, for an
+/// `Ephemeral` pool) otherwise.
 ///
-/// Rejections (all map to `Ready=False, reason=StorageImmutable`):
-/// - `Ephemeral ↔ PersistentClaim` switch.
-/// - `class` change.
-/// - `size` decrease.
+/// The observed storage *kind* is derived from the template count:
+/// `0 → Ephemeral`, `1 → PersistentClaim`, `>= 2 → Jbod` (JBOD always
+/// has >= 2 disks — see [`validate`]). Rejections (all map to
+/// `Ready=False, reason=StorageImmutable`):
+/// - storage-type switch (`Ephemeral` / `PersistentClaim` / `Jbod`).
+/// - `class` change on any matched disk.
+/// - `size` decrease on any matched disk.
+/// - JBOD disk-set change (adding/removing disks, deferred).
 ///
-/// `delete_claim` is *not* checked: the spec (§ 4) intentionally
-/// classifies it as mutable, and the PVC template doesn't reflect it
-/// (the retention policy lives on the `StatefulSet` spec). The
-/// reconstructed observed `Storage` therefore hardcodes
-/// `delete_claim: false` and this comparison never inspects that
-/// field, so a flip from `false → true` (or vice versa) passes
-/// through to the SSA-apply path.
+/// `delete_claim` is *not* checked: it only affects the `StatefulSet`'s
+/// retention-policy field (mutable), not the PVC templates this compares.
 fn validate_storage_change(
     desired: Option<&Storage>,
-    observed_template: Option<&PersistentVolumeClaim>,
+    observed: Option<&[PersistentVolumeClaim]>,
 ) -> Result<(), PoolValidationError> {
-    let observed = observed_template.map(observed_storage_from_pvc_template);
-    let desired_kind = storage_kind(desired);
-    let observed_kind = observed.as_ref().map(|s| storage_kind(Some(s)));
-
-    let Some(observed_kind) = observed_kind else {
+    let Some(observed) = observed else {
         return Ok(());
     };
 
+    let desired_kind = storage_kind(desired);
+    let observed_kind = observed_storage_kind(observed);
     if desired_kind != observed_kind {
         return Err(PoolValidationError::StorageTypeChanged {
             from: observed_kind,
@@ -559,39 +687,39 @@ fn validate_storage_change(
         });
     }
 
-    let (Some(Storage::PersistentClaim(desired_pc)), Some(Storage::PersistentClaim(observed_pc))) =
-        (desired, observed.as_ref())
-    else {
-        return Ok(());
-    };
-
-    if desired_pc.class != observed_pc.class {
-        return Err(PoolValidationError::StorageClassChanged {
-            from: observed_pc.class.clone(),
-            to: desired_pc.class.clone(),
-        });
+    match desired {
+        Some(Storage::PersistentClaim(desired_pc)) => {
+            // observed is exactly one `data` template (kind matched above).
+            let (observed_size, observed_class) = size_class_from_pvc(&observed[0]);
+            check_class_and_shrink(
+                &desired_pc.size,
+                desired_pc.class.as_deref(),
+                &observed_size,
+                observed_class.as_deref(),
+            )
+        }
+        Some(Storage::Jbod(desired_jbod)) => validate_jbod_change(desired_jbod, observed),
+        // Ephemeral / absent: nothing else to compare.
+        None | Some(Storage::Ephemeral) => Ok(()),
     }
-
-    let observed_bytes = common::parse_quantity(&observed_pc.size).unwrap_or(0);
-    let desired_bytes = common::parse_quantity(&desired_pc.size).unwrap_or(0);
-    if desired_bytes < observed_bytes {
-        return Err(PoolValidationError::StorageShrinkNotAllowed {
-            current: observed_pc.size.clone(),
-            desired: desired_pc.size.clone(),
-        });
-    }
-
-    Ok(())
 }
 
-/// Reconstruct a `Storage` value from the live `StatefulSet`'s `data`
-/// `volumeClaimTemplate`. `delete_claim` is set to `false` because the
-/// retention policy is not reflected in the PVC template; the
-/// monotonic validator never inspects this field (see
-/// [`validate_storage_change`]).
-fn observed_storage_from_pvc_template(pvc: &PersistentVolumeClaim) -> Storage {
+/// Derive the observed storage kind from the live `StatefulSet`'s
+/// `volumeClaimTemplates` count. JBOD is required to have >= 2 disks
+/// (see [`validate`]), so the count is an unambiguous discriminator.
+fn observed_storage_kind(templates: &[PersistentVolumeClaim]) -> &'static str {
+    match templates.len() {
+        0 => "Ephemeral",
+        1 => "PersistentClaim",
+        _ => "Jbod",
+    }
+}
+
+/// Extract `(size, class)` from a `volumeClaimTemplate`. A missing spec /
+/// request yields an empty size (compares as 0 bytes).
+fn size_class_from_pvc(pvc: &PersistentVolumeClaim) -> (String, Option<String>) {
     let Some(spec) = pvc.spec.as_ref() else {
-        return Storage::Ephemeral;
+        return (String::new(), None);
     };
     let size = spec
         .resources
@@ -600,18 +728,92 @@ fn observed_storage_from_pvc_template(pvc: &PersistentVolumeClaim) -> Storage {
         .and_then(|m| m.get("storage"))
         .map(|q| q.0.clone())
         .unwrap_or_default();
-    let class = spec.storage_class_name.clone();
-    Storage::PersistentClaim(PersistentClaimSpec {
-        size,
-        class,
-        delete_claim: false,
-    })
+    (size, spec.storage_class_name.clone())
+}
+
+/// Reject a `class` change or `size` decrease on one matched disk.
+fn check_class_and_shrink(
+    desired_size: &str,
+    desired_class: Option<&str>,
+    observed_size: &str,
+    observed_class: Option<&str>,
+) -> Result<(), PoolValidationError> {
+    if desired_class != observed_class {
+        return Err(PoolValidationError::StorageClassChanged {
+            from: observed_class.map(String::from),
+            to: desired_class.map(String::from),
+        });
+    }
+    let observed_bytes = common::parse_quantity(observed_size).unwrap_or(0);
+    let desired_bytes = common::parse_quantity(desired_size).unwrap_or(0);
+    if desired_bytes < observed_bytes {
+        return Err(PoolValidationError::StorageShrinkNotAllowed {
+            current: observed_size.to_string(),
+            desired: desired_size.to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// JBOD-vs-JBOD monotonic check. Disks are matched by identity: the
+/// `data` template ↔ the desired primary (lowest id), and each
+/// `data-{N}` template ↔ desired disk id `N`. The non-primary id set
+/// must be identical (adding/removing disks — and reassigning the
+/// primary — is deferred), and each matched disk's `class`/`size` obey
+/// [`check_class_and_shrink`].
+fn validate_jbod_change(
+    desired: &crate::crd::JbodSpec,
+    observed: &[PersistentVolumeClaim],
+) -> Result<(), PoolValidationError> {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let mut observed_primary: Option<(String, Option<String>)> = None;
+    let mut observed_extra: BTreeMap<i32, (String, Option<String>)> = BTreeMap::new();
+    for t in observed {
+        let name = t.metadata.name.as_deref().unwrap_or_default();
+        if name == "data" {
+            observed_primary = Some(size_class_from_pvc(t));
+        } else if let Some(n) = name
+            .strip_prefix("data-")
+            .and_then(|s| s.parse::<i32>().ok())
+        {
+            observed_extra.insert(n, size_class_from_pvc(t));
+        }
+    }
+
+    let mut volumes = desired.volumes.clone();
+    volumes.sort_by_key(|v| v.id);
+    let Some((primary, extras)) = volumes.split_first() else {
+        return Ok(()); // empty desired is caught by static validation
+    };
+
+    let desired_extra_ids: BTreeSet<i32> = extras.iter().map(|v| v.id).collect();
+    let observed_extra_ids: BTreeSet<i32> = observed_extra.keys().copied().collect();
+    if desired_extra_ids != observed_extra_ids {
+        return Err(PoolValidationError::JbodVolumesImmutable);
+    }
+
+    if let Some((obs_size, obs_class)) = observed_primary.as_ref() {
+        check_class_and_shrink(
+            &primary.size,
+            primary.class.as_deref(),
+            obs_size,
+            obs_class.as_deref(),
+        )?;
+    }
+    for v in extras {
+        if let Some((obs_size, obs_class)) = observed_extra.get(&v.id) {
+            check_class_and_shrink(&v.size, v.class.as_deref(), obs_size, obs_class.as_deref())?;
+        }
+    }
+    Ok(())
 }
 
 fn storage_kind(s: Option<&Storage>) -> &'static str {
     match s {
         None | Some(Storage::Ephemeral) => "Ephemeral",
         Some(Storage::PersistentClaim(_)) => "PersistentClaim",
+        Some(Storage::Jbod(_)) => "Jbod",
     }
 }
 
@@ -651,6 +853,21 @@ fn condition_for_validation_error(err: &PoolValidationError) -> KafkaCondition {
         PoolValidationError::StorageShrinkNotAllowed { current, desired } => (
             "StorageImmutable",
             format!("spec.storage.size {current} -> {desired} (shrink rejected)"),
+        ),
+        PoolValidationError::JbodNeedsTwoVolumes(n) => (
+            "JbodNeedsTwoVolumes",
+            format!(
+                "spec.storage.volumes has {n} disk(s); Jbod needs >= 2 (use PersistentClaim for one)"
+            ),
+        ),
+        PoolValidationError::JbodDuplicateVolumeId(id) => (
+            "JbodDuplicateVolumeId",
+            format!("spec.storage.volumes has a duplicate id {id}"),
+        ),
+        PoolValidationError::JbodVolumesImmutable => (
+            "StorageImmutable",
+            "spec.storage.volumes set changed: adding/removing JBOD disks is not yet supported"
+                .to_string(),
         ),
     };
     condition("Ready", "False", reason, &message)
@@ -747,17 +964,22 @@ pub async fn reconcile(
     let sts_api: Api<StatefulSet> = Api::namespaced(ctx.client.clone(), &ns);
     let sts_name = format!("{kafka_name}-{name}");
     let observed_sts = sts_api.get_opt(&sts_name).await?;
-    let observed_pvc_template = observed_sts
-        .as_ref()
-        .and_then(|s| s.spec.as_ref())
-        .and_then(|spec| spec.volume_claim_templates.as_ref())
-        .and_then(|templates| {
-            templates
-                .iter()
-                .find(|t| t.metadata.name.as_deref() == Some("data"))
+    // `None` = no live StatefulSet (first reconcile). `Some(templates)`
+    // (possibly empty, for an Ephemeral pool) = the live STS's PVC
+    // templates, which `validate_storage_change` reads to derive the
+    // observed storage kind + per-disk size/class.
+    let observed_pvc_templates: Option<Vec<PersistentVolumeClaim>> =
+        observed_sts.as_ref().map(|s| {
+            s.spec
+                .as_ref()
+                .and_then(|spec| spec.volume_claim_templates.clone())
+                .unwrap_or_default()
         });
 
-    if let Err(e) = validate_storage_change(pool.spec.storage.as_ref(), observed_pvc_template) {
+    if let Err(e) = validate_storage_change(
+        pool.spec.storage.as_ref(),
+        observed_pvc_templates.as_deref(),
+    ) {
         let cond = condition_for_validation_error(&e);
         patch_status_for_pool(&pool_api, &name, cond).await?;
         return Ok(Action::await_change());
@@ -1339,7 +1561,11 @@ mod tests {
     #[test]
     fn validate_storage_change_rejects_type_switch() {
         let observed = pvc_template("10Gi", None);
-        let err = validate_storage_change(Some(&Storage::Ephemeral), Some(&observed)).unwrap_err();
+        let err = validate_storage_change(
+            Some(&Storage::Ephemeral),
+            Some(std::slice::from_ref(&observed)),
+        )
+        .unwrap_err();
         assert!(matches!(
             err,
             PoolValidationError::StorageTypeChanged { .. }
@@ -1349,8 +1575,11 @@ mod tests {
     #[test]
     fn validate_storage_change_rejects_class_change() {
         let observed = pvc_template("10Gi", Some("class-a"));
-        let err = validate_storage_change(Some(&pc("10Gi", Some("class-b"))), Some(&observed))
-            .unwrap_err();
+        let err = validate_storage_change(
+            Some(&pc("10Gi", Some("class-b"))),
+            Some(std::slice::from_ref(&observed)),
+        )
+        .unwrap_err();
         assert!(matches!(
             err,
             PoolValidationError::StorageClassChanged { .. }
@@ -1360,7 +1589,11 @@ mod tests {
     #[test]
     fn validate_storage_change_rejects_shrink() {
         let observed = pvc_template("10Gi", None);
-        let err = validate_storage_change(Some(&pc("5Gi", None)), Some(&observed)).unwrap_err();
+        let err = validate_storage_change(
+            Some(&pc("5Gi", None)),
+            Some(std::slice::from_ref(&observed)),
+        )
+        .unwrap_err();
         assert!(matches!(
             err,
             PoolValidationError::StorageShrinkNotAllowed { .. }
@@ -1370,7 +1603,13 @@ mod tests {
     #[test]
     fn validate_storage_change_allows_grow() {
         let observed = pvc_template("10Gi", None);
-        assert!(validate_storage_change(Some(&pc("20Gi", None)), Some(&observed)).is_ok());
+        assert!(
+            validate_storage_change(
+                Some(&pc("20Gi", None)),
+                Some(std::slice::from_ref(&observed))
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -1380,7 +1619,9 @@ mod tests {
         if let Storage::PersistentClaim(ref mut p) = desired {
             p.delete_claim = true;
         }
-        assert!(validate_storage_change(Some(&desired), Some(&observed)).is_ok());
+        assert!(
+            validate_storage_change(Some(&desired), Some(std::slice::from_ref(&observed))).is_ok()
+        );
     }
 
     #[test]
@@ -1389,6 +1630,295 @@ mod tests {
         pool.spec.storage = Some(pc("banana", None));
         let err = validate(&pool).unwrap_err();
         assert!(matches!(err, PoolValidationError::StorageSizeInvalid(_, _)));
+    }
+
+    // --- Slice 46: JBOD ---------------------------------------------------
+
+    fn pvc_template_named(name: &str, size: &str, class: Option<&str>) -> PersistentVolumeClaim {
+        let mut t = pvc_template(size, class);
+        t.metadata.name = Some(name.into());
+        t
+    }
+
+    fn jbod(volumes: &[(i32, &str, Option<&str>)], delete_claim: bool) -> Storage {
+        Storage::Jbod(crate::crd::JbodSpec {
+            volumes: volumes
+                .iter()
+                .map(|(id, size, class)| JbodVolume {
+                    id: *id,
+                    size: (*size).into(),
+                    class: class.map(String::from),
+                })
+                .collect(),
+            delete_claim,
+        })
+    }
+
+    fn jbod_pool(volumes: &[(i32, &str, Option<&str>)], delete_claim: bool) -> KafkaNodePool {
+        let mut pool = pool_fixture("brokers", "demo", 1);
+        pool.spec.storage = Some(jbod(volumes, delete_claim));
+        pool
+    }
+
+    #[test]
+    fn validate_rejects_jbod_single_volume() {
+        let pool = jbod_pool(&[(0, "1Gi", None)], false);
+        let err = validate(&pool).unwrap_err();
+        assert!(matches!(err, PoolValidationError::JbodNeedsTwoVolumes(1)));
+    }
+
+    #[test]
+    fn validate_rejects_jbod_duplicate_ids() {
+        let pool = jbod_pool(&[(0, "1Gi", None), (0, "2Gi", None)], false);
+        let err = validate(&pool).unwrap_err();
+        assert!(matches!(err, PoolValidationError::JbodDuplicateVolumeId(0)));
+    }
+
+    #[test]
+    fn validate_rejects_jbod_bad_size() {
+        let pool = jbod_pool(&[(0, "1Gi", None), (1, "banana", None)], false);
+        let err = validate(&pool).unwrap_err();
+        assert!(matches!(err, PoolValidationError::StorageSizeInvalid(_, _)));
+    }
+
+    #[test]
+    fn validate_accepts_valid_jbod() {
+        let pool = jbod_pool(&[(0, "1Gi", None), (1, "2Gi", Some("fast"))], true);
+        assert!(validate(&pool).is_ok());
+    }
+
+    #[test]
+    fn render_statefulset_jbod_renders_one_pvc_per_volume() {
+        let pool = jbod_pool(&[(0, "10Gi", None), (1, "20Gi", Some("fast-ssd"))], false);
+        let sts = render_statefulset(&parent_fixture("demo"), &pool, "img:1").unwrap();
+        let vct = sts.spec.unwrap().volume_claim_templates.unwrap();
+        assert_eq!(vct.len(), 2);
+        // Primary (lowest id) keeps the slice-24 `data` name.
+        assert_eq!(vct[0].metadata.name.as_deref(), Some("data"));
+        assert_eq!(vct[1].metadata.name.as_deref(), Some("data-1"));
+        let req0 = vct[0]
+            .spec
+            .as_ref()
+            .unwrap()
+            .resources
+            .as_ref()
+            .unwrap()
+            .requests
+            .as_ref()
+            .unwrap();
+        assert_eq!(req0.get("storage").map(|q| q.0.as_str()), Some("10Gi"));
+        let req1 = vct[1]
+            .spec
+            .as_ref()
+            .unwrap()
+            .resources
+            .as_ref()
+            .unwrap()
+            .requests
+            .as_ref()
+            .unwrap();
+        assert_eq!(req1.get("storage").map(|q| q.0.as_str()), Some("20Gi"));
+        assert_eq!(
+            vct[0].spec.as_ref().unwrap().storage_class_name.as_deref(),
+            None
+        );
+        assert_eq!(
+            vct[1].spec.as_ref().unwrap().storage_class_name.as_deref(),
+            Some("fast-ssd")
+        );
+    }
+
+    #[test]
+    fn render_statefulset_jbod_sorts_volumes_by_id() {
+        // Disks listed out of order must render deterministically (sorted).
+        let pool = jbod_pool(
+            &[(2, "1Gi", None), (0, "1Gi", None), (1, "1Gi", None)],
+            false,
+        );
+        let sts = render_statefulset(&parent_fixture("demo"), &pool, "img:1").unwrap();
+        let vct = sts.spec.unwrap().volume_claim_templates.unwrap();
+        let names: Vec<&str> = vct
+            .iter()
+            .map(|t| t.metadata.name.as_deref().unwrap())
+            .collect();
+        assert_eq!(names, vec!["data", "data-1", "data-2"]);
+    }
+
+    #[test]
+    fn render_statefulset_jbod_sets_extra_log_dirs_env() {
+        let pool = jbod_pool(
+            &[(0, "1Gi", None), (1, "1Gi", None), (2, "1Gi", None)],
+            false,
+        );
+        let sts = render_statefulset(&parent_fixture("demo"), &pool, "img:1").unwrap();
+        let env = sts.spec.unwrap().template.spec.unwrap().containers[0]
+            .env
+            .clone()
+            .unwrap();
+        let extra = env
+            .iter()
+            .find(|e| e.name == "CRABKA_EXTRA_LOG_DIRS")
+            .expect("CRABKA_EXTRA_LOG_DIRS env present for JBOD");
+        // Primary (`/var/lib/crabka/data`) excluded; extras sorted by id.
+        assert_eq!(
+            extra.value.as_deref(),
+            Some("/var/lib/crabka/data-1,/var/lib/crabka/data-2")
+        );
+    }
+
+    #[test]
+    fn render_statefulset_jbod_mounts_extra_volumes() {
+        let pool = jbod_pool(&[(0, "1Gi", None), (1, "1Gi", None)], false);
+        let sts = render_statefulset(&parent_fixture("demo"), &pool, "img:1").unwrap();
+        let mounts = sts.spec.unwrap().template.spec.unwrap().containers[0]
+            .volume_mounts
+            .clone()
+            .unwrap();
+        let by_name: Vec<(&str, &str)> = mounts
+            .iter()
+            .map(|m| (m.name.as_str(), m.mount_path.as_str()))
+            .collect();
+        assert!(
+            by_name.contains(&("data", "/var/lib/crabka/data")),
+            "primary data mount; got {by_name:?}"
+        );
+        assert!(
+            by_name.contains(&("data-1", "/var/lib/crabka/data-1")),
+            "extra disk mount; got {by_name:?}"
+        );
+    }
+
+    #[test]
+    fn render_statefulset_jbod_no_extra_log_dirs_env_for_non_jbod() {
+        // Regression: PersistentClaim / Ephemeral pools must NOT gain the
+        // env (keeps their pod template byte-identical pre/post slice 46).
+        let mut pool = pool_fixture("brokers", "demo", 1);
+        pool.spec.storage = Some(pc("1Gi", None));
+        let sts = render_statefulset(&parent_fixture("demo"), &pool, "img:1").unwrap();
+        let env = sts.spec.unwrap().template.spec.unwrap().containers[0]
+            .env
+            .clone()
+            .unwrap();
+        assert!(env.iter().all(|e| e.name != "CRABKA_EXTRA_LOG_DIRS"));
+    }
+
+    #[test]
+    fn render_statefulset_jbod_retention_policy_delete_when_delete_claim_true() {
+        let pool = jbod_pool(&[(0, "1Gi", None), (1, "1Gi", None)], true);
+        let sts = render_statefulset(&parent_fixture("demo"), &pool, "img:1").unwrap();
+        let policy = sts
+            .spec
+            .unwrap()
+            .persistent_volume_claim_retention_policy
+            .unwrap();
+        assert_eq!(policy.when_deleted.as_deref(), Some("Delete"));
+        assert_eq!(policy.when_scaled.as_deref(), Some("Retain"));
+    }
+
+    #[test]
+    fn render_statefulset_jbod_pvc_labels_inherit_pod_labels() {
+        let pool = jbod_pool(&[(0, "1Gi", None), (1, "1Gi", None)], false);
+        let sts = render_statefulset(&parent_fixture("demo"), &pool, "img:1").unwrap();
+        let vct = sts.spec.unwrap().volume_claim_templates.unwrap();
+        for t in &vct {
+            let labels = t.metadata.labels.clone().expect("PVC labels");
+            assert_eq!(
+                labels.get("app.kubernetes.io/instance").map(String::as_str),
+                Some("demo"),
+                "every JBOD PVC inherits the GC instance label"
+            );
+        }
+    }
+
+    /// Build observed JBOD templates (`data` + `data-{id}`) for the
+    /// monotonic-change tests.
+    fn jbod_observed(volumes: &[(&str, &str, Option<&str>)]) -> Vec<PersistentVolumeClaim> {
+        volumes
+            .iter()
+            .map(|(name, size, class)| pvc_template_named(name, size, *class))
+            .collect()
+    }
+
+    #[test]
+    fn validate_storage_change_rejects_switch_into_jbod() {
+        // observed = single PersistentClaim template; desired = JBOD.
+        let observed = jbod_observed(&[("data", "10Gi", None)]);
+        let desired = jbod(&[(0, "10Gi", None), (1, "10Gi", None)], false);
+        let err = validate_storage_change(Some(&desired), Some(&observed)).unwrap_err();
+        assert!(matches!(
+            err,
+            PoolValidationError::StorageTypeChanged { .. }
+        ));
+    }
+
+    #[test]
+    fn validate_storage_change_rejects_switch_out_of_jbod() {
+        // observed = JBOD (2 templates); desired = PersistentClaim.
+        let observed = jbod_observed(&[("data", "10Gi", None), ("data-1", "10Gi", None)]);
+        let err = validate_storage_change(Some(&pc("10Gi", None)), Some(&observed)).unwrap_err();
+        assert!(matches!(
+            err,
+            PoolValidationError::StorageTypeChanged { .. }
+        ));
+    }
+
+    #[test]
+    fn validate_storage_change_jbod_allows_grow() {
+        let observed = jbod_observed(&[("data", "10Gi", None), ("data-1", "10Gi", None)]);
+        let desired = jbod(&[(0, "20Gi", None), (1, "30Gi", None)], false);
+        assert!(validate_storage_change(Some(&desired), Some(&observed)).is_ok());
+    }
+
+    #[test]
+    fn validate_storage_change_jbod_rejects_shrink() {
+        let observed = jbod_observed(&[("data", "10Gi", None), ("data-1", "10Gi", None)]);
+        let desired = jbod(&[(0, "10Gi", None), (1, "5Gi", None)], false);
+        let err = validate_storage_change(Some(&desired), Some(&observed)).unwrap_err();
+        assert!(matches!(
+            err,
+            PoolValidationError::StorageShrinkNotAllowed { .. }
+        ));
+    }
+
+    #[test]
+    fn validate_storage_change_jbod_rejects_class_change() {
+        let observed = jbod_observed(&[("data", "10Gi", None), ("data-1", "10Gi", Some("a"))]);
+        let desired = jbod(&[(0, "10Gi", None), (1, "10Gi", Some("b"))], false);
+        let err = validate_storage_change(Some(&desired), Some(&observed)).unwrap_err();
+        assert!(matches!(
+            err,
+            PoolValidationError::StorageClassChanged { .. }
+        ));
+    }
+
+    #[test]
+    fn validate_storage_change_jbod_rejects_adding_disk() {
+        let observed = jbod_observed(&[("data", "10Gi", None), ("data-1", "10Gi", None)]);
+        let desired = jbod(
+            &[(0, "10Gi", None), (1, "10Gi", None), (2, "10Gi", None)],
+            false,
+        );
+        let err = validate_storage_change(Some(&desired), Some(&observed)).unwrap_err();
+        assert!(matches!(err, PoolValidationError::JbodVolumesImmutable));
+    }
+
+    #[test]
+    fn validate_storage_change_jbod_rejects_removing_disk() {
+        let observed = jbod_observed(&[
+            ("data", "10Gi", None),
+            ("data-1", "10Gi", None),
+            ("data-2", "10Gi", None),
+        ]);
+        let desired = jbod(&[(0, "10Gi", None), (1, "10Gi", None)], false);
+        let err = validate_storage_change(Some(&desired), Some(&observed)).unwrap_err();
+        assert!(matches!(err, PoolValidationError::JbodVolumesImmutable));
+    }
+
+    #[test]
+    fn validate_storage_change_jbod_unchanged_is_ok() {
+        let observed = jbod_observed(&[("data", "10Gi", None), ("data-1", "20Gi", Some("fast"))]);
+        let desired = jbod(&[(0, "10Gi", None), (1, "20Gi", Some("fast"))], false);
+        assert!(validate_storage_change(Some(&desired), Some(&observed)).is_ok());
     }
 
     #[test]

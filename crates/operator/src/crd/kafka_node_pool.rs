@@ -61,32 +61,35 @@ pub enum NodeRole {
     Broker,
 }
 
-/// Storage configuration for the pool's pods. Slice 24 supports two
-/// variants:
+/// Storage configuration for the pool's pods. Three variants:
 /// - `Ephemeral` (or field absent) — `emptyDir` volume, no PVC. Matches
 ///   slice 19/20 behavior; suitable for dev clusters.
 /// - `PersistentClaim` — single PVC per pod via the `StatefulSet`'s
 ///   `volumeClaimTemplates`. Production-shaped.
+/// - `Jbod` (slice 46) — multiple PVCs per pod, one per JBOD disk. The
+///   broker spreads partition data across every disk (slice 45). The
+///   lowest-`id` volume is the primary metadata disk.
 ///
-/// The wire shape is flat (Strimzi-compatible): `type` is the
-/// discriminator and `PersistentClaim`'s fields (`size`, `class`,
-/// `deleteClaim`) are siblings of `type`. The custom `schema_with`
-/// hand-rolls a structural schema because kube-rs 3.x's
-/// `StructuralSchemaRewriter` panics when `oneOf` branches share a
-/// `type` property with differing enum values (the default schemars
-/// output for tagged-union enums).
+/// The wire shape is flat (Strimzi-shaped): `type` is the discriminator
+/// and each variant's fields (`PersistentClaim`: `size`, `class`,
+/// `deleteClaim`; `Jbod`: `volumes`, `deleteClaim`) are siblings of
+/// `type`. The custom `schema_with` hand-rolls a structural schema
+/// because kube-rs 3.x's `StructuralSchemaRewriter` panics when `oneOf`
+/// branches share a `type` property with differing enum values (the
+/// default schemars output for tagged-union enums).
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(tag = "type")]
 #[schemars(schema_with = "storage_schema")]
 pub enum Storage {
     Ephemeral,
     PersistentClaim(PersistentClaimSpec),
+    Jbod(JbodSpec),
 }
 
 /// Hand-rolled structural schema for `Storage`. See the doc comment on
 /// [`Storage`] for why this is necessary. The schema validates only
-/// the discriminator (`type ∈ {Ephemeral, PersistentClaim}`) and the
-/// `PersistentClaim` field types; cross-variant constraints (e.g.
+/// the discriminator (`type ∈ {Ephemeral, PersistentClaim, Jbod}`) and
+/// the per-variant field types; cross-variant constraints (e.g.
 /// "`size` must be present when `type=PersistentClaim`") are enforced
 /// by the operator at reconcile time, not by the apiserver.
 fn storage_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
@@ -96,11 +99,23 @@ fn storage_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
         "properties": {
             "type": {
                 "type": "string",
-                "enum": ["Ephemeral", "PersistentClaim"],
+                "enum": ["Ephemeral", "PersistentClaim", "Jbod"],
             },
             "size": { "type": "string" },
             "class": { "type": "string" },
             "deleteClaim": { "type": "boolean" },
+            "volumes": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["id", "size"],
+                    "properties": {
+                        "id": { "type": "integer", "format": "int32" },
+                        "size": { "type": "string" },
+                        "class": { "type": "string" },
+                    },
+                },
+            },
         },
     })
 }
@@ -120,6 +135,42 @@ pub struct PersistentClaimSpec {
     /// Default `false` (Retain) is the safe option.
     #[serde(default)]
     pub delete_claim: bool,
+}
+
+/// `Jbod` configuration (slice 46): a set of persistent disks, one PVC
+/// per disk. The broker spreads partition data across all of them (slice
+/// 45 JBOD / KIP-113). The lowest-`id` volume is the primary metadata
+/// disk and keeps the slice-24 PVC name `data` / mount
+/// `/var/lib/crabka/data`; every other volume `id = N` is mounted at
+/// `/var/lib/crabka/data-{N}` (PVC `data-{N}`) and handed to the broker
+/// via `CRABKA_EXTRA_LOG_DIRS`.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct JbodSpec {
+    /// One persistent volume per JBOD disk. Must be non-empty with unique
+    /// ids (validated at reconcile time).
+    pub volumes: Vec<JbodVolume>,
+    /// `true` → `persistentVolumeClaimRetentionPolicy.whenDeleted: Delete`
+    /// for *every* JBOD PVC. A `StatefulSet`'s retention policy is
+    /// set-wide — K8s offers no per-`volumeClaimTemplate` retention — so
+    /// this single flag covers all disks. Default `false` (Retain).
+    #[serde(default)]
+    pub delete_claim: bool,
+}
+
+/// One JBOD disk. `id` is a stable per-disk identifier; the lowest id is
+/// the primary metadata disk.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct JbodVolume {
+    /// Stable disk id (>= 0). Drives the PVC name / mount path for
+    /// non-primary disks (`data-{id}` / `/var/lib/crabka/data-{id}`).
+    pub id: i32,
+    /// K8s `Quantity` (e.g., `"100Gi"`). Validated at reconcile time.
+    pub size: String,
+    /// Storage class name. `None` = cluster default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
@@ -333,5 +384,65 @@ mod tests {
         let json = r#"{"roles":["Controller","Broker"],"nodeIdStart":0}"#;
         let spec: KafkaNodePoolSpec = serde_json::from_str(json).unwrap();
         assert!(spec.storage.is_none());
+    }
+
+    #[test]
+    fn storage_jbod_round_trips_through_json() {
+        let pool = KafkaNodePool::new(
+            "brokers",
+            KafkaNodePoolSpec {
+                roles: vec![NodeRole::Controller, NodeRole::Broker],
+                replicas: 1,
+                node_id_start: 0,
+                image: None,
+                resources: None,
+                template: None,
+                storage: Some(Storage::Jbod(JbodSpec {
+                    volumes: vec![
+                        JbodVolume {
+                            id: 0,
+                            size: "10Gi".into(),
+                            class: None,
+                        },
+                        JbodVolume {
+                            id: 1,
+                            size: "20Gi".into(),
+                            class: Some("fast-ssd".into()),
+                        },
+                    ],
+                    delete_claim: true,
+                })),
+            },
+        );
+        let json = serde_json::to_string(&pool).unwrap();
+        assert!(json.contains("\"type\":\"Jbod\""), "got: {json}");
+        assert!(json.contains("\"volumes\":["), "got: {json}");
+        assert!(json.contains("\"id\":0"), "got: {json}");
+        assert!(json.contains("\"size\":\"20Gi\""), "got: {json}");
+        assert!(json.contains("\"class\":\"fast-ssd\""), "got: {json}");
+        assert!(json.contains("\"deleteClaim\":true"), "got: {json}");
+        let back: KafkaNodePool = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.spec, pool.spec);
+    }
+
+    #[test]
+    fn storage_jbod_deserializes_flat_wire_shape() {
+        let json = r#"{
+            "roles":["Controller","Broker"],
+            "nodeIdStart":0,
+            "storage":{
+                "type":"Jbod",
+                "volumes":[{"id":0,"size":"1Gi"},{"id":1,"size":"1Gi"}]
+            }
+        }"#;
+        let spec: KafkaNodePoolSpec = serde_json::from_str(json).unwrap();
+        match spec.storage {
+            Some(Storage::Jbod(j)) => {
+                assert_eq!(j.volumes.len(), 2);
+                assert_eq!(j.volumes[0].id, 0);
+                assert!(!j.delete_claim, "deleteClaim defaults to false");
+            }
+            other => panic!("expected Jbod, got {other:?}"),
+        }
     }
 }
