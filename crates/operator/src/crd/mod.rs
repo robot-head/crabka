@@ -6,6 +6,7 @@ pub mod ca;
 pub mod kafka;
 pub mod kafka_node_pool;
 pub mod listener;
+pub mod logging;
 pub mod metrics;
 pub mod network_policy;
 pub mod rebalance;
@@ -19,6 +20,7 @@ pub use kafka_node_pool::{
     PersistentClaimSpec, PodTemplate, Storage,
 };
 pub use listener::*;
+pub use logging::{ConfigMapKeyRef, ExternalLoggingSource, Logging, LoggingType};
 pub use metrics::{MetricsConfig, MetricsType, PodMonitorSpec, ServiceMonitorSpec};
 pub use network_policy::{NetworkPolicyPeer, NetworkPolicySpec};
 pub use rebalance::{KafkaRebalance, KafkaRebalanceSpec, KafkaRebalanceStatus, OptimizationResult};

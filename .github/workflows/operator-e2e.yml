@@ -363,6 +363,44 @@ jobs:
           kubectl patch kafka demo -n default --type=merge \
             -p '{"spec":{"metadataVersion":null}}'
 
+      - name: Smoke — spec.logging renders RUST_LOG into broker config + pod env
+        run: |
+          set -e
+          # Inline logging composes a sorted RUST_LOG env-filter from the
+          # loggers map: root=info -> bare `info`, crabka_broker=debug ->
+          # `crabka_broker=debug`, sorted => "crabka_broker=debug,info".
+          kubectl patch kafka demo -n default --type=merge \
+            -p '{"spec":{"logging":{"type":"inline","loggers":{"root":"info","crabka_broker":"debug"}}}}'
+
+          ok=""
+          for i in $(seq 1 30); do
+            rl=$(kubectl get configmap demo-broker-config -n default \
+              -o jsonpath='{.data.rust\.log}' 2>/dev/null || true)
+            status=$(kubectl get kafka demo -n default \
+              -o jsonpath='{.status.conditions[?(@.type=="LoggingReady")].status}' 2>/dev/null || true)
+            echo "attempt $i: rust.log='$rl' LoggingReady=$status"
+            if [ "$rl" = "crabka_broker=debug,info" ] && [ "$status" = "True" ]; then
+              ok=1
+              break
+            fi
+            sleep 2
+          done
+          [ -n "$ok" ] || { echo "::error::rust.log not rendered or LoggingReady!=True"; kubectl get configmap demo-broker-config -n default -o yaml; kubectl get kafka demo -n default -o yaml; exit 1; }
+
+          # The broker pod template references rust.log via configMapKeyRef so
+          # a config-hash roll re-reads the value at restart.
+          cmref=$(kubectl get sts demo-brokers -n default \
+            -o jsonpath='{.spec.template.spec.containers[?(@.name=="broker")].env[?(@.name=="RUST_LOG")].valueFrom.configMapKeyRef.name}')
+          cmkey=$(kubectl get sts demo-brokers -n default \
+            -o jsonpath='{.spec.template.spec.containers[?(@.name=="broker")].env[?(@.name=="RUST_LOG")].valueFrom.configMapKeyRef.key}')
+          [ "$cmref" = "demo-broker-config" ] || { echo "::error::RUST_LOG env not wired to configMapKeyRef (name='$cmref')"; exit 1; }
+          [ "$cmkey" = "rust.log" ] || { echo "::error::RUST_LOG configMapKeyRef key wrong: '$cmkey'"; exit 1; }
+          echo "logging wired: RUST_LOG -> $cmref/$cmkey"
+
+          # Reset so later steps run against a clean spec (no RUST_LOG env).
+          kubectl patch kafka demo -n default --type=merge \
+            -p '{"spec":{"logging":null}}'
+
       - name: Smoke — NodePort listener exposes per-broker + bootstrap Services
         run: |
           set -e

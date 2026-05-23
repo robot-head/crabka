@@ -69,6 +69,14 @@ pub struct KafkaSpec {
     /// 37). Absent → fully-defaulted `CertificateAuthority`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clients_ca: Option<crate::crd::CertificateAuthority>,
+    /// Slice 41: broker log configuration. When `None`, brokers use their
+    /// built-in default `RUST_LOG` filter. When `Some`, the operator
+    /// composes (inline) or reads (external) a `tracing` env-filter string,
+    /// renders it into the broker `ConfigMap` (`rust.log` key), wires it
+    /// into each broker pod's `RUST_LOG` env, and rolls the cluster on
+    /// change via the slice-21 config hash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logging: Option<crate::crd::Logging>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
@@ -147,6 +155,7 @@ mod tests {
                 network_policy: None,
                 cluster_ca: None,
                 clients_ca: None,
+                logging: None,
             },
         );
         let json = serde_json::to_string(&k).unwrap();
@@ -172,6 +181,7 @@ mod tests {
                 network_policy: None,
                 cluster_ca: None,
                 clients_ca: None,
+                logging: None,
             },
         );
         let j = serde_json::to_string(&k.spec).unwrap();
@@ -280,6 +290,7 @@ mod tests {
                 network_policy: None,
                 cluster_ca: None,
                 clients_ca: None,
+                logging: None,
             },
         );
         let j = serde_json::to_string(&k.spec).unwrap();
@@ -313,6 +324,7 @@ mod tests {
                 network_policy: None,
                 cluster_ca: None,
                 clients_ca: None,
+                logging: None,
             },
         );
         let j = serde_json::to_string(&k.spec).unwrap();
@@ -324,6 +336,28 @@ mod tests {
         let json = r#"{"kafkaVersion":"0.1.1","networkPolicy":{}}"#;
         let spec: KafkaSpec = serde_json::from_str(json).unwrap();
         assert!(spec.network_policy.is_some(), "networkPolicy parsed");
+    }
+
+    #[test]
+    fn spec_omits_logging_when_none() {
+        let json = r#"{"kafkaVersion":"0.1.1"}"#;
+        let spec: KafkaSpec = serde_json::from_str(json).unwrap();
+        assert!(spec.logging.is_none());
+        let j = serde_json::to_string(&spec).unwrap();
+        assert!(!j.contains("logging"), "got: {j}");
+    }
+
+    #[test]
+    fn spec_carries_inline_logging() {
+        use crate::crd::LoggingType;
+        let json = r#"{"kafkaVersion":"0.1.1","logging":{"loggers":{"root":"info","crabka_broker":"debug"}}}"#;
+        let spec: KafkaSpec = serde_json::from_str(json).unwrap();
+        let lg = spec.logging.expect("logging present");
+        assert_eq!(lg.r#type, LoggingType::Inline);
+        assert_eq!(
+            lg.loggers.get("crabka_broker").map(String::as_str),
+            Some("debug")
+        );
     }
 
     #[test]

@@ -1617,3 +1617,61 @@ Kafka client for ApiVersions.
   [`docs/superpowers/specs/2026-05-22-crabka-operator-version-upgrades-28-design.md`],
   [`docs/superpowers/plans/2026-05-22-crabka-operator-version-upgrades-28.md`].
 
+## Slice 41 — Operator: Configurable logging (`Kafka.spec.logging`) (2026-05-23)
+
+- Continues Phase 6 (observability) after slices 39 (metrics exporter) +
+  40 (`metricsConfig`). Pure operator work — the broker already reads its
+  log filter from `RUST_LOG` via `EnvFilter::try_from_default_env()`
+  (`crates/broker/src/bin/broker.rs`), so no Crabka-core change.
+- New `Kafka.spec.logging` (Strimzi-shaped `Logging`): `type: inline`
+  carries a `loggers` map (tracing target → level) the operator composes
+  into a single `RUST_LOG` env-filter directive; `type: external`
+  references a user-managed `ConfigMap` key whose value is used verbatim.
+  `loggers` keys are **tracing targets** (Rust module paths, e.g.
+  `crabka_broker`); the key `root` (case-insensitive) sets the bare
+  global level. Levels are `trace|debug|info|warn|error|off`
+  (case-insensitive; `warning`→`warn`, `fatal`→`error`, `none`→`off`).
+- New `crd::logging` (`Logging`, `LoggingType`, `ExternalLoggingSource`,
+  `ConfigMapKeyRef`) and `controller::logging`
+  (`compose_inline_filter` — pure + deterministic, directives sorted so
+  the hash is stable; `resolve_logging` — inline composed in-process,
+  external read via one `ConfigMap` GET; `LoggingOutcome` +
+  `condition_for`).
+- Delivery: the resolved filter is rendered into the cluster broker
+  `ConfigMap` under a `rust.log` key (`common::render_configmap`), and
+  each broker pod's `RUST_LOG` env points at it via `configMapKeyRef`
+  (`optional: true` → pod stays bootable if the key is briefly absent,
+  falling back to the broker default). The env entry is gated on
+  `spec.logging.is_some()` — a logging-unset cluster keeps a
+  byte-identical pod template (no spurious roll), same approach as the
+  slice-40 metrics port/flag.
+- `combined_config_hash` gains a sixth segment (the resolved filter,
+  empty when unset) so a *value* change rolls the cluster via slice 21
+  — the broker only re-reads `RUST_LOG` at startup. The slice-24
+  empty-hash collapse is preserved (listeners + metricsConfig + CA cert +
+  metadata pin + logging all absent → `config_hash(config_part)`).
+- New `LoggingReady` condition (mirrors slice-40 `MetricsReady`):
+  `False/Disabled` when unset; `True/Available` when resolved;
+  `False/<reason>` for user errors (`InvalidLogLevel`,
+  `EmptyLoggers`, `ExternalRefMissing`, `LoggingConfigMapNotFound`,
+  `LoggingConfigMapKeyNotFound`). A user error surfaces the condition and
+  leaves the broker on its default filter; a transient API error during
+  the external GET propagates and requeues instead.
+- Tests: +20 lib unit (`crd::logging` ×4, `controller::logging` ×14,
+  `kafka_node_pool` env on/off ×2) + 4 reconcile integration tests
+  (`reconcile_kafka.rs`: inline renders `rust.log`+`LoggingReady=True`,
+  unset omits it, external reads the user ConfigMap, missing external CM
+  surfaces the condition without rendering a key). Operator lib tests
+  land at 339; full operator suite green; clippy `-D warnings` + fmt
+  clean; CRD YAML regenerated (only the `logging` field added).
+- kind-e2e: a new probe patches `demo` with inline logging, asserts the
+  composed `rust.log` is rendered + `LoggingReady=True` + the broker STS
+  pod template wires `RUST_LOG` to the `configMapKeyRef`, then resets.
+- Out of scope (deferred): per-`KafkaNodePool` logging override (logging
+  lives on the cluster spec; the pool reads `parent.spec.logging`); live
+  log-level hot-reload without a restart (broker reads `RUST_LOG` only at
+  startup — a future core control surface); log4j-name → tracing-target
+  translation; OTLP / structured-logging knobs (slice 42 territory).
+- Reference doc:
+  [`docs/superpowers/specs/2026-05-23-crabka-operator-logging-41-design.md`].
+
