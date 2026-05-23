@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU8;
+use std::sync::atomic::{AtomicU8, AtomicUsize};
 use std::time::Duration;
 
 use dashmap::DashMap;
@@ -86,6 +86,7 @@ impl Producer {
         let next_seq = Arc::new(DashMap::new());
         let partitioner = Arc::new(UniformStickyPartitioner::new());
         let flush_notify = Arc::new(Notify::new());
+        let in_flight = Arc::new(AtomicUsize::new(0));
 
         let txn_state = Arc::new(Mutex::new(TxnState::Uninitialized));
         let txn_pid_epoch = Arc::new(Mutex::new((-1i64, -1i16)));
@@ -106,6 +107,7 @@ impl Producer {
             state: state.clone(),
             wake_rx,
             flush_notify: flush_notify.clone(),
+            in_flight: in_flight.clone(),
             shutdown: shutdown.clone(),
             transactional_id: transactional_id.clone(),
             txn_state: txn_state.clone(),
@@ -132,6 +134,7 @@ impl Producer {
             state,
             wake_tx,
             flush_notify,
+            in_flight,
             sender_shutdown: shutdown,
             sender_handle: Some(sender_handle),
             transactional_id,

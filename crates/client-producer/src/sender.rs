@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use dashmap::DashMap;
@@ -62,6 +62,10 @@ pub(crate) struct SenderConfig {
     pub state: Arc<AtomicU8>,
     pub wake_rx: tokio::sync::mpsc::Receiver<()>,
     pub flush_notify: Arc<Notify>,
+    /// Shared with `Producer`; tracks batches popped from an accumulator that
+    /// are still being sent so `flush` can wait for them. See the field doc on
+    /// [`crate::producer::Producer`].
+    pub in_flight: Arc<AtomicUsize>,
     pub shutdown: CancellationToken,
     /// `transactional_id` from the producer config; `None` for non-transactional producers.
     pub transactional_id: Option<String>,
@@ -108,11 +112,23 @@ async fn drain_once(cfg: &mut SenderConfig) {
         let batch = {
             let mut a = acc.lock().await;
             a.seal_current();
-            a.ready.pop_front()
+            let b = a.ready.pop_front();
+            // Account for the batch as in-flight while still holding the
+            // accumulator lock, so a concurrent `flush` never observes a window
+            // where the batch is neither in the accumulator nor counted here.
+            if b.is_some() {
+                cfg.in_flight.fetch_add(1, Ordering::AcqRel);
+            }
+            b
         };
         let Some(batch) = batch else { continue };
         any_work = true;
         send_one(cfg, &key.0, key.1, batch).await;
+        if cfg.in_flight.fetch_sub(1, Ordering::AcqRel) == 1 {
+            // Last in-flight batch just completed; wake any `flush` waiter
+            // promptly instead of making it poll out its timeout.
+            cfg.flush_notify.notify_waiters();
+        }
     }
     if !any_work {
         cfg.flush_notify.notify_waiters();
