@@ -659,14 +659,4 @@ mod tests {
         let j = serde_json::to_string(&status).unwrap();
         assert!(j.contains("\"external\":false"), "got: {j}");
     }
-
-    #[test]
-    fn status_default_does_not_have_external_field_omitted() {
-        let status = KafkaUserStatus::default();
-        let j = serde_json::to_string(&status).unwrap();
-        assert!(
-            j.contains("external"),
-            "external field must always be emitted (no skip_serializing_if): {j}",
-        );
-    }
 }
