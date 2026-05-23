@@ -1,3 +1,7 @@
+# Slice 50 sample — OAUTHBEARER listener + tls-external KafkaUser.
+# Replace the keycloak.example URLs below with your IdP's real
+# issuer + JWKS endpoint before applying.
+---
 apiVersion: crabka.io/v1alpha1
 kind: Kafka
 metadata:
