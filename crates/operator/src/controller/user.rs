@@ -73,6 +73,7 @@ pub async fn reconcile(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Action,
     // prior value is still the truth.
     let prior_quotas_in_sync = obj.status.as_ref().is_some_and(|s| s.quotas_in_sync);
     let prior_tls = obj.status.as_ref().is_some_and(|s| s.tls);
+    let prior_external = obj.status.as_ref().is_some_and(|s| s.external);
     let prior_tls_not_after = obj
         .status
         .as_ref()
@@ -96,6 +97,7 @@ pub async fn reconcile(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Action,
                 message: "metadata.labels[\"crabka.io/cluster\"] is required",
                 scram_sha512: false,
                 tls: prior_tls,
+                external: prior_external,
                 tls_cert_not_after: prior_tls_not_after.clone(),
                 tls_principal: prior_tls_principal.clone(),
                 advance_generation: false,
@@ -118,6 +120,7 @@ pub async fn reconcile(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Action,
                 message: &msg,
                 scram_sha512: false,
                 tls: prior_tls,
+                external: prior_external,
                 tls_cert_not_after: prior_tls_not_after.clone(),
                 tls_principal: prior_tls_principal.clone(),
                 advance_generation: false,
@@ -143,6 +146,7 @@ pub async fn reconcile(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Action,
                 message: &format!("Kafka/{cluster} not Ready or no internal listener"),
                 scram_sha512: false,
                 tls: prior_tls,
+                external: prior_external,
                 tls_cert_not_after: prior_tls_not_after.clone(),
                 tls_principal: prior_tls_principal.clone(),
                 advance_generation: false,
@@ -287,6 +291,7 @@ pub async fn reconcile(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Action,
                         message: &format!("AlterUserScramCredentials: {} ({})", err.name, err.code),
                         scram_sha512: false,
                         tls: prior_tls,
+                        external: prior_external,
                         tls_cert_not_after: prior_tls_not_after.clone(),
                         tls_principal: prior_tls_principal.clone(),
                         advance_generation: false,
@@ -339,6 +344,10 @@ pub async fn reconcile(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Action,
             }
             Some(cert_status.not_after)
         }
+        // Credential-less user: the operator does not create a Secret
+        // or issue a cert. ACL + quota reconciliation below is
+        // principal-driven and Just Works for this arm.
+        Authentication::TlsExternal => None,
     };
 
     // Open admin for ACL + quota reconciliation (steps 8 + 9). Common
@@ -434,6 +443,7 @@ pub async fn reconcile(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Action,
 
     let is_scram = matches!(&obj.spec.authentication, Authentication::ScramSha512(_));
     let is_tls = matches!(&obj.spec.authentication, Authentication::Tls(_));
+    let is_external = matches!(&obj.spec.authentication, Authentication::TlsExternal);
     patch_status(
         &user_api,
         &name,
@@ -444,6 +454,7 @@ pub async fn reconcile(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Action,
             message: "user in sync",
             scram_sha512: is_scram,
             tls: is_tls && tls_not_after.is_some(),
+            external: is_external,
             tls_cert_not_after: tls_not_after.clone(),
             tls_principal: if is_tls {
                 Some(principal.clone())
@@ -463,6 +474,10 @@ pub async fn reconcile(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Action,
     let requeue = match &obj.spec.authentication {
         Authentication::ScramSha512(_) => Duration::from_mins(1),
         Authentication::Tls(_) => Duration::from_hours(6),
+        // `tls-external` users have no operator-owned credential to
+        // rotate, but ACLs + quotas can drift externally — keep the
+        // per-minute requeue to detect that.
+        Authentication::TlsExternal => Duration::from_mins(1),
     };
     Ok(Action::requeue(requeue))
 }
@@ -529,6 +544,7 @@ async fn user_broker_error(
     };
     let prior_qis = obj.status.as_ref().is_some_and(|s| s.quotas_in_sync);
     let prior_tls = obj.status.as_ref().is_some_and(|s| s.tls);
+    let prior_external = obj.status.as_ref().is_some_and(|s| s.external);
     let prior_tls_not_after = obj
         .status
         .as_ref()
@@ -544,6 +560,7 @@ async fn user_broker_error(
             message: &detail,
             scram_sha512: false,
             tls: prior_tls,
+            external: prior_external,
             tls_cert_not_after: prior_tls_not_after,
             tls_principal: prior_tls_principal,
             advance_generation: false,
@@ -568,14 +585,18 @@ pub(crate) fn entry_to_exact_filter(e: &AclEntry) -> AclEntryFilter {
     }
 }
 
-/// Kafka principal for the user. SCRAM users use bare `User:<name>`;
-/// TLS users use `User:CN=<name>` (matches the cert's Subject DN, which
-/// is what the broker's `extract_principal_from_cert` returns at
-/// runtime).
+/// Kafka principal for the user. SCRAM and `tls-external` users use
+/// bare `User:<name>`; TLS users use `User:CN=<name>` (matches the
+/// cert's Subject DN, which is what the broker's
+/// `extract_principal_from_cert` returns at runtime).
 pub(crate) fn principal_for(name: &str, auth: &Authentication) -> String {
     match auth {
         Authentication::ScramSha512(_) => format!("User:{name}"),
         Authentication::Tls(_) => user_tls::tls_principal(name),
+        // `tls-external` credentials are managed out-of-band (OIDC for
+        // OAUTHBEARER, or an external CA whose certs carry the bare
+        // metadata.name as the principal). Same shape as SCRAM.
+        Authentication::TlsExternal => format!("User:{name}"),
     }
 }
 
@@ -802,7 +823,7 @@ async fn remove_finalizer(api: &Api<KafkaUser>, name: &str) -> Result<(), Reconc
     Ok(())
 }
 
-// Four bools = "status flags" — each is an independent axis of the
+// Five bools = "status flags" — each is an independent axis of the
 // reconcile outcome. A state machine here would just rename the
 // problem; keep the flat shape.
 #[allow(clippy::struct_excessive_bools)]
@@ -813,6 +834,9 @@ struct StatusPatch<'a> {
     message: &'a str,
     scram_sha512: bool,
     tls: bool,
+    /// True iff this is a credential-less (`tls-external`) user that
+    /// has reached Ready. Sticky in `patch_status`.
+    external: bool,
     tls_cert_not_after: Option<String>,
     tls_principal: Option<String>,
     advance_generation: bool,
@@ -845,6 +869,7 @@ async fn patch_status(
             "secret": secret_name,
             "scramSha512": p.scram_sha512 || p.obj.status.as_ref().is_some_and(|s| s.scram_sha512),
             "tls": p.tls || p.obj.status.as_ref().is_some_and(|s| s.tls),
+            "external": p.external || p.obj.status.as_ref().is_some_and(|s| s.external),
             "tlsCertNotAfter": p.tls_cert_not_after,
             "tlsPrincipal": p.tls_principal,
             "quotasInSync": p.quotas_in_sync,
@@ -1058,5 +1083,41 @@ mod tests {
                 .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
             "got: {p1}"
         );
+    }
+
+    #[test]
+    fn principal_for_tls_external_uses_bare_name() {
+        // `tls-external` users share SCRAM's bare-name principal shape:
+        // credentials are managed out-of-band but the operator still
+        // pins ACLs / quotas under `User:<metadata.name>`.
+        assert_eq!(
+            principal_for("alice", &Authentication::TlsExternal),
+            "User:alice"
+        );
+    }
+
+    #[test]
+    fn validate_spec_accepts_tls_external_with_no_authorization_and_no_quotas() {
+        let spec = crate::crd::KafkaUserSpec {
+            authentication: Authentication::TlsExternal,
+            authorization: None,
+            quotas: None,
+        };
+        assert!(validate_spec(&spec).is_ok());
+    }
+
+    #[test]
+    fn validate_spec_accepts_tls_external_with_acls_and_quotas() {
+        let spec = crate::crd::KafkaUserSpec {
+            authentication: Authentication::TlsExternal,
+            authorization: Some(Authorization::Simple(SimpleAuthorization {
+                acls: vec![rule(AclResourceKind::Topic, "orders", &[AclOp::Read])],
+            })),
+            quotas: Some(crate::crd::KafkaUserQuotas {
+                producer_byte_rate: Some(1_048_576),
+                ..Default::default()
+            }),
+        };
+        assert!(validate_spec(&spec).is_ok());
     }
 }
