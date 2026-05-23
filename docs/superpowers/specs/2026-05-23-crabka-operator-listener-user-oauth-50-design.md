@@ -164,10 +164,20 @@ discriminator `enum`. No new sibling properties.
 | Check | Failure → status condition |
 |-------|----------------------------|
 | `oauth` only on `tls: true` listeners | `Ready=False reason=InvalidListenerAuth message="OAuth requires tls: true"` |
-| `validIssuerUri` parses as `https://…` | `Ready=False reason=InvalidListenerAuth message="validIssuerUri must be https URI"` |
-| `jwksEndpointUri` parses as `https://…` | `Ready=False reason=InvalidListenerAuth message="jwksEndpointUri must be https URI"` |
+| `validIssuerUri` is non-empty (any scheme; the broker matches it as a literal string against the JWT `iss` claim) | `Ready=False reason=InvalidListenerAuth message="validIssuerUri is required"` |
+| `jwksEndpointUri` parses as `http://…` or `https://…` (the broker uses plain reqwest, which accepts either; 49b is webpki-only for HTTPS) | `Ready=False reason=InvalidListenerAuth message="jwksEndpointUri must be http or https"` |
 | `jwksRefreshSeconds >= 30` if set | `Ready=False reason=InvalidListenerAuth message="jwksRefreshSeconds must be >= 30"` |
 | `customClaimCheck.scope` non-empty if `customClaimCheck` is present | `Ready=False reason=InvalidListenerAuth message="customClaimCheck.scope is required"` |
+
+**`http://` JWKS endpoint warning.** Like SCRAM-without-TLS, an
+`http://` `jwksEndpointUri` is accepted but emits a `WeakAuth`
+Kubernetes Event on the `Kafka` resource: "listener `<name>` has
+http:// JWKS endpoint; key material traverses the network in cleartext.
+Consider https." Mirrors the existing `weak_auth_warnings` flow for
+SCRAM in `crates/operator/src/controller/listeners.rs`. Slice 49c will
+add custom TLS trust to the IdP; until then, in-cluster HTTPS-to-IdP
+requires the IdP to use a webpki-trusted cert (which Keycloak in kind
+does not by default — hence the slice 50 Keycloak e2e uses HTTP).
 
 **Cross-listener validation** (post per-listener validation):
 
