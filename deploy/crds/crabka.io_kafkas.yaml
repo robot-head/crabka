@@ -123,11 +123,40 @@ spec:
                         must also have `tls: true` — enforced at reconcile time.
                       nullable: true
                       properties:
+                        customClaimCheck:
+                          properties:
+                            scope:
+                              minLength: 1
+                              type: string
+                            scopeClaim:
+                              type: string
+                          required:
+                          - scope
+                          type: object
+                        enableOauthBearer:
+                          type: boolean
+                        jwksEndpointUri:
+                          minLength: 1
+                          type: string
+                        jwksRefreshSeconds:
+                          minimum: 0.0
+                          type: integer
+                        maxClockSkewSeconds:
+                          minimum: 0.0
+                          type: integer
                         type:
                           enum:
                           - tls
                           - scram-sha-512
                           - scram-sha-256
+                          - oauth
+                          type: string
+                        userNameClaim:
+                          type: string
+                        validAudience:
+                          type: string
+                        validIssuerUri:
+                          minLength: 1
                           type: string
                       required:
                       - type

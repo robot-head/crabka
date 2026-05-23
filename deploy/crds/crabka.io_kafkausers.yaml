@@ -51,6 +51,7 @@ spec:
                     enum:
                     - scram-sha-512
                     - tls
+                    - tls-external
                     type: string
                   validityDays:
                     maximum: 36500.0
@@ -217,6 +218,14 @@ spec:
                   - type
                   type: object
                 type: array
+              external:
+                default: false
+                description: |-
+                  Slice 50: `true` once a credential-less user
+                  (`type: tls-external`) has been reconciled. Surfaces in
+                  `kubectl describe ku` so operators can tell at a glance that
+                  the operator does not own this user's credentials.
+                type: boolean
               observedGeneration:
                 description: '`metadata.generation` of the last successfully-reconciled spec.'
                 format: int64
