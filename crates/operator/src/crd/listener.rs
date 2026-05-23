@@ -126,7 +126,7 @@ pub struct BrokerOverride {
 /// The `schema_with` workaround avoids a kube-rs 3.x `StructuralSchemaRewriter`
 /// panic when `oneOf` branches share a `type` discriminator with differing `enum`
 /// values — same pattern as `Authentication` in `user.rs`.
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "type")]
 #[schemars(schema_with = "listener_authentication_schema")]
 pub enum ListenerAuthentication {
@@ -136,6 +136,71 @@ pub enum ListenerAuthentication {
     ScramSha512,
     #[serde(rename = "scram-sha-256")]
     ScramSha256,
+    #[serde(rename = "oauth")]
+    OAuth(ListenerAuthenticationOAuth),
+}
+
+/// Config for `authentication: { type: oauth }` on a listener. The
+/// reconciler (T3) renders these into the broker-global
+/// `[oauthbearer]` TOML block and appends `OAUTHBEARER` to the
+/// listener's `sasl_mechanisms`. Slice 50 narrows Strimzi's surface to
+/// the fields the 49b validator honors; see the umbrella roadmap
+/// (`2026-05-23-crabka-oauth-parity-roadmap-design.md`) for fields
+/// deferred to later slices.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ListenerAuthenticationOAuth {
+    /// Expected `iss` claim. Broker rejects tokens whose `iss` differs.
+    pub valid_issuer_uri: String,
+    /// HTTPS URL the broker fetches the signing JWKS from.
+    pub jwks_endpoint_uri: String,
+    /// Optional expected `aud` claim. Absent means no audience check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid_audience: Option<String>,
+    /// Claim name to use as the Kafka principal. Defaults broker-side
+    /// to `sub`; set e.g. to `preferred_username` for Keycloak.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_name_claim: Option<String>,
+    /// Optional required-scope check; see `OAuthCustomClaimCheck`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_claim_check: Option<OAuthCustomClaimCheck>,
+    /// JWKS refresh cadence in seconds. Reconciler (T3) enforces
+    /// `>= 30`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jwks_refresh_seconds: Option<u32>,
+    /// Allowed clock skew in seconds for `exp`/`nbf`/`iat` checks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_clock_skew_seconds: Option<u32>,
+    /// Whether to advertise `OAUTHBEARER` in the listener's
+    /// `sasl_mechanisms`. Defaults `true`; setting `false` keeps the
+    /// listener anonymous-over-SASL but still validates tokens if any
+    /// arrive via other mechanisms (rare; mirrors Strimzi).
+    #[serde(default = "default_true", skip_serializing_if = "is_default_true")]
+    pub enable_oauth_bearer: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+fn is_default_true(b: &bool) -> bool {
+    *b
+}
+
+/// Narrowed shape of Strimzi's `customClaimCheck`. Strimzi accepts a
+/// JsonPath-ish expression language; slice 50 only honors
+/// "<scopeClaim> contains <scope>" because that's what 49b's validator
+/// implements. Wider expression support is deferred to slice 50f
+/// (paired with broker slice 49g) in the umbrella roadmap.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OAuthCustomClaimCheck {
+    /// Required scope value. The token's `scopeClaim` (default
+    /// `scope`) must contain this value.
+    pub scope: String,
+    /// Override the claim the broker reads scopes from. Defaults to
+    /// `scope`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_claim: Option<String>,
 }
 
 fn listener_authentication_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
@@ -145,8 +210,23 @@ fn listener_authentication_schema(_: &mut schemars::SchemaGenerator) -> schemars
         "properties": {
             "type": {
                 "type": "string",
-                "enum": ["tls", "scram-sha-512", "scram-sha-256"],
+                "enum": ["tls", "scram-sha-512", "scram-sha-256", "oauth"],
             },
+            "validIssuerUri": { "type": "string", "minLength": 1 },
+            "jwksEndpointUri": { "type": "string", "minLength": 1 },
+            "validAudience": { "type": "string" },
+            "userNameClaim": { "type": "string" },
+            "customClaimCheck": {
+                "type": "object",
+                "required": ["scope"],
+                "properties": {
+                    "scope": { "type": "string", "minLength": 1 },
+                    "scopeClaim": { "type": "string" },
+                },
+            },
+            "jwksRefreshSeconds": { "type": "integer", "minimum": 0 },
+            "maxClockSkewSeconds": { "type": "integer", "minimum": 0 },
+            "enableOauthBearer": { "type": "boolean" },
         },
     })
 }
@@ -243,7 +323,7 @@ name: bad
 port: 9092
 type: internal
 authentication:
-  type: oauth
+  type: kerberos
 ",
         )
         .err();
@@ -251,6 +331,168 @@ authentication:
             err.is_some(),
             "unknown auth type should fail to deserialize"
         );
+    }
+
+    #[test]
+    fn listener_deserializes_oauth_authentication_full_config() {
+        let l: Listener = serde_yaml::from_str(
+            r"
+name: oauth
+port: 9096
+type: internal
+tls: true
+authentication:
+  type: oauth
+  validIssuerUri: https://kc.example.com/realms/kafka
+  jwksEndpointUri: https://kc.example.com/realms/kafka/protocol/openid-connect/certs
+  validAudience: kafka
+  userNameClaim: preferred_username
+  customClaimCheck:
+    scope: kafka.write
+    scopeClaim: scp
+  jwksRefreshSeconds: 300
+  maxClockSkewSeconds: 30
+  enableOauthBearer: false
+",
+        )
+        .unwrap();
+        let expected = ListenerAuthenticationOAuth {
+            valid_issuer_uri: "https://kc.example.com/realms/kafka".into(),
+            jwks_endpoint_uri: "https://kc.example.com/realms/kafka/protocol/openid-connect/certs"
+                .into(),
+            valid_audience: Some("kafka".into()),
+            user_name_claim: Some("preferred_username".into()),
+            custom_claim_check: Some(OAuthCustomClaimCheck {
+                scope: "kafka.write".into(),
+                scope_claim: Some("scp".into()),
+            }),
+            jwks_refresh_seconds: Some(300),
+            max_clock_skew_seconds: Some(30),
+            enable_oauth_bearer: false,
+        };
+        assert_eq!(
+            l.authentication,
+            Some(ListenerAuthentication::OAuth(expected))
+        );
+    }
+
+    #[test]
+    fn listener_deserializes_oauth_authentication_minimum_required() {
+        let l: Listener = serde_yaml::from_str(
+            r"
+name: oauth-min
+port: 9097
+type: internal
+tls: true
+authentication:
+  type: oauth
+  validIssuerUri: https://issuer.example.com/
+  jwksEndpointUri: https://issuer.example.com/jwks
+",
+        )
+        .unwrap();
+        let Some(ListenerAuthentication::OAuth(oauth)) = l.authentication else {
+            panic!("expected OAuth authentication, got {:?}", l.authentication);
+        };
+        assert_eq!(oauth.valid_issuer_uri, "https://issuer.example.com/");
+        assert_eq!(oauth.jwks_endpoint_uri, "https://issuer.example.com/jwks");
+        assert_eq!(oauth.valid_audience, None);
+        assert_eq!(oauth.user_name_claim, None);
+        assert_eq!(oauth.custom_claim_check, None);
+        assert_eq!(oauth.jwks_refresh_seconds, None);
+        assert_eq!(oauth.max_clock_skew_seconds, None);
+        // `enable_oauth_bearer` defaults to true when omitted.
+        assert!(oauth.enable_oauth_bearer);
+    }
+
+    #[test]
+    fn oauth_with_custom_claim_check_round_trips() {
+        let l: Listener = serde_yaml::from_str(
+            r"
+name: oauth-scope
+port: 9098
+type: internal
+tls: true
+authentication:
+  type: oauth
+  validIssuerUri: https://issuer.example.com/
+  jwksEndpointUri: https://issuer.example.com/jwks
+  customClaimCheck:
+    scope: kafka.write
+",
+        )
+        .unwrap();
+        let Some(ListenerAuthentication::OAuth(oauth)) = l.authentication else {
+            panic!("expected OAuth authentication");
+        };
+        let ccc = oauth.custom_claim_check.expect("customClaimCheck present");
+        assert_eq!(ccc.scope, "kafka.write");
+        assert_eq!(ccc.scope_claim, None);
+    }
+
+    #[test]
+    fn oauth_default_enable_omitted_on_serialize() {
+        let auth = ListenerAuthentication::OAuth(ListenerAuthenticationOAuth {
+            valid_issuer_uri: "https://issuer.example.com/".into(),
+            jwks_endpoint_uri: "https://issuer.example.com/jwks".into(),
+            valid_audience: None,
+            user_name_claim: None,
+            custom_claim_check: None,
+            jwks_refresh_seconds: None,
+            max_clock_skew_seconds: None,
+            enable_oauth_bearer: true,
+        });
+        let json = serde_json::to_string(&auth).unwrap();
+        assert!(
+            !json.contains("enableOauthBearer"),
+            "default-true enable_oauth_bearer must be omitted; got: {json}"
+        );
+    }
+
+    #[test]
+    fn oauth_enable_false_round_trips() {
+        let auth = ListenerAuthentication::OAuth(ListenerAuthenticationOAuth {
+            valid_issuer_uri: "https://issuer.example.com/".into(),
+            jwks_endpoint_uri: "https://issuer.example.com/jwks".into(),
+            valid_audience: None,
+            user_name_claim: None,
+            custom_claim_check: None,
+            jwks_refresh_seconds: None,
+            max_clock_skew_seconds: None,
+            enable_oauth_bearer: false,
+        });
+        let json = serde_json::to_string(&auth).unwrap();
+        assert!(json.contains("\"enableOauthBearer\":false"), "got: {json}");
+        let back: ListenerAuthentication = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, auth);
+    }
+
+    #[test]
+    fn oauth_unknown_subfield_silently_ignored() {
+        // ListenerAuthenticationOAuth does not use `#[serde(deny_unknown_fields)]`,
+        // so serde silently accepts unknown sibling keys. Apiserver-side
+        // structural-schema rejection (preserveUnknownFields=false in the
+        // generated CRD) is the wire-level guard against typos; this test
+        // pins the Rust-side behavior so it doesn't change unnoticed.
+        let l: Listener = serde_yaml::from_str(
+            r#"
+name: oauth-typo
+port: 9099
+type: internal
+tls: true
+authentication:
+  type: oauth
+  validIssuerUri: https://issuer.example.com/
+  jwksEndpointUri: https://issuer.example.com/jwks
+  madeUpField: "x"
+"#,
+        )
+        .expect("serde should accept the unknown sibling field");
+        let Some(ListenerAuthentication::OAuth(oauth)) = l.authentication else {
+            panic!("expected OAuth authentication");
+        };
+        assert_eq!(oauth.valid_issuer_uri, "https://issuer.example.com/");
+        assert_eq!(oauth.jwks_endpoint_uri, "https://issuer.example.com/jwks");
     }
 }
 
