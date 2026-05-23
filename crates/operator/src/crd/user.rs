@@ -299,9 +299,10 @@ pub struct KafkaUserStatus {
     pub tls_cert_not_after: Option<String>,
 
     /// The principal string the operator pinned in ACLs (e.g.
-    /// `User:CN=alice` for TLS users, `User:alice` for SCRAM). Always
-    /// populated when the user is provisioned. Load-bearing for
-    /// debugging "why isn't my ACL matching" issues.
+    /// `User:CN=alice` for TLS users, `User:alice` for SCRAM and
+    /// `tls-external` users). Always populated when the user is
+    /// provisioned. Load-bearing for debugging "why isn't my ACL
+    /// matching" issues.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_principal: Option<String>,
 }
