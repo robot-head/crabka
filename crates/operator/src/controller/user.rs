@@ -456,7 +456,11 @@ pub async fn reconcile(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Action,
             tls: is_tls && tls_not_after.is_some(),
             external: is_external,
             tls_cert_not_after: tls_not_after.clone(),
-            tls_principal: if is_tls {
+            // `tls_principal` is the principal the operator pinned in ACLs.
+            // For TLS users that's `User:CN=<name>`; for `tls-external`
+            // users it's `User:<name>`. SCRAM users skip this — `username`
+            // already carries the same string for them.
+            tls_principal: if is_tls || is_external {
                 Some(principal.clone())
             } else {
                 prior_tls_principal.clone()
