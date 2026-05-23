@@ -248,6 +248,10 @@ pub enum AclPermission {
     Deny,
 }
 
+// The bools are independent wire-level status axes (each is a distinct
+// reconcile outcome that surfaces in `kubectl describe ku`); refactoring
+// to an enum would hurt the printed-status ergonomics.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct KafkaUserStatus {

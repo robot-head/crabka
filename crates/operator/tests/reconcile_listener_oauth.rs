@@ -1,3 +1,4 @@
+#![allow(clippy::doc_markdown, clippy::doc_lazy_continuation)]
 //! Integration tests for the `oauth` listener authentication variant
 //! (slice 50). Verifies the full reconcile path against the kube-mock
 //! harness: broker-config ConfigMap contents (`[oauthbearer]` TOML block

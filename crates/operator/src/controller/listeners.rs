@@ -77,7 +77,7 @@ pub enum ValidationError {
     /// `http://` or `https://`.
     ListenerOauthJwksUriBadScheme(String),
     /// `authentication.oauth.jwksRefreshSeconds` set below the 30-second
-    /// floor (would hammer the IdP).
+    /// floor (would hammer the `IdP`).
     ListenerOauthJwksRefreshTooSmall {
         listener: String,
         got: u32,
@@ -104,8 +104,9 @@ impl ValidationError {
             Self::NoInternalListener => "NoInternalListener",
             Self::ListenerMtlsRequiresTransportTls(_) => "ListenerMtlsRequiresTransportTls",
             Self::ListenerOauthRequiresTransportTls(_) => "ListenerOauthRequiresTransportTls",
-            Self::ListenerOauthIssuerUriEmpty(_) => "ListenerOauthInvalidUri",
-            Self::ListenerOauthJwksUriBadScheme(_) => "ListenerOauthInvalidUri",
+            Self::ListenerOauthIssuerUriEmpty(_) | Self::ListenerOauthJwksUriBadScheme(_) => {
+                "ListenerOauthInvalidUri"
+            }
             Self::ListenerOauthJwksRefreshTooSmall { .. } => "ListenerOauthInvalidRefresh",
             Self::ListenerOauthCustomClaimCheckScopeEmpty(_) => "ListenerOauthInvalidScope",
             Self::ConflictingOAuthListenerConfig => "ConflictingOAuthConfig",
@@ -187,7 +188,7 @@ fn oauth_canonical(cfg: &ListenerAuthenticationOAuth) -> ListenerAuthenticationO
 /// `Ok(())` if everything is well-formed; otherwise the first error
 /// encountered (validation is short-circuit — surface the most
 /// actionable problem rather than a list).
-#[allow(dead_code)]
+#[allow(dead_code, clippy::too_many_lines)]
 pub fn validate_listeners(
     listeners: &[Listener],
     inter_broker_listener_name: Option<&str>,
@@ -2086,7 +2087,7 @@ pub struct BrokerTlsRender {
 /// this broker's advertised addresses). Deterministic — same input
 /// always produces byte-identical output so the slice-21 config-hash
 /// is stable.
-#[allow(dead_code)]
+#[allow(dead_code, clippy::too_many_lines)]
 pub fn render_broker_toml(
     broker_id: i32,
     listeners: &[Listener],

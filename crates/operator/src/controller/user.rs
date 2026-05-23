@@ -475,12 +475,13 @@ pub async fn reconcile(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Action,
     // cadence (password rotation is operator-driven, not time-driven,
     // but the per-minute requeue covers external drift in ACLs /
     // quotas).
+    // `tls-external` users have no operator-owned credential to rotate,
+    // but ACLs + quotas can drift externally — keep the per-minute
+    // requeue to detect that (same cadence as SCRAM, different reason).
+    #[allow(clippy::match_same_arms)]
     let requeue = match &obj.spec.authentication {
         Authentication::ScramSha512(_) => Duration::from_mins(1),
         Authentication::Tls(_) => Duration::from_hours(6),
-        // `tls-external` users have no operator-owned credential to
-        // rotate, but ACLs + quotas can drift externally — keep the
-        // per-minute requeue to detect that.
         Authentication::TlsExternal => Duration::from_mins(1),
     };
     Ok(Action::requeue(requeue))
@@ -593,13 +594,15 @@ pub(crate) fn entry_to_exact_filter(e: &AclEntry) -> AclEntryFilter {
 /// bare `User:<name>`; TLS users use `User:CN=<name>` (matches the
 /// cert's Subject DN, which is what the broker's
 /// `extract_principal_from_cert` returns at runtime).
+#[allow(clippy::match_same_arms)]
 pub(crate) fn principal_for(name: &str, auth: &Authentication) -> String {
     match auth {
         Authentication::ScramSha512(_) => format!("User:{name}"),
         Authentication::Tls(_) => user_tls::tls_principal(name),
         // `tls-external` credentials are managed out-of-band (OIDC for
         // OAUTHBEARER, or an external CA whose certs carry the bare
-        // metadata.name as the principal). Same shape as SCRAM.
+        // metadata.name as the principal). Same string shape as SCRAM
+        // but different rationale — kept as a distinct arm.
         Authentication::TlsExternal => format!("User:{name}"),
     }
 }
