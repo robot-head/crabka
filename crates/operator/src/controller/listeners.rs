@@ -88,6 +88,14 @@ pub enum ValidationError {
     /// `[oauthbearer]` block is broker-global (slice 49b), so per-listener
     /// OAuth divergence is not representable.
     ConflictingOAuthListenerConfig,
+    /// Slice 50c: an OAuth listener's `accessTokenIsJwt` setting disagrees
+    /// with which mode-specific fields are set. The `String` carries a
+    /// human-readable description (which listener + which invariant was
+    /// violated). JWT mode requires `jwksEndpointUri` and forbids all
+    /// introspection-mode fields; introspection mode requires
+    /// `introspectionEndpointUri` + `clientId` + `clientSecret` and forbids
+    /// `jwksEndpointUri`.
+    ListenerOauthAccessTokenIsJwtInvalid(String),
 }
 
 #[allow(dead_code)]
@@ -110,6 +118,7 @@ impl ValidationError {
             Self::ListenerOauthJwksRefreshTooSmall { .. } => "ListenerOauthInvalidRefresh",
             Self::ListenerOauthCustomClaimCheckScopeEmpty(_) => "ListenerOauthInvalidScope",
             Self::ConflictingOAuthListenerConfig => "ConflictingOAuthConfig",
+            Self::ListenerOauthAccessTokenIsJwtInvalid(_) => "ListenerOauthAccessTokenIsJwtInvalid",
         }
     }
 
@@ -166,6 +175,7 @@ impl ValidationError {
             Self::ConflictingOAuthListenerConfig => {
                 "all OAuth listeners must share identical config (per-listener OAuth is a future broker slice)".to_string()
             }
+            Self::ListenerOauthAccessTokenIsJwtInvalid(msg) => msg.clone(),
         }
     }
 }
@@ -218,11 +228,74 @@ pub fn validate_listeners(
                     l.name.clone(),
                 ));
             }
+            // Slice 50c cross-mode invariants. Fire first so operators see
+            // the mode-shape problem before any field-by-field complaint
+            // (e.g. "no JWKS URI" is more actionable than "JWKS URI must
+            // be http/https" when the user meant introspection mode).
+            if cfg.access_token_is_jwt {
+                if cfg.jwks_endpoint_uri.is_none() {
+                    return Err(ValidationError::ListenerOauthAccessTokenIsJwtInvalid(
+                        format!(
+                            "listener '{}': accessTokenIsJwt=true requires jwksEndpointUri",
+                            l.name
+                        ),
+                    ));
+                }
+                if cfg.introspection_endpoint_uri.is_some()
+                    || cfg.user_info_endpoint_uri.is_some()
+                    || cfg.client_id.is_some()
+                    || cfg.client_secret.is_some()
+                    || cfg.introspection_http_timeout_seconds.is_some()
+                {
+                    return Err(ValidationError::ListenerOauthAccessTokenIsJwtInvalid(
+                        format!(
+                            "listener '{}': accessTokenIsJwt=true forbids introspection-mode fields (introspectionEndpointUri/userInfoEndpointUri/clientId/clientSecret/introspectionHttpTimeoutSeconds)",
+                            l.name
+                        ),
+                    ));
+                }
+            } else {
+                if cfg.jwks_endpoint_uri.is_some() {
+                    return Err(ValidationError::ListenerOauthAccessTokenIsJwtInvalid(
+                        format!(
+                            "listener '{}': accessTokenIsJwt=false forbids jwksEndpointUri",
+                            l.name
+                        ),
+                    ));
+                }
+                if cfg.introspection_endpoint_uri.is_none() {
+                    return Err(ValidationError::ListenerOauthAccessTokenIsJwtInvalid(
+                        format!(
+                            "listener '{}': accessTokenIsJwt=false requires introspectionEndpointUri",
+                            l.name
+                        ),
+                    ));
+                }
+                if cfg.client_id.is_none() {
+                    return Err(ValidationError::ListenerOauthAccessTokenIsJwtInvalid(
+                        format!(
+                            "listener '{}': accessTokenIsJwt=false requires clientId",
+                            l.name
+                        ),
+                    ));
+                }
+                if cfg.client_secret.is_none() {
+                    return Err(ValidationError::ListenerOauthAccessTokenIsJwtInvalid(
+                        format!(
+                            "listener '{}': accessTokenIsJwt=false requires clientSecret",
+                            l.name
+                        ),
+                    ));
+                }
+            }
             if cfg.valid_issuer_uri.is_empty() {
                 return Err(ValidationError::ListenerOauthIssuerUriEmpty(l.name.clone()));
             }
-            if !cfg.jwks_endpoint_uri.starts_with("http://")
-                && !cfg.jwks_endpoint_uri.starts_with("https://")
+            // Cross-mode block above guarantees jwks_endpoint_uri is Some
+            // iff access_token_is_jwt; only validate scheme when set.
+            if let Some(uri) = &cfg.jwks_endpoint_uri
+                && !uri.starts_with("http://")
+                && !uri.starts_with("https://")
             {
                 return Err(ValidationError::ListenerOauthJwksUriBadScheme(
                     l.name.clone(),
@@ -346,7 +419,8 @@ pub(crate) fn weak_auth_warnings(listeners: &[Listener]) -> Vec<String> {
         .collect();
     for l in listeners {
         if let Some(ListenerAuthentication::OAuth(cfg)) = &l.authentication
-            && cfg.jwks_endpoint_uri.starts_with("http://")
+            && let Some(uri) = &cfg.jwks_endpoint_uri
+            && uri.starts_with("http://")
         {
             warnings.push(format!(
                 "listener '{}' has http:// JWKS endpoint; key material traverses the network in cleartext. Consider https.",
@@ -1506,6 +1580,25 @@ mod tests {
                     ..base.clone()
                 },
             ),
+            // Slice 50c: access_token_is_jwt flips the validator mode. The
+            // perturbed config switches to introspection mode AND wires up
+            // the introspection-mode required fields so the cross-mode
+            // validation doesn't reject the perturbed config standalone
+            // before we even get to the conflict check.
+            (
+                "access_token_is_jwt",
+                crate::crd::ListenerAuthenticationOAuth {
+                    access_token_is_jwt: false,
+                    jwks_endpoint_uri: None,
+                    introspection_endpoint_uri: Some("https://idp.example/introspect".into()),
+                    client_id: Some("kafka-broker".into()),
+                    client_secret: Some(crate::crd::OauthClientSecretRef {
+                        secret_name: "introspection-creds".into(),
+                        key: "client-secret".into(),
+                    }),
+                    ..base.clone()
+                },
+            ),
         ];
         for (field, perturbed) in perturbations {
             let listeners = vec![
@@ -1519,6 +1612,248 @@ mod tests {
                 matches!(err, ValidationError::ConflictingOAuthListenerConfig),
                 "field {field}: got {err:?}"
             );
+        }
+    }
+
+    #[test]
+    fn validate_listeners_rejects_two_oauth_listeners_with_divergent_introspection_config() {
+        // Mirror of the canonical-divergence walk but for the
+        // introspection-mode-only fields. The JWT-mode base used by the
+        // sibling test can't carry these fields (cross-mode validation
+        // rejects them), so build a dedicated introspection-mode base
+        // fixture here.
+        let base = crate::crd::ListenerAuthenticationOAuth {
+            valid_issuer_uri: "https://issuer.example.com/".into(),
+            jwks_endpoint_uri: None,
+            valid_audience: Some("kafka".into()),
+            user_name_claim: Some("preferred_username".into()),
+            custom_claim_check: None,
+            jwks_refresh_seconds: None,
+            max_clock_skew_seconds: Some(30),
+            enable_oauth_bearer: true,
+            tls_trusted_certificates: vec![],
+            access_token_is_jwt: false,
+            introspection_endpoint_uri: Some("https://idp.example/introspect".into()),
+            user_info_endpoint_uri: None,
+            client_id: Some("kafka-broker".into()),
+            client_secret: Some(crate::crd::OauthClientSecretRef {
+                secret_name: "base-secret".into(),
+                key: "k".into(),
+            }),
+            introspection_http_timeout_seconds: None,
+        };
+        let perturbations: Vec<(&str, crate::crd::ListenerAuthenticationOAuth)> = vec![
+            (
+                "introspection_endpoint_uri",
+                crate::crd::ListenerAuthenticationOAuth {
+                    introspection_endpoint_uri: Some("https://different/introspect".into()),
+                    ..base.clone()
+                },
+            ),
+            (
+                "user_info_endpoint_uri",
+                crate::crd::ListenerAuthenticationOAuth {
+                    user_info_endpoint_uri: Some("https://different/userinfo".into()),
+                    ..base.clone()
+                },
+            ),
+            (
+                "client_id",
+                crate::crd::ListenerAuthenticationOAuth {
+                    client_id: Some("other-client".into()),
+                    ..base.clone()
+                },
+            ),
+            (
+                "client_secret",
+                crate::crd::ListenerAuthenticationOAuth {
+                    client_secret: Some(crate::crd::OauthClientSecretRef {
+                        secret_name: "other".into(),
+                        key: "k".into(),
+                    }),
+                    ..base.clone()
+                },
+            ),
+            (
+                "introspection_http_timeout_seconds",
+                crate::crd::ListenerAuthenticationOAuth {
+                    introspection_http_timeout_seconds: Some(20),
+                    ..base.clone()
+                },
+            ),
+        ];
+        for (field, perturbed) in perturbations {
+            let listeners = vec![
+                oauth_listener("oauth-a", 9095, true, base.clone()),
+                oauth_listener("oauth-b", 9096, true, perturbed),
+            ];
+            let err = validate_listeners(&listeners, None).expect_err(&format!(
+                "expected ConflictingOAuthListenerConfig when only `{field}` differs"
+            ));
+            assert!(
+                matches!(err, ValidationError::ConflictingOAuthListenerConfig),
+                "field {field}: got {err:?}"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Slice 50c — cross-mode (accessTokenIsJwt) validation tests
+    // -----------------------------------------------------------------
+
+    fn oauth_introspection_cfg_minimal() -> crate::crd::ListenerAuthenticationOAuth {
+        crate::crd::ListenerAuthenticationOAuth {
+            valid_issuer_uri: "https://issuer.example.com/".into(),
+            jwks_endpoint_uri: None,
+            valid_audience: None,
+            user_name_claim: None,
+            custom_claim_check: None,
+            jwks_refresh_seconds: None,
+            max_clock_skew_seconds: None,
+            enable_oauth_bearer: true,
+            tls_trusted_certificates: vec![],
+            access_token_is_jwt: false,
+            introspection_endpoint_uri: Some("https://idp.example/introspect".into()),
+            user_info_endpoint_uri: None,
+            client_id: Some("kafka-broker".into()),
+            client_secret: Some(crate::crd::OauthClientSecretRef {
+                secret_name: "introspection-creds".into(),
+                key: "client-secret".into(),
+            }),
+            introspection_http_timeout_seconds: None,
+        }
+    }
+
+    #[test]
+    fn validate_listeners_rejects_oauth_jwt_mode_without_jwks_endpoint_uri() {
+        let mut cfg = oauth_cfg_minimal();
+        cfg.jwks_endpoint_uri = None;
+        let listeners = vec![oauth_listener("oauth", 9095, true, cfg)];
+        let err = validate_listeners(&listeners, None).unwrap_err();
+        assert_eq!(err.reason(), "ListenerOauthAccessTokenIsJwtInvalid");
+        match err {
+            ValidationError::ListenerOauthAccessTokenIsJwtInvalid(msg) => {
+                assert!(
+                    msg.contains("accessTokenIsJwt=true requires jwksEndpointUri"),
+                    "msg: {msg}"
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_listeners_rejects_oauth_introspection_mode_without_endpoint_uri() {
+        let mut cfg = oauth_introspection_cfg_minimal();
+        cfg.introspection_endpoint_uri = None;
+        let listeners = vec![oauth_listener("oauth", 9095, true, cfg)];
+        let err = validate_listeners(&listeners, None).unwrap_err();
+        assert_eq!(err.reason(), "ListenerOauthAccessTokenIsJwtInvalid");
+        match err {
+            ValidationError::ListenerOauthAccessTokenIsJwtInvalid(msg) => {
+                assert!(
+                    msg.contains("accessTokenIsJwt=false requires introspectionEndpointUri"),
+                    "msg: {msg}"
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_listeners_rejects_oauth_introspection_mode_without_client_id() {
+        let mut cfg = oauth_introspection_cfg_minimal();
+        cfg.client_id = None;
+        let listeners = vec![oauth_listener("oauth", 9095, true, cfg)];
+        let err = validate_listeners(&listeners, None).unwrap_err();
+        assert_eq!(err.reason(), "ListenerOauthAccessTokenIsJwtInvalid");
+        match err {
+            ValidationError::ListenerOauthAccessTokenIsJwtInvalid(msg) => {
+                assert!(
+                    msg.contains("accessTokenIsJwt=false requires clientId"),
+                    "msg: {msg}"
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_listeners_rejects_oauth_introspection_mode_without_client_secret() {
+        let mut cfg = oauth_introspection_cfg_minimal();
+        cfg.client_secret = None;
+        let listeners = vec![oauth_listener("oauth", 9095, true, cfg)];
+        let err = validate_listeners(&listeners, None).unwrap_err();
+        assert_eq!(err.reason(), "ListenerOauthAccessTokenIsJwtInvalid");
+        match err {
+            ValidationError::ListenerOauthAccessTokenIsJwtInvalid(msg) => {
+                assert!(
+                    msg.contains("accessTokenIsJwt=false requires clientSecret"),
+                    "msg: {msg}"
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_listeners_rejects_oauth_jwt_mode_with_introspection_fields() {
+        // JWT-mode base (jwksEndpointUri set, accessTokenIsJwt=true) that
+        // also accidentally sets an introspection-mode field — should be
+        // rejected, since the two configs imply contradictory broker
+        // behaviour.
+        let mut cfg = oauth_cfg_minimal();
+        cfg.introspection_endpoint_uri = Some("https://idp.example/introspect".into());
+        let listeners = vec![oauth_listener("oauth", 9095, true, cfg)];
+        let err = validate_listeners(&listeners, None).unwrap_err();
+        assert_eq!(err.reason(), "ListenerOauthAccessTokenIsJwtInvalid");
+        match err {
+            ValidationError::ListenerOauthAccessTokenIsJwtInvalid(msg) => {
+                assert!(
+                    msg.contains("accessTokenIsJwt=true forbids introspection-mode fields"),
+                    "msg: {msg}"
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_listeners_rejects_oauth_introspection_mode_with_jwks_endpoint_uri() {
+        let mut cfg = oauth_introspection_cfg_minimal();
+        cfg.jwks_endpoint_uri = Some("https://issuer.example.com/jwks".into());
+        let listeners = vec![oauth_listener("oauth", 9095, true, cfg)];
+        let err = validate_listeners(&listeners, None).unwrap_err();
+        assert_eq!(err.reason(), "ListenerOauthAccessTokenIsJwtInvalid");
+        match err {
+            ValidationError::ListenerOauthAccessTokenIsJwtInvalid(msg) => {
+                assert!(
+                    msg.contains("accessTokenIsJwt=false forbids jwksEndpointUri"),
+                    "msg: {msg}"
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_listeners_rejects_oauth_userinfo_endpoint_without_introspection_mode() {
+        // userInfoEndpointUri is an introspection-mode-only field; setting
+        // it on a JWT-mode listener must be rejected by the
+        // accessTokenIsJwt=true forbids-introspection-fields rule.
+        let mut cfg = oauth_cfg_minimal();
+        cfg.user_info_endpoint_uri = Some("https://idp.example/userinfo".into());
+        let listeners = vec![oauth_listener("oauth", 9095, true, cfg)];
+        let err = validate_listeners(&listeners, None).unwrap_err();
+        assert_eq!(err.reason(), "ListenerOauthAccessTokenIsJwtInvalid");
+        match err {
+            ValidationError::ListenerOauthAccessTokenIsJwtInvalid(msg) => {
+                assert!(
+                    msg.contains("accessTokenIsJwt=true forbids introspection-mode fields"),
+                    "msg: {msg}"
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
         }
     }
 
@@ -2215,11 +2550,42 @@ pub fn render_broker_toml(
         _ => None,
     }) {
         let _ = writeln!(out, "[oauthbearer]");
-        let _ = writeln!(
-            out,
-            "jwks_endpoint_uri = \"{}\"",
-            oauth_cfg.jwks_endpoint_uri
-        );
+        // Slice 50c: fork on access_token_is_jwt. JWT mode (true) emits
+        // jwks_endpoint_uri (slice 49b/49c). Introspection mode (false)
+        // emits introspection_endpoint_uri / userinfo_endpoint_uri /
+        // introspection_client_id / introspection_client_secret_path /
+        // introspection_http_timeout_ms in 49d FileOAuthBearerConfig
+        // field order. The cross-mode validator in `validate_listeners`
+        // guarantees the relevant Option fields are populated.
+        if oauth_cfg.access_token_is_jwt {
+            if let Some(uri) = &oauth_cfg.jwks_endpoint_uri {
+                let _ = writeln!(out, "jwks_endpoint_uri = \"{uri}\"");
+            }
+        } else {
+            if let Some(uri) = &oauth_cfg.introspection_endpoint_uri {
+                let _ = writeln!(out, "introspection_endpoint_uri = \"{uri}\"");
+            }
+            if let Some(uri) = &oauth_cfg.user_info_endpoint_uri {
+                let _ = writeln!(out, "userinfo_endpoint_uri = \"{uri}\"");
+            }
+            if let Some(id) = &oauth_cfg.client_id {
+                let _ = writeln!(out, "introspection_client_id = \"{id}\"");
+            }
+            // clientSecret bytes are mounted at this fixed path by T5's
+            // pod-template plumbing; the path itself is constant so the
+            // operator emits it whenever introspection mode is selected.
+            let _ = writeln!(
+                out,
+                r#"introspection_client_secret_path = "/etc/crabka/oauth-introspection/client-secret""#
+            );
+            if let Some(s) = oauth_cfg.introspection_http_timeout_seconds {
+                let _ = writeln!(
+                    out,
+                    "introspection_http_timeout_ms = {}",
+                    u64::from(s) * 1000
+                );
+            }
+        }
         let _ = writeln!(out, "valid_issuer_uri = \"{}\"", oauth_cfg.valid_issuer_uri);
         if let Some(aud) = &oauth_cfg.valid_audience {
             let _ = writeln!(out, "expected_audience = \"{aud}\"");
@@ -2820,6 +3186,159 @@ mod toml_rendering_tests {
         assert!(
             toml.contains(expected),
             "expected canonical [oauthbearer] block not found.\n--- expected ---\n{expected}\n--- got ---\n{toml}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Slice 50c — introspection-mode [oauthbearer] rendering
+    // -----------------------------------------------------------------
+
+    fn oauth_introspection_full_cfg() -> crate::crd::ListenerAuthenticationOAuth {
+        crate::crd::ListenerAuthenticationOAuth {
+            valid_issuer_uri: "https://idp.example/realms/kafka".into(),
+            jwks_endpoint_uri: None,
+            valid_audience: Some("kafka-broker".into()),
+            user_name_claim: Some("preferred_username".into()),
+            custom_claim_check: None,
+            jwks_refresh_seconds: None,
+            max_clock_skew_seconds: Some(60),
+            enable_oauth_bearer: true,
+            tls_trusted_certificates: vec![],
+            access_token_is_jwt: false,
+            introspection_endpoint_uri: Some("https://idp.example/introspect".into()),
+            user_info_endpoint_uri: Some("https://idp.example/userinfo".into()),
+            client_id: Some("kafka-broker".into()),
+            client_secret: Some(crate::crd::OauthClientSecretRef {
+                secret_name: "introspection-creds".into(),
+                key: "client-secret".into(),
+            }),
+            introspection_http_timeout_seconds: Some(15),
+        }
+    }
+
+    #[test]
+    fn render_broker_toml_emits_introspection_keys_when_introspection_mode() {
+        use std::collections::BTreeMap;
+        let listeners = vec![oauth_listener_for_render(
+            "oauth",
+            9095,
+            true,
+            oauth_introspection_full_cfg(),
+        )];
+        let toml = render_broker_toml(
+            0,
+            &listeners,
+            &addrs_for("oauth", 9095),
+            "oauth",
+            &BTreeMap::new(),
+            Some(&render_tls()),
+            None,
+        );
+        assert!(toml.contains("[oauthbearer]"), "TOML: {toml}");
+        assert!(
+            toml.contains("introspection_endpoint_uri = \"https://idp.example/introspect\""),
+            "TOML: {toml}"
+        );
+        assert!(
+            toml.contains("introspection_client_id = \"kafka-broker\""),
+            "TOML: {toml}"
+        );
+        assert!(
+            toml.contains(
+                "introspection_client_secret_path = \"/etc/crabka/oauth-introspection/client-secret\""
+            ),
+            "TOML: {toml}"
+        );
+    }
+
+    #[test]
+    fn render_broker_toml_omits_jwks_endpoint_uri_in_introspection_mode() {
+        use std::collections::BTreeMap;
+        let listeners = vec![oauth_listener_for_render(
+            "oauth",
+            9095,
+            true,
+            oauth_introspection_full_cfg(),
+        )];
+        let toml = render_broker_toml(
+            0,
+            &listeners,
+            &addrs_for("oauth", 9095),
+            "oauth",
+            &BTreeMap::new(),
+            Some(&render_tls()),
+            None,
+        );
+        assert!(!toml.contains("jwks_endpoint_uri"), "TOML: {toml}");
+    }
+
+    #[test]
+    fn render_broker_toml_emits_userinfo_endpoint_when_set() {
+        use std::collections::BTreeMap;
+        let cfg = oauth_introspection_full_cfg();
+        let listeners = vec![oauth_listener_for_render("oauth", 9095, true, cfg)];
+        let toml = render_broker_toml(
+            0,
+            &listeners,
+            &addrs_for("oauth", 9095),
+            "oauth",
+            &BTreeMap::new(),
+            Some(&render_tls()),
+            None,
+        );
+        assert!(
+            toml.contains("userinfo_endpoint_uri = \"https://idp.example/userinfo\""),
+            "TOML: {toml}"
+        );
+    }
+
+    #[test]
+    fn render_broker_toml_emits_introspection_http_timeout_ms_when_set() {
+        use std::collections::BTreeMap;
+        let mut cfg = oauth_introspection_full_cfg();
+        cfg.introspection_http_timeout_seconds = Some(15);
+        let listeners = vec![oauth_listener_for_render("oauth", 9095, true, cfg)];
+        let toml = render_broker_toml(
+            0,
+            &listeners,
+            &addrs_for("oauth", 9095),
+            "oauth",
+            &BTreeMap::new(),
+            Some(&render_tls()),
+            None,
+        );
+        assert!(
+            toml.contains("introspection_http_timeout_ms = 15000"),
+            "TOML: {toml}"
+        );
+    }
+
+    #[test]
+    fn render_broker_toml_oauthbearer_block_emits_introspection_keys_in_canonical_order() {
+        // Pin the exact byte sequence of the introspection-mode keys
+        // inside the `[oauthbearer]` block. The config hash that drives
+        // StatefulSet rollouts is taken over the rendered TOML bytes, so
+        // a key reorder here is a silent behavioural change.
+        use std::collections::BTreeMap;
+        let cfg = oauth_introspection_full_cfg();
+        let listeners = vec![oauth_listener_for_render("oauth", 9095, true, cfg)];
+        let toml = render_broker_toml(
+            0,
+            &listeners,
+            &addrs_for("oauth", 9095),
+            "oauth",
+            &BTreeMap::new(),
+            Some(&render_tls()),
+            None,
+        );
+        let expected = "introspection_endpoint_uri = \"https://idp.example/introspect\"\n\
+            userinfo_endpoint_uri = \"https://idp.example/userinfo\"\n\
+            introspection_client_id = \"kafka-broker\"\n\
+            introspection_client_secret_path = \"/etc/crabka/oauth-introspection/client-secret\"\n\
+            introspection_http_timeout_ms = 15000\n";
+        assert!(
+            toml.contains(expected),
+            "expected canonical introspection-mode block not found.\n--- expected ---\n{expected}\n--- got ---\n{toml}"
         );
     }
 
