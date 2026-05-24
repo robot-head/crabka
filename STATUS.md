@@ -2141,3 +2141,45 @@ Kafka client for ApiVersions.
   [`docs/superpowers/specs/2026-05-23-crabka-oauth-parity-roadmap-design.md`],
   [`docs/superpowers/plans/2026-05-23-crabka-operator-listener-user-oauth-50.md`].
 
+## Slice 49c — Broker: Custom TLS trust to IdP for JWKS (2026-05-23)
+
+- Adds an optional, broker-side custom TLS trust bundle for the JWKS endpoint
+  fetcher introduced in slice 49b: until now the `JwksRefresher` only reached
+  IdPs whose certs chain to webpki / Mozilla roots; this slice lets a
+  deployment point at a private CA (corp PKI, in-cluster Keycloak with a
+  self-signed cert) by passing a PEM bundle path. Unblocks slice 50b's
+  operator `tlsTrustedCertificates` listener surface (which will mount a
+  user-supplied `Secret` and pass the file path through) and the Keycloak
+  `kind` e2e upgrade from HTTP to HTTPS.
+- **`crates/security`:** new `jwks_trust.rs` with
+  `build_client_config_from_pem(pem: &[u8]) -> Result<rustls::ClientConfig>`
+  — parses one-or-many concatenated PEM `CERTIFICATE` blocks into an empty
+  `RootCertStore` (no webpki / Mozilla roots), returns a `ClientConfig` with
+  no client auth. Strimzi-shaped **replace** semantic: when set the user PEM
+  is the *exclusive* trust store, not additive. Reusable as-is for slice
+  49d's opaque-token introspection client.
+- **`crates/broker`:** new `[oauthbearer].jwks_tls_trust` TOML key in
+  `FileOAuthBearerConfig` and matching `BrokerConfig.oauthbearer_jwks_tls_trust:
+  Option<PathBuf>` runtime field (default `None`, webpki-roots behaviour
+  preserved when unset). `JwksRefresher::run` reads the PEM at startup,
+  calls the security helper, and wires the resulting `rustls::ClientConfig`
+  into the `reqwest` builder via `use_preconfigured_tls(...)`. PEM-load
+  failure is a hard-stop for the refresher (logged at `tracing::error`); the
+  broker stays up and OAUTHBEARER signed-token validation degrades
+  gracefully (handle empty → unknown-kid).
+- Tests: +5 security unit (`jwks_trust`: load single cert, load concatenated
+  chain, missing-file, empty-bytes, garbage-bytes-rejected); +2 broker
+  `file_config` unit (path threads through TOML; absent key defaults to
+  `None`); +2 broker HTTPS integration via a `tokio-rustls` server with an
+  `rcgen` self-signed cert (happy path: refresher populates the handle;
+  mismatched-trust: handle stays empty). Workspace `cargo clippy --tests -D
+  warnings` + `cargo fmt --check` clean.
+- Out of scope (deferred): operator CRD field + `Secret`-mounting wiring
+  (50b); opaque-token introspection, which will reuse this helper under a
+  new `introspection_tls_trust` key (49d); hot reload of the trust bundle
+  (refresher / broker restart required to pick up a rotated CA); multiple
+  PEM paths in one key (the operator concatenates before mounting, mirroring
+  Strimzi); cert pinning; mTLS to the IdP.
+- Reference doc:
+  [`docs/superpowers/specs/2026-05-23-crabka-broker-jwks-tls-trust-49c-design.md`].
+
