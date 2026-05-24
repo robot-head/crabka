@@ -60,7 +60,7 @@ users to wait for a long broker phase.
 | 49    | broker | A wire | OAUTHBEARER (KIP-255 / RFC 7628) | ✅ shipped |
 | 49b   | broker | A validator | JWKS / signed-JWT validation | ✅ shipped |
 | **50** | **operator** | **A surface** | **Listener OAuth + `KafkaUser` tls-external** | **First PR of this umbrella; this slice's own design + plan document the operator surface.** |
-| 49c   | broker | B | Custom TLS trust to IdP | Reusable for any future outbound HTTPS in the broker (e.g. introspection in 49d). Likely a small slice — new `[oauthbearer].jwks_tls_trust` config + a rustls `ClientConfig` builder that layers webpki + caller-supplied bundle. |
+| 49c   | broker | B | Custom TLS trust to IdP | Reusable for any future outbound HTTPS in the broker (e.g. introspection in 49d). Small slice — new `[oauthbearer].jwks_tls_trust` config + a rustls `ClientConfig` builder that uses the caller-supplied PEM bundle as the *exclusive* trust store (Strimzi-parity replace semantic, not additive). When unset, refresher keeps the slice-49b webpki-roots default. |
 | 50b   | operator | B | Listener `tlsTrustedCertificates` | Surface 49c. CRD field is a list of `{secretName, certificate}` (Strimzi shape). Reconciler mounts the Secret into the broker pod and writes the file path into the broker TOML. |
 | 49d   | broker | C | Opaque-token introspection | RFC 7662 introspection client, principal/claim derivation from the introspection JSON, optional `userInfoEndpointUri` for follow-up enrichment. Reuses 49c for the HTTPS trust config. |
 | 50c   | operator | C | Introspection CRD fields | `introspectionEndpointUri`, `userInfoEndpointUri`, `clientId`, `clientSecret` (Secret ref), `accessTokenIsJwt`, `checkAccessTokenType`. |
