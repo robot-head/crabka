@@ -2585,7 +2585,7 @@ introspection skips with a render-time rejection).
   `SignedJwsValidator`, `IntrospectionValidator`) carry an
   `Option<JsonPath>` for the pre-compiled expression; JWT-mode
   validators additionally carry `Option<String>` for `valid_token_type`
-  (header `typ` compared case-insensitively).
+  (header `typ` compared with strict string equality).
 - **Slice-50 stub removed:** `required_scope` + `scope_claim_name`
   fields on validators + the `scope_contains` / `scope_claim_contains`
   / `check_required_scope` helpers deleted. Operators rewrite

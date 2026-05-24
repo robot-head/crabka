@@ -2847,8 +2847,7 @@ jobs:
                   userInfoEndpointUri: https://kc-keycloak.keycloak.svc.cluster.local/realms/kafka/protocol/openid-connect/userinfo
                   validAudience: kafka-broker
                   userNameClaim: preferred_username
-                  customClaimCheck:
-                    scope: kafka.write
+                  customClaimCheck: "$.scope[?@ == 'kafka.write']"
                   clientId: kafka-broker
                   clientSecret:
                     secretName: keycloak-introspection-secret
