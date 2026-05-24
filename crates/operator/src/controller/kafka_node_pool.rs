@@ -322,7 +322,7 @@ fn render_broker_container(
     // `{kafka}-oauth-jwks-trust` Secret at
     // `/etc/crabka/oauth-jwks-trust` so the broker can read
     // `ca.crt` for JWKS-endpoint TLS verification (the broker's
-    // generated TOML's `jwks_tls_trust` points at this path).
+    // generated TOML's `idp_tls_trust` points at this path).
     if let Some(mount_path) = oauth_jwks_trust_mount {
         volume_mounts.push(json!({
             "name": "oauth-jwks-trust",
@@ -580,7 +580,7 @@ pub(crate) fn render_statefulset(
     // Slice 50b: the mount path is a stable contract with slice 49c's
     // broker (it reads the trust bundle from
     // `/etc/crabka/oauth-jwks-trust/ca.crt`), and matches the
-    // `jwks_tls_trust` TOML key rendered by T2's listener reconciler.
+    // `idp_tls_trust` TOML key rendered by T2's listener reconciler.
     let oauth_jwks_trust_mount = oauth_jwks_trust_secret
         .as_deref()
         .map(|_| "/etc/crabka/oauth-jwks-trust");

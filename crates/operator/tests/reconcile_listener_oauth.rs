@@ -668,7 +668,7 @@ async fn two_oauth_listeners_with_divergent_trust_certs_rejected_with_conflictin
     assert_listeners_invalid_with_reason(&observed, "c13", "ConflictingOAuthConfig");
 }
 
-// ── test 14: trust-certs reconcile end-to-end → jwks_tls_trust + managed Secret
+// ── test 14: trust-certs reconcile end-to-end → idp_tls_trust + managed Secret
 
 /// Slice 50b. A single OAuth listener with `tls_trusted_certificates`
 /// pointing at a user-supplied Secret must:
@@ -676,7 +676,7 @@ async fn two_oauth_listeners_with_divergent_trust_certs_rejected_with_conflictin
 ///      and SSA the managed `{kafka}-oauth-jwks-trust` Secret with the
 ///      concatenated PEM under key `ca.crt`,
 ///   2. cause the broker-config ConfigMap render path to emit
-///      `jwks_tls_trust = "/etc/crabka/oauth-jwks-trust/ca.crt"` in
+///      `idp_tls_trust = "/etc/crabka/oauth-jwks-trust/ca.crt"` in
 ///      `broker-0.toml` (T2's render-path wiring), and
 ///   3. surface `ListenersValid=True` on the Kafka status (the
 ///      reconcile path made it past validation + trust assembly with
@@ -686,7 +686,7 @@ async fn two_oauth_listeners_with_divergent_trust_certs_rejected_with_conflictin
 /// PATCH between the pool-list step and the broker-keystore step (the
 /// order they fire in `kafka.rs::reconcile`).
 #[tokio::test]
-async fn oauth_listener_with_tls_trusted_certificates_reconciles_renders_jwks_tls_trust_line() {
+async fn oauth_listener_with_tls_trusted_certificates_reconciles_renders_idp_tls_trust_line() {
     use base64::Engine as _;
 
     let items = vec![shared::fake_pool_list_item("brokers", "ns14", "c14", 1, 1)];
@@ -781,10 +781,10 @@ async fn oauth_listener_with_tls_trusted_certificates_reconciles_renders_jwks_tl
         "managed Secret bundle must match source PEM bytes"
     );
 
-    // (2) ConfigMap render contains the jwks_tls_trust pointer.
+    // (2) ConfigMap render contains the idp_tls_trust pointer.
     let toml = extract_broker0_toml(&observed, "c14");
     assert!(
-        toml.contains("jwks_tls_trust = \"/etc/crabka/oauth-jwks-trust/ca.crt\""),
+        toml.contains("idp_tls_trust = \"/etc/crabka/oauth-jwks-trust/ca.crt\""),
         "broker-0.toml must reference the mounted trust bundle; TOML: {toml}"
     );
 
