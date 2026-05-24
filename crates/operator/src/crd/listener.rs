@@ -168,9 +168,21 @@ pub struct ListenerAuthenticationOAuth {
     /// to `sub`; set e.g. to `preferred_username` for Keycloak.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_name_claim: Option<String>,
-    /// Optional required-scope check; see `OAuthCustomClaimCheck`.
+    /// Slice 49g (replaces slice 50's typed stub): JsonPath expression
+    /// (RFC 9535 via jsonpath-rust) evaluated against the token's claim
+    /// set. Token is rejected when the expression yields empty/null/false.
+    /// Examples (RFC 9535 syntax — note no parens around filter predicate):
+    ///   `"$.scope[?@ == 'kafka.write']"` — `scope` claim is an array
+    ///     containing 'kafka.write'.
+    ///   `"$[?@.aud == 'kafka-broker']"` — token's `aud` claim equals
+    ///     'kafka-broker'.
+    /// CRD-validated `minLength: 1` when set.
+    ///
+    /// Note: Strimzi uses Jayway JsonPath syntax (`$[?(@.x == 'y')]`); Crabka
+    /// uses RFC 9535 (`$[?@.x == 'y']` — no parens). Operators migrating
+    /// from Strimzi rewrite expressions accordingly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub custom_claim_check: Option<OAuthCustomClaimCheck>,
+    pub custom_claim_check: Option<String>,
     /// JWKS refresh cadence in seconds. Reconciler (T3) enforces
     /// `>= 30`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -237,6 +249,13 @@ pub struct ListenerAuthenticationOAuth {
     /// CRD-validated `minimum: 1`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_seconds_without_reauthentication: Option<u32>,
+    /// Slice 49g: when set, the JWT `typ` header must equal this
+    /// string. JWT-mode only — rejected with
+    /// `ListenersValid=False reason=ListenerOauthValidTokenTypeRejectedInIntrospectionMode`
+    /// when set on an `accessTokenIsJwt: false` listener (no JWT
+    /// header in introspection responses). CRD-validated `minLength: 1`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid_token_type: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -246,23 +265,6 @@ fn default_true() -> bool {
 #[allow(clippy::trivially_copy_pass_by_ref)]
 fn is_default_true(b: &bool) -> bool {
     *b
-}
-
-/// Narrowed shape of Strimzi's `customClaimCheck`. Strimzi accepts a
-/// JsonPath-ish expression language; slice 50 only honors
-/// "<scopeClaim> contains <scope>" because that's what 49b's validator
-/// implements. Wider expression support is deferred to slice 50f
-/// (paired with broker slice 49g) in the umbrella roadmap.
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct OAuthCustomClaimCheck {
-    /// Required scope value. The token's `scopeClaim` (default
-    /// `scope`) must contain this value.
-    pub scope: String,
-    /// Override the claim the broker reads scopes from. Defaults to
-    /// `scope`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scope_claim: Option<String>,
 }
 
 /// Slice 50b. One entry in
@@ -306,14 +308,8 @@ fn listener_authentication_schema(_: &mut schemars::SchemaGenerator) -> schemars
             "jwksEndpointUri": { "type": "string", "minLength": 1 },
             "validAudience": { "type": "string" },
             "userNameClaim": { "type": "string" },
-            "customClaimCheck": {
-                "type": "object",
-                "required": ["scope"],
-                "properties": {
-                    "scope": { "type": "string", "minLength": 1 },
-                    "scopeClaim": { "type": "string" },
-                },
-            },
+            "customClaimCheck": { "type": "string", "minLength": 1 },
+            "validTokenType": { "type": "string", "minLength": 1 },
             "jwksRefreshSeconds": { "type": "integer", "minimum": 0 },
             "maxClockSkewSeconds": { "type": "integer", "minimum": 0 },
             "enableOauthBearer": { "type": "boolean" },
@@ -451,7 +447,7 @@ authentication:
     #[test]
     fn listener_deserializes_oauth_authentication_full_config() {
         let l: Listener = serde_yaml::from_str(
-            r"
+            r#"
 name: oauth
 port: 9096
 type: internal
@@ -462,13 +458,11 @@ authentication:
   jwksEndpointUri: https://kc.example.com/realms/kafka/protocol/openid-connect/certs
   validAudience: kafka
   userNameClaim: preferred_username
-  customClaimCheck:
-    scope: kafka.write
-    scopeClaim: scp
+  customClaimCheck: "$.scope[?@ == 'kafka.write']"
   jwksRefreshSeconds: 300
   maxClockSkewSeconds: 30
   enableOauthBearer: false
-",
+"#,
         )
         .unwrap();
         let expected = ListenerAuthenticationOAuth {
@@ -478,10 +472,7 @@ authentication:
             ),
             valid_audience: Some("kafka".into()),
             user_name_claim: Some("preferred_username".into()),
-            custom_claim_check: Some(OAuthCustomClaimCheck {
-                scope: "kafka.write".into(),
-                scope_claim: Some("scp".into()),
-            }),
+            custom_claim_check: Some("$.scope[?@ == 'kafka.write']".into()),
             jwks_refresh_seconds: Some(300),
             max_clock_skew_seconds: Some(30),
             enable_oauth_bearer: false,
@@ -493,6 +484,7 @@ authentication:
             client_secret: None,
             introspection_http_timeout_seconds: None,
             max_seconds_without_reauthentication: None,
+            valid_token_type: None,
         };
         assert_eq!(
             l.authentication,
@@ -535,7 +527,7 @@ authentication:
     #[test]
     fn oauth_with_custom_claim_check_deserializes() {
         let l: Listener = serde_yaml::from_str(
-            r"
+            r#"
 name: oauth-scope
 port: 9098
 type: internal
@@ -544,17 +536,17 @@ authentication:
   type: oauth
   validIssuerUri: https://issuer.example.com/
   jwksEndpointUri: https://issuer.example.com/jwks
-  customClaimCheck:
-    scope: kafka.write
-",
+  customClaimCheck: "$.scope[?@ == 'kafka.write']"
+"#,
         )
         .unwrap();
         let Some(ListenerAuthentication::OAuth(oauth)) = l.authentication else {
             panic!("expected OAuth authentication");
         };
-        let ccc = oauth.custom_claim_check.expect("customClaimCheck present");
-        assert_eq!(ccc.scope, "kafka.write");
-        assert_eq!(ccc.scope_claim, None);
+        assert_eq!(
+            oauth.custom_claim_check.as_deref(),
+            Some("$.scope[?@ == 'kafka.write']")
+        );
     }
 
     #[test]
@@ -576,6 +568,7 @@ authentication:
             client_secret: None,
             introspection_http_timeout_seconds: None,
             max_seconds_without_reauthentication: None,
+            valid_token_type: None,
         });
         let json = serde_json::to_string(&auth).unwrap();
         assert!(
@@ -603,6 +596,7 @@ authentication:
             client_secret: None,
             introspection_http_timeout_seconds: None,
             max_seconds_without_reauthentication: None,
+            valid_token_type: None,
         });
         let json = serde_json::to_string(&auth).unwrap();
         assert!(json.contains("\"enableOauthBearer\":false"), "got: {json}");
@@ -688,9 +682,30 @@ authentication:
             "clientSecret",
             "introspectionHttpTimeoutSeconds",
             "maxSecondsWithoutReauthentication",
+            "validTokenType",
         ] {
             assert!(props.contains_key(want), "missing property {want}");
         }
+
+        // Slice 49g: customClaimCheck is now a string (not an object).
+        let ccc = v
+            .pointer("/properties/customClaimCheck")
+            .expect("customClaimCheck must be present");
+        assert_eq!(
+            ccc.pointer("/type").and_then(|x| x.as_str()),
+            Some("string"),
+            "customClaimCheck must be a string; got: {ccc}"
+        );
+
+        // Slice 49g: validTokenType is also a string with minLength 1.
+        let vtt = v
+            .pointer("/properties/validTokenType")
+            .expect("validTokenType must be present");
+        assert_eq!(
+            vtt.pointer("/type").and_then(|x| x.as_str()),
+            Some("string"),
+            "validTokenType must be a string; got: {vtt}"
+        );
     }
 
     #[test]
@@ -721,6 +736,7 @@ authentication:
             client_secret: None,
             introspection_http_timeout_seconds: None,
             max_seconds_without_reauthentication: None,
+            valid_token_type: None,
         };
         let json = serde_json::to_string(&original).unwrap();
         assert!(
@@ -750,6 +766,7 @@ authentication:
             client_secret: None,
             introspection_http_timeout_seconds: None,
             max_seconds_without_reauthentication: None,
+            valid_token_type: None,
         };
         let json = serde_json::to_string(&auth).unwrap();
         assert!(
@@ -795,6 +812,7 @@ authentication:
             }),
             introspection_http_timeout_seconds: None,
             max_seconds_without_reauthentication: None,
+            valid_token_type: None,
         };
         let json = serde_json::to_string(&original).unwrap();
         assert!(
@@ -838,6 +856,7 @@ authentication:
             client_secret: None,
             introspection_http_timeout_seconds: None,
             max_seconds_without_reauthentication: None,
+            valid_token_type: None,
         };
         let json = serde_json::to_string(&auth).unwrap();
         assert!(
@@ -880,6 +899,7 @@ authentication:
             }),
             introspection_http_timeout_seconds: None,
             max_seconds_without_reauthentication: None,
+            valid_token_type: None,
         };
         let json = serde_json::to_string(&auth).unwrap();
         assert!(
@@ -910,6 +930,7 @@ authentication:
             }),
             introspection_http_timeout_seconds: None,
             max_seconds_without_reauthentication: None,
+            valid_token_type: None,
         };
         let json = serde_json::to_string(&original).unwrap();
         assert!(
@@ -954,6 +975,7 @@ maxSecondsWithoutReauthentication: 300
             client_secret: None,
             introspection_http_timeout_seconds: None,
             max_seconds_without_reauthentication: None,
+            valid_token_type: None,
         };
         let auth = ListenerAuthentication::OAuth(cfg);
         let yaml = serde_yaml::to_string(&auth).expect("yaml must serialize");
@@ -961,6 +983,73 @@ maxSecondsWithoutReauthentication: 300
             !yaml.contains("maxSecondsWithoutReauthentication"),
             "None field must be omitted from YAML; got:\n{yaml}"
         );
+    }
+
+    #[test]
+    fn oauth_round_trip_with_custom_claim_check_string() {
+        let yaml = r#"
+type: oauth
+validIssuerUri: https://issuer.example/
+jwksEndpointUri: https://issuer.example/jwks
+customClaimCheck: "$.scope[?@ == 'kafka.write']"
+validTokenType: JWT
+"#;
+        let parsed: ListenerAuthentication = serde_yaml::from_str(yaml).expect("yaml must parse");
+        let ListenerAuthentication::OAuth(oauth) = &parsed else {
+            panic!("expected oauth variant");
+        };
+        assert_eq!(
+            oauth.custom_claim_check.as_deref(),
+            Some("$.scope[?@ == 'kafka.write']")
+        );
+        assert_eq!(oauth.valid_token_type.as_deref(), Some("JWT"));
+    }
+
+    #[test]
+    fn oauth_round_trip_without_custom_claim_check_and_valid_token_type_omits_both() {
+        let cfg = ListenerAuthenticationOAuth {
+            valid_issuer_uri: "https://issuer.example/".into(),
+            jwks_endpoint_uri: Some("https://issuer.example/jwks".into()),
+            valid_audience: None,
+            user_name_claim: None,
+            custom_claim_check: None,
+            jwks_refresh_seconds: None,
+            max_clock_skew_seconds: None,
+            enable_oauth_bearer: true,
+            tls_trusted_certificates: vec![],
+            access_token_is_jwt: true,
+            introspection_endpoint_uri: None,
+            user_info_endpoint_uri: None,
+            client_id: None,
+            client_secret: None,
+            introspection_http_timeout_seconds: None,
+            max_seconds_without_reauthentication: None,
+            valid_token_type: None,
+        };
+        let auth = ListenerAuthentication::OAuth(cfg);
+        let yaml = serde_yaml::to_string(&auth).expect("yaml must serialize");
+        assert!(
+            !yaml.contains("customClaimCheck"),
+            "None field must be omitted; got:\n{yaml}"
+        );
+        assert!(
+            !yaml.contains("validTokenType"),
+            "None field must be omitted; got:\n{yaml}"
+        );
+    }
+
+    #[test]
+    fn oauth_old_custom_claim_check_object_shape_no_longer_parses() {
+        // The slice-50 object shape `{ scope: ... }` is gone.
+        let yaml = r"
+type: oauth
+validIssuerUri: https://issuer.example/
+jwksEndpointUri: https://issuer.example/jwks
+customClaimCheck:
+  scope: kafka.write
+";
+        let result: Result<ListenerAuthentication, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_err(), "old object shape must be rejected; got Ok");
     }
 }
 
