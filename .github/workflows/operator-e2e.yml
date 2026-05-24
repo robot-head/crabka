@@ -13,12 +13,53 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Detect whether the PR touches operator-relevant code. Used to gate
+  # the kind-* jobs below — a docs-only or client-only PR skips the
+  # entire e2e suite. On push to main, every job runs unconditionally
+  # (their `if:` short-circuits on `github.event_name == 'push'`).
+  #
+  # Single `operator` filter covers all kind-* jobs. Per-job filters
+  # would be over-engineering: operator code is monolithic, a
+  # KafkaTopic-only change can still break the generic kind smoke test,
+  # and the per-job runtime savings don't justify the maintenance
+  # surface.
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    outputs:
+      operator: ${{ steps.filter.outputs.operator }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            operator:
+              - 'crates/operator/**'
+              - 'crates/broker/**'
+              - 'deploy/**'
+              - 'helm/**'
+              - 'packaging/melange/**'
+              - 'packaging/apko/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.github/workflows/operator-e2e.yml'
+
   # Build the operator + broker OCI images once and share them with every
   # kind job below via an artifact. melange/apko compile the Rust binaries
   # inside a docker build container (`--runner docker`), so the host Rust
   # toolchain and a host-side build cache would not be exercised here —
   # deduplicating the build across the four e2e jobs is the real win.
   build-images:
+    needs: changes
+    # Run on every push to main, on PRs that touch operator-relevant
+    # code, and on PRs labeled for an OAuth e2e run (even if the PR
+    # itself doesn't touch operator code — e.g. a workflow-only tweak).
+    if: |
+      github.event_name == 'push' ||
+      needs.changes.outputs.operator == 'true' ||
+      contains(github.event.pull_request.labels.*.name, 'e2e-oauth') ||
+      contains(github.event.pull_request.labels.*.name, 'e2e-oauth-introspection')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -64,7 +105,8 @@ jobs:
           if-no-files-found: error
 
   kind:
-    needs: build-images
+    needs: [build-images, changes]
+    if: ${{ github.event_name == 'push' || needs.changes.outputs.operator == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -791,7 +833,8 @@ jobs:
           if-no-files-found: ignore
 
   kind-network-policy:
-    needs: build-images
+    needs: [build-images, changes]
+    if: ${{ github.event_name == 'push' || needs.changes.outputs.operator == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -1035,7 +1078,8 @@ jobs:
           if-no-files-found: ignore
 
   kind-kafkatopic:
-    needs: build-images
+    needs: [build-images, changes]
+    if: ${{ github.event_name == 'push' || needs.changes.outputs.operator == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -1262,7 +1306,8 @@ jobs:
           if-no-files-found: ignore
 
   kind-listener-auth:
-    needs: build-images
+    needs: [build-images, changes]
+    if: ${{ github.event_name == 'push' || needs.changes.outputs.operator == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
