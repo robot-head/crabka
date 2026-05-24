@@ -314,13 +314,22 @@ pub async fn handle_authenticate_oauthbearer(
         } => {
             let mech = *mechanism;
             match validate_bearer(&req.auth_bytes, validator, now_ms).await {
-                Ok(principal) => {
-                    *auth = ConnectionAuth::Authenticated { principal };
+                Ok(outcome) => {
+                    // T1: surface the OAUTHBEARER token expiry as
+                    // session_lifetime_ms. The connection state still only
+                    // carries the principal — T2 extends `Authenticated` to
+                    // carry the session window for the per-connection re-auth
+                    // timer (KIP-368).
+                    let session_lifetime_ms =
+                        outcome.expires_at_ms.map_or(0, |e| (e - now_ms).max(0));
+                    *auth = ConnectionAuth::Authenticated {
+                        principal: outcome.principal,
+                    };
                     SaslAuthenticateResponse {
                         error_code: 0,
                         error_message: None,
                         auth_bytes: bytes::Bytes::new(),
-                        session_lifetime_ms: 0,
+                        session_lifetime_ms,
                         ..Default::default()
                     }
                 }
@@ -358,19 +367,19 @@ async fn validate_bearer(
     auth_bytes: &[u8],
     validator: &crabka_security::OAuthBearerValidator,
     now_ms: i64,
-) -> Result<Principal, &'static str> {
+) -> Result<crabka_security::AuthOutcome, &'static str> {
     let parsed = crabka_security::parse_client_initial_response(auth_bytes)
         .map_err(|_| "malformed OAUTHBEARER client response")?;
-    let principal = validator
+    let outcome = validator
         .validate(&parsed.token, now_ms)
         .await
         .map_err(|_| "token validation failed")?;
     if let Some(authzid) = parsed.authzid
-        && authzid != principal.name
+        && authzid != outcome.principal.name
     {
         return Err("authzid does not match token principal");
     }
-    Ok(principal)
+    Ok(outcome)
 }
 
 /// Parse the username from a SCRAM client-first message.
