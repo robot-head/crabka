@@ -1486,6 +1486,12 @@ mod tests {
     }
 
     #[test]
+    // Table-driven test: a single `perturbations` vec literal walks every
+    // field in `oauth_canonical`'s output. Splitting the function would
+    // obscure the field-by-field correspondence with the OAuth config
+    // surface and force the base fixture to be duplicated or threaded
+    // through a helper for no real gain.
+    #[allow(clippy::too_many_lines)]
     fn validate_listeners_rejects_two_oauth_listeners_with_divergent_config_in_any_canonical_field()
     {
         // Walk every field in `oauth_canonical`'s output (i.e. every

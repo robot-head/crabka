@@ -2342,7 +2342,7 @@ mod tests {
 
     /// Slice 50c. When the parent Kafka CR has an OAuth listener
     /// configured for introspection mode (`accessTokenIsJwt: false` +
-    /// `clientSecret`), the rendered StatefulSet must:
+    /// `clientSecret`), the rendered `StatefulSet` must:
     /// - expose the user's source Secret as a pod volume with a
     ///   projected `items` mapping that pins the user's key to the
     ///   fixed in-pod filename `client-secret`;
