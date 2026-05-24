@@ -5,6 +5,7 @@
 
 pub mod ca;
 mod jwks;
+mod jwks_trust;
 mod listener;
 mod mechanism;
 mod mtls;
@@ -16,6 +17,7 @@ pub mod scram;
 mod tls;
 
 pub use jwks::{Jwks, JwksHandle};
+pub use jwks_trust::{JwksTrustError, build_client_config_from_pem};
 pub use listener::ListenerProtocol;
 pub use mechanism::SaslMechanism;
 pub use mtls::extract_principal_from_cert;
