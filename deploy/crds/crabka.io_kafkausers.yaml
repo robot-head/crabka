@@ -261,9 +261,10 @@ spec:
               tlsPrincipal:
                 description: |-
                   The principal string the operator pinned in ACLs (e.g.
-                  `User:CN=alice` for TLS users, `User:alice` for SCRAM). Always
-                  populated when the user is provisioned. Load-bearing for
-                  debugging "why isn't my ACL matching" issues.
+                  `User:CN=alice` for TLS users, `User:alice` for SCRAM and
+                  `tls-external` users). Always populated when the user is
+                  provisioned. Load-bearing for debugging "why isn't my ACL
+                  matching" issues.
                 nullable: true
                 type: string
               username:
