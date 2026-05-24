@@ -61,7 +61,7 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls", "j
 serde_json = { workspace = true }
 # Slice 49g: compile customClaimCheck JsonPath expressions at config-load
 # and inject into the OAUTHBEARER validators.
-jsonpath-rust = "1.0"
+jsonpath-rust = { workspace = true }
 
 [dev-dependencies]
 crabka-broker = { version = "0.1", path = ".", features = ["test-helpers"] }
