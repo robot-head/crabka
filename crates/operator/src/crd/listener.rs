@@ -129,6 +129,10 @@ pub struct BrokerOverride {
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "type")]
 #[schemars(schema_with = "listener_authentication_schema")]
+// Operator state, not a hot-path enum — a few KB per ListenerAuthentication is fine.
+// Boxing the OAuth variant would cascade through every match site for no measurable
+// benefit (a handful of these per Kafka CR).
+#[allow(clippy::large_enum_variant)]
 pub enum ListenerAuthentication {
     #[serde(rename = "tls")]
     Tls,
@@ -206,7 +210,7 @@ pub struct ListenerAuthenticationOAuth {
     /// claims (slice 49d's userinfo enrichment).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_info_endpoint_uri: Option<String>,
-    /// HTTP Basic Auth client_id the broker uses against the
+    /// HTTP Basic Auth `client_id` the broker uses against the
     /// introspection endpoint. Required when `accessTokenIsJwt: false`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,

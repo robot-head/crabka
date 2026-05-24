@@ -376,7 +376,7 @@ async fn oauth_listener_with_http_jwks_uri_reconciles_but_emits_weak_auth_event(
     let (ctx, state) = build_ctx("ns5", rules);
 
     let mut cfg = oauth_cfg_minimal();
-    cfg.jwks_endpoint_uri = "http://issuer.example.com/jwks".into();
+    cfg.jwks_endpoint_uri = Some("http://issuer.example.com/jwks".into());
     let kafka =
         kafka_cr_with_listeners("c5", "ns5", vec![oauth_listener("oauth", 9095, true, cfg)]);
     reconcile(Arc::new(kafka), ctx).await.unwrap();
@@ -428,7 +428,7 @@ async fn oauth_listener_with_ftp_jwks_uri_rejected() {
     let (ctx, state) = build_ctx("ns6", rules);
 
     let mut cfg = oauth_cfg_minimal();
-    cfg.jwks_endpoint_uri = "ftp://issuer.example.com/jwks".into();
+    cfg.jwks_endpoint_uri = Some("ftp://issuer.example.com/jwks".into());
     let kafka =
         kafka_cr_with_listeners("c6", "ns6", vec![oauth_listener("oauth", 9095, true, cfg)]);
     reconcile(Arc::new(kafka), ctx).await.unwrap();
