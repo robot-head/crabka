@@ -228,6 +228,15 @@ pub struct ListenerAuthenticationOAuth {
     /// with `accessTokenIsJwt: false`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub introspection_http_timeout_seconds: Option<u32>,
+    /// Slice 50d: maximum SASL session lifetime (seconds) before the
+    /// broker forces re-authentication via KIP-368. Acts as a ceiling on
+    /// top of the token's `exp` — the effective session is
+    /// `min(token_exp - now, maxSecondsWithoutReauthentication)`. When
+    /// unset (the default), sessions last until the token's natural
+    /// `exp` (slice 49e behavior). Strimzi-shape field;
+    /// CRD-validated `minimum: 1`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_seconds_without_reauthentication: Option<u32>,
 }
 
 fn default_true() -> bool {
@@ -332,6 +341,7 @@ fn listener_authentication_schema(_: &mut schemars::SchemaGenerator) -> schemars
                 },
             },
             "introspectionHttpTimeoutSeconds": { "type": "integer", "minimum": 1 },
+            "maxSecondsWithoutReauthentication": { "type": "integer", "format": "int32", "minimum": 1 },
         },
     })
 }
@@ -482,6 +492,7 @@ authentication:
             client_id: None,
             client_secret: None,
             introspection_http_timeout_seconds: None,
+            max_seconds_without_reauthentication: None,
         };
         assert_eq!(
             l.authentication,
@@ -564,6 +575,7 @@ authentication:
             client_id: None,
             client_secret: None,
             introspection_http_timeout_seconds: None,
+            max_seconds_without_reauthentication: None,
         });
         let json = serde_json::to_string(&auth).unwrap();
         assert!(
@@ -590,6 +602,7 @@ authentication:
             client_id: None,
             client_secret: None,
             introspection_http_timeout_seconds: None,
+            max_seconds_without_reauthentication: None,
         });
         let json = serde_json::to_string(&auth).unwrap();
         assert!(json.contains("\"enableOauthBearer\":false"), "got: {json}");
@@ -674,6 +687,7 @@ authentication:
             "clientId",
             "clientSecret",
             "introspectionHttpTimeoutSeconds",
+            "maxSecondsWithoutReauthentication",
         ] {
             assert!(props.contains_key(want), "missing property {want}");
         }
@@ -706,6 +720,7 @@ authentication:
             client_id: None,
             client_secret: None,
             introspection_http_timeout_seconds: None,
+            max_seconds_without_reauthentication: None,
         };
         let json = serde_json::to_string(&original).unwrap();
         assert!(
@@ -734,6 +749,7 @@ authentication:
             client_id: None,
             client_secret: None,
             introspection_http_timeout_seconds: None,
+            max_seconds_without_reauthentication: None,
         };
         let json = serde_json::to_string(&auth).unwrap();
         assert!(
@@ -778,6 +794,7 @@ authentication:
                 key: "client-secret".into(),
             }),
             introspection_http_timeout_seconds: None,
+            max_seconds_without_reauthentication: None,
         };
         let json = serde_json::to_string(&original).unwrap();
         assert!(
@@ -820,6 +837,7 @@ authentication:
             client_id: None,
             client_secret: None,
             introspection_http_timeout_seconds: None,
+            max_seconds_without_reauthentication: None,
         };
         let json = serde_json::to_string(&auth).unwrap();
         assert!(
@@ -861,6 +879,7 @@ authentication:
                 key: "client-secret".into(),
             }),
             introspection_http_timeout_seconds: None,
+            max_seconds_without_reauthentication: None,
         };
         let json = serde_json::to_string(&auth).unwrap();
         assert!(
@@ -890,6 +909,7 @@ authentication:
                 key: "client-secret".into(),
             }),
             introspection_http_timeout_seconds: None,
+            max_seconds_without_reauthentication: None,
         };
         let json = serde_json::to_string(&original).unwrap();
         assert!(
@@ -898,6 +918,50 @@ authentication:
         );
         let round_tripped: ListenerAuthenticationOAuth = serde_json::from_str(&json).unwrap();
         assert_eq!(round_tripped, original);
+    }
+
+    #[test]
+    fn oauth_round_trip_with_max_seconds_without_reauthentication() {
+        let yaml = r"
+type: oauth
+validIssuerUri: https://issuer.example/
+jwksEndpointUri: https://issuer.example/jwks
+maxSecondsWithoutReauthentication: 300
+";
+        let parsed: ListenerAuthentication = serde_yaml::from_str(yaml).expect("yaml must parse");
+        let oauth = match &parsed {
+            ListenerAuthentication::OAuth(c) => c,
+            _ => panic!("expected oauth variant"),
+        };
+        assert_eq!(oauth.max_seconds_without_reauthentication, Some(300));
+    }
+
+    #[test]
+    fn oauth_round_trip_without_max_seconds_without_reauthentication_omits_field() {
+        let cfg = ListenerAuthenticationOAuth {
+            valid_issuer_uri: "https://issuer.example/".into(),
+            jwks_endpoint_uri: Some("https://issuer.example/jwks".into()),
+            valid_audience: None,
+            user_name_claim: None,
+            custom_claim_check: None,
+            jwks_refresh_seconds: None,
+            max_clock_skew_seconds: None,
+            enable_oauth_bearer: true,
+            tls_trusted_certificates: vec![],
+            access_token_is_jwt: true,
+            introspection_endpoint_uri: None,
+            user_info_endpoint_uri: None,
+            client_id: None,
+            client_secret: None,
+            introspection_http_timeout_seconds: None,
+            max_seconds_without_reauthentication: None,
+        };
+        let auth = ListenerAuthentication::OAuth(cfg);
+        let yaml = serde_yaml::to_string(&auth).expect("yaml must serialize");
+        assert!(
+            !yaml.contains("maxSecondsWithoutReauthentication"),
+            "None field must be omitted from YAML; got:\n{yaml}"
+        );
     }
 }
 
