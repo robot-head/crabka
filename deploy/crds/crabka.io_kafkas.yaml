@@ -141,15 +141,8 @@ spec:
                           - secretName
                           type: object
                         customClaimCheck:
-                          properties:
-                            scope:
-                              minLength: 1
-                              type: string
-                            scopeClaim:
-                              type: string
-                          required:
-                          - scope
-                          type: object
+                          minLength: 1
+                          type: string
                         enableOauthBearer:
                           type: boolean
                         introspectionEndpointUri:
@@ -200,6 +193,9 @@ spec:
                         validAudience:
                           type: string
                         validIssuerUri:
+                          minLength: 1
+                          type: string
+                        validTokenType:
                           minLength: 1
                           type: string
                       required:
