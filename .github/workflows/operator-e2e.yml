@@ -1951,8 +1951,8 @@ jobs:
   #   • `kafka-client-noscope` (token lacks `kafka.write`) is rejected with
   #     a SaslAuthenticationException at SASL-handshake time.
   #
-  # Also asserts the operator emitted a `WeakAuth` Warning Event on the
-  # `Kafka` resource, because the JWKS endpoint is `http://`.
+  # Also asserts NO `WeakAuth` Warning Event was emitted on the `Kafka`
+  # resource — all OAuth URLs are now `https://` (slice 50b).
   #
   # Gated to `push: main` + PRs labeled `e2e-oauth` so PRs that don't touch
   # OAuth code don't pay the multi-minute Keycloak rollout cost.
