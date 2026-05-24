@@ -2256,6 +2256,7 @@ jobs:
                   userNameClaim: client_id
                   customClaimCheck:
                     scope: kafka.write
+                  maxSecondsWithoutReauthentication: 300
                   tlsTrustedCertificates:
                     - secretName: keycloak-ca
                       certificate: tls.crt

@@ -2509,3 +2509,61 @@ Kafka client for ApiVersions.
 - Reference doc:
   [`docs/superpowers/specs/2026-05-24-crabka-broker-sasl-reauth-49e-design.md`].
 
+## Slice 50d — Operator + Broker: SASL session-lifetime cap (KIP-368 ceiling) (2026-05-24)
+
+Bundles a server-side cap on top of slice 49e + surfaces Strimzi's
+`maxSecondsWithoutReauthentication` field on
+`KafkaListenerAuthenticationOAuth`. Operators can now clamp
+OAUTHBEARER sessions tighter than the token's natural `exp`.
+
+- **Broker (`crates/broker/src/file_config.rs` + `config.rs`):** new
+  optional `[oauthbearer].max_session_lifetime_seconds: u32` TOML key,
+  threaded into `BrokerConfig.oauthbearer_max_session_lifetime_seconds`.
+  When unset, behavior is unchanged from 49e (session = token `exp`).
+- **Broker handler (`crates/broker/src/network/auth.rs`):** both the
+  Negotiating-success and Reauthenticating-success arms of
+  `handle_authenticate_oauthbearer` clamp:
+  `session_lifetime_ms = min(token_exp_ms - now_ms, cap * 1000)`. The
+  CLAMPED value is what's stored on `Authenticated.expires_at_ms`, so
+  the dispatch loop's KIP-368 timer fires at the time the client was
+  told (not the raw token exp).
+- **Operator CRD (`crates/operator/src/crd/listener.rs`):** new
+  `maxSecondsWithoutReauthentication: Option<u32>` field on
+  `ListenerAuthenticationOAuth`, Strimzi-shape camelCase. Hand-rolled
+  schema entry with `minimum: 1`.
+- **Operator reconciler (`crates/operator/src/controller/listeners.rs`):**
+  `render_broker_toml` emits `max_session_lifetime_seconds = N` under
+  `[oauthbearer]` when set. The existing cross-listener divergence
+  walk picks up the new field via `oauth_canonical`'s PartialEq
+  comparison; the per-field perturbation list explicitly covers it.
+- **Semantic divergence from Strimzi (acknowledged):** Strimzi's
+  unset = no re-auth (session = ∞), set = enable re-auth with cap.
+  Crabka 50d: unset = session = token exp (49e default), set =
+  clamp tighter. Strimzi parity is shape-only; greenfield-OK because
+  there are no users with existing unbounded expectations.
+- **Tests:** 3 new broker unit tests (clamp below / unset / above
+  token exp) + 1 new broker integration test
+  (`oauthbearer_session_capped_by_broker_max_session_lifetime_seconds`).
+  2 new operator CRD round-trip tests (with-field + omitted) +
+  extended schema regression. 2 new operator reconciler unit tests
+  (render set/unset) + extended cross-listener divergence walk. 2
+  new operator integration tests (render-through + divergence). A
+  followup commit (`7678395`) closed a `clippy::manual_let_else` lint
+  in T2's new round-trip test.
+- **Scope expansion (CLAUDE.md greenfield rule):** T2/T3/T4 swept ~30
+  fixture sites across operator code/tests (the bulk in
+  `crd/listener.rs` test fixtures + `controller/listeners.rs` tests +
+  the divergence-walk `base`; plus 2 in `controller/kafka.rs`, 3 in
+  `controller/kafka_node_pool.rs`, and one each in
+  `reconcile_oauth_introspection.rs` and `reconcile_oauth_trust.rs`)
+  so the struct extension compiled atomically with no
+  `#[serde(default)]` shim.
+- **E2E:** existing `kind-oauth` job's Kafka CR YAML extended with
+  `maxSecondsWithoutReauthentication: 300`. No new job.
+- **Reference doc:** `[docs/superpowers/specs/2026-05-24-crabka-sasl-session-cap-50d-design.md]`.
+- **Out of scope:** mechanism-agnostic `connections.max.reauth.ms`
+  (would force re-auth on PLAIN/SCRAM); per-listener divergent caps
+  (still rejected as `ConflictingOAuthListenerConfig`); client-side
+  re-auth scheduler in Crabka's Kafka client crate (broker-only this
+  slice); new e2e workflow job.
+

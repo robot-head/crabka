@@ -1357,6 +1357,7 @@ mod tests {
             client_id: None,
             client_secret: None,
             introspection_http_timeout_seconds: None,
+            max_seconds_without_reauthentication: None,
         }
     }
 
@@ -1522,6 +1523,7 @@ mod tests {
             client_id: None,
             client_secret: None,
             introspection_http_timeout_seconds: None,
+            max_seconds_without_reauthentication: None,
         };
         let perturbations: Vec<(&str, crate::crd::ListenerAuthenticationOAuth)> = vec![
             (
@@ -1605,6 +1607,13 @@ mod tests {
                     ..base.clone()
                 },
             ),
+            (
+                "max_seconds_without_reauthentication",
+                crate::crd::ListenerAuthenticationOAuth {
+                    max_seconds_without_reauthentication: Some(600),
+                    ..base.clone()
+                },
+            ),
         ];
         for (field, perturbed) in perturbations {
             let listeners = vec![
@@ -1647,6 +1656,7 @@ mod tests {
                 key: "k".into(),
             }),
             introspection_http_timeout_seconds: None,
+            max_seconds_without_reauthentication: None,
         };
         let perturbations: Vec<(&str, crate::crd::ListenerAuthenticationOAuth)> = vec![
             (
@@ -1727,6 +1737,7 @@ mod tests {
                 key: "client-secret".into(),
             }),
             introspection_http_timeout_seconds: None,
+            max_seconds_without_reauthentication: None,
         }
     }
 
@@ -2619,6 +2630,9 @@ pub fn render_broker_toml(
                 r#"idp_tls_trust = "/etc/crabka/oauth-jwks-trust/ca.crt""#,
             );
         }
+        if let Some(s) = oauth_cfg.max_seconds_without_reauthentication {
+            let _ = writeln!(out, "max_session_lifetime_seconds = {s}");
+        }
         out.push('\n');
     }
 
@@ -2837,6 +2851,7 @@ mod toml_rendering_tests {
             client_id: None,
             client_secret: None,
             introspection_http_timeout_seconds: None,
+            max_seconds_without_reauthentication: None,
         }
     }
 
@@ -2933,6 +2948,7 @@ mod toml_rendering_tests {
             client_id: None,
             client_secret: None,
             introspection_http_timeout_seconds: None,
+            max_seconds_without_reauthentication: None,
         };
         let listeners = vec![oauth_listener_for_render("oauth", 9095, true, cfg)];
         let toml = render_broker_toml(
@@ -2998,6 +3014,7 @@ mod toml_rendering_tests {
             client_id: None,
             client_secret: None,
             introspection_http_timeout_seconds: None,
+            max_seconds_without_reauthentication: None,
         };
         let listeners = vec![oauth_listener_for_render("oauth", 9095, true, cfg)];
         let toml = render_broker_toml(
@@ -3010,6 +3027,59 @@ mod toml_rendering_tests {
             None,
         );
         assert!(!toml.contains("idp_tls_trust"), "TOML: {toml}");
+    }
+
+    #[test]
+    fn render_broker_toml_emits_max_session_lifetime_seconds_when_set() {
+        // Slice 50d: when the listener's maxSecondsWithoutReauthentication
+        // is set, the rendered [oauthbearer] block carries
+        // `max_session_lifetime_seconds = N` so the broker clamps
+        // OAUTHBEARER session_lifetime_ms tighter than the token's exp.
+        use std::collections::BTreeMap;
+        let mut cfg = oauth_full_cfg();
+        cfg.max_seconds_without_reauthentication = Some(300);
+        let listeners = vec![oauth_listener_for_render("oauth", 9095, true, cfg)];
+        let toml = render_broker_toml(
+            0,
+            &listeners,
+            &addrs_for("oauth", 9095),
+            "oauth",
+            &BTreeMap::new(),
+            Some(&render_tls()),
+            None,
+        );
+        assert!(
+            toml.contains("max_session_lifetime_seconds = 300"),
+            "expected TOML to contain max_session_lifetime_seconds = 300; got:\n{toml}"
+        );
+    }
+
+    #[test]
+    fn render_broker_toml_omits_max_session_lifetime_seconds_when_unset() {
+        // Slice 50d: when maxSecondsWithoutReauthentication is unset
+        // (default), the rendered TOML must NOT contain the key — the
+        // broker then leaves session lifetime at the token's natural exp
+        // (49e default behavior).
+        use std::collections::BTreeMap;
+        let listeners = vec![oauth_listener_for_render(
+            "oauth",
+            9095,
+            true,
+            oauth_full_cfg(),
+        )];
+        let toml = render_broker_toml(
+            0,
+            &listeners,
+            &addrs_for("oauth", 9095),
+            "oauth",
+            &BTreeMap::new(),
+            Some(&render_tls()),
+            None,
+        );
+        assert!(
+            !toml.contains("max_session_lifetime_seconds"),
+            "TOML must omit max_session_lifetime_seconds when unset; got:\n{toml}"
+        );
     }
 
     #[test]
@@ -3169,6 +3239,7 @@ mod toml_rendering_tests {
             client_id: None,
             client_secret: None,
             introspection_http_timeout_seconds: None,
+            max_seconds_without_reauthentication: None,
         };
         let listeners = vec![oauth_listener_for_render("oauth", 9095, true, cfg)];
         let toml = render_broker_toml(
@@ -3219,6 +3290,7 @@ mod toml_rendering_tests {
                 key: "client-secret".into(),
             }),
             introspection_http_timeout_seconds: Some(15),
+            max_seconds_without_reauthentication: None,
         }
     }
 
@@ -3933,6 +4005,7 @@ mod weak_auth_tests {
                     client_id: None,
                     client_secret: None,
                     introspection_http_timeout_seconds: None,
+                    max_seconds_without_reauthentication: None,
                 },
             )),
             configuration: None,

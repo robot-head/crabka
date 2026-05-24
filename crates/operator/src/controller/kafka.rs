@@ -1699,6 +1699,7 @@ mod tests {
             client_id: None,
             client_secret: None,
             introspection_http_timeout_seconds: None,
+            max_seconds_without_reauthentication: None,
         }
     }
 
@@ -1722,6 +1723,7 @@ mod tests {
                 key: key.into(),
             }),
             introspection_http_timeout_seconds: None,
+            max_seconds_without_reauthentication: None,
         }
     }
 

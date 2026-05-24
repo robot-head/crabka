@@ -884,6 +884,32 @@ async fn start_oauthbearer_broker(
     Broker::start(cfg).await.expect("broker must start")
 }
 
+/// Slice 50d: same as [`start_oauthbearer_broker`] but with a configurable
+/// server-side ceiling on OAUTHBEARER session lifetime. Passing
+/// `Some(seconds)` clamps `session_lifetime_ms` (and the dispatch-loop
+/// re-auth deadline) to `min(token_exp - now, seconds * 1000)`. Passing
+/// `None` reproduces the 49e default (session = token exp).
+async fn start_oauthbearer_broker_with_cap(
+    log_dir: &std::path::Path,
+    validator: crabka_security::OAuthBearerValidator,
+    max_session_lifetime_seconds: Option<u32>,
+) -> crabka_broker::BrokerHandle {
+    let mut cfg = BrokerConfig::for_tests(log_dir.to_path_buf());
+    cfg.listeners = vec![ListenerSpec {
+        name: "SASL_PLAINTEXT".to_string(),
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        advertised: "127.0.0.1:0".to_string(),
+        protocol: ListenerProtocol::SaslPlaintext,
+        tls_config: None,
+        sasl_mechanisms: None,
+    }];
+    cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
+    cfg.enabled_sasl_mechanisms = vec![SaslMechanism::OAuthBearer];
+    cfg.oauthbearer_validator = validator;
+    cfg.oauthbearer_max_session_lifetime_seconds = max_session_lifetime_seconds;
+    Broker::start(cfg).await.expect("broker must start")
+}
+
 /// `ApiVersions` (pre-auth) + `SaslHandshake`(OAUTHBEARER); asserts the broker
 /// advertises OAUTHBEARER and the handshake succeeds.
 async fn oauthbearer_handshake(stream: &mut TcpStream, corr: &mut i32) -> Result<(), io::Error> {
@@ -1315,6 +1341,54 @@ async fn oauthbearer_session_lifetime_ms_set_from_token_exp() {
     assert!(
         (590_000..605_000).contains(&session_lifetime_ms),
         "session_lifetime_ms = {session_lifetime_ms}, expected ~600_000"
+    );
+
+    handle.shutdown().await;
+}
+
+/// Slice 50d: when the broker is configured with
+/// `[oauthbearer].max_session_lifetime_seconds`, the response's
+/// `session_lifetime_ms` is clamped to `min(token_exp_ms - now_ms, cap *
+/// 1000)`, and the dispatch loop's deadline is anchored to the CLAMPED
+/// value so the broker enforces what the client was told.
+#[tokio::test(flavor = "current_thread")]
+async fn oauthbearer_session_capped_by_broker_max_session_lifetime_seconds() {
+    let log_dir = tempfile::tempdir().unwrap();
+    let handle = start_oauthbearer_broker_with_cap(
+        log_dir.path(),
+        oauthbearer_zero_skew_validator(),
+        Some(30), // 30s cap
+    )
+    .await;
+    let addr = handle.listen_addr();
+
+    // Token exp = now + 600s. Cap = 30s. Expected session = 30_000 ms.
+    let exp_secs = now_unix_secs() + 600;
+    let token = unsecured_jws("alice", exp_secs);
+
+    let (mut stream, session_lifetime_ms) = drive_sasl_oauthbearer_session_open(addr, &token)
+        .await
+        .expect("OAUTHBEARER session must succeed");
+
+    // Cap should clamp the response.
+    assert!(
+        (29_000..31_000).contains(&session_lifetime_ms),
+        "session_lifetime_ms = {session_lifetime_ms}, expected ~30_000 (capped)"
+    );
+
+    // Now pause and advance past cap; broker should close.
+    tokio::time::pause();
+    tokio::time::advance(std::time::Duration::from_secs(31)).await;
+    tokio::time::resume();
+
+    let mut buf = [0_u8; 16];
+    let n = tokio::time::timeout(std::time::Duration::from_secs(5), stream.read(&mut buf))
+        .await
+        .expect("read should not hang")
+        .expect("read should not error");
+    assert_eq!(
+        n, 0,
+        "expected EOF after cap-bounded session expiry, got {n} bytes"
     );
 
     handle.shutdown().await;

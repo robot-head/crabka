@@ -1223,6 +1223,7 @@ async fn handle_sasl_frame(
                             auth,
                             &broker.config.oauthbearer_validator,
                             now_ms,
+                            broker.config.oauthbearer_max_session_lifetime_seconds,
                         )
                         .await
                     }

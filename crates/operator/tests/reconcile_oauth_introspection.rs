@@ -71,6 +71,7 @@ fn introspection_oauth_cfg() -> ListenerAuthenticationOAuth {
             key: SOURCE_KEY.into(),
         }),
         introspection_http_timeout_seconds: None,
+        max_seconds_without_reauthentication: None,
     }
 }
 
