@@ -2336,3 +2336,101 @@ Kafka client for ApiVersions.
 - Reference doc:
   [`docs/superpowers/specs/2026-05-24-crabka-broker-oauth-introspection-49d-design.md`].
 
+## Slice 50c — Operator: Listener OAuth introspection surface (2026-05-24)
+
+- Surfaces slice 49d's broker introspection validator on the operator
+  CRD: `listeners[].authentication.type: oauth` grows an explicit
+  `accessTokenIsJwt` toggle plus the introspection/userinfo endpoint
+  URIs, IdP client credentials, and HTTP timeout. The toggle is *not*
+  inferred from sibling presence (Strimzi parity); reconciler
+  cross-mode validation rejects any field that doesn't belong to the
+  active mode. A second e2e job `kind-oauth-introspection` runs the
+  introspection path end-to-end against Keycloak alongside the
+  pre-existing JWT-mode `kind-oauth` job.
+- **`crates/operator/src/crd/listener.rs`:** `jwksEndpointUri`
+  flipped from `String` (required) to `Option<String>` (greenfield
+  rename per `CLAUDE.md`, no `serde(default)` shim). Six new siblings
+  on `ListenerAuthenticationOAuth`: `accessTokenIsJwt: bool` (default
+  `true`), `introspectionEndpointUri: Option<String>`,
+  `userInfoEndpointUri: Option<String>`, `clientId: Option<String>`,
+  `clientSecret: Option<OauthClientSecretRef>` (new Strimzi-shaped
+  struct `{ secretName, key }`), and
+  `introspectionHttpTimeoutSeconds: Option<u32>`. Hand-rolled schema
+  extended; CRD regenerated.
+- **`crates/operator/src/controller/common.rs`:** four new
+  `ReconcileError` variants surfaced as `Ready=False`:
+  `InvalidListenerOauthAccessTokenIsJwt` (cross-mode validation —
+  required field missing or forbidden field set for the active mode),
+  `MissingOauthIntrospectionSecret` (`clientSecret.secretName` not
+  found in the namespace), `MissingOauthIntrospectionKey` (Secret
+  exists but doesn't contain `clientSecret.key`), and
+  `EmptyOauthIntrospectionValue` (key present but value empty). No
+  central `reason()` method — reasons are matched inline at each
+  call-site in `reconcile_kafka`.
+- **`crates/operator/src/controller/listeners.rs`:** `render_broker_toml`
+  forks on `access_token_is_jwt`. `true` → emit
+  `jwks_endpoint_uri = ...` (the slice 49b path). `false` → emit
+  introspection-mode keys in the slice 49d field order:
+  `introspection_endpoint_uri`, `userinfo_endpoint_uri` (when set),
+  `introspection_client_id`, `introspection_client_secret_path` (the
+  fixed pod-mount path), `introspection_http_timeout_ms`. Per-field
+  cross-listener divergence walk extended for each new field so a
+  mismatch yields a precise conflict message.
+- **`crates/operator/src/controller/kafka.rs`:** new
+  `pub(crate) struct OauthIntrospectionMount` + pure
+  `oauth_introspection_secret_mount` derivation helper, plus an async
+  `reconcile_oauth_introspection_secret` validator that reads the
+  referenced source `Secret` from the Kafka CR's namespace and checks
+  the named key is present and non-empty. **Validation-only** — no
+  managed-Secret upsert, unlike slice 50b's `tlsTrustedCertificates`
+  (which concatenates multiple PEM keys and therefore needs a managed
+  aggregate).
+- **`crates/operator/src/controller/kafka_node_pool.rs`:** the
+  source `Secret` is mounted DIRECTLY into the broker pod via a
+  projected `items: [{key: <user-key>, path: "client-secret"}]` entry,
+  so the broker reads from `/etc/crabka/oauth-introspection/client-secret`
+  regardless of what the user named the key in their `Secret`.
+  `defaultMode: 0o400`, `readOnly: true`. Cleanly composes with the
+  slice 50b trust-bundle mount (different mount path, independent
+  volume).
+- **Sample + CRD regen:** `crates/operator/sample/oauth-listener.yaml`
+  gains a commented introspection example; `deploy/crds/crabka.io_kafkas.yaml`
+  regenerated.
+- **E2E (`.github/workflows/operator-e2e.yml`):** new
+  `kind-oauth-introspection` job mirrors `kind-oauth` but bootstraps a
+  *second* Keycloak client `kafka-broker` (confidential,
+  service-account enabled) for the broker to authenticate to the
+  introspection endpoint; the operator-provisioned Secret carries that
+  client's secret. Producer/consumer Jobs are unchanged from
+  `kind-oauth` — the token endpoint is identical regardless of which
+  validation mode the broker runs. Label-gated `e2e-oauth-introspection`
+  + `push` to main.
+- Tests: +6 `crd::listener` unit (round-trip + schema-regression
+  extension for all six new fields); +7 `controller::listeners`
+  validation + +5 TOML render + +1 divergence-walk extension + +1
+  introspection-mode divergence; +4 `controller::kafka` unit
+  (introspection helper paths); +2 `controller::kafka_node_pool` unit
+  (pod-mount present/absent); +1 `tests/reconcile_listener_oauth.rs`
+  divergence integration; +9 `tests/reconcile_oauth_introspection.rs`
+  integration (happy path, missing source Secret, missing key, empty
+  value, validation-only-no-managed-Secret, both-modes-rejected,
+  cross-mode-field-on-wrong-mode, pod-mount-when-some,
+  pod-mount-absent-when-jwt). ~35 new tests total. Workspace
+  `cargo fmt --check` + `cargo clippy --workspace --all-targets -D
+  warnings` + `cargo test --workspace` all clean; CRD-drift gate
+  (`tools/regen-crds.sh` then `git diff --exit-code -- deploy/crds/`)
+  also clean.
+- Out of scope (deferred): per-listener introspection config (still
+  rejected with `ConflictingOAuthConfig` until slice 49h);
+  source-`Secret` reflector for instant rotation (broker reads at
+  startup — rotation requires pod restart); cross-namespace `Secret`
+  references (must live in the Kafka CR's namespace);
+  `client_secret_post` / `private_key_jwt` introspection-endpoint
+  auth methods (slice 49d ships HTTP Basic only); outbound mTLS to the
+  IdP (slice 49c provides one-way TLS trust only; mTLS would need a
+  future broker slice); operator-managed Keycloak client provisioning
+  (ops bootstrap the IdP's `kafka-broker` client out-of-band — see the
+  kind e2e for the manual `kcadm` flow).
+- Reference doc:
+  [`docs/superpowers/specs/2026-05-24-crabka-operator-oauth-introspection-50c-design.md`].
+
