@@ -2550,12 +2550,14 @@ OAUTHBEARER sessions tighter than the token's natural `exp`.
   new operator integration tests (render-through + divergence). A
   followup commit (`7678395`) closed a `clippy::manual_let_else` lint
   in T2's new round-trip test.
-- **Scope expansion (CLAUDE.md greenfield rule):** T2/T3/T4 swept ~14
-  fixture sites across operator code/tests (notably 2 in
-  `controller/kafka.rs`, 3 in `controller/kafka_node_pool.rs`, plus
-  one each in `reconcile_oauth_introspection.rs` and
-  `reconcile_oauth_trust.rs`) so the struct extension compiled
-  atomically with no `#[serde(default)]` shim.
+- **Scope expansion (CLAUDE.md greenfield rule):** T2/T3/T4 swept ~30
+  fixture sites across operator code/tests (the bulk in
+  `crd/listener.rs` test fixtures + `controller/listeners.rs` tests +
+  the divergence-walk `base`; plus 2 in `controller/kafka.rs`, 3 in
+  `controller/kafka_node_pool.rs`, and one each in
+  `reconcile_oauth_introspection.rs` and `reconcile_oauth_trust.rs`)
+  so the struct extension compiled atomically with no
+  `#[serde(default)]` shim.
 - **E2E:** existing `kind-oauth` job's Kafka CR YAML extended with
   `maxSecondsWithoutReauthentication: 300`. No new job.
 - **Reference doc:** `[docs/superpowers/specs/2026-05-24-crabka-sasl-session-cap-50d-design.md]`.
