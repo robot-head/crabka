@@ -262,6 +262,7 @@ fn render_broker_container(
     logging_enabled: bool,
     jbod_extra_mounts: &[(String, String)],
     oauth_jwks_trust_mount: Option<&str>,
+    oauth_introspection_mount_path: Option<&str>,
 ) -> serde_json::Value {
     let mut ports = vec![json!({
         "containerPort": BROKER_PORT, "name": "kafka-internal", "protocol": "TCP"
@@ -326,6 +327,19 @@ fn render_broker_container(
     if let Some(mount_path) = oauth_jwks_trust_mount {
         volume_mounts.push(json!({
             "name": "oauth-jwks-trust",
+            "mountPath": mount_path,
+            "readOnly": true,
+        }));
+    }
+    // Slice 50c: when the parent Kafka has an OAuth listener configured
+    // for introspection mode (`accessTokenIsJwt: false` + `clientSecret`),
+    // mount the source Secret directly at
+    // `/etc/crabka/oauth-introspection` so the broker can read the
+    // introspection-endpoint Basic-Auth client secret from
+    // `<mount>/client-secret` (matching T3's TOML render).
+    if let Some(mount_path) = oauth_introspection_mount_path {
+        volume_mounts.push(json!({
+            "name": "oauth-introspection-secret",
             "mountPath": mount_path,
             "readOnly": true,
         }));
@@ -399,6 +413,7 @@ fn render_storage(
     pod_labels: &BTreeMap<String, String>,
     parent_name: &str,
     oauth_jwks_trust_secret: Option<&str>,
+    oauth_introspection_mount: Option<&crate::controller::kafka::OauthIntrospectionMount>,
 ) -> (serde_json::Value, Vec<serde_json::Value>) {
     let broker_config_vol = json!({
         "name": "broker-config",
@@ -496,6 +511,26 @@ fn render_storage(
                 }
             }));
     }
+    // Slice 50c: append the user-owned source Secret as a read-only pod
+    // volume when an OAuth listener is configured for introspection mode.
+    // The projected `items` mapping pins the user's source key to a
+    // fixed in-pod path (`client-secret`) so the broker always reads
+    // `/etc/crabka/oauth-introspection/client-secret` regardless of
+    // what the user named their key. Same 0o400 mode as the other
+    // Secret volumes above.
+    if let Some(mount) = oauth_introspection_mount {
+        volumes
+            .as_array_mut()
+            .expect("render_storage built `volumes` via json!([...])")
+            .push(json!({
+                "name": "oauth-introspection-secret",
+                "secret": {
+                    "secretName": mount.secret_name,
+                    "items": [{ "key": mount.key, "path": "client-secret" }],
+                    "defaultMode": 0o400_i32,
+                }
+            }));
+    }
     (volumes, templates)
 }
 
@@ -584,6 +619,18 @@ pub(crate) fn render_statefulset(
     let oauth_jwks_trust_mount = oauth_jwks_trust_secret
         .as_deref()
         .map(|_| "/etc/crabka/oauth-jwks-trust");
+    // Slice 50c: derive the OAUTHBEARER introspection client-secret
+    // mount info from the parent CR's listeners (mirrors slice 50b's
+    // jwks-trust derivation above). `Some` iff at least one OAuth
+    // listener uses `accessTokenIsJwt: false` with a `clientSecret`
+    // ref. The mount path is a stable contract with T3's TOML render —
+    // the broker reads `<mount>/client-secret` regardless of the
+    // user's source key name.
+    let oauth_introspection_mount =
+        crate::controller::kafka::oauth_introspection_secret_mount(parent);
+    let oauth_introspection_mount_path = oauth_introspection_mount
+        .as_ref()
+        .map(|_| "/etc/crabka/oauth-introspection");
     let main = render_broker_container(
         broker_image,
         &secret_name,
@@ -593,6 +640,7 @@ pub(crate) fn render_statefulset(
         logging_enabled,
         &jbod_extra,
         oauth_jwks_trust_mount,
+        oauth_introspection_mount_path,
     );
 
     // Merge user-provided pod metadata under operator-owned labels.
@@ -662,6 +710,7 @@ pub(crate) fn render_statefulset(
         &pod_labels,
         &parent_name,
         oauth_jwks_trust_secret.as_deref(),
+        oauth_introspection_mount.as_ref(),
     );
     let retention_policy = render_pvc_retention_policy(pool.spec.storage.as_ref());
 
@@ -2150,7 +2199,7 @@ mod tests {
             tls: true,
             authentication: Some(ListenerAuthentication::OAuth(ListenerAuthenticationOAuth {
                 valid_issuer_uri: "https://iss.example/".into(),
-                jwks_endpoint_uri: "https://iss.example/jwks".into(),
+                jwks_endpoint_uri: Some("https://iss.example/jwks".into()),
                 valid_audience: None,
                 user_name_claim: None,
                 custom_claim_check: None,
@@ -2161,6 +2210,12 @@ mod tests {
                     secret_name: "my-idp-ca".into(),
                     certificate: "ca.crt".into(),
                 }],
+                access_token_is_jwt: true,
+                introspection_endpoint_uri: None,
+                user_info_endpoint_uri: None,
+                client_id: None,
+                client_secret: None,
+                introspection_http_timeout_seconds: None,
             })),
             configuration: None,
             network_policy_peers: None,
@@ -2245,7 +2300,7 @@ mod tests {
             tls: true,
             authentication: Some(ListenerAuthentication::OAuth(ListenerAuthenticationOAuth {
                 valid_issuer_uri: "https://iss.example/".into(),
-                jwks_endpoint_uri: "https://iss.example/jwks".into(),
+                jwks_endpoint_uri: Some("https://iss.example/jwks".into()),
                 valid_audience: None,
                 user_name_claim: None,
                 custom_claim_check: None,
@@ -2253,6 +2308,12 @@ mod tests {
                 max_clock_skew_seconds: None,
                 enable_oauth_bearer: true,
                 tls_trusted_certificates: vec![],
+                access_token_is_jwt: true,
+                introspection_endpoint_uri: None,
+                user_info_endpoint_uri: None,
+                client_id: None,
+                client_secret: None,
+                introspection_http_timeout_seconds: None,
             })),
             configuration: None,
             network_policy_peers: None,
@@ -2276,6 +2337,121 @@ mod tests {
                 .unwrap()
                 .iter()
                 .all(|v| v.name != "oauth-jwks-trust"),
+        );
+    }
+
+    /// Slice 50c. When the parent Kafka CR has an OAuth listener
+    /// configured for introspection mode (`accessTokenIsJwt: false` +
+    /// `clientSecret`), the rendered StatefulSet must:
+    /// - expose the user's source Secret as a pod volume with a
+    ///   projected `items` mapping that pins the user's key to the
+    ///   fixed in-pod filename `client-secret`;
+    /// - mount that volume on the broker container at the canonical
+    ///   path `/etc/crabka/oauth-introspection` (matching T3's TOML
+    ///   render).
+    #[test]
+    fn render_statefulset_mounts_oauth_introspection_secret_when_introspection_mode() {
+        use crate::crd::{
+            Listener, ListenerAuthentication, ListenerAuthenticationOAuth, ListenerType,
+            OauthClientSecretRef,
+        };
+        let mut parent = parent_fixture("demo");
+        parent.spec.listeners = vec![Listener {
+            name: "oauth".into(),
+            port: 9094,
+            type_: ListenerType::Internal,
+            tls: true,
+            authentication: Some(ListenerAuthentication::OAuth(ListenerAuthenticationOAuth {
+                valid_issuer_uri: "https://iss.example/".into(),
+                jwks_endpoint_uri: None,
+                valid_audience: None,
+                user_name_claim: None,
+                custom_claim_check: None,
+                jwks_refresh_seconds: None,
+                max_clock_skew_seconds: None,
+                enable_oauth_bearer: true,
+                tls_trusted_certificates: vec![],
+                access_token_is_jwt: false,
+                introspection_endpoint_uri: Some("https://iss.example/introspect".into()),
+                user_info_endpoint_uri: None,
+                client_id: Some("kafka-broker".into()),
+                client_secret: Some(OauthClientSecretRef {
+                    secret_name: "my-oauth-secret".into(),
+                    key: "my-key".into(),
+                }),
+                introspection_http_timeout_seconds: None,
+            })),
+            configuration: None,
+            network_policy_peers: None,
+        }];
+        let pool = pool_fixture("brokers", "demo", 1);
+        let ss = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE).expect("render");
+        let pod_spec = ss.spec.unwrap().template.spec.unwrap();
+
+        // VolumeMount on the broker container points at the canonical
+        // path T3's TOML render uses (`/etc/crabka/oauth-introspection`).
+        let mount = pod_spec.containers[0]
+            .volume_mounts
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|m| m.name == "oauth-introspection-secret")
+            .expect("oauth-introspection-secret mount present");
+        assert_eq!(mount.mount_path, "/etc/crabka/oauth-introspection");
+        assert_eq!(mount.read_only, Some(true));
+
+        // Pod volume sources the user-owned Secret directly with a
+        // projected items mapping (user's key -> fixed path
+        // `client-secret`) and the same 0o400 mode as the other
+        // Secret volumes.
+        let volume = pod_spec
+            .volumes
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|v| v.name == "oauth-introspection-secret")
+            .expect("oauth-introspection-secret volume present");
+        let secret = volume.secret.as_ref().expect("secret volume source");
+        assert_eq!(secret.secret_name.as_deref(), Some("my-oauth-secret"));
+        assert_eq!(secret.default_mode, Some(0o400));
+        let items = secret.items.as_ref().expect("projected items present");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].key, "my-key");
+        assert_eq!(items[0].path, "client-secret");
+    }
+
+    /// Slice 50c. JWT-mode OAuth listeners (the slice 50/50b default —
+    /// `accessTokenIsJwt: true`, no `clientSecret`) must NOT cause the
+    /// introspection volume / mount to be rendered. Confirms the
+    /// short-circuit in `oauth_introspection_secret_mount` flows through
+    /// to a byte-identical pod template for the common JWT path.
+    #[test]
+    fn render_statefulset_omits_oauth_introspection_volume_when_jwt_mode() {
+        // parent_with_oauth_trust builds a JWT-mode OAuth listener with
+        // tls_trusted_certificates; the introspection helper returns
+        // None for it.
+        let parent = parent_with_oauth_trust("demo");
+        let pool = pool_fixture("brokers", "demo", 1);
+        let ss = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE).expect("render");
+        let pod_spec = ss.spec.unwrap().template.spec.unwrap();
+
+        assert!(
+            pod_spec.containers[0]
+                .volume_mounts
+                .as_ref()
+                .unwrap()
+                .iter()
+                .all(|m| m.name != "oauth-introspection-secret"),
+            "JWT-mode OAuth must not produce an oauth-introspection-secret mount",
+        );
+        assert!(
+            pod_spec
+                .volumes
+                .as_ref()
+                .unwrap()
+                .iter()
+                .all(|v| v.name != "oauth-introspection-secret"),
+            "JWT-mode OAuth must not produce an oauth-introspection-secret volume",
         );
     }
 }
