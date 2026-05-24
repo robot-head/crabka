@@ -152,8 +152,11 @@ pub enum ListenerAuthentication {
 pub struct ListenerAuthenticationOAuth {
     /// Expected `iss` claim. Broker rejects tokens whose `iss` differs.
     pub valid_issuer_uri: String,
-    /// HTTPS URL the broker fetches the signing JWKS from.
-    pub jwks_endpoint_uri: String,
+    /// JWKS endpoint URL (RFC 7517). Required when
+    /// `accessTokenIsJwt: true` (the default); rejected when
+    /// `accessTokenIsJwt: false`. Slice 49b broker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jwks_endpoint_uri: Option<String>,
     /// Optional expected `aud` claim. Absent means no audience check.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub valid_audience: Option<String>,
@@ -186,6 +189,41 @@ pub struct ListenerAuthenticationOAuth {
     /// list (default) → no managed Secret, no mount, no TOML line.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tls_trusted_certificates: Vec<TlsTrustedCertificate>,
+    /// Strimzi-shape: when `true` (default), the broker validates
+    /// tokens as signed JWTs against `jwksEndpointUri` (slice 49b).
+    /// When `false`, the broker calls `introspectionEndpointUri` for
+    /// each token (slice 49d). Drives operator-side validation: see
+    /// also the cross-mode rules in the listeners reconciler.
+    #[serde(default = "default_true", skip_serializing_if = "is_default_true")]
+    pub access_token_is_jwt: bool,
+    /// RFC 7662 introspection endpoint. Required when
+    /// `accessTokenIsJwt: false`; rejected when `accessTokenIsJwt: true`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub introspection_endpoint_uri: Option<String>,
+    /// Optional OIDC userinfo endpoint. Permitted only with
+    /// `accessTokenIsJwt: false`. When set, the broker calls userinfo
+    /// after each successful introspection and merges the profile
+    /// claims (slice 49d's userinfo enrichment).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_info_endpoint_uri: Option<String>,
+    /// HTTP Basic Auth client_id the broker uses against the
+    /// introspection endpoint. Required when `accessTokenIsJwt: false`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    /// Reference to a Kubernetes `Secret` in the same namespace
+    /// holding the client-secret material for the introspection
+    /// endpoint's Basic Auth. The operator mounts the source Secret
+    /// directly into the broker pod with a projected `items` mapping
+    /// so the broker reads from a fixed path regardless of the
+    /// user's source key name. Required when `accessTokenIsJwt: false`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_secret: Option<OauthClientSecretRef>,
+    /// Slice 49d: timeout for the introspection (and userinfo) HTTP
+    /// requests, in seconds. Operator converts to ms for the broker
+    /// TOML. Optional; broker default is 10 seconds. Permitted only
+    /// with `accessTokenIsJwt: false`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub introspection_http_timeout_seconds: Option<u32>,
 }
 
 fn default_true() -> bool {
@@ -227,6 +265,21 @@ pub struct TlsTrustedCertificate {
     pub certificate: String,
 }
 
+/// Strimzi-shape Secret reference for the OAUTHBEARER
+/// introspection client secret. The source Secret must exist in
+/// the same namespace as the `Kafka` CR.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OauthClientSecretRef {
+    /// Name of the Kubernetes Secret holding the client secret.
+    pub secret_name: String,
+    /// Key within the Secret whose value is the client-secret
+    /// material. The operator mounts this key as a file at a fixed
+    /// path inside the broker pod (the user's key name is hidden
+    /// from the broker via projected `items`).
+    pub key: String,
+}
+
 fn listener_authentication_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
     schemars::json_schema!({
         "type": "object",
@@ -262,6 +315,19 @@ fn listener_authentication_schema(_: &mut schemars::SchemaGenerator) -> schemars
                     },
                 },
             },
+            "accessTokenIsJwt": { "type": "boolean" },
+            "introspectionEndpointUri": { "type": "string", "minLength": 1 },
+            "userInfoEndpointUri": { "type": "string", "minLength": 1 },
+            "clientId": { "type": "string", "minLength": 1 },
+            "clientSecret": {
+                "type": "object",
+                "required": ["secretName", "key"],
+                "properties": {
+                    "secretName": { "type": "string", "minLength": 1 },
+                    "key":        { "type": "string", "minLength": 1 },
+                },
+            },
+            "introspectionHttpTimeoutSeconds": { "type": "integer", "minimum": 1 },
         },
     })
 }
@@ -393,8 +459,9 @@ authentication:
         .unwrap();
         let expected = ListenerAuthenticationOAuth {
             valid_issuer_uri: "https://kc.example.com/realms/kafka".into(),
-            jwks_endpoint_uri: "https://kc.example.com/realms/kafka/protocol/openid-connect/certs"
-                .into(),
+            jwks_endpoint_uri: Some(
+                "https://kc.example.com/realms/kafka/protocol/openid-connect/certs".into(),
+            ),
             valid_audience: Some("kafka".into()),
             user_name_claim: Some("preferred_username".into()),
             custom_claim_check: Some(OAuthCustomClaimCheck {
@@ -405,6 +472,12 @@ authentication:
             max_clock_skew_seconds: Some(30),
             enable_oauth_bearer: false,
             tls_trusted_certificates: vec![],
+            access_token_is_jwt: true,
+            introspection_endpoint_uri: None,
+            user_info_endpoint_uri: None,
+            client_id: None,
+            client_secret: None,
+            introspection_http_timeout_seconds: None,
         };
         assert_eq!(
             l.authentication,
@@ -431,7 +504,10 @@ authentication:
             panic!("expected OAuth authentication, got {:?}", l.authentication);
         };
         assert_eq!(oauth.valid_issuer_uri, "https://issuer.example.com/");
-        assert_eq!(oauth.jwks_endpoint_uri, "https://issuer.example.com/jwks");
+        assert_eq!(
+            oauth.jwks_endpoint_uri.as_deref(),
+            Some("https://issuer.example.com/jwks")
+        );
         assert_eq!(oauth.valid_audience, None);
         assert_eq!(oauth.user_name_claim, None);
         assert_eq!(oauth.custom_claim_check, None);
@@ -470,7 +546,7 @@ authentication:
     fn oauth_default_enable_omitted_on_serialize() {
         let auth = ListenerAuthentication::OAuth(ListenerAuthenticationOAuth {
             valid_issuer_uri: "https://issuer.example.com/".into(),
-            jwks_endpoint_uri: "https://issuer.example.com/jwks".into(),
+            jwks_endpoint_uri: Some("https://issuer.example.com/jwks".into()),
             valid_audience: None,
             user_name_claim: None,
             custom_claim_check: None,
@@ -478,6 +554,12 @@ authentication:
             max_clock_skew_seconds: None,
             enable_oauth_bearer: true,
             tls_trusted_certificates: vec![],
+            access_token_is_jwt: true,
+            introspection_endpoint_uri: None,
+            user_info_endpoint_uri: None,
+            client_id: None,
+            client_secret: None,
+            introspection_http_timeout_seconds: None,
         });
         let json = serde_json::to_string(&auth).unwrap();
         assert!(
@@ -490,7 +572,7 @@ authentication:
     fn oauth_enable_false_round_trips() {
         let auth = ListenerAuthentication::OAuth(ListenerAuthenticationOAuth {
             valid_issuer_uri: "https://issuer.example.com/".into(),
-            jwks_endpoint_uri: "https://issuer.example.com/jwks".into(),
+            jwks_endpoint_uri: Some("https://issuer.example.com/jwks".into()),
             valid_audience: None,
             user_name_claim: None,
             custom_claim_check: None,
@@ -498,6 +580,12 @@ authentication:
             max_clock_skew_seconds: None,
             enable_oauth_bearer: false,
             tls_trusted_certificates: vec![],
+            access_token_is_jwt: true,
+            introspection_endpoint_uri: None,
+            user_info_endpoint_uri: None,
+            client_id: None,
+            client_secret: None,
+            introspection_http_timeout_seconds: None,
         });
         let json = serde_json::to_string(&auth).unwrap();
         assert!(json.contains("\"enableOauthBearer\":false"), "got: {json}");
@@ -530,7 +618,10 @@ authentication:
             panic!("expected OAuth authentication");
         };
         assert_eq!(oauth.valid_issuer_uri, "https://issuer.example.com/");
-        assert_eq!(oauth.jwks_endpoint_uri, "https://issuer.example.com/jwks");
+        assert_eq!(
+            oauth.jwks_endpoint_uri.as_deref(),
+            Some("https://issuer.example.com/jwks")
+        );
     }
 
     #[test]
@@ -573,6 +664,12 @@ authentication:
             "maxClockSkewSeconds",
             "enableOauthBearer",
             "tlsTrustedCertificates",
+            "accessTokenIsJwt",
+            "introspectionEndpointUri",
+            "userInfoEndpointUri",
+            "clientId",
+            "clientSecret",
+            "introspectionHttpTimeoutSeconds",
         ] {
             assert!(props.contains_key(want), "missing property {want}");
         }
@@ -582,7 +679,7 @@ authentication:
     fn oauth_with_tls_trusted_certificates_round_trips() {
         let original = ListenerAuthenticationOAuth {
             valid_issuer_uri: "https://issuer.example.com/".into(),
-            jwks_endpoint_uri: "https://issuer.example.com/jwks".into(),
+            jwks_endpoint_uri: Some("https://issuer.example.com/jwks".into()),
             valid_audience: None,
             user_name_claim: None,
             custom_claim_check: None,
@@ -599,6 +696,12 @@ authentication:
                     certificate: "tls.crt".into(),
                 },
             ],
+            access_token_is_jwt: true,
+            introspection_endpoint_uri: None,
+            user_info_endpoint_uri: None,
+            client_id: None,
+            client_secret: None,
+            introspection_http_timeout_seconds: None,
         };
         let json = serde_json::to_string(&original).unwrap();
         assert!(
@@ -613,7 +716,7 @@ authentication:
     fn oauth_tls_trusted_certificates_default_omitted_on_serialize() {
         let auth = ListenerAuthenticationOAuth {
             valid_issuer_uri: "https://issuer.example.com/".into(),
-            jwks_endpoint_uri: "https://issuer.example.com/jwks".into(),
+            jwks_endpoint_uri: Some("https://issuer.example.com/jwks".into()),
             valid_audience: None,
             user_name_claim: None,
             custom_claim_check: None,
@@ -621,6 +724,12 @@ authentication:
             max_clock_skew_seconds: None,
             enable_oauth_bearer: true,
             tls_trusted_certificates: vec![],
+            access_token_is_jwt: true,
+            introspection_endpoint_uri: None,
+            user_info_endpoint_uri: None,
+            client_id: None,
+            client_secret: None,
+            introspection_http_timeout_seconds: None,
         };
         let json = serde_json::to_string(&auth).unwrap();
         assert!(
@@ -642,6 +751,149 @@ authentication:
             missing_secret_name.is_err(),
             "entry without secretName must fail to deserialize"
         );
+    }
+
+    #[test]
+    fn oauth_with_access_token_is_jwt_false_introspection_round_trips() {
+        let original = ListenerAuthenticationOAuth {
+            valid_issuer_uri: "https://issuer.example.com/".into(),
+            jwks_endpoint_uri: None,
+            valid_audience: None,
+            user_name_claim: None,
+            custom_claim_check: None,
+            jwks_refresh_seconds: None,
+            max_clock_skew_seconds: None,
+            enable_oauth_bearer: true,
+            tls_trusted_certificates: vec![],
+            access_token_is_jwt: false,
+            introspection_endpoint_uri: Some("https://issuer.example.com/introspect".into()),
+            user_info_endpoint_uri: None,
+            client_id: Some("kafka-broker".into()),
+            client_secret: Some(OauthClientSecretRef {
+                secret_name: "kafka-broker-oauth".into(),
+                key: "client-secret".into(),
+            }),
+            introspection_http_timeout_seconds: None,
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        assert!(
+            json.contains("\"accessTokenIsJwt\":false"),
+            "expected accessTokenIsJwt:false in JSON; got: {json}"
+        );
+        assert!(
+            json.contains("\"introspectionEndpointUri\":\"https://issuer.example.com/introspect\""),
+            "expected introspectionEndpointUri in JSON; got: {json}"
+        );
+        assert!(
+            json.contains("\"clientId\":\"kafka-broker\""),
+            "expected clientId in JSON; got: {json}"
+        );
+        assert!(
+            json.contains(
+                "\"clientSecret\":{\"secretName\":\"kafka-broker-oauth\",\"key\":\"client-secret\"}"
+            ),
+            "expected clientSecret object in JSON; got: {json}"
+        );
+        let round_tripped: ListenerAuthenticationOAuth = serde_json::from_str(&json).unwrap();
+        assert_eq!(round_tripped, original);
+    }
+
+    #[test]
+    fn oauth_access_token_is_jwt_default_omitted_on_serialize() {
+        let auth = ListenerAuthenticationOAuth {
+            valid_issuer_uri: "https://issuer.example.com/".into(),
+            jwks_endpoint_uri: Some("https://issuer.example.com/jwks".into()),
+            valid_audience: None,
+            user_name_claim: None,
+            custom_claim_check: None,
+            jwks_refresh_seconds: None,
+            max_clock_skew_seconds: None,
+            enable_oauth_bearer: true,
+            tls_trusted_certificates: vec![],
+            access_token_is_jwt: true,
+            introspection_endpoint_uri: None,
+            user_info_endpoint_uri: None,
+            client_id: None,
+            client_secret: None,
+            introspection_http_timeout_seconds: None,
+        };
+        let json = serde_json::to_string(&auth).unwrap();
+        assert!(
+            !json.contains("accessTokenIsJwt"),
+            "default-true access_token_is_jwt must be omitted; got: {json}"
+        );
+    }
+
+    #[test]
+    fn oauth_client_secret_round_trips() {
+        let original = OauthClientSecretRef {
+            secret_name: "my-secret".into(),
+            key: "client-secret".into(),
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        assert_eq!(json, r#"{"secretName":"my-secret","key":"client-secret"}"#);
+        let round_tripped: OauthClientSecretRef = serde_json::from_str(&json).unwrap();
+        assert_eq!(round_tripped, original);
+    }
+
+    #[test]
+    fn oauth_jwks_endpoint_uri_now_optional_omits_when_none() {
+        let auth = ListenerAuthenticationOAuth {
+            valid_issuer_uri: "https://issuer.example.com/".into(),
+            jwks_endpoint_uri: None,
+            valid_audience: None,
+            user_name_claim: None,
+            custom_claim_check: None,
+            jwks_refresh_seconds: None,
+            max_clock_skew_seconds: None,
+            enable_oauth_bearer: true,
+            tls_trusted_certificates: vec![],
+            access_token_is_jwt: false,
+            introspection_endpoint_uri: Some("https://issuer.example.com/introspect".into()),
+            user_info_endpoint_uri: None,
+            client_id: Some("kafka-broker".into()),
+            client_secret: Some(OauthClientSecretRef {
+                secret_name: "kafka-broker-oauth".into(),
+                key: "client-secret".into(),
+            }),
+            introspection_http_timeout_seconds: None,
+        };
+        let json = serde_json::to_string(&auth).unwrap();
+        assert!(
+            !json.contains("jwksEndpointUri"),
+            "None jwks_endpoint_uri must be omitted from JSON; got: {json}"
+        );
+    }
+
+    #[test]
+    fn oauth_with_userinfo_endpoint_round_trips() {
+        let original = ListenerAuthenticationOAuth {
+            valid_issuer_uri: "https://issuer.example.com/".into(),
+            jwks_endpoint_uri: None,
+            valid_audience: None,
+            user_name_claim: None,
+            custom_claim_check: None,
+            jwks_refresh_seconds: None,
+            max_clock_skew_seconds: None,
+            enable_oauth_bearer: true,
+            tls_trusted_certificates: vec![],
+            access_token_is_jwt: false,
+            introspection_endpoint_uri: Some("https://issuer.example.com/introspect".into()),
+            user_info_endpoint_uri: Some("https://idp.example/userinfo".into()),
+            client_id: Some("kafka-broker".into()),
+            client_secret: Some(OauthClientSecretRef {
+                secret_name: "kafka-broker-oauth".into(),
+                key: "client-secret".into(),
+            }),
+            introspection_http_timeout_seconds: None,
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        assert!(
+            json.contains("\"userInfoEndpointUri\":\"https://idp.example/userinfo\""),
+            "expected userInfoEndpointUri in JSON; got: {json}"
+        );
+        let round_tripped: ListenerAuthenticationOAuth = serde_json::from_str(&json).unwrap();
+        assert_eq!(round_tripped, original);
     }
 }
 

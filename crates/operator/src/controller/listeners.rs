@@ -1269,7 +1269,7 @@ mod tests {
     fn oauth_cfg_minimal() -> crate::crd::ListenerAuthenticationOAuth {
         crate::crd::ListenerAuthenticationOAuth {
             valid_issuer_uri: "https://issuer.example.com/".into(),
-            jwks_endpoint_uri: "https://issuer.example.com/jwks".into(),
+            jwks_endpoint_uri: Some("https://issuer.example.com/jwks".into()),
             valid_audience: None,
             user_name_claim: None,
             custom_claim_check: None,
@@ -1277,6 +1277,12 @@ mod tests {
             max_clock_skew_seconds: None,
             enable_oauth_bearer: true,
             tls_trusted_certificates: vec![],
+            access_token_is_jwt: true,
+            introspection_endpoint_uri: None,
+            user_info_endpoint_uri: None,
+            client_id: None,
+            client_secret: None,
+            introspection_http_timeout_seconds: None,
         }
     }
 
@@ -1311,7 +1317,7 @@ mod tests {
     #[test]
     fn validate_listeners_accepts_oauth_with_http_jwks_uri() {
         let mut cfg = oauth_cfg_minimal();
-        cfg.jwks_endpoint_uri = "http://issuer.example.com/jwks".into();
+        cfg.jwks_endpoint_uri = Some("http://issuer.example.com/jwks".into());
         let listeners = vec![oauth_listener("oauth", 9095, true, cfg)];
         validate_listeners(&listeners, None).unwrap();
     }
@@ -1319,7 +1325,7 @@ mod tests {
     #[test]
     fn validate_listeners_rejects_oauth_with_ftp_jwks_uri() {
         let mut cfg = oauth_cfg_minimal();
-        cfg.jwks_endpoint_uri = "ftp://issuer.example.com/jwks".into();
+        cfg.jwks_endpoint_uri = Some("ftp://issuer.example.com/jwks".into());
         let listeners = vec![oauth_listener("oauth", 9095, true, cfg)];
         let err = validate_listeners(&listeners, None).unwrap_err();
         assert_eq!(err.reason(), "ListenerOauthInvalidUri");
@@ -1419,7 +1425,7 @@ mod tests {
         // through unnoticed.
         let base = crate::crd::ListenerAuthenticationOAuth {
             valid_issuer_uri: "https://issuer.example.com/".into(),
-            jwks_endpoint_uri: "https://issuer.example.com/jwks".into(),
+            jwks_endpoint_uri: Some("https://issuer.example.com/jwks".into()),
             valid_audience: Some("kafka".into()),
             user_name_claim: Some("preferred_username".into()),
             custom_claim_check: Some(crate::crd::OAuthCustomClaimCheck {
@@ -1430,6 +1436,12 @@ mod tests {
             max_clock_skew_seconds: Some(30),
             enable_oauth_bearer: true,
             tls_trusted_certificates: vec![],
+            access_token_is_jwt: true,
+            introspection_endpoint_uri: None,
+            user_info_endpoint_uri: None,
+            client_id: None,
+            client_secret: None,
+            introspection_http_timeout_seconds: None,
         };
         let perturbations: Vec<(&str, crate::crd::ListenerAuthenticationOAuth)> = vec![
             (
@@ -1442,7 +1454,7 @@ mod tests {
             (
                 "jwks_endpoint_uri",
                 crate::crd::ListenerAuthenticationOAuth {
-                    jwks_endpoint_uri: "https://other.example.com/jwks".into(),
+                    jwks_endpoint_uri: Some("https://other.example.com/jwks".into()),
                     ..base.clone()
                 },
             ),
@@ -2434,8 +2446,9 @@ mod toml_rendering_tests {
     fn oauth_full_cfg() -> crate::crd::ListenerAuthenticationOAuth {
         crate::crd::ListenerAuthenticationOAuth {
             valid_issuer_uri: "https://kc.example.com/realms/kafka".into(),
-            jwks_endpoint_uri: "https://kc.example.com/realms/kafka/protocol/openid-connect/certs"
-                .into(),
+            jwks_endpoint_uri: Some(
+                "https://kc.example.com/realms/kafka/protocol/openid-connect/certs".into(),
+            ),
             valid_audience: Some("kafka".into()),
             user_name_claim: Some("preferred_username".into()),
             custom_claim_check: Some(crate::crd::OAuthCustomClaimCheck {
@@ -2446,6 +2459,12 @@ mod toml_rendering_tests {
             max_clock_skew_seconds: Some(30),
             enable_oauth_bearer: true,
             tls_trusted_certificates: vec![],
+            access_token_is_jwt: true,
+            introspection_endpoint_uri: None,
+            user_info_endpoint_uri: None,
+            client_id: None,
+            client_secret: None,
+            introspection_http_timeout_seconds: None,
         }
     }
 
@@ -2528,7 +2547,7 @@ mod toml_rendering_tests {
         use std::collections::BTreeMap;
         let cfg = crate::crd::ListenerAuthenticationOAuth {
             valid_issuer_uri: "https://issuer.example.com/".into(),
-            jwks_endpoint_uri: "https://issuer.example.com/jwks".into(),
+            jwks_endpoint_uri: Some("https://issuer.example.com/jwks".into()),
             valid_audience: None,
             user_name_claim: None,
             custom_claim_check: None,
@@ -2536,6 +2555,12 @@ mod toml_rendering_tests {
             max_clock_skew_seconds: None,
             enable_oauth_bearer: true,
             tls_trusted_certificates: vec![],
+            access_token_is_jwt: true,
+            introspection_endpoint_uri: None,
+            user_info_endpoint_uri: None,
+            client_id: None,
+            client_secret: None,
+            introspection_http_timeout_seconds: None,
         };
         let listeners = vec![oauth_listener_for_render("oauth", 9095, true, cfg)];
         let toml = render_broker_toml(
@@ -2587,7 +2612,7 @@ mod toml_rendering_tests {
         use std::collections::BTreeMap;
         let cfg = crate::crd::ListenerAuthenticationOAuth {
             valid_issuer_uri: "https://issuer.example.com/".into(),
-            jwks_endpoint_uri: "https://issuer.example.com/jwks".into(),
+            jwks_endpoint_uri: Some("https://issuer.example.com/jwks".into()),
             valid_audience: None,
             user_name_claim: None,
             custom_claim_check: None,
@@ -2595,6 +2620,12 @@ mod toml_rendering_tests {
             max_clock_skew_seconds: None,
             enable_oauth_bearer: true,
             tls_trusted_certificates: vec![],
+            access_token_is_jwt: true,
+            introspection_endpoint_uri: None,
+            user_info_endpoint_uri: None,
+            client_id: None,
+            client_secret: None,
+            introspection_http_timeout_seconds: None,
         };
         let listeners = vec![oauth_listener_for_render("oauth", 9095, true, cfg)];
         let toml = render_broker_toml(
@@ -2749,7 +2780,7 @@ mod toml_rendering_tests {
         use std::collections::BTreeMap;
         let cfg = crate::crd::ListenerAuthenticationOAuth {
             valid_issuer_uri: "https://idp.example/realms/kafka".into(),
-            jwks_endpoint_uri: "https://idp.example/certs".into(),
+            jwks_endpoint_uri: Some("https://idp.example/certs".into()),
             valid_audience: Some("kafka-broker".into()),
             user_name_claim: Some("preferred_username".into()),
             custom_claim_check: Some(crate::crd::OAuthCustomClaimCheck {
@@ -2760,6 +2791,12 @@ mod toml_rendering_tests {
             max_clock_skew_seconds: Some(60),
             enable_oauth_bearer: true,
             tls_trusted_certificates: vec![],
+            access_token_is_jwt: true,
+            introspection_endpoint_uri: None,
+            user_info_endpoint_uri: None,
+            client_id: None,
+            client_secret: None,
+            introspection_http_timeout_seconds: None,
         };
         let listeners = vec![oauth_listener_for_render("oauth", 9095, true, cfg)];
         let toml = render_broker_toml(
@@ -3357,7 +3394,7 @@ mod weak_auth_tests {
             authentication: Some(ListenerAuthentication::OAuth(
                 crate::crd::ListenerAuthenticationOAuth {
                     valid_issuer_uri: "https://issuer.example.com/".into(),
-                    jwks_endpoint_uri: jwks.into(),
+                    jwks_endpoint_uri: Some(jwks.into()),
                     valid_audience: None,
                     user_name_claim: None,
                     custom_claim_check: None,
@@ -3365,6 +3402,12 @@ mod weak_auth_tests {
                     max_clock_skew_seconds: None,
                     enable_oauth_bearer: true,
                     tls_trusted_certificates: vec![],
+                    access_token_is_jwt: true,
+                    introspection_endpoint_uri: None,
+                    user_info_endpoint_uri: None,
+                    client_id: None,
+                    client_secret: None,
+                    introspection_http_timeout_seconds: None,
                 },
             )),
             configuration: None,

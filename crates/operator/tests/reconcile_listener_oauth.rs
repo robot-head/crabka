@@ -67,7 +67,7 @@ fn oauth_listener(name: &str, port: i32, tls: bool, cfg: ListenerAuthenticationO
 fn oauth_cfg_minimal() -> ListenerAuthenticationOAuth {
     ListenerAuthenticationOAuth {
         valid_issuer_uri: "https://issuer.example.com/".into(),
-        jwks_endpoint_uri: "https://issuer.example.com/jwks".into(),
+        jwks_endpoint_uri: Some("https://issuer.example.com/jwks".into()),
         valid_audience: None,
         user_name_claim: None,
         custom_claim_check: None,
@@ -75,6 +75,12 @@ fn oauth_cfg_minimal() -> ListenerAuthenticationOAuth {
         max_clock_skew_seconds: None,
         enable_oauth_bearer: true,
         tls_trusted_certificates: vec![],
+        access_token_is_jwt: true,
+        introspection_endpoint_uri: None,
+        user_info_endpoint_uri: None,
+        client_id: None,
+        client_secret: None,
+        introspection_http_timeout_seconds: None,
     }
 }
 
@@ -83,8 +89,9 @@ fn oauth_cfg_minimal() -> ListenerAuthenticationOAuth {
 fn oauth_cfg_full() -> ListenerAuthenticationOAuth {
     ListenerAuthenticationOAuth {
         valid_issuer_uri: "https://kc.example.com/realms/kafka".into(),
-        jwks_endpoint_uri: "https://kc.example.com/realms/kafka/protocol/openid-connect/certs"
-            .into(),
+        jwks_endpoint_uri: Some(
+            "https://kc.example.com/realms/kafka/protocol/openid-connect/certs".into(),
+        ),
         valid_audience: Some("kafka".into()),
         user_name_claim: Some("preferred_username".into()),
         custom_claim_check: Some(OAuthCustomClaimCheck {
@@ -95,6 +102,12 @@ fn oauth_cfg_full() -> ListenerAuthenticationOAuth {
         max_clock_skew_seconds: Some(30),
         enable_oauth_bearer: true,
         tls_trusted_certificates: vec![],
+        access_token_is_jwt: true,
+        introspection_endpoint_uri: None,
+        user_info_endpoint_uri: None,
+        client_id: None,
+        client_secret: None,
+        introspection_http_timeout_seconds: None,
     }
 }
 
