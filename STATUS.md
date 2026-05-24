@@ -2243,9 +2243,9 @@ Kafka client for ApiVersions.
   `controller::kafka_node_pool` (StatefulSet volume mount across all
   three storage shapes), +2 `tests/reconcile_listener_oauth.rs`
   integration, +8 `tests/reconcile_oauth_trust.rs` integration (happy
-  path, missing Secret, missing key, empty value, multi-Secret
-  concatenation order, managed-Secret owner-ref, idempotent
-  re-reconcile, trust-cert removal unmounts on next reconcile).
+  path concat, missing source Secret, missing key, empty value,
+  no-trust-certs no-op, source-rotation re-render, StatefulSet
+  mount-when-some, StatefulSet omit-when-none).
   Workspace clippy `-D warnings` + `cargo fmt --check` clean.
 - Out of scope (deferred): source-`Secret` reflector for instant
   rotation pickup; cross-namespace `Secret` refs; mTLS *to* the IdP;
