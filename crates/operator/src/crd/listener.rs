@@ -168,7 +168,7 @@ pub struct ListenerAuthenticationOAuth {
     /// to `sub`; set e.g. to `preferred_username` for Keycloak.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_name_claim: Option<String>,
-    /// Slice 49g (replaces slice 50's typed stub): JsonPath expression
+    /// Slice 49g (replaces slice 50's typed stub): `JsonPath` expression
     /// (RFC 9535 via jsonpath-rust) evaluated against the token's claim
     /// set. Token is rejected when the expression yields empty/null/false.
     /// Examples (RFC 9535 syntax — note no parens around filter predicate):
@@ -178,7 +178,7 @@ pub struct ListenerAuthenticationOAuth {
     ///     'kafka-broker'.
     /// CRD-validated `minLength: 1` when set.
     ///
-    /// Note: Strimzi uses Jayway JsonPath syntax (`$[?(@.x == 'y')]`); Crabka
+    /// Note: Strimzi uses Jayway `JsonPath` syntax (`$[?(@.x == 'y')]`); Crabka
     /// uses RFC 9535 (`$[?@.x == 'y']` — no parens). Operators migrating
     /// from Strimzi rewrite expressions accordingly.
     #[serde(default, skip_serializing_if = "Option::is_none")]

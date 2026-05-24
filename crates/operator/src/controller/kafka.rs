@@ -1700,6 +1700,7 @@ mod tests {
             client_secret: None,
             introspection_http_timeout_seconds: None,
             max_seconds_without_reauthentication: None,
+            valid_token_type: None,
         }
     }
 
@@ -1724,6 +1725,7 @@ mod tests {
             }),
             introspection_http_timeout_seconds: None,
             max_seconds_without_reauthentication: None,
+            valid_token_type: None,
         }
     }
 
