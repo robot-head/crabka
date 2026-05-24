@@ -232,8 +232,9 @@ async fn serve_connection_stream<S>(
         // table because handlers receive only `&Broker` and have no way to
         // touch `auth`. Returning `Some(SaslFrameOutcome)` short-circuits
         // the normal dispatch_one() path for that frame.
-        if let Some(outcome) = req_span
-            .in_scope(|| try_handle_sasl_frame(&broker, &frame, &mut auth, &sasl_mechanisms))
+        if let Some(outcome) = try_handle_sasl_frame(&broker, &frame, &mut auth, &sasl_mechanisms)
+            .instrument(req_span.clone())
+            .await
         {
             let SaslFrameOutcome {
                 response_bytes,
@@ -1049,7 +1050,7 @@ struct SaslFrameOutcome {
 ///
 /// Errors here close the connection (protocol violations, e.g. an
 /// undecodable header).
-fn try_handle_sasl_frame(
+async fn try_handle_sasl_frame(
     broker: &Broker,
     frame: &[u8],
     auth: &mut crate::network::auth::ConnectionAuth,
@@ -1059,16 +1060,10 @@ fn try_handle_sasl_frame(
     if api_key != 17 && api_key != 36 {
         return None;
     }
-    Some(handle_sasl_frame(
-        broker,
-        frame,
-        auth,
-        api_key,
-        sasl_mechanisms,
-    ))
+    Some(handle_sasl_frame(broker, frame, auth, api_key, sasl_mechanisms).await)
 }
 
-fn handle_sasl_frame(
+async fn handle_sasl_frame(
     broker: &Broker,
     frame: &[u8],
     auth: &mut crate::network::auth::ConnectionAuth,
@@ -1136,6 +1131,7 @@ fn handle_sasl_frame(
                             &broker.config.oauthbearer_validator,
                             now_ms,
                         )
+                        .await
                     }
                 }
             } else {
