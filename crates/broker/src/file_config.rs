@@ -85,6 +85,16 @@ pub struct FileOAuthBearerConfig {
     /// (5 minutes). Signed validator only.
     #[serde(default)]
     pub jwks_refresh_interval_ms: Option<u64>,
+
+    /// Slice 49c: PEM file containing the CA certificate(s) used to
+    /// verify the JWKS endpoint's TLS certificate when
+    /// `jwks_endpoint_uri` is an `https://` URL. When set, these are
+    /// the *only* trust roots used for the JWKS fetch (replaces the
+    /// default webpki-roots — Strimzi-shaped). When unset, the
+    /// refresher uses reqwest's default rustls webpki-roots. Inert if
+    /// `jwks_endpoint_uri` is unset.
+    #[serde(default)]
+    pub jwks_tls_trust: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -206,6 +216,10 @@ impl FileConfig {
             });
         }
         if let Some(oauth) = self.oauthbearer {
+            // Slice 49c: thread the JWKS trust-store path unconditionally.
+            // Inert when `jwks_endpoint_uri` is unset (refresher isn't spawned),
+            // and harmlessly carried even when the unsecured validator is selected.
+            cfg.oauthbearer_jwks_tls_trust = oauth.jwks_tls_trust;
             if let Some(jwks_uri) = oauth.jwks_endpoint_uri {
                 // Signed-JWT validation (slice 49b). The empty key handle is
                 // populated by the refresher `Broker::start` spawns.
@@ -638,6 +652,34 @@ allowable_clock_skew_ms = 5000
                 panic!("no jwks_endpoint_uri must keep the unsecured validator")
             }
         }
+    }
+
+    #[test]
+    fn apply_to_oauthbearer_threads_jwks_tls_trust_to_broker_config() {
+        let toml = r#"
+[oauthbearer]
+jwks_endpoint_uri = "https://idp.example/certs"
+jwks_tls_trust = "/etc/crabka/oauth/idp-ca.pem"
+"#;
+        let file: FileConfig = toml::from_str(toml).unwrap();
+        let mut cfg = crate::config::BrokerConfig::default();
+        file.apply_to(&mut cfg);
+        assert_eq!(
+            cfg.oauthbearer_jwks_tls_trust.as_deref(),
+            Some(std::path::Path::new("/etc/crabka/oauth/idp-ca.pem")),
+        );
+    }
+
+    #[test]
+    fn apply_to_oauthbearer_without_jwks_tls_trust_leaves_field_none() {
+        let toml = r#"
+[oauthbearer]
+jwks_endpoint_uri = "https://idp.example/certs"
+"#;
+        let file: FileConfig = toml::from_str(toml).unwrap();
+        let mut cfg = crate::config::BrokerConfig::default();
+        file.apply_to(&mut cfg);
+        assert!(cfg.oauthbearer_jwks_tls_trust.is_none());
     }
 
     #[test]
