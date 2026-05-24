@@ -39,7 +39,40 @@ pub enum ConnectionAuth {
     },
     Authenticated {
         principal: Principal,
+        /// SASL mechanism this connection authenticated with. Used by KIP-368
+        /// in-band re-auth (slice 49e) to reject a fresh `SaslHandshake` that
+        /// switches mechanisms mid-connection. For mTLS / anonymous
+        /// connections (no SASL), this is `SaslMechanism::Plain` as a
+        /// don't-care default (the in-band reauth path is unreachable since
+        /// the listener doesn't accept `SaslHandshake` at all).
+        mechanism: SaslMechanism,
+        /// Session expiry as Unix epoch ms. `None` = no expiry / no re-auth
+        /// timer (PLAIN/SCRAM/mTLS/anonymous). `Some` = OAUTHBEARER token's
+        /// `exp`; the dispatch loop closes the connection when this elapses
+        /// (slice 49e).
+        expires_at_ms: Option<i64>,
     },
+    /// In-band re-authentication in progress: a `SaslHandshake` from a
+    /// previously `Authenticated` OAuth connection. Holds the previous
+    /// session snapshot so the post-validate equality check (same principal
+    /// name, same mechanism) has something to compare against, and so a
+    /// failed re-auth's error message can reference the still-current
+    /// principal. (Slice 49e; KIP-368.)
+    Reauthenticating {
+        previous: AuthenticatedSnapshot,
+        exchange: SaslExchange,
+    },
+}
+
+/// Snapshot of an `Authenticated` connection at the moment a re-auth
+/// `SaslHandshake` arrives. Used by the `SaslAuthenticate` handler during
+/// re-auth to enforce same-mechanism + same-principal-name semantics
+/// (KIP-368).
+#[derive(Debug, Clone)]
+pub struct AuthenticatedSnapshot {
+    pub principal: Principal,
+    pub mechanism: SaslMechanism,
+    pub expires_at_ms: Option<i64>,
 }
 
 /// In-flight SASL exchange. `Plain` carries no state because PLAIN is a
@@ -71,10 +104,26 @@ impl ConnectionAuth {
 
     #[must_use]
     pub fn principal(&self) -> Option<&Principal> {
-        if let Self::Authenticated { principal } = self {
+        if let Self::Authenticated { principal, .. } = self {
             Some(principal)
         } else {
             None
+        }
+    }
+
+    /// Whether `api_key` may be served given the current auth state.
+    /// - `Anonymous` / `Negotiating`: allow the pre-auth allowlist
+    ///   (ApiVersions=18, SaslHandshake=17, SaslAuthenticate=36).
+    /// - `Reauthenticating`: allow only `SaslAuthenticate=36`. Any other
+    ///   request during in-band re-auth is a protocol violation and the
+    ///   dispatch layer closes the connection (KIP-368).
+    /// - `Authenticated`: allow everything.
+    #[must_use]
+    pub fn allows_request(&self, api_key: i16) -> bool {
+        match self {
+            Self::Anonymous | Self::Negotiating { .. } => is_pre_auth_allowed(api_key),
+            Self::Reauthenticating { .. } => api_key == 36,
+            Self::Authenticated { .. } => true,
         }
     }
 }
@@ -114,22 +163,62 @@ pub fn handle_handshake(
 ) -> SaslHandshakeResponse {
     let enabled_names: Vec<String> = enabled.iter().map(|m| m.wire_name().to_string()).collect();
     let requested = SaslMechanism::from_wire(&req.mechanism);
+
+    // Slice 49e: in-band re-auth on an already-authenticated connection.
+    // Per KIP-368, only the same mechanism is allowed; a mismatch is
+    // ILLEGAL_SASL_STATE and the previous session stays in force (no
+    // transition).
+    if let ConnectionAuth::Authenticated {
+        mechanism: current, ..
+    } = auth
+    {
+        let current = *current;
+        match requested {
+            Some(m) if m == current => {
+                // OK: snapshot the previous Authenticated and transition.
+                let prev = std::mem::replace(auth, ConnectionAuth::Anonymous);
+                let ConnectionAuth::Authenticated {
+                    principal,
+                    mechanism,
+                    expires_at_ms,
+                } = prev
+                else {
+                    unreachable!("matched Authenticated above");
+                };
+                let exchange = exchange_for_mechanism(m);
+                *auth = ConnectionAuth::Reauthenticating {
+                    previous: AuthenticatedSnapshot {
+                        principal,
+                        mechanism,
+                        expires_at_ms,
+                    },
+                    exchange,
+                };
+                return SaslHandshakeResponse {
+                    error_code: 0,
+                    mechanisms: enabled_names,
+                    ..Default::default()
+                };
+            }
+            _ => {
+                // Mechanism switch attempted — reject without transition.
+                tracing::debug!(
+                    requested = %req.mechanism,
+                    "SaslHandshake: mechanism switch on authenticated connection (ILLEGAL_SASL_STATE)"
+                );
+                return SaslHandshakeResponse {
+                    // ILLEGAL_SASL_STATE per Apache Kafka protocol.
+                    error_code: 34,
+                    mechanisms: enabled_names,
+                    ..Default::default()
+                };
+            }
+        }
+    }
+
     match requested {
         Some(m) if enabled.contains(&m) => {
-            let exchange = match m {
-                SaslMechanism::Plain => SaslExchange::Plain,
-                // SCRAM exchange is built lazily on the first SaslAuthenticate
-                // round (T14), once the username is known. Until then we sit
-                // in `ScramPending`. SHA-256 and SHA-512 share the same
-                // dispatch state; the mechanism is preserved on the outer
-                // `Negotiating` variant.
-                SaslMechanism::ScramSha256 | SaslMechanism::ScramSha512 => {
-                    SaslExchange::ScramPending
-                }
-                // The token arrives in the first SaslAuthenticate; no
-                // pre-built state needed (slice 49).
-                SaslMechanism::OAuthBearer => SaslExchange::OAuthBearer,
-            };
+            let exchange = exchange_for_mechanism(m);
             *auth = ConnectionAuth::Negotiating {
                 mechanism: m,
                 exchange,
@@ -151,6 +240,24 @@ pub fn handle_handshake(
                 ..Default::default()
             }
         }
+    }
+}
+
+/// Build the per-mechanism `SaslExchange` initial state. Extracted from
+/// `handle_handshake` so both the initial-auth path and the re-auth path
+/// can construct it identically.
+fn exchange_for_mechanism(m: SaslMechanism) -> SaslExchange {
+    match m {
+        SaslMechanism::Plain => SaslExchange::Plain,
+        // SCRAM exchange is built lazily on the first SaslAuthenticate
+        // round, once the username is known. Until then we sit in
+        // `ScramPending`. SHA-256 and SHA-512 share the same dispatch
+        // state; the mechanism is preserved on the outer `Negotiating` /
+        // `Reauthenticating` variant.
+        SaslMechanism::ScramSha256 | SaslMechanism::ScramSha512 => SaslExchange::ScramPending,
+        // The token arrives in the first SaslAuthenticate; no pre-built
+        // state needed (slice 49).
+        SaslMechanism::OAuthBearer => SaslExchange::OAuthBearer,
     }
 }
 
@@ -178,7 +285,11 @@ pub fn handle_authenticate_plain<S: BuildHasher>(
     let password = parts[2];
     match crabka_security::verify_plain(plain_credentials, user, password) {
         Ok(p) => {
-            *auth = ConnectionAuth::Authenticated { principal: p };
+            *auth = ConnectionAuth::Authenticated {
+                principal: p,
+                mechanism: SaslMechanism::Plain,
+                expires_at_ms: None,
+            };
             SaslAuthenticateResponse {
                 error_code: 0,
                 error_message: None,
@@ -259,9 +370,10 @@ pub fn handle_authenticate_scram(
         }
     } else if let ConnectionAuth::Negotiating {
         exchange: SaslExchange::Scram(server),
-        ..
+        mechanism,
     } = auth
     {
+        let mech = *mechanism;
         // Round 2: exchange already exists. Step it with the client-final
         // bytes; on success extract the principal + server-final bytes and
         // transition to `Authenticated`.
@@ -271,7 +383,11 @@ pub fn handle_authenticate_scram(
                 fail_authenticate("SCRAM second round expected Done")
             }
             crabka_security::StepResult::Done(principal, bytes) => {
-                *auth = ConnectionAuth::Authenticated { principal };
+                *auth = ConnectionAuth::Authenticated {
+                    principal,
+                    mechanism: mech,
+                    expires_at_ms: None,
+                };
                 SaslAuthenticateResponse {
                     error_code: 0,
                     error_message: None,
@@ -315,15 +431,12 @@ pub async fn handle_authenticate_oauthbearer(
             let mech = *mechanism;
             match validate_bearer(&req.auth_bytes, validator, now_ms).await {
                 Ok(outcome) => {
-                    // T1: surface the OAUTHBEARER token expiry as
-                    // session_lifetime_ms. The connection state still only
-                    // carries the principal — T2 extends `Authenticated` to
-                    // carry the session window for the per-connection re-auth
-                    // timer (KIP-368).
                     let session_lifetime_ms =
                         outcome.expires_at_ms.map_or(0, |e| (e - now_ms).max(0));
                     *auth = ConnectionAuth::Authenticated {
                         principal: outcome.principal,
+                        mechanism: mech,
+                        expires_at_ms: outcome.expires_at_ms,
                     };
                     SaslAuthenticateResponse {
                         error_code: 0,
@@ -357,6 +470,62 @@ pub async fn handle_authenticate_oauthbearer(
             exchange: SaslExchange::OAuthBearerFailed,
             ..
         } => fail_authenticate("oauthbearer token rejected"),
+        // Slice 49e: in-band re-authentication. Validate the new token and,
+        // on success, require the principal name to match the previous
+        // session (KIP-368 forbids principal switches mid-connection).
+        ConnectionAuth::Reauthenticating {
+            previous,
+            exchange: SaslExchange::OAuthBearer,
+        } => {
+            let prev_mech = previous.mechanism;
+            let prev_name = previous.principal.name.clone();
+            match validate_bearer(&req.auth_bytes, validator, now_ms).await {
+                Ok(outcome) => {
+                    if outcome.principal.name != prev_name {
+                        tracing::debug!(
+                            previous = %prev_name,
+                            attempted = %outcome.principal.name,
+                            "OAUTHBEARER re-auth principal mismatch"
+                        );
+                        // Principal switch — reject; dispatch closes the
+                        // connection on non-zero error_code.
+                        return SaslAuthenticateResponse {
+                            error_code: SASL_AUTHENTICATION_FAILED,
+                            error_message: Some(
+                                "re-authentication may not change the principal".to_string(),
+                            ),
+                            auth_bytes: bytes::Bytes::new(),
+                            session_lifetime_ms: 0,
+                            ..Default::default()
+                        };
+                    }
+                    let session_lifetime_ms =
+                        outcome.expires_at_ms.map_or(0, |e| (e - now_ms).max(0));
+                    *auth = ConnectionAuth::Authenticated {
+                        principal: outcome.principal,
+                        mechanism: prev_mech,
+                        expires_at_ms: outcome.expires_at_ms,
+                    };
+                    SaslAuthenticateResponse {
+                        error_code: 0,
+                        error_message: None,
+                        auth_bytes: bytes::Bytes::new(),
+                        session_lifetime_ms,
+                        ..Default::default()
+                    }
+                }
+                Err(reason) => {
+                    tracing::debug!(reason, "OAUTHBEARER re-auth token rejected");
+                    SaslAuthenticateResponse {
+                        error_code: SASL_AUTHENTICATION_FAILED,
+                        error_message: Some("re-authentication failed".to_string()),
+                        auth_bytes: bytes::Bytes::new(),
+                        session_lifetime_ms: 0,
+                        ..Default::default()
+                    }
+                }
+            }
+        }
         _ => fail_authenticate("not in oauthbearer negotiation"),
     }
 }
@@ -607,10 +776,221 @@ mod tests {
                 name: "alice".into(),
                 auth_method: crabka_security::AuthMethod::SaslScramSha512,
             },
+            mechanism: SaslMechanism::ScramSha512,
+            expires_at_ms: None,
         };
         assert!(a.is_authenticated());
         let p = a.principal().expect("principal");
         assert_eq!(p.name, "alice");
         assert_eq!(p.auth_method, crabka_security::AuthMethod::SaslScramSha512);
+    }
+
+    // Slice 49e (KIP-368): in-band re-auth tests.
+
+    #[test]
+    fn authenticated_state_carries_mechanism_and_expires_at_ms() {
+        let auth = ConnectionAuth::Authenticated {
+            principal: Principal {
+                name: "alice".to_string(),
+                auth_method: crabka_security::AuthMethod::SaslOAuthBearer,
+            },
+            mechanism: SaslMechanism::OAuthBearer,
+            expires_at_ms: Some(2_000_000),
+        };
+        match auth {
+            ConnectionAuth::Authenticated {
+                principal,
+                mechanism,
+                expires_at_ms,
+            } => {
+                assert_eq!(principal.name, "alice");
+                assert_eq!(mechanism, SaslMechanism::OAuthBearer);
+                assert_eq!(expires_at_ms, Some(2_000_000));
+            }
+            _ => panic!("expected Authenticated"),
+        }
+    }
+
+    #[test]
+    fn handshake_from_authenticated_with_same_mechanism_transitions_to_reauthenticating() {
+        let mut auth = ConnectionAuth::Authenticated {
+            principal: Principal {
+                name: "alice".to_string(),
+                auth_method: crabka_security::AuthMethod::SaslOAuthBearer,
+            },
+            mechanism: SaslMechanism::OAuthBearer,
+            expires_at_ms: Some(2_000_000),
+        };
+        let req = SaslHandshakeRequest {
+            mechanism: "OAUTHBEARER".to_string(),
+            ..Default::default()
+        };
+        let resp = handle_handshake(&req, &mut auth, &[SaslMechanism::OAuthBearer]);
+        assert_eq!(resp.error_code, 0);
+        assert!(matches!(
+            auth,
+            ConnectionAuth::Reauthenticating {
+                previous: AuthenticatedSnapshot {
+                    mechanism: SaslMechanism::OAuthBearer,
+                    ..
+                },
+                exchange: SaslExchange::OAuthBearer,
+            }
+        ));
+    }
+
+    #[test]
+    fn handshake_from_authenticated_with_different_mechanism_rejected_with_illegal_sasl_state() {
+        let mut auth = ConnectionAuth::Authenticated {
+            principal: Principal {
+                name: "alice".to_string(),
+                auth_method: crabka_security::AuthMethod::SaslOAuthBearer,
+            },
+            mechanism: SaslMechanism::OAuthBearer,
+            expires_at_ms: Some(2_000_000),
+        };
+        let req = SaslHandshakeRequest {
+            mechanism: "SCRAM-SHA-512".to_string(),
+            ..Default::default()
+        };
+        let resp = handle_handshake(
+            &req,
+            &mut auth,
+            &[SaslMechanism::OAuthBearer, SaslMechanism::ScramSha512],
+        );
+        // ILLEGAL_SASL_STATE = 34 per Apache Kafka protocol.
+        assert_eq!(resp.error_code, 34);
+        // The state stays Authenticated (not transitioned).
+        assert!(matches!(auth, ConnectionAuth::Authenticated { .. }));
+    }
+
+    #[tokio::test]
+    async fn authenticate_during_reauth_same_principal_transitions_back_to_authenticated() {
+        let validator = crabka_security::OAuthBearerValidator::default();
+        let now_ms = 1_000_000_000_000;
+        // Token's exp is in seconds; the validator computes expires_at_ms = exp * 1000.
+        let new_token_exp_seconds: i64 = 1_000_000_900;
+        let new_token_exp_millis: i64 = new_token_exp_seconds * 1000;
+        let token = unsecured_token("alice", new_token_exp_seconds);
+        let mut auth = ConnectionAuth::Reauthenticating {
+            previous: AuthenticatedSnapshot {
+                principal: Principal {
+                    name: "alice".to_string(),
+                    auth_method: crabka_security::AuthMethod::SaslOAuthBearer,
+                },
+                mechanism: SaslMechanism::OAuthBearer,
+                expires_at_ms: Some(now_ms + 1_000), // about to expire
+            },
+            exchange: SaslExchange::OAuthBearer,
+        };
+        let resp = handle_authenticate_oauthbearer(
+            &oauthbearer_client_response(&token),
+            &mut auth,
+            &validator,
+            now_ms,
+        )
+        .await;
+        assert_eq!(resp.error_code, 0);
+        assert_eq!(resp.session_lifetime_ms, new_token_exp_millis - now_ms);
+        assert!(matches!(
+            auth,
+            ConnectionAuth::Authenticated {
+                mechanism: SaslMechanism::OAuthBearer,
+                expires_at_ms: Some(_),
+                ..
+            }
+        ));
+        if let ConnectionAuth::Authenticated {
+            principal,
+            expires_at_ms,
+            ..
+        } = &auth
+        {
+            assert_eq!(principal.name, "alice");
+            assert_eq!(*expires_at_ms, Some(new_token_exp_millis));
+        } else {
+            panic!("expected Authenticated");
+        }
+    }
+
+    #[tokio::test]
+    async fn authenticate_during_reauth_different_principal_rejected_with_sasl_auth_failed() {
+        let validator = crabka_security::OAuthBearerValidator::default();
+        let now_ms = 1_000_000_000_000;
+        // Token belongs to "bob", but the prior session is "alice".
+        let token = unsecured_token("bob", 1_000_000_900);
+        let mut auth = ConnectionAuth::Reauthenticating {
+            previous: AuthenticatedSnapshot {
+                principal: Principal {
+                    name: "alice".to_string(),
+                    auth_method: crabka_security::AuthMethod::SaslOAuthBearer,
+                },
+                mechanism: SaslMechanism::OAuthBearer,
+                expires_at_ms: Some(now_ms + 1_000),
+            },
+            exchange: SaslExchange::OAuthBearer,
+        };
+        let resp = handle_authenticate_oauthbearer(
+            &oauthbearer_client_response(&token),
+            &mut auth,
+            &validator,
+            now_ms,
+        )
+        .await;
+        // SASL_AUTHENTICATION_FAILED = 58 per Apache Kafka protocol.
+        assert_eq!(resp.error_code, SASL_AUTHENTICATION_FAILED);
+        assert!(
+            resp.error_message
+                .as_deref()
+                .unwrap_or("")
+                .contains("principal")
+        );
+        // Connection remained in Reauthenticating (dispatch will close).
+        assert!(matches!(auth, ConnectionAuth::Reauthenticating { .. }));
+    }
+
+    #[test]
+    fn allows_request_during_reauthenticating_only_sasl_authenticate() {
+        let auth = ConnectionAuth::Reauthenticating {
+            previous: AuthenticatedSnapshot {
+                principal: Principal {
+                    name: "alice".to_string(),
+                    auth_method: crabka_security::AuthMethod::SaslOAuthBearer,
+                },
+                mechanism: SaslMechanism::OAuthBearer,
+                expires_at_ms: Some(2_000_000),
+            },
+            exchange: SaslExchange::OAuthBearer,
+        };
+        assert!(auth.allows_request(36)); // SaslAuthenticate
+        assert!(!auth.allows_request(17)); // SaslHandshake
+        assert!(!auth.allows_request(18)); // ApiVersions
+        assert!(!auth.allows_request(3)); // Metadata
+    }
+
+    #[test]
+    fn allows_request_anonymous_uses_pre_auth_allowlist() {
+        let auth = ConnectionAuth::Anonymous;
+        assert!(auth.allows_request(17));
+        assert!(auth.allows_request(36));
+        assert!(auth.allows_request(18));
+        assert!(!auth.allows_request(0));
+        assert!(!auth.allows_request(3));
+    }
+
+    #[test]
+    fn allows_request_authenticated_allows_all() {
+        let auth = ConnectionAuth::Authenticated {
+            principal: Principal {
+                name: "alice".into(),
+                auth_method: crabka_security::AuthMethod::SaslScramSha512,
+            },
+            mechanism: SaslMechanism::ScramSha512,
+            expires_at_ms: None,
+        };
+        assert!(auth.allows_request(0));
+        assert!(auth.allows_request(3));
+        assert!(auth.allows_request(17));
+        assert!(auth.allows_request(36));
     }
 }

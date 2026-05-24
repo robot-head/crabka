@@ -151,7 +151,14 @@ async fn serve_connection_stream<S>(
     let mut auth = if is_sasl_listener {
         crate::network::auth::ConnectionAuth::Anonymous
     } else if let Some(principal) = mtls_principal {
-        crate::network::auth::ConnectionAuth::Authenticated { principal }
+        // Slice 49e: non-SASL connections carry an inert mechanism +
+        // no-expiry; the in-band re-auth path is unreachable on these
+        // listeners (handshake is only sent on SASL listeners).
+        crate::network::auth::ConnectionAuth::Authenticated {
+            principal,
+            mechanism: crabka_security::SaslMechanism::Plain,
+            expires_at_ms: None,
+        }
     } else {
         // PLAINTEXT / SSL-without-cert: implicit anonymous, treated as
         // authenticated for gating purposes so the pre-auth allowlist
@@ -161,6 +168,8 @@ async fn serve_connection_stream<S>(
                 name: "ANONYMOUS".to_string(),
                 auth_method: crabka_security::AuthMethod::Anonymous,
             },
+            mechanism: crabka_security::SaslMechanism::Plain,
+            expires_at_ms: None,
         }
     };
     tracing::info!(listener = %spec.name, sasl = is_sasl_listener, "connection opened");
