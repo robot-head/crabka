@@ -1183,12 +1183,17 @@ async fn handle_sasl_frame(
                     &mut cur,
                     api_version,
                 )?;
-            // Must be in `Negotiating` state (i.e. SaslHandshake was the
-            // previous frame). Otherwise return ILLEGAL_SASL_STATE (34) and
-            // close.
+            // Must be mid-SASL: either `Negotiating` (initial auth: a
+            // SaslHandshake was the previous frame) or `Reauthenticating`
+            // (KIP-368 in-band re-auth: a SaslHandshake just ran on an
+            // already-authenticated connection). Any other state returns
+            // ILLEGAL_SASL_STATE (34) and closes.
             let mech_opt = match auth {
                 crate::network::auth::ConnectionAuth::Negotiating { mechanism, .. } => {
                     Some(*mechanism)
+                }
+                crate::network::auth::ConnectionAuth::Reauthenticating { previous, .. } => {
+                    Some(previous.mechanism)
                 }
                 _ => None,
             };
