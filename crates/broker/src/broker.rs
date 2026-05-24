@@ -1240,6 +1240,7 @@ impl Broker {
                 handle,
                 interval: config.oauthbearer_jwks_refresh_interval,
                 shutdown: supervisor_shutdown.child_token(),
+                tls_trust: config.oauthbearer_jwks_tls_trust.clone(),
             };
             tokio::spawn(refresher.run());
         }

@@ -76,3 +76,6 @@ tower.workspace = true
 # Slice 49b: mint ES256 tokens + build the matching JWK for the signed
 # OAUTHBEARER wire test.
 ring.workspace = true
+# Slice 49c T3: generate a self-signed cert with 127.0.0.1 SAN on the
+# fly for the HTTPS JWKS-refresher integration tests.
+rcgen.workspace = true
