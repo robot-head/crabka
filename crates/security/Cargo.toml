@@ -27,11 +27,13 @@ base64.workspace = true
 tracing.workspace = true
 x509-parser = { workspace = true, features = ["verify"] }
 arc-swap.workspace = true
+async-trait = { workspace = true }
 
 [dev-dependencies]
 hex.workspace = true
 tempfile.workspace = true
 criterion = { version = "4.6.0", package = "codspeed-criterion-compat" }
+tokio = { workspace = true, features = ["macros", "rt"] }
 
 [[bench]]
 name = "scram"

@@ -63,6 +63,12 @@ pub enum AuthError {
     /// RFC 7628 `invalid_token` server error status (slice 49).
     #[error("invalid token")]
     InvalidToken,
+    /// OAUTHBEARER introspection HTTP round-trip failed at the transport layer
+    /// (slice 49d). Distinct from `InvalidToken` so the SASL handler can
+    /// surface "`IdP` unreachable" separately from "client supplied a bad
+    /// token". Maps to the RFC 7628 `invalid_token` server error status.
+    #[error("oauthbearer introspection transport: {0}")]
+    IntrospectionTransport(String),
 }
 
 #[cfg(test)]

@@ -1352,6 +1352,7 @@ name = "crabka-security"
 version = "0.1.1"
 dependencies = [
  "arc-swap",
+ "async-trait",
  "base64",
  "codspeed-criterion-compat",
  "hex",
@@ -1369,6 +1370,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "time",
+ "tokio",
  "tracing",
  "x509-parser",
 ]

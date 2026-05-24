@@ -12,6 +12,8 @@
 //!    the built-in development/testing validator. Signed-token (JWKS)
 //!    validation is a follow-up slice.
 
+use std::sync::Arc;
+
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use serde_json::Value;
@@ -392,15 +394,18 @@ impl SignedJwsValidator {
     }
 }
 
-/// The broker's configured OAUTHBEARER token validator: either the
-/// development-only unsecured-JWS path (slice 49) or production signed-JWT
-/// validation against a JWKS endpoint (slice 49b). Defaults to unsecured.
+/// The broker's configured OAUTHBEARER token validator: the
+/// development-only unsecured-JWS path (slice 49), production signed-JWT
+/// validation against a JWKS endpoint (slice 49b), or RFC 7662 opaque-token
+/// introspection (slice 49d). Defaults to unsecured.
 #[derive(Debug, Clone)]
 pub enum OAuthBearerValidator {
     /// Unsecured JWS (`alg:none`) — development / testing only.
     Unsecured(UnsecuredJwsValidator),
     /// Signed JWS verified against a JWKS key set.
     Signed(SignedJwsValidator),
+    /// RFC 7662 opaque-token introspection (slice 49d).
+    Introspection(IntrospectionValidator),
 }
 
 impl Default for OAuthBearerValidator {
@@ -414,21 +419,189 @@ impl OAuthBearerValidator {
     ///
     /// # Errors
     ///
-    /// [`AuthError::InvalidToken`] when the token fails validation.
-    pub fn validate(&self, token: &str, now_ms: i64) -> Result<Principal, AuthError> {
+    /// - [`AuthError::InvalidToken`] when the token fails validation.
+    /// - [`AuthError::IntrospectionTransport`] when the introspection variant's
+    ///   HTTP call fails at the transport layer.
+    pub async fn validate(&self, token: &str, now_ms: i64) -> Result<Principal, AuthError> {
         match self {
             Self::Unsecured(v) => v.validate(token, now_ms),
             Self::Signed(v) => v.validate(token, now_ms),
+            Self::Introspection(v) => v.validate(token, now_ms).await,
         }
     }
 
     /// The JWKS handle when this is a signed validator, so the broker can wire
-    /// a refresher to the same key cell. `None` for the unsecured path.
+    /// a refresher to the same key cell. `None` for the unsecured + introspection paths.
     #[must_use]
     pub fn jwks_handle(&self) -> Option<JwksHandle> {
         match self {
-            Self::Unsecured(_) => None,
+            Self::Unsecured(_) | Self::Introspection(_) => None,
             Self::Signed(v) => Some(v.key_handle()),
+        }
+    }
+}
+
+/// HTTP transport contract for RFC 7662 introspection + OIDC userinfo.
+/// Lives in this crate to keep `crates/security` as the validator surface;
+/// the concrete reqwest-backed impl lives in `crates/broker`
+/// (`oauth_introspection.rs`) so this crate stays I/O-free.
+#[async_trait::async_trait]
+pub trait IntrospectionClient: Send + Sync + std::fmt::Debug {
+    /// POST the `IdP`'s introspection endpoint with `token` in a
+    /// form-encoded body. Caller checks `active` + claims.
+    async fn introspect(&self, token: &str) -> Result<serde_json::Value, IntrospectionError>;
+
+    /// GET the `IdP`'s userinfo endpoint with `Authorization: Bearer
+    /// <token>`. `Ok(None)` when the validator is configured without
+    /// userinfo enrichment.
+    async fn userinfo(&self, token: &str) -> Result<Option<serde_json::Value>, IntrospectionError>;
+}
+
+/// Transport-layer failures surfaced by [`IntrospectionClient`]. The
+/// validator maps these onto [`AuthError::IntrospectionTransport`] for
+/// the SASL handler.
+#[derive(Debug, thiserror::Error)]
+pub enum IntrospectionError {
+    #[error("transport: {0}")]
+    Transport(String),
+    #[error("non-2xx response: {0}")]
+    Status(u16),
+    #[error("invalid JSON body")]
+    Parse,
+}
+
+/// RFC 7662 opaque-token introspection validator (slice 49d). Calls the
+/// introspection endpoint per token (no caching — RFC 7662 §4 discourages
+/// caching without explicit lifetime info; SASL is once per connection so
+/// the cost is acceptable). Optionally calls OIDC userinfo after a
+/// successful introspection and merges the profile claims over the
+/// introspection claims.
+#[derive(Debug, Clone)]
+pub struct IntrospectionValidator {
+    pub client: Arc<dyn IntrospectionClient>,
+    /// Claim whose string value becomes the principal name. Default `sub`
+    /// for generic OAuth flows; commonly `client_id` for Keycloak
+    /// client-credentials.
+    pub principal_claim_name: String,
+    /// Claim carrying the token scope (string or array). Default `scope`.
+    pub scope_claim_name: String,
+    /// When set, the merged scope claim must contain this value.
+    pub required_scope: Option<String>,
+    /// `true` iff a `userinfo_endpoint_uri` is configured; the validator
+    /// calls `client.userinfo(token)` after a successful introspection and
+    /// merges the response over the introspection claims.
+    pub call_userinfo: bool,
+    /// Clock-skew tolerance for `exp`/`iat`/`nbf` checks on
+    /// introspection-response timestamps (when present).
+    pub allowable_clock_skew_ms: i64,
+}
+
+impl IntrospectionValidator {
+    /// Validate a bearer token via RFC 7662 introspection + optional
+    /// userinfo enrichment.
+    ///
+    /// # Errors
+    ///
+    /// - [`AuthError::IntrospectionTransport`] on HTTP transport / parse failures.
+    /// - [`AuthError::InvalidToken`] on `active != true`, missing principal
+    ///   claim, scope mismatch, or temporal-claim failure.
+    pub async fn validate(&self, token: &str, now_ms: i64) -> Result<Principal, AuthError> {
+        let mut claims = self
+            .client
+            .introspect(token)
+            .await
+            .map_err(|e| AuthError::IntrospectionTransport(e.to_string()))?;
+        if claims.get("active").and_then(Value::as_bool) != Some(true) {
+            return Err(AuthError::InvalidToken);
+        }
+        check_temporal_claims(&claims, now_ms, self.allowable_clock_skew_ms)?;
+        if self.call_userinfo
+            && let Some(ui) = self
+                .client
+                .userinfo(token)
+                .await
+                .map_err(|e| AuthError::IntrospectionTransport(e.to_string()))?
+        {
+            merge_userinfo_over_introspection(&mut claims, ui);
+        }
+        check_required_scope(
+            &claims,
+            &self.scope_claim_name,
+            self.required_scope.as_deref(),
+        )?;
+        let name = claims
+            .get(&self.principal_claim_name)
+            .and_then(Value::as_str)
+            .ok_or(AuthError::InvalidToken)?
+            .to_string();
+        Ok(Principal {
+            name,
+            auth_method: AuthMethod::SaslOAuthBearer,
+        })
+    }
+}
+
+/// Skew-tolerant temporal-claims check for introspection responses.
+/// RFC 7662 doesn't mandate exp/iat/nbf, but honor them when present.
+fn check_temporal_claims(claims: &Value, now_ms: i64, skew_ms: i64) -> Result<(), AuthError> {
+    if let Some(exp_s) = claims.get("exp").and_then(Value::as_i64) {
+        let exp_ms = exp_s.saturating_mul(1000);
+        if now_ms.saturating_sub(skew_ms) > exp_ms {
+            return Err(AuthError::InvalidToken);
+        }
+    }
+    if let Some(iat_s) = claims.get("iat").and_then(Value::as_i64) {
+        let iat_ms = iat_s.saturating_mul(1000);
+        if iat_ms.saturating_sub(skew_ms) > now_ms {
+            return Err(AuthError::InvalidToken);
+        }
+    }
+    if let Some(nbf_s) = claims.get("nbf").and_then(Value::as_i64) {
+        let nbf_ms = nbf_s.saturating_mul(1000);
+        if nbf_ms.saturating_sub(skew_ms) > now_ms {
+            return Err(AuthError::InvalidToken);
+        }
+    }
+    Ok(())
+}
+
+/// Required-scope check honoring both string-scope (space-separated, RFC
+/// 6749 §3.3) and array-scope (Keycloak / some `IdPs`) forms. Pure helper.
+fn check_required_scope(
+    claims: &Value,
+    scope_claim_name: &str,
+    required: Option<&str>,
+) -> Result<(), AuthError> {
+    let Some(required) = required else {
+        return Ok(());
+    };
+    let claim = claims
+        .get(scope_claim_name)
+        .ok_or(AuthError::InvalidToken)?;
+    let granted: Vec<&str> = match claim {
+        Value::String(s) => s.split_whitespace().collect(),
+        Value::Array(arr) => arr.iter().filter_map(Value::as_str).collect(),
+        _ => return Err(AuthError::InvalidToken),
+    };
+    if granted.contains(&required) {
+        Ok(())
+    } else {
+        Err(AuthError::InvalidToken)
+    }
+}
+
+/// Merge userinfo response over introspection claims. Userinfo wins for
+/// profile-style claims (`preferred_username`, email, name, `given_name`,
+/// `family_name`, ...); introspection wins for the small set of
+/// authorization claims listed in `RESERVED`.
+fn merge_userinfo_over_introspection(introspection: &mut Value, userinfo: Value) {
+    const RESERVED: &[&str] = &["active", "exp", "iat", "nbf", "scope", "client_id", "sub"];
+    let (Some(obj), Value::Object(ui_map)) = (introspection.as_object_mut(), userinfo) else {
+        return;
+    };
+    for (k, v) in ui_map {
+        if !RESERVED.contains(&k.as_str()) {
+            obj.insert(k, v);
         }
     }
 }
@@ -793,13 +966,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn enum_dispatches_unsecured_and_signed() {
+    #[tokio::test]
+    async fn enum_dispatches_unsecured_and_signed() {
         // Unsecured default.
         let unsecured = OAuthBearerValidator::default();
         assert!(unsecured.jwks_handle().is_none());
         let tok = unsecured_token("admin", 999_999_000, 9_999_999_999);
-        assert!(unsecured.validate(&tok, 1_000_000_000_000).is_ok());
+        assert!(unsecured.validate(&tok, 1_000_000_000_000).await.is_ok());
 
         // Signed.
         let (token, jwks) = mint_rs256("k1", "{\"sub\":\"x\",\"exp\":9999999999}");
@@ -809,6 +982,7 @@ mod tests {
         assert_eq!(
             signed_enum
                 .validate(&token, 1_000_000_000_000)
+                .await
                 .unwrap()
                 .name,
             "x"
@@ -820,5 +994,249 @@ mod tests {
             "{\"alg\":\"none\"}",
             &format!("{{\"sub\":\"{sub}\",\"iat\":{iat_s},\"exp\":{exp_s}}}"),
         )
+    }
+}
+
+#[cfg(test)]
+mod introspection_tests {
+    use super::*;
+    use crate::{AuthError, AuthMethod};
+    use serde_json::{Value, json};
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    /// Per-token canned responses. `introspect` returns the entry for
+    /// the matching token (or a Transport error if absent so a test can
+    /// exercise the transport-error path).
+    #[derive(Debug, Default)]
+    struct MockIntrospectionClient {
+        introspect_responses: Mutex<HashMap<String, Result<Value, IntrospectionError>>>,
+        userinfo_responses: Mutex<HashMap<String, Result<Option<Value>, IntrospectionError>>>,
+    }
+
+    impl MockIntrospectionClient {
+        fn arc() -> Arc<Self> {
+            Arc::new(Self::default())
+        }
+        fn set_introspect(&self, token: &str, resp: Result<Value, IntrospectionError>) {
+            self.introspect_responses
+                .lock()
+                .unwrap()
+                .insert(token.into(), resp);
+        }
+        fn set_userinfo(&self, token: &str, resp: Result<Option<Value>, IntrospectionError>) {
+            self.userinfo_responses
+                .lock()
+                .unwrap()
+                .insert(token.into(), resp);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl IntrospectionClient for MockIntrospectionClient {
+        async fn introspect(&self, token: &str) -> Result<Value, IntrospectionError> {
+            self.introspect_responses
+                .lock()
+                .unwrap()
+                .remove(token)
+                .unwrap_or(Err(IntrospectionError::Transport(
+                    "no canned response".into(),
+                )))
+        }
+        async fn userinfo(&self, token: &str) -> Result<Option<Value>, IntrospectionError> {
+            self.userinfo_responses
+                .lock()
+                .unwrap()
+                .remove(token)
+                .unwrap_or(Ok(None))
+        }
+    }
+
+    fn validator(client: Arc<MockIntrospectionClient>) -> IntrospectionValidator {
+        IntrospectionValidator {
+            client,
+            principal_claim_name: "sub".into(),
+            scope_claim_name: "scope".into(),
+            required_scope: None,
+            call_userinfo: false,
+            allowable_clock_skew_ms: 30_000,
+        }
+    }
+
+    const NOW_MS: i64 = 1_700_000_000_000;
+
+    #[tokio::test]
+    async fn introspection_active_true_with_principal_returns_ok() {
+        let mock = MockIntrospectionClient::arc();
+        mock.set_introspect(
+            "tok",
+            Ok(json!({"active": true, "sub": "alice", "exp": NOW_MS/1000 + 60})),
+        );
+        let v = validator(mock.clone());
+        let p = v.validate("tok", NOW_MS).await.unwrap();
+        assert_eq!(p.name, "alice");
+        assert_eq!(p.auth_method, AuthMethod::SaslOAuthBearer);
+    }
+
+    #[tokio::test]
+    async fn introspection_active_false_rejected() {
+        let mock = MockIntrospectionClient::arc();
+        mock.set_introspect("tok", Ok(json!({"active": false})));
+        let v = validator(mock.clone());
+        assert!(matches!(
+            v.validate("tok", NOW_MS).await,
+            Err(AuthError::InvalidToken)
+        ));
+    }
+
+    #[tokio::test]
+    async fn introspection_missing_active_field_rejected() {
+        let mock = MockIntrospectionClient::arc();
+        mock.set_introspect("tok", Ok(json!({"sub": "alice"})));
+        let v = validator(mock.clone());
+        assert!(matches!(
+            v.validate("tok", NOW_MS).await,
+            Err(AuthError::InvalidToken)
+        ));
+    }
+
+    #[tokio::test]
+    async fn introspection_expired_exp_rejected() {
+        let mock = MockIntrospectionClient::arc();
+        mock.set_introspect(
+            "tok",
+            Ok(json!({"active": true, "sub": "alice", "exp": NOW_MS/1000 - 3600})),
+        );
+        let v = validator(mock.clone());
+        assert!(matches!(
+            v.validate("tok", NOW_MS).await,
+            Err(AuthError::InvalidToken)
+        ));
+    }
+
+    #[tokio::test]
+    async fn introspection_required_scope_honored_string() {
+        let mock = MockIntrospectionClient::arc();
+        mock.set_introspect(
+            "tok",
+            Ok(json!({"active": true, "sub": "alice", "scope": "kafka.read kafka.write"})),
+        );
+        let mut v = validator(mock.clone());
+        v.required_scope = Some("kafka.write".into());
+        assert!(v.validate("tok", NOW_MS).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn introspection_required_scope_honored_array() {
+        let mock = MockIntrospectionClient::arc();
+        mock.set_introspect(
+            "tok",
+            Ok(json!({"active": true, "sub": "alice", "scope": ["kafka.read", "kafka.write"]})),
+        );
+        let mut v = validator(mock.clone());
+        v.required_scope = Some("kafka.write".into());
+        assert!(v.validate("tok", NOW_MS).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn introspection_required_scope_missing_rejected() {
+        let mock = MockIntrospectionClient::arc();
+        mock.set_introspect(
+            "tok",
+            Ok(json!({"active": true, "sub": "alice", "scope": "kafka.read"})),
+        );
+        let mut v = validator(mock.clone());
+        v.required_scope = Some("kafka.write".into());
+        assert!(matches!(
+            v.validate("tok", NOW_MS).await,
+            Err(AuthError::InvalidToken)
+        ));
+    }
+
+    #[tokio::test]
+    async fn introspection_userinfo_claims_override_introspection_for_profile_keys() {
+        let mock = MockIntrospectionClient::arc();
+        mock.set_introspect(
+            "tok",
+            Ok(json!({"active": true, "sub": "alice", "preferred_username": "intros-name"})),
+        );
+        mock.set_userinfo(
+            "tok",
+            Ok(Some(
+                json!({"preferred_username": "userinfo-name", "email": "a@b.c"}),
+            )),
+        );
+        let mut v = validator(mock.clone());
+        v.call_userinfo = true;
+        v.principal_claim_name = "preferred_username".into();
+        let p = v.validate("tok", NOW_MS).await.unwrap();
+        assert_eq!(p.name, "userinfo-name");
+    }
+
+    #[tokio::test]
+    async fn introspection_userinfo_does_not_override_authorization_keys() {
+        let mock = MockIntrospectionClient::arc();
+        mock.set_introspect("tok", Ok(json!({"active": true, "sub": "alice"})));
+        mock.set_userinfo("tok", Ok(Some(json!({"active": false, "sub": "mallory"}))));
+        let mut v = validator(mock.clone());
+        v.call_userinfo = true;
+        let p = v.validate("tok", NOW_MS).await.unwrap();
+        assert_eq!(p.name, "alice", "sub from introspection wins over userinfo");
+    }
+
+    #[tokio::test]
+    async fn introspection_userinfo_disabled_when_call_userinfo_false() {
+        let mock = MockIntrospectionClient::arc();
+        mock.set_introspect("tok", Ok(json!({"active": true, "sub": "alice"})));
+        // Deliberately set a userinfo response — should be ignored.
+        mock.set_userinfo("tok", Ok(Some(json!({"preferred_username": "ignored"}))));
+        let v = validator(mock.clone()); // call_userinfo: false (default)
+        let p = v.validate("tok", NOW_MS).await.unwrap();
+        assert_eq!(p.name, "alice");
+    }
+
+    #[tokio::test]
+    async fn introspection_transport_error_becomes_introspection_transport() {
+        let mock = MockIntrospectionClient::arc();
+        mock.set_introspect(
+            "tok",
+            Err(IntrospectionError::Transport("connection refused".into())),
+        );
+        let v = validator(mock.clone());
+        let err = v.validate("tok", NOW_MS).await.unwrap_err();
+        assert!(
+            matches!(err, AuthError::IntrospectionTransport(ref msg) if msg.contains("connection refused")),
+            "got {err:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn introspection_default_principal_claim_sub() {
+        let mock = MockIntrospectionClient::arc();
+        mock.set_introspect("tok", Ok(json!({"active": true, "sub": "sub-name"})));
+        let v = validator(mock.clone());
+        assert_eq!(v.validate("tok", NOW_MS).await.unwrap().name, "sub-name");
+    }
+
+    #[tokio::test]
+    async fn introspection_custom_principal_claim_client_id() {
+        let mock = MockIntrospectionClient::arc();
+        mock.set_introspect(
+            "tok",
+            Ok(json!({"active": true, "sub": "sub-name", "client_id": "my-client"})),
+        );
+        let mut v = validator(mock.clone());
+        v.principal_claim_name = "client_id".into();
+        assert_eq!(v.validate("tok", NOW_MS).await.unwrap().name, "my-client");
+    }
+
+    #[tokio::test]
+    async fn enum_dispatch_introspection_async() {
+        let mock = MockIntrospectionClient::arc();
+        mock.set_introspect("tok", Ok(json!({"active": true, "sub": "alice"})));
+        let v = validator(mock.clone());
+        let enum_v = OAuthBearerValidator::Introspection(v);
+        let p = enum_v.validate("tok", NOW_MS).await.unwrap();
+        assert_eq!(p.name, "alice");
     }
 }
