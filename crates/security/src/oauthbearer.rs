@@ -1222,7 +1222,7 @@ mod introspection_tests {
         let mock = MockIntrospectionClient::arc();
         mock.set_introspect(
             "tok",
-            Ok(json!({"active": true, "sub": "alice", "scope": "kafka.read"})),
+            Ok(json!({"active": true, "sub": "alice", "exp": NOW_MS / 1000 + 60, "scope": "kafka.read"})),
         );
         let mut v = validator(mock.clone());
         v.required_scope = Some("kafka.write".into());
