@@ -803,7 +803,7 @@ jwks_endpoint_uri = "https://idp.example/certs"
 [oauthbearer]
 introspection_endpoint_uri = "https://idp.example/introspect"
 introspection_client_id = "kafka-broker"
-introspection_client_secret_path = "{}"
+introspection_client_secret_path = '{}'
 "#,
             secret_path.display()
         );
@@ -828,7 +828,7 @@ introspection_client_secret_path = "{}"
 jwks_endpoint_uri = "https://idp.example/jwks"
 introspection_endpoint_uri = "https://idp.example/introspect"
 introspection_client_id = "id"
-introspection_client_secret_path = "{}"
+introspection_client_secret_path = '{}'
 "#,
             secret_path.display()
         );
@@ -847,7 +847,7 @@ introspection_client_secret_path = "{}"
             r#"
 [oauthbearer]
 introspection_endpoint_uri = "https://idp.example/introspect"
-introspection_client_secret_path = "{}"
+introspection_client_secret_path = '{}'
 "#,
             secret_path.display()
         );
@@ -880,7 +880,7 @@ introspection_client_id = "kafka-broker"
 introspection_endpoint_uri = "https://idp.example/introspect"
 userinfo_endpoint_uri = "https://idp.example/userinfo"
 introspection_client_id = "id"
-introspection_client_secret_path = "{}"
+introspection_client_secret_path = '{}'
 "#,
             secret_path.display()
         );
@@ -903,7 +903,7 @@ introspection_client_secret_path = "{}"
 [oauthbearer]
 introspection_endpoint_uri = "https://idp.example/introspect"
 introspection_client_id = "id"
-introspection_client_secret_path = "{}"
+introspection_client_secret_path = '{}'
 "#,
             secret_path.display()
         );
