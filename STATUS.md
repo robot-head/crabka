@@ -2152,7 +2152,7 @@ Kafka client for ApiVersions.
   user-supplied `Secret` and pass the file path through) and the Keycloak
   `kind` e2e upgrade from HTTP to HTTPS.
 - **`crates/security`:** new `jwks_trust.rs` with
-  `build_client_config_from_pem(pem: &[u8]) -> Result<rustls::ClientConfig>`
+  `build_client_config_from_pem(path: &Path) -> Result<Arc<rustls::ClientConfig>, JwksTrustError>`
   — parses one-or-many concatenated PEM `CERTIFICATE` blocks into an empty
   `RootCertStore` (no webpki / Mozilla roots), returns a `ClientConfig` with
   no client auth. Strimzi-shaped **replace** semantic: when set the user PEM
