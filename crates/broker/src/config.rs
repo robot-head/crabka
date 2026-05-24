@@ -170,6 +170,12 @@ pub struct BrokerConfig {
     /// Slice 49b: how often to re-fetch the JWKS. Default 5 minutes.
     pub oauthbearer_jwks_refresh_interval: std::time::Duration,
 
+    /// Slice 49c: optional PEM path used as the exclusive trust store for
+    /// outbound HTTPS to the JWKS endpoint. `None` → reqwest's default
+    /// webpki-roots (slice 49b behavior). Threaded into `JwksRefresher` at
+    /// spawn time.
+    pub oauthbearer_jwks_tls_trust: Option<std::path::PathBuf>,
+
     /// KIP-460 auto preferred-replica election. When true, a background
     /// task on the controller leader periodically scans partitions and
     /// re-elects the preferred replica as leader when it's alive + in
@@ -258,6 +264,7 @@ impl BrokerConfig {
             oauthbearer_validator: crabka_security::OAuthBearerValidator::default(),
             oauthbearer_jwks_endpoint: None,
             oauthbearer_jwks_refresh_interval: std::time::Duration::from_mins(5),
+            oauthbearer_jwks_tls_trust: None,
             auto_leader_rebalance_enable: false, // tests opt in explicitly
             leader_imbalance_check_interval_secs: 300,
             leader_imbalance_per_broker_percentage: 10,
@@ -423,6 +430,7 @@ impl Default for BrokerConfig {
             oauthbearer_validator: crabka_security::OAuthBearerValidator::default(),
             oauthbearer_jwks_endpoint: None,
             oauthbearer_jwks_refresh_interval: std::time::Duration::from_mins(5),
+            oauthbearer_jwks_tls_trust: None,
             auto_leader_rebalance_enable: true,
             leader_imbalance_check_interval_secs: 300,
             leader_imbalance_per_broker_percentage: 10,
