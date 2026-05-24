@@ -71,6 +71,25 @@ pub enum ReconcileError {
     MissingOauthTrustKey { secret: String, key: String },
     #[error("oauth trust Secret '{secret}' key '{key}' is empty")]
     EmptyOauthTrustValue { secret: String, key: String },
+    /// Slice 50c: an oauth listener's `accessTokenIsJwt` setting
+    /// disagrees with which mode-specific fields are set (JWT-mode
+    /// requires `jwksEndpointUri` and rejects introspection fields;
+    /// introspection-mode requires `introspectionEndpointUri` + `clientId`
+    /// + `clientSecret` and rejects `jwksEndpointUri`).
+    #[error("listener OAuth: {0}")]
+    InvalidListenerOauthAccessTokenIsJwt(String),
+    /// Slice 50c: an oauth listener's `clientSecret.secretName` doesn't
+    /// exist in the cluster's namespace.
+    #[error("oauth introspection Secret '{0}' not found")]
+    MissingOauthIntrospectionSecret(String),
+    /// Slice 50c: an oauth listener's `clientSecret.secretName` exists
+    /// but does not contain the named `key`.
+    #[error("oauth introspection Secret '{secret}' has no key '{key}'")]
+    MissingOauthIntrospectionKey { secret: String, key: String },
+    /// Slice 50c: an oauth listener's `clientSecret` Secret + key both
+    /// exist but the value is zero bytes.
+    #[error("oauth introspection Secret '{secret}' key '{key}' is empty")]
+    EmptyOauthIntrospectionValue { secret: String, key: String },
 }
 
 /// Build a Kubernetes-style condition with `lastTransitionTime` set to

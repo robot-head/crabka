@@ -409,6 +409,39 @@ pub(crate) fn oauth_jwks_trust_secret_name(kafka: &Kafka) -> Option<String> {
     Some(format!("{}-oauth-jwks-trust", kafka.name_any()))
 }
 
+/// Slice 50c. Describes the source Secret the operator mounts into
+/// broker pods for OAUTHBEARER introspection client-secret. Returned
+/// by [`reconcile_oauth_introspection_secret`] (validating, async,
+/// runs in `reconcile_kafka`) and re-derived deterministically from
+/// the parent Kafka CR via [`oauth_introspection_secret_mount`] (pure,
+/// sync, used by the pool reconciler to know what to mount without
+/// re-fetching from the apiserver).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OauthIntrospectionMount {
+    pub secret_name: String,
+    pub key: String,
+}
+
+/// Slice 50c. Derives the OAUTHBEARER introspection client-secret
+/// mount from the parent Kafka CR's listeners. `Some` when at least
+/// one OAuth listener has `accessTokenIsJwt: false` and a
+/// `clientSecret` ref; `None` when no OAuth listener uses
+/// introspection mode (or no OAuth listener at all). Pure: derives
+/// the same `OauthIntrospectionMount` the pool reconciler will mount
+/// without consulting the apiserver — the source Secret's name + key
+/// live on the CR.
+pub(crate) fn oauth_introspection_secret_mount(kafka: &Kafka) -> Option<OauthIntrospectionMount> {
+    let canonical = canonical_oauth_config(&kafka.spec.listeners)?;
+    if canonical.access_token_is_jwt {
+        return None;
+    }
+    let cs = canonical.client_secret.as_ref()?;
+    Some(OauthIntrospectionMount {
+        secret_name: cs.secret_name.clone(),
+        key: cs.key.clone(),
+    })
+}
+
 /// Slice 50b. Build the managed oauth-jwks-trust Secret from the
 /// canonical OAuth config's `tls_trusted_certificates`. Returns the
 /// Secret's name (so the `StatefulSet` can mount it), or `None` when no
@@ -480,6 +513,55 @@ async fn upsert_oauth_trust_secret(
         ..Default::default()
     };
     apply_object(secret_api, managed_name, &secret).await
+}
+
+/// Slice 50c. Validate the OAUTHBEARER introspection client-secret
+/// Secret + key exist (no managed-Secret upsert — T5's pod template
+/// mounts the source Secret directly via projected items). Returns
+/// the mount info for the `StatefulSet` renderer, or `None` when
+/// introspection is not configured (JWT mode or no oauth listener).
+///
+/// The `_kafka` arg mirrors the slice-50b sibling's signature for
+/// call-site symmetry but is unused here: there is no managed Secret
+/// to owner-ref — the source Secret stays user-owned.
+async fn reconcile_oauth_introspection_secret(
+    secret_api: &Api<Secret>,
+    _kafka: &Kafka,
+    canonical: Option<&ListenerAuthenticationOAuth>,
+) -> Result<Option<OauthIntrospectionMount>, ReconcileError> {
+    let Some(c) = canonical else {
+        return Ok(None);
+    };
+    if c.access_token_is_jwt {
+        return Ok(None);
+    }
+    let cs = c.client_secret.as_ref().ok_or_else(|| {
+        ReconcileError::InvalidListenerOauthAccessTokenIsJwt(
+            "introspection mode requires clientSecret".into(),
+        )
+    })?;
+    let src = secret_api
+        .get_opt(&cs.secret_name)
+        .await?
+        .ok_or_else(|| ReconcileError::MissingOauthIntrospectionSecret(cs.secret_name.clone()))?;
+    let val = src
+        .data
+        .as_ref()
+        .and_then(|d| d.get(&cs.key))
+        .ok_or_else(|| ReconcileError::MissingOauthIntrospectionKey {
+            secret: cs.secret_name.clone(),
+            key: cs.key.clone(),
+        })?;
+    if val.0.is_empty() {
+        return Err(ReconcileError::EmptyOauthIntrospectionValue {
+            secret: cs.secret_name.clone(),
+            key: cs.key.clone(),
+        });
+    }
+    Ok(Some(OauthIntrospectionMount {
+        secret_name: cs.secret_name.clone(),
+        key: cs.key.clone(),
+    }))
 }
 
 /// Apply one `OpenShift` `Route` via the dynamic-object path.
@@ -898,6 +980,46 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
                     ReconcileError::MissingOauthTrustSecret(_) => "MissingOauthTrustSecret",
                     ReconcileError::MissingOauthTrustKey { .. } => "MissingOauthTrustKey",
                     ReconcileError::EmptyOauthTrustValue { .. } => "EmptyOauthTrustValue",
+                    _ => unreachable!(),
+                };
+                let cond = condition("Ready", "False", reason, &e.to_string());
+                let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), &ns);
+                patch_status_with_condition(&kafka_api, &name, cond).await?;
+                return Ok(Action::requeue(Duration::from_secs(30)));
+            }
+            Err(e) => return Err(e),
+        }
+
+        // Slice 50c: validate the OAUTHBEARER introspection client-secret
+        // Secret (when introspection is configured). T5's pod template
+        // derives the same mount independently via
+        // `oauth_introspection_secret_mount`, so we don't need to thread
+        // the value through here — calling
+        // `reconcile_oauth_introspection_secret` is purely for its
+        // validate-Secret-exists side effect.
+        match reconcile_oauth_introspection_secret(&secret_api, &obj, oauth_canonical.as_ref())
+            .await
+        {
+            Ok(_) => {}
+            Err(
+                e @ (ReconcileError::InvalidListenerOauthAccessTokenIsJwt(_)
+                | ReconcileError::MissingOauthIntrospectionSecret(_)
+                | ReconcileError::MissingOauthIntrospectionKey { .. }
+                | ReconcileError::EmptyOauthIntrospectionValue { .. }),
+            ) => {
+                let reason = match &e {
+                    ReconcileError::InvalidListenerOauthAccessTokenIsJwt(_) => {
+                        "InvalidListenerOauthAccessTokenIsJwt"
+                    }
+                    ReconcileError::MissingOauthIntrospectionSecret(_) => {
+                        "MissingOauthIntrospectionSecret"
+                    }
+                    ReconcileError::MissingOauthIntrospectionKey { .. } => {
+                        "MissingOauthIntrospectionKey"
+                    }
+                    ReconcileError::EmptyOauthIntrospectionValue { .. } => {
+                        "EmptyOauthIntrospectionValue"
+                    }
                     _ => unreachable!(),
                 };
                 let cond = condition("Ready", "False", reason, &e.to_string());
@@ -1563,7 +1685,7 @@ mod tests {
     ) -> ListenerAuthenticationOAuth {
         ListenerAuthenticationOAuth {
             valid_issuer_uri: "https://iss.example/".into(),
-            jwks_endpoint_uri: "https://iss.example/jwks".into(),
+            jwks_endpoint_uri: Some("https://iss.example/jwks".into()),
             valid_audience: None,
             user_name_claim: None,
             custom_claim_check: None,
@@ -1571,7 +1693,57 @@ mod tests {
             max_clock_skew_seconds: None,
             enable_oauth_bearer: true,
             tls_trusted_certificates: certs,
+            access_token_is_jwt: true,
+            introspection_endpoint_uri: None,
+            user_info_endpoint_uri: None,
+            client_id: None,
+            client_secret: None,
+            introspection_http_timeout_seconds: None,
         }
+    }
+
+    fn sample_oauth_cfg_introspection(secret_name: &str, key: &str) -> ListenerAuthenticationOAuth {
+        ListenerAuthenticationOAuth {
+            valid_issuer_uri: "https://iss.example/".into(),
+            jwks_endpoint_uri: None,
+            valid_audience: None,
+            user_name_claim: None,
+            custom_claim_check: None,
+            jwks_refresh_seconds: None,
+            max_clock_skew_seconds: None,
+            enable_oauth_bearer: true,
+            tls_trusted_certificates: vec![],
+            access_token_is_jwt: false,
+            introspection_endpoint_uri: Some("https://iss.example/introspect".into()),
+            user_info_endpoint_uri: None,
+            client_id: Some("broker-client".into()),
+            client_secret: Some(crate::crd::OauthClientSecretRef {
+                secret_name: secret_name.into(),
+                key: key.into(),
+            }),
+            introspection_http_timeout_seconds: None,
+        }
+    }
+
+    fn kafka_with_listeners(listeners: Vec<Listener>) -> Kafka {
+        use crate::crd::KafkaSpec;
+        let mut k = Kafka::new(
+            "c1",
+            KafkaSpec {
+                kafka_version: "3.7.0".into(),
+                metadata_version: None,
+                config: None,
+                listeners,
+                inter_broker_listener_name: None,
+                metrics_config: None,
+                network_policy: None,
+                cluster_ca: None,
+                clients_ca: None,
+                logging: None,
+            },
+        );
+        k.metadata.namespace = Some("ns".into());
+        k
     }
 
     #[test]
@@ -1605,5 +1777,57 @@ mod tests {
         )];
         let got = canonical_oauth_config(&ls).expect("OAuth listener present");
         assert!(got.tls_trusted_certificates.is_empty());
+    }
+
+    // Slice 50c: pure helper — derives the introspection client-secret
+    // mount from the CR's listeners. The async, apiserver-touching
+    // `reconcile_oauth_introspection_secret` path is covered by T6's
+    // integration tests.
+
+    #[test]
+    fn oauth_introspection_secret_mount_returns_none_when_no_oauth_listener() {
+        let kafka = kafka_with_listeners(vec![
+            listener_with_auth("plain", None),
+            listener_with_auth("scram", Some(ListenerAuthentication::ScramSha512)),
+        ]);
+        assert!(oauth_introspection_secret_mount(&kafka).is_none());
+    }
+
+    #[test]
+    fn oauth_introspection_secret_mount_returns_none_when_access_token_is_jwt_true() {
+        // sample_oauth_cfg defaults to access_token_is_jwt = true (JWT mode).
+        let cfg = sample_oauth_cfg(vec![]);
+        let kafka = kafka_with_listeners(vec![listener_with_auth(
+            "oauth",
+            Some(ListenerAuthentication::OAuth(cfg)),
+        )]);
+        assert!(oauth_introspection_secret_mount(&kafka).is_none());
+    }
+
+    #[test]
+    fn oauth_introspection_secret_mount_returns_none_when_client_secret_absent_introspection_mode()
+    {
+        // Introspection mode but clientSecret omitted (would fail T3's
+        // validation, but the helper should still handle it gracefully —
+        // the pool reconciler must not panic on an invalid-but-applied CR).
+        let mut cfg = sample_oauth_cfg_introspection("oauth-cs", "client-secret");
+        cfg.client_secret = None;
+        let kafka = kafka_with_listeners(vec![listener_with_auth(
+            "oauth",
+            Some(ListenerAuthentication::OAuth(cfg)),
+        )]);
+        assert!(oauth_introspection_secret_mount(&kafka).is_none());
+    }
+
+    #[test]
+    fn oauth_introspection_secret_mount_returns_some_for_introspection_config() {
+        let cfg = sample_oauth_cfg_introspection("oauth-cs", "client-secret");
+        let kafka = kafka_with_listeners(vec![listener_with_auth(
+            "oauth",
+            Some(ListenerAuthentication::OAuth(cfg)),
+        )]);
+        let mount = oauth_introspection_secret_mount(&kafka).expect("mount derived");
+        assert_eq!(mount.secret_name, "oauth-cs");
+        assert_eq!(mount.key, "client-secret");
     }
 }

@@ -19,7 +19,7 @@ use std::sync::Arc;
 use crabka_operator::controller::kafka::reconcile;
 use crabka_operator::crd::{
     Kafka, KafkaSpec, Listener, ListenerAuthentication, ListenerAuthenticationOAuth, ListenerType,
-    OAuthCustomClaimCheck, TlsTrustedCertificate,
+    OAuthCustomClaimCheck, OauthClientSecretRef, TlsTrustedCertificate,
 };
 use http::Method;
 
@@ -67,7 +67,7 @@ fn oauth_listener(name: &str, port: i32, tls: bool, cfg: ListenerAuthenticationO
 fn oauth_cfg_minimal() -> ListenerAuthenticationOAuth {
     ListenerAuthenticationOAuth {
         valid_issuer_uri: "https://issuer.example.com/".into(),
-        jwks_endpoint_uri: "https://issuer.example.com/jwks".into(),
+        jwks_endpoint_uri: Some("https://issuer.example.com/jwks".into()),
         valid_audience: None,
         user_name_claim: None,
         custom_claim_check: None,
@@ -75,6 +75,12 @@ fn oauth_cfg_minimal() -> ListenerAuthenticationOAuth {
         max_clock_skew_seconds: None,
         enable_oauth_bearer: true,
         tls_trusted_certificates: vec![],
+        access_token_is_jwt: true,
+        introspection_endpoint_uri: None,
+        user_info_endpoint_uri: None,
+        client_id: None,
+        client_secret: None,
+        introspection_http_timeout_seconds: None,
     }
 }
 
@@ -83,8 +89,9 @@ fn oauth_cfg_minimal() -> ListenerAuthenticationOAuth {
 fn oauth_cfg_full() -> ListenerAuthenticationOAuth {
     ListenerAuthenticationOAuth {
         valid_issuer_uri: "https://kc.example.com/realms/kafka".into(),
-        jwks_endpoint_uri: "https://kc.example.com/realms/kafka/protocol/openid-connect/certs"
-            .into(),
+        jwks_endpoint_uri: Some(
+            "https://kc.example.com/realms/kafka/protocol/openid-connect/certs".into(),
+        ),
         valid_audience: Some("kafka".into()),
         user_name_claim: Some("preferred_username".into()),
         custom_claim_check: Some(OAuthCustomClaimCheck {
@@ -95,6 +102,12 @@ fn oauth_cfg_full() -> ListenerAuthenticationOAuth {
         max_clock_skew_seconds: Some(30),
         enable_oauth_bearer: true,
         tls_trusted_certificates: vec![],
+        access_token_is_jwt: true,
+        introspection_endpoint_uri: None,
+        user_info_endpoint_uri: None,
+        client_id: None,
+        client_secret: None,
+        introspection_http_timeout_seconds: None,
     }
 }
 
@@ -363,7 +376,7 @@ async fn oauth_listener_with_http_jwks_uri_reconciles_but_emits_weak_auth_event(
     let (ctx, state) = build_ctx("ns5", rules);
 
     let mut cfg = oauth_cfg_minimal();
-    cfg.jwks_endpoint_uri = "http://issuer.example.com/jwks".into();
+    cfg.jwks_endpoint_uri = Some("http://issuer.example.com/jwks".into());
     let kafka =
         kafka_cr_with_listeners("c5", "ns5", vec![oauth_listener("oauth", 9095, true, cfg)]);
     reconcile(Arc::new(kafka), ctx).await.unwrap();
@@ -415,7 +428,7 @@ async fn oauth_listener_with_ftp_jwks_uri_rejected() {
     let (ctx, state) = build_ctx("ns6", rules);
 
     let mut cfg = oauth_cfg_minimal();
-    cfg.jwks_endpoint_uri = "ftp://issuer.example.com/jwks".into();
+    cfg.jwks_endpoint_uri = Some("ftp://issuer.example.com/jwks".into());
     let kafka =
         kafka_cr_with_listeners("c6", "ns6", vec![oauth_listener("oauth", 9095, true, cfg)]);
     reconcile(Arc::new(kafka), ctx).await.unwrap();
@@ -802,4 +815,65 @@ async fn oauth_listener_with_tls_trusted_certificates_reconciles_renders_idp_tls
         .find(|c| c["type"] == "ListenersValid")
         .unwrap_or_else(|| panic!("ListenersValid present; body = {body}"));
     assert_eq!(valid["status"], "True", "body = {body}");
+}
+
+// ── test 15: divergent access_token_is_jwt rejected with ConflictingOAuthConfig
+
+/// Slice 50c. Two OAuth listeners that each pass per-listener
+/// validation but disagree on `accessTokenIsJwt` (one JWT-mode with
+/// `jwksEndpointUri`, the other introspection-mode with
+/// `introspectionEndpointUri` + `clientId` + `clientSecret`) cannot
+/// share the broker-global `[oauthbearer]` block — the canonical
+/// fingerprint differs in the JWT-vs-introspection bit and every
+/// mode-specific field. The cross-listener canonical guard must
+/// reject the combination as `ConflictingOAuthConfig`, and no
+/// broker-config ConfigMap PATCH must fire.
+#[tokio::test]
+async fn two_oauth_listeners_with_divergent_access_token_is_jwt_rejected_with_conflicting_oauth_config()
+ {
+    let items = vec![shared::fake_pool_list_item("brokers", "ns15", "c15", 1, 1)];
+    let rules = rules_for_invalid_listeners("c15", "ns15", &items);
+    let (ctx, state) = build_ctx("ns15", rules);
+
+    // Listener A: JWT mode — passes per-listener validation (has
+    // jwksEndpointUri, no introspection-mode fields).
+    let mut cfg_a = oauth_cfg_minimal();
+    cfg_a.access_token_is_jwt = true;
+    cfg_a.jwks_endpoint_uri = Some("https://idp.example/jwks".into());
+
+    // Listener B: introspection mode — passes per-listener validation
+    // (no jwksEndpointUri, has all introspection-mode required fields).
+    let cfg_b = ListenerAuthenticationOAuth {
+        valid_issuer_uri: "https://idp.example/".into(),
+        jwks_endpoint_uri: None,
+        valid_audience: None,
+        user_name_claim: None,
+        custom_claim_check: None,
+        jwks_refresh_seconds: None,
+        max_clock_skew_seconds: None,
+        enable_oauth_bearer: true,
+        tls_trusted_certificates: vec![],
+        access_token_is_jwt: false,
+        introspection_endpoint_uri: Some("https://idp.example/introspect".into()),
+        user_info_endpoint_uri: None,
+        client_id: Some("kafka-broker".into()),
+        client_secret: Some(OauthClientSecretRef {
+            secret_name: "kc-introspection-secret".into(),
+            key: "secret".into(),
+        }),
+        introspection_http_timeout_seconds: None,
+    };
+
+    let kafka = kafka_cr_with_listeners(
+        "c15",
+        "ns15",
+        vec![
+            oauth_listener("oauth-a", 9095, true, cfg_a),
+            oauth_listener("oauth-b", 9096, true, cfg_b),
+        ],
+    );
+    reconcile(Arc::new(kafka), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    assert_listeners_invalid_with_reason(&observed, "c15", "ConflictingOAuthConfig");
 }

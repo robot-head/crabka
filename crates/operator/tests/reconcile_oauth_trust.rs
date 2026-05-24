@@ -39,7 +39,7 @@ const FAKE_PEM_2: &[u8] = b"-----BEGIN CERTIFICATE-----\nBBB2\n-----END CERTIFIC
 fn kafka_with_oauth_trust(name: &str, ns: &str, trust_certs: Vec<(&str, &str)>) -> Kafka {
     let cfg = ListenerAuthenticationOAuth {
         valid_issuer_uri: "https://iss.example/".into(),
-        jwks_endpoint_uri: "https://iss.example/jwks".into(),
+        jwks_endpoint_uri: Some("https://iss.example/jwks".into()),
         valid_audience: None,
         user_name_claim: None,
         custom_claim_check: None,
@@ -53,6 +53,12 @@ fn kafka_with_oauth_trust(name: &str, ns: &str, trust_certs: Vec<(&str, &str)>) 
                 certificate: k.into(),
             })
             .collect(),
+        access_token_is_jwt: true,
+        introspection_endpoint_uri: None,
+        user_info_endpoint_uri: None,
+        client_id: None,
+        client_secret: None,
+        introspection_http_timeout_seconds: None,
     };
     let listener = Listener {
         name: "oauth".into(),

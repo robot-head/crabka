@@ -123,6 +123,23 @@ spec:
                         must also have `tls: true` — enforced at reconcile time.
                       nullable: true
                       properties:
+                        accessTokenIsJwt:
+                          type: boolean
+                        clientId:
+                          minLength: 1
+                          type: string
+                        clientSecret:
+                          properties:
+                            key:
+                              minLength: 1
+                              type: string
+                            secretName:
+                              minLength: 1
+                              type: string
+                          required:
+                          - key
+                          - secretName
+                          type: object
                         customClaimCheck:
                           properties:
                             scope:
@@ -135,6 +152,12 @@ spec:
                           type: object
                         enableOauthBearer:
                           type: boolean
+                        introspectionEndpointUri:
+                          minLength: 1
+                          type: string
+                        introspectionHttpTimeoutSeconds:
+                          minimum: 1.0
+                          type: integer
                         jwksEndpointUri:
                           minLength: 1
                           type: string
@@ -164,6 +187,9 @@ spec:
                           - scram-sha-512
                           - scram-sha-256
                           - oauth
+                          type: string
+                        userInfoEndpointUri:
+                          minLength: 1
                           type: string
                         userNameClaim:
                           type: string
