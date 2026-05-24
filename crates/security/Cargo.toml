@@ -28,6 +28,7 @@ tracing.workspace = true
 x509-parser = { workspace = true, features = ["verify"] }
 arc-swap.workspace = true
 async-trait = { workspace = true }
+jsonpath-rust = "1.0"
 
 [dev-dependencies]
 hex.workspace = true

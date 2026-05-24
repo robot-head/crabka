@@ -59,6 +59,9 @@ axum.workspace = true
 # RFC 7662 introspection POST; direct `serde_json` dep for the response value.
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "form"] }
 serde_json = { workspace = true }
+# Slice 49g: compile customClaimCheck JsonPath expressions at config-load
+# and inject into the OAUTHBEARER validators.
+jsonpath-rust = "1.0"
 
 [dev-dependencies]
 crabka-broker = { version = "0.1", path = ".", features = ["test-helpers"] }
