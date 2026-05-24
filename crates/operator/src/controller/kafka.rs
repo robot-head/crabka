@@ -19,8 +19,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt as _;
+use k8s_openapi::ByteString;
 use k8s_openapi::api::core::v1::{ConfigMap, Node, Pod, Secret, Service};
 use k8s_openapi::api::networking::v1::Ingress;
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::api::{Api, ListParams, Patch, PatchParams};
 use kube::runtime::controller::{Action, Controller};
 use kube::runtime::reflector::ObjectRef;
@@ -44,7 +46,7 @@ use crate::controller::logging;
 use crate::controller::network_policy;
 use crate::crd::{
     Kafka, KafkaCondition, KafkaNodePool, KafkaStatus, Listener, ListenerAddress,
-    ListenerAuthentication, ListenerStatus, ListenerType,
+    ListenerAuthentication, ListenerAuthenticationOAuth, ListenerStatus, ListenerType,
 };
 
 /// Rolled-up view of a cluster's pools. Computed by
@@ -377,6 +379,90 @@ async fn apply_external_services(
         }
     }
     Ok(())
+}
+
+/// Slice 50b. Return the single canonical OAuth listener config (if any).
+/// `validate_listeners` already rejects divergent per-listener OAuth
+/// configs, so the first OAuth listener's config is the canonical one
+/// for the whole cluster.
+fn canonical_oauth_config(listeners: &[Listener]) -> Option<ListenerAuthenticationOAuth> {
+    listeners.iter().find_map(|l| match &l.authentication {
+        Some(ListenerAuthentication::OAuth(cfg)) => Some(cfg.clone()),
+        _ => None,
+    })
+}
+
+/// Slice 50b. Build the managed oauth-jwks-trust Secret from the
+/// canonical OAuth config's `tls_trusted_certificates`. Returns the
+/// Secret's name (so the `StatefulSet` can mount it), or `None` when no
+/// managed Secret is needed (no OAuth listener, or no trust certs
+/// configured).
+async fn reconcile_oauth_jwks_trust(
+    secret_api: &Api<Secret>,
+    kafka: &Kafka,
+    canonical: Option<&ListenerAuthenticationOAuth>,
+) -> Result<Option<String>, ReconcileError> {
+    let Some(canonical) = canonical else {
+        return Ok(None);
+    };
+    if canonical.tls_trusted_certificates.is_empty() {
+        return Ok(None);
+    }
+    let mut bundle = Vec::<u8>::new();
+    for entry in &canonical.tls_trusted_certificates {
+        let src = secret_api
+            .get_opt(&entry.secret_name)
+            .await?
+            .ok_or_else(|| ReconcileError::MissingOauthTrustSecret(entry.secret_name.clone()))?;
+        let key_bytes = src
+            .data
+            .as_ref()
+            .and_then(|d| d.get(&entry.certificate))
+            .ok_or_else(|| ReconcileError::MissingOauthTrustKey {
+                secret: entry.secret_name.clone(),
+                key: entry.certificate.clone(),
+            })?;
+        if key_bytes.0.is_empty() {
+            return Err(ReconcileError::EmptyOauthTrustValue {
+                secret: entry.secret_name.clone(),
+                key: entry.certificate.clone(),
+            });
+        }
+        if !bundle.is_empty() && !bundle.ends_with(b"\n") {
+            bundle.push(b'\n');
+        }
+        bundle.extend_from_slice(&key_bytes.0);
+    }
+    let managed_name = format!("{}-oauth-jwks-trust", kafka.name_any());
+    upsert_oauth_trust_secret(secret_api, kafka, &managed_name, bundle).await?;
+    Ok(Some(managed_name))
+}
+
+/// Slice 50b. Server-side apply the managed `{kafka}-oauth-jwks-trust`
+/// Secret with the concatenated PEM bundle under key `ca.crt`. Owner-
+/// ref'd to the parent `Kafka` so deleting the CR cascades the Secret.
+async fn upsert_oauth_trust_secret(
+    secret_api: &Api<Secret>,
+    kafka: &Kafka,
+    managed_name: &str,
+    bundle: Vec<u8>,
+) -> Result<(), ReconcileError> {
+    let labels = common::common_labels(&kafka.name_any(), &kafka.spec.kafka_version, None);
+    let mut data = BTreeMap::new();
+    data.insert("ca.crt".to_string(), ByteString(bundle));
+    let secret = Secret {
+        metadata: ObjectMeta {
+            name: Some(managed_name.to_string()),
+            namespace: kafka.meta().namespace.clone(),
+            labels: Some(labels),
+            owner_references: Some(vec![owner_ref::<Kafka>(kafka)?]),
+            ..Default::default()
+        },
+        type_: Some("Opaque".into()),
+        data: Some(data),
+        ..Default::default()
+    };
+    apply_object(secret_api, managed_name, &secret).await
 }
 
 /// Apply one `OpenShift` `Route` via the dynamic-object path.
@@ -765,6 +851,15 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
     let listener_status: Vec<ListenerStatus>;
     let (listeners_valid_cond, listeners_ready_cond);
     let mut lb_pending: Vec<(i32, String)> = Vec::new();
+    // Slice 50b: name of the managed `{kafka}-oauth-jwks-trust` Secret
+    // when the canonical OAuth listener config carries
+    // `tls_trusted_certificates`. T4 mounts this into the broker pod.
+    // Populated only on the validation-success branch. The `let _ =`
+    // read at the bottom of this function silences the
+    // "assigned but never read" warning during the T3->T4 interim
+    // where the value is computed but not yet consumed by the pool
+    // reconciler (T4 wires it through the kafka_node_pool render path).
+    let mut oauth_jwks_trust_secret: Option<String> = None;
     if let Err(e) = validation {
         adopt_pools(&pool_api, &obj, pools.iter(), &cfg_hash).await?;
         listener_status = vec![];
@@ -772,6 +867,34 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
         listeners_ready_cond =
             condition("ListenersReady", "False", "ListenersInvalid", &e.message());
     } else {
+        // Slice 50b: assemble the OAUTHBEARER JWKS TLS trust bundle (if any).
+        // Failures here surface as Ready=False and short-circuit before
+        // any per-broker objects are rendered (an OAuth listener with a
+        // broken trust spec is not safe to bring brokers up against).
+        let oauth_canonical = canonical_oauth_config(&effective_listeners);
+        match reconcile_oauth_jwks_trust(&secret_api, &obj, oauth_canonical.as_ref()).await {
+            Ok(name) => {
+                oauth_jwks_trust_secret = name;
+            }
+            Err(
+                e @ (ReconcileError::MissingOauthTrustSecret(_)
+                | ReconcileError::MissingOauthTrustKey { .. }
+                | ReconcileError::EmptyOauthTrustValue { .. }),
+            ) => {
+                let reason = match &e {
+                    ReconcileError::MissingOauthTrustSecret(_) => "MissingOauthTrustSecret",
+                    ReconcileError::MissingOauthTrustKey { .. } => "MissingOauthTrustKey",
+                    ReconcileError::EmptyOauthTrustValue { .. } => "EmptyOauthTrustValue",
+                    _ => unreachable!(),
+                };
+                let cond = condition("Ready", "False", reason, &e.to_string());
+                let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), &ns);
+                patch_status_with_condition(&kafka_api, &name, cond).await?;
+                return Ok(Action::requeue(Duration::from_secs(30)));
+            }
+            Err(e) => return Err(e),
+        }
+
         // Enumerate brokers from sibling pools. Empty pool list ->
         // empty broker list -> ConfigMap with no per-broker TOML keys,
         // but listeners are still "valid" (just no consumers yet).
@@ -1146,6 +1269,11 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
         return Err(e);
     }
 
+    // Slice 50b: T4 will read this through the pool reconciler's
+    // StatefulSet render. Until T4 lands, take it explicitly to silence
+    // the "assigned but never read" warning without `#[allow(...)]`.
+    let _ = oauth_jwks_trust_secret;
+
     Ok(Action::requeue(Duration::from_secs(30)))
 }
 
@@ -1402,5 +1530,72 @@ mod tests {
         let (rolling, reason, _) = rolling_condition_from_rollup(&r);
         assert!(!rolling);
         assert_eq!(reason, "Stable");
+    }
+
+    // Slice 50b: pure helper — picks the first OAuth listener as canonical.
+    // The reconcile-level no-op cases (no OAuth listener / empty
+    // tls_trusted_certificates) are exercised through this helper plus the
+    // length check; the network-touching paths are covered by T6's
+    // integration tests.
+
+    fn listener_with_auth(name: &str, auth: Option<ListenerAuthentication>) -> Listener {
+        Listener {
+            name: name.into(),
+            port: 9092,
+            type_: ListenerType::Internal,
+            tls: true,
+            authentication: auth,
+            configuration: None,
+            network_policy_peers: None,
+        }
+    }
+
+    fn sample_oauth_cfg(
+        certs: Vec<crate::crd::TlsTrustedCertificate>,
+    ) -> ListenerAuthenticationOAuth {
+        ListenerAuthenticationOAuth {
+            valid_issuer_uri: "https://iss.example/".into(),
+            jwks_endpoint_uri: "https://iss.example/jwks".into(),
+            valid_audience: None,
+            user_name_claim: None,
+            custom_claim_check: None,
+            jwks_refresh_seconds: None,
+            max_clock_skew_seconds: None,
+            enable_oauth_bearer: true,
+            tls_trusted_certificates: certs,
+        }
+    }
+
+    #[test]
+    fn canonical_oauth_config_none_when_no_oauth_listener() {
+        let ls = vec![
+            listener_with_auth("plain", None),
+            listener_with_auth("scram", Some(ListenerAuthentication::ScramSha512)),
+        ];
+        assert!(canonical_oauth_config(&ls).is_none());
+    }
+
+    #[test]
+    fn canonical_oauth_config_picks_first_oauth() {
+        let cfg = sample_oauth_cfg(vec![]);
+        let ls = vec![
+            listener_with_auth("plain", None),
+            listener_with_auth("oauth", Some(ListenerAuthentication::OAuth(cfg.clone()))),
+        ];
+        assert_eq!(canonical_oauth_config(&ls), Some(cfg));
+    }
+
+    #[test]
+    fn canonical_oauth_config_with_empty_trust_certs_is_some_but_empty() {
+        // The reconcile-level no-op check is
+        //   `canonical.tls_trusted_certificates.is_empty()` — guard that the
+        // helper still returns Some so the no-op branch is reached.
+        let cfg = sample_oauth_cfg(vec![]);
+        let ls = vec![listener_with_auth(
+            "oauth",
+            Some(ListenerAuthentication::OAuth(cfg)),
+        )];
+        let got = canonical_oauth_config(&ls).expect("OAuth listener present");
+        assert!(got.tls_trusted_certificates.is_empty());
     }
 }

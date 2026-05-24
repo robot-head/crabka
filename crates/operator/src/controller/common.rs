@@ -65,6 +65,12 @@ pub enum ReconcileError {
     ByoCaMalformed { which: String, reason: String },
     #[error("CA Secret missing: {name}")]
     CaSecretMissing { name: String },
+    #[error("oauth trust Secret '{0}' not found")]
+    MissingOauthTrustSecret(String),
+    #[error("oauth trust Secret '{secret}' has no key '{key}'")]
+    MissingOauthTrustKey { secret: String, key: String },
+    #[error("oauth trust Secret '{secret}' key '{key}' is empty")]
+    EmptyOauthTrustValue { secret: String, key: String },
 }
 
 /// Build a Kubernetes-style condition with `lastTransitionTime` set to
