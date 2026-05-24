@@ -252,6 +252,7 @@ fn render_init_container(
     })
 }
 
+#[allow(clippy::too_many_arguments)] // pure render helper: each arg names one independent feature toggle, struct-ifying buys nothing
 fn render_broker_container(
     broker_image: &str,
     secret_name: &str,
@@ -260,6 +261,7 @@ fn render_broker_container(
     metrics_enabled: bool,
     logging_enabled: bool,
     jbod_extra_mounts: &[(String, String)],
+    oauth_jwks_trust_mount: Option<&str>,
 ) -> serde_json::Value {
     let mut ports = vec![json!({
         "containerPort": BROKER_PORT, "name": "kafka-internal", "protocol": "TCP"
@@ -314,6 +316,19 @@ fn render_broker_container(
     ];
     for (name, path) in jbod_extra_mounts {
         volume_mounts.push(json!({ "name": name, "mountPath": path }));
+    }
+    // Slice 50b: when the parent Kafka has an OAuth listener with
+    // `tls_trusted_certificates`, mount the managed
+    // `{kafka}-oauth-jwks-trust` Secret at
+    // `/etc/crabka/oauth-jwks-trust` so the broker can read
+    // `ca.crt` for JWKS-endpoint TLS verification (the broker's
+    // generated TOML's `jwks_tls_trust` points at this path).
+    if let Some(mount_path) = oauth_jwks_trust_mount {
+        volume_mounts.push(json!({
+            "name": "oauth-jwks-trust",
+            "mountPath": mount_path,
+            "readOnly": true,
+        }));
     }
     json!({
         "name": "broker",
@@ -383,6 +398,7 @@ fn render_storage(
     storage: Option<&Storage>,
     pod_labels: &BTreeMap<String, String>,
     parent_name: &str,
+    oauth_jwks_trust_secret: Option<&str>,
 ) -> (serde_json::Value, Vec<serde_json::Value>) {
     let broker_config_vol = json!({
         "name": "broker-config",
@@ -414,7 +430,7 @@ fn render_storage(
             "defaultMode": 0o400_i32,
         }
     });
-    match storage {
+    let (mut volumes, templates) = match storage {
         None | Some(Storage::Ephemeral) => {
             let volumes = json!([
                 { "name": "data", "emptyDir": {} },
@@ -442,8 +458,8 @@ fn render_storage(
         Some(Storage::Jbod(_)) => {
             // One PVC template per disk: the lowest-id disk is `data`
             // (primary / metadata), the rest are `data-{id}`.
-            let volumes = jbod_volumes_sorted(storage);
-            let templates = volumes
+            let jbod_vols = jbod_volumes_sorted(storage);
+            let templates = jbod_vols
                 .iter()
                 .enumerate()
                 .map(|(i, v)| {
@@ -462,7 +478,25 @@ fn render_storage(
                 templates,
             )
         }
+    };
+    // Slice 50b: append the managed `{kafka}-oauth-jwks-trust` Secret as
+    // a read-only pod volume when an OAuth listener carries
+    // `tls_trusted_certificates`. The matching volumeMount is appended
+    // by `render_broker_container`. Same `defaultMode` (0o400) as the
+    // cluster-CA / broker-TLS / clients-CA Secret volumes above.
+    if let Some(secret_name) = oauth_jwks_trust_secret {
+        volumes
+            .as_array_mut()
+            .expect("render_storage built `volumes` via json!([...])")
+            .push(json!({
+                "name": "oauth-jwks-trust",
+                "secret": {
+                    "secretName": secret_name,
+                    "defaultMode": 0o400_i32,
+                }
+            }));
     }
+    (volumes, templates)
 }
 
 /// Build the `StatefulSet`'s `persistentVolumeClaimRetentionPolicy`
@@ -534,6 +568,22 @@ pub(crate) fn render_statefulset(
     let logging_enabled = parent.spec.logging.is_some();
     let cm_name = format!("{parent_name}-broker-config");
     let jbod_extra = jbod_extra_mounts(pool.spec.storage.as_ref());
+    // Slice 50b: derive the managed `{kafka}-oauth-jwks-trust` Secret
+    // name from the parent Kafka CR's listeners. `Some` iff at least
+    // one OAuth listener has non-empty `tls_trusted_certificates` —
+    // i.e. iff `kafka.rs::reconcile_kafka` actually upserted the
+    // Secret. The naming is shared with `kafka.rs` via the
+    // [`controller::kafka::oauth_jwks_trust_secret_name`] helper so
+    // both sides stay in lockstep without re-doing the bundle
+    // assembly here.
+    let oauth_jwks_trust_secret = crate::controller::kafka::oauth_jwks_trust_secret_name(parent);
+    // Slice 50b: the mount path is a stable contract with slice 49c's
+    // broker (it reads the trust bundle from
+    // `/etc/crabka/oauth-jwks-trust/ca.crt`), and matches the
+    // `jwks_tls_trust` TOML key rendered by T2's listener reconciler.
+    let oauth_jwks_trust_mount = oauth_jwks_trust_secret
+        .as_deref()
+        .map(|_| "/etc/crabka/oauth-jwks-trust");
     let main = render_broker_container(
         broker_image,
         &secret_name,
@@ -542,6 +592,7 @@ pub(crate) fn render_statefulset(
         metrics_enabled,
         logging_enabled,
         &jbod_extra,
+        oauth_jwks_trust_mount,
     );
 
     // Merge user-provided pod metadata under operator-owned labels.
@@ -606,8 +657,12 @@ pub(crate) fn render_statefulset(
         }
     }
 
-    let (pod_volumes, volume_claim_templates) =
-        render_storage(pool.spec.storage.as_ref(), &pod_labels, &parent_name);
+    let (pod_volumes, volume_claim_templates) = render_storage(
+        pool.spec.storage.as_ref(),
+        &pod_labels,
+        &parent_name,
+        oauth_jwks_trust_secret.as_deref(),
+    );
     let retention_policy = render_pvc_retention_policy(pool.spec.storage.as_ref());
 
     let mut sts_spec = json!({
@@ -2075,6 +2130,152 @@ mod tests {
             ports
                 .iter()
                 .any(|p| p.name.as_deref() == Some("metrics") && p.container_port == 9404)
+        );
+    }
+
+    /// Slice 50b. Build a Kafka CR with one OAuth listener whose
+    /// `tls_trusted_certificates` contains one entry — exercises the
+    /// `Some(...)` branch of [`oauth_jwks_trust_secret_name`] from
+    /// inside the pool reconcile's render path.
+    fn parent_with_oauth_trust(name: &str) -> Kafka {
+        use crate::crd::{
+            Listener, ListenerAuthentication, ListenerAuthenticationOAuth, ListenerType,
+            TlsTrustedCertificate,
+        };
+        let mut k = parent_fixture(name);
+        k.spec.listeners = vec![Listener {
+            name: "oauth".into(),
+            port: 9094,
+            type_: ListenerType::Internal,
+            tls: true,
+            authentication: Some(ListenerAuthentication::OAuth(ListenerAuthenticationOAuth {
+                valid_issuer_uri: "https://iss.example/".into(),
+                jwks_endpoint_uri: "https://iss.example/jwks".into(),
+                valid_audience: None,
+                user_name_claim: None,
+                custom_claim_check: None,
+                jwks_refresh_seconds: None,
+                max_clock_skew_seconds: None,
+                enable_oauth_bearer: true,
+                tls_trusted_certificates: vec![TlsTrustedCertificate {
+                    secret_name: "my-idp-ca".into(),
+                    certificate: "ca.crt".into(),
+                }],
+            })),
+            configuration: None,
+            network_policy_peers: None,
+        }];
+        k
+    }
+
+    #[test]
+    fn render_statefulset_mounts_oauth_jwks_trust_secret_when_some() {
+        let parent = parent_with_oauth_trust("demo");
+        let pool = pool_fixture("brokers", "demo", 1);
+        let ss = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE).expect("render");
+        let pod_spec = ss.spec.unwrap().template.spec.unwrap();
+
+        // VolumeMount on the broker container points at the canonical
+        // path slice 49c's broker reads (`/etc/crabka/oauth-jwks-trust`).
+        let mount = pod_spec.containers[0]
+            .volume_mounts
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|m| m.name == "oauth-jwks-trust")
+            .expect("oauth-jwks-trust mount present");
+        assert_eq!(mount.mount_path, "/etc/crabka/oauth-jwks-trust");
+        assert_eq!(mount.read_only, Some(true));
+
+        // Pod volume sources the managed `{kafka}-oauth-jwks-trust`
+        // Secret with the same 0o400 mode as the other CA volumes.
+        let volume = pod_spec
+            .volumes
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|v| v.name == "oauth-jwks-trust")
+            .expect("oauth-jwks-trust volume present");
+        let secret = volume.secret.as_ref().expect("secret volume source");
+        assert_eq!(secret.secret_name.as_deref(), Some("demo-oauth-jwks-trust"));
+        assert_eq!(secret.default_mode, Some(0o400));
+    }
+
+    #[test]
+    fn render_statefulset_omits_oauth_jwks_trust_volume_when_none() {
+        // parent_fixture has no listeners at all — the helper returns
+        // None and the volume/mount must not appear.
+        let parent = parent_fixture("demo");
+        let pool = pool_fixture("brokers", "demo", 1);
+        let ss = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE).expect("render");
+        let pod_spec = ss.spec.unwrap().template.spec.unwrap();
+
+        assert!(
+            pod_spec.containers[0]
+                .volume_mounts
+                .as_ref()
+                .unwrap()
+                .iter()
+                .all(|m| m.name != "oauth-jwks-trust"),
+            "no OAuth listener → no oauth-jwks-trust mount",
+        );
+        assert!(
+            pod_spec
+                .volumes
+                .as_ref()
+                .unwrap()
+                .iter()
+                .all(|v| v.name != "oauth-jwks-trust"),
+            "no OAuth listener → no oauth-jwks-trust pod volume",
+        );
+    }
+
+    #[test]
+    fn render_statefulset_omits_oauth_jwks_trust_volume_when_certs_empty() {
+        use crate::crd::{
+            Listener, ListenerAuthentication, ListenerAuthenticationOAuth, ListenerType,
+        };
+        // OAuth listener with empty `tls_trusted_certificates` — the
+        // helper short-circuits to None, broker uses system trust.
+        let mut parent = parent_fixture("demo");
+        parent.spec.listeners = vec![Listener {
+            name: "oauth".into(),
+            port: 9094,
+            type_: ListenerType::Internal,
+            tls: true,
+            authentication: Some(ListenerAuthentication::OAuth(ListenerAuthenticationOAuth {
+                valid_issuer_uri: "https://iss.example/".into(),
+                jwks_endpoint_uri: "https://iss.example/jwks".into(),
+                valid_audience: None,
+                user_name_claim: None,
+                custom_claim_check: None,
+                jwks_refresh_seconds: None,
+                max_clock_skew_seconds: None,
+                enable_oauth_bearer: true,
+                tls_trusted_certificates: vec![],
+            })),
+            configuration: None,
+            network_policy_peers: None,
+        }];
+        let pool = pool_fixture("brokers", "demo", 1);
+        let ss = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE).expect("render");
+        let pod_spec = ss.spec.unwrap().template.spec.unwrap();
+
+        assert!(
+            pod_spec.containers[0]
+                .volume_mounts
+                .as_ref()
+                .unwrap()
+                .iter()
+                .all(|m| m.name != "oauth-jwks-trust"),
+        );
+        assert!(
+            pod_spec
+                .volumes
+                .as_ref()
+                .unwrap()
+                .iter()
+                .all(|v| v.name != "oauth-jwks-trust"),
         );
     }
 }

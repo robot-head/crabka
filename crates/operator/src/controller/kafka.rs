@@ -392,6 +392,23 @@ fn canonical_oauth_config(listeners: &[Listener]) -> Option<ListenerAuthenticati
     })
 }
 
+/// Slice 50b. Compute the managed OAUTHBEARER trust Secret's name from
+/// the parent Kafka CR's listeners. Returns `Some(name)` when at least
+/// one OAuth listener has a non-empty `tls_trusted_certificates`, else
+/// `None`. The naming is deterministic
+/// (`{kafka}-oauth-jwks-trust`) so both `kafka.rs::reconcile_kafka`
+/// (which actually upserts the Secret via [`reconcile_oauth_jwks_trust`])
+/// and `kafka_node_pool.rs::reconcile` (which mounts the Secret into
+/// the broker pod) can derive the same name independently without
+/// re-doing the bundle assembly.
+pub(crate) fn oauth_jwks_trust_secret_name(kafka: &Kafka) -> Option<String> {
+    let canonical = canonical_oauth_config(&kafka.spec.listeners)?;
+    if canonical.tls_trusted_certificates.is_empty() {
+        return None;
+    }
+    Some(format!("{}-oauth-jwks-trust", kafka.name_any()))
+}
+
 /// Slice 50b. Build the managed oauth-jwks-trust Secret from the
 /// canonical OAuth config's `tls_trusted_certificates`. Returns the
 /// Secret's name (so the `StatefulSet` can mount it), or `None` when no
@@ -851,15 +868,6 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
     let listener_status: Vec<ListenerStatus>;
     let (listeners_valid_cond, listeners_ready_cond);
     let mut lb_pending: Vec<(i32, String)> = Vec::new();
-    // Slice 50b: name of the managed `{kafka}-oauth-jwks-trust` Secret
-    // when the canonical OAuth listener config carries
-    // `tls_trusted_certificates`. T4 mounts this into the broker pod.
-    // Populated only on the validation-success branch. The `let _ =`
-    // read at the bottom of this function silences the
-    // "assigned but never read" warning during the T3->T4 interim
-    // where the value is computed but not yet consumed by the pool
-    // reconciler (T4 wires it through the kafka_node_pool render path).
-    let mut oauth_jwks_trust_secret: Option<String> = None;
     if let Err(e) = validation {
         adopt_pools(&pool_api, &obj, pools.iter(), &cfg_hash).await?;
         listener_status = vec![];
@@ -871,11 +879,16 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
         // Failures here surface as Ready=False and short-circuit before
         // any per-broker objects are rendered (an OAuth listener with a
         // broken trust spec is not safe to bring brokers up against).
+        // The managed Secret's name (derived deterministically from the
+        // parent name) is recomputed by the pool reconciler via
+        // [`oauth_jwks_trust_secret_name`] when rendering the
+        // `StatefulSet`'s pod template, so it doesn't need to be
+        // threaded out of this function — calling
+        // `reconcile_oauth_jwks_trust` here is purely for its
+        // upsert-the-Secret side effect.
         let oauth_canonical = canonical_oauth_config(&effective_listeners);
         match reconcile_oauth_jwks_trust(&secret_api, &obj, oauth_canonical.as_ref()).await {
-            Ok(name) => {
-                oauth_jwks_trust_secret = name;
-            }
+            Ok(_) => {}
             Err(
                 e @ (ReconcileError::MissingOauthTrustSecret(_)
                 | ReconcileError::MissingOauthTrustKey { .. }
@@ -1268,11 +1281,6 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
     if let Some(Err(e)) = np_outcome {
         return Err(e);
     }
-
-    // Slice 50b: T4 will read this through the pool reconciler's
-    // StatefulSet render. Until T4 lands, take it explicitly to silence
-    // the "assigned but never read" warning without `#[allow(...)]`.
-    let _ = oauth_jwks_trust_secret;
 
     Ok(Action::requeue(Duration::from_secs(30)))
 }
