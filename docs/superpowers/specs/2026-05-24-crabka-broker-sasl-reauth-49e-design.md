@@ -93,7 +93,7 @@ pub struct AuthOutcome {
     /// For OAUTHBEARER this is always `Some` (validators reject tokens
     /// without `exp`); the Option keeps the type usable for future
     /// non-OAuth paths that may not carry an explicit expiry.
-    pub expires_at_ms: Option<u64>,
+    pub expires_at_ms: Option<i64>,
 }
 ```
 
@@ -130,7 +130,7 @@ Changes:
    Authenticated {
        principal: Principal,
        mechanism: SaslMechanism,
-       expires_at_ms: Option<u64>,  // None = no re-auth (PLAIN/SCRAM)
+       expires_at_ms: Option<i64>,  // None = no re-auth (PLAIN/SCRAM)
    }
    ```
 
