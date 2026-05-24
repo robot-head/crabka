@@ -2254,8 +2254,8 @@ jobs:
                   jwksEndpointUri: https://kc-keycloak.keycloak.svc.cluster.local/realms/kafka/protocol/openid-connect/certs
                   validAudience: kafka-broker
                   userNameClaim: client_id
-                  customClaimCheck:
-                    scope: kafka.write
+                  customClaimCheck: "$.scope[?@ == 'kafka.write']"
+                  validTokenType: JWT
                   maxSecondsWithoutReauthentication: 300
                   tlsTrustedCertificates:
                     - secretName: keycloak-ca
