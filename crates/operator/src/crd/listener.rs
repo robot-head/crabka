@@ -929,9 +929,8 @@ jwksEndpointUri: https://issuer.example/jwks
 maxSecondsWithoutReauthentication: 300
 ";
         let parsed: ListenerAuthentication = serde_yaml::from_str(yaml).expect("yaml must parse");
-        let oauth = match &parsed {
-            ListenerAuthentication::OAuth(c) => c,
-            _ => panic!("expected oauth variant"),
+        let ListenerAuthentication::OAuth(oauth) = &parsed else {
+            panic!("expected oauth variant");
         };
         assert_eq!(oauth.max_seconds_without_reauthentication, Some(300));
     }
