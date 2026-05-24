@@ -38,6 +38,10 @@ impl ReqwestIntrospectionClient {
     /// `ClientConfig` is built via `crabka_security::build_client_config_from_pem`
     /// (slice 49c) — the same trust bundle covers JWKS, introspection,
     /// and userinfo. When `None`, reqwest's default webpki-roots apply.
+    // Returns Arc<dyn IntrospectionClient> to fit the validator's trait-object
+    // slot; constructing the concrete type would just be unwrapped immediately
+    // into the Arc.
+    #[allow(clippy::new_ret_no_self)]
     pub fn new(
         introspection_endpoint: String,
         userinfo_endpoint: Option<String>,
@@ -128,7 +132,10 @@ mod tests {
     /// Spin up an HTTPS test server. Routes:
     ///   POST /introspect  -> `introspect_body` with `introspect_status`
     ///   GET  /userinfo    -> `userinfo_body` (200) or 404 if None
-    /// Returns (addr, shutdown, ca_pem_path, observed).
+    /// Returns (addr, shutdown, `ca_pem_path`, observed).
+    // TLS handshake + HTTP/1.1 framing + dual-route dispatch sit naturally in one
+    // function for the test fixture; extraction would just scatter mock state.
+    #[allow(clippy::too_many_lines)]
     async fn serve_https(
         introspect_body: &'static str,
         introspect_status: u16,
@@ -256,7 +263,10 @@ mod tests {
         )
         .unwrap();
         let resp = client.introspect("tok").await.unwrap();
-        assert_eq!(resp.get("active").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(
+            resp.get("active").and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
         assert_eq!(resp.get("sub").and_then(|v| v.as_str()), Some("alice"));
         srv_shutdown.cancel();
     }
@@ -274,7 +284,10 @@ mod tests {
         )
         .unwrap();
         let resp = client.introspect("tok").await.unwrap();
-        assert_eq!(resp.get("active").and_then(|v| v.as_bool()), Some(false));
+        assert_eq!(
+            resp.get("active").and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
         srv_shutdown.cancel();
     }
 

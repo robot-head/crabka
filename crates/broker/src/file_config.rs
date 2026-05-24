@@ -90,8 +90,8 @@ pub struct FileOAuthBearerConfig {
     pub jwks_refresh_interval_ms: Option<u64>,
 
     /// Slice 49c (renamed in 49d): PEM file containing the CA
-    /// certificate(s) used to verify the IdP's TLS certificate on ALL
-    /// outbound HTTPS to the IdP — JWKS endpoint (49b), introspection
+    /// certificate(s) used to verify the `IdP`'s TLS certificate on ALL
+    /// outbound HTTPS to the `IdP` — JWKS endpoint (49b), introspection
     /// endpoint (49d), and userinfo endpoint (49d). When set, these are
     /// the *only* trust roots used for the outbound HTTPS (replaces the
     /// default webpki-roots — Strimzi-shaped). When unset, the broker
@@ -113,7 +113,7 @@ pub struct FileOAuthBearerConfig {
     #[serde(default)]
     pub userinfo_endpoint_uri: Option<String>,
 
-    /// Slice 49d: client_id the broker uses to authenticate (HTTP Basic
+    /// Slice 49d: `client_id` the broker uses to authenticate (HTTP Basic
     /// Auth) against the introspection endpoint. Required when
     /// `introspection_endpoint_uri` is set.
     #[serde(default)]
@@ -201,6 +201,9 @@ impl FileConfig {
     /// must NOT pass `--listen-addr` or `--advertised-listener`. The
     /// binary entrypoint enforces this (see `bin/broker.rs`); this
     /// method just merges what it's given.
+    // Linear config-load pipeline; each arm is its own validator construction —
+    // extraction obscures the dispatch shape.
+    #[allow(clippy::too_many_lines)]
     pub fn apply_to(self, cfg: &mut crate::config::BrokerConfig) {
         let defaults = crate::config::BrokerConfig::default();
         if let Some(id) = self.broker_id
@@ -256,7 +259,8 @@ impl FileConfig {
             // Slice 49c (renamed in 49d): thread the IdP trust-store path
             // unconditionally. Inert when no HTTPS-bound endpoint is set,
             // and harmlessly carried for the unsecured validator.
-            cfg.oauthbearer_idp_tls_trust = oauth.idp_tls_trust.clone();
+            cfg.oauthbearer_idp_tls_trust
+                .clone_from(&oauth.idp_tls_trust);
 
             match (
                 oauth.jwks_endpoint_uri.as_ref(),
@@ -320,7 +324,7 @@ impl FileConfig {
                                 e
                             )
                         })
-                        .trim_end_matches(|c: char| c == '\n' || c == '\r')
+                        .trim_end_matches(['\n', '\r'])
                         .to_string();
                     let timeout = std::time::Duration::from_millis(
                         oauth.introspection_http_timeout_ms.unwrap_or(10_000),

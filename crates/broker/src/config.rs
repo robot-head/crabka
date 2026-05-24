@@ -171,7 +171,7 @@ pub struct BrokerConfig {
     pub oauthbearer_jwks_refresh_interval: std::time::Duration,
 
     /// Slice 49c (renamed in 49d): optional PEM path for outbound
-    /// HTTPS to the IdP. Shared across JWKS, introspection, and
+    /// HTTPS to the `IdP`. Shared across JWKS, introspection, and
     /// userinfo. None → reqwest's default webpki-roots.
     pub oauthbearer_idp_tls_trust: Option<std::path::PathBuf>,
 
