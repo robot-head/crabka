@@ -55,7 +55,10 @@ prometheus-client.workspace = true
 axum.workspace = true
 # Slice 49b: fetch the OAUTHBEARER JWKS over HTTP(S). The `rustls` feature
 # reuses the rustls + aws-lc-rs crypto stack already in the workspace dep graph.
-reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+# Slice 49d: `json` (Response::json) + `form` (RequestBuilder::form) for the
+# RFC 7662 introspection POST; direct `serde_json` dep for the response value.
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "form"] }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 crabka-broker = { version = "0.1", path = ".", features = ["test-helpers"] }

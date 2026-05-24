@@ -140,6 +140,7 @@ mod log_dir;
 pub mod metrics;
 pub(crate) mod metrics_server;
 pub mod network;
+pub(crate) mod oauth_introspection;
 pub(crate) mod oauth_jwks;
 mod partition;
 mod partition_writer;
