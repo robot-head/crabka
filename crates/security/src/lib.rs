@@ -22,9 +22,9 @@ pub use listener::ListenerProtocol;
 pub use mechanism::SaslMechanism;
 pub use mtls::extract_principal_from_cert;
 pub use oauthbearer::{
-    ClientInitialResponse, IntrospectionClient, IntrospectionError, IntrospectionValidator,
-    OAuthBearerValidator, SignedJwsValidator, UnsecuredJwsValidator, invalid_token_json,
-    parse_client_initial_response,
+    AuthOutcome, ClientInitialResponse, IntrospectionClient, IntrospectionError,
+    IntrospectionValidator, OAuthBearerValidator, SignedJwsValidator, UnsecuredJwsValidator,
+    invalid_token_json, parse_client_initial_response,
 };
 pub use plain::verify_plain;
 pub use principal::{AuthError, AuthMethod, Principal};

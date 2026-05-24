@@ -2439,3 +2439,73 @@ Kafka client for ApiVersions.
 - Reference doc:
   [`docs/superpowers/specs/2026-05-24-crabka-operator-oauth-introspection-50c-design.md`].
 
+## Slice 49e — Broker: SASL re-authentication (KIP-368) (2026-05-24)
+
+- Bounds an OAUTHBEARER SASL session by the token's `exp`. The broker
+  now populates `SaslAuthenticateResponse.session_lifetime_ms` from the
+  validated token, and a per-connection `tokio::select!` timer closes
+  the TCP connection at session expiry. In-band re-auth (a fresh
+  `SaslHandshake` + `SaslAuthenticate` on an already-authenticated
+  connection) refreshes the session without dropping the stream, so
+  long-lived producers/consumers can roll tokens cleanly.
+- **Validator surface (`crates/security/src/oauthbearer.rs`):** new
+  `AuthOutcome { principal, expires_at_ms }`. `OAuthBearerValidator::
+  validate` returns `AuthOutcome` instead of bare `Principal`; all three
+  concrete validators (unsecured JWS / signed JWKS / RFC 7662
+  introspection) surface the token's `exp` (each already extracted it
+  during temporal-claim checks — this just stops discarding the value).
+  **Note:** introspection's `exp` is now REQUIRED (was optional
+  pre-49e); a response without `exp` returns `AuthError::InvalidToken`.
+  Intentional — without `exp` we cannot compute `session_lifetime_ms`.
+- **Connection state (`crates/broker/src/network/auth.rs`):**
+  `ConnectionAuth::Authenticated` extended with `{ mechanism:
+  SaslMechanism, expires_at_ms: Option<i64> }`. New
+  `Reauthenticating { previous: AuthenticatedSnapshot, exchange:
+  SaslExchange }` variant captures the in-band re-auth handshake mid-
+  flight. New `ConnectionAuth::allows_request(api_key)` method gates the
+  dispatch loop's pre-auth allowlist per state — during
+  `Reauthenticating`, only `SaslAuthenticate=36` is accepted.
+- **Handler updates (`auth.rs`):** `handle_handshake` now accepts an
+  in-band handshake from `Authenticated`. Same-mechanism enforced —
+  mismatch returns `ILLEGAL_SASL_STATE (34)`.
+  `handle_authenticate_oauthbearer` handles the `Reauthenticating` arm:
+  same-principal-name enforced — mismatch returns
+  `SASL_AUTHENTICATION_FAILED (58)` with message
+  "re-authentication may not change the principal".
+- **Dispatch loop (`crates/broker/src/network/dispatch.rs`):**
+  per-connection read becomes
+  `tokio::select! { biased; next = framed.next() => ...,
+  _ = sleep_until_some(deadline) => break }`. `deadline` is derived
+  from `Authenticated.expires_at_ms` (or
+  `Reauthenticating.previous.expires_at_ms` so a slow re-auth can't
+  extend the session past the original token's `exp` — security
+  invariant). `biased` makes the read arm win ties so the last in-
+  flight request before expiry completes. Non-OAuth connections return
+  `None` from the deadline derivation and the timer arm is disarmed via
+  `std::future::pending()`. The SASL-frame routing was also extended to
+  recognize `Reauthenticating` (T4 surfaced this gap).
+- Tests: +3 `crates/security/src/oauthbearer.rs` unit (each validator
+  surfaces `exp`); +8 `crates/broker/src/network/auth.rs` unit
+  (`Authenticated` shape; in-band handshake same-mech + diff-mech;
+  in-band authenticate same-principal + diff-principal;
+  `allows_request` behavior across all states); +6
+  `crates/broker/tests/auth_handlers.rs` integration (session lifetime
+  populated, timer fires at expiry, in-band re-auth happy path,
+  in-band re-auth principal-switch reject, in-band re-auth
+  mechanism-switch reject, PLAIN regression). Workspace
+  `cargo fmt --check` + `cargo clippy --workspace --all-targets -D
+  warnings` + `cargo test --workspace` all clean.
+- Out of scope (deferred):
+  - Mechanism-agnostic `connections.max.reauth.ms` broker config
+    (would gate PLAIN/SCRAM too); not in the OAUTHBEARER parity
+    umbrella.
+  - Operator-side `maxSecondsWithoutReauthentication` CRD field —
+    slice 50d.
+  - Server-side cap on `session_lifetime_ms`
+    (`oauthbearer.max.session.lifetime.ms` defense-in-depth knob).
+  - Server-side minimum check ("token too-short-lived, reject auth").
+  - Client-side re-auth scheduler in Crabka's Kafka client crate
+    (broker-only this slice).
+- Reference doc:
+  [`docs/superpowers/specs/2026-05-24-crabka-broker-sasl-reauth-49e-design.md`].
+

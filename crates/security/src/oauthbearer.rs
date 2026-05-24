@@ -21,6 +21,20 @@ use serde_json::Value;
 use crate::jwks::JwksHandle;
 use crate::{AuthError, AuthMethod, Principal};
 
+/// Outcome of an OAUTHBEARER validation: the authenticated principal plus the
+/// token's expiry. The expiry is what slice 49e populates as
+/// `SaslAuthenticateResponse.session_lifetime_ms` and what the dispatch loop
+/// uses to schedule per-connection re-auth deadlines (KIP-368).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthOutcome {
+    pub principal: Principal,
+    /// Token expiry as Unix epoch milliseconds. `None` means "no expiry / no
+    /// re-auth required" — reserved for future non-OAuth paths. For
+    /// OAUTHBEARER this is always `Some` (validators reject tokens without
+    /// `exp`).
+    pub expires_at_ms: Option<i64>,
+}
+
 /// Parsed RFC 7628 client initial response.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientInitialResponse {
@@ -133,7 +147,7 @@ impl UnsecuredJwsValidator {
     /// [`AuthError::InvalidToken`] for any structural, signature, temporal,
     /// scope, or principal-claim failure. The caller maps this onto the RFC
     /// 7628 `invalid_token` server error status.
-    pub fn validate(&self, token: &str, now_ms: i64) -> Result<Principal, AuthError> {
+    pub fn validate(&self, token: &str, now_ms: i64) -> Result<AuthOutcome, AuthError> {
         // JWS compact serialization: header.payload.signature. For `alg:none`
         // the signature segment is empty.
         let mut segs = token.split('.');
@@ -180,9 +194,12 @@ impl UnsecuredJwsValidator {
             .ok_or(AuthError::InvalidToken)?
             .to_string();
 
-        Ok(Principal {
-            name,
-            auth_method: AuthMethod::SaslOAuthBearer,
+        Ok(AuthOutcome {
+            principal: Principal {
+                name,
+                auth_method: AuthMethod::SaslOAuthBearer,
+            },
+            expires_at_ms: Some(exp_ms),
         })
     }
 
@@ -308,7 +325,7 @@ impl SignedJwsValidator {
     ///
     /// [`AuthError::InvalidToken`] for any structural, signature, temporal,
     /// issuer, audience, scope, or principal-claim failure.
-    pub fn validate(&self, token: &str, now_ms: i64) -> Result<Principal, AuthError> {
+    pub fn validate(&self, token: &str, now_ms: i64) -> Result<AuthOutcome, AuthError> {
         // JWS compact serialization: header.payload.signature, all non-empty.
         let mut segs = token.split('.');
         let header_b64 = segs.next().ok_or(AuthError::InvalidToken)?;
@@ -343,7 +360,7 @@ impl SignedJwsValidator {
     /// Apply the claim policy (temporal, issuer, audience, scope, principal) to
     /// already-signature-verified `claims`. Split out so the policy is
     /// unit-testable without minting signed tokens.
-    fn check_claims(&self, claims: &Value, now_ms: i64) -> Result<Principal, AuthError> {
+    fn check_claims(&self, claims: &Value, now_ms: i64) -> Result<AuthOutcome, AuthError> {
         // `exp` required and in the future (within skew).
         let exp_ms = numeric_date_ms(claims, "exp").ok_or(AuthError::InvalidToken)?;
         if exp_ms + self.allowable_clock_skew_ms <= now_ms {
@@ -387,9 +404,12 @@ impl SignedJwsValidator {
             .ok_or(AuthError::InvalidToken)?
             .to_string();
 
-        Ok(Principal {
-            name,
-            auth_method: AuthMethod::SaslOAuthBearer,
+        Ok(AuthOutcome {
+            principal: Principal {
+                name,
+                auth_method: AuthMethod::SaslOAuthBearer,
+            },
+            expires_at_ms: Some(exp_ms),
         })
     }
 }
@@ -422,7 +442,7 @@ impl OAuthBearerValidator {
     /// - [`AuthError::InvalidToken`] when the token fails validation.
     /// - [`AuthError::IntrospectionTransport`] when the introspection variant's
     ///   HTTP call fails at the transport layer.
-    pub async fn validate(&self, token: &str, now_ms: i64) -> Result<Principal, AuthError> {
+    pub async fn validate(&self, token: &str, now_ms: i64) -> Result<AuthOutcome, AuthError> {
         match self {
             Self::Unsecured(v) => v.validate(token, now_ms),
             Self::Signed(v) => v.validate(token, now_ms),
@@ -503,9 +523,11 @@ impl IntrospectionValidator {
     /// # Errors
     ///
     /// - [`AuthError::IntrospectionTransport`] on HTTP transport / parse failures.
-    /// - [`AuthError::InvalidToken`] on `active != true`, missing principal
-    ///   claim, scope mismatch, or temporal-claim failure.
-    pub async fn validate(&self, token: &str, now_ms: i64) -> Result<Principal, AuthError> {
+    /// - [`AuthError::InvalidToken`] on `active != true`, missing `exp`,
+    ///   missing principal claim, scope mismatch, or temporal-claim failure.
+    ///   `exp` is required so the SASL handler can populate
+    ///   `session_lifetime_ms` for KIP-368 re-authentication.
+    pub async fn validate(&self, token: &str, now_ms: i64) -> Result<AuthOutcome, AuthError> {
         let mut claims = self
             .client
             .introspect(token)
@@ -515,6 +537,14 @@ impl IntrospectionValidator {
             return Err(AuthError::InvalidToken);
         }
         check_temporal_claims(&claims, now_ms, self.allowable_clock_skew_ms)?;
+        // Capture `exp_ms` from the introspection response BEFORE any userinfo
+        // merge. Introspection's `exp` is the authoritative session expiry
+        // (RFC 7662); userinfo typically doesn't carry `exp`, and the
+        // `merge_userinfo_over_introspection` precedence already reserves
+        // `exp` to introspection, but pulling it out here makes the
+        // ordering explicit. Required for OAUTHBEARER (validators reject
+        // tokens without `exp`).
+        let exp_ms = numeric_date_ms(&claims, "exp").ok_or(AuthError::InvalidToken)?;
         if self.call_userinfo
             && let Some(ui) = self
                 .client
@@ -534,9 +564,12 @@ impl IntrospectionValidator {
             .and_then(Value::as_str)
             .ok_or(AuthError::InvalidToken)?
             .to_string();
-        Ok(Principal {
-            name,
-            auth_method: AuthMethod::SaslOAuthBearer,
+        Ok(AuthOutcome {
+            principal: Principal {
+                name,
+                auth_method: AuthMethod::SaslOAuthBearer,
+            },
+            expires_at_ms: Some(exp_ms),
         })
     }
 }
@@ -677,9 +710,21 @@ mod tests {
         let v = UnsecuredJwsValidator::default();
         let now = 1_000_000_000_000;
         let token = unsecured("admin", 999_999_000, 1_000_000_900); // seconds
-        let p = v.validate(&token, now).unwrap();
-        assert_eq!(p.name, "admin");
-        assert_eq!(p.auth_method, AuthMethod::SaslOAuthBearer);
+        let outcome = v.validate(&token, now).unwrap();
+        assert_eq!(outcome.principal.name, "admin");
+        assert_eq!(outcome.principal.auth_method, AuthMethod::SaslOAuthBearer);
+    }
+
+    #[test]
+    fn unsecured_validate_surfaces_exp_in_auth_outcome() {
+        // exp = 2000 sec = 2_000_000 ms; now = 1_000_000 ms.
+        let exp_secs: i64 = 2_000;
+        let now_ms: i64 = 1_000_000;
+        let token = unsecured("alice", 999, exp_secs);
+        let v = UnsecuredJwsValidator::default();
+        let outcome = v.validate(&token, now_ms).expect("token valid");
+        assert_eq!(outcome.principal.name, "alice");
+        assert_eq!(outcome.expires_at_ms, Some(exp_secs * 1000));
     }
 
     #[test]
@@ -782,8 +827,8 @@ mod tests {
             "{\"alg\":\"none\"}",
             "{\"client_id\":\"svc-1\",\"exp\":5000000000}",
         );
-        let p = v.validate(&token, 1_000_000_000_000).unwrap();
-        assert_eq!(p.name, "svc-1");
+        let outcome = v.validate(&token, 1_000_000_000_000).unwrap();
+        assert_eq!(outcome.principal.name, "svc-1");
     }
 
     #[test]
@@ -805,9 +850,20 @@ mod tests {
     fn signed_accepts_fresh_rs256_token() {
         let (token, jwks) = mint_rs256("k1", "{\"sub\":\"admin\",\"exp\":9999999999}");
         let (v, _h) = signed(&jwks);
-        let p = v.validate(&token, 1_000_000_000_000).unwrap();
-        assert_eq!(p.name, "admin");
-        assert_eq!(p.auth_method, AuthMethod::SaslOAuthBearer);
+        let outcome = v.validate(&token, 1_000_000_000_000).unwrap();
+        assert_eq!(outcome.principal.name, "admin");
+        assert_eq!(outcome.principal.auth_method, AuthMethod::SaslOAuthBearer);
+    }
+
+    #[test]
+    fn signed_validate_surfaces_exp_in_auth_outcome() {
+        let exp_secs: i64 = 2_000;
+        let now_ms: i64 = 1_000_000;
+        let (token, jwks) = mint_rs256("k1", &format!("{{\"sub\":\"alice\",\"exp\":{exp_secs}}}"));
+        let (v, _h) = signed(&jwks);
+        let outcome = v.validate(&token, now_ms).expect("token valid");
+        assert_eq!(outcome.principal.name, "alice");
+        assert_eq!(outcome.expires_at_ms, Some(exp_secs * 1000));
     }
 
     #[test]
@@ -934,7 +990,13 @@ mod tests {
         let (token, jwks) = mint_rs256("k1", "{\"client_id\":\"svc-1\",\"exp\":9999999999}");
         let (mut v, _h) = signed(&jwks);
         v.principal_claim_name = "client_id".to_string();
-        assert_eq!(v.validate(&token, 1_000_000_000_000).unwrap().name, "svc-1");
+        assert_eq!(
+            v.validate(&token, 1_000_000_000_000)
+                .unwrap()
+                .principal
+                .name,
+            "svc-1"
+        );
     }
 
     #[test]
@@ -953,7 +1015,13 @@ mod tests {
             v.validate(&token_a, 1_000_000_000_000),
             Err(AuthError::InvalidToken)
         );
-        assert_eq!(v.validate(&token_b, 1_000_000_000_000).unwrap().name, "b");
+        assert_eq!(
+            v.validate(&token_b, 1_000_000_000_000)
+                .unwrap()
+                .principal
+                .name,
+            "b"
+        );
     }
 
     #[test]
@@ -984,6 +1052,7 @@ mod tests {
                 .validate(&token, 1_000_000_000_000)
                 .await
                 .unwrap()
+                .principal
                 .name,
             "x"
         );
@@ -1073,9 +1142,9 @@ mod introspection_tests {
             Ok(json!({"active": true, "sub": "alice", "exp": NOW_MS/1000 + 60})),
         );
         let v = validator(mock.clone());
-        let p = v.validate("tok", NOW_MS).await.unwrap();
-        assert_eq!(p.name, "alice");
-        assert_eq!(p.auth_method, AuthMethod::SaslOAuthBearer);
+        let outcome = v.validate("tok", NOW_MS).await.unwrap();
+        assert_eq!(outcome.principal.name, "alice");
+        assert_eq!(outcome.principal.auth_method, AuthMethod::SaslOAuthBearer);
     }
 
     #[tokio::test]
@@ -1119,7 +1188,12 @@ mod introspection_tests {
         let mock = MockIntrospectionClient::arc();
         mock.set_introspect(
             "tok",
-            Ok(json!({"active": true, "sub": "alice", "scope": "kafka.read kafka.write"})),
+            Ok(json!({
+                "active": true,
+                "sub": "alice",
+                "exp": NOW_MS/1000 + 60,
+                "scope": "kafka.read kafka.write",
+            })),
         );
         let mut v = validator(mock.clone());
         v.required_scope = Some("kafka.write".into());
@@ -1131,7 +1205,12 @@ mod introspection_tests {
         let mock = MockIntrospectionClient::arc();
         mock.set_introspect(
             "tok",
-            Ok(json!({"active": true, "sub": "alice", "scope": ["kafka.read", "kafka.write"]})),
+            Ok(json!({
+                "active": true,
+                "sub": "alice",
+                "exp": NOW_MS/1000 + 60,
+                "scope": ["kafka.read", "kafka.write"],
+            })),
         );
         let mut v = validator(mock.clone());
         v.required_scope = Some("kafka.write".into());
@@ -1143,7 +1222,7 @@ mod introspection_tests {
         let mock = MockIntrospectionClient::arc();
         mock.set_introspect(
             "tok",
-            Ok(json!({"active": true, "sub": "alice", "scope": "kafka.read"})),
+            Ok(json!({"active": true, "sub": "alice", "exp": NOW_MS / 1000 + 60, "scope": "kafka.read"})),
         );
         let mut v = validator(mock.clone());
         v.required_scope = Some("kafka.write".into());
@@ -1158,7 +1237,12 @@ mod introspection_tests {
         let mock = MockIntrospectionClient::arc();
         mock.set_introspect(
             "tok",
-            Ok(json!({"active": true, "sub": "alice", "preferred_username": "intros-name"})),
+            Ok(json!({
+                "active": true,
+                "sub": "alice",
+                "exp": NOW_MS/1000 + 60,
+                "preferred_username": "intros-name",
+            })),
         );
         mock.set_userinfo(
             "tok",
@@ -1169,30 +1253,39 @@ mod introspection_tests {
         let mut v = validator(mock.clone());
         v.call_userinfo = true;
         v.principal_claim_name = "preferred_username".into();
-        let p = v.validate("tok", NOW_MS).await.unwrap();
-        assert_eq!(p.name, "userinfo-name");
+        let outcome = v.validate("tok", NOW_MS).await.unwrap();
+        assert_eq!(outcome.principal.name, "userinfo-name");
     }
 
     #[tokio::test]
     async fn introspection_userinfo_does_not_override_authorization_keys() {
         let mock = MockIntrospectionClient::arc();
-        mock.set_introspect("tok", Ok(json!({"active": true, "sub": "alice"})));
+        mock.set_introspect(
+            "tok",
+            Ok(json!({"active": true, "sub": "alice", "exp": NOW_MS/1000 + 60})),
+        );
         mock.set_userinfo("tok", Ok(Some(json!({"active": false, "sub": "mallory"}))));
         let mut v = validator(mock.clone());
         v.call_userinfo = true;
-        let p = v.validate("tok", NOW_MS).await.unwrap();
-        assert_eq!(p.name, "alice", "sub from introspection wins over userinfo");
+        let outcome = v.validate("tok", NOW_MS).await.unwrap();
+        assert_eq!(
+            outcome.principal.name, "alice",
+            "sub from introspection wins over userinfo"
+        );
     }
 
     #[tokio::test]
     async fn introspection_userinfo_disabled_when_call_userinfo_false() {
         let mock = MockIntrospectionClient::arc();
-        mock.set_introspect("tok", Ok(json!({"active": true, "sub": "alice"})));
+        mock.set_introspect(
+            "tok",
+            Ok(json!({"active": true, "sub": "alice", "exp": NOW_MS/1000 + 60})),
+        );
         // Deliberately set a userinfo response — should be ignored.
         mock.set_userinfo("tok", Ok(Some(json!({"preferred_username": "ignored"}))));
         let v = validator(mock.clone()); // call_userinfo: false (default)
-        let p = v.validate("tok", NOW_MS).await.unwrap();
-        assert_eq!(p.name, "alice");
+        let outcome = v.validate("tok", NOW_MS).await.unwrap();
+        assert_eq!(outcome.principal.name, "alice");
     }
 
     #[tokio::test]
@@ -1213,9 +1306,15 @@ mod introspection_tests {
     #[tokio::test]
     async fn introspection_default_principal_claim_sub() {
         let mock = MockIntrospectionClient::arc();
-        mock.set_introspect("tok", Ok(json!({"active": true, "sub": "sub-name"})));
+        mock.set_introspect(
+            "tok",
+            Ok(json!({"active": true, "sub": "sub-name", "exp": NOW_MS/1000 + 60})),
+        );
         let v = validator(mock.clone());
-        assert_eq!(v.validate("tok", NOW_MS).await.unwrap().name, "sub-name");
+        assert_eq!(
+            v.validate("tok", NOW_MS).await.unwrap().principal.name,
+            "sub-name"
+        );
     }
 
     #[tokio::test]
@@ -1223,20 +1322,54 @@ mod introspection_tests {
         let mock = MockIntrospectionClient::arc();
         mock.set_introspect(
             "tok",
-            Ok(json!({"active": true, "sub": "sub-name", "client_id": "my-client"})),
+            Ok(json!({
+                "active": true,
+                "sub": "sub-name",
+                "exp": NOW_MS/1000 + 60,
+                "client_id": "my-client",
+            })),
         );
         let mut v = validator(mock.clone());
         v.principal_claim_name = "client_id".into();
-        assert_eq!(v.validate("tok", NOW_MS).await.unwrap().name, "my-client");
+        assert_eq!(
+            v.validate("tok", NOW_MS).await.unwrap().principal.name,
+            "my-client"
+        );
     }
 
     #[tokio::test]
     async fn enum_dispatch_introspection_async() {
         let mock = MockIntrospectionClient::arc();
-        mock.set_introspect("tok", Ok(json!({"active": true, "sub": "alice"})));
+        mock.set_introspect(
+            "tok",
+            Ok(json!({"active": true, "sub": "alice", "exp": NOW_MS/1000 + 60})),
+        );
         let v = validator(mock.clone());
         let enum_v = OAuthBearerValidator::Introspection(v);
-        let p = enum_v.validate("tok", NOW_MS).await.unwrap();
-        assert_eq!(p.name, "alice");
+        let outcome = enum_v.validate("tok", NOW_MS).await.unwrap();
+        assert_eq!(outcome.principal.name, "alice");
+    }
+
+    #[tokio::test]
+    async fn introspection_validate_surfaces_exp_from_introspection_response() {
+        let exp_secs: i64 = 2_000;
+        let now_ms: i64 = 1_000_000;
+        let mock = MockIntrospectionClient::arc();
+        mock.set_introspect(
+            "opaque-token",
+            Ok(json!({
+                "active": true,
+                "sub": "alice",
+                "exp": exp_secs,
+                "scope": "kafka.write",
+            })),
+        );
+        let v = validator(mock.clone());
+        let outcome = v
+            .validate("opaque-token", now_ms)
+            .await
+            .expect("token valid");
+        assert_eq!(outcome.principal.name, "alice");
+        assert_eq!(outcome.expires_at_ms, Some(exp_secs * 1000));
     }
 }

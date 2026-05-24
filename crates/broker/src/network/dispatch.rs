@@ -30,6 +30,45 @@ use crate::network::codec::{self, MAX_FRAME_BYTES};
 
 const API_VERSIONS_KEY: i16 = 18;
 
+/// Returns a future that resolves at `deadline` if `Some`, or never resolves
+/// if `None`. Used in `tokio::select!` to disarm the timer arm for non-OAuth
+/// connections (which have no session expiry).
+async fn sleep_until_some(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(t) => tokio::time::sleep_until(t).await,
+        None => std::future::pending::<()>().await,
+    }
+}
+
+/// Convert an "expires-at as Unix epoch ms" into a `tokio::time::Instant`
+/// suitable for `sleep_until`. Computes the delta against the current wall
+/// clock and adds to `Instant::now()`; tests using `tokio::time::pause` can
+/// then advance the tokio clock to fire the deadline deterministically.
+fn instant_at_epoch_ms(epoch_ms: i64) -> tokio::time::Instant {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0_i64, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
+    // `.max(0)` ensures delta is non-negative before the unsigned cast;
+    // tokens with past `exp` fire the timer on the very next poll.
+    let delta_ms = (epoch_ms - now_ms).max(0);
+    tokio::time::Instant::now() + std::time::Duration::from_millis(delta_ms.cast_unsigned())
+}
+
+/// Returns the principal name for an `Authenticated` connection, or for the
+/// `previous` snapshot of a `Reauthenticating` connection; `None` otherwise.
+/// Used by the per-connection re-auth timer's tracing log on expiry.
+fn auth_principal_name(auth: &crate::network::auth::ConnectionAuth) -> Option<&str> {
+    match auth {
+        crate::network::auth::ConnectionAuth::Authenticated { principal, .. } => {
+            Some(principal.name.as_str())
+        }
+        crate::network::auth::ConnectionAuth::Reauthenticating { previous, .. } => {
+            Some(previous.principal.name.as_str())
+        }
+        _ => None,
+    }
+}
+
 /// Per-listener entrypoint. Branches between TLS termination (when the
 /// listener's protocol requires TLS) and the plaintext path. Both paths
 /// converge on [`serve_connection_stream`] for the per-connection request
@@ -151,7 +190,14 @@ async fn serve_connection_stream<S>(
     let mut auth = if is_sasl_listener {
         crate::network::auth::ConnectionAuth::Anonymous
     } else if let Some(principal) = mtls_principal {
-        crate::network::auth::ConnectionAuth::Authenticated { principal }
+        // Slice 49e: non-SASL connections carry an inert mechanism +
+        // no-expiry; the in-band re-auth path is unreachable on these
+        // listeners (handshake is only sent on SASL listeners).
+        crate::network::auth::ConnectionAuth::Authenticated {
+            principal,
+            mechanism: crabka_security::SaslMechanism::Plain,
+            expires_at_ms: None,
+        }
     } else {
         // PLAINTEXT / SSL-without-cert: implicit anonymous, treated as
         // authenticated for gating purposes so the pre-auth allowlist
@@ -161,17 +207,53 @@ async fn serve_connection_stream<S>(
                 name: "ANONYMOUS".to_string(),
                 auth_method: crabka_security::AuthMethod::Anonymous,
             },
+            mechanism: crabka_security::SaslMechanism::Plain,
+            expires_at_ms: None,
         }
     };
     tracing::info!(listener = %spec.name, sasl = is_sasl_listener, "connection opened");
 
-    while let Some(frame) = framed.next().await {
-        let frame = match frame {
-            Ok(b) => b,
-            Err(e) => {
+    loop {
+        // Compute the re-auth deadline for OAUTHBEARER connections. PLAIN /
+        // SCRAM / mTLS / anonymous return `None` and the timer arm is
+        // effectively disabled via `std::future::pending()` inside
+        // `sleep_until_some`. During `Reauthenticating`, the deadline stays
+        // pinned to the `previous` session's `expires_at_ms` so a slow
+        // in-band re-auth attempt cannot extend the session by sitting in
+        // the in-progress state past the original expiry (KIP-368).
+        let deadline: Option<tokio::time::Instant> = match &auth {
+            crate::network::auth::ConnectionAuth::Authenticated {
+                expires_at_ms: Some(exp_ms),
+                ..
+            } => Some(instant_at_epoch_ms(*exp_ms)),
+            crate::network::auth::ConnectionAuth::Reauthenticating { previous, .. } => {
+                previous.expires_at_ms.map(instant_at_epoch_ms)
+            }
+            _ => None,
+        };
+
+        // `biased;` ensures that if both `framed.next()` and the deadline
+        // are ready in the same poll, the read arm wins — letting the last
+        // in-flight request before expiry complete normally (KIP-368).
+        let frame_result = tokio::select! {
+            biased;
+            next = framed.next() => next,
+            () = sleep_until_some(deadline) => {
+                tracing::info!(
+                    principal = ?auth_principal_name(&auth),
+                    "SASL session expired, closing connection (KIP-368)"
+                );
+                break;
+            }
+        };
+
+        let frame = match frame_result {
+            Some(Ok(b)) => b,
+            Some(Err(e)) => {
                 tracing::warn!(error = %e, "frame decode error, closing");
                 break;
             }
+            None => break, // EOF
         };
         // Per-request server span (slice 42). The `enabled!` guard keeps
         // this a single disabled-level check on a broker without OTLP —
@@ -196,9 +278,15 @@ async fn serve_connection_stream<S>(
         } else {
             tracing::Span::none()
         };
-        // Pre-auth gate: on SASL listeners, before the connection is
-        // authenticated, only api_keys on the allowlist (17/36/18) are
-        // permitted. Anything else gets ILLEGAL_SASL_STATE (34).
+        // Per-state request gate: on SASL listeners, gate every api_key
+        // through `auth.allows_request(api_key)`. This covers:
+        //   - Anonymous / Negotiating: only the pre-auth allowlist
+        //     (ApiVersions=18, SaslHandshake=17, SaslAuthenticate=36).
+        //   - Reauthenticating (KIP-368 in-band re-auth in progress): only
+        //     SaslAuthenticate=36 — any other request during re-auth is a
+        //     protocol violation and the connection is closed.
+        //   - Authenticated: all api_keys allowed.
+        // Anything blocked closes the TCP connection with no body.
         //
         // Response-shape note: every api_key has a different response body,
         // so producing a typed `error_code = 34` frame from this generic
@@ -209,13 +297,13 @@ async fn serve_connection_stream<S>(
         // sending a body — JVM clients surface this to the caller as an
         // auth failure (closed connection during SASL), and this matches
         // the conservative behaviour we want for unauthenticated peers.
-        if is_sasl_listener && !auth.is_authenticated() {
+        if is_sasl_listener {
             match peek_api_key(&frame) {
-                Ok(api_key) if !crate::network::auth::is_pre_auth_allowed(api_key) => {
+                Ok(api_key) if !auth.allows_request(api_key) => {
                     tracing::info!(
                         api_key,
                         listener = %spec.name,
-                        "pre-auth request blocked (ILLEGAL_SASL_STATE), closing connection"
+                        "request blocked by per-state auth gate (ILLEGAL_SASL_STATE), closing connection"
                     );
                     let _ = codes::ILLEGAL_SASL_STATE; // referenced for docs/grep
                     break;
@@ -1095,12 +1183,17 @@ async fn handle_sasl_frame(
                     &mut cur,
                     api_version,
                 )?;
-            // Must be in `Negotiating` state (i.e. SaslHandshake was the
-            // previous frame). Otherwise return ILLEGAL_SASL_STATE (34) and
-            // close.
+            // Must be mid-SASL: either `Negotiating` (initial auth: a
+            // SaslHandshake was the previous frame) or `Reauthenticating`
+            // (KIP-368 in-band re-auth: a SaslHandshake just ran on an
+            // already-authenticated connection). Any other state returns
+            // ILLEGAL_SASL_STATE (34) and closes.
             let mech_opt = match auth {
                 crate::network::auth::ConnectionAuth::Negotiating { mechanism, .. } => {
                     Some(*mechanism)
+                }
+                crate::network::auth::ConnectionAuth::Reauthenticating { previous, .. } => {
+                    Some(previous.mechanism)
                 }
                 _ => None,
             };
