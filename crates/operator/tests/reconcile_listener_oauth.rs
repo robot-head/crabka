@@ -19,7 +19,7 @@ use std::sync::Arc;
 use crabka_operator::controller::kafka::reconcile;
 use crabka_operator::crd::{
     Kafka, KafkaSpec, Listener, ListenerAuthentication, ListenerAuthenticationOAuth, ListenerType,
-    OAuthCustomClaimCheck,
+    OAuthCustomClaimCheck, TlsTrustedCertificate,
 };
 use http::Method;
 
@@ -74,6 +74,7 @@ fn oauth_cfg_minimal() -> ListenerAuthenticationOAuth {
         jwks_refresh_seconds: None,
         max_clock_skew_seconds: None,
         enable_oauth_bearer: true,
+        tls_trusted_certificates: vec![],
     }
 }
 
@@ -93,6 +94,7 @@ fn oauth_cfg_full() -> ListenerAuthenticationOAuth {
         jwks_refresh_seconds: Some(300),
         max_clock_skew_seconds: Some(30),
         enable_oauth_bearer: true,
+        tls_trusted_certificates: vec![],
     }
 }
 
@@ -628,4 +630,176 @@ async fn two_oauth_listeners_with_divergent_config_rejected_with_conflicting_oau
 
     let observed = state.take_observed();
     assert_listeners_invalid_with_reason(&observed, "c12", "ConflictingOAuthConfig");
+}
+
+// ── test 13: divergent trust-certs rejected with ConflictingOAuthConfig ─────
+
+/// Slice 50b. Two OAuth listeners whose `[oauthbearer]` config is
+/// identical EXCEPT for `tls_trusted_certificates` (one empty, one
+/// pointing at a Secret) cannot share the broker-global block — the
+/// trust-bundle is part of the canonical OAuth fingerprint. The
+/// reconciler must reject with `ListenersValid=False` reason
+/// `ConflictingOAuthConfig`, and (because validation fails before any
+/// per-broker rendering) must not patch the broker-config ConfigMap.
+#[tokio::test]
+async fn two_oauth_listeners_with_divergent_trust_certs_rejected_with_conflicting_oauth_config() {
+    let items = vec![shared::fake_pool_list_item("brokers", "ns13", "c13", 1, 1)];
+    let rules = rules_for_invalid_listeners("c13", "ns13", &items);
+    let (ctx, state) = build_ctx("ns13", rules);
+
+    let mut cfg_a = oauth_cfg_full();
+    cfg_a.tls_trusted_certificates = vec![];
+    let mut cfg_b = oauth_cfg_full();
+    cfg_b.tls_trusted_certificates = vec![TlsTrustedCertificate {
+        secret_name: "any-secret".into(),
+        certificate: "tls.crt".into(),
+    }];
+    let kafka = kafka_cr_with_listeners(
+        "c13",
+        "ns13",
+        vec![
+            oauth_listener("oauth-a", 9095, true, cfg_a),
+            oauth_listener("oauth-b", 9096, true, cfg_b),
+        ],
+    );
+    reconcile(Arc::new(kafka), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    assert_listeners_invalid_with_reason(&observed, "c13", "ConflictingOAuthConfig");
+}
+
+// ── test 14: trust-certs reconcile end-to-end → jwks_tls_trust + managed Secret
+
+/// Slice 50b. A single OAuth listener with `tls_trusted_certificates`
+/// pointing at a user-supplied Secret must:
+///   1. drive `reconcile_oauth_jwks_trust` to GET the source Secret
+///      and SSA the managed `{kafka}-oauth-jwks-trust` Secret with the
+///      concatenated PEM under key `ca.crt`,
+///   2. cause the broker-config ConfigMap render path to emit
+///      `jwks_tls_trust = "/etc/crabka/oauth-jwks-trust/ca.crt"` in
+///      `broker-0.toml` (T2's render-path wiring), and
+///   3. surface `ListenersValid=True` on the Kafka status (the
+///      reconcile path made it past validation + trust assembly with
+///      no errors).
+///
+/// The FIFO mock list inserts the source-Secret GET + managed-Secret
+/// PATCH between the pool-list step and the broker-keystore step (the
+/// order they fire in `kafka.rs::reconcile`).
+#[tokio::test]
+async fn oauth_listener_with_tls_trusted_certificates_reconciles_renders_jwks_tls_trust_line() {
+    use base64::Engine as _;
+
+    let items = vec![shared::fake_pool_list_item("brokers", "ns14", "c14", 1, 1)];
+    let mut rules = happy_path_rules("c14", "ns14", &items);
+
+    // Source Secret read by `reconcile_oauth_jwks_trust`. The operator
+    // doesn't parse the bytes — any non-empty value under the named key
+    // is concatenated into the managed bundle.
+    let pem = b"-----BEGIN CERTIFICATE-----\nMIIBIzCCAQ==\n-----END CERTIFICATE-----\n";
+    let pem_b64 = base64::engine::general_purpose::STANDARD.encode(pem);
+    let source_secret_body = serde_json::json!({
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": { "name": "demo-keycloak-ca", "namespace": "ns14", "uid": "src-uid" },
+        "type": "Opaque",
+        "data": { "tls.crt": pem_b64 },
+    });
+    let managed_secret_body = serde_json::json!({
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": { "name": "c14-oauth-jwks-trust", "namespace": "ns14", "uid": "mgd-uid" },
+        "type": "Opaque",
+        "data": { "ca.crt": pem_b64 },
+    });
+    // Insert the trust-assembly rules ahead of the broker-keystore /
+    // ConfigMap rules so FIFO picks them up first. (The mock matches on
+    // path substring + method; the source GET and managed PATCH have
+    // unique substrings, so ordering is purely a defensive measure.)
+    rules.insert(
+        0,
+        MockRule {
+            method: Method::GET,
+            path_substr: "/secrets/demo-keycloak-ca".into(),
+            response: json_response(200, &source_secret_body),
+        },
+    );
+    rules.insert(
+        1,
+        MockRule {
+            method: Method::PATCH,
+            path_substr: "/secrets/c14-oauth-jwks-trust".into(),
+            response: json_response(200, &managed_secret_body),
+        },
+    );
+
+    let (ctx, state) = build_ctx("ns14", rules);
+
+    let mut cfg = oauth_cfg_minimal();
+    cfg.tls_trusted_certificates = vec![TlsTrustedCertificate {
+        secret_name: "demo-keycloak-ca".into(),
+        certificate: "tls.crt".into(),
+    }];
+    let kafka = kafka_cr_with_listeners(
+        "c14",
+        "ns14",
+        vec![oauth_listener("oauth", 9095, true, cfg)],
+    );
+    reconcile(Arc::new(kafka), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+
+    // (1) Managed Secret SSA fired against the expected URI with the
+    //     concatenated PEM bundle under `ca.crt`.
+    let managed_patch = observed
+        .iter()
+        .find(|r| {
+            r.method() == Method::PATCH
+                && r.uri()
+                    .to_string()
+                    .contains("/secrets/c14-oauth-jwks-trust")
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "expected SSA PATCH to /secrets/c14-oauth-jwks-trust; observed: {:?}",
+                observed
+                    .iter()
+                    .map(|r| format!("{} {}", r.method(), r.uri()))
+                    .collect::<Vec<_>>()
+            )
+        });
+    let mgd_body: serde_json::Value =
+        serde_json::from_slice(managed_patch.body()).expect("managed Secret PATCH body is JSON");
+    let mgd_b64 = mgd_body["data"]["ca.crt"]
+        .as_str()
+        .unwrap_or_else(|| panic!("managed Secret data.ca.crt missing; body = {mgd_body}"));
+    let mgd_bytes = base64::engine::general_purpose::STANDARD
+        .decode(mgd_b64)
+        .expect("managed Secret ca.crt is base64");
+    assert_eq!(
+        mgd_bytes,
+        pem.to_vec(),
+        "managed Secret bundle must match source PEM bytes"
+    );
+
+    // (2) ConfigMap render contains the jwks_tls_trust pointer.
+    let toml = extract_broker0_toml(&observed, "c14");
+    assert!(
+        toml.contains("jwks_tls_trust = \"/etc/crabka/oauth-jwks-trust/ca.crt\""),
+        "broker-0.toml must reference the mounted trust bundle; TOML: {toml}"
+    );
+
+    // (3) ListenersValid=True on the status PATCH.
+    let status_patch = observed
+        .iter()
+        .find(|r| r.method() == Method::PATCH && r.uri().to_string().contains("/kafkas/c14/status"))
+        .expect("status PATCH captured");
+    let body: serde_json::Value =
+        serde_json::from_slice(status_patch.body()).expect("status body is JSON");
+    let valid = body["status"]["conditions"]
+        .as_array()
+        .expect("conditions array")
+        .iter()
+        .find(|c| c["type"] == "ListenersValid")
+        .unwrap_or_else(|| panic!("ListenersValid present; body = {body}"));
+    assert_eq!(valid["status"], "True", "body = {body}");
 }

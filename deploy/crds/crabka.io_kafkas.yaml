@@ -144,6 +144,20 @@ spec:
                         maxClockSkewSeconds:
                           minimum: 0.0
                           type: integer
+                        tlsTrustedCertificates:
+                          items:
+                            properties:
+                              certificate:
+                                minLength: 1
+                                type: string
+                              secretName:
+                                minLength: 1
+                                type: string
+                            required:
+                            - certificate
+                            - secretName
+                            type: object
+                          type: array
                         type:
                           enum:
                           - tls

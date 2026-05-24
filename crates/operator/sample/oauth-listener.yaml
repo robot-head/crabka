@@ -26,6 +26,12 @@ spec:
         userNameClaim: preferred_username
         customClaimCheck:
           scope: kafka.write
+        tlsTrustedCertificates:
+          # Replace `keycloak-ca` with a Secret in the same namespace as
+          # the Kafka CR; `certificate` is the key within that Secret
+          # whose value is a PEM bundle of CA certs.
+          - secretName: keycloak-ca
+            certificate: tls.crt
   interBrokerListenerName: PLAIN
 ---
 apiVersion: crabka.io/v1alpha1

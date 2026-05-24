@@ -1276,6 +1276,7 @@ mod tests {
             jwks_refresh_seconds: None,
             max_clock_skew_seconds: None,
             enable_oauth_bearer: true,
+            tls_trusted_certificates: vec![],
         }
     }
 
@@ -1428,6 +1429,7 @@ mod tests {
             jwks_refresh_seconds: Some(300),
             max_clock_skew_seconds: Some(30),
             enable_oauth_bearer: true,
+            tls_trusted_certificates: vec![],
         };
         let perturbations: Vec<(&str, crate::crd::ListenerAuthenticationOAuth)> = vec![
             (
@@ -1479,6 +1481,16 @@ mod tests {
                 "max_clock_skew_seconds",
                 crate::crd::ListenerAuthenticationOAuth {
                     max_clock_skew_seconds: Some(120),
+                    ..base.clone()
+                },
+            ),
+            (
+                "tls_trusted_certificates",
+                crate::crd::ListenerAuthenticationOAuth {
+                    tls_trusted_certificates: vec![crate::crd::TlsTrustedCertificate {
+                        secret_name: "different-secret".into(),
+                        certificate: "tls.crt".into(),
+                    }],
                     ..base.clone()
                 },
             ),
@@ -2217,6 +2229,12 @@ pub fn render_broker_toml(
         if let Some(s) = oauth_cfg.max_clock_skew_seconds {
             let _ = writeln!(out, "allowable_clock_skew_ms = {}", i64::from(s) * 1000);
         }
+        if !oauth_cfg.tls_trusted_certificates.is_empty() {
+            let _ = writeln!(
+                out,
+                r#"jwks_tls_trust = "/etc/crabka/oauth-jwks-trust/ca.crt""#,
+            );
+        }
         out.push('\n');
     }
 
@@ -2427,6 +2445,7 @@ mod toml_rendering_tests {
             jwks_refresh_seconds: Some(300),
             max_clock_skew_seconds: Some(30),
             enable_oauth_bearer: true,
+            tls_trusted_certificates: vec![],
         }
     }
 
@@ -2516,6 +2535,7 @@ mod toml_rendering_tests {
             jwks_refresh_seconds: None,
             max_clock_skew_seconds: None,
             enable_oauth_bearer: true,
+            tls_trusted_certificates: vec![],
         };
         let listeners = vec![oauth_listener_for_render("oauth", 9095, true, cfg)];
         let toml = render_broker_toml(
@@ -2536,6 +2556,57 @@ mod toml_rendering_tests {
         assert!(!toml.contains("required_scope"));
         assert!(!toml.contains("jwks_refresh_interval_ms"));
         assert!(!toml.contains("allowable_clock_skew_ms"));
+    }
+
+    #[test]
+    fn render_broker_toml_emits_jwks_tls_trust_when_trust_certs_present() {
+        use std::collections::BTreeMap;
+        let mut cfg = oauth_full_cfg();
+        cfg.tls_trusted_certificates = vec![crate::crd::TlsTrustedCertificate {
+            secret_name: "x".into(),
+            certificate: "tls.crt".into(),
+        }];
+        let listeners = vec![oauth_listener_for_render("oauth", 9095, true, cfg)];
+        let toml = render_broker_toml(
+            0,
+            &listeners,
+            &addrs_for("oauth", 9095),
+            "oauth",
+            &BTreeMap::new(),
+            Some(&render_tls()),
+            None,
+        );
+        assert!(
+            toml.contains("jwks_tls_trust = \"/etc/crabka/oauth-jwks-trust/ca.crt\""),
+            "TOML: {toml}"
+        );
+    }
+
+    #[test]
+    fn render_broker_toml_omits_jwks_tls_trust_when_no_trust_certs() {
+        use std::collections::BTreeMap;
+        let cfg = crate::crd::ListenerAuthenticationOAuth {
+            valid_issuer_uri: "https://issuer.example.com/".into(),
+            jwks_endpoint_uri: "https://issuer.example.com/jwks".into(),
+            valid_audience: None,
+            user_name_claim: None,
+            custom_claim_check: None,
+            jwks_refresh_seconds: None,
+            max_clock_skew_seconds: None,
+            enable_oauth_bearer: true,
+            tls_trusted_certificates: vec![],
+        };
+        let listeners = vec![oauth_listener_for_render("oauth", 9095, true, cfg)];
+        let toml = render_broker_toml(
+            0,
+            &listeners,
+            &addrs_for("oauth", 9095),
+            "oauth",
+            &BTreeMap::new(),
+            Some(&render_tls()),
+            None,
+        );
+        assert!(!toml.contains("jwks_tls_trust"), "TOML: {toml}");
     }
 
     #[test]
@@ -2688,6 +2759,7 @@ mod toml_rendering_tests {
             jwks_refresh_seconds: Some(300),
             max_clock_skew_seconds: Some(60),
             enable_oauth_bearer: true,
+            tls_trusted_certificates: vec![],
         };
         let listeners = vec![oauth_listener_for_render("oauth", 9095, true, cfg)];
         let toml = render_broker_toml(
@@ -3292,6 +3364,7 @@ mod weak_auth_tests {
                     jwks_refresh_seconds: None,
                     max_clock_skew_seconds: None,
                     enable_oauth_bearer: true,
+                    tls_trusted_certificates: vec![],
                 },
             )),
             configuration: None,

@@ -177,6 +177,15 @@ pub struct ListenerAuthenticationOAuth {
     /// arrive via other mechanisms (rare; mirrors Strimzi).
     #[serde(default = "default_true", skip_serializing_if = "is_default_true")]
     pub enable_oauth_bearer: bool,
+    /// Slice 50b: Strimzi-shaped list of `{secretName, certificate}`
+    /// entries naming source Secrets (same namespace as the `Kafka`
+    /// CR) whose listed PEM keys are concatenated into a managed
+    /// Secret `{kafka.name}-oauth-jwks-trust` and mounted into broker
+    /// pods. The broker reads the concatenated bundle at the path
+    /// written into `[oauthbearer].jwks_tls_trust` (slice 49c). Empty
+    /// list (default) → no managed Secret, no mount, no TOML line.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tls_trusted_certificates: Vec<TlsTrustedCertificate>,
 }
 
 fn default_true() -> bool {
@@ -205,6 +214,19 @@ pub struct OAuthCustomClaimCheck {
     pub scope_claim: Option<String>,
 }
 
+/// Slice 50b. One entry in
+/// `ListenerAuthenticationOAuth.tls_trusted_certificates`. Names a
+/// source `Secret` (in the same namespace as the `Kafka` CR) and the
+/// key within that Secret whose value is a PEM-encoded CA certificate.
+/// The operator concatenates all listed entries into a managed Secret
+/// the broker mounts and reads as its OAUTHBEARER JWKS trust store.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TlsTrustedCertificate {
+    pub secret_name: String,
+    pub certificate: String,
+}
+
 fn listener_authentication_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
     schemars::json_schema!({
         "type": "object",
@@ -229,6 +251,17 @@ fn listener_authentication_schema(_: &mut schemars::SchemaGenerator) -> schemars
             "jwksRefreshSeconds": { "type": "integer", "minimum": 0 },
             "maxClockSkewSeconds": { "type": "integer", "minimum": 0 },
             "enableOauthBearer": { "type": "boolean" },
+            "tlsTrustedCertificates": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["secretName", "certificate"],
+                    "properties": {
+                        "secretName": { "type": "string", "minLength": 1 },
+                        "certificate": { "type": "string", "minLength": 1 },
+                    },
+                },
+            },
         },
     })
 }
@@ -371,6 +404,7 @@ authentication:
             jwks_refresh_seconds: Some(300),
             max_clock_skew_seconds: Some(30),
             enable_oauth_bearer: false,
+            tls_trusted_certificates: vec![],
         };
         assert_eq!(
             l.authentication,
@@ -443,6 +477,7 @@ authentication:
             jwks_refresh_seconds: None,
             max_clock_skew_seconds: None,
             enable_oauth_bearer: true,
+            tls_trusted_certificates: vec![],
         });
         let json = serde_json::to_string(&auth).unwrap();
         assert!(
@@ -462,6 +497,7 @@ authentication:
             jwks_refresh_seconds: None,
             max_clock_skew_seconds: None,
             enable_oauth_bearer: false,
+            tls_trusted_certificates: vec![],
         });
         let json = serde_json::to_string(&auth).unwrap();
         assert!(json.contains("\"enableOauthBearer\":false"), "got: {json}");
@@ -536,9 +572,76 @@ authentication:
             "jwksRefreshSeconds",
             "maxClockSkewSeconds",
             "enableOauthBearer",
+            "tlsTrustedCertificates",
         ] {
             assert!(props.contains_key(want), "missing property {want}");
         }
+    }
+
+    #[test]
+    fn oauth_with_tls_trusted_certificates_round_trips() {
+        let original = ListenerAuthenticationOAuth {
+            valid_issuer_uri: "https://issuer.example.com/".into(),
+            jwks_endpoint_uri: "https://issuer.example.com/jwks".into(),
+            valid_audience: None,
+            user_name_claim: None,
+            custom_claim_check: None,
+            jwks_refresh_seconds: None,
+            max_clock_skew_seconds: None,
+            enable_oauth_bearer: true,
+            tls_trusted_certificates: vec![
+                TlsTrustedCertificate {
+                    secret_name: "kc-ca".into(),
+                    certificate: "ca.crt".into(),
+                },
+                TlsTrustedCertificate {
+                    secret_name: "intermediate-ca".into(),
+                    certificate: "tls.crt".into(),
+                },
+            ],
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        assert!(
+            json.contains("\"tlsTrustedCertificates\":["),
+            "expected tlsTrustedCertificates array in JSON; got: {json}"
+        );
+        let round_tripped: ListenerAuthenticationOAuth = serde_json::from_str(&json).unwrap();
+        assert_eq!(round_tripped, original);
+    }
+
+    #[test]
+    fn oauth_tls_trusted_certificates_default_omitted_on_serialize() {
+        let auth = ListenerAuthenticationOAuth {
+            valid_issuer_uri: "https://issuer.example.com/".into(),
+            jwks_endpoint_uri: "https://issuer.example.com/jwks".into(),
+            valid_audience: None,
+            user_name_claim: None,
+            custom_claim_check: None,
+            jwks_refresh_seconds: None,
+            max_clock_skew_seconds: None,
+            enable_oauth_bearer: true,
+            tls_trusted_certificates: vec![],
+        };
+        let json = serde_json::to_string(&auth).unwrap();
+        assert!(
+            !json.contains("tlsTrustedCertificates"),
+            "empty tls_trusted_certificates must be omitted; got: {json}"
+        );
+    }
+
+    #[test]
+    fn tls_trusted_certificate_required_fields_missing_rejected() {
+        let missing_certificate = serde_yaml::from_str::<TlsTrustedCertificate>(r"secretName: foo");
+        assert!(
+            missing_certificate.is_err(),
+            "entry without certificate must fail to deserialize"
+        );
+        let missing_secret_name =
+            serde_yaml::from_str::<TlsTrustedCertificate>(r"certificate: bar");
+        assert!(
+            missing_secret_name.is_err(),
+            "entry without secretName must fail to deserialize"
+        );
     }
 }
 
