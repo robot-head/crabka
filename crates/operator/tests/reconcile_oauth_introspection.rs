@@ -43,8 +43,7 @@ const SOURCE_VALUE: &[u8] = b"shhh-broker-secret";
 
 const INTROSPECTION_URI: &str =
     "https://keycloak.example/realms/kafka/protocol/openid-connect/token/introspect";
-const USERINFO_URI: &str =
-    "https://keycloak.example/realms/kafka/protocol/openid-connect/userinfo";
+const USERINFO_URI: &str = "https://keycloak.example/realms/kafka/protocol/openid-connect/userinfo";
 const CLIENT_ID: &str = "kafka-broker";
 const VALID_AUDIENCE: &str = "kafka-broker";
 const USER_NAME_CLAIM: &str = "preferred_username";
@@ -262,7 +261,11 @@ async fn oauth_introspection_validates_source_secret_and_mounts_it() {
     ));
 
     let (ctx, state) = build_ctx("ns1", rules);
-    let kafka = kafka_cr("c1", "ns1", vec![oauth_listener("oauth", 9095, introspection_oauth_cfg())]);
+    let kafka = kafka_cr(
+        "c1",
+        "ns1",
+        vec![oauth_listener("oauth", 9095, introspection_oauth_cfg())],
+    );
     reconcile_kafka(Arc::new(kafka), ctx).await.unwrap();
 
     let observed = state.take_observed();
@@ -299,7 +302,11 @@ async fn oauth_introspection_missing_source_secret_rejects_with_missing_oauth_in
     rules.push(rule_get_secret_404(SOURCE_SECRET_NAME));
 
     let (ctx, state) = build_ctx("ns2", rules);
-    let kafka = kafka_cr("c2", "ns2", vec![oauth_listener("oauth", 9095, introspection_oauth_cfg())]);
+    let kafka = kafka_cr(
+        "c2",
+        "ns2",
+        vec![oauth_listener("oauth", 9095, introspection_oauth_cfg())],
+    );
     reconcile_kafka(Arc::new(kafka), ctx).await.unwrap();
 
     let observed = state.take_observed();
@@ -326,7 +333,11 @@ async fn oauth_introspection_missing_key_in_secret_rejects_with_missing_oauth_in
     ));
 
     let (ctx, state) = build_ctx("ns3", rules);
-    let kafka = kafka_cr("c3", "ns3", vec![oauth_listener("oauth", 9095, introspection_oauth_cfg())]);
+    let kafka = kafka_cr(
+        "c3",
+        "ns3",
+        vec![oauth_listener("oauth", 9095, introspection_oauth_cfg())],
+    );
     reconcile_kafka(Arc::new(kafka), ctx).await.unwrap();
 
     let observed = state.take_observed();
@@ -346,7 +357,11 @@ async fn oauth_introspection_empty_key_value_rejects_with_empty_oauth_introspect
     ));
 
     let (ctx, state) = build_ctx("ns4", rules);
-    let kafka = kafka_cr("c4", "ns4", vec![oauth_listener("oauth", 9095, introspection_oauth_cfg())]);
+    let kafka = kafka_cr(
+        "c4",
+        "ns4",
+        vec![oauth_listener("oauth", 9095, introspection_oauth_cfg())],
+    );
     reconcile_kafka(Arc::new(kafka), ctx).await.unwrap();
 
     let observed = state.take_observed();
@@ -373,10 +388,7 @@ async fn oauth_introspection_jwt_mode_does_not_mount_anything() {
         "brokers",
         "ns5",
         &parent_kafka_body_with_oauth(
-            "c5",
-            "ns5",
-            /* jwt_mode = */ true,
-            /* userinfo = */ None,
+            "c5", "ns5", /* jwt_mode = */ true, /* userinfo = */ None,
         ),
     );
     let (ctx, state) = pool_ctx("ns5", rules);
@@ -431,10 +443,7 @@ async fn oauth_introspection_managed_pod_template_mounts_secret_with_projected_i
         "brokers",
         "ns6",
         &parent_kafka_body_with_oauth(
-            "c6",
-            "ns6",
-            /* jwt_mode = */ false,
-            /* userinfo = */ None,
+            "c6", "ns6", /* jwt_mode = */ false, /* userinfo = */ None,
         ),
     );
     let (ctx, state) = pool_ctx("ns6", rules);
@@ -506,7 +515,9 @@ async fn oauth_introspection_with_userinfo_renders_userinfo_endpoint_in_toml() {
         "userinfo_endpoint_uri must be present in [oauthbearer] TOML when userInfoEndpointUri is set; TOML: {toml}",
     );
     assert!(
-        toml.contains(&format!("introspection_endpoint_uri = \"{INTROSPECTION_URI}\"")),
+        toml.contains(&format!(
+            "introspection_endpoint_uri = \"{INTROSPECTION_URI}\""
+        )),
         "introspection_endpoint_uri must still be present; TOML: {toml}",
     );
 }
@@ -524,10 +535,7 @@ async fn statefulset_mounts_oauth_introspection_secret_when_introspection_mode()
         "brokers",
         "ns8",
         &parent_kafka_body_with_oauth(
-            "c8",
-            "ns8",
-            /* jwt_mode = */ false,
-            /* userinfo = */ None,
+            "c8", "ns8", /* jwt_mode = */ false, /* userinfo = */ None,
         ),
     );
     let (ctx, state) = pool_ctx("ns8", rules);
@@ -591,10 +599,7 @@ async fn statefulset_omits_oauth_introspection_volume_when_jwt_mode() {
         "brokers",
         "ns9",
         &parent_kafka_body_with_oauth(
-            "c9",
-            "ns9",
-            /* jwt_mode = */ true,
-            /* userinfo = */ None,
+            "c9", "ns9", /* jwt_mode = */ true, /* userinfo = */ None,
         ),
     );
     let (ctx, state) = pool_ctx("ns9", rules);
