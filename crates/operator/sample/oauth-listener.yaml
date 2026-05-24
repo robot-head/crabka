@@ -32,6 +32,30 @@ spec:
           # whose value is a PEM bundle of CA certs.
           - secretName: keycloak-ca
             certificate: tls.crt
+    # Alternative: introspection mode (slice 50c).
+    # The broker calls Keycloak's introspection endpoint for each
+    # token instead of validating a signed JWT against JWKS. Set
+    # `accessTokenIsJwt: false` and provide an introspectionEndpointUri,
+    # clientId, and clientSecret Secret reference.
+    #
+    # - name: oauth-introspection
+    #   port: 9098
+    #   type: internal
+    #   tls: true
+    #   authentication:
+    #     type: oauth
+    #     accessTokenIsJwt: false
+    #     validIssuerUri: https://keycloak.example/realms/kafka
+    #     introspectionEndpointUri: https://keycloak.example/realms/kafka/protocol/openid-connect/token/introspect
+    #     userInfoEndpointUri: https://keycloak.example/realms/kafka/protocol/openid-connect/userinfo
+    #     validAudience: kafka-broker
+    #     userNameClaim: preferred_username
+    #     customClaimCheck:
+    #       scope: kafka.write
+    #     clientId: kafka-broker
+    #     clientSecret:
+    #       secretName: keycloak-introspection-secret
+    #       key: secret
   interBrokerListenerName: PLAIN
 ---
 apiVersion: crabka.io/v1alpha1
