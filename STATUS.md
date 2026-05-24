@@ -2256,3 +2256,83 @@ Kafka client for ApiVersions.
 - Reference doc:
   [`docs/superpowers/specs/2026-05-23-crabka-operator-oauth-tls-trust-50b-design.md`].
 
+## Slice 49d — Broker: OAUTHBEARER opaque-token introspection (2026-05-24)
+
+- Adds RFC 7662 OAuth 2.0 token introspection alongside the JWKS / signed-JWT
+  path landed in slice 49b: the broker now accepts opaque bearer tokens
+  issued by IdPs that don't return JWTs (or where the deployment prefers
+  the IdP to remain authoritative on revocation). Unblocks the operator
+  slice 50c, which will surface `introspectionEndpointUri` on the listener
+  CRD. Same slice also renames the slice-49c `[oauthbearer].jwks_tls_trust`
+  TOML key to `idp_tls_trust` — one trust bundle now covers all outbound
+  HTTPS to the IdP (JWKS, introspection, userinfo).
+- **`crates/security`:** new `IntrospectionValidator` (the RFC 7662
+  validator) backed by a new `IntrospectionClient` trait (`introspect` +
+  optional `userinfo`) so the security crate stays I/O-free; new
+  `IntrospectionError` enum (`Transport` / `Status` / `Parse`) and an
+  `AuthError::IntrospectionTransport` variant on the existing auth error.
+  `OAuthBearerValidator::validate` becomes `async fn` so the introspection
+  variant can `.await` the HTTP call; the Unsecured and Signed variants
+  wrap the synchronous validation in `async {}` (zero runtime cost). The
+  enum is built so adding 49f device-grant or hybrid validators is a
+  variant-and-arm change rather than a trait redesign.
+- **`crates/broker/src/oauth_introspection.rs`:** new
+  `ReqwestIntrospectionClient` implementing `IntrospectionClient`. POSTs
+  `token=<opaque>` to the introspection endpoint with HTTP Basic Auth
+  (`client_id` + `client_secret`); when a userinfo endpoint is configured,
+  follows up with a bearer-auth GET and merges the profile claims under
+  the introspection response (introspection wins for `active`, `exp`,
+  `iat`, `nbf`, `scope`, `client_id`, `sub`). Reuses slice 49c's
+  `build_client_config_from_pem` for outbound TLS to the IdP via the
+  shared trust bundle.
+- **`crates/broker/src/file_config.rs`:** five new `[oauthbearer]`
+  TOML keys — `introspection_endpoint_uri`, `userinfo_endpoint_uri`,
+  `introspection_client_id`, `introspection_client_secret_path`,
+  `introspection_http_timeout_ms`. Three-way validator selection at
+  config-load: neither endpoint URI → unsecured-JWS (dev only); only
+  `jwks_endpoint_uri` → signed (49b); only `introspection_endpoint_uri`
+  → introspection (49d); **both → reject** with a precise error. The
+  client secret is read from disk at config-load (path-based, not
+  literal, so secret bytes don't sit in the TOML; trailing `\r` / `\n`
+  stripped — the operator slice 50c will mount a `Secret` and write the
+  mount path here).
+- **Rename:** `[oauthbearer].jwks_tls_trust` →
+  `[oauthbearer].idp_tls_trust` (and matching
+  `BrokerConfig.oauthbearer_jwks_tls_trust` →
+  `oauthbearer_idp_tls_trust`). The PEM bundle now covers JWKS,
+  introspection, and userinfo — one trust root rather than per-endpoint
+  knobs. Greenfield rename per `CLAUDE.md` (no `serde(default)`
+  back-compat alias, no V2 fallthroughs). Coordinated flips: broker
+  `file_config` + `config` + `broker.rs` + operator
+  `render_broker_toml` + ~5 test assertions + 4 stale doc comments.
+- **SASL handler async ripple:** `handle_authenticate_oauthbearer` and
+  `validate_bearer` become `async fn`; the `try_handle_sasl_frame` /
+  `handle_sasl_frame` sync wrappers in `dispatch.rs` convert to async
+  and `.instrument(req_span.clone()).await` (matching the file's other
+  handlers). The four existing OAUTHBEARER tests flip to
+  `#[tokio::test]`.
+- Tests: +14 security unit (introspection validator paths —
+  active/inactive/transport-fail/non-success-status/parse-fail/userinfo
+  merge/scope-required/principal-claim/expired-token — plus
+  enum-dispatch async coverage); +9 broker integration (HTTPS-served
+  introspection fixture via `tokio-rustls` + `rcgen` self-signed cert,
+  end-to-end through the SASL handler); +6 broker `file_config` unit
+  (three-way selection, mutually-exclusive rejection, missing-fields,
+  with/without userinfo); +2 broker tests renamed for the
+  `idp_tls_trust` flip; +2 operator tests renamed likewise. Workspace
+  `cargo fmt --check` + `cargo clippy --workspace --all-targets -D
+  warnings` + `cargo test --workspace` all clean (T6 also paid down 12
+  pre-existing clippy nits in T2 / T3 files surfaced when the workspace
+  gate ran).
+- Out of scope (deferred): slice 50c (operator CRD field +
+  `Secret` mount for the client secret + reconciler wiring for
+  `introspectionEndpointUri` / `userinfoEndpointUri`); hybrid validator
+  (try JWT first, fall back to introspection); broker-side token
+  caching keyed by `(token, exp)` to amortize IdP round-trips;
+  `client_secret_post` / `private_key_jwt` introspection-endpoint auth
+  styles (HTTP Basic only); outbound mTLS to the IdP (one-way TLS via
+  the shared trust bundle only); per-listener `[oauthbearer]` config
+  (still rejected at config-load — future slice 49h).
+- Reference doc:
+  [`docs/superpowers/specs/2026-05-24-crabka-broker-oauth-introspection-49d-design.md`].
+

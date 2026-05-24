@@ -49,8 +49,11 @@ pub struct FileConfig {
 
 /// TOML shape of `[oauthbearer]`. Maps to
 /// [`crabka_security::OAuthBearerValidator`]. Setting `jwks_endpoint_uri`
-/// selects the signed-JWT validator (slice 49b); otherwise the unsecured-JWS
-/// validator (slice 49, development only) is used.
+/// selects the signed-JWT validator (slice 49b); setting
+/// `introspection_endpoint_uri` selects the RFC 7662 introspection
+/// validator (slice 49d); the two endpoint URIs are mutually
+/// exclusive. With neither set, the unsecured-JWS validator
+/// (slice 49, development only) is used.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 pub struct FileOAuthBearerConfig {
     /// Claim whose value becomes the principal name. Default `sub`.
@@ -86,15 +89,49 @@ pub struct FileOAuthBearerConfig {
     #[serde(default)]
     pub jwks_refresh_interval_ms: Option<u64>,
 
-    /// Slice 49c: PEM file containing the CA certificate(s) used to
-    /// verify the JWKS endpoint's TLS certificate when
-    /// `jwks_endpoint_uri` is an `https://` URL. When set, these are
-    /// the *only* trust roots used for the JWKS fetch (replaces the
-    /// default webpki-roots — Strimzi-shaped). When unset, the
-    /// refresher uses reqwest's default rustls webpki-roots. Inert if
-    /// `jwks_endpoint_uri` is unset.
+    /// Slice 49c (renamed in 49d): PEM file containing the CA
+    /// certificate(s) used to verify the `IdP`'s TLS certificate on ALL
+    /// outbound HTTPS to the `IdP` — JWKS endpoint (49b), introspection
+    /// endpoint (49d), and userinfo endpoint (49d). When set, these are
+    /// the *only* trust roots used for the outbound HTTPS (replaces the
+    /// default webpki-roots — Strimzi-shaped). When unset, the broker
+    /// uses reqwest's default rustls webpki-roots.
     #[serde(default)]
-    pub jwks_tls_trust: Option<std::path::PathBuf>,
+    pub idp_tls_trust: Option<std::path::PathBuf>,
+
+    /// Slice 49d: RFC 7662 introspection endpoint URL. When set,
+    /// selects the introspection validator (mutually exclusive with
+    /// `jwks_endpoint_uri`).
+    #[serde(default)]
+    pub introspection_endpoint_uri: Option<String>,
+
+    /// Slice 49d: optional OIDC userinfo endpoint URL. When set, the
+    /// introspection validator calls `GET userinfo` after a successful
+    /// introspection and merges the profile claims over the
+    /// introspection claims (introspection wins for `active`, `exp`,
+    /// `iat`, `nbf`, `scope`, `client_id`, `sub`).
+    #[serde(default)]
+    pub userinfo_endpoint_uri: Option<String>,
+
+    /// Slice 49d: `client_id` the broker uses to authenticate (HTTP Basic
+    /// Auth) against the introspection endpoint. Required when
+    /// `introspection_endpoint_uri` is set.
+    #[serde(default)]
+    pub introspection_client_id: Option<String>,
+
+    /// Slice 49d: filesystem path to a file containing the client
+    /// secret the broker uses to authenticate against the introspection
+    /// endpoint. Required when `introspection_endpoint_uri` is set.
+    /// File-based (not literal) so secret material doesn't sit in the
+    /// TOML; operator mounts a `Secret` and writes the mount path here.
+    /// The file's trailing newline (if any) is stripped at config-load.
+    #[serde(default)]
+    pub introspection_client_secret_path: Option<std::path::PathBuf>,
+
+    /// Slice 49d: timeout for the introspection (and userinfo) HTTP
+    /// requests, in milliseconds. Default 10 000 (10 s).
+    #[serde(default)]
+    pub introspection_http_timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -164,6 +201,9 @@ impl FileConfig {
     /// must NOT pass `--listen-addr` or `--advertised-listener`. The
     /// binary entrypoint enforces this (see `bin/broker.rs`); this
     /// method just merges what it's given.
+    // Linear config-load pipeline; each arm is its own validator construction —
+    // extraction obscures the dispatch shape.
+    #[allow(clippy::too_many_lines)]
     pub fn apply_to(self, cfg: &mut crate::config::BrokerConfig) {
         let defaults = crate::config::BrokerConfig::default();
         if let Some(id) = self.broker_id
@@ -216,51 +256,124 @@ impl FileConfig {
             });
         }
         if let Some(oauth) = self.oauthbearer {
-            // Slice 49c: thread the JWKS trust-store path unconditionally.
-            // Inert when `jwks_endpoint_uri` is unset (refresher isn't spawned),
-            // and harmlessly carried even when the unsecured validator is selected.
-            cfg.oauthbearer_jwks_tls_trust = oauth.jwks_tls_trust;
-            if let Some(jwks_uri) = oauth.jwks_endpoint_uri {
-                // Signed-JWT validation (slice 49b). The empty key handle is
-                // populated by the refresher `Broker::start` spawns.
-                let mut v = crabka_security::SignedJwsValidator::new(
-                    crabka_security::JwksHandle::default(),
-                );
-                if let Some(name) = oauth.principal_claim_name {
-                    v.principal_claim_name = name;
+            // Slice 49c (renamed in 49d): thread the IdP trust-store path
+            // unconditionally. Inert when no HTTPS-bound endpoint is set,
+            // and harmlessly carried for the unsecured validator.
+            cfg.oauthbearer_idp_tls_trust
+                .clone_from(&oauth.idp_tls_trust);
+
+            match (
+                oauth.jwks_endpoint_uri.as_ref(),
+                oauth.introspection_endpoint_uri.as_ref(),
+            ) {
+                (Some(_), Some(_)) => {
+                    panic!(
+                        "[oauthbearer]: jwks_endpoint_uri and introspection_endpoint_uri are mutually exclusive; configure exactly one"
+                    );
                 }
-                if let Some(name) = oauth.scope_claim_name {
-                    v.scope_claim_name = name;
+                (Some(_), None) => {
+                    // Signed-JWT validation (slice 49b). The empty key handle is
+                    // populated by the refresher `Broker::start` spawns.
+                    let jwks_uri = oauth.jwks_endpoint_uri.clone().unwrap();
+                    let mut v = crabka_security::SignedJwsValidator::new(
+                        crabka_security::JwksHandle::default(),
+                    );
+                    if let Some(name) = oauth.principal_claim_name {
+                        v.principal_claim_name = name;
+                    }
+                    if let Some(name) = oauth.scope_claim_name {
+                        v.scope_claim_name = name;
+                    }
+                    if oauth.required_scope.is_some() {
+                        v.required_scope = oauth.required_scope;
+                    }
+                    if let Some(skew) = oauth.allowable_clock_skew_ms {
+                        v.allowable_clock_skew_ms = skew;
+                    }
+                    v.valid_issuer = oauth.valid_issuer_uri;
+                    v.expected_audience = oauth.expected_audience;
+                    cfg.oauthbearer_validator = crabka_security::OAuthBearerValidator::Signed(v);
+                    cfg.oauthbearer_jwks_endpoint = Some(jwks_uri);
+                    if let Some(ms) = oauth.jwks_refresh_interval_ms {
+                        cfg.oauthbearer_jwks_refresh_interval =
+                            std::time::Duration::from_millis(ms);
+                    }
                 }
-                if oauth.required_scope.is_some() {
-                    v.required_scope = oauth.required_scope;
+                (None, Some(introspect_uri)) => {
+                    // Slice 49d: RFC 7662 introspection validator. The
+                    // client secret is read from disk at config-load.
+                    let client_id =
+                        oauth.introspection_client_id.clone().unwrap_or_else(|| {
+                            panic!(
+                                "[oauthbearer]: introspection_endpoint_uri set but introspection_client_id is missing"
+                            )
+                        });
+                    let secret_path = oauth
+                        .introspection_client_secret_path
+                        .clone()
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "[oauthbearer]: introspection_endpoint_uri set but introspection_client_secret_path is missing"
+                            )
+                        });
+                    let client_secret = std::fs::read_to_string(&secret_path)
+                        .unwrap_or_else(|e| {
+                            panic!(
+                                "[oauthbearer]: failed to read introspection_client_secret_path {}: {}",
+                                secret_path.display(),
+                                e
+                            )
+                        })
+                        .trim_end_matches(['\n', '\r'])
+                        .to_string();
+                    let timeout = std::time::Duration::from_millis(
+                        oauth.introspection_http_timeout_ms.unwrap_or(10_000),
+                    );
+                    let client = crate::oauth_introspection::ReqwestIntrospectionClient::new(
+                        introspect_uri.clone(),
+                        oauth.userinfo_endpoint_uri.clone(),
+                        client_id,
+                        client_secret,
+                        oauth.idp_tls_trust.as_deref(),
+                        timeout,
+                    )
+                    .unwrap_or_else(|e| {
+                        panic!("[oauthbearer]: failed to build introspection client: {e}")
+                    });
+                    let v = crabka_security::IntrospectionValidator {
+                        client,
+                        principal_claim_name: oauth
+                            .principal_claim_name
+                            .clone()
+                            .unwrap_or_else(|| "sub".into()),
+                        scope_claim_name: oauth
+                            .scope_claim_name
+                            .clone()
+                            .unwrap_or_else(|| "scope".into()),
+                        required_scope: oauth.required_scope.clone(),
+                        call_userinfo: oauth.userinfo_endpoint_uri.is_some(),
+                        allowable_clock_skew_ms: oauth.allowable_clock_skew_ms.unwrap_or(30_000),
+                    };
+                    cfg.oauthbearer_validator =
+                        crabka_security::OAuthBearerValidator::Introspection(v);
                 }
-                if let Some(skew) = oauth.allowable_clock_skew_ms {
-                    v.allowable_clock_skew_ms = skew;
+                (None, None) => {
+                    // Unsecured-JWS validation (slice 49, development only).
+                    let mut v = crabka_security::UnsecuredJwsValidator::default();
+                    if let Some(name) = oauth.principal_claim_name {
+                        v.principal_claim_name = name;
+                    }
+                    if let Some(name) = oauth.scope_claim_name {
+                        v.scope_claim_name = name;
+                    }
+                    if oauth.required_scope.is_some() {
+                        v.required_scope = oauth.required_scope;
+                    }
+                    if let Some(skew) = oauth.allowable_clock_skew_ms {
+                        v.allowable_clock_skew_ms = skew;
+                    }
+                    cfg.oauthbearer_validator = crabka_security::OAuthBearerValidator::Unsecured(v);
                 }
-                v.valid_issuer = oauth.valid_issuer_uri;
-                v.expected_audience = oauth.expected_audience;
-                cfg.oauthbearer_validator = crabka_security::OAuthBearerValidator::Signed(v);
-                cfg.oauthbearer_jwks_endpoint = Some(jwks_uri);
-                if let Some(ms) = oauth.jwks_refresh_interval_ms {
-                    cfg.oauthbearer_jwks_refresh_interval = std::time::Duration::from_millis(ms);
-                }
-            } else {
-                // Unsecured-JWS validation (slice 49, development only).
-                let mut v = crabka_security::UnsecuredJwsValidator::default();
-                if let Some(name) = oauth.principal_claim_name {
-                    v.principal_claim_name = name;
-                }
-                if let Some(name) = oauth.scope_claim_name {
-                    v.scope_claim_name = name;
-                }
-                if oauth.required_scope.is_some() {
-                    v.required_scope = oauth.required_scope;
-                }
-                if let Some(skew) = oauth.allowable_clock_skew_ms {
-                    v.allowable_clock_skew_ms = skew;
-                }
-                cfg.oauthbearer_validator = crabka_security::OAuthBearerValidator::Unsecured(v);
             }
         }
     }
@@ -627,9 +740,7 @@ jwks_refresh_interval_ms = 60000
                 assert_eq!(v.expected_audience.as_deref(), Some("kafka"));
                 assert_eq!(v.principal_claim_name, "client_id");
             }
-            crabka_security::OAuthBearerValidator::Unsecured(_) => {
-                panic!("jwks_endpoint_uri must select the Signed validator")
-            }
+            other => panic!("jwks_endpoint_uri must select the Signed validator; got {other:?}"),
         }
     }
 
@@ -648,30 +759,30 @@ allowable_clock_skew_ms = 5000
             crabka_security::OAuthBearerValidator::Unsecured(v) => {
                 assert_eq!(v.allowable_clock_skew_ms, 5000);
             }
-            crabka_security::OAuthBearerValidator::Signed(_) => {
-                panic!("no jwks_endpoint_uri must keep the unsecured validator")
+            other => {
+                panic!("no jwks_endpoint_uri must keep the unsecured validator; got {other:?}")
             }
         }
     }
 
     #[test]
-    fn apply_to_oauthbearer_threads_jwks_tls_trust_to_broker_config() {
+    fn apply_to_oauthbearer_threads_idp_tls_trust_to_broker_config() {
         let toml = r#"
 [oauthbearer]
 jwks_endpoint_uri = "https://idp.example/certs"
-jwks_tls_trust = "/etc/crabka/oauth/idp-ca.pem"
+idp_tls_trust = "/etc/crabka/oauth/idp-ca.pem"
 "#;
         let file: FileConfig = toml::from_str(toml).unwrap();
         let mut cfg = crate::config::BrokerConfig::default();
         file.apply_to(&mut cfg);
         assert_eq!(
-            cfg.oauthbearer_jwks_tls_trust.as_deref(),
+            cfg.oauthbearer_idp_tls_trust.as_deref(),
             Some(std::path::Path::new("/etc/crabka/oauth/idp-ca.pem")),
         );
     }
 
     #[test]
-    fn apply_to_oauthbearer_without_jwks_tls_trust_leaves_field_none() {
+    fn apply_to_oauthbearer_without_idp_tls_trust_leaves_field_none() {
         let toml = r#"
 [oauthbearer]
 jwks_endpoint_uri = "https://idp.example/certs"
@@ -679,7 +790,130 @@ jwks_endpoint_uri = "https://idp.example/certs"
         let file: FileConfig = toml::from_str(toml).unwrap();
         let mut cfg = crate::config::BrokerConfig::default();
         file.apply_to(&mut cfg);
-        assert!(cfg.oauthbearer_jwks_tls_trust.is_none());
+        assert!(cfg.oauthbearer_idp_tls_trust.is_none());
+    }
+
+    #[test]
+    fn apply_to_oauthbearer_selects_introspection_validator_when_endpoint_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret_path = dir.path().join("client-secret");
+        std::fs::write(&secret_path, "the-secret").unwrap();
+        let toml = format!(
+            r#"
+[oauthbearer]
+introspection_endpoint_uri = "https://idp.example/introspect"
+introspection_client_id = "kafka-broker"
+introspection_client_secret_path = '{}'
+"#,
+            secret_path.display()
+        );
+        let file: FileConfig = toml::from_str(&toml).unwrap();
+        let mut cfg = crate::config::BrokerConfig::default();
+        file.apply_to(&mut cfg);
+        assert!(matches!(
+            cfg.oauthbearer_validator,
+            crabka_security::OAuthBearerValidator::Introspection(_)
+        ));
+    }
+
+    #[test]
+    #[should_panic(expected = "mutually exclusive")]
+    fn apply_to_oauthbearer_rejects_both_jwks_and_introspection_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret_path = dir.path().join("client-secret");
+        std::fs::write(&secret_path, "x").unwrap();
+        let toml = format!(
+            r#"
+[oauthbearer]
+jwks_endpoint_uri = "https://idp.example/jwks"
+introspection_endpoint_uri = "https://idp.example/introspect"
+introspection_client_id = "id"
+introspection_client_secret_path = '{}'
+"#,
+            secret_path.display()
+        );
+        let file: FileConfig = toml::from_str(&toml).unwrap();
+        let mut cfg = crate::config::BrokerConfig::default();
+        file.apply_to(&mut cfg);
+    }
+
+    #[test]
+    #[should_panic(expected = "introspection_client_id")]
+    fn apply_to_oauthbearer_introspection_requires_client_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret_path = dir.path().join("client-secret");
+        std::fs::write(&secret_path, "x").unwrap();
+        let toml = format!(
+            r#"
+[oauthbearer]
+introspection_endpoint_uri = "https://idp.example/introspect"
+introspection_client_secret_path = '{}'
+"#,
+            secret_path.display()
+        );
+        let file: FileConfig = toml::from_str(&toml).unwrap();
+        let mut cfg = crate::config::BrokerConfig::default();
+        file.apply_to(&mut cfg);
+    }
+
+    #[test]
+    #[should_panic(expected = "introspection_client_secret_path")]
+    fn apply_to_oauthbearer_introspection_requires_client_secret_path() {
+        let toml = r#"
+[oauthbearer]
+introspection_endpoint_uri = "https://idp.example/introspect"
+introspection_client_id = "kafka-broker"
+"#;
+        let file: FileConfig = toml::from_str(toml).unwrap();
+        let mut cfg = crate::config::BrokerConfig::default();
+        file.apply_to(&mut cfg);
+    }
+
+    #[test]
+    fn apply_to_oauthbearer_introspection_with_userinfo_sets_call_userinfo_true() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret_path = dir.path().join("client-secret");
+        std::fs::write(&secret_path, "x").unwrap();
+        let toml = format!(
+            r#"
+[oauthbearer]
+introspection_endpoint_uri = "https://idp.example/introspect"
+userinfo_endpoint_uri = "https://idp.example/userinfo"
+introspection_client_id = "id"
+introspection_client_secret_path = '{}'
+"#,
+            secret_path.display()
+        );
+        let file: FileConfig = toml::from_str(&toml).unwrap();
+        let mut cfg = crate::config::BrokerConfig::default();
+        file.apply_to(&mut cfg);
+        match cfg.oauthbearer_validator {
+            crabka_security::OAuthBearerValidator::Introspection(v) => assert!(v.call_userinfo),
+            other => panic!("expected Introspection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn apply_to_oauthbearer_introspection_without_userinfo_sets_call_userinfo_false() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret_path = dir.path().join("client-secret");
+        std::fs::write(&secret_path, "x").unwrap();
+        let toml = format!(
+            r#"
+[oauthbearer]
+introspection_endpoint_uri = "https://idp.example/introspect"
+introspection_client_id = "id"
+introspection_client_secret_path = '{}'
+"#,
+            secret_path.display()
+        );
+        let file: FileConfig = toml::from_str(&toml).unwrap();
+        let mut cfg = crate::config::BrokerConfig::default();
+        file.apply_to(&mut cfg);
+        match cfg.oauthbearer_validator {
+            crabka_security::OAuthBearerValidator::Introspection(v) => assert!(!v.call_userinfo),
+            other => panic!("expected Introspection, got {other:?}"),
+        }
     }
 
     #[test]

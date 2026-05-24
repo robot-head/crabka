@@ -301,7 +301,7 @@ pub fn handle_authenticate_scram(
 /// Round 2 (failure only): the JVM client replies to the error JSON with a
 /// single `\x01`. We return `SASL_AUTHENTICATION_FAILED` (58); the dispatcher
 /// closes the connection.
-pub fn handle_authenticate_oauthbearer(
+pub async fn handle_authenticate_oauthbearer(
     req: &SaslAuthenticateRequest,
     auth: &mut ConnectionAuth,
     validator: &crabka_security::OAuthBearerValidator,
@@ -313,7 +313,7 @@ pub fn handle_authenticate_oauthbearer(
             mechanism,
         } => {
             let mech = *mechanism;
-            match validate_bearer(&req.auth_bytes, validator, now_ms) {
+            match validate_bearer(&req.auth_bytes, validator, now_ms).await {
                 Ok(principal) => {
                     *auth = ConnectionAuth::Authenticated { principal };
                     SaslAuthenticateResponse {
@@ -354,7 +354,7 @@ pub fn handle_authenticate_oauthbearer(
 
 /// Parse + validate an OAUTHBEARER client initial response. The authzid, when
 /// present, must equal the token principal (RFC 7628 / Kafka behaviour).
-fn validate_bearer(
+async fn validate_bearer(
     auth_bytes: &[u8],
     validator: &crabka_security::OAuthBearerValidator,
     now_ms: i64,
@@ -363,6 +363,7 @@ fn validate_bearer(
         .map_err(|_| "malformed OAUTHBEARER client response")?;
     let principal = validator
         .validate(&parsed.token, now_ms)
+        .await
         .map_err(|_| "token validation failed")?;
     if let Some(authzid) = parsed.authzid
         && authzid != principal.name
@@ -486,8 +487,8 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn oauthbearer_valid_token_authenticates() {
+    #[tokio::test]
+    async fn oauthbearer_valid_token_authenticates() {
         let validator = crabka_security::OAuthBearerValidator::default();
         let now_ms = 1_000_000_000_000;
         let token = unsecured_token("svc-account", 1_000_000_900); // exp seconds → future of now
@@ -500,7 +501,8 @@ mod tests {
             &mut auth,
             &validator,
             now_ms,
-        );
+        )
+        .await;
         assert_eq!(resp.error_code, 0);
         assert!(resp.auth_bytes.is_empty());
         let p = auth.principal().expect("authenticated");
@@ -508,8 +510,8 @@ mod tests {
         assert_eq!(p.auth_method, crabka_security::AuthMethod::SaslOAuthBearer);
     }
 
-    #[test]
-    fn oauthbearer_invalid_token_returns_error_json_then_fails_on_dummy() {
+    #[tokio::test]
+    async fn oauthbearer_invalid_token_returns_error_json_then_fails_on_dummy() {
         let validator = crabka_security::OAuthBearerValidator::Unsecured(
             crabka_security::UnsecuredJwsValidator {
                 allowable_clock_skew_ms: 0,
@@ -529,7 +531,8 @@ mod tests {
             &mut auth,
             &validator,
             now_ms,
-        );
+        )
+        .await;
         assert_eq!(resp.error_code, 0);
         assert_eq!(&resp.auth_bytes[..], br#"{"status":"invalid_token"}"#);
         assert!(matches!(
@@ -544,13 +547,13 @@ mod tests {
             auth_bytes: bytes::Bytes::from_static(&[1u8]),
             ..Default::default()
         };
-        let resp2 = handle_authenticate_oauthbearer(&dummy, &mut auth, &validator, now_ms);
+        let resp2 = handle_authenticate_oauthbearer(&dummy, &mut auth, &validator, now_ms).await;
         assert_eq!(resp2.error_code, SASL_AUTHENTICATION_FAILED);
         assert!(!auth.is_authenticated());
     }
 
-    #[test]
-    fn oauthbearer_malformed_response_returns_error_json() {
+    #[tokio::test]
+    async fn oauthbearer_malformed_response_returns_error_json() {
         let validator = crabka_security::OAuthBearerValidator::default();
         let mut auth = ConnectionAuth::Negotiating {
             mechanism: SaslMechanism::OAuthBearer,
@@ -560,13 +563,14 @@ mod tests {
             auth_bytes: bytes::Bytes::from_static(b"not-a-valid-gs2-message"),
             ..Default::default()
         };
-        let resp = handle_authenticate_oauthbearer(&req, &mut auth, &validator, 1_000_000_000_000);
+        let resp =
+            handle_authenticate_oauthbearer(&req, &mut auth, &validator, 1_000_000_000_000).await;
         assert_eq!(resp.error_code, 0);
         assert_eq!(&resp.auth_bytes[..], br#"{"status":"invalid_token"}"#);
     }
 
-    #[test]
-    fn oauthbearer_authzid_mismatch_fails() {
+    #[tokio::test]
+    async fn oauthbearer_authzid_mismatch_fails() {
         let validator = crabka_security::OAuthBearerValidator::default();
         let now_ms = 1_000_000_000_000;
         let token = unsecured_token("alice", 1_000_000_900);
@@ -581,7 +585,7 @@ mod tests {
             ),
             ..Default::default()
         };
-        let resp = handle_authenticate_oauthbearer(&req, &mut auth, &validator, now_ms);
+        let resp = handle_authenticate_oauthbearer(&req, &mut auth, &validator, now_ms).await;
         assert_eq!(resp.error_code, 0);
         assert_eq!(&resp.auth_bytes[..], br#"{"status":"invalid_token"}"#);
         assert!(!auth.is_authenticated());

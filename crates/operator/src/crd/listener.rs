@@ -182,7 +182,7 @@ pub struct ListenerAuthenticationOAuth {
     /// CR) whose listed PEM keys are concatenated into a managed
     /// Secret `{kafka.name}-oauth-jwks-trust` and mounted into broker
     /// pods. The broker reads the concatenated bundle at the path
-    /// written into `[oauthbearer].jwks_tls_trust` (slice 49c). Empty
+    /// written into `[oauthbearer].idp_tls_trust` (slice 49c). Empty
     /// list (default) → no managed Secret, no mount, no TOML line.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tls_trusted_certificates: Vec<TlsTrustedCertificate>,

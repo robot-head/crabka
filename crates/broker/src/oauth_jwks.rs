@@ -52,10 +52,14 @@ pub(crate) struct JwksRefresher {
     pub interval: Duration,
     /// Cancels the task on broker shutdown.
     pub shutdown: CancellationToken,
-    /// Slice 49c: optional PEM path; when `Some`, the rustls
-    /// `ClientConfig` used by reqwest is built from this file and
-    /// replaces the default webpki-roots trust store. When `None`,
-    /// reqwest's webpki-roots default applies (slice 49b behavior).
+    /// Slice 49c (semantic broadened in 49d): optional PEM path; when
+    /// `Some`, the rustls `ClientConfig` used by reqwest is built from
+    /// this file and replaces the default webpki-roots trust store. When
+    /// `None`, reqwest's webpki-roots default applies (slice 49b
+    /// behavior). The bundle is shared with the introspection client when
+    /// configured — operator slice 50b's `tlsTrustedCertificates` flows
+    /// through `idp_tls_trust` and is used for JWKS, introspection, and
+    /// userinfo HTTPS.
     pub tls_trust: Option<PathBuf>,
 }
 

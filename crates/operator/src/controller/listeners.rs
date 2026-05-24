@@ -2232,7 +2232,7 @@ pub fn render_broker_toml(
         if !oauth_cfg.tls_trusted_certificates.is_empty() {
             let _ = writeln!(
                 out,
-                r#"jwks_tls_trust = "/etc/crabka/oauth-jwks-trust/ca.crt""#,
+                r#"idp_tls_trust = "/etc/crabka/oauth-jwks-trust/ca.crt""#,
             );
         }
         out.push('\n');
@@ -2559,7 +2559,7 @@ mod toml_rendering_tests {
     }
 
     #[test]
-    fn render_broker_toml_emits_jwks_tls_trust_when_trust_certs_present() {
+    fn render_broker_toml_emits_idp_tls_trust_when_trust_certs_present() {
         use std::collections::BTreeMap;
         let mut cfg = oauth_full_cfg();
         cfg.tls_trusted_certificates = vec![crate::crd::TlsTrustedCertificate {
@@ -2577,13 +2577,13 @@ mod toml_rendering_tests {
             None,
         );
         assert!(
-            toml.contains("jwks_tls_trust = \"/etc/crabka/oauth-jwks-trust/ca.crt\""),
+            toml.contains("idp_tls_trust = \"/etc/crabka/oauth-jwks-trust/ca.crt\""),
             "TOML: {toml}"
         );
     }
 
     #[test]
-    fn render_broker_toml_omits_jwks_tls_trust_when_no_trust_certs() {
+    fn render_broker_toml_omits_idp_tls_trust_when_no_trust_certs() {
         use std::collections::BTreeMap;
         let cfg = crate::crd::ListenerAuthenticationOAuth {
             valid_issuer_uri: "https://issuer.example.com/".into(),
@@ -2606,7 +2606,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
         );
-        assert!(!toml.contains("jwks_tls_trust"), "TOML: {toml}");
+        assert!(!toml.contains("idp_tls_trust"), "TOML: {toml}");
     }
 
     #[test]
