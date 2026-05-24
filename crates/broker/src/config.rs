@@ -175,6 +175,14 @@ pub struct BrokerConfig {
     /// userinfo. None → reqwest's default webpki-roots.
     pub oauthbearer_idp_tls_trust: Option<std::path::PathBuf>,
 
+    /// Slice 50d: optional ceiling on OAUTHBEARER session lifetime, in
+    /// seconds. When set, the broker reports
+    /// `session_lifetime_ms = min(token_exp_ms - now_ms, cap * 1000)`
+    /// and the dispatch-loop re-auth timer fires at the clamped time.
+    /// When unset, sessions last until the token's natural `exp`
+    /// (slice 49e default).
+    pub oauthbearer_max_session_lifetime_seconds: Option<u32>,
+
     /// KIP-460 auto preferred-replica election. When true, a background
     /// task on the controller leader periodically scans partitions and
     /// re-elects the preferred replica as leader when it's alive + in
@@ -264,6 +272,7 @@ impl BrokerConfig {
             oauthbearer_jwks_endpoint: None,
             oauthbearer_jwks_refresh_interval: std::time::Duration::from_mins(5),
             oauthbearer_idp_tls_trust: None,
+            oauthbearer_max_session_lifetime_seconds: None,
             auto_leader_rebalance_enable: false, // tests opt in explicitly
             leader_imbalance_check_interval_secs: 300,
             leader_imbalance_per_broker_percentage: 10,
@@ -430,6 +439,7 @@ impl Default for BrokerConfig {
             oauthbearer_jwks_endpoint: None,
             oauthbearer_jwks_refresh_interval: std::time::Duration::from_mins(5),
             oauthbearer_idp_tls_trust: None,
+            oauthbearer_max_session_lifetime_seconds: None,
             auto_leader_rebalance_enable: true,
             leader_imbalance_check_interval_secs: 300,
             leader_imbalance_per_broker_percentage: 10,

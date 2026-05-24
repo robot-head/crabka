@@ -132,6 +132,13 @@ pub struct FileOAuthBearerConfig {
     /// requests, in milliseconds. Default 10 000 (10 s).
     #[serde(default)]
     pub introspection_http_timeout_ms: Option<u64>,
+
+    /// Slice 50d: optional ceiling on OAUTHBEARER session lifetime, in
+    /// seconds. When set, the broker clamps `session_lifetime_ms` to
+    /// `min(token_exp_ms - now_ms, cap * 1000)`. When unset, sessions
+    /// last until the token's natural `exp`.
+    #[serde(default)]
+    pub max_session_lifetime_seconds: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -261,6 +268,9 @@ impl FileConfig {
             // and harmlessly carried for the unsecured validator.
             cfg.oauthbearer_idp_tls_trust
                 .clone_from(&oauth.idp_tls_trust);
+            // Slice 50d: optional session-lifetime cap. Carried unconditionally;
+            // the auth handler interprets None as "no cap" (= 49e behavior).
+            cfg.oauthbearer_max_session_lifetime_seconds = oauth.max_session_lifetime_seconds;
 
             match (
                 oauth.jwks_endpoint_uri.as_ref(),
