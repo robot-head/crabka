@@ -2357,16 +2357,21 @@ Kafka client for ApiVersions.
   struct `{ secretName, key }`), and
   `introspectionHttpTimeoutSeconds: Option<u32>`. Hand-rolled schema
   extended; CRD regenerated.
-- **`crates/operator/src/controller/common.rs`:** four new
-  `ReconcileError` variants surfaced as `Ready=False`:
-  `InvalidListenerOauthAccessTokenIsJwt` (cross-mode validation —
-  required field missing or forbidden field set for the active mode),
-  `MissingOauthIntrospectionSecret` (`clientSecret.secretName` not
-  found in the namespace), `MissingOauthIntrospectionKey` (Secret
-  exists but doesn't contain `clientSecret.key`), and
-  `EmptyOauthIntrospectionValue` (key present but value empty). No
-  central `reason()` method — reasons are matched inline at each
-  call-site in `reconcile_kafka`.
+- **`crates/operator/src/controller/common.rs`:** three new
+  `ReconcileError` variants surfaced as `Ready=False` from the
+  introspection-Secret validator: `MissingOauthIntrospectionSecret`
+  (`clientSecret.secretName` not found in the namespace),
+  `MissingOauthIntrospectionKey` (Secret exists but doesn't contain
+  `clientSecret.key`), and `EmptyOauthIntrospectionValue` (key present
+  but value empty). Plus one `ValidationError` variant in
+  `controller/listeners.rs` —
+  `ListenerOauthAccessTokenIsJwtInvalid` — surfaced as
+  `ListenersValid=False` when the cross-mode rules reject a listener
+  config (required field missing or forbidden field set for the active
+  mode). The validator runs before the reconciler, so cross-mode
+  rejections never reach the Secret-validation path. No central
+  `reason()` method — reasons are matched inline at each call-site in
+  `reconcile_kafka`.
 - **`crates/operator/src/controller/listeners.rs`:** `render_broker_toml`
   forks on `access_token_is_jwt`. `true` → emit
   `jwks_endpoint_uri = ...` (the slice 49b path). `false` → emit
