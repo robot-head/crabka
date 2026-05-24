@@ -81,6 +81,7 @@ fn oauth_cfg_minimal() -> ListenerAuthenticationOAuth {
         client_id: None,
         client_secret: None,
         introspection_http_timeout_seconds: None,
+        max_seconds_without_reauthentication: None,
     }
 }
 
@@ -108,6 +109,7 @@ fn oauth_cfg_full() -> ListenerAuthenticationOAuth {
         client_id: None,
         client_secret: None,
         introspection_http_timeout_seconds: None,
+        max_seconds_without_reauthentication: None,
     }
 }
 
@@ -862,6 +864,7 @@ async fn two_oauth_listeners_with_divergent_access_token_is_jwt_rejected_with_co
             key: "secret".into(),
         }),
         introspection_http_timeout_seconds: None,
+        max_seconds_without_reauthentication: None,
     };
 
     let kafka = kafka_cr_with_listeners(
@@ -876,4 +879,70 @@ async fn two_oauth_listeners_with_divergent_access_token_is_jwt_rejected_with_co
 
     let observed = state.take_observed();
     assert_listeners_invalid_with_reason(&observed, "c15", "ConflictingOAuthConfig");
+}
+
+// ── test 16: maxSecondsWithoutReauthentication threads through to broker TOML ─
+
+/// Slice 50d. An OAuth listener with
+/// `maxSecondsWithoutReauthentication: 300` reconciles successfully and
+/// the rendered broker-config ConfigMap embeds the broker-global
+/// `max_session_lifetime_seconds = 300` line under `[oauthbearer]`. The
+/// broker uses this as a ceiling on `session_lifetime_ms` returned to
+/// SASL clients; the dispatch-loop KIP-368 timer fires at the clamped
+/// time.
+#[tokio::test]
+async fn oauth_listener_with_max_seconds_without_reauthentication_renders_broker_toml_key() {
+    let items = vec![shared::fake_pool_list_item("brokers", "ns16", "c16", 1, 1)];
+    let (ctx, state) = build_ctx("ns16", happy_path_rules("c16", "ns16", &items));
+
+    let mut cfg = oauth_cfg_minimal();
+    cfg.max_seconds_without_reauthentication = Some(300);
+    let kafka = kafka_cr_with_listeners(
+        "c16",
+        "ns16",
+        vec![oauth_listener("oauth", 9095, true, cfg)],
+    );
+    reconcile(Arc::new(kafka), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    let toml = extract_broker0_toml(&observed, "c16");
+
+    assert!(toml.contains("[oauthbearer]"), "TOML: {toml}");
+    assert!(
+        toml.contains("max_session_lifetime_seconds = 300"),
+        "expected rendered broker TOML to include max_session_lifetime_seconds = 300;\nTOML: {toml}"
+    );
+}
+
+// ── test 17: divergent maxSecondsWithoutReauthentication → ConflictingOAuthConfig
+
+/// Slice 50d. Two OAuth listeners that each pass per-listener validation
+/// but disagree on `maxSecondsWithoutReauthentication` (one capped at
+/// 300s, the other at 600s) cannot share the broker-global
+/// `[oauthbearer]` block — the cap is part of the canonical fingerprint
+/// (T3's divergence-walk perturbation list). The reconciler must reject
+/// with `ListenersValid=False` reason `ConflictingOAuthConfig`.
+#[tokio::test]
+async fn two_oauth_listeners_with_divergent_max_seconds_without_reauthentication_rejected_with_conflicting_oauth_config()
+ {
+    let items = vec![shared::fake_pool_list_item("brokers", "ns17", "c17", 1, 1)];
+    let rules = rules_for_invalid_listeners("c17", "ns17", &items);
+    let (ctx, state) = build_ctx("ns17", rules);
+
+    let mut cfg_a = oauth_cfg_minimal();
+    cfg_a.max_seconds_without_reauthentication = Some(300);
+    let mut cfg_b = oauth_cfg_minimal();
+    cfg_b.max_seconds_without_reauthentication = Some(600);
+    let kafka = kafka_cr_with_listeners(
+        "c17",
+        "ns17",
+        vec![
+            oauth_listener("oauth-a", 9095, true, cfg_a),
+            oauth_listener("oauth-b", 9096, true, cfg_b),
+        ],
+    );
+    reconcile(Arc::new(kafka), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    assert_listeners_invalid_with_reason(&observed, "c17", "ConflictingOAuthConfig");
 }

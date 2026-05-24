@@ -167,6 +167,10 @@ spec:
                         maxClockSkewSeconds:
                           minimum: 0.0
                           type: integer
+                        maxSecondsWithoutReauthentication:
+                          format: int32
+                          minimum: 1.0
+                          type: integer
                         tlsTrustedCertificates:
                           items:
                             properties:

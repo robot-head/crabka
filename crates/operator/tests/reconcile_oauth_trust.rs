@@ -59,6 +59,7 @@ fn kafka_with_oauth_trust(name: &str, ns: &str, trust_certs: Vec<(&str, &str)>) 
         client_id: None,
         client_secret: None,
         introspection_http_timeout_seconds: None,
+        max_seconds_without_reauthentication: None,
     };
     let listener = Listener {
         name: "oauth".into(),

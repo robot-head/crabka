@@ -26,6 +26,11 @@ spec:
         userNameClaim: preferred_username
         customClaimCheck:
           scope: kafka.write
+        # Optional: cap SASL session lifetime tighter than the token's natural `exp`
+        # (KIP-368 re-auth ceiling, slice 50d). Forces clients to refresh more
+        # often than their token would otherwise require. Unset = session lasts
+        # until token exp.
+        # maxSecondsWithoutReauthentication: 300
         tlsTrustedCertificates:
           # Replace `keycloak-ca` with a Secret in the same namespace as
           # the Kafka CR; `certificate` is the key within that Secret
