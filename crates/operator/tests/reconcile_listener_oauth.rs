@@ -74,6 +74,7 @@ fn oauth_cfg_minimal() -> ListenerAuthenticationOAuth {
         jwks_refresh_seconds: None,
         max_clock_skew_seconds: None,
         enable_oauth_bearer: true,
+        tls_trusted_certificates: vec![],
     }
 }
 
@@ -93,6 +94,7 @@ fn oauth_cfg_full() -> ListenerAuthenticationOAuth {
         jwks_refresh_seconds: Some(300),
         max_clock_skew_seconds: Some(30),
         enable_oauth_bearer: true,
+        tls_trusted_certificates: vec![],
     }
 }
 

@@ -1276,6 +1276,7 @@ mod tests {
             jwks_refresh_seconds: None,
             max_clock_skew_seconds: None,
             enable_oauth_bearer: true,
+            tls_trusted_certificates: vec![],
         }
     }
 
@@ -1428,6 +1429,7 @@ mod tests {
             jwks_refresh_seconds: Some(300),
             max_clock_skew_seconds: Some(30),
             enable_oauth_bearer: true,
+            tls_trusted_certificates: vec![],
         };
         let perturbations: Vec<(&str, crate::crd::ListenerAuthenticationOAuth)> = vec![
             (
@@ -2427,6 +2429,7 @@ mod toml_rendering_tests {
             jwks_refresh_seconds: Some(300),
             max_clock_skew_seconds: Some(30),
             enable_oauth_bearer: true,
+            tls_trusted_certificates: vec![],
         }
     }
 
@@ -2516,6 +2519,7 @@ mod toml_rendering_tests {
             jwks_refresh_seconds: None,
             max_clock_skew_seconds: None,
             enable_oauth_bearer: true,
+            tls_trusted_certificates: vec![],
         };
         let listeners = vec![oauth_listener_for_render("oauth", 9095, true, cfg)];
         let toml = render_broker_toml(
@@ -2688,6 +2692,7 @@ mod toml_rendering_tests {
             jwks_refresh_seconds: Some(300),
             max_clock_skew_seconds: Some(60),
             enable_oauth_bearer: true,
+            tls_trusted_certificates: vec![],
         };
         let listeners = vec![oauth_listener_for_render("oauth", 9095, true, cfg)];
         let toml = render_broker_toml(
@@ -3292,6 +3297,7 @@ mod weak_auth_tests {
                     jwks_refresh_seconds: None,
                     max_clock_skew_seconds: None,
                     enable_oauth_bearer: true,
+                    tls_trusted_certificates: vec![],
                 },
             )),
             configuration: None,
