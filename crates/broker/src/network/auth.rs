@@ -498,6 +498,10 @@ pub fn handle_authenticate_scram(
     }
 }
 
+/// Slice 51 (KIP-48): fixed SCRAM iteration count for delegation-token
+/// credentials. Specified by KIP-48 §"Token Format".
+const TOKEN_SCRAM_ITERS: u32 = 4096;
+
 /// Slice 51 (KIP-48): build a synthetic SCRAM-SHA-256 credential for
 /// authenticating callers against a delegation token. KIP-48 fixes:
 ///   - mechanism = SCRAM-SHA-256 (the only token-SCRAM mechanism)
@@ -506,7 +510,7 @@ pub fn handle_authenticate_scram(
 ///     present as the SCRAM password)
 ///   - salt = UTF-8 bytes of `token_id` (the token UUID is already
 ///     uniformly random — no extra randomness needed)
-///   - iters = 4096 (KIP-48 fixed)
+///   - iters = [`TOKEN_SCRAM_ITERS`]
 ///
 /// The result is identical to what `hash_scram_password_with_salt`
 /// would produce for those inputs — computed on every auth attempt
@@ -520,7 +524,7 @@ fn synthesize_token_scram_credential(
     crabka_security::scram::hash_scram_password_with_salt(
         password.as_bytes(),
         SaslMechanism::ScramSha256,
-        4096,
+        TOKEN_SCRAM_ITERS,
         salt,
     )
 }

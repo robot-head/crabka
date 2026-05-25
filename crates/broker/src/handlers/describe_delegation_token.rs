@@ -100,12 +100,13 @@ pub(crate) async fn handle<S: std::hash::BuildHasher>(
         // the calling principal. Apply the same owner filter if one
         // was supplied so the filter remains authoritative.
         //
-        // Skip the extension entirely in the pre-ACL "no super-users,
-        // no ACLs" world — `authorize()` returns Allow unconditionally
-        // there (its compatibility shim) and would otherwise surface
-        // every token to every caller.
+        // Skip the extension when no super-users and no ACLs are
+        // configured — `authorize()` returns Allow unconditionally
+        // in that world (a pre-existing compatibility shim) and would
+        // otherwise surface every token to every caller. Delete this
+        // gate together with the shim itself when slice 53/54 lands.
         let acl_extra: Vec<&crabka_metadata::DelegationToken> =
-            if super_users.is_empty() && image.all_acls().next().is_none() {
+            if !acl_authorization_is_active(&image, super_users) {
                 Vec::new()
             } else {
                 image
@@ -149,6 +150,20 @@ pub(crate) async fn handle<S: std::hash::BuildHasher>(
         throttle_time_ms: 0,
         ..Default::default()
     }
+}
+
+/// True when the broker has anything that would make
+/// [`crate::authorizer::authorize`] perform real ACL checks. The
+/// existing authorizer treats "no super-users AND no ACL entries" as
+/// "allow everything" (a pre-slice-13 compat shim); in that mode the
+/// delegation-token Describe-via-ACL extension must be suppressed or
+/// every caller would see every token. Delete this helper together
+/// with that shim once slice 53/54 lands a real authorizer.
+fn acl_authorization_is_active<S: std::hash::BuildHasher>(
+    image: &crabka_metadata::MetadataImage,
+    super_users: &std::collections::HashSet<String, S>,
+) -> bool {
+    !super_users.is_empty() || image.all_acls().next().is_some()
 }
 
 fn describe_token(t: crabka_metadata::DelegationToken) -> DescribedDelegationToken {
