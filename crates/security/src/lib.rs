@@ -29,7 +29,7 @@ pub use oauthbearer::{
     invalid_token_json, parse_client_initial_response,
 };
 pub use plain::verify_plain;
-pub use principal::{AuthError, AuthMethod, Principal};
+pub use principal::{AuthError, AuthMethod, KafkaPrincipal, Principal};
 pub use reload::DynamicServerConfig;
 pub use scram::{
     ScramClientExchange, ScramCredential, ScramServerExchange, StepResult, derive_keys_from_salted,

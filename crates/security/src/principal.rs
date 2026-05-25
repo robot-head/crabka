@@ -53,6 +53,37 @@ pub struct Principal {
     pub groups: Vec<String>,
 }
 
+/// Slice 51 (KIP-48): Kafka wire-level principal — the `(principalType,
+/// name)` pair carried in delegation-token records, ACL entries, and
+/// `KafkaPrincipal`-shaped fields across the Kafka protocol. Distinct
+/// from [`Principal`] which models the *runtime session* identity
+/// (auth method + OAuth groups). Format-stable: `Display`/`FromStr`
+/// round-trip the canonical `Type:Name` form.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct KafkaPrincipal {
+    pub principal_type: String,
+    pub name: String,
+}
+
+impl std::fmt::Display for KafkaPrincipal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.principal_type, self.name)
+    }
+}
+
+impl std::str::FromStr for KafkaPrincipal {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        let (pt, n) = s
+            .split_once(':')
+            .ok_or_else(|| format!("invalid principal {s:?}"))?;
+        Ok(Self {
+            principal_type: pt.into(),
+            name: n.into(),
+        })
+    }
+}
+
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum AuthError {
     #[error("unknown user")]

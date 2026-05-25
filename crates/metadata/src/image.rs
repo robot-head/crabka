@@ -299,6 +299,11 @@ impl MetadataImage {
                     }
                 }
             }
+            // Slice 51 (KIP-48): T1 stub — exhaustiveness only. T2
+            // replaces these arms with the real apply paths
+            // (insert/replace into `delegation_tokens`, tombstone
+            // removal).
+            MetadataRecord::V1DelegationToken(_) | MetadataRecord::V1DeleteDelegationToken(_) => {}
         }
     }
 
@@ -352,7 +357,11 @@ impl MetadataImage {
             | MetadataRecord::V1AccessControlEntry(_)
             | MetadataRecord::V1DeleteAccessControlEntry(_)
             | MetadataRecord::V1BrokerConfig(_)
-            | MetadataRecord::V1ClientQuota(_) => Ok(()),
+            | MetadataRecord::V1ClientQuota(_)
+            // Slice 51 (KIP-48): T1 stub — exhaustiveness only. T2
+            // replaces these arms with the real validate paths.
+            | MetadataRecord::V1DelegationToken(_)
+            | MetadataRecord::V1DeleteDelegationToken(_) => Ok(()),
         }
     }
 }
