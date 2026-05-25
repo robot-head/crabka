@@ -55,6 +55,7 @@ pub(crate) mod alter_user_scram_credentials;
 pub(crate) mod api_versions;
 pub(crate) mod broker_heartbeat;
 pub(crate) mod create_acls;
+pub(crate) mod create_delegation_token;
 pub(crate) mod create_partitions;
 pub(crate) mod create_topics;
 pub(crate) mod delete_acls;
@@ -65,10 +66,12 @@ pub(crate) mod describe_acls;
 pub(crate) mod describe_client_quotas;
 pub(crate) mod describe_cluster;
 pub(crate) mod describe_configs;
+pub(crate) mod describe_delegation_token;
 pub(crate) mod describe_groups;
 pub(crate) mod describe_log_dirs;
 pub(crate) mod describe_user_scram_credentials;
 pub(crate) mod elect_leaders;
+pub(crate) mod expire_delegation_token;
 pub(crate) mod fetch;
 pub(crate) mod find_coordinator;
 pub(crate) mod heartbeat;
@@ -84,6 +87,7 @@ pub(crate) mod offset_commit;
 pub(crate) mod offset_fetch;
 pub(crate) mod offset_for_leader_epoch;
 pub(crate) mod produce;
+pub(crate) mod renew_delegation_token;
 pub(crate) mod sync_group;
 
 /// Build the dispatch table. Phase E registers concrete handlers; for
