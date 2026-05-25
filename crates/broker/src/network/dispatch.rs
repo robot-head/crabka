@@ -2126,6 +2126,7 @@ async fn handle_create_delegation_token_frame(
         broker.config.delegation_token_max_lifetime_ms,
         broker.config.delegation_token_default_renew_period_ms,
         &broker.controller,
+        &broker.config.super_users,
     )
     .await;
     let mut buf = BytesMut::with_capacity(resp.encoded_len(api_version));

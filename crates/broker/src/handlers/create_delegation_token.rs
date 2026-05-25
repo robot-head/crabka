@@ -1,13 +1,25 @@
 //! Slice 51 (KIP-48): `CreateDelegationToken` (`api_key` 38).
 //!
-//! Per spec §1.2: caller must be SASL-authenticated and NOT itself
-//! authenticated via a delegation token (KIP-48 forbids
-//! token-creating-token chains). The owner is always the calling
-//! principal (we don't support the privileged "act-as" form via wire
-//! `owner_principal_type/name`). The HMAC-SHA-256 of `(secret_key,
-//! token_id)` becomes the token's "password equivalent" — clients
-//! re-authenticate with the hex `token_id` as the SCRAM username and
-//! the HMAC bytes as the password.
+//! Per spec §1.2 (slice 51) + §1.2 (slice 51b act-as): caller must be
+//! SASL-authenticated and NOT itself authenticated via a delegation
+//! token (KIP-48 forbids token-creating-token chains). Owner resolution:
+//!
+//! - If both `owner_principal_type` and `owner_principal_name` are
+//!   empty/absent: owner = caller (self-mint).
+//! - If both are present + non-empty: caller must be a configured
+//!   super-user (per `broker.config.super_users`), and the owner becomes
+//!   the wire-specified `KafkaPrincipal`. Slice 51b restricts the type
+//!   to `"User"` (mTLS-DN owners deferred). Non-super-users get
+//!   `DELEGATION_TOKEN_AUTHORIZATION_FAILED` (65).
+//! - If exactly one is set: `INVALID_REQUEST` (42) — partial act-as is
+//!   never valid.
+//!
+//! The HMAC-SHA-256 of `(secret_key, token_id)` becomes the token's
+//! "password equivalent" — clients re-authenticate with the hex
+//! `token_id` as the SCRAM username and the HMAC bytes as the password.
+
+use std::collections::HashSet;
+use std::hash::BuildHasher;
 
 use crabka_metadata::{DelegationTokenRecord, MetadataRecord};
 use crabka_protocol::owned::create_delegation_token_request::CreateDelegationTokenRequest;
@@ -18,13 +30,22 @@ use crabka_security::{KafkaPrincipal, SecretBytes};
 use crate::network::auth::ConnectionAuth;
 use crate::time_util::now_ms;
 
-pub(crate) async fn handle(
+/// Wire convention: the JVM admin client serialises "not act-as" by
+/// either omitting the compact-nullable string (`None`) or sending an
+/// empty string. Treat both as "absent" so the act-as branch only fires
+/// when the caller actually supplied a principal.
+fn is_empty_owner_field(f: Option<&str>) -> bool {
+    f.is_none_or(str::is_empty)
+}
+
+pub(crate) async fn handle<S: BuildHasher>(
     req: &CreateDelegationTokenRequest,
     auth: &ConnectionAuth,
     secret_key: Option<&SecretBytes>,
     max_lifetime_ms: i64,
     default_renew_period_ms: i64,
     controller: &ControllerHandle,
+    super_users: &HashSet<String, S>,
 ) -> CreateDelegationTokenResponse {
     let Some(secret_key) = secret_key else {
         return err_response(crate::codes::DELEGATION_TOKEN_AUTH_DISABLED);
@@ -44,11 +65,42 @@ pub(crate) async fn handle(
         return err_response(crate::codes::DELEGATION_TOKEN_REQUEST_NOT_ALLOWED);
     }
 
-    // KIP-48: the owner is the requester. The wire
-    // `owner_principal_type/name` fields exist for the privileged
-    // "act-as" path, which Crabka doesn't support (any non-self request
-    // would be a no-op since we'd reject it).
-    let owner = principal.to_kafka();
+    // KIP-48 owner resolution. The wire `owner_principal_type/name`
+    // pair drives the privileged "act-as" path: super-users may mint
+    // tokens owned by *other* principals so an operator can pre-mint
+    // tokens for KafkaUsers without first holding their credentials.
+    let owner_type_empty = is_empty_owner_field(req.owner_principal_type.as_deref());
+    let owner_name_empty = is_empty_owner_field(req.owner_principal_name.as_deref());
+    let (owner, act_as) = match (owner_type_empty, owner_name_empty) {
+        (true, true) => (principal.to_kafka(), false),
+        (false, false) => {
+            // Both set → act-as. Only super-users may use this path; the
+            // permission is broker-wide because no token exists yet to
+            // hang an ACL on.
+            if !super_users.contains(&principal.name) {
+                return err_response(crate::codes::DELEGATION_TOKEN_AUTHORIZATION_FAILED);
+            }
+            let owner_type = req.owner_principal_type.as_deref().unwrap_or_default();
+            let owner_name = req.owner_principal_name.as_deref().unwrap_or_default();
+            // Slice 51b restricts the act-as owner type to `User`
+            // (mTLS-DN owners deferred). Match Kafka's behavior of
+            // returning INVALID_REQUEST for unsupported types here
+            // rather than authorization-failed — the request is
+            // syntactically wrong, not unauthorized.
+            if owner_type != "User" {
+                return err_response(crate::codes::INVALID_REQUEST);
+            }
+            (
+                KafkaPrincipal {
+                    principal_type: owner_type.to_string(),
+                    name: owner_name.to_string(),
+                },
+                true,
+            )
+        }
+        // Exactly one set → caller is confused; either both or neither.
+        _ => return err_response(crate::codes::INVALID_REQUEST),
+    };
 
     // Validate + clamp `max_lifetime_ms`. `-1` defers to the broker
     // ceiling; a positive value is clamped to the ceiling; anything
@@ -101,12 +153,23 @@ pub(crate) async fn handle(
         return err_response(crate::codes::INVALID_REQUEST);
     }
 
+    // Per spec §1.3: populate the `token_requester_*` fields with the
+    // caller's principal only when act-as fired. Self-mint leaves them
+    // as empty strings, matching what the JVM admin CLI prints (it
+    // shows owner-only on self-owned tokens).
+    let (requester_type, requester_name) = if act_as {
+        let caller = principal.to_kafka();
+        (caller.principal_type, caller.name)
+    } else {
+        (String::new(), String::new())
+    };
+
     CreateDelegationTokenResponse {
         error_code: 0,
         principal_type: owner.principal_type.clone(),
         principal_name: owner.name.clone(),
-        token_requester_principal_type: owner.principal_type,
-        token_requester_principal_name: owner.name,
+        token_requester_principal_type: requester_type,
+        token_requester_principal_name: requester_name,
         issue_timestamp_ms: now,
         expiry_timestamp_ms: initial_expiry_ms,
         max_timestamp_ms,
@@ -128,10 +191,22 @@ fn err_response(code: i16) -> CreateDelegationTokenResponse {
 mod tests {
     use super::*;
     use crabka_security::{AuthMethod, Principal, SaslMechanism};
+    use std::collections::HashSet;
     use std::net::SocketAddr;
     use std::sync::Arc;
     use std::time::Duration;
     use tempfile::TempDir;
+
+    /// Helper: produce an empty super-users set for tests that don't
+    /// exercise the act-as path.
+    fn empty_super_users() -> HashSet<String> {
+        HashSet::new()
+    }
+
+    /// Helper: produce a super-users set containing the given names.
+    fn super_users_with(names: &[&str]) -> HashSet<String> {
+        names.iter().map(|s| (*s).to_string()).collect()
+    }
 
     /// Spin up a single-voter `Controller` for tests, wait for leader.
     async fn test_controller(log_dir: std::path::PathBuf) -> Arc<ControllerHandle> {
@@ -186,7 +261,16 @@ mod tests {
         let controller = test_controller(dir.path().into()).await;
         let req = CreateDelegationTokenRequest::default();
         let auth = authed("alice");
-        let resp = handle(&req, &auth, None, 1_000, RENEW_24H_MS, &controller).await;
+        let resp = handle(
+            &req,
+            &auth,
+            None,
+            1_000,
+            RENEW_24H_MS,
+            &controller,
+            &empty_super_users(),
+        )
+        .await;
         assert_eq!(
             resp.error_code,
             crate::codes::DELEGATION_TOKEN_AUTH_DISABLED
@@ -213,6 +297,7 @@ mod tests {
             60_000,
             RENEW_24H_MS,
             &controller,
+            &empty_super_users(),
         )
         .await;
         assert_eq!(resp.error_code, 0);
@@ -254,6 +339,7 @@ mod tests {
             60_000,
             RENEW_24H_MS,
             &controller,
+            &empty_super_users(),
         )
         .await;
         assert_eq!(
@@ -281,6 +367,7 @@ mod tests {
             ceiling_ms,
             RENEW_24H_MS,
             &controller,
+            &empty_super_users(),
         )
         .await;
         assert_eq!(resp.error_code, 0);
@@ -319,6 +406,7 @@ mod tests {
             one_hour,
             RENEW_24H_MS,
             &controller,
+            &empty_super_users(),
         )
         .await;
         assert_eq!(resp.error_code, 0);
@@ -353,6 +441,7 @@ mod tests {
             seven_days,
             RENEW_24H_MS,
             &controller,
+            &empty_super_users(),
         )
         .await;
         assert_eq!(resp.error_code, 0);
@@ -391,6 +480,164 @@ mod tests {
             60_000,
             RENEW_24H_MS,
             &controller,
+            &empty_super_users(),
+        )
+        .await;
+        assert_eq!(resp.error_code, crate::codes::INVALID_REQUEST);
+        controller.cancel().await;
+    }
+
+    /// Spec §1.2/§1.4: a super-user caller may mint a token owned by a
+    /// different principal by setting `owner_principal_type/name`. The
+    /// response advertises the owner *and* records the original caller
+    /// in the `token_requester_*` fields so the JVM admin CLI can show
+    /// "minted by X on behalf of Y".
+    #[tokio::test]
+    async fn act_as_super_user_sets_specified_owner() {
+        let dir = TempDir::new().unwrap();
+        let controller = test_controller(dir.path().into()).await;
+        let secret = SecretBytes::new(b"k".to_vec());
+        let req = CreateDelegationTokenRequest {
+            max_lifetime_ms: -1,
+            owner_principal_type: Some("User".to_string()),
+            owner_principal_name: Some("alice".to_string()),
+            ..Default::default()
+        };
+        let resp = handle(
+            &req,
+            &authed("admin"),
+            Some(&secret),
+            60_000,
+            RENEW_24H_MS,
+            &controller,
+            &super_users_with(&["admin"]),
+        )
+        .await;
+        assert_eq!(resp.error_code, 0);
+        // Owner = the act-as target.
+        assert_eq!(resp.principal_type, "User");
+        assert_eq!(resp.principal_name, "alice");
+        // Requester = the caller (admin) — this is the slice-51b
+        // addition; slice-51 left these as empty strings.
+        assert_eq!(resp.token_requester_principal_type, "User");
+        assert_eq!(resp.token_requester_principal_name, "admin");
+        // Persisted owner matches the response owner.
+        let img = controller.current_image();
+        let stored = img
+            .delegation_token_by_id(&resp.token_id)
+            .expect("token in image");
+        assert_eq!(stored.owner.principal_type, "User");
+        assert_eq!(stored.owner.name, "alice");
+        controller.cancel().await;
+    }
+
+    /// Spec §1.2: act-as is privileged. A caller who is NOT in
+    /// `super_users` attempting act-as gets `DELEGATION_TOKEN_AUTHORIZATION_FAILED`
+    /// (65) — the broker explicitly distinguishes "you are not allowed
+    /// to do this" (65) from "your request is malformed" (42).
+    #[tokio::test]
+    async fn act_as_non_super_user_rejected_with_authorization_failed() {
+        let dir = TempDir::new().unwrap();
+        let controller = test_controller(dir.path().into()).await;
+        let secret = SecretBytes::new(b"k".to_vec());
+        let req = CreateDelegationTokenRequest {
+            max_lifetime_ms: -1,
+            owner_principal_type: Some("User".to_string()),
+            owner_principal_name: Some("alice".to_string()),
+            ..Default::default()
+        };
+        let resp = handle(
+            &req,
+            // `bob` is not in the super-users set.
+            &authed("bob"),
+            Some(&secret),
+            60_000,
+            RENEW_24H_MS,
+            &controller,
+            &super_users_with(&["admin"]),
+        )
+        .await;
+        assert_eq!(
+            resp.error_code,
+            crate::codes::DELEGATION_TOKEN_AUTHORIZATION_FAILED
+        );
+        controller.cancel().await;
+    }
+
+    /// Spec §1.2: act-as requires BOTH `owner_principal_type` and
+    /// `owner_principal_name` to be set; partial state is never valid
+    /// even for a super-user. Returns `INVALID_REQUEST` (42) — a
+    /// malformed request, not an authorization failure.
+    #[tokio::test]
+    async fn act_as_with_only_one_field_set_returns_invalid_request() {
+        let dir = TempDir::new().unwrap();
+        let controller = test_controller(dir.path().into()).await;
+        let secret = SecretBytes::new(b"k".to_vec());
+
+        // Type set but name empty.
+        let req_name_missing = CreateDelegationTokenRequest {
+            max_lifetime_ms: -1,
+            owner_principal_type: Some("User".to_string()),
+            owner_principal_name: None,
+            ..Default::default()
+        };
+        let resp = handle(
+            &req_name_missing,
+            &authed("admin"),
+            Some(&secret),
+            60_000,
+            RENEW_24H_MS,
+            &controller,
+            &super_users_with(&["admin"]),
+        )
+        .await;
+        assert_eq!(resp.error_code, crate::codes::INVALID_REQUEST);
+
+        // Name set but type empty.
+        let req_type_missing = CreateDelegationTokenRequest {
+            max_lifetime_ms: -1,
+            owner_principal_type: None,
+            owner_principal_name: Some("alice".to_string()),
+            ..Default::default()
+        };
+        let resp = handle(
+            &req_type_missing,
+            &authed("admin"),
+            Some(&secret),
+            60_000,
+            RENEW_24H_MS,
+            &controller,
+            &super_users_with(&["admin"]),
+        )
+        .await;
+        assert_eq!(resp.error_code, crate::codes::INVALID_REQUEST);
+
+        controller.cancel().await;
+    }
+
+    /// Spec §1.2: slice 51b only supports `User` as the act-as owner
+    /// type (mTLS-DN owners deferred). Any other type from a super-user
+    /// is `INVALID_REQUEST` (42) — the request is syntactically wrong,
+    /// not unauthorized.
+    #[tokio::test]
+    async fn act_as_with_non_user_principal_type_returns_invalid_request() {
+        let dir = TempDir::new().unwrap();
+        let controller = test_controller(dir.path().into()).await;
+        let secret = SecretBytes::new(b"k".to_vec());
+        let req = CreateDelegationTokenRequest {
+            max_lifetime_ms: -1,
+            owner_principal_type: Some("Group".to_string()),
+            owner_principal_name: Some("eng".to_string()),
+            ..Default::default()
+        };
+        let resp = handle(
+            &req,
+            &authed("admin"),
+            Some(&secret),
+            60_000,
+            RENEW_24H_MS,
+            &controller,
+            &super_users_with(&["admin"]),
         )
         .await;
         assert_eq!(resp.error_code, crate::codes::INVALID_REQUEST);
