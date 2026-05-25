@@ -552,19 +552,17 @@ pub async fn reconcile(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Action,
     // `tls-external` users have no operator-owned credential to rotate,
     // but ACLs + quotas can drift externally — keep the per-minute
     // requeue to detect that (same cadence as SCRAM, different reason).
+    // Slice 51b: delegation-token users do not reach this match — that
+    // arm returns its renew-driven `Action` earlier (see the
+    // `Authentication::DelegationToken(dt)` arm above).
     #[allow(clippy::match_same_arms)]
     let requeue = match &obj.spec.authentication {
         Authentication::ScramSha512(_) => Duration::from_mins(1),
         Authentication::Tls(_) => Duration::from_hours(6),
         Authentication::TlsExternal => Duration::from_mins(1),
-        // Slice 51b: the renew-driven cadence is computed by
-        // `user_delegation_token::compute_requeue` based on the token's
-        // live `expiry_timestamp_ms`. Until O3's admin-client adapter
-        // lands, the operator can't read the live token from the broker
-        // here — keep the per-minute fallback so ACL/quota drift is
-        // still caught. Once wired, the renew-driven Action returned by
-        // `user_delegation_token::reconcile` supersedes this branch.
-        Authentication::DelegationToken(_) => Duration::from_mins(1),
+        Authentication::DelegationToken(_) => unreachable!(
+            "delegation-token arm returns early after user_delegation_token::reconcile",
+        ),
     };
     Ok(Action::requeue(requeue))
 }

@@ -27,13 +27,6 @@
 //! trait pair. Unit tests substitute trivial in-memory mocks; production
 //! wires `kube::Api<Secret>` / `kube::Api<KafkaUser>` adapters.
 
-// Slice 51b: production dispatch from `controller::user` lands in this
-// module's `reconcile` entry. The module-level `dead_code` allow stays
-// to keep test-only helpers (mocks, recording writers, sub-helpers
-// exercised exclusively from the in-module tests) from tripping lints
-// when individual code paths are exercised only on the happy path.
-#![allow(dead_code)]
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
@@ -157,7 +150,6 @@ pub(crate) trait KafkaUserStatusWriter: Send + Sync {
 }
 
 /// Production `SecretWriter` over `kube::Api<Secret>`.
-#[allow(dead_code)] // wired in by callers (`user.rs` reconcile) below
 pub(crate) struct KubeSecretWriter {
     pub api: Api<Secret>,
 }
@@ -179,7 +171,6 @@ impl SecretWriter for KubeSecretWriter {
 }
 
 /// Production `KafkaUserStatusWriter` over `kube::Api<KafkaUser>`.
-#[allow(dead_code)] // wired in by callers (`user.rs` reconcile) below
 pub(crate) struct KubeKafkaUserStatusWriter {
     pub api: Api<KafkaUser>,
 }
@@ -415,10 +406,17 @@ pub(crate) fn compute_requeue(
     Duration::from_millis(clamped_ms as u64)
 }
 
-/// Compute the `TokenIssued` + `TokenExpiring` conditions.
+/// Compute the `Ready` + `TokenIssued` + `TokenExpiring` conditions.
 ///
 /// - `TokenIssued = True` on the success path with reason `Issued`.
 /// - `TokenIssued = False` on the error path with the spec §2.5 reason.
+/// - `Ready = True` on the success path with reason `TokenReady`. The
+///   reconcile loop only calls this after the Secret has been written,
+///   so `Ready = True` is the spec §2.4 aggregator (`TokenIssued=True
+///   AND Secret exists`).
+/// - `Ready = False` on the error path with the same reason as
+///   `TokenIssued`, so `kubectl describe kafkauser` surfaces the
+///   correlated cause without cross-referencing two conditions.
 /// - `TokenExpiring = True` when `expiry_ts - now < renew_before * 2`,
 ///   else `False`. Reason: `WithinRenewalHorizon` / `Healthy`.
 pub(crate) fn compute_conditions(
@@ -431,8 +429,14 @@ pub(crate) fn compute_conditions(
     let renew_before = auth
         .renew_before_expiry_ms
         .unwrap_or(DEFAULT_RENEW_BEFORE_EXPIRY_MS);
-    let mut out = Vec::with_capacity(2);
+    let mut out = Vec::with_capacity(3);
     if issued_ok {
+        out.push(condition(
+            "Ready",
+            "True",
+            "TokenReady",
+            "delegation token issued and Secret in sync",
+        ));
         out.push(condition(
             "TokenIssued",
             "True",
@@ -441,6 +445,7 @@ pub(crate) fn compute_conditions(
         ));
     } else {
         let (reason, msg) = issued_reason.unwrap_or(("IssueFailed", "issue failed"));
+        out.push(condition("Ready", "False", reason, msg));
         out.push(condition("TokenIssued", "False", reason, msg));
     }
 
@@ -543,7 +548,13 @@ async fn on_admin_error(
         other => ("Transport", format!("{op}: {other}"), TRANSIENT_BACKOFF),
     };
 
-    let conds = vec![condition("TokenIssued", "False", reason, &message)];
+    // Both `Ready` and `TokenIssued` flip to `False` with the same reason —
+    // the aggregator and the underlying cause share a root, so they should
+    // share a story in `kubectl describe`.
+    let conds = vec![
+        condition("Ready", "False", reason, &message),
+        condition("TokenIssued", "False", reason, &message),
+    ];
     let body = build_failure_status_patch(&conds);
     users.patch_status(name, body).await?;
     Ok(ReconcileOutcome {
@@ -554,7 +565,6 @@ async fn on_admin_error(
 /// `expire_owned_tokens` is called from the user.rs finalizer arm on
 /// deletion. Best-effort: errors are logged by the caller and never
 /// block finalizer removal.
-#[allow(dead_code)] // wired in by callers (`user.rs` finalizer) below
 pub(crate) async fn expire_owned_tokens(
     name: &str,
     admin: &dyn DelegationTokenAdmin,
@@ -956,6 +966,15 @@ mod tests {
                 .any(|c| c["type"] == "TokenIssued" && c["status"] == "True"),
             "missing TokenIssued=True: {conds:?}",
         );
+        // Ready=True is the spec §2.4 aggregator (TokenIssued AND Secret
+        // exists) — required for the kind e2e's
+        // `kubectl wait --for=condition=Ready` to ever return.
+        assert!(
+            conds.iter().any(|c| c["type"] == "Ready"
+                && c["status"] == "True"
+                && c["reason"] == "TokenReady"),
+            "missing Ready=True/TokenReady: {conds:?}",
+        );
     }
 
     #[tokio::test]
@@ -1028,6 +1047,14 @@ mod tests {
             .expect("TokenIssued present");
         assert_eq!(issued["status"], "False");
         assert_eq!(issued["reason"], "OperatorNotSuperUser");
+        // Ready mirrors TokenIssued on the failure path — same reason
+        // string so `kubectl describe` shows the correlated cause.
+        let ready = conds
+            .iter()
+            .find(|c| c["type"] == "Ready")
+            .expect("Ready present");
+        assert_eq!(ready["status"], "False");
+        assert_eq!(ready["reason"], "OperatorNotSuperUser");
     }
 
     #[tokio::test]
@@ -1048,6 +1075,9 @@ mod tests {
         let issued = conds.iter().find(|c| c["type"] == "TokenIssued").unwrap();
         assert_eq!(issued["status"], "False");
         assert_eq!(issued["reason"], "InvalidSpec");
+        let ready = conds.iter().find(|c| c["type"] == "Ready").unwrap();
+        assert_eq!(ready["status"], "False");
+        assert_eq!(ready["reason"], "InvalidSpec");
     }
 
     // --- helpers ----------------------------------------------------------
@@ -1093,6 +1123,10 @@ mod tests {
         let expiring = conds.iter().find(|c| c.type_ == "TokenExpiring").unwrap();
         assert_eq!(expiring.status, "True");
         assert_eq!(expiring.reason, "WithinRenewalHorizon");
+        // Success path also emits Ready=True/TokenReady (spec §2.4).
+        let ready = conds.iter().find(|c| c.type_ == "Ready").unwrap();
+        assert_eq!(ready.status, "True");
+        assert_eq!(ready.reason, "TokenReady");
     }
 
     #[test]
@@ -1103,5 +1137,8 @@ mod tests {
         let expiring = conds.iter().find(|c| c.type_ == "TokenExpiring").unwrap();
         assert_eq!(expiring.status, "False");
         assert_eq!(expiring.reason, "Healthy");
+        let ready = conds.iter().find(|c| c.type_ == "Ready").unwrap();
+        assert_eq!(ready.status, "True");
+        assert_eq!(ready.reason, "TokenReady");
     }
 }

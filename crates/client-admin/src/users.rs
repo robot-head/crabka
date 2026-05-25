@@ -5,10 +5,11 @@
 //! `CreateAcls`, `DeleteAcls`, `DescribeAcls`.
 //!
 //! Wire `i8` discriminants are kept private to this module; callers use
-//! the typed Rust enums below. The slice intentionally does **not**
-//! depend on `crabka-metadata` or `crabka-broker` so `crates/client-admin`
-//! stays a leaf — the local enum copies are unit-tested for wire round-
-//! trip.
+//! the typed Rust enums below. `crates/client-admin` depends on
+//! `crabka-metadata` for shared image types (`DelegationToken`,
+//! introduced in slice 51b) but stays free of `crabka-broker` so the
+//! crate remains usable from out-of-process clients — the local enum
+//! copies are unit-tested for wire round-trip.
 
 use bytes::Bytes;
 use crabka_protocol::owned::{
