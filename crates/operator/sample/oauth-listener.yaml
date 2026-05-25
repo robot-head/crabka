@@ -36,6 +36,18 @@ spec:
         # often than their token would otherwise require. Unset = session lasts
         # until token exp.
         # maxSecondsWithoutReauthentication: 300
+        # Slice 49h: fallback principal claim — used when userNameClaim
+        # is absent or empty on the token. Pair with fallbackUserNamePrefix
+        # to namespace service-account principals so ACLs can distinguish
+        # them (Strimzi convention).
+        # fallbackUserNameClaim: client_id
+        # fallbackUserNamePrefix: "service-account-"
+        #
+        # Slice 49h: groups extraction — JsonPath (RFC 9535) against the
+        # token's claim set. Attached to the Kafka principal; no
+        # broker-side authorizer reads this yet (slice 53/54 will).
+        # groupsClaim: "$.realm_access.roles[*]"
+        # groupsClaimDelimiter: ","
         tlsTrustedCertificates:
           # Replace `keycloak-ca` with a Secret in the same namespace as
           # the Kafka CR; `certificate` is the key within that Secret

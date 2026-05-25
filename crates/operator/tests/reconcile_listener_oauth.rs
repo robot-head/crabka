@@ -83,6 +83,10 @@ fn oauth_cfg_minimal() -> ListenerAuthenticationOAuth {
         introspection_http_timeout_seconds: None,
         max_seconds_without_reauthentication: None,
         valid_token_type: None,
+        fallback_user_name_claim: None,
+        fallback_user_name_prefix: None,
+        groups_claim: None,
+        groups_claim_delimiter: None,
     }
 }
 
@@ -109,6 +113,10 @@ fn oauth_cfg_full() -> ListenerAuthenticationOAuth {
         introspection_http_timeout_seconds: None,
         max_seconds_without_reauthentication: None,
         valid_token_type: None,
+        fallback_user_name_claim: None,
+        fallback_user_name_prefix: None,
+        groups_claim: None,
+        groups_claim_delimiter: None,
     }
 }
 
@@ -843,6 +851,10 @@ async fn two_oauth_listeners_with_divergent_access_token_is_jwt_rejected_with_co
         introspection_http_timeout_seconds: None,
         max_seconds_without_reauthentication: None,
         valid_token_type: None,
+        fallback_user_name_claim: None,
+        fallback_user_name_prefix: None,
+        groups_claim: None,
+        groups_claim_delimiter: None,
     };
 
     let kafka = kafka_cr_with_listeners(
@@ -1027,5 +1039,85 @@ async fn oauth_listener_valid_token_type_in_introspection_mode_rejected_with_lis
         &observed,
         "c20",
         "ListenerOauthValidTokenTypeRejectedInIntrospectionMode",
+    );
+}
+
+// ── test 21 (slice 49h): fallbackUserNameClaim + prefix render to broker TOML ─
+
+/// Slice 49h: an OAuth listener with `fallbackUserNameClaim: "client_id"`
+/// and `fallbackUserNamePrefix: "service-account-"` reconciles cleanly
+/// and the rendered broker-config ConfigMap embeds both keys under
+/// `[oauthbearer]`. The broker's principal extractor consults the
+/// fallback claim only when `userNameClaim` (default `sub`) is
+/// absent/empty on the incoming token, then prepends the prefix to the
+/// resolved name. Strimzi convention for Keycloak service-account
+/// tokens whose `sub` is a UUID.
+#[tokio::test]
+async fn oauth_listener_with_fallback_user_name_claim_renders_broker_toml_key() {
+    let items = vec![shared::fake_pool_list_item("brokers", "ns21", "c21", 1, 1)];
+    let (ctx, state) = build_ctx("ns21", happy_path_rules("c21", "ns21", &items));
+
+    let mut cfg = oauth_cfg_minimal();
+    cfg.fallback_user_name_claim = Some("client_id".into());
+    cfg.fallback_user_name_prefix = Some("service-account-".into());
+    let kafka = kafka_cr_with_listeners(
+        "c21",
+        "ns21",
+        vec![oauth_listener("oauth", 9095, true, cfg)],
+    );
+    reconcile(Arc::new(kafka), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    let toml = extract_broker0_toml(&observed, "c21");
+
+    assert!(toml.contains("[oauthbearer]"), "TOML: {toml}");
+    assert!(
+        toml.contains("fallback_user_name_claim = \"client_id\""),
+        "expected fallback_user_name_claim render; got:\n{toml}"
+    );
+    assert!(
+        toml.contains("fallback_user_name_prefix = \"service-account-\""),
+        "expected fallback_user_name_prefix render; got:\n{toml}"
+    );
+}
+
+// ── test 22 (slice 49h): groupsClaim JsonPath + delimiter render to broker TOML
+
+/// Slice 49h: an OAuth listener with `groupsClaim:
+/// "$.realm_access.roles[*]"` (RFC 9535 JsonPath, evaluated by
+/// jsonpath-rust on the broker) and `groupsClaimDelimiter: ","`
+/// reconciles cleanly and the rendered broker-config ConfigMap embeds
+/// both keys under `[oauthbearer]`. The path is emitted as a TOML
+/// multi-line literal string (triple-single-quoted) so the `[*]`
+/// selector and any future predicate single-quotes survive without
+/// escape collisions. The delimiter is a plain TOML basic string. The
+/// resolved groups are attached to the Kafka principal but no
+/// broker-side authorizer reads them yet (slice 53/54 will).
+#[tokio::test]
+async fn oauth_listener_with_groups_claim_renders_broker_toml_key() {
+    let items = vec![shared::fake_pool_list_item("brokers", "ns22", "c22", 1, 1)];
+    let (ctx, state) = build_ctx("ns22", happy_path_rules("c22", "ns22", &items));
+
+    let mut cfg = oauth_cfg_minimal();
+    cfg.groups_claim = Some("$.realm_access.roles[*]".into());
+    cfg.groups_claim_delimiter = Some(",".into());
+    let kafka = kafka_cr_with_listeners(
+        "c22",
+        "ns22",
+        vec![oauth_listener("oauth", 9095, true, cfg)],
+    );
+    reconcile(Arc::new(kafka), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    let toml = extract_broker0_toml(&observed, "c22");
+
+    assert!(toml.contains("[oauthbearer]"), "TOML: {toml}");
+    assert!(
+        toml.contains("groups_claim = '''$.realm_access.roles[*]'''"),
+        "expected groups_claim render; got:\n{toml}"
+    );
+    assert!(
+        toml.contains("groups_claim_delimiter = \",\""),
+        "expected groups_claim_delimiter render; got:\n{toml}"
     );
 }
