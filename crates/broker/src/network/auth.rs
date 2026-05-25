@@ -51,6 +51,18 @@ pub enum ConnectionAuth {
         /// `exp`; the dispatch loop closes the connection when this elapses
         /// (slice 49e).
         expires_at_ms: Option<i64>,
+        /// Slice 51 (KIP-48): whether this connection authenticated via a
+        /// delegation token (SCRAM-SHA-256 with the token's HMAC as the
+        /// password equivalent) rather than a "real" principal credential.
+        /// The delegation-token RPCs check this flag — `CreateDelegationToken`
+        /// rejects token-authed callers with
+        /// `DELEGATION_TOKEN_REQUEST_NOT_ALLOWED` (KIP-48 forbids
+        /// token-creating-token chains), and `DescribeDelegationToken`
+        /// restricts a token-authed caller to their own owned tokens
+        /// regardless of any owner filter. Set to `true` only by the
+        /// token-auth path (T8); every other construction site defaults
+        /// to `false`.
+        authenticated_via_token: bool,
     },
     /// In-band re-authentication in progress: a `SaslHandshake` from a
     /// previously `Authenticated` OAuth connection. Holds the previous
@@ -109,6 +121,21 @@ impl ConnectionAuth {
         } else {
             None
         }
+    }
+
+    /// Slice 51 (KIP-48): whether the current session authenticated via a
+    /// delegation token. Used by the four delegation-token RPC handlers
+    /// to gate token-creating-token (`Create`) and visibility restriction
+    /// (`Describe`). `false` for any non-`Authenticated` state.
+    #[must_use]
+    pub fn authenticated_via_token(&self) -> bool {
+        matches!(
+            self,
+            Self::Authenticated {
+                authenticated_via_token: true,
+                ..
+            }
+        )
     }
 
     /// Whether `api_key` may be served given the current auth state.
@@ -181,6 +208,7 @@ pub fn handle_handshake(
                     principal,
                     mechanism,
                     expires_at_ms,
+                    authenticated_via_token: _,
                 } = prev
                 else {
                     unreachable!("matched Authenticated above");
@@ -289,6 +317,8 @@ pub fn handle_authenticate_plain<S: BuildHasher>(
                 principal: p,
                 mechanism: SaslMechanism::Plain,
                 expires_at_ms: None,
+                // Slice 51: PLAIN never auths via a delegation token.
+                authenticated_via_token: false,
             };
             SaslAuthenticateResponse {
                 error_code: 0,
@@ -387,6 +417,9 @@ pub fn handle_authenticate_scram(
                     principal,
                     mechanism: mech,
                     expires_at_ms: None,
+                    // Slice 51: T8 will set this to `true` when the SCRAM
+                    // lookup fell back to the delegation-token table.
+                    authenticated_via_token: false,
                 };
                 SaslAuthenticateResponse {
                     error_code: 0,
@@ -454,6 +487,9 @@ pub async fn handle_authenticate_oauthbearer(
                         principal: outcome.principal,
                         mechanism: mech,
                         expires_at_ms: effective_expires_at_ms,
+                        // Slice 51: OAUTHBEARER is a real SASL mechanism,
+                        // never a delegation token.
+                        authenticated_via_token: false,
                     };
                     SaslAuthenticateResponse {
                         error_code: 0,
@@ -528,6 +564,9 @@ pub async fn handle_authenticate_oauthbearer(
                         principal: outcome.principal,
                         mechanism: prev_mech,
                         expires_at_ms: effective_expires_at_ms,
+                        // Slice 51: OAUTHBEARER re-auth never produces a
+                        // token-authed session.
+                        authenticated_via_token: false,
                     };
                     SaslAuthenticateResponse {
                         error_code: 0,
@@ -806,6 +845,7 @@ mod tests {
             },
             mechanism: SaslMechanism::ScramSha512,
             expires_at_ms: None,
+            authenticated_via_token: false,
         };
         assert!(a.is_authenticated());
         let p = a.principal().expect("principal");
@@ -825,12 +865,14 @@ mod tests {
             },
             mechanism: SaslMechanism::OAuthBearer,
             expires_at_ms: Some(2_000_000),
+            authenticated_via_token: false,
         };
         match auth {
             ConnectionAuth::Authenticated {
                 principal,
                 mechanism,
                 expires_at_ms,
+                authenticated_via_token: _,
             } => {
                 assert_eq!(principal.name, "alice");
                 assert_eq!(mechanism, SaslMechanism::OAuthBearer);
@@ -850,6 +892,7 @@ mod tests {
             },
             mechanism: SaslMechanism::OAuthBearer,
             expires_at_ms: Some(2_000_000),
+            authenticated_via_token: false,
         };
         let req = SaslHandshakeRequest {
             mechanism: "OAUTHBEARER".to_string(),
@@ -879,6 +922,7 @@ mod tests {
             },
             mechanism: SaslMechanism::OAuthBearer,
             expires_at_ms: Some(2_000_000),
+            authenticated_via_token: false,
         };
         let req = SaslHandshakeRequest {
             mechanism: "SCRAM-SHA-512".to_string(),
@@ -1024,6 +1068,7 @@ mod tests {
             },
             mechanism: SaslMechanism::ScramSha512,
             expires_at_ms: None,
+            authenticated_via_token: false,
         };
         assert!(auth.allows_request(0));
         assert!(auth.allows_request(3));

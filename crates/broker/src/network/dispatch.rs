@@ -198,6 +198,8 @@ async fn serve_connection_stream<S>(
             principal,
             mechanism: crabka_security::SaslMechanism::Plain,
             expires_at_ms: None,
+            // Slice 51: mTLS clients never auth via a delegation token.
+            authenticated_via_token: false,
         }
     } else {
         // PLAINTEXT / SSL-without-cert: implicit anonymous, treated as
@@ -211,6 +213,8 @@ async fn serve_connection_stream<S>(
             },
             mechanism: crabka_security::SaslMechanism::Plain,
             expires_at_ms: None,
+            // Slice 51: anonymous never auths via a delegation token.
+            authenticated_via_token: false,
         }
     };
     tracing::info!(listener = %spec.name, sasl = is_sasl_listener, "connection opened");
@@ -969,15 +973,15 @@ async fn serve_connection_stream<S>(
                 }
             }
         }
-        // CreateDelegationToken (38, slice-51 T5) needs the broker's
-        // delegation-token master HMAC key (`broker.config.delegation_token_secret_key`)
-        // to authenticate the request. The `&Broker`-only handler table
-        // signature can't carry the `Option<&SecretBytes>` parameter, so this
-        // api_key intercepts inline. Stub handler returns
-        // DELEGATION_TOKEN_AUTH_DISABLED (61) when the key is unset; T6
-        // replaces this with the full implementation.
+        // CreateDelegationToken (38, slice-51 T6) needs the broker's
+        // delegation-token master HMAC key plus the per-connection
+        // `auth` so the handler can enforce KIP-48's
+        // "token-creating-token disallowed" rule via
+        // `ConnectionAuth::Authenticated.authenticated_via_token`.
+        // The `&Broker`-only handler table signature can't carry those
+        // extra params, so this api_key intercepts inline.
         if peek_api_key(&frame).ok() == Some(38) {
-            match handle_create_delegation_token_frame(&broker, &frame)
+            match handle_create_delegation_token_frame(&broker, &frame, &auth)
                 .instrument(req_span.clone())
                 .await
             {
@@ -1036,10 +1040,12 @@ async fn serve_connection_stream<S>(
                 }
             }
         }
-        // DescribeDelegationToken (41, slice-51 T5) — see CreateDelegationToken
-        // comment above; T6 fills in the body.
+        // DescribeDelegationToken (41, slice-51 T6) — handler needs
+        // `auth` for the visibility rules (token-authed callers see
+        // only their own tokens; non-token callers see tokens they
+        // own OR are listed as a renewer on).
         if peek_api_key(&frame).ok() == Some(41) {
-            match handle_describe_delegation_token_frame(&broker, &frame)
+            match handle_describe_delegation_token_frame(&broker, &frame, &auth)
                 .instrument(req_span.clone())
                 .await
             {
@@ -2091,13 +2097,16 @@ async fn handle_describe_user_scram_credentials_frame(
 }
 
 /// Decode + dispatch a `CreateDelegationToken` (`api_key` 38) frame
-/// (slice-51 T5 stub — T6 fills in the body). Reads the broker's
-/// master HMAC key from `broker.config.delegation_token_secret_key`
-/// and passes it through to the handler; when unset the handler
-/// returns `DELEGATION_TOKEN_AUTH_DISABLED` (61).
+/// (slice-51 T6). Threads the per-connection `auth` to the handler so
+/// it can enforce the KIP-48 token-creating-token rule (via
+/// `ConnectionAuth::Authenticated.authenticated_via_token`), passes
+/// the broker's master HMAC key, the configured maximum-lifetime
+/// ceiling (used to clamp the caller's `max_lifetime_ms`), and the
+/// controller handle for appending the resulting metadata record.
 async fn handle_create_delegation_token_frame(
     broker: &Broker,
     frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
 ) -> Result<Bytes, BrokerError> {
     use crabka_protocol::{Decode, Encode};
 
@@ -2112,7 +2121,10 @@ async fn handle_create_delegation_token_frame(
 
     let resp = crate::handlers::create_delegation_token::handle(
         &req,
+        auth,
         broker.config.delegation_token_secret_key.as_ref(),
+        broker.config.delegation_token_max_lifetime_ms,
+        &broker.controller,
     )
     .await;
     let mut buf = BytesMut::with_capacity(resp.encoded_len(api_version));
@@ -2204,10 +2216,14 @@ async fn handle_expire_delegation_token_frame(
 }
 
 /// Decode + dispatch a `DescribeDelegationToken` (`api_key` 41) frame
-/// (slice-51 T5 stub — T6 fills in the body).
+/// (slice-51 T6). Threads the per-connection `auth` so the handler can
+/// apply KIP-48 visibility rules (token-authed callers see only their
+/// own tokens; non-token callers see owner-or-renewer tokens), and the
+/// controller handle so it can read the live image.
 async fn handle_describe_delegation_token_frame(
     broker: &Broker,
     frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
 ) -> Result<Bytes, BrokerError> {
     use crabka_protocol::{Decode, Encode};
 
@@ -2222,7 +2238,9 @@ async fn handle_describe_delegation_token_frame(
 
     let resp = crate::handlers::describe_delegation_token::handle(
         &req,
+        auth,
         broker.config.delegation_token_secret_key.as_ref(),
+        &broker.controller,
     )
     .await;
     let mut buf = BytesMut::with_capacity(resp.encoded_len(api_version));

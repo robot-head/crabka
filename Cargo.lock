@@ -1027,6 +1027,7 @@ dependencies = [
  "axum",
  "base64",
  "bytes",
+ "chrono",
  "clap",
  "crabka-broker",
  "crabka-client-consumer",
