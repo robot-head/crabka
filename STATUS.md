@@ -2644,3 +2644,74 @@ introspection skips with a render-time rejection).
   `jwksIgnoreKeyUse`); slice 49f (PLAIN-with-OAuth-token, skipped
   indefinitely).
 
+## Slice 49h — Operator + Broker: OAUTHBEARER claims mapping (fallback principal chain + groups extraction) (2026-05-24)
+
+Second of three "long-tail" Strimzi-parity clusters closing the
+OAUTHBEARER umbrella (49g shipped validation policies; 49i will ship
+JWKS refresher policies). Adds 4 Strimzi-shape fields on the listener
+OAuth CRD + broker validators.
+
+- **Broker (`crates/security/`, `crates/broker/`):** new
+  `Principal.groups: Vec<String>` field — populated by OAuth
+  validators when `groupsClaim` is configured; empty for non-OAuth
+  principals. **No broker-side authorizer reads `groups` yet** —
+  scaffolding for slice 53/54.
+  Four new `[oauthbearer]` TOML keys: `fallback_user_name_claim`,
+  `fallback_user_name_prefix`, `groups_claim` (RFC 9535 JsonPath via
+  jsonpath-rust, compiled at broker startup), `groups_claim_delimiter`.
+- **Validator logic:** All three OAuth validators (`UnsecuredJwsValidator`,
+  `SignedJwsValidator`, `IntrospectionValidator`) execute new
+  principal-name resolution + groups extraction:
+  - **Name fallback chain**: primary `principal_claim_name` → fallback
+    `fallback_user_name_claim` → reject. Prefix
+    `fallback_user_name_prefix` applied only when fallback fires (Strimzi
+    behavior).
+  - **Groups extraction** (`extract_groups` helper): JsonPath result
+    interpreted per element type — string + delimiter → split+trim+
+    drop-empty; array → string elements only; number/object/null
+    ignored; empty match → empty groups (not an error).
+- **Operator CRD (`crates/operator/src/crd/listener.rs`):** 4 new
+  `Option<String>` fields on `ListenerAuthenticationOAuth`,
+  Strimzi-shape camelCase, all hand-rolled schema entries `minLength: 1`.
+- **Operator reconciler (`crates/operator/src/controller/listeners.rs`):**
+  `render_broker_toml` emits the 4 new keys when set; `groups_claim`
+  uses TOML multi-line literal `'''...'''` per slice 49g's JsonPath
+  pattern. Existing cross-listener divergence walk extended with 4
+  new perturbations.
+- **Principal cascade (CLAUDE.md greenfield rule):** T1 swept 49
+  `Principal { ... }` literal sites across `crates/security/` and
+  `crates/broker/` (PLAIN/SCRAM/mTLS/OAuth construction + dispatch
+  init + tests) to add `groups: vec![]` defaults. (Plan estimate was
+  ~30; actual was 49.)
+- **`ListenerAuthenticationOAuth` cascade:** T2/T3/T4 swept ~21
+  fixture sites so the struct extension compiled atomically with no
+  `#[serde(default)]` shim: 11 in `crd/listener.rs`, 11 in
+  `controller/listeners.rs` + 2 in `controller/kafka.rs` + 3 in
+  `controller/kafka_node_pool.rs`, 5 across `tests/reconcile_*.rs`
+  operator integration files. (Plan estimate was ~21; actual matched.)
+- **E2E (`.github/workflows/operator-e2e.yml`):** both `kind-oauth`
+  (JWT mode) and `kind-oauth-introspection` (introspection mode)
+  Kafka CRs add `groupsClaim: "$.realm_access.roles[*]"`. Both
+  jobs' Keycloak realm bootstraps gain a `kafka-cluster-admin`
+  realm role mapped to the `kafka-client` service account so
+  `realm_access.roles` is populated on tokens. `validTokenType` is
+  JWT-mode only and is NOT added to the introspection job.
+- **`fallbackUserNameClaim` not exercised in e2e** — would require
+  producers to send tokens without `sub`. Unit-tested only (covered
+  in the broker unit matrix for primary/fallback/prefix).
+- **Tests:** ~20 new — 12 broker unit (T1, covering the Unsecured
+  primary/fallback/prefix/groups matrix + Signed parity +
+  Introspection parity + `extract_groups` helper coverage) + 2 CRD
+  round-trip (T2) + 4 reconciler unit (T3) + extended cross-listener
+  divergence walk (T3) + 2 operator integration (T4). Workspace fmt +
+  clippy `-D warnings` + tests + CRD drift gate all green.
+- **Reference doc:** `[docs/superpowers/specs/2026-05-24-crabka-oauth-claims-mapping-49h-design.md]`
+- **Semantic divergence from Strimzi:** `groupsClaim` is RFC 9535
+  JsonPath (inherited from 49g's jsonpath-rust choice), not Strimzi's
+  Jayway flavor. Operators porting Strimzi configs rewrite filter
+  predicates accordingly.
+- **Out of scope:** slice 49i (JWKS refresher policies — last of the
+  long-tail clusters); slice 49f (PLAIN-with-OAuth-token, skipped
+  indefinitely); broker-side groups consumer (slice 53/54 operator
+  authorizer plugins).
+
