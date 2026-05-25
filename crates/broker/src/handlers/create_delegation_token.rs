@@ -13,9 +13,10 @@ use crabka_metadata::{DelegationTokenRecord, MetadataRecord};
 use crabka_protocol::owned::create_delegation_token_request::CreateDelegationTokenRequest;
 use crabka_protocol::owned::create_delegation_token_response::CreateDelegationTokenResponse;
 use crabka_raft::ControllerHandle;
-use crabka_security::{KafkaPrincipal, Principal, SecretBytes};
+use crabka_security::{KafkaPrincipal, SecretBytes};
 
 use crate::network::auth::ConnectionAuth;
+use crate::time_util::now_ms;
 
 pub(crate) async fn handle(
     req: &CreateDelegationTokenRequest,
@@ -46,7 +47,7 @@ pub(crate) async fn handle(
     // `owner_principal_type/name` fields exist for the privileged
     // "act-as" path, which Crabka doesn't support (any non-self request
     // would be a no-op since we'd reject it).
-    let owner = principal_to_kafka(principal);
+    let owner = principal.to_kafka();
 
     // Validate + clamp `max_lifetime_ms`. `-1` defers to the broker
     // ceiling; a positive value is clamped to the ceiling; anything
@@ -57,7 +58,7 @@ pub(crate) async fn handle(
         _ => return err_response(crate::codes::INVALID_REQUEST),
     };
 
-    let now = chrono::Utc::now().timestamp_millis();
+    let now = now_ms();
     let token_id = uuid::Uuid::new_v4().to_string();
     let hmac = crabka_security::compute_token_hmac(secret_key.as_bytes(), &token_id);
 
@@ -112,21 +113,10 @@ fn err_response(code: i16) -> CreateDelegationTokenResponse {
     }
 }
 
-/// Maps a runtime session [`Principal`] (auth-method + name) onto the
-/// Kafka wire-level [`KafkaPrincipal`] (`principalType:name`). All
-/// authenticated callers ride under `principal_type = "User"`, matching
-/// Kafka's `DefaultKafkaPrincipalBuilder`.
-fn principal_to_kafka(p: &Principal) -> KafkaPrincipal {
-    KafkaPrincipal {
-        principal_type: "User".to_string(),
-        name: p.name.clone(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crabka_security::{AuthMethod, SaslMechanism};
+    use crabka_security::{AuthMethod, Principal, SaslMechanism};
     use std::net::SocketAddr;
     use std::sync::Arc;
     use std::time::Duration;

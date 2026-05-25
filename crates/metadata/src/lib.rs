@@ -15,8 +15,8 @@
 
 pub mod acl;
 mod error;
-pub mod image;
-pub mod records;
+mod image;
+mod records;
 
 pub use acl::{AclEntry, AclEntryFilter, AclOperation, PatternType, PermissionType, ResourceType};
 pub use error::MetadataError;

@@ -19,7 +19,7 @@ use crabka_protocol::owned::describe_delegation_token_response::{
     DescribeDelegationTokenResponse, DescribedDelegationToken, DescribedDelegationTokenRenewer,
 };
 use crabka_raft::ControllerHandle;
-use crabka_security::{KafkaPrincipal, Principal, SecretBytes};
+use crabka_security::{KafkaPrincipal, SecretBytes};
 
 use crate::network::auth::ConnectionAuth;
 
@@ -44,7 +44,7 @@ pub(crate) async fn handle(
     else {
         return err_response(crate::codes::INVALID_REQUEST);
     };
-    let caller = principal_to_kafka(principal);
+    let caller = principal.to_kafka();
 
     let image = controller.current_image();
 
@@ -132,23 +132,12 @@ fn err_response(code: i16) -> DescribeDelegationTokenResponse {
     }
 }
 
-/// Maps a runtime session [`Principal`] (auth-method + name) onto the
-/// Kafka wire-level [`KafkaPrincipal`] (`principalType:name`). All
-/// authenticated callers ride under `principal_type = "User"`, matching
-/// Kafka's `DefaultKafkaPrincipalBuilder`.
-fn principal_to_kafka(p: &Principal) -> KafkaPrincipal {
-    KafkaPrincipal {
-        principal_type: "User".to_string(),
-        name: p.name.clone(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crabka_metadata::{DelegationTokenRecord, MetadataRecord};
     use crabka_protocol::owned::describe_delegation_token_request::DescribeDelegationTokenOwner;
-    use crabka_security::{AuthMethod, SaslMechanism};
+    use crabka_security::{AuthMethod, Principal, SaslMechanism};
     use std::net::SocketAddr;
     use std::sync::Arc;
     use std::time::Duration;

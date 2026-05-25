@@ -10,9 +10,10 @@ use crabka_metadata::{DelegationTokenRecord, MetadataRecord};
 use crabka_protocol::owned::renew_delegation_token_request::RenewDelegationTokenRequest;
 use crabka_protocol::owned::renew_delegation_token_response::RenewDelegationTokenResponse;
 use crabka_raft::ControllerHandle;
-use crabka_security::{KafkaPrincipal, Principal, SecretBytes};
+use crabka_security::SecretBytes;
 
 use crate::network::auth::ConnectionAuth;
+use crate::time_util::now_ms;
 
 pub(crate) async fn handle(
     req: &RenewDelegationTokenRequest,
@@ -27,14 +28,10 @@ pub(crate) async fn handle(
     let ConnectionAuth::Authenticated { principal, .. } = auth else {
         return err_response(crate::codes::INVALID_REQUEST);
     };
-    let caller = principal_to_kafka(principal);
+    let caller = principal.to_kafka();
 
     let image = controller.current_image();
-    let Some(token) = image
-        .all_delegation_tokens()
-        .find(|t| t.hmac == req.hmac.as_ref())
-        .cloned()
-    else {
+    let Some(token) = image.delegation_token_by_hmac(req.hmac.as_ref()).cloned() else {
         return err_response(crate::codes::DELEGATION_TOKEN_NOT_FOUND);
     };
 
@@ -42,7 +39,7 @@ pub(crate) async fn handle(
         return err_response(crate::codes::DELEGATION_TOKEN_OWNER_MISMATCH);
     }
 
-    let now = chrono::Utc::now().timestamp_millis();
+    let now = now_ms();
     let renew_period_ms = if req.renew_period_ms == -1 {
         default_renew_period_ms
     } else {
@@ -59,9 +56,13 @@ pub(crate) async fn handle(
         max_timestamp_ms: token.max_timestamp_ms,
         renewers: token.renewers.clone(),
     };
-    let _ = controller
+    if let Err(e) = controller
         .submit_change(vec![MetadataRecord::V1DelegationToken(record)])
-        .await;
+        .await
+    {
+        tracing::warn!(error = %e, "RenewDelegationToken: submit_change failed");
+        return err_response(crate::codes::INVALID_REQUEST);
+    }
 
     RenewDelegationTokenResponse {
         error_code: 0,
@@ -77,21 +78,10 @@ fn err_response(code: i16) -> RenewDelegationTokenResponse {
     }
 }
 
-/// Maps a runtime session [`Principal`] (auth-method + name) onto the
-/// Kafka wire-level [`KafkaPrincipal`] (`principalType:name`). All
-/// authenticated callers ride under `principal_type = "User"`, matching
-/// Kafka's `DefaultKafkaPrincipalBuilder`.
-fn principal_to_kafka(p: &Principal) -> KafkaPrincipal {
-    KafkaPrincipal {
-        principal_type: "User".to_string(),
-        name: p.name.clone(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crabka_security::{AuthMethod, SaslMechanism};
+    use crabka_security::{AuthMethod, KafkaPrincipal, Principal, SaslMechanism};
     use std::net::SocketAddr;
     use std::sync::Arc;
     use std::time::Duration;
@@ -189,7 +179,7 @@ mod tests {
         let controller = test_controller(dir.path().into()).await;
         let secret = SecretBytes::new(b"k".to_vec());
         let hmac = vec![0xAA; 32];
-        let now = chrono::Utc::now().timestamp_millis();
+        let now = now_ms();
         seed_token(
             &controller,
             "tok-1",
@@ -211,7 +201,7 @@ mod tests {
         assert_eq!(resp.error_code, 0);
         // expiry should be roughly now + 1h (within a small slop window).
         let slop = 60_000;
-        let target = chrono::Utc::now().timestamp_millis() + 3_600_000;
+        let target = now_ms() + 3_600_000;
         assert!(
             (resp.expiry_timestamp_ms - target).abs() < slop,
             "expiry {} far from {target}",
@@ -230,7 +220,7 @@ mod tests {
         let controller = test_controller(dir.path().into()).await;
         let secret = SecretBytes::new(b"k".to_vec());
         let hmac = vec![0xBB; 32];
-        let now = chrono::Utc::now().timestamp_millis();
+        let now = now_ms();
         seed_token(
             &controller,
             "tok-2",
@@ -275,7 +265,7 @@ mod tests {
         let controller = test_controller(dir.path().into()).await;
         let secret = SecretBytes::new(b"k".to_vec());
         let hmac = vec![0xCC; 32];
-        let now = chrono::Utc::now().timestamp_millis();
+        let now = now_ms();
         seed_token(
             &controller,
             "tok-3",

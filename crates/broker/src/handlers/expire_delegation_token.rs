@@ -16,9 +16,10 @@ use crabka_metadata::{
 use crabka_protocol::owned::expire_delegation_token_request::ExpireDelegationTokenRequest;
 use crabka_protocol::owned::expire_delegation_token_response::ExpireDelegationTokenResponse;
 use crabka_raft::ControllerHandle;
-use crabka_security::{KafkaPrincipal, Principal, SecretBytes};
+use crabka_security::SecretBytes;
 
 use crate::network::auth::ConnectionAuth;
+use crate::time_util::now_ms;
 
 pub(crate) async fn handle(
     req: &ExpireDelegationTokenRequest,
@@ -32,14 +33,10 @@ pub(crate) async fn handle(
     let ConnectionAuth::Authenticated { principal, .. } = auth else {
         return err_response(crate::codes::INVALID_REQUEST);
     };
-    let caller = principal_to_kafka(principal);
+    let caller = principal.to_kafka();
 
     let image = controller.current_image();
-    let Some(token) = image
-        .all_delegation_tokens()
-        .find(|t| t.hmac == req.hmac.as_ref())
-        .cloned()
-    else {
+    let Some(token) = image.delegation_token_by_hmac(req.hmac.as_ref()).cloned() else {
         return err_response(crate::codes::DELEGATION_TOKEN_NOT_FOUND);
     };
 
@@ -50,16 +47,20 @@ pub(crate) async fn handle(
     let new_expiry = if req.expiry_time_period_ms < 0 {
         // KIP-48: negative period deletes the token immediately. The
         // response carries a past-sentinel timestamp.
-        let _ = controller
+        if let Err(e) = controller
             .submit_change(vec![MetadataRecord::V1DeleteDelegationToken(
                 DeleteDelegationTokenRecord {
                     token_id: token.token_id.clone(),
                 },
             )])
-            .await;
-        chrono::Utc::now().timestamp_millis() - 1
+            .await
+        {
+            tracing::warn!(error = %e, "ExpireDelegationToken: tombstone submit_change failed");
+            return err_response(crate::codes::INVALID_REQUEST);
+        }
+        now_ms() - 1
     } else {
-        let now = chrono::Utc::now().timestamp_millis();
+        let now = now_ms();
         let candidate = if req.expiry_time_period_ms == 0 {
             now
         } else {
@@ -70,9 +71,13 @@ pub(crate) async fn handle(
             expiry_timestamp_ms: new_expiry,
             ..token_to_record(&token)
         };
-        let _ = controller
+        if let Err(e) = controller
             .submit_change(vec![MetadataRecord::V1DelegationToken(record)])
-            .await;
+            .await
+        {
+            tracing::warn!(error = %e, "ExpireDelegationToken: update submit_change failed");
+            return err_response(crate::codes::INVALID_REQUEST);
+        }
         new_expiry
     };
 
@@ -105,21 +110,10 @@ fn token_to_record(t: &DelegationToken) -> DelegationTokenRecord {
     }
 }
 
-/// Maps a runtime session [`Principal`] (auth-method + name) onto the
-/// Kafka wire-level [`KafkaPrincipal`] (`principalType:name`). All
-/// authenticated callers ride under `principal_type = "User"`, matching
-/// Kafka's `DefaultKafkaPrincipalBuilder`.
-fn principal_to_kafka(p: &Principal) -> KafkaPrincipal {
-    KafkaPrincipal {
-        principal_type: "User".to_string(),
-        name: p.name.clone(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crabka_security::{AuthMethod, SaslMechanism};
+    use crabka_security::{AuthMethod, KafkaPrincipal, Principal, SaslMechanism};
     use std::net::SocketAddr;
     use std::sync::Arc;
     use std::time::Duration;
@@ -214,7 +208,7 @@ mod tests {
         let controller = test_controller(dir.path().into()).await;
         let secret = SecretBytes::new(b"k".to_vec());
         let hmac = vec![0xAA; 32];
-        let now = chrono::Utc::now().timestamp_millis();
+        let now = now_ms();
         seed_token(
             &controller,
             "tok-1",
@@ -234,7 +228,7 @@ mod tests {
         };
         let resp = handle(&req, &authed("alice"), Some(&secret), &controller).await;
         assert_eq!(resp.error_code, 0);
-        let target = chrono::Utc::now().timestamp_millis() + 30_000;
+        let target = now_ms() + 30_000;
         let slop = 60_000;
         assert!(
             (resp.expiry_timestamp_ms - target).abs() < slop,
@@ -253,7 +247,7 @@ mod tests {
         let controller = test_controller(dir.path().into()).await;
         let secret = SecretBytes::new(b"k".to_vec());
         let hmac = vec![0xBB; 32];
-        let now = chrono::Utc::now().timestamp_millis();
+        let now = now_ms();
         seed_token(
             &controller,
             "tok-2",
@@ -274,7 +268,7 @@ mod tests {
         let resp = handle(&req, &authed("alice"), Some(&secret), &controller).await;
         assert_eq!(resp.error_code, 0);
         // Past sentinel: should be <= now.
-        assert!(resp.expiry_timestamp_ms <= chrono::Utc::now().timestamp_millis());
+        assert!(resp.expiry_timestamp_ms <= now_ms());
         // Token removed from image.
         let img = controller.current_image();
         assert!(img.delegation_token_by_id("tok-2").is_none());
@@ -287,7 +281,7 @@ mod tests {
         let controller = test_controller(dir.path().into()).await;
         let secret = SecretBytes::new(b"k".to_vec());
         let hmac = vec![0xCC; 32];
-        let now = chrono::Utc::now().timestamp_millis();
+        let now = now_ms();
         seed_token(
             &controller,
             "tok-3",

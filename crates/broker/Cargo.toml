@@ -62,10 +62,6 @@ serde_json = { workspace = true }
 # Slice 49g: compile customClaimCheck JsonPath expressions at config-load
 # and inject into the OAUTHBEARER validators.
 jsonpath-rust = { workspace = true }
-# Slice 51 (KIP-48): wall-clock millis for delegation-token issue/expiry
-# timestamps. `chrono::Utc::now()` avoids the verbose `SystemTime::now()`
-# → `UNIX_EPOCH` → `as_millis()` → `i64::try_from` boilerplate.
-chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [dev-dependencies]
 crabka-broker = { version = "0.1", path = ".", features = ["test-helpers"] }

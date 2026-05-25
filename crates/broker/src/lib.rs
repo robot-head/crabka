@@ -154,6 +154,7 @@ mod replicator;
 mod replicator_supervisor;
 pub mod telemetry;
 pub mod throttle;
+pub(crate) mod time_util;
 pub(crate) mod tls_reload;
 mod txn;
 

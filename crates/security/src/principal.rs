@@ -54,6 +54,21 @@ pub struct Principal {
     pub groups: Vec<String>,
 }
 
+impl Principal {
+    /// Project a runtime session [`Principal`] onto the Kafka wire-level
+    /// [`KafkaPrincipal`] (`principalType:name`) used by ACLs and
+    /// delegation-token records. All authenticated callers ride under
+    /// `principal_type = "User"`, matching Kafka's
+    /// `DefaultKafkaPrincipalBuilder`.
+    #[must_use]
+    pub fn to_kafka(&self) -> KafkaPrincipal {
+        KafkaPrincipal {
+            principal_type: "User".to_string(),
+            name: self.name.clone(),
+        }
+    }
+}
+
 /// Slice 51 (KIP-48): Kafka wire-level principal — the `(principalType,
 /// name)` pair carried in delegation-token records, ACL entries, and
 /// `KafkaPrincipal`-shaped fields across the Kafka protocol. Distinct

@@ -271,6 +271,18 @@ impl MetadataImage {
         self.delegation_tokens.values()
     }
 
+    /// Slice 51 (KIP-48): lookup a delegation token by its HMAC bytes.
+    /// `RenewDelegationToken` / `ExpireDelegationToken` identify a token
+    /// by HMAC on the wire (not by `token_id`), and the upcoming SCRAM
+    /// delegation-token fallback (slice 51 T8) needs the same lookup at
+    /// the auth path. Implementation is a linear scan over the small
+    /// (per-broker, in-memory) token map — clarity over an explicit
+    /// HMAC→token_id index until cardinality justifies it.
+    #[must_use]
+    pub fn delegation_token_by_hmac(&self, hmac: &[u8]) -> Option<&DelegationToken> {
+        self.delegation_tokens.values().find(|t| t.hmac == hmac)
+    }
+
     /// Apply one record. Returns the previous record (for `V1Topic` /
     /// `V1BrokerRegistration`) so the caller can observe overwrite cases.
     /// Infallible — pre-validation against the current image happens
@@ -1122,6 +1134,44 @@ mod tests {
         ));
         assert!(img.delegation_token_by_id("tok-1").is_none());
         assert_eq!(img.all_delegation_tokens().count(), 0);
+    }
+
+    #[test]
+    fn delegation_token_by_hmac_finds_token_by_hmac_bytes() {
+        let mut img = MetadataImage::new(uuid::Uuid::nil());
+        let alice = principal("User", "alice");
+        let bob = principal("User", "bob");
+
+        let hmac_a = vec![0xAA; 32];
+        let hmac_b = vec![0xBB; 32];
+        img.apply(&MetadataRecord::V1DelegationToken(DelegationTokenRecord {
+            token_id: "tok-a".into(),
+            owner: alice,
+            hmac: hmac_a.clone(),
+            issue_timestamp_ms: 1_000,
+            expiry_timestamp_ms: 5_000,
+            max_timestamp_ms: 10_000,
+            renewers: vec![],
+        }));
+        img.apply(&MetadataRecord::V1DelegationToken(DelegationTokenRecord {
+            token_id: "tok-b".into(),
+            owner: bob,
+            hmac: hmac_b.clone(),
+            issue_timestamp_ms: 1_000,
+            expiry_timestamp_ms: 5_000,
+            max_timestamp_ms: 10_000,
+            renewers: vec![],
+        }));
+
+        let found_a = img
+            .delegation_token_by_hmac(&hmac_a)
+            .expect("hmac_a present");
+        assert_eq!(found_a.token_id, "tok-a");
+        let found_b = img
+            .delegation_token_by_hmac(&hmac_b)
+            .expect("hmac_b present");
+        assert_eq!(found_b.token_id, "tok-b");
+        assert!(img.delegation_token_by_hmac(&[0xCC; 32]).is_none());
     }
 
     #[test]
