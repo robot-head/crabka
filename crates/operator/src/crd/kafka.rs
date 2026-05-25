@@ -77,6 +77,44 @@ pub struct KafkaSpec {
     /// change via the slice-21 config hash.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logging: Option<crate::crd::Logging>,
+    /// Slice 51b: delegation-token master HMAC key source. When `None`,
+    /// the broker rejects all KIP-48 delegation-token RPCs with err 61
+    /// `DELEGATION_TOKEN_AUTH_DISABLED`. When `Some`, the operator
+    /// injects `CRABKA_DELEGATION_TOKEN_SECRET_KEY` into each broker
+    /// pod via a `valueFrom.secretKeyRef`, baking the key into the
+    /// rendered `StatefulSet` so the slice-21 SSA reconcile doesn't
+    /// race with out-of-band `kubectl set env` patches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation_token: Option<DelegationTokenConfig>,
+}
+
+/// Slice 51b: master-HMAC-key source for KIP-48 delegation tokens.
+///
+/// The operator wires the referenced Secret key as the broker pod's
+/// `CRABKA_DELEGATION_TOKEN_SECRET_KEY` env var (env wins over TOML in
+/// slice 51's broker config layer). Required for delegation-token
+/// `KafkaUser` support (slice 51b). If unset on the parent `Kafka`,
+/// the broker rejects all delegation-token RPCs with err 61
+/// `DELEGATION_TOKEN_AUTH_DISABLED`.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DelegationTokenConfig {
+    /// Reference to a Kubernetes `Secret` (same namespace as the
+    /// `Kafka` CR) whose `data.<key>` value is the broker's master HMAC
+    /// key for KIP-48 delegation tokens.
+    pub secret_key_ref: SecretKeyRef,
+}
+
+/// Slice 51b: minimal namespaced Secret-key reference (name + optional
+/// data-map key, defaulting to `secret-key`).
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SecretKeyRef {
+    /// Secret name in the same namespace as the `Kafka` CR.
+    pub name: String,
+    /// Key within the Secret's `data`. Defaults to `secret-key`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
@@ -156,6 +194,7 @@ mod tests {
                 cluster_ca: None,
                 clients_ca: None,
                 logging: None,
+                delegation_token: None,
             },
         );
         let json = serde_json::to_string(&k).unwrap();
@@ -182,6 +221,7 @@ mod tests {
                 cluster_ca: None,
                 clients_ca: None,
                 logging: None,
+                delegation_token: None,
             },
         );
         let j = serde_json::to_string(&k.spec).unwrap();
@@ -291,6 +331,7 @@ mod tests {
                 cluster_ca: None,
                 clients_ca: None,
                 logging: None,
+                delegation_token: None,
             },
         );
         let j = serde_json::to_string(&k.spec).unwrap();
@@ -325,6 +366,7 @@ mod tests {
                 cluster_ca: None,
                 clients_ca: None,
                 logging: None,
+                delegation_token: None,
             },
         );
         let j = serde_json::to_string(&k.spec).unwrap();
@@ -368,6 +410,39 @@ mod tests {
         .expect("parse minimal spec");
         assert!(v.cluster_ca.is_none());
         assert!(v.clients_ca.is_none());
+    }
+
+    #[test]
+    fn spec_omits_delegation_token_when_none() {
+        let json = r#"{"kafkaVersion":"0.1.1"}"#;
+        let spec: KafkaSpec = serde_json::from_str(json).unwrap();
+        assert!(spec.delegation_token.is_none());
+        let j = serde_json::to_string(&spec).unwrap();
+        assert!(!j.contains("delegationToken"), "got: {j}");
+    }
+
+    #[test]
+    fn spec_carries_delegation_token_with_default_key() {
+        let json = r#"{
+            "kafkaVersion":"0.1.1",
+            "delegationToken":{"secretKeyRef":{"name":"dt-master"}}
+        }"#;
+        let spec: KafkaSpec = serde_json::from_str(json).unwrap();
+        let dt = spec.delegation_token.expect("delegationToken present");
+        assert_eq!(dt.secret_key_ref.name, "dt-master");
+        assert!(dt.secret_key_ref.key.is_none());
+    }
+
+    #[test]
+    fn spec_carries_delegation_token_with_explicit_key() {
+        let json = r#"{
+            "kafkaVersion":"0.1.1",
+            "delegationToken":{"secretKeyRef":{"name":"dt-master","key":"hmac"}}
+        }"#;
+        let spec: KafkaSpec = serde_json::from_str(json).unwrap();
+        let dt = spec.delegation_token.expect("delegationToken present");
+        assert_eq!(dt.secret_key_ref.name, "dt-master");
+        assert_eq!(dt.secret_key_ref.key.as_deref(), Some("hmac"));
     }
 
     #[test]

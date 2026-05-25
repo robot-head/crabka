@@ -749,6 +749,7 @@ mod config_hash_tests {
             cluster_ca: None,
             clients_ca: None,
             logging: None,
+            delegation_token: None,
         };
         let h = combined_config_hash(&spec_a, None, None, None);
         let h_again = combined_config_hash(&spec_a, None, None, None);
@@ -791,6 +792,7 @@ mod config_hash_tests {
             cluster_ca: None,
             clients_ca: None,
             logging: None,
+            delegation_token: None,
         };
         let h_off = combined_config_hash(&spec_off, None, None, None);
 
@@ -835,6 +837,7 @@ mod config_hash_tests {
             cluster_ca: None,
             clients_ca: None,
             logging: None,
+            delegation_token: None,
         };
         let h_none = combined_config_hash(&spec, None, None, None);
         let h_a = combined_config_hash(
@@ -870,6 +873,7 @@ mod config_hash_tests {
             cluster_ca: None,
             clients_ca: None,
             logging: None,
+            delegation_token: None,
         };
         let h1 = combined_config_hash(&spec, Some("ca-pem"), None, None);
         let h2 = combined_config_hash(&spec, Some("ca-pem"), None, None);
@@ -894,6 +898,7 @@ mod config_hash_tests {
                 cluster_ca: None,
                 clients_ca: None,
                 logging: None,
+                delegation_token: None,
             },
         );
         k.meta_mut().namespace = Some("default".into());
@@ -947,6 +952,7 @@ mod config_hash_tests {
             cluster_ca: None,
             clients_ca: None,
             logging: None,
+            delegation_token: None,
         };
         // No explicit pin => slice-24 collapse preserved (== config_hash of
         // the empty config part).
@@ -979,6 +985,7 @@ mod config_hash_tests {
                 cluster_ca: None,
                 clients_ca: None,
                 logging: None,
+                delegation_token: None,
             },
         );
         k.meta_mut().namespace = Some("default".into());

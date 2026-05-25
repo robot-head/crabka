@@ -3060,29 +3060,32 @@ introspection metadata).
   on create, renew inside horizon, delete expires + removes).
   Workspace test count: 2785.
 - **kind e2e:** new `kind-kafkauser-delegation-token` job in
-  `.github/workflows/operator-e2e.yml` (E1 commit `f6c7771`). Brings
-  up a single-broker cluster, injects
-  `CRABKA_DELEGATION_TOKEN_SECRET_KEY` via `kubectl set env` (no
-  `Kafka.spec.kafka.delegationToken` CRD surface yet — deferred to a
-  follow-up slice), applies a delegation-token `KafkaUser`, waits
-  for `Ready=True`, asserts the Secret carries the four canonical
-  keys + `status.delegationTokenId` populated. Produce/consume with
-  the issued credentials is deferred — the control-plane handshake
-  is what slice 51b's e2e gates.
+  `.github/workflows/operator-e2e.yml` (E1 commit `f6c7771`,
+  follow-up commit lands the CRD-surface cleanup). Brings up a
+  single-broker cluster; the `Kafka.spec.delegationToken.secretKeyRef`
+  CRD field surfaces the master key cleanly — the operator wires
+  `CRABKA_DELEGATION_TOKEN_SECRET_KEY` into the broker pod via
+  `valueFrom.secretKeyRef` on the first SSA render of the
+  StatefulSet, so the broker boots with the four delegation-token
+  RPCs live and there is no race with the 30s SSA reconcile loop.
+  The job applies a delegation-token `KafkaUser`, waits for
+  `Ready=True`, asserts the Secret carries the four canonical keys
+  + `status.delegationTokenId` populated. Produce/consume with the
+  issued credentials is deferred — the control-plane handshake is
+  what slice 51b's e2e gates.
+- **Operator CRD (`Kafka.spec.delegationToken`):** new optional
+  `DelegationTokenConfig { secretKeyRef: SecretKeyRef { name,
+  key? } }` field on `KafkaSpec`. Absent → broker rejects all
+  KIP-48 RPCs with err 61; present → operator pushes a
+  `valueFrom.secretKeyRef` env entry into `render_broker_container`
+  (`controller/kafka_node_pool.rs`), with `key` defaulting to
+  `secret-key`. 3 new CRD round-trip tests + 3 new SS-render
+  tests (off / default-key / explicit-key).
 - **Known limitations / honest follow-ups:**
   - **Master-key hot-swap** NOT supported (carried over from slice 51).
   - **Token rotation** NOT supported — renewal extends the same
     `(token_id, hmac)`; Cycle (renewer-set drift) is the only path
     that mints a fresh token.
-  - **ACL/quota drift for delegation-token users** reconciled only
-    at the renewal cadence (up to 24h), not the standard 1-minute
-    generic requeue. The `Authentication::DelegationToken` arm in
-    `controller/user.rs` returns the token-module's `Action`
-    directly and bypasses the shared ACL/quota tail to avoid
-    clobbering `TokenIssued` / `TokenExpiring` on the trailing
-    `patch_status`. Trade-off documented inline. Follow-up: teach
-    `patch_status` to preserve token-side conditions OR run
-    ACL/quota under the token module.
   - **`AdminClientLike::renew_delegation_token` describes all tokens
     then filters by hmac** (operator is super-user); O(all_tokens)
     per renewal on large clusters. Follow-up: thread owner principal
@@ -3091,15 +3094,18 @@ introspection metadata).
     act-as to fire; if not, every reconcile lands at err-65 and
     `TokenIssued` reports `OperatorNotSuperUser` with a 5m backoff
     (surfaced in `kubectl describe ku`).
-- **Decomposition:** 10-commit slice (design + plan + 6 substantive
-  tasks + B3 polish + production-wiring fix): `6a1f2f7` design,
-  `9ab6919` plan, `bbe5972` B1 act-as, `0b79313` B1 fix, `1709faa`
-  B2 integration tests, `74253e6` O1 CRD, `605508d` O3 client-admin,
-  `b757a2e` O2 reconcile, `1828757` O2 follow-up (production wiring
-  + finalizer), `d95d96d` B3 polish (`Ready` aggregator + dead-code
-  cleanup). O4 (`6509d2b`) added integration tests + sample
-  manifest; E1 (`f6c7771`) added the kind job; this S1 commit lands
-  the STATUS entry + final fmt / clippy / test / CRD-drift gate.
+- **Decomposition:** 14-commit slice (design + plan + 6 substantive
+  tasks + B3 polish + production-wiring fix + S1 STATUS + E1 e2e +
+  this e2e SSA-clobber fix): `6a1f2f7` design, `9ab6919` plan,
+  `bbe5972` B1 act-as, `0b79313` B1 fix, `1709faa` B2 integration
+  tests, `74253e6` O1 CRD, `605508d` O3 client-admin, `b757a2e` O2
+  reconcile, `1828757` O2 follow-up (production wiring +
+  finalizer), `d95d96d` B3 polish (`Ready` aggregator + dead-code
+  cleanup), `6509d2b` O4 (integration tests + sample manifest),
+  `f6c7771` E1 (kind job), `3be1653` S1 (STATUS + final gate), plus
+  this commit adding the `Kafka.spec.delegationToken` CRD surface +
+  operator env injection so the e2e doesn't race the operator's
+  SSA reconcile.
 - **Workspace fmt + clippy `-D warnings` + tests + CRD drift gate**
   all green. S1 paid down 11 clippy `-D warnings` nits surfaced
   when the workspace gate ran (`clamp` pattern, `cast_sign_loss`,

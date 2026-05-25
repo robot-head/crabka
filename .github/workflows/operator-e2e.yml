@@ -1983,11 +1983,15 @@ jobs:
   #
   # Brings up a 1-broker cluster + a SCRAM-SHA-512 listener so the operator
   # can authenticate to the broker as `operator` (a super-user the act-as
-  # path requires). The Kafka.spec.kafka.delegationToken CRD surface is
-  # deferred to a later slice — for this e2e we instead use `kubectl set
-  # env` to inject `CRABKA_DELEGATION_TOKEN_SECRET_KEY` on the broker
-  # StatefulSet *after* the cluster is Ready, which triggers a rolling
-  # restart and enables the four delegation-token RPCs on the broker side.
+  # path requires). The broker's master HMAC key is sourced through the
+  # `Kafka.spec.delegationToken.secretKeyRef` CRD surface: a Secret
+  # `delegation-token-key` (data: `secret-key`) is applied BEFORE the
+  # `Kafka` CR, and the operator wires `CRABKA_DELEGATION_TOKEN_SECRET_KEY`
+  # into the broker pod via `valueFrom.secretKeyRef`. This bakes the
+  # env var into the initial StatefulSet render — no out-of-band
+  # `kubectl set env` patch, so no race with the operator's 30s SSA
+  # reconcile (the previous `kubectl set env` flavour of this job
+  # would clobber on the next reconcile).
   #
   # The verification step is the smoke-only path: apply a KafkaUser with
   # `authentication.type: delegation-token`, wait for `Ready=True`, then
@@ -2045,11 +2049,39 @@ jobs:
           kubectl rollout status -n crabka-operator deploy/operator-crabka-operator --timeout=240s
 
       # ─────────────────────────────────────────────────────────────────────
-      # Apply the minimal Kafka cluster (single broker, defaulted
-      # PLAIN:9092 internal listener — listeners and auth are not what
-      # this slice exercises). The critical knob for the four
-      # delegation-token RPCs is the broker's master HMAC key, which we
-      # inject after the cluster is Ready (next step).
+      # Pre-stage the delegation-token master key Secret BEFORE the Kafka
+      # CR. The operator's pool reconciler reads
+      # `Kafka.spec.delegationToken.secretKeyRef` and wires the env var
+      # into the initial StatefulSet render via `valueFrom.secretKeyRef`,
+      # so the broker comes up with the four delegation-token RPCs live
+      # on first boot — no out-of-band `kubectl set env` patch, no race
+      # with the operator's 30s SSA reconcile loop. The literal value
+      # base64-encodes `e2e-delegation-master-key` (the same string the
+      # previous `kubectl set env` flavour of this job injected).
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Pre-stage delegation-token master key Secret
+        run: |
+          set -e
+          cat <<'EOF' | kubectl apply -f -
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: delegation-token-key
+            namespace: default
+          type: Opaque
+          data:
+            # echo -n "e2e-delegation-master-key" | base64
+            secret-key: ZTJlLWRlbGVnYXRpb24tbWFzdGVyLWtleQ==
+          EOF
+
+      # ─────────────────────────────────────────────────────────────────────
+      # Apply the Kafka cluster (single broker, defaulted PLAIN:9092
+      # internal listener — listeners and auth are not what this slice
+      # exercises). `spec.delegationToken.secretKeyRef` points at the
+      # Secret applied in the previous step, so the operator wires
+      # `CRABKA_DELEGATION_TOKEN_SECRET_KEY` into the broker pod via
+      # `valueFrom.secretKeyRef` on the first SSA render of the
+      # StatefulSet.
       # ─────────────────────────────────────────────────────────────────────
       - name: Apply Kafka cluster + wait Ready
         run: |
@@ -2062,6 +2094,9 @@ jobs:
             namespace: default
           spec:
             kafkaVersion: "0.1.1"
+            delegationToken:
+              secretKeyRef:
+                name: delegation-token-key
           ---
           apiVersion: crabka.io/v1alpha1
           kind: KafkaNodePool
@@ -2086,37 +2121,6 @@ jobs:
             echo "::error::Kafka demo did not become Ready in 10 minutes"
             kubectl describe kafka demo -n default
             kubectl describe kafkanodepool brokers -n default
-            kubectl logs -n default demo-brokers-0 -c broker --tail=200 || true
-            exit 1
-          }
-
-      # ─────────────────────────────────────────────────────────────────────
-      # Enable delegation-token RPCs on the broker.
-      #
-      # The Kafka CRD does not (yet) expose a `spec.kafka.delegationToken`
-      # surface — that is left to a follow-up slice. For the e2e we inject
-      # the master HMAC key directly via `kubectl set env`, which patches
-      # the StatefulSet and rolls the broker pod. The broker's slice-51
-      # config layer reads `CRABKA_DELEGATION_TOKEN_SECRET_KEY` from env
-      # (env wins over TOML) and flips the four delegation-token RPCs
-      # from `DELEGATION_TOKEN_AUTH_DISABLED` to live.
-      # ─────────────────────────────────────────────────────────────────────
-      - name: Inject delegation-token master key + wait reroll
-        run: |
-          set -e
-          kubectl set env statefulset/demo-brokers -n default \
-            CRABKA_DELEGATION_TOKEN_SECRET_KEY=e2e-delegation-master-key
-          kubectl rollout status statefulset/demo-brokers -n default --timeout=300s
-          for i in $(seq 1 60); do
-            s=$(kubectl get kafka demo -n default \
-              -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
-            echo "attempt $i: post-reroll Ready=$s"
-            if [ "$s" = "True" ]; then break; fi
-            sleep 5
-          done
-          [ "$s" = "True" ] || {
-            echo "::error::Kafka demo did not return to Ready after env injection"
-            kubectl describe kafka demo -n default
             kubectl logs -n default demo-brokers-0 -c broker --tail=200 || true
             exit 1
           }

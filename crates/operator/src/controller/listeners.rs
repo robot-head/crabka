@@ -913,6 +913,7 @@ mod service_rendering_tests {
                 cluster_ca: None,
                 clients_ca: None,
                 logging: None,
+                delegation_token: None,
             },
         );
         k.meta_mut().namespace = Some("default".into());

@@ -44,6 +44,7 @@ fn kafka_cr_with_listeners(name: &str, namespace: &str, listeners: Vec<Listener>
             cluster_ca: None,
             clients_ca: None,
             logging: None,
+            delegation_token: None,
         },
     );
     k.metadata.namespace = Some(namespace.into());
