@@ -393,6 +393,13 @@ pub struct SignedJwsValidator {
     pub groups_claim: Option<JpQuery>,
     /// Slice 49h: delimiter when `groups_claim` resolves to a string.
     pub groups_claim_delimiter: Option<String>,
+    /// Slice 49i: hard cache-expiry threshold, in milliseconds. When set,
+    /// the validator rejects tokens if the paired refresher has not had a
+    /// successful fetch within this window (using
+    /// [`JwksHandle::last_successful_fetch_ms`]). `None` = no expiry check
+    /// (slice 49b behavior). Fails closed on prolonged `IdP` outage so a
+    /// rotated-out key can't keep signing valid tokens indefinitely.
+    pub expiry_ms: Option<i64>,
     /// The live JWKS, swapped in by the broker's refresher.
     keys: JwksHandle,
 }
@@ -413,6 +420,7 @@ impl SignedJwsValidator {
             fallback_user_name_prefix: None,
             groups_claim: None,
             groups_claim_delimiter: None,
+            expiry_ms: None,
             keys,
         }
     }
@@ -454,15 +462,46 @@ impl SignedJwsValidator {
         {
             return Err(AuthError::InvalidToken);
         }
+
+        // Slice 49i: hard cache-expiry. If the last successful refresh is
+        // older than `expiry_ms`, reject all tokens until the refresher
+        // succeeds again. The `last_fetch > 0` guard skips this on a
+        // never-fetched handle so the slice-49b "broker is still starting
+        // up" path stays open (the verify-level check below will reject
+        // anyway because the key set is empty).
+        if let Some(expiry_ms) = self.expiry_ms {
+            let last_fetch = self.keys.last_successful_fetch_ms();
+            if last_fetch > 0 && now_ms.saturating_sub(last_fetch) > expiry_ms {
+                tracing::debug!(
+                    last_fetch_ms = last_fetch,
+                    now_ms,
+                    expiry_ms,
+                    "JWKS cache expired; rejecting token until next successful refresh",
+                );
+                return Err(AuthError::InvalidToken);
+            }
+        }
+
         let kid = header.get("kid").and_then(Value::as_str);
 
         let signing_input = format!("{header_b64}.{payload_b64}");
         let sig = B64URL
             .decode(sig_b64)
             .map_err(|_| AuthError::InvalidToken)?;
-        self.keys
+        // Slice 49i: on any verify failure (unknown kid or bad signature)
+        // signal the refresher to attempt an on-demand JWKS fetch — the
+        // signing key may have rotated since the last periodic refresh.
+        // The current token still rejects; a subsequent reconnect will
+        // see the rotated keys. The refresher's `min_on_demand_pause`
+        // caps the signal-storm cost.
+        if let Err(e) = self
+            .keys
             .load()
-            .verify(kid, alg, signing_input.as_bytes(), &sig)?;
+            .verify(kid, alg, signing_input.as_bytes(), &sig)
+        {
+            self.keys.signal_refresh();
+            return Err(e);
+        }
 
         let claims: Value = decode_json_segment(payload_b64)?;
         self.check_claims(&claims, now_ms)
@@ -1245,7 +1284,7 @@ mod tests {
 
     /// Build a `SignedJwsValidator` whose key set is populated from `jwks_json`.
     fn signed(jwks_json: &str) -> (SignedJwsValidator, JwksHandle) {
-        let handle = JwksHandle::new(Jwks::from_json(jwks_json).unwrap());
+        let handle = JwksHandle::new(Jwks::from_json(jwks_json, false).unwrap());
         (SignedJwsValidator::new(handle.clone()), handle)
     }
 
@@ -1457,7 +1496,7 @@ mod tests {
         // Rotate to a fresh key set (same kid, new key). Token A no longer
         // verifies; a token under the new key does. Same validator instance.
         let (token_b, jwks_b) = mint_es256("k1", "{\"sub\":\"b\",\"exp\":9999999999}");
-        handle.store(Jwks::from_json(&jwks_b).unwrap());
+        handle.store(Jwks::from_json(&jwks_b, false).unwrap());
         assert_eq!(
             v.validate(&token_a, 1_000_000_000_000),
             Err(AuthError::InvalidToken)
@@ -1510,6 +1549,110 @@ mod tests {
         assert_eq!(
             outcome.principal.groups,
             vec!["admin".to_string(), "ops".to_string()]
+        );
+    }
+
+    // ---- Slice 49i: cache expiry + signal-on-verify-failure ----------------
+
+    /// Build a signed validator whose paired `JwksHandle` carries explicit
+    /// `last_successful_fetch_ms` and a fresh signal channel. Returns the
+    /// validator and the receiver so tests can assert on emitted signals.
+    fn signed_with_handles(
+        jwks_json: &str,
+        last_successful_fetch_ms: i64,
+    ) -> (SignedJwsValidator, tokio::sync::mpsc::Receiver<()>) {
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicI64;
+        let (tx, rx) = tokio::sync::mpsc::channel::<()>(1);
+        let ts = Arc::new(AtomicI64::new(last_successful_fetch_ms));
+        let handle = JwksHandle::new_with_refresher_handles(
+            Jwks::from_json(jwks_json, false).unwrap(),
+            ts,
+            tx,
+        );
+        (SignedJwsValidator::new(handle), rx)
+    }
+
+    #[test]
+    fn signed_validate_rejects_when_jwks_cache_expired() {
+        let now_ms: i64 = 10_000_000;
+        let exp_secs: i64 = (now_ms / 1000) + 60;
+        let (token, jwks) = mint_rs256("k1", &format!("{{\"sub\":\"alice\",\"exp\":{exp_secs}}}"));
+        // Last fetch 2s ago; expiry threshold 1s ⇒ expired.
+        let (mut v, _rx) = signed_with_handles(&jwks, now_ms - 2_000);
+        v.expiry_ms = Some(1_000);
+        assert_eq!(v.validate(&token, now_ms), Err(AuthError::InvalidToken));
+    }
+
+    #[test]
+    fn signed_validate_accepts_when_jwks_cache_within_expiry() {
+        let now_ms: i64 = 10_000_000;
+        let exp_secs: i64 = (now_ms / 1000) + 60;
+        let (token, jwks) = mint_rs256("k1", &format!("{{\"sub\":\"alice\",\"exp\":{exp_secs}}}"));
+        // Last fetch 500ms ago; expiry threshold 1s ⇒ still fresh.
+        let (mut v, _rx) = signed_with_handles(&jwks, now_ms - 500);
+        v.expiry_ms = Some(1_000);
+        let outcome = v.validate(&token, now_ms).expect("valid");
+        assert_eq!(outcome.principal.name, "alice");
+    }
+
+    #[test]
+    fn signed_validate_accepts_when_expiry_unset_regardless_of_cache_age() {
+        let now_ms: i64 = 10_000_000;
+        let exp_secs: i64 = (now_ms / 1000) + 60;
+        let (token, jwks) = mint_rs256("k1", &format!("{{\"sub\":\"alice\",\"exp\":{exp_secs}}}"));
+        // Cache "is" very stale, but expiry_ms = None ⇒ no check fires.
+        let (v, _rx) = signed_with_handles(&jwks, now_ms - 999_999_999);
+        // expiry_ms left at default None.
+        assert!(v.validate(&token, now_ms).is_ok());
+    }
+
+    #[test]
+    fn signed_validate_skips_expiry_check_when_never_fetched() {
+        // last_successful_fetch_ms still at 0 ⇒ no expiry math runs (the
+        // never-fetched broker-startup window stays open; verify will fail
+        // anyway because the served key set is intact, but the expiry path
+        // must not preempt with a spurious rejection).
+        let now_ms: i64 = 10_000_000;
+        let exp_secs: i64 = (now_ms / 1000) + 60;
+        let (token, jwks) = mint_rs256("k1", &format!("{{\"sub\":\"alice\",\"exp\":{exp_secs}}}"));
+        let (mut v, _rx) = signed_with_handles(&jwks, 0);
+        v.expiry_ms = Some(1);
+        // Cache "age" math would say "very expired" if we ran it, but the
+        // sentinel-zero guard skips. Verification succeeds.
+        assert!(v.validate(&token, now_ms).is_ok());
+    }
+
+    #[test]
+    fn signed_validate_signals_refresh_on_unknown_kid() {
+        let now_ms: i64 = 10_000_000;
+        let exp_secs: i64 = (now_ms / 1000) + 60;
+        // Token's header advertises kid="k1" (the default rs256 mint), but the
+        // served JWKS has a different kid ⇒ verify() returns InvalidToken AND
+        // signal_refresh() fires.
+        let (token, _jwks_with_k1) =
+            mint_rs256("k1", &format!("{{\"sub\":\"alice\",\"exp\":{exp_secs}}}"));
+        // Hand-craft a JWKS with a different kid so verify can't find k1.
+        let mismatched_jwks =
+            r#"{"keys":[{"kty":"RSA","kid":"other","n":"AQAB","e":"AQAB"}]}"#.to_string();
+        let (v, mut rx) = signed_with_handles(&mismatched_jwks, now_ms);
+        assert_eq!(v.validate(&token, now_ms), Err(AuthError::InvalidToken));
+        assert!(
+            rx.try_recv().is_ok(),
+            "validator should signal refresh on verify failure",
+        );
+    }
+
+    #[test]
+    fn signed_validate_does_not_signal_when_verification_succeeds() {
+        let now_ms: i64 = 10_000_000;
+        let exp_secs: i64 = (now_ms / 1000) + 60;
+        let (token, jwks) = mint_rs256("k1", &format!("{{\"sub\":\"alice\",\"exp\":{exp_secs}}}"));
+        let (v, mut rx) = signed_with_handles(&jwks, now_ms);
+        assert!(v.validate(&token, now_ms).is_ok());
+        assert!(
+            rx.try_recv().is_err(),
+            "happy-path verification should not signal a refresh",
         );
     }
 

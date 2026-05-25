@@ -290,6 +290,32 @@ pub struct ListenerAuthenticationOAuth {
     /// when the claim is an array. CRD-validated `minLength: 1`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub groups_claim_delimiter: Option<String>,
+    /// Slice 49i: minimum pause (seconds) between on-demand JWKS
+    /// refreshes triggered by tokens with unknown `kid`. When the
+    /// broker receives a token whose `kid` isn't in the cached
+    /// JWKS, it triggers an immediate refresh; this field
+    /// rate-limits to protect the `IdP` from being hammered by a
+    /// stream of bad tokens. Strimzi default: 1. CRD-validated
+    /// `minimum: 0` (0 = no rate-limit). JWT-mode only — rejected
+    /// when `accessTokenIsJwt: false`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jwks_min_refresh_pause_seconds: Option<u32>,
+    /// Slice 49i: maximum age (seconds) of the cached JWKS before
+    /// validators reject tokens until next successful refresh.
+    /// Distinct from `jwksRefreshSeconds` (the periodic cadence) —
+    /// this is the HARD expiry that fails closed if the `IdP` is
+    /// unreachable for too long. Strimzi default: 360 (6 minutes).
+    /// CRD-validated `minimum: 1`. JWT-mode only — rejected when
+    /// `accessTokenIsJwt: false`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jwks_expiry_seconds: Option<u32>,
+    /// Slice 49i: when true, accept JWKS keys with any `use` field
+    /// value (not just `sig`). Default false matches Strimzi/JWS
+    /// behavior of filtering out encryption-only keys. Set true for
+    /// `IdPs` that mis-tag their signing keys. JWT-mode only —
+    /// rejected when `accessTokenIsJwt: false`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jwks_ignore_key_use: Option<bool>,
 }
 
 fn default_true() -> bool {
@@ -376,6 +402,9 @@ fn listener_authentication_schema(_: &mut schemars::SchemaGenerator) -> schemars
             "fallbackUserNamePrefix": { "type": "string", "minLength": 1 },
             "groupsClaim":            { "type": "string", "minLength": 1 },
             "groupsClaimDelimiter":   { "type": "string", "minLength": 1 },
+            "jwksMinRefreshPauseSeconds": { "type": "integer", "format": "int32", "minimum": 0 },
+            "jwksExpirySeconds":          { "type": "integer", "format": "int32", "minimum": 1 },
+            "jwksIgnoreKeyUse":           { "type": "boolean" },
         },
     })
 }
@@ -527,6 +556,9 @@ authentication:
             fallback_user_name_prefix: None,
             groups_claim: None,
             groups_claim_delimiter: None,
+            jwks_min_refresh_pause_seconds: None,
+            jwks_expiry_seconds: None,
+            jwks_ignore_key_use: None,
         };
         assert_eq!(
             l.authentication,
@@ -615,6 +647,9 @@ authentication:
             fallback_user_name_prefix: None,
             groups_claim: None,
             groups_claim_delimiter: None,
+            jwks_min_refresh_pause_seconds: None,
+            jwks_expiry_seconds: None,
+            jwks_ignore_key_use: None,
         });
         let json = serde_json::to_string(&auth).unwrap();
         assert!(
@@ -647,6 +682,9 @@ authentication:
             fallback_user_name_prefix: None,
             groups_claim: None,
             groups_claim_delimiter: None,
+            jwks_min_refresh_pause_seconds: None,
+            jwks_expiry_seconds: None,
+            jwks_ignore_key_use: None,
         });
         let json = serde_json::to_string(&auth).unwrap();
         assert!(json.contains("\"enableOauthBearer\":false"), "got: {json}");
@@ -737,6 +775,9 @@ authentication:
             "fallbackUserNamePrefix",
             "groupsClaim",
             "groupsClaimDelimiter",
+            "jwksMinRefreshPauseSeconds",
+            "jwksExpirySeconds",
+            "jwksIgnoreKeyUse",
         ] {
             assert!(props.contains_key(want), "missing property {want}");
         }
@@ -795,6 +836,9 @@ authentication:
             fallback_user_name_prefix: None,
             groups_claim: None,
             groups_claim_delimiter: None,
+            jwks_min_refresh_pause_seconds: None,
+            jwks_expiry_seconds: None,
+            jwks_ignore_key_use: None,
         };
         let json = serde_json::to_string(&original).unwrap();
         assert!(
@@ -829,6 +873,9 @@ authentication:
             fallback_user_name_prefix: None,
             groups_claim: None,
             groups_claim_delimiter: None,
+            jwks_min_refresh_pause_seconds: None,
+            jwks_expiry_seconds: None,
+            jwks_ignore_key_use: None,
         };
         let json = serde_json::to_string(&auth).unwrap();
         assert!(
@@ -879,6 +926,9 @@ authentication:
             fallback_user_name_prefix: None,
             groups_claim: None,
             groups_claim_delimiter: None,
+            jwks_min_refresh_pause_seconds: None,
+            jwks_expiry_seconds: None,
+            jwks_ignore_key_use: None,
         };
         let json = serde_json::to_string(&original).unwrap();
         assert!(
@@ -927,6 +977,9 @@ authentication:
             fallback_user_name_prefix: None,
             groups_claim: None,
             groups_claim_delimiter: None,
+            jwks_min_refresh_pause_seconds: None,
+            jwks_expiry_seconds: None,
+            jwks_ignore_key_use: None,
         };
         let json = serde_json::to_string(&auth).unwrap();
         assert!(
@@ -974,6 +1027,9 @@ authentication:
             fallback_user_name_prefix: None,
             groups_claim: None,
             groups_claim_delimiter: None,
+            jwks_min_refresh_pause_seconds: None,
+            jwks_expiry_seconds: None,
+            jwks_ignore_key_use: None,
         };
         let json = serde_json::to_string(&auth).unwrap();
         assert!(
@@ -1009,6 +1065,9 @@ authentication:
             fallback_user_name_prefix: None,
             groups_claim: None,
             groups_claim_delimiter: None,
+            jwks_min_refresh_pause_seconds: None,
+            jwks_expiry_seconds: None,
+            jwks_ignore_key_use: None,
         };
         let json = serde_json::to_string(&original).unwrap();
         assert!(
@@ -1058,6 +1117,9 @@ maxSecondsWithoutReauthentication: 300
             fallback_user_name_prefix: None,
             groups_claim: None,
             groups_claim_delimiter: None,
+            jwks_min_refresh_pause_seconds: None,
+            jwks_expiry_seconds: None,
+            jwks_ignore_key_use: None,
         };
         let auth = ListenerAuthentication::OAuth(cfg);
         let yaml = serde_yaml::to_string(&auth).expect("yaml must serialize");
@@ -1111,6 +1173,9 @@ validTokenType: JWT
             fallback_user_name_prefix: None,
             groups_claim: None,
             groups_claim_delimiter: None,
+            jwks_min_refresh_pause_seconds: None,
+            jwks_expiry_seconds: None,
+            jwks_ignore_key_use: None,
         };
         let auth = ListenerAuthentication::OAuth(cfg);
         let yaml = serde_yaml::to_string(&auth).expect("yaml must serialize");
@@ -1189,6 +1254,9 @@ groupsClaimDelimiter: ","
             fallback_user_name_prefix: None,
             groups_claim: None,
             groups_claim_delimiter: None,
+            jwks_min_refresh_pause_seconds: None,
+            jwks_expiry_seconds: None,
+            jwks_ignore_key_use: None,
         };
         let auth = ListenerAuthentication::OAuth(cfg);
         let yaml = serde_yaml::to_string(&auth).expect("yaml must serialize");
@@ -1197,6 +1265,64 @@ groupsClaimDelimiter: ","
             "fallbackUserNamePrefix",
             "groupsClaim",
             "groupsClaimDelimiter",
+        ] {
+            assert!(!yaml.contains(key), "{key} must be omitted; got:\n{yaml}");
+        }
+    }
+
+    #[test]
+    fn oauth_round_trip_with_jwks_policy_fields() {
+        let yaml = r"
+type: oauth
+validIssuerUri: https://issuer.example/
+jwksEndpointUri: https://issuer.example/jwks
+jwksMinRefreshPauseSeconds: 1
+jwksExpirySeconds: 3600
+jwksIgnoreKeyUse: false
+";
+        let parsed: ListenerAuthentication = serde_yaml::from_str(yaml).expect("yaml must parse");
+        let ListenerAuthentication::OAuth(oauth) = &parsed else {
+            panic!("expected oauth variant");
+        };
+        assert_eq!(oauth.jwks_min_refresh_pause_seconds, Some(1));
+        assert_eq!(oauth.jwks_expiry_seconds, Some(3600));
+        assert_eq!(oauth.jwks_ignore_key_use, Some(false));
+    }
+
+    #[test]
+    fn oauth_round_trip_without_jwks_policy_fields_omits_them() {
+        let cfg = ListenerAuthenticationOAuth {
+            valid_issuer_uri: "https://issuer.example/".into(),
+            jwks_endpoint_uri: Some("https://issuer.example/jwks".into()),
+            valid_audience: None,
+            user_name_claim: None,
+            custom_claim_check: None,
+            jwks_refresh_seconds: None,
+            max_clock_skew_seconds: None,
+            enable_oauth_bearer: true,
+            tls_trusted_certificates: vec![],
+            access_token_is_jwt: true,
+            introspection_endpoint_uri: None,
+            user_info_endpoint_uri: None,
+            client_id: None,
+            client_secret: None,
+            introspection_http_timeout_seconds: None,
+            max_seconds_without_reauthentication: None,
+            valid_token_type: None,
+            fallback_user_name_claim: None,
+            fallback_user_name_prefix: None,
+            groups_claim: None,
+            groups_claim_delimiter: None,
+            jwks_min_refresh_pause_seconds: None,
+            jwks_expiry_seconds: None,
+            jwks_ignore_key_use: None,
+        };
+        let auth = ListenerAuthentication::OAuth(cfg);
+        let yaml = serde_yaml::to_string(&auth).expect("yaml must serialize");
+        for key in [
+            "jwksMinRefreshPauseSeconds",
+            "jwksExpirySeconds",
+            "jwksIgnoreKeyUse",
         ] {
             assert!(!yaml.contains(key), "{key} must be omitted; got:\n{yaml}");
         }

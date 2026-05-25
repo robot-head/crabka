@@ -72,11 +72,18 @@ impl Jwks {
     /// about). A document that is not valid JSON or lacks a `keys` array is an
     /// error.
     ///
+    /// Slice 49i: when `ignore_key_use` is `false` (the default), keys with
+    /// `use=enc` are filtered out (encryption-only keys are unsuitable for
+    /// signature verification). When `true`, all keys are kept regardless of
+    /// `use`. Strimzi exposes the same toggle; some identity providers serve
+    /// signing keys with `use:"enc"` by mistake, and operators occasionally
+    /// need to override.
+    ///
     /// # Errors
     ///
     /// [`AuthError::MalformedMessage`] when the document is not valid JSON or
     /// has no `keys` array.
-    pub fn from_json(s: &str) -> Result<Self, AuthError> {
+    pub fn from_json(s: &str, ignore_key_use: bool) -> Result<Self, AuthError> {
         let doc: Value = serde_json::from_str(s).map_err(|_| AuthError::MalformedMessage)?;
         let arr = doc
             .get("keys")
@@ -84,12 +91,20 @@ impl Jwks {
             .ok_or(AuthError::MalformedMessage)?;
         let mut keys = HashMap::new();
         for jwk in arr {
-            let Some((kid, key)) = parse_one_jwk(jwk) else {
+            let Some((kid, key)) = parse_one_jwk(jwk, ignore_key_use) else {
                 continue;
             };
             keys.insert(kid, key);
         }
         Ok(Self { keys })
+    }
+
+    /// Whether this key set holds an entry for `kid`. Convenience for callers
+    /// that want to assert on individual keys without exposing the internal
+    /// map type.
+    #[must_use]
+    pub fn contains_kid(&self, kid: &str) -> bool {
+        self.keys.contains_key(kid)
     }
 
     /// Verify a JWS `signature` over `signing_input` (the ASCII
@@ -150,9 +165,10 @@ impl Jwks {
 
 /// Parse a single JWK object into a `(kid, key)` pair, or `None` for an
 /// unsupported / malformed key (skipped, not fatal). `use` is honored when
-/// present: a key explicitly marked for encryption (`use: "enc"`) is skipped.
-fn parse_one_jwk(jwk: &Value) -> Option<(String, JwkKey)> {
-    if jwk.get("use").and_then(Value::as_str) == Some("enc") {
+/// present: a key explicitly marked for encryption (`use: "enc"`) is skipped
+/// unless `ignore_key_use` is true (slice 49i).
+fn parse_one_jwk(jwk: &Value, ignore_key_use: bool) -> Option<(String, JwkKey)> {
+    if !ignore_key_use && jwk.get("use").and_then(Value::as_str) == Some("enc") {
         return None;
     }
     let kid = jwk
@@ -207,27 +223,90 @@ fn left_pad_32(bytes: &[u8]) -> Option<[u8; 32]> {
 /// refresher [`store`](JwksHandle::store)s a freshly-fetched key set while
 /// validators [`load`](JwksHandle::load) the current one with no lock. Cloning
 /// a handle shares the same underlying cell.
+///
+/// Slice 49i: handles paired with a refresher additionally carry a shared
+/// `last_successful_fetch_ms` counter (for hard cache-expiry checks in the
+/// signed validator) and a `signal_tx` mpsc sender (for fire-and-forget
+/// on-demand refresh requests when validators encounter unknown-kid /
+/// bad-signature tokens). Default-constructed handles carry no signal sender
+/// — `signal_refresh()` is a silent no-op on those.
 #[derive(Debug, Clone)]
-pub struct JwksHandle(Arc<ArcSwap<Jwks>>);
+pub struct JwksHandle {
+    keys: Arc<ArcSwap<Jwks>>,
+    /// Slice 49i: epoch ms of last successful refresh. Validators
+    /// check this against `expiry_ms` to fail closed on stale cache.
+    /// `0` sentinel = never successfully fetched (initial state).
+    last_successful_fetch_ms: Arc<std::sync::atomic::AtomicI64>,
+    /// Slice 49i: fire-and-forget signal sender to the refresher.
+    /// Validator calls `signal_refresh()` on verify failure (unknown
+    /// kid or bad signature). `None` when the validator isn't paired
+    /// with a refresher (e.g., default-constructed `JwksHandle` in
+    /// non-signed validators or pre-`apply_to` state).
+    signal_tx: Option<tokio::sync::mpsc::Sender<()>>,
+}
 
 impl JwksHandle {
-    /// Wrap an initial key set (often [`Jwks::empty`] at startup).
+    /// Wrap an initial key set (often [`Jwks::empty`] at startup) with NO
+    /// refresher coordination. Used by default-constructed handles and tests
+    /// that don't need the signal channel. `signal_refresh()` on these is a
+    /// silent no-op.
     #[must_use]
     pub fn new(jwks: Jwks) -> Self {
-        Self(Arc::new(ArcSwap::from_pointee(jwks)))
+        Self {
+            keys: Arc::new(ArcSwap::from_pointee(jwks)),
+            last_successful_fetch_ms: Arc::new(std::sync::atomic::AtomicI64::new(0)),
+            signal_tx: None,
+        }
+    }
+
+    /// Slice 49i: wrap an initial key set WITH the shared timestamp counter
+    /// and signal sender pre-wired. The refresher constructs its own
+    /// `(signal_tx, signal_rx)` pair and passes `signal_tx` here; the
+    /// refresher holds `signal_rx` and a clone of the shared
+    /// `Arc<AtomicI64>` for timestamp updates.
+    #[must_use]
+    pub fn new_with_refresher_handles(
+        jwks: Jwks,
+        last_successful_fetch_ms: Arc<std::sync::atomic::AtomicI64>,
+        signal_tx: tokio::sync::mpsc::Sender<()>,
+    ) -> Self {
+        Self {
+            keys: Arc::new(ArcSwap::from_pointee(jwks)),
+            last_successful_fetch_ms,
+            signal_tx: Some(signal_tx),
+        }
     }
 
     /// Atomically replace the key set — called by the refresher after a
     /// successful fetch. Lock-free; concurrent `load`s see either the old or
     /// the new set, never a torn one.
     pub fn store(&self, jwks: Jwks) {
-        self.0.store(Arc::new(jwks));
+        self.keys.store(Arc::new(jwks));
     }
 
     /// Load the current key set. Cheap (an `Arc` clone).
     #[must_use]
     pub fn load(&self) -> Arc<Jwks> {
-        self.0.load_full()
+        self.keys.load_full()
+    }
+
+    /// Slice 49i: epoch-ms timestamp of last successful JWKS fetch. `0` if no
+    /// fetch has succeeded yet (initial state). Validators compare against
+    /// `now_ms - expiry_ms` to enforce hard cache expiry.
+    #[must_use]
+    pub fn last_successful_fetch_ms(&self) -> i64 {
+        self.last_successful_fetch_ms
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Slice 49i: fire-and-forget signal to the refresher that an on-demand
+    /// refresh is requested (e.g., unknown-kid token). Non-blocking — drops
+    /// silently if the channel is full (signals coalesce; one is enough).
+    /// No-op when `signal_tx` is `None` (default-constructed handles).
+    pub fn signal_refresh(&self) {
+        if let Some(tx) = &self.signal_tx {
+            let _ = tx.try_send(());
+        }
     }
 }
 
@@ -393,7 +472,7 @@ mod tests {
         let mut keys = ec["keys"].as_array().unwrap().clone();
         keys.extend(rsa["keys"].as_array().unwrap().clone());
         let merged = serde_json::json!({ "keys": keys }).to_string();
-        let jwks = Jwks::from_json(&merged).unwrap();
+        let jwks = Jwks::from_json(&merged, false).unwrap();
         assert_eq!(jwks.len(), 2);
     }
 
@@ -405,6 +484,7 @@ mod tests {
                 {"kty":"EC","crv":"P-384","kid":"big"},
                 {"kty":"RSA","use":"enc","kid":"enc1","n":"AQAB","e":"AQAB"}
             ]}"#,
+            false,
         )
         .unwrap();
         assert!(jwks.is_empty());
@@ -413,16 +493,19 @@ mod tests {
     #[test]
     fn rejects_non_json_and_missing_keys_array() {
         assert_eq!(
-            Jwks::from_json("not json"),
+            Jwks::from_json("not json", false),
             Err(AuthError::MalformedMessage)
         );
-        assert_eq!(Jwks::from_json("{}"), Err(AuthError::MalformedMessage));
+        assert_eq!(
+            Jwks::from_json("{}", false),
+            Err(AuthError::MalformedMessage)
+        );
     }
 
     #[test]
     fn verifies_valid_rs256() {
         let (token, jwks_json) = rs256("rsa1", "{\"sub\":\"admin\",\"exp\":9999999999}");
-        let jwks = Jwks::from_json(&jwks_json).unwrap();
+        let jwks = Jwks::from_json(&jwks_json, false).unwrap();
         let (kid, alg, si, sig) = parts(&token);
         assert!(jwks.verify(kid.as_deref(), &alg, &si, &sig).is_ok());
     }
@@ -431,7 +514,7 @@ mod tests {
     fn verifies_valid_es256() {
         let (kp, jwks_json) = es256_key("ec1");
         let token = es256_token(&kp, "ec1", "{\"sub\":\"admin\",\"exp\":9999999999}");
-        let jwks = Jwks::from_json(&jwks_json).unwrap();
+        let jwks = Jwks::from_json(&jwks_json, false).unwrap();
         let (kid, alg, si, sig) = parts(&token);
         assert!(jwks.verify(kid.as_deref(), &alg, &si, &sig).is_ok());
     }
@@ -439,7 +522,7 @@ mod tests {
     #[test]
     fn rejects_tampered_rs256_signature() {
         let (token, jwks_json) = rs256("rsa1", "{\"sub\":\"admin\",\"exp\":9999999999}");
-        let jwks = Jwks::from_json(&jwks_json).unwrap();
+        let jwks = Jwks::from_json(&jwks_json, false).unwrap();
         let (kid, alg, si, mut sig) = parts(&token);
         sig[0] ^= 0xff;
         assert_eq!(
@@ -451,7 +534,7 @@ mod tests {
     #[test]
     fn rejects_unknown_kid() {
         let (token, jwks_json) = rs256("rsa1", "{\"sub\":\"a\",\"exp\":9999999999}");
-        let jwks = Jwks::from_json(&jwks_json).unwrap();
+        let jwks = Jwks::from_json(&jwks_json, false).unwrap();
         let (_kid, alg, si, sig) = parts(&token);
         assert_eq!(
             jwks.verify(Some("other"), &alg, &si, &sig),
@@ -468,7 +551,7 @@ mod tests {
         let mut keys = ec["keys"].as_array().unwrap().clone();
         keys.extend(rsa["keys"].as_array().unwrap().clone());
         let merged = serde_json::json!({ "keys": keys }).to_string();
-        let jwks = Jwks::from_json(&merged).unwrap();
+        let jwks = Jwks::from_json(&merged, false).unwrap();
         // Token minted without a kid in the header.
         let header = b64(b"{\"alg\":\"ES256\"}");
         let payload = b64(b"{\"sub\":\"a\",\"exp\":9999999999}");
@@ -487,7 +570,7 @@ mod tests {
         let (kp_a, _jwks_a) = es256_key("ec1");
         let (_kp_b, jwks_b) = es256_key("ec1"); // same kid, different key
         let token = es256_token(&kp_a, "ec1", "{\"sub\":\"a\",\"exp\":9999999999}");
-        let jwks = Jwks::from_json(&jwks_b).unwrap();
+        let jwks = Jwks::from_json(&jwks_b, false).unwrap();
         let (kid, alg, si, sig) = parts(&token);
         assert_eq!(
             jwks.verify(kid.as_deref(), &alg, &si, &sig),
@@ -499,7 +582,7 @@ mod tests {
     fn rejects_alg_key_type_mismatch() {
         // RSA key set, but ask it to verify with ES256.
         let (token, jwks_json) = rs256("rsa1", "{\"sub\":\"a\",\"exp\":9999999999}");
-        let jwks = Jwks::from_json(&jwks_json).unwrap();
+        let jwks = Jwks::from_json(&jwks_json, false).unwrap();
         let (kid, _alg, si, sig) = parts(&token);
         assert_eq!(
             jwks.verify(kid.as_deref(), "ES256", &si, &sig),
@@ -512,8 +595,66 @@ mod tests {
         let h = JwksHandle::default();
         assert!(h.load().is_empty());
         let (_t, jwks_json) = rs256("rsa1", "{\"sub\":\"a\",\"exp\":9999999999}");
-        h.store(Jwks::from_json(&jwks_json).unwrap());
+        h.store(Jwks::from_json(&jwks_json, false).unwrap());
         assert_eq!(h.load().len(), 1);
+    }
+
+    // ---- Slice 49i: ignore_key_use filter + handle helpers ------------------
+
+    #[test]
+    fn parse_jwks_filters_use_enc_by_default() {
+        let json = r#"{
+            "keys": [
+                {"kty":"RSA","kid":"sig-key","use":"sig","n":"AQAB","e":"AQAB"},
+                {"kty":"RSA","kid":"enc-key","use":"enc","n":"AQAB","e":"AQAB"}
+            ]
+        }"#;
+        let jwks = Jwks::from_json(json, false).expect("parses");
+        assert!(jwks.contains_kid("sig-key"));
+        assert!(!jwks.contains_kid("enc-key"));
+    }
+
+    #[test]
+    fn parse_jwks_keeps_use_enc_when_ignore_key_use_true() {
+        let json = r#"{
+            "keys": [
+                {"kty":"RSA","kid":"sig-key","use":"sig","n":"AQAB","e":"AQAB"},
+                {"kty":"RSA","kid":"enc-key","use":"enc","n":"AQAB","e":"AQAB"}
+            ]
+        }"#;
+        let jwks = Jwks::from_json(json, true).expect("parses");
+        assert!(jwks.contains_kid("sig-key"));
+        assert!(jwks.contains_kid("enc-key"));
+    }
+
+    #[test]
+    fn parse_jwks_keeps_keys_with_absent_use_field_regardless() {
+        let json = r#"{
+            "keys": [
+                {"kty":"RSA","kid":"no-use","n":"AQAB","e":"AQAB"}
+            ]
+        }"#;
+        assert!(Jwks::from_json(json, false).unwrap().contains_kid("no-use"));
+        assert!(Jwks::from_json(json, true).unwrap().contains_kid("no-use"));
+    }
+
+    #[test]
+    fn default_handle_signal_refresh_is_silent_noop() {
+        // A handle constructed without refresher wiring must not panic on
+        // signal_refresh(); validators may share the same code path whether
+        // or not a refresher is paired.
+        let h = JwksHandle::default();
+        h.signal_refresh();
+        assert_eq!(h.last_successful_fetch_ms(), 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn paired_handle_signal_refresh_delivers_to_receiver() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(1);
+        let ts = Arc::new(std::sync::atomic::AtomicI64::new(0));
+        let h = JwksHandle::new_with_refresher_handles(Jwks::empty(), ts, tx);
+        h.signal_refresh();
+        assert!(rx.try_recv().is_ok(), "signal should land in receiver");
     }
 
     // Expose minting helpers to the sibling `oauthbearer` tests.

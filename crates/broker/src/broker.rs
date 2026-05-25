@@ -1232,15 +1232,32 @@ impl Broker {
         // validator's key handle, so a successful fetch rotates the keys the
         // SaslAuthenticate path reads — no restart, no lock. The first fetch
         // fires immediately on spawn. Child token of supervisor_shutdown.
+        // Slice 49i: consume the parked signal_rx + shared rate-limit /
+        // expiry-timestamp state from `apply_to`; on-demand refresh + cache
+        // expiry are wired here so the validator's `JwksHandle` and the
+        // refresher point at the same Arc-shared cells.
         if let Some(endpoint) = config.oauthbearer_jwks_endpoint.clone()
             && let Some(handle) = config.oauthbearer_validator.jwks_handle()
         {
+            let signal_rx = config
+                .oauthbearer_jwks_signal_rx
+                .lock()
+                .unwrap()
+                .take()
+                .expect("apply_to must park signal_rx whenever a signed validator is configured");
             let refresher = crate::oauth_jwks::JwksRefresher {
                 endpoint,
                 handle,
                 interval: config.oauthbearer_jwks_refresh_interval,
                 shutdown: supervisor_shutdown.child_token(),
                 tls_trust: config.oauthbearer_idp_tls_trust.clone(),
+                signal_rx,
+                min_on_demand_pause: config.oauthbearer_jwks_min_on_demand_pause,
+                last_successful_fetch_ms: config.oauthbearer_jwks_last_successful_fetch_ms.clone(),
+                last_on_demand_refresh_ms: config
+                    .oauthbearer_jwks_last_on_demand_refresh_ms
+                    .clone(),
+                ignore_key_use: config.oauthbearer_jwks_ignore_key_use,
             };
             tokio::spawn(refresher.run());
         }

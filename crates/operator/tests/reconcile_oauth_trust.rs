@@ -65,6 +65,9 @@ fn kafka_with_oauth_trust(name: &str, ns: &str, trust_certs: Vec<(&str, &str)>) 
         fallback_user_name_prefix: None,
         groups_claim: None,
         groups_claim_delimiter: None,
+        jwks_min_refresh_pause_seconds: None,
+        jwks_expiry_seconds: None,
+        jwks_ignore_key_use: None,
     };
     let listener = Listener {
         name: "oauth".into(),
