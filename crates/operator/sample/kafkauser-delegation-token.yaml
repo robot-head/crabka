@@ -1,0 +1,20 @@
+apiVersion: crabka.io/v1alpha1
+kind: KafkaUser
+metadata:
+  name: alice
+  namespace: kafka
+  labels:
+    crabka.io/cluster: my-cluster
+spec:
+  authentication:
+    type: delegation-token
+    # Optional: principals allowed to renew/expire this user's token
+    # in addition to the owner.
+    # renewers:
+    #   - User:bob
+    # Optional: hard ceiling on token lifetime (ms). Defaults to the
+    # broker's delegation.token.max.lifetime.ms (7d).
+    # maxLifetimeMs: 86400000
+    # Optional: renew when remaining lifetime drops below this many ms
+    # (default 24h, min 60s).
+    # renewBeforeExpiryMs: 7200000
