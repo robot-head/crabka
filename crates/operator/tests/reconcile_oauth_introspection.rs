@@ -72,6 +72,7 @@ fn introspection_oauth_cfg() -> ListenerAuthenticationOAuth {
         }),
         introspection_http_timeout_seconds: None,
         max_seconds_without_reauthentication: None,
+        valid_token_type: None,
     }
 }
 

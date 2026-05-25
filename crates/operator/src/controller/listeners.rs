@@ -82,8 +82,11 @@ pub enum ValidationError {
         listener: String,
         got: u32,
     },
-    /// `authentication.oauth.customClaimCheck.scope` is an empty string.
-    ListenerOauthCustomClaimCheckScopeEmpty(String),
+    /// Slice 49g: `validTokenType` set on an `accessTokenIsJwt: false`
+    /// listener. Introspection-mode validation has no JWT header to
+    /// check `typ` against; the field is rejected. The `String` carries
+    /// the listener name + a human-readable description.
+    ListenerOauthValidTokenTypeRejectedInIntrospectionMode(String),
     /// Two or more OAuth listeners declare differing configs. The broker
     /// `[oauthbearer]` block is broker-global (slice 49b), so per-listener
     /// OAuth divergence is not representable.
@@ -116,7 +119,9 @@ impl ValidationError {
                 "ListenerOauthInvalidUri"
             }
             Self::ListenerOauthJwksRefreshTooSmall { .. } => "ListenerOauthInvalidRefresh",
-            Self::ListenerOauthCustomClaimCheckScopeEmpty(_) => "ListenerOauthInvalidScope",
+            Self::ListenerOauthValidTokenTypeRejectedInIntrospectionMode(_) => {
+                "ListenerOauthValidTokenTypeRejectedInIntrospectionMode"
+            }
             Self::ConflictingOAuthListenerConfig => "ConflictingOAuthConfig",
             Self::ListenerOauthAccessTokenIsJwtInvalid(_) => "ListenerOauthAccessTokenIsJwtInvalid",
         }
@@ -167,15 +172,11 @@ impl ValidationError {
                     "listener '{listener}': authentication.oauth.jwksRefreshSeconds must be >= 30 (got {got})"
                 )
             }
-            Self::ListenerOauthCustomClaimCheckScopeEmpty(n) => {
-                format!(
-                    "listener '{n}': authentication.oauth.customClaimCheck.scope must be non-empty"
-                )
-            }
             Self::ConflictingOAuthListenerConfig => {
                 "all OAuth listeners must share identical config (per-listener OAuth is a future broker slice)".to_string()
             }
-            Self::ListenerOauthAccessTokenIsJwtInvalid(msg) => msg.clone(),
+            Self::ListenerOauthAccessTokenIsJwtInvalid(msg)
+            | Self::ListenerOauthValidTokenTypeRejectedInIntrospectionMode(msg) => msg.clone(),
         }
     }
 }
@@ -287,6 +288,16 @@ pub fn validate_listeners(
                         ),
                     ));
                 }
+                if cfg.valid_token_type.is_some() {
+                    return Err(
+                        ValidationError::ListenerOauthValidTokenTypeRejectedInIntrospectionMode(
+                            format!(
+                                "listener '{}': accessTokenIsJwt=false forbids validTokenType (no JWT header in introspection responses)",
+                                l.name
+                            ),
+                        ),
+                    );
+                }
             }
             if cfg.valid_issuer_uri.is_empty() {
                 return Err(ValidationError::ListenerOauthIssuerUriEmpty(l.name.clone()));
@@ -308,13 +319,6 @@ pub fn validate_listeners(
                     listener: l.name.clone(),
                     got: s,
                 });
-            }
-            if let Some(c) = &cfg.custom_claim_check
-                && c.scope.is_empty()
-            {
-                return Err(ValidationError::ListenerOauthCustomClaimCheckScopeEmpty(
-                    l.name.clone(),
-                ));
             }
         }
         if matches!(l.type_, ListenerType::Ingress | ListenerType::Route) {
@@ -1358,6 +1362,7 @@ mod tests {
             client_secret: None,
             introspection_http_timeout_seconds: None,
             max_seconds_without_reauthentication: None,
+            valid_token_type: None,
         }
     }
 
@@ -1448,22 +1453,6 @@ mod tests {
     }
 
     #[test]
-    fn validate_listeners_rejects_oauth_custom_claim_check_with_empty_scope() {
-        let mut cfg = oauth_cfg_minimal();
-        cfg.custom_claim_check = Some(crate::crd::OAuthCustomClaimCheck {
-            scope: String::new(),
-            scope_claim: None,
-        });
-        let listeners = vec![oauth_listener("oauth", 9095, true, cfg)];
-        let err = validate_listeners(&listeners, None).unwrap_err();
-        assert_eq!(err.reason(), "ListenerOauthInvalidScope");
-        assert!(matches!(
-            err,
-            ValidationError::ListenerOauthCustomClaimCheckScopeEmpty(ref n) if n == "oauth"
-        ));
-    }
-
-    #[test]
     fn validate_listeners_accepts_two_oauth_listeners_with_identical_config() {
         let cfg = oauth_cfg_minimal();
         let listeners = vec![
@@ -1509,10 +1498,7 @@ mod tests {
             jwks_endpoint_uri: Some("https://issuer.example.com/jwks".into()),
             valid_audience: Some("kafka".into()),
             user_name_claim: Some("preferred_username".into()),
-            custom_claim_check: Some(crate::crd::OAuthCustomClaimCheck {
-                scope: "kafka.write".into(),
-                scope_claim: Some("scope".into()),
-            }),
+            custom_claim_check: Some("$.scope[?@ == 'kafka.write']".into()),
             jwks_refresh_seconds: Some(300),
             max_clock_skew_seconds: Some(30),
             enable_oauth_bearer: true,
@@ -1524,6 +1510,7 @@ mod tests {
             client_secret: None,
             introspection_http_timeout_seconds: None,
             max_seconds_without_reauthentication: None,
+            valid_token_type: None,
         };
         let perturbations: Vec<(&str, crate::crd::ListenerAuthenticationOAuth)> = vec![
             (
@@ -1557,10 +1544,7 @@ mod tests {
             (
                 "custom_claim_check",
                 crate::crd::ListenerAuthenticationOAuth {
-                    custom_claim_check: Some(crate::crd::OAuthCustomClaimCheck {
-                        scope: "kafka.read".into(),
-                        scope_claim: Some("scope".into()),
-                    }),
+                    custom_claim_check: Some("$.scope[?@ == 'kafka.read']".into()),
                     ..base.clone()
                 },
             ),
@@ -1614,6 +1598,13 @@ mod tests {
                     ..base.clone()
                 },
             ),
+            (
+                "valid_token_type",
+                crate::crd::ListenerAuthenticationOAuth {
+                    valid_token_type: Some("JWT".into()),
+                    ..base.clone()
+                },
+            ),
         ];
         for (field, perturbed) in perturbations {
             let listeners = vec![
@@ -1657,6 +1648,7 @@ mod tests {
             }),
             introspection_http_timeout_seconds: None,
             max_seconds_without_reauthentication: None,
+            valid_token_type: None,
         };
         let perturbations: Vec<(&str, crate::crd::ListenerAuthenticationOAuth)> = vec![
             (
@@ -1738,6 +1730,7 @@ mod tests {
             }),
             introspection_http_timeout_seconds: None,
             max_seconds_without_reauthentication: None,
+            valid_token_type: None,
         }
     }
 
@@ -1914,6 +1907,54 @@ mod tests {
             };
             assert_eq!(listener_protocol(&l), expected, "tls={tls}, auth={auth:?}");
         }
+    }
+
+    // -----------------------------------------------------------------
+    // Slice 49g — validTokenType cross-mode validation
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn validate_listeners_rejects_valid_token_type_in_introspection_mode() {
+        // Introspection-mode listener with validTokenType set must be
+        // rejected: introspection responses carry no JWT header, so a
+        // `typ` check has nothing to bind against. Mirrors the new
+        // `ListenerOauthValidTokenTypeRejectedInIntrospectionMode`
+        // variant introduced in slice 49g.
+        let cfg = crate::crd::ListenerAuthenticationOAuth {
+            valid_issuer_uri: "https://iss.example/".into(),
+            jwks_endpoint_uri: None,
+            valid_audience: None,
+            user_name_claim: None,
+            custom_claim_check: None,
+            jwks_refresh_seconds: None,
+            max_clock_skew_seconds: None,
+            enable_oauth_bearer: true,
+            tls_trusted_certificates: vec![],
+            access_token_is_jwt: false,
+            introspection_endpoint_uri: Some("https://iss.example/introspect".into()),
+            user_info_endpoint_uri: None,
+            client_id: Some("kafka-broker".into()),
+            client_secret: Some(crate::crd::OauthClientSecretRef {
+                secret_name: "creds".into(),
+                key: "client-secret".into(),
+            }),
+            introspection_http_timeout_seconds: None,
+            max_seconds_without_reauthentication: None,
+            valid_token_type: Some("JWT".into()),
+        };
+        let listeners = vec![oauth_listener("oauth", 9096, true, cfg)];
+        let err = validate_listeners(&listeners, None).unwrap_err();
+        assert_eq!(
+            err.reason(),
+            "ListenerOauthValidTokenTypeRejectedInIntrospectionMode"
+        );
+        assert!(
+            matches!(
+                err,
+                ValidationError::ListenerOauthValidTokenTypeRejectedInIntrospectionMode(_)
+            ),
+            "unexpected error variant: {err:?}"
+        );
     }
 }
 
@@ -2610,14 +2651,6 @@ pub fn render_broker_toml(
         if let Some(claim) = &oauth_cfg.user_name_claim {
             let _ = writeln!(out, "principal_claim_name = \"{claim}\"");
         }
-        if let Some(ccc) = &oauth_cfg.custom_claim_check
-            && let Some(sc) = &ccc.scope_claim
-        {
-            let _ = writeln!(out, "scope_claim_name = \"{sc}\"");
-        }
-        if let Some(ccc) = &oauth_cfg.custom_claim_check {
-            let _ = writeln!(out, "required_scope = \"{}\"", ccc.scope);
-        }
         if let Some(s) = oauth_cfg.jwks_refresh_seconds {
             let _ = writeln!(out, "jwks_refresh_interval_ms = {}", u64::from(s) * 1000);
         }
@@ -2632,6 +2665,16 @@ pub fn render_broker_toml(
         }
         if let Some(s) = oauth_cfg.max_seconds_without_reauthentication {
             let _ = writeln!(out, "max_session_lifetime_seconds = {s}");
+        }
+        // Slice 49g: customClaimCheck (JsonPath expression) — use TOML multi-line
+        // literal `'''...'''` to avoid escape processing AND allow embedded `'`
+        // and `"` in the expression. JsonPath expressions commonly contain both.
+        if let Some(expr) = &oauth_cfg.custom_claim_check {
+            let _ = writeln!(out, "custom_claim_check = '''{expr}'''");
+        }
+        // Slice 49g: validTokenType (JWT typ header check).
+        if let Some(typ) = &oauth_cfg.valid_token_type {
+            let _ = writeln!(out, "valid_token_type = \"{typ}\"");
         }
         out.push('\n');
     }
@@ -2837,10 +2880,7 @@ mod toml_rendering_tests {
             ),
             valid_audience: Some("kafka".into()),
             user_name_claim: Some("preferred_username".into()),
-            custom_claim_check: Some(crate::crd::OAuthCustomClaimCheck {
-                scope: "kafka-broker".into(),
-                scope_claim: Some("scope".into()),
-            }),
+            custom_claim_check: Some("$.scope[?@ == 'kafka-broker']".into()),
             jwks_refresh_seconds: Some(300),
             max_clock_skew_seconds: Some(30),
             enable_oauth_bearer: true,
@@ -2852,6 +2892,7 @@ mod toml_rendering_tests {
             client_secret: None,
             introspection_http_timeout_seconds: None,
             max_seconds_without_reauthentication: None,
+            valid_token_type: None,
         }
     }
 
@@ -2923,10 +2964,9 @@ mod toml_rendering_tests {
         );
         assert!(toml.contains("expected_audience = \"kafka\""));
         assert!(toml.contains("principal_claim_name = \"preferred_username\""));
-        assert!(toml.contains("scope_claim_name = \"scope\""));
-        assert!(toml.contains("required_scope = \"kafka-broker\""));
         assert!(toml.contains("jwks_refresh_interval_ms = 300000"));
         assert!(toml.contains("allowable_clock_skew_ms = 30000"));
+        assert!(toml.contains("custom_claim_check = '''$.scope[?@ == 'kafka-broker']'''"));
     }
 
     #[test]
@@ -2949,6 +2989,7 @@ mod toml_rendering_tests {
             client_secret: None,
             introspection_http_timeout_seconds: None,
             max_seconds_without_reauthentication: None,
+            valid_token_type: None,
         };
         let listeners = vec![oauth_listener_for_render("oauth", 9095, true, cfg)];
         let toml = render_broker_toml(
@@ -3015,6 +3056,7 @@ mod toml_rendering_tests {
             client_secret: None,
             introspection_http_timeout_seconds: None,
             max_seconds_without_reauthentication: None,
+            valid_token_type: None,
         };
         let listeners = vec![oauth_listener_for_render("oauth", 9095, true, cfg)];
         let toml = render_broker_toml(
@@ -3175,8 +3217,10 @@ mod toml_rendering_tests {
             ob.principal_claim_name.as_deref(),
             Some("preferred_username")
         );
-        assert_eq!(ob.scope_claim_name.as_deref(), Some("scope"));
-        assert_eq!(ob.required_scope.as_deref(), Some("kafka-broker"));
+        assert_eq!(
+            ob.custom_claim_check.as_deref(),
+            Some("$.scope[?@ == 'kafka-broker']")
+        );
         assert_eq!(ob.jwks_refresh_interval_ms, Some(300_000));
         assert_eq!(ob.allowable_clock_skew_ms, Some(30_000));
     }
@@ -3225,10 +3269,7 @@ mod toml_rendering_tests {
             jwks_endpoint_uri: Some("https://idp.example/certs".into()),
             valid_audience: Some("kafka-broker".into()),
             user_name_claim: Some("preferred_username".into()),
-            custom_claim_check: Some(crate::crd::OAuthCustomClaimCheck {
-                scope: "kafka.write".into(),
-                scope_claim: Some("scope".into()),
-            }),
+            custom_claim_check: Some("$.scope[?@ == 'kafka.write']".into()),
             jwks_refresh_seconds: Some(300),
             max_clock_skew_seconds: Some(60),
             enable_oauth_bearer: true,
@@ -3240,6 +3281,7 @@ mod toml_rendering_tests {
             client_secret: None,
             introspection_http_timeout_seconds: None,
             max_seconds_without_reauthentication: None,
+            valid_token_type: None,
         };
         let listeners = vec![oauth_listener_for_render("oauth", 9095, true, cfg)];
         let toml = render_broker_toml(
@@ -3256,10 +3298,9 @@ mod toml_rendering_tests {
             valid_issuer_uri = \"https://idp.example/realms/kafka\"\n\
             expected_audience = \"kafka-broker\"\n\
             principal_claim_name = \"preferred_username\"\n\
-            scope_claim_name = \"scope\"\n\
-            required_scope = \"kafka.write\"\n\
             jwks_refresh_interval_ms = 300000\n\
-            allowable_clock_skew_ms = 60000\n";
+            allowable_clock_skew_ms = 60000\n\
+            custom_claim_check = '''$.scope[?@ == 'kafka.write']'''\n";
         assert!(
             toml.contains(expected),
             "expected canonical [oauthbearer] block not found.\n--- expected ---\n{expected}\n--- got ---\n{toml}"
@@ -3291,6 +3332,7 @@ mod toml_rendering_tests {
             }),
             introspection_http_timeout_seconds: Some(15),
             max_seconds_without_reauthentication: None,
+            valid_token_type: None,
         }
     }
 
@@ -3452,6 +3494,78 @@ mod toml_rendering_tests {
         assert!(toml.contains("protocol = \"Ssl\""));
         assert!(toml.contains("client_ca_path = \"/etc/crabka/clients-ca/ca.crt\""));
         assert!(toml.contains("client_auth = \"Required\""));
+    }
+
+    // -----------------------------------------------------------------
+    // Slice 49g — customClaimCheck + validTokenType render
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn render_broker_toml_emits_custom_claim_check_when_set() {
+        // The JsonPath expression must be emitted in a TOML multi-line
+        // literal (`'''...'''`) so embedded `'` and `"` characters in the
+        // expression don't trip escape processing or string termination.
+        use std::collections::BTreeMap;
+        let mut oauth = oauth_full_cfg();
+        oauth.custom_claim_check = Some("$.scope[?@ == 'kafka.write']".into());
+        let listeners = vec![oauth_listener_for_render("oauth", 9096, true, oauth)];
+        let toml = render_broker_toml(
+            0,
+            &listeners,
+            &addrs_for("oauth", 9096),
+            "oauth",
+            &BTreeMap::new(),
+            Some(&render_tls()),
+            None,
+        );
+        assert!(
+            toml.contains("custom_claim_check = '''$.scope[?@ == 'kafka.write']'''"),
+            "expected custom_claim_check render; got:\n{toml}"
+        );
+    }
+
+    #[test]
+    fn render_broker_toml_emits_valid_token_type_when_set() {
+        use std::collections::BTreeMap;
+        let mut oauth = oauth_full_cfg();
+        oauth.valid_token_type = Some("JWT".into());
+        let listeners = vec![oauth_listener_for_render("oauth", 9096, true, oauth)];
+        let toml = render_broker_toml(
+            0,
+            &listeners,
+            &addrs_for("oauth", 9096),
+            "oauth",
+            &BTreeMap::new(),
+            Some(&render_tls()),
+            None,
+        );
+        assert!(
+            toml.contains("valid_token_type = \"JWT\""),
+            "expected valid_token_type render; got:\n{toml}"
+        );
+    }
+
+    #[test]
+    fn render_broker_toml_omits_custom_claim_check_when_unset() {
+        // Default oauth_full_cfg() now has custom_claim_check set; clear
+        // it explicitly so the omit branch is exercised.
+        use std::collections::BTreeMap;
+        let mut oauth = oauth_full_cfg();
+        oauth.custom_claim_check = None;
+        let listeners = vec![oauth_listener_for_render("oauth", 9096, true, oauth)];
+        let toml = render_broker_toml(
+            0,
+            &listeners,
+            &addrs_for("oauth", 9096),
+            "oauth",
+            &BTreeMap::new(),
+            Some(&render_tls()),
+            None,
+        );
+        assert!(
+            !toml.contains("custom_claim_check"),
+            "TOML must omit custom_claim_check when None; got:\n{toml}"
+        );
     }
 }
 
@@ -4006,6 +4120,7 @@ mod weak_auth_tests {
                     client_secret: None,
                     introspection_http_timeout_seconds: None,
                     max_seconds_without_reauthentication: None,
+                    valid_token_type: None,
                 },
             )),
             configuration: None,

@@ -240,7 +240,7 @@ impl Default for JwksHandle {
 // Token-minting helpers the sibling `oauthbearer` tests reuse. Declared before
 // the test module so clippy's `items_after_test_module` stays quiet.
 #[cfg(test)]
-pub(crate) use tests::{mint_es256, mint_rs256};
+pub(crate) use tests::{mint_es256, mint_rs256, mint_rs256_with_header};
 
 #[cfg(test)]
 mod tests {
@@ -519,6 +519,35 @@ mod tests {
     // Expose minting helpers to the sibling `oauthbearer` tests.
     pub(crate) fn mint_rs256(kid: &str, claims: &str) -> (String, String) {
         rs256(kid, claims)
+    }
+
+    /// Mint an RS256 token with a fully-controlled header JSON (so the
+    /// caller can drive `typ` / `kid` / extra header fields). Returns
+    /// `(token, jwks_json)` like the other minters.
+    pub(crate) fn mint_rs256_with_header(header_json: &str, claims: &str) -> (String, String) {
+        let der = rsa_pkcs8();
+        let kp = RsaKeyPair::from_pkcs8(&der).unwrap();
+        let signing_input = format!("{}.{}", b64(header_json.as_bytes()), b64(claims.as_bytes()));
+        let mut sig = vec![0u8; kp.public().modulus_len()];
+        kp.sign(
+            &signature::RSA_PKCS1_SHA256,
+            &SystemRandom::new(),
+            signing_input.as_bytes(),
+            &mut sig,
+        )
+        .unwrap();
+        let token = format!("{signing_input}.{}", b64(&sig));
+
+        // Echo the JWKS used by `rs256` so the validator can verify the
+        // signature. Default kid="k1" so tests don't have to thread it.
+        let pkcs1 = kp.public().as_ref();
+        let (n, e) = split_pkcs1_public(pkcs1);
+        let jwks = format!(
+            "{{\"keys\":[{{\"kty\":\"RSA\",\"kid\":\"k1\",\"n\":\"{}\",\"e\":\"{}\"}}]}}",
+            b64(&n),
+            b64(&e),
+        );
+        (token, jwks)
     }
 
     /// Mint an ES256 token under a *fresh* key, returning `(token, jwks_json)`.

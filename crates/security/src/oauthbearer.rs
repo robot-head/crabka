@@ -16,6 +16,8 @@ use std::sync::Arc;
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
+use jsonpath_rust::parser::model::JpQuery;
+use jsonpath_rust::query::js_path_process;
 use serde_json::Value;
 
 use crate::jwks::JwksHandle;
@@ -113,27 +115,29 @@ fn parse_gs2_header(gs2: &str) -> Result<Option<String>, AuthError> {
 /// Validates an *unsecured* JWS bearer token (`alg: none`) and derives the
 /// connection principal. Mirrors Kafka's
 /// `OAuthBearerUnsecuredValidatorCallbackHandler`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct UnsecuredJwsValidator {
     /// Claim whose string value becomes the principal name. Default `sub`.
     pub principal_claim_name: String,
-    /// Claim carrying the token scope (string or array of strings). Default
-    /// `scope`. Only consulted when `required_scope` is set.
-    pub scope_claim_name: String,
-    /// When set, the token scope must contain this value or validation fails.
-    pub required_scope: Option<String>,
     /// Tolerance, in milliseconds, applied to the `exp` / `iat` temporal
     /// checks to absorb clock drift between the client and broker.
     pub allowable_clock_skew_ms: i64,
+    /// Slice 49g: precompiled `JsonPath` expression evaluated against the
+    /// token's claim set. Token is rejected when the expression yields
+    /// empty/null/false. Compile once at validator construction.
+    pub custom_claim_check: Option<JpQuery>,
+    /// Slice 49g: when set, the JWT `typ` header field must equal this
+    /// string. Ignored when unset.
+    pub valid_token_type: Option<String>,
 }
 
 impl Default for UnsecuredJwsValidator {
     fn default() -> Self {
         Self {
             principal_claim_name: "sub".to_string(),
-            scope_claim_name: "scope".to_string(),
-            required_scope: None,
             allowable_clock_skew_ms: 30_000,
+            custom_claim_check: None,
+            valid_token_type: None,
         }
     }
 }
@@ -166,6 +170,12 @@ impl UnsecuredJwsValidator {
         if header.get("alg").and_then(Value::as_str) != Some("none") {
             return Err(AuthError::InvalidToken);
         }
+        // Slice 49g: optional JWT `typ` header check (JWT-mode validator only).
+        if let Some(expected_typ) = &self.valid_token_type
+            && header.get("typ").and_then(Value::as_str) != Some(expected_typ.as_str())
+        {
+            return Err(AuthError::InvalidToken);
+        }
 
         let claims: Value = decode_json_segment(payload_b64)?;
 
@@ -181,8 +191,9 @@ impl UnsecuredJwsValidator {
             return Err(AuthError::InvalidToken);
         }
 
-        if let Some(required) = &self.required_scope
-            && !self.scope_contains(&claims, required)
+        // Slice 49g: optional JsonPath custom_claim_check.
+        if let Some(path) = &self.custom_claim_check
+            && !evaluate_custom_claim_check(path, &claims)
         {
             return Err(AuthError::InvalidToken);
         }
@@ -202,27 +213,26 @@ impl UnsecuredJwsValidator {
             expires_at_ms: Some(exp_ms),
         })
     }
-
-    /// Whether the token scope claim contains `required`. The scope claim may
-    /// be a space-delimited string or a JSON array of strings (both per
-    /// Kafka's `OAuthBearerUnsecuredJws`).
-    fn scope_contains(&self, claims: &Value, required: &str) -> bool {
-        scope_claim_contains(claims, &self.scope_claim_name, required)
-    }
 }
 
-/// Whether the `scope_claim_name` claim of `claims` contains `required`. The
-/// scope claim may be a space-delimited string or a JSON array of strings.
-/// Shared by the unsecured and signed validators.
-fn scope_claim_contains(claims: &Value, scope_claim_name: &str, required: &str) -> bool {
-    match claims.get(scope_claim_name) {
-        Some(Value::String(s)) => s.split_whitespace().any(|sc| sc == required),
-        Some(Value::Array(items)) => items
-            .iter()
-            .filter_map(Value::as_str)
-            .any(|sc| sc == required),
-        _ => false,
+/// Evaluate a precompiled `JsonPath` expression against the token claims.
+/// Returns true when the result is truthy (non-empty, with no element being
+/// null or false); false otherwise. Matches Strimzi's "expression yields
+/// truthy" semantics. Errors during evaluation count as falsy (rejection).
+fn evaluate_custom_claim_check(path: &JpQuery, claims: &Value) -> bool {
+    let Ok(refs) = js_path_process(path, claims) else {
+        return false;
+    };
+    if refs.is_empty() {
+        return false;
     }
+    for r in refs {
+        match r.val() {
+            Value::Null | Value::Bool(false) => return false,
+            _ => {}
+        }
+    }
+    true
 }
 
 /// Whether the JWT `aud` claim contains `expected`. `aud` is a single string
@@ -282,16 +292,17 @@ pub fn invalid_token_json() -> String {
 pub struct SignedJwsValidator {
     /// Claim whose string value becomes the principal name. Default `sub`.
     pub principal_claim_name: String,
-    /// Claim carrying the token scope (string or array). Default `scope`.
-    pub scope_claim_name: String,
-    /// When set, the token scope must contain this value.
-    pub required_scope: Option<String>,
     /// Tolerance, in milliseconds, applied to `exp` / `iat` / `nbf`.
     pub allowable_clock_skew_ms: i64,
     /// When set, the token `iss` claim must equal this exactly.
     pub valid_issuer: Option<String>,
     /// When set, the token `aud` claim must contain this value.
     pub expected_audience: Option<String>,
+    /// Slice 49g: precompiled `JsonPath` `custom_claim_check`. See
+    /// [`UnsecuredJwsValidator`] for semantics.
+    pub custom_claim_check: Option<JpQuery>,
+    /// Slice 49g: JWT `typ` header check. Ignored when unset.
+    pub valid_token_type: Option<String>,
     /// The live JWKS, swapped in by the broker's refresher.
     keys: JwksHandle,
 }
@@ -303,11 +314,11 @@ impl SignedJwsValidator {
     pub fn new(keys: JwksHandle) -> Self {
         Self {
             principal_claim_name: "sub".to_string(),
-            scope_claim_name: "scope".to_string(),
-            required_scope: None,
             allowable_clock_skew_ms: 30_000,
             valid_issuer: None,
             expected_audience: None,
+            custom_claim_check: None,
+            valid_token_type: None,
             keys,
         }
     }
@@ -341,6 +352,12 @@ impl SignedJwsValidator {
             .and_then(Value::as_str)
             .ok_or(AuthError::InvalidToken)?;
         if alg != "RS256" && alg != "ES256" {
+            return Err(AuthError::InvalidToken);
+        }
+        // Slice 49g: optional JWT `typ` check (JWT-mode validator only).
+        if let Some(expected_typ) = &self.valid_token_type
+            && header.get("typ").and_then(Value::as_str) != Some(expected_typ.as_str())
+        {
             return Err(AuthError::InvalidToken);
         }
         let kid = header.get("kid").and_then(Value::as_str);
@@ -391,8 +408,9 @@ impl SignedJwsValidator {
             return Err(AuthError::InvalidToken);
         }
 
-        if let Some(required) = &self.required_scope
-            && !scope_claim_contains(claims, &self.scope_claim_name, required)
+        // Slice 49g: optional JsonPath custom_claim_check.
+        if let Some(path) = &self.custom_claim_check
+            && !evaluate_custom_claim_check(path, claims)
         {
             return Err(AuthError::InvalidToken);
         }
@@ -503,10 +521,10 @@ pub struct IntrospectionValidator {
     /// for generic OAuth flows; commonly `client_id` for Keycloak
     /// client-credentials.
     pub principal_claim_name: String,
-    /// Claim carrying the token scope (string or array). Default `scope`.
-    pub scope_claim_name: String,
-    /// When set, the merged scope claim must contain this value.
-    pub required_scope: Option<String>,
+    /// Slice 49g: precompiled `JsonPath` `custom_claim_check`. See
+    /// [`UnsecuredJwsValidator`] for semantics. Introspection has no JWT
+    /// header, so there is no `valid_token_type` field here.
+    pub custom_claim_check: Option<JpQuery>,
     /// `true` iff a `userinfo_endpoint_uri` is configured; the validator
     /// calls `client.userinfo(token)` after a successful introspection and
     /// merges the response over the introspection claims.
@@ -554,11 +572,14 @@ impl IntrospectionValidator {
         {
             merge_userinfo_over_introspection(&mut claims, ui);
         }
-        check_required_scope(
-            &claims,
-            &self.scope_claim_name,
-            self.required_scope.as_deref(),
-        )?;
+        // Slice 49g: optional JsonPath custom_claim_check (replaces slice-50
+        // scope check). Evaluated against the merged claims (introspection
+        // plus optional userinfo).
+        if let Some(path) = &self.custom_claim_check
+            && !evaluate_custom_claim_check(path, &claims)
+        {
+            return Err(AuthError::InvalidToken);
+        }
         let name = claims
             .get(&self.principal_claim_name)
             .and_then(Value::as_str)
@@ -598,31 +619,6 @@ fn check_temporal_claims(claims: &Value, now_ms: i64, skew_ms: i64) -> Result<()
     Ok(())
 }
 
-/// Required-scope check honoring both string-scope (space-separated, RFC
-/// 6749 §3.3) and array-scope (Keycloak / some `IdPs`) forms. Pure helper.
-fn check_required_scope(
-    claims: &Value,
-    scope_claim_name: &str,
-    required: Option<&str>,
-) -> Result<(), AuthError> {
-    let Some(required) = required else {
-        return Ok(());
-    };
-    let claim = claims
-        .get(scope_claim_name)
-        .ok_or(AuthError::InvalidToken)?;
-    let granted: Vec<&str> = match claim {
-        Value::String(s) => s.split_whitespace().collect(),
-        Value::Array(arr) => arr.iter().filter_map(Value::as_str).collect(),
-        _ => return Err(AuthError::InvalidToken),
-    };
-    if granted.contains(&required) {
-        Ok(())
-    } else {
-        Err(AuthError::InvalidToken)
-    }
-}
-
 /// Merge userinfo response over introspection claims. Userinfo wins for
 /// profile-style claims (`preferred_username`, email, name, `given_name`,
 /// `family_name`, ...); introspection wins for the small set of
@@ -642,6 +638,7 @@ fn merge_userinfo_over_introspection(introspection: &mut Value, userinfo: Value)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jsonpath_rust::parser::parse_json_path;
 
     fn jws(header: &str, claims: &str) -> String {
         format!(
@@ -656,6 +653,28 @@ mod tests {
             "{\"alg\":\"none\"}",
             &format!("{{\"sub\":\"{sub}\",\"iat\":{iat_s},\"exp\":{exp_s}}}"),
         )
+    }
+
+    /// Build an unsecured-JWS from an explicit header + claim object (so
+    /// callers can drive the `typ` header for slice-49g tests). The
+    /// signature segment is left empty per `alg:none`.
+    fn make_unsecured_jws_with_header(
+        header: &serde_json::Value,
+        claims: &serde_json::Value,
+    ) -> String {
+        format!(
+            "{}.{}.",
+            B64URL.encode(serde_json::to_vec(header).unwrap()),
+            B64URL.encode(serde_json::to_vec(claims).unwrap()),
+        )
+    }
+
+    fn make_unsecured_jws(claims: &serde_json::Value) -> String {
+        make_unsecured_jws_with_header(&serde_json::json!({"alg": "none"}), claims)
+    }
+
+    fn parse_jp(expr: &str) -> JpQuery {
+        parse_json_path(expr).expect("expression compiles")
     }
 
     fn client_resp(token: &str) -> Vec<u8> {
@@ -784,37 +803,85 @@ mod tests {
         );
     }
 
+    // ---- Slice 49g: custom_claim_check (JsonPath) + valid_token_type ---
+
     #[test]
-    fn validate_honors_required_scope_string() {
+    fn unsecured_validate_rejects_when_custom_claim_check_fails() {
+        let exp_secs: i64 = 2_000;
+        let now_ms: i64 = 1_000_000;
+        let token = make_unsecured_jws(&serde_json::json!({
+            "sub": "alice",
+            "exp": exp_secs,
+            "scope": ["kafka.read"],
+        }));
         let v = UnsecuredJwsValidator {
-            required_scope: Some("kafka".to_string()),
+            custom_claim_check: Some(parse_jp("$.scope[?@ == 'kafka.admin']")),
             ..Default::default()
         };
-        let now = 1_000_000_000_000;
-        let ok = jws(
-            "{\"alg\":\"none\"}",
-            "{\"sub\":\"a\",\"exp\":5000000000,\"scope\":\"read kafka write\"}",
-        );
-        assert!(v.validate(&ok, now).is_ok());
-        let bad = jws(
-            "{\"alg\":\"none\"}",
-            "{\"sub\":\"a\",\"exp\":5000000000,\"scope\":\"read write\"}",
-        );
-        assert_eq!(v.validate(&bad, now), Err(AuthError::InvalidToken));
+        let result = v.validate(&token, now_ms);
+        assert_eq!(result.unwrap_err(), AuthError::InvalidToken);
     }
 
     #[test]
-    fn validate_honors_required_scope_array() {
+    fn unsecured_validate_accepts_when_custom_claim_check_passes() {
+        let exp_secs: i64 = 2_000;
+        let now_ms: i64 = 1_000_000;
+        let token = make_unsecured_jws(&serde_json::json!({
+            "sub": "alice",
+            "exp": exp_secs,
+            "scope": ["kafka.admin", "kafka.read"],
+        }));
         let v = UnsecuredJwsValidator {
-            required_scope: Some("kafka".to_string()),
+            custom_claim_check: Some(parse_jp("$.scope[?@ == 'kafka.admin']")),
             ..Default::default()
         };
-        let now = 1_000_000_000_000;
-        let ok = jws(
-            "{\"alg\":\"none\"}",
-            "{\"sub\":\"a\",\"exp\":5000000000,\"scope\":[\"read\",\"kafka\"]}",
+        let outcome = v.validate(&token, now_ms).expect("valid token");
+        assert_eq!(outcome.principal.name, "alice");
+    }
+
+    #[test]
+    fn unsecured_validate_rejects_when_valid_token_type_mismatch() {
+        let exp_secs: i64 = 2_000;
+        let now_ms: i64 = 1_000_000;
+        // Token with typ=OPAQUE in the header.
+        let token = make_unsecured_jws_with_header(
+            &serde_json::json!({"alg": "none", "typ": "OPAQUE"}),
+            &serde_json::json!({"sub": "alice", "exp": exp_secs}),
         );
-        assert!(v.validate(&ok, now).is_ok());
+        let v = UnsecuredJwsValidator {
+            valid_token_type: Some("JWT".into()),
+            ..Default::default()
+        };
+        let result = v.validate(&token, now_ms);
+        assert_eq!(result.unwrap_err(), AuthError::InvalidToken);
+    }
+
+    #[test]
+    fn unsecured_validate_accepts_when_valid_token_type_match() {
+        let exp_secs: i64 = 2_000;
+        let now_ms: i64 = 1_000_000;
+        let token = make_unsecured_jws_with_header(
+            &serde_json::json!({"alg": "none", "typ": "JWT"}),
+            &serde_json::json!({"sub": "alice", "exp": exp_secs}),
+        );
+        let v = UnsecuredJwsValidator {
+            valid_token_type: Some("JWT".into()),
+            ..Default::default()
+        };
+        assert!(v.validate(&token, now_ms).is_ok());
+    }
+
+    #[test]
+    fn unsecured_validate_accepts_when_valid_token_type_unset_regardless_of_header() {
+        let exp_secs: i64 = 2_000;
+        let now_ms: i64 = 1_000_000;
+        let token = make_unsecured_jws_with_header(
+            &serde_json::json!({"alg": "none", "typ": "OPAQUE"}),
+            &serde_json::json!({"sub": "alice", "exp": exp_secs}),
+        );
+        let v = UnsecuredJwsValidator::default();
+        // No valid_token_type set → header `typ` ignored.
+        assert!(v.validate(&token, now_ms).is_ok());
     }
 
     #[test]
@@ -838,7 +905,7 @@ mod tests {
 
     // ---- SignedJwsValidator (slice 49b) -------------------------------------
 
-    use crate::jwks::{Jwks, JwksHandle, mint_es256, mint_rs256};
+    use crate::jwks::{Jwks, JwksHandle, mint_es256, mint_rs256, mint_rs256_with_header};
 
     /// Build a `SignedJwsValidator` whose key set is populated from `jwks_json`.
     fn signed(jwks_json: &str) -> (SignedJwsValidator, JwksHandle) {
@@ -959,20 +1026,64 @@ mod tests {
         );
     }
 
+    // ---- Slice 49g: SignedJwsValidator custom_claim_check + valid_token_type
+
     #[test]
-    fn signed_honors_required_scope() {
+    fn signed_validate_rejects_when_custom_claim_check_fails() {
         let (token, jwks) = mint_rs256(
             "k1",
-            "{\"sub\":\"a\",\"exp\":9999999999,\"scope\":\"read kafka\"}",
+            "{\"sub\":\"alice\",\"exp\":9999999999,\"scope\":[\"kafka.read\"]}",
         );
         let (mut v, _h) = signed(&jwks);
-        v.required_scope = Some("kafka".to_string());
-        assert!(v.validate(&token, 1_000_000_000_000).is_ok());
-        v.required_scope = Some("admin".to_string());
-        assert_eq!(
-            v.validate(&token, 1_000_000_000_000),
-            Err(AuthError::InvalidToken)
+        v.custom_claim_check = Some(parse_jp("$.scope[?@ == 'kafka.admin']"));
+        let result = v.validate(&token, 1_000_000_000_000);
+        assert_eq!(result.unwrap_err(), AuthError::InvalidToken);
+    }
+
+    #[test]
+    fn signed_validate_accepts_when_custom_claim_check_passes() {
+        let (token, jwks) = mint_rs256(
+            "k1",
+            "{\"sub\":\"alice\",\"exp\":9999999999,\"scope\":[\"kafka.admin\",\"kafka.read\"]}",
         );
+        let (mut v, _h) = signed(&jwks);
+        v.custom_claim_check = Some(parse_jp("$.scope[?@ == 'kafka.admin']"));
+        let outcome = v.validate(&token, 1_000_000_000_000).expect("valid token");
+        assert_eq!(outcome.principal.name, "alice");
+    }
+
+    #[test]
+    fn signed_validate_rejects_when_valid_token_type_mismatch() {
+        let (token, jwks) = mint_rs256_with_header(
+            "{\"alg\":\"RS256\",\"kid\":\"k1\",\"typ\":\"OPAQUE\"}",
+            "{\"sub\":\"alice\",\"exp\":9999999999}",
+        );
+        let (mut v, _h) = signed(&jwks);
+        v.valid_token_type = Some("JWT".into());
+        let result = v.validate(&token, 1_000_000_000_000);
+        assert_eq!(result.unwrap_err(), AuthError::InvalidToken);
+    }
+
+    #[test]
+    fn signed_validate_accepts_when_valid_token_type_match() {
+        let (token, jwks) = mint_rs256_with_header(
+            "{\"alg\":\"RS256\",\"kid\":\"k1\",\"typ\":\"JWT\"}",
+            "{\"sub\":\"alice\",\"exp\":9999999999}",
+        );
+        let (mut v, _h) = signed(&jwks);
+        v.valid_token_type = Some("JWT".into());
+        assert!(v.validate(&token, 1_000_000_000_000).is_ok());
+    }
+
+    #[test]
+    fn signed_validate_accepts_when_valid_token_type_unset_regardless_of_header() {
+        let (token, jwks) = mint_rs256_with_header(
+            "{\"alg\":\"RS256\",\"kid\":\"k1\",\"typ\":\"OPAQUE\"}",
+            "{\"sub\":\"alice\",\"exp\":9999999999}",
+        );
+        let (v, _h) = signed(&jwks);
+        // No valid_token_type set → header `typ` ignored.
+        assert!(v.validate(&token, 1_000_000_000_000).is_ok());
     }
 
     #[test]
@@ -1064,12 +1175,21 @@ mod tests {
             &format!("{{\"sub\":\"{sub}\",\"iat\":{iat_s},\"exp\":{exp_s}}}"),
         )
     }
+
+    #[test]
+    fn custom_claim_check_compile_error_at_validator_construction() {
+        // Operators paste a malformed expression. We catch it at parse
+        // time (validator construction), not per-token validation.
+        let result = parse_json_path("@.unterminated");
+        assert!(result.is_err(), "malformed expression must fail to parse");
+    }
 }
 
 #[cfg(test)]
 mod introspection_tests {
     use super::*;
     use crate::{AuthError, AuthMethod};
+    use jsonpath_rust::parser::parse_json_path;
     use serde_json::{Value, json};
     use std::collections::HashMap;
     use std::sync::Mutex;
@@ -1125,11 +1245,14 @@ mod introspection_tests {
         IntrospectionValidator {
             client,
             principal_claim_name: "sub".into(),
-            scope_claim_name: "scope".into(),
-            required_scope: None,
+            custom_claim_check: None,
             call_userinfo: false,
             allowable_clock_skew_ms: 30_000,
         }
+    }
+
+    fn parse_jp(expr: &str) -> JpQuery {
+        parse_json_path(expr).expect("expression compiles")
     }
 
     const NOW_MS: i64 = 1_700_000_000_000;
@@ -1183,8 +1306,10 @@ mod introspection_tests {
         ));
     }
 
+    // ---- Slice 49g: IntrospectionValidator custom_claim_check -------------
+
     #[tokio::test]
-    async fn introspection_required_scope_honored_string() {
+    async fn introspection_validate_rejects_when_custom_claim_check_fails() {
         let mock = MockIntrospectionClient::arc();
         mock.set_introspect(
             "tok",
@@ -1192,16 +1317,17 @@ mod introspection_tests {
                 "active": true,
                 "sub": "alice",
                 "exp": NOW_MS/1000 + 60,
-                "scope": "kafka.read kafka.write",
+                "scope": ["kafka.read"],
             })),
         );
         let mut v = validator(mock.clone());
-        v.required_scope = Some("kafka.write".into());
-        assert!(v.validate("tok", NOW_MS).await.is_ok());
+        v.custom_claim_check = Some(parse_jp("$.scope[?@ == 'kafka.admin']"));
+        let result = v.validate("tok", NOW_MS).await;
+        assert_eq!(result.unwrap_err(), AuthError::InvalidToken);
     }
 
     #[tokio::test]
-    async fn introspection_required_scope_honored_array() {
+    async fn introspection_validate_accepts_when_custom_claim_check_passes() {
         let mock = MockIntrospectionClient::arc();
         mock.set_introspect(
             "tok",
@@ -1209,27 +1335,34 @@ mod introspection_tests {
                 "active": true,
                 "sub": "alice",
                 "exp": NOW_MS/1000 + 60,
-                "scope": ["kafka.read", "kafka.write"],
+                "scope": ["kafka.admin", "kafka.read"],
             })),
         );
         let mut v = validator(mock.clone());
-        v.required_scope = Some("kafka.write".into());
-        assert!(v.validate("tok", NOW_MS).await.is_ok());
+        v.custom_claim_check = Some(parse_jp("$.scope[?@ == 'kafka.admin']"));
+        let outcome = v.validate("tok", NOW_MS).await.expect("valid");
+        assert_eq!(outcome.principal.name, "alice");
     }
 
     #[tokio::test]
-    async fn introspection_required_scope_missing_rejected() {
+    async fn introspection_validate_does_not_check_valid_token_type() {
+        // Introspection responses have no JWT header → typ check is N/A.
+        // The struct doesn't even expose a valid_token_type field; this
+        // is a regression test that validation passes regardless of any
+        // hypothetical typ in the response (introspection responses
+        // don't carry `typ`).
         let mock = MockIntrospectionClient::arc();
         mock.set_introspect(
             "tok",
-            Ok(json!({"active": true, "sub": "alice", "exp": NOW_MS / 1000 + 60, "scope": "kafka.read"})),
+            Ok(json!({
+                "active": true,
+                "sub": "alice",
+                "exp": NOW_MS/1000 + 60,
+            })),
         );
-        let mut v = validator(mock.clone());
-        v.required_scope = Some("kafka.write".into());
-        assert!(matches!(
-            v.validate("tok", NOW_MS).await,
-            Err(AuthError::InvalidToken)
-        ));
+        let v = validator(mock.clone());
+        let outcome = v.validate("tok", NOW_MS).await.expect("valid");
+        assert_eq!(outcome.principal.name, "alice");
     }
 
     #[tokio::test]

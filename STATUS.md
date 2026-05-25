@@ -2567,3 +2567,80 @@ OAUTHBEARER sessions tighter than the token's natural `exp`.
   re-auth scheduler in Crabka's Kafka client crate (broker-only this
   slice); new e2e workflow job.
 
+## Slice 49g — Operator + Broker: OAUTHBEARER validation policies (customClaimCheck JsonPath + validTokenType) (2026-05-24)
+
+First of the three "long-tail" clusters closing out the OAUTHBEARER
+umbrella's Strimzi field parity. Replaces slice 50's typed
+`customClaimCheck: { scope, scope_claim }` stub with the full Strimzi
+string-expression shape (JsonPath via `jsonpath-rust` 1.0); adds
+`validTokenType` (JWT `typ` header check, JWT-mode validators only —
+introspection skips with a render-time rejection).
+
+- **Broker (`crates/security/`, `crates/broker/`):** `jsonpath-rust`
+  promoted to a workspace dependency (T1 polish `3d49458`) and pulled
+  into `crabka-security`. New `[oauthbearer].custom_claim_check: String`
+  TOML key (RFC 9535 JsonPath, compiled once at broker startup via
+  `JsonPath::try_from`). New `[oauthbearer].valid_token_type: String`
+  TOML key. All three validators (`UnsecuredJwsValidator`,
+  `SignedJwsValidator`, `IntrospectionValidator`) carry an
+  `Option<JsonPath>` for the pre-compiled expression; JWT-mode
+  validators additionally carry `Option<String>` for `valid_token_type`
+  (header `typ` compared with strict string equality).
+- **Slice-50 stub removed:** `required_scope` + `scope_claim_name`
+  fields on validators + the `scope_contains` / `scope_claim_contains`
+  / `check_required_scope` helpers deleted. Operators rewrite
+  `customClaimCheck: { scope: 'X' }` to
+  `customClaimCheck: "$.scope[?@ == 'X']"`. Greenfield: no compat shim.
+- **Operator CRD (`crates/operator/src/crd/listener.rs`):**
+  `custom_claim_check: Option<OAuthCustomClaimCheck>` (typed struct,
+  slice 50) → `custom_claim_check: Option<String>`. The
+  `OAuthCustomClaimCheck` struct + its schema entry + re-exports
+  deleted. New `valid_token_type: Option<String>` field. Hand-rolled
+  schema entries: `customClaimCheck` flips to string `minLength: 1`;
+  `validTokenType` added similarly.
+- **Operator reconciler (`crates/operator/src/controller/listeners.rs`):**
+  `render_broker_toml` emits `custom_claim_check = '''<expr>'''` (TOML
+  multi-line literal, no escape processing) and
+  `valid_token_type = "<v>"`. New cross-mode validation:
+  `ListenerOauthValidTokenTypeRejectedInIntrospectionMode` fires when
+  `validTokenType` is set on an `accessTokenIsJwt: false` listener.
+  Obsolete `ListenerOauthCustomClaimCheckScopeEmpty` ValidationError
+  variant deleted (slice 50 residue — CRD `minLength: 1` already
+  rejects empty strings). Cross-listener divergence walk extended
+  with a `valid_token_type` perturbation; the existing
+  `custom_claim_check` perturbation rewritten to the new string shape.
+- **Scope expansion (CLAUDE.md greenfield rule):** T2/T3/T4 swept ~21
+  fixture sites so the struct extension + deletion compiled atomically
+  with no `#[serde(default)]` shim: 11 in `crd/listener.rs`, 10 in
+  `controller/listeners.rs`, 2 in `controller/kafka.rs`, 3 in
+  `controller/kafka_node_pool.rs`, 5 across 3 operator integration
+  test files. 4 `OAuthCustomClaimCheck { ... }` instantiations
+  rewritten to RFC 9535 string form.
+- **E2E (`.github/workflows/operator-e2e.yml`):** existing `kind-oauth`
+  job's Kafka CR YAML rewrote `customClaimCheck` to the JsonPath shape
+  and added `validTokenType: JWT`. Same producer Jobs (Keycloak emits
+  `typ: JWT` by default). No new job.
+- **Tests:** ~24 new — 14 broker unit (5 unsecured + 5 signed + 3
+  introspection + 1 compile-error helper) + 3 operator CRD round-trip
+  + 4 operator reconciler unit (3 render + 1 cross-mode) + 3 operator
+  integration. 1 obsolete slice-50 stub test deleted
+  (`oauth_listener_custom_claim_check_empty_scope_rejected`). T2 doc-
+  markdown clippy nits cleaned up in the T3 commit. Workspace fmt +
+  clippy `-D warnings` + tests + CRD drift gate all green.
+- **Reference doc:** `[docs/superpowers/specs/2026-05-24-crabka-oauth-validation-policies-49g-design.md]`.
+- **Semantic divergence from Strimzi (acknowledged):** Crabka uses
+  `jsonpath-rust` 1.0, which implements **RFC 9535** — NOT the
+  Jayway dialect Strimzi inherits from its Java JsonPath dependency.
+  Operators porting Strimzi expressions must rewrite Jayway
+  `$[?(@.scope == 'X')]` → RFC 9535 `$.scope[?@ == 'X']` (or the
+  bare-bracket equivalent). YAML field shape matches Strimzi exactly;
+  expression syntax does not. Edge cases (Jayway-specific operators
+  like `=~` regex, nested filter `?(@.x > 0 && @.y < 10)`) may
+  differ further.
+- **Out of scope:** slice 49h (claims mapping — `groupsClaim`,
+  `groupsClaimDelimiter`, `fallbackUserNameClaim`,
+  `fallbackUserNamePrefix`); slice 49i (JWKS refresher policies —
+  `jwksMinRefreshPauseSeconds`, `jwksExpirySeconds`,
+  `jwksIgnoreKeyUse`); slice 49f (PLAIN-with-OAuth-token, skipped
+  indefinitely).
+

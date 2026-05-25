@@ -19,7 +19,7 @@ use std::sync::Arc;
 use crabka_operator::controller::kafka::reconcile;
 use crabka_operator::crd::{
     Kafka, KafkaSpec, Listener, ListenerAuthentication, ListenerAuthenticationOAuth, ListenerType,
-    OAuthCustomClaimCheck, OauthClientSecretRef, TlsTrustedCertificate,
+    OauthClientSecretRef, TlsTrustedCertificate,
 };
 use http::Method;
 
@@ -82,6 +82,7 @@ fn oauth_cfg_minimal() -> ListenerAuthenticationOAuth {
         client_secret: None,
         introspection_http_timeout_seconds: None,
         max_seconds_without_reauthentication: None,
+        valid_token_type: None,
     }
 }
 
@@ -95,10 +96,7 @@ fn oauth_cfg_full() -> ListenerAuthenticationOAuth {
         ),
         valid_audience: Some("kafka".into()),
         user_name_claim: Some("preferred_username".into()),
-        custom_claim_check: Some(OAuthCustomClaimCheck {
-            scope: "kafka.write".into(),
-            scope_claim: Some("scope".into()),
-        }),
+        custom_claim_check: Some("$.scope[?@ == 'kafka.write']".into()),
         jwks_refresh_seconds: Some(300),
         max_clock_skew_seconds: Some(30),
         enable_oauth_bearer: true,
@@ -110,6 +108,7 @@ fn oauth_cfg_full() -> ListenerAuthenticationOAuth {
         client_secret: None,
         introspection_http_timeout_seconds: None,
         max_seconds_without_reauthentication: None,
+        valid_token_type: None,
     }
 }
 
@@ -258,11 +257,7 @@ async fn oauth_listener_renders_oauthbearer_toml_block() {
         "TOML: {toml}"
     );
     assert!(
-        toml.contains("scope_claim_name = \"scope\""),
-        "TOML: {toml}"
-    );
-    assert!(
-        toml.contains("required_scope = \"kafka.write\""),
+        toml.contains("custom_claim_check = '''$.scope[?@ == 'kafka.write']'''"),
         "TOML: {toml}"
     );
     assert!(
@@ -481,29 +476,11 @@ async fn oauth_listener_with_jwks_refresh_below_30_rejected() {
     assert_listeners_invalid_with_reason(&observed, "c8", "ListenerOauthInvalidRefresh");
 }
 
-// ── test 9: customClaimCheck.scope empty rejected ───────────────────────────
-
-/// `customClaimCheck: { scope: "" }` is rejected with reason
-/// `ListenerOauthInvalidScope`. Duplicates T3's
-/// `validate_listeners_rejects_oauth_custom_claim_check_with_empty_scope`.
-#[tokio::test]
-async fn oauth_listener_custom_claim_check_empty_scope_rejected() {
-    let items = vec![shared::fake_pool_list_item("brokers", "ns9", "c9", 1, 1)];
-    let rules = rules_for_invalid_listeners("c9", "ns9", &items);
-    let (ctx, state) = build_ctx("ns9", rules);
-
-    let mut cfg = oauth_cfg_minimal();
-    cfg.custom_claim_check = Some(OAuthCustomClaimCheck {
-        scope: String::new(),
-        scope_claim: None,
-    });
-    let kafka =
-        kafka_cr_with_listeners("c9", "ns9", vec![oauth_listener("oauth", 9095, true, cfg)]);
-    reconcile(Arc::new(kafka), ctx).await.unwrap();
-
-    let observed = state.take_observed();
-    assert_listeners_invalid_with_reason(&observed, "c9", "ListenerOauthInvalidScope");
-}
+// ── test 9 removed (slice 49g): the legacy
+// `ListenerOauthInvalidScope` / `OAuthCustomClaimCheckScopeEmpty`
+// variant is gone — `customClaimCheck` is now a free-form JsonPath
+// string and CRD `minLength: 1` rejects empty values at admission
+// before the operator ever sees them.
 
 // ── test 10: two oauth listeners with identical config → Ready ──────────────
 
@@ -865,6 +842,7 @@ async fn two_oauth_listeners_with_divergent_access_token_is_jwt_rejected_with_co
         }),
         introspection_http_timeout_seconds: None,
         max_seconds_without_reauthentication: None,
+        valid_token_type: None,
     };
 
     let kafka = kafka_cr_with_listeners(
@@ -945,4 +923,109 @@ async fn two_oauth_listeners_with_divergent_max_seconds_without_reauthentication
 
     let observed = state.take_observed();
     assert_listeners_invalid_with_reason(&observed, "c17", "ConflictingOAuthConfig");
+}
+
+// ── test 18 (slice 49g): customClaimCheck JsonPath renders to broker TOML ──
+
+/// Slice 49g. An OAuth listener with a `customClaimCheck` JsonPath
+/// expression (RFC 9535 syntax, evaluated by jsonpath-rust on the
+/// broker) reconciles cleanly and the rendered broker-config ConfigMap
+/// embeds the expression under `[oauthbearer].custom_claim_check` as a
+/// TOML multi-line literal string (triple-single-quoted so no escape
+/// processing collides with the `'` chars inside the path predicate).
+#[tokio::test]
+async fn oauth_listener_with_custom_claim_check_expression_renders_broker_toml_key() {
+    let items = vec![shared::fake_pool_list_item("brokers", "ns18", "c18", 1, 1)];
+    let (ctx, state) = build_ctx("ns18", happy_path_rules("c18", "ns18", &items));
+
+    let mut cfg = oauth_cfg_minimal();
+    cfg.custom_claim_check = Some("$.scope[?@ == 'kafka.write']".into());
+    let kafka = kafka_cr_with_listeners(
+        "c18",
+        "ns18",
+        vec![oauth_listener("oauth", 9095, true, cfg)],
+    );
+    reconcile(Arc::new(kafka), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    let toml = extract_broker0_toml(&observed, "c18");
+
+    assert!(toml.contains("[oauthbearer]"), "TOML: {toml}");
+    assert!(
+        toml.contains("custom_claim_check = '''$.scope[?@ == 'kafka.write']'''"),
+        "expected custom_claim_check render; got:\n{toml}"
+    );
+}
+
+// ── test 19 (slice 49g): validTokenType renders to broker TOML ─────────────
+
+/// Slice 49g. An OAuth listener with `validTokenType: JWT` reconciles
+/// cleanly (JWT-mode is the only mode that accepts the field) and the
+/// rendered broker-config ConfigMap embeds the value under
+/// `[oauthbearer].valid_token_type` as a basic TOML string. The broker
+/// JWT validators enforce the `typ` header check at token-verify time.
+#[tokio::test]
+async fn oauth_listener_with_valid_token_type_renders_broker_toml_key() {
+    let items = vec![shared::fake_pool_list_item("brokers", "ns19", "c19", 1, 1)];
+    let (ctx, state) = build_ctx("ns19", happy_path_rules("c19", "ns19", &items));
+
+    let mut cfg = oauth_cfg_minimal();
+    cfg.valid_token_type = Some("JWT".into());
+    let kafka = kafka_cr_with_listeners(
+        "c19",
+        "ns19",
+        vec![oauth_listener("oauth", 9095, true, cfg)],
+    );
+    reconcile(Arc::new(kafka), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    let toml = extract_broker0_toml(&observed, "c19");
+
+    assert!(toml.contains("[oauthbearer]"), "TOML: {toml}");
+    assert!(
+        toml.contains("valid_token_type = \"JWT\""),
+        "expected valid_token_type render; got:\n{toml}"
+    );
+}
+
+// ── test 20 (slice 49g): validTokenType in introspection mode → reject ─────
+
+/// Slice 49g. Setting `validTokenType` on an introspection-mode listener
+/// (`accessTokenIsJwt: false`) is rejected up front: introspection
+/// responses carry no JWT header so a `typ` check has nothing to bind
+/// against. The reconciler must patch `ListenersValid=False` with reason
+/// `ListenerOauthValidTokenTypeRejectedInIntrospectionMode`. Mirrors the
+/// `validate_listeners_rejects_valid_token_type_in_introspection_mode`
+/// unit test at the integration layer.
+#[tokio::test]
+async fn oauth_listener_valid_token_type_in_introspection_mode_rejected_with_listeners_valid_false()
+{
+    let items = vec![shared::fake_pool_list_item("brokers", "ns20", "c20", 1, 1)];
+    let rules = rules_for_invalid_listeners("c20", "ns20", &items);
+    let (ctx, state) = build_ctx("ns20", rules);
+
+    let mut cfg = oauth_cfg_minimal();
+    cfg.access_token_is_jwt = false;
+    cfg.jwks_endpoint_uri = None;
+    cfg.introspection_endpoint_uri = Some("https://iss.example/introspect".into());
+    cfg.client_id = Some("kafka-broker".into());
+    cfg.client_secret = Some(OauthClientSecretRef {
+        secret_name: "creds".into(),
+        key: "client-secret".into(),
+    });
+    cfg.valid_token_type = Some("JWT".into()); // the violation
+
+    let kafka = kafka_cr_with_listeners(
+        "c20",
+        "ns20",
+        vec![oauth_listener("oauth", 9095, true, cfg)],
+    );
+    reconcile(Arc::new(kafka), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    assert_listeners_invalid_with_reason(
+        &observed,
+        "c20",
+        "ListenerOauthValidTokenTypeRejectedInIntrospectionMode",
+    );
 }

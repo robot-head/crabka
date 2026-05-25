@@ -24,8 +24,13 @@ spec:
         jwksEndpointUri: https://keycloak.example/realms/kafka/protocol/openid-connect/certs
         validAudience: kafka-broker
         userNameClaim: preferred_username
-        customClaimCheck:
-          scope: kafka.write
+        # JsonPath (RFC 9535) evaluated by the broker on every token. The
+        # token JSON is the document; the example below requires the
+        # `scope` array to contain the string `kafka.write`.
+        customClaimCheck: "$.scope[?@ == 'kafka.write']"
+        # Optional: enforce the JWT `typ` header (slice 49g). JWT-mode
+        # only; rejected on introspection-mode listeners.
+        # validTokenType: JWT
         # Optional: cap SASL session lifetime tighter than the token's natural `exp`
         # (KIP-368 re-auth ceiling, slice 50d). Forces clients to refresh more
         # often than their token would otherwise require. Unset = session lasts
@@ -60,8 +65,8 @@ spec:
     #     userInfoEndpointUri: https://keycloak.example/realms/kafka/protocol/openid-connect/userinfo
     #     validAudience: kafka-broker
     #     userNameClaim: preferred_username
-    #     customClaimCheck:
-    #       scope: kafka.write
+    #     customClaimCheck: "$.scope[?@ == 'kafka.write']"
+    #     # validTokenType is JWT-mode only — leave it OUT here.
     #     clientId: kafka-broker
     #     clientSecret:
     #       secretName: keycloak-introspection-secret

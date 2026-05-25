@@ -59,12 +59,19 @@ pub struct FileOAuthBearerConfig {
     /// Claim whose value becomes the principal name. Default `sub`.
     #[serde(default)]
     pub principal_claim_name: Option<String>,
-    /// Claim carrying the token scope. Default `scope`.
+    /// Slice 49g: optional `JsonPath` expression (RFC 9535, via
+    /// jsonpath-rust) evaluated against the token claim set. Token is
+    /// rejected when the expression yields empty/null/false. Compiled
+    /// once at broker startup; malformed expressions panic with a
+    /// descriptive error.
     #[serde(default)]
-    pub scope_claim_name: Option<String>,
-    /// When set, the token scope must contain this value.
+    pub custom_claim_check: Option<String>,
+    /// Slice 49g: optional JWT `typ` header check. When set, JWT-mode
+    /// validators (unsecured + signed JWS) require the JWT header's
+    /// `typ` field to equal this string. Introspection-mode skips
+    /// (no JWT header). Ignored when unset.
     #[serde(default)]
-    pub required_scope: Option<String>,
+    pub valid_token_type: Option<String>,
     /// Clock-skew tolerance, in milliseconds, for `exp` / `iat` / `nbf`.
     /// Default 30000.
     #[serde(default)]
@@ -272,6 +279,19 @@ impl FileConfig {
             // the auth handler interprets None as "no cap" (= 49e behavior).
             cfg.oauthbearer_max_session_lifetime_seconds = oauth.max_session_lifetime_seconds;
 
+            // Slice 49g: compile the JsonPath expression once at load time;
+            // a malformed expression panics with a descriptive error.
+            let custom_claim_check_compiled = oauth
+                .custom_claim_check
+                .as_deref()
+                .map(|expr| {
+                    jsonpath_rust::parser::parse_json_path(expr).unwrap_or_else(|e| {
+                        panic!(
+                            "[oauthbearer]: invalid custom_claim_check JsonPath expression {expr:?}: {e}"
+                        )
+                    })
+                });
+
             match (
                 oauth.jwks_endpoint_uri.as_ref(),
                 oauth.introspection_endpoint_uri.as_ref(),
@@ -291,17 +311,15 @@ impl FileConfig {
                     if let Some(name) = oauth.principal_claim_name {
                         v.principal_claim_name = name;
                     }
-                    if let Some(name) = oauth.scope_claim_name {
-                        v.scope_claim_name = name;
-                    }
-                    if oauth.required_scope.is_some() {
-                        v.required_scope = oauth.required_scope;
-                    }
                     if let Some(skew) = oauth.allowable_clock_skew_ms {
                         v.allowable_clock_skew_ms = skew;
                     }
                     v.valid_issuer = oauth.valid_issuer_uri;
                     v.expected_audience = oauth.expected_audience;
+                    // Slice 49g: JsonPath custom_claim_check + JWT typ check.
+                    v.custom_claim_check
+                        .clone_from(&custom_claim_check_compiled);
+                    v.valid_token_type.clone_from(&oauth.valid_token_type);
                     cfg.oauthbearer_validator = crabka_security::OAuthBearerValidator::Signed(v);
                     cfg.oauthbearer_jwks_endpoint = Some(jwks_uri);
                     if let Some(ms) = oauth.jwks_refresh_interval_ms {
@@ -356,11 +374,9 @@ impl FileConfig {
                             .principal_claim_name
                             .clone()
                             .unwrap_or_else(|| "sub".into()),
-                        scope_claim_name: oauth
-                            .scope_claim_name
-                            .clone()
-                            .unwrap_or_else(|| "scope".into()),
-                        required_scope: oauth.required_scope.clone(),
+                        // Slice 49g: JsonPath custom_claim_check. No typ
+                        // check for introspection (no JWT header).
+                        custom_claim_check: custom_claim_check_compiled,
                         call_userinfo: oauth.userinfo_endpoint_uri.is_some(),
                         allowable_clock_skew_ms: oauth.allowable_clock_skew_ms.unwrap_or(30_000),
                     };
@@ -373,15 +389,12 @@ impl FileConfig {
                     if let Some(name) = oauth.principal_claim_name {
                         v.principal_claim_name = name;
                     }
-                    if let Some(name) = oauth.scope_claim_name {
-                        v.scope_claim_name = name;
-                    }
-                    if oauth.required_scope.is_some() {
-                        v.required_scope = oauth.required_scope;
-                    }
                     if let Some(skew) = oauth.allowable_clock_skew_ms {
                         v.allowable_clock_skew_ms = skew;
                     }
+                    // Slice 49g: JsonPath custom_claim_check + JWT typ check.
+                    v.custom_claim_check = custom_claim_check_compiled;
+                    v.valid_token_type.clone_from(&oauth.valid_token_type);
                     cfg.oauthbearer_validator = crabka_security::OAuthBearerValidator::Unsecured(v);
                 }
             }
