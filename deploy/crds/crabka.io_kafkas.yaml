@@ -166,6 +166,16 @@ spec:
                         jwksEndpointUri:
                           minLength: 1
                           type: string
+                        jwksExpirySeconds:
+                          format: int32
+                          minimum: 1.0
+                          type: integer
+                        jwksIgnoreKeyUse:
+                          type: boolean
+                        jwksMinRefreshPauseSeconds:
+                          format: int32
+                          minimum: 0.0
+                          type: integer
                         jwksRefreshSeconds:
                           minimum: 0.0
                           type: integer

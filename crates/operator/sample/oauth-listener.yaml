@@ -48,6 +48,31 @@ spec:
         # broker-side authorizer reads this yet (slice 53/54 will).
         # groupsClaim: "$.realm_access.roles[*]"
         # groupsClaimDelimiter: ","
+        #
+        # Slice 49i: JWKS refresher operational tuning (JWT-mode only —
+        # rejected on introspection-mode listeners since the broker's
+        # introspection validator does not consult a JWKS).
+        #
+        # Rate-limits on-demand JWKS refreshes triggered by tokens with
+        # an unknown `kid` header — protects the IdP from a thundering
+        # herd if many clients rotate to a new key at once. Strimzi
+        # default 1.
+        # jwksMinRefreshPauseSeconds: 1
+        #
+        # Hard cache expiry: the signed-JWT validator rejects tokens
+        # when the JWKS hasn't been successfully refreshed within this
+        # window. Fails closed on IdP outage rather than serving stale
+        # signing keys indefinitely. Strimzi default 360 (6 minutes);
+        # raise for longer offline tolerance, lower for tighter
+        # freshness guarantees.
+        # jwksExpirySeconds: 3600
+        #
+        # Filter toggle for the JWKS parser. Default `false` filters
+        # out JWK entries with `use=enc` so only signing keys are
+        # retained. Set `true` for IdPs that mis-tag signing keys (or
+        # omit the `use` claim) and require all keys to be considered
+        # for signature verification.
+        # jwksIgnoreKeyUse: false
         tlsTrustedCertificates:
           # Replace `keycloak-ca` with a Secret in the same namespace as
           # the Kafka CR; `certificate` is the key within that Secret

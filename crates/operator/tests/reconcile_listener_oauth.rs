@@ -87,6 +87,9 @@ fn oauth_cfg_minimal() -> ListenerAuthenticationOAuth {
         fallback_user_name_prefix: None,
         groups_claim: None,
         groups_claim_delimiter: None,
+        jwks_min_refresh_pause_seconds: None,
+        jwks_expiry_seconds: None,
+        jwks_ignore_key_use: None,
     }
 }
 
@@ -117,6 +120,9 @@ fn oauth_cfg_full() -> ListenerAuthenticationOAuth {
         fallback_user_name_prefix: None,
         groups_claim: None,
         groups_claim_delimiter: None,
+        jwks_min_refresh_pause_seconds: None,
+        jwks_expiry_seconds: None,
+        jwks_ignore_key_use: None,
     }
 }
 
@@ -855,6 +861,9 @@ async fn two_oauth_listeners_with_divergent_access_token_is_jwt_rejected_with_co
         fallback_user_name_prefix: None,
         groups_claim: None,
         groups_claim_delimiter: None,
+        jwks_min_refresh_pause_seconds: None,
+        jwks_expiry_seconds: None,
+        jwks_ignore_key_use: None,
     };
 
     let kafka = kafka_cr_with_listeners(
@@ -1119,5 +1128,92 @@ async fn oauth_listener_with_groups_claim_renders_broker_toml_key() {
     assert!(
         toml.contains("groups_claim_delimiter = \",\""),
         "expected groups_claim_delimiter render; got:\n{toml}"
+    );
+}
+
+// ── test 23 (slice 49i): JWKS refresher policy fields render to broker TOML ─
+
+/// Slice 49i: an OAuth listener with `jwksMinRefreshPauseSeconds: 2`,
+/// `jwksExpirySeconds: 3600`, and `jwksIgnoreKeyUse: true` reconciles
+/// cleanly and the rendered broker-config ConfigMap embeds all three
+/// keys under `[oauthbearer]`. The broker's JWKS refresher consumes
+/// them: `min_on_demand_pause` rate-limits on-demand refreshes,
+/// `expiry_ms` is the hard fail-closed cache age the signed-JWT
+/// validator pre-checks against `last_successful_fetch`, and
+/// `ignore_key_use` toggles whether `use=enc` JWK entries are filtered
+/// out at parse time.
+#[tokio::test]
+async fn oauth_listener_with_jwks_policies_renders_broker_toml_keys() {
+    let items = vec![shared::fake_pool_list_item("brokers", "ns23", "c23", 1, 1)];
+    let (ctx, state) = build_ctx("ns23", happy_path_rules("c23", "ns23", &items));
+
+    let mut cfg = oauth_cfg_minimal();
+    cfg.jwks_min_refresh_pause_seconds = Some(2);
+    cfg.jwks_expiry_seconds = Some(3600);
+    cfg.jwks_ignore_key_use = Some(true);
+    let kafka = kafka_cr_with_listeners(
+        "c23",
+        "ns23",
+        vec![oauth_listener("oauth", 9095, true, cfg)],
+    );
+    reconcile(Arc::new(kafka), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    let toml = extract_broker0_toml(&observed, "c23");
+
+    assert!(toml.contains("[oauthbearer]"), "TOML: {toml}");
+    assert!(
+        toml.contains("jwks_min_refresh_pause_seconds = 2"),
+        "expected jwks_min_refresh_pause_seconds render; got:\n{toml}"
+    );
+    assert!(
+        toml.contains("jwks_expiry_seconds = 3600"),
+        "expected jwks_expiry_seconds render; got:\n{toml}"
+    );
+    assert!(
+        toml.contains("jwks_ignore_key_use = true"),
+        "expected jwks_ignore_key_use render; got:\n{toml}"
+    );
+}
+
+// ── test 24 (slice 49i): JWKS policy fields rejected on introspection-mode ──
+
+/// Slice 49i: the 3 JWKS refresher policy fields
+/// (`jwksMinRefreshPauseSeconds`, `jwksExpirySeconds`,
+/// `jwksIgnoreKeyUse`) are JWT-mode only — the broker's introspection
+/// validator does not consult a JWKS, so setting any of them on an
+/// `accessTokenIsJwt: false` listener is rejected at reconcile with
+/// `ListenersValid=False` reason
+/// `ListenerOauthJwksFieldsRejectedInIntrospectionMode`. Mirrors the
+/// slice 49g `validTokenType` and earlier cross-mode rejection shape.
+#[tokio::test]
+async fn oauth_listener_jwks_fields_in_introspection_mode_rejected_with_listeners_valid_false() {
+    let items = vec![shared::fake_pool_list_item("brokers", "ns24", "c24", 1, 1)];
+    let rules = rules_for_invalid_listeners("c24", "ns24", &items);
+    let (ctx, state) = build_ctx("ns24", rules);
+
+    let mut cfg = oauth_cfg_minimal();
+    cfg.access_token_is_jwt = false;
+    cfg.jwks_endpoint_uri = None;
+    cfg.introspection_endpoint_uri = Some("https://iss.example/introspect".into());
+    cfg.client_id = Some("kafka-broker".into());
+    cfg.client_secret = Some(OauthClientSecretRef {
+        secret_name: "creds".into(),
+        key: "client-secret".into(),
+    });
+    cfg.jwks_expiry_seconds = Some(3600); // the violation
+
+    let kafka = kafka_cr_with_listeners(
+        "c24",
+        "ns24",
+        vec![oauth_listener("oauth", 9095, true, cfg)],
+    );
+    reconcile(Arc::new(kafka), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    assert_listeners_invalid_with_reason(
+        &observed,
+        "c24",
+        "ListenerOauthJwksFieldsRejectedInIntrospectionMode",
     );
 }
