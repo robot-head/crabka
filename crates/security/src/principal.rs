@@ -1,4 +1,5 @@
 use crate::SaslMechanism;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// How a [`Principal`] was authenticated. A strict superset of
@@ -59,7 +60,7 @@ pub struct Principal {
 /// from [`Principal`] which models the *runtime session* identity
 /// (auth method + OAuth groups). Format-stable: `Display`/`FromStr`
 /// round-trip the canonical `Type:Name` form.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct KafkaPrincipal {
     pub principal_type: String,
     pub name: String,

@@ -126,8 +126,7 @@ pub struct DeleteScramCredentialRecord {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DelegationTokenRecord {
     pub token_id: String,
-    pub owner_principal_type: String,
-    pub owner_name: String,
+    pub owner: crabka_security::KafkaPrincipal,
     pub hmac: Vec<u8>,
     pub issue_timestamp_ms: i64,
     pub expiry_timestamp_ms: i64,
@@ -334,8 +333,10 @@ mod tests {
     fn delegation_token_record_round_trip() {
         let r = MetadataRecord::V1DelegationToken(DelegationTokenRecord {
             token_id: "tok-abc".into(),
-            owner_principal_type: "User".into(),
-            owner_name: "alice".into(),
+            owner: crabka_security::KafkaPrincipal {
+                principal_type: "User".into(),
+                name: "alice".into(),
+            },
             hmac: vec![0xAB; 32],
             issue_timestamp_ms: 1_700_000_000_000,
             expiry_timestamp_ms: 1_700_000_600_000,
