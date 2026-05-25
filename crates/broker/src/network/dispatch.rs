@@ -994,10 +994,12 @@ async fn serve_connection_stream<S>(
                 }
             }
         }
-        // RenewDelegationToken (39, slice-51 T5) — see CreateDelegationToken
-        // comment above; T7 fills in the body.
+        // RenewDelegationToken (39, slice-51 T7) — needs the per-connection
+        // `auth` so the handler can pull the calling principal for the
+        // owner/renewer authorization check. Inline intercept matches
+        // CreateDelegationToken (38) above.
         if peek_api_key(&frame).ok() == Some(39) {
-            match handle_renew_delegation_token_frame(&broker, &frame)
+            match handle_renew_delegation_token_frame(&broker, &frame, &auth)
                 .instrument(req_span.clone())
                 .await
             {
@@ -1014,10 +1016,10 @@ async fn serve_connection_stream<S>(
                 }
             }
         }
-        // ExpireDelegationToken (40, slice-51 T5) — see CreateDelegationToken
-        // comment above; T7 fills in the body.
+        // ExpireDelegationToken (40, slice-51 T7) — same shape as Renew;
+        // handler needs `auth` for the owner-or-renewer gate.
         if peek_api_key(&frame).ok() == Some(40) {
-            match handle_expire_delegation_token_frame(&broker, &frame)
+            match handle_expire_delegation_token_frame(&broker, &frame, &auth)
                 .instrument(req_span.clone())
                 .await
             {
@@ -2125,10 +2127,14 @@ async fn handle_create_delegation_token_frame(
 }
 
 /// Decode + dispatch a `RenewDelegationToken` (`api_key` 39) frame
-/// (slice-51 T5 stub — T7 fills in the body).
+/// (slice-51 T7). Threads the per-connection `auth` to the handler so it
+/// can enforce the KIP-48 owner-or-renewer check, and passes the
+/// configured expiry-check interval as the default renew period used
+/// when the request specifies `renew_period_ms == -1` (spec §1.3 step 4).
 async fn handle_renew_delegation_token_frame(
     broker: &Broker,
     frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
 ) -> Result<Bytes, BrokerError> {
     use crabka_protocol::{Decode, Encode};
 
@@ -2143,7 +2149,10 @@ async fn handle_renew_delegation_token_frame(
 
     let resp = crate::handlers::renew_delegation_token::handle(
         &req,
+        auth,
         broker.config.delegation_token_secret_key.as_ref(),
+        broker.config.delegation_token_expiry_check_interval_ms,
+        &broker.controller,
     )
     .await;
     let mut buf = BytesMut::with_capacity(resp.encoded_len(api_version));
@@ -2158,10 +2167,12 @@ async fn handle_renew_delegation_token_frame(
 }
 
 /// Decode + dispatch an `ExpireDelegationToken` (`api_key` 40) frame
-/// (slice-51 T5 stub — T7 fills in the body).
+/// (slice-51 T7). Threads the per-connection `auth` to the handler so it
+/// can enforce the KIP-48 owner-or-renewer check.
 async fn handle_expire_delegation_token_frame(
     broker: &Broker,
     frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
 ) -> Result<Bytes, BrokerError> {
     use crabka_protocol::{Decode, Encode};
 
@@ -2176,7 +2187,9 @@ async fn handle_expire_delegation_token_frame(
 
     let resp = crate::handlers::expire_delegation_token::handle(
         &req,
+        auth,
         broker.config.delegation_token_secret_key.as_ref(),
+        &broker.controller,
     )
     .await;
     let mut buf = BytesMut::with_capacity(resp.encoded_len(api_version));
