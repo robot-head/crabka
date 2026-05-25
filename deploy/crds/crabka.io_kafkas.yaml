@@ -145,6 +145,18 @@ spec:
                           type: string
                         enableOauthBearer:
                           type: boolean
+                        fallbackUserNameClaim:
+                          minLength: 1
+                          type: string
+                        fallbackUserNamePrefix:
+                          minLength: 1
+                          type: string
+                        groupsClaim:
+                          minLength: 1
+                          type: string
+                        groupsClaimDelimiter:
+                          minLength: 1
+                          type: string
                         introspectionEndpointUri:
                           minLength: 1
                           type: string

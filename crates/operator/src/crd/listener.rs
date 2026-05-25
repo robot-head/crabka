@@ -256,6 +256,40 @@ pub struct ListenerAuthenticationOAuth {
     /// header in introspection responses). CRD-validated `minLength: 1`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub valid_token_type: Option<String>,
+    /// Slice 49h: alternate claim name for principal-name fallback when
+    /// `userNameClaim` (default `sub`) is absent/empty on the token.
+    /// Strimzi convention: `client_id` for Keycloak service-account
+    /// tokens whose `sub` is a UUID. Flat claim name, NOT `JsonPath`.
+    /// CRD-validated `minLength: 1`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_user_name_claim: Option<String>,
+    /// Slice 49h: prepended to the resolved principal name ONLY when
+    /// the fallback claim fires (primary present → no prefix). Strimzi
+    /// convention: `"service-account-"` to namespace
+    /// fallback-derived principals so ACLs can distinguish service
+    /// accounts from human users. CRD-validated `minLength: 1`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_user_name_prefix: Option<String>,
+    /// Slice 49h: `JsonPath` expression (RFC 9535 via jsonpath-rust)
+    /// extracting group memberships from token claims. Examples:
+    /// `"$.groups"` (top-level array), `"$.realm_access.roles[*]"`
+    /// (Keycloak realm-roles shape). When the path resolves to an
+    /// array, each string element is a group; when it resolves to a
+    /// string and `groupsClaimDelimiter` is set, the string is split.
+    /// Result attached to the Kafka principal but not yet consumed by
+    /// any broker-side authorizer (slice 53/54 will use it).
+    /// CRD-validated `minLength: 1`.
+    ///
+    /// Note: Strimzi uses Jayway `JsonPath` (`$[?(@.x == 'y')]`); Crabka
+    /// uses RFC 9535 (`$[?@.x == 'y']` — no parens) per the slice 49g
+    /// choice of `jsonpath-rust`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub groups_claim: Option<String>,
+    /// Slice 49h: delimiter to split `groupsClaim` results when the
+    /// claim resolves to a string (e.g., `","` or `" "`). Ignored
+    /// when the claim is an array. CRD-validated `minLength: 1`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub groups_claim_delimiter: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -338,6 +372,10 @@ fn listener_authentication_schema(_: &mut schemars::SchemaGenerator) -> schemars
             },
             "introspectionHttpTimeoutSeconds": { "type": "integer", "minimum": 1 },
             "maxSecondsWithoutReauthentication": { "type": "integer", "format": "int32", "minimum": 1 },
+            "fallbackUserNameClaim":  { "type": "string", "minLength": 1 },
+            "fallbackUserNamePrefix": { "type": "string", "minLength": 1 },
+            "groupsClaim":            { "type": "string", "minLength": 1 },
+            "groupsClaimDelimiter":   { "type": "string", "minLength": 1 },
         },
     })
 }
@@ -485,6 +523,10 @@ authentication:
             introspection_http_timeout_seconds: None,
             max_seconds_without_reauthentication: None,
             valid_token_type: None,
+            fallback_user_name_claim: None,
+            fallback_user_name_prefix: None,
+            groups_claim: None,
+            groups_claim_delimiter: None,
         };
         assert_eq!(
             l.authentication,
@@ -569,6 +611,10 @@ authentication:
             introspection_http_timeout_seconds: None,
             max_seconds_without_reauthentication: None,
             valid_token_type: None,
+            fallback_user_name_claim: None,
+            fallback_user_name_prefix: None,
+            groups_claim: None,
+            groups_claim_delimiter: None,
         });
         let json = serde_json::to_string(&auth).unwrap();
         assert!(
@@ -597,6 +643,10 @@ authentication:
             introspection_http_timeout_seconds: None,
             max_seconds_without_reauthentication: None,
             valid_token_type: None,
+            fallback_user_name_claim: None,
+            fallback_user_name_prefix: None,
+            groups_claim: None,
+            groups_claim_delimiter: None,
         });
         let json = serde_json::to_string(&auth).unwrap();
         assert!(json.contains("\"enableOauthBearer\":false"), "got: {json}");
@@ -683,6 +733,10 @@ authentication:
             "introspectionHttpTimeoutSeconds",
             "maxSecondsWithoutReauthentication",
             "validTokenType",
+            "fallbackUserNameClaim",
+            "fallbackUserNamePrefix",
+            "groupsClaim",
+            "groupsClaimDelimiter",
         ] {
             assert!(props.contains_key(want), "missing property {want}");
         }
@@ -737,6 +791,10 @@ authentication:
             introspection_http_timeout_seconds: None,
             max_seconds_without_reauthentication: None,
             valid_token_type: None,
+            fallback_user_name_claim: None,
+            fallback_user_name_prefix: None,
+            groups_claim: None,
+            groups_claim_delimiter: None,
         };
         let json = serde_json::to_string(&original).unwrap();
         assert!(
@@ -767,6 +825,10 @@ authentication:
             introspection_http_timeout_seconds: None,
             max_seconds_without_reauthentication: None,
             valid_token_type: None,
+            fallback_user_name_claim: None,
+            fallback_user_name_prefix: None,
+            groups_claim: None,
+            groups_claim_delimiter: None,
         };
         let json = serde_json::to_string(&auth).unwrap();
         assert!(
@@ -813,6 +875,10 @@ authentication:
             introspection_http_timeout_seconds: None,
             max_seconds_without_reauthentication: None,
             valid_token_type: None,
+            fallback_user_name_claim: None,
+            fallback_user_name_prefix: None,
+            groups_claim: None,
+            groups_claim_delimiter: None,
         };
         let json = serde_json::to_string(&original).unwrap();
         assert!(
@@ -857,6 +923,10 @@ authentication:
             introspection_http_timeout_seconds: None,
             max_seconds_without_reauthentication: None,
             valid_token_type: None,
+            fallback_user_name_claim: None,
+            fallback_user_name_prefix: None,
+            groups_claim: None,
+            groups_claim_delimiter: None,
         };
         let json = serde_json::to_string(&auth).unwrap();
         assert!(
@@ -900,6 +970,10 @@ authentication:
             introspection_http_timeout_seconds: None,
             max_seconds_without_reauthentication: None,
             valid_token_type: None,
+            fallback_user_name_claim: None,
+            fallback_user_name_prefix: None,
+            groups_claim: None,
+            groups_claim_delimiter: None,
         };
         let json = serde_json::to_string(&auth).unwrap();
         assert!(
@@ -931,6 +1005,10 @@ authentication:
             introspection_http_timeout_seconds: None,
             max_seconds_without_reauthentication: None,
             valid_token_type: None,
+            fallback_user_name_claim: None,
+            fallback_user_name_prefix: None,
+            groups_claim: None,
+            groups_claim_delimiter: None,
         };
         let json = serde_json::to_string(&original).unwrap();
         assert!(
@@ -976,6 +1054,10 @@ maxSecondsWithoutReauthentication: 300
             introspection_http_timeout_seconds: None,
             max_seconds_without_reauthentication: None,
             valid_token_type: None,
+            fallback_user_name_claim: None,
+            fallback_user_name_prefix: None,
+            groups_claim: None,
+            groups_claim_delimiter: None,
         };
         let auth = ListenerAuthentication::OAuth(cfg);
         let yaml = serde_yaml::to_string(&auth).expect("yaml must serialize");
@@ -1025,6 +1107,10 @@ validTokenType: JWT
             introspection_http_timeout_seconds: None,
             max_seconds_without_reauthentication: None,
             valid_token_type: None,
+            fallback_user_name_claim: None,
+            fallback_user_name_prefix: None,
+            groups_claim: None,
+            groups_claim_delimiter: None,
         };
         let auth = ListenerAuthentication::OAuth(cfg);
         let yaml = serde_yaml::to_string(&auth).expect("yaml must serialize");
@@ -1050,6 +1136,70 @@ customClaimCheck:
 ";
         let result: Result<ListenerAuthentication, _> = serde_yaml::from_str(yaml);
         assert!(result.is_err(), "old object shape must be rejected; got Ok");
+    }
+
+    #[test]
+    fn oauth_round_trip_with_claims_mapping_fields() {
+        let yaml = r#"
+type: oauth
+validIssuerUri: https://issuer.example/
+jwksEndpointUri: https://issuer.example/jwks
+fallbackUserNameClaim: client_id
+fallbackUserNamePrefix: "service-account-"
+groupsClaim: "$.realm_access.roles[*]"
+groupsClaimDelimiter: ","
+"#;
+        let parsed: ListenerAuthentication = serde_yaml::from_str(yaml).expect("yaml must parse");
+        let ListenerAuthentication::OAuth(oauth) = &parsed else {
+            panic!("expected oauth variant");
+        };
+        assert_eq!(oauth.fallback_user_name_claim.as_deref(), Some("client_id"));
+        assert_eq!(
+            oauth.fallback_user_name_prefix.as_deref(),
+            Some("service-account-")
+        );
+        assert_eq!(
+            oauth.groups_claim.as_deref(),
+            Some("$.realm_access.roles[*]")
+        );
+        assert_eq!(oauth.groups_claim_delimiter.as_deref(), Some(","));
+    }
+
+    #[test]
+    fn oauth_round_trip_without_claims_mapping_fields_omits_them() {
+        let cfg = ListenerAuthenticationOAuth {
+            valid_issuer_uri: "https://issuer.example/".into(),
+            jwks_endpoint_uri: Some("https://issuer.example/jwks".into()),
+            valid_audience: None,
+            user_name_claim: None,
+            custom_claim_check: None,
+            jwks_refresh_seconds: None,
+            max_clock_skew_seconds: None,
+            enable_oauth_bearer: true,
+            tls_trusted_certificates: vec![],
+            access_token_is_jwt: true,
+            introspection_endpoint_uri: None,
+            user_info_endpoint_uri: None,
+            client_id: None,
+            client_secret: None,
+            introspection_http_timeout_seconds: None,
+            max_seconds_without_reauthentication: None,
+            valid_token_type: None,
+            fallback_user_name_claim: None,
+            fallback_user_name_prefix: None,
+            groups_claim: None,
+            groups_claim_delimiter: None,
+        };
+        let auth = ListenerAuthentication::OAuth(cfg);
+        let yaml = serde_yaml::to_string(&auth).expect("yaml must serialize");
+        for key in [
+            "fallbackUserNameClaim",
+            "fallbackUserNamePrefix",
+            "groupsClaim",
+            "groupsClaimDelimiter",
+        ] {
+            assert!(!yaml.contains(key), "{key} must be omitted; got:\n{yaml}");
+        }
     }
 }
 

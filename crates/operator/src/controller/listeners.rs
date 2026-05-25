@@ -1363,6 +1363,10 @@ mod tests {
             introspection_http_timeout_seconds: None,
             max_seconds_without_reauthentication: None,
             valid_token_type: None,
+            fallback_user_name_claim: None,
+            fallback_user_name_prefix: None,
+            groups_claim: None,
+            groups_claim_delimiter: None,
         }
     }
 
@@ -1511,6 +1515,10 @@ mod tests {
             introspection_http_timeout_seconds: None,
             max_seconds_without_reauthentication: None,
             valid_token_type: None,
+            fallback_user_name_claim: None,
+            fallback_user_name_prefix: None,
+            groups_claim: None,
+            groups_claim_delimiter: None,
         };
         let perturbations: Vec<(&str, crate::crd::ListenerAuthenticationOAuth)> = vec![
             (
@@ -1605,6 +1613,34 @@ mod tests {
                     ..base.clone()
                 },
             ),
+            (
+                "fallback_user_name_claim",
+                crate::crd::ListenerAuthenticationOAuth {
+                    fallback_user_name_claim: Some("client_id".into()),
+                    ..base.clone()
+                },
+            ),
+            (
+                "fallback_user_name_prefix",
+                crate::crd::ListenerAuthenticationOAuth {
+                    fallback_user_name_prefix: Some("svc-".into()),
+                    ..base.clone()
+                },
+            ),
+            (
+                "groups_claim",
+                crate::crd::ListenerAuthenticationOAuth {
+                    groups_claim: Some("$.groups".into()),
+                    ..base.clone()
+                },
+            ),
+            (
+                "groups_claim_delimiter",
+                crate::crd::ListenerAuthenticationOAuth {
+                    groups_claim_delimiter: Some(",".into()),
+                    ..base.clone()
+                },
+            ),
         ];
         for (field, perturbed) in perturbations {
             let listeners = vec![
@@ -1649,6 +1685,10 @@ mod tests {
             introspection_http_timeout_seconds: None,
             max_seconds_without_reauthentication: None,
             valid_token_type: None,
+            fallback_user_name_claim: None,
+            fallback_user_name_prefix: None,
+            groups_claim: None,
+            groups_claim_delimiter: None,
         };
         let perturbations: Vec<(&str, crate::crd::ListenerAuthenticationOAuth)> = vec![
             (
@@ -1731,6 +1771,10 @@ mod tests {
             introspection_http_timeout_seconds: None,
             max_seconds_without_reauthentication: None,
             valid_token_type: None,
+            fallback_user_name_claim: None,
+            fallback_user_name_prefix: None,
+            groups_claim: None,
+            groups_claim_delimiter: None,
         }
     }
 
@@ -1941,6 +1985,10 @@ mod tests {
             introspection_http_timeout_seconds: None,
             max_seconds_without_reauthentication: None,
             valid_token_type: Some("JWT".into()),
+            fallback_user_name_claim: None,
+            fallback_user_name_prefix: None,
+            groups_claim: None,
+            groups_claim_delimiter: None,
         };
         let listeners = vec![oauth_listener("oauth", 9096, true, cfg)];
         let err = validate_listeners(&listeners, None).unwrap_err();
@@ -2676,6 +2724,21 @@ pub fn render_broker_toml(
         if let Some(typ) = &oauth_cfg.valid_token_type {
             let _ = writeln!(out, "valid_token_type = \"{typ}\"");
         }
+        // Slice 49h: claims mapping.
+        if let Some(c) = &oauth_cfg.fallback_user_name_claim {
+            let _ = writeln!(out, "fallback_user_name_claim = \"{c}\"");
+        }
+        if let Some(p) = &oauth_cfg.fallback_user_name_prefix {
+            let _ = writeln!(out, "fallback_user_name_prefix = \"{p}\"");
+        }
+        if let Some(expr) = &oauth_cfg.groups_claim {
+            // TOML multi-line literal — JsonPath may contain `'` and `"`,
+            // same convention as 49g's custom_claim_check.
+            let _ = writeln!(out, "groups_claim = '''{expr}'''");
+        }
+        if let Some(d) = &oauth_cfg.groups_claim_delimiter {
+            let _ = writeln!(out, "groups_claim_delimiter = \"{d}\"");
+        }
         out.push('\n');
     }
 
@@ -2893,6 +2956,10 @@ mod toml_rendering_tests {
             introspection_http_timeout_seconds: None,
             max_seconds_without_reauthentication: None,
             valid_token_type: None,
+            fallback_user_name_claim: None,
+            fallback_user_name_prefix: None,
+            groups_claim: None,
+            groups_claim_delimiter: None,
         }
     }
 
@@ -2990,6 +3057,10 @@ mod toml_rendering_tests {
             introspection_http_timeout_seconds: None,
             max_seconds_without_reauthentication: None,
             valid_token_type: None,
+            fallback_user_name_claim: None,
+            fallback_user_name_prefix: None,
+            groups_claim: None,
+            groups_claim_delimiter: None,
         };
         let listeners = vec![oauth_listener_for_render("oauth", 9095, true, cfg)];
         let toml = render_broker_toml(
@@ -3057,6 +3128,10 @@ mod toml_rendering_tests {
             introspection_http_timeout_seconds: None,
             max_seconds_without_reauthentication: None,
             valid_token_type: None,
+            fallback_user_name_claim: None,
+            fallback_user_name_prefix: None,
+            groups_claim: None,
+            groups_claim_delimiter: None,
         };
         let listeners = vec![oauth_listener_for_render("oauth", 9095, true, cfg)];
         let toml = render_broker_toml(
@@ -3282,6 +3357,10 @@ mod toml_rendering_tests {
             introspection_http_timeout_seconds: None,
             max_seconds_without_reauthentication: None,
             valid_token_type: None,
+            fallback_user_name_claim: None,
+            fallback_user_name_prefix: None,
+            groups_claim: None,
+            groups_claim_delimiter: None,
         };
         let listeners = vec![oauth_listener_for_render("oauth", 9095, true, cfg)];
         let toml = render_broker_toml(
@@ -3333,6 +3412,10 @@ mod toml_rendering_tests {
             introspection_http_timeout_seconds: Some(15),
             max_seconds_without_reauthentication: None,
             valid_token_type: None,
+            fallback_user_name_claim: None,
+            fallback_user_name_prefix: None,
+            groups_claim: None,
+            groups_claim_delimiter: None,
         }
     }
 
@@ -3542,6 +3625,94 @@ mod toml_rendering_tests {
         assert!(
             toml.contains("valid_token_type = \"JWT\""),
             "expected valid_token_type render; got:\n{toml}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Slice 49h — claims mapping render
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn render_broker_toml_emits_fallback_user_name_claim_when_set() {
+        use std::collections::BTreeMap;
+        let mut oauth = oauth_full_cfg();
+        oauth.fallback_user_name_claim = Some("client_id".into());
+        let listeners = vec![oauth_listener_for_render("oauth", 9096, true, oauth)];
+        let toml = render_broker_toml(
+            0,
+            &listeners,
+            &addrs_for("oauth", 9096),
+            "oauth",
+            &BTreeMap::new(),
+            Some(&render_tls()),
+            None,
+        );
+        assert!(
+            toml.contains("fallback_user_name_claim = \"client_id\""),
+            "expected fallback_user_name_claim render; got:\n{toml}"
+        );
+    }
+
+    #[test]
+    fn render_broker_toml_emits_fallback_user_name_prefix_when_set() {
+        use std::collections::BTreeMap;
+        let mut oauth = oauth_full_cfg();
+        oauth.fallback_user_name_prefix = Some("service-account-".into());
+        let listeners = vec![oauth_listener_for_render("oauth", 9096, true, oauth)];
+        let toml = render_broker_toml(
+            0,
+            &listeners,
+            &addrs_for("oauth", 9096),
+            "oauth",
+            &BTreeMap::new(),
+            Some(&render_tls()),
+            None,
+        );
+        assert!(
+            toml.contains("fallback_user_name_prefix = \"service-account-\""),
+            "expected fallback_user_name_prefix render; got:\n{toml}"
+        );
+    }
+
+    #[test]
+    fn render_broker_toml_emits_groups_claim_with_jsonpath_when_set() {
+        use std::collections::BTreeMap;
+        let mut oauth = oauth_full_cfg();
+        oauth.groups_claim = Some("$.realm_access.roles[*]".into());
+        let listeners = vec![oauth_listener_for_render("oauth", 9096, true, oauth)];
+        let toml = render_broker_toml(
+            0,
+            &listeners,
+            &addrs_for("oauth", 9096),
+            "oauth",
+            &BTreeMap::new(),
+            Some(&render_tls()),
+            None,
+        );
+        assert!(
+            toml.contains("groups_claim = '''$.realm_access.roles[*]'''"),
+            "expected groups_claim render (TOML multi-line literal); got:\n{toml}"
+        );
+    }
+
+    #[test]
+    fn render_broker_toml_emits_groups_claim_delimiter_when_set() {
+        use std::collections::BTreeMap;
+        let mut oauth = oauth_full_cfg();
+        oauth.groups_claim_delimiter = Some(",".into());
+        let listeners = vec![oauth_listener_for_render("oauth", 9096, true, oauth)];
+        let toml = render_broker_toml(
+            0,
+            &listeners,
+            &addrs_for("oauth", 9096),
+            "oauth",
+            &BTreeMap::new(),
+            Some(&render_tls()),
+            None,
+        );
+        assert!(
+            toml.contains("groups_claim_delimiter = \",\""),
+            "expected groups_claim_delimiter render; got:\n{toml}"
         );
     }
 
@@ -4121,6 +4292,10 @@ mod weak_auth_tests {
                     introspection_http_timeout_seconds: None,
                     max_seconds_without_reauthentication: None,
                     valid_token_type: None,
+                    fallback_user_name_claim: None,
+                    fallback_user_name_prefix: None,
+                    groups_claim: None,
+                    groups_claim_delimiter: None,
                 },
             )),
             configuration: None,

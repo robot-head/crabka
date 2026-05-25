@@ -168,6 +168,7 @@ impl ScramServerExchange {
             Principal {
                 name: self.username.clone(),
                 auth_method: AuthMethod::from_sasl(self.credential.mechanism),
+                groups: vec![],
             },
             server_final.into_bytes(),
         )

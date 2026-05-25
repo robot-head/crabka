@@ -165,6 +165,7 @@ mod tests {
         Principal {
             name: "alice".into(),
             auth_method: crabka_security::AuthMethod::SaslPlain,
+            groups: vec![],
         }
     }
 
@@ -735,10 +736,12 @@ mod tests {
         let admin = Principal {
             name: "admin".into(),
             auth_method: crabka_security::AuthMethod::SaslPlain,
+            groups: vec![],
         };
         let ops = Principal {
             name: "ops-bot".into(),
             auth_method: crabka_security::AuthMethod::SaslPlain,
+            groups: vec![],
         };
         let alice = alice();
         assert_eq!(

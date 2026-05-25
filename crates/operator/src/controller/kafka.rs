@@ -1701,6 +1701,10 @@ mod tests {
             introspection_http_timeout_seconds: None,
             max_seconds_without_reauthentication: None,
             valid_token_type: None,
+            fallback_user_name_claim: None,
+            fallback_user_name_prefix: None,
+            groups_claim: None,
+            groups_claim_delimiter: None,
         }
     }
 
@@ -1726,6 +1730,10 @@ mod tests {
             introspection_http_timeout_seconds: None,
             max_seconds_without_reauthentication: None,
             valid_token_type: None,
+            fallback_user_name_claim: None,
+            fallback_user_name_prefix: None,
+            groups_claim: None,
+            groups_claim_delimiter: None,
         }
     }
 

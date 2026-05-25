@@ -22,6 +22,7 @@ pub fn verify_plain<S: BuildHasher>(
         Ok(Principal {
             name: user.to_string(),
             auth_method: AuthMethod::SaslPlain,
+            groups: vec![],
         })
     } else {
         Err(AuthError::BadPassword)

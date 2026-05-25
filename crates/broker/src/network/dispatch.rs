@@ -141,6 +141,7 @@ fn peer_cert_principal<S>(
     Some(crabka_security::Principal {
         name,
         auth_method: crabka_security::AuthMethod::MTls,
+        groups: vec![],
     })
 }
 
@@ -206,6 +207,7 @@ async fn serve_connection_stream<S>(
             principal: crabka_security::Principal {
                 name: "ANONYMOUS".to_string(),
                 auth_method: crabka_security::AuthMethod::Anonymous,
+                groups: vec![],
             },
             mechanism: crabka_security::SaslMechanism::Plain,
             expires_at_ms: None,
@@ -1283,6 +1285,7 @@ async fn handle_alter_user_scram_credentials_frame(
         .unwrap_or_else(|| crabka_security::Principal {
             name: "ANONYMOUS".to_string(),
             auth_method: crabka_security::AuthMethod::Anonymous,
+            groups: vec![],
         });
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
@@ -1324,6 +1327,7 @@ async fn handle_describe_cluster_frame(
         .unwrap_or_else(|| crabka_security::Principal {
             name: "ANONYMOUS".to_string(),
             auth_method: crabka_security::AuthMethod::Anonymous,
+            groups: vec![],
         });
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
@@ -1367,6 +1371,7 @@ async fn handle_produce_frame(
         .unwrap_or_else(|| crabka_security::Principal {
             name: "ANONYMOUS".to_string(),
             auth_method: crabka_security::AuthMethod::Anonymous,
+            groups: vec![],
         });
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
@@ -1409,6 +1414,7 @@ async fn handle_fetch_frame(
         .unwrap_or_else(|| crabka_security::Principal {
             name: "ANONYMOUS".to_string(),
             auth_method: crabka_security::AuthMethod::Anonymous,
+            groups: vec![],
         });
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
@@ -1452,6 +1458,7 @@ async fn handle_metadata_frame(
         .unwrap_or_else(|| crabka_security::Principal {
             name: "ANONYMOUS".to_string(),
             auth_method: crabka_security::AuthMethod::Anonymous,
+            groups: vec![],
         });
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
@@ -1494,6 +1501,7 @@ async fn handle_create_topics_frame(
         .unwrap_or_else(|| crabka_security::Principal {
             name: "ANONYMOUS".to_string(),
             auth_method: crabka_security::AuthMethod::Anonymous,
+            groups: vec![],
         });
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
@@ -1537,6 +1545,7 @@ async fn handle_delete_topics_frame(
         .unwrap_or_else(|| crabka_security::Principal {
             name: "ANONYMOUS".to_string(),
             auth_method: crabka_security::AuthMethod::Anonymous,
+            groups: vec![],
         });
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
@@ -1588,6 +1597,7 @@ async fn handle_describe_acls_frame(
         .unwrap_or_else(|| crabka_security::Principal {
             name: "ANONYMOUS".to_string(),
             auth_method: crabka_security::AuthMethod::Anonymous,
+            groups: vec![],
         });
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
@@ -1634,6 +1644,7 @@ async fn handle_create_acls_frame(
         .unwrap_or_else(|| crabka_security::Principal {
             name: "ANONYMOUS".to_string(),
             auth_method: crabka_security::AuthMethod::Anonymous,
+            groups: vec![],
         });
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
@@ -1680,6 +1691,7 @@ async fn handle_delete_acls_frame(
         .unwrap_or_else(|| crabka_security::Principal {
             name: "ANONYMOUS".to_string(),
             auth_method: crabka_security::AuthMethod::Anonymous,
+            groups: vec![],
         });
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
@@ -1726,6 +1738,7 @@ async fn handle_elect_leaders_frame(
         .unwrap_or_else(|| crabka_security::Principal {
             name: "ANONYMOUS".to_string(),
             auth_method: crabka_security::AuthMethod::Anonymous,
+            groups: vec![],
         });
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
@@ -1772,6 +1785,7 @@ async fn handle_alter_partition_reassignments_frame(
         .unwrap_or_else(|| crabka_security::Principal {
             name: "ANONYMOUS".to_string(),
             auth_method: crabka_security::AuthMethod::Anonymous,
+            groups: vec![],
         });
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
@@ -1820,6 +1834,7 @@ async fn handle_list_partition_reassignments_frame(
         .unwrap_or_else(|| crabka_security::Principal {
             name: "ANONYMOUS".to_string(),
             auth_method: crabka_security::AuthMethod::Anonymous,
+            groups: vec![],
         });
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
@@ -1869,6 +1884,7 @@ async fn handle_describe_client_quotas_frame(
         .unwrap_or_else(|| crabka_security::Principal {
             name: "ANONYMOUS".to_string(),
             auth_method: crabka_security::AuthMethod::Anonymous,
+            groups: vec![],
         });
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
@@ -1918,6 +1934,7 @@ async fn handle_alter_client_quotas_frame(
         .unwrap_or_else(|| crabka_security::Principal {
             name: "ANONYMOUS".to_string(),
             auth_method: crabka_security::AuthMethod::Anonymous,
+            groups: vec![],
         });
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
@@ -1966,6 +1983,7 @@ async fn handle_describe_user_scram_credentials_frame(
         .unwrap_or_else(|| crabka_security::Principal {
             name: "ANONYMOUS".to_string(),
             auth_method: crabka_security::AuthMethod::Anonymous,
+            groups: vec![],
         });
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
@@ -2007,6 +2025,7 @@ async fn handle_alter_configs_frame(
         .unwrap_or_else(|| crabka_security::Principal {
             name: "ANONYMOUS".to_string(),
             auth_method: crabka_security::AuthMethod::Anonymous,
+            groups: vec![],
         });
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
@@ -2048,6 +2067,7 @@ async fn handle_incremental_alter_configs_frame(
         .unwrap_or_else(|| crabka_security::Principal {
             name: "ANONYMOUS".to_string(),
             auth_method: crabka_security::AuthMethod::Anonymous,
+            groups: vec![],
         });
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
@@ -2094,6 +2114,7 @@ async fn handle_delete_records_frame(
         .unwrap_or_else(|| crabka_security::Principal {
             name: "ANONYMOUS".to_string(),
             auth_method: crabka_security::AuthMethod::Anonymous,
+            groups: vec![],
         });
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
@@ -2135,6 +2156,7 @@ async fn handle_create_partitions_frame(
         .unwrap_or_else(|| crabka_security::Principal {
             name: "ANONYMOUS".to_string(),
             auth_method: crabka_security::AuthMethod::Anonymous,
+            groups: vec![],
         });
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
@@ -2175,6 +2197,7 @@ async fn handle_describe_groups_frame(
         .unwrap_or_else(|| crabka_security::Principal {
             name: "ANONYMOUS".to_string(),
             auth_method: crabka_security::AuthMethod::Anonymous,
+            groups: vec![],
         });
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
@@ -2215,6 +2238,7 @@ async fn handle_list_groups_frame(
         .unwrap_or_else(|| crabka_security::Principal {
             name: "ANONYMOUS".to_string(),
             auth_method: crabka_security::AuthMethod::Anonymous,
+            groups: vec![],
         });
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
@@ -2255,6 +2279,7 @@ async fn handle_delete_groups_frame(
         .unwrap_or_else(|| crabka_security::Principal {
             name: "ANONYMOUS".to_string(),
             auth_method: crabka_security::AuthMethod::Anonymous,
+            groups: vec![],
         });
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
@@ -2295,6 +2320,7 @@ async fn handle_join_group_frame(
         .unwrap_or_else(|| crabka_security::Principal {
             name: "ANONYMOUS".to_string(),
             auth_method: crabka_security::AuthMethod::Anonymous,
+            groups: vec![],
         });
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
@@ -2336,6 +2362,7 @@ async fn handle_offset_commit_frame(
         .unwrap_or_else(|| crabka_security::Principal {
             name: "ANONYMOUS".to_string(),
             auth_method: crabka_security::AuthMethod::Anonymous,
+            groups: vec![],
         });
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
@@ -2378,6 +2405,7 @@ async fn handle_offset_fetch_frame(
         .unwrap_or_else(|| crabka_security::Principal {
             name: "ANONYMOUS".to_string(),
             auth_method: crabka_security::AuthMethod::Anonymous,
+            groups: vec![],
         });
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
@@ -2419,6 +2447,7 @@ async fn handle_init_producer_id_frame(
         .unwrap_or_else(|| crabka_security::Principal {
             name: "ANONYMOUS".to_string(),
             auth_method: crabka_security::AuthMethod::Anonymous,
+            groups: vec![],
         });
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
@@ -2459,6 +2488,7 @@ async fn handle_add_partitions_to_txn_frame(
         .unwrap_or_else(|| crabka_security::Principal {
             name: "ANONYMOUS".to_string(),
             auth_method: crabka_security::AuthMethod::Anonymous,
+            groups: vec![],
         });
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
@@ -2503,6 +2533,7 @@ async fn handle_end_txn_frame(
         .unwrap_or_else(|| crabka_security::Principal {
             name: "ANONYMOUS".to_string(),
             auth_method: crabka_security::AuthMethod::Anonymous,
+            groups: vec![],
         });
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
@@ -2543,6 +2574,7 @@ async fn handle_txn_offset_commit_frame(
         .unwrap_or_else(|| crabka_security::Principal {
             name: "ANONYMOUS".to_string(),
             auth_method: crabka_security::AuthMethod::Anonymous,
+            groups: vec![],
         });
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {

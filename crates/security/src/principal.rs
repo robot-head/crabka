@@ -44,6 +44,13 @@ impl AuthMethod {
 pub struct Principal {
     pub name: String,
     pub auth_method: AuthMethod,
+    /// Slice 49h: OAuth-derived group memberships from the listener's
+    /// `groupsClaim`. Empty vec for non-OAuth principals (PLAIN/SCRAM/
+    /// mTLS/anonymous) and for OAuth principals whose listener has no
+    /// `groupsClaim` configured. No broker-side authorizer reads this
+    /// yet (slice 53/54 will); populated as scaffolding + for
+    /// observability.
+    pub groups: Vec<String>,
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]

@@ -146,6 +146,22 @@ pub struct FileOAuthBearerConfig {
     /// last until the token's natural `exp`.
     #[serde(default)]
     pub max_session_lifetime_seconds: Option<u32>,
+
+    /// Slice 49h: alternate claim name for principal-name fallback.
+    #[serde(default)]
+    pub fallback_user_name_claim: Option<String>,
+    /// Slice 49h: prepended on fallback only.
+    #[serde(default)]
+    pub fallback_user_name_prefix: Option<String>,
+    /// Slice 49h: `JsonPath` expression (RFC 9535) extracting groups.
+    /// Compiled once at broker startup; malformed expression panics
+    /// with descriptive error.
+    #[serde(default)]
+    pub groups_claim: Option<String>,
+    /// Slice 49h: when `groups_claim` resolves to a string, split on
+    /// this delimiter.
+    #[serde(default)]
+    pub groups_claim_delimiter: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -292,6 +308,13 @@ impl FileConfig {
                     })
                 });
 
+            // Slice 49h: compile groups_claim JsonPath at load time.
+            let groups_claim_compiled = oauth.groups_claim.as_deref().map(|expr| {
+                jsonpath_rust::parser::parse_json_path(expr).unwrap_or_else(|e| {
+                    panic!("[oauthbearer]: invalid groups_claim JsonPath expression {expr:?}: {e}")
+                })
+            });
+
             match (
                 oauth.jwks_endpoint_uri.as_ref(),
                 oauth.introspection_endpoint_uri.as_ref(),
@@ -320,6 +343,14 @@ impl FileConfig {
                     v.custom_claim_check
                         .clone_from(&custom_claim_check_compiled);
                     v.valid_token_type.clone_from(&oauth.valid_token_type);
+                    // Slice 49h: claims mapping.
+                    v.fallback_user_name_claim
+                        .clone_from(&oauth.fallback_user_name_claim);
+                    v.fallback_user_name_prefix
+                        .clone_from(&oauth.fallback_user_name_prefix);
+                    v.groups_claim.clone_from(&groups_claim_compiled);
+                    v.groups_claim_delimiter
+                        .clone_from(&oauth.groups_claim_delimiter);
                     cfg.oauthbearer_validator = crabka_security::OAuthBearerValidator::Signed(v);
                     cfg.oauthbearer_jwks_endpoint = Some(jwks_uri);
                     if let Some(ms) = oauth.jwks_refresh_interval_ms {
@@ -376,9 +407,14 @@ impl FileConfig {
                             .unwrap_or_else(|| "sub".into()),
                         // Slice 49g: JsonPath custom_claim_check. No typ
                         // check for introspection (no JWT header).
-                        custom_claim_check: custom_claim_check_compiled,
+                        custom_claim_check: custom_claim_check_compiled.clone(),
                         call_userinfo: oauth.userinfo_endpoint_uri.is_some(),
                         allowable_clock_skew_ms: oauth.allowable_clock_skew_ms.unwrap_or(30_000),
+                        // Slice 49h: claims mapping.
+                        fallback_user_name_claim: oauth.fallback_user_name_claim.clone(),
+                        fallback_user_name_prefix: oauth.fallback_user_name_prefix.clone(),
+                        groups_claim: groups_claim_compiled.clone(),
+                        groups_claim_delimiter: oauth.groups_claim_delimiter.clone(),
                     };
                     cfg.oauthbearer_validator =
                         crabka_security::OAuthBearerValidator::Introspection(v);
@@ -395,6 +431,11 @@ impl FileConfig {
                     // Slice 49g: JsonPath custom_claim_check + JWT typ check.
                     v.custom_claim_check = custom_claim_check_compiled;
                     v.valid_token_type.clone_from(&oauth.valid_token_type);
+                    // Slice 49h: claims mapping.
+                    v.fallback_user_name_claim = oauth.fallback_user_name_claim;
+                    v.fallback_user_name_prefix = oauth.fallback_user_name_prefix;
+                    v.groups_claim = groups_claim_compiled;
+                    v.groups_claim_delimiter = oauth.groups_claim_delimiter;
                     cfg.oauthbearer_validator = crabka_security::OAuthBearerValidator::Unsecured(v);
                 }
             }
