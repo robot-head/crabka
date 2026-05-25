@@ -3,17 +3,23 @@
 //! Per spec §1.5: SASL-authenticated callers can list tokens visible
 //! to them. Filtering rules:
 //!   - Token-authed callers see only their own owned tokens (regardless
-//!     of any owner filter — KIP-48 isolation).
+//!     of any owner filter — KIP-48 isolation; the ACL extension below
+//!     does NOT apply to token-authed callers).
 //!   - With an explicit non-empty `owners` filter: tokens whose owner
 //!     matches one of the entries AND that the caller can see (owner
-//!     or listed renewer).
+//!     or listed renewer, OR Describe-ACL on `TOKEN:<owner>`).
 //!   - With no `owners` filter (or an empty/null one): every token
-//!     where the caller is owner or a renewer.
+//!     where the caller is owner / listed renewer / holds the
+//!     `Describe` ACL on `TOKEN:<owner>`.
 //!
-//! ACL-based visibility (the `Describe` operation on `TOKEN:<owner>`)
-//! is T9's job; this handler currently only honours owner+renewer
-//! visibility.
+//! ACL-based visibility (spec §5.3): for any token whose owner has
+//! been granted `Describe` on `TOKEN:<owner_principal_string>` to the
+//! calling principal, include it in the visible set even if the caller
+//! is not owner or renewer.
 
+use std::net::SocketAddr;
+
+use crabka_metadata::{AclOperation, ResourceType};
 use crabka_protocol::owned::describe_delegation_token_request::DescribeDelegationTokenRequest;
 use crabka_protocol::owned::describe_delegation_token_response::{
     DescribeDelegationTokenResponse, DescribedDelegationToken, DescribedDelegationTokenRenewer,
@@ -21,17 +27,19 @@ use crabka_protocol::owned::describe_delegation_token_response::{
 use crabka_raft::ControllerHandle;
 use crabka_security::{KafkaPrincipal, SecretBytes};
 
+use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize};
 use crate::network::auth::ConnectionAuth;
 
 // `async` matches the call-site shape used by every other
-// `crate::handlers::*::handle` and lets T9 add ACL lookups without
-// changing the signature; today the body is purely synchronous.
+// `crate::handlers::*::handle`; today the body is purely synchronous.
 #[allow(clippy::unused_async)]
-pub(crate) async fn handle(
+pub(crate) async fn handle<S: std::hash::BuildHasher>(
     req: &DescribeDelegationTokenRequest,
     auth: &ConnectionAuth,
     secret_key: Option<&SecretBytes>,
     controller: &ControllerHandle,
+    peer: &SocketAddr,
+    super_users: &std::collections::HashSet<String, S>,
 ) -> DescribeDelegationTokenResponse {
     if secret_key.is_none() {
         return err_response(crate::codes::DELEGATION_TOKEN_AUTH_DISABLED);
@@ -64,31 +72,75 @@ pub(crate) async fn handle(
     };
 
     // Build the visible-token set per the rules above.
-    // TODO (T9): extend visibility with ACL-based `Describe` permission
-    // on `TOKEN:<owner_name>` so cluster admins can see tokens they
-    // neither own nor renew.
     let tokens: Vec<crabka_metadata::DelegationToken> = if *authenticated_via_token {
         // KIP-48: a token-authed caller is restricted to tokens they
-        // own. The wire owner filter is intentionally ignored.
+        // own. The wire owner filter is intentionally ignored, and the
+        // ACL extension below does NOT apply to token-authed callers.
         image
             .delegation_tokens_by_owner(&caller)
             .into_iter()
             .cloned()
             .collect()
-    } else if let Some(owners) = candidate_owners {
-        image
-            .all_delegation_tokens()
-            .filter(|t| {
-                owners.contains(&t.owner) && (t.owner == caller || t.renewers.contains(&caller))
-            })
-            .cloned()
-            .collect()
     } else {
-        image
-            .delegation_tokens_visible_to(&caller)
-            .into_iter()
-            .cloned()
-            .collect()
+        // Step 1: tokens visible via owner / renewer (and the optional
+        // owner filter, if present).
+        let base: Vec<&crabka_metadata::DelegationToken> = if let Some(owners) = &candidate_owners {
+            image
+                .all_delegation_tokens()
+                .filter(|t| {
+                    owners.contains(&t.owner) && (t.owner == caller || t.renewers.contains(&caller))
+                })
+                .collect()
+        } else {
+            image.delegation_tokens_visible_to(&caller)
+        };
+
+        // Step 2 (spec §5.3): extend with tokens whose owner has
+        // granted `Describe` on `TOKEN:<owner_principal_string>` to
+        // the calling principal. Apply the same owner filter if one
+        // was supplied so the filter remains authoritative.
+        //
+        // Skip the extension entirely in the pre-ACL "no super-users,
+        // no ACLs" world — `authorize()` returns Allow unconditionally
+        // there (its compatibility shim) and would otherwise surface
+        // every token to every caller.
+        let acl_extra: Vec<&crabka_metadata::DelegationToken> =
+            if super_users.is_empty() && image.all_acls().next().is_none() {
+                Vec::new()
+            } else {
+                image
+                    .all_delegation_tokens()
+                    .filter(|t| match &candidate_owners {
+                        Some(owners) => owners.contains(&t.owner),
+                        None => true,
+                    })
+                    .filter(|t| {
+                        let resource = t.owner.to_string();
+                        authorize(
+                            &image,
+                            super_users,
+                            &AuthorizationRequest {
+                                principal,
+                                host: peer,
+                                resource_type: ResourceType::DelegationToken,
+                                resource_name: &resource,
+                                operation: AclOperation::Describe,
+                            },
+                        ) == AuthorizationResult::Allow
+                    })
+                    .collect()
+            };
+
+        // Merge + dedup by token_id. Order is unspecified (matches the
+        // existing `delegation_tokens_*` accessor contracts).
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let mut merged: Vec<crabka_metadata::DelegationToken> = Vec::new();
+        for t in base.into_iter().chain(acl_extra.into_iter()) {
+            if seen.insert(t.token_id.as_str()) {
+                merged.push(t.clone());
+            }
+        }
+        merged
     };
 
     DescribeDelegationTokenResponse {
@@ -193,6 +245,21 @@ mod tests {
         }
     }
 
+    fn peer() -> SocketAddr {
+        "127.0.0.1:0".parse().unwrap()
+    }
+
+    fn no_super() -> std::collections::HashSet<String> {
+        std::collections::HashSet::new()
+    }
+
+    async fn seed_acl(controller: &ControllerHandle, entry: crabka_metadata::AclEntry) {
+        controller
+            .submit_change(vec![MetadataRecord::V1AccessControlEntry(entry)])
+            .await
+            .expect("seed acl");
+    }
+
     async fn seed_token(
         controller: &ControllerHandle,
         token_id: &str,
@@ -219,7 +286,15 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let controller = test_controller(dir.path().into()).await;
         let req = DescribeDelegationTokenRequest::default();
-        let resp = handle(&req, &authed("alice"), None, &controller).await;
+        let resp = handle(
+            &req,
+            &authed("alice"),
+            None,
+            &controller,
+            &peer(),
+            &no_super(),
+        )
+        .await;
         assert_eq!(
             resp.error_code,
             crate::codes::DELEGATION_TOKEN_AUTH_DISABLED
@@ -239,7 +314,15 @@ mod tests {
         seed_token(&controller, "t-c", kp("carol"), vec![]).await;
 
         let req = DescribeDelegationTokenRequest::default();
-        let resp = handle(&req, &authed("alice"), Some(&secret), &controller).await;
+        let resp = handle(
+            &req,
+            &authed("alice"),
+            Some(&secret),
+            &controller,
+            &peer(),
+            &no_super(),
+        )
+        .await;
         assert_eq!(resp.error_code, 0);
         let ids: std::collections::HashSet<&str> =
             resp.tokens.iter().map(|t| t.token_id.as_str()).collect();
@@ -277,7 +360,15 @@ mod tests {
             ]),
             ..Default::default()
         };
-        let resp = handle(&req, &authed("alice"), Some(&secret), &controller).await;
+        let resp = handle(
+            &req,
+            &authed("alice"),
+            Some(&secret),
+            &controller,
+            &peer(),
+            &no_super(),
+        )
+        .await;
         assert_eq!(resp.error_code, 0);
         let ids: std::collections::HashSet<&str> =
             resp.tokens.iter().map(|t| t.token_id.as_str()).collect();
@@ -310,6 +401,8 @@ mod tests {
             &authed_with_token("alice", true),
             Some(&secret),
             &controller,
+            &peer(),
+            &no_super(),
         )
         .await;
         assert_eq!(resp.error_code, 0);
@@ -317,6 +410,99 @@ mod tests {
             resp.tokens.iter().map(|t| t.token_id.as_str()).collect();
         assert_eq!(ids.len(), 1);
         assert!(ids.contains("t-a"));
+        controller.cancel().await;
+    }
+
+    /// Slice 51 T9 / spec §5.3: a caller who is neither owner nor a
+    /// listed renewer can still see a token when granted `Describe` on
+    /// `TOKEN:<owner_principal_string>`. Token-authed callers do NOT
+    /// pick this extension up — covered by
+    /// `token_authed_caller_acl_extension_does_not_apply` below.
+    #[tokio::test]
+    async fn describe_grants_visibility_via_token_acl() {
+        use crabka_metadata::{AclEntry, AclOperation, PatternType, PermissionType, ResourceType};
+        let dir = TempDir::new().unwrap();
+        let controller = test_controller(dir.path().into()).await;
+        let secret = SecretBytes::new(b"k".to_vec());
+        // alice owns t-a; bob has no owner/renewer relationship to it.
+        seed_token(&controller, "t-a", kp("alice"), vec![]).await;
+        // Grant bob `Describe` on `TOKEN:User:alice`.
+        seed_acl(
+            &controller,
+            AclEntry {
+                resource_type: ResourceType::DelegationToken,
+                resource_name: "User:alice".into(),
+                pattern_type: PatternType::Literal,
+                principal: "User:bob".into(),
+                host: "*".into(),
+                operation: AclOperation::Describe,
+                permission_type: PermissionType::Allow,
+            },
+        )
+        .await;
+
+        // bob queries with an empty filter; the ACL extension should
+        // surface alice's token.
+        let req = DescribeDelegationTokenRequest::default();
+        let resp = handle(
+            &req,
+            &authed("bob"),
+            Some(&secret),
+            &controller,
+            &peer(),
+            &no_super(),
+        )
+        .await;
+        assert_eq!(resp.error_code, 0);
+        let ids: std::collections::HashSet<&str> =
+            resp.tokens.iter().map(|t| t.token_id.as_str()).collect();
+        assert!(
+            ids.contains("t-a"),
+            "expected ACL Describe on TOKEN:User:alice to make t-a visible to bob; got {ids:?}"
+        );
+        controller.cancel().await;
+    }
+
+    /// Token-authenticated callers stay restricted to their own owned
+    /// tokens even when an ACL would otherwise extend visibility.
+    #[tokio::test]
+    async fn token_authed_caller_acl_extension_does_not_apply() {
+        use crabka_metadata::{AclEntry, AclOperation, PatternType, PermissionType, ResourceType};
+        let dir = TempDir::new().unwrap();
+        let controller = test_controller(dir.path().into()).await;
+        let secret = SecretBytes::new(b"k".to_vec());
+        seed_token(&controller, "t-a", kp("alice"), vec![]).await;
+        seed_acl(
+            &controller,
+            AclEntry {
+                resource_type: ResourceType::DelegationToken,
+                resource_name: "User:alice".into(),
+                pattern_type: PatternType::Literal,
+                principal: "User:bob".into(),
+                host: "*".into(),
+                operation: AclOperation::Describe,
+                permission_type: PermissionType::Allow,
+            },
+        )
+        .await;
+
+        let req = DescribeDelegationTokenRequest::default();
+        let resp = handle(
+            &req,
+            &authed_with_token("bob", true),
+            Some(&secret),
+            &controller,
+            &peer(),
+            &no_super(),
+        )
+        .await;
+        assert_eq!(resp.error_code, 0);
+        // bob owns nothing — ACL extension MUST NOT surface alice's t-a.
+        assert!(
+            resp.tokens.is_empty(),
+            "token-authed bob must not see alice's token via ACL; got {:?}",
+            resp.tokens.iter().map(|t| &t.token_id).collect::<Vec<_>>()
+        );
         controller.cancel().await;
     }
 }

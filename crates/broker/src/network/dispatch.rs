@@ -1045,7 +1045,7 @@ async fn serve_connection_stream<S>(
         // only their own tokens; non-token callers see tokens they
         // own OR are listed as a renewer on).
         if peek_api_key(&frame).ok() == Some(41) {
-            match handle_describe_delegation_token_frame(&broker, &frame, &auth)
+            match handle_describe_delegation_token_frame(&broker, &frame, &auth, &peer)
                 .instrument(req_span.clone())
                 .await
             {
@@ -2224,6 +2224,7 @@ async fn handle_describe_delegation_token_frame(
     broker: &Broker,
     frame: &[u8],
     auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
 ) -> Result<Bytes, BrokerError> {
     use crabka_protocol::{Decode, Encode};
 
@@ -2241,6 +2242,8 @@ async fn handle_describe_delegation_token_frame(
         auth,
         broker.config.delegation_token_secret_key.as_ref(),
         &broker.controller,
+        peer,
+        &broker.config.super_users,
     )
     .await;
     let mut buf = BytesMut::with_capacity(resp.encoded_len(api_version));
