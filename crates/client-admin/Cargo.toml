@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 crabka-client-core = { version = "0.1", path = "../client-core" }
+crabka-metadata    = { version = "0.1", path = "../metadata" }
 crabka-protocol    = { version = "0.1", path = "../protocol", default-features = false }
 crabka-security    = { version = "0.1", path = "../security" }
 async-trait        = { workspace = true }

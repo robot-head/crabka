@@ -1099,6 +1099,7 @@ dependencies = [
  "bytes",
  "crabka-broker",
  "crabka-client-core",
+ "crabka-metadata",
  "crabka-protocol",
  "crabka-security",
  "ring",

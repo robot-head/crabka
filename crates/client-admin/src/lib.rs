@@ -11,6 +11,7 @@ use crabka_client_core::{ClientError, Connection, ConnectionOptions};
 use thiserror::Error;
 
 pub mod configs;
+pub mod delegation_tokens;
 pub mod quotas;
 pub mod topics;
 pub mod users;
