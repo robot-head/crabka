@@ -6937,3 +6937,429 @@ async fn jvm_kafka_log_dirs_describe_reports_jbod_spread() {
 
     broker.shutdown().await;
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// Slice 51 (KIP-48): delegation-token JVM acceptance.
+// ────────────────────────────────────────────────────────────────────────
+
+/// Like [`start_three_broker_sasl_plaintext_jvm_cluster_with_users`] but
+/// also enables `SCRAM-SHA-256` on the listener and installs the given
+/// `secret_key` as the HMAC master for KIP-48 delegation tokens on every
+/// broker. The admin user is provisioned as PLAIN (so the JVM CLI's
+/// `kafka-delegation-tokens --create/--describe/--expire` calls can
+/// authenticate over PLAIN), while the SCRAM-SHA-256 mechanism is needed
+/// for the *token consumer* — `kafka-console-producer` authenticates as
+/// the freshly minted token using SCRAM-SHA-256, which the broker
+/// satisfies via the token-fallback path (`TokenID` → username, HMAC →
+/// password).
+///
+/// Returns `(h1, h2, h3, cfg1, cfg2, cfg3, dir1, dir2, dir3)`.
+#[allow(clippy::type_complexity)]
+#[allow(clippy::too_many_lines)]
+async fn start_three_broker_sasl_plaintext_jvm_cluster_with_delegation_tokens(
+    admin: &str,
+    admin_pass: &str,
+    secret_key: &[u8],
+) -> (
+    crabka_broker::BrokerHandle,
+    crabka_broker::BrokerHandle,
+    crabka_broker::BrokerHandle,
+    BrokerConfig,
+    BrokerConfig,
+    BrokerConfig,
+    tempfile::TempDir,
+    tempfile::TempDir,
+    tempfile::TempDir,
+) {
+    use crabka_broker::config::{InterBrokerCredentials, ListenerSpec};
+    use crabka_security::{ListenerProtocol, SaslMechanism, SecretBytes};
+
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("crabka_broker=info")),
+        )
+        .with_test_writer()
+        .try_init();
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let dir0 = tempfile::tempdir().expect("tempdir b0");
+    let dir1 = tempfile::tempdir().expect("tempdir b1");
+    let dir2 = tempfile::tempdir().expect("tempdir b2");
+
+    let listen0: std::net::SocketAddr = LISTEN.parse().expect("static addr");
+    let listen1: std::net::SocketAddr = LISTEN_B1.parse().expect("static addr");
+    let listen2: std::net::SocketAddr = LISTEN_B2.parse().expect("static addr");
+
+    let ctrl0: std::net::SocketAddr = "0.0.0.0:9093".parse().expect("static addr");
+    let ctrl1: std::net::SocketAddr = "0.0.0.0:9095".parse().expect("static addr");
+    let ctrl2: std::net::SocketAddr = "0.0.0.0:9097".parse().expect("static addr");
+
+    let voters = vec![(1_u64, ctrl0), (2_u64, ctrl1), (3_u64, ctrl2)];
+
+    let mk_cfg = |idx: u64,
+                  listen: std::net::SocketAddr,
+                  ctrl: std::net::SocketAddr,
+                  advertised: &str,
+                  log_dir: std::path::PathBuf,
+                  mode: crabka_broker::BootstrapMode|
+     -> BrokerConfig {
+        let mut cfg = BrokerConfig {
+            broker_id: i32::try_from(idx).unwrap(),
+            listen_addr: listen,
+            advertised_listener: advertised.to_string(),
+            log_dir,
+            log_config: LogConfig::default(),
+            node_id: idx,
+            controller_listen_addr: ctrl,
+            controller_quorum_voters: voters.clone(),
+            heartbeat_interval_ms: 3_000,
+            heartbeat_timeout_ms: 9_000,
+            replica_lag_time_max_ms: 30_000,
+            controller_election_timeout: std::time::Duration::from_secs(5),
+            controller_heartbeat_interval: std::time::Duration::from_millis(500),
+            bootstrap_mode: mode,
+            listeners: vec![ListenerSpec {
+                name: "SASL_PLAINTEXT".to_string(),
+                bind_addr: listen,
+                advertised: advertised.to_string(),
+                protocol: ListenerProtocol::SaslPlaintext,
+                tls_config: None,
+                sasl_mechanisms: None,
+            }],
+            inter_broker_listener_name: "SASL_PLAINTEXT".to_string(),
+            // PLAIN for the admin/inter-broker channel; SCRAM-SHA-256 so the
+            // freshly minted delegation token (TokenID/HMAC) can authenticate
+            // via the token-fallback path on the SCRAM handler.
+            enabled_sasl_mechanisms: vec![SaslMechanism::Plain, SaslMechanism::ScramSha256],
+            super_users: std::collections::HashSet::from([admin.to_string()]),
+            inter_broker_credentials: Some(InterBrokerCredentials {
+                mechanism: SaslMechanism::Plain,
+                username: admin.to_string(),
+                password: admin_pass.to_string(),
+            }),
+            delegation_token_secret_key: Some(SecretBytes::new(secret_key.to_vec())),
+            ..BrokerConfig::default()
+        };
+        cfg.plain_credentials
+            .insert(admin.to_string(), admin_pass.to_string());
+        cfg
+    };
+
+    let cfg0 = mk_cfg(
+        1,
+        listen0,
+        ctrl0,
+        BOOTSTRAP,
+        dir0.path().to_path_buf(),
+        crabka_broker::BootstrapMode::Bootstrap,
+    );
+    let broker0 = Broker::start(cfg0.clone()).await.expect("start broker 0");
+
+    let cfg1 = mk_cfg(
+        2,
+        listen1,
+        ctrl1,
+        BOOTSTRAP_B1,
+        dir1.path().to_path_buf(),
+        crabka_broker::BootstrapMode::Join,
+    );
+    let join_handle1 = tokio::spawn({
+        let c = cfg1.clone();
+        async move { Broker::start(c).await }
+    });
+
+    broker0
+        .add_learner(2, ctrl1)
+        .await
+        .expect("add_learner for broker 1");
+    let target2: std::collections::BTreeSet<u64> = [1_u64, 2_u64].into_iter().collect();
+    broker0
+        .change_membership(target2)
+        .await
+        .expect("change_membership to {1,2}");
+
+    let broker1 = join_handle1
+        .await
+        .expect("broker 1 spawn join")
+        .expect("broker 1 start");
+
+    let cfg2 = mk_cfg(
+        3,
+        listen2,
+        ctrl2,
+        BOOTSTRAP_B2,
+        dir2.path().to_path_buf(),
+        crabka_broker::BootstrapMode::Join,
+    );
+    let join_handle2 = tokio::spawn({
+        let c = cfg2.clone();
+        async move { Broker::start(c).await }
+    });
+
+    broker0
+        .add_learner(3, ctrl2)
+        .await
+        .expect("add_learner for broker 2");
+    let target3: std::collections::BTreeSet<u64> = [1_u64, 2_u64, 3_u64].into_iter().collect();
+    broker0
+        .change_membership(target3)
+        .await
+        .expect("change_membership to {1,2,3}");
+
+    let broker2 = join_handle2
+        .await
+        .expect("broker 2 spawn join")
+        .expect("broker 2 start");
+
+    eprintln!(
+        "CRABKA[test] three-broker sasl (delegation tokens): b0={LISTEN} adv={BOOTSTRAP} b1={LISTEN_B1} adv={BOOTSTRAP_B1} b2={LISTEN_B2} adv={BOOTSTRAP_B2}"
+    );
+    let _ = HOST_PORT;
+    let _ = HOST_PORT_B1;
+    let _ = HOST_PORT_B2;
+    (
+        broker0, broker1, broker2, cfg0, cfg1, cfg2, dir0, dir1, dir2,
+    )
+}
+
+/// Parse the JVM `kafka-delegation-tokens --create` stdout for a line
+/// matching `<key>\t<value>` or `<key>=<value>` and return `<value>`.
+/// The tool prints both a header row and a data row separated by tabs;
+/// we scan every line and return the first occurrence whose key matches.
+fn extract_jvm_kv(stdout: &str, key: &str) -> String {
+    // The kafka-delegation-tokens tool prints a header line then a tab-
+    // separated value row, e.g.:
+    //   TOKENID                                      HMAC ...
+    //   <id>                                         <hmac> ...
+    // Some Kafka versions instead print `key = value` pairs. Try both.
+    for line in stdout.lines() {
+        if let Some(rest) = line.strip_prefix(&format!("{key} = ")) {
+            return rest.trim().to_string();
+        }
+        if let Some(rest) = line.strip_prefix(&format!("{key}=")) {
+            return rest.trim().to_string();
+        }
+    }
+    // Fallback: header/data table. Find the header column index, then
+    // return the same-indexed cell from the next non-header line.
+    let mut header_cols: Option<Vec<&str>> = None;
+    for line in stdout.lines() {
+        let cols: Vec<&str> = line.split('\t').collect();
+        if header_cols.is_none() {
+            if cols.iter().any(|c| c.trim().eq_ignore_ascii_case(key)) {
+                header_cols = Some(cols);
+            }
+            continue;
+        }
+        let idx = header_cols
+            .as_ref()
+            .unwrap()
+            .iter()
+            .position(|c| c.trim().eq_ignore_ascii_case(key));
+        if let Some(i) = idx
+            && i < cols.len()
+        {
+            return cols[i].trim().to_string();
+        }
+    }
+    panic!("could not extract key={key} from stdout: {stdout}");
+}
+
+/// JVM acceptance: KIP-48 delegation-token round-trip via the official
+/// `kafka-delegation-tokens` admin CLI.
+///
+/// 3-broker `SASL_PLAINTEXT` cluster with both `PLAIN` (admin auth) and
+/// `SCRAM-SHA-256` (token auth) mechanisms enabled, plus a master
+/// delegation-token HMAC key. The flow:
+///
+/// 1. Admin (PLAIN) calls `kafka-delegation-tokens --create` → broker
+///    mints a token, replicates `V1DelegationToken` via raft, returns
+///    `(TokenID, HMAC, …)`.
+/// 2. Build a `token.properties` referencing those credentials via
+///    `sasl.mechanism=SCRAM-SHA-256`.
+/// 3. `kafka-console-producer --producer.config token.properties` produces
+///    one record — authenticates against the token-fallback path of the
+///    SCRAM handler.
+/// 4. `kafka-delegation-tokens --describe --owner-principal User:admin`
+///    lists the token (substring match on `TokenID`).
+/// 5. `kafka-delegation-tokens --expire --expiry-time-period -1 --hmac
+///    <hmac>` deletes the token.
+///
+/// `#[ignore = "requires Docker"]` — run with `--ignored`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires Docker"]
+#[allow(clippy::too_many_lines)]
+async fn jvm_kafka_delegation_tokens_end_to_end() {
+    const ADMIN: &str = "admin";
+    const ADMIN_PASS: &str = "admin-secret";
+    const TOPIC: &str = "crabka-deleg-token-itest";
+    const SECRET: &[u8] = b"jvm-master-key";
+
+    let (h1, h2, h3, _cfg1, _cfg2, _cfg3, _d1, _d2, _d3) =
+        start_three_broker_sasl_plaintext_jvm_cluster_with_delegation_tokens(
+            ADMIN, ADMIN_PASS, SECRET,
+        )
+        .await;
+    nc_check_connectivity();
+
+    wait_three_brokers_registered(&h1, &h2, &h3, 3).await;
+
+    // Admin properties: PLAIN, super-user — used for create/describe/expire.
+    let admin_props = write_client_props(&format!(
+        "security.protocol=SASL_PLAINTEXT\n\
+         sasl.mechanism=PLAIN\n\
+         sasl.jaas.config={}\n",
+        plain_jaas(ADMIN, ADMIN_PASS),
+    ));
+    let admin_mount = admin_props.mount_str();
+
+    // 1. Create the token. `--max-life-time-period -1` ⇒ use the broker's
+    //    configured `delegation.token.max.lifetime.ms` default.
+    let create_out = docker_run_kafka_tool_with_image_and_mount(
+        KAFKA_IMAGE_TXN,
+        &admin_mount,
+        &[
+            "kafka-delegation-tokens",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--command-config",
+            "/client.properties",
+            "--create",
+            "--max-life-time-period",
+            "-1",
+        ],
+    );
+    let create_stdout = String::from_utf8_lossy(&create_out.stdout).to_string();
+    eprintln!("CRABKA[test] --create stdout:\n{create_stdout}");
+
+    let token_id = extract_jvm_kv(&create_stdout, "TOKENID");
+    let hmac = extract_jvm_kv(&create_stdout, "HMAC");
+    assert!(
+        !token_id.is_empty(),
+        "empty TOKENID; stdout: {create_stdout}"
+    );
+    assert!(!hmac.is_empty(), "empty HMAC; stdout: {create_stdout}");
+
+    // 2. Build token.properties referencing the new credentials via
+    //    SCRAM-SHA-256 (the JVM client SASL mechanism for delegation
+    //    tokens per KIP-48).
+    let token_props = write_client_props(&format!(
+        "security.protocol=SASL_PLAINTEXT\n\
+         sasl.mechanism=SCRAM-SHA-256\n\
+         sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required \
+         tokenauth=true \
+         username=\"{token_id}\" password=\"{hmac}\";\n\
+         enable.idempotence=false\n\
+         acks=1\n",
+    ));
+    let token_mount = token_props.mount_str();
+
+    // 3. Create the topic as admin so the token producer can target it.
+    docker_run_kafka_tool_with_image_and_mount(
+        KAFKA_IMAGE_TXN,
+        &admin_mount,
+        &[
+            "kafka-topics",
+            "--create",
+            "--if-not-exists",
+            "--topic",
+            TOPIC,
+            "--partitions",
+            "1",
+            "--replication-factor",
+            "1",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--command-config",
+            "/client.properties",
+        ],
+    );
+
+    // 4. Produce one message authenticated as the delegation token.
+    let mut child = Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "-i",
+            "-v",
+            &token_mount,
+            "--add-host=host.docker.internal:host-gateway",
+            KAFKA_IMAGE_TXN,
+            "kafka-console-producer",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--topic",
+            TOPIC,
+            "--producer.config",
+            "/client.properties",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn producer");
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(b"hello\n")
+        .expect("write stdin");
+    drop(child.stdin.take());
+    let producer_out = child.wait_with_output().expect("wait producer");
+    assert!(
+        producer_out.status.success(),
+        "token producer failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&producer_out.stdout),
+        String::from_utf8_lossy(&producer_out.stderr),
+    );
+
+    // 5. Describe — confirm the token is visible to the owner principal.
+    let desc_out = docker_run_kafka_tool_with_image_and_mount(
+        KAFKA_IMAGE_TXN,
+        &admin_mount,
+        &[
+            "kafka-delegation-tokens",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--command-config",
+            "/client.properties",
+            "--describe",
+            "--owner-principal",
+            "User:admin",
+        ],
+    );
+    let desc_stdout = String::from_utf8_lossy(&desc_out.stdout);
+    assert!(
+        desc_stdout.contains(&token_id),
+        "--describe stdout missing token_id={token_id}: {desc_stdout}",
+    );
+
+    // 6. Expire the token; `--expiry-time-period -1` deletes immediately.
+    let exp_out = docker_run_kafka_tool_with_image_and_mount(
+        KAFKA_IMAGE_TXN,
+        &admin_mount,
+        &[
+            "kafka-delegation-tokens",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--command-config",
+            "/client.properties",
+            "--expire",
+            "--expiry-time-period",
+            "-1",
+            "--hmac",
+            &hmac,
+        ],
+    );
+    assert!(
+        exp_out.status.success(),
+        "--expire failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&exp_out.stdout),
+        String::from_utf8_lossy(&exp_out.stderr),
+    );
+
+    h1.shutdown().await;
+    h2.shutdown().await;
+    h3.shutdown().await;
+}
