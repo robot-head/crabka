@@ -7128,11 +7128,16 @@ async fn start_three_broker_sasl_plaintext_jvm_cluster_with_delegation_tokens(
 /// The tool prints both a header row and a data row separated by tabs;
 /// we scan every line and return the first occurrence whose key matches.
 fn extract_jvm_kv(stdout: &str, key: &str) -> String {
-    // The kafka-delegation-tokens tool prints a header line then a tab-
-    // separated value row, e.g.:
-    //   TOKENID                                      HMAC ...
-    //   <id>                                         <hmac> ...
-    // Some Kafka versions instead print `key = value` pairs. Try both.
+    // The kafka-delegation-tokens tool prints output in three forms
+    // across versions and code paths:
+    //   1. `key = value` lines, or
+    //   2. `key : value` lines (used by the "Created delegation token
+    //      with tokenId : <id>" preamble), or
+    //   3. a space-aligned column table:
+    //         TOKENID                              HMAC      OWNER ...
+    //                                                                 <- blank
+    //         <id>                                 <hmac>    User:admin ...
+    // Try each in order.
     for line in stdout.lines() {
         if let Some(rest) = line.strip_prefix(&format!("{key} = ")) {
             return rest.trim().to_string();
@@ -7141,13 +7146,25 @@ fn extract_jvm_kv(stdout: &str, key: &str) -> String {
             return rest.trim().to_string();
         }
     }
-    // Fallback: header/data table. Find the header column index, then
-    // return the same-indexed cell from the next non-header line.
-    let mut header_cols: Option<Vec<&str>> = None;
+    // `Created delegation token with tokenId : <id>` is the canonical
+    // single-line output for TOKENID after a successful --create.
+    if key.eq_ignore_ascii_case("tokenid") {
+        for line in stdout.lines() {
+            if let Some(rest) = line.split_once("tokenId :") {
+                return rest.1.trim().to_string();
+            }
+        }
+    }
+    // Column table — split on runs of whitespace.
+    let mut header_cols: Option<Vec<String>> = None;
     for line in stdout.lines() {
-        let cols: Vec<&str> = line.split('\t').collect();
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let cols: Vec<String> = trimmed.split_whitespace().map(str::to_string).collect();
         if header_cols.is_none() {
-            if cols.iter().any(|c| c.trim().eq_ignore_ascii_case(key)) {
+            if cols.iter().any(|c| c.eq_ignore_ascii_case(key)) {
                 header_cols = Some(cols);
             }
             continue;
@@ -7156,11 +7173,11 @@ fn extract_jvm_kv(stdout: &str, key: &str) -> String {
             .as_ref()
             .unwrap()
             .iter()
-            .position(|c| c.trim().eq_ignore_ascii_case(key));
+            .position(|c| c.eq_ignore_ascii_case(key));
         if let Some(i) = idx
             && i < cols.len()
         {
-            return cols[i].trim().to_string();
+            return cols[i].clone();
         }
     }
     panic!("could not extract key={key} from stdout: {stdout}");
