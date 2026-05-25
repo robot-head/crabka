@@ -2265,6 +2265,9 @@ jobs:
                   customClaimCheck: "$.scope[?@ == 'kafka.write']"
                   validTokenType: JWT
                   groupsClaim: "$.realm_access.roles[*]"
+                  jwksMinRefreshPauseSeconds: 1
+                  jwksExpirySeconds: 3600
+                  jwksIgnoreKeyUse: false
                   maxSecondsWithoutReauthentication: 300
                   tlsTrustedCertificates:
                     - secretName: keycloak-ca
