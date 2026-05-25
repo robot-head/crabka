@@ -2989,3 +2989,123 @@ introspection metadata).
 - **Workspace fmt + clippy `-D warnings` + new-crate tests** all green.
   Additive only — no existing crate touched; no CRDs touched.
 
+## Slice 51b — Operator + Broker: KafkaUser delegation tokens (2026-05-25)
+
+- **Goal:** Lift the slice-51 KIP-48 delegation-token surface from
+  "broker can mint" to "operator owns the lifecycle" — a `KafkaUser`
+  with `spec.authentication.type: delegation-token` gets a
+  super-user-act-as-issued token persisted into a Secret, renewed
+  ahead of expiry, and tombstoned on delete. Closes the slice-51 "no
+  operator-side surface" follow-up.
+- **Broker (KIP-48 act-as):** `CreateDelegationToken` (api_key 38)
+  gained the act-as path. Super-users may set `owner_principal_type`
+  + `owner_principal_name` to mint a token owned by an arbitrary
+  principal; non-super-users requesting act-as → err 65
+  `DELEGATION_TOKEN_AUTHORIZATION_FAILED`; mixed (one field set, the
+  other empty/missing) → err 42 `INVALID_REQUEST`; owner type must
+  be `User` (anything else → 42). Owner-less requests still mint a
+  self-owned token. Response now populates
+  `token_requester_principal_type` + `token_requester_principal_name`
+  unconditionally (matches Kafka's `DelegationTokenManager` — the
+  slice-51 `token_requester_*` field-naming carries through unchanged;
+  B1-fix `0b79313` flipped the emit from "only on act-as" to
+  "always" after checking the cp-kafka image).
+- **Operator CRD (`KafkaUser.spec.authentication.type: delegation-token`):**
+  new `Authentication::DelegationToken(DelegationTokenAuth)` variant
+  on the tagged enum in `crd/user.rs`. Fields: `renewers`
+  (`Vec<String>` of `User:<name>`, default empty), `maxLifetimeMs`
+  (`Option<i64>`, capped by broker), `renewBeforeExpiryMs`
+  (`Option<i64>`, default 24h, minimum 60s). Hand-rolled
+  `authentication_schema` extended with the new properties +
+  `delegation-token` enum value (same kube-rs 3.x tagged-union
+  workaround as slice 50). New status fields: `delegationTokenId`,
+  `delegationTokenExpiryTimestampMs`, `delegationTokenMaxTimestampMs`.
+- **Reconciler (`controller/user_delegation_token.rs`, new):** pure
+  `decide(spec, existing, now_ms) → {Create, NoOp, Renew, Cycle}`
+  drives the 4-way state machine; production `reconcile` does
+  Describe (filtered to owner = `User:<name>`), `decide()`, then
+  Create / Renew / Expire+Create via the new `DelegationTokenAdmin`
+  trait, then writes the Secret (keys: `token-id`, `hmac`,
+  `password` = base64(hmac), `sasl.jaas.config` = SCRAM-SHA-256
+  JAAS template with `tokenauth="true"`), then patches status with
+  `Ready` (aggregator) + `TokenIssued` (spec §2.5) + `TokenExpiring`
+  (True when `expiry - now < renew_before * 2`). Broker-error →
+  reason mapping per spec §2.5: `42 → InvalidSpec` (1h backoff), `61
+  → BrokerAuthDisabled`, `64 → OperatorTokenAuthed`, `65 →
+  OperatorNotSuperUser`, all transient → 5m requeue. Success requeue
+  cadence is `expiry - now - renew_before`, clamped to [1m, 24h].
+  Finalizer (`crabka.io/delegation-token`) calls
+  `expire_owned_tokens` on delete.
+- **`crabka-client-admin`:** four new `AdminClient` methods
+  (`create_delegation_token_as_owner`, `renew_delegation_token`,
+  `expire_delegation_token`, `describe_delegation_tokens_owned_by`)
+  in a new `delegation_tokens` module + matching `AdminClientLike`
+  trait extension; `impl DelegationTokenAdmin for AdminClientHandle`
+  adapter lives in the operator module so the trait stays
+  operator-local. `crabka-metadata` added as a dep (was previously
+  leaf-only; doc comment in `users.rs` updated).
+- **CRD cascade:** ~2 fixture sites swept — most `KafkaUserSpec`
+  constructors use `default()` for authentication, so the new
+  variant rides along as a no-op.
+- **Tests:** ~28 new — 4 broker unit (act-as: super-user-mints,
+  non-super-user-rejected, only-one-field-set, non-User-type) + 2
+  broker integration (`act_as_*` end-to-end in
+  `crates/broker/tests/delegation_tokens.rs`) + 2 CRD round-trip
+  (full + minimal) + 14 reconciler unit (`decide()` matrix,
+  Create / Renew / Cycle / NoOp happy paths, error → spec §2.5 reason
+  mapping, conditions aggregation, requeue clamps,
+  `build_status_patch`, finalizer) + 7 client-admin unit (per-RPC
+  wire round-trip + error surfacing) + 3 operator integration
+  (`tests/reconcile_kafkauser_delegation_token.rs`: Secret + status
+  on create, renew inside horizon, delete expires + removes).
+  Workspace test count: 2785.
+- **kind e2e:** new `kind-kafkauser-delegation-token` job in
+  `.github/workflows/operator-e2e.yml` (E1 commit `f6c7771`). Brings
+  up a single-broker cluster, injects
+  `CRABKA_DELEGATION_TOKEN_SECRET_KEY` via `kubectl set env` (no
+  `Kafka.spec.kafka.delegationToken` CRD surface yet — deferred to a
+  follow-up slice), applies a delegation-token `KafkaUser`, waits
+  for `Ready=True`, asserts the Secret carries the four canonical
+  keys + `status.delegationTokenId` populated. Produce/consume with
+  the issued credentials is deferred — the control-plane handshake
+  is what slice 51b's e2e gates.
+- **Known limitations / honest follow-ups:**
+  - **Master-key hot-swap** NOT supported (carried over from slice 51).
+  - **Token rotation** NOT supported — renewal extends the same
+    `(token_id, hmac)`; Cycle (renewer-set drift) is the only path
+    that mints a fresh token.
+  - **ACL/quota drift for delegation-token users** reconciled only
+    at the renewal cadence (up to 24h), not the standard 1-minute
+    generic requeue. The `Authentication::DelegationToken` arm in
+    `controller/user.rs` returns the token-module's `Action`
+    directly and bypasses the shared ACL/quota tail to avoid
+    clobbering `TokenIssued` / `TokenExpiring` on the trailing
+    `patch_status`. Trade-off documented inline. Follow-up: teach
+    `patch_status` to preserve token-side conditions OR run
+    ACL/quota under the token module.
+  - **`AdminClientLike::renew_delegation_token` describes all tokens
+    then filters by hmac** (operator is super-user); O(all_tokens)
+    per renewal on large clusters. Follow-up: thread owner principal
+    through the trait surface so Describe can be wire-scoped.
+  - **Operator's inter-broker principal MUST be a super-user** for
+    act-as to fire; if not, every reconcile lands at err-65 and
+    `TokenIssued` reports `OperatorNotSuperUser` with a 5m backoff
+    (surfaced in `kubectl describe ku`).
+- **Decomposition:** 10-commit slice (design + plan + 6 substantive
+  tasks + B3 polish + production-wiring fix): `6a1f2f7` design,
+  `9ab6919` plan, `bbe5972` B1 act-as, `0b79313` B1 fix, `1709faa`
+  B2 integration tests, `74253e6` O1 CRD, `605508d` O3 client-admin,
+  `b757a2e` O2 reconcile, `1828757` O2 follow-up (production wiring
+  + finalizer), `d95d96d` B3 polish (`Ready` aggregator + dead-code
+  cleanup). O4 (`6509d2b`) added integration tests + sample
+  manifest; E1 (`f6c7771`) added the kind job; this S1 commit lands
+  the STATUS entry + final fmt / clippy / test / CRD-drift gate.
+- **Workspace fmt + clippy `-D warnings` + tests + CRD drift gate**
+  all green. S1 paid down 11 clippy `-D warnings` nits surfaced
+  when the workspace gate ran (`clamp` pattern, `cast_sign_loss`,
+  `duration_suboptimal_units` × 5, `doc_lazy_continuation`,
+  `doc_markdown` × 4, unnecessary raw-string hashes).
+- Reference docs:
+  [`docs/superpowers/specs/2026-05-25-crabka-kafkauser-delegation-tokens-51b-design.md`],
+  [`docs/superpowers/plans/2026-05-25-crabka-kafkauser-delegation-tokens-51b.md`].
+

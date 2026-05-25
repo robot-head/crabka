@@ -359,7 +359,7 @@ async fn delegation_token_user_reconcile_renews_when_within_threshold() {
 
 // ─── Test 3: deletion expires the token and removes the Secret ──────────
 
-/// Spec §3.2: deleting the `KafkaUser` (deletion_timestamp set) triggers
+/// Spec §3.2: deleting the `KafkaUser` (`deletion_timestamp` set) triggers
 /// the finalizer. The finalizer calls `expire_owned_tokens` (which
 /// Describe-lists tokens owned by `User:<name>` and Expires each), then
 /// removes the finalizer. Owner-references on the Secret then cascade

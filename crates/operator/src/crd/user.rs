@@ -754,7 +754,7 @@ spec:
 
     #[test]
     fn delegation_token_authentication_minimal_omits_optional_fields() {
-        let yaml = r#"
+        let yaml = "
 apiVersion: crabka.io/v1alpha1
 kind: KafkaUser
 metadata:
@@ -762,7 +762,7 @@ metadata:
 spec:
   authentication:
     type: delegation-token
-"#;
+";
         let user: KafkaUser = serde_yaml::from_str(yaml).unwrap();
         let Authentication::DelegationToken(dt) = user.spec.authentication else {
             panic!("expected DelegationToken variant");

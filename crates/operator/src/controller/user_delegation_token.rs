@@ -17,8 +17,8 @@
 //! - `NoOp`   — token healthy and well within its expiry horizon.
 //! - `Renew`  — token within `renew_before_expiry_ms`; call `RenewDelegationToken`.
 //! - `Cycle`  — renewer set diverged from spec; expire + create (KIP-48's
-//!              `Renew` cannot mutate the renewer set, so the old token
-//!              must be tombstoned).
+//!   `Renew` cannot mutate the renewer set, so the old token must be
+//!   tombstoned).
 //!
 //! # I/O isolation
 //!
@@ -50,8 +50,8 @@ use crate::crd::{DelegationTokenAuth, KafkaCondition, KafkaUser};
 pub(crate) const DEFAULT_RENEW_BEFORE_EXPIRY_MS: i64 = 24 * 60 * 60 * 1_000;
 
 /// Transient broker errors trigger a 5-minute requeue backoff per spec
-/// §2.5 (AUTH_DISABLED, AUTHORIZATION_FAILED, REQUEST_NOT_ALLOWED).
-const TRANSIENT_BACKOFF: Duration = Duration::from_secs(5 * 60);
+/// §2.5 (`AUTH_DISABLED`, `AUTHORIZATION_FAILED`, `REQUEST_NOT_ALLOWED`).
+const TRANSIENT_BACKOFF: Duration = Duration::from_mins(5);
 
 /// Broker error codes the spec §2.5 table calls out.
 const CODE_INVALID_REQUEST: i16 = 42;
@@ -400,10 +400,8 @@ pub(crate) fn compute_requeue(
         .renew_before_expiry_ms
         .unwrap_or(DEFAULT_RENEW_BEFORE_EXPIRY_MS);
     let until_renew_ms = (token.expiry_timestamp_ms - now_ms - renew_before).max(0);
-    let clamped_ms = until_renew_ms
-        .min(24 * 60 * 60 * 1_000) // upper bound: 24h
-        .max(60 * 1_000); // lower bound: 1m
-    Duration::from_millis(clamped_ms as u64)
+    let clamped_ms = until_renew_ms.clamp(60 * 1_000, 24 * 60 * 60 * 1_000); // [1m, 24h]
+    Duration::from_millis(clamped_ms.cast_unsigned())
 }
 
 /// Compute the `Ready` + `TokenIssued` + `TokenExpiring` conditions.
@@ -470,7 +468,7 @@ pub(crate) fn compute_conditions(
 
 /// Build the merge-patch JSON body for `KafkaUserStatus` after a
 /// successful reconcile. Only sets the delegation-token specific fields
-/// + the two new conditions; existing status fields (managed by the
+/// plus the two new conditions; existing status fields (managed by the
 /// shared SCRAM/TLS path) are not touched.
 pub(crate) fn build_status_patch(
     token: &DelegationToken,
@@ -519,7 +517,7 @@ async fn on_admin_error(
             "InvalidSpec",
             format!("{op}: INVALID_REQUEST (42)"),
             // No automatic recovery — long requeue so a human notices.
-            Duration::from_secs(60 * 60),
+            Duration::from_hours(1),
         ),
         AdminError::Broker { code, .. } if *code == CODE_DELEGATION_TOKEN_AUTH_DISABLED => (
             "BrokerAuthDisabled",
@@ -1104,7 +1102,7 @@ mod tests {
         // we'd compute Duration::ZERO and hot-loop the reconciler.
         let t = token_with(0, vec![]);
         let r = compute_requeue(&t, &auth(vec![], None), 0);
-        assert!(r >= Duration::from_secs(60));
+        assert!(r >= Duration::from_mins(1));
     }
 
     #[test]
@@ -1112,7 +1110,7 @@ mod tests {
         // Token expires in a year; without clamp we'd requeue weeks out.
         let t = token_with(365 * 24 * 60 * 60 * 1_000, vec![]);
         let r = compute_requeue(&t, &auth(vec![], None), 0);
-        assert!(r <= Duration::from_secs(24 * 60 * 60));
+        assert!(r <= Duration::from_hours(24));
     }
 
     #[test]
