@@ -1979,6 +1979,256 @@ jobs:
           if-no-files-found: ignore
 
   # ─────────────────────────────────────────────────────────────────────────
+  # Slice 51b: KafkaUser delegation-token authentication (KIP-48 act-as).
+  #
+  # Brings up a 1-broker cluster + a SCRAM-SHA-512 listener so the operator
+  # can authenticate to the broker as `operator` (a super-user the act-as
+  # path requires). The Kafka.spec.kafka.delegationToken CRD surface is
+  # deferred to a later slice — for this e2e we instead use `kubectl set
+  # env` to inject `CRABKA_DELEGATION_TOKEN_SECRET_KEY` on the broker
+  # StatefulSet *after* the cluster is Ready, which triggers a rolling
+  # restart and enables the four delegation-token RPCs on the broker side.
+  #
+  # The verification step is the smoke-only path: apply a KafkaUser with
+  # `authentication.type: delegation-token`, wait for `Ready=True`, then
+  # dump the materialized Secret and assert it carries the four expected
+  # keys (`token-id`, `hmac`, `password`, `sasl.jaas.config`). Producing
+  # against the broker with the token credentials is deferred to keep this
+  # job tightly scoped to the new operator-broker control-plane handshake.
+  # ─────────────────────────────────────────────────────────────────────────
+  kind-kafkauser-delegation-token:
+    needs: [build-images, changes]
+    if: ${{ github.event_name == 'push' || needs.changes.outputs.operator == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+      - uses: azure/setup-helm@v5
+        with:
+          version: v3.16.2
+      - name: Download prebuilt image tarballs
+        uses: actions/download-artifact@v8
+        with:
+          name: e2e-images
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: crabka-dt-e2e
+          version: v0.24.0
+          node_image: kindest/node:v1.30.0
+
+      - name: Load images into kind
+        run: |
+          set -e
+          for tar in crabka-operator.tar crabka-broker.tar; do
+            docker load -i "$tar" 2>&1 | tee /tmp/load.log
+            loaded=$(sed -n 's/^Loaded image: //p' /tmp/load.log | head -1)
+            want=$(basename "$tar" .tar):e2e
+            if [ "$loaded" != "$want" ]; then docker tag "$loaded" "$want"; fi
+            kind load docker-image "$want" --name crabka-dt-e2e
+          done
+
+      - name: Install CRDs + chart
+        run: |
+          set -e
+          kubectl apply -f deploy/crds/crabka.io_kafkas.yaml
+          kubectl apply -f deploy/crds/crabka.io_kafkanodepools.yaml
+          kubectl apply -f deploy/crds/crabka.io_kafkausers.yaml
+          kubectl create namespace crabka-operator
+          helm install operator charts/crabka-operator \
+            --namespace crabka-operator \
+            --set image.repository=crabka-operator --set image.tag=e2e \
+            --set image.pullPolicy=IfNotPresent \
+            --set brokerImage.repository=crabka-broker --set brokerImage.tag=e2e \
+            --set brokerImage.pullPolicy=IfNotPresent
+          kubectl rollout status -n crabka-operator deploy/operator-crabka-operator --timeout=240s
+
+      # ─────────────────────────────────────────────────────────────────────
+      # Apply the minimal Kafka cluster (single broker, defaulted
+      # PLAIN:9092 internal listener — listeners and auth are not what
+      # this slice exercises). The critical knob for the four
+      # delegation-token RPCs is the broker's master HMAC key, which we
+      # inject after the cluster is Ready (next step).
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Apply Kafka cluster + wait Ready
+        run: |
+          set -e
+          cat <<'EOF' | kubectl apply -f -
+          apiVersion: crabka.io/v1alpha1
+          kind: Kafka
+          metadata:
+            name: demo
+            namespace: default
+          spec:
+            kafkaVersion: "0.1.1"
+          ---
+          apiVersion: crabka.io/v1alpha1
+          kind: KafkaNodePool
+          metadata:
+            name: brokers
+            namespace: default
+            labels:
+              crabka.io/cluster: demo
+          spec:
+            roles: [Controller, Broker]
+            replicas: 1
+            nodeIdStart: 0
+          EOF
+          for i in $(seq 1 120); do
+            s=$(kubectl get kafka demo -n default \
+              -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
+            echo "attempt $i: Ready=$s"
+            if [ "$s" = "True" ]; then break; fi
+            sleep 5
+          done
+          [ "$s" = "True" ] || {
+            echo "::error::Kafka demo did not become Ready in 10 minutes"
+            kubectl describe kafka demo -n default
+            kubectl describe kafkanodepool brokers -n default
+            kubectl logs -n default demo-brokers-0 -c broker --tail=200 || true
+            exit 1
+          }
+
+      # ─────────────────────────────────────────────────────────────────────
+      # Enable delegation-token RPCs on the broker.
+      #
+      # The Kafka CRD does not (yet) expose a `spec.kafka.delegationToken`
+      # surface — that is left to a follow-up slice. For the e2e we inject
+      # the master HMAC key directly via `kubectl set env`, which patches
+      # the StatefulSet and rolls the broker pod. The broker's slice-51
+      # config layer reads `CRABKA_DELEGATION_TOKEN_SECRET_KEY` from env
+      # (env wins over TOML) and flips the four delegation-token RPCs
+      # from `DELEGATION_TOKEN_AUTH_DISABLED` to live.
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Inject delegation-token master key + wait reroll
+        run: |
+          set -e
+          kubectl set env statefulset/demo-brokers -n default \
+            CRABKA_DELEGATION_TOKEN_SECRET_KEY=e2e-delegation-master-key
+          kubectl rollout status statefulset/demo-brokers -n default --timeout=300s
+          for i in $(seq 1 60); do
+            s=$(kubectl get kafka demo -n default \
+              -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
+            echo "attempt $i: post-reroll Ready=$s"
+            if [ "$s" = "True" ]; then break; fi
+            sleep 5
+          done
+          [ "$s" = "True" ] || {
+            echo "::error::Kafka demo did not return to Ready after env injection"
+            kubectl describe kafka demo -n default
+            kubectl logs -n default demo-brokers-0 -c broker --tail=200 || true
+            exit 1
+          }
+
+      - name: Apply KafkaUser alice (delegation-token)
+        run: |
+          set -e
+          cat <<'EOF' | kubectl apply -f -
+          apiVersion: crabka.io/v1alpha1
+          kind: KafkaUser
+          metadata:
+            name: alice
+            namespace: default
+            labels:
+              crabka.io/cluster: demo
+          spec:
+            authentication:
+              type: delegation-token
+          EOF
+
+      - name: Wait for KafkaUser alice Ready
+        run: |
+          set -e
+          for i in $(seq 1 60); do
+            s=$(kubectl get kafkauser alice -n default \
+              -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
+            r=$(kubectl get kafkauser alice -n default \
+              -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}' 2>/dev/null || true)
+            echo "attempt $i: KafkaUser Ready=$s reason=$r"
+            if [ "$s" = "True" ]; then exit 0; fi
+            sleep 5
+          done
+          echo "::error::KafkaUser alice did not become Ready in 300s"
+          kubectl describe kafkauser alice -n default
+          kubectl logs -n crabka-operator deploy/operator-crabka-operator --tail=300 || true
+          kubectl logs -n default demo-brokers-0 -c broker --tail=200 || true
+          exit 1
+
+      # ─────────────────────────────────────────────────────────────────────
+      # Smoke verification: the operator-managed Secret must exist and
+      # carry the four canonical keys. Their values being well-formed is
+      # exercised by the operator unit + integration tests; here we just
+      # confirm the operator wrote them in the cluster end-to-end.
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Assert KafkaUser Secret carries the 4 delegation-token keys
+        run: |
+          set -e
+          # The operator names the per-user Secret after the KafkaUser.
+          if ! kubectl get secret alice -n default >/dev/null 2>&1; then
+            echo "::error::expected Secret 'alice' in default ns; operator did not materialize it"
+            kubectl get kafkauser alice -n default -o yaml
+            kubectl get secret -n default
+            exit 1
+          fi
+          for key in token-id hmac password sasl.jaas.config; do
+            v=$(kubectl get secret alice -n default \
+              -o jsonpath="{.data.${key//./\\.}}" 2>/dev/null || true)
+            if [ -z "$v" ]; then
+              echo "::error::Secret 'alice' missing key '$key'"
+              kubectl get secret alice -n default -o yaml
+              exit 1
+            fi
+          done
+          # Sanity-check the status echoes the token id (proves the
+          # reconciler reached the post-create patch_status branch).
+          tid=$(kubectl get kafkauser alice -n default \
+            -o jsonpath='{.status.delegationTokenId}' 2>/dev/null || true)
+          if [ -z "$tid" ]; then
+            echo "::error::KafkaUser alice status missing delegationTokenId"
+            kubectl get kafkauser alice -n default -o yaml
+            exit 1
+          fi
+          echo "Secret + status both populated; delegation-token reconcile complete (token=$tid)."
+
+      - name: Collect diagnostics on failure
+        if: failure()
+        run: |
+          set +e
+          mkdir -p /tmp/dt-diag
+          {
+            echo "## kind-kafkauser-delegation-token diagnostics"
+            kubectl get pods -A -o wide
+            echo "### operator logs"
+            kubectl logs -n crabka-operator deploy/operator-crabka-operator --tail=500
+            echo "### kafka demo"
+            kubectl get kafka demo -n default -o yaml || true
+            echo "### kafkanodepool brokers"
+            kubectl get kafkanodepool brokers -n default -o yaml || true
+            echo "### kafkauser alice"
+            kubectl get kafkauser alice -n default -o yaml || true
+            echo "### secrets (names only)"
+            kubectl get secret -n default || true
+            echo "### secret alice (no payload — metadata only)"
+            kubectl get secret alice -n default -o yaml 2>&1 | head -60 || true
+            echo "### broker statefulset env"
+            kubectl get statefulset demo-brokers -n default \
+              -o jsonpath='{.spec.template.spec.containers[?(@.name=="broker")].env}' \
+              | python3 -m json.tool 2>&1 || true
+            echo "### broker logs"
+            kubectl logs -n default demo-brokers-0 --tail=300 --all-containers || true
+          } > /tmp/dt-diag/diagnostics.md
+
+      - name: Upload diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: operator-e2e-kafkauser-delegation-token-diagnostics
+          path: /tmp/dt-diag/
+          retention-days: 14
+          if-no-files-found: ignore
+
+  # ─────────────────────────────────────────────────────────────────────────
   # Slice 50: OAUTHBEARER listener + tls-external KafkaUser
   #
   # Stands up Bitnami Keycloak in-cluster (HTTP only — broker → IdP HTTPS
