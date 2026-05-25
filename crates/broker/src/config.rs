@@ -261,6 +261,28 @@ pub struct BrokerConfig {
     /// sizes, and updates the `partition_disk_bytes` gauge consumed by
     /// the rebalancer's usage scraper.
     pub partition_disk_scan_interval_secs: u64,
+
+    /// Slice 51 (KIP-48): HMAC-SHA-256 master key used to mint + verify
+    /// delegation tokens. When `None`, the broker rejects all four
+    /// delegation-token RPCs with `DELEGATION_TOKEN_AUTH_DISABLED` and
+    /// SCRAM cannot fall back to token lookup. Sourced from
+    /// `CRABKA_DELEGATION_TOKEN_SECRET_KEY` (env wins) or
+    /// `[delegation_token] secret_key` in `broker.toml`. Wrapped in
+    /// `SecretBytes` so `Debug` redacts the bytes.
+    pub delegation_token_secret_key: Option<crabka_security::SecretBytes>,
+
+    /// Slice 51 (KIP-48): hard upper bound on delegation-token lifetime,
+    /// in milliseconds. A token's `max_timestamp_ms` is set to
+    /// `issue_timestamp_ms + delegation_token_max_lifetime_ms` and the
+    /// renew handler clamps any caller-requested expiry to this. Default
+    /// 7 days (`delegation.token.max.lifetime.ms` in Kafka).
+    pub delegation_token_max_lifetime_ms: i64,
+
+    /// Slice 51 (KIP-48): cadence of the background sweep task that
+    /// proposes `V1DeleteDelegationToken` tombstones for tokens whose
+    /// `expiry_timestamp_ms` or `max_timestamp_ms` is in the past. Default
+    /// 1 hour (`delegation.token.expiry.check.interval.ms` in Kafka).
+    pub delegation_token_expiry_check_interval_ms: i64,
 }
 
 impl BrokerConfig {
@@ -332,6 +354,12 @@ impl BrokerConfig {
             // background task doesn't tick during short-lived fixtures.
             // The dedicated 43e integration test enables it explicitly.
             partition_disk_scan_interval_secs: 0,
+            // Slice 51: tests opt into delegation tokens by setting
+            // `delegation_token_secret_key`; default off keeps the
+            // four DT RPCs returning DELEGATION_TOKEN_AUTH_DISABLED.
+            delegation_token_secret_key: None,
+            delegation_token_max_lifetime_ms: 7 * 24 * 60 * 60 * 1_000,
+            delegation_token_expiry_check_interval_ms: 60 * 60 * 1_000,
         }
     }
 
@@ -506,6 +534,12 @@ impl Default for BrokerConfig {
             // metrics by default.
             metrics_listen_addr: None,
             partition_disk_scan_interval_secs: 60,
+            // Slice 51: master key off by default. Operators flip this on
+            // via `CRABKA_DELEGATION_TOKEN_SECRET_KEY` env var or the
+            // `[delegation_token] secret_key` TOML stanza.
+            delegation_token_secret_key: None,
+            delegation_token_max_lifetime_ms: 7 * 24 * 60 * 60 * 1_000,
+            delegation_token_expiry_check_interval_ms: 60 * 60 * 1_000,
         }
     }
 }

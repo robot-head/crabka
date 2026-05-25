@@ -85,3 +85,7 @@ ring.workspace = true
 # Slice 49c T3: generate a self-signed cert with 127.0.0.1 SAN on the
 # fly for the HTTPS JWKS-refresher integration tests.
 rcgen.workspace = true
+# Slice 51 T4: scoped env-var mutation in tests for the delegation-token
+# secret-key env-wins-over-TOML check. The workspace forbids `unsafe_code`,
+# so direct `std::env::set_var` (unsafe under edition 2024) isn't available.
+temp-env = "0.3"
