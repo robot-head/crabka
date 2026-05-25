@@ -129,6 +129,20 @@ pub struct UnsecuredJwsValidator {
     /// Slice 49g: when set, the JWT `typ` header field must equal this
     /// string. Ignored when unset.
     pub valid_token_type: Option<String>,
+    /// Slice 49h: alternate claim name to read the principal name from
+    /// when `principal_claim_name` is absent or empty. Strimzi's
+    /// "service-account fallback" — `sub` typically holds a UUID,
+    /// `client_id` is the readable name.
+    pub fallback_user_name_claim: Option<String>,
+    /// Slice 49h: prepended to the resolved principal name ONLY when
+    /// the fallback claim fires. Strimzi convention: "service-account-".
+    pub fallback_user_name_prefix: Option<String>,
+    /// Slice 49h: precompiled `JsonPath` expression extracting group
+    /// memberships from the token claims. Compile-once-at-startup.
+    pub groups_claim: Option<JpQuery>,
+    /// Slice 49h: when `groups_claim` resolves to a string (not an
+    /// array), split on this delimiter. Common: "," or " ".
+    pub groups_claim_delimiter: Option<String>,
 }
 
 impl Default for UnsecuredJwsValidator {
@@ -138,6 +152,10 @@ impl Default for UnsecuredJwsValidator {
             allowable_clock_skew_ms: 30_000,
             custom_claim_check: None,
             valid_token_type: None,
+            fallback_user_name_claim: None,
+            fallback_user_name_prefix: None,
+            groups_claim: None,
+            groups_claim_delimiter: None,
         }
     }
 }
@@ -198,21 +216,85 @@ impl UnsecuredJwsValidator {
             return Err(AuthError::InvalidToken);
         }
 
-        let name = claims
+        // Slice 49h: primary → fallback → reject. Prefix applied only
+        // when fallback fires.
+        let (raw_name, used_fallback) = if let Some(n) = claims
             .get(&self.principal_claim_name)
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())
-            .ok_or(AuthError::InvalidToken)?
-            .to_string();
+        {
+            (n.to_string(), false)
+        } else {
+            let fallback_claim = self
+                .fallback_user_name_claim
+                .as_deref()
+                .ok_or(AuthError::InvalidToken)?;
+            let raw = claims
+                .get(fallback_claim)
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .ok_or(AuthError::InvalidToken)?;
+            (raw.to_string(), true)
+        };
+        let name = if used_fallback {
+            match &self.fallback_user_name_prefix {
+                Some(prefix) => format!("{prefix}{raw_name}"),
+                None => raw_name,
+            }
+        } else {
+            raw_name
+        };
+
+        // Slice 49h: groups extraction.
+        let groups = match &self.groups_claim {
+            Some(path) => extract_groups(path, &claims, self.groups_claim_delimiter.as_deref()),
+            None => Vec::new(),
+        };
 
         Ok(AuthOutcome {
             principal: Principal {
                 name,
                 auth_method: AuthMethod::SaslOAuthBearer,
+                groups,
             },
             expires_at_ms: Some(exp_ms),
         })
     }
+}
+
+/// Slice 49h: extract group memberships from token claims using a
+/// precompiled `JsonPath`. Each result element is interpreted per its
+/// JSON type:
+/// - `String`: if `delimiter` is set, split + trim + drop empty;
+///   otherwise the whole string becomes one group.
+/// - `Array`: each string element becomes a group.
+/// - `Number` / `Object` / `Null`: ignored (no error).
+///
+/// Returns `vec![]` for empty matches (no groups extracted is not an
+/// error — the token may legitimately have no groups).
+fn extract_groups(path: &JpQuery, claims: &Value, delimiter: Option<&str>) -> Vec<String> {
+    let Ok(refs) = js_path_process(path, claims) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for r in refs {
+        match r.val() {
+            Value::String(s) => match delimiter {
+                Some(d) => out.extend(
+                    s.split(d)
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(String::from),
+                ),
+                None => out.push(s.clone()),
+            },
+            Value::Array(items) => {
+                out.extend(items.iter().filter_map(Value::as_str).map(String::from));
+            }
+            _ => {} // ignore numbers, objects, nulls
+        }
+    }
+    out
 }
 
 /// Evaluate a precompiled `JsonPath` expression against the token claims.
@@ -303,6 +385,14 @@ pub struct SignedJwsValidator {
     pub custom_claim_check: Option<JpQuery>,
     /// Slice 49g: JWT `typ` header check. Ignored when unset.
     pub valid_token_type: Option<String>,
+    /// Slice 49h: alternate principal claim. See [`UnsecuredJwsValidator`].
+    pub fallback_user_name_claim: Option<String>,
+    /// Slice 49h: prepended to the principal name only on fallback.
+    pub fallback_user_name_prefix: Option<String>,
+    /// Slice 49h: precompiled `JsonPath` extracting group memberships.
+    pub groups_claim: Option<JpQuery>,
+    /// Slice 49h: delimiter when `groups_claim` resolves to a string.
+    pub groups_claim_delimiter: Option<String>,
     /// The live JWKS, swapped in by the broker's refresher.
     keys: JwksHandle,
 }
@@ -319,6 +409,10 @@ impl SignedJwsValidator {
             expected_audience: None,
             custom_claim_check: None,
             valid_token_type: None,
+            fallback_user_name_claim: None,
+            fallback_user_name_prefix: None,
+            groups_claim: None,
+            groups_claim_delimiter: None,
             keys,
         }
     }
@@ -415,17 +509,44 @@ impl SignedJwsValidator {
             return Err(AuthError::InvalidToken);
         }
 
-        let name = claims
+        // Slice 49h: primary → fallback → reject. Prefix on fallback only.
+        let (raw_name, used_fallback) = if let Some(n) = claims
             .get(&self.principal_claim_name)
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())
-            .ok_or(AuthError::InvalidToken)?
-            .to_string();
+        {
+            (n.to_string(), false)
+        } else {
+            let fallback_claim = self
+                .fallback_user_name_claim
+                .as_deref()
+                .ok_or(AuthError::InvalidToken)?;
+            let raw = claims
+                .get(fallback_claim)
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .ok_or(AuthError::InvalidToken)?;
+            (raw.to_string(), true)
+        };
+        let name = if used_fallback {
+            match &self.fallback_user_name_prefix {
+                Some(prefix) => format!("{prefix}{raw_name}"),
+                None => raw_name,
+            }
+        } else {
+            raw_name
+        };
+
+        let groups = match &self.groups_claim {
+            Some(path) => extract_groups(path, claims, self.groups_claim_delimiter.as_deref()),
+            None => Vec::new(),
+        };
 
         Ok(AuthOutcome {
             principal: Principal {
                 name,
                 auth_method: AuthMethod::SaslOAuthBearer,
+                groups,
             },
             expires_at_ms: Some(exp_ms),
         })
@@ -532,6 +653,16 @@ pub struct IntrospectionValidator {
     /// Clock-skew tolerance for `exp`/`iat`/`nbf` checks on
     /// introspection-response timestamps (when present).
     pub allowable_clock_skew_ms: i64,
+    /// Slice 49h: alternate principal claim. See [`UnsecuredJwsValidator`].
+    pub fallback_user_name_claim: Option<String>,
+    /// Slice 49h: prepended to the principal name only on fallback.
+    pub fallback_user_name_prefix: Option<String>,
+    /// Slice 49h: precompiled `JsonPath` extracting group memberships,
+    /// evaluated against the merged claims (introspection + optional
+    /// userinfo).
+    pub groups_claim: Option<JpQuery>,
+    /// Slice 49h: delimiter when `groups_claim` resolves to a string.
+    pub groups_claim_delimiter: Option<String>,
 }
 
 impl IntrospectionValidator {
@@ -580,15 +711,44 @@ impl IntrospectionValidator {
         {
             return Err(AuthError::InvalidToken);
         }
-        let name = claims
+        // Slice 49h: primary → fallback → reject. Prefix on fallback only.
+        let (raw_name, used_fallback) = if let Some(n) = claims
             .get(&self.principal_claim_name)
             .and_then(Value::as_str)
-            .ok_or(AuthError::InvalidToken)?
-            .to_string();
+            .filter(|s| !s.is_empty())
+        {
+            (n.to_string(), false)
+        } else {
+            let fallback_claim = self
+                .fallback_user_name_claim
+                .as_deref()
+                .ok_or(AuthError::InvalidToken)?;
+            let raw = claims
+                .get(fallback_claim)
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .ok_or(AuthError::InvalidToken)?;
+            (raw.to_string(), true)
+        };
+        let name = if used_fallback {
+            match &self.fallback_user_name_prefix {
+                Some(prefix) => format!("{prefix}{raw_name}"),
+                None => raw_name,
+            }
+        } else {
+            raw_name
+        };
+
+        let groups = match &self.groups_claim {
+            Some(path) => extract_groups(path, &claims, self.groups_claim_delimiter.as_deref()),
+            None => Vec::new(),
+        };
+
         Ok(AuthOutcome {
             principal: Principal {
                 name,
                 auth_method: AuthMethod::SaslOAuthBearer,
+                groups,
             },
             expires_at_ms: Some(exp_ms),
         })
@@ -884,6 +1044,182 @@ mod tests {
         assert!(v.validate(&token, now_ms).is_ok());
     }
 
+    // ---- Slice 49h: name fallback chain + groups extraction --------------
+
+    #[test]
+    fn unsecured_validate_uses_primary_principal_claim_when_present() {
+        // Regression: primary claim present → use primary, no prefix.
+        let exp_secs: i64 = 2_000;
+        let now_ms: i64 = 1_000_000;
+        let token = make_unsecured_jws_with_header(
+            &serde_json::json!({"alg": "none", "typ": "JWT"}),
+            &serde_json::json!({"sub": "alice", "exp": exp_secs}),
+        );
+        let v = UnsecuredJwsValidator {
+            fallback_user_name_claim: Some("client_id".into()),
+            fallback_user_name_prefix: Some("service-account-".into()),
+            ..Default::default()
+        };
+        let outcome = v.validate(&token, now_ms).expect("valid");
+        assert_eq!(outcome.principal.name, "alice"); // primary, no prefix
+    }
+
+    #[test]
+    fn unsecured_validate_falls_back_to_alt_claim_when_primary_absent() {
+        let exp_secs: i64 = 2_000;
+        let now_ms: i64 = 1_000_000;
+        let token = make_unsecured_jws_with_header(
+            &serde_json::json!({"alg": "none", "typ": "JWT"}),
+            // No `sub` — primary lookup fails.
+            &serde_json::json!({"client_id": "svc1", "exp": exp_secs}),
+        );
+        let v = UnsecuredJwsValidator {
+            fallback_user_name_claim: Some("client_id".into()),
+            ..Default::default()
+        };
+        let outcome = v.validate(&token, now_ms).expect("valid");
+        assert_eq!(outcome.principal.name, "svc1"); // fallback, no prefix
+    }
+
+    #[test]
+    fn unsecured_validate_applies_fallback_prefix_only_on_fallback() {
+        let exp_secs: i64 = 2_000;
+        let now_ms: i64 = 1_000_000;
+        let token = make_unsecured_jws_with_header(
+            &serde_json::json!({"alg": "none", "typ": "JWT"}),
+            &serde_json::json!({"client_id": "svc1", "exp": exp_secs}),
+        );
+        let v = UnsecuredJwsValidator {
+            fallback_user_name_claim: Some("client_id".into()),
+            fallback_user_name_prefix: Some("service-account-".into()),
+            ..Default::default()
+        };
+        let outcome = v.validate(&token, now_ms).expect("valid");
+        assert_eq!(outcome.principal.name, "service-account-svc1");
+    }
+
+    #[test]
+    fn unsecured_validate_rejects_when_neither_primary_nor_fallback_present() {
+        let exp_secs: i64 = 2_000;
+        let now_ms: i64 = 1_000_000;
+        let token = make_unsecured_jws_with_header(
+            &serde_json::json!({"alg": "none", "typ": "JWT"}),
+            // Neither sub nor client_id.
+            &serde_json::json!({"exp": exp_secs}),
+        );
+        let v = UnsecuredJwsValidator {
+            fallback_user_name_claim: Some("client_id".into()),
+            ..Default::default()
+        };
+        assert_eq!(v.validate(&token, now_ms), Err(AuthError::InvalidToken));
+    }
+
+    #[test]
+    fn unsecured_validate_extracts_groups_from_array_claim() {
+        let exp_secs: i64 = 2_000;
+        let now_ms: i64 = 1_000_000;
+        let token = make_unsecured_jws_with_header(
+            &serde_json::json!({"alg": "none", "typ": "JWT"}),
+            &serde_json::json!({
+                "sub": "alice",
+                "exp": exp_secs,
+                "groups": ["admin", "ops"],
+            }),
+        );
+        let v = UnsecuredJwsValidator {
+            groups_claim: Some(parse_jp("$.groups")),
+            ..Default::default()
+        };
+        let outcome = v.validate(&token, now_ms).expect("valid");
+        assert_eq!(
+            outcome.principal.groups,
+            vec!["admin".to_string(), "ops".to_string()]
+        );
+    }
+
+    #[test]
+    fn unsecured_validate_extracts_groups_from_delimited_string() {
+        let exp_secs: i64 = 2_000;
+        let now_ms: i64 = 1_000_000;
+        let token = make_unsecured_jws_with_header(
+            &serde_json::json!({"alg": "none", "typ": "JWT"}),
+            &serde_json::json!({
+                "sub": "alice",
+                "exp": exp_secs,
+                "groups": "admin,ops, kafka",
+            }),
+        );
+        let v = UnsecuredJwsValidator {
+            groups_claim: Some(parse_jp("$.groups")),
+            groups_claim_delimiter: Some(",".into()),
+            ..Default::default()
+        };
+        let outcome = v.validate(&token, now_ms).expect("valid");
+        assert_eq!(
+            outcome.principal.groups,
+            vec!["admin".to_string(), "ops".to_string(), "kafka".to_string()]
+        );
+    }
+
+    #[test]
+    fn unsecured_validate_extracts_groups_from_nested_claim_via_jsonpath() {
+        let exp_secs: i64 = 2_000;
+        let now_ms: i64 = 1_000_000;
+        let token = make_unsecured_jws_with_header(
+            &serde_json::json!({"alg": "none", "typ": "JWT"}),
+            &serde_json::json!({
+                "sub": "alice",
+                "exp": exp_secs,
+                "realm_access": { "roles": ["admin", "ops"] },
+            }),
+        );
+        let v = UnsecuredJwsValidator {
+            groups_claim: Some(parse_jp("$.realm_access.roles[*]")),
+            ..Default::default()
+        };
+        let outcome = v.validate(&token, now_ms).expect("valid");
+        assert_eq!(
+            outcome.principal.groups,
+            vec!["admin".to_string(), "ops".to_string()]
+        );
+    }
+
+    #[test]
+    fn unsecured_validate_returns_empty_groups_when_claim_unset() {
+        let exp_secs: i64 = 2_000;
+        let now_ms: i64 = 1_000_000;
+        let token = make_unsecured_jws_with_header(
+            &serde_json::json!({"alg": "none", "typ": "JWT"}),
+            &serde_json::json!({
+                "sub": "alice",
+                "exp": exp_secs,
+                "groups": ["admin"],
+            }),
+        );
+        let v = UnsecuredJwsValidator::default(); // no groups_claim
+        let outcome = v.validate(&token, now_ms).expect("valid");
+        assert_eq!(outcome.principal.groups, Vec::<String>::new());
+    }
+
+    #[test]
+    fn unsecured_validate_returns_empty_groups_when_claim_resolves_to_empty() {
+        let exp_secs: i64 = 2_000;
+        let now_ms: i64 = 1_000_000;
+        let token = make_unsecured_jws_with_header(
+            &serde_json::json!({"alg": "none", "typ": "JWT"}),
+            &serde_json::json!({
+                "sub": "alice",
+                "exp": exp_secs,
+            }),
+        );
+        let v = UnsecuredJwsValidator {
+            groups_claim: Some(parse_jp("$.nonexistent")),
+            ..Default::default()
+        };
+        let outcome = v.validate(&token, now_ms).expect("valid");
+        assert_eq!(outcome.principal.groups, Vec::<String>::new());
+    }
+
     #[test]
     fn validate_custom_principal_claim() {
         let v = UnsecuredJwsValidator {
@@ -1145,6 +1481,38 @@ mod tests {
         );
     }
 
+    // ---- Slice 49h: signed-validator parity --------------------------------
+
+    #[test]
+    fn signed_validate_falls_back_to_alt_claim_when_primary_absent() {
+        // Mirror the unsecured fallback test using the signed validator.
+        // No `sub` claim → fallback to `client_id`, then apply prefix.
+        let (token, jwks) = mint_rs256_with_header(
+            "{\"alg\":\"RS256\",\"kid\":\"k1\",\"typ\":\"JWT\"}",
+            "{\"client_id\":\"svc1\",\"exp\":9999999999,\"iss\":\"https://test.example\"}",
+        );
+        let (mut v, _h) = signed(&jwks);
+        v.fallback_user_name_claim = Some("client_id".into());
+        v.fallback_user_name_prefix = Some("service-account-".into());
+        let outcome = v.validate(&token, 1_000_000_000_000).expect("valid");
+        assert_eq!(outcome.principal.name, "service-account-svc1");
+    }
+
+    #[test]
+    fn signed_validate_extracts_groups_from_array_claim() {
+        let (token, jwks) = mint_rs256(
+            "k1",
+            "{\"sub\":\"alice\",\"exp\":9999999999,\"groups\":[\"admin\",\"ops\"]}",
+        );
+        let (mut v, _h) = signed(&jwks);
+        v.groups_claim = Some(parse_jp("$.groups"));
+        let outcome = v.validate(&token, 1_000_000_000_000).expect("valid");
+        assert_eq!(
+            outcome.principal.groups,
+            vec!["admin".to_string(), "ops".to_string()]
+        );
+    }
+
     #[tokio::test]
     async fn enum_dispatches_unsecured_and_signed() {
         // Unsecured default.
@@ -1248,6 +1616,10 @@ mod introspection_tests {
             custom_claim_check: None,
             call_userinfo: false,
             allowable_clock_skew_ms: 30_000,
+            fallback_user_name_claim: None,
+            fallback_user_name_prefix: None,
+            groups_claim: None,
+            groups_claim_delimiter: None,
         }
     }
 
@@ -1504,5 +1876,30 @@ mod introspection_tests {
             .expect("token valid");
         assert_eq!(outcome.principal.name, "alice");
         assert_eq!(outcome.expires_at_ms, Some(exp_secs * 1000));
+    }
+
+    // ---- Slice 49h: introspection parity -----------------------------------
+
+    #[tokio::test]
+    async fn introspection_validate_extracts_groups_from_introspection_response() {
+        let exp_secs: i64 = 2_000;
+        let now_ms: i64 = 1_000_000;
+        let mock = MockIntrospectionClient::arc();
+        mock.set_introspect(
+            "opaque-token",
+            Ok(json!({
+                "active": true,
+                "sub": "alice",
+                "exp": exp_secs,
+                "groups": ["admin", "ops"],
+            })),
+        );
+        let mut v = validator(mock.clone());
+        v.groups_claim = Some(parse_jp("$.groups"));
+        let outcome = v.validate("opaque-token", now_ms).await.expect("valid");
+        assert_eq!(
+            outcome.principal.groups,
+            vec!["admin".to_string(), "ops".to_string()]
+        );
     }
 }

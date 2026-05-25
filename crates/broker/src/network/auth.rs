@@ -802,6 +802,7 @@ mod tests {
             principal: Principal {
                 name: "alice".into(),
                 auth_method: crabka_security::AuthMethod::SaslScramSha512,
+                groups: vec![],
             },
             mechanism: SaslMechanism::ScramSha512,
             expires_at_ms: None,
@@ -820,6 +821,7 @@ mod tests {
             principal: Principal {
                 name: "alice".to_string(),
                 auth_method: crabka_security::AuthMethod::SaslOAuthBearer,
+                groups: vec![],
             },
             mechanism: SaslMechanism::OAuthBearer,
             expires_at_ms: Some(2_000_000),
@@ -844,6 +846,7 @@ mod tests {
             principal: Principal {
                 name: "alice".to_string(),
                 auth_method: crabka_security::AuthMethod::SaslOAuthBearer,
+                groups: vec![],
             },
             mechanism: SaslMechanism::OAuthBearer,
             expires_at_ms: Some(2_000_000),
@@ -872,6 +875,7 @@ mod tests {
             principal: Principal {
                 name: "alice".to_string(),
                 auth_method: crabka_security::AuthMethod::SaslOAuthBearer,
+                groups: vec![],
             },
             mechanism: SaslMechanism::OAuthBearer,
             expires_at_ms: Some(2_000_000),
@@ -904,6 +908,7 @@ mod tests {
                 principal: Principal {
                     name: "alice".to_string(),
                     auth_method: crabka_security::AuthMethod::SaslOAuthBearer,
+                    groups: vec![],
                 },
                 mechanism: SaslMechanism::OAuthBearer,
                 expires_at_ms: Some(now_ms + 1_000), // about to expire
@@ -952,6 +957,7 @@ mod tests {
                 principal: Principal {
                     name: "alice".to_string(),
                     auth_method: crabka_security::AuthMethod::SaslOAuthBearer,
+                    groups: vec![],
                 },
                 mechanism: SaslMechanism::OAuthBearer,
                 expires_at_ms: Some(now_ms + 1_000),
@@ -985,6 +991,7 @@ mod tests {
                 principal: Principal {
                     name: "alice".to_string(),
                     auth_method: crabka_security::AuthMethod::SaslOAuthBearer,
+                    groups: vec![],
                 },
                 mechanism: SaslMechanism::OAuthBearer,
                 expires_at_ms: Some(2_000_000),
@@ -1013,6 +1020,7 @@ mod tests {
             principal: Principal {
                 name: "alice".into(),
                 auth_method: crabka_security::AuthMethod::SaslScramSha512,
+                groups: vec![],
             },
             mechanism: SaslMechanism::ScramSha512,
             expires_at_ms: None,
