@@ -1237,6 +1237,7 @@ dependencies = [
  "crabka-broker",
  "crabka-client-admin",
  "crabka-client-core",
+ "crabka-metadata",
  "crabka-rebalancer",
  "crabka-security",
  "futures",

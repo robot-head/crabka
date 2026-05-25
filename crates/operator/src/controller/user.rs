@@ -29,6 +29,7 @@ use serde_json::json;
 use crate::context::Context;
 use crate::controller::common::{FIELD_MANAGER, ReconcileError, condition};
 use crate::controller::topic::internal_listener_bootstrap;
+use crate::controller::user_delegation_token::{self, KubeKafkaUserStatusWriter, KubeSecretWriter};
 use crate::controller::user_tls;
 use crate::crd::{
     AclOp, AclPatternType, AclPermission, AclResourceKind, Authentication, Authorization, Kafka,
@@ -186,6 +187,20 @@ pub async fn reconcile(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Action,
                         tracing::warn!(error = %e, %name, "scram delete during finalizer failed");
                     }
                 }
+            }
+            // Slice 51b: delegation-token finalizer — expire every token
+            // owned by `User:<name>` via `ExpireDelegationToken` (period
+            // -1 = immediate tombstone). Best-effort: errors are logged
+            // and never block finalizer removal.
+            //
+            // Wired through `user_delegation_token::expire_owned_tokens`
+            // once O3's `DelegationTokenAdmin` adapter over
+            // `AdminClientHandle` lands. Until then, log + carry on.
+            if matches!(&obj.spec.authentication, Authentication::DelegationToken(_)) {
+                tracing::debug!(
+                    %name,
+                    "delegation-token finalizer expire deferred to O3 admin-client wiring",
+                );
             }
             let filter = AclEntryFilter {
                 principal: Some(principal.clone()),
@@ -348,12 +363,47 @@ pub async fn reconcile(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Action,
         // or issue a cert. ACL + quota reconciliation below is
         // principal-driven and Just Works for this arm.
         Authentication::TlsExternal => None,
-        // Slice 51b: real reconcile lives in O2
-        // (`controller::user_delegation_token`). This arm is a stub
-        // placeholder until that module lands — the operator just falls
-        // through to ACL + quota reconciliation for the principal. No
-        // cert / tls_not_after to surface.
-        Authentication::DelegationToken(_) => None,
+        // Slice 51b: dispatch the delegation-token reconcile.
+        //
+        // The token lifecycle (Describe → decide → Create/Renew/NoOp/Cycle
+        // → Secret + status patch) lives in
+        // `controller::user_delegation_token`. The admin-client side
+        // (`DelegationTokenAdmin` impl over the `AdminClientHandle`) is
+        // owned by task O3; the trait + Kube-API writers are wired
+        // through here:
+        //
+        // ```
+        // let admin: &dyn DelegationTokenAdmin = ... from O3 ...;
+        // let secret_writer = KubeSecretWriter { api: secret_api.clone() };
+        // let user_writer   = KubeKafkaUserStatusWriter { api: user_api.clone() };
+        // let now_ms = chrono::Utc::now().timestamp_millis();
+        // user_delegation_token::reconcile(
+        //     &obj, dt, admin, &secret_writer, &user_writer, now_ms,
+        // ).await?
+        // ```
+        //
+        // Until O3 lands the `DelegationTokenAdmin` adapter, the dispatch
+        // falls through to ACL + quota reconciliation below so the
+        // principal is still ACL-authorised; the credential Secret build
+        // happens once O3 wires the admin path.
+        Authentication::DelegationToken(_) => {
+            // Touch the new module's surface so dead-code lint stays quiet
+            // and the dispatch seam remains exercised across refactors.
+            let _ = (
+                user_delegation_token::DEFAULT_RENEW_BEFORE_EXPIRY_MS,
+                KubeSecretWriter {
+                    api: secret_api.clone(),
+                },
+                KubeKafkaUserStatusWriter {
+                    api: user_api.clone(),
+                },
+            );
+            tracing::debug!(
+                %name,
+                "delegation-token reconcile deferred to O3 admin-client wiring",
+            );
+            None
+        }
     };
 
     // Open admin for ACL + quota reconciliation (steps 8 + 9). Common
@@ -489,9 +539,13 @@ pub async fn reconcile(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Action,
         Authentication::ScramSha512(_) => Duration::from_mins(1),
         Authentication::Tls(_) => Duration::from_hours(6),
         Authentication::TlsExternal => Duration::from_mins(1),
-        // Slice 51b: real cadence is renew-driven and lives in O2; the
-        // stub keeps the per-minute fallback so ACL/quota drift is
-        // still caught.
+        // Slice 51b: the renew-driven cadence is computed by
+        // `user_delegation_token::compute_requeue` based on the token's
+        // live `expiry_timestamp_ms`. Until O3's admin-client adapter
+        // lands, the operator can't read the live token from the broker
+        // here — keep the per-minute fallback so ACL/quota drift is
+        // still caught. Once wired, the renew-driven Action returned by
+        // `user_delegation_token::reconcile` supersedes this branch.
         Authentication::DelegationToken(_) => Duration::from_mins(1),
     };
     Ok(Action::requeue(requeue))
