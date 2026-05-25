@@ -135,31 +135,26 @@ pub(crate) fn prune_expired(blocks: &[String], now: OffsetDateTime) -> Vec<Strin
 
 /// Staged key-replacement phase, persisted in the cert Secret's
 /// `crabka.io/ca-rotation-phase` annotation (absent ≡ `Idle`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::IntoStaticStr, strum::EnumString)]
 pub(crate) enum CaPhase {
+    #[strum(serialize = "idle")]
     Idle,
     /// New CA generated, its cert added to the trust bundle (trust-only); the
     /// old key still signs. A roll distributes the larger trust set.
+    #[strum(serialize = "key-replace-trust")]
     KeyReplaceTrust,
     /// New key promoted to signer + leafs reissued; the old cert lingers in the
     /// bundle so in-flight peers still validate. A roll applies the new leafs.
+    #[strum(serialize = "key-replace-promote")]
     KeyReplacePromote,
 }
 
 impl CaPhase {
     pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Idle => "idle",
-            Self::KeyReplaceTrust => "key-replace-trust",
-            Self::KeyReplacePromote => "key-replace-promote",
-        }
+        self.into()
     }
     fn parse(s: &str) -> Self {
-        match s {
-            "key-replace-trust" => Self::KeyReplaceTrust,
-            "key-replace-promote" => Self::KeyReplacePromote,
-            _ => Self::Idle,
-        }
+        s.parse().unwrap_or(Self::Idle)
     }
 }
 

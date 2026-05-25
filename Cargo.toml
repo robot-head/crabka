@@ -59,6 +59,11 @@ opentelemetry_sdk = { version = "0.32", default-features = false, features = ["t
 opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "grpc-tonic", "http-proto", "reqwest-blocking-client"] }
 tracing-opentelemetry = { version = "0.33", default-features = false }
 bon = "3"
+# strum: derive enum<->&'static str (IntoStaticStr) and &str->enum (EnumString)
+# to retire hand-written match-arm conversions. Its whole proc-macro tree
+# (syn/quote/proc-macro2/heck/rustversion) is already compiled in the graph,
+# so the marginal build cost is one small proc-macro crate.
+strum = { version = "0.27", features = ["derive"] }
 # wincode + serde-wincode replace bincode for serde-derived wire shapes.
 # Pinned to 0.4: serde-wincode 0.1.0 depends on wincode ^0.4, so a 0.5
 # pin would silently duplicate wincode in the dep graph and fail trait

@@ -4,7 +4,9 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, strum::IntoStaticStr,
+)]
 pub enum AnomalyKind {
     BrokerDeath,
     UnderReplicatedPartitions,
@@ -15,12 +17,7 @@ pub enum AnomalyKind {
 impl AnomalyKind {
     #[must_use]
     pub fn as_str(self) -> &'static str {
-        match self {
-            AnomalyKind::BrokerDeath => "BrokerDeath",
-            AnomalyKind::UnderReplicatedPartitions => "UnderReplicatedPartitions",
-            AnomalyKind::DiskPressure => "DiskPressure",
-            AnomalyKind::SlowBroker => "SlowBroker",
-        }
+        self.into()
     }
 }
 

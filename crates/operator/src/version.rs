@@ -80,7 +80,7 @@ fn parse_component(c: Option<&str>, original: &str) -> Result<u32, VersionError>
 }
 
 /// Machine reason for a `KafkaVersionValid=False` condition.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::IntoStaticStr)]
 pub enum VersionReason {
     /// `kafkaVersion` or `metadataVersion` did not parse.
     InvalidVersion,
@@ -93,11 +93,7 @@ pub enum VersionReason {
 impl VersionReason {
     #[must_use]
     pub fn as_str(self) -> &'static str {
-        match self {
-            VersionReason::InvalidVersion => "InvalidVersion",
-            VersionReason::MetadataVersionTooHigh => "MetadataVersionTooHigh",
-            VersionReason::MetadataVersionDowngrade => "MetadataVersionDowngrade",
-        }
+        self.into()
     }
 }
 

@@ -311,67 +311,14 @@ pub fn request_span(
 }
 
 /// Map a Kafka request `api_key` to its canonical protocol name, used as
-/// the `OTel` span name. Unknown keys (newer than what the broker handles)
-/// render as `"Unknown"` so a span is still emitted.
+/// the `OTel` span name. The name is sourced from the generated
+/// [`crabka_protocol::ApiKey`] registry (whose variant names are the
+/// canonical Kafka request names), so it stays in sync with the schemas.
+/// Keys outside the registry render as `"Unknown"` so a span is still
+/// emitted.
 #[must_use]
 pub fn api_name(api_key: i16) -> &'static str {
-    match api_key {
-        0 => "Produce",
-        1 => "Fetch",
-        2 => "ListOffsets",
-        3 => "Metadata",
-        8 => "OffsetCommit",
-        9 => "OffsetFetch",
-        10 => "FindCoordinator",
-        11 => "JoinGroup",
-        12 => "Heartbeat",
-        13 => "LeaveGroup",
-        14 => "SyncGroup",
-        15 => "DescribeGroups",
-        16 => "ListGroups",
-        17 => "SaslHandshake",
-        18 => "ApiVersions",
-        19 => "CreateTopics",
-        20 => "DeleteTopics",
-        21 => "DeleteRecords",
-        22 => "InitProducerId",
-        23 => "OffsetForLeaderEpoch",
-        24 => "AddPartitionsToTxn",
-        25 => "AddOffsetsToTxn",
-        26 => "EndTxn",
-        28 => "TxnOffsetCommit",
-        32 => "DescribeConfigs",
-        33 => "AlterConfigs",
-        36 => "SaslAuthenticate",
-        37 => "CreatePartitions",
-        42 => "DeleteGroups",
-        44 => "IncrementalAlterConfigs",
-        47 => "OffsetDelete",
-        50 => "DescribeUserScramCredentials",
-        51 => "AlterUserScramCredentials",
-        55 => "DescribeQuorum",
-        56 => "AlterPartition",
-        57 => "UpdateFeatures",
-        60 => "DescribeCluster",
-        _ => api_name_admin(api_key),
-    }
-}
-
-/// Second arm of [`api_name`] — ACL / quota / reassignment / leader-election
-/// admin keys. Split out to keep the primary `match` under clippy's
-/// arm-count lints.
-fn api_name_admin(api_key: i16) -> &'static str {
-    match api_key {
-        29 => "DescribeAcls",
-        30 => "CreateAcls",
-        31 => "DeleteAcls",
-        43 => "ElectLeaders",
-        45 => "AlterPartitionReassignments",
-        46 => "ListPartitionReassignments",
-        48 => "DescribeClientQuotas",
-        49 => "AlterClientQuotas",
-        _ => "Unknown",
-    }
+    crabka_protocol::ApiKey::from_i16(api_key).map_or("Unknown", Into::into)
 }
 
 #[cfg(test)]
