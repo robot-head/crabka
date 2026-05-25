@@ -1007,7 +1007,7 @@ dependencies = [
  "hdrhistogram",
  "k8s-openapi",
  "kube",
- "reqwest 0.13.3",
+ "reqwest 0.13.4",
  "rustls",
  "serde",
  "serde_json",
@@ -1047,7 +1047,7 @@ dependencies = [
  "pbkdf2 0.13.0",
  "prometheus-client",
  "rcgen",
- "reqwest 0.13.3",
+ "reqwest 0.13.4",
  "ring",
  "rustls",
  "rustls-pki-types",
@@ -1245,7 +1245,7 @@ dependencies = [
  "k8s-openapi",
  "kube",
  "prometheus-client",
- "reqwest 0.13.3",
+ "reqwest 0.13.4",
  "ring",
  "rustls",
  "schemars 1.2.1",
@@ -1336,7 +1336,7 @@ dependencies = [
  "pbjson",
  "prometheus-client",
  "prost",
- "reqwest 0.13.3",
+ "reqwest 0.13.4",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -3245,7 +3245,7 @@ dependencies = [
  "bytes",
  "http",
  "opentelemetry",
- "reqwest 0.13.3",
+ "reqwest 0.13.4",
 ]
 
 [[package]]
@@ -3260,7 +3260,7 @@ dependencies = [
  "opentelemetry-proto",
  "opentelemetry_sdk",
  "prost",
- "reqwest 0.13.3",
+ "reqwest 0.13.4",
  "thiserror 2.0.18",
  "tokio",
  "tonic",
@@ -4070,9 +4070,9 @@ dependencies = [
 
 [[package]]
 name = "reqwest"
-version = "0.13.3"
+version = "0.13.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62e0021ea2c22aed41653bc7e1419abb2c97e038ff2c33d0e1309e49a97deec0"
+checksum = "219c5811de6525e5416c7d5d53bb656d3afdbc6c5af816e0802bcfa42dbdc1c3"
 dependencies = [
  "base64",
  "bytes",
