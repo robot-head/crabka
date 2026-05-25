@@ -283,6 +283,17 @@ pub struct BrokerConfig {
     /// `expiry_timestamp_ms` or `max_timestamp_ms` is in the past. Default
     /// 1 hour (`delegation.token.expiry.check.interval.ms` in Kafka).
     pub delegation_token_expiry_check_interval_ms: i64,
+
+    /// Slice 51 (KIP-48): default renew period used as the *initial*
+    /// `expiry_timestamp_ms` offset at create time, and as the implicit
+    /// renew period when `RenewDelegationToken.renew_period_ms == -1`.
+    /// Distinct from `delegation_token_max_lifetime_ms` (the absolute
+    /// ceiling that `expiry_timestamp_ms` can never be pushed past via
+    /// `Renew`): a fresh token gets `expiry_timestamp_ms = now +
+    /// min(default_renew_period, chosen_max_lifetime)` while
+    /// `max_timestamp_ms = now + chosen_max_lifetime`. Default 24 hours
+    /// (`delegation.token.expiry.time.ms` in Kafka).
+    pub delegation_token_default_renew_period_ms: i64,
 }
 
 /// Slice 51 (KIP-48): default hard upper bound on delegation-token lifetime.
@@ -292,6 +303,12 @@ pub const DEFAULT_DELEGATION_TOKEN_MAX_LIFETIME_MS: i64 = 7 * 24 * 60 * 60 * 1_0
 /// Slice 51 (KIP-48): default cadence of the background expiry sweep task.
 /// 1 hour, matches Kafka's `delegation.token.expiry.check.interval.ms`.
 pub const DEFAULT_DELEGATION_TOKEN_EXPIRY_CHECK_INTERVAL_MS: i64 = 60 * 60 * 1_000;
+
+/// Slice 51 (KIP-48): default renew period used as the initial
+/// `expiry_timestamp_ms` offset at create time, and as the implicit
+/// renew period when `RenewDelegationToken.renew_period_ms == -1`.
+/// 24 hours, matches Kafka's `delegation.token.expiry.time.ms` default.
+pub const DEFAULT_DELEGATION_TOKEN_RENEW_PERIOD_MS: i64 = 24 * 60 * 60 * 1_000;
 
 impl BrokerConfig {
     /// Helpful for tests: a config that listens on an OS-assigned port
@@ -369,6 +386,7 @@ impl BrokerConfig {
             delegation_token_max_lifetime_ms: DEFAULT_DELEGATION_TOKEN_MAX_LIFETIME_MS,
             delegation_token_expiry_check_interval_ms:
                 DEFAULT_DELEGATION_TOKEN_EXPIRY_CHECK_INTERVAL_MS,
+            delegation_token_default_renew_period_ms: DEFAULT_DELEGATION_TOKEN_RENEW_PERIOD_MS,
         }
     }
 
@@ -550,6 +568,7 @@ impl Default for BrokerConfig {
             delegation_token_max_lifetime_ms: DEFAULT_DELEGATION_TOKEN_MAX_LIFETIME_MS,
             delegation_token_expiry_check_interval_ms:
                 DEFAULT_DELEGATION_TOKEN_EXPIRY_CHECK_INTERVAL_MS,
+            delegation_token_default_renew_period_ms: DEFAULT_DELEGATION_TOKEN_RENEW_PERIOD_MS,
         }
     }
 }

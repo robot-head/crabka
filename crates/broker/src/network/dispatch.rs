@@ -2124,6 +2124,7 @@ async fn handle_create_delegation_token_frame(
         auth,
         broker.config.delegation_token_secret_key.as_ref(),
         broker.config.delegation_token_max_lifetime_ms,
+        broker.config.delegation_token_default_renew_period_ms,
         &broker.controller,
     )
     .await;
@@ -2141,8 +2142,9 @@ async fn handle_create_delegation_token_frame(
 /// Decode + dispatch a `RenewDelegationToken` (`api_key` 39) frame
 /// (slice-51 T7). Threads the per-connection `auth` to the handler so it
 /// can enforce the KIP-48 owner-or-renewer check, and passes the
-/// configured expiry-check interval as the default renew period used
-/// when the request specifies `renew_period_ms == -1` (spec §1.3 step 4).
+/// configured default renew period (Kafka's `delegation.token.expiry.time.ms`,
+/// 24h by default) as the fallback used when the request specifies
+/// `renew_period_ms == -1` (spec §1.3 step 4).
 async fn handle_renew_delegation_token_frame(
     broker: &Broker,
     frame: &[u8],
@@ -2163,7 +2165,7 @@ async fn handle_renew_delegation_token_frame(
         &req,
         auth,
         broker.config.delegation_token_secret_key.as_ref(),
-        broker.config.delegation_token_expiry_check_interval_ms,
+        broker.config.delegation_token_default_renew_period_ms,
         &broker.controller,
     )
     .await;

@@ -67,6 +67,11 @@ pub struct FileDelegationTokenConfig {
     pub max_lifetime_ms: Option<i64>,
     /// Background sweep cadence, ms. Default 1 hour.
     pub expiry_check_interval_ms: Option<i64>,
+    /// Default renew period — the initial `expiry_timestamp_ms` offset
+    /// at create time and the implicit renew period when
+    /// `RenewDelegationToken.renew_period_ms == -1`. Distinct from
+    /// `max_lifetime_ms` (the absolute ceiling). Default 24 hours.
+    pub default_renew_period_ms: Option<i64>,
 }
 
 /// TOML shape of `[oauthbearer]`. Maps to
@@ -529,6 +534,9 @@ impl FileConfig {
             }
             if let Some(ms) = d.expiry_check_interval_ms {
                 cfg.delegation_token_expiry_check_interval_ms = ms;
+            }
+            if let Some(ms) = d.default_renew_period_ms {
+                cfg.delegation_token_default_renew_period_ms = ms;
             }
         }
     }
@@ -1126,7 +1134,8 @@ secret_key = "abcdef"
                     .map(|s| s.as_bytes().to_vec()),
                 Some(b"abcdef".to_vec()),
             );
-            // KIP-48 defaults: 7 days max lifetime, 1 hour sweep cadence.
+            // KIP-48 defaults: 7 days max lifetime, 1 hour sweep cadence,
+            // 24 hour default renew period.
             assert_eq!(
                 cfg.delegation_token_max_lifetime_ms,
                 7 * 24 * 60 * 60 * 1_000
@@ -1134,6 +1143,45 @@ secret_key = "abcdef"
             assert_eq!(
                 cfg.delegation_token_expiry_check_interval_ms,
                 60 * 60 * 1_000
+            );
+            assert_eq!(
+                cfg.delegation_token_default_renew_period_ms,
+                24 * 60 * 60 * 1_000
+            );
+        });
+    }
+
+    #[test]
+    fn delegation_token_default_renew_period_ms_default_and_override() {
+        let _g = env_lock().lock().unwrap();
+        temp_env::with_var_unset("CRABKA_DELEGATION_TOKEN_SECRET_KEY", || {
+            // (1) When the TOML omits `default_renew_period_ms`, the config
+            //     stays at the 24h KIP-48 default.
+            let toml = r#"
+[delegation_token]
+secret_key = "abcdef"
+"#;
+            let file: FileConfig = toml::from_str(toml).unwrap();
+            let mut cfg = crate::config::BrokerConfig::default();
+            file.apply_to(&mut cfg);
+            assert_eq!(
+                cfg.delegation_token_default_renew_period_ms,
+                24 * 60 * 60 * 1_000,
+                "absent default_renew_period_ms should leave the 24h default in place",
+            );
+
+            // (2) When the TOML sets it, the override wins.
+            let toml = r#"
+[delegation_token]
+secret_key = "abcdef"
+default_renew_period_ms = 7200000
+"#;
+            let file: FileConfig = toml::from_str(toml).unwrap();
+            let mut cfg = crate::config::BrokerConfig::default();
+            file.apply_to(&mut cfg);
+            assert_eq!(
+                cfg.delegation_token_default_renew_period_ms, 7_200_000,
+                "TOML default_renew_period_ms must override the default",
             );
         });
     }
@@ -1180,6 +1228,10 @@ secret_key = "toml-loses"
             assert_eq!(
                 cfg.delegation_token_expiry_check_interval_ms,
                 60 * 60 * 1_000
+            );
+            assert_eq!(
+                cfg.delegation_token_default_renew_period_ms,
+                24 * 60 * 60 * 1_000
             );
         });
     }

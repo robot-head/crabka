@@ -749,6 +749,7 @@ pub(crate) async fn handle(
     auth: &ConnectionAuth,
     secret_key: Option<&SecretBytes>,
     max_lifetime_ms: i64,
+    default_renew_period_ms: i64,
     controller: &ControllerHandle,
 ) -> CreateDelegationTokenResponse {
     let Some(key) = secret_key else {
@@ -784,14 +785,23 @@ pub(crate) async fn handle(
         name: r.principal_name.to_string(),
     }).collect();
 
+    // KIP-48: `max_timestamp_ms` is the absolute ceiling (Renew may never
+    // push expiry past it); `expiry_timestamp_ms` is the initial "next
+    // renewal due" instant, starting at `now + min(default_renew_period,
+    // chosen_lifetime)` so a tiny `chosen_lifetime` never overflows the
+    // max. The two are SEPARATE so Renew has room to actually advance
+    // `expiry_timestamp_ms`.
+    let max_timestamp_ms = now + chosen_lifetime;
+    let initial_expiry_ms = now + default_renew_period_ms.min(chosen_lifetime);
+
     let record = DelegationTokenRecord {
         token_id: token_id.clone(),
         owner_principal_type: owner.principal_type.clone(),
         owner_name: owner.name.clone(),
         hmac: hmac.clone(),
         issue_timestamp_ms: now,
-        expiry_timestamp_ms: now + chosen_lifetime,
-        max_timestamp_ms: now + chosen_lifetime,
+        expiry_timestamp_ms: initial_expiry_ms,
+        max_timestamp_ms,
         renewers,
     };
 
@@ -808,8 +818,8 @@ pub(crate) async fn handle(
         token_requester_principal_type: Default::default(),
         token_requester_principal_name: Default::default(),
         issue_timestamp_ms: now,
-        expiry_timestamp_ms: now + chosen_lifetime,
-        max_timestamp_ms: now + chosen_lifetime,
+        expiry_timestamp_ms: initial_expiry_ms,
+        max_timestamp_ms,
         token_id: token_id.into(),
         hmac: bytes::Bytes::from(hmac),
         throttle_time_ms: 0,

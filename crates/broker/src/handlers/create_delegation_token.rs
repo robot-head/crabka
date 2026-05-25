@@ -23,6 +23,7 @@ pub(crate) async fn handle(
     auth: &ConnectionAuth,
     secret_key: Option<&SecretBytes>,
     max_lifetime_ms: i64,
+    default_renew_period_ms: i64,
     controller: &ControllerHandle,
 ) -> CreateDelegationTokenResponse {
     let Some(secret_key) = secret_key else {
@@ -71,14 +72,24 @@ pub(crate) async fn handle(
         })
         .collect();
 
-    let expiry_ms = now + chosen_lifetime;
+    // KIP-48 (matches org.apache.kafka.metadata.security.DelegationTokenManager):
+    // `max_timestamp_ms` is the absolute upper bound on the token's lifetime
+    // — `Renew` may never push expiry past it. `expiry_timestamp_ms` is the
+    // initial "next renewal due" instant, computed as `now + default_renew_period`
+    // clamped down so a tiny `chosen_lifetime` never produces an `expiry >
+    // max`. The two values are deliberately separate so that the typical
+    // case (7-day ceiling, 24h renew window) leaves room for `Renew` to
+    // actually extend `expiry_timestamp_ms` up to `max_timestamp_ms`.
+    let max_timestamp_ms = now + chosen_lifetime;
+    let initial_expiry_ms = now + default_renew_period_ms.min(chosen_lifetime);
+
     let record = DelegationTokenRecord {
         token_id: token_id.clone(),
         owner: owner.clone(),
         hmac: hmac.clone(),
         issue_timestamp_ms: now,
-        expiry_timestamp_ms: expiry_ms,
-        max_timestamp_ms: expiry_ms,
+        expiry_timestamp_ms: initial_expiry_ms,
+        max_timestamp_ms,
         renewers,
     };
 
@@ -97,8 +108,8 @@ pub(crate) async fn handle(
         token_requester_principal_type: owner.principal_type,
         token_requester_principal_name: owner.name,
         issue_timestamp_ms: now,
-        expiry_timestamp_ms: expiry_ms,
-        max_timestamp_ms: expiry_ms,
+        expiry_timestamp_ms: initial_expiry_ms,
+        max_timestamp_ms,
         token_id,
         hmac: bytes::Bytes::from(hmac),
         throttle_time_ms: 0,
@@ -165,13 +176,17 @@ mod tests {
         authed_with_token(name, false)
     }
 
+    /// KIP-48 24h default — matches Kafka's `delegation.token.expiry.time.ms`.
+    /// Tests that don't care about renew-period clamping pass this value.
+    const RENEW_24H_MS: i64 = 24 * 60 * 60 * 1_000;
+
     #[tokio::test]
     async fn returns_auth_disabled_when_no_secret_key() {
         let dir = TempDir::new().unwrap();
         let controller = test_controller(dir.path().into()).await;
         let req = CreateDelegationTokenRequest::default();
         let auth = authed("alice");
-        let resp = handle(&req, &auth, None, 1_000, &controller).await;
+        let resp = handle(&req, &auth, None, 1_000, RENEW_24H_MS, &controller).await;
         assert_eq!(
             resp.error_code,
             crate::codes::DELEGATION_TOKEN_AUTH_DISABLED
@@ -188,14 +203,29 @@ mod tests {
             max_lifetime_ms: -1,
             ..Default::default()
         };
-        let resp = handle(&req, &authed("alice"), Some(&secret), 60_000, &controller).await;
+        // Broker ceiling 60s; default renew period 24h. KIP-48: the renew
+        // period is clamped down to chosen_lifetime when smaller, so for
+        // this 60s-ceiling case expiry == max == issue + 60s.
+        let resp = handle(
+            &req,
+            &authed("alice"),
+            Some(&secret),
+            60_000,
+            RENEW_24H_MS,
+            &controller,
+        )
+        .await;
         assert_eq!(resp.error_code, 0);
         assert_eq!(resp.principal_type, "User");
         assert_eq!(resp.principal_name, "alice");
         assert!(!resp.token_id.is_empty(), "token_id should be non-empty");
         // HMAC-SHA-256 output is 32 bytes; the response carries them raw.
         assert_eq!(resp.hmac.len(), 32);
-        // Persisted in image with the same hmac + owner.
+        // 60s ceiling < 24h default renew period → both timestamps collapse
+        // to issue + 60s (the chosen_lifetime ceiling).
+        assert_eq!(resp.expiry_timestamp_ms - resp.issue_timestamp_ms, 60_000);
+        assert_eq!(resp.max_timestamp_ms, resp.expiry_timestamp_ms);
+        // Persisted in image with the same hmac + owner + timestamps.
         let img = controller.current_image();
         let stored = img
             .delegation_token_by_id(&resp.token_id)
@@ -203,6 +233,8 @@ mod tests {
         assert_eq!(stored.hmac.as_slice(), &resp.hmac[..]);
         assert_eq!(stored.owner.principal_type, "User");
         assert_eq!(stored.owner.name, "alice");
+        assert_eq!(stored.expiry_timestamp_ms, resp.expiry_timestamp_ms);
+        assert_eq!(stored.max_timestamp_ms, resp.max_timestamp_ms);
         controller.cancel().await;
     }
 
@@ -220,6 +252,7 @@ mod tests {
             &authed_with_token("alice", true),
             Some(&secret),
             60_000,
+            RENEW_24H_MS,
             &controller,
         )
         .await;
@@ -246,13 +279,98 @@ mod tests {
             &authed("alice"),
             Some(&secret),
             ceiling_ms,
+            RENEW_24H_MS,
             &controller,
         )
         .await;
         assert_eq!(resp.error_code, 0);
-        let lifetime = resp.expiry_timestamp_ms - resp.issue_timestamp_ms;
-        assert_eq!(lifetime, ceiling_ms);
+        // 5-minute ceiling < 24h default renew period → both timestamps
+        // collapse to issue + ceiling.
+        let max_offset = resp.max_timestamp_ms - resp.issue_timestamp_ms;
+        let expiry_offset = resp.expiry_timestamp_ms - resp.issue_timestamp_ms;
+        assert_eq!(max_offset, ceiling_ms);
+        assert_eq!(expiry_offset, ceiling_ms);
         assert_eq!(resp.max_timestamp_ms, resp.expiry_timestamp_ms);
+        controller.cancel().await;
+    }
+
+    /// KIP-48 separates `expiry_timestamp_ms` (initially `issue + min(default_renew,
+    /// chosen_lifetime)`) from `max_timestamp_ms` (`issue + chosen_lifetime`),
+    /// so `Renew` can extend the former up to the latter rather than round-tripping
+    /// exactly. This test pins both branches of the `min`.
+    #[tokio::test]
+    async fn initial_expiry_is_default_renew_period_clamped_by_max_lifetime() {
+        let dir = TempDir::new().unwrap();
+        let controller = test_controller(dir.path().into()).await;
+        let secret = SecretBytes::new(b"k".to_vec());
+
+        // Branch 1: max_lifetime_ms = 1h, default_renew_period_ms = 24h.
+        // The renew period is clamped *down* to chosen_lifetime, so both
+        // timestamps collapse to issue + 1h.
+        let one_hour = 60 * 60 * 1_000;
+        let req = CreateDelegationTokenRequest {
+            max_lifetime_ms: -1,
+            ..Default::default()
+        };
+        let resp = handle(
+            &req,
+            &authed("alice"),
+            Some(&secret),
+            one_hour,
+            RENEW_24H_MS,
+            &controller,
+        )
+        .await;
+        assert_eq!(resp.error_code, 0);
+        assert_eq!(
+            resp.expiry_timestamp_ms - resp.issue_timestamp_ms,
+            one_hour,
+            "1h ceiling clamps the 24h renew period; expiry must == issue + 1h",
+        );
+        assert_eq!(
+            resp.max_timestamp_ms - resp.issue_timestamp_ms,
+            one_hour,
+            "max must equal issue + chosen_lifetime",
+        );
+        assert_eq!(
+            resp.expiry_timestamp_ms, resp.max_timestamp_ms,
+            "expiry must collapse to max when renew period > chosen_lifetime",
+        );
+
+        // Branch 2: max_lifetime_ms = 7d, default_renew_period_ms = 24h.
+        // Now the renew period is the smaller of the two, so expiry =
+        // issue + 24h and max = issue + 7d — they are SEPARATE, leaving
+        // room for Renew to extend expiry up to max.
+        let seven_days = 7 * 24 * 60 * 60 * 1_000;
+        let req = CreateDelegationTokenRequest {
+            max_lifetime_ms: -1,
+            ..Default::default()
+        };
+        let resp = handle(
+            &req,
+            &authed("alice"),
+            Some(&secret),
+            seven_days,
+            RENEW_24H_MS,
+            &controller,
+        )
+        .await;
+        assert_eq!(resp.error_code, 0);
+        assert_eq!(
+            resp.expiry_timestamp_ms - resp.issue_timestamp_ms,
+            RENEW_24H_MS,
+            "24h renew period < 7d ceiling, so expiry must == issue + 24h",
+        );
+        assert_eq!(
+            resp.max_timestamp_ms - resp.issue_timestamp_ms,
+            seven_days,
+            "max must == issue + 7d (the ceiling, untouched)",
+        );
+        assert!(
+            resp.expiry_timestamp_ms < resp.max_timestamp_ms,
+            "expiry and max must be SEPARATE so Renew has room to extend",
+        );
+
         controller.cancel().await;
     }
 
@@ -266,7 +384,15 @@ mod tests {
             max_lifetime_ms: 0,
             ..Default::default()
         };
-        let resp = handle(&req, &authed("alice"), Some(&secret), 60_000, &controller).await;
+        let resp = handle(
+            &req,
+            &authed("alice"),
+            Some(&secret),
+            60_000,
+            RENEW_24H_MS,
+            &controller,
+        )
+        .await;
         assert_eq!(resp.error_code, crate::codes::INVALID_REQUEST);
         controller.cancel().await;
     }

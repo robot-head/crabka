@@ -27,10 +27,13 @@
 //!   (d) Same connection: re-`CreateDelegationToken` → expect 64.
 //!   (e) Third TCP connection; SASL/PLAIN as `bob`; `RenewDelegationToken`
 //!       with the captured HMAC. Expect `error_code = 0` (the
-//!       renewer-authorization gate accepts the listed renewer). The
-//!       returned expiry is clamped to `max_timestamp_ms`, which the
-//!       create handler set equal to the original expiry — so this
-//!       round-trips the original value rather than extending past it.
+//!       renewer-authorization gate accepts the listed renewer). Per
+//!       KIP-48, the create handler sets `expiry_timestamp_ms = now +
+//!       min(default_renew_period, chosen_lifetime)` and
+//!       `max_timestamp_ms = now + chosen_lifetime` as SEPARATE values,
+//!       so a Renew with a large `renew_period_ms` extends the expiry
+//!       strictly beyond its initial value — up to (but not past)
+//!       `max_timestamp_ms`.
 //!   (f) `alice`'s connection: `DescribeDelegationToken` with
 //!       `owners=[User:alice]`. Expect 1 token, matching `token_id`.
 //!   (g) `alice`'s connection: `ExpireDelegationToken` with
@@ -407,15 +410,15 @@ async fn start_broker() -> (BrokerHandle, TempDir, SocketAddr) {
         password: "wonderland".to_string(),
     });
     cfg.delegation_token_secret_key = Some(SecretBytes::new(b"e2e-master-key".to_vec()));
-    // Broker ceiling = 7 days (Kafka default). Note: the
-    // `CreateDelegationToken` handler sets both `expiry_timestamp_ms`
-    // AND `max_timestamp_ms` to `now + chosen_lifetime`, so the Renew
-    // step's `min(now + renew_period_ms, max_timestamp_ms)` clamps the
-    // renewed expiry to the original — Renew can never push expiry
-    // beyond the original ceiling. The lifecycle test compensates by
-    // asserting Renew SUCCEEDED + returned a positive timestamp, rather
-    // than strict-monotonic extension.
+    // KIP-48 distinguishes the absolute ceiling (`max_lifetime_ms` →
+    // `max_timestamp_ms`) from the initial renew window (`default_renew_period`
+    // → `expiry_timestamp_ms`). With 7d ceiling + 24h renew period (both
+    // the Kafka defaults), the create handler emits expiry = issue + 24h
+    // and max = issue + 7d as separate values, so Renew can extend the
+    // expiry well past its initial value (and the lifecycle test asserts
+    // strict-monotonic extension below).
     cfg.delegation_token_max_lifetime_ms = 7 * 24 * 60 * 60 * 1_000;
+    cfg.delegation_token_default_renew_period_ms = 24 * 60 * 60 * 1_000;
 
     let handle = Broker::start(cfg).await.expect("broker must start");
     let addr = handle.listen_addr();
@@ -472,7 +475,16 @@ async fn delegation_token_lifecycle_end_to_end() {
 
         let token_id = create_resp.token_id.clone();
         let hmac_bytes = create_resp.hmac.clone();
-        let original_expiry_ms = create_resp.expiry_timestamp_ms;
+        // Capture both timestamps: with the KIP-48 fix, Renew must extend
+        // `expiry_timestamp_ms` strictly past `create_resp.expiry_timestamp_ms`
+        // but never push it past `create_resp.max_timestamp_ms`.
+        let initial_expiry_ms = create_resp.expiry_timestamp_ms;
+        let max_timestamp_ms = create_resp.max_timestamp_ms;
+        assert!(
+            initial_expiry_ms < max_timestamp_ms,
+            "KIP-48 separation invariant: initial expiry ({initial_expiry_ms}) must be strictly \
+             less than max ({max_timestamp_ms}) when default_renew_period < max_lifetime",
+        );
 
         // Wait briefly for the V1DelegationToken record to apply on this
         // node's image — every subsequent step reads it back via the same
@@ -527,18 +539,16 @@ async fn delegation_token_lifecycle_end_to_end() {
 
         // ── (e) Third connection: bob (a listed renewer) calls Renew.
         //         Renew authorization (owner OR renewer) is what's load-bearing
-        //         here — the absolute expiry value is constrained by
-        //         `min(now + renew_period_ms, max_timestamp_ms)`, and since
-        //         the broker sets `max_timestamp_ms == expiry_timestamp_ms`
-        //         at create, Renew clamps to the original expiry. The
-        //         renewer-authorization gate is what's untested without this
-        //         step.
+        //         here. With the KIP-48 fix, Create sets
+        //         `expiry_timestamp_ms = issue + 24h` and
+        //         `max_timestamp_ms = issue + 7d` as SEPARATE values, so
+        //         `min(now + renew_period_ms, max_timestamp_ms)` actually
+        //         advances the expiry — bounded above by `max_timestamp_ms`.
         let mut bob = sasl_plain_authenticate(addr, "bob", b"builder")
             .await
             .map_err(|e| format!("bob PLAIN auth: {e}"))?;
         // Use a huge renew period so the clamp lands at `max_timestamp_ms`
-        // (≈ original expiry) regardless of wall-clock drift between
-        // Create and Renew.
+        // regardless of wall-clock drift between Create and Renew.
         let renew_resp = send_renew_delegation_token(
             &mut bob,
             300,
@@ -555,18 +565,21 @@ async fn delegation_token_lifecycle_end_to_end() {
             "Renew by listed renewer must succeed; got {}",
             renew_resp.error_code,
         );
+        // KIP-48: with the fix, Renew strictly extends the expiry past
+        // its initial value, capped at `max_timestamp_ms`.
         assert!(
-            renew_resp.expiry_timestamp_ms > 0,
-            "Renew must return a positive expiry; got {}",
+            renew_resp.expiry_timestamp_ms > initial_expiry_ms,
+            "Renew must strictly extend expiry past initial value: \
+             renewed={} initial={}",
             renew_resp.expiry_timestamp_ms,
+            initial_expiry_ms,
         );
-        // The clamp pins renewed expiry to the original `max_timestamp_ms`
-        // (which the Create handler sets equal to the original
-        // `expiry_timestamp_ms`); this round-trips the value exactly.
-        assert_eq!(
-            renew_resp.expiry_timestamp_ms, original_expiry_ms,
-            "Renew must clamp to original max_timestamp_ms ({}); got {}",
-            original_expiry_ms, renew_resp.expiry_timestamp_ms,
+        assert!(
+            renew_resp.expiry_timestamp_ms <= max_timestamp_ms,
+            "Renew must never push expiry past max_timestamp_ms: \
+             renewed={} max={}",
+            renew_resp.expiry_timestamp_ms,
+            max_timestamp_ms,
         );
 
         // ── (f) alice describes with an explicit owner filter — should see

@@ -57,7 +57,18 @@ codegen required.
    - `-1` or omitted → use broker config `delegation_token_max_lifetime_ms` (default 7 days).
    - `>0` → clamp to `min(requested, delegation_token_max_lifetime_ms)`.
    - `0` or negative-non-`-1` → `INVALID_REQUEST`.
-5. **Issue + expire timestamps.** `issue_ts = now`, `expire_ts = issue_ts + chosen_lifetime`.
+5. **Issue + expire timestamps.** Per KIP-48 (matching
+   `org.apache.kafka.metadata.security.DelegationTokenManager`), `expiry_timestamp_ms`
+   and `max_timestamp_ms` are SEPARATE values:
+   - `issue_ts = now`
+   - `max_timestamp_ms = issue_ts + chosen_lifetime` — the absolute upper bound.
+     `Renew` may never push expiry past this.
+   - `expiry_timestamp_ms = issue_ts + min(delegation_token_default_renew_period_ms, chosen_lifetime)`
+     — the initial "next renewal due" instant, what `Renew` actually extends
+     (up to `max_timestamp_ms`).
+   The two collapse only when `default_renew_period_ms >= chosen_lifetime`
+   (e.g. caller asked for a very short ceiling); otherwise they're
+   distinct so `Renew` has room to actually advance the expiry.
 6. **Renewers list.** Whatever caller passed (zero-or-more SASL
    principal strings, e.g. `"User:alice"`). Renewers in addition to the
    owner can call `RenewDelegationToken`.
@@ -230,7 +241,7 @@ pub struct DelegationTokenRecord {
     pub hmac: Vec<u8>,                     // 32-byte HMAC-SHA-256 output (in slice 51 we use SHA-256, not 512)
     pub issue_timestamp_ms: i64,
     pub expiry_timestamp_ms: i64,
-    pub max_timestamp_ms: i64,             // issue + lifetime; renew can't push past this
+    pub max_timestamp_ms: i64,             // issue + chosen_lifetime; absolute ceiling, Renew may never push expiry past this. Distinct from expiry_timestamp_ms (which starts at issue + min(default_renew_period, chosen_lifetime) and Renew extends).
     pub renewers: Vec<KafkaPrincipal>,
     pub tombstone: bool,                   // true = remove from image
 }
