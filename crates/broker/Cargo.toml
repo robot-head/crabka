@@ -62,6 +62,10 @@ serde_json = { workspace = true }
 # Slice 49g: compile customClaimCheck JsonPath expressions at config-load
 # and inject into the OAUTHBEARER validators.
 jsonpath-rust = { workspace = true }
+# Slice 51 (KIP-48): base64-encode delegation-token HMAC bytes when
+# synthesizing a SCRAM credential for token authentication
+# (`network::auth::synthesize_token_scram_credential`).
+base64.workspace = true
 
 [dev-dependencies]
 crabka-broker = { version = "0.1", path = ".", features = ["test-helpers"] }
@@ -70,7 +74,6 @@ crabka-client-producer = { version = "0.1", path = "../client-producer" }
 rustls.workspace = true
 rustls-pki-types.workspace = true
 tempfile = { workspace = true }
-base64.workspace = true
 tokio = { workspace = true, features = ["test-util", "macros"] }
 tokio-rustls.workspace = true
 # Slice 12 T15 tests: client-side PBKDF2 of the SCRAM password to build

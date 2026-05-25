@@ -36,6 +36,20 @@ pub enum ConnectionAuth {
     Negotiating {
         mechanism: SaslMechanism,
         exchange: SaslExchange,
+        /// Slice 51 (KIP-48) side-channel: when the SCRAM round-1
+        /// lookup falls back to a delegation token, the token's
+        /// `expiry_timestamp_ms` is captured here so the round-2
+        /// success arm can:
+        /// 1. Set `ConnectionAuth::Authenticated.expires_at_ms` (the
+        ///    KIP-368 re-auth ceiling from slice 50d), and
+        /// 2. Set `authenticated_via_token: true` (the KIP-48
+        ///    token-to-token chain guard read by `CreateDelegationToken`).
+        ///
+        /// `None` for every non-token-SCRAM negotiation (PLAIN,
+        /// regular SCRAM, OAUTHBEARER, plus token-SCRAM round 1
+        /// before the lookup fires). The presence of `Some(_)` is
+        /// the unambiguous "token-authed session" marker.
+        pending_token_expiry_ms: Option<i64>,
     },
     Authenticated {
         principal: Principal,
@@ -250,6 +264,10 @@ pub fn handle_handshake(
             *auth = ConnectionAuth::Negotiating {
                 mechanism: m,
                 exchange,
+                // Slice 51: fresh handshake; the token-fallback in
+                // `handle_authenticate_scram` may populate this later
+                // during SCRAM round 1.
+                pending_token_expiry_ms: None,
             };
             SaslHandshakeResponse {
                 error_code: 0,
@@ -361,20 +379,49 @@ pub fn handle_authenticate_scram(
     if let ConnectionAuth::Negotiating {
         exchange: SaslExchange::ScramPending,
         mechanism,
+        pending_token_expiry_ms: _,
     } = auth
     {
         let mech = *mechanism;
         let Some(username) = parse_scram_username(&req.auth_bytes) else {
             return fail_authenticate("malformed SCRAM client-first");
         };
-        let Some(cred) = controller
-            .current_image()
-            .scram_credential(&username, mech)
-            .cloned()
-        else {
-            return fail_authenticate("unknown user");
+
+        // Look up the SCRAM credential. Slice 51 (KIP-48): when the
+        // user is unknown AND the mechanism is SCRAM-SHA-256, fall
+        // back to the delegation-token table (KIP-48 scopes
+        // token-SCRAM to SHA-256 only). On a token hit, synthesize a
+        // SCRAM credential whose stored/server keys are derived from
+        // the token's HMAC bytes (see
+        // `synthesize_token_scram_credential`), capture the owner
+        // principal so the `Done` arm surfaces the caller as
+        // `User:<owner>` rather than `User:<token-uuid>`, and capture
+        // the token's `expiry_timestamp_ms` for the slice 50d /
+        // KIP-368 re-auth ceiling.
+        let image = controller.current_image();
+        let (cred, principal_override, token_expiry_ms) =
+            if let Some(scram_cred) = image.scram_credential(&username, mech) {
+                (scram_cred.clone(), None, None)
+            } else if mech == SaslMechanism::ScramSha256 {
+                if let Some(token) = image.delegation_token_by_id(&username) {
+                    let synth = synthesize_token_scram_credential(token);
+                    let owner = Principal {
+                        name: token.owner.name.clone(),
+                        auth_method: crabka_security::AuthMethod::SaslScramSha256,
+                        groups: vec![],
+                    };
+                    (synth, Some(owner), Some(token.expiry_timestamp_ms))
+                } else {
+                    return fail_authenticate("unknown user");
+                }
+            } else {
+                return fail_authenticate("unknown user");
+            };
+
+        let mut server = match principal_override {
+            Some(p) => ScramServerExchange::new_with_principal(username, cred, p),
+            None => ScramServerExchange::new(username, cred),
         };
-        let mut server = ScramServerExchange::new(username, cred);
         // Feed the same client-first bytes; on success the exchange emits
         // the server-first message and advances its own internal state.
         match server.step(&req.auth_bytes) {
@@ -382,6 +429,12 @@ pub fn handle_authenticate_scram(
                 *auth = ConnectionAuth::Negotiating {
                     mechanism: mech,
                     exchange: SaslExchange::Scram(server),
+                    // Slice 51: side-channel — `Some` here is the
+                    // unambiguous "this is a token-authed session"
+                    // signal that the round-2 success arm consumes
+                    // to set `Authenticated.authenticated_via_token`
+                    // + `expires_at_ms`.
+                    pending_token_expiry_ms: token_expiry_ms,
                 };
                 SaslAuthenticateResponse {
                     error_code: 0,
@@ -401,9 +454,11 @@ pub fn handle_authenticate_scram(
     } else if let ConnectionAuth::Negotiating {
         exchange: SaslExchange::Scram(server),
         mechanism,
+        pending_token_expiry_ms,
     } = auth
     {
         let mech = *mechanism;
+        let pending_token_expiry_ms = *pending_token_expiry_ms;
         // Round 2: exchange already exists. Step it with the client-final
         // bytes; on success extract the principal + server-final bytes and
         // transition to `Authenticated`.
@@ -413,19 +468,26 @@ pub fn handle_authenticate_scram(
                 fail_authenticate("SCRAM second round expected Done")
             }
             crabka_security::StepResult::Done(principal, bytes) => {
+                // Slice 51: when round-1 fell back to a delegation
+                // token, `pending_token_expiry_ms` is `Some(expiry)`
+                // — its presence is both the marker for
+                // `authenticated_via_token: true` and the value of
+                // `expires_at_ms` (the KIP-368 re-auth ceiling, slice
+                // 50d). For regular SCRAM, it's `None` and the
+                // session has no expiry.
+                let session_lifetime_ms =
+                    pending_token_expiry_ms.map_or(0, |e| (e - crate::time_util::now_ms()).max(0));
                 *auth = ConnectionAuth::Authenticated {
                     principal,
                     mechanism: mech,
-                    expires_at_ms: None,
-                    // Slice 51: T8 will set this to `true` when the SCRAM
-                    // lookup fell back to the delegation-token table.
-                    authenticated_via_token: false,
+                    expires_at_ms: pending_token_expiry_ms,
+                    authenticated_via_token: pending_token_expiry_ms.is_some(),
                 };
                 SaslAuthenticateResponse {
                     error_code: 0,
                     error_message: None,
                     auth_bytes: bytes::Bytes::from(bytes),
-                    session_lifetime_ms: 0,
+                    session_lifetime_ms,
                     ..Default::default()
                 }
             }
@@ -434,6 +496,33 @@ pub fn handle_authenticate_scram(
     } else {
         fail_authenticate("not in SCRAM negotiation")
     }
+}
+
+/// Slice 51 (KIP-48): build a synthetic SCRAM-SHA-256 credential for
+/// authenticating callers against a delegation token. KIP-48 fixes:
+///   - mechanism = SCRAM-SHA-256 (the only token-SCRAM mechanism)
+///   - "password" = base64-encoded token HMAC bytes (the same value
+///     `CreateDelegationToken` returns to the client and that clients
+///     present as the SCRAM password)
+///   - salt = UTF-8 bytes of `token_id` (the token UUID is already
+///     uniformly random — no extra randomness needed)
+///   - iters = 4096 (KIP-48 fixed)
+///
+/// The result is identical to what `hash_scram_password_with_salt`
+/// would produce for those inputs — computed on every auth attempt
+/// rather than stored per-token in the metadata image.
+fn synthesize_token_scram_credential(
+    token: &crabka_metadata::DelegationToken,
+) -> crabka_security::ScramCredential {
+    use base64::Engine;
+    let password = base64::engine::general_purpose::STANDARD.encode(&token.hmac);
+    let salt = token.token_id.as_bytes().to_vec();
+    crabka_security::scram::hash_scram_password_with_salt(
+        password.as_bytes(),
+        SaslMechanism::ScramSha256,
+        4096,
+        salt,
+    )
 }
 
 /// SASL/OAUTHBEARER `SaslAuthenticate` handler (KIP-255 / RFC 7628).
@@ -466,6 +555,10 @@ pub async fn handle_authenticate_oauthbearer(
         ConnectionAuth::Negotiating {
             exchange: SaslExchange::OAuthBearer,
             mechanism,
+            // Slice 51: OAUTHBEARER never carries a delegation-token expiry;
+            // this side-channel is only ever populated by the SCRAM round-1
+            // token-fallback path. Ignore here.
+            pending_token_expiry_ms: _,
         } => {
             let mech = *mechanism;
             match validate_bearer(&req.auth_bytes, validator, now_ms).await {
@@ -504,6 +597,9 @@ pub async fn handle_authenticate_oauthbearer(
                     *auth = ConnectionAuth::Negotiating {
                         mechanism: mech,
                         exchange: SaslExchange::OAuthBearerFailed,
+                        // Slice 51: OAUTHBEARER failure path never
+                        // involves a delegation token.
+                        pending_token_expiry_ms: None,
                     };
                     SaslAuthenticateResponse {
                         error_code: 0,
@@ -675,6 +771,7 @@ mod tests {
         let a = ConnectionAuth::Negotiating {
             mechanism: SaslMechanism::Plain,
             exchange: SaslExchange::Plain,
+            pending_token_expiry_ms: None,
         };
         assert!(!a.is_authenticated());
         assert!(a.principal().is_none());
@@ -685,6 +782,7 @@ mod tests {
         let a = ConnectionAuth::Negotiating {
             mechanism: SaslMechanism::ScramSha512,
             exchange: SaslExchange::ScramPending,
+            pending_token_expiry_ms: None,
         };
         assert!(!a.is_authenticated());
         assert!(a.principal().is_none());
@@ -723,6 +821,7 @@ mod tests {
             ConnectionAuth::Negotiating {
                 mechanism: SaslMechanism::OAuthBearer,
                 exchange: SaslExchange::OAuthBearer,
+                ..
             }
         ));
     }
@@ -735,6 +834,7 @@ mod tests {
         let mut auth = ConnectionAuth::Negotiating {
             mechanism: SaslMechanism::OAuthBearer,
             exchange: SaslExchange::OAuthBearer,
+            pending_token_expiry_ms: None,
         };
         let resp = handle_authenticate_oauthbearer(
             &oauthbearer_client_response(&token),
@@ -765,6 +865,7 @@ mod tests {
         let mut auth = ConnectionAuth::Negotiating {
             mechanism: SaslMechanism::OAuthBearer,
             exchange: SaslExchange::OAuthBearer,
+            pending_token_expiry_ms: None,
         };
         // Round 1: rejected → error JSON, error_code 0, connection stays open.
         let resp = handle_authenticate_oauthbearer(
@@ -801,6 +902,7 @@ mod tests {
         let mut auth = ConnectionAuth::Negotiating {
             mechanism: SaslMechanism::OAuthBearer,
             exchange: SaslExchange::OAuthBearer,
+            pending_token_expiry_ms: None,
         };
         let req = SaslAuthenticateRequest {
             auth_bytes: bytes::Bytes::from_static(b"not-a-valid-gs2-message"),
@@ -821,6 +923,7 @@ mod tests {
         let mut auth = ConnectionAuth::Negotiating {
             mechanism: SaslMechanism::OAuthBearer,
             exchange: SaslExchange::OAuthBearer,
+            pending_token_expiry_ms: None,
         };
         // authzid "bob" != token principal "alice".
         let req = SaslAuthenticateRequest {
@@ -1085,6 +1188,7 @@ mod tests {
         let mut auth = ConnectionAuth::Negotiating {
             mechanism: SaslMechanism::OAuthBearer,
             exchange: SaslExchange::OAuthBearer,
+            pending_token_expiry_ms: None,
         };
         let validator = crabka_security::OAuthBearerValidator::Unsecured(
             crabka_security::UnsecuredJwsValidator {
@@ -1125,6 +1229,7 @@ mod tests {
         let mut auth = ConnectionAuth::Negotiating {
             mechanism: SaslMechanism::OAuthBearer,
             exchange: SaslExchange::OAuthBearer,
+            pending_token_expiry_ms: None,
         };
         let validator = crabka_security::OAuthBearerValidator::Unsecured(
             crabka_security::UnsecuredJwsValidator {
@@ -1154,6 +1259,7 @@ mod tests {
         let mut auth = ConnectionAuth::Negotiating {
             mechanism: SaslMechanism::OAuthBearer,
             exchange: SaslExchange::OAuthBearer,
+            pending_token_expiry_ms: None,
         };
         let validator = crabka_security::OAuthBearerValidator::Unsecured(
             crabka_security::UnsecuredJwsValidator {
@@ -1185,6 +1291,354 @@ mod tests {
                 assert_eq!(expires_at_ms, Some(exp_ms), "cap above exp = raw token exp");
             }
             _ => panic!("expected Authenticated"),
+        }
+    }
+
+    // Slice 51 (KIP-48) — SCRAM-SHA-256 delegation-token fallback tests.
+    //
+    // The tests below spin up a single-voter raft controller so we can
+    // append a `DelegationTokenRecord` and then exercise
+    // `handle_authenticate_scram` against the live image.
+
+    mod token_scram_fallback {
+        use super::*;
+        use crabka_metadata::{DelegationTokenRecord, MetadataRecord};
+        use crabka_security::scram::hash_scram_password_with_salt;
+        use crabka_security::{KafkaPrincipal, ScramClientExchange};
+        use std::net::SocketAddr;
+        use std::sync::Arc;
+        use std::time::Duration;
+        use tempfile::TempDir;
+
+        async fn test_controller(
+            log_dir: std::path::PathBuf,
+        ) -> Arc<crabka_raft::ControllerHandle> {
+            let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+            let cfg = crabka_raft::ControllerConfig {
+                node_id: 1,
+                voters: vec![(1, addr)],
+                controller_listen_addr: addr,
+                log_dir,
+                election_timeout: Duration::from_millis(200),
+                heartbeat_interval: Duration::from_millis(50),
+                client_id: "test".into(),
+                bootstrap_mode: crabka_raft::BootstrapMode::Bootstrap,
+                cluster_id: None,
+                dialer: None,
+                handshake: None,
+            };
+            let handle = Arc::new(crabka_raft::Controller::start(cfg).await.unwrap());
+            let mut rx = handle.watch_leader();
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while rx.borrow().is_none() {
+                assert!(std::time::Instant::now() < deadline, "no leader in 5s");
+                let _ = tokio::time::timeout(Duration::from_millis(100), rx.changed()).await;
+            }
+            handle
+        }
+
+        /// Helper: append a delegation token to the controller's image.
+        async fn append_token(
+            controller: &crabka_raft::ControllerHandle,
+            token_id: &str,
+            owner_name: &str,
+            hmac: Vec<u8>,
+            expiry_timestamp_ms: i64,
+        ) {
+            let rec = MetadataRecord::V1DelegationToken(DelegationTokenRecord {
+                token_id: token_id.into(),
+                owner: KafkaPrincipal {
+                    principal_type: "User".into(),
+                    name: owner_name.into(),
+                },
+                hmac,
+                issue_timestamp_ms: 0,
+                expiry_timestamp_ms,
+                max_timestamp_ms: expiry_timestamp_ms,
+                renewers: vec![],
+            });
+            controller.submit_change(vec![rec]).await.unwrap();
+        }
+
+        /// Drive the SCRAM client through both rounds against the broker's
+        /// `handle_authenticate_scram`. Returns the final `auth` state plus
+        /// the round-2 server response so callers can assert on
+        /// `error_code`, `session_lifetime_ms`, etc.
+        fn drive_scram_to_done(
+            controller: &crabka_raft::ControllerHandle,
+            scram_username: &str,
+            password: &[u8],
+            mechanism: SaslMechanism,
+        ) -> (ConnectionAuth, SaslAuthenticateResponse) {
+            let mut auth = ConnectionAuth::Negotiating {
+                mechanism,
+                exchange: SaslExchange::ScramPending,
+                pending_token_expiry_ms: None,
+            };
+            let mut client =
+                ScramClientExchange::new(scram_username.into(), password.to_vec(), mechanism);
+
+            // Round 1: client-first
+            let c1 = client.client_first().expect("client first");
+            let resp1 = handle_authenticate_scram(
+                &SaslAuthenticateRequest {
+                    auth_bytes: bytes::Bytes::from(c1),
+                    ..Default::default()
+                },
+                &mut auth,
+                controller,
+            );
+            assert_eq!(resp1.error_code, 0, "round 1 must succeed for happy path");
+
+            // Round 2: client-final
+            let c2 = client.step(&resp1.auth_bytes).expect("client final");
+            let resp2 = handle_authenticate_scram(
+                &SaslAuthenticateRequest {
+                    auth_bytes: bytes::Bytes::from(c2),
+                    ..Default::default()
+                },
+                &mut auth,
+                controller,
+            );
+            (auth, resp2)
+        }
+
+        /// Happy path: image contains a delegation token, no matching
+        /// regular SCRAM user, SCRAM-SHA-256 round-1 falls back to the
+        /// token table and round-2 succeeds.
+        #[tokio::test]
+        async fn scram_sha256_falls_back_to_delegation_token_when_no_scram_user() {
+            let dir = TempDir::new().unwrap();
+            let controller = test_controller(dir.path().into()).await;
+            let hmac = vec![0xABu8; 32];
+            let expiry_ms = crate::time_util::now_ms() + 60_000;
+            append_token(&controller, "tok-uuid", "alice", hmac.clone(), expiry_ms).await;
+
+            let password = {
+                use base64::Engine;
+                base64::engine::general_purpose::STANDARD.encode(&hmac)
+            };
+
+            let mut auth = ConnectionAuth::Negotiating {
+                mechanism: SaslMechanism::ScramSha256,
+                exchange: SaslExchange::ScramPending,
+                pending_token_expiry_ms: None,
+            };
+            let mut client = ScramClientExchange::new(
+                "tok-uuid".into(),
+                password.as_bytes().to_vec(),
+                SaslMechanism::ScramSha256,
+            );
+            let c1 = client.client_first().unwrap();
+            let resp1 = handle_authenticate_scram(
+                &SaslAuthenticateRequest {
+                    auth_bytes: bytes::Bytes::from(c1),
+                    ..Default::default()
+                },
+                &mut auth,
+                &controller,
+            );
+            assert_eq!(
+                resp1.error_code, 0,
+                "round 1 must succeed: token-fallback synthesizes the credential"
+            );
+            // Negotiating state now carries pending_token_expiry_ms.
+            match &auth {
+                ConnectionAuth::Negotiating {
+                    pending_token_expiry_ms,
+                    ..
+                } => {
+                    assert_eq!(
+                        *pending_token_expiry_ms,
+                        Some(expiry_ms),
+                        "round 1 must thread the token expiry through"
+                    );
+                }
+                other => panic!("expected Negotiating, got {other:?}"),
+            }
+            controller.cancel().await;
+        }
+
+        /// Round-2 success: full two-round-trip drive ends in
+        /// `Authenticated` whose principal is the token's owner (`alice`),
+        /// with `authenticated_via_token: true` and `expires_at_ms` set
+        /// to the token's `expiry_timestamp_ms`.
+        #[tokio::test]
+        async fn token_authed_connection_has_authenticated_via_token_true_and_owner_principal() {
+            let dir = TempDir::new().unwrap();
+            let controller = test_controller(dir.path().into()).await;
+            let hmac = vec![0x42u8; 32];
+            let expiry_ms = crate::time_util::now_ms() + 60_000;
+            append_token(&controller, "tok-xyz", "alice", hmac.clone(), expiry_ms).await;
+
+            let password = {
+                use base64::Engine;
+                base64::engine::general_purpose::STANDARD.encode(&hmac)
+            };
+
+            let (auth, resp2) = drive_scram_to_done(
+                &controller,
+                "tok-xyz",
+                password.as_bytes(),
+                SaslMechanism::ScramSha256,
+            );
+
+            assert_eq!(resp2.error_code, 0, "round 2 must succeed");
+            match auth {
+                ConnectionAuth::Authenticated {
+                    principal,
+                    mechanism,
+                    expires_at_ms,
+                    authenticated_via_token,
+                } => {
+                    assert_eq!(
+                        principal.name, "alice",
+                        "principal is the token OWNER, not the tokenId"
+                    );
+                    assert_eq!(mechanism, SaslMechanism::ScramSha256);
+                    assert_eq!(
+                        expires_at_ms,
+                        Some(expiry_ms),
+                        "expires_at_ms = token expiry (KIP-368 ceiling)"
+                    );
+                    assert!(
+                        authenticated_via_token,
+                        "token-fallback path must mark the session as token-authed"
+                    );
+                }
+                other => panic!("expected Authenticated, got {other:?}"),
+            }
+            controller.cancel().await;
+        }
+
+        /// Token-fallback must NOT fire for an unknown SCRAM username
+        /// when the image has no matching token either.
+        #[tokio::test]
+        async fn scram_sha256_token_fallback_does_not_fire_for_unknown_token_id() {
+            let dir = TempDir::new().unwrap();
+            let controller = test_controller(dir.path().into()).await;
+            // No tokens appended.
+
+            let mut auth = ConnectionAuth::Negotiating {
+                mechanism: SaslMechanism::ScramSha256,
+                exchange: SaslExchange::ScramPending,
+                pending_token_expiry_ms: None,
+            };
+            let mut client = ScramClientExchange::new(
+                "no-such-token".into(),
+                b"whatever".to_vec(),
+                SaslMechanism::ScramSha256,
+            );
+            let c1 = client.client_first().unwrap();
+            let resp = handle_authenticate_scram(
+                &SaslAuthenticateRequest {
+                    auth_bytes: bytes::Bytes::from(c1),
+                    ..Default::default()
+                },
+                &mut auth,
+                &controller,
+            );
+            assert_eq!(
+                resp.error_code, SASL_AUTHENTICATION_FAILED,
+                "no SCRAM user + no token = unknown-user failure"
+            );
+            controller.cancel().await;
+        }
+
+        /// SCRAM-SHA-512 must NOT consult the delegation-token table
+        /// even when the SCRAM username happens to match a token's id:
+        /// KIP-48 scopes token-SCRAM to SHA-256 only.
+        #[tokio::test]
+        async fn scram_sha512_does_not_fall_back_to_token() {
+            let dir = TempDir::new().unwrap();
+            let controller = test_controller(dir.path().into()).await;
+            // Image has a token with id "tok-xyz".
+            let hmac = vec![0x55u8; 32];
+            let expiry_ms = crate::time_util::now_ms() + 60_000;
+            append_token(&controller, "tok-xyz", "alice", hmac, expiry_ms).await;
+
+            // Client requests SHA-512 with the tokenId as the username.
+            let mut auth = ConnectionAuth::Negotiating {
+                mechanism: SaslMechanism::ScramSha512,
+                exchange: SaslExchange::ScramPending,
+                pending_token_expiry_ms: None,
+            };
+            let mut client = ScramClientExchange::new(
+                "tok-xyz".into(),
+                b"whatever".to_vec(),
+                SaslMechanism::ScramSha512,
+            );
+            let c1 = client.client_first().unwrap();
+            let resp = handle_authenticate_scram(
+                &SaslAuthenticateRequest {
+                    auth_bytes: bytes::Bytes::from(c1),
+                    ..Default::default()
+                },
+                &mut auth,
+                &controller,
+            );
+            assert_eq!(
+                resp.error_code, SASL_AUTHENTICATION_FAILED,
+                "SCRAM-SHA-512 must not consult the delegation-token table"
+            );
+            controller.cancel().await;
+        }
+
+        /// Regular SCRAM (non-token) preserves the existing semantics:
+        /// `Authenticated.authenticated_via_token = false` and
+        /// `expires_at_ms = None`.
+        #[tokio::test]
+        async fn regular_scram_user_authentication_does_not_set_token_flag() {
+            let dir = TempDir::new().unwrap();
+            let controller = test_controller(dir.path().into()).await;
+            // Append a regular SCRAM credential for `alice` directly via
+            // metadata records. PBKDF2 is deterministic for a fixed salt.
+            let salt = (0..16).collect::<Vec<u8>>();
+            let cred = hash_scram_password_with_salt(
+                b"alice-password",
+                SaslMechanism::ScramSha256,
+                4096,
+                salt.clone(),
+            );
+            let scram_rec =
+                MetadataRecord::V1ScramCredential(crabka_metadata::ScramCredentialRecord {
+                    user: "alice".into(),
+                    mechanism: SaslMechanism::ScramSha256,
+                    salt,
+                    stored_key: cred.stored_key.clone(),
+                    server_key: cred.server_key.clone(),
+                    iterations: cred.iterations,
+                });
+            controller.submit_change(vec![scram_rec]).await.unwrap();
+
+            let (auth, resp2) = drive_scram_to_done(
+                &controller,
+                "alice",
+                b"alice-password",
+                SaslMechanism::ScramSha256,
+            );
+            assert_eq!(resp2.error_code, 0);
+            assert_eq!(
+                resp2.session_lifetime_ms, 0,
+                "regular SCRAM has no session lifetime"
+            );
+            match auth {
+                ConnectionAuth::Authenticated {
+                    principal,
+                    expires_at_ms,
+                    authenticated_via_token,
+                    ..
+                } => {
+                    assert_eq!(principal.name, "alice");
+                    assert_eq!(expires_at_ms, None);
+                    assert!(
+                        !authenticated_via_token,
+                        "regular SCRAM is NOT a token-authed session"
+                    );
+                }
+                other => panic!("expected Authenticated, got {other:?}"),
+            }
+            controller.cancel().await;
         }
     }
 }
