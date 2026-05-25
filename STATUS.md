@@ -2678,17 +2678,19 @@ OAuth CRD + broker validators.
   uses TOML multi-line literal `'''...'''` per slice 49g's JsonPath
   pattern. Existing cross-listener divergence walk extended with 4
   new perturbations.
-- **Principal cascade (CLAUDE.md greenfield rule):** T1 swept 49
-  `Principal { ... }` literal sites across `crates/security/` and
-  `crates/broker/` (PLAIN/SCRAM/mTLS/OAuth construction + dispatch
-  init + tests) to add `groups: vec![]` defaults. (Plan estimate was
-  ~30; actual was 49.)
-- **`ListenerAuthenticationOAuth` cascade:** T2/T3/T4 swept ~21
+- **Principal cascade (CLAUDE.md greenfield rule):** T1 added the
+  `groups: vec![]` default at 45 `Principal { ... }` literal sites
+  across `crates/security/` and `crates/broker/` (PLAIN/SCRAM/mTLS/
+  OAuth construction + dispatch init + tests). (Plan estimate was
+  ~30; actual was 45 — the 3 OAuth validator sites construct from
+  the extracted `groups` value rather than the `vec![]` default.)
+- **`ListenerAuthenticationOAuth` cascade:** T2/T3/T4 swept 33
   fixture sites so the struct extension compiled atomically with no
-  `#[serde(default)]` shim: 11 in `crd/listener.rs`, 11 in
-  `controller/listeners.rs` + 2 in `controller/kafka.rs` + 3 in
-  `controller/kafka_node_pool.rs`, 5 across `tests/reconcile_*.rs`
-  operator integration files. (Plan estimate was ~21; actual matched.)
+  `#[serde(default)]` shim: 12 in `crd/listener.rs` (11 fixtures +
+  1 new round-trip test), 11 + 2 + 3 in `controller/listeners.rs` +
+  `controller/kafka.rs` + `controller/kafka_node_pool.rs`, and 5
+  across the three `tests/reconcile_*.rs` operator integration
+  files.
 - **E2E (`.github/workflows/operator-e2e.yml`):** both `kind-oauth`
   (JWT mode) and `kind-oauth-introspection` (introspection mode)
   Kafka CRs add `groupsClaim: "$.realm_access.roles[*]"`. Both
