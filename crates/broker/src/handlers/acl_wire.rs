@@ -218,6 +218,8 @@ mod tests {
     /// ACLs guarding delegation tokens.
     #[test]
     fn delegation_token_resource_type_now_accepted() {
+        use crabka_metadata::AclEntry;
+
         // Concrete (CreateAcls).
         assert_eq!(resource_type_concrete(6), Ok(ResourceType::DelegationToken));
         // Filter (Delete/DescribeAcls).
@@ -230,7 +232,6 @@ mod tests {
 
         // Build a concrete AclEntry at the canonical (Describe, Allow)
         // shape KIP-48 token ACLs use; verify the wire bytes line up.
-        use crabka_metadata::AclEntry;
         let entry = AclEntry {
             resource_type: resource_type_concrete(6).unwrap(),
             resource_name: "User:alice".into(),

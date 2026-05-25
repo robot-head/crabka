@@ -111,7 +111,11 @@ pub struct AuthenticatedSnapshot {
 pub enum SaslExchange {
     Plain,
     ScramPending,
-    Scram(ScramServerExchange),
+    /// Boxed because `ScramServerExchange` grew past clippy's 200-byte
+    /// `large_enum_variant` threshold once slice 51 added the
+    /// `principal_override: Option<Principal>` field for delegation-token
+    /// SCRAM fallback. Keeps the cold path off the hot enum size.
+    Scram(Box<ScramServerExchange>),
     /// OAUTHBEARER, post-handshake / pre-token. The bearer token arrives in
     /// the first (and on success only) `SaslAuthenticate`.
     OAuthBearer,
@@ -428,7 +432,7 @@ pub fn handle_authenticate_scram(
             crabka_security::StepResult::Continue(bytes) => {
                 *auth = ConnectionAuth::Negotiating {
                     mechanism: mech,
-                    exchange: SaslExchange::Scram(server),
+                    exchange: SaslExchange::Scram(Box::new(server)),
                     // Slice 51: side-channel — `Some` here is the
                     // unambiguous "this is a token-authed session"
                     // signal that the round-2 success arm consumes

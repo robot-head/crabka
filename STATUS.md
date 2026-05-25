@@ -2820,3 +2820,99 @@ tokens, GSSAPI/Kerberos, OPA/Keycloak authorizer plugins). Slices
 (`Principal.groups`, `customClaimCheck` evaluation results,
 introspection metadata).
 
+## Slice 51 — Crabka core: Delegation tokens (KIP-48) (2026-05-25)
+
+- **Goal:** Full KIP-48 in one slice — broker-issued delegation tokens that
+  let clients authenticate as the token's owner via SCRAM-SHA-256, with
+  raft-replicated storage, an ACL extension for visibility, and a background
+  expiry sweep.
+- **Wire surface:** 4 new handlers — `CreateDelegationToken` (api_key 38),
+  `RenewDelegationToken` (39), `ExpireDelegationToken` (40),
+  `DescribeDelegationToken` (41). Dispatched from `network/dispatch.rs`;
+  request/response codecs are JVM-generated `borrowed/` + `owned/` modules.
+- **Storage:** Two new metadata records `V1DelegationToken` /
+  `V1DeleteDelegationToken` (SCRAM-style insert+tombstone pair). New
+  `Image::delegation_tokens` field + 4 accessors (`by_id`, `by_owner`,
+  `visible_to`, `all`) plus `delegation_token_by_hmac` for the
+  Renew/Expire handlers and the SCRAM token-fallback path. New image
+  type `DelegationToken` mirrors the record minus tombstone shape.
+- **`KafkaPrincipal` type:** New `crabka_security::KafkaPrincipal`
+  (`principal_type` + `name`, `Display` as `User:alice`, `FromStr`
+  round-trip) added in T1 so records and ACL resource names carry the
+  canonical Kafka shape, not the broker's richer `Principal {
+  auth_method, groups, .. }`. B3 polish lifted the conversion to a
+  `Principal::to_kafka()` method to dedupe four handler call sites.
+- **Master key:** Required broker-wide HMAC-SHA-256 secret. Env wins:
+  `CRABKA_DELEGATION_TOKEN_SECRET_KEY` > `[delegation_token] secret_key`
+  in broker TOML. Absent → all 4 handlers return
+  `DELEGATION_TOKEN_AUTH_DISABLED` (err 61); SCRAM token-fallback
+  short-circuits to "unknown user"; expiry sweep does not start.
+  New `SecretBytes` newtype carries the key with a redacted `Debug`
+  (`SecretBytes(<N bytes redacted>)`). Hot-swap not supported.
+- **Token-SCRAM auth:** `network/auth.rs::handle_authenticate_scram`
+  gained an `.or_else` fallback: when the SCRAM username doesn't match
+  any real user AND the mechanism is `SCRAM-SHA-256`, the username is
+  treated as a `token_id`. Token HMAC bytes are base64-encoded as the
+  SCRAM password equivalent; salt = `token_id` UTF-8 bytes;
+  iters = `TOKEN_SCRAM_ITERS = 4096` (KIP-48 fixed). Principal override
+  via new `ScramServerExchange::new_with_principal` surfaces the
+  authenticated principal as the token's OWNER, not the random token
+  UUID. New `authenticated_via_token: bool` on
+  `ConnectionAuth::Authenticated` blocks token-creates-token with err
+  64 (`DELEGATION_TOKEN_REQUEST_NOT_ALLOWED`). Re-auth ceiling:
+  `expires_at_ms = token.expiry_timestamp_ms` via slice 50d's KIP-368
+  plumbing — connection fails next re-auth when the token expires.
+- **TOKEN ACL resource type unblocked:** `acl_wire.rs` previously
+  rejected `ResourceType` 6 outright; now accepted with
+  `resource_name` = owner principal string. Only `Describe` is
+  externally grantable; Create/Renew/Expire stay implicit-on-ownership.
+  `DescribeDelegationToken` widens the visibility set via ACL when the
+  caller is not the owner.
+- **Background sweep:** New `delegation_token_cleanup::run` task,
+  spawned from `Broker::start` only when the master key is set. Every
+  `delegation_token_expiry_check_interval_ms` (default 1h) emits
+  `V1DeleteDelegationToken` tombstones for `expiry_timestamp_ms <=
+  now`. Every broker runs the loop; raft serializes the tombstones so
+  duplicates are no-ops.
+- **Error codes** (lifted to `broker/src/codes.rs` in B2 polish):
+  `DELEGATION_TOKEN_AUTH_DISABLED = 61`, `…_NOT_FOUND = 62`,
+  `…_OWNER_MISMATCH = 63`, `…_REQUEST_NOT_ALLOWED = 64`,
+  `…_AUTHORIZATION_FAILED = 65`, `…_EXPIRED = 66`.
+- **Pre-existing bugs flagged (not fixed in this slice):**
+  - `ELIGIBLE_LEADERS_NOT_AVAILABLE = 81` in `codes.rs` is wrong
+    (Kafka assigns 83) — annotated for a follow-up slice-14 fix.
+  - `authorize()` returns `Allow` unconditionally when zero
+    super-users AND zero ACLs exist (pre-slice-13 compat shim). New
+    `acl_authorization_is_active()` helper in
+    `describe_delegation_token.rs` gates the ACL widening off in
+    that mode so Describe doesn't leak every token to every caller;
+    delete both the helper and the shim when slice 53/54 lands a
+    real authorizer.
+- **KIP-48 expiry/max separation (B5 fix):** Original B2 code reused
+  `delegation_token_max_lifetime_ms` for both the absolute ceiling and
+  the default renew window. B5 split them: new
+  `delegation_token_default_renew_period_ms` config (default 24h)
+  drives Create/Renew default expiry; the existing
+  `delegation_token_max_lifetime_ms` (default 7d) only caps the
+  absolute `max_timestamp_ms`.
+- **Decomposition:** 13 tasks across 6 batches as planned, plus 5
+  in-line polish commits (B1/B2/B3/B4 polish + B5 fix) reviewing prior
+  batches before the next started — kept naming, error codes, KIP-48
+  semantics, and the `KafkaPrincipal` boundary consistent end-to-end.
+- **Tests:** ~28 unit (security HMAC + `SecretBytes` redaction;
+  metadata record round-trip + apply insert/replace + tombstone +
+  by-owner; 4 Create + 6 Describe + 5 Renew + 4 Expire handler;
+  SCRAM token-fallback in `auth.rs`; ACL TOKEN type accepted in
+  `acl_wire.rs`; sweep emits tombstones) + 1 broker integration
+  (`crates/broker/tests/delegation_tokens.rs`
+  `delegation_token_lifecycle_end_to_end`) + 1 JVM acceptance
+  (`#[ignore]`, WSL-gated `kafka-delegation-tokens.sh` round-trip).
+  Workspace lib test count: 2348.
+- **Known limitations:** Master-key hot-swap not supported
+  (restart-only rotation). No per-token rate-limit on
+  `CreateDelegationToken`. No operator-side
+  `KafkaUser.spec.authentication.delegation` surface yet — operator
+  follow-up sub-slice.
+- **Workspace fmt + clippy `-D warnings` + tests** all green. No
+  CRDs touched.
+

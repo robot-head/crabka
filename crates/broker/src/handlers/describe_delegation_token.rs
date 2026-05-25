@@ -106,9 +106,7 @@ pub(crate) async fn handle<S: std::hash::BuildHasher>(
         // otherwise surface every token to every caller. Delete this
         // gate together with the shim itself when slice 53/54 lands.
         let acl_extra: Vec<&crabka_metadata::DelegationToken> =
-            if !acl_authorization_is_active(&image, super_users) {
-                Vec::new()
-            } else {
+            if acl_authorization_is_active(&image, super_users) {
                 image
                     .all_delegation_tokens()
                     .filter(|t| match &candidate_owners {
@@ -130,13 +128,15 @@ pub(crate) async fn handle<S: std::hash::BuildHasher>(
                         ) == AuthorizationResult::Allow
                     })
                     .collect()
+            } else {
+                Vec::new()
             };
 
         // Merge + dedup by token_id. Order is unspecified (matches the
         // existing `delegation_tokens_*` accessor contracts).
         let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
         let mut merged: Vec<crabka_metadata::DelegationToken> = Vec::new();
-        for t in base.into_iter().chain(acl_extra.into_iter()) {
+        for t in base.into_iter().chain(acl_extra) {
             if seen.insert(t.token_id.as_str()) {
                 merged.push(t.clone());
             }

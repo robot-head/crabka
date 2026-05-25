@@ -137,7 +137,7 @@ pub struct DelegationTokenRecord {
 }
 
 /// Slice 51 (KIP-48): Tombstone record removing a delegation token
-/// from the image. Emitted by ExpireDelegationToken handlers and the
+/// from the image. Emitted by `ExpireDelegationToken` handlers and the
 /// background expiry sweep.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeleteDelegationTokenRecord {

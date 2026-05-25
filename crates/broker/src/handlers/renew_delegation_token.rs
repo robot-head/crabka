@@ -133,6 +133,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn seed_token(
         controller: &ControllerHandle,
         token_id: &str,

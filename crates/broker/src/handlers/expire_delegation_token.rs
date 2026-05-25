@@ -5,10 +5,10 @@
 //! entry may expire it (else `DELEGATION_TOKEN_AUTHORIZATION_FAILED`).
 //! Decision on `expiry_time_period_ms`:
 //!   - `< 0`  → append `V1DeleteDelegationToken` tombstone; respond with
-//!              a past-sentinel `expiry_timestamp_ms = now - 1` per KIP-48.
+//!     a past-sentinel `expiry_timestamp_ms = now - 1` per KIP-48.
 //!   - `== 0` → set expiry to `now` (record-replace).
 //!   - `> 0`  → set expiry to `now + period`, clamped to the token's
-//!              `max_timestamp_ms` (record-replace).
+//!     `max_timestamp_ms` (record-replace).
 
 use crabka_metadata::{
     DelegationToken, DelegationTokenRecord, DeleteDelegationTokenRecord, MetadataRecord,
@@ -164,6 +164,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn seed_token(
         controller: &ControllerHandle,
         token_id: &str,

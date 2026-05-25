@@ -277,7 +277,7 @@ impl MetadataImage {
     /// delegation-token fallback (slice 51 T8) needs the same lookup at
     /// the auth path. Implementation is a linear scan over the small
     /// (per-broker, in-memory) token map — clarity over an explicit
-    /// HMAC→token_id index until cardinality justifies it.
+    /// `HMAC→token_id` index until cardinality justifies it.
     #[must_use]
     pub fn delegation_token_by_hmac(&self, hmac: &[u8]) -> Option<&DelegationToken> {
         self.delegation_tokens.values().find(|t| t.hmac == hmac)
