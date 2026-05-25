@@ -2916,3 +2916,76 @@ introspection metadata).
 - **Workspace fmt + clippy `-D warnings` + tests** all green. No
   CRDs touched.
 
+## Slice 48a — Crabka core: Tiered storage foundations (KIP-405 SPI + reference impls) (2026-05-25)
+
+- **Goal:** First sub-slice of KIP-405 tiered storage. Land the
+  foundation layer — the two plugin SPIs, the full metadata model +
+  lifecycle state machines, and the two reference implementations the
+  rest of the tiered-storage stack is built and tested against. Pure
+  logic; **no broker wiring, no config** (those land in 48b+). Mirrors
+  Apache Kafka's `storage-api` module
+  (`org.apache.kafka.server.log.remote.storage`) and its
+  `LocalTieredStorage` / `InmemoryRemoteLogMetadataManager` test
+  fixtures.
+- **New crate:** `crates/remote-storage` → `crabka-remote-storage`.
+  Auto-included by the `members = ["crates/*"]` glob; deps are
+  `bytes` + `thiserror` + `uuid` (dev: `tempfile`). No async runtime —
+  the SPIs are synchronous, matching Kafka's blocking RSM/RLMM (the
+  broker will drive them via `spawn_blocking` in later slices).
+- **Data model (`metadata.rs`):** `TopicIdPartition` (equality/hash by
+  `topic_id` + `partition`, name informational, matching Kafka);
+  `RemoteLogSegmentId` (`topic_id_partition` + per-segment `Uuid`);
+  `RemoteLogSegmentState` { `CopySegmentStarted`, `CopySegmentFinished`,
+  `DeleteSegmentStarted`, `DeleteSegmentFinished` } + `is_valid_transition`;
+  `RemoteLogSegmentMetadata` (start/end offset, broker id, max-ts,
+  event-ts, size, `segment_leader_epochs: BTreeMap<i32,i64>`,
+  `custom_metadata`, state) with constructor validation (non-empty
+  epochs, `end >= start`, non-negative size) + `with_update` (validates
+  the transition and the id match); `RemoteLogSegmentMetadataUpdate`;
+  `RemotePartitionDeleteState` { Marked, Started, Finished } +
+  transition check; `RemotePartitionDeleteMetadata`; `CustomMetadata`.
+- **RSM SPI (`storage_manager.rs`):** `RemoteStorageManager` trait
+  (`copy_log_segment_data`, `fetch_log_segment` with inclusive
+  start/optional-inclusive end byte range, `fetch_index`,
+  `delete_log_segment_data`) + `LogSegmentData` (paths to
+  log/offset/time/producer-snapshot/optional-txn indexes + in-memory
+  leader-epoch bytes) + `IndexType` { Offset, Timestamp,
+  ProducerSnapshot, LeaderEpoch, Transaction }.
+- **RLMM SPI (`metadata_manager.rs`):** `RemoteLogMetadataManager`
+  trait (add / update / `remote_log_segment_metadata(epoch,offset)` /
+  `highest_offset_for_epoch` / `list_remote_log_segments[_by_epoch]` /
+  `put_remote_partition_delete_metadata`).
+- **Cache (`cache.rs`):** `RemoteLogMetadataCache` — per-partition state
+  machine + per-epoch navigable offset→segment index (`HashMap<i32,
+  BTreeMap<i64, Uuid>>`). Only `CopySegmentFinished` segments are
+  indexed/visible; `DeleteSegmentStarted` de-indexes;
+  `DeleteSegmentFinished` drops entirely. `(epoch, offset)` query is a
+  `range(..=offset).next_back()` floor lookup with an end-offset bound
+  check — the heart of KIP-405 remote-read positioning.
+- **Reference impls:** `InmemoryRemoteLogMetadataManager` (`inmemory.rs`,
+  `Mutex<HashMap<tp, cache>>`) and `LocalTieredStorage` (`local.rs`,
+  filesystem RSM: one dir per segment keyed by
+  `<topic_id>_<partition>/<segment_uuid>`; idempotent delete; partial
+  byte-range fetch).
+- **Lifecycle invariants enforced:** add requires `CopySegmentStarted`
+  + unique id; update requires the segment to exist + a valid
+  transition; partition-delete follows None→Marked→Started→Finished.
+- **Tests:** 33 unit tests — state-transition matrix (valid + rejected),
+  constructor validation, `with_update` semantics (7 in `metadata.rs`);
+  epoch/offset lookup across segments + epochs, highest-offset, delete
+  lifecycle visibility, ordering, error paths (9 in `cache.rs`);
+  manager round-trip + unknown-partition + out-of-order delete (6 in
+  `inmemory.rs`); copy→fetch (full + partial + per-index-type)→delete
+  round-trips, missing-optional-index, isolation-by-id (8 in `local.rs`).
+- **Design:** `[docs/superpowers/specs/2026-05-25-crabka-tiered-storage-roadmap-design.md]`
+  (umbrella roadmap with the 48a–48g sub-slice breakdown).
+- **Out of scope (deferred to 48b+):** broker `RemoteLogManager` copy
+  task; remote read path on `Fetch`; local-vs-remote retention split +
+  `local-log-start-offset`; broker/topic config
+  (`remote.storage.enable`, `local.retention.*`);
+  `TopicBasedRemoteLogMetadataManager` (topic-backed prod RLMM); a real
+  object-store RSM; on-disk/wire serialization of remote metadata;
+  operator CRD surface.
+- **Workspace fmt + clippy `-D warnings` + new-crate tests** all green.
+  Additive only — no existing crate touched; no CRDs touched.
+
