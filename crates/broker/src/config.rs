@@ -285,6 +285,14 @@ pub struct BrokerConfig {
     pub delegation_token_expiry_check_interval_ms: i64,
 }
 
+/// Slice 51 (KIP-48): default hard upper bound on delegation-token lifetime.
+/// 7 days, matches Kafka's `delegation.token.max.lifetime.ms` default.
+pub const DEFAULT_DELEGATION_TOKEN_MAX_LIFETIME_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
+
+/// Slice 51 (KIP-48): default cadence of the background expiry sweep task.
+/// 1 hour, matches Kafka's `delegation.token.expiry.check.interval.ms`.
+pub const DEFAULT_DELEGATION_TOKEN_EXPIRY_CHECK_INTERVAL_MS: i64 = 60 * 60 * 1_000;
+
 impl BrokerConfig {
     /// Helpful for tests: a config that listens on an OS-assigned port
     /// under a tempdir.
@@ -358,8 +366,9 @@ impl BrokerConfig {
             // `delegation_token_secret_key`; default off keeps the
             // four DT RPCs returning DELEGATION_TOKEN_AUTH_DISABLED.
             delegation_token_secret_key: None,
-            delegation_token_max_lifetime_ms: 7 * 24 * 60 * 60 * 1_000,
-            delegation_token_expiry_check_interval_ms: 60 * 60 * 1_000,
+            delegation_token_max_lifetime_ms: DEFAULT_DELEGATION_TOKEN_MAX_LIFETIME_MS,
+            delegation_token_expiry_check_interval_ms:
+                DEFAULT_DELEGATION_TOKEN_EXPIRY_CHECK_INTERVAL_MS,
         }
     }
 
@@ -538,8 +547,9 @@ impl Default for BrokerConfig {
             // via `CRABKA_DELEGATION_TOKEN_SECRET_KEY` env var or the
             // `[delegation_token] secret_key` TOML stanza.
             delegation_token_secret_key: None,
-            delegation_token_max_lifetime_ms: 7 * 24 * 60 * 60 * 1_000,
-            delegation_token_expiry_check_interval_ms: 60 * 60 * 1_000,
+            delegation_token_max_lifetime_ms: DEFAULT_DELEGATION_TOKEN_MAX_LIFETIME_MS,
+            delegation_token_expiry_check_interval_ms:
+                DEFAULT_DELEGATION_TOKEN_EXPIRY_CHECK_INTERVAL_MS,
         }
     }
 }

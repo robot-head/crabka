@@ -135,6 +135,17 @@ pub const ELECTION_NOT_NEEDED: i16 = 84;
 pub const INVALID_REPLICA_ASSIGNMENT: i16 = 39;
 pub const NO_REASSIGNMENT_IN_PROGRESS: i16 = 85;
 
+// Slice 51 additions — KIP-48 delegation-token codes. Numbers from
+// org.apache.kafka.common.protocol.Errors. Note the existing slice 14
+// ELIGIBLE_LEADERS_NOT_AVAILABLE = 81 is incorrect (Kafka says 83) but
+// pre-dates this slice; flagged for a separate fix.
+pub const DELEGATION_TOKEN_AUTH_DISABLED: i16 = 61;
+pub const DELEGATION_TOKEN_NOT_FOUND: i16 = 62;
+pub const DELEGATION_TOKEN_OWNER_MISMATCH: i16 = 63;
+pub const DELEGATION_TOKEN_REQUEST_NOT_ALLOWED: i16 = 64;
+pub const DELEGATION_TOKEN_AUTHORIZATION_FAILED: i16 = 65;
+pub const DELEGATION_TOKEN_EXPIRED: i16 = 66;
+
 /// Map an internal [`crate::error::BrokerError`] to a wire-level code.
 /// Most internal errors map to `UNKNOWN_SERVER_ERROR`; specific variants
 /// pick more meaningful codes.

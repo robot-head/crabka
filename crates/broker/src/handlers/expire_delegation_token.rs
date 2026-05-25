@@ -4,10 +4,6 @@
 use crabka_protocol::owned::expire_delegation_token_request::ExpireDelegationTokenRequest;
 use crabka_protocol::owned::expire_delegation_token_response::ExpireDelegationTokenResponse;
 
-/// `DELEGATION_TOKEN_AUTH_DISABLED` (61) — returned by every delegation-token
-/// RPC when the broker is not configured with a master HMAC key.
-const DELEGATION_TOKEN_AUTH_DISABLED: i16 = 61;
-
 #[allow(clippy::unused_async)]
 pub(crate) async fn handle(
     _req: &ExpireDelegationTokenRequest,
@@ -15,7 +11,7 @@ pub(crate) async fn handle(
 ) -> ExpireDelegationTokenResponse {
     if secret_key.is_none() {
         return ExpireDelegationTokenResponse {
-            error_code: DELEGATION_TOKEN_AUTH_DISABLED,
+            error_code: crate::codes::DELEGATION_TOKEN_AUTH_DISABLED,
             ..Default::default()
         };
     }
@@ -31,6 +27,9 @@ mod tests {
     async fn returns_auth_disabled_when_no_secret_key() {
         let req = ExpireDelegationTokenRequest::default();
         let resp = handle(&req, None).await;
-        assert_eq!(resp.error_code, DELEGATION_TOKEN_AUTH_DISABLED);
+        assert_eq!(
+            resp.error_code,
+            crate::codes::DELEGATION_TOKEN_AUTH_DISABLED
+        );
     }
 }
