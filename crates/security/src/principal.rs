@@ -1,4 +1,5 @@
 use crate::SaslMechanism;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// How a [`Principal`] was authenticated. A strict superset of
@@ -51,6 +52,52 @@ pub struct Principal {
     /// yet (slice 53/54 will); populated as scaffolding + for
     /// observability.
     pub groups: Vec<String>,
+}
+
+impl Principal {
+    /// Project a runtime session [`Principal`] onto the Kafka wire-level
+    /// [`KafkaPrincipal`] (`principalType:name`) used by ACLs and
+    /// delegation-token records. All authenticated callers ride under
+    /// `principal_type = "User"`, matching Kafka's
+    /// `DefaultKafkaPrincipalBuilder`.
+    #[must_use]
+    pub fn to_kafka(&self) -> KafkaPrincipal {
+        KafkaPrincipal {
+            principal_type: "User".to_string(),
+            name: self.name.clone(),
+        }
+    }
+}
+
+/// Slice 51 (KIP-48): Kafka wire-level principal — the `(principalType,
+/// name)` pair carried in delegation-token records, ACL entries, and
+/// `KafkaPrincipal`-shaped fields across the Kafka protocol. Distinct
+/// from [`Principal`] which models the *runtime session* identity
+/// (auth method + OAuth groups). Format-stable: `Display`/`FromStr`
+/// round-trip the canonical `Type:Name` form.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct KafkaPrincipal {
+    pub principal_type: String,
+    pub name: String,
+}
+
+impl std::fmt::Display for KafkaPrincipal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.principal_type, self.name)
+    }
+}
+
+impl std::str::FromStr for KafkaPrincipal {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        let (pt, n) = s
+            .split_once(':')
+            .ok_or_else(|| format!("invalid principal {s:?}"))?;
+        Ok(Self {
+            principal_type: pt.into(),
+            name: n.into(),
+        })
+    }
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]

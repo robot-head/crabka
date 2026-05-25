@@ -12,6 +12,12 @@ pub enum ResourceType {
     Group,
     Cluster,
     TransactionalId,
+    /// KIP-48 delegation tokens. Resource name is the owner's
+    /// `KafkaPrincipal` string form (e.g. `"User:alice"`). Pattern types
+    /// `LITERAL`/`PREFIXED` apply via the existing matcher; only the
+    /// `Describe` operation is externally grantable
+    /// (`Create`/`Renew`/`Expire` are implicit on ownership).
+    DelegationToken,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

@@ -736,6 +736,33 @@ impl crate::quota::ImageWatcher for QuotaControllerAdapter {
     }
 }
 
+/// Slice 51 (KIP-48): wraps a real [`crabka_raft::ControllerHandle`] so it
+/// can satisfy the [`crate::delegation_token_cleanup::DelegationTokenController`]
+/// trait required by the delegation-token expiry sweep. Every broker runs
+/// the sweep; raft serializes duplicate tombstones so each becomes a no-op.
+struct DelegationTokenCleanupControllerAdapter {
+    handle: Arc<crabka_raft::ControllerHandle>,
+}
+
+#[async_trait::async_trait]
+impl crate::delegation_token_cleanup::DelegationTokenController
+    for DelegationTokenCleanupControllerAdapter
+{
+    fn current_image(&self) -> Arc<crabka_metadata::MetadataImage> {
+        self.handle.current_image()
+    }
+
+    async fn submit_change(
+        &self,
+        records: Vec<crabka_metadata::MetadataRecord>,
+    ) -> Result<(), String> {
+        self.handle
+            .submit_change(records)
+            .await
+            .map_err(|e| e.to_string())
+    }
+}
+
 impl Broker {
     /// Build a `Broker`, scan the log dir, spawn partition writers for
     /// every existing `<topic>-<partition>/`, bind the TCP listener, and
@@ -1366,6 +1393,32 @@ impl Broker {
             });
             let shutdown = supervisor_shutdown.child_token();
             tokio::spawn(crate::quota::run(watcher, buckets, shutdown));
+        }
+
+        // Slice 51 (KIP-48): delegation-token expiry sweep. Only spawn
+        // when a master key is configured — without it the four
+        // delegation-token RPCs all return DELEGATION_TOKEN_AUTH_DISABLED
+        // and the image never has any tokens to expire. Every broker
+        // runs the sweep; raft serializes duplicate tombstones into
+        // no-ops on the apply path.
+        if config.delegation_token_secret_key.is_some() {
+            let interval = std::time::Duration::from_millis(
+                u64::try_from(config.delegation_token_expiry_check_interval_ms).unwrap_or(
+                    u64::try_from(crate::config::DEFAULT_DELEGATION_TOKEN_EXPIRY_CHECK_INTERVAL_MS)
+                        .unwrap_or(3_600_000),
+                ),
+            );
+            let controller_adapter: Arc<
+                dyn crate::delegation_token_cleanup::DelegationTokenController,
+            > = Arc::new(DelegationTokenCleanupControllerAdapter {
+                handle: controller.clone(),
+            });
+            let shutdown = supervisor_shutdown.child_token();
+            tokio::spawn(crate::delegation_token_cleanup::run(
+                controller_adapter,
+                interval,
+                shutdown,
+            ));
         }
 
         // 5. Build handler table.

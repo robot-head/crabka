@@ -45,6 +45,33 @@ pub struct FileConfig {
     /// listener enables the `OAUTHBEARER` mechanism.
     #[serde(default)]
     pub oauthbearer: Option<FileOAuthBearerConfig>,
+
+    /// Slice 51 (KIP-48): delegation-token master key + lifetime knobs.
+    /// Env var `CRABKA_DELEGATION_TOKEN_SECRET_KEY` wins over `secret_key`
+    /// here. When neither source provides a key, the broker disables
+    /// delegation-token auth.
+    #[serde(default)]
+    pub delegation_token: Option<FileDelegationTokenConfig>,
+}
+
+/// TOML shape of `[delegation_token]`. Maps to the three `delegation_token_*`
+/// fields on [`crate::BrokerConfig`].
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct FileDelegationTokenConfig {
+    /// HMAC master key. Overridden by `CRABKA_DELEGATION_TOKEN_SECRET_KEY`
+    /// when set. Bytes are wrapped in
+    /// [`crabka_security::SecretBytes`] before reaching `BrokerConfig`.
+    pub secret_key: Option<String>,
+    /// Hard upper bound on token lifetime, ms. Default 7 days.
+    pub max_lifetime_ms: Option<i64>,
+    /// Background sweep cadence, ms. Default 1 hour.
+    pub expiry_check_interval_ms: Option<i64>,
+    /// Default renew period — the initial `expiry_timestamp_ms` offset
+    /// at create time and the implicit renew period when
+    /// `RenewDelegationToken.renew_period_ms == -1`. Distinct from
+    /// `max_lifetime_ms` (the absolute ceiling). Default 24 hours.
+    pub default_renew_period_ms: Option<i64>,
 }
 
 /// TOML shape of `[oauthbearer]`. Maps to
@@ -486,6 +513,32 @@ impl FileConfig {
                 }
             }
         }
+
+        // Slice 51 (KIP-48): delegation-token master key + lifetime knobs.
+        // `CRABKA_DELEGATION_TOKEN_SECRET_KEY` env var wins over the TOML
+        // `secret_key`; when neither source provides a key the broker
+        // leaves the field as `None` and the four DT RPCs return
+        // `DELEGATION_TOKEN_AUTH_DISABLED`.
+        let env_key = std::env::var("CRABKA_DELEGATION_TOKEN_SECRET_KEY").ok();
+        let toml_key = self
+            .delegation_token
+            .as_ref()
+            .and_then(|d| d.secret_key.clone());
+        if let Some(k) = env_key.or(toml_key) {
+            cfg.delegation_token_secret_key =
+                Some(crabka_security::SecretBytes::new(k.into_bytes()));
+        }
+        if let Some(d) = &self.delegation_token {
+            if let Some(ms) = d.max_lifetime_ms {
+                cfg.delegation_token_max_lifetime_ms = ms;
+            }
+            if let Some(ms) = d.expiry_check_interval_ms {
+                cfg.delegation_token_expiry_check_interval_ms = ms;
+            }
+            if let Some(ms) = d.default_renew_period_ms {
+                cfg.delegation_token_default_renew_period_ms = ms;
+            }
+        }
     }
 }
 
@@ -609,6 +662,15 @@ client_auth = "Required"
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    /// Serializes any test that mutates process-wide env vars. Tests in
+    /// the same `cargo test` process run on multiple threads by default,
+    /// and `set_var`/`remove_var` are global side-effects.
+    static ENV_LOCK_CELL: OnceLock<Mutex<()>> = OnceLock::new();
+    fn env_lock() -> &'static Mutex<()> {
+        ENV_LOCK_CELL.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn empty_toml_round_trips() {
@@ -1047,5 +1109,130 @@ introspection_client_secret_path = '{}'
 
         assert_eq!(cfg.listeners.len(), 1);
         assert_eq!(cfg.listeners[0].name, "X");
+    }
+
+    #[test]
+    fn delegation_token_section_parses_secret_key_and_defaults() {
+        // Hold the lock so a concurrently-running env-var test can't
+        // leak CRABKA_DELEGATION_TOKEN_SECRET_KEY into this assertion.
+        // `temp_env::with_var_unset` removes the var for the duration
+        // of the closure and restores the prior value on return —
+        // safe against the workspace `forbid(unsafe_code)` lint.
+        let _g = env_lock().lock().unwrap();
+        temp_env::with_var_unset("CRABKA_DELEGATION_TOKEN_SECRET_KEY", || {
+            let toml = r#"
+[delegation_token]
+secret_key = "abcdef"
+"#;
+            let file: FileConfig = toml::from_str(toml).unwrap();
+            let mut cfg = crate::config::BrokerConfig::default();
+            file.apply_to(&mut cfg);
+
+            assert_eq!(
+                cfg.delegation_token_secret_key
+                    .as_ref()
+                    .map(|s| s.as_bytes().to_vec()),
+                Some(b"abcdef".to_vec()),
+            );
+            // KIP-48 defaults: 7 days max lifetime, 1 hour sweep cadence,
+            // 24 hour default renew period.
+            assert_eq!(
+                cfg.delegation_token_max_lifetime_ms,
+                7 * 24 * 60 * 60 * 1_000
+            );
+            assert_eq!(
+                cfg.delegation_token_expiry_check_interval_ms,
+                60 * 60 * 1_000
+            );
+            assert_eq!(
+                cfg.delegation_token_default_renew_period_ms,
+                24 * 60 * 60 * 1_000
+            );
+        });
+    }
+
+    #[test]
+    fn delegation_token_default_renew_period_ms_default_and_override() {
+        let _g = env_lock().lock().unwrap();
+        temp_env::with_var_unset("CRABKA_DELEGATION_TOKEN_SECRET_KEY", || {
+            // (1) When the TOML omits `default_renew_period_ms`, the config
+            //     stays at the 24h KIP-48 default.
+            let toml = r#"
+[delegation_token]
+secret_key = "abcdef"
+"#;
+            let file: FileConfig = toml::from_str(toml).unwrap();
+            let mut cfg = crate::config::BrokerConfig::default();
+            file.apply_to(&mut cfg);
+            assert_eq!(
+                cfg.delegation_token_default_renew_period_ms,
+                24 * 60 * 60 * 1_000,
+                "absent default_renew_period_ms should leave the 24h default in place",
+            );
+
+            // (2) When the TOML sets it, the override wins.
+            let toml = r#"
+[delegation_token]
+secret_key = "abcdef"
+default_renew_period_ms = 7200000
+"#;
+            let file: FileConfig = toml::from_str(toml).unwrap();
+            let mut cfg = crate::config::BrokerConfig::default();
+            file.apply_to(&mut cfg);
+            assert_eq!(
+                cfg.delegation_token_default_renew_period_ms, 7_200_000,
+                "TOML default_renew_period_ms must override the default",
+            );
+        });
+    }
+
+    #[test]
+    fn delegation_token_env_var_overrides_toml() {
+        let _g = env_lock().lock().unwrap();
+        temp_env::with_var(
+            "CRABKA_DELEGATION_TOKEN_SECRET_KEY",
+            Some("env-wins"),
+            || {
+                let toml = r#"
+[delegation_token]
+secret_key = "toml-loses"
+"#;
+                let file: FileConfig = toml::from_str(toml).unwrap();
+                let mut cfg = crate::config::BrokerConfig::default();
+                file.apply_to(&mut cfg);
+
+                assert_eq!(
+                    cfg.delegation_token_secret_key
+                        .as_ref()
+                        .map(|s| s.as_bytes().to_vec()),
+                    Some(b"env-wins".to_vec()),
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn delegation_token_absent_when_unset_anywhere() {
+        let _g = env_lock().lock().unwrap();
+        temp_env::with_var_unset("CRABKA_DELEGATION_TOKEN_SECRET_KEY", || {
+            let file: FileConfig = toml::from_str("").unwrap();
+            let mut cfg = crate::config::BrokerConfig::default();
+            file.apply_to(&mut cfg);
+
+            assert!(cfg.delegation_token_secret_key.is_none());
+            // Lifetime knobs stay at their defaults when no section is present.
+            assert_eq!(
+                cfg.delegation_token_max_lifetime_ms,
+                7 * 24 * 60 * 60 * 1_000
+            );
+            assert_eq!(
+                cfg.delegation_token_expiry_check_interval_ms,
+                60 * 60 * 1_000
+            );
+            assert_eq!(
+                cfg.delegation_token_default_renew_period_ms,
+                24 * 60 * 60 * 1_000
+            );
+        });
     }
 }

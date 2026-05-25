@@ -6,15 +6,45 @@ use std::collections::{BTreeMap, HashMap};
 
 use uuid::Uuid;
 
-use crabka_security::{SaslMechanism, ScramCredential};
+use crabka_security::{KafkaPrincipal, SaslMechanism, ScramCredential};
 
 use crate::acl::{AclEntry, PatternType, ResourceType};
 use crate::error::MetadataError;
 use crate::records::{
-    BrokerRegistrationRecord, MetadataRecord, NodeId, PartitionRecord, TopicRecord,
+    BrokerRegistrationRecord, DelegationTokenRecord, MetadataRecord, NodeId, PartitionRecord,
+    TopicRecord,
 };
 
 pub type EntityKey = Vec<(String, Option<String>)>;
+
+/// Slice 51 (KIP-48): In-memory image type for a single delegation
+/// token. Mirrors [`DelegationTokenRecord`] minus any tombstone
+/// concerns — tombstones are handled as removals on the apply path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DelegationToken {
+    pub token_id: String,
+    pub owner: KafkaPrincipal,
+    pub hmac: Vec<u8>,
+    pub issue_timestamp_ms: i64,
+    pub expiry_timestamp_ms: i64,
+    pub max_timestamp_ms: i64,
+    pub renewers: Vec<KafkaPrincipal>,
+}
+
+impl DelegationToken {
+    #[must_use]
+    pub fn from_record(rec: &DelegationTokenRecord) -> Self {
+        Self {
+            token_id: rec.token_id.clone(),
+            owner: rec.owner.clone(),
+            hmac: rec.hmac.clone(),
+            issue_timestamp_ms: rec.issue_timestamp_ms,
+            expiry_timestamp_ms: rec.expiry_timestamp_ms,
+            max_timestamp_ms: rec.max_timestamp_ms,
+            renewers: rec.renewers.clone(),
+        }
+    }
+}
 
 #[must_use]
 pub fn canonicalize_entity(mut tuple: Vec<(String, Option<String>)>) -> EntityKey {
@@ -34,6 +64,7 @@ pub struct MetadataImage {
     acls_literal: HashMap<(ResourceType, String), Vec<AclEntry>>,
     acls_prefixed: HashMap<ResourceType, Vec<AclEntry>>,
     client_quotas: HashMap<EntityKey, BTreeMap<String, f64>>,
+    delegation_tokens: HashMap<String, DelegationToken>,
 }
 
 /// Selects which KIP-73 throttle rate config key to read.
@@ -57,6 +88,7 @@ impl MetadataImage {
             acls_literal: HashMap::new(),
             acls_prefixed: HashMap::new(),
             client_quotas: HashMap::new(),
+            delegation_tokens: HashMap::new(),
         }
     }
 
@@ -201,6 +233,56 @@ impl MetadataImage {
             .chain(self.acls_prefixed.values().flatten())
     }
 
+    /// Slice 51 (KIP-48): lookup a delegation token by its `token_id`.
+    #[must_use]
+    pub fn delegation_token_by_id(&self, token_id: &str) -> Option<&DelegationToken> {
+        self.delegation_tokens.get(token_id)
+    }
+
+    /// Slice 51 (KIP-48): all tokens owned by `owner` (exact match on
+    /// the owning [`KafkaPrincipal`]). Order is unspecified.
+    #[must_use]
+    pub fn delegation_tokens_by_owner(&self, owner: &KafkaPrincipal) -> Vec<&DelegationToken> {
+        self.delegation_tokens
+            .values()
+            .filter(|t| &t.owner == owner)
+            .collect()
+    }
+
+    /// Slice 51 (KIP-48): tokens that `principal` is allowed to see via
+    /// `DescribeDelegationToken` without `DescribeToken` permission —
+    /// either as the owner or as a listed renewer. Order is
+    /// unspecified.
+    #[must_use]
+    pub fn delegation_tokens_visible_to(
+        &self,
+        principal: &KafkaPrincipal,
+    ) -> Vec<&DelegationToken> {
+        self.delegation_tokens
+            .values()
+            .filter(|t| &t.owner == principal || t.renewers.iter().any(|r| r == principal))
+            .collect()
+    }
+
+    /// Slice 51 (KIP-48): every delegation token currently in the
+    /// image. Used by `DescribeDelegationToken` for callers with
+    /// `DescribeToken` permission on the cluster.
+    pub fn all_delegation_tokens(&self) -> impl Iterator<Item = &DelegationToken> {
+        self.delegation_tokens.values()
+    }
+
+    /// Slice 51 (KIP-48): lookup a delegation token by its HMAC bytes.
+    /// `RenewDelegationToken` / `ExpireDelegationToken` identify a token
+    /// by HMAC on the wire (not by `token_id`), and the upcoming SCRAM
+    /// delegation-token fallback (slice 51 T8) needs the same lookup at
+    /// the auth path. Implementation is a linear scan over the small
+    /// (per-broker, in-memory) token map — clarity over an explicit
+    /// `HMAC→token_id` index until cardinality justifies it.
+    #[must_use]
+    pub fn delegation_token_by_hmac(&self, hmac: &[u8]) -> Option<&DelegationToken> {
+        self.delegation_tokens.values().find(|t| t.hmac == hmac)
+    }
+
     /// Apply one record. Returns the previous record (for `V1Topic` /
     /// `V1BrokerRegistration`) so the caller can observe overwrite cases.
     /// Infallible — pre-validation against the current image happens
@@ -299,6 +381,16 @@ impl MetadataImage {
                     }
                 }
             }
+            // Slice 51 (KIP-48): replacement semantics — same
+            // `token_id` overwrites the prior entry (used by Create
+            // and Renew). Tombstone removes by `token_id`.
+            MetadataRecord::V1DelegationToken(rec) => {
+                self.delegation_tokens
+                    .insert(rec.token_id.clone(), DelegationToken::from_record(rec));
+            }
+            MetadataRecord::V1DeleteDelegationToken(rec) => {
+                self.delegation_tokens.remove(&rec.token_id);
+            }
         }
     }
 
@@ -352,7 +444,13 @@ impl MetadataImage {
             | MetadataRecord::V1AccessControlEntry(_)
             | MetadataRecord::V1DeleteAccessControlEntry(_)
             | MetadataRecord::V1BrokerConfig(_)
-            | MetadataRecord::V1ClientQuota(_) => Ok(()),
+            | MetadataRecord::V1ClientQuota(_)
+            // Slice 51 (KIP-48): delegation-token records have no
+            // topic-store concerns and admission is gated by the
+            // handler-side checks (KIP-48 §protocol errors), so the
+            // image-level validate is unconditional Ok.
+            | MetadataRecord::V1DelegationToken(_)
+            | MetadataRecord::V1DeleteDelegationToken(_) => Ok(()),
         }
     }
 }
@@ -362,8 +460,8 @@ mod tests {
     use super::*;
     use crate::acl::{AclEntryFilter, AclOperation, PermissionType};
     use crate::records::{
-        BrokerConfigRecord, ClientQuotaRecord, DeleteScramCredentialRecord, DeleteTopicRecord,
-        QuotaEntity, ScramCredentialRecord,
+        BrokerConfigRecord, ClientQuotaRecord, DeleteDelegationTokenRecord,
+        DeleteScramCredentialRecord, DeleteTopicRecord, QuotaEntity, ScramCredentialRecord,
     };
 
     fn img() -> MetadataImage {
@@ -978,6 +1076,128 @@ mod tests {
         let mut users = img.scram_credentials_users();
         users.sort();
         assert_eq!(users, vec!["alice".to_string(), "bob".to_string()]);
+    }
+
+    fn principal(pt: &str, name: &str) -> KafkaPrincipal {
+        KafkaPrincipal {
+            principal_type: pt.into(),
+            name: name.into(),
+        }
+    }
+
+    fn dt_record(
+        token_id: &str,
+        owner: KafkaPrincipal,
+        expiry_timestamp_ms: i64,
+        renewers: Vec<KafkaPrincipal>,
+    ) -> MetadataRecord {
+        MetadataRecord::V1DelegationToken(DelegationTokenRecord {
+            token_id: token_id.into(),
+            owner,
+            hmac: vec![0x42; 32],
+            issue_timestamp_ms: 1_000,
+            expiry_timestamp_ms,
+            max_timestamp_ms: 10_000,
+            renewers,
+        })
+    }
+
+    #[test]
+    fn apply_delegation_token_insert_and_replace() {
+        let mut img = MetadataImage::new(uuid::Uuid::nil());
+        let alice = principal("User", "alice");
+
+        img.apply(&dt_record("tok-1", alice.clone(), 5_000, vec![]));
+        let got = img.delegation_token_by_id("tok-1").expect("token present");
+        assert_eq!(got.expiry_timestamp_ms, 5_000);
+        assert_eq!(got.owner, alice);
+
+        // Same token_id, different expiry — replace, not duplicate.
+        img.apply(&dt_record("tok-1", alice.clone(), 7_500, vec![]));
+        let got = img.delegation_token_by_id("tok-1").expect("token present");
+        assert_eq!(got.expiry_timestamp_ms, 7_500);
+        assert_eq!(img.all_delegation_tokens().count(), 1);
+    }
+
+    #[test]
+    fn apply_delete_delegation_token_removes_from_image() {
+        let mut img = MetadataImage::new(uuid::Uuid::nil());
+        let alice = principal("User", "alice");
+
+        img.apply(&dt_record("tok-1", alice, 5_000, vec![]));
+        assert!(img.delegation_token_by_id("tok-1").is_some());
+
+        img.apply(&MetadataRecord::V1DeleteDelegationToken(
+            DeleteDelegationTokenRecord {
+                token_id: "tok-1".into(),
+            },
+        ));
+        assert!(img.delegation_token_by_id("tok-1").is_none());
+        assert_eq!(img.all_delegation_tokens().count(), 0);
+    }
+
+    #[test]
+    fn delegation_token_by_hmac_finds_token_by_hmac_bytes() {
+        let mut img = MetadataImage::new(uuid::Uuid::nil());
+        let alice = principal("User", "alice");
+        let bob = principal("User", "bob");
+
+        let hmac_a = vec![0xAA; 32];
+        let hmac_b = vec![0xBB; 32];
+        img.apply(&MetadataRecord::V1DelegationToken(DelegationTokenRecord {
+            token_id: "tok-a".into(),
+            owner: alice,
+            hmac: hmac_a.clone(),
+            issue_timestamp_ms: 1_000,
+            expiry_timestamp_ms: 5_000,
+            max_timestamp_ms: 10_000,
+            renewers: vec![],
+        }));
+        img.apply(&MetadataRecord::V1DelegationToken(DelegationTokenRecord {
+            token_id: "tok-b".into(),
+            owner: bob,
+            hmac: hmac_b.clone(),
+            issue_timestamp_ms: 1_000,
+            expiry_timestamp_ms: 5_000,
+            max_timestamp_ms: 10_000,
+            renewers: vec![],
+        }));
+
+        let found_a = img
+            .delegation_token_by_hmac(&hmac_a)
+            .expect("hmac_a present");
+        assert_eq!(found_a.token_id, "tok-a");
+        let found_b = img
+            .delegation_token_by_hmac(&hmac_b)
+            .expect("hmac_b present");
+        assert_eq!(found_b.token_id, "tok-b");
+        assert!(img.delegation_token_by_hmac(&[0xCC; 32]).is_none());
+    }
+
+    #[test]
+    fn delegation_tokens_by_owner_filters_correctly() {
+        let mut img = MetadataImage::new(uuid::Uuid::nil());
+        let alice = principal("User", "alice");
+        let bob = principal("User", "bob");
+
+        img.apply(&dt_record("a-1", alice.clone(), 5_000, vec![]));
+        img.apply(&dt_record("a-2", alice.clone(), 6_000, vec![bob.clone()]));
+        img.apply(&dt_record("b-1", bob.clone(), 7_000, vec![]));
+
+        let alice_tokens = img.delegation_tokens_by_owner(&alice);
+        assert_eq!(alice_tokens.len(), 2);
+        assert!(alice_tokens.iter().all(|t| t.owner == alice));
+
+        let bob_tokens = img.delegation_tokens_by_owner(&bob);
+        assert_eq!(bob_tokens.len(), 1);
+        assert_eq!(bob_tokens[0].token_id, "b-1");
+
+        // visible_to: bob owns b-1 and is renewer on a-2 → 2 tokens.
+        let bob_visible = img.delegation_tokens_visible_to(&bob);
+        assert_eq!(bob_visible.len(), 2);
+        let mut ids: Vec<&str> = bob_visible.iter().map(|t| t.token_id.as_str()).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec!["a-2", "b-1"]);
     }
 
     #[test]

@@ -128,6 +128,7 @@ mod codes;
 pub mod config;
 pub(crate) mod config_keys;
 mod coordinator;
+pub(crate) mod delegation_token_cleanup;
 pub mod disk_scanner;
 mod error;
 pub mod file_config;
@@ -154,6 +155,7 @@ mod replicator;
 mod replicator_supervisor;
 pub mod telemetry;
 pub mod throttle;
+pub(crate) mod time_util;
 pub(crate) mod tls_reload;
 mod txn;
 

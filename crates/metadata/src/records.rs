@@ -115,6 +115,35 @@ pub struct DeleteScramCredentialRecord {
     pub mechanism: crabka_security::SaslMechanism,
 }
 
+/// Slice 51 (KIP-48): A single delegation token's authoritative state.
+/// Replacement semantics — appending a new record with the same
+/// `token_id` overwrites the prior one in the image (used by both
+/// Create and Renew). Removal goes through
+/// [`DeleteDelegationTokenRecord`]. `hmac` is the 32-byte HMAC-SHA-256
+/// over `token_id` keyed by the broker's master secret key; clients
+/// authenticate via SCRAM-SHA-256 using the hex-encoded HMAC as the
+/// password.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DelegationTokenRecord {
+    pub token_id: String,
+    pub owner: crabka_security::KafkaPrincipal,
+    pub hmac: Vec<u8>,
+    pub issue_timestamp_ms: i64,
+    pub expiry_timestamp_ms: i64,
+    /// Issue + max-lifetime; renewals cannot push `expiry_timestamp_ms`
+    /// past this ceiling.
+    pub max_timestamp_ms: i64,
+    pub renewers: Vec<crabka_security::KafkaPrincipal>,
+}
+
+/// Slice 51 (KIP-48): Tombstone record removing a delegation token
+/// from the image. Emitted by `ExpireDelegationToken` handlers and the
+/// background expiry sweep.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeleteDelegationTokenRecord {
+    pub token_id: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum MetadataRecord {
@@ -129,6 +158,8 @@ pub enum MetadataRecord {
     V1DeleteAccessControlEntry(crate::AclEntryFilter),
     V1BrokerConfig(BrokerConfigRecord),
     V1ClientQuota(ClientQuotaRecord),
+    V1DelegationToken(DelegationTokenRecord),
+    V1DeleteDelegationToken(DeleteDelegationTokenRecord),
 }
 
 #[cfg(test)]
@@ -294,6 +325,34 @@ mod tests {
             ],
             config_key: "producer_byte_rate".into(),
             config_value: Some(1024.0),
+        });
+        assert_eq!(round_trip(&r), r);
+    }
+
+    #[test]
+    fn delegation_token_record_round_trip() {
+        let r = MetadataRecord::V1DelegationToken(DelegationTokenRecord {
+            token_id: "tok-abc".into(),
+            owner: crabka_security::KafkaPrincipal {
+                principal_type: "User".into(),
+                name: "alice".into(),
+            },
+            hmac: vec![0xAB; 32],
+            issue_timestamp_ms: 1_700_000_000_000,
+            expiry_timestamp_ms: 1_700_000_600_000,
+            max_timestamp_ms: 1_700_604_800_000,
+            renewers: vec![crabka_security::KafkaPrincipal {
+                principal_type: "User".into(),
+                name: "bob".into(),
+            }],
+        });
+        assert_eq!(round_trip(&r), r);
+    }
+
+    #[test]
+    fn delete_delegation_token_record_round_trip() {
+        let r = MetadataRecord::V1DeleteDelegationToken(DeleteDelegationTokenRecord {
+            token_id: "tok-abc".into(),
         });
         assert_eq!(round_trip(&r), r);
     }

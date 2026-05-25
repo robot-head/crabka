@@ -198,6 +198,8 @@ async fn serve_connection_stream<S>(
             principal,
             mechanism: crabka_security::SaslMechanism::Plain,
             expires_at_ms: None,
+            // Slice 51: mTLS clients never auth via a delegation token.
+            authenticated_via_token: false,
         }
     } else {
         // PLAINTEXT / SSL-without-cert: implicit anonymous, treated as
@@ -211,6 +213,8 @@ async fn serve_connection_stream<S>(
             },
             mechanism: crabka_security::SaslMechanism::Plain,
             expires_at_ms: None,
+            // Slice 51: anonymous never auths via a delegation token.
+            authenticated_via_token: false,
         }
     };
     tracing::info!(listener = %spec.name, sasl = is_sasl_listener, "connection opened");
@@ -965,6 +969,95 @@ async fn serve_connection_stream<S>(
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "DescribeUserScramCredentials dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
+        // CreateDelegationToken (38, slice-51 T6) needs the broker's
+        // delegation-token master HMAC key plus the per-connection
+        // `auth` so the handler can enforce KIP-48's
+        // "token-creating-token disallowed" rule via
+        // `ConnectionAuth::Authenticated.authenticated_via_token`.
+        // The `&Broker`-only handler table signature can't carry those
+        // extra params, so this api_key intercepts inline.
+        if peek_api_key(&frame).ok() == Some(38) {
+            match handle_create_delegation_token_frame(&broker, &frame, &auth)
+                .instrument(req_span.clone())
+                .await
+            {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during CreateDelegationToken, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "CreateDelegationToken dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
+        // RenewDelegationToken (39, slice-51 T7) — needs the per-connection
+        // `auth` so the handler can pull the calling principal for the
+        // owner/renewer authorization check. Inline intercept matches
+        // CreateDelegationToken (38) above.
+        if peek_api_key(&frame).ok() == Some(39) {
+            match handle_renew_delegation_token_frame(&broker, &frame, &auth)
+                .instrument(req_span.clone())
+                .await
+            {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during RenewDelegationToken, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "RenewDelegationToken dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
+        // ExpireDelegationToken (40, slice-51 T7) — same shape as Renew;
+        // handler needs `auth` for the owner-or-renewer gate.
+        if peek_api_key(&frame).ok() == Some(40) {
+            match handle_expire_delegation_token_frame(&broker, &frame, &auth)
+                .instrument(req_span.clone())
+                .await
+            {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during ExpireDelegationToken, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "ExpireDelegationToken dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
+        // DescribeDelegationToken (41, slice-51 T6) — handler needs
+        // `auth` for the visibility rules (token-authed callers see
+        // only their own tokens; non-token callers see tokens they
+        // own OR are listed as a renewer on).
+        if peek_api_key(&frame).ok() == Some(41) {
+            match handle_describe_delegation_token_frame(&broker, &frame, &auth, &peer)
+                .instrument(req_span.clone())
+                .await
+            {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during DescribeDelegationToken, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "DescribeDelegationToken dispatch error, closing connection");
                     break;
                 }
             }
@@ -2003,6 +2096,169 @@ async fn handle_describe_user_scram_credentials_frame(
     ))
 }
 
+/// Decode + dispatch a `CreateDelegationToken` (`api_key` 38) frame
+/// (slice-51 T6). Threads the per-connection `auth` to the handler so
+/// it can enforce the KIP-48 token-creating-token rule (via
+/// `ConnectionAuth::Authenticated.authenticated_via_token`), passes
+/// the broker's master HMAC key, the configured maximum-lifetime
+/// ceiling (used to clamp the caller's `max_lifetime_ms`), and the
+/// controller handle for appending the resulting metadata record.
+async fn handle_create_delegation_token_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+) -> Result<Bytes, BrokerError> {
+    use crabka_protocol::{Decode, Encode};
+
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 38);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let mut cur: &[u8] = body;
+    let req = crabka_protocol::owned::create_delegation_token_request::CreateDelegationTokenRequest::decode(
+        &mut cur, api_version,
+    )?;
+
+    let resp = crate::handlers::create_delegation_token::handle(
+        &req,
+        auth,
+        broker.config.delegation_token_secret_key.as_ref(),
+        broker.config.delegation_token_max_lifetime_ms,
+        broker.config.delegation_token_default_renew_period_ms,
+        &broker.controller,
+    )
+    .await;
+    let mut buf = BytesMut::with_capacity(resp.encoded_len(api_version));
+    resp.encode(&mut buf, api_version)?;
+    let resp_body = buf.freeze();
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch a `RenewDelegationToken` (`api_key` 39) frame
+/// (slice-51 T7). Threads the per-connection `auth` to the handler so it
+/// can enforce the KIP-48 owner-or-renewer check, and passes the
+/// configured default renew period (Kafka's `delegation.token.expiry.time.ms`,
+/// 24h by default) as the fallback used when the request specifies
+/// `renew_period_ms == -1` (spec §1.3 step 4).
+async fn handle_renew_delegation_token_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+) -> Result<Bytes, BrokerError> {
+    use crabka_protocol::{Decode, Encode};
+
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 39);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let mut cur: &[u8] = body;
+    let req = crabka_protocol::owned::renew_delegation_token_request::RenewDelegationTokenRequest::decode(
+        &mut cur, api_version,
+    )?;
+
+    let resp = crate::handlers::renew_delegation_token::handle(
+        &req,
+        auth,
+        broker.config.delegation_token_secret_key.as_ref(),
+        broker.config.delegation_token_default_renew_period_ms,
+        &broker.controller,
+    )
+    .await;
+    let mut buf = BytesMut::with_capacity(resp.encoded_len(api_version));
+    resp.encode(&mut buf, api_version)?;
+    let resp_body = buf.freeze();
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch an `ExpireDelegationToken` (`api_key` 40) frame
+/// (slice-51 T7). Threads the per-connection `auth` to the handler so it
+/// can enforce the KIP-48 owner-or-renewer check.
+async fn handle_expire_delegation_token_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+) -> Result<Bytes, BrokerError> {
+    use crabka_protocol::{Decode, Encode};
+
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 40);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let mut cur: &[u8] = body;
+    let req = crabka_protocol::owned::expire_delegation_token_request::ExpireDelegationTokenRequest::decode(
+        &mut cur, api_version,
+    )?;
+
+    let resp = crate::handlers::expire_delegation_token::handle(
+        &req,
+        auth,
+        broker.config.delegation_token_secret_key.as_ref(),
+        &broker.controller,
+    )
+    .await;
+    let mut buf = BytesMut::with_capacity(resp.encoded_len(api_version));
+    resp.encode(&mut buf, api_version)?;
+    let resp_body = buf.freeze();
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch a `DescribeDelegationToken` (`api_key` 41) frame
+/// (slice-51 T6). Threads the per-connection `auth` so the handler can
+/// apply KIP-48 visibility rules (token-authed callers see only their
+/// own tokens; non-token callers see owner-or-renewer tokens), and the
+/// controller handle so it can read the live image.
+async fn handle_describe_delegation_token_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    use crabka_protocol::{Decode, Encode};
+
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 41);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let mut cur: &[u8] = body;
+    let req = crabka_protocol::owned::describe_delegation_token_request::DescribeDelegationTokenRequest::decode(
+        &mut cur, api_version,
+    )?;
+
+    let resp = crate::handlers::describe_delegation_token::handle(
+        &req,
+        auth,
+        broker.config.delegation_token_secret_key.as_ref(),
+        &broker.controller,
+        peer,
+        &broker.config.super_users,
+    )
+    .await;
+    let mut buf = BytesMut::with_capacity(resp.encoded_len(api_version));
+    resp.encode(&mut buf, api_version)?;
+    let resp_body = buf.freeze();
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
 /// Decode + dispatch an `AlterConfigs` (`api_key` 33) frame. Pulls the
 /// authenticated principal off the per-connection `auth` state and the
 /// peer `SocketAddr` from the accept-time capture so the handler can
@@ -2788,6 +3044,10 @@ fn handler_body_flexible(api_key: i16, version: i16) -> bool {
         35 => version >= owned::describe_log_dirs_request::FLEXIBLE_MIN,
         36 => version >= owned::sasl_authenticate_request::FLEXIBLE_MIN,
         37 => version >= owned::create_partitions_request::FLEXIBLE_MIN,
+        38 => version >= owned::create_delegation_token_request::FLEXIBLE_MIN,
+        39 => version >= owned::renew_delegation_token_request::FLEXIBLE_MIN,
+        40 => version >= owned::expire_delegation_token_request::FLEXIBLE_MIN,
+        41 => version >= owned::describe_delegation_token_request::FLEXIBLE_MIN,
         42 => version >= owned::delete_groups_request::FLEXIBLE_MIN,
         43 => version >= owned::elect_leaders_request::FLEXIBLE_MIN,
         44 => version >= owned::incremental_alter_configs_request::FLEXIBLE_MIN,

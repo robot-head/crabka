@@ -21,7 +21,8 @@ pub fn resource_type_concrete(b: i8) -> Result<ResourceType, WireAclError> {
         3 => Ok(ResourceType::Group),
         4 => Ok(ResourceType::Cluster),
         5 => Ok(ResourceType::TransactionalId),
-        // 6 (DelegationToken) / 7 (User) / 0 (Unknown) / 1 (Any) all rejected.
+        6 => Ok(ResourceType::DelegationToken),
+        // 7 (User) / 0 (Unknown) / 1 (Any) rejected.
         0 | 1 => Err(WireAclError::AnyRequiresFilter),
         _ => Err(WireAclError::UnknownDiscriminant),
     }
@@ -37,6 +38,7 @@ pub fn resource_type_filter(b: i8) -> Result<Option<ResourceType>, WireAclError>
         3 => Ok(Some(ResourceType::Group)),
         4 => Ok(Some(ResourceType::Cluster)),
         5 => Ok(Some(ResourceType::TransactionalId)),
+        6 => Ok(Some(ResourceType::DelegationToken)),
         _ => Err(WireAclError::UnknownDiscriminant),
     }
 }
@@ -49,6 +51,7 @@ pub fn resource_type_to_wire(rt: ResourceType) -> i8 {
         ResourceType::Group => 3,
         ResourceType::Cluster => 4,
         ResourceType::TransactionalId => 5,
+        ResourceType::DelegationToken => 6,
     }
 }
 
@@ -207,5 +210,39 @@ mod tests {
             let b = operation_to_wire(op);
             assert_eq!(operation_concrete(b).unwrap(), op);
         }
+    }
+
+    /// Slice 51 T9: the KIP-48 `TOKEN` (a.k.a. `DELEGATION_TOKEN`)
+    /// resource type, wire byte 6, must round-trip through the wire
+    /// codec so `CreateAcls`/`DeleteAcls`/`DescribeAcls` can carry
+    /// ACLs guarding delegation tokens.
+    #[test]
+    fn delegation_token_resource_type_now_accepted() {
+        use crabka_metadata::AclEntry;
+
+        // Concrete (CreateAcls).
+        assert_eq!(resource_type_concrete(6), Ok(ResourceType::DelegationToken));
+        // Filter (Delete/DescribeAcls).
+        assert_eq!(
+            resource_type_filter(6),
+            Ok(Some(ResourceType::DelegationToken))
+        );
+        // Encoder.
+        assert_eq!(resource_type_to_wire(ResourceType::DelegationToken), 6);
+
+        // Build a concrete AclEntry at the canonical (Describe, Allow)
+        // shape KIP-48 token ACLs use; verify the wire bytes line up.
+        let entry = AclEntry {
+            resource_type: resource_type_concrete(6).unwrap(),
+            resource_name: "User:alice".into(),
+            pattern_type: PatternType::Literal,
+            principal: "User:bob".into(),
+            host: "*".into(),
+            operation: operation_concrete(8).unwrap(),
+            permission_type: permission_concrete(3).unwrap(),
+        };
+        assert_eq!(resource_type_to_wire(entry.resource_type), 6);
+        assert_eq!(entry.operation, AclOperation::Describe);
+        assert_eq!(entry.permission_type, PermissionType::Allow);
     }
 }

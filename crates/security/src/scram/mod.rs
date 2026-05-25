@@ -355,6 +355,53 @@ mod tests {
         assert_eq!(server_key.len(), 32);
     }
 
+    /// Slice 51 (KIP-48): `new_with_principal` stamps an override
+    /// principal that wins on the `Done` arm — used by the
+    /// delegation-token SCRAM fallback so a client authenticating
+    /// with a `tokenId` as the SCRAM username surfaces as the token's
+    /// owner (e.g. `User:alice`), not as `User:<token-uuid>`.
+    #[test]
+    fn scram_server_with_principal_override_yields_override_on_done() {
+        let password = b"hunter2";
+        let cred = hash_scram_password_with_salt(
+            password,
+            SaslMechanism::ScramSha256,
+            4096,
+            (0..16).collect::<Vec<u8>>(),
+        );
+        let override_principal = crate::Principal {
+            name: "alice".to_string(),
+            auth_method: crate::AuthMethod::SaslScramSha256,
+            groups: vec![],
+        };
+        // SCRAM username (the wire "n=..." attribute) is "tok-uuid";
+        // the override principal is "alice" (the token's owner).
+        let mut server = ScramServerExchange::new_with_principal(
+            "tok-uuid".to_string(),
+            cred,
+            override_principal.clone(),
+        );
+        let mut client = ScramClientExchange::new(
+            "tok-uuid".to_string(),
+            password.to_vec(),
+            SaslMechanism::ScramSha256,
+        );
+
+        let c1 = client.client_first().expect("client first");
+        let s1 = match server.step(&c1) {
+            StepResult::Continue(b) => b,
+            other => panic!("server step 1 must continue, got {other:?}"),
+        };
+        let c2 = client.step(&s1).expect("client final");
+        let (principal, _s2) = match server.step(&c2) {
+            StepResult::Done(p, b) => (p, b),
+            other => panic!("server step 2 must Done, got {other:?}"),
+        };
+        // Override wins: principal is the token owner, NOT "tok-uuid".
+        assert_eq!(principal, override_principal);
+        assert_eq!(principal.name, "alice");
+    }
+
     #[test]
     fn scram_server_rejects_bad_proof() {
         let cred = hash_scram_password_with_salt(

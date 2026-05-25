@@ -89,6 +89,15 @@ fn supported_apis() -> Vec<ApiVersion> {
         v!(describe_client_quotas_request),
         v!(alter_client_quotas_request),
         v!(describe_user_scram_credentials_request),
+        // Slice 51 (KIP-48): delegation-token RPCs. Conditional on the
+        // broker having a master key configured is tempting, but Kafka
+        // always advertises these — clients discover support at this
+        // level then get DELEGATION_TOKEN_AUTH_DISABLED (61) on the
+        // actual call when the broker isn't configured for tokens.
+        v!(create_delegation_token_request),
+        v!(renew_delegation_token_request),
+        v!(expire_delegation_token_request),
+        v!(describe_delegation_token_request),
     ]
 }
 
