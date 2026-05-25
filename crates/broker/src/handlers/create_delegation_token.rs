@@ -71,8 +71,8 @@ pub(crate) async fn handle<S: BuildHasher>(
     // tokens for KafkaUsers without first holding their credentials.
     let owner_type_empty = is_empty_owner_field(req.owner_principal_type.as_deref());
     let owner_name_empty = is_empty_owner_field(req.owner_principal_name.as_deref());
-    let (owner, act_as) = match (owner_type_empty, owner_name_empty) {
-        (true, true) => (principal.to_kafka(), false),
+    let owner = match (owner_type_empty, owner_name_empty) {
+        (true, true) => principal.to_kafka(),
         (false, false) => {
             // Both set → act-as. Only super-users may use this path; the
             // permission is broker-wide because no token exists yet to
@@ -90,13 +90,10 @@ pub(crate) async fn handle<S: BuildHasher>(
             if owner_type != "User" {
                 return err_response(crate::codes::INVALID_REQUEST);
             }
-            (
-                KafkaPrincipal {
-                    principal_type: owner_type.to_string(),
-                    name: owner_name.to_string(),
-                },
-                true,
-            )
+            KafkaPrincipal {
+                principal_type: owner_type.to_string(),
+                name: owner_name.to_string(),
+            }
         }
         // Exactly one set → caller is confused; either both or neither.
         _ => return err_response(crate::codes::INVALID_REQUEST),
@@ -153,16 +150,13 @@ pub(crate) async fn handle<S: BuildHasher>(
         return err_response(crate::codes::INVALID_REQUEST);
     }
 
-    // Per spec §1.3: populate the `token_requester_*` fields with the
-    // caller's principal only when act-as fired. Self-mint leaves them
-    // as empty strings, matching what the JVM admin CLI prints (it
-    // shows owner-only on self-owned tokens).
-    let (requester_type, requester_name) = if act_as {
-        let caller = principal.to_kafka();
-        (caller.principal_type, caller.name)
-    } else {
-        (String::new(), String::new())
-    };
+    // Always populate `token_requester_*` with the caller's principal.
+    // On self-mint this equals the owner; on act-as it identifies the
+    // super-user who minted on behalf of `owner`. Matches Kafka's
+    // `DelegationTokenManager.createDelegationToken` (the JVM admin CLI
+    // displays both columns unconditionally).
+    let caller = principal.to_kafka();
+    let (requester_type, requester_name) = (caller.principal_type, caller.name);
 
     CreateDelegationTokenResponse {
         error_code: 0,
