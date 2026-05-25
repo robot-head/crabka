@@ -575,10 +575,13 @@ mod tests {
             make_signal_refresher(endpoint, Duration::from_mins(1));
         let task = tokio::spawn(refresher.run());
 
-        // First signal: fires.
+        // First signal: fires. Wait on the HTTP counter (the strict
+        // happens-after of refresh_and_swap) rather than the timestamp
+        // store, which the select! arm performs BEFORE the HTTP call —
+        // otherwise CI races between timestamp-set and request-arrival.
         signal_tx.send(()).await.unwrap();
         for _ in 0..100 {
-            if last_on_demand.load(Ordering::Relaxed) > 0 {
+            if count.load(Ordering::Relaxed) >= 1 {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
