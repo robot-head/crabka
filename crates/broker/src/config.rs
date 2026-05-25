@@ -183,6 +183,40 @@ pub struct BrokerConfig {
     /// (slice 49e default).
     pub oauthbearer_max_session_lifetime_seconds: Option<u32>,
 
+    /// Slice 49i: receiver half of the JWKS refresher signal channel.
+    /// `apply_to` creates the channel pair: the sender is wired into the
+    /// signed validator's `JwksHandle`; the receiver is parked here for
+    /// `Broker::start` to `take()` and pass to `JwksRefresher`. `None`
+    /// when JWKS validation isn't configured. `Arc<Mutex<…>>` so the
+    /// containing `BrokerConfig` can stay `Clone`; only `Broker::start`
+    /// `.lock().take()`s the receiver, and there is only ever one
+    /// `Broker::start` per validator construction.
+    pub oauthbearer_jwks_signal_rx:
+        std::sync::Arc<std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<()>>>>,
+
+    /// Slice 49i: shared timestamp of the last successful JWKS fetch.
+    /// `apply_to` creates it (`AtomicI64::new(0)`); the validator's
+    /// `JwksHandle` and the refresher both clone this `Arc` so the
+    /// refresher's writes are visible to the validator's expiry check.
+    pub oauthbearer_jwks_last_successful_fetch_ms: std::sync::Arc<std::sync::atomic::AtomicI64>,
+
+    /// Slice 49i: shared on-demand-refresh timestamp for rate-limiting.
+    /// `apply_to` creates it; `Broker::start` hands a clone to the
+    /// refresher. The validator never reads this — it's refresher-only
+    /// bookkeeping carried through `BrokerConfig` for symmetry.
+    pub oauthbearer_jwks_last_on_demand_refresh_ms: std::sync::Arc<std::sync::atomic::AtomicI64>,
+
+    /// Slice 49i: minimum pause between on-demand JWKS refreshes
+    /// triggered by validator signals. `apply_to` sets this from
+    /// `FileOAuthBearerConfig::jwks_min_refresh_pause_seconds`;
+    /// `Broker::start` passes it into `JwksRefresher`. Strimzi default
+    /// 1 second; we default to 1 second too.
+    pub oauthbearer_jwks_min_on_demand_pause: std::time::Duration,
+
+    /// Slice 49i: when true, the refresher's JWKS parser keeps keys
+    /// regardless of `use` value (default behavior filters out `use=enc`).
+    pub oauthbearer_jwks_ignore_key_use: bool,
+
     /// KIP-460 auto preferred-replica election. When true, a background
     /// task on the controller leader periodically scans partitions and
     /// re-elects the preferred replica as leader when it's alive + in
@@ -273,6 +307,15 @@ impl BrokerConfig {
             oauthbearer_jwks_refresh_interval: std::time::Duration::from_mins(5),
             oauthbearer_idp_tls_trust: None,
             oauthbearer_max_session_lifetime_seconds: None,
+            oauthbearer_jwks_signal_rx: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            oauthbearer_jwks_last_successful_fetch_ms: std::sync::Arc::new(
+                std::sync::atomic::AtomicI64::new(0),
+            ),
+            oauthbearer_jwks_last_on_demand_refresh_ms: std::sync::Arc::new(
+                std::sync::atomic::AtomicI64::new(0),
+            ),
+            oauthbearer_jwks_min_on_demand_pause: std::time::Duration::from_secs(1),
+            oauthbearer_jwks_ignore_key_use: false,
             auto_leader_rebalance_enable: false, // tests opt in explicitly
             leader_imbalance_check_interval_secs: 300,
             leader_imbalance_per_broker_percentage: 10,
@@ -440,6 +483,15 @@ impl Default for BrokerConfig {
             oauthbearer_jwks_refresh_interval: std::time::Duration::from_mins(5),
             oauthbearer_idp_tls_trust: None,
             oauthbearer_max_session_lifetime_seconds: None,
+            oauthbearer_jwks_signal_rx: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            oauthbearer_jwks_last_successful_fetch_ms: std::sync::Arc::new(
+                std::sync::atomic::AtomicI64::new(0),
+            ),
+            oauthbearer_jwks_last_on_demand_refresh_ms: std::sync::Arc::new(
+                std::sync::atomic::AtomicI64::new(0),
+            ),
+            oauthbearer_jwks_min_on_demand_pause: std::time::Duration::from_secs(1),
+            oauthbearer_jwks_ignore_key_use: false,
             auto_leader_rebalance_enable: true,
             leader_imbalance_check_interval_secs: 300,
             leader_imbalance_per_broker_percentage: 10,

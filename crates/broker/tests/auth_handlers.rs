@@ -1107,8 +1107,9 @@ fn es256_token(kp: &ring::signature::EcdsaKeyPair, kid: &str, claims: &str) -> S
 /// A `Signed` validator whose key set is pre-populated from `jwks_json` (no
 /// network fetch needed for the test).
 fn signed_validator(jwks_json: &str) -> crabka_security::OAuthBearerValidator {
-    let handle =
-        crabka_security::JwksHandle::new(crabka_security::Jwks::from_json(jwks_json).unwrap());
+    let handle = crabka_security::JwksHandle::new(
+        crabka_security::Jwks::from_json(jwks_json, false).unwrap(),
+    );
     crabka_security::OAuthBearerValidator::Signed(crabka_security::SignedJwsValidator::new(handle))
 }
 

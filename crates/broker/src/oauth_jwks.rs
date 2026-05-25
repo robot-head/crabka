@@ -11,9 +11,12 @@
 //! [`SignedJwsValidator`]: crabka_security::SignedJwsValidator
 
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
 use crabka_security::{Jwks, JwksHandle};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 /// A JWKS fetch failure — surfaced for logging / tests; the refresher keeps the
@@ -28,9 +31,12 @@ pub(crate) enum FetchError {
 
 /// Fetch and parse a JWKS document from `endpoint` (HTTP or HTTPS). A 10s
 /// timeout caps a hung identity provider; non-2xx responses are errors.
+/// Slice 49i: `ignore_key_use` threads through to the JWKS parser — when
+/// false, `use=enc` keys are filtered out.
 pub(crate) async fn fetch_jwks(
     client: &reqwest::Client,
     endpoint: &str,
+    ignore_key_use: bool,
 ) -> Result<Jwks, FetchError> {
     let body = client
         .get(endpoint)
@@ -39,16 +45,25 @@ pub(crate) async fn fetch_jwks(
         .error_for_status()?
         .text()
         .await?;
-    Jwks::from_json(&body).map_err(|_| FetchError::Parse)
+    Jwks::from_json(&body, ignore_key_use).map_err(|_| FetchError::Parse)
 }
 
 /// Periodically refreshes a [`JwksHandle`] from a JWKS endpoint.
+///
+/// Slice 49i: the loop additionally serves on-demand refresh requests
+/// triggered by validators that encountered an unknown-kid or
+/// bad-signature token (received via [`signal_rx`](Self::signal_rx)).
+/// On-demand refreshes are rate-limited by
+/// [`min_on_demand_pause`](Self::min_on_demand_pause) so a verify-fail
+/// storm can't hammer the `IdP`. Successful refreshes update
+/// [`last_successful_fetch_ms`](Self::last_successful_fetch_ms) — the
+/// validator reads that to enforce hard cache expiry.
 pub(crate) struct JwksRefresher {
     /// JWKS endpoint URL.
     pub endpoint: String,
     /// Shared key cell read by the validator; this task `store`s into it.
     pub handle: JwksHandle,
-    /// Re-fetch cadence.
+    /// Re-fetch cadence (periodic).
     pub interval: Duration,
     /// Cancels the task on broker shutdown.
     pub shutdown: CancellationToken,
@@ -61,14 +76,36 @@ pub(crate) struct JwksRefresher {
     /// through `idp_tls_trust` and is used for JWKS, introspection, and
     /// userinfo HTTPS.
     pub tls_trust: Option<PathBuf>,
+    /// Slice 49i: receives signals from validators on verify-failure to
+    /// trigger an on-demand refresh (subject to `min_on_demand_pause`).
+    /// Capacity 1 + `try_send` on the producer side ⇒ signals coalesce.
+    pub signal_rx: mpsc::Receiver<()>,
+    /// Slice 49i: minimum pause between on-demand refreshes. Strimzi
+    /// default 1 second. Periodic refresh (`interval`) is unaffected.
+    pub min_on_demand_pause: Duration,
+    /// Slice 49i: shared timestamp counter. Refresher updates after each
+    /// successful fetch; validators read for cache-expiry check. Shared
+    /// (`Arc<AtomicI64>`) with the paired `JwksHandle`.
+    pub last_successful_fetch_ms: Arc<AtomicI64>,
+    /// Slice 49i: tracks the last on-demand-refresh epoch ms for
+    /// rate-limiting. Independent of periodic refresh.
+    pub last_on_demand_refresh_ms: Arc<AtomicI64>,
+    /// Slice 49i: when true, accept JWKS keys regardless of `use` field.
+    /// Default false (filter out `use=enc`). Threads to
+    /// [`Jwks::from_json`].
+    pub ignore_key_use: bool,
 }
 
 impl JwksRefresher {
-    /// Run until cancelled. The first fetch fires immediately (a
+    /// Run until cancelled. The first periodic fetch fires immediately (a
     /// `tokio::interval` ticks at t=0), so keys are available shortly after
     /// startup; a failed fetch logs a warning and leaves the previous key set
     /// in place — a transient identity-provider outage never crashes the broker.
-    pub(crate) async fn run(self) {
+    /// Slice 49i: on-demand refresh signals from validators race with the
+    /// periodic tick in the same `select!`; the on-demand arm consults
+    /// `last_on_demand_refresh_ms` against `min_on_demand_pause` and drops
+    /// the signal silently when within the window.
+    pub(crate) async fn run(mut self) {
         let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(10));
         if let Some(path) = &self.tls_trust {
             match crabka_security::build_client_config_from_pem(path) {
@@ -101,26 +138,72 @@ impl JwksRefresher {
         loop {
             tokio::select! {
                 _ = tick.tick() => {
-                    match fetch_jwks(&client, &self.endpoint).await {
-                        Ok(jwks) => {
-                            tracing::debug!(
-                                endpoint = %self.endpoint,
-                                keys = jwks.len(),
-                                "refreshed OAUTHBEARER JWKS",
-                            );
-                            self.handle.store(jwks);
-                        }
-                        Err(e) => tracing::warn!(
+                    self.refresh_and_swap(&client).await;
+                }
+                // Slice 49i: on-demand refresh triggered by validator
+                // signal. Subject to `min_on_demand_pause` rate-limit.
+                // Signals coalesce via mpsc capacity 1 + `try_send`.
+                Some(()) = self.signal_rx.recv() => {
+                    let now_ms = current_epoch_ms();
+                    let last = self.last_on_demand_refresh_ms.load(Ordering::Relaxed);
+                    let elapsed_ms = now_ms.saturating_sub(last);
+                    let pause_ms = i64::try_from(self.min_on_demand_pause.as_millis())
+                        .unwrap_or(i64::MAX);
+                    if elapsed_ms >= pause_ms {
+                        self.last_on_demand_refresh_ms.store(now_ms, Ordering::Relaxed);
+                        tracing::debug!(
                             endpoint = %self.endpoint,
-                            error = %e,
-                            "failed to refresh OAUTHBEARER JWKS; keeping previous key set",
-                        ),
+                            elapsed_ms,
+                            "on-demand JWKS refresh triggered by validator signal",
+                        );
+                        self.refresh_and_swap(&client).await;
+                    } else {
+                        tracing::debug!(
+                            endpoint = %self.endpoint,
+                            elapsed_ms,
+                            pause_ms,
+                            "on-demand JWKS refresh rate-limited; signal dropped",
+                        );
                     }
                 }
                 () = self.shutdown.cancelled() => return,
             }
         }
     }
+
+    /// Slice 49i: extracted from the loop so the periodic + on-demand arms
+    /// both call it. Updates `last_successful_fetch_ms` only on success
+    /// (failure leaves the timestamp untouched so the cache ages toward
+    /// expiry and validators eventually start failing closed).
+    async fn refresh_and_swap(&self, client: &reqwest::Client) {
+        match fetch_jwks(client, &self.endpoint, self.ignore_key_use).await {
+            Ok(jwks) => {
+                tracing::debug!(
+                    endpoint = %self.endpoint,
+                    keys = jwks.len(),
+                    "refreshed OAUTHBEARER JWKS",
+                );
+                self.handle.store(jwks);
+                self.last_successful_fetch_ms
+                    .store(current_epoch_ms(), Ordering::Relaxed);
+            }
+            Err(e) => tracing::warn!(
+                endpoint = %self.endpoint,
+                error = %e,
+                "failed to refresh OAUTHBEARER JWKS; keeping previous key set",
+            ),
+        }
+    }
+}
+
+/// Slice 49i: current Unix epoch in milliseconds, saturating on overflow
+/// or pre-epoch clock skew. Used by the refresher to populate the shared
+/// timestamp counter read by validators for cache-expiry checks.
+fn current_epoch_ms() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
 }
 
 #[cfg(test)]
@@ -148,11 +231,38 @@ mod tests {
 
     const JWKS_BODY: &str = r#"{"keys":[{"kty":"EC","crv":"P-256","kid":"k1","x":"f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU","y":"x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0"}]}"#;
 
+    /// Slice 49i: pick the on-demand-refresh-relevant slots out of a
+    /// `JwksRefresher` so the simple slice-49b refresher tests can stay
+    /// terse. `signal_rx` is given but never sent on in these tests;
+    /// `min_on_demand_pause` is irrelevant; the timestamps are isolated
+    /// per test.
+    fn slice_49b_refresher(
+        endpoint: String,
+        handle: JwksHandle,
+        interval: Duration,
+        shutdown: CancellationToken,
+        tls_trust: Option<PathBuf>,
+    ) -> JwksRefresher {
+        let (_tx, rx) = mpsc::channel::<()>(1);
+        JwksRefresher {
+            endpoint,
+            handle,
+            interval,
+            shutdown,
+            tls_trust,
+            signal_rx: rx,
+            min_on_demand_pause: Duration::from_secs(1),
+            last_successful_fetch_ms: Arc::new(AtomicI64::new(0)),
+            last_on_demand_refresh_ms: Arc::new(AtomicI64::new(0)),
+            ignore_key_use: false,
+        }
+    }
+
     #[tokio::test]
     async fn fetch_jwks_parses_served_keyset() {
         let (addr, shutdown) = serve_jwks(JWKS_BODY).await;
         let client = reqwest::Client::new();
-        let jwks = fetch_jwks(&client, &format!("http://{addr}/jwks"))
+        let jwks = fetch_jwks(&client, &format!("http://{addr}/jwks"), false)
             .await
             .unwrap();
         assert_eq!(jwks.len(), 1);
@@ -166,7 +276,7 @@ mod tests {
             .timeout(Duration::from_millis(500))
             .build()
             .unwrap();
-        let err = fetch_jwks(&client, "http://127.0.0.1:1/jwks").await;
+        let err = fetch_jwks(&client, "http://127.0.0.1:1/jwks", false).await;
         assert!(err.is_err());
     }
 
@@ -176,13 +286,13 @@ mod tests {
         let handle = JwksHandle::default();
         assert!(handle.load().is_empty());
         let shutdown = CancellationToken::new();
-        let refresher = JwksRefresher {
-            endpoint: format!("http://{addr}/jwks"),
-            handle: handle.clone(),
-            interval: Duration::from_millis(50),
-            shutdown: shutdown.clone(),
-            tls_trust: None,
-        };
+        let refresher = slice_49b_refresher(
+            format!("http://{addr}/jwks"),
+            handle.clone(),
+            Duration::from_millis(50),
+            shutdown.clone(),
+            None,
+        );
         let task = tokio::spawn(refresher.run());
 
         // Poll until the immediate first fetch lands.
@@ -282,13 +392,13 @@ mod tests {
         let (addr, srv_shutdown, ca_path) = serve_jwks_https(JWKS_BODY).await;
         let handle = JwksHandle::default();
         let shutdown = CancellationToken::new();
-        let refresher = JwksRefresher {
-            endpoint: format!("https://127.0.0.1:{}/jwks", addr.port()),
-            handle: handle.clone(),
-            interval: Duration::from_millis(50),
-            shutdown: shutdown.clone(),
-            tls_trust: Some(ca_path),
-        };
+        let refresher = slice_49b_refresher(
+            format!("https://127.0.0.1:{}/jwks", addr.port()),
+            handle.clone(),
+            Duration::from_millis(50),
+            shutdown.clone(),
+            Some(ca_path),
+        );
         let task = tokio::spawn(refresher.run());
         for _ in 0..100 {
             if !handle.load().is_empty() {
@@ -317,13 +427,13 @@ mod tests {
 
         let handle = JwksHandle::default();
         let shutdown = CancellationToken::new();
-        let refresher = JwksRefresher {
-            endpoint: format!("https://127.0.0.1:{}/jwks", addr.port()),
-            handle: handle.clone(),
-            interval: Duration::from_millis(50),
-            shutdown: shutdown.clone(),
-            tls_trust: Some(bogus_ca),
-        };
+        let refresher = slice_49b_refresher(
+            format!("https://127.0.0.1:{}/jwks", addr.port()),
+            handle.clone(),
+            Duration::from_millis(50),
+            shutdown.clone(),
+            Some(bogus_ca),
+        );
         let task = tokio::spawn(refresher.run());
         // Give the refresher time for several ticks; each should fail.
         tokio::time::sleep(Duration::from_millis(300)).await;
@@ -333,6 +443,280 @@ mod tests {
         );
         shutdown.cancel();
         task.await.unwrap();
+        srv_shutdown.cancel();
+    }
+
+    // ---- Slice 49i: on-demand refresh + cache-expiry timestamp -------------
+
+    /// Serve a fixed body but track how many HTTP requests have hit the
+    /// `/jwks` route. Returns a shared `AtomicUsize` so the test can assert
+    /// on call count after the refresher has been driven.
+    async fn serve_jwks_counting(
+        body: &'static str,
+    ) -> (
+        SocketAddr,
+        CancellationToken,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let shutdown = CancellationToken::new();
+        let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter_cl = counter.clone();
+        let app = axum::Router::new().route(
+            "/jwks",
+            axum::routing::get(move || {
+                let c = counter_cl.clone();
+                async move {
+                    c.fetch_add(1, Ordering::Relaxed);
+                    body
+                }
+            }),
+        );
+        let srv_shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async move { srv_shutdown.cancelled().await })
+                .await
+                .unwrap();
+        });
+        (addr, shutdown, counter)
+    }
+
+    /// Builds a refresher with a 1-hour periodic interval (so only on-demand
+    /// signals matter for the test) and returns the shared signal sender +
+    /// the rate-limit timestamp + the success-timestamp.
+    #[allow(clippy::type_complexity)]
+    fn make_signal_refresher(
+        endpoint: String,
+        min_on_demand_pause: Duration,
+    ) -> (
+        JwksRefresher,
+        mpsc::Sender<()>,
+        Arc<AtomicI64>, // last_successful_fetch_ms
+        Arc<AtomicI64>, // last_on_demand_refresh_ms
+        CancellationToken,
+        JwksHandle,
+    ) {
+        let (signal_tx, signal_rx) = mpsc::channel::<()>(1);
+        let shutdown = CancellationToken::new();
+        let last_successful = Arc::new(AtomicI64::new(0));
+        let last_on_demand = Arc::new(AtomicI64::new(0));
+        let handle = JwksHandle::new_with_refresher_handles(
+            Jwks::empty(),
+            last_successful.clone(),
+            signal_tx.clone(),
+        );
+        let refresher = JwksRefresher {
+            endpoint,
+            handle: handle.clone(),
+            interval: Duration::from_hours(1), // disable periodic for these tests
+            shutdown: shutdown.clone(),
+            tls_trust: None,
+            signal_rx,
+            min_on_demand_pause,
+            last_successful_fetch_ms: last_successful.clone(),
+            last_on_demand_refresh_ms: last_on_demand.clone(),
+            ignore_key_use: false,
+        };
+        (
+            refresher,
+            signal_tx,
+            last_successful,
+            last_on_demand,
+            shutdown,
+            handle,
+        )
+    }
+
+    #[tokio::test]
+    async fn refresher_signal_triggers_on_demand_refresh_when_pause_elapsed() {
+        let (addr, srv_shutdown, count) = serve_jwks_counting(JWKS_BODY).await;
+        let endpoint = format!("http://{addr}/jwks");
+        let (refresher, signal_tx, _last_successful, last_on_demand, shutdown, handle) =
+            make_signal_refresher(endpoint, Duration::from_millis(0));
+        let task = tokio::spawn(refresher.run());
+
+        // Drive at least one signal refresh.
+        signal_tx.send(()).await.unwrap();
+        // Poll until the on-demand timestamp moves or until the handle has been
+        // populated by the on-demand fetch.
+        for _ in 0..100 {
+            if last_on_demand.load(Ordering::Relaxed) > 0 && !handle.load().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            last_on_demand.load(Ordering::Relaxed) > 0,
+            "on-demand timestamp should have advanced past sentinel 0",
+        );
+        assert!(
+            count.load(Ordering::Relaxed) >= 1,
+            "server should have served the on-demand request"
+        );
+        assert_eq!(
+            handle.load().len(),
+            1,
+            "refresher must store the fetched key set"
+        );
+
+        shutdown.cancel();
+        let _ = task.await;
+        srv_shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn refresher_signal_dropped_when_within_min_pause_window() {
+        let (addr, srv_shutdown, count) = serve_jwks_counting(JWKS_BODY).await;
+        let endpoint = format!("http://{addr}/jwks");
+        // 60s pause — second signal MUST be rate-limited.
+        let (refresher, signal_tx, _last_successful, last_on_demand, shutdown, _handle) =
+            make_signal_refresher(endpoint, Duration::from_mins(1));
+        let task = tokio::spawn(refresher.run());
+
+        // First signal: fires.
+        signal_tx.send(()).await.unwrap();
+        for _ in 0..100 {
+            if last_on_demand.load(Ordering::Relaxed) > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let first_ts = last_on_demand.load(Ordering::Relaxed);
+        assert!(first_ts > 0, "first signal must have fired a refresh");
+        let count_after_first = count.load(Ordering::Relaxed);
+        assert!(count_after_first >= 1);
+
+        // Second signal within the 60s pause: dropped.
+        signal_tx.send(()).await.unwrap();
+        // Yield the runtime a few times to let the select! arm process.
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            last_on_demand.load(Ordering::Relaxed),
+            first_ts,
+            "second signal within min_pause must not advance timestamp",
+        );
+        assert_eq!(
+            count.load(Ordering::Relaxed),
+            count_after_first,
+            "server must not see a second on-demand HTTP request",
+        );
+
+        shutdown.cancel();
+        let _ = task.await;
+        srv_shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn refresher_successful_refresh_updates_last_successful_fetch_timestamp() {
+        let (addr, srv_shutdown, _count) = serve_jwks_counting(JWKS_BODY).await;
+        let endpoint = format!("http://{addr}/jwks");
+        let (refresher, signal_tx, last_successful, _last_on_demand, shutdown, _handle) =
+            make_signal_refresher(endpoint, Duration::from_millis(0));
+        let task = tokio::spawn(refresher.run());
+
+        assert_eq!(last_successful.load(Ordering::Relaxed), 0);
+        signal_tx.send(()).await.unwrap();
+        for _ in 0..100 {
+            if last_successful.load(Ordering::Relaxed) > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            last_successful.load(Ordering::Relaxed) > 0,
+            "last_successful_fetch_ms must advance after a successful fetch",
+        );
+
+        shutdown.cancel();
+        let _ = task.await;
+        srv_shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn refresher_failed_refresh_does_not_advance_last_successful_fetch() {
+        // Endpoint that always returns 500 ⇒ fetch fails, timestamp must stay
+        // at the sentinel 0.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let srv_shutdown = CancellationToken::new();
+        let srv_token = srv_shutdown.clone();
+        let app = axum::Router::new().route(
+            "/jwks",
+            axum::routing::get(|| async {
+                (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "boom")
+            }),
+        );
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async move { srv_token.cancelled().await })
+                .await
+                .unwrap();
+        });
+
+        let endpoint = format!("http://{addr}/jwks");
+        let (refresher, signal_tx, last_successful, last_on_demand, shutdown, _handle) =
+            make_signal_refresher(endpoint, Duration::from_millis(0));
+        let task = tokio::spawn(refresher.run());
+
+        signal_tx.send(()).await.unwrap();
+        // Wait long enough for the refresh attempt to complete & log.
+        for _ in 0..50 {
+            if last_on_demand.load(Ordering::Relaxed) > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        // On-demand timestamp advances regardless (rate-limit accounting);
+        // success timestamp must stay at 0.
+        assert!(
+            last_on_demand.load(Ordering::Relaxed) > 0,
+            "on-demand rate-limit timestamp updates even when the fetch itself fails",
+        );
+        assert_eq!(
+            last_successful.load(Ordering::Relaxed),
+            0,
+            "failed fetch must leave last_successful_fetch_ms at sentinel 0",
+        );
+
+        shutdown.cancel();
+        let _ = task.await;
+        srv_shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn refresher_passes_ignore_key_use_through_to_jwks_parser() {
+        // JWKS body has an RSA key marked `use=enc`. With ignore_key_use=true
+        // the refresher should still install it; with false it would be filtered
+        // out (yielding an empty key set).
+        const ENC_KEY_BODY: &str =
+            r#"{"keys":[{"kty":"RSA","kid":"enc-kid","use":"enc","n":"AQAB","e":"AQAB"}]}"#;
+        let (addr, srv_shutdown, _count) = serve_jwks_counting(ENC_KEY_BODY).await;
+        let endpoint = format!("http://{addr}/jwks");
+        let (mut refresher, signal_tx, _last_successful, _last_on_demand, shutdown, handle) =
+            make_signal_refresher(endpoint, Duration::from_millis(0));
+        refresher.ignore_key_use = true;
+        let task = tokio::spawn(refresher.run());
+
+        signal_tx.send(()).await.unwrap();
+        for _ in 0..100 {
+            if !handle.load().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            handle.load().len(),
+            1,
+            "ignore_key_use=true must keep the use=enc key in the installed set",
+        );
+
+        shutdown.cancel();
+        let _ = task.await;
         srv_shutdown.cancel();
     }
 }

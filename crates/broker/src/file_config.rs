@@ -162,6 +162,26 @@ pub struct FileOAuthBearerConfig {
     /// this delimiter.
     #[serde(default)]
     pub groups_claim_delimiter: Option<String>,
+
+    /// Slice 49i: minimum pause (seconds) between on-demand JWKS refreshes
+    /// triggered by validator signals (unknown-kid / bad-signature tokens).
+    /// Defaults to 1 (Strimzi parity). Signed validator only.
+    #[serde(default)]
+    pub jwks_min_refresh_pause_seconds: Option<u32>,
+
+    /// Slice 49i: maximum age (seconds) of the cached JWKS before validators
+    /// reject tokens until the next successful refresh. Strimzi default 360
+    /// (6 minutes). Unset = no expiry check (slice 49b behavior). Fails
+    /// closed on prolonged `IdP` outage. Signed validator only.
+    #[serde(default)]
+    pub jwks_expiry_seconds: Option<u32>,
+
+    /// Slice 49i: when true, the JWKS parser keeps keys regardless of `use`
+    /// field. Default false (filter out `use=enc`). Some identity providers
+    /// publish signing keys with `use="enc"` by mistake; operators set this
+    /// to true to accept them. Signed validator only.
+    #[serde(default)]
+    pub jwks_ignore_key_use: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -328,9 +348,23 @@ impl FileConfig {
                     // Signed-JWT validation (slice 49b). The empty key handle is
                     // populated by the refresher `Broker::start` spawns.
                     let jwks_uri = oauth.jwks_endpoint_uri.clone().unwrap();
-                    let mut v = crabka_security::SignedJwsValidator::new(
-                        crabka_security::JwksHandle::default(),
+
+                    // Slice 49i: create the signal channel + the shared
+                    // timestamps here so the validator's `JwksHandle` and
+                    // the refresher (constructed in `Broker::start`) point at
+                    // the same Arc-shared state. Channel capacity 1 +
+                    // `try_send` on the producer ⇒ signals coalesce.
+                    let (signal_tx, signal_rx) = tokio::sync::mpsc::channel::<()>(1);
+                    let last_successful = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0));
+                    let last_on_demand = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0));
+
+                    let handle = crabka_security::JwksHandle::new_with_refresher_handles(
+                        crabka_security::Jwks::empty(),
+                        last_successful.clone(),
+                        signal_tx,
                     );
+
+                    let mut v = crabka_security::SignedJwsValidator::new(handle);
                     if let Some(name) = oauth.principal_claim_name {
                         v.principal_claim_name = name;
                     }
@@ -351,12 +385,24 @@ impl FileConfig {
                     v.groups_claim.clone_from(&groups_claim_compiled);
                     v.groups_claim_delimiter
                         .clone_from(&oauth.groups_claim_delimiter);
+                    // Slice 49i: hard cache-expiry threshold.
+                    v.expiry_ms = oauth.jwks_expiry_seconds.map(|s| i64::from(s) * 1000);
                     cfg.oauthbearer_validator = crabka_security::OAuthBearerValidator::Signed(v);
                     cfg.oauthbearer_jwks_endpoint = Some(jwks_uri);
                     if let Some(ms) = oauth.jwks_refresh_interval_ms {
                         cfg.oauthbearer_jwks_refresh_interval =
                             std::time::Duration::from_millis(ms);
                     }
+
+                    // Slice 49i: park signal_rx + shared state for Broker::start.
+                    *cfg.oauthbearer_jwks_signal_rx.lock().unwrap() = Some(signal_rx);
+                    cfg.oauthbearer_jwks_last_successful_fetch_ms = last_successful;
+                    cfg.oauthbearer_jwks_last_on_demand_refresh_ms = last_on_demand;
+                    cfg.oauthbearer_jwks_min_on_demand_pause = std::time::Duration::from_secs(
+                        u64::from(oauth.jwks_min_refresh_pause_seconds.unwrap_or(1)),
+                    );
+                    cfg.oauthbearer_jwks_ignore_key_use =
+                        oauth.jwks_ignore_key_use.unwrap_or(false);
                 }
                 (None, Some(introspect_uri)) => {
                     // Slice 49d: RFC 7662 introspection validator. The
