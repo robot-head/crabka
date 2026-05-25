@@ -91,6 +91,39 @@ pub enum Authentication {
     /// mTLS). Mirrors Strimzi's `tls-external`.
     #[serde(rename = "tls-external")]
     TlsExternal,
+    /// Slice 51b: KIP-48 delegation-token authentication. The operator
+    /// acts-as a super-user to mint a token owned by this user, persists
+    /// `(token-id, hmac)` into a Secret, and periodically renews ahead
+    /// of expiry.
+    #[serde(rename = "delegation-token")]
+    DelegationToken(DelegationTokenAuth),
+}
+
+/// Slice 51b: per-user knobs that flow into `CreateDelegationToken` and
+/// the operator's renew loop. The reconciler mints the token via the
+/// admin client (operator acts-as a super-user), persists
+/// `(token-id, hmac)` into the user's Secret, and renews ahead of
+/// `expiry_timestamp_ms`.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DelegationTokenAuth {
+    /// Principal strings (e.g. `"User:bob"`) allowed to renew/expire
+    /// this token in addition to the owner. Default empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub renewers: Vec<String>,
+
+    /// Hard upper bound on token lifetime in milliseconds. `None` →
+    /// broker's `delegation_token_max_lifetime_ms` (7d default). Capped
+    /// by the broker even when explicitly set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub max_lifetime_ms: Option<i64>,
+
+    /// Renew when `expiry_timestamp_ms - now <= this`. Default 24h.
+    /// Minimum 60s.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 60_000))]
+    pub renew_before_expiry_ms: Option<i64>,
 }
 
 fn authentication_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
@@ -100,12 +133,21 @@ fn authentication_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema 
         "properties": {
             "type": {
                 "type": "string",
-                "enum": ["scram-sha-512", "tls", "tls-external"],
+                "enum": ["scram-sha-512", "tls", "tls-external", "delegation-token"],
             },
+            // SCRAM
             "iterations": { "type": "integer", "minimum": 4096, "maximum": 1_000_000 },
             "passwordLength": { "type": "integer", "minimum": 16, "maximum": 256 },
+            // TLS
             "validityDays": { "type": "integer", "minimum": 1, "maximum": 36500 },
             "renewalDays": { "type": "integer", "minimum": 1, "maximum": 3650 },
+            // Delegation token (slice 51b)
+            "renewers": {
+                "type": "array",
+                "items": { "type": "string", "pattern": "^User:.+$" },
+            },
+            "maxLifetimeMs": { "type": "integer", "minimum": 1 },
+            "renewBeforeExpiryMs": { "type": "integer", "minimum": 60000 },
         },
     })
 }
@@ -305,6 +347,28 @@ pub struct KafkaUserStatus {
     /// matching" issues.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_principal: Option<String>,
+
+    /// Slice 51b: persisted `token_id` (UUID) of the operator-managed
+    /// delegation token for this user. Used across reconciles to find
+    /// the same token via `DescribeDelegationToken`. Present once the
+    /// operator has successfully issued a token via
+    /// `CreateDelegationToken`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation_token_id: Option<String>,
+
+    /// Slice 51b: current `expiry_timestamp_ms` of the operator-managed
+    /// delegation token (extended on each successful renew). Compared
+    /// against `now` to decide when to renew per
+    /// `spec.authentication.renewBeforeExpiryMs`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation_token_expiry_timestamp_ms: Option<i64>,
+
+    /// Slice 51b: token's absolute upper bound (`max_timestamp_ms`).
+    /// Renew can never push `expiry_timestamp_ms` past this — the
+    /// operator stops renewing and surfaces `TokenExpiring` once
+    /// further extension is impossible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation_token_max_timestamp_ms: Option<i64>,
 }
 
 impl KafkaUserQuotas {
@@ -663,5 +727,48 @@ mod tests {
         let status = KafkaUserStatus::default();
         let j = serde_json::to_string(&status).unwrap();
         assert!(j.contains("\"external\":false"), "got: {j}");
+    }
+
+    #[test]
+    fn delegation_token_authentication_round_trip() {
+        let yaml = r#"
+apiVersion: crabka.io/v1alpha1
+kind: KafkaUser
+metadata:
+  name: alice
+spec:
+  authentication:
+    type: delegation-token
+    renewers: ["User:bob", "User:carol"]
+    maxLifetimeMs: 86400000
+    renewBeforeExpiryMs: 7200000
+"#;
+        let user: KafkaUser = serde_yaml::from_str(yaml).unwrap();
+        let Authentication::DelegationToken(dt) = user.spec.authentication else {
+            panic!("expected DelegationToken variant");
+        };
+        assert_eq!(dt.renewers, vec!["User:bob", "User:carol"]);
+        assert_eq!(dt.max_lifetime_ms, Some(86_400_000));
+        assert_eq!(dt.renew_before_expiry_ms, Some(7_200_000));
+    }
+
+    #[test]
+    fn delegation_token_authentication_minimal_omits_optional_fields() {
+        let yaml = r#"
+apiVersion: crabka.io/v1alpha1
+kind: KafkaUser
+metadata:
+  name: alice
+spec:
+  authentication:
+    type: delegation-token
+"#;
+        let user: KafkaUser = serde_yaml::from_str(yaml).unwrap();
+        let Authentication::DelegationToken(dt) = user.spec.authentication else {
+            panic!("expected DelegationToken variant");
+        };
+        assert!(dt.renewers.is_empty());
+        assert!(dt.max_lifetime_ms.is_none());
+        assert!(dt.renew_before_expiry_ms.is_none());
     }
 }

@@ -348,6 +348,12 @@ pub async fn reconcile(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Action,
         // or issue a cert. ACL + quota reconciliation below is
         // principal-driven and Just Works for this arm.
         Authentication::TlsExternal => None,
+        // Slice 51b: real reconcile lives in O2
+        // (`controller::user_delegation_token`). This arm is a stub
+        // placeholder until that module lands — the operator just falls
+        // through to ACL + quota reconciliation for the principal. No
+        // cert / tls_not_after to surface.
+        Authentication::DelegationToken(_) => None,
     };
 
     // Open admin for ACL + quota reconciliation (steps 8 + 9). Common
@@ -483,6 +489,10 @@ pub async fn reconcile(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Action,
         Authentication::ScramSha512(_) => Duration::from_mins(1),
         Authentication::Tls(_) => Duration::from_hours(6),
         Authentication::TlsExternal => Duration::from_mins(1),
+        // Slice 51b: real cadence is renew-driven and lives in O2; the
+        // stub keeps the per-minute fallback so ACL/quota drift is
+        // still caught.
+        Authentication::DelegationToken(_) => Duration::from_mins(1),
     };
     Ok(Action::requeue(requeue))
 }
@@ -604,6 +614,10 @@ pub(crate) fn principal_for(name: &str, auth: &Authentication) -> String {
         // metadata.name as the principal). Same string shape as SCRAM
         // but different rationale — kept as a distinct arm.
         Authentication::TlsExternal => format!("User:{name}"),
+        // Slice 51b: delegation tokens carry the owner principal
+        // (`User:<metadata.name>`); ACLs continue to be authored
+        // against the owner, not the token-id.
+        Authentication::DelegationToken(_) => format!("User:{name}"),
     }
 }
 

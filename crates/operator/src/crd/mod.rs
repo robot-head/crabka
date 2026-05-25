@@ -27,6 +27,6 @@ pub use rebalance::{KafkaRebalance, KafkaRebalanceSpec, KafkaRebalanceStatus, Op
 pub use topic::{KafkaTopic, KafkaTopicSpec, KafkaTopicStatus};
 pub use user::{
     AclOp, AclPatternType, AclPermission, AclResource, AclResourceKind, AclRule, Authentication,
-    Authorization, KafkaUser, KafkaUserQuotas, KafkaUserSpec, KafkaUserStatus, ScramSha512Auth,
-    SimpleAuthorization,
+    Authorization, DelegationTokenAuth, KafkaUser, KafkaUserQuotas, KafkaUserSpec, KafkaUserStatus,
+    ScramSha512Auth, SimpleAuthorization,
 };
