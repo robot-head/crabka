@@ -27,15 +27,14 @@
 //! trait pair. Unit tests substitute trivial in-memory mocks; production
 //! wires `kube::Api<Secret>` / `kube::Api<KafkaUser>` adapters.
 
-// Slice 51b: the production dispatch from `controller::user` into
-// `reconcile` here lands in task O3 (admin-client wiring). Until then,
-// the `reconcile` + helper surface is exercised by this module's tests
-// only — keep dead-code lints quiet at the module level rather than
-// sprinkling per-item allows.
+// Slice 51b: production dispatch from `controller::user` lands in this
+// module's `reconcile` entry. The module-level `dead_code` allow stays
+// to keep test-only helpers (mocks, recording writers, sub-helpers
+// exercised exclusively from the in-module tests) from tripping lints
+// when individual code paths are exercised only on the happy path.
 #![allow(dead_code)]
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -570,25 +569,48 @@ pub(crate) async fn expire_owned_tokens(
     Ok(())
 }
 
-/// Adapter that wraps an `Arc<tokio::sync::Mutex<AdminClient>>` so the
-/// reconcile path can take a `&dyn DelegationTokenAdmin`. The
-/// `crabka_client_admin::AdminClient` impl block lives in O3's module
-/// (`crabka-client-admin/src/delegation_tokens.rs`) and is plugged in
-/// via this adapter.
+/// Production `DelegationTokenAdmin` impl over the operator's
+/// `AdminClientHandle` (an `Arc<Mutex<dyn AdminClientLike + Send>>`).
+/// Each method locks the inner mutex and delegates to the four
+/// `AdminClientLike` methods added in this slice.
 ///
-/// The `4 admin methods` themselves are O3-owned; until O3 lands the
-/// adapter cannot compile. Hide it behind a stub for now: the trait
-/// signature here is the contract the reconciler relies on, and the
-/// glue between operator and admin client is finalised in O3.
-#[allow(dead_code)] // wired in by O3 in a follow-up
-pub(crate) struct AdminClientAdapter<C> {
-    pub client: Arc<tokio::sync::Mutex<C>>,
-}
+/// The trait surface uses `&self`, so the mutex is taken per call —
+/// matching the SCRAM/ACL/quota arms in `user.rs` which also lock the
+/// same handle on each admin RPC.
+#[async_trait]
+impl DelegationTokenAdmin for crate::context::AdminClientHandle {
+    async fn create_delegation_token_as_owner(
+        &self,
+        owner_principal_name: &str,
+        renewers: &[String],
+        max_lifetime_ms: i64,
+    ) -> Result<DelegationToken, AdminError> {
+        let mut admin = self.lock().await;
+        admin
+            .create_delegation_token_as_owner(owner_principal_name, renewers, max_lifetime_ms)
+            .await
+    }
 
-// NOTE: The `impl DelegationTokenAdmin for AdminClientAdapter<AdminClient>`
-// block lives in `crabka-client-admin/src/delegation_tokens.rs` (task O3).
-// Placing it there avoids cycling the operator crate's compile on the
-// admin client's wire-types and keeps this module unit-testable on its own.
+    async fn renew_delegation_token(&self, hmac: &[u8]) -> Result<DelegationToken, AdminError> {
+        let mut admin = self.lock().await;
+        admin.renew_delegation_token(hmac).await
+    }
+
+    async fn expire_delegation_token(&self, hmac: &[u8]) -> Result<(), AdminError> {
+        let mut admin = self.lock().await;
+        admin.expire_delegation_token(hmac).await
+    }
+
+    async fn describe_delegation_tokens_owned_by(
+        &self,
+        owner_principal: &str,
+    ) -> Result<Vec<DelegationToken>, AdminError> {
+        let mut admin = self.lock().await;
+        admin
+            .describe_delegation_tokens_owned_by(owner_principal)
+            .await
+    }
+}
 
 #[cfg(test)]
 mod tests {

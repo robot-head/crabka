@@ -683,6 +683,40 @@ impl AdminClientLike for FakeAdminClient {
         }
         Ok(None)
     }
+
+    // ── Slice 51b: delegation-token RPCs ──────────────────────────────
+    //
+    // No reconcile test under `tests/` exercises a delegation-token
+    // `KafkaUser` today (the delegation-token reconcile is unit-tested
+    // in `user_delegation_token.rs` against an in-module mock). These
+    // stubs satisfy the trait so the test binary compiles; calling
+    // any of them in a test would be a bug.
+    async fn create_delegation_token_as_owner(
+        &mut self,
+        _owner_principal_name: &str,
+        _renewers: &[String],
+        _max_lifetime_ms: i64,
+    ) -> Result<crabka_metadata::DelegationToken, AdminError> {
+        unimplemented!("FakeAdminClient: delegation-token RPCs not exercised by these tests");
+    }
+
+    async fn renew_delegation_token(
+        &mut self,
+        _hmac: &[u8],
+    ) -> Result<crabka_metadata::DelegationToken, AdminError> {
+        unimplemented!("FakeAdminClient: delegation-token RPCs not exercised by these tests");
+    }
+
+    async fn expire_delegation_token(&mut self, _hmac: &[u8]) -> Result<(), AdminError> {
+        unimplemented!("FakeAdminClient: delegation-token RPCs not exercised by these tests");
+    }
+
+    async fn describe_delegation_tokens_owned_by(
+        &mut self,
+        _owner_principal: &str,
+    ) -> Result<Vec<crabka_metadata::DelegationToken>, AdminError> {
+        unimplemented!("FakeAdminClient: delegation-token RPCs not exercised by these tests");
+    }
 }
 
 /// True if every populated axis of `filter` matches `entry`. Matches
