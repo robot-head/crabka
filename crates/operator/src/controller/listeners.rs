@@ -87,6 +87,13 @@ pub enum ValidationError {
     /// check `typ` against; the field is rejected. The `String` carries
     /// the listener name + a human-readable description.
     ListenerOauthValidTokenTypeRejectedInIntrospectionMode(String),
+    /// Slice 49i: any of `jwksMinRefreshPauseSeconds`,
+    /// `jwksExpirySeconds`, `jwksIgnoreKeyUse` set on an
+    /// `accessTokenIsJwt: false` listener. Introspection mode
+    /// doesn't use JWKS; setting these fields is a configuration
+    /// error worth surfacing at apply time. The String carries the
+    /// listener name + which field(s) were rejected.
+    ListenerOauthJwksFieldsRejectedInIntrospectionMode(String),
     /// Two or more OAuth listeners declare differing configs. The broker
     /// `[oauthbearer]` block is broker-global (slice 49b), so per-listener
     /// OAuth divergence is not representable.
@@ -121,6 +128,9 @@ impl ValidationError {
             Self::ListenerOauthJwksRefreshTooSmall { .. } => "ListenerOauthInvalidRefresh",
             Self::ListenerOauthValidTokenTypeRejectedInIntrospectionMode(_) => {
                 "ListenerOauthValidTokenTypeRejectedInIntrospectionMode"
+            }
+            Self::ListenerOauthJwksFieldsRejectedInIntrospectionMode(_) => {
+                "ListenerOauthJwksFieldsRejectedInIntrospectionMode"
             }
             Self::ConflictingOAuthListenerConfig => "ConflictingOAuthConfig",
             Self::ListenerOauthAccessTokenIsJwtInvalid(_) => "ListenerOauthAccessTokenIsJwtInvalid",
@@ -176,7 +186,8 @@ impl ValidationError {
                 "all OAuth listeners must share identical config (per-listener OAuth is a future broker slice)".to_string()
             }
             Self::ListenerOauthAccessTokenIsJwtInvalid(msg)
-            | Self::ListenerOauthValidTokenTypeRejectedInIntrospectionMode(msg) => msg.clone(),
+            | Self::ListenerOauthValidTokenTypeRejectedInIntrospectionMode(msg)
+            | Self::ListenerOauthJwksFieldsRejectedInIntrospectionMode(msg) => msg.clone(),
         }
     }
 }
@@ -294,6 +305,28 @@ pub fn validate_listeners(
                             format!(
                                 "listener '{}': accessTokenIsJwt=false forbids validTokenType (no JWT header in introspection responses)",
                                 l.name
+                            ),
+                        ),
+                    );
+                }
+                // Slice 49i: JWKS-only fields are rejected in introspection mode.
+                let mut jwks_fields_set = Vec::new();
+                if cfg.jwks_min_refresh_pause_seconds.is_some() {
+                    jwks_fields_set.push("jwksMinRefreshPauseSeconds");
+                }
+                if cfg.jwks_expiry_seconds.is_some() {
+                    jwks_fields_set.push("jwksExpirySeconds");
+                }
+                if cfg.jwks_ignore_key_use.is_some() {
+                    jwks_fields_set.push("jwksIgnoreKeyUse");
+                }
+                if !jwks_fields_set.is_empty() {
+                    return Err(
+                        ValidationError::ListenerOauthJwksFieldsRejectedInIntrospectionMode(
+                            format!(
+                                "listener '{}': accessTokenIsJwt=false forbids JWKS-only fields ({})",
+                                l.name,
+                                jwks_fields_set.join(", "),
                             ),
                         ),
                     );
@@ -1367,6 +1400,9 @@ mod tests {
             fallback_user_name_prefix: None,
             groups_claim: None,
             groups_claim_delimiter: None,
+            jwks_min_refresh_pause_seconds: None,
+            jwks_expiry_seconds: None,
+            jwks_ignore_key_use: None,
         }
     }
 
@@ -1519,6 +1555,9 @@ mod tests {
             fallback_user_name_prefix: None,
             groups_claim: None,
             groups_claim_delimiter: None,
+            jwks_min_refresh_pause_seconds: None,
+            jwks_expiry_seconds: None,
+            jwks_ignore_key_use: None,
         };
         let perturbations: Vec<(&str, crate::crd::ListenerAuthenticationOAuth)> = vec![
             (
@@ -1641,6 +1680,27 @@ mod tests {
                     ..base.clone()
                 },
             ),
+            (
+                "jwks_min_refresh_pause_seconds",
+                crate::crd::ListenerAuthenticationOAuth {
+                    jwks_min_refresh_pause_seconds: Some(5),
+                    ..base.clone()
+                },
+            ),
+            (
+                "jwks_expiry_seconds",
+                crate::crd::ListenerAuthenticationOAuth {
+                    jwks_expiry_seconds: Some(3600),
+                    ..base.clone()
+                },
+            ),
+            (
+                "jwks_ignore_key_use",
+                crate::crd::ListenerAuthenticationOAuth {
+                    jwks_ignore_key_use: Some(true),
+                    ..base.clone()
+                },
+            ),
         ];
         for (field, perturbed) in perturbations {
             let listeners = vec![
@@ -1689,6 +1749,9 @@ mod tests {
             fallback_user_name_prefix: None,
             groups_claim: None,
             groups_claim_delimiter: None,
+            jwks_min_refresh_pause_seconds: None,
+            jwks_expiry_seconds: None,
+            jwks_ignore_key_use: None,
         };
         let perturbations: Vec<(&str, crate::crd::ListenerAuthenticationOAuth)> = vec![
             (
@@ -1775,6 +1838,9 @@ mod tests {
             fallback_user_name_prefix: None,
             groups_claim: None,
             groups_claim_delimiter: None,
+            jwks_min_refresh_pause_seconds: None,
+            jwks_expiry_seconds: None,
+            jwks_ignore_key_use: None,
         }
     }
 
@@ -1989,6 +2055,9 @@ mod tests {
             fallback_user_name_prefix: None,
             groups_claim: None,
             groups_claim_delimiter: None,
+            jwks_min_refresh_pause_seconds: None,
+            jwks_expiry_seconds: None,
+            jwks_ignore_key_use: None,
         };
         let listeners = vec![oauth_listener("oauth", 9096, true, cfg)];
         let err = validate_listeners(&listeners, None).unwrap_err();
@@ -2000,6 +2069,62 @@ mod tests {
             matches!(
                 err,
                 ValidationError::ListenerOauthValidTokenTypeRejectedInIntrospectionMode(_)
+            ),
+            "unexpected error variant: {err:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Slice 49i — JWKS-only fields cross-mode validation
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn validate_listeners_rejects_jwks_fields_in_introspection_mode() {
+        // Introspection-mode listener with one JWKS-only field set must
+        // be rejected: JWKS isn't consulted at all in introspection
+        // mode, so a JWKS refresher policy field has nothing to bind
+        // against. Mirrors the new
+        // `ListenerOauthJwksFieldsRejectedInIntrospectionMode` variant
+        // introduced in slice 49i.
+        let cfg = crate::crd::ListenerAuthenticationOAuth {
+            valid_issuer_uri: "https://iss.example/".into(),
+            jwks_endpoint_uri: None,
+            valid_audience: None,
+            user_name_claim: None,
+            custom_claim_check: None,
+            jwks_refresh_seconds: None,
+            max_clock_skew_seconds: None,
+            enable_oauth_bearer: true,
+            tls_trusted_certificates: vec![],
+            access_token_is_jwt: false,
+            introspection_endpoint_uri: Some("https://iss.example/introspect".into()),
+            user_info_endpoint_uri: None,
+            client_id: Some("kafka-broker".into()),
+            client_secret: Some(crate::crd::OauthClientSecretRef {
+                secret_name: "creds".into(),
+                key: "client-secret".into(),
+            }),
+            introspection_http_timeout_seconds: None,
+            max_seconds_without_reauthentication: None,
+            valid_token_type: None,
+            fallback_user_name_claim: None,
+            fallback_user_name_prefix: None,
+            groups_claim: None,
+            groups_claim_delimiter: None,
+            jwks_min_refresh_pause_seconds: Some(1),
+            jwks_expiry_seconds: None,
+            jwks_ignore_key_use: None,
+        };
+        let listeners = vec![oauth_listener("oauth", 9096, true, cfg)];
+        let err = validate_listeners(&listeners, None).unwrap_err();
+        assert_eq!(
+            err.reason(),
+            "ListenerOauthJwksFieldsRejectedInIntrospectionMode"
+        );
+        assert!(
+            matches!(
+                err,
+                ValidationError::ListenerOauthJwksFieldsRejectedInIntrospectionMode(_)
             ),
             "unexpected error variant: {err:?}"
         );
@@ -2739,6 +2864,15 @@ pub fn render_broker_toml(
         if let Some(d) = &oauth_cfg.groups_claim_delimiter {
             let _ = writeln!(out, "groups_claim_delimiter = \"{d}\"");
         }
+        if let Some(s) = oauth_cfg.jwks_min_refresh_pause_seconds {
+            let _ = writeln!(out, "jwks_min_refresh_pause_seconds = {s}");
+        }
+        if let Some(s) = oauth_cfg.jwks_expiry_seconds {
+            let _ = writeln!(out, "jwks_expiry_seconds = {s}");
+        }
+        if let Some(b) = oauth_cfg.jwks_ignore_key_use {
+            let _ = writeln!(out, "jwks_ignore_key_use = {b}");
+        }
         out.push('\n');
     }
 
@@ -2960,6 +3094,9 @@ mod toml_rendering_tests {
             fallback_user_name_prefix: None,
             groups_claim: None,
             groups_claim_delimiter: None,
+            jwks_min_refresh_pause_seconds: None,
+            jwks_expiry_seconds: None,
+            jwks_ignore_key_use: None,
         }
     }
 
@@ -3061,6 +3198,9 @@ mod toml_rendering_tests {
             fallback_user_name_prefix: None,
             groups_claim: None,
             groups_claim_delimiter: None,
+            jwks_min_refresh_pause_seconds: None,
+            jwks_expiry_seconds: None,
+            jwks_ignore_key_use: None,
         };
         let listeners = vec![oauth_listener_for_render("oauth", 9095, true, cfg)];
         let toml = render_broker_toml(
@@ -3132,6 +3272,9 @@ mod toml_rendering_tests {
             fallback_user_name_prefix: None,
             groups_claim: None,
             groups_claim_delimiter: None,
+            jwks_min_refresh_pause_seconds: None,
+            jwks_expiry_seconds: None,
+            jwks_ignore_key_use: None,
         };
         let listeners = vec![oauth_listener_for_render("oauth", 9095, true, cfg)];
         let toml = render_broker_toml(
@@ -3361,6 +3504,9 @@ mod toml_rendering_tests {
             fallback_user_name_prefix: None,
             groups_claim: None,
             groups_claim_delimiter: None,
+            jwks_min_refresh_pause_seconds: None,
+            jwks_expiry_seconds: None,
+            jwks_ignore_key_use: None,
         };
         let listeners = vec![oauth_listener_for_render("oauth", 9095, true, cfg)];
         let toml = render_broker_toml(
@@ -3416,6 +3562,9 @@ mod toml_rendering_tests {
             fallback_user_name_prefix: None,
             groups_claim: None,
             groups_claim_delimiter: None,
+            jwks_min_refresh_pause_seconds: None,
+            jwks_expiry_seconds: None,
+            jwks_ignore_key_use: None,
         }
     }
 
@@ -3736,6 +3885,103 @@ mod toml_rendering_tests {
         assert!(
             !toml.contains("custom_claim_check"),
             "TOML must omit custom_claim_check when None; got:\n{toml}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Slice 49i — JWKS refresher policy fields render
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn render_broker_toml_emits_jwks_min_refresh_pause_seconds_when_set() {
+        use std::collections::BTreeMap;
+        let mut oauth = oauth_full_cfg();
+        oauth.jwks_min_refresh_pause_seconds = Some(2);
+        let listeners = vec![oauth_listener_for_render("oauth", 9096, true, oauth)];
+        let toml = render_broker_toml(
+            0,
+            &listeners,
+            &addrs_for("oauth", 9096),
+            "oauth",
+            &BTreeMap::new(),
+            Some(&render_tls()),
+            None,
+        );
+        assert!(
+            toml.contains("jwks_min_refresh_pause_seconds = 2"),
+            "expected jwks_min_refresh_pause_seconds render; got:\n{toml}"
+        );
+    }
+
+    #[test]
+    fn render_broker_toml_emits_jwks_expiry_seconds_when_set() {
+        use std::collections::BTreeMap;
+        let mut oauth = oauth_full_cfg();
+        oauth.jwks_expiry_seconds = Some(3600);
+        let listeners = vec![oauth_listener_for_render("oauth", 9096, true, oauth)];
+        let toml = render_broker_toml(
+            0,
+            &listeners,
+            &addrs_for("oauth", 9096),
+            "oauth",
+            &BTreeMap::new(),
+            Some(&render_tls()),
+            None,
+        );
+        assert!(
+            toml.contains("jwks_expiry_seconds = 3600"),
+            "expected jwks_expiry_seconds render; got:\n{toml}"
+        );
+    }
+
+    #[test]
+    fn render_broker_toml_emits_jwks_ignore_key_use_when_set() {
+        use std::collections::BTreeMap;
+        let mut oauth = oauth_full_cfg();
+        oauth.jwks_ignore_key_use = Some(true);
+        let listeners = vec![oauth_listener_for_render("oauth", 9096, true, oauth)];
+        let toml = render_broker_toml(
+            0,
+            &listeners,
+            &addrs_for("oauth", 9096),
+            "oauth",
+            &BTreeMap::new(),
+            Some(&render_tls()),
+            None,
+        );
+        assert!(
+            toml.contains("jwks_ignore_key_use = true"),
+            "expected jwks_ignore_key_use render; got:\n{toml}"
+        );
+    }
+
+    #[test]
+    fn render_broker_toml_omits_jwks_policy_fields_when_unset() {
+        // Default oauth_full_cfg() leaves all 3 fields None; render
+        // must not emit any of the keys.
+        use std::collections::BTreeMap;
+        let oauth = oauth_full_cfg();
+        let listeners = vec![oauth_listener_for_render("oauth", 9096, true, oauth)];
+        let toml = render_broker_toml(
+            0,
+            &listeners,
+            &addrs_for("oauth", 9096),
+            "oauth",
+            &BTreeMap::new(),
+            Some(&render_tls()),
+            None,
+        );
+        assert!(
+            !toml.contains("jwks_min_refresh_pause_seconds"),
+            "TOML must omit jwks_min_refresh_pause_seconds when None; got:\n{toml}"
+        );
+        assert!(
+            !toml.contains("jwks_expiry_seconds"),
+            "TOML must omit jwks_expiry_seconds when None; got:\n{toml}"
+        );
+        assert!(
+            !toml.contains("jwks_ignore_key_use"),
+            "TOML must omit jwks_ignore_key_use when None; got:\n{toml}"
         );
     }
 }
@@ -4296,6 +4542,9 @@ mod weak_auth_tests {
                     fallback_user_name_prefix: None,
                     groups_claim: None,
                     groups_claim_delimiter: None,
+                    jwks_min_refresh_pause_seconds: None,
+                    jwks_expiry_seconds: None,
+                    jwks_ignore_key_use: None,
                 },
             )),
             configuration: None,

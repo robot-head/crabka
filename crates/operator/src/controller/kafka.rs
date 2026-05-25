@@ -1705,6 +1705,9 @@ mod tests {
             fallback_user_name_prefix: None,
             groups_claim: None,
             groups_claim_delimiter: None,
+            jwks_min_refresh_pause_seconds: None,
+            jwks_expiry_seconds: None,
+            jwks_ignore_key_use: None,
         }
     }
 
@@ -1734,6 +1737,9 @@ mod tests {
             fallback_user_name_prefix: None,
             groups_claim: None,
             groups_claim_delimiter: None,
+            jwks_min_refresh_pause_seconds: None,
+            jwks_expiry_seconds: None,
+            jwks_ignore_key_use: None,
         }
     }
 
