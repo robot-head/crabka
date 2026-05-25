@@ -4,6 +4,7 @@
 //! crate produces verifiers, hashes, and TLS configs.
 
 pub mod ca;
+pub mod delegation_token;
 mod jwks;
 mod jwks_trust;
 mod listener;
@@ -16,6 +17,7 @@ mod reload;
 pub mod scram;
 mod tls;
 
+pub use delegation_token::{SecretBytes, compute_token_hmac};
 pub use jwks::{Jwks, JwksHandle};
 pub use jwks_trust::{JwksTrustError, build_client_config_from_pem};
 pub use listener::ListenerProtocol;

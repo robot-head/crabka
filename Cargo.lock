@@ -1356,6 +1356,7 @@ dependencies = [
  "arc-swap",
  "async-trait",
  "base64",
+ "bytes",
  "codspeed-criterion-compat",
  "hex",
  "hmac 0.13.0",
