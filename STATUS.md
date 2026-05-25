@@ -2764,9 +2764,10 @@ OAuth CRD + broker JWKS refresher:
   no-op). Cross-listener divergence walk extended with 3 new
   perturbations.
 - **`ListenerAuthenticationOAuth` cascade (CLAUDE.md greenfield rule):**
-  T2/T3/T4 swept ~33 fixture sites for the 3 new `None` defaults so
+  T2/T3/T4 swept 34 fixture sites for the 3 new `None` defaults so
   the struct extension compiled atomically with no `#[serde(default)]`
-  shim: 12 in `crd/listener.rs` (T2), 11 in `controller/listeners.rs`
+  shim: 13 in `crd/listener.rs` (T2 — 12 pre-existing fixtures + 1
+  new round-trip-omits test fixture), 11 in `controller/listeners.rs`
   + 2 in `controller/kafka.rs` + 3 in `controller/kafka_node_pool.rs`
   (T3 — plan estimated 4+3 sibling sites; actual 2+3), and 5 across
   3 `tests/reconcile_*.rs` operator integration files (T4 — plan
@@ -2774,13 +2775,14 @@ OAuth CRD + broker JWKS refresher:
 - **E2E (`.github/workflows/operator-e2e.yml`)**: `kind-oauth` job's
   Kafka CR YAML adds the 3 fields. `kind-oauth-introspection` job
   NOT touched — cross-mode validator would reject.
-- **Tests**: ~25 new — 16 broker unit (T1: 5 JWKS parser filter +
-  6 refresher behavior including rate-limit + expiry-tracking +
-  5 SignedJwsValidator expiry-check + signal-on-failure) + 2 CRD
-  round-trip + extended schema regression (T2) + 4 reconciler render
-  + 1 cross-mode validation (T3) + 2 operator integration (T4).
-  Extended cross-listener divergence walk. Workspace fmt + clippy
-  `-D warnings` + tests + CRD drift gate all green.
+- **Tests**: ~25 new — 16 broker unit (T1: 5 JWKS parser/handle in
+  `jwks.rs` + 5 refresher behavior in `oauth_jwks.rs` covering
+  rate-limit + expiry-tracking + 6 `SignedJwsValidator` expiry-check
+  + signal-on-failure in `oauthbearer.rs`) + 2 CRD round-trip +
+  extended schema regression (T2) + 4 reconciler render + 1 cross-mode
+  validation (T3) + 2 operator integration (T4). Extended cross-listener
+  divergence walk. Workspace fmt + clippy `-D warnings` + tests + CRD
+  drift gate all green.
 - **Reference doc**:
   `[docs/superpowers/specs/2026-05-24-crabka-oauth-jwks-refresher-policies-49i-design.md]`
 - **Architecture choice**: Approach A (fire-and-forget mpsc signal).
