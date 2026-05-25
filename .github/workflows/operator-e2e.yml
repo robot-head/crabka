@@ -2183,6 +2183,14 @@ jobs:
           SECRET=$($KCADM get "clients/$CID/client-secret" -r kafka \
             --fields value --format csv --noquotes | tail -1)
 
+          # Slice 49h: create a realm role + assign to the kafka-client
+          # service account so realm_access.roles is populated on access
+          # tokens. The broker's groupsClaim = "$.realm_access.roles[*]"
+          # extracts this into Principal.groups. Keycloak's service-account
+          # user convention is `service-account-<clientId>`.
+          $KCADM create roles -r kafka -s name=kafka-cluster-admin
+          $KCADM add-roles -r kafka --uusername service-account-kafka-client --rolename kafka-cluster-admin
+
           # Token-issuing client #2 — same shape, but NO `kafka.write` scope.
           # Used by the negative-test producer; broker rejects at scope-check
           # time before principal authorization is even consulted.
@@ -2256,6 +2264,7 @@ jobs:
                   userNameClaim: client_id
                   customClaimCheck: "$.scope[?@ == 'kafka.write']"
                   validTokenType: JWT
+                  groupsClaim: "$.realm_access.roles[*]"
                   maxSecondsWithoutReauthentication: 300
                   tlsTrustedCertificates:
                     - secretName: keycloak-ca
@@ -2764,6 +2773,14 @@ jobs:
           SECRET=$($KCADM get "clients/$CID/client-secret" -r kafka \
             --fields value --format csv --noquotes | tail -1)
 
+          # Slice 49h: create a realm role + assign to the kafka-client
+          # service account so realm_access.roles is populated on access
+          # tokens. The broker's groupsClaim = "$.realm_access.roles[*]"
+          # extracts this into Principal.groups. Keycloak's service-account
+          # user convention is `service-account-<clientId>`.
+          $KCADM create roles -r kafka -s name=kafka-cluster-admin
+          $KCADM add-roles -r kafka --uusername service-account-kafka-client --rolename kafka-cluster-admin
+
           # Producer client #2 — same shape, NO kafka.write scope. Negative test.
           $KCADM create clients -r kafka \
             -s clientId=kafka-client-noscope \
@@ -2848,6 +2865,7 @@ jobs:
                   validAudience: kafka-broker
                   userNameClaim: preferred_username
                   customClaimCheck: "$.scope[?@ == 'kafka.write']"
+                  groupsClaim: "$.realm_access.roles[*]"
                   clientId: kafka-broker
                   clientSecret:
                     secretName: keycloak-introspection-secret
