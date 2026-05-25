@@ -2717,3 +2717,104 @@ OAuth CRD + broker validators.
   indefinitely); broker-side groups consumer (slice 53/54 operator
   authorizer plugins).
 
+## Slice 49i — Operator + Broker: OAUTHBEARER JWKS refresher policies (2026-05-24)
+
+LAST OAUTHBEARER umbrella slice. After this lands, Strimzi field parity
+reached (modulo the explicitly-skipped slice 49f, PLAIN-with-OAuth-token).
+
+Adds 3 Strimzi-shape JWKS operational tuning fields on the listener
+OAuth CRD + broker JWKS refresher:
+
+- **`jwksMinRefreshPauseSeconds`**: rate-limits on-demand JWKS refresh
+  triggered by tokens with unknown `kid`. Strimzi default 1.
+- **`jwksExpirySeconds`**: hard cache expiry. `SignedJwsValidator`
+  rejects tokens when the JWKS hasn't been successfully refreshed
+  within this window. Fails closed on IdP outage. Strimzi default
+  360 (6 minutes).
+- **`jwksIgnoreKeyUse`**: filter toggle. Default `false` filters out
+  JWKS keys with `use=enc`; setting `true` keeps all keys regardless.
+
+- **Broker JWKS refresher (`crates/broker/src/oauth_jwks.rs`)**:
+  `JwksRefresher` loop becomes 3-arm `tokio::select!` over
+  periodic-tick + `signal_rx.recv()` + cancellation. On-demand
+  refresh fires only when `now - last_on_demand_refresh >=
+  min_on_demand_pause`; signals coalesce via mpsc capacity-1
+  `try_send`. `last_successful_fetch_ms` advances only on success
+  so the cache ages toward expiry on persistent failure.
+- **JwksHandle (`crates/security/src/jwks.rs`)**: gained
+  `last_successful_fetch_ms: Arc<AtomicI64>` and
+  `signal_tx: Option<mpsc::Sender<()>>` fields. New constructor
+  `JwksHandle::new_with_refresher_handles` for the wired path; the
+  default constructor leaves both `None`/sentinel for non-paired
+  validators.
+- **SignedJwsValidator (`crates/security/src/oauthbearer.rs`)**:
+  new `expiry_ms: Option<i64>` field. `validate()` pre-checks
+  `now - last_successful_fetch > expiry_ms` (reject if stale);
+  signal-on-verify-failure pattern (any `verify()` error fires
+  `signal_refresh()` then returns the error). Unsecured-JWS +
+  Introspection validators untouched (don't consult JWKS).
+- **Operator CRD (`crates/operator/src/crd/listener.rs`)**: 3 new
+  `Option<>` fields. Hand-rolled schema: 2 integers with
+  `minimum: 0` / `minimum: 1` + 1 boolean.
+- **Operator reconciler (`crates/operator/src/controller/listeners.rs`)**:
+  `render_broker_toml` emits 3 new TOML keys when set. New cross-mode
+  validation `ListenerOauthJwksFieldsRejectedInIntrospectionMode`
+  fires when any of the 3 fields is set on an `accessTokenIsJwt:
+  false` listener (operator-side feedback rather than silent broker-side
+  no-op). Cross-listener divergence walk extended with 3 new
+  perturbations.
+- **`ListenerAuthenticationOAuth` cascade (CLAUDE.md greenfield rule):**
+  T2/T3/T4 swept ~33 fixture sites for the 3 new `None` defaults so
+  the struct extension compiled atomically with no `#[serde(default)]`
+  shim: 12 in `crd/listener.rs` (T2), 11 in `controller/listeners.rs`
+  + 2 in `controller/kafka.rs` + 3 in `controller/kafka_node_pool.rs`
+  (T3 — plan estimated 4+3 sibling sites; actual 2+3), and 5 across
+  3 `tests/reconcile_*.rs` operator integration files (T4 — plan
+  estimated 5+2+1; actual 3+1+1).
+- **E2E (`.github/workflows/operator-e2e.yml`)**: `kind-oauth` job's
+  Kafka CR YAML adds the 3 fields. `kind-oauth-introspection` job
+  NOT touched — cross-mode validator would reject.
+- **Tests**: ~25 new — 16 broker unit (T1: 5 JWKS parser filter +
+  6 refresher behavior including rate-limit + expiry-tracking +
+  5 SignedJwsValidator expiry-check + signal-on-failure) + 2 CRD
+  round-trip + extended schema regression (T2) + 4 reconciler render
+  + 1 cross-mode validation (T3) + 2 operator integration (T4).
+  Extended cross-listener divergence walk. Workspace fmt + clippy
+  `-D warnings` + tests + CRD drift gate all green.
+- **Reference doc**:
+  `[docs/superpowers/specs/2026-05-24-crabka-oauth-jwks-refresher-policies-49i-design.md]`
+- **Architecture choice**: Approach A (fire-and-forget mpsc signal).
+  Validator stays sync; refresher consumes signals in its
+  `tokio::select!` loop. Rejected Approach B (async-await on
+  validator) and Approach C (skip on-demand refresh) for API-shape
+  and Strimzi-parity reasons.
+- **Out of scope (deferred or never):** per-listener JWKS refreshers
+  (broker still has one global `[oauthbearer]` block); reconcile-time
+  validation against the actual IdP (operator just renders); slice 49f
+  (PLAIN-with-OAuth-token, indefinitely skipped).
+
+### OAUTHBEARER umbrella complete
+
+After 49i lands, the OAUTHBEARER umbrella shipped 9 slices over
+the past month:
+
+- 49 / 49b: wire + JWKS validator (broker).
+- 50: KafkaUser tls-external + listener OAuth surface (operator).
+- 49c / 50b: TLS trust to IdP (broker + operator).
+- 49d / 50c: opaque-token introspection (broker + operator).
+- 49e / 50d: KIP-368 SASL re-auth + session-lifetime cap (broker + operator).
+- 49g: customClaimCheck JsonPath + validTokenType (broker + operator).
+- 49h: claims mapping — fallback chain + groups extraction (broker + operator).
+- 49i: JWKS refresher policies (broker + operator). **THIS SLICE.**
+
+Strimzi `KafkaListenerAuthenticationOAuth` field parity reached
+(modulo intentionally-skipped slice 49f PLAIN-with-OAuth-token,
+which gates clients that can't speak OAUTHBEARER — re-evaluate if
+a user reports needing it).
+
+Next umbrella per the operator roadmap: slices 51+ (delegation
+tokens, GSSAPI/Kerberos, OPA/Keycloak authorizer plugins). Slices
+53/54 will CONSUME the scaffolding 49g/49h/49d laid down
+(`Principal.groups`, `customClaimCheck` evaluation results,
+introspection metadata).
+
