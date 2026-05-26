@@ -3228,7 +3228,19 @@ jobs:
                         sasl.mechanism=OAUTHBEARER
                         sasl.login.callback.handler.class=org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginCallbackHandler
                         sasl.oauthbearer.token.endpoint.url=https://kc-keycloak.keycloak.svc.cluster.local/realms/kafka/protocol/openid-connect/token
-                        sasl.jaas.config=org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule required clientId="kafka-client" clientSecret="$SECRET" scope="kafka.write";
+                        # `kafka.write` is assigned to `kafka-client` as a
+                        # DEFAULT client-scope (always included on every
+                        # client_credentials token issuance). Keycloak
+                        # 26.x rejects `scope=<defaultScopeName>` in the
+                        # token request as `invalid_scope` because the
+                        # `scope` request-parameter only accepts OPTIONAL
+                        # client-scopes — default scopes are auto-applied
+                        # and re-requesting them is treated as a client
+                        # error. The token still carries `kafka.write` in
+                        # its `scope` claim (default-scope semantics), so
+                        # the broker's customClaimCheck
+                        # `$.scope[?@ == 'kafka.write']` still matches.
+                        sasl.jaas.config=org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule required clientId="kafka-client" clientSecret="$SECRET";
                         ssl.truststore.location=/tmp/trust.jks
                         ssl.truststore.password=changeit
                         INNER
@@ -3878,7 +3890,19 @@ jobs:
                         sasl.mechanism=OAUTHBEARER
                         sasl.login.callback.handler.class=org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginCallbackHandler
                         sasl.oauthbearer.token.endpoint.url=https://kc-keycloak.keycloak.svc.cluster.local/realms/kafka/protocol/openid-connect/token
-                        sasl.jaas.config=org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule required clientId="kafka-client" clientSecret="$SECRET" scope="kafka.write";
+                        # `kafka.write` is assigned to `kafka-client` as a
+                        # DEFAULT client-scope (always included on every
+                        # client_credentials token issuance). Keycloak
+                        # 26.x rejects `scope=<defaultScopeName>` in the
+                        # token request as `invalid_scope` because the
+                        # `scope` request-parameter only accepts OPTIONAL
+                        # client-scopes — default scopes are auto-applied
+                        # and re-requesting them is treated as a client
+                        # error. The token still carries `kafka.write` in
+                        # its `scope` claim (default-scope semantics), so
+                        # the broker's customClaimCheck
+                        # `$.scope[?@ == 'kafka.write']` still matches.
+                        sasl.jaas.config=org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule required clientId="kafka-client" clientSecret="$SECRET";
                         ssl.truststore.location=/tmp/trust.jks
                         ssl.truststore.password=changeit
                         INNER
