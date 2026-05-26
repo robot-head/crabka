@@ -23,7 +23,7 @@ use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 use crabka_protocol::{Decode, Encode};
 use tokio::sync::oneshot;
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize, authorize_topics};
+use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize_topics};
 use crate::broker::Broker;
 use crate::codes;
 use crate::error::BrokerError;
@@ -69,7 +69,7 @@ pub(crate) async fn handle(
                 resource_name: tid,
                 operation: AclOperation::Write,
             };
-            authorize(&image, &broker.config.super_users, &acl_req) == AuthorizationResult::Deny
+            broker.config.authorizer.authorize(&image, &acl_req) == AuthorizationResult::Deny
         }
         _ => false,
     };
@@ -91,8 +91,8 @@ pub(crate) async fn handle(
         })
         .collect();
     let acl_results = authorize_topics(
+        broker.config.authorizer.as_ref(),
         &image,
-        &broker.config.super_users,
         ctx.principal,
         ctx.peer,
         AclOperation::Write,

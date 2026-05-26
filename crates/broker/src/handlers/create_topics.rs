@@ -15,7 +15,7 @@ use crabka_protocol::{Decode, Encode};
 use crabka_raft::RaftError;
 use uuid::Uuid;
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize};
+use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 use crate::broker::Broker;
 use crate::codes;
 use crate::error::BrokerError;
@@ -62,9 +62,8 @@ pub(crate) async fn handle(
     // CLUSTER_AUTHORIZATION_FAILED on every topic row and short-circuit.
     {
         let image = broker.controller.current_image();
-        let allow = authorize(
+        let allow = broker.config.authorizer.authorize(
             &image,
-            &broker.config.super_users,
             &AuthorizationRequest {
                 principal: ctx.principal,
                 host: ctx.peer,

@@ -14,7 +14,7 @@ use crabka_protocol::owned::offset_fetch_response::{
 };
 use crabka_protocol::{Decode, Encode};
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize, authorize_topics};
+use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize_topics};
 use crate::broker::Broker;
 use crate::codes;
 use crate::error::BrokerError;
@@ -42,7 +42,7 @@ pub(crate) async fn handle(
             resource_name: req.group_id.as_str(),
             operation: AclOperation::Describe,
         };
-        if authorize(&image, &broker.config.super_users, &acl_req) == AuthorizationResult::Deny {
+        if broker.config.authorizer.authorize(&image, &acl_req) == AuthorizationResult::Deny {
             let resp = OffsetFetchResponse {
                 topics: Vec::new(),
                 error_code: codes::GROUP_AUTHORIZATION_FAILED,
@@ -85,8 +85,8 @@ pub(crate) async fn handle(
         let topic_decisions = {
             let image = broker.controller.current_image();
             authorize_topics(
+                broker.config.authorizer.as_ref(),
                 &image,
-                &broker.config.super_users,
                 ctx.principal,
                 ctx.peer,
                 AclOperation::Read,
@@ -137,8 +137,8 @@ pub(crate) async fn handle(
         let topic_decisions = {
             let image = broker.controller.current_image();
             authorize_topics(
+                broker.config.authorizer.as_ref(),
                 &image,
-                &broker.config.super_users,
                 ctx.principal,
                 ctx.peer,
                 AclOperation::Read,

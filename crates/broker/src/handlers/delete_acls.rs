@@ -12,7 +12,7 @@ use super::acl_wire::{
     operation_filter, operation_to_wire, pattern_type_filter, pattern_type_to_wire,
     permission_filter, permission_to_wire, resource_type_filter, resource_type_to_wire,
 };
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize};
+use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 use crate::broker::Broker;
 use crate::codes;
 
@@ -25,9 +25,8 @@ pub(crate) async fn handle(
     let image = broker.controller.current_image();
 
     // Whole-request cluster-alter gate.
-    let allow = authorize(
+    let allow = broker.config.authorizer.authorize(
         &image,
-        &broker.config.super_users,
         &AuthorizationRequest {
             principal: ctx.principal,
             host: ctx.peer,

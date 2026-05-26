@@ -12,7 +12,7 @@ use crabka_protocol::owned::describe_cluster_response::{
     DescribeClusterBroker, DescribeClusterResponse,
 };
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize};
+use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 use crate::broker::Broker;
 use crate::codes;
 use crate::error::BrokerError;
@@ -32,9 +32,8 @@ pub(crate) async fn handle(
     // ── slice-13 ACL preamble ────────────────────────────────────────
     // Whole-request Cluster Describe gate. On Deny, return
     // CLUSTER_AUTHORIZATION_FAILED on the whole response.
-    let allow = authorize(
+    let allow = broker.config.authorizer.authorize(
         &image,
-        &broker.config.super_users,
         &AuthorizationRequest {
             principal: ctx.principal,
             host: ctx.peer,

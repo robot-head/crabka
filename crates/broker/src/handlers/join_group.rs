@@ -11,7 +11,7 @@ use crabka_protocol::owned::join_group_request::JoinGroupRequest;
 use crabka_protocol::owned::join_group_response::{JoinGroupResponse, JoinGroupResponseMember};
 use crabka_protocol::{Decode, Encode};
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize};
+use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 use crate::broker::Broker;
 use crate::codes;
 use crate::coordinator::group::{GroupState, Member};
@@ -48,7 +48,7 @@ pub(crate) async fn handle(
             resource_name: req.group_id.as_str(),
             operation: AclOperation::Read,
         };
-        if authorize(&image, &broker.config.super_users, &acl_req) == AuthorizationResult::Deny {
+        if broker.config.authorizer.authorize(&image, &acl_req) == AuthorizationResult::Deny {
             return encode(
                 version,
                 &JoinGroupResponse {

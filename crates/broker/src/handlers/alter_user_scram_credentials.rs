@@ -44,7 +44,7 @@ use crabka_protocol::owned::alter_user_scram_credentials_response::{
 };
 use crabka_security::SaslMechanism;
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize};
+use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 use crate::broker::Broker;
 use crate::codes;
 
@@ -64,9 +64,8 @@ pub(crate) async fn handle(
     // bypass still handles slice-12 tests (they configure
     // `super_users`, which short-circuits inside `authorize` → ALLOW).
     let image = broker.controller.current_image();
-    let authorized = authorize(
+    let authorized = broker.config.authorizer.authorize(
         &image,
-        &broker.config.super_users,
         &AuthorizationRequest {
             principal: ctx.principal,
             host: ctx.peer,

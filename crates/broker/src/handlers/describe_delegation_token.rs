@@ -16,6 +16,16 @@
 //! been granted `Describe` on `TOKEN:<owner_principal_string>` to the
 //! calling principal, include it in the visible set even if the caller
 //! is not owner or renewer.
+//!
+//! Slice 53: the slice-51b `acl_authorization_is_active` gate is gone.
+//! With the explicit [`crate::authorizer::Authorizer`] trait, the
+//! "no super-users + no ACLs ⇒ Allow" compat shim that used to surface
+//! every token to every caller now lives in [`crate::authorizer::
+//! AllowAllAuthorizer`], which is the documented "allow everything"
+//! mode — so showing every token under `AllowAll` is the correct
+//! behavior (it's what the operator asked for). With `SimpleAcl` or
+//! `Opa` configured, the authorizer returns Deny for callers without a
+//! `Describe`-on-`TOKEN:<owner>` ACL, restoring the original filtering.
 
 use std::net::SocketAddr;
 
@@ -27,19 +37,19 @@ use crabka_protocol::owned::describe_delegation_token_response::{
 use crabka_raft::ControllerHandle;
 use crabka_security::{KafkaPrincipal, SecretBytes};
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize};
+use crate::authorizer::{AuthorizationRequest, AuthorizationResult, Authorizer};
 use crate::network::auth::ConnectionAuth;
 
 // `async` matches the call-site shape used by every other
 // `crate::handlers::*::handle`; today the body is purely synchronous.
 #[allow(clippy::unused_async)]
-pub(crate) async fn handle<S: std::hash::BuildHasher>(
+pub(crate) async fn handle(
     req: &DescribeDelegationTokenRequest,
     auth: &ConnectionAuth,
     secret_key: Option<&SecretBytes>,
     controller: &ControllerHandle,
     peer: &SocketAddr,
-    super_users: &std::collections::HashSet<String, S>,
+    authorizer: &dyn Authorizer,
 ) -> DescribeDelegationTokenResponse {
     if secret_key.is_none() {
         return err_response(crate::codes::DELEGATION_TOKEN_AUTH_DISABLED);
@@ -100,37 +110,35 @@ pub(crate) async fn handle<S: std::hash::BuildHasher>(
         // the calling principal. Apply the same owner filter if one
         // was supplied so the filter remains authoritative.
         //
-        // Skip the extension when no super-users and no ACLs are
-        // configured — `authorize()` returns Allow unconditionally
-        // in that world (a pre-existing compatibility shim) and would
-        // otherwise surface every token to every caller. Delete this
-        // gate together with the shim itself when slice 53/54 lands.
-        let acl_extra: Vec<&crabka_metadata::DelegationToken> =
-            if acl_authorization_is_active(&image, super_users) {
-                image
-                    .all_delegation_tokens()
-                    .filter(|t| match &candidate_owners {
-                        Some(owners) => owners.contains(&t.owner),
-                        None => true,
-                    })
-                    .filter(|t| {
-                        let resource = t.owner.to_string();
-                        authorize(
-                            &image,
-                            super_users,
-                            &AuthorizationRequest {
-                                principal,
-                                host: peer,
-                                resource_type: ResourceType::DelegationToken,
-                                resource_name: &resource,
-                                operation: AclOperation::Describe,
-                            },
-                        ) == AuthorizationResult::Allow
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
+        // Slice 53: the slice-51b `acl_authorization_is_active` gate
+        // is gone — we just consult the authorizer for every candidate
+        // token. With `AllowAllAuthorizer` every token surfaces (which
+        // is correct: the operator opted into "allow everything"), but
+        // dedup-by-token_id below means the base owner/renewer set
+        // already covers anything the caller would see anyway. With
+        // `SimpleAclAuthorizer` (no matching ACL ⇒ default-deny) or
+        // `OpaAuthorizer` (policy decides), the extension contributes
+        // only tokens the caller is explicitly authorized to Describe.
+        let acl_extra: Vec<&crabka_metadata::DelegationToken> = image
+            .all_delegation_tokens()
+            .filter(|t| match &candidate_owners {
+                Some(owners) => owners.contains(&t.owner),
+                None => true,
+            })
+            .filter(|t| {
+                let resource = t.owner.to_string();
+                authorizer.authorize(
+                    &image,
+                    &AuthorizationRequest {
+                        principal,
+                        host: peer,
+                        resource_type: ResourceType::DelegationToken,
+                        resource_name: &resource,
+                        operation: AclOperation::Describe,
+                    },
+                ) == AuthorizationResult::Allow
+            })
+            .collect();
 
         // Merge + dedup by token_id. Order is unspecified (matches the
         // existing `delegation_tokens_*` accessor contracts).
@@ -150,20 +158,6 @@ pub(crate) async fn handle<S: std::hash::BuildHasher>(
         throttle_time_ms: 0,
         ..Default::default()
     }
-}
-
-/// True when the broker has anything that would make
-/// [`crate::authorizer::authorize`] perform real ACL checks. The
-/// existing authorizer treats "no super-users AND no ACL entries" as
-/// "allow everything" (a pre-slice-13 compat shim); in that mode the
-/// delegation-token Describe-via-ACL extension must be suppressed or
-/// every caller would see every token. Delete this helper together
-/// with that shim once slice 53/54 lands a real authorizer.
-fn acl_authorization_is_active<S: std::hash::BuildHasher>(
-    image: &crabka_metadata::MetadataImage,
-    super_users: &std::collections::HashSet<String, S>,
-) -> bool {
-    !super_users.is_empty() || image.all_acls().next().is_some()
 }
 
 fn describe_token(t: crabka_metadata::DelegationToken) -> DescribedDelegationToken {
@@ -264,8 +258,19 @@ mod tests {
         "127.0.0.1:0".parse().unwrap()
     }
 
-    fn no_super() -> std::collections::HashSet<String> {
-        std::collections::HashSet::new()
+    /// Slice 53: the tests below want the "real ACL" semantics — the
+    /// describe-via-ACL extension should add tokens iff the caller holds
+    /// a matching `Describe` ACL on `TOKEN:<owner>`. Pre-slice-53 these
+    /// tests passed an empty `super_users` `HashSet` and got "real ACL"
+    /// behavior implicitly because the slice-13 compat shim only kicked
+    /// in when BOTH super-users AND ACLs were empty (and these tests
+    /// always seed at least one ACL). Now that the shim is gone we
+    /// construct a [`SimpleAclAuthorizer`] explicitly. With
+    /// [`AllowAllAuthorizer`] every token would surface, which is
+    /// correct under "allow everything" but doesn't exercise the ACL
+    /// filter the tests are written against.
+    fn simple_authz() -> crate::authorizer::SimpleAclAuthorizer {
+        crate::authorizer::SimpleAclAuthorizer::new(std::collections::HashSet::new())
     }
 
     async fn seed_acl(controller: &ControllerHandle, entry: crabka_metadata::AclEntry) {
@@ -307,7 +312,7 @@ mod tests {
             None,
             &controller,
             &peer(),
-            &no_super(),
+            &simple_authz(),
         )
         .await;
         assert_eq!(
@@ -335,7 +340,7 @@ mod tests {
             Some(&secret),
             &controller,
             &peer(),
-            &no_super(),
+            &simple_authz(),
         )
         .await;
         assert_eq!(resp.error_code, 0);
@@ -381,7 +386,7 @@ mod tests {
             Some(&secret),
             &controller,
             &peer(),
-            &no_super(),
+            &simple_authz(),
         )
         .await;
         assert_eq!(resp.error_code, 0);
@@ -417,7 +422,7 @@ mod tests {
             Some(&secret),
             &controller,
             &peer(),
-            &no_super(),
+            &simple_authz(),
         )
         .await;
         assert_eq!(resp.error_code, 0);
@@ -465,7 +470,7 @@ mod tests {
             Some(&secret),
             &controller,
             &peer(),
-            &no_super(),
+            &simple_authz(),
         )
         .await;
         assert_eq!(resp.error_code, 0);
@@ -508,7 +513,7 @@ mod tests {
             Some(&secret),
             &controller,
             &peer(),
-            &no_super(),
+            &simple_authz(),
         )
         .await;
         assert_eq!(resp.error_code, 0);

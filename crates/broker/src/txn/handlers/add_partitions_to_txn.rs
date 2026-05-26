@@ -35,7 +35,7 @@ use crabka_protocol::owned::common::add_partitions_to_txn_topic_result::AddParti
 use crabka_protocol::{Decode, Encode};
 use crabka_security::Principal;
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize, authorize_topics};
+use crate::authorizer::{AuthorizationRequest, AuthorizationResult, Authorizer, authorize_topics};
 use crate::broker::Broker;
 use crate::codes;
 use crate::error::BrokerError;
@@ -51,7 +51,7 @@ pub(crate) async fn handle(
 ) -> Result<Bytes, BrokerError> {
     let coord = broker.txn_coordinator.clone();
     let controller = broker.controller.clone();
-    let super_users = &broker.config.super_users;
+    let authorizer = broker.config.authorizer.as_ref();
     let mut cur: &[u8] = req_bytes;
     let req = AddPartitionsToTxnRequest::decode(&mut cur, version)?;
 
@@ -66,7 +66,7 @@ pub(crate) async fn handle(
             version,
             &req,
             &image,
-            super_users,
+            authorizer,
             ctx.principal,
             ctx.peer,
         )
@@ -77,7 +77,7 @@ pub(crate) async fn handle(
             version,
             &req,
             &image,
-            super_users,
+            authorizer,
             ctx.principal,
             ctx.peer,
         )
@@ -92,7 +92,7 @@ async fn handle_v4(
     version: i16,
     req: &AddPartitionsToTxnRequest,
     image: &MetadataImage,
-    super_users: &std::collections::HashSet<String>,
+    authorizer: &dyn Authorizer,
     principal: &Principal,
     peer: &SocketAddr,
 ) -> Result<Bytes, BrokerError> {
@@ -108,12 +108,11 @@ async fn handle_v4(
             resource_name: txn.transactional_id.as_str(),
             operation: AclOperation::Write,
         };
-        let topic_results = if authorize(image, super_users, &tid_req) == AuthorizationResult::Deny
-        {
+        let topic_results = if authorizer.authorize(image, &tid_req) == AuthorizationResult::Deny {
             topic_error(&txn.topics, codes::TRANSACTIONAL_ID_AUTHORIZATION_FAILED)
         } else {
             // Per-topic Write check.
-            let denied = denied_topics(image, super_users, principal, peer, &txn.topics);
+            let denied = denied_topics(authorizer, image, principal, peer, &txn.topics);
             process_one_txn(
                 coord,
                 txn.transactional_id.as_str(),
@@ -146,7 +145,7 @@ async fn handle_v3(
     version: i16,
     req: &AddPartitionsToTxnRequest,
     image: &MetadataImage,
-    super_users: &std::collections::HashSet<String>,
+    authorizer: &dyn Authorizer,
     principal: &Principal,
     peer: &SocketAddr,
 ) -> Result<Bytes, BrokerError> {
@@ -158,19 +157,13 @@ async fn handle_v3(
         resource_name: req.v3_and_below_transactional_id.as_str(),
         operation: AclOperation::Write,
     };
-    let topic_results = if authorize(image, super_users, &tid_req) == AuthorizationResult::Deny {
+    let topic_results = if authorizer.authorize(image, &tid_req) == AuthorizationResult::Deny {
         topic_error(
             &req.v3_and_below_topics,
             codes::TRANSACTIONAL_ID_AUTHORIZATION_FAILED,
         )
     } else {
-        let denied = denied_topics(
-            image,
-            super_users,
-            principal,
-            peer,
-            &req.v3_and_below_topics,
-        );
+        let denied = denied_topics(authorizer, image, principal, peer, &req.v3_and_below_topics);
         process_one_txn(
             coord,
             req.v3_and_below_transactional_id.as_str(),
@@ -196,16 +189,16 @@ async fn handle_v3(
 /// principal/host. Caller uses this to stamp `TOPIC_AUTHORIZATION_FAILED`
 /// on every partition row of denied topics.
 fn denied_topics(
+    authorizer: &dyn Authorizer,
     image: &MetadataImage,
-    super_users: &std::collections::HashSet<String>,
     principal: &Principal,
     peer: &SocketAddr,
     topics: &[AddPartitionsToTxnTopic],
 ) -> std::collections::HashSet<String> {
     let names: Vec<&str> = topics.iter().map(|t| t.name.as_str()).collect();
     let map = authorize_topics(
+        authorizer,
         image,
-        super_users,
         principal,
         peer,
         AclOperation::Write,

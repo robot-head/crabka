@@ -73,8 +73,8 @@ pub(crate) async fn handle(
     // TOPIC_AUTHORIZATION_FAILED on that topic row.
     let known_names: Vec<&str> = name_list.iter().filter_map(|opt| opt.as_deref()).collect();
     let acl_results = authorize_topics(
+        broker.config.authorizer.as_ref(),
         &image,
-        &broker.config.super_users,
         ctx.principal,
         ctx.peer,
         AclOperation::Delete,

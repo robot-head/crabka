@@ -12,7 +12,7 @@ use crabka_protocol::owned::alter_client_quotas_response::{
     AlterClientQuotasResponse, EntityData as RespEntity, EntryData as RespEntry,
 };
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize};
+use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 use crate::broker::Broker;
 use crate::codes::{
     CLUSTER_AUTHORIZATION_FAILED, COORDINATOR_NOT_AVAILABLE, INVALID_CONFIG, INVALID_REQUEST,
@@ -34,9 +34,8 @@ pub(crate) async fn handle(
     api_version: i16,
 ) -> Result<Bytes, crate::error::BrokerError> {
     let image = broker.controller.current_image();
-    let allow = authorize(
+    let allow = broker.config.authorizer.authorize(
         &image,
-        &broker.config.super_users,
         &AuthorizationRequest {
             principal: ctx.principal,
             host: ctx.peer,

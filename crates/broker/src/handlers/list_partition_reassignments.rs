@@ -10,7 +10,7 @@ use crabka_protocol::owned::list_partition_reassignments_response::{
     ListPartitionReassignmentsResponse, OngoingPartitionReassignment, OngoingTopicReassignment,
 };
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize};
+use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 use crate::broker::Broker;
 use crate::codes::CLUSTER_AUTHORIZATION_FAILED;
 
@@ -21,9 +21,8 @@ pub(crate) async fn handle(
     api_version: i16,
 ) -> Result<Bytes, crate::error::BrokerError> {
     let image = broker.controller.current_image();
-    let allow = authorize(
+    let allow = broker.config.authorizer.authorize(
         &image,
-        &broker.config.super_users,
         &AuthorizationRequest {
             principal: ctx.principal,
             host: ctx.peer,

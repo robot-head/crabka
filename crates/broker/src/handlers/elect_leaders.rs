@@ -18,7 +18,7 @@ use crabka_protocol::owned::elect_leaders_response::{
     ElectLeadersResponse, PartitionResult, ReplicaElectionResult,
 };
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize};
+use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 use crate::broker::Broker;
 use crate::codes;
 use crate::leader_election::{ElectError, ElectionType, select_new_leader_for_partition};
@@ -35,9 +35,8 @@ pub(crate) async fn handle(
 ) -> Result<Bytes, crate::error::BrokerError> {
     // Authorize Cluster Alter — whole-request gate.
     let image = broker.controller.current_image();
-    let allow = authorize(
+    let allow = broker.config.authorizer.authorize(
         &image,
-        &broker.config.super_users,
         &AuthorizationRequest {
             principal: ctx.principal,
             host: ctx.peer,
