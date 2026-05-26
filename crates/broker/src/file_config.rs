@@ -1295,7 +1295,7 @@ storage_dir = "/var/lib/crabka/tier"
 "#;
         let file: FileConfig = toml::from_str(toml).unwrap();
         let mut cfg = crate::config::BrokerConfig::default();
-        file.apply_to(&mut cfg);
+        file.apply_to(&mut cfg).unwrap();
         assert_eq!(
             cfg.remote_log_storage_dir,
             Some(std::path::PathBuf::from("/var/lib/crabka/tier"))
@@ -1306,7 +1306,7 @@ storage_dir = "/var/lib/crabka/tier"
     fn no_remote_storage_section_leaves_dir_none() {
         let file: FileConfig = toml::from_str("broker_id = 1").unwrap();
         let mut cfg = crate::config::BrokerConfig::default();
-        file.apply_to(&mut cfg);
+        file.apply_to(&mut cfg).unwrap();
         assert!(cfg.remote_log_storage_dir.is_none());
     }
 

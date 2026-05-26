@@ -103,4 +103,4 @@ parking_lot = "0.12"
 # Slice 53: bounded decision cache for the OPA authorizer. `lru` provides
 # an O(1) LRU with a non-zero capacity invariant; pair it with our own
 # TTL field on the value (no built-in expiry).
-lru = "0.12"
+lru = "0.16"
