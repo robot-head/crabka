@@ -3582,3 +3582,69 @@ introspection metadata).
 - **Workspace fmt + clippy `-D warnings` + tests** all green. No CRDs
   touched.
 
+## Slice 48e — Crabka core: Tiered storage remote retention + partition delete (2026-05-26)
+
+- **Goal:** Fifth sub-slice of KIP-405. Drive the
+  `DeleteSegmentStarted` → `DeleteSegmentFinished` and
+  `DeletePartitionMarked` → `DeletePartitionStarted` →
+  `DeletePartitionFinished` lifecycles 48a defined: a periodic
+  remote-retention pass shrinks the remote tier's footprint under
+  `retention.ms` / `retention.bytes` pressure, and `DeleteTopics`
+  cascades through every remote segment a deleted tiered topic ever
+  offloaded.
+- **`RemoteLogManager` extension (`crates/broker/src/remote_log_manager.rs`):**
+  - New pure-logic `remote_retention_eviction_set(finished,
+    retention_ms, retention_bytes, now_ms)` mirrors the
+    local-retention helper: oldest-first walk, time **OR** size
+    eviction, stops at the first non-deletable segment to keep the
+    remote prefix contiguous (matches Kafka).
+  - New `remote_retention_pass(tp, broker_id, log_config, rsm, rlmm,
+    now_ms)` called after `local_retention_pass` in `tick_all`. Reads
+    the topic's total `retention.ms` / `retention.bytes` from
+    `LogConfig` (existing fields — no new config keys), lists the
+    finished segments, runs the helper, then drives each evictable
+    segment through `CopySegmentFinished` →
+    `DeleteSegmentStarted` → `rsm.delete_log_segment_data`
+    (on `spawn_blocking`) → `DeleteSegmentFinished`. Failures log at
+    WARN and short-circuit the partition's pass — leftover
+    `DeleteSegmentStarted` segments are invisible to 48d's
+    finished-only read filter and get retried on the next tick.
+  - New `cascade_remote_partition_delete(tp, broker_id, rsm, rlmm)`
+    walks the partition-delete state machine
+    (`DeletePartitionMarked` → `DeletePartitionStarted` → per-segment
+    lifecycle → `DeletePartitionFinished`). Shared
+    `delete_one_segment` helper between retention and cascade.
+- **DeleteTopics handler
+  (`crates/broker/src/handlers/delete_topics.rs`):**
+  - Before the controller commit (and the existing in-memory +
+    on-disk tear-down), snapshot every tiered partition's
+    `TopicIdPartition` by joining the metadata image's `topic_id`
+    with each `Partition.log.config_snapshot().remote_storage_enable`
+    check. The snapshot is the sole record that drives the cascade —
+    after tear-down the `Partition` is gone.
+  - After successful local tear-down, spawn one detached
+    `cascade_remote_partition_delete` task per tiered partition. The
+    response returns immediately; the cascade runs to completion (or
+    WARN) in the background.
+- **`log_start_offset` does NOT split in 48e** (revisited from 48c
+  comments): with `EARLIEST` already returning `min(local_log_start,
+  remote_earliest)` (48d) and `Fetch` falling through to
+  `OFFSET_OUT_OF_RANGE` when a remote-evicted segment is no longer in
+  the RLMM, the split is unnecessary for correctness.
+  `local_log_start_offset()` continues to delegate to
+  `log_start_offset()`.
+- **Tests:** broker lib +9 (6 pure-logic helper tests covering empty,
+  time-only, size-only, time+size union, None-disables-axis, walk
+  stops at first non-deletable; 3 integration tests against
+  `LocalTieredStorage` + `InmemoryRemoteLogMetadataManager` covering
+  retention happy path, retention no-op, and config with no retention
+  settings being an early return; 2 cascade tests for full-partition
+  delete and empty-partition no-op).
+- **Design:** `[docs/superpowers/specs/2026-05-26-crabka-tiered-storage-remote-retention-48e-design.md]`.
+- **Out of scope (48f+):** `TopicBasedRemoteLogMetadataManager`
+  (production RLMM backed by an internal topic). Object-store RSM
+  (S3/etc.). Operator CRD surface. Read-committed
+  aborted-transaction filtering on remote batches.
+- **Workspace fmt + clippy `-D warnings` + tests** all green. No CRDs
+  touched.
+

@@ -29,7 +29,8 @@ use crabka_metadata::NodeId;
 use crabka_raft::ControllerHandle;
 use crabka_remote_storage::{
     LogSegmentData, RemoteLogMetadataManager, RemoteLogSegmentId, RemoteLogSegmentMetadata,
-    RemoteLogSegmentMetadataUpdate, RemoteLogSegmentState, RemoteStorageManager, TopicIdPartition,
+    RemoteLogSegmentMetadataUpdate, RemoteLogSegmentState, RemotePartitionDeleteMetadata,
+    RemotePartitionDeleteState, RemoteStorageManager, TopicIdPartition,
 };
 
 use crate::partition::Partition;
@@ -116,6 +117,7 @@ async fn tick_all(
         let tp = TopicIdPartition::new(topic_id, partition.topic.clone(), partition.partition_id);
         copy_eligible(&tp, broker_id, leader_epoch, exports.clone(), rsm, rlmm).await;
         local_retention_pass(&tp, &partition, &exports, &log_config, rlmm, now_ms()).await;
+        remote_retention_pass(&tp, broker_id, &log_config, rsm, rlmm, now_ms()).await;
     }
 }
 
@@ -269,6 +271,246 @@ pub(crate) async fn local_retention_pass(
             0
         }
     }
+}
+
+/// Slice 48e (KIP-405): compute the set of finished remote segments whose
+/// total-retention window has expired (by time or by size budget), in
+/// oldest-first order. Mirrors [`local_retention_target`]'s walk; **stops at
+/// the first non-deletable segment** so the remaining remote prefix stays
+/// contiguous (matches Kafka).
+///
+/// A segment is deletable when either:
+/// - `now_ms - md.max_timestamp_ms > retention_ms`, or
+/// - the running sum of sizes from the oldest forward must exceed
+///   `total_bytes - retention_bytes` (greedy size eviction).
+///
+/// `None` settings disable that axis. Caller must already have filtered to
+/// `CopySegmentFinished` and sorted by `start_offset`.
+pub(crate) fn remote_retention_eviction_set(
+    finished: &[RemoteLogSegmentMetadata],
+    retention_ms: Option<i64>,
+    retention_bytes: Option<u64>,
+    now_ms: i64,
+) -> Vec<RemoteLogSegmentMetadata> {
+    let total: u64 = finished
+        .iter()
+        .map(|m| u64::try_from(m.segment_size_in_bytes().max(0)).unwrap_or(0))
+        .sum();
+    let mut size_to_reclaim = match retention_bytes {
+        Some(budget) if total > budget => total - budget,
+        _ => 0,
+    };
+    let mut out = Vec::new();
+    for md in finished {
+        let by_time = matches!(
+            retention_ms,
+            Some(window) if now_ms.saturating_sub(md.max_timestamp_ms()) > window
+        );
+        let by_size = size_to_reclaim > 0;
+        if !(by_time || by_size) {
+            break;
+        }
+        let bytes = u64::try_from(md.segment_size_in_bytes().max(0)).unwrap_or(0);
+        if by_size {
+            size_to_reclaim = size_to_reclaim.saturating_sub(bytes);
+        }
+        out.push(md.clone());
+    }
+    out
+}
+
+/// Slice 48e (KIP-405): evict remote segments past the topic's total
+/// retention window (`retention.ms` / `retention.bytes`). For each
+/// deletable segment, runs the lifecycle:
+/// `CopySegmentFinished` → `DeleteSegmentStarted` → RSM delete →
+/// `DeleteSegmentFinished`. Failures log at WARN and short-circuit the
+/// partition's pass — leftover `DeleteSegmentStarted` metadata is invisible
+/// to the read path's finished-only filter and gets retried on the next
+/// tick. Returns the count of segments transitioned to
+/// `DeleteSegmentFinished` (i.e. successfully evicted).
+pub(crate) async fn remote_retention_pass(
+    tp: &TopicIdPartition,
+    broker_id: i32,
+    log_config: &LogConfig,
+    rsm: &Arc<dyn RemoteStorageManager>,
+    rlmm: &dyn RemoteLogMetadataManager,
+    now_ms: i64,
+) -> usize {
+    let retention_ms = log_config
+        .retention_ms
+        .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
+    let retention_bytes = log_config.retention_bytes;
+    if retention_ms.is_none() && retention_bytes.is_none() {
+        return 0;
+    }
+
+    let mut finished: Vec<RemoteLogSegmentMetadata> = match rlmm.list_remote_log_segments(tp) {
+        Ok(list) => list
+            .into_iter()
+            .filter(|md| md.state() == RemoteLogSegmentState::CopySegmentFinished)
+            .collect(),
+        Err(e) => {
+            warn!(topic = %tp.topic, partition = tp.partition, error = %e,
+                  "remote-log-manager: failed to list remote segments for retention");
+            return 0;
+        }
+    };
+    finished.sort_by_key(RemoteLogSegmentMetadata::start_offset);
+
+    let evict = remote_retention_eviction_set(&finished, retention_ms, retention_bytes, now_ms);
+    let mut deleted = 0;
+    for md in evict {
+        if delete_one_segment(tp, broker_id, &md, rsm, rlmm).await {
+            deleted += 1;
+        } else {
+            // Stop at the first failure to preserve the contiguous-prefix
+            // invariant — the next tick re-tries from the same base.
+            break;
+        }
+    }
+    deleted
+}
+
+/// Slice 48e (KIP-405): cascade the
+/// [`DeletePartitionMarked` → `DeletePartitionStarted` →
+/// `DeletePartitionFinished`] lifecycle for `tp`, deleting every remote
+/// segment along the way. Run as a detached task from the `DeleteTopics`
+/// handler so the response doesn't wait on remote-tier I/O. Failures log
+/// at WARN; leftover `DeleteSegmentStarted` segments are harmless in the
+/// in-memory RLMM (a `DeleteTopics`-recreate combination regenerates the
+/// topic id and the new partition is a fresh `TopicIdPartition`).
+pub(crate) async fn cascade_remote_partition_delete(
+    tp: TopicIdPartition,
+    broker_id: i32,
+    rsm: Arc<dyn RemoteStorageManager>,
+    rlmm: Arc<dyn RemoteLogMetadataManager>,
+) {
+    if let Err(e) = put_partition_state(
+        rlmm.as_ref(),
+        &tp,
+        RemotePartitionDeleteState::DeletePartitionMarked,
+        broker_id,
+    ) {
+        warn!(topic = %tp.topic, partition = tp.partition, error = %e,
+              "remote-log-manager: failed to mark partition deleted");
+        return;
+    }
+    if let Err(e) = put_partition_state(
+        rlmm.as_ref(),
+        &tp,
+        RemotePartitionDeleteState::DeletePartitionStarted,
+        broker_id,
+    ) {
+        warn!(topic = %tp.topic, partition = tp.partition, error = %e,
+              "remote-log-manager: failed to start partition delete");
+        return;
+    }
+
+    let segments = match rlmm.list_remote_log_segments(&tp) {
+        Ok(list) => list,
+        Err(e) => {
+            warn!(topic = %tp.topic, partition = tp.partition, error = %e,
+                  "remote-log-manager: failed to list segments for partition delete");
+            return;
+        }
+    };
+    for md in segments {
+        // Skip segments already past `DeleteSegmentStarted` (no-op delete).
+        if md.state() == RemoteLogSegmentState::DeleteSegmentFinished {
+            continue;
+        }
+        let _ = delete_one_segment(&tp, broker_id, &md, &rsm, rlmm.as_ref()).await;
+    }
+
+    if let Err(e) = put_partition_state(
+        rlmm.as_ref(),
+        &tp,
+        RemotePartitionDeleteState::DeletePartitionFinished,
+        broker_id,
+    ) {
+        warn!(topic = %tp.topic, partition = tp.partition, error = %e,
+              "remote-log-manager: failed to finish partition delete");
+    }
+}
+
+fn put_partition_state(
+    rlmm: &dyn RemoteLogMetadataManager,
+    tp: &TopicIdPartition,
+    state: RemotePartitionDeleteState,
+    broker_id: i32,
+) -> Result<(), crabka_remote_storage::RemoteStorageError> {
+    rlmm.put_remote_partition_delete_metadata(RemotePartitionDeleteMetadata {
+        topic_id_partition: tp.clone(),
+        state,
+        event_timestamp_ms: now_ms(),
+        broker_id,
+    })
+}
+
+/// Drive one `CopySegmentFinished` (or in-flight) segment through the
+/// `DeleteSegmentStarted` → RSM delete → `DeleteSegmentFinished` chain.
+/// Returns `true` when the lifecycle completes cleanly. Shared by
+/// [`remote_retention_pass`] and [`cascade_remote_partition_delete`].
+async fn delete_one_segment(
+    tp: &TopicIdPartition,
+    broker_id: i32,
+    md: &RemoteLogSegmentMetadata,
+    rsm: &Arc<dyn RemoteStorageManager>,
+    rlmm: &dyn RemoteLogMetadataManager,
+) -> bool {
+    let id = md.remote_log_segment_id().clone();
+    // Transition to DeleteSegmentStarted unless the segment is already
+    // there (cascade may retry against a partially-cleaned partition).
+    if md.state() == RemoteLogSegmentState::CopySegmentFinished {
+        let upd = RemoteLogSegmentMetadataUpdate {
+            remote_log_segment_id: id.clone(),
+            event_timestamp_ms: now_ms(),
+            custom_metadata: None,
+            state: RemoteLogSegmentState::DeleteSegmentStarted,
+            broker_id,
+        };
+        if let Err(e) = rlmm.update_remote_log_segment_metadata(upd) {
+            warn!(topic = %tp.topic, partition = tp.partition, base = md.start_offset(),
+                  error = %e,
+                  "remote-log-manager: failed to record DeleteSegmentStarted");
+            return false;
+        }
+    }
+
+    // RSM delete (blocking).
+    let rsm_del = rsm.clone();
+    let md_del = md.clone();
+    let delete_result =
+        tokio::task::spawn_blocking(move || rsm_del.delete_log_segment_data(&md_del)).await;
+    match delete_result {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            warn!(topic = %tp.topic, partition = tp.partition, base = md.start_offset(),
+                  error = %e, "remote-log-manager: RSM delete failed");
+            return false;
+        }
+        Err(e) => {
+            warn!(topic = %tp.topic, partition = tp.partition, base = md.start_offset(),
+                  error = %e, "remote-log-manager: RSM delete task panicked");
+            return false;
+        }
+    }
+
+    let upd = RemoteLogSegmentMetadataUpdate {
+        remote_log_segment_id: id,
+        event_timestamp_ms: now_ms(),
+        custom_metadata: None,
+        state: RemoteLogSegmentState::DeleteSegmentFinished,
+        broker_id,
+    };
+    if let Err(e) = rlmm.update_remote_log_segment_metadata(upd) {
+        warn!(topic = %tp.topic, partition = tp.partition, base = md.start_offset(),
+              error = %e, "remote-log-manager: failed to record DeleteSegmentFinished");
+        return false;
+    }
+    debug!(topic = %tp.topic, partition = tp.partition, base = md.start_offset(),
+           "remote-log-manager: deleted remote segment");
+    true
 }
 
 /// Copy one sealed segment through the full `Started` → `Finished`
@@ -791,5 +1033,229 @@ mod tests {
         // Re-running is a no-op.
         let removed_again = local_retention_drive(&mut log, &finished_bases, &log_config, future);
         assert_eq!(removed_again, 0);
+    }
+
+    // ── Slice 48e: remote-retention helper + cascade tests ────────────
+
+    fn synth_remote_md(
+        id: u128,
+        start: i64,
+        end: i64,
+        max_ts: i64,
+        size: i32,
+    ) -> RemoteLogSegmentMetadata {
+        RemoteLogSegmentMetadata::new(
+            RemoteLogSegmentId::new(tp(), Uuid::from_u128(id)),
+            start,
+            end,
+            max_ts,
+            1,
+            max_ts,
+            size,
+            RemoteLogSegmentState::CopySegmentStarted,
+            BTreeMap::from([(0, start)]),
+        )
+        .unwrap()
+        .with_update(&RemoteLogSegmentMetadataUpdate {
+            remote_log_segment_id: RemoteLogSegmentId::new(tp(), Uuid::from_u128(id)),
+            event_timestamp_ms: max_ts,
+            custom_metadata: None,
+            state: RemoteLogSegmentState::CopySegmentFinished,
+            broker_id: 1,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn remote_retention_eviction_set_returns_empty_when_no_segments() {
+        let out = remote_retention_eviction_set(&[], Some(1), Some(1), 10_000);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn remote_retention_eviction_set_time_based_picks_oldest_until_first_in_window() {
+        let segs = vec![
+            synth_remote_md(10, 0, 9, 100, 100),
+            synth_remote_md(11, 10, 19, 200, 100),
+            synth_remote_md(12, 20, 29, 9_500, 100),
+        ];
+        // now=10_000, retention=500ms → seg with max_ts < 9_500 is deletable.
+        // seg0 (100) + seg1 (200) qualify; seg2 (9_500) stops the walk.
+        let out = remote_retention_eviction_set(&segs, Some(500), None, 10_000);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].start_offset(), 0);
+        assert_eq!(out[1].start_offset(), 10);
+    }
+
+    #[test]
+    fn remote_retention_eviction_set_size_based_evicts_oldest_first() {
+        let segs = vec![
+            synth_remote_md(10, 0, 9, 100, 100),
+            synth_remote_md(11, 10, 19, 200, 100),
+            synth_remote_md(12, 20, 29, 300, 100),
+        ];
+        // Total=300, budget=150 → reclaim 150 → oldest two go.
+        let out = remote_retention_eviction_set(&segs, None, Some(150), 1_000);
+        assert_eq!(out.len(), 2);
+        // Budget tighter than one segment → all three.
+        let out = remote_retention_eviction_set(&segs, None, Some(50), 1_000);
+        assert_eq!(out.len(), 3);
+        // Budget larger than total → none.
+        let out = remote_retention_eviction_set(&segs, None, Some(10_000), 1_000);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn remote_retention_eviction_set_time_and_size_take_union_of_either() {
+        let segs = vec![
+            synth_remote_md(10, 0, 9, 100, 100),
+            synth_remote_md(11, 10, 19, 200, 100),
+            synth_remote_md(12, 20, 29, 5_000, 100),
+        ];
+        // Time-window: seg0+seg1 qualify (max_ts<500). Budget very generous
+        // so size-based evicts nothing. Result is the time-window prefix.
+        let out = remote_retention_eviction_set(&segs, Some(500), Some(10_000), 1_000);
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn remote_retention_eviction_set_none_settings_disable_axis() {
+        let segs = vec![synth_remote_md(10, 0, 9, 100, 100)];
+        // No time or size → no eviction.
+        assert!(remote_retention_eviction_set(&segs, None, None, 10_000).is_empty());
+    }
+
+    #[test]
+    fn remote_retention_eviction_set_walk_stops_at_first_non_deletable() {
+        let segs = vec![
+            synth_remote_md(10, 0, 9, 100, 100),     // deletable by time
+            synth_remote_md(11, 10, 19, 9_500, 100), // in window → stops walk
+            synth_remote_md(12, 20, 29, 200, 100),   // also deletable by time, but
+                                                     // walk stopped at seg1 already.
+        ];
+        let out = remote_retention_eviction_set(&segs, Some(500), None, 10_000);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].start_offset(), 0);
+    }
+
+    #[tokio::test]
+    async fn remote_retention_pass_evicts_old_segments_through_lifecycle() {
+        let log_dir = tempfile::tempdir().unwrap();
+        let remote_dir = tempfile::tempdir().unwrap();
+        let log = rolled_log(log_dir.path());
+        let exports = log.tierable_segments();
+        let rsm: Arc<dyn RemoteStorageManager> =
+            Arc::new(LocalTieredStorage::new(remote_dir.path()));
+        let rlmm = InmemoryRemoteLogMetadataManager::new();
+        let copied = copy_eligible(&tp(), 1, 0, exports.clone(), &rsm, &rlmm).await;
+        assert_eq!(copied, exports.len());
+        let pre = rlmm.list_remote_log_segments(&tp()).unwrap();
+        assert!(!pre.is_empty());
+
+        let cfg = LogConfig {
+            retention_ms: Some(Duration::from_millis(1)),
+            ..LogConfig::default()
+        };
+        // far-future `now_ms` → every finished segment is past the window.
+        let deleted =
+            remote_retention_pass(&tp(), 1, &cfg, &rsm, &rlmm, now_ms() + 1_000_000).await;
+        assert_eq!(deleted, exports.len());
+
+        // DeleteSegmentFinished drops the entries entirely from the cache.
+        let post = rlmm.list_remote_log_segments(&tp()).unwrap();
+        assert!(
+            post.is_empty(),
+            "every segment should be gone, got {} left",
+            post.len()
+        );
+        // RSM data is gone too.
+        for md in &pre {
+            assert!(rsm.fetch_log_segment(md, 0, None).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_retention_pass_noop_when_nothing_qualifies() {
+        let log_dir = tempfile::tempdir().unwrap();
+        let remote_dir = tempfile::tempdir().unwrap();
+        let log = rolled_log(log_dir.path());
+        let exports = log.tierable_segments();
+        let rsm: Arc<dyn RemoteStorageManager> =
+            Arc::new(LocalTieredStorage::new(remote_dir.path()));
+        let rlmm = InmemoryRemoteLogMetadataManager::new();
+        copy_eligible(&tp(), 1, 0, exports.clone(), &rsm, &rlmm).await;
+
+        let cfg = LogConfig {
+            // Long retention; nothing is past the window.
+            retention_ms: Some(Duration::from_hours(8760)),
+            retention_bytes: None,
+            ..LogConfig::default()
+        };
+        // Use a `now_ms` close to the segments' max_timestamp so the test
+        // is independent of wall-clock. `rolled_log` builds batches with
+        // default base_timestamp=0, so picking now=1 keeps every segment
+        // inside the year-long retention window.
+        let deleted = remote_retention_pass(&tp(), 1, &cfg, &rsm, &rlmm, 1).await;
+        assert_eq!(deleted, 0);
+        assert_eq!(
+            rlmm.list_remote_log_segments(&tp()).unwrap().len(),
+            exports.len(),
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_retention_pass_no_settings_no_op() {
+        // Neither retention.ms nor retention.bytes — early return, no list.
+        let remote_dir = tempfile::tempdir().unwrap();
+        let rsm: Arc<dyn RemoteStorageManager> =
+            Arc::new(LocalTieredStorage::new(remote_dir.path()));
+        let rlmm = InmemoryRemoteLogMetadataManager::new();
+        let cfg = LogConfig {
+            retention_ms: None,
+            retention_bytes: None,
+            ..LogConfig::default()
+        };
+        let deleted = remote_retention_pass(&tp(), 1, &cfg, &rsm, &rlmm, now_ms()).await;
+        assert_eq!(deleted, 0);
+    }
+
+    #[tokio::test]
+    async fn cascade_remote_partition_delete_drops_every_segment() {
+        let log_dir = tempfile::tempdir().unwrap();
+        let remote_dir = tempfile::tempdir().unwrap();
+        let log = rolled_log(log_dir.path());
+        let exports = log.tierable_segments();
+        let rsm: Arc<dyn RemoteStorageManager> =
+            Arc::new(LocalTieredStorage::new(remote_dir.path()));
+        let rlmm: Arc<dyn RemoteLogMetadataManager> =
+            Arc::new(InmemoryRemoteLogMetadataManager::new());
+        let copied = copy_eligible(&tp(), 1, 0, exports.clone(), &rsm, rlmm.as_ref()).await;
+        assert_eq!(copied, exports.len());
+
+        cascade_remote_partition_delete(tp(), 1, rsm.clone(), rlmm.clone()).await;
+
+        // All segments are gone from the cache.
+        assert!(rlmm.list_remote_log_segments(&tp()).unwrap().is_empty());
+        // The remote directory for this partition is empty (or absent).
+        // LocalTieredStorage layout: <remote_dir>/<topic_id>/<partition>/.
+        let part_dir = remote_dir.path().join(tp().topic_id.to_string()).join("0");
+        if part_dir.exists() {
+            let entries: Vec<_> = std::fs::read_dir(&part_dir).unwrap().collect();
+            assert!(entries.is_empty(), "stray remote files: {entries:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn cascade_remote_partition_delete_is_noop_on_empty_partition() {
+        let remote_dir = tempfile::tempdir().unwrap();
+        let rsm: Arc<dyn RemoteStorageManager> =
+            Arc::new(LocalTieredStorage::new(remote_dir.path()));
+        let rlmm: Arc<dyn RemoteLogMetadataManager> =
+            Arc::new(InmemoryRemoteLogMetadataManager::new());
+        // No add — partition has no segments. Cascade still walks the
+        // three partition-delete states without error.
+        cascade_remote_partition_delete(tp(), 1, rsm, rlmm.clone()).await;
+        // No segments after, no panics; that's the test.
+        assert!(rlmm.list_remote_log_segments(&tp()).unwrap().is_empty());
     }
 }
