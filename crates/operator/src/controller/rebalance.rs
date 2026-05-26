@@ -43,7 +43,7 @@ const TRANSPORT_RETRY: Duration = Duration::from_secs(15);
 
 /// The rebalance lifecycle state. Surfaced as the active condition's
 /// `type` in the CRD status.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::IntoStaticStr, strum::EnumString)]
 pub enum RebalanceState {
     New,
     ProposalReady,
@@ -56,27 +56,12 @@ pub enum RebalanceState {
 impl RebalanceState {
     #[must_use]
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::New => "New",
-            Self::ProposalReady => "ProposalReady",
-            Self::Rebalancing => "Rebalancing",
-            Self::Ready => "Ready",
-            Self::NotReady => "NotReady",
-            Self::Stopped => "Stopped",
-        }
+        self.into()
     }
 
     #[must_use]
     fn from_condition_type(t: &str) -> Option<Self> {
-        match t {
-            "New" => Some(Self::New),
-            "ProposalReady" => Some(Self::ProposalReady),
-            "Rebalancing" => Some(Self::Rebalancing),
-            "Ready" => Some(Self::Ready),
-            "NotReady" => Some(Self::NotReady),
-            "Stopped" => Some(Self::Stopped),
-            _ => None,
-        }
+        t.parse().ok()
     }
 }
 

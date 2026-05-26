@@ -37,7 +37,11 @@ pub fn emit(specs: &[MessageSpec], schemas_version: &str) -> String {
          /// keys in future schema updates is non-breaking."
     )
     .unwrap();
-    writeln!(out, "#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]").unwrap();
+    writeln!(
+        out,
+        "#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::IntoStaticStr)]"
+    )
+    .unwrap();
     writeln!(out, "#[repr(i16)]").unwrap();
     writeln!(out, "#[non_exhaustive]").unwrap();
     writeln!(out, "pub enum ApiKey {{").unwrap();

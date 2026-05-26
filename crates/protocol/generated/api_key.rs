@@ -9,7 +9,7 @@
 ///
 /// The enum is `#[non_exhaustive]` so that adding variants for new Kafka API
 /// keys in future schema updates is non-breaking.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::IntoStaticStr)]
 #[repr(i16)]
 #[non_exhaustive]
 pub enum ApiKey {

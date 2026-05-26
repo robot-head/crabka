@@ -47,6 +47,7 @@ zerocopy = { workspace = true }
 crc32c = { workspace = true }
 crabka-compression = { version = "0.1", path = "../compression", default-features = false }
 serde_json = { workspace = true }
+strum = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
