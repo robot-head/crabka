@@ -25,6 +25,7 @@ bytes = { workspace = true }
 thiserror = { workspace = true }
 memmap2 = { workspace = true }
 tracing = { workspace = true }
+zerocopy = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
