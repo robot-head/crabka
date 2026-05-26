@@ -155,9 +155,9 @@ pub struct BrokerConfig {
     /// Slice 53: pluggable cluster authorizer. One boxed instance per
     /// broker; configured via `[authorization]` in `broker.toml`. The
     /// default is [`crate::authorizer::AllowAllAuthorizer`] — explicit
-    /// "allow everything" — which replaces the slice-13 "no super-users
-    /// + no ACLs ⇒ Allow" compat shim that previously lived inside the
-    /// ACL impl.
+    /// "allow everything" — which replaces the slice-13
+    /// "no super-users + no ACLs ⇒ Allow" compat shim that previously
+    /// lived inside the ACL impl.
     pub authorizer: std::sync::Arc<dyn crate::authorizer::Authorizer>,
 
     /// TLS configuration. `None` — no TLS (slice 12 default).
