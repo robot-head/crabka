@@ -148,7 +148,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..BrokerConfig::default()
     };
     if let Some(fc) = file_config {
-        fc.apply_to(&mut config);
+        fc.apply_to(&mut config)?;
     }
     // Detect against the *resolved* log_dir so a TOML override picks up
     // its on-disk state rather than the CLI-default empty path. This is
