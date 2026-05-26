@@ -913,6 +913,7 @@ mod service_rendering_tests {
                 cluster_ca: None,
                 clients_ca: None,
                 logging: None,
+                delegation_token: None,
             },
         );
         k.meta_mut().namespace = Some("default".into());
@@ -2677,7 +2678,9 @@ pub struct BrokerTlsRender {
 /// this broker's advertised addresses). Deterministic — same input
 /// always produces byte-identical output so the slice-21 config-hash
 /// is stable.
-#[allow(dead_code, clippy::too_many_lines)]
+// Each arg is an independent operator-owned broker-pod render input —
+// extraction obscures the single deterministic render shape.
+#[allow(dead_code, clippy::too_many_lines, clippy::too_many_arguments)]
 pub fn render_broker_toml(
     broker_id: i32,
     listeners: &[Listener],
@@ -2686,6 +2689,7 @@ pub fn render_broker_toml(
     server_properties: &std::collections::BTreeMap<String, String>,
     tls: Option<&BrokerTlsRender>,
     clients_ca_path: Option<&str>,
+    delegation_token_enabled: bool,
 ) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
@@ -2706,6 +2710,17 @@ pub fn render_broker_toml(
             "controller_listener_protocol = \"{}\"",
             tls.controller_listener_protocol
         );
+    }
+    // Slice 51b: when delegation tokens are enabled on this cluster, the
+    // operator's `KafkaUser` reconcile loop calls `CreateDelegationToken`
+    // act-as-<user>. The broker's act-as check requires the caller's
+    // principal to be in `super_users`. The operator currently talks to
+    // the broker over the PLAINTEXT inter-broker listener (principal:
+    // `ANONYMOUS`), so we hardcode that here. Production deployments
+    // using SASL inter-broker need a CRD-level super-user list — tracked
+    // as a follow-up in STATUS.md.
+    if delegation_token_enabled {
+        let _ = writeln!(out, "super_users = [\"ANONYMOUS\"]");
     }
     out.push('\n');
 
@@ -2920,7 +2935,8 @@ mod toml_rendering_tests {
         );
         let listeners = vec![synthesized_default_listener()];
         let props = std::collections::BTreeMap::new();
-        let toml_str = render_broker_toml(0, &listeners, &addrs, "PLAIN", &props, None, None);
+        let toml_str =
+            render_broker_toml(0, &listeners, &addrs, "PLAIN", &props, None, None, false);
 
         // Sanity: parses cleanly with the broker's FileConfig.
         let parsed: crabka_broker::file_config::FileConfig =
@@ -2946,8 +2962,8 @@ mod toml_rendering_tests {
         p.insert("z.last".into(), "1".into());
         p.insert("a.first".into(), "0".into());
 
-        let t1 = render_broker_toml(0, &l, &addrs, "PLAIN", &p, None, None);
-        let t2 = render_broker_toml(0, &l, &addrs, "PLAIN", &p, None, None);
+        let t1 = render_broker_toml(0, &l, &addrs, "PLAIN", &p, None, None, false);
+        let t2 = render_broker_toml(0, &l, &addrs, "PLAIN", &p, None, None, false);
         assert_eq!(t1, t2);
         // Sorted property keys (BTreeMap iteration).
         let a_pos = t1.find("a.first").unwrap();
@@ -2973,8 +2989,68 @@ mod toml_rendering_tests {
             &std::collections::BTreeMap::new(),
             None,
             None,
+            false,
         );
         assert!(!t.contains("[server_properties]"), "got:\n{t}");
+    }
+
+    #[test]
+    fn render_broker_toml_emits_super_users_anonymous_when_delegation_token_set() {
+        let mut addrs = std::collections::BTreeMap::new();
+        addrs.insert(
+            "PLAIN".into(),
+            AdvertisedAddress {
+                host: "h".into(),
+                port: 9092,
+            },
+        );
+        let t = render_broker_toml(
+            0,
+            &[synthesized_default_listener()],
+            &addrs,
+            "PLAIN",
+            &std::collections::BTreeMap::new(),
+            None,
+            None,
+            true,
+        );
+        assert!(
+            t.contains("super_users = [\"ANONYMOUS\"]"),
+            "expected ANONYMOUS super-user line when delegation tokens are enabled, got:\n{t}"
+        );
+        // And the rendered TOML must still round-trip through FileConfig.
+        let parsed: crabka_broker::file_config::FileConfig =
+            toml::from_str(&t).expect("rendered TOML must parse with broker FileConfig");
+        assert_eq!(
+            parsed.super_users.as_deref(),
+            Some(&["ANONYMOUS".to_string()][..]),
+        );
+    }
+
+    #[test]
+    fn render_broker_toml_omits_super_users_when_delegation_token_unset() {
+        let mut addrs = std::collections::BTreeMap::new();
+        addrs.insert(
+            "PLAIN".into(),
+            AdvertisedAddress {
+                host: "h".into(),
+                port: 9092,
+            },
+        );
+        let t = render_broker_toml(
+            0,
+            &[synthesized_default_listener()],
+            &addrs,
+            "PLAIN",
+            &std::collections::BTreeMap::new(),
+            None,
+            None,
+            false,
+        );
+        assert!(
+            !t.contains("super_users"),
+            "super_users must be absent when delegation tokens are disabled, got:\n{t}"
+        );
     }
 
     #[test]
@@ -2996,7 +3072,16 @@ mod toml_rendering_tests {
             client_ca_path: "/etc/crabka/cluster-ca/ca.crt".into(),
             client_auth: "Required".into(),
         };
-        let toml_str = render_broker_toml(0, &listeners, &addrs, "PLAIN", &props, Some(&tls), None);
+        let toml_str = render_broker_toml(
+            0,
+            &listeners,
+            &addrs,
+            "PLAIN",
+            &props,
+            Some(&tls),
+            None,
+            false,
+        );
 
         let parsed: crabka_broker::file_config::FileConfig =
             toml::from_str(&toml_str).expect("rendered TOML must parse with broker FileConfig");
@@ -3023,7 +3108,8 @@ mod toml_rendering_tests {
         );
         let listeners = vec![synthesized_default_listener()];
         let props = std::collections::BTreeMap::new();
-        let toml_str = render_broker_toml(0, &listeners, &addrs, "PLAIN", &props, None, None);
+        let toml_str =
+            render_broker_toml(0, &listeners, &addrs, "PLAIN", &props, None, None, false);
         assert!(!toml_str.contains("[tls_config]"));
         assert!(!toml_str.contains("controller_listener_protocol"));
     }
@@ -3062,6 +3148,7 @@ mod toml_rendering_tests {
                 client_auth: "Required".into(),
             }),
             None,
+            false,
         );
         assert!(toml.contains("protocol = \"SaslSsl\""), "TOML: {toml}");
         assert!(toml.contains("tls_config = { cert_path = \"/etc/crabka/broker-tls/0.crt\""));
@@ -3156,6 +3243,7 @@ mod toml_rendering_tests {
             &BTreeMap::new(),
             Some(&render_tls()),
             None,
+            false,
         );
         assert!(toml.contains("[oauthbearer]"), "TOML: {toml}");
         assert!(
@@ -3211,6 +3299,7 @@ mod toml_rendering_tests {
             &BTreeMap::new(),
             Some(&render_tls()),
             None,
+            false,
         );
         assert!(toml.contains("[oauthbearer]"));
         assert!(toml.contains("jwks_endpoint_uri = \"https://issuer.example.com/jwks\""));
@@ -3240,6 +3329,7 @@ mod toml_rendering_tests {
             &BTreeMap::new(),
             Some(&render_tls()),
             None,
+            false,
         );
         assert!(
             toml.contains("idp_tls_trust = \"/etc/crabka/oauth-jwks-trust/ca.crt\""),
@@ -3285,6 +3375,7 @@ mod toml_rendering_tests {
             &BTreeMap::new(),
             Some(&render_tls()),
             None,
+            false,
         );
         assert!(!toml.contains("idp_tls_trust"), "TOML: {toml}");
     }
@@ -3307,6 +3398,7 @@ mod toml_rendering_tests {
             &BTreeMap::new(),
             Some(&render_tls()),
             None,
+            false,
         );
         assert!(
             toml.contains("max_session_lifetime_seconds = 300"),
@@ -3335,6 +3427,7 @@ mod toml_rendering_tests {
             &BTreeMap::new(),
             Some(&render_tls()),
             None,
+            false,
         );
         assert!(
             !toml.contains("max_session_lifetime_seconds"),
@@ -3359,6 +3452,7 @@ mod toml_rendering_tests {
             &BTreeMap::new(),
             Some(&render_tls()),
             None,
+            false,
         );
         assert!(
             toml.contains("sasl_config = { enabled_mechanisms = [\"OAUTHBEARER\"] }"),
@@ -3381,6 +3475,7 @@ mod toml_rendering_tests {
             &BTreeMap::new(),
             Some(&render_tls()),
             None,
+            false,
         );
         assert!(toml.contains("[oauthbearer]"), "TOML: {toml}");
         assert!(!toml.contains("sasl_config"), "TOML: {toml}");
@@ -3397,6 +3492,7 @@ mod toml_rendering_tests {
             &BTreeMap::new(),
             None,
             None,
+            false,
         );
         assert!(!toml.contains("[oauthbearer]"), "TOML: {toml}");
     }
@@ -3418,6 +3514,7 @@ mod toml_rendering_tests {
             &BTreeMap::new(),
             Some(&render_tls()),
             None,
+            false,
         );
         let parsed: crabka_broker::file_config::FileConfig =
             toml::from_str(&toml).expect("rendered TOML must parse with broker FileConfig");
@@ -3460,6 +3557,7 @@ mod toml_rendering_tests {
             &BTreeMap::new(),
             Some(&render_tls()),
             None,
+            false,
         );
         let b = render_broker_toml(
             0,
@@ -3469,6 +3567,7 @@ mod toml_rendering_tests {
             &BTreeMap::new(),
             Some(&render_tls()),
             None,
+            false,
         );
         assert_eq!(a, b);
     }
@@ -3517,6 +3616,7 @@ mod toml_rendering_tests {
             &BTreeMap::new(),
             Some(&render_tls()),
             None,
+            false,
         );
         let expected = "[oauthbearer]\n\
             jwks_endpoint_uri = \"https://idp.example/certs\"\n\
@@ -3585,6 +3685,7 @@ mod toml_rendering_tests {
             &BTreeMap::new(),
             Some(&render_tls()),
             None,
+            false,
         );
         assert!(toml.contains("[oauthbearer]"), "TOML: {toml}");
         assert!(
@@ -3620,6 +3721,7 @@ mod toml_rendering_tests {
             &BTreeMap::new(),
             Some(&render_tls()),
             None,
+            false,
         );
         assert!(!toml.contains("jwks_endpoint_uri"), "TOML: {toml}");
     }
@@ -3637,6 +3739,7 @@ mod toml_rendering_tests {
             &BTreeMap::new(),
             Some(&render_tls()),
             None,
+            false,
         );
         assert!(
             toml.contains("userinfo_endpoint_uri = \"https://idp.example/userinfo\""),
@@ -3658,6 +3761,7 @@ mod toml_rendering_tests {
             &BTreeMap::new(),
             Some(&render_tls()),
             None,
+            false,
         );
         assert!(
             toml.contains("introspection_http_timeout_ms = 15000"),
@@ -3682,6 +3786,7 @@ mod toml_rendering_tests {
             &BTreeMap::new(),
             Some(&render_tls()),
             None,
+            false,
         );
         let expected = "introspection_endpoint_uri = \"https://idp.example/introspect\"\n\
             userinfo_endpoint_uri = \"https://idp.example/userinfo\"\n\
@@ -3722,6 +3827,7 @@ mod toml_rendering_tests {
             &BTreeMap::new(),
             None,
             Some("/etc/crabka/clients-ca/ca.crt"),
+            false,
         );
         assert!(toml.contains("protocol = \"Ssl\""));
         assert!(toml.contains("client_ca_path = \"/etc/crabka/clients-ca/ca.crt\""));
@@ -3749,6 +3855,7 @@ mod toml_rendering_tests {
             &BTreeMap::new(),
             Some(&render_tls()),
             None,
+            false,
         );
         assert!(
             toml.contains("custom_claim_check = '''$.scope[?@ == 'kafka.write']'''"),
@@ -3770,6 +3877,7 @@ mod toml_rendering_tests {
             &BTreeMap::new(),
             Some(&render_tls()),
             None,
+            false,
         );
         assert!(
             toml.contains("valid_token_type = \"JWT\""),
@@ -3795,6 +3903,7 @@ mod toml_rendering_tests {
             &BTreeMap::new(),
             Some(&render_tls()),
             None,
+            false,
         );
         assert!(
             toml.contains("fallback_user_name_claim = \"client_id\""),
@@ -3816,6 +3925,7 @@ mod toml_rendering_tests {
             &BTreeMap::new(),
             Some(&render_tls()),
             None,
+            false,
         );
         assert!(
             toml.contains("fallback_user_name_prefix = \"service-account-\""),
@@ -3837,6 +3947,7 @@ mod toml_rendering_tests {
             &BTreeMap::new(),
             Some(&render_tls()),
             None,
+            false,
         );
         assert!(
             toml.contains("groups_claim = '''$.realm_access.roles[*]'''"),
@@ -3858,6 +3969,7 @@ mod toml_rendering_tests {
             &BTreeMap::new(),
             Some(&render_tls()),
             None,
+            false,
         );
         assert!(
             toml.contains("groups_claim_delimiter = \",\""),
@@ -3881,6 +3993,7 @@ mod toml_rendering_tests {
             &BTreeMap::new(),
             Some(&render_tls()),
             None,
+            false,
         );
         assert!(
             !toml.contains("custom_claim_check"),
@@ -3906,6 +4019,7 @@ mod toml_rendering_tests {
             &BTreeMap::new(),
             Some(&render_tls()),
             None,
+            false,
         );
         assert!(
             toml.contains("jwks_min_refresh_pause_seconds = 2"),
@@ -3927,6 +4041,7 @@ mod toml_rendering_tests {
             &BTreeMap::new(),
             Some(&render_tls()),
             None,
+            false,
         );
         assert!(
             toml.contains("jwks_expiry_seconds = 3600"),
@@ -3948,6 +4063,7 @@ mod toml_rendering_tests {
             &BTreeMap::new(),
             Some(&render_tls()),
             None,
+            false,
         );
         assert!(
             toml.contains("jwks_ignore_key_use = true"),
@@ -3970,6 +4086,7 @@ mod toml_rendering_tests {
             &BTreeMap::new(),
             Some(&render_tls()),
             None,
+            false,
         );
         assert!(
             !toml.contains("jwks_min_refresh_pause_seconds"),

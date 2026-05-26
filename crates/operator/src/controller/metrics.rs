@@ -281,6 +281,7 @@ mod tests {
                 cluster_ca: None,
                 clients_ca: None,
                 logging: None,
+                delegation_token: None,
             },
         );
         k.metadata.namespace = Some("default".into());

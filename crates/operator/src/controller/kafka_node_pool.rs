@@ -263,6 +263,7 @@ fn render_broker_container(
     jbod_extra_mounts: &[(String, String)],
     oauth_jwks_trust_mount: Option<&str>,
     oauth_introspection_mount_path: Option<&str>,
+    delegation_token: Option<&crate::crd::kafka::DelegationTokenConfig>,
 ) -> serde_json::Value {
     let mut ports = vec![json!({
         "containerPort": BROKER_PORT, "name": "kafka-internal", "protocol": "TCP"
@@ -305,6 +306,29 @@ fn render_broker_container(
             .collect::<Vec<_>>()
             .join(",");
         env.push(json!({ "name": "CRABKA_EXTRA_LOG_DIRS", "value": value }));
+    }
+    // Slice 51b: when `Kafka.spec.delegationToken` is set, source the
+    // broker's master HMAC key from the referenced Secret via
+    // `valueFrom.secretKeyRef`. Baking the env entry into the
+    // operator-rendered pod template removes the slice-51 e2e
+    // `kubectl set env` race: every SSA reconcile re-asserts the env
+    // entry, so it can't drift from beneath the broker. The broker's
+    // slice-51 config layer reads `CRABKA_DELEGATION_TOKEN_SECRET_KEY`
+    // (env wins over TOML) and flips the four delegation-token RPCs
+    // from `DELEGATION_TOKEN_AUTH_DISABLED` (err 61) to live. Omitted
+    // entirely when `delegation_token` is `None`, keeping the rendered
+    // pod template byte-identical to the pre-slice-51b shape.
+    if let Some(dt) = delegation_token {
+        let key = dt.secret_key_ref.key.as_deref().unwrap_or("secret-key");
+        env.push(json!({
+            "name": "CRABKA_DELEGATION_TOKEN_SECRET_KEY",
+            "valueFrom": {
+                "secretKeyRef": {
+                    "name": dt.secret_key_ref.name,
+                    "key": key,
+                }
+            }
+        }));
     }
     let main_script = build_main_script(metrics_enabled);
     let mut volume_mounts = vec![
@@ -641,6 +665,7 @@ pub(crate) fn render_statefulset(
         &jbod_extra,
         oauth_jwks_trust_mount,
         oauth_introspection_mount_path,
+        parent.spec.delegation_token.as_ref(),
     );
 
     // Merge user-provided pod metadata under operator-owned labels.
@@ -1139,6 +1164,7 @@ mod tests {
                 cluster_ca: None,
                 clients_ca: None,
                 logging: None,
+                delegation_token: None,
             },
         );
         k.metadata.namespace = Some("default".into());
@@ -2158,6 +2184,91 @@ mod tests {
         // Value must be sourced (not literal) so a ConfigMap update + config
         // hash roll re-reads it.
         assert!(rust_log.value.is_none());
+    }
+
+    /// Slice 51b: without `spec.delegationToken`, the broker container's
+    /// env list must NOT carry `CRABKA_DELEGATION_TOKEN_SECRET_KEY` —
+    /// keeps the pod template byte-identical to pre-slice-51b clusters
+    /// (no spurious roll).
+    #[test]
+    fn render_statefulset_omits_dt_master_key_env_when_unset() {
+        let parent = parent_fixture("demo");
+        let pool = pool_fixture("brokers", "demo", 1);
+        let sts = render_statefulset(&parent, &pool, "img:latest").unwrap();
+        let env = sts.spec.unwrap().template.spec.unwrap().containers[0]
+            .env
+            .clone()
+            .unwrap();
+        assert!(
+            env.iter()
+                .all(|e| e.name != "CRABKA_DELEGATION_TOKEN_SECRET_KEY"),
+            "env: {env:#?}"
+        );
+    }
+
+    /// Slice 51b: with `spec.delegationToken.secretKeyRef`, the operator
+    /// must wire `CRABKA_DELEGATION_TOKEN_SECRET_KEY` via
+    /// `valueFrom.secretKeyRef` (NOT a literal value — otherwise the
+    /// Secret value leaks into the `StatefulSet` manifest). With the key
+    /// unset, it defaults to `secret-key`.
+    #[test]
+    fn render_statefulset_dt_master_key_env_from_secret_default_key() {
+        use crate::crd::kafka::{DelegationTokenConfig, SecretKeyRef};
+        let mut parent = parent_fixture("demo");
+        parent.spec.delegation_token = Some(DelegationTokenConfig {
+            secret_key_ref: SecretKeyRef {
+                name: "dt-master".into(),
+                key: None,
+            },
+        });
+        let pool = pool_fixture("brokers", "demo", 1);
+        let sts = render_statefulset(&parent, &pool, "img:latest").unwrap();
+        let env = sts.spec.unwrap().template.spec.unwrap().containers[0]
+            .env
+            .clone()
+            .unwrap();
+        let dt_env = env
+            .iter()
+            .find(|e| e.name == "CRABKA_DELEGATION_TOKEN_SECRET_KEY")
+            .expect("dt env present when spec.delegationToken set");
+        assert!(
+            dt_env.value.is_none(),
+            "literal value must not be set; valueFrom only"
+        );
+        let secret_ref = dt_env
+            .value_from
+            .as_ref()
+            .and_then(|vf| vf.secret_key_ref.as_ref())
+            .expect("secretKeyRef present");
+        assert_eq!(secret_ref.name, "dt-master");
+        assert_eq!(secret_ref.key, "secret-key");
+    }
+
+    /// Slice 51b: explicit `key` override surfaces in the `SecretKeySelector`.
+    #[test]
+    fn render_statefulset_dt_master_key_env_honors_explicit_key() {
+        use crate::crd::kafka::{DelegationTokenConfig, SecretKeyRef};
+        let mut parent = parent_fixture("demo");
+        parent.spec.delegation_token = Some(DelegationTokenConfig {
+            secret_key_ref: SecretKeyRef {
+                name: "dt-master".into(),
+                key: Some("hmac".into()),
+            },
+        });
+        let pool = pool_fixture("brokers", "demo", 1);
+        let sts = render_statefulset(&parent, &pool, "img:latest").unwrap();
+        let env = sts.spec.unwrap().template.spec.unwrap().containers[0]
+            .env
+            .clone()
+            .unwrap();
+        let secret_ref = env
+            .iter()
+            .find(|e| e.name == "CRABKA_DELEGATION_TOKEN_SECRET_KEY")
+            .and_then(|e| e.value_from.as_ref())
+            .and_then(|vf| vf.secret_key_ref.as_ref())
+            .expect("secretKeyRef present");
+        assert_eq!(secret_ref.name, "dt-master");
+        assert_eq!(secret_ref.key, "hmac");
     }
 
     #[test]

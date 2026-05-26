@@ -54,6 +54,7 @@ fn kafka_cr(name: &str, namespace: &str) -> Kafka {
             cluster_ca: None,
             clients_ca: None,
             logging: None,
+            delegation_token: None,
         },
     );
     k.metadata.namespace = Some(namespace.into());
@@ -76,6 +77,7 @@ fn kafka_cr_with_metrics(name: &str, namespace: &str, metrics: Option<MetricsCon
             cluster_ca: None,
             clients_ca: None,
             logging: None,
+            delegation_token: None,
         },
     );
     k.metadata.namespace = Some(namespace.into());
@@ -102,6 +104,7 @@ fn kafka_cr_with_network_policy(
             cluster_ca: None,
             clients_ca: None,
             logging: None,
+            delegation_token: None,
         },
     );
     k.metadata.namespace = Some(namespace.into());
@@ -130,6 +133,7 @@ fn kafka_cr_with_config(
             cluster_ca: None,
             clients_ca: None,
             logging: None,
+            delegation_token: None,
         },
     );
     k.metadata.namespace = Some(namespace.into());
@@ -588,6 +592,7 @@ fn kafka_cr_with_versions(
             cluster_ca: None,
             clients_ca: None,
             logging: None,
+            delegation_token: None,
         },
     );
     k.metadata.namespace = Some(namespace.into());
@@ -610,6 +615,7 @@ fn kafka_cr_with_logging(name: &str, namespace: &str, logging: Option<Logging>) 
             cluster_ca: None,
             clients_ca: None,
             logging,
+            delegation_token: None,
         },
     );
     k.metadata.namespace = Some(namespace.into());

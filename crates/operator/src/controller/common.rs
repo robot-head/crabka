@@ -283,6 +283,10 @@ pub(crate) fn render_configmap(
     if let Some(mv) = metadata_version {
         server_properties.insert("metadata.version".to_string(), mv.to_string());
     }
+    // Slice 51b: surface delegation-token enablement to the per-broker
+    // renderer so it can emit `super_users = ["ANONYMOUS"]` (needed for
+    // operator-side act-as over PLAINTEXT inter-broker).
+    let delegation_token_enabled = owner.spec.delegation_token.is_some();
     for (broker_id, addrs) in addresses_per_broker {
         let tls_for_broker = tls_per_broker.and_then(|m| m.get(broker_id));
         let toml = crate::controller::listeners::render_broker_toml(
@@ -293,6 +297,7 @@ pub(crate) fn render_configmap(
             &server_properties,
             tls_for_broker,
             clients_ca_path,
+            delegation_token_enabled,
         );
         data.insert(format!("broker-{broker_id}.toml"), toml);
     }
@@ -749,6 +754,7 @@ mod config_hash_tests {
             cluster_ca: None,
             clients_ca: None,
             logging: None,
+            delegation_token: None,
         };
         let h = combined_config_hash(&spec_a, None, None, None);
         let h_again = combined_config_hash(&spec_a, None, None, None);
@@ -791,6 +797,7 @@ mod config_hash_tests {
             cluster_ca: None,
             clients_ca: None,
             logging: None,
+            delegation_token: None,
         };
         let h_off = combined_config_hash(&spec_off, None, None, None);
 
@@ -835,6 +842,7 @@ mod config_hash_tests {
             cluster_ca: None,
             clients_ca: None,
             logging: None,
+            delegation_token: None,
         };
         let h_none = combined_config_hash(&spec, None, None, None);
         let h_a = combined_config_hash(
@@ -870,6 +878,7 @@ mod config_hash_tests {
             cluster_ca: None,
             clients_ca: None,
             logging: None,
+            delegation_token: None,
         };
         let h1 = combined_config_hash(&spec, Some("ca-pem"), None, None);
         let h2 = combined_config_hash(&spec, Some("ca-pem"), None, None);
@@ -894,6 +903,7 @@ mod config_hash_tests {
                 cluster_ca: None,
                 clients_ca: None,
                 logging: None,
+                delegation_token: None,
             },
         );
         k.meta_mut().namespace = Some("default".into());
@@ -947,6 +957,7 @@ mod config_hash_tests {
             cluster_ca: None,
             clients_ca: None,
             logging: None,
+            delegation_token: None,
         };
         // No explicit pin => slice-24 collapse preserved (== config_hash of
         // the empty config part).
@@ -979,6 +990,7 @@ mod config_hash_tests {
                 cluster_ca: None,
                 clients_ca: None,
                 logging: None,
+                delegation_token: None,
             },
         );
         k.meta_mut().namespace = Some("default".into());

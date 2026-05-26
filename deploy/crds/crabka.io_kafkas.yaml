@@ -97,6 +97,36 @@ spec:
                   hash.
                 nullable: true
                 type: object
+              delegationToken:
+                description: |-
+                  Slice 51b: delegation-token master HMAC key source. When `None`,
+                  the broker rejects all KIP-48 delegation-token RPCs with err 61
+                  `DELEGATION_TOKEN_AUTH_DISABLED`. When `Some`, the operator
+                  injects `CRABKA_DELEGATION_TOKEN_SECRET_KEY` into each broker
+                  pod via a `valueFrom.secretKeyRef`, baking the key into the
+                  rendered `StatefulSet` so the slice-21 SSA reconcile doesn't
+                  race with out-of-band `kubectl set env` patches.
+                nullable: true
+                properties:
+                  secretKeyRef:
+                    description: |-
+                      Reference to a Kubernetes `Secret` (same namespace as the
+                      `Kafka` CR) whose `data.<key>` value is the broker's master HMAC
+                      key for KIP-48 delegation tokens.
+                    properties:
+                      key:
+                        description: Key within the Secret's `data`. Defaults to `secret-key`.
+                        nullable: true
+                        type: string
+                      name:
+                        description: Secret name in the same namespace as the `Kafka` CR.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                required:
+                - secretKeyRef
+                type: object
               interBrokerListenerName:
                 description: |-
                   Slice 25: name of the listener used for inter-broker traffic.

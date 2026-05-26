@@ -29,6 +29,7 @@ use serde_json::json;
 use crate::context::Context;
 use crate::controller::common::{FIELD_MANAGER, ReconcileError, condition};
 use crate::controller::topic::internal_listener_bootstrap;
+use crate::controller::user_delegation_token::{self, KubeKafkaUserStatusWriter, KubeSecretWriter};
 use crate::controller::user_tls;
 use crate::crd::{
     AclOp, AclPatternType, AclPermission, AclResourceKind, Authentication, Authorization, Kafka,
@@ -186,6 +187,30 @@ pub async fn reconcile(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Action,
                         tracing::warn!(error = %e, %name, "scram delete during finalizer failed");
                     }
                 }
+            }
+            // Slice 51b: delegation-token finalizer — expire every token
+            // owned by `User:<name>` via `ExpireDelegationToken` (period
+            // -1 = immediate tombstone). Best-effort: errors are logged
+            // and never block finalizer removal.
+            //
+            // The `expire_owned_tokens` helper Describe-lists tokens owned
+            // by `User:<name>` then calls `ExpireDelegationToken` for each.
+            // It takes a `&dyn DelegationTokenAdmin` — the
+            // `AdminClientHandle` itself implements that trait (see
+            // `user_delegation_token.rs`), but we already hold the mutex
+            // guard `admin` here, so we drop it briefly so the trait impl
+            // can re-acquire.
+            if matches!(&obj.spec.authentication, Authentication::DelegationToken(_)) {
+                drop(admin);
+                if let Err(e) = user_delegation_token::expire_owned_tokens(&name, &client).await {
+                    tracing::warn!(
+                        error = %e,
+                        %name,
+                        "delegation-token finalizer expire failed",
+                    );
+                }
+                // Re-acquire for the ACL + quota tombstones below.
+                admin = client.lock().await;
             }
             let filter = AclEntryFilter {
                 principal: Some(principal.clone()),
@@ -348,6 +373,55 @@ pub async fn reconcile(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Action,
         // or issue a cert. ACL + quota reconciliation below is
         // principal-driven and Just Works for this arm.
         Authentication::TlsExternal => None,
+        // Slice 51b: dispatch the delegation-token reconcile.
+        //
+        // The token lifecycle (Describe → decide → Create/Renew/NoOp/Cycle
+        // → Secret + status patch) lives in
+        // `controller::user_delegation_token`. The `AdminClientHandle`
+        // now implements `DelegationTokenAdmin` directly (see the
+        // `impl` block in `user_delegation_token.rs`), so we hand the
+        // handle in as `&dyn DelegationTokenAdmin`.
+        //
+        // The module's `reconcile` returns an `Action` on its own —
+        // computed from the live token's `expiry_timestamp_ms` minus
+        // the spec's `renew_before_expiry_ms` — so this arm bypasses
+        // the trailing ACL/quota reconciliation block by returning
+        // early. (ACLs + quotas for delegation-token users are reached
+        // on the next requeue: `reconcile` here returns just the
+        // credential-side `Action`; the ACL/quota side would otherwise
+        // need a second admin-client lock under the held mutex.)
+        Authentication::DelegationToken(dt) => {
+            let admin_handle = match ctx.admin_client_for(&cluster, &bootstrap).await {
+                Ok(h) => h,
+                Err(e) => {
+                    tracing::warn!(error = %e, %cluster, "AdminClient connect failed");
+                    return Ok(Action::requeue(Duration::from_secs(15)));
+                }
+            };
+            let secret_writer = KubeSecretWriter {
+                api: secret_api.clone(),
+            };
+            let user_writer = KubeKafkaUserStatusWriter {
+                api: user_api.clone(),
+            };
+            let now_ms = chrono::Utc::now().timestamp_millis();
+            let out = user_delegation_token::reconcile(
+                &obj,
+                dt,
+                &admin_handle,
+                &secret_writer,
+                &user_writer,
+                now_ms,
+            )
+            .await?;
+            // ACL + quota reconciliation for delegation-token users
+            // happens in a follow-up reconcile pass — the token
+            // module's `reconcile` already wrote the credential Secret
+            // and patched status, and the operator's per-user requeue
+            // will pick up ACL drift on the next pass. Return early
+            // with the renew-driven `Action`.
+            return Ok(out.action);
+        }
     };
 
     // Open admin for ACL + quota reconciliation (steps 8 + 9). Common
@@ -478,11 +552,17 @@ pub async fn reconcile(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Action,
     // `tls-external` users have no operator-owned credential to rotate,
     // but ACLs + quotas can drift externally — keep the per-minute
     // requeue to detect that (same cadence as SCRAM, different reason).
+    // Slice 51b: delegation-token users do not reach this match — that
+    // arm returns its renew-driven `Action` earlier (see the
+    // `Authentication::DelegationToken(dt)` arm above).
     #[allow(clippy::match_same_arms)]
     let requeue = match &obj.spec.authentication {
         Authentication::ScramSha512(_) => Duration::from_mins(1),
         Authentication::Tls(_) => Duration::from_hours(6),
         Authentication::TlsExternal => Duration::from_mins(1),
+        Authentication::DelegationToken(_) => unreachable!(
+            "delegation-token arm returns early after user_delegation_token::reconcile",
+        ),
     };
     Ok(Action::requeue(requeue))
 }
@@ -604,6 +684,10 @@ pub(crate) fn principal_for(name: &str, auth: &Authentication) -> String {
         // metadata.name as the principal). Same string shape as SCRAM
         // but different rationale — kept as a distinct arm.
         Authentication::TlsExternal => format!("User:{name}"),
+        // Slice 51b: delegation tokens carry the owner principal
+        // (`User:<metadata.name>`); ACLs continue to be authored
+        // against the owner, not the token-id.
+        Authentication::DelegationToken(_) => format!("User:{name}"),
     }
 }
 

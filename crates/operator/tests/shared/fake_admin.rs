@@ -20,6 +20,8 @@ use crabka_client_admin::{
     TopicMetadataEntry, UserQuotaConfig,
 };
 use crabka_client_core::ClientError;
+use crabka_metadata::DelegationToken;
+use crabka_security::KafkaPrincipal;
 
 /// Per-RPC error to inject. `Broker` surfaces as a per-outcome error
 /// (matches how Kafka reports per-topic errors); `Transport` surfaces as
@@ -76,6 +78,21 @@ pub enum RecordedCall {
         ops: Vec<QuotaOp>,
         validate_only: bool,
     },
+    // ── Slice 51b: delegation-token RPCs ──────────────────────────────
+    CreateDelegationToken {
+        owner_principal_name: String,
+        renewers: Vec<String>,
+        max_lifetime_ms: i64,
+    },
+    RenewDelegationToken {
+        hmac: Vec<u8>,
+    },
+    ExpireDelegationToken {
+        hmac: Vec<u8>,
+    },
+    DescribeDelegationTokensOwnedBy {
+        owner_principal: String,
+    },
 }
 
 /// Per-topic state held by the fake. Mirrors `TopicMetadataEntry` +
@@ -109,6 +126,17 @@ pub struct FakeAdminClient {
     /// In-memory client-quota store, keyed by username. Slice 38 reconcile
     /// tests seed this when verifying convergence.
     pub user_quotas: StdMutex<BTreeMap<String, UserQuotaConfig>>,
+    /// Slice 51b: in-memory delegation-token store. The fake mirrors the
+    /// broker's KIP-48 semantics enough for the reconciler's
+    /// Describe → decide → Create/Renew/Expire loop to exercise its
+    /// branches: `create_delegation_token_as_owner` mints a fresh token
+    /// keyed by a sequential id with `expiry_timestamp_ms = now + 7d`
+    /// and `max_timestamp_ms = now + 30d`; `renew_delegation_token`
+    /// extends `expiry_timestamp_ms` to `min(now + 7d, max_timestamp_ms)`;
+    /// `expire_delegation_token` removes the matching entry.
+    pub delegation_tokens: StdMutex<Vec<DelegationToken>>,
+    /// Monotonic id counter for minted tokens.
+    pub next_token_id: StdMutex<u64>,
 }
 
 impl FakeAdminClient {
@@ -682,6 +710,120 @@ impl AdminClientLike for FakeAdminClient {
             store.remove(username);
         }
         Ok(None)
+    }
+
+    // ── Slice 51b: delegation-token RPCs ──────────────────────────────
+    //
+    // In-memory KIP-48 model. Tokens carry:
+    //   - `token_id`  — sequential `tok-<n>` strings
+    //   - `hmac`      — 32 zero bytes plus the id as a discriminator,
+    //                   so `expire(hmac)` / `renew(hmac)` can find them.
+    //   - `expiry_timestamp_ms` — `now + 7d` on create.
+    //   - `max_timestamp_ms`    — `now + 30d` on create.
+    //
+    // Renew advances `expiry_timestamp_ms` to `min(now + 7d, max)`. The
+    // operator's `reconcile_renews_when_within_threshold` test depends
+    // on this — it uses a `renew_before_expiry_ms` of exactly 7d so the
+    // decision always lands on Renew, and asserts that the post-renew
+    // expiry only ever increases (or holds at `max`).
+    async fn create_delegation_token_as_owner(
+        &mut self,
+        owner_principal_name: &str,
+        renewers: &[String],
+        max_lifetime_ms: i64,
+    ) -> Result<DelegationToken, AdminError> {
+        self.recorded_calls
+            .lock()
+            .unwrap()
+            .push(RecordedCall::CreateDelegationToken {
+                owner_principal_name: owner_principal_name.into(),
+                renewers: renewers.to_vec(),
+                max_lifetime_ms,
+            });
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let lifetime_ms = if max_lifetime_ms <= 0 {
+            7 * 24 * 60 * 60 * 1_000
+        } else {
+            max_lifetime_ms.min(7 * 24 * 60 * 60 * 1_000)
+        };
+        let max_ts = now_ms + 30 * 24 * 60 * 60 * 1_000;
+        let id = {
+            let mut next = self.next_token_id.lock().unwrap();
+            let i = *next;
+            *next += 1;
+            i
+        };
+        let token_id = format!("tok-{id}");
+        // Discriminating HMAC: 32 bytes where the trailing 8 carry the
+        // id LE-encoded so `renew`/`expire` can match the right token.
+        let mut hmac = vec![0u8; 32];
+        hmac[24..].copy_from_slice(&id.to_le_bytes());
+
+        let owner: KafkaPrincipal = format!("User:{owner_principal_name}")
+            .parse()
+            .map_err(AdminError::Protocol)?;
+        let parsed_renewers: Vec<KafkaPrincipal> =
+            renewers.iter().filter_map(|s| s.parse().ok()).collect();
+        let token = DelegationToken {
+            token_id,
+            owner,
+            hmac,
+            issue_timestamp_ms: now_ms,
+            expiry_timestamp_ms: now_ms + lifetime_ms,
+            max_timestamp_ms: max_ts,
+            renewers: parsed_renewers,
+        };
+        self.delegation_tokens.lock().unwrap().push(token.clone());
+        Ok(token)
+    }
+
+    async fn renew_delegation_token(&mut self, hmac: &[u8]) -> Result<DelegationToken, AdminError> {
+        self.recorded_calls
+            .lock()
+            .unwrap()
+            .push(RecordedCall::RenewDelegationToken {
+                hmac: hmac.to_vec(),
+            });
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let mut store = self.delegation_tokens.lock().unwrap();
+        let pos = store
+            .iter()
+            .position(|t| t.hmac == hmac)
+            .ok_or_else(|| AdminError::Protocol("renew: hmac not found".into()))?;
+        let max = store[pos].max_timestamp_ms;
+        let new_expiry = (now_ms + 7 * 24 * 60 * 60 * 1_000).min(max);
+        // Renew never moves expiry backwards.
+        if new_expiry > store[pos].expiry_timestamp_ms {
+            store[pos].expiry_timestamp_ms = new_expiry;
+        }
+        Ok(store[pos].clone())
+    }
+
+    async fn expire_delegation_token(&mut self, hmac: &[u8]) -> Result<(), AdminError> {
+        self.recorded_calls
+            .lock()
+            .unwrap()
+            .push(RecordedCall::ExpireDelegationToken {
+                hmac: hmac.to_vec(),
+            });
+        let mut store = self.delegation_tokens.lock().unwrap();
+        store.retain(|t| t.hmac != hmac);
+        Ok(())
+    }
+
+    async fn describe_delegation_tokens_owned_by(
+        &mut self,
+        owner_principal: &str,
+    ) -> Result<Vec<DelegationToken>, AdminError> {
+        self.recorded_calls
+            .lock()
+            .unwrap()
+            .push(RecordedCall::DescribeDelegationTokensOwnedBy {
+                owner_principal: owner_principal.into(),
+            });
+        let want: KafkaPrincipal = owner_principal.parse().map_err(AdminError::Protocol)?;
+        let store = self.delegation_tokens.lock().unwrap();
+        Ok(store.iter().filter(|t| t.owner == want).cloned().collect())
     }
 }
 

@@ -39,19 +39,31 @@ spec:
                     maximum: 1000000.0
                     minimum: 4096.0
                     type: integer
+                  maxLifetimeMs:
+                    minimum: 1.0
+                    type: integer
                   passwordLength:
                     maximum: 256.0
                     minimum: 16.0
+                    type: integer
+                  renewBeforeExpiryMs:
+                    minimum: 60000.0
                     type: integer
                   renewalDays:
                     maximum: 3650.0
                     minimum: 1.0
                     type: integer
+                  renewers:
+                    items:
+                      pattern: ^User:.+$
+                      type: string
+                    type: array
                   type:
                     enum:
                     - scram-sha-512
                     - tls
                     - tls-external
+                    - delegation-token
                     type: string
                   validityDays:
                     maximum: 36500.0
@@ -218,6 +230,33 @@ spec:
                   - type
                   type: object
                 type: array
+              delegationTokenExpiryTimestampMs:
+                description: |-
+                  Slice 51b: current `expiry_timestamp_ms` of the operator-managed
+                  delegation token (extended on each successful renew). Compared
+                  against `now` to decide when to renew per
+                  `spec.authentication.renewBeforeExpiryMs`.
+                format: int64
+                nullable: true
+                type: integer
+              delegationTokenId:
+                description: |-
+                  Slice 51b: persisted `token_id` (UUID) of the operator-managed
+                  delegation token for this user. Used across reconciles to find
+                  the same token via `DescribeDelegationToken`. Present once the
+                  operator has successfully issued a token via
+                  `CreateDelegationToken`.
+                nullable: true
+                type: string
+              delegationTokenMaxTimestampMs:
+                description: |-
+                  Slice 51b: token's absolute upper bound (`max_timestamp_ms`).
+                  Renew can never push `expiry_timestamp_ms` past this — the
+                  operator stops renewing and surfaces `TokenExpiring` once
+                  further extension is impossible.
+                format: int64
+                nullable: true
+                type: integer
               external:
                 default: false
                 description: |-

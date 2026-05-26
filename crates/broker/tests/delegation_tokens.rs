@@ -84,6 +84,9 @@ use crabka_security::{ListenerProtocol, SaslMechanism, SecretBytes};
 /// private to the crate, so we keep a local copy — kept in sync with
 /// `crates/broker/src/codes.rs` and the Apache Kafka error table.
 const DELEGATION_TOKEN_REQUEST_NOT_ALLOWED: i16 = 64;
+/// Canonical Kafka error code mirroring `crabka_broker::codes::
+/// DELEGATION_TOKEN_AUTHORIZATION_FAILED`. Same kept-in-sync rule.
+const DELEGATION_TOKEN_AUTHORIZATION_FAILED: i16 = 65;
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -425,6 +428,60 @@ async fn start_broker() -> (BrokerHandle, TempDir, SocketAddr) {
     (handle, log_dir, addr)
 }
 
+/// Slice 51b act-as variant: boot a single-broker SASL_PLAINTEXT cluster with
+/// caller-specified PLAIN credentials and a caller-specified set of super-users.
+///
+/// `plain_creds` is `&[(username, password)]`. `super_users` is `&[username]`
+/// — names listed here are inserted into `BrokerConfig.super_users` and bypass
+/// ACL checks (in particular, they're the only callers allowed to set
+/// `owner_principal_*` on `CreateDelegationToken` per the slice-51b spec §1).
+///
+/// Same protocol surface as `start_broker`: PLAIN + SCRAM-SHA-256 enabled,
+/// master delegation-token key set, 7d ceiling / 24h default renew period.
+async fn start_broker_with_super_users(
+    plain_creds: &[(&str, &str)],
+    super_users: &[&str],
+) -> (BrokerHandle, TempDir, SocketAddr) {
+    let log_dir = tempfile::tempdir().unwrap();
+    let mut cfg = BrokerConfig::for_tests(log_dir.path().to_path_buf());
+    cfg.listeners = vec![ListenerSpec {
+        name: "SASL_PLAINTEXT".to_string(),
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        advertised: "127.0.0.1:0".to_string(),
+        protocol: ListenerProtocol::SaslPlaintext,
+        tls_config: None,
+        sasl_mechanisms: None,
+    }];
+    cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
+    cfg.enabled_sasl_mechanisms = vec![SaslMechanism::Plain, SaslMechanism::ScramSha256];
+    for (user, password) in plain_creds {
+        cfg.plain_credentials
+            .insert((*user).to_string(), (*password).to_string());
+    }
+    for user in super_users {
+        cfg.super_users.insert((*user).to_string());
+    }
+    // Inter-broker auth uses PLAIN as the first listed user. `BrokerConfig::
+    // validate` requires inter-broker credentials when the inter-broker
+    // listener is SASL, even though a single-broker cluster never opens an
+    // inter-broker connection.
+    let (ib_user, ib_pw) = plain_creds
+        .first()
+        .expect("must supply at least one PLAIN credential for inter-broker auth");
+    cfg.inter_broker_credentials = Some(crabka_broker::config::InterBrokerCredentials {
+        mechanism: SaslMechanism::Plain,
+        username: (*ib_user).to_string(),
+        password: (*ib_pw).to_string(),
+    });
+    cfg.delegation_token_secret_key = Some(SecretBytes::new(b"act-as-master-key".to_vec()));
+    cfg.delegation_token_max_lifetime_ms = 7 * 24 * 60 * 60 * 1_000;
+    cfg.delegation_token_default_renew_period_ms = 24 * 60 * 60 * 1_000;
+
+    let handle = Broker::start(cfg).await.expect("broker must start");
+    let addr = handle.listen_addr();
+    (handle, log_dir, addr)
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // The lifecycle test.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -694,5 +751,162 @@ async fn wait_for_token_gone(handle: &BrokerHandle, token_id: &str) {
             panic!("token {token_id} still visible in image after 5s (expected tombstone)");
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Slice 51b act-as wire-path tests (spec §3.1). These exercise the
+// `owner_principal_type` + `owner_principal_name` request fields on
+// `CreateDelegationTokenRequest` (v3+), which let a super-user mint a token
+// owned by *another* principal. Implemented in slice-51b task B1
+// (`handlers/create_delegation_token.rs`); these are the integration-level
+// oracles for that wire path.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Spec §3.1 / Plan §B2 test 1.
+///
+/// Super-user `admin` mints a delegation token owned by `alice` (act-as).
+/// Verifies:
+///   - request succeeds (`error_code = 0`)
+///   - response `principal_*` reflects the OWNER (`User:alice`)
+///   - response `token_requester_*` reflects the CALLER (`User:admin`)
+///   - a second SCRAM-token-authed connection is correctly tagged
+///     `authenticated_via_token = true` — proven by re-Create returning
+///     `DELEGATION_TOKEN_REQUEST_NOT_ALLOWED` (64), which only fires on
+///     token-authed sessions.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn act_as_super_user_mints_token_owned_by_target() {
+    let (handle, _dir, addr) =
+        start_broker_with_super_users(&[("admin", "admin-pw"), ("alice", "alice-pw")], &["admin"])
+            .await;
+
+    let result: Result<(), String> = async {
+        // (1) admin authenticates via SASL/PLAIN.
+        let mut admin = sasl_plain_authenticate(addr, "admin", b"admin-pw")
+            .await
+            .map_err(|e| format!("admin PLAIN auth: {e}"))?;
+
+        // (2) admin mints a token owned by alice. owner_principal_type=User,
+        // owner_principal_name=alice, empty renewers, broker-chosen lifetime.
+        let create_req = CreateDelegationTokenRequest {
+            owner_principal_type: Some("User".to_string()),
+            owner_principal_name: Some("alice".to_string()),
+            max_lifetime_ms: -1,
+            renewers: vec![],
+            ..Default::default()
+        };
+        let create_resp = send_create_delegation_token(&mut admin, 100, &create_req)
+            .await
+            .map_err(|e| format!("CreateDelegationToken(admin act-as alice): {e}"))?;
+        if create_resp.error_code != 0 {
+            return Err(format!(
+                "act-as Create must succeed; got code={} principal={}:{} requester={}:{}",
+                create_resp.error_code,
+                create_resp.principal_type,
+                create_resp.principal_name,
+                create_resp.token_requester_principal_type,
+                create_resp.token_requester_principal_name,
+            ));
+        }
+        assert_eq!(create_resp.principal_type, "User");
+        assert_eq!(create_resp.principal_name, "alice");
+        assert_eq!(create_resp.token_requester_principal_type, "User");
+        assert_eq!(create_resp.token_requester_principal_name, "admin");
+        assert!(!create_resp.token_id.is_empty(), "token_id must be set");
+        assert_eq!(create_resp.hmac.len(), 32, "HMAC length must be 32 bytes");
+
+        let token_id = create_resp.token_id.clone();
+        let hmac_bytes = create_resp.hmac.clone();
+
+        // Wait for the V1DelegationToken record to replicate to this node's
+        // image. Belt-and-suspenders — the SCRAM token-fallback lookup in
+        // step (3) reads from the same image.
+        let img_token = wait_for_token(&handle, &token_id).await;
+        assert_eq!(img_token.owner.principal_type, "User");
+        assert_eq!(img_token.owner.name, "alice");
+
+        // (3) Open a second connection; SASL/SCRAM-SHA-256 with username =
+        // token_id, password = base64(hmac). The token-fallback path
+        // authenticates this session as the token's OWNER — alice.
+        let token_password = base64::engine::general_purpose::STANDARD.encode(&hmac_bytes);
+        let mut tokenuser = sasl_scram_sha256_authenticate(addr, &token_id, &token_password)
+            .await
+            .map_err(|e| format!("token SCRAM auth: {e}"))?;
+
+        // (4) Re-Create from the token-authed connection MUST return 64
+        // (DELEGATION_TOKEN_REQUEST_NOT_ALLOWED). This is the unambiguous
+        // oracle that the broker tagged this session as
+        // `authenticated_via_token = true` AND set the principal back to the
+        // token's owner. If either flag/override regressed, the request
+        // would either succeed (wrong) or fail with a different error.
+        let create_via_token = send_create_delegation_token(
+            &mut tokenuser,
+            200,
+            &CreateDelegationTokenRequest {
+                max_lifetime_ms: -1,
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|e| format!("CreateDelegationToken(token-auth): {e}"))?;
+        assert_eq!(
+            create_via_token.error_code, DELEGATION_TOKEN_REQUEST_NOT_ALLOWED,
+            "token-authed Create must return DELEGATION_TOKEN_REQUEST_NOT_ALLOWED (64); \
+             got {}",
+            create_via_token.error_code,
+        );
+
+        drop(admin);
+        drop(tokenuser);
+        Ok(())
+    }
+    .await;
+
+    handle.shutdown().await;
+    if let Err(msg) = result {
+        panic!("act-as super-user mint test failed: {msg}");
+    }
+}
+
+/// Spec §3.1 / Plan §B2 test 2.
+///
+/// Non-super-user `alice` attempts to act-as: requests a token owned by
+/// `bob`. Must be rejected with `DELEGATION_TOKEN_AUTHORIZATION_FAILED` (65).
+/// This is the load-bearing authorization gate for slice 51b — without it,
+/// any authenticated user could mint tokens impersonating any other user.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn act_as_non_super_user_rejected_with_authorization_failed() {
+    let (handle, _dir, addr) = start_broker_with_super_users(&[("alice", "alice-pw")], &[]).await;
+
+    let result: Result<(), String> = async {
+        let mut alice = sasl_plain_authenticate(addr, "alice", b"alice-pw")
+            .await
+            .map_err(|e| format!("alice PLAIN auth: {e}"))?;
+
+        let create_req = CreateDelegationTokenRequest {
+            owner_principal_type: Some("User".to_string()),
+            owner_principal_name: Some("bob".to_string()),
+            max_lifetime_ms: -1,
+            renewers: vec![],
+            ..Default::default()
+        };
+        let resp = send_create_delegation_token(&mut alice, 100, &create_req)
+            .await
+            .map_err(|e| format!("CreateDelegationToken(alice act-as bob): {e}"))?;
+        assert_eq!(
+            resp.error_code, DELEGATION_TOKEN_AUTHORIZATION_FAILED,
+            "non-super-user act-as must be rejected with \
+             DELEGATION_TOKEN_AUTHORIZATION_FAILED (65); got {}",
+            resp.error_code,
+        );
+
+        drop(alice);
+        Ok(())
+    }
+    .await;
+
+    handle.shutdown().await;
+    if let Err(msg) = result {
+        panic!("act-as non-super-user reject test failed: {msg}");
     }
 }
