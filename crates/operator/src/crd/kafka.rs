@@ -96,6 +96,46 @@ pub struct KafkaSpec {
     /// `ANONYMOUS` allow); operators opt in explicitly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authorization: Option<Authorization>,
+    /// Slice 48g (KIP-405): cluster-wide tiered storage. When `Some`,
+    /// every broker pod boots with the local-tier RSM enabled, an
+    /// `emptyDir` mounted at `/var/lib/crabka/remote` (the broker's
+    /// `remote_log_storage_dir`), and `[remote_storage]` rendered in
+    /// the broker TOML. Per-topic enablement is unchanged
+    /// (`KafkaTopic.spec.config["remote.storage.enable"] = "true"`).
+    ///
+    /// 48g uses `emptyDir`; with `InmemoryRemoteLogMetadataManager` as
+    /// the only RLMM, tier data does not survive pod restarts. PVC
+    /// support pairs with the production RLMM (48f).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tiered_storage: Option<TieredStorage>,
+}
+
+/// Slice 48g (KIP-405): cluster-wide tiered-storage configuration.
+///
+/// The single `type` discriminator reserves space for future variants
+/// (`S3`, `Gcs`, `Azure`, …) without breaking the wire shape. Only
+/// `Local` is supported today.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TieredStorage {
+    /// Backend kind. Only [`TieredStorageType::Local`] is recognised by
+    /// the broker in 48g — selecting an unsupported variant surfaces
+    /// `TieredStorageInvalid` on `Kafka.status.conditions` at reconcile
+    /// time (deferred; today only `Local` is in the enum).
+    #[serde(rename = "type")]
+    pub kind: TieredStorageType,
+}
+
+/// Slice 48g (KIP-405): the set of RSM backends the operator knows how
+/// to render. Adding a backend means extending this enum AND the
+/// matching render path in
+/// [`crate::controller::listeners::render_broker_toml`].
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+pub enum TieredStorageType {
+    /// On-pod filesystem store via `LocalTieredStorage` (slice 48a's
+    /// reference RSM). Data lives at `/var/lib/crabka/remote` on the
+    /// broker pod.
+    Local,
 }
 
 /// Slice 51b: master-HMAC-key source for KIP-48 delegation tokens.
@@ -302,6 +342,7 @@ mod tests {
                 logging: None,
                 delegation_token: None,
                 authorization: None,
+                tiered_storage: None,
             },
         );
         let json = serde_json::to_string(&k).unwrap();
@@ -330,6 +371,7 @@ mod tests {
                 logging: None,
                 delegation_token: None,
                 authorization: None,
+                tiered_storage: None,
             },
         );
         let j = serde_json::to_string(&k.spec).unwrap();
@@ -441,6 +483,7 @@ mod tests {
                 logging: None,
                 delegation_token: None,
                 authorization: None,
+                tiered_storage: None,
             },
         );
         let j = serde_json::to_string(&k.spec).unwrap();
@@ -477,6 +520,7 @@ mod tests {
                 logging: None,
                 delegation_token: None,
                 authorization: None,
+                tiered_storage: None,
             },
         );
         let j = serde_json::to_string(&k.spec).unwrap();
@@ -694,5 +738,37 @@ authorization:
         }
         let back: KafkaSpec = serde_json::from_str(&json).unwrap();
         assert_eq!(back, spec);
+    }
+
+    // ── Slice 48g: tieredStorage round-trip tests ─────────────────────
+
+    #[test]
+    fn tiered_storage_round_trips_through_json() {
+        let json = r#"{"kafkaVersion":"0.1.1","tieredStorage":{"type":"Local"}}"#;
+        let spec: KafkaSpec = serde_json::from_str(json).unwrap();
+        let ts = spec.tiered_storage.as_ref().expect("tieredStorage parsed");
+        assert_eq!(ts.kind, TieredStorageType::Local);
+
+        let serialized = serde_json::to_string(&spec).unwrap();
+        assert!(
+            serialized.contains("\"tieredStorage\":{\"type\":\"Local\"}"),
+            "round-trip JSON: {serialized}"
+        );
+    }
+
+    #[test]
+    fn tiered_storage_omitted_when_none() {
+        let json = r#"{"kafkaVersion":"0.1.1"}"#;
+        let spec: KafkaSpec = serde_json::from_str(json).unwrap();
+        assert!(spec.tiered_storage.is_none());
+        let j = serde_json::to_string(&spec).unwrap();
+        assert!(!j.contains("tieredStorage"), "got: {j}");
+    }
+
+    #[test]
+    fn tiered_storage_rejects_unknown_type() {
+        let json = r#"{"kafkaVersion":"0.1.1","tieredStorage":{"type":"Bogus"}}"#;
+        let res: Result<KafkaSpec, _> = serde_json::from_str(json);
+        assert!(res.is_err(), "unknown TieredStorageType must fail");
     }
 }

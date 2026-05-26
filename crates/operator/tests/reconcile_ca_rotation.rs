@@ -104,6 +104,7 @@ fn kafka_cr(name: &str, ns: &str, anns: &[(&str, &str)]) -> Kafka {
             logging: None,
             delegation_token: None,
             authorization: None,
+            tiered_storage: None,
         },
     );
     k.metadata.namespace = Some(ns.into());

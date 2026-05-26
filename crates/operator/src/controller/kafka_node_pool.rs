@@ -264,6 +264,7 @@ fn render_broker_container(
     oauth_jwks_trust_mount: Option<&str>,
     oauth_introspection_mount_path: Option<&str>,
     delegation_token: Option<&crate::crd::kafka::DelegationTokenConfig>,
+    tier_storage_enabled: bool,
 ) -> serde_json::Value {
     let mut ports = vec![json!({
         "containerPort": BROKER_PORT, "name": "kafka-internal", "protocol": "TCP"
@@ -368,6 +369,17 @@ fn render_broker_container(
             "readOnly": true,
         }));
     }
+    // Slice 48g (KIP-405): mount the `tier-storage` emptyDir
+    // read-write at the broker's `remote_log_storage_dir` (matches
+    // `[remote_storage].storage_dir` in the rendered TOML). Omitted
+    // entirely when the parent `Kafka.spec.tieredStorage` is `None`
+    // so non-tiered clusters keep a byte-identical pod template.
+    if tier_storage_enabled {
+        volume_mounts.push(json!({
+            "name": "tier-storage",
+            "mountPath": crate::controller::listeners::TIER_STORAGE_PATH,
+        }));
+    }
     json!({
         "name": "broker",
         "image": broker_image,
@@ -432,12 +444,14 @@ fn pvc_template(
 /// `data` (and `data-{id}`) volume entries are omitted: the `StatefulSet`
 /// controller mounts each PVC into the pod under the template name
 /// automatically, so an explicit pod-volume entry would conflict.
+#[allow(clippy::too_many_lines)] // each branch + secret mount is independent
 fn render_storage(
     storage: Option<&Storage>,
     pod_labels: &BTreeMap<String, String>,
     parent_name: &str,
     oauth_jwks_trust_secret: Option<&str>,
     oauth_introspection_mount: Option<&crate::controller::kafka::OauthIntrospectionMount>,
+    tier_storage_enabled: bool,
 ) -> (serde_json::Value, Vec<serde_json::Value>) {
     let broker_config_vol = json!({
         "name": "broker-config",
@@ -555,6 +569,20 @@ fn render_storage(
                 }
             }));
     }
+    // Slice 48g (KIP-405): append a writable `tier-storage` emptyDir
+    // pod volume when the parent `Kafka.spec.tieredStorage` is set. The
+    // matching volumeMount lives in `render_broker_container`; the path
+    // (`TIER_STORAGE_PATH`) is the broker's `[remote_storage].storage_dir`.
+    // 48g uses emptyDir only — PVC support pairs with 48f.
+    if tier_storage_enabled {
+        volumes
+            .as_array_mut()
+            .expect("render_storage built `volumes` via json!([...])")
+            .push(json!({
+                "name": "tier-storage",
+                "emptyDir": {}
+            }));
+    }
     (volumes, templates)
 }
 
@@ -655,6 +683,10 @@ pub(crate) fn render_statefulset(
     let oauth_introspection_mount_path = oauth_introspection_mount
         .as_ref()
         .map(|_| "/etc/crabka/oauth-introspection");
+    // Slice 48g (KIP-405): cluster-wide tier-storage toggle. When `Some`,
+    // the broker container gets a writable mount at `TIER_STORAGE_PATH`
+    // and the pod spec gets a matching `tier-storage` emptyDir volume.
+    let tier_storage_enabled = parent.spec.tiered_storage.is_some();
     let main = render_broker_container(
         broker_image,
         &secret_name,
@@ -666,6 +698,7 @@ pub(crate) fn render_statefulset(
         oauth_jwks_trust_mount,
         oauth_introspection_mount_path,
         parent.spec.delegation_token.as_ref(),
+        tier_storage_enabled,
     );
 
     // Merge user-provided pod metadata under operator-owned labels.
@@ -736,6 +769,7 @@ pub(crate) fn render_statefulset(
         &parent_name,
         oauth_jwks_trust_secret.as_deref(),
         oauth_introspection_mount.as_ref(),
+        tier_storage_enabled,
     );
     let retention_policy = render_pvc_retention_policy(pool.spec.storage.as_ref());
 
@@ -1166,6 +1200,7 @@ mod tests {
                 logging: None,
                 delegation_token: None,
                 authorization: None,
+                tiered_storage: None,
             },
         );
         k.metadata.namespace = Some("default".into());
@@ -2591,6 +2626,87 @@ mod tests {
                 .iter()
                 .all(|v| v.name != "oauth-introspection-secret"),
             "JWT-mode OAuth must not produce an oauth-introspection-secret volume",
+        );
+    }
+
+    // ── Slice 48g: tieredStorage volume + mount tests ────────────────
+
+    fn parent_with_tiered_storage(name: &str) -> Kafka {
+        let mut k = parent_fixture(name);
+        k.spec.tiered_storage = Some(crate::crd::kafka::TieredStorage {
+            kind: crate::crd::kafka::TieredStorageType::Local,
+        });
+        k
+    }
+
+    #[test]
+    fn pod_template_mounts_tier_storage_emptydir_when_tiered_set() {
+        let parent = parent_with_tiered_storage("demo");
+        let pool = pool_fixture("brokers", "demo", 1);
+        let sts = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE).unwrap();
+        let pod_spec = sts.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
+        // Volume present with the tier-storage emptyDir shape.
+        let volumes = pod_spec.volumes.as_ref().expect("pod volumes");
+        let tier = volumes
+            .iter()
+            .find(|v| v.name == "tier-storage")
+            .expect("tier-storage volume present");
+        assert!(
+            tier.empty_dir.is_some(),
+            "tier-storage must be an emptyDir, got: {tier:?}"
+        );
+
+        // Broker container has the matching mount at the canonical path.
+        let broker = pod_spec
+            .containers
+            .iter()
+            .find(|c| c.name == "broker")
+            .expect("broker container");
+        let mount = broker
+            .volume_mounts
+            .as_ref()
+            .expect("broker volumeMounts")
+            .iter()
+            .find(|m| m.name == "tier-storage")
+            .expect("tier-storage mount present");
+        assert_eq!(
+            mount.mount_path,
+            crate::controller::listeners::TIER_STORAGE_PATH
+        );
+        // The mount is writable (no read_only flag).
+        assert!(
+            mount.read_only.is_none() || mount.read_only == Some(false),
+            "tier-storage mount must be writable, got read_only={:?}",
+            mount.read_only
+        );
+    }
+
+    #[test]
+    fn pod_template_omits_tier_storage_when_tiered_none() {
+        let parent = parent_fixture("demo");
+        let pool = pool_fixture("brokers", "demo", 1);
+        let sts = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE).unwrap();
+        let pod_spec = sts.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
+        assert!(
+            pod_spec
+                .volumes
+                .as_ref()
+                .unwrap()
+                .iter()
+                .all(|v| v.name != "tier-storage"),
+            "non-tiered cluster must not have a tier-storage volume",
+        );
+        let broker = pod_spec
+            .containers
+            .iter()
+            .find(|c| c.name == "broker")
+            .expect("broker container");
+        assert!(
+            broker
+                .volume_mounts
+                .as_ref()
+                .is_none_or(|m| m.iter().all(|x| x.name != "tier-storage")),
+            "non-tiered cluster must not mount tier-storage",
         );
     }
 }

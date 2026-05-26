@@ -3648,3 +3648,58 @@ introspection metadata).
 - **Workspace fmt + clippy `-D warnings` + tests** all green. No CRDs
   touched.
 
+## Slice 48g — Operator: Tiered storage CRD surface (2026-05-26)
+
+- **Goal:** Sixth and operator-facing sub-slice of KIP-405. Make
+  Crabka's tiered-storage stack (48a-e) operator-addressable: an
+  operator declares tiered storage on the `Kafka` CR, every broker pod
+  boots with the local-tier RSM enabled, an `emptyDir` mounted at
+  `/var/lib/crabka/remote`, and `[remote_storage]` rendered in the
+  broker TOML. The smallest viable tiered-storage cluster is now one
+  field: `spec.tieredStorage: { type: Local }`.
+- **CRD (`crates/operator/src/crd/kafka.rs`):**
+  - New `KafkaSpec.tiered_storage: Option<TieredStorage>`.
+  - `TieredStorage { kind: TieredStorageType }` with a single `Local`
+    discriminator that reserves the `type` field for future
+    object-store backends (`S3` / `Gcs` / `Azure`). Unknown variants
+    fail parsing — Strimzi-style discriminated unions.
+- **TOML render (`crates/operator/src/controller/listeners.rs`):**
+  - `render_broker_toml` gains a `tiered_storage` arg; when `Some` it
+    emits a `[remote_storage]` block with `storage_dir =
+    "/var/lib/crabka/remote"` after `[server_properties]`. Path is
+    operator-owned (new module-level `TIER_STORAGE_PATH` constant).
+  - Per-topic enablement is unchanged: existing
+    `KafkaTopic.spec.config["remote.storage.enable"] = "true"` already
+    flows through the slice-35 `IncrementalAlterConfigs` path.
+- **StatefulSet render
+  (`crates/operator/src/controller/kafka_node_pool.rs`):**
+  - When `parent.spec.tiered_storage.is_some()`, the pod template
+    gains a `tier-storage` `emptyDir` volume + a writable `volumeMount`
+    on the broker container at the same `TIER_STORAGE_PATH`. Wiring
+    threaded through `render_storage` and `render_broker_container`
+    via a new `tier_storage_enabled: bool` arg on each.
+  - Non-tiered clusters render byte-identically to pre-48g (no
+    spurious rolling restart on upgrade).
+- **`log_start_offset` is NOT split** (revisited from 48c/48e
+  comments): `ListOffsets EARLIEST` (48d) already returns
+  `min(local_log_start, remote_earliest)` and `Fetch` falls through to
+  `OFFSET_OUT_OF_RANGE` on a remote-evicted segment, so 48g doesn't
+  touch the broker's log-start invariants.
+- **Out of scope (48f / later):** `PersistentClaim` for the
+  local-tier dir (paired with `TopicBasedRemoteLogMetadataManager` —
+  PVC without a durable RLMM only delays data loss by one restart).
+  Object-store backends (`S3` / `Gcs` / `Azure`). Per-pool
+  tiered-storage overrides (tiered storage is cluster-wide).
+  `Kafka.status.tieredStorage` reporting.
+- **Tests:** operator lib +7 (3 CRD round-trip: round-trip JSON,
+  omits-when-none, rejects unknown type; 2 broker TOML render:
+  emits `[remote_storage]` + parses with `FileConfig`, omits when
+  `tiered_storage` is `None`; 2 pod-template: tier-storage volume +
+  mount present when set, both absent when unset). Operator lib
+  tests 507 passing.
+- **Design:**
+  `[docs/superpowers/specs/2026-05-26-crabka-tiered-storage-operator-surface-48g-design.md]`.
+- **CRDs regenerated:** `deploy/crds/crabka.io_kafkas.yaml` gains
+  `tieredStorage` schema; other CRDs unchanged.
+- **Workspace fmt + clippy `-D warnings` + operator lib tests** all
+  green. Operator integration tests run in CI.
