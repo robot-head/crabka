@@ -1188,22 +1188,48 @@ jobs:
           kubectl logs -n crabka-operator deploy/operator-crabka-operator --tail=200 || true
           exit 1
 
+      # Wait for the broker StatefulSet's pod to be Ready before issuing
+      # bootstrap-server requests. The operator marks the Kafka CR
+      # Ready=True as soon as its own reconcile finishes, which can be
+      # several seconds before the broker pod's readiness probe passes
+      # and the headless service's endpoints surface. Without this wait,
+      # `kafka-topics.sh` races the DNS endpoint slice and silently exits
+      # non-zero (no stderr captured by `kubectl run -i > file`), making
+      # the next failure invisible.
+      - name: Wait for broker pod readiness
+        run: |
+          set -e
+          kubectl rollout status -n default statefulset/demo-brokers --timeout=180s
+          kubectl wait pods -n default \
+            -l app.kubernetes.io/instance=demo,crabka.io/pool=brokers \
+            --for=condition=Ready --timeout=180s
+
       - name: Assert partition count + config via JVM kafka-topics
         run: |
           set -e
           bootstrap="demo-broker-headless.default.svc.cluster.local:9092"
-          kubectl run kt-describe -n default --rm -i --restart=Never \
-            --image=apache/kafka:3.8.0 --command -- \
+          # `kubectl run -i ... > file` only captures stdout, and if the
+          # underlying command exits non-zero `set -e` skips the `cat` —
+          # so a failed assertion produces no diagnostic. Capture both
+          # streams to a file via a wrapper, print it unconditionally,
+          # and only then grep.
+          run_kt() {
+            local name=$1 out=$2; shift 2
+            kubectl run "$name" -n default --rm -i --restart=Never \
+              --image=apache/kafka:3.8.0 --command -- "$@" \
+              >"$out" 2>>"$out" || true
+            echo "----- $name output ($out) -----"
+            cat "$out"
+            echo "----- end $name -----"
+          }
+          run_kt kt-describe /tmp/describe.txt \
             /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$bootstrap" \
-              --describe --topic demo-topic > /tmp/describe.txt
-          cat /tmp/describe.txt
+              --describe --topic demo-topic
           grep -q "PartitionCount: 3" /tmp/describe.txt
           grep -q "ReplicationFactor: 1" /tmp/describe.txt
-          kubectl run kt-configs -n default --rm -i --restart=Never \
-            --image=apache/kafka:3.8.0 --command -- \
+          run_kt kt-configs /tmp/configs.txt \
             /opt/kafka/bin/kafka-configs.sh --bootstrap-server "$bootstrap" \
-              --describe --entity-type topics --entity-name demo-topic > /tmp/configs.txt
-          cat /tmp/configs.txt
+              --describe --entity-type topics --entity-name demo-topic
           grep -q "retention.ms=60000" /tmp/configs.txt
 
       - name: Patch to 5 partitions + wait Ready
@@ -1229,10 +1255,15 @@ jobs:
         run: |
           set -e
           bootstrap="demo-broker-headless.default.svc.cluster.local:9092"
+          # See "Assert partition count + config" above for the rationale
+          # behind capturing stderr and dumping unconditionally.
           kubectl run kt-describe2 -n default --rm -i --restart=Never \
             --image=apache/kafka:3.8.0 --command -- \
             /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$bootstrap" \
-              --describe --topic demo-topic > /tmp/describe2.txt
+              --describe --topic demo-topic >/tmp/describe2.txt 2>>/tmp/describe2.txt || true
+          echo "----- kt-describe2 output -----"
+          cat /tmp/describe2.txt
+          echo "----- end kt-describe2 -----"
           grep -q "PartitionCount: 5" /tmp/describe2.txt
 
       - name: Patch to 2 partitions, expect ImmutableFieldChanged
@@ -2111,7 +2142,10 @@ jobs:
       # pulls them once on the runner (with retry) and `kind load`s them
       # into the node, so kubelet serves them locally (chart default
       # pullPolicy is IfNotPresent) and never touches docker.io. `--wait`
-      # keeps 900s of headroom for first-boot on the CPU-contended node.
+      # keeps 1500s of headroom for first-boot on the CPU-contended node —
+      # 900s wasn't enough when Postgres+Keycloak first-start under load
+      # (observed: helm `context deadline exceeded` while both pods were
+      # still in early-startup probes).
       # ─────────────────────────────────────────────────────────────────────
       - name: Install Bitnami Keycloak chart
         run: |
@@ -2130,8 +2164,8 @@ jobs:
             --set postgresql.image.repository=bitnamilegacy/postgresql \
             --set production=false \
             --set proxy=edge \
-            --wait --timeout=900s
-          kubectl rollout status -n keycloak statefulset/kc-keycloak --timeout=900s
+            --wait --timeout=1500s
+          kubectl rollout status -n keycloak statefulset/kc-keycloak --timeout=1500s
 
       # ─────────────────────────────────────────────────────────────────────
       # Copy the chart's auto-generated TLS Secret into the default ns so
@@ -2183,6 +2217,11 @@ jobs:
           cat > /tmp/realm-bootstrap.sh <<'BOOTSTRAP'
           #!/bin/bash
           set -ex
+          # kcadm writes its session config to $HOME/.keycloak/kcadm.config.
+          # `kubectl exec` doesn't propagate HOME, so it defaults to "" → the
+          # path resolves to /.keycloak which the keycloak user can't create.
+          # /tmp is writable; pin HOME there.
+          export HOME=/tmp
           KCADM=/opt/bitnami/keycloak/bin/kcadm.sh
           # --insecure: loopback connection inside the Keycloak pod; not on the wire
           $KCADM config credentials \
@@ -2751,8 +2790,8 @@ jobs:
             --set postgresql.image.repository=bitnamilegacy/postgresql \
             --set production=false \
             --set proxy=edge \
-            --wait --timeout=900s
-          kubectl rollout status -n keycloak statefulset/kc-keycloak --timeout=900s
+            --wait --timeout=1500s
+          kubectl rollout status -n keycloak statefulset/kc-keycloak --timeout=1500s
 
       - name: Identify and copy Keycloak CA to default namespace
         run: |
@@ -2784,6 +2823,11 @@ jobs:
           cat > /tmp/realm-bootstrap.sh <<'BOOTSTRAP'
           #!/bin/bash
           set -ex
+          # kcadm writes its session config to $HOME/.keycloak/kcadm.config.
+          # `kubectl exec` doesn't propagate HOME, so it defaults to "" → the
+          # path resolves to /.keycloak which the keycloak user can't create.
+          # /tmp is writable; pin HOME there.
+          export HOME=/tmp
           KCADM=/opt/bitnami/keycloak/bin/kcadm.sh
           # --insecure: loopback connection inside the Keycloak pod; not on the wire
           $KCADM config credentials \
