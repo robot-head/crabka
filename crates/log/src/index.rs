@@ -11,10 +11,23 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
+use zerocopy::byteorder::{I64, U32};
+use zerocopy::{BigEndian, FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
+
 use crate::error::LogError;
 
 /// 8 bytes per entry.
 pub const OFFSET_ENTRY_SIZE: usize = 8;
+
+/// On-disk byte layout of one offset-index entry.
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+struct OffsetEntryRaw {
+    relative_offset: U32<BigEndian>,
+    position: U32<BigEndian>,
+}
+
+const _: () = assert!(std::mem::size_of::<OffsetEntryRaw>() == OFFSET_ENTRY_SIZE);
 
 #[derive(Debug)]
 pub struct OffsetIndex {
@@ -35,22 +48,24 @@ impl OffsetIndex {
             .open(path)?;
         let mut buf = Vec::new();
         file.read_to_end(&mut buf)?;
-        let mut entries = Vec::with_capacity(buf.len() / OFFSET_ENTRY_SIZE);
-        for chunk in buf.chunks_exact(OFFSET_ENTRY_SIZE) {
-            let rel = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-            let pos = u32::from_be_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]);
-            entries.push((rel, pos));
-        }
+        let truncated_len = (buf.len() / OFFSET_ENTRY_SIZE) * OFFSET_ENTRY_SIZE;
+        let raws = <[OffsetEntryRaw]>::ref_from_bytes(&buf[..truncated_len])
+            .expect("length is a multiple of OFFSET_ENTRY_SIZE and OffsetEntryRaw is Unaligned");
+        let entries = raws
+            .iter()
+            .map(|r| (r.relative_offset.get(), r.position.get()))
+            .collect();
         Ok(Self { file, entries })
     }
 
     /// Append a new entry. Caller ensures monotonicity.
     pub fn append(&mut self, relative_offset: u32, position: u32) -> Result<(), LogError> {
-        let mut buf = [0u8; OFFSET_ENTRY_SIZE];
-        buf[0..4].copy_from_slice(&relative_offset.to_be_bytes());
-        buf[4..8].copy_from_slice(&position.to_be_bytes());
+        let raw = OffsetEntryRaw {
+            relative_offset: U32::new(relative_offset),
+            position: U32::new(position),
+        };
         self.file.seek(SeekFrom::End(0))?;
-        self.file.write_all(&buf)?;
+        self.file.write_all(raw.as_bytes())?;
         self.entries.push((relative_offset, position));
         Ok(())
     }
@@ -161,6 +176,16 @@ mod tests {
 /// 12 bytes per entry: timestamp (i64 BE) + `relative_offset` (u32 BE).
 pub const TIME_ENTRY_SIZE: usize = 12;
 
+/// On-disk byte layout of one time-index entry.
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+struct TimeEntryRaw {
+    timestamp: I64<BigEndian>,
+    relative_offset: U32<BigEndian>,
+}
+
+const _: () = assert!(std::mem::size_of::<TimeEntryRaw>() == TIME_ENTRY_SIZE);
+
 #[derive(Debug)]
 pub struct TimeIndex {
     file: File,
@@ -177,24 +202,24 @@ impl TimeIndex {
             .open(path)?;
         let mut buf = Vec::new();
         file.read_to_end(&mut buf)?;
-        let mut entries = Vec::with_capacity(buf.len() / TIME_ENTRY_SIZE);
-        for chunk in buf.chunks_exact(TIME_ENTRY_SIZE) {
-            let ts = i64::from_be_bytes([
-                chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
-            ]);
-            let rel = u32::from_be_bytes([chunk[8], chunk[9], chunk[10], chunk[11]]);
-            entries.push((ts, rel));
-        }
+        let truncated_len = (buf.len() / TIME_ENTRY_SIZE) * TIME_ENTRY_SIZE;
+        let raws = <[TimeEntryRaw]>::ref_from_bytes(&buf[..truncated_len])
+            .expect("length is a multiple of TIME_ENTRY_SIZE and TimeEntryRaw is Unaligned");
+        let entries = raws
+            .iter()
+            .map(|r| (r.timestamp.get(), r.relative_offset.get()))
+            .collect();
         Ok(Self { file, entries })
     }
 
     /// Append. Caller ensures monotonicity.
     pub fn append(&mut self, timestamp: i64, relative_offset: u32) -> Result<(), LogError> {
-        let mut buf = [0u8; TIME_ENTRY_SIZE];
-        buf[0..8].copy_from_slice(&timestamp.to_be_bytes());
-        buf[8..12].copy_from_slice(&relative_offset.to_be_bytes());
+        let raw = TimeEntryRaw {
+            timestamp: I64::new(timestamp),
+            relative_offset: U32::new(relative_offset),
+        };
         self.file.seek(SeekFrom::End(0))?;
-        self.file.write_all(&buf)?;
+        self.file.write_all(raw.as_bytes())?;
         self.entries.push((timestamp, relative_offset));
         Ok(())
     }

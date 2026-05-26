@@ -12,6 +12,9 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
 
+use zerocopy::byteorder::I64;
+use zerocopy::{BigEndian, FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
+
 use crate::error::LogError;
 
 const ENTRY_BYTES: usize = 24;
@@ -22,6 +25,18 @@ pub struct AbortedTxn {
     pub last_offset: i64,
     pub producer_id: i64,
 }
+
+/// On-disk byte layout of one `AbortedTxn` entry. Reinterpreted in place
+/// from the file bytes via `zerocopy`.
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+struct AbortedTxnRaw {
+    start_offset: I64<BigEndian>,
+    last_offset: I64<BigEndian>,
+    producer_id: I64<BigEndian>,
+}
+
+const _: () = assert!(std::mem::size_of::<AbortedTxnRaw>() == ENTRY_BYTES);
 
 #[derive(Debug)]
 pub struct TxnIndex {
@@ -45,11 +60,14 @@ impl TxnIndex {
                         ENTRY_BYTES,
                     )));
                 }
-                for chunk in bytes.chunks_exact(ENTRY_BYTES) {
+                let raws = <[AbortedTxnRaw]>::ref_from_bytes(&bytes)
+                    .expect("length is a multiple of ENTRY_BYTES and AbortedTxnRaw is Unaligned");
+                entries.reserve(raws.len());
+                for raw in raws {
                     entries.push(AbortedTxn {
-                        start_offset: i64::from_be_bytes(chunk[0..8].try_into().unwrap()),
-                        last_offset: i64::from_be_bytes(chunk[8..16].try_into().unwrap()),
-                        producer_id: i64::from_be_bytes(chunk[16..24].try_into().unwrap()),
+                        start_offset: raw.start_offset.get(),
+                        last_offset: raw.last_offset.get(),
+                        producer_id: raw.producer_id.get(),
                     });
                 }
             }
@@ -66,11 +84,12 @@ impl TxnIndex {
             .append(true)
             .open(&self.path)
             .map_err(LogError::Io)?;
-        let mut buf = [0u8; ENTRY_BYTES];
-        buf[0..8].copy_from_slice(&entry.start_offset.to_be_bytes());
-        buf[8..16].copy_from_slice(&entry.last_offset.to_be_bytes());
-        buf[16..24].copy_from_slice(&entry.producer_id.to_be_bytes());
-        f.write_all(&buf).map_err(LogError::Io)?;
+        let raw = AbortedTxnRaw {
+            start_offset: I64::new(entry.start_offset),
+            last_offset: I64::new(entry.last_offset),
+            producer_id: I64::new(entry.producer_id),
+        };
+        f.write_all(raw.as_bytes()).map_err(LogError::Io)?;
         f.sync_data().map_err(LogError::Io)?;
         self.entries.push(entry);
         Ok(())
