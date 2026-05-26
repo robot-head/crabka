@@ -10,7 +10,8 @@ use crabka_client_admin::{QuotaOp, ResourceType};
 use crabka_operator::controller::user::reconcile;
 use crabka_operator::crd::{
     AclOp, AclPatternType, AclPermission, AclResource, AclResourceKind, AclRule, Authentication,
-    Authorization, KafkaUser, KafkaUserQuotas, KafkaUserSpec, SimpleAuthorization,
+    KafkaUser, KafkaUserAuthorization as Authorization, KafkaUserQuotas,
+    KafkaUserSimpleAuthorization as SimpleAuthorization, KafkaUserSpec,
 };
 use http::Method;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;

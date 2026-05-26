@@ -10,7 +10,8 @@ use crabka_operator::controller::user::reconcile;
 use crabka_operator::crd::user::TlsAuth;
 use crabka_operator::crd::{
     AclOp, AclPatternType, AclPermission, AclResource, AclResourceKind, AclRule, Authentication,
-    Authorization, KafkaUser, KafkaUserQuotas, KafkaUserSpec, ScramSha512Auth, SimpleAuthorization,
+    KafkaUser, KafkaUserAuthorization as Authorization, KafkaUserQuotas,
+    KafkaUserSimpleAuthorization as SimpleAuthorization, KafkaUserSpec, ScramSha512Auth,
 };
 use crabka_security::ca;
 use http::{Method, Response};
