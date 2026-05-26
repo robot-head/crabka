@@ -56,6 +56,6 @@ mod txn_index;
 pub use config::{CleanupPolicy, LogConfig};
 pub use error::LogError;
 pub use leader_epoch_checkpoint::{EpochEntry, LeaderEpochCheckpoint};
-pub use log::{Log, ReadOutput};
+pub use log::{Log, ReadOutput, SegmentExport};
 pub use segment::Segment;
 pub use txn_index::{AbortedTxn, TxnIndex};

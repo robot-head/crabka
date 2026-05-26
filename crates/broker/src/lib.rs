@@ -150,6 +150,7 @@ mod producer_state;
 pub mod quota;
 pub mod raft_handshake;
 pub(crate) mod reassignment;
+pub(crate) mod remote_log_manager;
 pub(crate) mod replica_state;
 mod replicator;
 mod replicator_supervisor;

@@ -3159,4 +3159,72 @@ introspection metadata).
   unblocks the e2e — the operator was already correctly calling Renew
   on tokens it didn't own.
 - **Workspace fmt + clippy `-D warnings` + tests** all green.
+## Slice 48b — Crabka core: Tiered storage copy path (KIP-405) (2026-05-25)
+
+- **Goal:** Second sub-slice of KIP-405. Wire the broker's first
+  tiered-storage behavior: a background `RemoteLogManager` that, on the
+  partition leader, copies sealed log segments of
+  `remote.storage.enable=true` topics to the remote tier (via the
+  slice-48a `RemoteStorageManager`) and records each copy in a
+  `RemoteLogMetadataManager` (`CopySegmentStarted` → `CopySegmentFinished`).
+  **Copy path only** — local-retention deletion + `local-log-start-offset`
+  (48c) and the remote read path on `Fetch` (48d) are deferred.
+- **Config (consumed this slice — no dead config):**
+  - Per-topic `remote.storage.enable` (Kafka-standard) → new
+    `LogConfig.remote_storage_enable: bool` (default `false`). Threaded
+    through `config_keys::{validate_topic_config, is_recognized,
+    apply_to_log_config}`.
+  - Broker-global `BrokerConfig.remote_log_storage_dir: Option<PathBuf>`.
+    `Some(dir)` enables tiered storage broker-wide and roots the
+    `LocalTieredStorage`; `None` (default) leaves it off — collapses
+    Kafka's `remote.log.storage.system.enable` + RSM dir into one knob
+    (greenfield-OK). TOML: `[remote_storage] storage_dir = "…"` via
+    new `FileRemoteStorageConfig` in `file_config.rs`.
+- **Log-crate surface (`crates/log`):** new `SegmentExport` (paths +
+  offset/timestamp/size + leader-epoch ranges) and
+  `Log::tierable_segments() -> Vec<SegmentExport>`. Active segment never
+  included; `last_offset` derived from the next segment's base (correct
+  even for disk-loaded segments without a tail scan); `max_timestamp`
+  falls back to `-1` when unknown. Leader-epoch ranges computed from the
+  per-partition checkpoint (`epochs_for_range`, clamped to the segment
+  base). `LogSegmentData.producer_snapshot_index` made `Option<PathBuf>`
+  (Crabka writes no producer snapshots) — breaking change to the 48a
+  crate, greenfield-OK; `LocalTieredStorage` skips it when `None`.
+- **`RemoteLogManager` (`crates/broker/src/remote_log_manager.rs`):**
+  cleaner-style interval ticker (`run` / `tick_all`) filtered to
+  (leader && `remote_storage_enable`) partitions, plus the testable
+  orchestration core `copy_eligible` / `copy_one`:
+  - Skips segments whose `base_offset` is already known to the RLMM.
+  - Per segment: mint `RemoteLogSegmentId` (v4 UUID), build metadata
+    (epochs from the export, falling back to
+    `[(current_leader_epoch.max(0), base)]` when empty), `add` Started,
+    `copy_log_segment_data` on the `spawn_blocking` pool (RSM is a
+    blocking SPI), `update` Finished on success.
+  - On copy failure: idempotent remote delete + `DeleteSegmentStarted`
+    → `DeleteSegmentFinished` to drop the metadata so the segment
+    retries next tick (uses the slice-48a lifecycle, no new state).
+  - `topic_id` (Uuid) from `controller.current_image().topic(name)`;
+    leader epoch from `partition.current_leader_epoch`. Leader-epoch
+    index serialized into Kafka's `leader-epoch-checkpoint` text format
+    as `LogSegmentData.leader_epoch_index`.
+- **Startup wiring (`broker.rs`):** when `remote_log_storage_dir` is
+  `Some`, construct one shared `Arc<LocalTieredStorage>` +
+  `Arc<InmemoryRemoteLogMetadataManager>` and `tokio::spawn` the task
+  with a child shutdown token — same pattern as the slice-18 cleaner.
+- **Tests:** log crate +5 (`tierable_segments` excludes active /
+  reports paths / contiguous `last_offset` / carries leader epochs;
+  `epochs_for_range` clamp+filter). config_keys +4. remote_log_manager
+  +4 (`#[tokio::test]`, driving `copy_eligible` against a **real** rolled
+  `Log` + `LocalTieredStorage` + `InmemoryRemoteLogMetadataManager`:
+  all sealed segments copied + recorded Finished + fetchable; idempotent
+  re-run copies nothing; empty exports no-op; leader-epoch fallback).
+  Workspace lib counts: log 70, remote-storage 33, broker 426.
+- **Design:** `[docs/superpowers/specs/2026-05-25-crabka-tiered-storage-copy-path-48b-design.md]`.
+- **Out of scope (48c+):** local-retention deletion +
+  `local-log-start-offset`; remote read path on `Fetch` / `ListOffsets`;
+  remote-retention + partition delete on `DeleteTopics`; topic-backed
+  prod RLMM; object-store RSM; operator CRD surface; copy
+  throttling/parallelism (one segment at a time per tick).
+- **Workspace fmt + clippy `-D warnings` + tests** all green. No CRDs
+  touched.
 
