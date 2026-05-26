@@ -13,6 +13,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use bytes::{Buf, BufMut, BytesMut};
+use crabka_broker::authorizer::SimpleAclAuthorizer;
 use crabka_broker::config::ListenerSpec;
 use crabka_broker::{Broker, BrokerConfig};
 use crabka_client_core::Client;
@@ -1845,6 +1846,10 @@ async fn alter_scram_creds_non_super_user_rejected() {
     cfg.plain_credentials
         .insert("bob".to_string(), "hunter2".to_string());
     cfg.super_users = std::collections::HashSet::from(["admin".to_string()]);
+    // Slice 53: install `SimpleAclAuthorizer` so the cluster-Alter gate
+    // fires for non-super principals; the default `AllowAllAuthorizer`
+    // would let alice through.
+    cfg.authorizer = std::sync::Arc::new(SimpleAclAuthorizer::new(cfg.super_users.clone()));
 
     let handle = Broker::start(cfg).await.expect("broker must start");
     let addr = handle.listen_addr();

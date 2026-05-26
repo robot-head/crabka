@@ -6,7 +6,7 @@
 //! The pure-function render tests already live alongside
 //! `render_broker_toml` in `controller/listeners.rs`. The added value at
 //! this layer is verifying that the rendered TOML actually lands in the
-//! broker-config ConfigMap PATCH (`<cluster>-broker-config`, data key
+//! broker-config `ConfigMap` PATCH (`<cluster>-broker-config`, data key
 //! `broker-<id>.toml`) on a real reconcile.
 
 use std::sync::Arc;
@@ -54,20 +54,20 @@ fn kafka_cr_with_authorization(
     k
 }
 
-/// Extract the `broker-0.toml` string from the captured ConfigMap PATCH
+/// Extract the `broker-0.toml` string from the captured `ConfigMap` PATCH
 /// body. Panics with a helpful message when the PATCH (or the key) is
 /// missing — both are reconcile-path invariants for these tests.
 fn broker_0_toml_from_observed(
     observed: &[http::Request<hyper::body::Bytes>],
     cluster: &str,
 ) -> String {
-    let cm_path = format!("/configmaps/{cluster}-broker-config");
-    let cm_patch = observed
+    let cm_uri = format!("/configmaps/{cluster}-broker-config");
+    let cm_req = observed
         .iter()
-        .find(|r| r.method() == Method::PATCH && r.uri().to_string().contains(&cm_path))
-        .unwrap_or_else(|| panic!("ConfigMap PATCH at {cm_path} must have been captured"));
+        .find(|r| r.method() == Method::PATCH && r.uri().to_string().contains(&cm_uri))
+        .unwrap_or_else(|| panic!("ConfigMap PATCH at {cm_uri} must have been captured"));
     let body: serde_json::Value =
-        serde_json::from_slice(cm_patch.body()).expect("ConfigMap PATCH body is JSON");
+        serde_json::from_slice(cm_req.body()).expect("ConfigMap PATCH body is JSON");
     body["data"]["broker-0.toml"]
         .as_str()
         .unwrap_or_else(|| panic!("broker-0.toml key missing from CM PATCH; body = {body}"))

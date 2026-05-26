@@ -24,6 +24,7 @@ use std::io;
 use std::net::SocketAddr;
 
 use bytes::{Buf, BufMut, BytesMut};
+use crabka_broker::authorizer::SimpleAclAuthorizer;
 use crabka_broker::config::ListenerSpec;
 use crabka_broker::{Broker, BrokerConfig};
 use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
@@ -112,9 +113,10 @@ const ERR_MEMBER_ID_REQUIRED: i16 = 79;
 
 /// Build a `BrokerConfig` with a single `SASL_PLAINTEXT` listener, PLAIN
 /// enabled, and the given super-user. The non-super-user case still
-/// declares a super-user so the compat shim (zero ACLs + no super-user →
-/// ALLOW) doesn't kick in — we want the authorizer to actually evaluate
-/// the cluster gate.
+/// declares a super-user so the cluster-Alter gate applies. Slice 53:
+/// installs `SimpleAclAuthorizer` explicitly so the broker enforces ACLs
+/// (the new default is `AllowAllAuthorizer`, which would silently let
+/// every test through).
 fn sasl_plain_broker_config(
     log_dir: &std::path::Path,
     creds: &[(&str, &str)],
@@ -136,6 +138,7 @@ fn sasl_plain_broker_config(
             .insert((*u).to_string(), (*p).to_string());
     }
     cfg.super_users = super_user.map(str::to_string).into_iter().collect();
+    cfg.authorizer = std::sync::Arc::new(SimpleAclAuthorizer::new(cfg.super_users.clone()));
     cfg
 }
 
@@ -163,6 +166,7 @@ fn sasl_plain_broker_config_multi_super(
             .insert((*u).to_string(), (*p).to_string());
     }
     cfg.super_users = super_users.iter().map(|s| (*s).to_string()).collect();
+    cfg.authorizer = std::sync::Arc::new(SimpleAclAuthorizer::new(cfg.super_users.clone()));
     cfg
 }
 
