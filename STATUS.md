@@ -3297,18 +3297,33 @@ introspection metadata).
   reconcile inspects the `ConfigMap` PATCH and asserts the
   rendered `broker-0.toml`). Workspace test count: **2850**
   (up from 2785 on slice 51b).
-- **kind e2e:** new `kind-opa-authorization` job in
-  `.github/workflows/operator-e2e.yml` (E1 commit `464076e`).
-  Deploys `openpolicyagent/opa:0.65.0` w/ a self-contained Rego
-  policy via ConfigMap (alice allow, ClusterAction allow,
-  default deny), brings up a single-broker `Kafka` with
-  `spec.authorization: { type: opa, url:
-  http://opa:8181/v1/data/kafka/authz/allow, super_users:
-  ["ANONYMOUS"] }`, then exercises produce-as-alice (succeeds)
-  + produce-as-bob (fails w/ `TOPIC_AUTHORIZATION_FAILED` / err
-  29). Sample manifest at
+- **kind e2e (smoke-only):** new `kind-opa-authorization` job in
+  `.github/workflows/operator-e2e.yml` (E1 commit `464076e`,
+  rescoped in this slice's CI-fix commit). Deploys
+  `openpolicyagent/opa:0.65.0` w/ a self-contained Rego policy via
+  ConfigMap (alice allow, ClusterAction allow, default deny), brings
+  up a single-broker `Kafka` with `spec.authorization: { type: opa,
+  url: http://opa:8181/v1/data/kafka/authz/allow, super_users:
+  ["ANONYMOUS"] }`, then asserts (1) OPA `/health` answers, (2) the
+  rendered `demo-broker-config` ConfigMap's `broker-0.toml` contains
+  the expected `[authorization]` + `[authorization.opa]` blocks
+  pointing at the OPA URL, (3) `alice` + `bob` KafkaUser Secrets
+  materialise with the SCRAM-SHA-512 `password` data key, and
+  (4) `Kafka demo` + both KafkaUsers reach `Ready=True`. The
+  wire-enforcement allow/deny path is *not* exercised at the
+  produce level here — see the known-limitation bullet below.
+  Sample manifest at
   `deploy/operator/sample/kafka-opa-authorization.yaml`.
 - **Known limitations / honest follow-ups:**
+  - **`kind-opa-authorization` is smoke-only** — it asserts the
+    operator emits the right `broker.toml` + the cluster comes up +
+    KafkaUser Secrets materialise. The OPA wire-enforcement happy /
+    deny paths are covered by broker unit + integration tests
+    (`crates/broker/src/authorizer/opa.rs::tests` +
+    `crates/broker/tests/opa_authorizer.rs`). A produce-level e2e
+    would require fixing a pre-existing SCRAM-SHA-512+TLS
+    Metadata-listener advertising issue that's out of slice 53's
+    scope.
   - **No OPA mTLS** — `url` is plain HTTP/HTTPS today; mTLS
     needs cert plumbing into `reqwest::ClientBuilder`. Follow-up.
   - **No OPA-bundle awareness** — operators wire the policy
