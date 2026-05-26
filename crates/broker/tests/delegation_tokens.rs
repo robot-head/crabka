@@ -910,3 +910,140 @@ async fn act_as_non_super_user_rejected_with_authorization_failed() {
         panic!("act-as non-super-user reject test failed: {msg}");
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Slice 51c super-user bypass (Renew + Expire).
+//
+// Slice 51's Renew/Expire handlers gated on `caller == owner || caller in
+// renewers` only. After slice 51b shipped operator-driven token issuance,
+// the operator (a super-user) was unable to renew/expire tokens it minted
+// via act-as on behalf of `KafkaUser` principals, because it was neither
+// owner nor renewer. Slice 51c adds the super-user fast path that Kafka's
+// `DelegationTokenManager.isAuthorizedToOperateOnToken` includes.
+//
+// This integration test exercises the wire path end-to-end: admin act-as
+// mints a token owned by alice, then admin Renews and Expires it — both
+// must succeed (no err 63 / 65).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Slice 51c regression / spec §1.3 + §1.4.
+///
+/// Super-user `admin` mints a token owned by `alice` via act-as
+/// (slice 51b path), then renews + expires it via the wire. Both must
+/// succeed despite admin being neither owner nor renewer. Mirrors the
+/// kind-kafkauser-delegation-token e2e flow that was red on main with
+/// `RenewDelegationToken: UNKNOWN (63)` before this fix.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn super_user_can_renew_other_owners_token() {
+    let (handle, _dir, addr) =
+        start_broker_with_super_users(&[("admin", "admin-pw"), ("alice", "alice-pw")], &["admin"])
+            .await;
+
+    let result: Result<(), String> = async {
+        // (1) admin authenticates via SASL/PLAIN.
+        let mut admin = sasl_plain_authenticate(addr, "admin", b"admin-pw")
+            .await
+            .map_err(|e| format!("admin PLAIN auth: {e}"))?;
+
+        // (2) admin act-as mints a token owned by alice — no renewers.
+        // This is exactly what the slice 51b operator does for a
+        // delegation-token `KafkaUser`.
+        let create_req = CreateDelegationTokenRequest {
+            owner_principal_type: Some("User".to_string()),
+            owner_principal_name: Some("alice".to_string()),
+            max_lifetime_ms: -1,
+            renewers: vec![],
+            ..Default::default()
+        };
+        let create_resp = send_create_delegation_token(&mut admin, 100, &create_req)
+            .await
+            .map_err(|e| format!("CreateDelegationToken(admin act-as alice): {e}"))?;
+        if create_resp.error_code != 0 {
+            return Err(format!(
+                "act-as Create must succeed; got code={}",
+                create_resp.error_code,
+            ));
+        }
+        assert_eq!(create_resp.principal_name, "alice");
+
+        let token_id = create_resp.token_id.clone();
+        let hmac_bytes = create_resp.hmac.clone();
+        let initial_expiry_ms = create_resp.expiry_timestamp_ms;
+        let max_timestamp_ms = create_resp.max_timestamp_ms;
+        assert!(
+            initial_expiry_ms < max_timestamp_ms,
+            "KIP-48 separation invariant must hold so Renew has room to extend"
+        );
+
+        // Wait for the V1DelegationToken record to apply on this node's image.
+        let img_token = wait_for_token(&handle, &token_id).await;
+        assert_eq!(img_token.owner.name, "alice");
+        assert!(
+            img_token.renewers.is_empty(),
+            "no renewers were specified, so admin is neither owner NOR renewer"
+        );
+
+        // (3) admin Renews — this is the slice 51b operator's renewal
+        // path. Before slice 51c, this returned err 63
+        // (DELEGATION_TOKEN_OWNER_MISMATCH); with the super-user bypass,
+        // it must succeed and strictly extend the expiry.
+        let renew_resp = send_renew_delegation_token(
+            &mut admin,
+            200,
+            &RenewDelegationTokenRequest {
+                hmac: hmac_bytes.clone(),
+                renew_period_ms: 30 * 24 * 60 * 60 * 1_000, // 30d (> 7d ceiling → clamps to max)
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|e| format!("RenewDelegationToken(admin super-user): {e}"))?;
+        assert_eq!(
+            renew_resp.error_code, 0,
+            "super-user Renew of another owner's token must succeed; got {} \
+             (slice 51c super-user bypass regressed)",
+            renew_resp.error_code,
+        );
+        assert!(
+            renew_resp.expiry_timestamp_ms > initial_expiry_ms,
+            "Renew must strictly extend expiry: renewed={} initial={}",
+            renew_resp.expiry_timestamp_ms,
+            initial_expiry_ms,
+        );
+        assert!(
+            renew_resp.expiry_timestamp_ms <= max_timestamp_ms,
+            "Renew must never push expiry past max_timestamp_ms",
+        );
+
+        // (4) admin Expires (tombstone path) — this is the slice 51b
+        // operator's finalizer path on KafkaUser delete.
+        let expire_resp = send_expire_delegation_token(
+            &mut admin,
+            300,
+            &ExpireDelegationTokenRequest {
+                hmac: hmac_bytes.clone(),
+                expiry_time_period_ms: -1,
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|e| format!("ExpireDelegationToken(admin super-user): {e}"))?;
+        assert_eq!(
+            expire_resp.error_code, 0,
+            "super-user Expire of another owner's token must succeed; got {} \
+             (slice 51c super-user bypass regressed)",
+            expire_resp.error_code,
+        );
+
+        // Tombstone should propagate.
+        drop(admin);
+        wait_for_token_gone(&handle, &token_id).await;
+        Ok(())
+    }
+    .await;
+
+    handle.shutdown().await;
+    if let Err(msg) = result {
+        panic!("super-user renew/expire bypass test failed: {msg}");
+    }
+}
