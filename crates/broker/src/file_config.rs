@@ -62,6 +62,22 @@ pub struct FileConfig {
     /// `BrokerConfig.super_users` empty.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub super_users: Option<Vec<String>>,
+
+    /// Slice 48b (KIP-405): tiered-storage enablement. Setting
+    /// `storage_dir` turns tiered storage on broker-wide and roots the
+    /// local reference `RemoteStorageManager` there.
+    #[serde(default)]
+    pub remote_storage: Option<FileRemoteStorageConfig>,
+}
+
+/// TOML shape of `[remote_storage]`. Maps to
+/// [`crate::BrokerConfig::remote_log_storage_dir`].
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct FileRemoteStorageConfig {
+    /// Root directory for the local tiered-storage store. `Some` enables
+    /// tiered storage broker-wide; absent leaves it off.
+    pub storage_dir: Option<String>,
 }
 
 /// TOML shape of `[delegation_token]`. Maps to the three `delegation_token_*`
@@ -556,6 +572,14 @@ impl FileConfig {
         // we should preserve.
         if let Some(vec) = self.super_users {
             cfg.super_users.extend(vec.iter().cloned());
+        }
+
+        // Slice 48b: a configured `[remote_storage] storage_dir` enables
+        // tiered storage broker-wide.
+        if let Some(rs) = &self.remote_storage
+            && let Some(dir) = &rs.storage_dir
+        {
+            cfg.remote_log_storage_dir = Some(std::path::PathBuf::from(dir));
         }
     }
 }

@@ -1037,6 +1037,7 @@ dependencies = [
  "crabka-metadata",
  "crabka-protocol",
  "crabka-raft",
+ "crabka-remote-storage",
  "crabka-security",
  "dashmap",
  "futures-util",

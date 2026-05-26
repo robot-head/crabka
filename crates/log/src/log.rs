@@ -72,6 +72,35 @@ pub struct ReadOutput {
     pub batches: Vec<RecordBatch>,
 }
 
+/// Slice 48b (KIP-405): a sealed segment described for tiered-storage
+/// offload. Carries the on-disk file paths plus the offset / timestamp /
+/// size metadata and the leader-epoch ranges a `RemoteLogManager` needs to
+/// build remote-segment metadata. Produced by [`Log::tierable_segments`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SegmentExport {
+    /// First absolute offset in the segment.
+    pub base_offset: i64,
+    /// Last absolute offset (inclusive) in the segment.
+    pub last_offset: i64,
+    /// Highest record timestamp in the segment, or `-1` when unknown
+    /// (a sealed segment loaded from disk without a tail scan).
+    pub max_timestamp: i64,
+    /// `.log` file size in bytes.
+    pub size_bytes: u64,
+    /// Path to the `.log` data file.
+    pub log_path: PathBuf,
+    /// Path to the `.index` (offset index) file.
+    pub offset_index_path: PathBuf,
+    /// Path to the `.timeindex` file.
+    pub time_index_path: PathBuf,
+    /// Path to the `.txnindex` file, present only when it exists on disk.
+    pub transaction_index_path: Option<PathBuf>,
+    /// Leader epochs whose coverage overlaps `[base_offset, last_offset]`,
+    /// as `(epoch, start_offset)` clamped to `base_offset`, ordered by
+    /// offset. May be empty when no epochs were recorded for this log.
+    pub leader_epochs: Vec<(i32, i64)>,
+}
+
 impl Log {
     /// Open or create a `Log` at `dir`. Discovers existing segments by
     /// `.log` filename, marks all but the latest as sealed, and (if the
@@ -644,6 +673,53 @@ impl Log {
         Ok(())
     }
 
+    /// Slice 48b (KIP-405): describe every sealed segment for
+    /// tiered-storage offload. The active segment is never included — only
+    /// sealed segments are immutable and safe to copy.
+    ///
+    /// `last_offset` is derived from the next segment's `base_offset` (the
+    /// active segment's base for the most-recent sealed segment), so it is
+    /// correct even for segments loaded from disk without a tail scan.
+    /// `max_timestamp` falls back to `-1` (unknown) when the in-memory
+    /// value has not been populated.
+    #[must_use]
+    pub fn tierable_segments(&self) -> Vec<SegmentExport> {
+        let epoch_entries = self.epoch_checkpoint.entries();
+        let active_base = self
+            .active
+            .as_ref()
+            .map_or_else(|| self.log_end_offset(), Segment::base_offset);
+        let next_bases: Vec<i64> = self
+            .segments
+            .iter()
+            .map(|s| s.base_offset())
+            .skip(1)
+            .chain(std::iter::once(active_base))
+            .collect();
+
+        self.segments
+            .iter()
+            .zip(next_bases)
+            .map(|(seg, next_base)| {
+                let base = seg.base_offset();
+                let last = next_base - 1;
+                let max_ts = seg.max_timestamp();
+                let txn = name::txnindex_path(&self.dir, base);
+                SegmentExport {
+                    base_offset: base,
+                    last_offset: last,
+                    max_timestamp: if max_ts == i64::MIN { -1 } else { max_ts },
+                    size_bytes: seg.size_bytes(),
+                    log_path: name::log_path(&self.dir, base),
+                    offset_index_path: name::index_path(&self.dir, base),
+                    time_index_path: name::timeindex_path(&self.dir, base),
+                    transaction_index_path: txn.exists().then_some(txn),
+                    leader_epochs: epochs_for_range(epoch_entries, base, last),
+                }
+            })
+            .collect()
+    }
+
     /// Run one compaction pass over the sealed segment list. No-op if
     /// fewer than 2 sealed segments exist (nothing to dedup yet).
     ///
@@ -685,6 +761,28 @@ impl Log {
         self.segments.push(Arc::new(new_seg));
         Ok(())
     }
+}
+
+/// Leader epochs whose coverage `[start_e, start_{e+1})` overlaps the
+/// segment range `[base, last]`, returned as `(epoch, start_offset)` with
+/// the start clamped up to `base` and ordered by offset. An epoch with no
+/// recorded entries yields an empty result.
+fn epochs_for_range(
+    entries: &[crate::leader_epoch_checkpoint::EpochEntry],
+    base: i64,
+    last: i64,
+) -> Vec<(i32, i64)> {
+    let mut sorted: Vec<_> = entries.to_vec();
+    sorted.sort_by_key(|e| e.start_offset);
+    let mut out = Vec::new();
+    for (i, e) in sorted.iter().enumerate() {
+        // Coverage of this epoch is [start_offset, next.start_offset).
+        let end = sorted.get(i + 1).map_or(i64::MAX, |n| n.start_offset);
+        if e.start_offset <= last && end > base {
+            out.push((e.epoch, e.start_offset.max(base)));
+        }
+    }
+    out
 }
 
 /// Parse the control-marker type from the key of the first record in a
@@ -1263,6 +1361,134 @@ mod tests {
             keys.contains(&b"active-key".as_ref()),
             "active segment record must survive"
         );
+    }
+
+    #[test]
+    fn tierable_segments_excludes_active_and_reports_paths() {
+        let dir = tempdir().unwrap();
+        let config = LogConfig {
+            segment_bytes: 200, // small so we roll fast
+            ..LogConfig::default()
+        };
+        let mut log = Log::open(dir.path(), config).unwrap();
+        for _ in 0..10 {
+            let mut b = sample_batch(2);
+            log.append(&mut b).unwrap();
+        }
+        let sealed_count = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("log"))
+            .count()
+            - 1; // minus the active segment's .log
+
+        let exports = log.tierable_segments();
+        assert_eq!(exports.len(), sealed_count, "one export per sealed segment");
+
+        let active_base = log.log_end_offset(); // not literally, but exports must be below it
+        let mut prev_last = -1;
+        for ex in &exports {
+            assert!(ex.log_path.exists(), "log file present: {:?}", ex.log_path);
+            assert!(ex.offset_index_path.exists());
+            assert!(ex.time_index_path.exists());
+            assert!(ex.last_offset >= ex.base_offset);
+            assert!(ex.base_offset > prev_last, "segments are offset-ordered");
+            prev_last = ex.last_offset;
+            assert!(
+                ex.last_offset < active_base,
+                "sealed segments end before the log end"
+            );
+        }
+    }
+
+    #[test]
+    fn tierable_segments_empty_for_single_active_segment() {
+        let dir = tempdir().unwrap();
+        let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
+        let mut b = sample_batch(3);
+        log.append(&mut b).unwrap();
+        // No roll happened: the only segment is active and never tierable.
+        assert!(log.tierable_segments().is_empty());
+    }
+
+    #[test]
+    fn tierable_segments_last_offset_matches_next_base() {
+        let dir = tempdir().unwrap();
+        let config = LogConfig {
+            segment_bytes: 200,
+            ..LogConfig::default()
+        };
+        let mut log = Log::open(dir.path(), config).unwrap();
+        for _ in 0..8 {
+            let mut b = sample_batch(2);
+            log.append(&mut b).unwrap();
+        }
+        let exports = log.tierable_segments();
+        // Each sealed segment's last_offset is exactly one below the next
+        // segment's base — contiguous coverage with no gaps.
+        for pair in exports.windows(2) {
+            assert_eq!(pair[0].last_offset + 1, pair[1].base_offset);
+        }
+    }
+
+    #[test]
+    fn tierable_segments_carry_leader_epochs() {
+        let dir = tempdir().unwrap();
+        let config = LogConfig {
+            segment_bytes: 200,
+            ..LogConfig::default()
+        };
+        let mut log = Log::open(dir.path(), config).unwrap();
+        // epoch 0 for the first few, then epoch 1.
+        for _ in 0..4 {
+            let mut b = sample_batch_with_epoch(2, 0);
+            log.append(&mut b).unwrap();
+        }
+        for _ in 0..4 {
+            let mut b = sample_batch_with_epoch(2, 1);
+            log.append(&mut b).unwrap();
+        }
+        let exports = log.tierable_segments();
+        assert!(!exports.is_empty());
+        // Every export carries at least one epoch, and each recorded start
+        // offset is clamped to >= the segment base.
+        for ex in &exports {
+            assert!(!ex.leader_epochs.is_empty(), "export has leader epochs");
+            for (_epoch, start) in &ex.leader_epochs {
+                assert!(*start >= ex.base_offset);
+                assert!(*start <= ex.last_offset);
+            }
+        }
+    }
+
+    #[test]
+    fn epochs_for_range_clamps_and_filters() {
+        use crate::leader_epoch_checkpoint::EpochEntry;
+        let entries = vec![
+            EpochEntry {
+                epoch: 0,
+                start_offset: 0,
+            },
+            EpochEntry {
+                epoch: 1,
+                start_offset: 50,
+            },
+            EpochEntry {
+                epoch: 2,
+                start_offset: 100,
+            },
+        ];
+        // Segment [60, 90] sits entirely in epoch 1.
+        assert_eq!(epochs_for_range(&entries, 60, 90), vec![(1, 60)]);
+        // Segment [40, 60] straddles epoch 0 (->clamped to 40) and epoch 1.
+        assert_eq!(epochs_for_range(&entries, 40, 60), vec![(0, 40), (1, 50)]);
+        // Segment [0, 200] covers all three.
+        assert_eq!(
+            epochs_for_range(&entries, 0, 200),
+            vec![(0, 0), (1, 50), (2, 100)]
+        );
+        // No entries -> empty.
+        assert!(epochs_for_range(&[], 0, 100).is_empty());
     }
 
     #[test]

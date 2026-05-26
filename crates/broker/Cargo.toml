@@ -27,6 +27,7 @@ crabka-log = { version = "0.1", path = "../log" }
 crabka-compression = { version = "0.1", path = "../compression", default-features = false }
 crabka-raft = { version = "0.1", path = "../raft" }
 crabka-metadata = { version = "0.1", path = "../metadata" }
+crabka-remote-storage = { version = "0.1", path = "../remote-storage" }
 crabka-client-core = { version = "0.1", path = "../client-core" }
 crabka-security.workspace = true
 async-trait.workspace = true

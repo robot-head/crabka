@@ -294,6 +294,15 @@ pub struct BrokerConfig {
     /// `max_timestamp_ms = now + chosen_max_lifetime`. Default 24 hours
     /// (`delegation.token.expiry.time.ms` in Kafka).
     pub delegation_token_default_renew_period_ms: i64,
+
+    /// Slice 48b (KIP-405): root directory for the local tiered-storage
+    /// reference `RemoteStorageManager`. `Some(dir)` enables tiered storage
+    /// broker-wide (collapsing Kafka's `remote.log.storage.system.enable`
+    /// plus the RSM directory config into one knob) and spawns the
+    /// `RemoteLogManager` copy task; per-topic offload is still gated by
+    /// `remote.storage.enable`. `None` (default) leaves tiered storage off.
+    /// TOML: `[remote_storage] storage_dir = "..."`.
+    pub remote_log_storage_dir: Option<PathBuf>,
 }
 
 /// Slice 51 (KIP-48): default hard upper bound on delegation-token lifetime.
@@ -387,6 +396,8 @@ impl BrokerConfig {
             delegation_token_expiry_check_interval_ms:
                 DEFAULT_DELEGATION_TOKEN_EXPIRY_CHECK_INTERVAL_MS,
             delegation_token_default_renew_period_ms: DEFAULT_DELEGATION_TOKEN_RENEW_PERIOD_MS,
+            // Slice 48b: tiered storage off by default in tests.
+            remote_log_storage_dir: None,
         }
     }
 
@@ -569,6 +580,9 @@ impl Default for BrokerConfig {
             delegation_token_expiry_check_interval_ms:
                 DEFAULT_DELEGATION_TOKEN_EXPIRY_CHECK_INTERVAL_MS,
             delegation_token_default_renew_period_ms: DEFAULT_DELEGATION_TOKEN_RENEW_PERIOD_MS,
+            // Slice 48b: tiered storage off by default. Operators enable it
+            // via `[remote_storage] storage_dir` in `broker.toml`.
+            remote_log_storage_dir: None,
         }
     }
 }

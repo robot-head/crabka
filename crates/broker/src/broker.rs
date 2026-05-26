@@ -1354,6 +1354,31 @@ impl Broker {
             ));
         }
 
+        // Slice 48b (KIP-405): tiered-storage copy path. Only spawn when a
+        // remote-storage directory is configured. The reference local store
+        // + in-memory metadata manager are constructed once and shared
+        // across ticks; per-topic offload is gated by `remote.storage.enable`,
+        // and the task filters to partitions this broker leads.
+        if let Some(dir) = config.remote_log_storage_dir.clone() {
+            let partitions = partitions.clone();
+            let controller = controller.clone();
+            let shutdown = supervisor_shutdown.child_token();
+            let rsm: Arc<dyn crabka_remote_storage::RemoteStorageManager> =
+                Arc::new(crabka_remote_storage::LocalTieredStorage::new(dir));
+            let rlmm: Arc<dyn crabka_remote_storage::RemoteLogMetadataManager> =
+                Arc::new(crabka_remote_storage::InmemoryRemoteLogMetadataManager::new());
+            tokio::spawn(crate::remote_log_manager::run(
+                partitions,
+                controller,
+                rsm,
+                rlmm,
+                config.node_id,
+                config.broker_id,
+                crate::remote_log_manager::RemoteLogManagerConfig::default(),
+                shutdown,
+            ));
+        }
+
         // Slice 33: TLS hot-reload watcher. Only spawn when a TLS
         // config is present — non-TLS brokers don't need it.
         if let (Some(dynamic), Some(tls_cfg_owned)) =
