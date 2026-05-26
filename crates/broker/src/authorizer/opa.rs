@@ -1,5 +1,513 @@
-//! Slice 53: OPA authorizer (stub).
+//! Slice 53: OPA authorizer. POSTs Strimzi-compatible JSON to a
+//! configurable OPA decision endpoint, with super-user bypass + LRU+TTL
+//! decision cache + fail-open-or-closed.
 //!
-//! TODO(B2): fill in with HTTP-backed, LRU+TTL-cached, super-user-bypass
-//! `OpaAuthorizer` that POSTs Strimzi-compatible JSON to a configurable
-//! OPA decision endpoint. Stub kept here so `mod opa` resolves in B1.
+//! The trait method [`Authorizer::authorize`] is synchronous (called
+//! from sync handler hot paths), but `reqwest` is async. We bridge with
+//! [`tokio::task::block_in_place`] + a captured runtime [`Handle`] —
+//! acceptable for a tail authorization check (sub-millisecond on cache
+//! hit, low-double-digit-ms on miss). Cache misses on a single-threaded
+//! runtime would deadlock; the broker is multi-thread, so this is fine.
+//!
+//! Cache semantics: decisions are cached on BOTH success and error.
+//! Negative caching is intentional — under `allow_on_error = false`
+//! errors become `Deny`, which is the safe behavior for a brief OPA
+//! outage; entries expire on TTL so OPA recovery is observable.
+
+use std::collections::HashSet;
+use std::net::IpAddr;
+use std::num::NonZeroUsize;
+use std::sync::Mutex;
+use std::time::Duration;
+
+use crabka_metadata::{AclOperation, MetadataImage, ResourceType};
+use lru::LruCache;
+use serde::{Deserialize, Serialize};
+
+use super::{AuthorizationRequest, AuthorizationResult, Authorizer};
+use crate::time_util::now_ms;
+
+/// HTTP request timeout for a single OPA decision call. Conservative —
+/// OPA in-policy evaluation should be sub-millisecond; this catches
+/// network-level pathology (DNS, TCP RTT spikes) without holding the
+/// caller's tokio worker for arbitrary durations.
+const OPA_HTTP_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// HTTP-backed pluggable authorizer. Owns its `super_users` bypass set,
+/// HTTP client, decision cache, and a captured `tokio::runtime::Handle`
+/// so the synchronous [`Authorizer::authorize`] entry point can call
+/// `reqwest`'s async API via `block_in_place`.
+pub struct OpaAuthorizer {
+    super_users: HashSet<String>,
+    http_client: reqwest::Client,
+    url: String,
+    allow_on_error: bool,
+    cache: Mutex<LruCache<CacheKey, CachedDecision>>,
+    expire_after_ms: i64,
+    runtime: tokio::runtime::Handle,
+}
+
+impl std::fmt::Debug for OpaAuthorizer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Skip `http_client`, `cache`, and `runtime` — they're not
+        // `Debug`-friendly (Mutex would lock, Handle prints nothing
+        // useful, Client prints the whole TLS config). Field-list is
+        // operator-relevant config.
+        f.debug_struct("OpaAuthorizer")
+            .field("super_users", &self.super_users)
+            .field("url", &self.url)
+            .field("allow_on_error", &self.allow_on_error)
+            .field("expire_after_ms", &self.expire_after_ms)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, std::hash::Hash)]
+struct CacheKey {
+    principal: String,
+    operation: AclOperation,
+    resource_type: ResourceType,
+    resource_name: String,
+    host: IpAddr,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CachedDecision {
+    decision: AuthorizationResult,
+    expires_at_ms: i64,
+}
+
+/// Outer envelope of the Strimzi-compatible OPA request.
+#[derive(Debug, Serialize)]
+struct OpaRequest<'a> {
+    input: OpaInput<'a>,
+}
+
+#[derive(Debug, Serialize)]
+struct OpaInput<'a> {
+    request: OpaRequestInner<'a>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OpaRequestInner<'a> {
+    principal: String,
+    operation: &'a str,
+    resource: OpaResource<'a>,
+    host: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OpaResource<'a> {
+    resource_type: &'a str,
+    name: &'a str,
+    pattern_type: &'a str,
+}
+
+/// Decision payload returned by OPA — Strimzi expects exactly
+/// `{"result": true|false}`. Anything else parses as an error and the
+/// caller falls through to [`OpaAuthorizer::error_decision`].
+#[derive(Debug, Deserialize)]
+struct OpaResponse {
+    result: bool,
+}
+
+impl OpaAuthorizer {
+    /// Build a new OPA authorizer. MUST be called from inside a tokio
+    /// runtime — we capture the current `Handle` to drive async HTTP
+    /// from the synchronous [`Authorizer::authorize`] entry point.
+    ///
+    /// # Errors
+    ///
+    /// * [`OpaConfigError::Http`] if the `reqwest::Client` cannot be
+    ///   constructed (TLS misconfig is the realistic failure).
+    /// * [`OpaConfigError::ZeroCache`] if `max_cache_size == 0`.
+    /// * [`OpaConfigError::NoTokioRuntime`] if no tokio runtime is
+    ///   active on the current thread.
+    pub fn new(
+        super_users: HashSet<String>,
+        url: String,
+        allow_on_error: bool,
+        max_cache_size: usize,
+        expire_after_ms: i64,
+    ) -> Result<Self, OpaConfigError> {
+        let http_client = reqwest::Client::builder()
+            .timeout(OPA_HTTP_TIMEOUT)
+            .build()
+            .map_err(|e| OpaConfigError::Http(e.to_string()))?;
+        let capacity = NonZeroUsize::new(max_cache_size).ok_or(OpaConfigError::ZeroCache)?;
+        let cache = Mutex::new(LruCache::new(capacity));
+        let runtime =
+            tokio::runtime::Handle::try_current().map_err(|_| OpaConfigError::NoTokioRuntime)?;
+        Ok(Self {
+            super_users,
+            http_client,
+            url,
+            allow_on_error,
+            cache,
+            expire_after_ms,
+            runtime,
+        })
+    }
+
+    /// POST the request to OPA and translate the boolean response into
+    /// our binary decision. Any HTTP- or JSON-level error falls through
+    /// to [`Self::error_decision`] which honours `allow_on_error`.
+    async fn call_opa(&self, req: &AuthorizationRequest<'_>) -> AuthorizationResult {
+        let body = OpaRequest {
+            input: OpaInput {
+                request: OpaRequestInner {
+                    principal: format!("User:{}", req.principal.name),
+                    operation: operation_str(req.operation),
+                    resource: OpaResource {
+                        resource_type: resource_type_str(req.resource_type),
+                        name: req.resource_name,
+                        pattern_type: "Literal",
+                    },
+                    host: req.host.ip().to_string(),
+                },
+            },
+        };
+        match self.http_client.post(&self.url).json(&body).send().await {
+            Ok(resp) => match resp.json::<OpaResponse>().await {
+                Ok(r) => {
+                    if r.result {
+                        AuthorizationResult::Allow
+                    } else {
+                        AuthorizationResult::Deny
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, url = %self.url, "OPA response parse failed");
+                    self.error_decision()
+                }
+            },
+            Err(e) => {
+                tracing::warn!(error = %e, url = %self.url, "OPA HTTP call failed");
+                self.error_decision()
+            }
+        }
+    }
+
+    /// What to return when OPA is unreachable / returned garbage.
+    /// Fail-open (`allow_on_error = true`) is for environments where
+    /// blocking on OPA outage is worse than briefly over-permitting.
+    fn error_decision(&self) -> AuthorizationResult {
+        if self.allow_on_error {
+            AuthorizationResult::Allow
+        } else {
+            AuthorizationResult::Deny
+        }
+    }
+}
+
+impl Authorizer for OpaAuthorizer {
+    fn authorize(
+        &self,
+        _image: &MetadataImage,
+        req: &AuthorizationRequest<'_>,
+    ) -> AuthorizationResult {
+        // 1. Super-user bypass — no HTTP, no cache touch.
+        if self.super_users.contains(&req.principal.name) {
+            return AuthorizationResult::Allow;
+        }
+        // 2. Cache lookup. We do NOT eagerly evict expired entries; the
+        //    lookup just rejects them. Lazy eviction is good enough at
+        //    LRU capacities measured in the tens of thousands.
+        let key = CacheKey {
+            principal: format!("User:{}", req.principal.name),
+            operation: req.operation,
+            resource_type: req.resource_type,
+            resource_name: req.resource_name.to_string(),
+            host: req.host.ip(),
+        };
+        let now = now_ms();
+        {
+            let mut cache = self.cache.lock().expect("OPA cache mutex poisoned");
+            if let Some(cached) = cache.get(&key)
+                && cached.expires_at_ms > now
+            {
+                return cached.decision;
+            }
+        }
+        // 3. Sync→async bridge. `block_in_place` releases the current
+        //    worker for other tasks; the captured runtime drives the
+        //    HTTP call on its own threads.
+        let decision = tokio::task::block_in_place(|| self.runtime.block_on(self.call_opa(req)));
+        // 4. Cache the decision — both successes AND errors. Negative
+        //    caching keeps OPA outages from amplifying broker load;
+        //    TTL expiry lets recovery propagate naturally.
+        let mut cache = self.cache.lock().expect("OPA cache mutex poisoned");
+        cache.put(
+            key,
+            CachedDecision {
+                decision,
+                expires_at_ms: now + self.expire_after_ms,
+            },
+        );
+        decision
+    }
+}
+
+/// Constructor-time failures for [`OpaAuthorizer::new`]. Surfaced
+/// up through `file_config::FileConfigError` at broker startup so
+/// misconfigured deployments fail fast rather than at first request.
+#[derive(Debug, thiserror::Error)]
+pub enum OpaConfigError {
+    /// `reqwest::Client::build` failed (TLS / DNS / proxy misconfig).
+    #[error("OPA HTTP client build failed: {0}")]
+    Http(String),
+    /// `max_cache_size = 0` would mean the LRU rejects every entry —
+    /// invariant violation rather than a useful "disable cache" knob.
+    #[error("OPA cache size must be > 0")]
+    ZeroCache,
+    /// `OpaAuthorizer::new` MUST run inside a tokio runtime — we capture
+    /// the current `Handle` for the sync→async bridge in `authorize`.
+    #[error("OPA authorizer requires an active tokio runtime")]
+    NoTokioRuntime,
+}
+
+/// Map [`AclOperation`] to its Strimzi-compatible OPA wire string. The
+/// vocabulary mirrors Kafka's `AclOperation.name()` exactly so existing
+/// Strimzi Rego policies port unchanged.
+fn operation_str(op: AclOperation) -> &'static str {
+    match op {
+        AclOperation::All => "All",
+        AclOperation::Read => "Read",
+        AclOperation::Write => "Write",
+        AclOperation::Create => "Create",
+        AclOperation::Delete => "Delete",
+        AclOperation::Alter => "Alter",
+        AclOperation::Describe => "Describe",
+        AclOperation::ClusterAction => "ClusterAction",
+        AclOperation::DescribeConfigs => "DescribeConfigs",
+        AclOperation::AlterConfigs => "AlterConfigs",
+        AclOperation::IdempotentWrite => "IdempotentWrite",
+    }
+}
+
+/// Map [`ResourceType`] to its Strimzi-compatible OPA wire string.
+fn resource_type_str(t: ResourceType) -> &'static str {
+    match t {
+        ResourceType::Topic => "Topic",
+        ResourceType::Group => "Group",
+        ResourceType::Cluster => "Cluster",
+        ResourceType::TransactionalId => "TransactionalId",
+        ResourceType::DelegationToken => "DelegationToken",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crabka_security::{AuthMethod, Principal};
+    use std::net::SocketAddr;
+    use uuid::Uuid;
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn test_principal(name: &str) -> Principal {
+        Principal {
+            name: name.into(),
+            auth_method: AuthMethod::SaslPlain,
+            groups: vec![],
+        }
+    }
+
+    fn img() -> MetadataImage {
+        MetadataImage::new(Uuid::nil())
+    }
+
+    fn host() -> SocketAddr {
+        "1.2.3.4:9092".parse().unwrap()
+    }
+
+    fn req<'a>(p: &'a Principal, h: &'a SocketAddr, topic: &'a str) -> AuthorizationRequest<'a> {
+        AuthorizationRequest {
+            principal: p,
+            host: h,
+            resource_type: ResourceType::Topic,
+            resource_name: topic,
+            operation: AclOperation::Read,
+        }
+    }
+
+    fn opa_url(server: &MockServer) -> String {
+        format!("{}/v1/data/kafka/authz/allow", server.uri())
+    }
+
+    fn supers(names: &[&str]) -> HashSet<String> {
+        names.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn super_user_bypasses_opa_call() {
+        let mock = MockServer::start().await;
+        // expect(0) verifies on drop that no HTTP call landed.
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"result": false})),
+            )
+            .expect(0)
+            .mount(&mock)
+            .await;
+
+        let auth =
+            OpaAuthorizer::new(supers(&["admin"]), opa_url(&mock), false, 100, 60_000).unwrap();
+        let image = img();
+        let p = test_principal("admin");
+        let h = host();
+        assert_eq!(
+            auth.authorize(&image, &req(&p, &h, "anything")),
+            AuthorizationResult::Allow,
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cache_hit_returns_cached_decision_without_http_call() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"result": true})),
+            )
+            .expect(1) // exactly one call — second authorize() must hit cache.
+            .mount(&mock)
+            .await;
+
+        let auth = OpaAuthorizer::new(HashSet::new(), opa_url(&mock), false, 100, 60_000).unwrap();
+        let image = img();
+        let p = test_principal("alice");
+        let h = host();
+        assert_eq!(
+            auth.authorize(&image, &req(&p, &h, "t")),
+            AuthorizationResult::Allow,
+        );
+        assert_eq!(
+            auth.authorize(&image, &req(&p, &h, "t")),
+            AuthorizationResult::Allow,
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cache_miss_calls_opa_and_caches_result() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"result": true})),
+            )
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let auth = OpaAuthorizer::new(HashSet::new(), opa_url(&mock), false, 100, 60_000).unwrap();
+        let image = img();
+        let p = test_principal("alice");
+        let h = host();
+        assert_eq!(
+            auth.authorize(&image, &req(&p, &h, "fresh-topic")),
+            AuthorizationResult::Allow,
+        );
+        // Cache populated; introspect by asserting a second call doesn't
+        // bump the mock's request count when the assertion fires on drop.
+        assert_eq!(
+            auth.authorize(&image, &req(&p, &h, "fresh-topic")),
+            AuthorizationResult::Allow,
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cache_entry_expires_after_ttl() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"result": true})),
+            )
+            .expect(2) // first call + post-expiry call.
+            .mount(&mock)
+            .await;
+
+        // 10ms TTL — wall-clock; reliable on any host that isn't paused
+        // in a debugger.
+        let auth = OpaAuthorizer::new(HashSet::new(), opa_url(&mock), false, 100, 10).unwrap();
+        let image = img();
+        let p = test_principal("alice");
+        let h = host();
+        assert_eq!(
+            auth.authorize(&image, &req(&p, &h, "t")),
+            AuthorizationResult::Allow,
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            auth.authorize(&image, &req(&p, &h, "t")),
+            AuthorizationResult::Allow,
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn http_error_with_allow_on_error_true_returns_allow() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&mock)
+            .await;
+
+        // allow_on_error=true → 500 maps to Allow.
+        let auth = OpaAuthorizer::new(HashSet::new(), opa_url(&mock), true, 100, 60_000).unwrap();
+        let image = img();
+        let p = test_principal("alice");
+        let h = host();
+        assert_eq!(
+            auth.authorize(&image, &req(&p, &h, "t")),
+            AuthorizationResult::Allow,
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn http_error_with_allow_on_error_false_returns_deny() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&mock)
+            .await;
+
+        let auth = OpaAuthorizer::new(HashSet::new(), opa_url(&mock), false, 100, 60_000).unwrap();
+        let image = img();
+        let p = test_principal("alice");
+        let h = host();
+        assert_eq!(
+            auth.authorize(&image, &req(&p, &h, "t")),
+            AuthorizationResult::Deny,
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn json_response_parse_error_returns_per_allow_on_error_config() {
+        // 200 OK but body isn't valid OPA JSON. The shape parses as
+        // serde-json but lacks the `result` field — should fall through
+        // to error_decision().
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("not-json-at-all"))
+            .mount(&mock)
+            .await;
+
+        let p = test_principal("alice");
+        let h = host();
+        let image = img();
+
+        let auth_open =
+            OpaAuthorizer::new(HashSet::new(), opa_url(&mock), true, 100, 60_000).unwrap();
+        assert_eq!(
+            auth_open.authorize(&image, &req(&p, &h, "t")),
+            AuthorizationResult::Allow,
+        );
+
+        let auth_closed =
+            OpaAuthorizer::new(HashSet::new(), opa_url(&mock), false, 100, 60_000).unwrap();
+        assert_eq!(
+            auth_closed.authorize(&image, &req(&p, &h, "t")),
+            AuthorizationResult::Deny,
+        );
+    }
+}

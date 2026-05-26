@@ -67,6 +67,8 @@ jsonpath-rust = { workspace = true }
 # synthesizing a SCRAM credential for token authentication
 # (`network::auth::synthesize_token_scram_credential`).
 base64.workspace = true
+# Slice 53: bounded decision cache for the OPA authorizer.
+lru.workspace = true
 
 [dev-dependencies]
 crabka-broker = { version = "0.1", path = ".", features = ["test-helpers"] }
@@ -93,3 +95,6 @@ rcgen.workspace = true
 # secret-key env-wins-over-TOML check. The workspace forbids `unsafe_code`,
 # so direct `std::env::set_var` (unsafe under edition 2024) isn't available.
 temp-env = "0.3"
+# Slice 53: mock OPA server for OpaAuthorizer unit tests — wiremock
+# answers HTTP on a random local port and lets us assert call counts.
+wiremock = "0.6"
