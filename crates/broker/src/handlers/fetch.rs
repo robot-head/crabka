@@ -294,21 +294,32 @@ pub(crate) async fn handle(
     // into p.cpu_micros — skipping wall-time spent awaiting I/O.
     let mut total_bytes = 0_usize;
     for p in &mut pending {
-        if let Some(part) = &p.partition {
-            let monitor = tokio_metrics::TaskMonitor::new();
-            total_bytes += monitor
-                .instrument(do_read(
-                    part,
-                    p.fetch_offset,
-                    p.max_bytes,
-                    p.read_committed,
-                    p.is_follower_fetch,
-                    &mut p.out,
-                ))
-                .await?;
-            let micros = u64::try_from(monitor.cumulative().total_poll_duration.as_micros())
-                .unwrap_or(u64::MAX);
-            p.cpu_micros = p.cpu_micros.saturating_add(micros);
+        let Some(part) = p.partition.clone() else {
+            continue;
+        };
+        let monitor = tokio_metrics::TaskMonitor::new();
+        total_bytes += monitor
+            .instrument(do_read(
+                &part,
+                p.fetch_offset,
+                p.max_bytes,
+                p.read_committed,
+                p.is_follower_fetch,
+                &mut p.out,
+            ))
+            .await?;
+        let micros =
+            u64::try_from(monitor.cumulative().total_poll_duration.as_micros()).unwrap_or(u64::MAX);
+        p.cpu_micros = p.cpu_micros.saturating_add(micros);
+
+        // Slice 48d (KIP-405): if the local read came back
+        // OFFSET_OUT_OF_RANGE because the requested offset is below
+        // `local_log_start_offset()` on a tiered topic, attempt to
+        // serve the batch from the remote tier.
+        if p.out.error_code == codes::OFFSET_OUT_OF_RANGE
+            && let Some(serviced_bytes) = try_remote_read(broker, p, &part).await
+        {
+            total_bytes += serviced_bytes;
         }
     }
 
@@ -316,7 +327,7 @@ pub(crate) async fn handle(
     // partition's append_notify with a single timeout, then re-read.
     let want_more = total_bytes < usize::try_from(req.min_bytes.max(0)).unwrap_or(0);
     if want_more && req.max_wait_ms > 0 {
-        long_poll_then_reread(&mut pending, req.max_wait_ms).await?;
+        long_poll_then_reread(broker, &mut pending, req.max_wait_ms).await?;
     }
 
     // Slice 43f: drain per-partition cpu_micros accumulators before
@@ -566,10 +577,69 @@ async fn do_read(
     Ok(bytes_est)
 }
 
+/// Slice 48d (KIP-405): try to serve `p`'s requested offset from the remote
+/// tier when the local log returned `OFFSET_OUT_OF_RANGE` and the topic has
+/// `remote.storage.enable=true`. On success, replaces the partition's error +
+/// records and returns the encoded batch size; on miss / error / non-tiered,
+/// leaves `p.out` untouched and returns `None`.
+async fn try_remote_read(broker: &Broker, p: &mut PendingRead, part: &Partition) -> Option<usize> {
+    let reader = broker.remote_reader.clone()?;
+    let remote_storage_enable = {
+        let log = part.log.lock().expect("log mutex poisoned");
+        log.config_snapshot().remote_storage_enable
+    };
+    if !remote_storage_enable {
+        return None;
+    }
+    if p.topic_id == WireUuid::ZERO {
+        // Without a topic_id we can't build `TopicIdPartition` keyed the
+        // same way the RLMM stores entries (Kafka's equality is by id +
+        // partition).
+        return None;
+    }
+    let topic_id = uuid::Uuid::from_bytes(p.topic_id.0);
+    let tp = crabka_remote_storage::TopicIdPartition::new(
+        topic_id,
+        p.topic_name.clone(),
+        p.partition_index,
+    );
+    let leader_epoch = part
+        .current_leader_epoch
+        .load(std::sync::atomic::Ordering::Acquire);
+    let max_bytes = usize::try_from(p.max_bytes.max(0)).unwrap_or(0);
+
+    match reader
+        .fetch_batch(&tp, leader_epoch, p.fetch_offset, max_bytes)
+        .await
+    {
+        Ok(Some(batch)) => {
+            let bytes_est = <RecordBatch as Encode>::encoded_len(&batch, 0);
+            p.out.error_code = codes::NONE;
+            // `log_start_offset` / HW / LSO stay at whatever `do_read`
+            // wrote out (the local view); the remote tier doesn't change
+            // those pointers.
+            p.out.records = Some(batch);
+            Some(bytes_est)
+        }
+        Ok(None) => None,
+        Err(e) => {
+            tracing::warn!(
+                topic = %p.topic_name,
+                partition = p.partition_index,
+                offset = p.fetch_offset,
+                error = %e,
+                "remote-reader: fetch_batch failed; leaving OFFSET_OUT_OF_RANGE"
+            );
+            None
+        }
+    }
+}
+
 /// Wait for any readable partition's `append_notify` to fire (with timeout),
 /// then re-read every partition once. Resets each partition's accumulated
 /// records before re-reading so the new read replaces the old one.
 async fn long_poll_then_reread(
+    broker: &Broker,
     pending: &mut [PendingRead],
     max_wait_ms: i32,
 ) -> Result<(), BrokerError> {
@@ -592,27 +662,35 @@ async fn long_poll_then_reread(
     let _ = tokio::time::timeout(max_wait, futures_util::future::select_all(waits)).await;
 
     for p in pending.iter_mut() {
-        if let Some(part) = &p.partition {
-            p.out = PartitionData {
-                partition_index: p.partition_index,
-                ..Default::default()
-            };
-            // Slice 43f: instrument the re-read so its poll time accumulates
-            // into the same per-partition CPU counter as the first pass.
-            let monitor = tokio_metrics::TaskMonitor::new();
-            monitor
-                .instrument(do_read(
-                    part,
-                    p.fetch_offset,
-                    p.max_bytes,
-                    p.read_committed,
-                    p.is_follower_fetch,
-                    &mut p.out,
-                ))
-                .await?;
-            let micros = u64::try_from(monitor.cumulative().total_poll_duration.as_micros())
-                .unwrap_or(u64::MAX);
-            p.cpu_micros = p.cpu_micros.saturating_add(micros);
+        let Some(part) = p.partition.clone() else {
+            continue;
+        };
+        p.out = PartitionData {
+            partition_index: p.partition_index,
+            ..Default::default()
+        };
+        // Slice 43f: instrument the re-read so its poll time accumulates
+        // into the same per-partition CPU counter as the first pass.
+        let monitor = tokio_metrics::TaskMonitor::new();
+        monitor
+            .instrument(do_read(
+                &part,
+                p.fetch_offset,
+                p.max_bytes,
+                p.read_committed,
+                p.is_follower_fetch,
+                &mut p.out,
+            ))
+            .await?;
+        let micros =
+            u64::try_from(monitor.cumulative().total_poll_duration.as_micros()).unwrap_or(u64::MAX);
+        p.cpu_micros = p.cpu_micros.saturating_add(micros);
+
+        // Slice 48d: re-attempt the remote-tier read on the re-read pass
+        // so a long-poll that fires on a non-tiered partition doesn't
+        // clobber the remote batch we'd already served on this one.
+        if p.out.error_code == codes::OFFSET_OUT_OF_RANGE {
+            let _ = try_remote_read(broker, p, &part).await;
         }
     }
     Ok(())
