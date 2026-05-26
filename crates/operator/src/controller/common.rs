@@ -294,6 +294,10 @@ pub(crate) fn render_configmap(
     // auto-injected `simple + ANONYMOUS` block — see
     // `render_broker_toml`).
     let authorization = owner.spec.authorization.as_ref();
+    // Slice 48g: thread `Kafka.spec.tieredStorage` into each broker's
+    // TOML so the broker-wide `[remote_storage]` block (and the matching
+    // `tier-storage` pod volume) light up together.
+    let tiered_storage = owner.spec.tiered_storage.as_ref();
     for (broker_id, addrs) in addresses_per_broker {
         let tls_for_broker = tls_per_broker.and_then(|m| m.get(broker_id));
         let toml = crate::controller::listeners::render_broker_toml(
@@ -306,6 +310,7 @@ pub(crate) fn render_configmap(
             clients_ca_path,
             delegation_token_enabled,
             authorization,
+            tiered_storage,
         );
         data.insert(format!("broker-{broker_id}.toml"), toml);
     }
@@ -764,6 +769,7 @@ mod config_hash_tests {
             logging: None,
             delegation_token: None,
             authorization: None,
+            tiered_storage: None,
         };
         let h = combined_config_hash(&spec_a, None, None, None);
         let h_again = combined_config_hash(&spec_a, None, None, None);
@@ -808,6 +814,7 @@ mod config_hash_tests {
             logging: None,
             delegation_token: None,
             authorization: None,
+            tiered_storage: None,
         };
         let h_off = combined_config_hash(&spec_off, None, None, None);
 
@@ -854,6 +861,7 @@ mod config_hash_tests {
             logging: None,
             delegation_token: None,
             authorization: None,
+            tiered_storage: None,
         };
         let h_none = combined_config_hash(&spec, None, None, None);
         let h_a = combined_config_hash(
@@ -891,6 +899,7 @@ mod config_hash_tests {
             logging: None,
             delegation_token: None,
             authorization: None,
+            tiered_storage: None,
         };
         let h1 = combined_config_hash(&spec, Some("ca-pem"), None, None);
         let h2 = combined_config_hash(&spec, Some("ca-pem"), None, None);
@@ -917,6 +926,7 @@ mod config_hash_tests {
                 logging: None,
                 delegation_token: None,
                 authorization: None,
+                tiered_storage: None,
             },
         );
         k.meta_mut().namespace = Some("default".into());
@@ -972,6 +982,7 @@ mod config_hash_tests {
             logging: None,
             delegation_token: None,
             authorization: None,
+            tiered_storage: None,
         };
         // No explicit pin => slice-24 collapse preserved (== config_hash of
         // the empty config part).
@@ -1006,6 +1017,7 @@ mod config_hash_tests {
                 logging: None,
                 delegation_token: None,
                 authorization: None,
+                tiered_storage: None,
             },
         );
         k.meta_mut().namespace = Some("default".into());

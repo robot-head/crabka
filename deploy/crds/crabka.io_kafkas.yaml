@@ -588,6 +588,32 @@ spec:
                   controller pods.
                 nullable: true
                 type: object
+              tieredStorage:
+                description: |-
+                  Slice 48g (KIP-405): cluster-wide tiered storage. When `Some`,
+                  every broker pod boots with the local-tier RSM enabled, an
+                  `emptyDir` mounted at `/var/lib/crabka/remote` (the broker's
+                  `remote_log_storage_dir`), and `[remote_storage]` rendered in
+                  the broker TOML. Per-topic enablement is unchanged
+                  (`KafkaTopic.spec.config["remote.storage.enable"] = "true"`).
+
+                  48g uses `emptyDir`; with `InmemoryRemoteLogMetadataManager` as
+                  the only RLMM, tier data does not survive pod restarts. PVC
+                  support pairs with the production RLMM (48f).
+                nullable: true
+                properties:
+                  type:
+                    description: |-
+                      Backend kind. Only [`TieredStorageType::Local`] is recognised by
+                      the broker in 48g — selecting an unsupported variant surfaces
+                      `TieredStorageInvalid` on `Kafka.status.conditions` at reconcile
+                      time (deferred; today only `Local` is in the enum).
+                    enum:
+                    - Local
+                    type: string
+                required:
+                - type
+                type: object
             required:
             - kafkaVersion
             type: object

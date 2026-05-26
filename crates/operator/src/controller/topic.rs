@@ -527,6 +527,7 @@ mod tests {
                 logging: None,
                 delegation_token: None,
                 authorization: None,
+                tiered_storage: None,
             },
         );
         k.metadata.namespace = Some(namespace.into());
