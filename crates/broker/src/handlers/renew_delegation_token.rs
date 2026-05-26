@@ -1,10 +1,21 @@
 //! Slice 51 (KIP-48): `RenewDelegationToken` (`api_key` 39).
 //!
 //! Per spec §1.3: caller must be SASL-authenticated; the request's
-//! `hmac` selects an existing token by HMAC bytes; only the owner or a
-//! `renewers` entry may extend it; the new expiry is clamped to the
-//! token's `max_timestamp_ms`; a fresh `V1DelegationToken` record is
-//! appended with the same `token_id` (image semantics: replace).
+//! `hmac` selects an existing token by HMAC bytes; only the owner, a
+//! `renewers` entry, or a configured super-user may extend it; the new
+//! expiry is clamped to the token's `max_timestamp_ms`; a fresh
+//! `V1DelegationToken` record is appended with the same `token_id`
+//! (image semantics: replace).
+//!
+//! The super-user bypass matches Kafka's `DelegationTokenManager.
+//! isAuthorizedToOperateOnToken` (via `SecurityUtils.isAuthorized`),
+//! and is what slice 51b's operator relies on: the operator is a
+//! super-user that mints tokens on behalf of `KafkaUser` principals
+//! via act-as, then must be able to renew/expire them despite being
+//! neither the owner nor a listed renewer.
+
+use std::collections::HashSet;
+use std::hash::BuildHasher;
 
 use crabka_metadata::{DelegationTokenRecord, MetadataRecord};
 use crabka_protocol::owned::renew_delegation_token_request::RenewDelegationTokenRequest;
@@ -15,12 +26,13 @@ use crabka_security::SecretBytes;
 use crate::network::auth::ConnectionAuth;
 use crate::time_util::now_ms;
 
-pub(crate) async fn handle(
+pub(crate) async fn handle<S: BuildHasher>(
     req: &RenewDelegationTokenRequest,
     auth: &ConnectionAuth,
     secret_key: Option<&SecretBytes>,
     default_renew_period_ms: i64,
     controller: &ControllerHandle,
+    super_users: &HashSet<String, S>,
 ) -> RenewDelegationTokenResponse {
     if secret_key.is_none() {
         return err_response(crate::codes::DELEGATION_TOKEN_AUTH_DISABLED);
@@ -35,7 +47,13 @@ pub(crate) async fn handle(
         return err_response(crate::codes::DELEGATION_TOKEN_NOT_FOUND);
     };
 
-    if token.owner != caller && !token.renewers.contains(&caller) {
+    // KIP-48: super-users bypass the owner/renewer gate. Slice 51b's
+    // operator-driven issuance flow depends on this — the operator is
+    // a super-user that mints tokens via act-as for other principals,
+    // so it is neither the owner nor a listed renewer when it later
+    // needs to renew them ahead of expiry.
+    let is_super_user = super_users.contains(&principal.name);
+    if !is_super_user && token.owner != caller && !token.renewers.contains(&caller) {
         return err_response(crate::codes::DELEGATION_TOKEN_OWNER_MISMATCH);
     }
 
@@ -82,10 +100,23 @@ fn err_response(code: i16) -> RenewDelegationTokenResponse {
 mod tests {
     use super::*;
     use crabka_security::{AuthMethod, KafkaPrincipal, Principal, SaslMechanism};
+    use std::collections::HashSet;
     use std::net::SocketAddr;
     use std::sync::Arc;
     use std::time::Duration;
     use tempfile::TempDir;
+
+    /// Helper: empty super-users set for the pre-existing tests, which
+    /// all exercise the owner/renewer path.
+    fn empty_super_users() -> HashSet<String> {
+        HashSet::new()
+    }
+
+    /// Helper: super-users set containing the given names (for the new
+    /// super-user-bypass tests).
+    fn super_users_with(names: &[&str]) -> HashSet<String> {
+        names.iter().map(|s| (*s).to_string()).collect()
+    }
 
     /// Spin up a single-voter `Controller` for tests, wait for leader.
     async fn test_controller(log_dir: std::path::PathBuf) -> Arc<ControllerHandle> {
@@ -166,7 +197,7 @@ mod tests {
         let auth = authed("alice");
         let dir = TempDir::new().unwrap();
         let controller = test_controller(dir.path().into()).await;
-        let resp = handle(&req, &auth, None, 1_000, &controller).await;
+        let resp = handle(&req, &auth, None, 1_000, &controller, &empty_super_users()).await;
         assert_eq!(
             resp.error_code,
             crate::codes::DELEGATION_TOKEN_AUTH_DISABLED
@@ -198,7 +229,15 @@ mod tests {
             renew_period_ms: 3_600_000, // +1h
             ..Default::default()
         };
-        let resp = handle(&req, &authed("alice"), Some(&secret), 1_000, &controller).await;
+        let resp = handle(
+            &req,
+            &authed("alice"),
+            Some(&secret),
+            1_000,
+            &controller,
+            &empty_super_users(),
+        )
+        .await;
         assert_eq!(resp.error_code, 0);
         // expiry should be roughly now + 1h (within a small slop window).
         let slop = 60_000;
@@ -239,7 +278,15 @@ mod tests {
             renew_period_ms: 60_000, // +1m
             ..Default::default()
         };
-        let resp = handle(&req, &authed("bob"), Some(&secret), 1_000, &controller).await;
+        let resp = handle(
+            &req,
+            &authed("bob"),
+            Some(&secret),
+            1_000,
+            &controller,
+            &empty_super_users(),
+        )
+        .await;
         assert_eq!(resp.error_code, 0);
         assert!(resp.expiry_timestamp_ms > now + 30_000);
         controller.cancel().await;
@@ -255,7 +302,15 @@ mod tests {
             renew_period_ms: 60_000,
             ..Default::default()
         };
-        let resp = handle(&req, &authed("alice"), Some(&secret), 1_000, &controller).await;
+        let resp = handle(
+            &req,
+            &authed("alice"),
+            Some(&secret),
+            1_000,
+            &controller,
+            &empty_super_users(),
+        )
+        .await;
         assert_eq!(resp.error_code, crate::codes::DELEGATION_TOKEN_NOT_FOUND);
         controller.cancel().await;
     }
@@ -284,7 +339,113 @@ mod tests {
             renew_period_ms: 60_000,
             ..Default::default()
         };
-        let resp = handle(&req, &authed("eve"), Some(&secret), 1_000, &controller).await;
+        let resp = handle(
+            &req,
+            &authed("eve"),
+            Some(&secret),
+            1_000,
+            &controller,
+            &empty_super_users(),
+        )
+        .await;
+        assert_eq!(
+            resp.error_code,
+            crate::codes::DELEGATION_TOKEN_OWNER_MISMATCH
+        );
+        controller.cancel().await;
+    }
+
+    /// Slice 51c regression: a super-user caller may renew a token they
+    /// neither own nor are listed as a renewer on. This mirrors Kafka's
+    /// `DelegationTokenManager.isAuthorizedToOperateOnToken` and is the
+    /// load-bearing gate for slice 51b's operator flow — the operator
+    /// is a super-user that act-as-mints tokens on behalf of `KafkaUser`
+    /// principals, then must be able to renew them ahead of expiry.
+    #[tokio::test]
+    async fn super_user_can_renew_any_token() {
+        let dir = TempDir::new().unwrap();
+        let controller = test_controller(dir.path().into()).await;
+        let secret = SecretBytes::new(b"k".to_vec());
+        let hmac = vec![0xDD; 32];
+        let now = now_ms();
+        // Token owned by `alice`, no renewers — operator (`admin`) is
+        // neither, but it IS in `super_users`, so renew must succeed.
+        seed_token(
+            &controller,
+            "tok-super",
+            hmac.clone(),
+            kp("alice"),
+            vec![],
+            now - 1_000,
+            now + 60_000,
+            now + 7 * 24 * 60 * 60 * 1_000,
+        )
+        .await;
+
+        let req = RenewDelegationTokenRequest {
+            hmac: hmac.into(),
+            renew_period_ms: 3_600_000, // +1h
+            ..Default::default()
+        };
+        let resp = handle(
+            &req,
+            &authed("admin"),
+            Some(&secret),
+            1_000,
+            &controller,
+            &super_users_with(&["admin"]),
+        )
+        .await;
+        assert_eq!(
+            resp.error_code, 0,
+            "super-user must be able to renew any token regardless of owner/renewers"
+        );
+        // Persisted in image with the new expiry.
+        let img = controller.current_image();
+        let stored = img.delegation_token_by_id("tok-super").expect("present");
+        assert_eq!(stored.expiry_timestamp_ms, resp.expiry_timestamp_ms);
+        controller.cancel().await;
+    }
+
+    /// Slice 51c regression: a non-super-user caller who is also not the
+    /// owner and not a listed renewer must still be rejected with
+    /// `DELEGATION_TOKEN_OWNER_MISMATCH`. Guards against accidentally
+    /// widening the bypass beyond `super_users`.
+    #[tokio::test]
+    async fn non_super_user_non_owner_non_renewer_still_rejected() {
+        let dir = TempDir::new().unwrap();
+        let controller = test_controller(dir.path().into()).await;
+        let secret = SecretBytes::new(b"k".to_vec());
+        let hmac = vec![0xEE; 32];
+        let now = now_ms();
+        seed_token(
+            &controller,
+            "tok-eve",
+            hmac.clone(),
+            kp("alice"),
+            vec![kp("bob")],
+            now - 1_000,
+            now + 60_000,
+            now + 7 * 24 * 60 * 60 * 1_000,
+        )
+        .await;
+
+        let req = RenewDelegationTokenRequest {
+            hmac: hmac.into(),
+            renew_period_ms: 60_000,
+            ..Default::default()
+        };
+        // `eve` is not in the super-users set (only `admin` is) and is
+        // neither owner nor renewer — must still get the mismatch error.
+        let resp = handle(
+            &req,
+            &authed("eve"),
+            Some(&secret),
+            1_000,
+            &controller,
+            &super_users_with(&["admin"]),
+        )
+        .await;
         assert_eq!(
             resp.error_code,
             crate::codes::DELEGATION_TOKEN_OWNER_MISMATCH
