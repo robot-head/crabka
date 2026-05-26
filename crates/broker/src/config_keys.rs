@@ -26,6 +26,8 @@ pub(crate) const SEGMENT_BYTES: &str = "segment.bytes";
 pub(crate) const CLEANUP_POLICY: &str = "cleanup.policy";
 pub(crate) const COMPRESSION_TYPE: &str = "compression.type";
 pub(crate) const MIN_INSYNC_REPLICAS: &str = "min.insync.replicas";
+/// Slice 48b (KIP-405): per-topic tiered-storage opt-in.
+pub(crate) const REMOTE_STORAGE_ENABLE: &str = "remote.storage.enable";
 
 /// Validate a single key/value pair. `Err(reason)` carries an
 /// operator-readable explanation that the handler propagates into the
@@ -42,6 +44,12 @@ pub(crate) fn validate_topic_config(key: &str, value: &str) -> Result<(), String
         },
         COMPRESSION_TYPE => parse_compression_type(value).map(|_| ()),
         MIN_INSYNC_REPLICAS => parse_i64_at_least(1, value).map(|_| ()),
+        REMOTE_STORAGE_ENABLE => match value {
+            "true" | "false" => Ok(()),
+            _ => Err(format!(
+                "remote.storage.enable={value} not supported; expected `true` or `false`"
+            )),
+        },
         crate::throttle::LEADER_THROTTLED_REPLICAS_KEY
         | crate::throttle::FOLLOWER_THROTTLED_REPLICAS_KEY => {
             crate::throttle::ThrottledReplicas::parse(value).map(|_| ())
@@ -104,6 +112,7 @@ pub(crate) fn is_recognized(key: &str) -> bool {
             | CLEANUP_POLICY
             | COMPRESSION_TYPE
             | MIN_INSYNC_REPLICAS
+            | REMOTE_STORAGE_ENABLE
             | crate::throttle::LEADER_THROTTLED_REPLICAS_KEY
             | crate::throttle::FOLLOWER_THROTTLED_REPLICAS_KEY
     )
@@ -158,6 +167,9 @@ pub(crate) fn apply_to_log_config(
                 if let Ok(target) = parse_compression_type(v) {
                     out.compression_type = target;
                 }
+            }
+            REMOTE_STORAGE_ENABLE => {
+                out.remote_storage_enable = v == "true";
             }
             // The remaining keys are recognized but no broker behavior is
             // wired to them yet (see module docs).
@@ -289,6 +301,40 @@ mod tests {
     fn validate_unknown_key_rejected() {
         let err = validate_topic_config("flush.ms", "1000").unwrap_err();
         assert!(err.contains("unrecognized"));
+    }
+
+    #[test]
+    fn validate_remote_storage_enable_accepts_bools() {
+        assert!(validate_topic_config(REMOTE_STORAGE_ENABLE, "true").is_ok());
+        assert!(validate_topic_config(REMOTE_STORAGE_ENABLE, "false").is_ok());
+    }
+
+    #[test]
+    fn validate_remote_storage_enable_rejects_junk() {
+        let err = validate_topic_config(REMOTE_STORAGE_ENABLE, "yes").unwrap_err();
+        assert!(err.contains("remote.storage.enable"), "got: {err}");
+    }
+
+    #[test]
+    fn is_recognized_includes_remote_storage_enable() {
+        assert!(is_recognized(REMOTE_STORAGE_ENABLE));
+    }
+
+    #[test]
+    fn apply_remote_storage_enable_propagates() {
+        let mut o = BTreeMap::new();
+        o.insert(REMOTE_STORAGE_ENABLE.into(), "true".into());
+        let out = apply_to_log_config(&o, &LogConfig::default());
+        assert!(out.remote_storage_enable);
+
+        let mut off = BTreeMap::new();
+        off.insert(REMOTE_STORAGE_ENABLE.into(), "false".into());
+        let base = LogConfig {
+            remote_storage_enable: true,
+            ..LogConfig::default()
+        };
+        let out = apply_to_log_config(&off, &base);
+        assert!(!out.remote_storage_enable);
     }
 
     #[test]

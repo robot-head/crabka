@@ -58,6 +58,12 @@ pub struct LogConfig {
     /// config: `gzip` / `snappy` / `lz4` / `zstd` / `uncompressed` map
     /// to `Some(_)`; `producer` (the default) maps to `None`.
     pub compression_type: Option<CompressionType>,
+
+    /// Slice 48b (KIP-405): when `true`, this partition's sealed segments
+    /// are eligible to be copied to the remote tier by the broker's
+    /// `RemoteLogManager`. Maps to Kafka's per-topic `remote.storage.enable`.
+    /// Default `false` (Kafka's default — tiered storage is opt-in per topic).
+    pub remote_storage_enable: bool,
 }
 
 impl Default for LogConfig {
@@ -75,6 +81,8 @@ impl Default for LogConfig {
             // default. Operators flip this to a specific codec on
             // topics where they want broker-side enforcement.
             compression_type: None,
+            // Tiered storage is opt-in per topic (Kafka default false).
+            remote_storage_enable: false,
         }
     }
 }

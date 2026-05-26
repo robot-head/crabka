@@ -82,10 +82,12 @@ impl RemoteStorageManager for LocalTieredStorage {
             &data.time_index,
             Self::index_path(&dir, IndexType::Timestamp),
         )?;
-        fs::copy(
-            &data.producer_snapshot_index,
-            Self::index_path(&dir, IndexType::ProducerSnapshot),
-        )?;
+        if let Some(snapshot) = &data.producer_snapshot_index {
+            fs::copy(
+                snapshot,
+                Self::index_path(&dir, IndexType::ProducerSnapshot),
+            )?;
+        }
         fs::write(
             Self::index_path(&dir, IndexType::LeaderEpoch),
             &data.leader_epoch_index,
@@ -206,7 +208,7 @@ mod tests {
             offset_index: write_file(src, "00.index", b"OFFSET-IDX"),
             time_index: write_file(src, "00.timeindex", b"TIME-IDX"),
             transaction_index: with_txn.then(|| write_file(src, "00.txnindex", b"TXN-IDX")),
-            producer_snapshot_index: write_file(src, "00.snapshot", b"SNAP"),
+            producer_snapshot_index: Some(write_file(src, "00.snapshot", b"SNAP")),
             leader_epoch_index: Bytes::from_static(b"EPOCH-BYTES"),
         }
     }
