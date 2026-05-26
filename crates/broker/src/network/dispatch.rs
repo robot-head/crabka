@@ -2142,10 +2142,12 @@ async fn handle_create_delegation_token_frame(
 
 /// Decode + dispatch a `RenewDelegationToken` (`api_key` 39) frame
 /// (slice-51 T7). Threads the per-connection `auth` to the handler so it
-/// can enforce the KIP-48 owner-or-renewer check, and passes the
-/// configured default renew period (Kafka's `delegation.token.expiry.time.ms`,
-/// 24h by default) as the fallback used when the request specifies
-/// `renew_period_ms == -1` (spec §1.3 step 4).
+/// can enforce the KIP-48 owner-or-renewer check (slice 51c added the
+/// super-user bypass so the operator can renew tokens it minted via
+/// act-as), and passes the configured default renew period (Kafka's
+/// `delegation.token.expiry.time.ms`, 24h by default) as the fallback
+/// used when the request specifies `renew_period_ms == -1` (spec §1.3
+/// step 4).
 async fn handle_renew_delegation_token_frame(
     broker: &Broker,
     frame: &[u8],
@@ -2168,6 +2170,7 @@ async fn handle_renew_delegation_token_frame(
         broker.config.delegation_token_secret_key.as_ref(),
         broker.config.delegation_token_default_renew_period_ms,
         &broker.controller,
+        &broker.config.super_users,
     )
     .await;
     let mut buf = BytesMut::with_capacity(resp.encoded_len(api_version));
@@ -2182,8 +2185,10 @@ async fn handle_renew_delegation_token_frame(
 }
 
 /// Decode + dispatch an `ExpireDelegationToken` (`api_key` 40) frame
-/// (slice-51 T7). Threads the per-connection `auth` to the handler so it
-/// can enforce the KIP-48 owner-or-renewer check.
+/// (slice-51 T7). Threads the per-connection `auth` to the handler so
+/// it can enforce the KIP-48 owner-or-renewer check (slice 51c added
+/// the super-user bypass so the operator's finalizer can tombstone
+/// tokens it minted via act-as).
 async fn handle_expire_delegation_token_frame(
     broker: &Broker,
     frame: &[u8],
@@ -2205,6 +2210,7 @@ async fn handle_expire_delegation_token_frame(
         auth,
         broker.config.delegation_token_secret_key.as_ref(),
         &broker.controller,
+        &broker.config.super_users,
     )
     .await;
     let mut buf = BytesMut::with_capacity(resp.encoded_len(api_version));

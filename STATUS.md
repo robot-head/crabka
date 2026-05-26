@@ -3124,3 +3124,39 @@ introspection metadata).
   [`docs/superpowers/specs/2026-05-25-crabka-kafkauser-delegation-tokens-51b-design.md`],
   [`docs/superpowers/plans/2026-05-25-crabka-kafkauser-delegation-tokens-51b.md`].
 
+## Slice 51c — Broker: super-user bypass on Renew/Expire delegation token (2026-05-25)
+
+- **Goal:** Close the missing super-user bypass on
+  `RenewDelegationToken` (api_key 39) and `ExpireDelegationToken`
+  (api_key 40) that broke the slice-51b
+  `kind-kafkauser-delegation-token` e2e. The job was red on main with
+  `RenewDelegationToken: UNKNOWN (63)`.
+- **Cause:** Slice 51's handlers gated authorization on `caller ==
+  owner || caller in renewers` only — they missed the super-user fast
+  path that Kafka's `DelegationTokenManager.isAuthorizedToOperateOnToken`
+  includes (via `SecurityUtils.isAuthorized`). Slice 51b made the gap
+  visible because the operator (a super-user) became the canonical
+  renewer for tokens it act-as-mints on behalf of `KafkaUser`
+  principals — but it is neither the owner (the user is) nor a listed
+  renewer, so every operator renew/expire failed with err 63
+  (`DELEGATION_TOKEN_OWNER_MISMATCH`) or err 65
+  (`DELEGATION_TOKEN_AUTHORIZATION_FAILED`).
+- **Fix:** Both handler signatures grew a `super_users: &HashSet<String, S>`
+  argument (same shape as the Create handler from slice 51b B1); the
+  authorization gate now reads `is_super_user || owner ||
+  renewer`. Dispatch (`network/dispatch.rs`) threads
+  `&broker.config.super_users` through both `handle_*_delegation_token_frame`
+  helpers.
+- **Tests:** 5 new — 2 broker unit per handler (`super_user_can_renew_any_token`
+  + `non_super_user_non_owner_non_renewer_still_rejected` on renew; the
+  matching pair on expire) + 1 broker integration
+  (`super_user_can_renew_other_owners_token` in
+  `crates/broker/tests/delegation_tokens.rs`, which boots a broker with
+  `admin` in `super_users`, act-as mints a token owned by `alice`, and
+  asserts admin's Renew + Expire both return `error_code = 0` over the
+  wire).
+- **No CRD change. No operator change.** The broker-side fix alone
+  unblocks the e2e — the operator was already correctly calling Renew
+  on tokens it didn't own.
+- **Workspace fmt + clippy `-D warnings` + tests** all green.
+
