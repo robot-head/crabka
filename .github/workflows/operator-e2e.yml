@@ -1208,17 +1208,30 @@ jobs:
         run: |
           set -e
           bootstrap="demo-broker-headless.default.svc.cluster.local:9092"
-          # `kubectl run -i ... > file` only captures stdout, and if the
-          # underlying command exits non-zero `set -e` skips the `cat` —
-          # so a failed assertion produces no diagnostic. Capture both
-          # streams to a file via a wrapper, print it unconditionally,
-          # and only then grep.
+          # `kubectl run --rm -i` is racy on fast-completing pods: once the
+          # apache/kafka image is cached on the node, the container can
+          # exit (and `--rm` fire) before kubectl finishes attaching the
+          # stream, leaving the output file with only kubectl's warning
+          # banners and no actual command stdout. Create the pod async
+          # (no `--rm`, no `-i`), wait for it to reach a terminal phase,
+          # then read its logs. Capture both streams to the same file so
+          # a non-zero exit still produces a diagnostic.
           run_kt() {
             local name=$1 out=$2; shift 2
-            kubectl run "$name" -n default --rm -i --restart=Never \
-              --image=apache/kafka:3.8.0 --command -- "$@" \
-              >"$out" 2>>"$out" || true
-            echo "----- $name output ($out) -----"
+            kubectl run "$name" -n default --restart=Never \
+              --image=apache/kafka:3.8.0 --command -- "$@" >/dev/null
+            for i in $(seq 1 60); do
+              phase=$(kubectl get pod "$name" -n default \
+                -o jsonpath='{.status.phase}' 2>/dev/null || true)
+              case "$phase" in
+                Succeeded|Failed) break ;;
+              esac
+              sleep 2
+            done
+            kubectl logs "$name" -n default >"$out" 2>>"$out" || true
+            kubectl delete pod "$name" -n default \
+              --ignore-not-found --wait=false >/dev/null 2>&1 || true
+            echo "----- $name output ($out) phase=$phase -----"
             cat "$out"
             echo "----- end $name -----"
           }
@@ -1256,12 +1269,23 @@ jobs:
           set -e
           bootstrap="demo-broker-headless.default.svc.cluster.local:9092"
           # See "Assert partition count + config" above for the rationale
-          # behind capturing stderr and dumping unconditionally.
-          kubectl run kt-describe2 -n default --rm -i --restart=Never \
+          # behind create→wait→logs instead of `kubectl run --rm -i`.
+          kubectl run kt-describe2 -n default --restart=Never \
             --image=apache/kafka:3.8.0 --command -- \
             /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$bootstrap" \
-              --describe --topic demo-topic >/tmp/describe2.txt 2>>/tmp/describe2.txt || true
-          echo "----- kt-describe2 output -----"
+              --describe --topic demo-topic >/dev/null
+          for i in $(seq 1 60); do
+            phase=$(kubectl get pod kt-describe2 -n default \
+              -o jsonpath='{.status.phase}' 2>/dev/null || true)
+            case "$phase" in
+              Succeeded|Failed) break ;;
+            esac
+            sleep 2
+          done
+          kubectl logs kt-describe2 -n default >/tmp/describe2.txt 2>>/tmp/describe2.txt || true
+          kubectl delete pod kt-describe2 -n default \
+            --ignore-not-found --wait=false >/dev/null 2>&1 || true
+          echo "----- kt-describe2 output phase=$phase -----"
           cat /tmp/describe2.txt
           echo "----- end kt-describe2 -----"
           grep -q "PartitionCount: 5" /tmp/describe2.txt
