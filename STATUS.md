@@ -3094,6 +3094,15 @@ introspection metadata).
     act-as to fire; if not, every reconcile lands at err-65 and
     `TokenIssued` reports `OperatorNotSuperUser` with a 5m backoff
     (surfaced in `kubectl describe ku`).
+  - **Super-user population is hardcoded to `["ANONYMOUS"]`** when
+    `Kafka.spec.delegationToken` is set. This matches the
+    PLAINTEXT-inter-broker path the kind-e2e (and local dev) uses,
+    where the operator's inter-broker connection has no SASL/TLS auth
+    and lands as `ANONYMOUS`. Production deployments using SASL or
+    mTLS for the inter-broker listener need a follow-up CRD field
+    (e.g. `Kafka.spec.superUsers`) — without it, the operator's
+    SASL/TLS principal won't match `ANONYMOUS` and every
+    `CreateDelegationToken` act-as will fail with err-65.
 - **Decomposition:** 14-commit slice (design + plan + 6 substantive
   tasks + B3 polish + production-wiring fix + S1 STATUS + E1 e2e +
   this e2e SSA-clobber fix): `6a1f2f7` design, `9ab6919` plan,

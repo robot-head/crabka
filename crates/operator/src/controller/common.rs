@@ -283,6 +283,10 @@ pub(crate) fn render_configmap(
     if let Some(mv) = metadata_version {
         server_properties.insert("metadata.version".to_string(), mv.to_string());
     }
+    // Slice 51b: surface delegation-token enablement to the per-broker
+    // renderer so it can emit `super_users = ["ANONYMOUS"]` (needed for
+    // operator-side act-as over PLAINTEXT inter-broker).
+    let delegation_token_enabled = owner.spec.delegation_token.is_some();
     for (broker_id, addrs) in addresses_per_broker {
         let tls_for_broker = tls_per_broker.and_then(|m| m.get(broker_id));
         let toml = crate::controller::listeners::render_broker_toml(
@@ -293,6 +297,7 @@ pub(crate) fn render_configmap(
             &server_properties,
             tls_for_broker,
             clients_ca_path,
+            delegation_token_enabled,
         );
         data.insert(format!("broker-{broker_id}.toml"), toml);
     }

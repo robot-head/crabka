@@ -52,6 +52,16 @@ pub struct FileConfig {
     /// delegation-token auth.
     #[serde(default)]
     pub delegation_token: Option<FileDelegationTokenConfig>,
+
+    /// Slice 51b: principals that are unconditionally authorized for
+    /// all operations, including KIP-48 delegation-token `act-as`. The
+    /// operator emits `super_users = ["ANONYMOUS"]` when
+    /// `Kafka.spec.delegationToken` is set so its PLAINTEXT
+    /// inter-broker reconcile loop can mint per-`KafkaUser` tokens.
+    /// `None` and `Some(empty)` are equivalent — both leave
+    /// `BrokerConfig.super_users` empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub super_users: Option<Vec<String>>,
 }
 
 /// TOML shape of `[delegation_token]`. Maps to the three `delegation_token_*`
@@ -538,6 +548,14 @@ impl FileConfig {
             if let Some(ms) = d.default_renew_period_ms {
                 cfg.delegation_token_default_renew_period_ms = ms;
             }
+        }
+
+        // Slice 51b: merge the TOML super-user list into the broker's
+        // set (initially empty). `extend` over `clone_from` because a
+        // future CLI/programmatic source may pre-populate entries that
+        // we should preserve.
+        if let Some(vec) = self.super_users {
+            cfg.super_users.extend(vec.iter().cloned());
         }
     }
 }
@@ -1234,5 +1252,19 @@ secret_key = "toml-loses"
                 24 * 60 * 60 * 1_000
             );
         });
+    }
+
+    #[test]
+    fn super_users_toml_populates_broker_config_set() {
+        let toml = r#"
+super_users = ["ANONYMOUS", "admin"]
+"#;
+        let file: FileConfig = toml::from_str(toml).unwrap();
+        let mut cfg = crate::config::BrokerConfig::default();
+        file.apply_to(&mut cfg);
+
+        assert!(cfg.super_users.contains("ANONYMOUS"));
+        assert!(cfg.super_users.contains("admin"));
+        assert_eq!(cfg.super_users.len(), 2);
     }
 }
