@@ -1188,22 +1188,48 @@ jobs:
           kubectl logs -n crabka-operator deploy/operator-crabka-operator --tail=200 || true
           exit 1
 
+      # Wait for the broker StatefulSet's pod to be Ready before issuing
+      # bootstrap-server requests. The operator marks the Kafka CR
+      # Ready=True as soon as its own reconcile finishes, which can be
+      # several seconds before the broker pod's readiness probe passes
+      # and the headless service's endpoints surface. Without this wait,
+      # `kafka-topics.sh` races the DNS endpoint slice and silently exits
+      # non-zero (no stderr captured by `kubectl run -i > file`), making
+      # the next failure invisible.
+      - name: Wait for broker pod readiness
+        run: |
+          set -e
+          kubectl rollout status -n default statefulset/demo-brokers --timeout=180s
+          kubectl wait pods -n default \
+            -l app.kubernetes.io/instance=demo,crabka.io/pool=brokers \
+            --for=condition=Ready --timeout=180s
+
       - name: Assert partition count + config via JVM kafka-topics
         run: |
           set -e
           bootstrap="demo-broker-headless.default.svc.cluster.local:9092"
-          kubectl run kt-describe -n default --rm -i --restart=Never \
-            --image=apache/kafka:3.8.0 --command -- \
+          # `kubectl run -i ... > file` only captures stdout, and if the
+          # underlying command exits non-zero `set -e` skips the `cat` —
+          # so a failed assertion produces no diagnostic. Capture both
+          # streams to a file via a wrapper, print it unconditionally,
+          # and only then grep.
+          run_kt() {
+            local name=$1 out=$2; shift 2
+            kubectl run "$name" -n default --rm -i --restart=Never \
+              --image=apache/kafka:3.8.0 --command -- "$@" \
+              >"$out" 2>>"$out" || true
+            echo "----- $name output ($out) -----"
+            cat "$out"
+            echo "----- end $name -----"
+          }
+          run_kt kt-describe /tmp/describe.txt \
             /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$bootstrap" \
-              --describe --topic demo-topic > /tmp/describe.txt
-          cat /tmp/describe.txt
+              --describe --topic demo-topic
           grep -q "PartitionCount: 3" /tmp/describe.txt
           grep -q "ReplicationFactor: 1" /tmp/describe.txt
-          kubectl run kt-configs -n default --rm -i --restart=Never \
-            --image=apache/kafka:3.8.0 --command -- \
+          run_kt kt-configs /tmp/configs.txt \
             /opt/kafka/bin/kafka-configs.sh --bootstrap-server "$bootstrap" \
-              --describe --entity-type topics --entity-name demo-topic > /tmp/configs.txt
-          cat /tmp/configs.txt
+              --describe --entity-type topics --entity-name demo-topic
           grep -q "retention.ms=60000" /tmp/configs.txt
 
       - name: Patch to 5 partitions + wait Ready
@@ -1229,10 +1255,15 @@ jobs:
         run: |
           set -e
           bootstrap="demo-broker-headless.default.svc.cluster.local:9092"
+          # See "Assert partition count + config" above for the rationale
+          # behind capturing stderr and dumping unconditionally.
           kubectl run kt-describe2 -n default --rm -i --restart=Never \
             --image=apache/kafka:3.8.0 --command -- \
             /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$bootstrap" \
-              --describe --topic demo-topic > /tmp/describe2.txt
+              --describe --topic demo-topic >/tmp/describe2.txt 2>>/tmp/describe2.txt || true
+          echo "----- kt-describe2 output -----"
+          cat /tmp/describe2.txt
+          echo "----- end kt-describe2 -----"
           grep -q "PartitionCount: 5" /tmp/describe2.txt
 
       - name: Patch to 2 partitions, expect ImmutableFieldChanged
@@ -2727,6 +2758,33 @@ jobs:
             --set brokerImage.pullPolicy=IfNotPresent
           kubectl rollout status -n crabka-operator deploy/operator-crabka-operator --timeout=240s
 
+      # Resolve the exact image refs the pinned chart uses, pull them once on
+      # the runner, and `kind load` them into the node. docker.io anonymous
+      # pulls are rate-limited per IP on shared GitHub runners, so letting
+      # kubelet pull these large images in-cluster yields ImagePullBackOff and
+      # a `--wait` timeout; preloading + IfNotPresent keeps kubelet off
+      # docker.io entirely.
+      - name: Preload Keycloak images into kind
+        run: |
+          set -euo pipefail
+          helm repo add bitnami https://charts.bitnami.com/bitnami
+          helm repo update bitnami
+          imgs=$(helm template kc bitnami/keycloak --version 25.2.0 \
+            --set image.repository=bitnamilegacy/keycloak \
+            --set postgresql.image.repository=bitnamilegacy/postgresql \
+            | grep -oE 'image: [^ ]+' | awk '{print $2}' | tr -d '"' \
+            | grep bitnamilegacy | sort -u)
+          if [ -z "$imgs" ]; then echo "::error::no bitnamilegacy images resolved from chart"; exit 1; fi
+          echo "Preloading:"; echo "$imgs"
+          for img in $imgs; do
+            for attempt in 1 2 3 4 5; do
+              if docker pull "$img"; then break; fi
+              if [ "$attempt" = 5 ]; then echo "::error::failed to pull $img after 5 attempts"; exit 1; fi
+              echo "pull failed for $img (attempt $attempt); backing off"; sleep $((attempt * 15))
+            done
+            kind load docker-image "$img" --name crabka-oauth-e2e
+          done
+
       # ─────────────────────────────────────────────────────────────────────
       # Install Bitnami Keycloak chart with TLS enabled.
       #
@@ -2735,12 +2793,35 @@ jobs:
       # Bump the pin in a follow-up if/when the chart's defaults change
       # incompatibly with the kcadm bootstrap script below.
       #
-      # `tls.enabled=true tls.autoGenerated=true` — the chart provisions a
-      # self-signed CA + leaf cert in a `kc-keycloak-crt` Secret in the
+      # `tls.enabled=true tls.autoGenerated.enabled=true` — the chart
+      # provisions a self-signed CA + leaf cert (engine `helm`, the
+      # `tls.autoGenerated` default) in a `kc-keycloak-crt` Secret in the
       # keycloak ns. We copy that into the default ns as `keycloak-ca` and
       # reference it from the Kafka CR's `tlsTrustedCertificates` (slice 50b
       # operator surface + slice 49c broker trust knob). Broker now talks
       # HTTPS to the JWKS endpoint, so no `WeakAuth` Event fires.
+      #
+      # `image.repository=bitnamilegacy/keycloak` +
+      # `postgresql.image.repository=bitnamilegacy/postgresql` — Bitnami's
+      # 2025 "Secure Images" migration emptied the free `docker.io/bitnami/*`
+      # namespace, so the chart's default `docker.io/bitnami/{keycloak,
+      # postgresql}` tags now 404 → ImagePullBackOff → the install's
+      # `--wait` times out. The old images live on at `docker.io/
+      # bitnamilegacy/*` (same tags); repoint both there. (`bitnamilegacy`
+      # is itself unmaintained — if it disappears, swap to the upstream
+      # `quay.io/keycloak/keycloak` image and a hand-rolled Deployment.)
+      #
+      # The bitnamilegacy images are large and live only on docker.io, so
+      # in-cluster (kubelet) pulls hit Docker Hub's anonymous per-IP pull
+      # rate limit on shared GitHub runners → ImagePullBackOff → the
+      # install's `--wait` burns the full timeout. The preload step above
+      # pulls them once on the runner (with retry) and `kind load`s them
+      # into the node, so kubelet serves them locally (chart default
+      # pullPolicy is IfNotPresent) and never touches docker.io. `--wait`
+      # keeps 1500s of headroom for first-boot on the CPU-contended node —
+      # 900s wasn't enough when Postgres+Keycloak first-start under load
+      # (observed: helm `context deadline exceeded` while both pods were
+      # still in early-startup probes).
       # ─────────────────────────────────────────────────────────────────────
       - name: Install Bitnami Keycloak chart
         run: |
@@ -2754,11 +2835,13 @@ jobs:
             --set auth.adminPassword=admin \
             --set service.type=ClusterIP \
             --set tls.enabled=true \
-            --set tls.autoGenerated=true \
+            --set tls.autoGenerated.enabled=true \
+            --set image.repository=bitnamilegacy/keycloak \
+            --set postgresql.image.repository=bitnamilegacy/postgresql \
             --set production=false \
             --set proxy=edge \
-            --wait --timeout=600s
-          kubectl rollout status -n keycloak statefulset/kc-keycloak --timeout=600s
+            --wait --timeout=1500s
+          kubectl rollout status -n keycloak statefulset/kc-keycloak --timeout=1500s
 
       # ─────────────────────────────────────────────────────────────────────
       # Copy the chart's auto-generated TLS Secret into the default ns so
@@ -2810,6 +2893,11 @@ jobs:
           cat > /tmp/realm-bootstrap.sh <<'BOOTSTRAP'
           #!/bin/bash
           set -ex
+          # kcadm writes its session config to $HOME/.keycloak/kcadm.config.
+          # `kubectl exec` doesn't propagate HOME, so it defaults to "" → the
+          # path resolves to /.keycloak which the keycloak user can't create.
+          # /tmp is writable; pin HOME there.
+          export HOME=/tmp
           KCADM=/opt/bitnami/keycloak/bin/kcadm.sh
           # --insecure: loopback connection inside the Keycloak pod; not on the wire
           $KCADM config credentials \
@@ -3343,6 +3431,29 @@ jobs:
             --set brokerImage.pullPolicy=IfNotPresent
           kubectl rollout status -n crabka-operator deploy/operator-crabka-operator --timeout=240s
 
+      # Preload the chart's images into kind so kubelet never pulls from the
+      # rate-limited docker.io anon endpoint — see kind-oauth for rationale.
+      - name: Preload Keycloak images into kind
+        run: |
+          set -euo pipefail
+          helm repo add bitnami https://charts.bitnami.com/bitnami
+          helm repo update bitnami
+          imgs=$(helm template kc bitnami/keycloak --version 25.2.0 \
+            --set image.repository=bitnamilegacy/keycloak \
+            --set postgresql.image.repository=bitnamilegacy/postgresql \
+            | grep -oE 'image: [^ ]+' | awk '{print $2}' | tr -d '"' \
+            | grep bitnamilegacy | sort -u)
+          if [ -z "$imgs" ]; then echo "::error::no bitnamilegacy images resolved from chart"; exit 1; fi
+          echo "Preloading:"; echo "$imgs"
+          for img in $imgs; do
+            for attempt in 1 2 3 4 5; do
+              if docker pull "$img"; then break; fi
+              if [ "$attempt" = 5 ]; then echo "::error::failed to pull $img after 5 attempts"; exit 1; fi
+              echo "pull failed for $img (attempt $attempt); backing off"; sleep $((attempt * 15))
+            done
+            kind load docker-image "$img" --name crabka-oauth-introspection-e2e
+          done
+
       # ─────────────────────────────────────────────────────────────────────
       # Install Bitnami Keycloak chart with TLS enabled.
       #
@@ -3363,11 +3474,13 @@ jobs:
             --set auth.adminPassword=admin \
             --set service.type=ClusterIP \
             --set tls.enabled=true \
-            --set tls.autoGenerated=true \
+            --set tls.autoGenerated.enabled=true \
+            --set image.repository=bitnamilegacy/keycloak \
+            --set postgresql.image.repository=bitnamilegacy/postgresql \
             --set production=false \
             --set proxy=edge \
-            --wait --timeout=600s
-          kubectl rollout status -n keycloak statefulset/kc-keycloak --timeout=600s
+            --wait --timeout=1500s
+          kubectl rollout status -n keycloak statefulset/kc-keycloak --timeout=1500s
 
       - name: Identify and copy Keycloak CA to default namespace
         run: |
@@ -3399,6 +3512,11 @@ jobs:
           cat > /tmp/realm-bootstrap.sh <<'BOOTSTRAP'
           #!/bin/bash
           set -ex
+          # kcadm writes its session config to $HOME/.keycloak/kcadm.config.
+          # `kubectl exec` doesn't propagate HOME, so it defaults to "" → the
+          # path resolves to /.keycloak which the keycloak user can't create.
+          # /tmp is writable; pin HOME there.
+          export HOME=/tmp
           KCADM=/opt/bitnami/keycloak/bin/kcadm.sh
           # --insecure: loopback connection inside the Keycloak pod; not on the wire
           $KCADM config credentials \
