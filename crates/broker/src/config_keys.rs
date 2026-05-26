@@ -1,11 +1,12 @@
 //! Topic-config whitelist for `AlterConfigs` / `IncrementalAlterConfigs`.
 //!
-//! Eight keys are recognized. Five propagate live to `Log.config`
-//! (`retention.ms`, `retention.bytes`, `segment.bytes`,
-//! `cleanup.policy`, `compression.type`). One is accepted but not yet
-//! enforced: `min.insync.replicas` (integers >= 1 accepted but not yet
-//! enforced — see the design spec for the rationale). Two are KIP-73
-//! throttle keys (`leader.replication.throttled.replicas`,
+//! Ten keys are recognized. Five propagate live to `Log.config`
+//! (`retention.ms`, `retention.bytes`, `segment.bytes`, `cleanup.policy`,
+//! `compression.type`), plus the slice-48c tiered-storage local-retention
+//! pair (`local.retention.ms`, `local.retention.bytes`). One is accepted
+//! but not yet enforced: `min.insync.replicas` (integers >= 1 accepted but
+//! not yet enforced — see the design spec for the rationale). Two are
+//! KIP-73 throttle keys (`leader.replication.throttled.replicas`,
 //! `follower.replication.throttled.replicas`) validated via
 //! `ThrottledReplicas::parse`.
 //!
@@ -28,6 +29,10 @@ pub(crate) const COMPRESSION_TYPE: &str = "compression.type";
 pub(crate) const MIN_INSYNC_REPLICAS: &str = "min.insync.replicas";
 /// Slice 48b (KIP-405): per-topic tiered-storage opt-in.
 pub(crate) const REMOTE_STORAGE_ENABLE: &str = "remote.storage.enable";
+/// Slice 48c (KIP-405): per-topic local-retention time window for tiered partitions.
+pub(crate) const LOCAL_RETENTION_MS: &str = "local.retention.ms";
+/// Slice 48c (KIP-405): per-topic local-retention size budget for tiered partitions.
+pub(crate) const LOCAL_RETENTION_BYTES: &str = "local.retention.bytes";
 
 /// Validate a single key/value pair. `Err(reason)` carries an
 /// operator-readable explanation that the handler propagates into the
@@ -35,6 +40,7 @@ pub(crate) const REMOTE_STORAGE_ENABLE: &str = "remote.storage.enable";
 pub(crate) fn validate_topic_config(key: &str, value: &str) -> Result<(), String> {
     match key {
         RETENTION_MS | RETENTION_BYTES => parse_i64_at_least(-1, value).map(|_| ()),
+        LOCAL_RETENTION_MS | LOCAL_RETENTION_BYTES => parse_i64_at_least(-2, value).map(|_| ()),
         SEGMENT_BYTES => parse_u64_at_least(1, value).map(|_| ()),
         CLEANUP_POLICY => match value {
             "delete" | "compact" => Ok(()),
@@ -113,6 +119,8 @@ pub(crate) fn is_recognized(key: &str) -> bool {
             | COMPRESSION_TYPE
             | MIN_INSYNC_REPLICAS
             | REMOTE_STORAGE_ENABLE
+            | LOCAL_RETENTION_MS
+            | LOCAL_RETENTION_BYTES
             | crate::throttle::LEADER_THROTTLED_REPLICAS_KEY
             | crate::throttle::FOLLOWER_THROTTLED_REPLICAS_KEY
     )
@@ -145,6 +153,29 @@ pub(crate) fn apply_to_log_config(
             RETENTION_BYTES => {
                 if let Ok(b) = v.parse::<i64>() {
                     out.retention_bytes = if b < 0 {
+                        None
+                    } else {
+                        Some(u64::try_from(b).expect("validated non-negative above"))
+                    };
+                }
+            }
+            LOCAL_RETENTION_MS => {
+                if let Ok(ms) = v.parse::<i64>() {
+                    // Per the slice-48c design: -2 (inherit) and -1 (unlimited)
+                    // both collapse to `None` — the greenfield simplification noted
+                    // in the spec. >=0 maps to `Some(Duration::from_millis(n))`.
+                    out.local_retention_ms = if ms < 0 {
+                        None
+                    } else {
+                        Some(Duration::from_millis(
+                            u64::try_from(ms).expect("validated non-negative above"),
+                        ))
+                    };
+                }
+            }
+            LOCAL_RETENTION_BYTES => {
+                if let Ok(b) = v.parse::<i64>() {
+                    out.local_retention_bytes = if b < 0 {
                         None
                     } else {
                         Some(u64::try_from(b).expect("validated non-negative above"))
@@ -423,5 +454,60 @@ mod tests {
         };
         let out = apply_to_log_config(&overrides, &base);
         assert_eq!(out.cleanup_policy, crabka_log::CleanupPolicy::Delete);
+    }
+
+    #[test]
+    fn validate_local_retention_ms_accepts_minus_one_minus_two_and_positive() {
+        assert!(validate_topic_config(LOCAL_RETENTION_MS, "-2").is_ok());
+        assert!(validate_topic_config(LOCAL_RETENTION_MS, "-1").is_ok());
+        assert!(validate_topic_config(LOCAL_RETENTION_MS, "60000").is_ok());
+    }
+
+    #[test]
+    fn validate_local_retention_ms_rejects_below_minus_two() {
+        assert!(validate_topic_config(LOCAL_RETENTION_MS, "-3").is_err());
+    }
+
+    #[test]
+    fn is_recognized_includes_local_retention_keys() {
+        assert!(is_recognized(LOCAL_RETENTION_MS));
+        assert!(is_recognized(LOCAL_RETENTION_BYTES));
+    }
+
+    #[test]
+    fn apply_local_retention_ms_minus_two_means_inherit() {
+        let mut o = BTreeMap::new();
+        o.insert(LOCAL_RETENTION_MS.into(), "-2".into());
+        let out = apply_to_log_config(&o, &LogConfig::default());
+        assert_eq!(out.local_retention_ms, None);
+
+        let mut unlimited = BTreeMap::new();
+        unlimited.insert(LOCAL_RETENTION_MS.into(), "-1".into());
+        let out = apply_to_log_config(&unlimited, &LogConfig::default());
+        assert_eq!(out.local_retention_ms, None);
+    }
+
+    #[test]
+    fn apply_local_retention_ms_positive_propagates() {
+        let mut o = BTreeMap::new();
+        o.insert(LOCAL_RETENTION_MS.into(), "60000".into());
+        let out = apply_to_log_config(&o, &LogConfig::default());
+        assert_eq!(out.local_retention_ms, Some(Duration::from_mins(1)));
+    }
+
+    #[test]
+    fn apply_local_retention_bytes_propagates() {
+        let mut o = BTreeMap::new();
+        o.insert(LOCAL_RETENTION_BYTES.into(), "1048576".into());
+        let out = apply_to_log_config(&o, &LogConfig::default());
+        assert_eq!(out.local_retention_bytes, Some(1_048_576));
+    }
+
+    #[test]
+    fn apply_local_retention_bytes_minus_two_means_inherit() {
+        let mut o = BTreeMap::new();
+        o.insert(LOCAL_RETENTION_BYTES.into(), "-2".into());
+        let out = apply_to_log_config(&o, &LogConfig::default());
+        assert_eq!(out.local_retention_bytes, None);
     }
 }

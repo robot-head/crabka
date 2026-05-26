@@ -38,6 +38,13 @@ pub struct Log {
     /// simulate retention-driven truncation in integration tests.
     log_start_override: Option<i64>,
 
+    /// Slice 48c (KIP-405): override for `local_log_start_offset()`. Tracks
+    /// the local-only floor advanced by `delete_local_segments_through`.
+    /// In 48c this co-advances with `log_start_override`; the accessor
+    /// delegates to `log_start_offset()` so the two pointers remain a
+    /// single source of truth. They split in 48e.
+    local_log_start_override: Option<i64>,
+
     /// Last-Stable-Offset: the offset before the first record of any
     /// in-flight transaction. Defaults to `log_end_offset()` when no
     /// transactions are in flight.
@@ -156,6 +163,7 @@ impl Log {
             segments,
             active: Some(active),
             log_start_override: None,
+            local_log_start_override: None,
             lso,
             pending: HashMap::new(),
             active_txn_index,
@@ -241,6 +249,7 @@ impl Log {
 
         // Clear the start override so the derived value takes over.
         self.log_start_override = None;
+        self.local_log_start_override = None;
 
         let new_active = Segment::create(&self.dir, new_base)?;
         self.active_txn_index = TxnIndex::open(new_active.txn_index_path())?;
@@ -643,6 +652,10 @@ impl Log {
     /// segment would otherwise be evicted we retain at least one.
     /// (Active-roll-on-age is a placeholder per the plan; skip it.)
     pub fn tick(&mut self, now: SystemTime) -> Result<(), LogError> {
+        // Slice 48c: tiered topics' segment lifecycle is owned by the RemoteLogManager.
+        if self.config.read().unwrap().remote_storage_enable {
+            return Ok(());
+        }
         let sealed_refs: Vec<&Segment> = self.segments.iter().map(AsRef::as_ref).collect();
         let active_size = self.active.as_ref().map_or(0, Segment::size_bytes);
 
@@ -671,6 +684,79 @@ impl Log {
             let _ = retention::delete_segment_files(&self.dir, base);
         }
         Ok(())
+    }
+
+    /// Slice 48c (KIP-405): first absolute offset still present on this
+    /// broker's local disk. In 48c this delegates to
+    /// [`Log::log_start_offset`] — the two pointers co-advance until 48e
+    /// (remote-retention) lets them diverge.
+    #[must_use]
+    pub fn local_log_start_offset(&self) -> i64 {
+        self.log_start_offset()
+    }
+
+    /// Slice 48c (KIP-405): physically delete every sealed segment whose
+    /// `last_offset < target`, then bump both `log_start_override` and
+    /// `local_log_start_override` to `target`. The active segment is
+    /// never touched. Returns the count of segments removed; a no-op
+    /// (returns `Ok(0)`) when `target <= local_log_start_offset()`.
+    ///
+    /// The caller is responsible for verifying these segments are safely
+    /// in the remote tier (`CopySegmentFinished`) before invoking this;
+    /// `Log` enforces no tiered-storage invariants. See
+    /// `crates/broker/src/remote_log_manager.rs` for the production caller.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LogError::InvalidArgument`] if `target` is negative.
+    pub fn delete_local_segments_through(&mut self, target: i64) -> Result<usize, LogError> {
+        if target < 0 {
+            return Err(LogError::InvalidArgument(
+                "delete_local_segments_through: target must be >= 0".into(),
+            ));
+        }
+        if target <= self.local_log_start_offset() {
+            return Ok(0);
+        }
+
+        // Mirror `tierable_segments`: each sealed segment's last offset is
+        // `next.base_offset - 1`, where `next` is the next sealed segment
+        // or — for the most-recent sealed segment — the active segment.
+        let active_base = self
+            .active
+            .as_ref()
+            .map_or_else(|| self.log_end_offset(), Segment::base_offset);
+        let next_bases: Vec<i64> = self
+            .segments
+            .iter()
+            .map(|s| s.base_offset())
+            .skip(1)
+            .chain(std::iter::once(active_base))
+            .collect();
+
+        let to_drop: Vec<i64> = self
+            .segments
+            .iter()
+            .zip(next_bases.iter())
+            .filter_map(|(seg, next_base)| {
+                let last = *next_base - 1;
+                (last < target).then(|| seg.base_offset())
+            })
+            .collect();
+
+        let removed = to_drop.len();
+        for base in &to_drop {
+            self.segments.retain(|s| s.base_offset() != *base);
+            let _ = retention::delete_segment_files(&self.dir, *base);
+        }
+
+        // Write both overrides directly: `set_log_start_offset` only
+        // touches `log_start_override`, but 48c requires the local pointer
+        // to advance in lockstep.
+        self.log_start_override = Some(target);
+        self.local_log_start_override = Some(target);
+
+        Ok(removed)
     }
 
     /// Slice 48b (KIP-405): describe every sealed segment for
@@ -1512,5 +1598,193 @@ mod tests {
         log.compact().unwrap();
         let leo2 = log.log_end_offset();
         assert_eq!(leo1, leo2);
+    }
+
+    // ---- Slice 48c (KIP-405): local-retention helpers ----
+
+    /// Build a log rolled into several sealed segments under `dir`. Mirror
+    /// of the `remote_log_manager` test helper, kept local to this module.
+    #[allow(clippy::needless_pass_by_value)]
+    fn rolled_log(dir: &std::path::Path, extra: LogConfig) -> Log {
+        let mut log = Log::open(
+            dir,
+            LogConfig {
+                segment_bytes: 200,
+                ..extra
+            },
+        )
+        .unwrap();
+        for _ in 0..16 {
+            let mut b = sample_batch(2);
+            log.append(&mut b).unwrap();
+        }
+        log
+    }
+
+    #[test]
+    fn local_log_start_offset_matches_log_start_offset() {
+        let dir = tempdir().unwrap();
+        let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
+        for _ in 0..3 {
+            let mut b = sample_batch(2);
+            log.append(&mut b).unwrap();
+        }
+        assert_eq!(log.local_log_start_offset(), log.log_start_offset());
+    }
+
+    #[test]
+    fn delete_local_segments_through_drops_sealed_below_target() {
+        let dir = tempdir().unwrap();
+        let mut log = rolled_log(dir.path(), LogConfig::default());
+        let exports = log.tierable_segments();
+        assert!(
+            exports.len() >= 3,
+            "test needs multiple sealed segments; got {}",
+            exports.len()
+        );
+
+        // Pick a target strictly between two sealed-segment boundaries:
+        // one past the second sealed segment's last_offset. Every sealed
+        // segment whose last_offset < target should be deleted.
+        let target = exports[1].last_offset + 1;
+        let expected_deleted: Vec<i64> = exports
+            .iter()
+            .filter(|e| e.last_offset < target)
+            .map(|e| e.base_offset)
+            .collect();
+        let active_base_before = log.log_end_offset();
+
+        let removed = log.delete_local_segments_through(target).unwrap();
+        assert_eq!(removed, expected_deleted.len());
+
+        // (a) sealed segments below target are gone from the in-memory list.
+        let remaining_bases: Vec<i64> = log
+            .tierable_segments()
+            .iter()
+            .map(|e| e.base_offset)
+            .collect();
+        for base in &expected_deleted {
+            assert!(
+                !remaining_bases.contains(base),
+                "base {base} should be dropped"
+            );
+        }
+
+        // (b) on-disk files for deleted segments are gone.
+        for base in &expected_deleted {
+            assert!(!name::log_path(dir.path(), *base).exists());
+            assert!(!name::index_path(dir.path(), *base).exists());
+            assert!(!name::timeindex_path(dir.path(), *base).exists());
+        }
+
+        // (c) the active segment is untouched.
+        assert_eq!(log.log_end_offset(), active_base_before);
+    }
+
+    #[test]
+    fn delete_local_segments_through_keeps_active_segment() {
+        let dir = tempdir().unwrap();
+        let mut log = rolled_log(dir.path(), LogConfig::default());
+        let leo_before = log.log_end_offset();
+        let active_log = dir.path().join(format!(
+            "{:020}.log",
+            log.tierable_segments().last().unwrap().last_offset + 1
+        ));
+        // The active segment's .log file should exist before and after.
+        assert!(active_log.exists());
+
+        // First: target far beyond every sealed segment but well past
+        // active.base_offset. The active segment must not be removed.
+        let huge_target = leo_before + 1_000_000;
+        let _ = log.delete_local_segments_through(huge_target).unwrap();
+        assert!(active_log.exists(), "active segment must survive");
+        assert_eq!(
+            log.log_end_offset(),
+            leo_before,
+            "active segment untouched (LEO unchanged)"
+        );
+        // Sealed-segment pointer should have advanced past everything.
+        assert!(log.tierable_segments().is_empty());
+    }
+
+    #[test]
+    fn delete_local_segments_through_advances_local_start_pointer() {
+        let dir = tempdir().unwrap();
+        let mut log = rolled_log(dir.path(), LogConfig::default());
+        let exports = log.tierable_segments();
+        let target = exports[1].last_offset + 1;
+        log.delete_local_segments_through(target).unwrap();
+        assert_eq!(log.local_log_start_offset(), target);
+        assert_eq!(log.log_start_offset(), target);
+    }
+
+    #[test]
+    fn delete_local_segments_through_is_noop_at_or_below_current_start() {
+        let dir = tempdir().unwrap();
+        let mut log = rolled_log(dir.path(), LogConfig::default());
+        let start_before = log.log_start_offset();
+        let sealed_before = log.tierable_segments().len();
+
+        let removed = log.delete_local_segments_through(start_before).unwrap();
+        assert_eq!(removed, 0);
+        let removed_below = log
+            .delete_local_segments_through((start_before - 1).max(0))
+            .unwrap();
+        assert_eq!(removed_below, 0);
+        assert_eq!(log.log_start_offset(), start_before);
+        assert_eq!(log.tierable_segments().len(), sealed_before);
+    }
+
+    #[test]
+    fn delete_local_segments_through_rejects_negative_target() {
+        let dir = tempdir().unwrap();
+        let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
+        let err = log.delete_local_segments_through(-1).unwrap_err();
+        assert!(matches!(err, LogError::InvalidArgument(_)));
+    }
+
+    #[test]
+    fn tick_skips_retention_when_remote_storage_enable_is_true() {
+        use std::time::Duration;
+        let far_future = SystemTime::now() + Duration::from_hours(365 * 24);
+
+        // Tiered topic: tick must NOT delete anything.
+        let dir_tiered = tempdir().unwrap();
+        let mut tiered = rolled_log(
+            dir_tiered.path(),
+            LogConfig {
+                remote_storage_enable: true,
+                retention_ms: Some(Duration::from_millis(1)),
+                ..LogConfig::default()
+            },
+        );
+        let sealed_before = tiered.tierable_segments().len();
+        assert!(sealed_before > 0, "test setup must roll multiple segments");
+        tiered.tick(far_future).unwrap();
+        assert_eq!(
+            tiered.tierable_segments().len(),
+            sealed_before,
+            "tiered topics' retention is the RemoteLogManager's job"
+        );
+
+        // Non-tiered baseline: tick should still evict aggressively.
+        let dir_plain = tempdir().unwrap();
+        let mut plain = rolled_log(
+            dir_plain.path(),
+            LogConfig {
+                remote_storage_enable: false,
+                retention_ms: Some(Duration::from_millis(1)),
+                ..LogConfig::default()
+            },
+        );
+        assert!(!plain.tierable_segments().is_empty());
+        plain.tick(far_future).unwrap();
+        // Non-tiered path keeps at least one segment (the active one); every
+        // sealed segment is evicted.
+        assert_eq!(
+            plain.tierable_segments().len(),
+            0,
+            "standard retention deletes all sealed segments"
+        );
     }
 }

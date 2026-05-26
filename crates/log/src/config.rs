@@ -64,6 +64,14 @@ pub struct LogConfig {
     /// `RemoteLogManager`. Maps to Kafka's per-topic `remote.storage.enable`.
     /// Default `false` (Kafka's default — tiered storage is opt-in per topic).
     pub remote_storage_enable: bool,
+
+    /// Slice 48c (KIP-405): local-disk time-retention window for tiered
+    /// partitions. `None` inherits `retention_ms`. Default `None`.
+    pub local_retention_ms: Option<Duration>,
+
+    /// Slice 48c (KIP-405): local-disk size budget for tiered partitions.
+    /// `None` inherits `retention_bytes`. Default `None`.
+    pub local_retention_bytes: Option<u64>,
 }
 
 impl Default for LogConfig {
@@ -83,6 +91,8 @@ impl Default for LogConfig {
             compression_type: None,
             // Tiered storage is opt-in per topic (Kafka default false).
             remote_storage_enable: false,
+            local_retention_ms: None,
+            local_retention_bytes: None,
         }
     }
 }
@@ -110,5 +120,12 @@ mod tests {
     fn default_compression_is_producer_passthrough() {
         let c = LogConfig::default();
         assert_eq!(c.compression_type, None);
+    }
+
+    #[test]
+    fn default_local_retention_is_none() {
+        let c = LogConfig::default();
+        assert_eq!(c.local_retention_ms, None);
+        assert_eq!(c.local_retention_bytes, None);
     }
 }

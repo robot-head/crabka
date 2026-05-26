@@ -24,7 +24,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 use uuid::Uuid;
 
-use crabka_log::SegmentExport;
+use crabka_log::{LogConfig, SegmentExport};
 use crabka_metadata::NodeId;
 use crabka_raft::ControllerHandle;
 use crabka_remote_storage::{
@@ -97,12 +97,13 @@ async fn tick_all(
             continue;
         }
         // Read config + sealed-segment list under the log lock, then drop it.
-        let exports = {
+        let (log_config, exports) = {
             let log = partition.log.lock().expect("log mutex poisoned");
-            if !log.config_snapshot().remote_storage_enable {
+            let cfg = log.config_snapshot();
+            if !cfg.remote_storage_enable {
                 continue;
             }
-            log.tierable_segments()
+            (cfg, log.tierable_segments())
         };
         if exports.is_empty() {
             continue;
@@ -113,7 +114,8 @@ async fn tick_all(
         };
         let leader_epoch = partition.current_leader_epoch.load(Ordering::Acquire);
         let tp = TopicIdPartition::new(topic_id, partition.topic.clone(), partition.partition_id);
-        copy_eligible(&tp, broker_id, leader_epoch, exports, rsm, rlmm).await;
+        copy_eligible(&tp, broker_id, leader_epoch, exports.clone(), rsm, rlmm).await;
+        local_retention_pass(&tp, &partition, &exports, &log_config, rlmm, now_ms()).await;
     }
 }
 
@@ -151,6 +153,122 @@ pub(crate) async fn copy_eligible(
         }
     }
     copied
+}
+
+/// Slice 48c: compute the highest `target` to pass to
+/// [`crabka_log::Log::delete_local_segments_through`] given the
+/// partition's local sealed-segment exports and the per-topic
+/// local-retention settings. Returns `None` when nothing is deletable.
+///
+/// A segment is eligible iff its `base_offset` is in `finished_bases`
+/// (i.e. `CopySegmentFinished` in the RLMM) AND it satisfies either
+/// time-based eviction (`now_ms - seg.max_timestamp > effective_local_ms`)
+/// or size-based eviction (oldest-first until sealed-total fits
+/// `effective_local_bytes`). The walk stops at the first non-finished
+/// segment so the local prefix stays contiguous (matches Kafka).
+///
+/// Size-based eviction ignores the active segment — operators set
+/// local.retention.bytes in MB/GB ranges where the active segment
+/// (bounded by `segment.bytes`) is negligible. 48c simplification.
+pub(crate) fn local_retention_target(
+    exports: &[SegmentExport],
+    finished_bases: &HashSet<i64>,
+    effective_local_ms: Option<i64>,
+    effective_local_bytes: Option<u64>,
+    now_ms: i64,
+) -> Option<i64> {
+    let sealed_total: u64 = exports.iter().map(|e| e.size_bytes).sum();
+    let mut deletable_size_remaining = match effective_local_bytes {
+        Some(budget) if sealed_total > budget => sealed_total - budget,
+        _ => 0,
+    };
+
+    let mut delete_through_last: Option<i64> = None;
+    for ex in exports {
+        if !finished_bases.contains(&ex.base_offset) {
+            break;
+        }
+        let by_time = matches!(
+            effective_local_ms,
+            Some(retention) if now_ms.saturating_sub(ex.max_timestamp) > retention
+        );
+        let by_size = deletable_size_remaining > 0;
+        if !(by_time || by_size) {
+            break;
+        }
+        delete_through_last = Some(ex.last_offset);
+        if by_size {
+            deletable_size_remaining = deletable_size_remaining.saturating_sub(ex.size_bytes);
+        }
+    }
+
+    delete_through_last.map(|last| last + 1)
+}
+
+/// Slice 48c: after the copy pass, drop local sealed segments whose
+/// remote copy is `CopySegmentFinished` and that fall outside the
+/// per-topic local-retention window. Returns the count of segments
+/// physically removed from disk.
+// Async mirrors `copy_eligible` and gives the call site a stable signature
+// for the day the RLMM SPI grows async fetch methods (48f).
+#[allow(clippy::unused_async)]
+pub(crate) async fn local_retention_pass(
+    tp: &TopicIdPartition,
+    partition: &Partition,
+    exports: &[SegmentExport],
+    log_config: &LogConfig,
+    rlmm: &dyn RemoteLogMetadataManager,
+    now_ms: i64,
+) -> usize {
+    let effective_local_ms = log_config
+        .local_retention_ms
+        .or(log_config.retention_ms)
+        .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
+    let effective_local_bytes = log_config
+        .local_retention_bytes
+        .or(log_config.retention_bytes);
+
+    let finished_bases: HashSet<i64> = match rlmm.list_remote_log_segments(tp) {
+        Ok(list) => list
+            .iter()
+            .filter(|md| md.state() == RemoteLogSegmentState::CopySegmentFinished)
+            .map(RemoteLogSegmentMetadata::start_offset)
+            .collect(),
+        Err(e) => {
+            warn!(topic = %tp.topic, partition = tp.partition, error = %e,
+                  "remote-log-manager: failed to list remote segments for local retention");
+            return 0;
+        }
+    };
+
+    let Some(target) = local_retention_target(
+        exports,
+        &finished_bases,
+        effective_local_ms,
+        effective_local_bytes,
+        now_ms,
+    ) else {
+        return 0;
+    };
+
+    let result = {
+        let mut log = partition.log.lock().expect("log mutex poisoned");
+        log.delete_local_segments_through(target)
+    };
+    match result {
+        Ok(n) => {
+            if n > 0 {
+                debug!(topic = %tp.topic, partition = tp.partition, target, removed = n,
+                       "remote-log-manager: deleted local segments past local-retention floor");
+            }
+            n
+        }
+        Err(e) => {
+            warn!(topic = %tp.topic, partition = tp.partition, target, error = %e,
+                  "remote-log-manager: failed to delete local segments");
+            0
+        }
+    }
 }
 
 /// Copy one sealed segment through the full `Started` → `Finished`
@@ -494,5 +612,184 @@ mod tests {
         let md = &rlmm.list_remote_log_segments(&tp()).unwrap()[0];
         // The fallback recorded the partition's current leader epoch (3).
         assert_eq!(md.segment_leader_epochs().get(&3), Some(&0));
+    }
+
+    fn synth_export(base: i64, last: i64, max_ts: i64, size: u64) -> SegmentExport {
+        SegmentExport {
+            base_offset: base,
+            last_offset: last,
+            max_timestamp: max_ts,
+            size_bytes: size,
+            log_path: std::path::PathBuf::new(),
+            offset_index_path: std::path::PathBuf::new(),
+            time_index_path: std::path::PathBuf::new(),
+            transaction_index_path: None,
+            leader_epochs: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn local_retention_target_returns_none_when_no_finished_segments() {
+        let exports = vec![synth_export(0, 9, 100, 64), synth_export(10, 19, 200, 64)];
+        let finished: HashSet<i64> = HashSet::new();
+        // Big enough time-pressure to delete everything, but nothing is finished.
+        assert_eq!(
+            local_retention_target(&exports, &finished, Some(1), None, 10_000),
+            None
+        );
+    }
+
+    #[test]
+    fn local_retention_target_time_based_eviction() {
+        let exports = vec![
+            synth_export(0, 9, 100, 64),
+            synth_export(10, 19, 200, 64),
+            synth_export(20, 29, 5_000, 64),
+        ];
+        let finished: HashSet<i64> = [0, 10, 20].into_iter().collect();
+        // now=1000, retention=500ms → segs with max_ts<500 are deletable.
+        // Only seg0 (max_ts=100) and seg1 (max_ts=200) qualify; seg2 stops it.
+        let target = local_retention_target(&exports, &finished, Some(500), None, 1_000);
+        assert_eq!(target, Some(20));
+    }
+
+    #[test]
+    fn local_retention_target_size_based_eviction() {
+        let exports = vec![
+            synth_export(0, 9, 100, 100),
+            synth_export(10, 19, 200, 100),
+            synth_export(20, 29, 300, 100),
+        ];
+        let finished: HashSet<i64> = [0, 10, 20].into_iter().collect();
+        // Total = 300; budget = 150 → must evict 150 bytes → oldest two go.
+        let target = local_retention_target(&exports, &finished, None, Some(150), 1_000);
+        assert_eq!(target, Some(20));
+
+        // Budget tighter than one segment: still only the oldest, because
+        // after evicting 100B the remaining is 100 (>budget? no, 200>150,
+        // wait: total=300, budget=150 → need to evict 150; after dropping
+        // first 100B we still need 50 more → second segment also drops.
+        // Test with budget = 50: need to evict 250 → all three? but the
+        // walk stops since segments 0..=2 all become deletable.
+        let target = local_retention_target(&exports, &finished, None, Some(50), 1_000);
+        assert_eq!(target, Some(30));
+
+        // Budget larger than total → nothing deletable.
+        let target = local_retention_target(&exports, &finished, None, Some(10_000), 1_000);
+        assert_eq!(target, None);
+    }
+
+    #[test]
+    fn local_retention_target_skips_unfinished_segments_and_stops() {
+        let exports = vec![
+            synth_export(0, 9, 100, 64),
+            synth_export(10, 19, 200, 64),
+            synth_export(20, 29, 300, 64),
+        ];
+        // Segment at base=10 has NOT been copy-finished. Walk stops there.
+        let finished: HashSet<i64> = [0, 20].into_iter().collect();
+        let target = local_retention_target(&exports, &finished, Some(1), None, 10_000);
+        assert_eq!(target, Some(10), "only seg0 deletable; walk stops at seg1");
+    }
+
+    #[test]
+    fn local_retention_target_uses_already_resolved_effective_ms() {
+        // The pure helper takes already-resolved effective_* args. This test
+        // pins that contract: when caller passes effective_local_ms equal to
+        // the topic's retention_ms (the fallback), the helper deletes the
+        // same set as if local_retention_ms had been set directly.
+        let exports = vec![synth_export(0, 9, 100, 64), synth_export(10, 19, 200, 64)];
+        let finished: HashSet<i64> = [0, 10].into_iter().collect();
+        // Caller resolved effective_local_ms = retention_ms = 250ms; now=1000.
+        let target = local_retention_target(&exports, &finished, Some(250), None, 1_000);
+        assert_eq!(target, Some(20));
+    }
+
+    /// Test-only drive helper: mirrors the body of `local_retention_pass`
+    /// without the `Partition` wrapper, so we can exercise the integration
+    /// against a real `Log` without standing up the broker fixtures.
+    fn local_retention_drive(
+        log: &mut Log,
+        finished_bases: &HashSet<i64>,
+        log_config: &LogConfig,
+        now_ms: i64,
+    ) -> usize {
+        let effective_local_ms = log_config
+            .local_retention_ms
+            .or(log_config.retention_ms)
+            .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
+        let effective_local_bytes = log_config
+            .local_retention_bytes
+            .or(log_config.retention_bytes);
+        let exports = log.tierable_segments();
+        let Some(target) = local_retention_target(
+            &exports,
+            finished_bases,
+            effective_local_ms,
+            effective_local_bytes,
+            now_ms,
+        ) else {
+            return 0;
+        };
+        log.delete_local_segments_through(target).unwrap()
+    }
+
+    #[tokio::test]
+    async fn local_retention_drive_deletes_copied_segments() {
+        let log_dir = tempfile::tempdir().unwrap();
+        let remote_dir = tempfile::tempdir().unwrap();
+        let mut log = Log::open(
+            log_dir.path(),
+            LogConfig {
+                segment_bytes: 256,
+                remote_storage_enable: true,
+                local_retention_ms: Some(Duration::from_millis(1)),
+                ..LogConfig::default()
+            },
+        )
+        .unwrap();
+        for _ in 0..12 {
+            let mut b = batch(2);
+            log.append(&mut b).unwrap();
+        }
+        let exports = log.tierable_segments();
+        assert!(exports.len() >= 2, "test needs multiple sealed segments");
+        let log_config = log.config_snapshot();
+
+        let rsm: Arc<dyn RemoteStorageManager> =
+            Arc::new(LocalTieredStorage::new(remote_dir.path()));
+        let rlmm = InmemoryRemoteLogMetadataManager::new();
+        let copied = copy_eligible(&tp(), 1, 0, exports.clone(), &rsm, &rlmm).await;
+        assert_eq!(copied, exports.len());
+
+        // Gather finished bases the same way `local_retention_pass` would.
+        let finished_bases: HashSet<i64> = rlmm
+            .list_remote_log_segments(&tp())
+            .unwrap()
+            .iter()
+            .filter(|md| md.state() == RemoteLogSegmentState::CopySegmentFinished)
+            .map(RemoteLogSegmentMetadata::start_offset)
+            .collect();
+        assert_eq!(finished_bases.len(), exports.len());
+
+        // Drive retention with `now_ms` far in the future so every sealed
+        // segment satisfies the 1ms time-based eviction.
+        let future = now_ms() + 1_000_000;
+        let removed = local_retention_drive(&mut log, &finished_bases, &log_config, future);
+        assert_eq!(removed, exports.len());
+
+        // local_log_start_offset advanced; sealed log files are gone.
+        let last = exports.last().unwrap().last_offset;
+        assert_eq!(log.local_log_start_offset(), last + 1);
+        for ex in &exports {
+            assert!(
+                !ex.log_path.exists(),
+                "sealed segment {:?} should be deleted",
+                ex.log_path
+            );
+        }
+        // Re-running is a no-op.
+        let removed_again = local_retention_drive(&mut log, &finished_bases, &log_config, future);
+        assert_eq!(removed_again, 0);
     }
 }
