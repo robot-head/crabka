@@ -1,0 +1,24 @@
+# Slice 53 sample — Kafka cluster with OPA-backed authorization.
+#
+# Apply alongside an OPA Deployment reachable at the URL below. The
+# broker calls OPA's data API on every authorize() that misses the
+# decision cache, posting {input: {principal, operation, resource, host}}
+# and expecting `{"result": <bool>}` (or a JSON object with a top-level
+# `allow` boolean). Principals in `superUsers` bypass OPA entirely —
+# include the operator's inter-broker principal here (defaults to
+# `ANONYMOUS` since inter-broker traffic runs unauthenticated).
+---
+apiVersion: crabka.io/v1alpha1
+kind: Kafka
+metadata:
+  name: demo
+  namespace: default
+spec:
+  kafkaVersion: "0.1.1"
+  authorization:
+    type: opa
+    url: http://opa.kafka.svc.cluster.local:8181/v1/data/kafka/authz/allow
+    superUsers: ["ANONYMOUS"]
+    allowOnError: false
+    maximumCacheSize: 50000
+    expireAfterMs: 3600000
