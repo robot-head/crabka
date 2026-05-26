@@ -4,6 +4,10 @@ End-to-end benchmark comparing **Apache Kafka via the Strimzi operator**
 against **Crabka via its own operator**, on the same Kubernetes cluster
 with identical topology, identical load, and identical observability.
 
+> Looking for a third-party comparison using the industry-standard
+> [openmessaging-benchmark](https://github.com/openmessaging/openmessaging-benchmark)
+> suite on bare GCP VMs? See [`bench/omb/`](./omb/README.md).
+
 Both stacks speak the Kafka wire protocol, so a single Rust load driver
 — `crates/bench-driver/`, built on top of Crabka's own
 `crabka-client-producer` / `crabka-client-consumer` crates — runs

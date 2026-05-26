@@ -1,0 +1,57 @@
+# OMB harness recipes. Run from the repo root via
+# `just -f bench/omb/justfile <recipe>`.
+#
+# Pre-reqs (one-time): terraform, ansible-core, gcloud, jq.
+# Auth: `gcloud auth application-default login`.
+
+set shell := ["bash", "-euo", "pipefail", "-c"]
+
+bench_omb_dir   := justfile_directory()
+default_workloads := "1-topic-16-partitions-1kb 1-topic-1-partition-100b 1-topic-100-partitions-1kb-4p-4c-200k"
+
+default:
+    @just --list
+
+# Full bring-up: fetch OMB, provision VMs, install both stacks + clients.
+up: fetch tf-apply deploy-all
+
+# Tear it all down.
+down:
+    {{ bench_omb_dir }}/scripts/tf-destroy.sh
+
+# Fetch the upstream OMB checkout at the pinned commit.
+fetch:
+    {{ bench_omb_dir }}/scripts/fetch-omb.sh
+
+# Provision GCP infra.
+tf-apply:
+    {{ bench_omb_dir }}/scripts/tf-apply.sh
+
+# Install Kafka + Crabka + OMB clients (three plays).
+deploy-all:
+    {{ bench_omb_dir }}/scripts/deploy-stack.sh kafka
+    {{ bench_omb_dir }}/scripts/deploy-stack.sh crabka
+    {{ bench_omb_dir }}/scripts/deploy-stack.sh client
+
+# Run one workload against one stack.
+#   just -f bench/omb/justfile run kafka  1-topic-16-partitions-1kb
+run STACK WORKLOAD:
+    {{ bench_omb_dir }}/scripts/run-workload.sh {{STACK}} {{WORKLOAD}}
+
+# Sweep default workloads against both stacks, in series.
+sweep:
+    for w in {{default_workloads}}; do \
+      for s in kafka crabka; do \
+        echo "═══ $s / $w ═══"; \
+        {{ bench_omb_dir }}/scripts/run-workload.sh "$s" "$w"; \
+      done; \
+    done
+    just -f {{ bench_omb_dir }}/justfile report
+
+# Render the Markdown summary.
+report:
+    {{ bench_omb_dir }}/scripts/aggregate-results.sh
+
+# Pull stray result files from every client VM (rsync).
+fetch-results:
+    {{ bench_omb_dir }}/scripts/fetch-results.sh

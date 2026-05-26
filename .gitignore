@@ -17,3 +17,6 @@ packages/
 crabka-operator.tar
 .worktree
 .worktrees/
+
+# OMB harness — upstream checkout fetched at run time
+.omb/

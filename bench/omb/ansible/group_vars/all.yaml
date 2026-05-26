@@ -1,0 +1,38 @@
+---
+# ── Shared defaults for the OMB playbooks ──────────────────────────────────
+
+# Apache Kafka version (KRaft mode). The OMB AWS reference pins
+# 3.6.1; bump as you like.
+kafka_version: "3.7.1"
+kafka_scala_version: "2.13"
+kafka_download_url: >-
+  https://archive.apache.org/dist/kafka/{{ kafka_version }}/kafka_{{ kafka_scala_version }}-{{ kafka_version }}.tgz
+kafka_install_dir: /opt/kafka
+
+# Crabka source. Default is this repo's GitHub remote at the current
+# branch; the deploy playbook clones and `cargo build --release`s on
+# the broker VM. Override via `-e crabka_git_ref=...` to test a
+# specific PR or commit.
+crabka_git_repo: "https://github.com/robot-head/crabka.git"
+crabka_git_ref: "main"
+crabka_install_dir: /opt/crabka
+crabka_rust_channel: "1.95.0"
+
+# OMB. The playbook assumes you've run `bench/omb/scripts/fetch-omb.sh`
+# so `.omb/` exists in the repo root; the deploy-client playbook
+# tarballs and ships it to each client VM. The tarball name is fixed
+# by OMB's package layout.
+omb_local_checkout: "{{ playbook_dir }}/../../.omb"
+omb_pkg_name: openmessaging-benchmark-0.0.1-SNAPSHOT
+omb_install_dir: /opt/benchmark
+
+# Driver YAML shipped to clients. The playbook copies our shared
+# `drivers/kafka-omb.yaml`, then injects per-stack bootstrap.servers
+# into a stack-flavored copy under
+# `/opt/benchmark/driver-kafka/kafka-{kafka,crabka}.yaml`.
+driver_template: "{{ playbook_dir }}/../drivers/kafka-omb.yaml"
+
+# JVM heap for the OMB worker. The AWS reference pins 100 G; matches
+# n2-standard-32 (128 GB RAM). Lower this if you reduce the client
+# machine type.
+omb_worker_heap: "100G"

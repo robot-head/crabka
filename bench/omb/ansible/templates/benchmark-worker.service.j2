@@ -1,0 +1,14 @@
+[Unit]
+Description=OpenMessaging Benchmark Worker
+After=network.target
+
+[Service]
+ExecStart={{ omb_install_dir }}/bin/benchmark-worker
+WorkingDirectory={{ omb_install_dir }}
+RestartSec=1s
+Restart=on-failure
+Type=simple
+LimitNOFILE=300000
+
+[Install]
+WantedBy=multi-user.target

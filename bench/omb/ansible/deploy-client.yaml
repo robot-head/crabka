@@ -1,0 +1,114 @@
+---
+# Ships the OMB tarball to every client VM, starts a benchmark-worker
+# systemd service per host, and renders a `workers.yaml` (used by the
+# coordinator on the first client) plus per-stack driver YAMLs.
+
+- name: Build OMB tarball locally if missing
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Check for the prebuilt tarball
+      ansible.builtin.stat:
+        path: "{{ omb_local_checkout }}/package/target/{{ omb_pkg_name }}-bin.tar.gz"
+      register: omb_tarball
+
+    - name: Build the OMB tarball via Maven (slow, one-time)
+      when: not omb_tarball.stat.exists
+      ansible.builtin.command:
+        chdir: "{{ omb_local_checkout }}"
+        cmd: mvn -q -DskipTests=true package
+
+- name: Install benchmark workers on every client
+  hosts: client
+  become: true
+  tasks:
+    - name: Install OS packages
+      ansible.builtin.apt:
+        name:
+          - openjdk-17-jre-headless
+          - chrony
+          - sysstat
+          - jq
+        state: present
+        update_cache: true
+
+    - name: Raise nofile limits
+      community.general.pam_limits:
+        domain: "*"
+        limit_type: "{{ item }}"
+        limit_item: nofile
+        value: "500000"
+      loop: ["soft", "hard"]
+
+    - name: Wipe existing install
+      ansible.builtin.file:
+        path: "{{ omb_install_dir }}"
+        state: absent
+
+    - name: Ship + unpack OMB tarball
+      ansible.builtin.unarchive:
+        src: "{{ omb_local_checkout }}/package/target/{{ omb_pkg_name }}-bin.tar.gz"
+        dest: /opt
+
+    - name: Rename to /opt/benchmark
+      ansible.builtin.command:
+        cmd: mv /opt/{{ omb_pkg_name }} {{ omb_install_dir }}
+        creates: "{{ omb_install_dir }}/bin/benchmark-worker"
+
+    - name: Render stack-flavored driver YAMLs (Kafka + Crabka)
+      ansible.builtin.template:
+        src: kafka-driver.yaml.j2
+        dest: "{{ omb_install_dir }}/driver-kafka/kafka-{{ item.stack }}.yaml"
+        mode: "0644"
+      loop:
+        - { stack: kafka,  bootstrap: "{{ hostvars[groups['kafka'][0]].bootstrap_servers | default(groups['kafka'] | map('extract', hostvars, 'private_ip') | map('regex_replace', '$', ':9092') | join(',')) }}", driver_name: "Kafka-OMB" }
+        - { stack: crabka, bootstrap: "{{ hostvars[groups['crabka'][0]].bootstrap_servers | default(groups['crabka'] | map('extract', hostvars, 'private_ip') | map('regex_replace', '$', ':9092') | join(',')) }}", driver_name: "Crabka-OMB" }
+      vars:
+        driver_bootstrap_servers: "{{ item.bootstrap }}"
+        driver_name: "{{ item.driver_name }}"
+      when: groups[item.stack] | length > 0
+
+    - name: Pump JVM heap on benchmark-worker
+      ansible.builtin.lineinfile:
+        path: "{{ omb_install_dir }}/bin/benchmark-worker"
+        regexp: '^JVM_MEM='
+        line: 'JVM_MEM="-Xms{{ omb_worker_heap }} -Xmx{{ omb_worker_heap }} -XX:+UseZGC -XX:+ParallelRefProcEnabled -XX:+DoEscapeAnalysis -XX:ParallelGCThreads=12 -XX:ConcGCThreads=12 -XX:+DisableExplicitGC"'
+
+    - name: Pump JVM heap on coordinator
+      ansible.builtin.lineinfile:
+        path: "{{ omb_install_dir }}/bin/benchmark"
+        regexp: '^JVM_MEM='
+        line: 'JVM_MEM="-Xmx4G"'
+
+    - name: Render workers.yaml (consumed by the coordinator)
+      ansible.builtin.template:
+        src: workers.yaml.j2
+        dest: "{{ omb_install_dir }}/workers.yaml"
+        mode: "0644"
+
+    - name: Install benchmark-worker systemd unit
+      ansible.builtin.template:
+        src: benchmark-worker.service.j2
+        dest: /etc/systemd/system/benchmark-worker.service
+        mode: "0644"
+      notify: restart worker
+
+    - name: Enable + start benchmark-worker
+      ansible.builtin.systemd:
+        name: benchmark-worker
+        daemon_reload: true
+        enabled: true
+        state: started
+
+    - name: Wait for worker HTTP port
+      ansible.builtin.wait_for:
+        host: "{{ private_ip }}"
+        port: 8080
+        timeout: 60
+
+  handlers:
+    - name: restart worker
+      ansible.builtin.systemd:
+        name: benchmark-worker
+        state: restarted

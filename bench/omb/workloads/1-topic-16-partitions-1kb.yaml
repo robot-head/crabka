@@ -1,0 +1,16 @@
+# Throughput baseline. 1 producer / 1 consumer / 1 topic / 16 partitions.
+# Mirrors OMB's stock workload of the same name. Useful for
+# producer/broker single-pipe ceiling at 1 KiB payloads.
+
+name: 1 topic / 16 partitions / 1KiB
+
+topics: 1
+partitionsPerTopic: 16
+messageSize: 1024
+payloadFile: "payload/payload-1Kb.data"
+subscriptionsPerTopic: 1
+consumerPerSubscription: 1
+producersPerTopic: 1
+producerRate: 50000
+consumerBacklogSizeGB: 0
+testDurationMinutes: 15

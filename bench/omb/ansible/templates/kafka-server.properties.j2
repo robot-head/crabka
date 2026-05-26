@@ -1,0 +1,35 @@
+# Apache Kafka KRaft mode — combined controller + broker. Generated
+# by bench/omb/ansible/deploy-kafka.yaml. Settings reflect OMB's
+# AWS reference deployment, ported to KRaft.
+
+process.roles=broker,controller
+node.id={{ kafka_node_id }}
+controller.quorum.voters={{ kafka_controller_voters }}
+
+listeners=PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+inter.broker.listener.name=PLAINTEXT
+controller.listener.names=CONTROLLER
+advertised.listeners=PLAINTEXT://{{ private_ip }}:9092
+
+log.dirs={{ kafka_log_dirs }}
+
+num.replica.fetchers=8
+message.max.bytes=10485760
+replica.fetch.max.bytes=10485760
+
+num.network.threads=8
+num.io.threads=16
+
+# Match OMB AWS reference perf knobs.
+log.retention.hours=24
+log.segment.bytes=1073741824
+log.cleaner.enable=true
+log.flush.interval.messages=9223372036854775807
+log.flush.interval.ms=9223372036854775807
+
+# Group + transaction state topics — RF must be ≤ broker count.
+offsets.topic.replication.factor={{ [groups['kafka'] | length, 3] | min }}
+transaction.state.log.replication.factor={{ [groups['kafka'] | length, 3] | min }}
+transaction.state.log.min.isr={{ [groups['kafka'] | length, 2] | min }}
+
+auto.create.topics.enable=true
