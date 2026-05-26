@@ -298,7 +298,49 @@ mod tests {
 
     use crabka_log::{Log, LogConfig};
     use crabka_protocol::records::{Record, RecordBatch};
-    use crabka_remote_storage::{IndexType, InmemoryRemoteLogMetadataManager, LocalTieredStorage};
+    use crabka_remote_storage::{
+        CustomMetadata, IndexType, InmemoryRemoteLogMetadataManager, LocalTieredStorage,
+        RemoteStorageError,
+    };
+
+    /// An RSM whose copy always fails (delete succeeds). Used to exercise
+    /// the failure rollback path.
+    struct AlwaysFailRsm;
+
+    impl RemoteStorageManager for AlwaysFailRsm {
+        fn copy_log_segment_data(
+            &self,
+            _metadata: &RemoteLogSegmentMetadata,
+            _data: &LogSegmentData,
+        ) -> Result<Option<CustomMetadata>, RemoteStorageError> {
+            Err(RemoteStorageError::InvalidArgument("boom".into()))
+        }
+        fn fetch_log_segment(
+            &self,
+            metadata: &RemoteLogSegmentMetadata,
+            _start: u32,
+            _end: Option<u32>,
+        ) -> Result<Vec<u8>, RemoteStorageError> {
+            Err(RemoteStorageError::SegmentNotFound(
+                metadata.remote_log_segment_id().clone(),
+            ))
+        }
+        fn fetch_index(
+            &self,
+            metadata: &RemoteLogSegmentMetadata,
+            _index_type: IndexType,
+        ) -> Result<Vec<u8>, RemoteStorageError> {
+            Err(RemoteStorageError::SegmentNotFound(
+                metadata.remote_log_segment_id().clone(),
+            ))
+        }
+        fn delete_log_segment_data(
+            &self,
+            _metadata: &RemoteLogSegmentMetadata,
+        ) -> Result<(), RemoteStorageError> {
+            Ok(())
+        }
+    }
 
     fn tp() -> TopicIdPartition {
         TopicIdPartition::new(Uuid::from_u128(1), "orders", 0)
@@ -398,6 +440,27 @@ mod tests {
         let copied = copy_eligible(&tp(), 1, 0, Vec::new(), &rsm, &rlmm).await;
         assert_eq!(copied, 0);
         assert!(rlmm.list_remote_log_segments(&tp()).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn copy_failure_rolls_back_and_leaves_no_metadata() {
+        let log_dir = tempfile::tempdir().unwrap();
+        let log = rolled_log(log_dir.path());
+        let exports = log.tierable_segments();
+        assert!(!exports.is_empty());
+
+        let rsm: Arc<dyn RemoteStorageManager> = Arc::new(AlwaysFailRsm);
+        let rlmm = InmemoryRemoteLogMetadataManager::new();
+
+        let copied = copy_eligible(&tp(), 1, 0, exports.clone(), &rsm, &rlmm).await;
+        assert_eq!(copied, 0, "every copy failed");
+        // Rollback (delete + DeleteSegmentStarted -> DeleteSegmentFinished)
+        // drops the started metadata, so nothing is left behind and a later
+        // run with a healthy store can retry the same segments.
+        assert!(
+            rlmm.list_remote_log_segments(&tp()).unwrap().is_empty(),
+            "failed copies must not leave dangling metadata"
+        );
     }
 
     #[tokio::test]

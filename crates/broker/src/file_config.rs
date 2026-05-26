@@ -1154,6 +1154,29 @@ introspection_client_secret_path = '{}'
     }
 
     #[test]
+    fn remote_storage_section_enables_and_sets_dir() {
+        let toml = r#"
+[remote_storage]
+storage_dir = "/var/lib/crabka/tier"
+"#;
+        let file: FileConfig = toml::from_str(toml).unwrap();
+        let mut cfg = crate::config::BrokerConfig::default();
+        file.apply_to(&mut cfg);
+        assert_eq!(
+            cfg.remote_log_storage_dir,
+            Some(std::path::PathBuf::from("/var/lib/crabka/tier"))
+        );
+    }
+
+    #[test]
+    fn no_remote_storage_section_leaves_dir_none() {
+        let file: FileConfig = toml::from_str("broker_id = 1").unwrap();
+        let mut cfg = crate::config::BrokerConfig::default();
+        file.apply_to(&mut cfg);
+        assert!(cfg.remote_log_storage_dir.is_none());
+    }
+
+    #[test]
     fn delegation_token_section_parses_secret_key_and_defaults() {
         // Hold the lock so a concurrently-running env-var test can't
         // leak CRABKA_DELEGATION_TOKEN_SECRET_KEY into this assertion.
