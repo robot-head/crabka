@@ -107,69 +107,32 @@ pub(crate) async fn handle(
 
     // Build per-topic/per-partition result rows and queue the tombstone
     // batch for the rows that should actually delete.
-    let now_ms = now_ms();
-    let mut tombstones = RecordBatch {
-        max_timestamp: now_ms,
-        ..RecordBatch::default()
-    };
-    let mut delta: i32 = 0;
-    let mut topics_out: Vec<OffsetDeleteResponseTopic> = Vec::with_capacity(req.topics.len());
-    let mut to_remove: Vec<(String, i32)> = Vec::new();
+    let topic_partition_counts: std::collections::HashMap<&str, i32> = req
+        .topics
+        .iter()
+        .filter_map(|t| {
+            image
+                .topic(&t.name)
+                .map(|tr| (t.name.as_str(), tr.partitions))
+        })
+        .collect();
+    let (topics_out, tombstone_records, to_remove) = build_response_rows(
+        &req.group_id,
+        &req.topics,
+        &topic_decisions,
+        &subscribed_topics,
+        &topic_partition_counts,
+    );
 
-    for topic in &req.topics {
-        let denied = topic_decisions
-            .get(topic.name.as_str())
-            .copied()
-            .unwrap_or(AuthorizationResult::Deny)
-            == AuthorizationResult::Deny;
-        let topic_record = image.topic(&topic.name);
-        let mut partitions_out: Vec<OffsetDeleteResponsePartition> =
-            Vec::with_capacity(topic.partitions.len());
-
-        for part in &topic.partitions {
-            let code = if denied {
-                codes::TOPIC_AUTHORIZATION_FAILED
-            } else if subscribed_topics.contains(&topic.name) {
-                codes::GROUP_SUBSCRIBED_TO_TOPIC
-            } else {
-                match topic_record {
-                    Some(tr)
-                        if part.partition_index >= 0 && part.partition_index < tr.partitions =>
-                    {
-                        tombstones.records.push(Record {
-                            offset_delta: delta,
-                            timestamp_delta: 0,
-                            key: Some(OffsetCommitValue::encode_key(
-                                &req.group_id,
-                                &topic.name,
-                                part.partition_index,
-                            )),
-                            value: None, // null value = tombstone
-                            ..Default::default()
-                        });
-                        delta += 1;
-                        to_remove.push((topic.name.clone(), part.partition_index));
-                        codes::NONE
-                    }
-                    _ => codes::UNKNOWN_TOPIC_OR_PARTITION,
-                }
-            };
-            partitions_out.push(OffsetDeleteResponsePartition {
-                partition_index: part.partition_index,
-                error_code: code,
-                ..Default::default()
-            });
-        }
-
-        topics_out.push(OffsetDeleteResponseTopic {
-            name: topic.name.clone(),
-            partitions: partitions_out,
-            ..Default::default()
-        });
-    }
-
-    if !tombstones.records.is_empty() {
-        tombstones.last_offset_delta = (delta - 1).max(0);
+    if !tombstone_records.is_empty() {
+        let last_offset_delta =
+            i32::try_from(tombstone_records.len().saturating_sub(1)).unwrap_or(i32::MAX);
+        let tombstones = RecordBatch {
+            max_timestamp: now_ms(),
+            last_offset_delta,
+            records: tombstone_records,
+            ..RecordBatch::default()
+        };
         if let Err(code) = append_tombstones(broker, tombstones).await {
             return encode(version, &rewrite_success_as(topics_out, code));
         }
@@ -211,6 +174,88 @@ fn whole_error(req: &OffsetDeleteRequest, code: i16) -> OffsetDeleteResponse {
             .collect(),
         ..Default::default()
     }
+}
+
+/// Pure helper: build the per-topic / per-partition response rows for a
+/// decoded `OffsetDeleteRequest`, plus the tombstone records that need to
+/// be appended to `__consumer_offsets-0` and the `(topic, partition)`
+/// keys to remove from in-memory `Group.committed_offsets` once the
+/// append succeeds.
+///
+/// Branching matches KIP-496:
+///   - `topic_decisions[name] == Deny` → per-partition
+///     `TOPIC_AUTHORIZATION_FAILED` for every partition in the topic.
+///   - `subscribed_topics.contains(name)` →
+///     `GROUP_SUBSCRIBED_TO_TOPIC` for every partition in the topic.
+///   - `topic_partition_counts[name]` absent or `partition_index` out of
+///     range → `UNKNOWN_TOPIC_OR_PARTITION`.
+///   - otherwise → tombstone queued, `NONE` returned.
+fn build_response_rows(
+    group_id: &str,
+    topics: &[crabka_protocol::owned::offset_delete_request::OffsetDeleteRequestTopic],
+    topic_decisions: &std::collections::HashMap<&str, AuthorizationResult>,
+    subscribed_topics: &HashSet<String>,
+    topic_partition_counts: &std::collections::HashMap<&str, i32>,
+) -> (
+    Vec<OffsetDeleteResponseTopic>,
+    Vec<Record>,
+    Vec<(String, i32)>,
+) {
+    let mut topics_out: Vec<OffsetDeleteResponseTopic> = Vec::with_capacity(topics.len());
+    let mut tombstones: Vec<Record> = Vec::new();
+    let mut to_remove: Vec<(String, i32)> = Vec::new();
+    let mut delta: i32 = 0;
+
+    for topic in topics {
+        let denied = topic_decisions
+            .get(topic.name.as_str())
+            .copied()
+            .unwrap_or(AuthorizationResult::Deny)
+            == AuthorizationResult::Deny;
+        let mut partitions_out: Vec<OffsetDeleteResponsePartition> =
+            Vec::with_capacity(topic.partitions.len());
+
+        for part in &topic.partitions {
+            let code = if denied {
+                codes::TOPIC_AUTHORIZATION_FAILED
+            } else if subscribed_topics.contains(&topic.name) {
+                codes::GROUP_SUBSCRIBED_TO_TOPIC
+            } else {
+                match topic_partition_counts.get(topic.name.as_str()) {
+                    Some(n) if part.partition_index >= 0 && part.partition_index < *n => {
+                        tombstones.push(Record {
+                            offset_delta: delta,
+                            timestamp_delta: 0,
+                            key: Some(OffsetCommitValue::encode_key(
+                                group_id,
+                                &topic.name,
+                                part.partition_index,
+                            )),
+                            value: None, // null value = tombstone
+                            ..Default::default()
+                        });
+                        delta += 1;
+                        to_remove.push((topic.name.clone(), part.partition_index));
+                        codes::NONE
+                    }
+                    _ => codes::UNKNOWN_TOPIC_OR_PARTITION,
+                }
+            };
+            partitions_out.push(OffsetDeleteResponsePartition {
+                partition_index: part.partition_index,
+                error_code: code,
+                ..Default::default()
+            });
+        }
+
+        topics_out.push(OffsetDeleteResponseTopic {
+            name: topic.name.clone(),
+            partitions: partitions_out,
+            ..Default::default()
+        });
+    }
+
+    (topics_out, tombstones, to_remove)
 }
 
 fn rewrite_success_as(topics: Vec<OffsetDeleteResponseTopic>, code: i16) -> OffsetDeleteResponse {
@@ -304,6 +349,12 @@ mod tests {
     use super::*;
     use bytes::BufMut;
     use crabka_protocol::owned::consumer_protocol_subscription::ConsumerProtocolSubscription;
+    use crabka_protocol::owned::offset_delete_request::{
+        OffsetDeleteRequestPartition, OffsetDeleteRequestTopic,
+    };
+    use std::collections::HashMap;
+
+    // ── decode_subscribed_topics ─────────────────────────────────────
 
     fn encode_subscription(topics: &[&str]) -> Vec<u8> {
         let sub = ConsumerProtocolSubscription {
@@ -345,5 +396,244 @@ mod tests {
         // Valid version prefix, but truncated body → decode fails.
         let bytes = vec![0u8, 0u8];
         assert!(decode_subscribed_topics(&bytes).is_empty());
+    }
+
+    // ── whole_error ──────────────────────────────────────────────────
+
+    fn req_with_topics(topics: &[(&str, &[i32])]) -> OffsetDeleteRequest {
+        OffsetDeleteRequest {
+            group_id: "g".to_string(),
+            topics: topics
+                .iter()
+                .map(|(n, ps)| OffsetDeleteRequestTopic {
+                    name: (*n).to_string(),
+                    partitions: ps
+                        .iter()
+                        .map(|p| OffsetDeleteRequestPartition {
+                            partition_index: *p,
+                            ..Default::default()
+                        })
+                        .collect(),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn whole_error_stamps_top_level_and_each_partition() {
+        let req = req_with_topics(&[("t1", &[0, 1]), ("t2", &[5])]);
+        let resp = whole_error(&req, codes::GROUP_AUTHORIZATION_FAILED);
+        assert_eq!(resp.error_code, codes::GROUP_AUTHORIZATION_FAILED);
+        assert_eq!(resp.topics.len(), 2);
+        assert_eq!(resp.topics[0].partitions.len(), 2);
+        for t in &resp.topics {
+            for p in &t.partitions {
+                assert_eq!(p.error_code, codes::GROUP_AUTHORIZATION_FAILED);
+            }
+        }
+    }
+
+    #[test]
+    fn whole_error_with_empty_request_returns_empty_topics_list() {
+        let req = req_with_topics(&[]);
+        let resp = whole_error(&req, codes::GROUP_ID_NOT_FOUND);
+        assert_eq!(resp.error_code, codes::GROUP_ID_NOT_FOUND);
+        assert!(resp.topics.is_empty());
+    }
+
+    // ── rewrite_success_as ───────────────────────────────────────────
+
+    fn resp_topics(rows: &[(&str, &[(i32, i16)])]) -> Vec<OffsetDeleteResponseTopic> {
+        rows.iter()
+            .map(|(n, ps)| OffsetDeleteResponseTopic {
+                name: (*n).to_string(),
+                partitions: ps
+                    .iter()
+                    .map(|(idx, code)| OffsetDeleteResponsePartition {
+                        partition_index: *idx,
+                        error_code: *code,
+                        ..Default::default()
+                    })
+                    .collect(),
+                ..Default::default()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn rewrite_success_as_overwrites_none_rows_only() {
+        let rows = resp_topics(&[(
+            "t",
+            &[
+                (0, codes::NONE),
+                (1, codes::TOPIC_AUTHORIZATION_FAILED),
+                (2, codes::NONE),
+            ],
+        )]);
+        let resp = rewrite_success_as(rows, codes::UNKNOWN_SERVER_ERROR);
+        assert_eq!(resp.error_code, codes::NONE);
+        assert_eq!(
+            resp.topics[0].partitions[0].error_code,
+            codes::UNKNOWN_SERVER_ERROR
+        );
+        assert_eq!(
+            resp.topics[0].partitions[1].error_code,
+            codes::TOPIC_AUTHORIZATION_FAILED,
+            "denied row stays denied"
+        );
+        assert_eq!(
+            resp.topics[0].partitions[2].error_code,
+            codes::UNKNOWN_SERVER_ERROR
+        );
+    }
+
+    #[test]
+    fn rewrite_success_as_noop_when_no_none_rows() {
+        let rows = resp_topics(&[("t", &[(0, codes::GROUP_SUBSCRIBED_TO_TOPIC)])]);
+        let resp = rewrite_success_as(rows, codes::UNKNOWN_SERVER_ERROR);
+        assert_eq!(
+            resp.topics[0].partitions[0].error_code,
+            codes::GROUP_SUBSCRIBED_TO_TOPIC
+        );
+    }
+
+    // ── build_response_rows ──────────────────────────────────────────
+
+    #[test]
+    fn build_rows_denied_topic_returns_topic_authorization_failed_per_partition() {
+        let req = req_with_topics(&[("t1", &[0, 1])]);
+        let mut decisions = HashMap::new();
+        decisions.insert("t1", AuthorizationResult::Deny);
+        let subscribed: HashSet<String> = HashSet::new();
+        let mut counts = HashMap::new();
+        counts.insert("t1", 4);
+
+        let (out, tombs, to_remove) =
+            build_response_rows("g", &req.topics, &decisions, &subscribed, &counts);
+        assert!(tombs.is_empty(), "no tombstones when denied");
+        assert!(to_remove.is_empty());
+        for p in &out[0].partitions {
+            assert_eq!(p.error_code, codes::TOPIC_AUTHORIZATION_FAILED);
+        }
+    }
+
+    #[test]
+    fn build_rows_subscribed_topic_returns_group_subscribed_per_partition() {
+        let req = req_with_topics(&[("t1", &[0])]);
+        let mut decisions = HashMap::new();
+        decisions.insert("t1", AuthorizationResult::Allow);
+        let mut subscribed: HashSet<String> = HashSet::new();
+        subscribed.insert("t1".to_string());
+        let mut counts = HashMap::new();
+        counts.insert("t1", 4);
+
+        let (out, tombs, _) =
+            build_response_rows("g", &req.topics, &decisions, &subscribed, &counts);
+        assert!(tombs.is_empty(), "subscribed topic → no tombstone");
+        assert_eq!(
+            out[0].partitions[0].error_code,
+            codes::GROUP_SUBSCRIBED_TO_TOPIC
+        );
+    }
+
+    #[test]
+    fn build_rows_missing_topic_returns_unknown_topic_or_partition() {
+        let req = req_with_topics(&[("ghost", &[0])]);
+        let mut decisions = HashMap::new();
+        decisions.insert("ghost", AuthorizationResult::Allow);
+        let subscribed: HashSet<String> = HashSet::new();
+        // counts is empty: topic doesn't exist in image.
+        let counts: HashMap<&str, i32> = HashMap::new();
+
+        let (out, tombs, _) =
+            build_response_rows("g", &req.topics, &decisions, &subscribed, &counts);
+        assert!(tombs.is_empty());
+        assert_eq!(
+            out[0].partitions[0].error_code,
+            codes::UNKNOWN_TOPIC_OR_PARTITION
+        );
+    }
+
+    #[test]
+    fn build_rows_partition_out_of_range_returns_unknown_topic_or_partition() {
+        let req = req_with_topics(&[("t1", &[0, 99, -1])]);
+        let mut decisions = HashMap::new();
+        decisions.insert("t1", AuthorizationResult::Allow);
+        let subscribed: HashSet<String> = HashSet::new();
+        let mut counts = HashMap::new();
+        counts.insert("t1", 2);
+
+        let (out, tombs, to_remove) =
+            build_response_rows("g", &req.topics, &decisions, &subscribed, &counts);
+        // p=0 succeeds; p=99 and p=-1 each fail with UNKNOWN_TOPIC_OR_PARTITION.
+        assert_eq!(out[0].partitions[0].error_code, codes::NONE);
+        assert_eq!(
+            out[0].partitions[1].error_code,
+            codes::UNKNOWN_TOPIC_OR_PARTITION
+        );
+        assert_eq!(
+            out[0].partitions[2].error_code,
+            codes::UNKNOWN_TOPIC_OR_PARTITION
+        );
+        assert_eq!(tombs.len(), 1, "only p=0 queued");
+        assert_eq!(to_remove, vec![("t1".to_string(), 0)]);
+    }
+
+    #[test]
+    fn build_rows_happy_path_queues_tombstone_with_increasing_deltas() {
+        let req = req_with_topics(&[("t1", &[0, 2]), ("t2", &[7])]);
+        let mut decisions = HashMap::new();
+        decisions.insert("t1", AuthorizationResult::Allow);
+        decisions.insert("t2", AuthorizationResult::Allow);
+        let subscribed: HashSet<String> = HashSet::new();
+        let mut counts = HashMap::new();
+        counts.insert("t1", 4);
+        counts.insert("t2", 8);
+
+        let (out, tombs, to_remove) =
+            build_response_rows("g", &req.topics, &decisions, &subscribed, &counts);
+        assert_eq!(tombs.len(), 3, "3 partitions × 1 tombstone each");
+        // Offset deltas increase monotonically across the whole batch.
+        assert_eq!(tombs[0].offset_delta, 0);
+        assert_eq!(tombs[1].offset_delta, 1);
+        assert_eq!(tombs[2].offset_delta, 2);
+        // Tombstones carry null values.
+        assert!(tombs[0].value.is_none());
+        assert!(tombs[1].value.is_none());
+        assert!(tombs[2].value.is_none());
+        for t in &out {
+            for p in &t.partitions {
+                assert_eq!(p.error_code, codes::NONE);
+            }
+        }
+        assert_eq!(
+            to_remove,
+            vec![
+                ("t1".to_string(), 0),
+                ("t1".to_string(), 2),
+                ("t2".to_string(), 7),
+            ]
+        );
+    }
+
+    #[test]
+    fn build_rows_missing_topic_in_decisions_treats_as_deny() {
+        // ACL decisions map didn't include the topic → treat as Deny
+        // (defensive default). Per-partition TOPIC_AUTHORIZATION_FAILED.
+        let req = req_with_topics(&[("t1", &[0])]);
+        let decisions: HashMap<&str, AuthorizationResult> = HashMap::new();
+        let subscribed: HashSet<String> = HashSet::new();
+        let mut counts = HashMap::new();
+        counts.insert("t1", 4);
+
+        let (out, tombs, _) =
+            build_response_rows("g", &req.topics, &decisions, &subscribed, &counts);
+        assert!(tombs.is_empty());
+        assert_eq!(
+            out[0].partitions[0].error_code,
+            codes::TOPIC_AUTHORIZATION_FAILED
+        );
     }
 }
