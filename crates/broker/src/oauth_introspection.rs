@@ -50,6 +50,21 @@ impl ReqwestIntrospectionClient {
         tls_trust: Option<&Path>,
         timeout: Duration,
     ) -> Result<Arc<dyn IntrospectionClient>, BuildError> {
+        // `file_config::FileConfig::apply_to` constructs this client
+        // before `Broker::start` runs, so the rustls CryptoProvider that
+        // `Broker::start` installs at line ~783 isn't there yet when
+        // `build_client_config_from_pem` reaches into
+        // `rustls::ClientConfig::builder()` → `CryptoProvider::get_default()`
+        // and panics with "Could not automatically determine the
+        // process-level CryptoProvider from Rustls crate features."
+        // (Both the `aws-lc-rs` and `ring` rustls features end up in the
+        // dep graph, so the `auto-determine` heuristic refuses to pick
+        // one.) Install idempotently here so the introspection client
+        // works from any entry point — the `let _ =` swallows
+        // `AlreadySet` when a sibling caller (notably `Broker::start`)
+        // won the race.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
         let mut builder = reqwest::Client::builder().timeout(timeout);
         if let Some(path) = tls_trust {
             let cfg = build_client_config_from_pem(path)?;
