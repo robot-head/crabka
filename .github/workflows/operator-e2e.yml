@@ -3232,6 +3232,19 @@ jobs:
                         ssl.truststore.location=/tmp/trust.jks
                         ssl.truststore.password=changeit
                         INNER
+                        # Kafka's OAUTHBEARER token-endpoint HTTP client
+                        # (HttpAccessTokenRetriever) is HttpsURLConnection,
+                        # which uses the JVM-default truststore — NOT the
+                        # client's ssl.truststore.* properties. Without
+                        # this `-Djavax.net.ssl.trustStore=…`, the token
+                        # fetch from Keycloak hits PKIX path-building
+                        # failure on the chart's auto-generated leaf and
+                        # SASL login retries to exhaustion. Setting it as
+                        # a system property points the JVM-wide
+                        # X509TrustManagerImpl at our truststore for both
+                        # the Kafka broker (cluster CA) and the token
+                        # endpoint (Keycloak leaf) connections.
+                        export KAFKA_OPTS="-Djavax.net.ssl.trustStore=/tmp/trust.jks -Djavax.net.ssl.trustStorePassword=changeit"
                         echo "oauth-test-record" | \
                           /opt/kafka/bin/kafka-console-producer.sh \
                             --bootstrap-server demo-broker-headless.default.svc.cluster.local:9096 \
@@ -3320,6 +3333,11 @@ jobs:
                         ssl.truststore.location=/tmp/trust.jks
                         ssl.truststore.password=changeit
                         INNER
+                        # See `oauth-producer-ok` above for why KAFKA_OPTS
+                        # also has to point at the truststore: the
+                        # OAUTHBEARER token-endpoint HTTPS call bypasses
+                        # ssl.truststore.* and uses JVM defaults.
+                        export KAFKA_OPTS="-Djavax.net.ssl.trustStore=/tmp/trust.jks -Djavax.net.ssl.trustStorePassword=changeit"
                         echo "should-be-rejected" | \
                           /opt/kafka/bin/kafka-console-producer.sh \
                             --bootstrap-server demo-broker-headless.default.svc.cluster.local:9096 \
@@ -3864,6 +3882,19 @@ jobs:
                         ssl.truststore.location=/tmp/trust.jks
                         ssl.truststore.password=changeit
                         INNER
+                        # Kafka's OAUTHBEARER token-endpoint HTTP client
+                        # (HttpAccessTokenRetriever) is HttpsURLConnection,
+                        # which uses the JVM-default truststore — NOT the
+                        # client's ssl.truststore.* properties. Without
+                        # this `-Djavax.net.ssl.trustStore=…`, the token
+                        # fetch from Keycloak hits PKIX path-building
+                        # failure on the chart's auto-generated leaf and
+                        # SASL login retries to exhaustion. Setting it as
+                        # a system property points the JVM-wide
+                        # X509TrustManagerImpl at our truststore for both
+                        # the Kafka broker (cluster CA) and the token
+                        # endpoint (Keycloak leaf) connections.
+                        export KAFKA_OPTS="-Djavax.net.ssl.trustStore=/tmp/trust.jks -Djavax.net.ssl.trustStorePassword=changeit"
                         echo "oauth-test-record" | \
                           /opt/kafka/bin/kafka-console-producer.sh \
                             --bootstrap-server demo-broker-headless.default.svc.cluster.local:9096 \
@@ -3944,6 +3975,11 @@ jobs:
                         ssl.truststore.location=/tmp/trust.jks
                         ssl.truststore.password=changeit
                         INNER
+                        # See `oauth-producer-ok` above for why KAFKA_OPTS
+                        # also has to point at the truststore: the
+                        # OAUTHBEARER token-endpoint HTTPS call bypasses
+                        # ssl.truststore.* and uses JVM defaults.
+                        export KAFKA_OPTS="-Djavax.net.ssl.trustStore=/tmp/trust.jks -Djavax.net.ssl.trustStorePassword=changeit"
                         echo "should-be-rejected" | \
                           /opt/kafka/bin/kafka-console-producer.sh \
                             --bootstrap-server demo-broker-headless.default.svc.cluster.local:9096 \
