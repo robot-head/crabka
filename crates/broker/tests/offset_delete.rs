@@ -1,0 +1,332 @@
+//! `OffsetDelete` (`api_key` 47, KIP-496) broker integration tests.
+//!
+//! Each test boots a single broker via `support::start`, drives the
+//! relevant flows over the PLAINTEXT data plane, and asserts on the
+//! response shape. Gated to non-Windows in line with the multi-broker
+//! test convention (single-broker tests stay unconditional but this
+//! file only uses `support::start` which is cross-platform — no gate
+//! needed).
+
+mod support;
+
+use bytes::BufMut;
+
+use crabka_protocol::Encode;
+use crabka_protocol::owned::consumer_protocol_subscription::ConsumerProtocolSubscription;
+use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
+use crabka_protocol::owned::join_group_request::{JoinGroupRequest, JoinGroupRequestProtocol};
+use crabka_protocol::owned::offset_commit_request::{
+    OffsetCommitRequest, OffsetCommitRequestPartition, OffsetCommitRequestTopic,
+};
+use crabka_protocol::owned::offset_delete_request::{
+    OffsetDeleteRequest, OffsetDeleteRequestPartition, OffsetDeleteRequestTopic,
+};
+use crabka_protocol::owned::offset_fetch_request::{OffsetFetchRequest, OffsetFetchRequestTopic};
+
+const OFFSET_ABSENT_SENTINEL: i64 = -1; // OffsetFetch returns -1 when no offset is committed.
+
+async fn create_topic(p: &support::InProcess, name: &str, num_partitions: i32) {
+    let resp = p
+        .client
+        .send(CreateTopicsRequest {
+            topics: vec![CreatableTopic {
+                name: name.into(),
+                num_partitions,
+                replication_factor: 1,
+                ..Default::default()
+            }],
+            timeout_ms: 5_000,
+            ..Default::default()
+        })
+        .await
+        .expect("CreateTopics");
+    assert_eq!(resp.topics[0].error_code, 0, "CreateTopics for {name}");
+}
+
+async fn commit_offset(p: &support::InProcess, group: &str, topic: &str, partition: i32, off: i64) {
+    let resp = p
+        .client
+        .send(OffsetCommitRequest {
+            group_id: group.into(),
+            generation_id_or_member_epoch: -1,
+            member_id: String::new(),
+            topics: vec![OffsetCommitRequestTopic {
+                name: topic.into(),
+                partitions: vec![OffsetCommitRequestPartition {
+                    partition_index: partition,
+                    committed_offset: off,
+                    committed_leader_epoch: -1,
+                    committed_metadata: Some(String::new()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("OffsetCommit");
+    assert_eq!(
+        resp.topics[0].partitions[0].error_code, 0,
+        "OffsetCommit({group},{topic},{partition})"
+    );
+}
+
+async fn fetch_offset(p: &support::InProcess, group: &str, topic: &str, partition: i32) -> i64 {
+    let resp = p
+        .client
+        .send(OffsetFetchRequest {
+            group_id: group.into(),
+            topics: Some(vec![OffsetFetchRequestTopic {
+                name: topic.into(),
+                partition_indexes: vec![partition],
+                ..Default::default()
+            }]),
+            ..Default::default()
+        })
+        .await
+        .expect("OffsetFetch");
+    resp.topics[0].partitions[0].committed_offset
+}
+
+/// T1 — happy path: commit an offset for an Empty group, delete it,
+/// `OffsetFetch` then returns `-1` (no committed offset).
+#[tokio::test]
+async fn delete_offsets_from_empty_group_round_trip() {
+    let p = support::start().await;
+    create_topic(&p, "t1", 2).await;
+
+    commit_offset(&p, "g1", "t1", 0, 42).await;
+    commit_offset(&p, "g1", "t1", 1, 100).await;
+
+    // Group is Empty (no JoinGroup), delete should succeed.
+    let resp = p
+        .client
+        .send(OffsetDeleteRequest {
+            group_id: "g1".into(),
+            topics: vec![OffsetDeleteRequestTopic {
+                name: "t1".into(),
+                partitions: vec![OffsetDeleteRequestPartition {
+                    partition_index: 0,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("OffsetDelete");
+    assert_eq!(resp.error_code, 0, "top-level NONE");
+    assert_eq!(resp.topics.len(), 1);
+    assert_eq!(resp.topics[0].partitions.len(), 1);
+    assert_eq!(
+        resp.topics[0].partitions[0].error_code, 0,
+        "partition 0 NONE"
+    );
+
+    // Verify partition 0 is gone, partition 1 still has its offset.
+    assert_eq!(
+        fetch_offset(&p, "g1", "t1", 0).await,
+        OFFSET_ABSENT_SENTINEL,
+        "partition 0 offset cleared"
+    );
+    assert_eq!(
+        fetch_offset(&p, "g1", "t1", 1).await,
+        100,
+        "partition 1 offset untouched"
+    );
+
+    p.broker.shutdown().await;
+}
+
+/// T2 — unknown group: `OffsetDelete` against a group that was never
+/// joined or committed returns `GROUP_ID_NOT_FOUND` at the top level.
+#[tokio::test]
+async fn delete_offsets_unknown_group_returns_group_id_not_found() {
+    let p = support::start().await;
+    create_topic(&p, "t2", 1).await;
+
+    let resp = p
+        .client
+        .send(OffsetDeleteRequest {
+            group_id: "ghost".into(),
+            topics: vec![OffsetDeleteRequestTopic {
+                name: "t2".into(),
+                partitions: vec![OffsetDeleteRequestPartition {
+                    partition_index: 0,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("OffsetDelete");
+    assert_eq!(resp.error_code, 69, "top-level GROUP_ID_NOT_FOUND (69)");
+
+    p.broker.shutdown().await;
+}
+
+/// T3 — missing topic: per-partition `UNKNOWN_TOPIC_OR_PARTITION` (3)
+/// for a topic that doesn't exist (even when the group does).
+#[tokio::test]
+async fn delete_offsets_missing_topic_returns_unknown_topic_or_partition() {
+    let p = support::start().await;
+    create_topic(&p, "t3", 1).await;
+    commit_offset(&p, "g3", "t3", 0, 7).await;
+
+    let resp = p
+        .client
+        .send(OffsetDeleteRequest {
+            group_id: "g3".into(),
+            topics: vec![OffsetDeleteRequestTopic {
+                name: "nonexistent".into(),
+                partitions: vec![OffsetDeleteRequestPartition {
+                    partition_index: 0,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("OffsetDelete");
+    assert_eq!(resp.error_code, 0, "top-level NONE");
+    assert_eq!(
+        resp.topics[0].partitions[0].error_code, 3,
+        "UNKNOWN_TOPIC_OR_PARTITION (3) for missing topic"
+    );
+
+    p.broker.shutdown().await;
+}
+
+/// T4 — out-of-range partition: per-partition
+/// `UNKNOWN_TOPIC_OR_PARTITION` (3) for a partition index beyond the
+/// topic's partition count.
+#[tokio::test]
+async fn delete_offsets_partition_out_of_range_returns_unknown_topic_or_partition() {
+    let p = support::start().await;
+    create_topic(&p, "t4", 1).await;
+    commit_offset(&p, "g4", "t4", 0, 5).await;
+
+    let resp = p
+        .client
+        .send(OffsetDeleteRequest {
+            group_id: "g4".into(),
+            topics: vec![OffsetDeleteRequestTopic {
+                name: "t4".into(),
+                partitions: vec![
+                    OffsetDeleteRequestPartition {
+                        partition_index: 0,
+                        ..Default::default()
+                    },
+                    OffsetDeleteRequestPartition {
+                        partition_index: 99,
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("OffsetDelete");
+    assert_eq!(resp.error_code, 0);
+    assert_eq!(resp.topics[0].partitions[0].error_code, 0, "p=0 deleted");
+    assert_eq!(
+        resp.topics[0].partitions[1].error_code, 3,
+        "p=99 UNKNOWN_TOPIC_OR_PARTITION"
+    );
+
+    p.broker.shutdown().await;
+}
+
+/// T5 — subscription guard: a non-empty consumer-protocol group still
+/// subscribed to the topic returns per-partition
+/// `GROUP_SUBSCRIBED_TO_TOPIC` (86). The offset survives the request.
+#[tokio::test]
+async fn delete_offsets_for_subscribed_topic_returns_group_subscribed() {
+    let p = support::start().await;
+    create_topic(&p, "t5", 1).await;
+    commit_offset(&p, "g5", "t5", 0, 9).await;
+
+    // Build a ConsumerProtocolSubscription bytestring that subscribes to t5.
+    let sub = ConsumerProtocolSubscription {
+        topics: vec!["t5".into()],
+        ..Default::default()
+    };
+    let mut sub_bytes = bytes::BytesMut::new();
+    sub_bytes.put_i16(0); // protocol version negotiation prefix
+    sub.encode(&mut sub_bytes, 0).expect("encode subscription");
+    let sub_bytes = bytes::Bytes::from(sub_bytes.to_vec());
+
+    // JoinGroup to create a live member with that subscription.
+    let r1 = p
+        .client
+        .send(JoinGroupRequest {
+            group_id: "g5".into(),
+            protocol_type: "consumer".into(),
+            member_id: String::new(),
+            session_timeout_ms: 30_000,
+            rebalance_timeout_ms: 1_500,
+            protocols: vec![JoinGroupRequestProtocol {
+                name: "range".into(),
+                metadata: sub_bytes.clone(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("JoinGroup1");
+    // First JoinGroup with empty member_id returns MEMBER_ID_REQUIRED (79).
+    assert_eq!(r1.error_code, 79);
+    let mid = r1.member_id.clone();
+    assert!(!mid.is_empty());
+
+    // Re-join with the assigned member_id → become an actual member.
+    let r2 = p
+        .client
+        .send(JoinGroupRequest {
+            group_id: "g5".into(),
+            protocol_type: "consumer".into(),
+            member_id: mid,
+            session_timeout_ms: 30_000,
+            rebalance_timeout_ms: 1_500,
+            protocols: vec![JoinGroupRequestProtocol {
+                name: "range".into(),
+                metadata: sub_bytes,
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("JoinGroup2");
+    assert_eq!(r2.error_code, 0);
+
+    // OffsetDelete on the subscribed topic → GROUP_SUBSCRIBED_TO_TOPIC.
+    let resp = p
+        .client
+        .send(OffsetDeleteRequest {
+            group_id: "g5".into(),
+            topics: vec![OffsetDeleteRequestTopic {
+                name: "t5".into(),
+                partitions: vec![OffsetDeleteRequestPartition {
+                    partition_index: 0,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("OffsetDelete");
+    assert_eq!(resp.error_code, 0, "top-level NONE");
+    assert_eq!(
+        resp.topics[0].partitions[0].error_code, 86,
+        "GROUP_SUBSCRIBED_TO_TOPIC (86)"
+    );
+
+    // Offset is unchanged.
+    assert_eq!(fetch_offset(&p, "g5", "t5", 0).await, 9, "offset survived");
+
+    p.broker.shutdown().await;
+}

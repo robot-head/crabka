@@ -3703,3 +3703,70 @@ introspection metadata).
   `tieredStorage` schema; other CRDs unchanged.
 - **Workspace fmt + clippy `-D warnings` + operator lib tests** all
   green. Operator integration tests run in CI.
+
+## Slice — OffsetDelete admin API (KIP-496) (2026-05-26)
+
+- **Goal:** Close the last ❌ on the consumer-side admin surface by
+  implementing `OffsetDelete` (`api_key` 47, v0). Unblocks
+  `kafka-consumer-groups --delete-offsets` and the JVM AdminClient's
+  `Admin.deleteConsumerGroupOffsets`. Lets operators clear stale
+  per-`(group, topic, partition)` commits without dropping the whole
+  group.
+- **Handler (`crates/broker/src/handlers/offset_delete.rs`):**
+  - Whole-response `Delete` ACL on `Group(group_id)` →
+    `GROUP_AUTHORIZATION_FAILED (30)`.
+  - Missing group → whole-response `GROUP_ID_NOT_FOUND (69)`.
+  - Per-topic `Read` ACL → per-partition
+    `TOPIC_AUTHORIZATION_FAILED (29)` on Deny.
+  - Per-partition `UNKNOWN_TOPIC_OR_PARTITION (3)` when the topic
+    doesn't exist or `partition_index` is out of range.
+  - KIP-496 subscription guard: a non-Empty `"consumer"`-protocol
+    group whose decoded `ConsumerProtocolSubscription` lists the
+    target topic returns per-partition
+    `GROUP_SUBSCRIBED_TO_TOPIC (86)`. Empty / Dead groups and
+    non-`"consumer"` protocol_type groups skip the guard.
+  - On accept: append a null-value tombstone record (key =
+    `OffsetCommitKey` v1) to `__consumer_offsets-0` through the
+    partition writer, then drop the entry from
+    `Group.committed_offsets`. The append runs before the
+    in-memory mutation, so a writer-side failure rewrites the
+    queued `NONE` rows with the broker-error code instead of
+    silently losing the delete.
+  - Inline-intercept dispatch (handler needs `RequestContext`)
+    mirrors slice-13's `OffsetCommit` / `OffsetFetch` framing.
+- **New error code:** `codes::GROUP_SUBSCRIBED_TO_TOPIC = 86`.
+- **`ApiVersions`:** advertises `OffsetDeleteRequest` (api_key 47,
+  v0–v0, non-flexible).
+- **Subscription decoder:** new private
+  `decode_subscribed_topics` strips the 2-byte protocol-version
+  prefix the JVM consumer prepends, then runs the generated
+  `ConsumerProtocolSubscription::decode` at that version. Returns
+  an empty vec on any malformed-blob path so a corrupt subscription
+  fails closed (allow the delete to proceed) — operationally
+  safer than the alternative of refusing every delete on a single
+  bad member.
+- **Tests:**
+  - broker lib +5 (`decode_subscribed_topics` happy-path,
+    empty input, short input, out-of-range version,
+    malformed body).
+  - broker integration +5 in `tests/offset_delete.rs`:
+    empty-group happy path (commit two offsets, delete one,
+    `OffsetFetch` shows partition 0 absent and partition 1
+    intact), unknown group returns
+    `GROUP_ID_NOT_FOUND`, missing topic returns
+    `UNKNOWN_TOPIC_OR_PARTITION`, partition-out-of-range
+    returns `UNKNOWN_TOPIC_OR_PARTITION` alongside a successful
+    sibling, and live-subscriber returns
+    `GROUP_SUBSCRIBED_TO_TOPIC` with the offset surviving.
+- **Workspace fmt + clippy `-D warnings` + broker lib tests** all
+  green.
+- **README updated:** `OffsetDelete` and KIP-496 rows flipped from ❌
+  to ✅.
+- **Out of scope:** JVM acceptance test (the JVM AdminClient
+  expects the broker to return the principal name on a successful
+  `DescribeGroups` call so its `--delete-offsets` flow goes through
+  the group's Describe ACL implication — covered by slice 13b's
+  `Read` ⇒ `Describe` implication, which already applies here. A
+  dedicated `kafka-consumer-groups --delete-offsets` JVM test
+  belongs to a follow-up that also exercises the JVM tool's
+  retry/refresh quirks.)

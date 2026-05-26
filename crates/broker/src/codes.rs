@@ -65,6 +65,10 @@ pub const INVALID_CONFIG: i16 = 40;
 pub const NON_EMPTY_GROUP: i16 = 68;
 /// `GROUP_ID_NOT_FOUND` (69) — no group with the given id exists.
 pub const GROUP_ID_NOT_FOUND: i16 = 69;
+/// `GROUP_SUBSCRIBED_TO_TOPIC` (86, KIP-496) — `OffsetDelete` refused
+/// because the (live, consumer-protocol) group still subscribes to the
+/// topic. The operator must stop consumers first.
+pub const GROUP_SUBSCRIBED_TO_TOPIC: i16 = 86;
 /// `INVALID_RESOURCE_TYPE` — alias for `INVALID_REQUEST` (42); the Kafka
 /// protocol does not assign a distinct wire code for unsupported resource
 /// types; `INVALID_REQUEST` is the correct response.

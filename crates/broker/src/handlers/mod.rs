@@ -84,6 +84,7 @@ pub(crate) mod list_offsets;
 pub(crate) mod list_partition_reassignments;
 pub(crate) mod metadata;
 pub(crate) mod offset_commit;
+pub(crate) mod offset_delete;
 pub(crate) mod offset_fetch;
 pub(crate) mod offset_for_leader_epoch;
 pub(crate) mod produce;
