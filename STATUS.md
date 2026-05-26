@@ -3228,3 +3228,91 @@ introspection metadata).
 - **Workspace fmt + clippy `-D warnings` + tests** all green. No CRDs
   touched.
 
+## Slice 48c — Crabka core: Tiered storage local-retention split (2026-05-26)
+
+- **Goal:** Third sub-slice of KIP-405. Once a sealed segment is durably
+  in the remote tier (`CopySegmentFinished` in the RLMM), let the broker
+  delete its local copy on a `local.retention.{ms,bytes}` schedule
+  independent of (and typically tighter than) total retention. Introduce
+  `local_log_start_offset()` distinct from `log_start_offset()` and stop
+  the standard `Log::tick()` retention from clobbering uncopied segments
+  on tiered topics.
+- **Config (consumed this slice — no dead config):**
+  - Per-topic `local.retention.ms` (Kafka-standard) → new
+    `LogConfig.local_retention_ms: Option<Duration>` (default `None`).
+    Validation accepts i64 ≥ -2; apply maps -2 (inherit) and -1
+    (unlimited) both to `None` — greenfield simplification (the
+    operationally-useful case is local-tighter-than-total). ≥0 maps to
+    `Some(Duration::from_millis(n))`.
+  - Per-topic `local.retention.bytes` (Kafka-standard) → new
+    `LogConfig.local_retention_bytes: Option<u64>` with the same
+    semantics + apply rule. Module doc bumped from "Eight keys" to
+    "Ten keys recognized".
+- **Log-crate surface (`crates/log`):**
+  - `LogConfig.local_retention_ms` / `local_retention_bytes` fields
+    (above). Defaults preserve current behavior.
+  - New `Log::local_log_start_offset() -> i64` — for 48c delegates to
+    `log_start_offset()` (single-sourced invariant; the two pointers
+    only split in 48e when remote-retention can advance one without
+    the other).
+  - New `Log::delete_local_segments_through(target) -> Result<usize>`
+    — physically deletes every sealed segment whose `last_offset <
+    target` and bumps both `log_start_override` and the new
+    `local_log_start_override` in lockstep. Active segment never
+    touched. No-op when `target ≤ local_log_start_offset()`. Caller is
+    responsible for verifying remote-tier safety (the Log enforces no
+    tiered-storage invariants).
+  - `Log::tick()` short-circuits at the top when
+    `remote_storage_enable` is true — for tiered topics the
+    `RemoteLogManager` is the sole driver of segment deletion.
+- **`RemoteLogManager` extension (`crates/broker/src/remote_log_manager.rs`):**
+  - `tick_all` now snapshots both `log_config` and `exports` under the
+    log lock, then calls the existing `copy_eligible` followed by a new
+    `local_retention_pass`.
+  - `local_retention_pass(tp, partition, exports, log_config, rlmm,
+    now_ms)` — resolves `effective_local_ms =
+    local_retention_ms.or(retention_ms)` (same for bytes), queries
+    `rlmm.list_remote_log_segments(tp)` filtered to
+    `CopySegmentFinished` start-offsets, calls `local_retention_target`
+    and, on `Some(target)`, takes the log lock and invokes
+    `Log::delete_local_segments_through(target)`. Warns on RLMM list
+    failure or filesystem deletion error.
+  - `local_retention_target` — pure-logic helper, testable independent
+    of tokio/DashMap. Walks oldest-first; **stops at the first
+    non-`CopySegmentFinished` segment** to keep the local prefix
+    contiguous (matches Kafka). Combines time-based eviction (`now_ms
+    - max_timestamp > effective_local_ms`) with size-based greedy
+    oldest-first eviction (sealed-total above `effective_local_bytes`).
+    Returns `Option<i64>` = `last_offset + 1`. **48c simplification:**
+    size-based eviction ignores the active-segment size (operators set
+    local.retention.bytes in MB/GB ranges where the active segment is
+    negligible).
+- **Tests:** log crate +7 (new `local_log_start_offset_matches_log_start_offset`,
+  `delete_local_segments_through_drops_sealed_below_target` +
+  `_keeps_active_segment` + `_advances_local_start_pointer` +
+  `_is_noop_at_or_below_current_start` + `_rejects_negative_target`,
+  `tick_skips_retention_when_remote_storage_enable_is_true` —
+  including a non-tiered baseline that asserts the standard path still
+  evicts). config_keys +7 (validate accepts -2/-1/positive, rejects <
+  -2; `is_recognized` covers both keys; apply -2 and -1 both collapse
+  to `None`; apply positive propagates ms + bytes). remote_log_manager
+  +6 (4 pure-logic helper tests — `_returns_none_when_no_finished`,
+  `_time_based_eviction`, `_size_based_eviction` (3 sub-cases),
+  `_skips_unfinished_segments_and_stops`, `_uses_already_resolved_effective_ms`;
+  1 end-to-end `local_retention_drive_deletes_copied_segments` that
+  rolls a real tiered `Log`, copies all sealed segments through
+  `copy_eligible` against `LocalTieredStorage` +
+  `InmemoryRemoteLogMetadataManager`, then drives the retention helper
+  and asserts `local_log_start_offset()` advanced + sealed files are
+  physically gone). Workspace lib counts: log 78, broker 451.
+- **Design:** `[docs/superpowers/specs/2026-05-26-crabka-tiered-storage-local-retention-48c-design.md]`.
+- **Out of scope (48d+):** Remote read path on `Fetch` / `ListOffsets`
+  — until 48d ships, fetching below `local_log_start_offset()` returns
+  `OFFSET_OUT_OF_RANGE` just as if the data had been deleted by total
+  retention; operators who want the "local-tighter-than-total" window
+  observable have to wait for 48d. Remote-tier retention + topic-delete
+  cascade (48e). `TopicBasedRemoteLogMetadataManager` (48f). Object-store
+  RSM (48f). Operator CRD surface (48g).
+- **Workspace fmt + clippy `-D warnings` + tests** all green. No CRDs
+  touched.
+
