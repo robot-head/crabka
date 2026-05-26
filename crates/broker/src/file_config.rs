@@ -14,6 +14,25 @@ use crabka_security::ListenerProtocol;
 
 use crate::config::ListenerSpec;
 
+/// Failures surfaced by [`FileConfig::apply_to`]. Each variant
+/// corresponds to a specific misconfiguration the broker can diagnose
+/// at startup; the variants exist (rather than a single `String`
+/// fallthrough) so the binary entry point can log structured context.
+#[derive(Debug, thiserror::Error)]
+pub enum FileConfigError {
+    /// A `[section]` referenced by another field is missing — e.g.
+    /// `[authorization] type = "opa"` without an `[authorization.opa]`
+    /// table. The payload names the missing section.
+    #[error("missing required TOML section: {0}")]
+    MissingSection(String),
+    /// `OpaAuthorizer::new` failed (see [`crate::authorizer::opa::OpaConfigError`]).
+    /// The payload is the underlying error's `Debug` form — formatted
+    /// here rather than at the call site so the binary entry point can
+    /// log a single string.
+    #[error("OPA authorizer configuration error: {0}")]
+    OpaConfig(String),
+}
+
 /// Top-level shape of `broker.toml`. `serde(deny_unknown_fields)` is
 /// off — future slices add fields and old binaries should warn rather
 /// than refuse to start.
@@ -68,6 +87,14 @@ pub struct FileConfig {
     /// local reference `RemoteStorageManager` there.
     #[serde(default)]
     pub remote_storage: Option<FileRemoteStorageConfig>,
+
+    /// Slice 53: pluggable cluster authorizer + super-user list.
+    /// `None` ⇒ [`crate::authorizer::AllowAllAuthorizer`] with empty
+    /// super-users (default-on-no-config behavior). When `Some`, the
+    /// `type` field selects the authorizer implementation; for
+    /// `type = "opa"`, the `[authorization.opa]` subtable is required.
+    #[serde(default)]
+    pub authorization: Option<FileAuthorizationConfig>,
 }
 
 /// TOML shape of `[remote_storage]`. Maps to
@@ -78,6 +105,70 @@ pub struct FileRemoteStorageConfig {
     /// Root directory for the local tiered-storage store. `Some` enables
     /// tiered storage broker-wide; absent leaves it off.
     pub storage_dir: Option<String>,
+}
+
+/// TOML shape of `[authorization]`. `type` (renamed to `authz_type` on
+/// the Rust side to avoid shadowing the keyword) defaults to
+/// `AllowAll`; `super_users` is the principal bypass list consulted by
+/// every concrete authorizer impl.
+///
+/// `deny_unknown_fields` so a misspelled `super_user` typo at the top
+/// of the `[authorization]` block is rejected at parse time rather
+/// than silently producing the wrong authorizer.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FileAuthorizationConfig {
+    #[serde(rename = "type", default)]
+    pub authz_type: AuthzType,
+    #[serde(default)]
+    pub super_users: Vec<String>,
+    /// `Some` iff `authz_type == Opa`. Required in that case;
+    /// `apply_to` returns [`FileConfigError::MissingSection`] when
+    /// omitted.
+    #[serde(default)]
+    pub opa: Option<FileOpaConfig>,
+}
+
+/// Which [`crate::authorizer::Authorizer`] impl to instantiate.
+/// `snake_case` to match the spec's `type = "allow_all" | "simple" |
+/// "opa"` wire shape.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthzType {
+    #[default]
+    AllowAll,
+    Simple,
+    Opa,
+}
+
+/// TOML shape of `[authorization.opa]`. Mirrors the constructor
+/// arguments of [`crate::authorizer::opa::OpaAuthorizer::new`]. Defaults
+/// are picked to match Strimzi's `KafkaAuthorizationOpa` (`50_000` LRU
+/// entries, 1 h TTL, fail-closed on OPA error).
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FileOpaConfig {
+    /// OPA decision endpoint URL — must include the data-API path,
+    /// e.g. `http://opa:8181/v1/data/kafka/authz/allow`.
+    pub url: String,
+    /// Permit the operation when the OPA call fails (timeout, 5xx,
+    /// parse error). Default `false` (fail-closed).
+    #[serde(default)]
+    pub allow_on_error: bool,
+    /// LRU cache capacity, in entries. Default `50_000`.
+    #[serde(default = "default_opa_maximum_cache_size")]
+    pub maximum_cache_size: usize,
+    /// Decision TTL, in milliseconds. Default `3_600_000` (1 h).
+    #[serde(default = "default_opa_expire_after_ms")]
+    pub expire_after_ms: i64,
+}
+
+fn default_opa_maximum_cache_size() -> usize {
+    50_000
+}
+
+fn default_opa_expire_after_ms() -> i64 {
+    60 * 60 * 1_000
 }
 
 /// TOML shape of `[delegation_token]`. Maps to the three `delegation_token_*`
@@ -306,8 +397,15 @@ impl FileConfig {
     /// method just merges what it's given.
     // Linear config-load pipeline; each arm is its own validator construction —
     // extraction obscures the dispatch shape.
+    //
+    // # Errors
+    //
+    // * [`FileConfigError::MissingSection`] when `[authorization] type = "opa"`
+    //   is set without the required `[authorization.opa]` subtable.
+    // * [`FileConfigError::OpaConfig`] when [`crate::authorizer::opa::OpaAuthorizer::new`]
+    //   rejects the resolved knobs (zero cache size, no tokio runtime, etc.).
     #[allow(clippy::too_many_lines)]
-    pub fn apply_to(self, cfg: &mut crate::config::BrokerConfig) {
+    pub fn apply_to(self, cfg: &mut crate::config::BrokerConfig) -> Result<(), FileConfigError> {
         let defaults = crate::config::BrokerConfig::default();
         if let Some(id) = self.broker_id
             && cfg.broker_id == defaults.broker_id
@@ -569,7 +667,8 @@ impl FileConfig {
         // Slice 51b: merge the TOML super-user list into the broker's
         // set (initially empty). `extend` over `clone_from` because a
         // future CLI/programmatic source may pre-populate entries that
-        // we should preserve.
+        // we should preserve. The slice-53 `[authorization]` block
+        // below may overwrite this with its own super-user list.
         if let Some(vec) = self.super_users {
             cfg.super_users.extend(vec.iter().cloned());
         }
@@ -581,6 +680,41 @@ impl FileConfig {
         {
             cfg.remote_log_storage_dir = Some(std::path::PathBuf::from(dir));
         }
+
+        // Slice 53: pluggable cluster authorizer. When `[authorization]`
+        // is present, its `super_users` list becomes the broker's
+        // authoritative super-user set (overwriting whatever the
+        // top-level slice-51b list contributed above — operator O2
+        // emits exactly one of the two sources). When absent, fall
+        // through to the default [`AllowAllAuthorizer`] and leave
+        // `cfg.super_users` as whatever the slice-51b extend produced.
+        if let Some(a) = self.authorization.as_ref() {
+            let auth_super_users: std::collections::HashSet<String> =
+                a.super_users.iter().cloned().collect();
+            cfg.super_users.clone_from(&auth_super_users);
+            cfg.authorizer = match a.authz_type {
+                AuthzType::AllowAll => std::sync::Arc::new(crate::authorizer::AllowAllAuthorizer),
+                AuthzType::Simple => std::sync::Arc::new(
+                    crate::authorizer::SimpleAclAuthorizer::new(auth_super_users),
+                ),
+                AuthzType::Opa => {
+                    let opa = a.opa.as_ref().ok_or_else(|| {
+                        FileConfigError::MissingSection("[authorization.opa]".into())
+                    })?;
+                    let built = crate::authorizer::opa::OpaAuthorizer::new(
+                        auth_super_users,
+                        opa.url.clone(),
+                        opa.allow_on_error,
+                        opa.maximum_cache_size,
+                        opa.expire_after_ms,
+                    )
+                    .map_err(|e| FileConfigError::OpaConfig(format!("{e:?}")))?;
+                    std::sync::Arc::new(built)
+                }
+            };
+        }
+
+        Ok(())
     }
 }
 
@@ -828,7 +962,7 @@ protocol = "Plaintext"
 "#;
         let file: FileConfig = toml::from_str(src).unwrap();
         let mut cfg = BrokerConfig::default();
-        file.apply_to(&mut cfg);
+        file.apply_to(&mut cfg).unwrap();
 
         assert_eq!(cfg.listeners.len(), 1);
         assert_eq!(cfg.listeners[0].name, "PLAIN");
@@ -848,7 +982,7 @@ protocol = "Plaintext"
             ..BrokerConfig::default()
         };
 
-        file.apply_to(&mut cfg);
+        file.apply_to(&mut cfg).unwrap();
 
         // CLI value wins because it differs from default.
         assert_eq!(cfg.broker_id, 7);
@@ -862,7 +996,7 @@ protocol = "Plaintext"
         let file: FileConfig = toml::from_str(src).unwrap();
         let mut cfg = BrokerConfig::default(); // broker_id == default (1)
 
-        file.apply_to(&mut cfg);
+        file.apply_to(&mut cfg).unwrap();
 
         assert_eq!(cfg.broker_id, 42);
     }
@@ -918,7 +1052,7 @@ client_auth = "Required"
 "#;
         let file: FileConfig = toml::from_str(src).expect("parse");
         let mut cfg = crate::config::BrokerConfig::default();
-        file.apply_to(&mut cfg);
+        file.apply_to(&mut cfg).unwrap();
         assert_eq!(
             cfg.controller_listener_protocol,
             crabka_security::ListenerProtocol::Ssl
@@ -939,7 +1073,7 @@ jwks_refresh_interval_ms = 60000
 "#;
         let file: FileConfig = toml::from_str(src).expect("parse");
         let mut cfg = crate::config::BrokerConfig::default();
-        file.apply_to(&mut cfg);
+        file.apply_to(&mut cfg).unwrap();
         assert_eq!(
             cfg.oauthbearer_jwks_endpoint.as_deref(),
             Some("https://idp.example/jwks")
@@ -967,7 +1101,7 @@ allowable_clock_skew_ms = 5000
 "#;
         let file: FileConfig = toml::from_str(src).expect("parse");
         let mut cfg = crate::config::BrokerConfig::default();
-        file.apply_to(&mut cfg);
+        file.apply_to(&mut cfg).unwrap();
         assert!(cfg.oauthbearer_jwks_endpoint.is_none());
         match cfg.oauthbearer_validator {
             crabka_security::OAuthBearerValidator::Unsecured(v) => {
@@ -988,7 +1122,7 @@ idp_tls_trust = "/etc/crabka/oauth/idp-ca.pem"
 "#;
         let file: FileConfig = toml::from_str(toml).unwrap();
         let mut cfg = crate::config::BrokerConfig::default();
-        file.apply_to(&mut cfg);
+        file.apply_to(&mut cfg).unwrap();
         assert_eq!(
             cfg.oauthbearer_idp_tls_trust.as_deref(),
             Some(std::path::Path::new("/etc/crabka/oauth/idp-ca.pem")),
@@ -1003,7 +1137,7 @@ jwks_endpoint_uri = "https://idp.example/certs"
 "#;
         let file: FileConfig = toml::from_str(toml).unwrap();
         let mut cfg = crate::config::BrokerConfig::default();
-        file.apply_to(&mut cfg);
+        file.apply_to(&mut cfg).unwrap();
         assert!(cfg.oauthbearer_idp_tls_trust.is_none());
     }
 
@@ -1023,7 +1157,7 @@ introspection_client_secret_path = '{}'
         );
         let file: FileConfig = toml::from_str(&toml).unwrap();
         let mut cfg = crate::config::BrokerConfig::default();
-        file.apply_to(&mut cfg);
+        file.apply_to(&mut cfg).unwrap();
         assert!(matches!(
             cfg.oauthbearer_validator,
             crabka_security::OAuthBearerValidator::Introspection(_)
@@ -1048,7 +1182,7 @@ introspection_client_secret_path = '{}'
         );
         let file: FileConfig = toml::from_str(&toml).unwrap();
         let mut cfg = crate::config::BrokerConfig::default();
-        file.apply_to(&mut cfg);
+        file.apply_to(&mut cfg).unwrap();
     }
 
     #[test]
@@ -1067,7 +1201,7 @@ introspection_client_secret_path = '{}'
         );
         let file: FileConfig = toml::from_str(&toml).unwrap();
         let mut cfg = crate::config::BrokerConfig::default();
-        file.apply_to(&mut cfg);
+        file.apply_to(&mut cfg).unwrap();
     }
 
     #[test]
@@ -1080,7 +1214,7 @@ introspection_client_id = "kafka-broker"
 "#;
         let file: FileConfig = toml::from_str(toml).unwrap();
         let mut cfg = crate::config::BrokerConfig::default();
-        file.apply_to(&mut cfg);
+        file.apply_to(&mut cfg).unwrap();
     }
 
     #[test]
@@ -1100,7 +1234,7 @@ introspection_client_secret_path = '{}'
         );
         let file: FileConfig = toml::from_str(&toml).unwrap();
         let mut cfg = crate::config::BrokerConfig::default();
-        file.apply_to(&mut cfg);
+        file.apply_to(&mut cfg).unwrap();
         match cfg.oauthbearer_validator {
             crabka_security::OAuthBearerValidator::Introspection(v) => assert!(v.call_userinfo),
             other => panic!("expected Introspection, got {other:?}"),
@@ -1123,7 +1257,7 @@ introspection_client_secret_path = '{}'
         );
         let file: FileConfig = toml::from_str(&toml).unwrap();
         let mut cfg = crate::config::BrokerConfig::default();
-        file.apply_to(&mut cfg);
+        file.apply_to(&mut cfg).unwrap();
         match cfg.oauthbearer_validator {
             crabka_security::OAuthBearerValidator::Introspection(v) => assert!(!v.call_userinfo),
             other => panic!("expected Introspection, got {other:?}"),
@@ -1147,7 +1281,7 @@ introspection_client_secret_path = '{}'
             ..BrokerConfig::default()
         };
 
-        file.apply_to(&mut cfg);
+        file.apply_to(&mut cfg).unwrap();
 
         assert_eq!(cfg.listeners.len(), 1);
         assert_eq!(cfg.listeners[0].name, "X");
@@ -1161,7 +1295,7 @@ storage_dir = "/var/lib/crabka/tier"
 "#;
         let file: FileConfig = toml::from_str(toml).unwrap();
         let mut cfg = crate::config::BrokerConfig::default();
-        file.apply_to(&mut cfg);
+        file.apply_to(&mut cfg).unwrap();
         assert_eq!(
             cfg.remote_log_storage_dir,
             Some(std::path::PathBuf::from("/var/lib/crabka/tier"))
@@ -1172,7 +1306,7 @@ storage_dir = "/var/lib/crabka/tier"
     fn no_remote_storage_section_leaves_dir_none() {
         let file: FileConfig = toml::from_str("broker_id = 1").unwrap();
         let mut cfg = crate::config::BrokerConfig::default();
-        file.apply_to(&mut cfg);
+        file.apply_to(&mut cfg).unwrap();
         assert!(cfg.remote_log_storage_dir.is_none());
     }
 
@@ -1191,7 +1325,7 @@ secret_key = "abcdef"
 "#;
             let file: FileConfig = toml::from_str(toml).unwrap();
             let mut cfg = crate::config::BrokerConfig::default();
-            file.apply_to(&mut cfg);
+            file.apply_to(&mut cfg).unwrap();
 
             assert_eq!(
                 cfg.delegation_token_secret_key
@@ -1228,7 +1362,7 @@ secret_key = "abcdef"
 "#;
             let file: FileConfig = toml::from_str(toml).unwrap();
             let mut cfg = crate::config::BrokerConfig::default();
-            file.apply_to(&mut cfg);
+            file.apply_to(&mut cfg).unwrap();
             assert_eq!(
                 cfg.delegation_token_default_renew_period_ms,
                 24 * 60 * 60 * 1_000,
@@ -1243,7 +1377,7 @@ default_renew_period_ms = 7200000
 "#;
             let file: FileConfig = toml::from_str(toml).unwrap();
             let mut cfg = crate::config::BrokerConfig::default();
-            file.apply_to(&mut cfg);
+            file.apply_to(&mut cfg).unwrap();
             assert_eq!(
                 cfg.delegation_token_default_renew_period_ms, 7_200_000,
                 "TOML default_renew_period_ms must override the default",
@@ -1264,7 +1398,7 @@ secret_key = "toml-loses"
 "#;
                 let file: FileConfig = toml::from_str(toml).unwrap();
                 let mut cfg = crate::config::BrokerConfig::default();
-                file.apply_to(&mut cfg);
+                file.apply_to(&mut cfg).unwrap();
 
                 assert_eq!(
                     cfg.delegation_token_secret_key
@@ -1282,7 +1416,7 @@ secret_key = "toml-loses"
         temp_env::with_var_unset("CRABKA_DELEGATION_TOKEN_SECRET_KEY", || {
             let file: FileConfig = toml::from_str("").unwrap();
             let mut cfg = crate::config::BrokerConfig::default();
-            file.apply_to(&mut cfg);
+            file.apply_to(&mut cfg).unwrap();
 
             assert!(cfg.delegation_token_secret_key.is_none());
             // Lifetime knobs stay at their defaults when no section is present.
@@ -1308,10 +1442,151 @@ super_users = ["ANONYMOUS", "admin"]
 "#;
         let file: FileConfig = toml::from_str(toml).unwrap();
         let mut cfg = crate::config::BrokerConfig::default();
-        file.apply_to(&mut cfg);
+        file.apply_to(&mut cfg).unwrap();
 
         assert!(cfg.super_users.contains("ANONYMOUS"));
         assert!(cfg.super_users.contains("admin"));
         assert_eq!(cfg.super_users.len(), 2);
+    }
+
+    // Slice 53 — `[authorization]` TOML section → `Arc<dyn Authorizer>`.
+
+    fn test_principal(name: &str) -> crabka_security::Principal {
+        crabka_security::Principal {
+            name: name.into(),
+            auth_method: crabka_security::AuthMethod::SaslPlain,
+            groups: vec![],
+        }
+    }
+
+    #[test]
+    fn authorization_section_simple_builds_simple_acl_authorizer() {
+        use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
+        use crabka_metadata::{AclOperation, MetadataImage, ResourceType};
+
+        let toml = r#"
+[authorization]
+type = "simple"
+super_users = ["admin"]
+"#;
+        let file: FileConfig = toml::from_str(toml).unwrap();
+        let mut cfg = crate::config::BrokerConfig::default();
+        file.apply_to(&mut cfg).unwrap();
+
+        assert!(
+            cfg.super_users.contains("admin"),
+            "[authorization].super_users must populate BrokerConfig.super_users for slice-51 act-as parity"
+        );
+        // `admin` is a super-user → bypass returns Allow even with an
+        // empty MetadataImage (no ACLs). This is the SimpleAclAuthorizer
+        // contract; AllowAllAuthorizer would also Allow, but the
+        // slice-53 default-deny SimpleAcl behavior is exercised by the
+        // explicit `type = "simple"` branch's own unit tests.
+        let img = MetadataImage::new(uuid::Uuid::nil());
+        let admin = test_principal("admin");
+        let host: std::net::SocketAddr = "127.0.0.1:9092".parse().unwrap();
+        let req = AuthorizationRequest {
+            principal: &admin,
+            host: &host,
+            resource_type: ResourceType::Topic,
+            resource_name: "t",
+            operation: AclOperation::Read,
+        };
+        assert_eq!(
+            cfg.authorizer.authorize(&img, &req),
+            AuthorizationResult::Allow
+        );
+
+        // Non-super-user with no matching ACL → Deny (proves we got
+        // SimpleAcl, not AllowAll).
+        let alice = test_principal("alice");
+        let req_alice = AuthorizationRequest {
+            principal: &alice,
+            host: &host,
+            resource_type: ResourceType::Topic,
+            resource_name: "t",
+            operation: AclOperation::Read,
+        };
+        assert_eq!(
+            cfg.authorizer.authorize(&img, &req_alice),
+            AuthorizationResult::Deny,
+            "type=simple must default-deny non-super-users with no matching ACL"
+        );
+    }
+
+    #[test]
+    fn authorization_section_opa_builds_opa_authorizer() {
+        use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
+        use crabka_metadata::{AclOperation, MetadataImage, ResourceType};
+
+        // `OpaAuthorizer::new` captures `Handle::try_current()` — needs
+        // an active tokio runtime. `Runtime::new()` defaults to
+        // multi-thread, which the OPA `block_in_place` bridge requires
+        // for any actual HTTP call (super-user bypass below sidesteps
+        // that).
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let toml = r#"
+[authorization]
+type = "opa"
+super_users = ["ANONYMOUS"]
+
+[authorization.opa]
+url = "http://opa.invalid:8181/v1/data/k/a"
+allow_on_error = false
+maximum_cache_size = 100
+expire_after_ms = 60000
+"#;
+            let file: FileConfig = toml::from_str(toml).unwrap();
+            let mut cfg = crate::config::BrokerConfig::default();
+            file.apply_to(&mut cfg).unwrap();
+
+            assert!(cfg.super_users.contains("ANONYMOUS"));
+
+            // Smoke-check via the super-user bypass — no HTTP call is
+            // made (and `opa.invalid` deliberately doesn't resolve).
+            let img = MetadataImage::new(uuid::Uuid::nil());
+            let anon = test_principal("ANONYMOUS");
+            let host: std::net::SocketAddr = "127.0.0.1:9092".parse().unwrap();
+            let req = AuthorizationRequest {
+                principal: &anon,
+                host: &host,
+                resource_type: ResourceType::Topic,
+                resource_name: "t",
+                operation: AclOperation::Read,
+            };
+            assert_eq!(
+                cfg.authorizer.authorize(&img, &req),
+                AuthorizationResult::Allow,
+                "OPA super-user bypass must short-circuit before any HTTP call"
+            );
+        });
+    }
+
+    #[test]
+    fn authorization_section_absent_defaults_to_allow_all() {
+        use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
+        use crabka_metadata::{AclOperation, MetadataImage, ResourceType};
+
+        let file: FileConfig = toml::from_str("").unwrap();
+        let mut cfg = crate::config::BrokerConfig::default();
+        file.apply_to(&mut cfg).unwrap();
+
+        // Default authorizer is AllowAll — anyone gets Allow, including
+        // a principal who isn't in any super-user set.
+        let img = MetadataImage::new(uuid::Uuid::nil());
+        let anyone = test_principal("anyone");
+        let host: std::net::SocketAddr = "127.0.0.1:9092".parse().unwrap();
+        let req = AuthorizationRequest {
+            principal: &anyone,
+            host: &host,
+            resource_type: ResourceType::Topic,
+            resource_name: "t",
+            operation: AclOperation::Read,
+        };
+        assert_eq!(
+            cfg.authorizer.authorize(&img, &req),
+            AuthorizationResult::Allow
+        );
     }
 }

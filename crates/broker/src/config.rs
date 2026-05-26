@@ -145,8 +145,20 @@ pub struct BrokerConfig {
     /// (PLAIN auth disabled until mechanisms are explicitly enabled).
     pub plain_credentials: HashMap<String, String>,
 
-    /// Usernames that bypass ACL checks (super-users).
+    /// Usernames that bypass ACL checks (super-users). Slice 51's
+    /// `create_delegation_token` act-as gate reads this directly; the
+    /// active [`crate::authorizer::Authorizer`] impl also reads it
+    /// (`SimpleAclAuthorizer` / `OpaAuthorizer`). Both are populated
+    /// from the same `[authorization]` TOML stanza by `file_config`.
     pub super_users: std::collections::HashSet<String>,
+
+    /// Slice 53: pluggable cluster authorizer. One boxed instance per
+    /// broker; configured via `[authorization]` in `broker.toml`. The
+    /// default is [`crate::authorizer::AllowAllAuthorizer`] — explicit
+    /// "allow everything" — which replaces the slice-13
+    /// "no super-users + no ACLs ⇒ Allow" compat shim that previously
+    /// lived inside the ACL impl.
+    pub authorizer: std::sync::Arc<dyn crate::authorizer::Authorizer>,
 
     /// TLS configuration. `None` — no TLS (slice 12 default).
     pub tls_config: Option<TlsConfig>,
@@ -356,6 +368,7 @@ impl BrokerConfig {
             inter_broker_credentials: None,
             plain_credentials: HashMap::new(),
             super_users: std::collections::HashSet::new(),
+            authorizer: std::sync::Arc::new(crate::authorizer::AllowAllAuthorizer),
             tls_config: None,
             enabled_sasl_mechanisms: vec![],
             oauthbearer_validator: crabka_security::OAuthBearerValidator::default(),
@@ -542,6 +555,7 @@ impl Default for BrokerConfig {
             inter_broker_credentials: None,
             plain_credentials: HashMap::new(),
             super_users: std::collections::HashSet::new(),
+            authorizer: std::sync::Arc::new(crate::authorizer::AllowAllAuthorizer),
             tls_config: None,
             enabled_sasl_mechanisms: vec![],
             oauthbearer_validator: crabka_security::OAuthBearerValidator::default(),

@@ -526,6 +526,7 @@ mod tests {
                 clients_ca: None,
                 logging: None,
                 delegation_token: None,
+                authorization: None,
             },
         );
         k.metadata.namespace = Some(namespace.into());

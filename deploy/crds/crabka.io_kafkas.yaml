@@ -25,6 +25,43 @@ spec:
               broker pods are described by sibling `KafkaNodePool`s labeled
               `crabka.io/cluster=<this name>`.
             properties:
+              authorization:
+                description: |-
+                  Slice 53: cluster-level authorizer selection. When `None`, the
+                  broker uses the default `AllowAll` authorizer (no ACL checks).
+                  When `Some`, the operator renders the `[authorization]` TOML
+                  section so the broker builds the matching `Arc<dyn Authorizer>`
+                  (`SimpleAclAuthorizer` for `type: simple`, `OpaAuthorizer` for
+                  `type: opa`). With `simple` or `opa` selected, the operator's
+                  inter-broker principal MUST appear in `super_users` (no implicit
+                  `ANONYMOUS` allow); operators opt in explicitly.
+                nullable: true
+                properties:
+                  allowOnError:
+                    type: boolean
+                  expireAfterMs:
+                    minimum: 1000.0
+                    type: integer
+                  initialCacheCapacity:
+                    minimum: 0.0
+                    type: integer
+                  maximumCacheSize:
+                    minimum: 1.0
+                    type: integer
+                  superUsers:
+                    items:
+                      type: string
+                    type: array
+                  type:
+                    enum:
+                    - simple
+                    - opa
+                    type: string
+                  url:
+                    type: string
+                required:
+                - type
+                type: object
               clientsCa:
                 description: |-
                   Slice 30: per-cluster CA used to sign `KafkaUser` TLS certs (slice

@@ -29,7 +29,7 @@ use crabka_protocol::owned::txn_offset_commit_response::{
 use crabka_protocol::records::{Attributes, Record, RecordBatch};
 use crabka_protocol::{Decode, Encode};
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize, authorize_topics};
+use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize_topics};
 use crate::broker::Broker;
 use crate::codes;
 use crate::coordinator::bootstrap::{OFFSETS_PARTITION, OFFSETS_TOPIC};
@@ -52,7 +52,7 @@ pub(crate) async fn handle(
     // ── slice-13 ACL preamble: Write on TransactionalId ────────────────
     {
         let image = broker.controller.current_image();
-        let super_users = &broker.config.super_users;
+        let authorizer = broker.config.authorizer.as_ref();
         let tid_req = AuthorizationRequest {
             principal: ctx.principal,
             host: ctx.peer,
@@ -60,7 +60,7 @@ pub(crate) async fn handle(
             resource_name: req.transactional_id.as_str(),
             operation: AclOperation::Write,
         };
-        if authorize(&image, super_users, &tid_req) == AuthorizationResult::Deny {
+        if authorizer.authorize(&image, &tid_req) == AuthorizationResult::Deny {
             return encode_err_all(version, &req, codes::TRANSACTIONAL_ID_AUTHORIZATION_FAILED);
         }
         // Group Read gate.
@@ -71,7 +71,7 @@ pub(crate) async fn handle(
             resource_name: req.group_id.as_str(),
             operation: AclOperation::Read,
         };
-        if authorize(&image, super_users, &group_req) == AuthorizationResult::Deny {
+        if authorizer.authorize(&image, &group_req) == AuthorizationResult::Deny {
             return encode_err_all(version, &req, codes::GROUP_AUTHORIZATION_FAILED);
         }
     }
@@ -81,8 +81,8 @@ pub(crate) async fn handle(
         let image = broker.controller.current_image();
         let topic_names: Vec<&str> = req.topics.iter().map(|t| t.name.as_str()).collect();
         authorize_topics(
+            broker.config.authorizer.as_ref(),
             &image,
-            &broker.config.super_users,
             ctx.principal,
             ctx.peer,
             AclOperation::Read,

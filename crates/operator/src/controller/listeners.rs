@@ -914,6 +914,7 @@ mod service_rendering_tests {
                 clients_ca: None,
                 logging: None,
                 delegation_token: None,
+                authorization: None,
             },
         );
         k.meta_mut().namespace = Some("default".into());
@@ -2674,6 +2675,92 @@ pub struct BrokerTlsRender {
     pub client_auth: String,
 }
 
+/// Slice 53: intermediate shape for rendering the `[authorization]`
+/// TOML block. Built from `Kafka.spec.authorization` (+ the
+/// delegation-token enablement flag) by
+/// [`AuthorizationRender::from_spec`] / [`AuthorizationRender::auto_injected_simple`].
+struct AuthorizationRender {
+    /// `"simple"` or `"opa"` — matches the broker's `AuthzType` wire
+    /// names (`snake_case`). Never `"allow_all"`: that's the omit-block
+    /// case, not a render shape.
+    kind: &'static str,
+    /// Final super-user list emitted to TOML. Always rendered (even when
+    /// empty) so the broker's `[authorization].super_users`
+    /// authoritative-overwrite path is deterministic.
+    super_users: Vec<String>,
+    /// `Some` iff `kind == "opa"`; carries the `[authorization.opa]`
+    /// subtable inputs.
+    opa: Option<AuthorizationOpaRender>,
+}
+
+/// `[authorization.opa]` subtable inputs. `initial_cache_capacity` is
+/// intentionally omitted — the broker's `FileOpaConfig` uses
+/// `deny_unknown_fields` and only carries `maximum_cache_size`.
+struct AuthorizationOpaRender {
+    url: String,
+    allow_on_error: Option<bool>,
+    maximum_cache_size: Option<u32>,
+    expire_after_ms: Option<i64>,
+}
+
+impl AuthorizationRender {
+    /// Build from an explicit `Kafka.spec.authorization`. When
+    /// `delegation_token_enabled`, merges `"ANONYMOUS"` into
+    /// `super_users` (de-duplicated, ordering preserved) — the
+    /// slice-51b act-as path requires the operator's PLAINTEXT
+    /// inter-broker principal to be a super-user.
+    fn from_spec(a: &crate::crd::kafka::Authorization, delegation_token_enabled: bool) -> Self {
+        match a {
+            crate::crd::kafka::Authorization::Simple(s) => Self {
+                kind: "simple",
+                super_users: merge_anonymous(&s.super_users, delegation_token_enabled),
+                opa: None,
+            },
+            crate::crd::kafka::Authorization::Opa(o) => Self {
+                kind: "opa",
+                super_users: merge_anonymous(&o.super_users, delegation_token_enabled),
+                opa: Some(AuthorizationOpaRender {
+                    url: o.url.clone(),
+                    allow_on_error: o.allow_on_error,
+                    maximum_cache_size: o.maximum_cache_size,
+                    expire_after_ms: o.expire_after_ms,
+                }),
+            },
+        }
+    }
+
+    /// Slice-51b backcompat: when `delegation_token_enabled` is set but
+    /// `Kafka.spec.authorization` is unset, the operator silently
+    /// injects a `type = "simple", super_users = ["ANONYMOUS"]` block so
+    /// the act-as path keeps working. Documented in the spec §2.2.
+    fn auto_injected_simple() -> Self {
+        Self {
+            kind: "simple",
+            super_users: vec!["ANONYMOUS".to_string()],
+            opa: None,
+        }
+    }
+}
+
+/// Merge `"ANONYMOUS"` into `base` when `inject` is set. Preserves
+/// `base`'s ordering and de-duplicates — if `"ANONYMOUS"` is already in
+/// `base` the merge is a no-op.
+fn merge_anonymous(base: &[String], inject: bool) -> Vec<String> {
+    let mut out: Vec<String> = base.to_vec();
+    if inject && !out.iter().any(|s| s == "ANONYMOUS") {
+        out.push("ANONYMOUS".to_string());
+    }
+    out
+}
+
+/// Render a `Vec<String>` as a TOML inline string array, e.g.
+/// `["a", "b"]`. Each element is double-quoted; no escaping (the
+/// principal strings we emit never contain `"` or `\`).
+fn toml_string_array(items: &[String]) -> String {
+    let quoted: Vec<String> = items.iter().map(|s| format!("\"{s}\"")).collect();
+    format!("[{}]", quoted.join(", "))
+}
+
 /// Render the complete TOML for one broker (cluster-wide content +
 /// this broker's advertised addresses). Deterministic — same input
 /// always produces byte-identical output so the slice-21 config-hash
@@ -2690,6 +2777,7 @@ pub fn render_broker_toml(
     tls: Option<&BrokerTlsRender>,
     clients_ca_path: Option<&str>,
     delegation_token_enabled: bool,
+    authorization: Option<&crate::crd::kafka::Authorization>,
 ) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
@@ -2710,17 +2798,6 @@ pub fn render_broker_toml(
             "controller_listener_protocol = \"{}\"",
             tls.controller_listener_protocol
         );
-    }
-    // Slice 51b: when delegation tokens are enabled on this cluster, the
-    // operator's `KafkaUser` reconcile loop calls `CreateDelegationToken`
-    // act-as-<user>. The broker's act-as check requires the caller's
-    // principal to be in `super_users`. The operator currently talks to
-    // the broker over the PLAINTEXT inter-broker listener (principal:
-    // `ANONYMOUS`), so we hardcode that here. Production deployments
-    // using SASL inter-broker need a CRD-level super-user list — tracked
-    // as a follow-up in STATUS.md.
-    if delegation_token_enabled {
-        let _ = writeln!(out, "super_users = [\"ANONYMOUS\"]");
     }
     out.push('\n');
 
@@ -2785,6 +2862,58 @@ pub fn render_broker_toml(
             let _ = writeln!(out, "\"{k}\" = \"{v}\"");
         }
         out.push('\n');
+    }
+
+    // Slice 53: `[authorization]` block. Folds in the slice-51b
+    // `super_users = ["ANONYMOUS"]` hack — the broker now consumes
+    // super-users exclusively via `[authorization].super_users` when the
+    // block is present.
+    //
+    // Rules:
+    //   * `authorization = Some(Simple { super_users })` → render
+    //     `type = "simple"` with the spec super-users, MERGED with
+    //     `"ANONYMOUS"` when `delegation_token_enabled` (operator's
+    //     PLAINTEXT inter-broker connection identifies as ANONYMOUS and
+    //     the broker's act-as check requires it to be a super-user).
+    //   * `authorization = Some(Opa { ... })` → render `type = "opa"`
+    //     plus the `[authorization.opa]` subtable, with the same
+    //     ANONYMOUS-merge rule for delegation-token clusters.
+    //   * `authorization = None` AND `delegation_token_enabled` → auto-
+    //     inject `type = "simple", super_users = ["ANONYMOUS"]` so the
+    //     slice-51b act-as path keeps working without forcing the user
+    //     to author an explicit `Kafka.spec.authorization`.
+    //   * `authorization = None` AND not delegation-token → omit the
+    //     block entirely; broker falls back to `AllowAllAuthorizer`.
+    //
+    // We intentionally do NOT emit `initial_cache_capacity` from the
+    // `OpaAuthorization` CRD field — the broker's `FileOpaConfig` uses
+    // `deny_unknown_fields` and only carries `maximum_cache_size`.
+    let authz_render = match (authorization, delegation_token_enabled) {
+        (Some(a), dt) => Some(AuthorizationRender::from_spec(a, dt)),
+        (None, true) => Some(AuthorizationRender::auto_injected_simple()),
+        (None, false) => None,
+    };
+    if let Some(r) = &authz_render {
+        let _ = writeln!(out, "[authorization]");
+        let _ = writeln!(out, "type = \"{}\"", r.kind);
+        // super_users is always rendered (even if empty) so the broker's
+        // `[authorization].super_users` overwrite path is deterministic.
+        let _ = writeln!(out, "super_users = {}", toml_string_array(&r.super_users));
+        out.push('\n');
+        if let Some(opa) = &r.opa {
+            let _ = writeln!(out, "[authorization.opa]");
+            let _ = writeln!(out, "url = \"{}\"", opa.url);
+            if let Some(b) = opa.allow_on_error {
+                let _ = writeln!(out, "allow_on_error = {b}");
+            }
+            if let Some(n) = opa.maximum_cache_size {
+                let _ = writeln!(out, "maximum_cache_size = {n}");
+            }
+            if let Some(n) = opa.expire_after_ms {
+                let _ = writeln!(out, "expire_after_ms = {n}");
+            }
+            out.push('\n');
+        }
     }
 
     // Broker-global [oauthbearer] block (slice 49b TOML shape). Emitted
@@ -2935,8 +3064,9 @@ mod toml_rendering_tests {
         );
         let listeners = vec![synthesized_default_listener()];
         let props = std::collections::BTreeMap::new();
-        let toml_str =
-            render_broker_toml(0, &listeners, &addrs, "PLAIN", &props, None, None, false);
+        let toml_str = render_broker_toml(
+            0, &listeners, &addrs, "PLAIN", &props, None, None, false, None,
+        );
 
         // Sanity: parses cleanly with the broker's FileConfig.
         let parsed: crabka_broker::file_config::FileConfig =
@@ -2962,8 +3092,8 @@ mod toml_rendering_tests {
         p.insert("z.last".into(), "1".into());
         p.insert("a.first".into(), "0".into());
 
-        let t1 = render_broker_toml(0, &l, &addrs, "PLAIN", &p, None, None, false);
-        let t2 = render_broker_toml(0, &l, &addrs, "PLAIN", &p, None, None, false);
+        let t1 = render_broker_toml(0, &l, &addrs, "PLAIN", &p, None, None, false, None);
+        let t2 = render_broker_toml(0, &l, &addrs, "PLAIN", &p, None, None, false, None);
         assert_eq!(t1, t2);
         // Sorted property keys (BTreeMap iteration).
         let a_pos = t1.find("a.first").unwrap();
@@ -2990,12 +3120,18 @@ mod toml_rendering_tests {
             None,
             None,
             false,
+            None,
         );
         assert!(!t.contains("[server_properties]"), "got:\n{t}");
     }
 
     #[test]
     fn render_broker_toml_emits_super_users_anonymous_when_delegation_token_set() {
+        // Slice 53: when `delegation_token_enabled` and no explicit
+        // `Kafka.spec.authorization`, the renderer auto-injects an
+        // `[authorization]` block with `type = "simple", super_users =
+        // ["ANONYMOUS"]` — preserving the slice-51b act-as path through
+        // the new pluggable-authorizer plumbing.
         let mut addrs = std::collections::BTreeMap::new();
         addrs.insert(
             "PLAIN".into(),
@@ -3013,18 +3149,29 @@ mod toml_rendering_tests {
             None,
             None,
             true,
+            None,
+        );
+        assert!(
+            t.contains("[authorization]"),
+            "expected auto-injected [authorization] block, got:\n{t}"
+        );
+        assert!(
+            t.contains("type = \"simple\""),
+            "expected type = \"simple\", got:\n{t}"
         );
         assert!(
             t.contains("super_users = [\"ANONYMOUS\"]"),
             "expected ANONYMOUS super-user line when delegation tokens are enabled, got:\n{t}"
         );
-        // And the rendered TOML must still round-trip through FileConfig.
+        // Round-trip: the broker's FileConfig must accept the rendered
+        // block and the `[authorization].super_users` field must carry
+        // ANONYMOUS.
         let parsed: crabka_broker::file_config::FileConfig =
             toml::from_str(&t).expect("rendered TOML must parse with broker FileConfig");
-        assert_eq!(
-            parsed.super_users.as_deref(),
-            Some(&["ANONYMOUS".to_string()][..]),
-        );
+        let authz = parsed
+            .authorization
+            .expect("[authorization] block must round-trip into FileConfig");
+        assert_eq!(authz.super_users, vec!["ANONYMOUS".to_string()]);
     }
 
     #[test]
@@ -3046,10 +3193,216 @@ mod toml_rendering_tests {
             None,
             None,
             false,
+            None,
         );
         assert!(
             !t.contains("super_users"),
             "super_users must be absent when delegation tokens are disabled, got:\n{t}"
+        );
+        assert!(
+            !t.contains("[authorization]"),
+            "[authorization] block must be omitted when both `authorization` and \
+             `delegation_token_enabled` are unset; broker falls back to AllowAll, \
+             got:\n{t}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Slice 53 — `[authorization]` block render
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn render_broker_toml_emits_simple_authorization_section() {
+        let mut addrs = std::collections::BTreeMap::new();
+        addrs.insert(
+            "PLAIN".into(),
+            AdvertisedAddress {
+                host: "h".into(),
+                port: 9092,
+            },
+        );
+        let authz =
+            crate::crd::kafka::Authorization::Simple(crate::crd::kafka::SimpleAuthorization {
+                super_users: vec!["admin".into()],
+            });
+        let t = render_broker_toml(
+            0,
+            &[synthesized_default_listener()],
+            &addrs,
+            "PLAIN",
+            &std::collections::BTreeMap::new(),
+            None,
+            None,
+            false,
+            Some(&authz),
+        );
+        assert!(
+            t.contains("[authorization]"),
+            "expected [authorization] section, got:\n{t}"
+        );
+        assert!(
+            t.contains("type = \"simple\""),
+            "expected type = \"simple\" line, got:\n{t}"
+        );
+        assert!(
+            t.contains("super_users = [\"admin\"]"),
+            "expected super_users = [\"admin\"] line, got:\n{t}"
+        );
+        // No OPA subtable when type = simple.
+        assert!(
+            !t.contains("[authorization.opa]"),
+            "[authorization.opa] must NOT be emitted for type = simple, got:\n{t}"
+        );
+        // Round-trip through the broker's FileConfig.
+        let parsed: crabka_broker::file_config::FileConfig =
+            toml::from_str(&t).expect("rendered TOML must parse with broker FileConfig");
+        let a = parsed.authorization.expect("[authorization] present");
+        assert_eq!(a.super_users, vec!["admin".to_string()]);
+        assert!(a.opa.is_none());
+    }
+
+    #[test]
+    fn render_broker_toml_emits_opa_authorization_section() {
+        let mut addrs = std::collections::BTreeMap::new();
+        addrs.insert(
+            "PLAIN".into(),
+            AdvertisedAddress {
+                host: "h".into(),
+                port: 9092,
+            },
+        );
+        let authz = crate::crd::kafka::Authorization::Opa(crate::crd::kafka::OpaAuthorization {
+            url: "http://opa:8181/v1/data/k/a".into(),
+            allow_on_error: Some(false),
+            initial_cache_capacity: None,
+            maximum_cache_size: Some(1000),
+            expire_after_ms: Some(60000),
+            super_users: vec!["ANONYMOUS".into()],
+        });
+        let t = render_broker_toml(
+            0,
+            &[synthesized_default_listener()],
+            &addrs,
+            "PLAIN",
+            &std::collections::BTreeMap::new(),
+            None,
+            None,
+            false,
+            Some(&authz),
+        );
+        assert!(
+            t.contains("type = \"opa\""),
+            "expected type = \"opa\" line, got:\n{t}"
+        );
+        assert!(
+            t.contains("super_users = [\"ANONYMOUS\"]"),
+            "expected super_users = [\"ANONYMOUS\"] line, got:\n{t}"
+        );
+        assert!(
+            t.contains("[authorization.opa]"),
+            "expected [authorization.opa] subtable, got:\n{t}"
+        );
+        assert!(
+            t.contains("url = \"http://opa:8181/v1/data/k/a\""),
+            "expected url line in [authorization.opa], got:\n{t}"
+        );
+        assert!(
+            t.contains("allow_on_error = false"),
+            "expected allow_on_error = false, got:\n{t}"
+        );
+        assert!(
+            t.contains("maximum_cache_size = 1000"),
+            "expected maximum_cache_size = 1000, got:\n{t}"
+        );
+        assert!(
+            t.contains("expire_after_ms = 60000"),
+            "expected expire_after_ms = 60000, got:\n{t}"
+        );
+        // The CRD-level `initial_cache_capacity` MUST NOT be emitted:
+        // the broker's `FileOpaConfig` uses `deny_unknown_fields` and
+        // has no such field. A leaked key would refuse to parse.
+        assert!(
+            !t.contains("initial_cache_capacity"),
+            "initial_cache_capacity MUST NOT be emitted (broker rejects unknown fields), got:\n{t}"
+        );
+    }
+
+    #[test]
+    fn render_broker_toml_omits_authorization_section_when_unset() {
+        let mut addrs = std::collections::BTreeMap::new();
+        addrs.insert(
+            "PLAIN".into(),
+            AdvertisedAddress {
+                host: "h".into(),
+                port: 9092,
+            },
+        );
+        let t = render_broker_toml(
+            0,
+            &[synthesized_default_listener()],
+            &addrs,
+            "PLAIN",
+            &std::collections::BTreeMap::new(),
+            None,
+            None,
+            false,
+            None,
+        );
+        assert!(
+            !t.contains("[authorization]"),
+            "no [authorization] section must be emitted when both inputs are unset \
+             (broker falls back to AllowAllAuthorizer), got:\n{t}"
+        );
+    }
+
+    #[test]
+    fn render_broker_toml_auto_injects_simple_authorization_for_delegation_token() {
+        // Bonus: when `delegation_token_enabled` but the CRD has no
+        // explicit `Kafka.spec.authorization`, the operator auto-injects
+        // the slice-51b-shaped `type = "simple", super_users =
+        // ["ANONYMOUS"]` block so the act-as path keeps working.
+        let mut addrs = std::collections::BTreeMap::new();
+        addrs.insert(
+            "PLAIN".into(),
+            AdvertisedAddress {
+                host: "h".into(),
+                port: 9092,
+            },
+        );
+        let t = render_broker_toml(
+            0,
+            &[synthesized_default_listener()],
+            &addrs,
+            "PLAIN",
+            &std::collections::BTreeMap::new(),
+            None,
+            None,
+            true,
+            None,
+        );
+        assert!(t.contains("[authorization]"), "TOML:\n{t}");
+        assert!(t.contains("type = \"simple\""), "TOML:\n{t}");
+        assert!(t.contains("super_users = [\"ANONYMOUS\"]"), "TOML:\n{t}");
+        // Verify the merge path too: explicit Simple + delegation_token
+        // merges ANONYMOUS into the user's super-users list.
+        let authz =
+            crate::crd::kafka::Authorization::Simple(crate::crd::kafka::SimpleAuthorization {
+                super_users: vec!["User:admin".into()],
+            });
+        let t2 = render_broker_toml(
+            0,
+            &[synthesized_default_listener()],
+            &addrs,
+            "PLAIN",
+            &std::collections::BTreeMap::new(),
+            None,
+            None,
+            true,
+            Some(&authz),
+        );
+        assert!(
+            t2.contains("super_users = [\"User:admin\", \"ANONYMOUS\"]"),
+            "delegation_token must merge ANONYMOUS into user-authored super_users, got:\n{t2}"
         );
     }
 
@@ -3081,6 +3434,7 @@ mod toml_rendering_tests {
             Some(&tls),
             None,
             false,
+            None,
         );
 
         let parsed: crabka_broker::file_config::FileConfig =
@@ -3108,8 +3462,9 @@ mod toml_rendering_tests {
         );
         let listeners = vec![synthesized_default_listener()];
         let props = std::collections::BTreeMap::new();
-        let toml_str =
-            render_broker_toml(0, &listeners, &addrs, "PLAIN", &props, None, None, false);
+        let toml_str = render_broker_toml(
+            0, &listeners, &addrs, "PLAIN", &props, None, None, false, None,
+        );
         assert!(!toml_str.contains("[tls_config]"));
         assert!(!toml_str.contains("controller_listener_protocol"));
     }
@@ -3149,6 +3504,7 @@ mod toml_rendering_tests {
             }),
             None,
             false,
+            None,
         );
         assert!(toml.contains("protocol = \"SaslSsl\""), "TOML: {toml}");
         assert!(toml.contains("tls_config = { cert_path = \"/etc/crabka/broker-tls/0.crt\""));
@@ -3244,6 +3600,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
             false,
+            None,
         );
         assert!(toml.contains("[oauthbearer]"), "TOML: {toml}");
         assert!(
@@ -3300,6 +3657,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
             false,
+            None,
         );
         assert!(toml.contains("[oauthbearer]"));
         assert!(toml.contains("jwks_endpoint_uri = \"https://issuer.example.com/jwks\""));
@@ -3330,6 +3688,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
             false,
+            None,
         );
         assert!(
             toml.contains("idp_tls_trust = \"/etc/crabka/oauth-jwks-trust/ca.crt\""),
@@ -3376,6 +3735,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
             false,
+            None,
         );
         assert!(!toml.contains("idp_tls_trust"), "TOML: {toml}");
     }
@@ -3399,6 +3759,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
             false,
+            None,
         );
         assert!(
             toml.contains("max_session_lifetime_seconds = 300"),
@@ -3428,6 +3789,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
             false,
+            None,
         );
         assert!(
             !toml.contains("max_session_lifetime_seconds"),
@@ -3453,6 +3815,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
             false,
+            None,
         );
         assert!(
             toml.contains("sasl_config = { enabled_mechanisms = [\"OAUTHBEARER\"] }"),
@@ -3476,6 +3839,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
             false,
+            None,
         );
         assert!(toml.contains("[oauthbearer]"), "TOML: {toml}");
         assert!(!toml.contains("sasl_config"), "TOML: {toml}");
@@ -3493,6 +3857,7 @@ mod toml_rendering_tests {
             None,
             None,
             false,
+            None,
         );
         assert!(!toml.contains("[oauthbearer]"), "TOML: {toml}");
     }
@@ -3515,6 +3880,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
             false,
+            None,
         );
         let parsed: crabka_broker::file_config::FileConfig =
             toml::from_str(&toml).expect("rendered TOML must parse with broker FileConfig");
@@ -3558,6 +3924,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
             false,
+            None,
         );
         let b = render_broker_toml(
             0,
@@ -3568,6 +3935,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
             false,
+            None,
         );
         assert_eq!(a, b);
     }
@@ -3617,6 +3985,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
             false,
+            None,
         );
         let expected = "[oauthbearer]\n\
             jwks_endpoint_uri = \"https://idp.example/certs\"\n\
@@ -3686,6 +4055,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
             false,
+            None,
         );
         assert!(toml.contains("[oauthbearer]"), "TOML: {toml}");
         assert!(
@@ -3722,6 +4092,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
             false,
+            None,
         );
         assert!(!toml.contains("jwks_endpoint_uri"), "TOML: {toml}");
     }
@@ -3740,6 +4111,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
             false,
+            None,
         );
         assert!(
             toml.contains("userinfo_endpoint_uri = \"https://idp.example/userinfo\""),
@@ -3762,6 +4134,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
             false,
+            None,
         );
         assert!(
             toml.contains("introspection_http_timeout_ms = 15000"),
@@ -3787,6 +4160,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
             false,
+            None,
         );
         let expected = "introspection_endpoint_uri = \"https://idp.example/introspect\"\n\
             userinfo_endpoint_uri = \"https://idp.example/userinfo\"\n\
@@ -3828,6 +4202,7 @@ mod toml_rendering_tests {
             None,
             Some("/etc/crabka/clients-ca/ca.crt"),
             false,
+            None,
         );
         assert!(toml.contains("protocol = \"Ssl\""));
         assert!(toml.contains("client_ca_path = \"/etc/crabka/clients-ca/ca.crt\""));
@@ -3856,6 +4231,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
             false,
+            None,
         );
         assert!(
             toml.contains("custom_claim_check = '''$.scope[?@ == 'kafka.write']'''"),
@@ -3878,6 +4254,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
             false,
+            None,
         );
         assert!(
             toml.contains("valid_token_type = \"JWT\""),
@@ -3904,6 +4281,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
             false,
+            None,
         );
         assert!(
             toml.contains("fallback_user_name_claim = \"client_id\""),
@@ -3926,6 +4304,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
             false,
+            None,
         );
         assert!(
             toml.contains("fallback_user_name_prefix = \"service-account-\""),
@@ -3948,6 +4327,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
             false,
+            None,
         );
         assert!(
             toml.contains("groups_claim = '''$.realm_access.roles[*]'''"),
@@ -3970,6 +4350,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
             false,
+            None,
         );
         assert!(
             toml.contains("groups_claim_delimiter = \",\""),
@@ -3994,6 +4375,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
             false,
+            None,
         );
         assert!(
             !toml.contains("custom_claim_check"),
@@ -4020,6 +4402,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
             false,
+            None,
         );
         assert!(
             toml.contains("jwks_min_refresh_pause_seconds = 2"),
@@ -4042,6 +4425,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
             false,
+            None,
         );
         assert!(
             toml.contains("jwks_expiry_seconds = 3600"),
@@ -4064,6 +4448,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
             false,
+            None,
         );
         assert!(
             toml.contains("jwks_ignore_key_use = true"),
@@ -4087,6 +4472,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
             false,
+            None,
         );
         assert!(
             !toml.contains("jwks_min_refresh_pause_seconds"),

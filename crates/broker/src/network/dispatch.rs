@@ -2252,7 +2252,7 @@ async fn handle_describe_delegation_token_frame(
         broker.config.delegation_token_secret_key.as_ref(),
         &broker.controller,
         peer,
-        &broker.config.super_users,
+        broker.config.authorizer.as_ref(),
     )
     .await;
     let mut buf = BytesMut::with_capacity(resp.encoded_len(api_version));

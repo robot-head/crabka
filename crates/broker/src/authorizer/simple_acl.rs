@@ -1,105 +1,66 @@
-//! Slice 13. Pure-logic ACL authorization decision algorithm.
+//! Slice 53: ACL-based authorizer (slice-13 logic, behind the
+//! [`Authorizer`] trait). Super-user bypass + deny-wins-over-allow +
+//! LITERAL/PREFIXED matching + principal/host/operation wildcards.
 //!
-//! Mirrors Kafka's `StandardAuthorizer`:
-//! - super-user bypass
-//! - compatibility shim: when zero ACLs AND no super-user, ALLOW
-//!   (preserves slice 11/12 pre-ACL behavior)
-//! - DENY-wins over ALLOW
-//! - LITERAL exact + PREFIXED prefix matching on `resource_name`
-//! - principal wildcard (`User:*`), host wildcard (`*`),
-//!   operation wildcard (`AclOperation::All`)
-//! - default-deny when ACLs exist but none match this request
+//! The slice-13 "empty super-users AND no ACLs ⇒ Allow" compat shim is
+//! DELETED — that case now lives in [`super::AllowAllAuthorizer`].
+//! [`SimpleAclAuthorizer`] with an empty image + empty super-users
+//! denies everything (default-deny), which matches Kafka's
+//! `StandardAuthorizer` once an authorizer is explicitly configured.
 
-use std::net::SocketAddr;
+use std::collections::HashSet;
 
-use crabka_metadata::{AclEntry, AclOperation, MetadataImage, PermissionType, ResourceType};
-use crabka_security::Principal;
+use crabka_metadata::{AclEntry, AclOperation, MetadataImage, PermissionType};
 
-#[derive(Debug, Clone)]
-pub struct AuthorizationRequest<'a> {
-    pub principal: &'a Principal,
-    pub host: &'a SocketAddr,
-    pub resource_type: ResourceType,
-    pub resource_name: &'a str,
-    pub operation: AclOperation,
+use super::{AuthorizationRequest, AuthorizationResult, Authorizer};
+
+/// Authorizer that consults the cluster's persisted ACLs (the
+/// `MetadataImage` is held by the controller and passed in per call).
+/// Holds the configured super-user set; principals in this set bypass
+/// ACL evaluation and always get `Allow`.
+#[derive(Debug)]
+pub struct SimpleAclAuthorizer {
+    super_users: HashSet<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AuthorizationResult {
-    Allow,
-    Deny,
-}
-
-/// Batch-authorize a set of topic names against the same principal /
-/// host / operation. Used by `Produce`, `Fetch`, and `Metadata`
-/// per-topic enforcement. The returned map's keys are borrowed from
-/// the input iterator so callers can avoid copying topic strings.
-#[must_use]
-pub fn authorize_topics<'a, S: std::hash::BuildHasher>(
-    image: &MetadataImage,
-    super_users: &std::collections::HashSet<String, S>,
-    principal: &Principal,
-    host: &SocketAddr,
-    operation: AclOperation,
-    topic_names: impl IntoIterator<Item = &'a str>,
-) -> std::collections::HashMap<&'a str, AuthorizationResult> {
-    topic_names
-        .into_iter()
-        .map(|name| {
-            let req = AuthorizationRequest {
-                principal,
-                host,
-                resource_type: ResourceType::Topic,
-                resource_name: name,
-                operation,
-            };
-            (name, authorize(image, super_users, &req))
-        })
-        .collect()
-}
-
-/// Decide whether `req.principal` may perform `req.operation` on
-/// `(req.resource_type, req.resource_name)` from `req.host`, given the
-/// current metadata image and optional super-user.
-///
-/// See module docs for the algorithm.
-#[must_use]
-pub fn authorize<S: std::hash::BuildHasher>(
-    image: &MetadataImage,
-    super_users: &std::collections::HashSet<String, S>,
-    req: &AuthorizationRequest,
-) -> AuthorizationResult {
-    // Compatibility shim: pre-ACL deployments (no super-user, no ACLs)
-    // get the old "allow everything authenticated" behavior. Keeps
-    // slice 11/12 tests green.
-    if super_users.is_empty() && image.all_acls().next().is_none() {
-        return AuthorizationResult::Allow;
+impl SimpleAclAuthorizer {
+    #[must_use]
+    pub fn new(super_users: HashSet<String>) -> Self {
+        Self { super_users }
     }
+}
 
-    // Super-user bypass.
-    if super_users.contains(&req.principal.name) {
-        return AuthorizationResult::Allow;
-    }
-
-    let user_pattern = format!("User:{}", req.principal.name);
-    let host_str = req.host.ip().to_string();
-    let mut saw_allow = false;
-    for entry in image.matching_acls(req.resource_type, req.resource_name) {
-        if !matches_principal(entry, &user_pattern)
-            || !matches_host(entry, &host_str)
-            || !matches_operation(entry.operation, req.operation)
-        {
-            continue;
+impl Authorizer for SimpleAclAuthorizer {
+    fn authorize(
+        &self,
+        image: &MetadataImage,
+        req: &AuthorizationRequest<'_>,
+    ) -> AuthorizationResult {
+        // Super-user bypass.
+        if self.super_users.contains(&req.principal.name) {
+            return AuthorizationResult::Allow;
         }
-        match entry.permission_type {
-            PermissionType::Deny => return AuthorizationResult::Deny,
-            PermissionType::Allow => saw_allow = true,
+
+        let user_pattern = format!("User:{}", req.principal.name);
+        let host_str = req.host.ip().to_string();
+        let mut saw_allow = false;
+        for entry in image.matching_acls(req.resource_type, req.resource_name) {
+            if !matches_principal(entry, &user_pattern)
+                || !matches_host(entry, &host_str)
+                || !matches_operation(entry.operation, req.operation)
+            {
+                continue;
+            }
+            match entry.permission_type {
+                PermissionType::Deny => return AuthorizationResult::Deny,
+                PermissionType::Allow => saw_allow = true,
+            }
         }
-    }
-    if saw_allow {
-        AuthorizationResult::Allow
-    } else {
-        AuthorizationResult::Deny
+        if saw_allow {
+            AuthorizationResult::Allow
+        } else {
+            AuthorizationResult::Deny
+        }
     }
 }
 
@@ -148,15 +109,18 @@ fn implies(stored: AclOperation, requested: AclOperation) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::super::authorize_topics;
     use super::*;
-    use crabka_metadata::{MetadataRecord, PatternType};
+    use crabka_metadata::{MetadataRecord, PatternType, ResourceType};
+    use crabka_security::Principal;
+    use std::net::SocketAddr;
     use uuid::Uuid;
 
-    fn no_super() -> std::collections::HashSet<String> {
-        std::collections::HashSet::new()
+    fn no_super() -> HashSet<String> {
+        HashSet::new()
     }
-    fn one_super(name: &str) -> std::collections::HashSet<String> {
-        let mut s = std::collections::HashSet::new();
+    fn one_super(name: &str) -> HashSet<String> {
+        let mut s = HashSet::new();
         s.insert(name.to_string());
         s
     }
@@ -212,13 +176,18 @@ mod tests {
     }
 
     #[test]
-    fn compatibility_shim_allows_when_no_acls_and_no_super_user() {
+    fn empty_image_with_no_super_users_defaults_to_deny() {
+        // Slice 53: the slice-13 compat shim that returned Allow in this
+        // case is gone — `SimpleAclAuthorizer` is now default-deny when
+        // nothing matches. Operators who want "allow everything" should
+        // configure `AllowAllAuthorizer` explicitly.
         let img = img();
         let a = alice();
         let h = addr();
+        let auth = SimpleAclAuthorizer::new(no_super());
         assert_eq!(
-            authorize(&img, &no_super(), &req(&a, &h, "foo", AclOperation::Read)),
-            AuthorizationResult::Allow,
+            auth.authorize(&img, &req(&a, &h, "foo", AclOperation::Read)),
+            AuthorizationResult::Deny,
         );
     }
 
@@ -236,12 +205,9 @@ mod tests {
         )));
         let a = alice();
         let h = addr();
+        let auth = SimpleAclAuthorizer::new(one_super("alice"));
         assert_eq!(
-            authorize(
-                &img,
-                &one_super("alice"),
-                &req(&a, &h, "foo", AclOperation::Read)
-            ),
+            auth.authorize(&img, &req(&a, &h, "foo", AclOperation::Read)),
             AuthorizationResult::Allow,
         );
     }
@@ -249,7 +215,7 @@ mod tests {
     #[test]
     fn deny_by_default_when_super_user_set_but_principal_mismatches() {
         let mut img = img();
-        // Need at least one ACL to disable the compatibility shim.
+        // An ACL exists but doesn't match alice.
         img.apply(&MetadataRecord::V1AccessControlEntry(topic_acl(
             PermissionType::Allow,
             AclOperation::Read,
@@ -260,12 +226,9 @@ mod tests {
         )));
         let a = alice();
         let h = addr();
+        let auth = SimpleAclAuthorizer::new(one_super("admin"));
         assert_eq!(
-            authorize(
-                &img,
-                &one_super("admin"),
-                &req(&a, &h, "foo", AclOperation::Read)
-            ),
+            auth.authorize(&img, &req(&a, &h, "foo", AclOperation::Read)),
             AuthorizationResult::Deny,
         );
     }
@@ -283,16 +246,13 @@ mod tests {
         )));
         let a = alice();
         let h = addr();
+        let auth = SimpleAclAuthorizer::new(no_super());
         assert_eq!(
-            authorize(&img, &no_super(), &req(&a, &h, "foo", AclOperation::Read)),
+            auth.authorize(&img, &req(&a, &h, "foo", AclOperation::Read)),
             AuthorizationResult::Allow,
         );
         assert_eq!(
-            authorize(
-                &img,
-                &no_super(),
-                &req(&a, &h, "foobar", AclOperation::Read)
-            ),
+            auth.authorize(&img, &req(&a, &h, "foobar", AclOperation::Read)),
             AuthorizationResult::Deny,
         );
     }
@@ -310,16 +270,13 @@ mod tests {
         )));
         let a = alice();
         let h = addr();
+        let auth = SimpleAclAuthorizer::new(no_super());
         assert_eq!(
-            authorize(
-                &img,
-                &no_super(),
-                &req(&a, &h, "team-foo", AclOperation::Read)
-            ),
+            auth.authorize(&img, &req(&a, &h, "team-foo", AclOperation::Read)),
             AuthorizationResult::Allow,
         );
         assert_eq!(
-            authorize(&img, &no_super(), &req(&a, &h, "other", AclOperation::Read)),
+            auth.authorize(&img, &req(&a, &h, "other", AclOperation::Read)),
             AuthorizationResult::Deny,
         );
     }
@@ -345,8 +302,9 @@ mod tests {
         )));
         let a = alice();
         let h = addr();
+        let auth = SimpleAclAuthorizer::new(no_super());
         assert_eq!(
-            authorize(&img, &no_super(), &req(&a, &h, "foo", AclOperation::Read)),
+            auth.authorize(&img, &req(&a, &h, "foo", AclOperation::Read)),
             AuthorizationResult::Deny,
         );
     }
@@ -364,8 +322,9 @@ mod tests {
         )));
         let a = alice();
         let h = addr();
+        let auth = SimpleAclAuthorizer::new(no_super());
         assert_eq!(
-            authorize(&img, &no_super(), &req(&a, &h, "foo", AclOperation::Read)),
+            auth.authorize(&img, &req(&a, &h, "foo", AclOperation::Read)),
             AuthorizationResult::Allow,
         );
     }
@@ -384,20 +343,13 @@ mod tests {
         let a = alice();
         let h_match: SocketAddr = "127.0.0.1:5000".parse().unwrap();
         let h_nomatch: SocketAddr = "127.0.0.2:5000".parse().unwrap();
+        let auth = SimpleAclAuthorizer::new(no_super());
         assert_eq!(
-            authorize(
-                &img,
-                &no_super(),
-                &req(&a, &h_match, "foo", AclOperation::Read)
-            ),
+            auth.authorize(&img, &req(&a, &h_match, "foo", AclOperation::Read)),
             AuthorizationResult::Allow,
         );
         assert_eq!(
-            authorize(
-                &img,
-                &no_super(),
-                &req(&a, &h_nomatch, "foo", AclOperation::Read)
-            ),
+            auth.authorize(&img, &req(&a, &h_nomatch, "foo", AclOperation::Read)),
             AuthorizationResult::Deny,
         );
     }
@@ -415,6 +367,7 @@ mod tests {
         )));
         let a = alice();
         let h = addr();
+        let auth = SimpleAclAuthorizer::new(no_super());
         for op in [
             AclOperation::Read,
             AclOperation::Write,
@@ -422,7 +375,7 @@ mod tests {
             AclOperation::Delete,
         ] {
             assert_eq!(
-                authorize(&img, &no_super(), &req(&a, &h, "foo", op)),
+                auth.authorize(&img, &req(&a, &h, "foo", op)),
                 AuthorizationResult::Allow,
                 "{op:?} should be allowed under operation::All",
             );
@@ -450,17 +403,12 @@ mod tests {
         )));
         let a = alice();
         let h = addr();
-        let map = authorize_topics(
-            &img,
-            &no_super(),
-            &a,
-            &h,
-            AclOperation::Read,
-            ["t1", "t2", "t3"],
-        );
+        let auth = SimpleAclAuthorizer::new(no_super());
+        let map = authorize_topics(&auth, &img, &a, &h, AclOperation::Read, ["t1", "t2", "t3"]);
         assert_eq!(map.get("t1").copied(), Some(AuthorizationResult::Allow));
         assert_eq!(map.get("t2").copied(), Some(AuthorizationResult::Deny));
-        // t3: no matching ACL + non-empty image → Deny by default.
+        // t3: no matching ACL → Deny by default (slice-53 default-deny;
+        // the slice-13 shim that allowed in this case is gone).
         assert_eq!(map.get("t3").copied(), Some(AuthorizationResult::Deny));
     }
 
@@ -477,12 +425,13 @@ mod tests {
         )));
         let a = alice();
         let h = addr();
+        let auth = SimpleAclAuthorizer::new(no_super());
         assert_eq!(
-            authorize(&img, &no_super(), &req(&a, &h, "foo", AclOperation::Read)),
+            auth.authorize(&img, &req(&a, &h, "foo", AclOperation::Read)),
             AuthorizationResult::Allow,
         );
         assert_eq!(
-            authorize(&img, &no_super(), &req(&a, &h, "foo", AclOperation::Write)),
+            auth.authorize(&img, &req(&a, &h, "foo", AclOperation::Write)),
             AuthorizationResult::Deny,
         );
     }
@@ -509,12 +458,9 @@ mod tests {
         )));
         let a = alice();
         let h = addr();
+        let auth = SimpleAclAuthorizer::new(no_super());
         assert_eq!(
-            authorize(
-                &img,
-                &no_super(),
-                &req(&a, &h, "foo", AclOperation::Describe)
-            ),
+            auth.authorize(&img, &req(&a, &h, "foo", AclOperation::Describe)),
             AuthorizationResult::Allow,
         );
     }
@@ -529,12 +475,9 @@ mod tests {
         )));
         let a = alice();
         let h = addr();
+        let auth = SimpleAclAuthorizer::new(no_super());
         assert_eq!(
-            authorize(
-                &img,
-                &no_super(),
-                &req(&a, &h, "foo", AclOperation::Describe)
-            ),
+            auth.authorize(&img, &req(&a, &h, "foo", AclOperation::Describe)),
             AuthorizationResult::Allow,
         );
     }
@@ -549,12 +492,9 @@ mod tests {
         )));
         let a = alice();
         let h = addr();
+        let auth = SimpleAclAuthorizer::new(no_super());
         assert_eq!(
-            authorize(
-                &img,
-                &no_super(),
-                &req(&a, &h, "foo", AclOperation::Describe)
-            ),
+            auth.authorize(&img, &req(&a, &h, "foo", AclOperation::Describe)),
             AuthorizationResult::Allow,
         );
     }
@@ -569,12 +509,9 @@ mod tests {
         )));
         let a = alice();
         let h = addr();
+        let auth = SimpleAclAuthorizer::new(no_super());
         assert_eq!(
-            authorize(
-                &img,
-                &no_super(),
-                &req(&a, &h, "foo", AclOperation::Describe)
-            ),
+            auth.authorize(&img, &req(&a, &h, "foo", AclOperation::Describe)),
             AuthorizationResult::Allow,
         );
     }
@@ -589,12 +526,9 @@ mod tests {
         )));
         let a = alice();
         let h = addr();
+        let auth = SimpleAclAuthorizer::new(no_super());
         assert_eq!(
-            authorize(
-                &img,
-                &no_super(),
-                &req(&a, &h, "foo", AclOperation::DescribeConfigs)
-            ),
+            auth.authorize(&img, &req(&a, &h, "foo", AclOperation::DescribeConfigs)),
             AuthorizationResult::Allow,
         );
     }
@@ -609,8 +543,9 @@ mod tests {
         )));
         let a = alice();
         let h = addr();
+        let auth = SimpleAclAuthorizer::new(no_super());
         assert_eq!(
-            authorize(&img, &no_super(), &req(&a, &h, "foo", AclOperation::Read)),
+            auth.authorize(&img, &req(&a, &h, "foo", AclOperation::Read)),
             AuthorizationResult::Deny,
         );
     }
@@ -659,10 +594,10 @@ mod tests {
         )));
         let a = alice();
         let h = addr();
+        let auth = SimpleAclAuthorizer::new(no_super());
         assert_eq!(
-            authorize(
+            auth.authorize(
                 &img,
-                &no_super(),
                 &req_on(&a, &h, ResourceType::Group, "cg-1", AclOperation::Describe)
             ),
             AuthorizationResult::Allow,
@@ -680,10 +615,10 @@ mod tests {
         )));
         let a = alice();
         let h = addr();
+        let auth = SimpleAclAuthorizer::new(no_super());
         assert_eq!(
-            authorize(
+            auth.authorize(
                 &img,
-                &no_super(),
                 &req_on(
                     &a,
                     &h,
@@ -707,10 +642,10 @@ mod tests {
         )));
         let a = alice();
         let h = addr();
+        let auth = SimpleAclAuthorizer::new(no_super());
         assert_eq!(
-            authorize(
+            auth.authorize(
                 &img,
-                &no_super(),
                 &req_on(
                     &a,
                     &h,
@@ -728,7 +663,7 @@ mod tests {
         let img = img();
         let h = addr();
         let supers = {
-            let mut s = std::collections::HashSet::new();
+            let mut s = HashSet::new();
             s.insert("admin".to_string());
             s.insert("ops-bot".to_string());
             s
@@ -744,24 +679,19 @@ mod tests {
             groups: vec![],
         };
         let alice = alice();
+        let auth = SimpleAclAuthorizer::new(supers);
         assert_eq!(
-            authorize(&img, &supers, &req(&admin, &h, "foo", AclOperation::Write)),
+            auth.authorize(&img, &req(&admin, &h, "foo", AclOperation::Write)),
             AuthorizationResult::Allow,
         );
         assert_eq!(
-            authorize(&img, &supers, &req(&ops, &h, "foo", AclOperation::Write)),
+            auth.authorize(&img, &req(&ops, &h, "foo", AclOperation::Write)),
             AuthorizationResult::Allow,
         );
-        // alice would hit the compat shim with an empty image; force a
-        // non-empty image by adding an unrelated ACL.
-        let mut img2 = img;
-        img2.apply(&MetadataRecord::V1AccessControlEntry(topic_acl_op(
-            PermissionType::Allow,
-            AclOperation::Read,
-            "_other",
-        )));
+        // alice is not a super-user and the image has no matching ACL,
+        // so default-deny applies (slice-53: no more compat shim).
         assert_eq!(
-            authorize(&img2, &supers, &req(&alice, &h, "foo", AclOperation::Write)),
+            auth.authorize(&img, &req(&alice, &h, "foo", AclOperation::Write)),
             AuthorizationResult::Deny,
         );
     }

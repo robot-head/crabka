@@ -45,6 +45,7 @@ fn kafka_cr(name: &str, namespace: &str) -> Kafka {
             clients_ca: None,
             logging: None,
             delegation_token: None,
+            authorization: None,
         },
     );
     k.metadata.namespace = Some(namespace.into());
@@ -72,6 +73,7 @@ fn kafka_cr_byo(name: &str, namespace: &str) -> Kafka {
             clients_ca: Some(byo),
             logging: None,
             delegation_token: None,
+            authorization: None,
         },
     );
     k.metadata.namespace = Some(namespace.into());

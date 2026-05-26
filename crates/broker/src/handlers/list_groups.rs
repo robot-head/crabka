@@ -10,7 +10,7 @@ use crabka_protocol::owned::list_groups_request::ListGroupsRequest;
 use crabka_protocol::owned::list_groups_response::{ListGroupsResponse, ListedGroup};
 use crabka_protocol::{Decode, Encode};
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize};
+use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 use crate::broker::Broker;
 use crate::codes;
 use crate::coordinator::group::GroupState;
@@ -37,9 +37,11 @@ pub(crate) async fn handle(
     for s in snapshots {
         // ── slice-13 ACL preamble ────────────────────────────────────
         // Per-group `Describe` check. On Deny the group is silently
-        // omitted from the response (no per-group error_code). The
-        // compatibility shim (no ACLs + no super-user) and the
-        // super-user bypass both let all groups through.
+        // omitted from the response (no per-group error_code). With the
+        // default `AllowAllAuthorizer` every group passes; with
+        // `SimpleAclAuthorizer` the super-user bypass plus matching
+        // Describe ACLs let groups through; with `OpaAuthorizer` the
+        // policy decides per group.
         let acl_req = AuthorizationRequest {
             principal: ctx.principal,
             host: ctx.peer,
@@ -47,7 +49,7 @@ pub(crate) async fn handle(
             resource_name: s.group_id.as_str(),
             operation: AclOperation::Describe,
         };
-        if authorize(&image, &broker.config.super_users, &acl_req) == AuthorizationResult::Deny {
+        if broker.config.authorizer.authorize(&image, &acl_req) == AuthorizationResult::Deny {
             continue;
         }
 

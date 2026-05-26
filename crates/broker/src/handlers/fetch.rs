@@ -104,8 +104,8 @@ pub(crate) async fn handle(
         })
         .collect();
     let acl_results = authorize_topics(
+        broker.config.authorizer.as_ref(),
         &image,
-        &broker.config.super_users,
         ctx.principal,
         ctx.peer,
         AclOperation::Read,

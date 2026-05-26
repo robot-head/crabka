@@ -11,7 +11,7 @@ use crabka_protocol::owned::describe_groups_response::{
 };
 use crabka_protocol::{Decode, Encode};
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize};
+use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 use crate::broker::Broker;
 use crate::codes;
 use crate::coordinator::group::GroupState;
@@ -41,7 +41,7 @@ pub(crate) async fn handle(
             resource_name: gid.as_str(),
             operation: AclOperation::Describe,
         };
-        if authorize(&image, &broker.config.super_users, &acl_req) == AuthorizationResult::Deny {
+        if broker.config.authorizer.authorize(&image, &acl_req) == AuthorizationResult::Deny {
             groups.push(DescribedGroup {
                 group_id: gid,
                 error_code: codes::GROUP_AUTHORIZATION_FAILED,

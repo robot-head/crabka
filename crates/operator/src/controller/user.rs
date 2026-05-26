@@ -32,8 +32,8 @@ use crate::controller::topic::internal_listener_bootstrap;
 use crate::controller::user_delegation_token::{self, KubeKafkaUserStatusWriter, KubeSecretWriter};
 use crate::controller::user_tls;
 use crate::crd::{
-    AclOp, AclPatternType, AclPermission, AclResourceKind, Authentication, Authorization, Kafka,
-    KafkaUser,
+    AclOp, AclPatternType, AclPermission, AclResourceKind, Authentication, Kafka, KafkaUser,
+    KafkaUserAuthorization as Authorization,
 };
 
 const FINALIZER: &str = "crabka.io/user-finalizer";
@@ -980,7 +980,7 @@ mod tests {
     use super::*;
     use crate::crd::{
         AclOp, AclPatternType, AclPermission, AclResource, AclResourceKind, AclRule,
-        SimpleAuthorization,
+        KafkaUserSimpleAuthorization as SimpleAuthorization,
     };
 
     fn rule(kind: AclResourceKind, name: &str, ops: &[AclOp]) -> AclRule {

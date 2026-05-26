@@ -24,7 +24,7 @@ use crabka_protocol::owned::init_producer_id_request::InitProducerIdRequest;
 use crabka_protocol::owned::init_producer_id_response::InitProducerIdResponse;
 use crabka_protocol::{Decode, Encode};
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize};
+use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 use crate::broker::Broker;
 use crate::codes;
 use crate::error::BrokerError;
@@ -54,7 +54,7 @@ pub(crate) async fn handle(
     // request and gate on the appropriate resource/operation.
     {
         let image = controller.current_image();
-        let super_users = &broker.config.super_users;
+        let authorizer = broker.config.authorizer.as_ref();
         match req.transactional_id.as_deref() {
             Some(tid) if !tid.is_empty() => {
                 let acl_req = AuthorizationRequest {
@@ -64,7 +64,7 @@ pub(crate) async fn handle(
                     resource_name: tid,
                     operation: AclOperation::Write,
                 };
-                if authorize(&image, super_users, &acl_req) == AuthorizationResult::Deny {
+                if authorizer.authorize(&image, &acl_req) == AuthorizationResult::Deny {
                     return encode_err(version, codes::TRANSACTIONAL_ID_AUTHORIZATION_FAILED);
                 }
             }
@@ -76,7 +76,7 @@ pub(crate) async fn handle(
                     resource_name: "kafka-cluster",
                     operation: AclOperation::IdempotentWrite,
                 };
-                if authorize(&image, super_users, &acl_req) == AuthorizationResult::Deny {
+                if authorizer.authorize(&image, &acl_req) == AuthorizationResult::Deny {
                     return encode_err(version, codes::CLUSTER_AUTHORIZATION_FAILED);
                 }
             }

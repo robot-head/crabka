@@ -15,7 +15,7 @@ use crabka_protocol::owned::alter_configs_response::{
 use crabka_protocol::{Decode, Encode};
 use crabka_raft::RaftError;
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize};
+use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 use crate::broker::Broker;
 use crate::codes;
 use crate::config_keys;
@@ -53,9 +53,8 @@ pub(crate) async fn handle(
         // Broker (4) → AlterConfigs on Cluster("kafka-cluster") → CLUSTER_AUTHORIZATION_FAILED on Deny.
         // Other resource types are unsupported (INVALID_RESOURCE_TYPE) — checked after ACL.
         let acl_result = match resource.resource_type {
-            RESOURCE_TYPE_TOPIC => authorize(
+            RESOURCE_TYPE_TOPIC => broker.config.authorizer.authorize(
                 &image,
-                &broker.config.super_users,
                 &AuthorizationRequest {
                     principal: ctx.principal,
                     host: ctx.peer,
@@ -64,9 +63,8 @@ pub(crate) async fn handle(
                     operation: AclOperation::AlterConfigs,
                 },
             ),
-            RESOURCE_TYPE_BROKER => authorize(
+            RESOURCE_TYPE_BROKER => broker.config.authorizer.authorize(
                 &image,
-                &broker.config.super_users,
                 &AuthorizationRequest {
                     principal: ctx.principal,
                     host: ctx.peer,

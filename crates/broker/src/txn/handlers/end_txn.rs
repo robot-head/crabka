@@ -30,7 +30,7 @@ use crabka_protocol::owned::write_txn_markers_request::{
     WritableTxnMarker, WritableTxnMarkerTopic, WriteTxnMarkersRequest,
 };
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize};
+use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 use crate::broker::Broker;
 use crate::codes;
 use crate::coordinator::bootstrap::OFFSETS_TOPIC;
@@ -57,7 +57,7 @@ pub(crate) async fn handle(
     let controller = broker.controller.clone();
     let partitions = broker.partitions.clone();
     let node_id = broker.config.node_id;
-    let super_users = &broker.config.super_users;
+    let authorizer = broker.config.authorizer.as_ref();
     let mut cur: &[u8] = req_bytes;
     let req = EndTxnRequest::decode(&mut cur, version)?;
 
@@ -76,7 +76,7 @@ pub(crate) async fn handle(
         resource_name: tid,
         operation: AclOperation::Write,
     };
-    if authorize(&image, super_users, &tid_req) == AuthorizationResult::Deny {
+    if authorizer.authorize(&image, &tid_req) == AuthorizationResult::Deny {
         return encode_err(version, codes::TRANSACTIONAL_ID_AUTHORIZATION_FAILED);
     }
 

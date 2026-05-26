@@ -16,7 +16,7 @@ use crabka_protocol::{Decode, Encode};
 use dashmap::DashMap;
 use tokio::sync::oneshot;
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize, authorize_topics};
+use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize_topics};
 use crate::broker::Broker;
 use crate::codes;
 use crate::coordinator::GroupHandle;
@@ -50,7 +50,7 @@ pub(crate) async fn handle(
             resource_name: req.group_id.as_str(),
             operation: AclOperation::Read,
         };
-        if authorize(&image, &broker.config.super_users, &acl_req) == AuthorizationResult::Deny {
+        if broker.config.authorizer.authorize(&image, &acl_req) == AuthorizationResult::Deny {
             let resp = build_response_all(&req, codes::GROUP_AUTHORIZATION_FAILED);
             return encode(version, &resp);
         }
@@ -74,8 +74,8 @@ pub(crate) async fn handle(
         let image = broker.controller.current_image();
         let topic_names: Vec<&str> = req.topics.iter().map(|t| t.name.as_str()).collect();
         authorize_topics(
+            broker.config.authorizer.as_ref(),
             &image,
-            &broker.config.super_users,
             ctx.principal,
             ctx.peer,
             AclOperation::Read,

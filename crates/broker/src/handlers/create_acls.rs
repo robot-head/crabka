@@ -13,7 +13,7 @@ use crabka_protocol::owned::create_acls_response::{AclCreationResult, CreateAcls
 use super::acl_wire::{
     operation_concrete, pattern_type_concrete, permission_concrete, resource_type_concrete,
 };
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize};
+use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 use crate::broker::Broker;
 use crate::codes;
 
@@ -29,9 +29,8 @@ pub(crate) async fn handle(
     let image = broker.controller.current_image();
 
     // Whole-request cluster-alter gate.
-    let allow = authorize(
+    let allow = broker.config.authorizer.authorize(
         &image,
-        &broker.config.super_users,
         &AuthorizationRequest {
             principal: ctx.principal,
             host: ctx.peer,

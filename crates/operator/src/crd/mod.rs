@@ -14,7 +14,10 @@ pub mod topic;
 pub mod user;
 
 pub use ca::{CertificateAuthority, CertificateAuthorityStatus};
-pub use kafka::{Kafka, KafkaCondition, KafkaSpec, KafkaStatus};
+pub use kafka::{
+    Authorization, Kafka, KafkaCondition, KafkaSpec, KafkaStatus, OpaAuthorization,
+    SimpleAuthorization,
+};
 pub use kafka_node_pool::{
     JbodSpec, JbodVolume, KafkaNodePool, KafkaNodePoolSpec, KafkaNodePoolStatus, MetadataTemplate,
     NodeRole, PersistentClaimSpec, PodTemplate, Storage,
@@ -25,8 +28,15 @@ pub use metrics::{MetricsConfig, MetricsType, PodMonitorSpec, ServiceMonitorSpec
 pub use network_policy::{NetworkPolicyPeer, NetworkPolicySpec};
 pub use rebalance::{KafkaRebalance, KafkaRebalanceSpec, KafkaRebalanceStatus, OptimizationResult};
 pub use topic::{KafkaTopic, KafkaTopicSpec, KafkaTopicStatus};
+// Slice 53: the cluster-level `Authorization` / `SimpleAuthorization` on
+// `KafkaSpec` (above) take the unqualified re-export names. The per-user
+// counterparts on `KafkaUserSpec` are re-exported with a `KafkaUser`
+// prefix to disambiguate — same role (drives ACL authorization) but at a
+// different scope (one user vs the whole cluster) and with a different
+// payload (per-user ACL rules vs cluster super-user list).
 pub use user::{
     AclOp, AclPatternType, AclPermission, AclResource, AclResourceKind, AclRule, Authentication,
-    Authorization, DelegationTokenAuth, KafkaUser, KafkaUserQuotas, KafkaUserSpec, KafkaUserStatus,
-    ScramSha512Auth, SimpleAuthorization,
+    Authorization as KafkaUserAuthorization, DelegationTokenAuth, KafkaUser, KafkaUserQuotas,
+    KafkaUserSpec, KafkaUserStatus, ScramSha512Auth,
+    SimpleAuthorization as KafkaUserSimpleAuthorization,
 };

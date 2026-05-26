@@ -3228,6 +3228,183 @@ introspection metadata).
 - **Workspace fmt + clippy `-D warnings` + tests** all green. No CRDs
   touched.
 
+## Slice 53 — Operator + Broker: OPA-style cluster authorizer bridge (2026-05-25)
+
+- **Goal:** Ship a replace-style cluster authorizer behind a new
+  `Authorizer` trait with three impls — `AllowAllAuthorizer`
+  (default, replaces the slice-13 implicit "no super-users + no ACLs
+  ⇒ allow" shim), `SimpleAclAuthorizer` (slice-13 ACL logic ported
+  verbatim), `OpaAuthorizer` (HTTP-backed Strimzi-style bridge w/
+  LRU+TTL decision cache) — plus a new `Kafka.spec.authorization:
+  { type: simple | opa }` CRD field that selects which impl the
+  broker boots with. Also deletes two pre-existing compat shims:
+  slice-13's free-fn `authorize` "no super-users + no ACLs ⇒ Allow"
+  branch, and slice-51b's `describe_delegation_token::acl_authorization_is_active`
+  workaround (the Describe handler now calls
+  `broker.config.authorizer.authorize(...)` unconditionally per
+  candidate token).
+- **Broker — `Authorizer` trait + 3 impls
+  (`crates/broker/src/authorizer/`):** new `mod.rs` exports
+  `Authorizer` + `AuthorizationRequest<'_>` (borrowed
+  principal / host / resource_name — allocation-free at handler
+  sites) + `AuthorizationResult { Allow, Deny }` + an
+  `authorize_topics` batch helper (Produce / Fetch / Metadata).
+  Each impl owns its super-user bypass policy. The broker holds
+  one `Arc<dyn Authorizer>` in `BrokerConfig::authorizer` (default
+  `AllowAllAuthorizer`); the slice-13 free fn is gone.
+  `SimpleAclAuthorizer` ports the slice-13 logic verbatim:
+  super-user bypass → operation-implication lookup → deny-wins →
+  LITERAL/PREFIXED match → deny-by-default.
+- **`OpaAuthorizer` (`authorizer/opa.rs`):** super-user bypass →
+  `Mutex<LruCache>` lookup (TTL absorbs OPA recovery; both
+  success **and** error decisions cached so a flapping OPA pod
+  doesn't melt the broker) → `block_in_place` +
+  `Handle::current().block_on(reqwest POST)` sync→async bridge →
+  cache the decision → return. Wire JSON is Strimzi-byte-compatible:
+  `{"input":{"request":{"principal":"User:alice","operation":"Read","resource":{"resourceType":"Topic","name":"orders","patternType":"Literal"},"host":"10.0.1.42"}}}`
+  ⇒ `{"result": bool}`. 5s HTTP timeout; `allow_on_error`
+  switch decides whether HTTP failure / JSON-parse error fails
+  open or closed (either way the decision is cached).
+- **Compat-shim deletions:**
+  - Slice-13 `super_users.is_empty() && image.all_acls().next().is_none() → Allow`
+    is gone with the free `authorize` fn it lived in.
+    `AllowAllAuthorizer` is the new explicit default
+    (`BrokerConfig::for_tests` installs it).
+  - Slice-51b `acl_authorization_is_active` workaround in
+    `describe_delegation_token.rs` removed; the Describe handler
+    is now a straight per-candidate `authorizer.authorize(...)`
+    call. Five broker integration test files (`acl_handlers.rs`,
+    `auth_handlers.rs`, `client_quotas.rs`, `elect_leaders.rs`,
+    `partition_reassignment.rs`) gained an explicit
+    `cfg.authorizer = Arc::new(SimpleAclAuthorizer::new(...))`
+    install in the test harnesses that set `super_users` — they
+    previously relied on the slice-13 "ACLs-active ⇒ shim off ⇒
+    authorize runs" implicit wiring that is now removed.
+- **Broker `[authorization]` TOML wiring (`file_config.rs`):** new
+  `[authorization] type = "simple"|"opa"` + optional
+  `super_users = [...]`. `opa` requires an `[authorization.opa]`
+  subtable: `url`, `allow_on_error` (default `false`),
+  `initial_cache_capacity` (100), `maximum_cache_size` (1000),
+  `expire_after_ms` (`3_600_000` = 1h). Section absent ⇒
+  `AllowAllAuthorizer`. `apply_to` also seeds
+  `BrokerConfig::super_users` from the section so the existing
+  per-handler super-user bypass paths stay in sync with the
+  authorizer's own super-user set.
+- **Operator CRD (`Kafka.spec.authorization`):** new
+  `Option<Authorization>` tagged enum on `KafkaSpec`:
+  `Simple { super_users }` and `Opa { url, allow_on_error,
+  initial_cache_capacity, maximum_cache_size, expire_after_ms,
+  super_users }`. Manual `authorization_schema` (kube-rs 3.x
+  tagged-union workaround per slices 50 / 51b — `oneOf` +
+  `discriminator: type`). Per-user `KafkaUser.spec.authorization`
+  (slice 36) is unaffected — those types were renamed
+  `KafkaUserAuthorization` / `KafkaUserSimpleAuthorization` in
+  `crd/mod.rs` re-exports to free up the unqualified names for
+  this cluster-level enum. 16 `KafkaSpec` struct-literal sites
+  gained `authorization: None`.
+- **Reconciler (`controller/listeners.rs::render_broker_toml`):**
+  emits `[authorization]` + (for OPA) `[authorization.opa]` per
+  spec. Slice-51b's hardcoded top-level
+  `super_users = ["ANONYMOUS"]` render is gone — a new
+  `merge_anonymous` helper folds `"ANONYMOUS"` into the
+  **authorization section's** super-users list when
+  `Kafka.spec.delegationToken` is configured. When
+  `spec.authorization = None` but `delegationToken` is set, the
+  reconciler synthesises a `type = "simple", super_users =
+  ["ANONYMOUS"]` block (preserves the slice-51b
+  inter-broker-as-ANONYMOUS contract the kind-delegation-token
+  e2e relies on).
+- **Tests (43 new):** 1 broker unit `AllowAllAuthorizer` smoke
+  + 21 broker unit `SimpleAclAuthorizer` (every slice-13 free-fn
+  case ported: super-user bypass, deny-wins, LITERAL/PREFIXED,
+  principal wildcard, op-implication on Topic / Group / Cluster /
+  TransactionalId) + 7 broker unit `OpaAuthorizer` w/ wiremock
+  (super-user bypass, cache hit, cache miss, TTL expiry, HTTP
+  error w/ `allow_on_error=true|false`, JSON parse error) + 3
+  broker unit `file_config` TOML wiring (`[authorization]`
+  simple / opa / absent → `AllowAll`) + 2 broker integration
+  (`tests/opa_authorizer.rs` — real broker + mock OPA: produce
+  blocked → TOPIC_AUTHORIZATION_FAILED; produce allowed →
+  success) + 3 CRD round-trip (simple, opa full, opa minimal) +
+  4 reconciler render (`render_broker_toml` simple / opa / unset /
+  auto-injects-simple-+-ANONYMOUS) + 2 operator integration
+  (`tests/reconcile_kafka_authorization.rs` — end-to-end
+  reconcile inspects the `ConfigMap` PATCH and asserts the
+  rendered `broker-0.toml`). Workspace test count: **2850**
+  (up from 2785 on slice 51b).
+- **kind e2e (smoke-only):** new `kind-opa-authorization` job in
+  `.github/workflows/operator-e2e.yml` (E1 commit `464076e`,
+  rescoped in this slice's CI-fix commit). Deploys
+  `openpolicyagent/opa:0.65.0` w/ a self-contained Rego policy via
+  ConfigMap (alice allow, ClusterAction allow, default deny), brings
+  up a single-broker `Kafka` with `spec.authorization: { type: opa,
+  url: http://opa:8181/v1/data/kafka/authz/allow, super_users:
+  ["ANONYMOUS"] }`, then asserts (1) OPA `/health` answers, (2) the
+  rendered `demo-broker-config` ConfigMap's `broker-0.toml` contains
+  the expected `[authorization]` + `[authorization.opa]` blocks
+  pointing at the OPA URL, (3) `alice` + `bob` KafkaUser Secrets
+  materialise with the SCRAM-SHA-512 `password` data key, and
+  (4) `Kafka demo` + both KafkaUsers reach `Ready=True`. The
+  wire-enforcement allow/deny path is *not* exercised at the
+  produce level here — see the known-limitation bullet below.
+  Sample manifest at
+  `deploy/operator/sample/kafka-opa-authorization.yaml`.
+- **Known limitations / honest follow-ups:**
+  - **`kind-opa-authorization` is smoke-only** — it asserts the
+    operator emits the right `broker.toml` + the cluster comes up +
+    KafkaUser Secrets materialise. The OPA wire-enforcement happy /
+    deny paths are covered by broker unit + integration tests
+    (`crates/broker/src/authorizer/opa.rs::tests` +
+    `crates/broker/tests/opa_authorizer.rs`). A produce-level e2e
+    would require fixing a pre-existing SCRAM-SHA-512+TLS
+    Metadata-listener advertising issue that's out of slice 53's
+    scope.
+  - **No OPA mTLS** — `url` is plain HTTP/HTTPS today; mTLS
+    needs cert plumbing into `reqwest::ClientBuilder`. Follow-up.
+  - **No OPA-bundle awareness** — operators wire the policy
+    bundle into OPA externally (Bundle API, Git sidecar, or a
+    static ConfigMap as the kind e2e does).
+  - **Sync→async bridge** — `OpaAuthorizer::authorize` does
+    `block_in_place` + `Handle::block_on` per cache miss.
+    Acceptable for a tail authz call (cache absorbs steady-state);
+    visible under heavy miss load. Follow-up: refactor
+    `Authorizer::authorize` to be `async` end-to-end.
+  - **`Mutex<LruCache>` thundering-herd** — N concurrent misses
+    for the same key serialise on the cache write-lock.
+    Follow-up: single-flight (e.g. `tokio::sync::OnceCell` per
+    in-flight key).
+  - **No decision-log shipping** — broker doesn't forward OPA's
+    decision audit log; operators ship OPA's own audit log
+    externally.
+  - **Per-broker cache** — same decision is re-fetched from OPA
+    on cluster cold-start (no cross-broker warmup). Acceptable;
+    out of scope.
+- **Decomposition:** 12-commit slice (design + plan + 8 tasks +
+  B1 polish + S1 STATUS + gate): `b36922e` design, `a79a07d`
+  plan, `a79b757` B1 (`Authorizer` trait + AllowAll + SimpleAcl
+  + slice-13 free-fn removal + slice-51b shim removal),
+  `77bcfe2` B2 (`OpaAuthorizer` impl), `1de4b9a` B3
+  (`[authorization]` TOML wiring), `75b3b2a` B4 (broker
+  integration tests w/ mock OPA), `e8621eb` B1 polish (clippy
+  `doc_lazy_continuation` nit), `3df8262` O1
+  (`Kafka.spec.authorization` CRD + manual schema + 16-site
+  cascade sweep), `61d83b2` O2 (`render_broker_toml`
+  `[authorization]` block + slice-51b ANONYMOUS-render
+  fold-in), `1ee677b` O3 (operator integration tests + sample
+  manifest), `464076e` E1 (kind-opa-authorization e2e job), and
+  this commit (STATUS entry + final gate + the 5-file
+  test-shim sweep that lets the slice-13 shim removal land
+  cleanly).
+- **Workspace fmt + clippy `-D warnings` + tests + CRD drift gate**
+  all green. S1 paid down 3 clippy `-D warnings` nits in the O3
+  integration-test file (2 `doc_markdown` on `ConfigMap`, 1
+  `similar_names` on `cm_patch`/`cm_path` → renamed
+  `cm_req`/`cm_uri`) and ran the 5-file authorizer-wiring sweep
+  described above so the slice-13 shim removal lands cleanly in
+  the pre-existing broker integration tests.
+- Reference docs:
+  [`docs/superpowers/specs/2026-05-26-crabka-opa-authorizer-53-design.md`],
+  [`docs/superpowers/plans/2026-05-26-crabka-opa-authorizer-53.md`].
 ## Slice 48c — Crabka core: Tiered storage local-retention split (2026-05-26)
 
 - **Goal:** Third sub-slice of KIP-405. Once a sealed segment is durably

@@ -86,6 +86,16 @@ pub struct KafkaSpec {
     /// race with out-of-band `kubectl set env` patches.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delegation_token: Option<DelegationTokenConfig>,
+    /// Slice 53: cluster-level authorizer selection. When `None`, the
+    /// broker uses the default `AllowAll` authorizer (no ACL checks).
+    /// When `Some`, the operator renders the `[authorization]` TOML
+    /// section so the broker builds the matching `Arc<dyn Authorizer>`
+    /// (`SimpleAclAuthorizer` for `type: simple`, `OpaAuthorizer` for
+    /// `type: opa`). With `simple` or `opa` selected, the operator's
+    /// inter-broker principal MUST appear in `super_users` (no implicit
+    /// `ANONYMOUS` allow); operators opt in explicitly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization: Option<Authorization>,
 }
 
 /// Slice 51b: master-HMAC-key source for KIP-48 delegation tokens.
@@ -115,6 +125,102 @@ pub struct SecretKeyRef {
     /// Key within the Secret's `data`. Defaults to `secret-key`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
+}
+
+/// Slice 53: cluster-level authorizer selection on `Kafka.spec.authorization`.
+///
+/// Tagged on `type` to pick the broker-side `Arc<dyn Authorizer>` impl.
+/// `None` on the parent spec means `AllowAll` (no `[authorization]` TOML
+/// section is rendered, the broker uses `AllowAllAuthorizer`). When set,
+/// the operator's inter-broker principal MUST be in `super_users` — there
+/// is no implicit ANONYMOUS allow.
+///
+/// The `schema_with` workaround avoids a kube-rs 3.x `StructuralSchemaRewriter`
+/// panic when `oneOf` branches share a `type` discriminator with differing
+/// `enum` values — same pattern as `Authentication` in `user.rs` and
+/// `ListenerAuthentication` in `listener.rs`.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(tag = "type", rename_all = "kebab-case")]
+#[schemars(schema_with = "authorization_schema")]
+pub enum Authorization {
+    #[serde(rename = "simple")]
+    Simple(SimpleAuthorization),
+    #[serde(rename = "opa")]
+    Opa(OpaAuthorization),
+}
+
+/// Slice 53: `type: simple` config for `Kafka.spec.authorization`. Drives the
+/// broker's `SimpleAclAuthorizer`. Distinct from the per-user
+/// `crate::crd::user::SimpleAuthorization` (which carries ACL rules for one
+/// `KafkaUser`): this one is cluster-wide and only carries the super-user
+/// bypass list. ACLs themselves are owned by `KafkaUser` CRs / `CreateAcls`.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SimpleAuthorization {
+    /// Principal strings (e.g. `"User:admin"`, `"ANONYMOUS"`) that
+    /// bypass ACL checks. Empty = no super-users.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub super_users: Vec<String>,
+}
+
+/// Slice 53: `type: opa` config for `Kafka.spec.authorization`. Drives the
+/// broker's `OpaAuthorizer` — an HTTP-backed authorizer with an LRU+TTL
+/// decision cache. No `derive(Default)` because `url` has no sensible default.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct OpaAuthorization {
+    /// OPA decision endpoint URL — must include the data-API path, e.g.
+    /// `http://opa:8181/v1/data/kafka/authz/allow`.
+    pub url: String,
+    /// Permit the operation on any OPA error (timeout, 5xx, parse).
+    /// Default false (fail-closed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_on_error: Option<bool>,
+    /// Initial capacity of the broker's LRU decision cache. Broker
+    /// default applies when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0))]
+    pub initial_cache_capacity: Option<u32>,
+    /// Hard upper bound on the LRU decision cache. Broker default
+    /// applies when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub maximum_cache_size: Option<u32>,
+    /// Per-entry TTL (ms). Broker default applies when unset.
+    /// Minimum 1000 ms — sub-second TTLs defeat the cache.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1000))]
+    pub expire_after_ms: Option<i64>,
+    /// Principal strings that bypass OPA entirely. The broker's
+    /// internal calls (replication etc.) use `ANONYMOUS` by default,
+    /// which MUST be a super-user for inter-broker traffic to work
+    /// when `type: opa` is selected. Empty = no super-users (OPA
+    /// decides every request).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub super_users: Vec<String>,
+}
+
+fn authorization_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "object",
+        "required": ["type"],
+        "properties": {
+            "type": {
+                "type": "string",
+                "enum": ["simple", "opa"],
+            },
+            "superUsers": {
+                "type": "array",
+                "items": { "type": "string" },
+            },
+            // OPA-only sibling properties.
+            "url": { "type": "string" },
+            "allowOnError": { "type": "boolean" },
+            "initialCacheCapacity": { "type": "integer", "minimum": 0 },
+            "maximumCacheSize": { "type": "integer", "minimum": 1 },
+            "expireAfterMs": { "type": "integer", "minimum": 1000 },
+        },
+    })
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
@@ -195,6 +301,7 @@ mod tests {
                 clients_ca: None,
                 logging: None,
                 delegation_token: None,
+                authorization: None,
             },
         );
         let json = serde_json::to_string(&k).unwrap();
@@ -222,6 +329,7 @@ mod tests {
                 clients_ca: None,
                 logging: None,
                 delegation_token: None,
+                authorization: None,
             },
         );
         let j = serde_json::to_string(&k.spec).unwrap();
@@ -332,6 +440,7 @@ mod tests {
                 clients_ca: None,
                 logging: None,
                 delegation_token: None,
+                authorization: None,
             },
         );
         let j = serde_json::to_string(&k.spec).unwrap();
@@ -367,6 +476,7 @@ mod tests {
                 clients_ca: None,
                 logging: None,
                 delegation_token: None,
+                authorization: None,
             },
         );
         let j = serde_json::to_string(&k.spec).unwrap();
@@ -460,5 +570,129 @@ mod tests {
                 .unwrap()
                 .generate_certificate_authority
         );
+    }
+
+    // Slice 53: `Kafka.spec.authorization` round-trip tests.
+    //
+    // Pin the wire shape of the slice-53 authorizer-selection CRD
+    // alongside its sibling enums on `KafkaSpec`. Mirrors the slice-51b
+    // `delegationToken` round-trip pattern: deserialize Strimzi-shape
+    // YAML, assert the typed Rust value, then re-serialize and assert
+    // optional fields are omitted (so the rendered TOML stays minimal
+    // and the broker's `[authorization]` parser doesn't trip on
+    // explicit-null vs absent).
+
+    #[test]
+    fn simple_authorization_round_trip() {
+        let yaml = r"
+kafkaVersion: 0.1.1
+authorization:
+  type: simple
+  superUsers:
+    - User:admin
+    - ANONYMOUS
+";
+        let spec: KafkaSpec = serde_yaml::from_str(yaml).expect("yaml must parse");
+        let Some(Authorization::Simple(simple)) = spec.authorization.clone() else {
+            panic!("expected Simple variant, got {:?}", spec.authorization);
+        };
+        assert_eq!(
+            simple.super_users,
+            vec!["User:admin".to_string(), "ANONYMOUS".to_string()]
+        );
+
+        // JSON round-trip pins the camelCase wire shape (`superUsers`,
+        // `type: "simple"`).
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(json.contains("\"type\":\"simple\""), "got: {json}");
+        assert!(
+            json.contains("\"superUsers\":[\"User:admin\",\"ANONYMOUS\"]"),
+            "got: {json}"
+        );
+        let back: KafkaSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, spec);
+    }
+
+    #[test]
+    fn opa_authorization_round_trip_full_fields() {
+        let yaml = r"
+kafkaVersion: 0.1.1
+authorization:
+  type: opa
+  url: http://opa.opa.svc:8181/v1/data/kafka/authz/allow
+  allowOnError: true
+  initialCacheCapacity: 1000
+  maximumCacheSize: 50000
+  expireAfterMs: 60000
+  superUsers:
+    - User:admin
+    - ANONYMOUS
+";
+        let spec: KafkaSpec = serde_yaml::from_str(yaml).expect("yaml must parse");
+        let Some(Authorization::Opa(opa)) = spec.authorization.clone() else {
+            panic!("expected Opa variant, got {:?}", spec.authorization);
+        };
+        assert_eq!(opa.url, "http://opa.opa.svc:8181/v1/data/kafka/authz/allow");
+        assert_eq!(opa.allow_on_error, Some(true));
+        assert_eq!(opa.initial_cache_capacity, Some(1000));
+        assert_eq!(opa.maximum_cache_size, Some(50_000));
+        assert_eq!(opa.expire_after_ms, Some(60_000));
+        assert_eq!(
+            opa.super_users,
+            vec!["User:admin".to_string(), "ANONYMOUS".to_string()]
+        );
+
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(json.contains("\"type\":\"opa\""), "got: {json}");
+        // Every numeric knob must round-trip in camelCase form.
+        assert!(json.contains("\"allowOnError\":true"), "got: {json}");
+        assert!(
+            json.contains("\"initialCacheCapacity\":1000"),
+            "got: {json}"
+        );
+        assert!(json.contains("\"maximumCacheSize\":50000"), "got: {json}");
+        assert!(json.contains("\"expireAfterMs\":60000"), "got: {json}");
+        let back: KafkaSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, spec);
+    }
+
+    #[test]
+    fn opa_authorization_minimal_omits_optional_fields() {
+        // Only `url` is required on the `opa` variant; every other
+        // field is `Option<...>` / `Vec<...>` and must be skipped on
+        // serialize when `None`/empty so the rendered TOML and the
+        // resulting hash are minimal.
+        let yaml = r"
+kafkaVersion: 0.1.1
+authorization:
+  type: opa
+  url: http://opa.opa.svc:8181/v1/data/kafka/authz/allow
+";
+        let spec: KafkaSpec = serde_yaml::from_str(yaml).expect("yaml must parse");
+        let Some(Authorization::Opa(opa)) = spec.authorization.clone() else {
+            panic!("expected Opa variant, got {:?}", spec.authorization);
+        };
+        assert_eq!(opa.url, "http://opa.opa.svc:8181/v1/data/kafka/authz/allow");
+        assert_eq!(opa.allow_on_error, None);
+        assert_eq!(opa.initial_cache_capacity, None);
+        assert_eq!(opa.maximum_cache_size, None);
+        assert_eq!(opa.expire_after_ms, None);
+        assert!(opa.super_users.is_empty());
+
+        let json = serde_json::to_string(&spec).unwrap();
+        for absent in [
+            "allowOnError",
+            "initialCacheCapacity",
+            "maximumCacheSize",
+            "expireAfterMs",
+            "superUsers",
+        ] {
+            assert!(
+                !json.contains(absent),
+                "{absent} must be omitted when None/empty; got: {json}"
+            );
+        }
+        let back: KafkaSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, spec);
     }
 }

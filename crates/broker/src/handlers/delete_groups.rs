@@ -8,7 +8,7 @@ use crabka_protocol::owned::delete_groups_request::DeleteGroupsRequest;
 use crabka_protocol::owned::delete_groups_response::{DeletableGroupResult, DeleteGroupsResponse};
 use crabka_protocol::{Decode, Encode};
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize};
+use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 use crate::broker::Broker;
 use crate::codes;
 use crate::coordinator::DeleteGroupError;
@@ -38,7 +38,7 @@ pub(crate) async fn handle(
             resource_name: gid.as_str(),
             operation: AclOperation::Delete,
         };
-        if authorize(&image, &broker.config.super_users, &acl_req) == AuthorizationResult::Deny {
+        if broker.config.authorizer.authorize(&image, &acl_req) == AuthorizationResult::Deny {
             results.push(DeletableGroupResult {
                 group_id: gid,
                 error_code: codes::GROUP_AUTHORIZATION_FAILED,
