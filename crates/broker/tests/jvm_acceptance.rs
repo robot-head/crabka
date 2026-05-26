@@ -2152,6 +2152,9 @@ async fn start_dual_mech_broker(
         super_users: std::collections::HashSet::from([admin.to_string()]),
         ..BrokerConfig::default()
     };
+    config.authorizer = std::sync::Arc::new(crabka_broker::authorizer::SimpleAclAuthorizer::new(
+        config.super_users.clone(),
+    ));
     config
         .plain_credentials
         .insert(admin.to_string(), admin_pass.to_string());
@@ -3240,6 +3243,9 @@ async fn start_sasl_ssl_broker(
         super_users: std::collections::HashSet::from([admin.to_string()]),
         ..BrokerConfig::default()
     };
+    config.authorizer = std::sync::Arc::new(crabka_broker::authorizer::SimpleAclAuthorizer::new(
+        config.super_users.clone(),
+    ));
     config
         .plain_credentials
         .insert(admin.to_string(), admin_pass.to_string());
@@ -3459,6 +3465,7 @@ const LISTEN_B1: &str = "0.0.0.0:9094";
 /// name on both is `"SASL_PLAINTEXT"`, so the broker peers dial each
 /// other's advertised host (which we set to `host.docker.internal:<port>`
 /// so the JVM containers can use the same metadata response).
+#[allow(clippy::too_many_lines)]
 async fn start_two_sasl_brokers(
     admin: &str,
     admin_pass: &str,
@@ -3528,6 +3535,9 @@ async fn start_two_sasl_brokers(
             }),
             ..BrokerConfig::default()
         };
+        cfg.authorizer = std::sync::Arc::new(crabka_broker::authorizer::SimpleAclAuthorizer::new(
+            cfg.super_users.clone(),
+        ));
         cfg.plain_credentials
             .insert(admin.to_string(), admin_pass.to_string());
         cfg
@@ -3858,6 +3868,9 @@ async fn start_two_sasl_ssl_brokers_with_controller_protocol(
             }),
             ..BrokerConfig::default()
         };
+        cfg.authorizer = std::sync::Arc::new(crabka_broker::authorizer::SimpleAclAuthorizer::new(
+            cfg.super_users.clone(),
+        ));
         cfg.plain_credentials
             .insert(admin.to_string(), admin_pass.to_string());
         cfg
@@ -4184,6 +4197,9 @@ async fn start_sasl_plaintext_broker_with_super_user(
         super_users: std::collections::HashSet::from([super_user.to_string()]),
         ..BrokerConfig::default()
     };
+    config.authorizer = std::sync::Arc::new(crabka_broker::authorizer::SimpleAclAuthorizer::new(
+        config.super_users.clone(),
+    ));
     for (u, p) in users {
         config
             .plain_credentials
@@ -5131,6 +5147,9 @@ async fn start_three_broker_sasl_plaintext_jvm_cluster(
             }),
             ..BrokerConfig::default()
         };
+        cfg.authorizer = std::sync::Arc::new(crabka_broker::authorizer::SimpleAclAuthorizer::new(
+            cfg.super_users.clone(),
+        ));
         cfg.plain_credentials
             .insert(admin.to_string(), admin_pass.to_string());
         cfg
@@ -6049,6 +6068,9 @@ async fn start_three_broker_sasl_plaintext_jvm_cluster_with_users(
             }),
             ..BrokerConfig::default()
         };
+        cfg.authorizer = std::sync::Arc::new(crabka_broker::authorizer::SimpleAclAuthorizer::new(
+            cfg.super_users.clone(),
+        ));
         cfg.plain_credentials
             .insert(admin.to_string(), admin_pass.to_string());
         for (u, p) in extra_users {
@@ -7041,6 +7063,9 @@ async fn start_three_broker_sasl_plaintext_jvm_cluster_with_delegation_tokens(
             delegation_token_secret_key: Some(SecretBytes::new(secret_key.to_vec())),
             ..BrokerConfig::default()
         };
+        cfg.authorizer = std::sync::Arc::new(crabka_broker::authorizer::SimpleAclAuthorizer::new(
+            cfg.super_users.clone(),
+        ));
         cfg.plain_credentials
             .insert(admin.to_string(), admin_pass.to_string());
         cfg
