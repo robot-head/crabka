@@ -1,0 +1,18 @@
+# crabka-broker TOML config (consumed via --config-file).
+# Bare-VM bring-up: single broker, plaintext listener on 9092.
+# Mirrors what the operator would emit on Kubernetes minus the
+# multi-broker / TLS / SASL bits.
+
+broker_id = 1
+log_dir = "{{ crabka_primary_log_dir }}"
+{% if crabka_extra_log_dirs | length > 0 %}
+extra_log_dirs = {{ crabka_extra_log_dirs | to_json }}
+{% endif %}
+
+inter_broker_listener_name = "client"
+
+[[listeners]]
+name = "client"
+bind_addr = "0.0.0.0:9092"
+advertised = "{{ private_ip }}:9092"
+protocol = "Plaintext"

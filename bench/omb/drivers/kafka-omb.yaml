@@ -1,0 +1,29 @@
+# Reference copy of the OMB Kafka driver, identical for Crabka because
+# Crabka speaks the Kafka wire protocol. The actual driver YAMLs used
+# at run time are rendered per-stack by deploy-client.yaml from
+# ansible/templates/kafka-driver.yaml.j2 (it injects bootstrap.servers).
+# This file is here so you can diff against future upstream changes.
+
+name: Kafka-OMB
+driverClass: io.openmessaging.benchmark.driver.kafka.KafkaBenchmarkDriver
+
+# Pinned at 1 to match Crabka's single-broker bare-VM constraint.
+replicationFactor: 1
+
+topicConfig: |
+  min.insync.replicas=1
+
+commonConfig: |
+  bootstrap.servers=__INJECTED_BY_ANSIBLE__:9092
+  default.api.timeout.ms=1200000
+  request.timeout.ms=1200000
+
+producerConfig: |
+  acks=1
+  linger.ms=1
+  batch.size=1048576
+
+consumerConfig: |
+  auto.offset.reset=earliest
+  enable.auto.commit=false
+  max.partition.fetch.bytes=10485760

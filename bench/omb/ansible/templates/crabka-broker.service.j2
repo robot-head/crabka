@@ -1,0 +1,15 @@
+[Unit]
+Description=Crabka broker (OMB bench harness)
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/crabka-broker --config-file /etc/crabka-broker.toml
+WorkingDirectory={{ crabka_install_dir }}
+Environment='RUST_LOG=info,crabka_broker=info,crabka_log=info'
+RestartSec=1s
+Restart=on-failure
+Type=simple
+LimitNOFILE=300000
+
+[Install]
+WantedBy=multi-user.target

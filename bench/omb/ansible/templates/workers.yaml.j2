@@ -1,0 +1,7 @@
+# OMB workers.yaml — list of benchmark-worker HTTP endpoints the
+# coordinator will distribute work across.
+
+workers:
+{% for w in groups['client'] %}
+  - http://{{ hostvars[w].private_ip }}:8080
+{% endfor %}

@@ -1,0 +1,16 @@
+# Fan-out parallel-producer/consumer workload. 200 k msgs/s aggregate,
+# 4 producers, 4 consumers in a single subscription, 100 partitions.
+# Tests broker-side partition distribution + group rebalance.
+
+name: 1 topic / 100 partitions / 4p 4c / 1KiB / 200k
+
+topics: 1
+partitionsPerTopic: 100
+messageSize: 1024
+payloadFile: "payload/payload-1Kb.data"
+subscriptionsPerTopic: 1
+consumerPerSubscription: 4
+producersPerTopic: 4
+producerRate: 200000
+consumerBacklogSizeGB: 0
+testDurationMinutes: 15

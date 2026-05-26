@@ -1,0 +1,203 @@
+---
+# Brings up Apache Kafka in KRaft mode (combined controller+broker
+# roles) on every host in the `kafka` group. No Zookeeper — diverges
+# from OMB's AWS reference, which still uses ZK, but matches what
+# anyone deploying a fresh Kafka in 2026 would actually run.
+#
+# Idempotent: re-running will reinstall systemd units + restart
+# brokers, but won't reformat the storage directories unless
+# `-e force_format=true` is passed.
+
+- name: System prep for Kafka broker hosts
+  hosts: kafka
+  become: true
+  gather_facts: true
+  tasks:
+    - name: Install OS packages
+      ansible.builtin.apt:
+        name:
+          - openjdk-17-jre-headless
+          - xfsprogs
+          - chrony
+          - sysstat
+          - jq
+        state: present
+        update_cache: true
+
+    - name: Detect local-SSD block devices
+      ansible.builtin.shell: |
+        set -euo pipefail
+        # On n2 + scratch_disk{interface=NVME}, local SSDs appear as
+        # /dev/nvme0n[1..N] (boot disk is /dev/sda). The list we use
+        # is everything under /dev/nvme0n* sorted.
+        ls -1 /dev/nvme0n* 2>/dev/null | sort
+      register: nvme_devices
+      changed_when: false
+
+    - name: Fail loudly if no local SSDs were attached
+      ansible.builtin.fail:
+        msg: "Expected ≥1 local SSD via nvme0n*; got none. Check terraform `local_ssd_count`."
+      when: nvme_devices.stdout_lines | length == 0
+
+    - name: Format local SSDs as XFS
+      community.general.filesystem:
+        fstype: xfs
+        dev: "{{ item }}"
+        force: "{{ force_format | default(false) | bool }}"
+      loop: "{{ nvme_devices.stdout_lines }}"
+
+    - name: Create mount points
+      ansible.builtin.file:
+        path: "/mnt/data-{{ idx + 1 }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      loop: "{{ nvme_devices.stdout_lines }}"
+      loop_control:
+        index_var: idx
+
+    - name: Mount local SSDs
+      ansible.posix.mount:
+        path: "/mnt/data-{{ idx + 1 }}"
+        src: "{{ item }}"
+        fstype: xfs
+        opts: "defaults,noatime,nodiscard"
+        state: mounted
+      loop: "{{ nvme_devices.stdout_lines }}"
+      loop_control:
+        index_var: idx
+
+    - name: Raise nofile limits
+      community.general.pam_limits:
+        domain: "*"
+        limit_type: "{{ item }}"
+        limit_item: nofile
+        value: "500000"
+      loop: ["soft", "hard"]
+
+    - name: Tune sysctl for Kafka
+      ansible.posix.sysctl:
+        name: "{{ item.k }}"
+        value: "{{ item.v }}"
+        sysctl_set: true
+        state: present
+        reload: true
+      loop:
+        - { k: "vm.swappiness",      v: "1" }
+        - { k: "vm.max_map_count",   v: "262144" }
+        - { k: "vm.dirty_ratio",     v: "60" }
+        - { k: "vm.dirty_background_ratio", v: "5" }
+
+- name: Install and configure Kafka (KRaft)
+  hosts: kafka
+  become: true
+  vars:
+    kafka_log_dirs: "{{ ansible_facts.mounts | selectattr('mount', 'match', '^/mnt/data-') | map(attribute='mount') | map('regex_replace', '$', '/kafka-logs') | join(',') }}"
+    # Cluster-wide controller quorum: every kafka host is also a controller.
+    kafka_controller_voters: >-
+      {{ groups['kafka']
+         | map('extract', hostvars, ['private_ip'])
+         | zip(range(1, groups['kafka'] | length + 1))
+         | map('reverse')
+         | map('join', '@')
+         | map('regex_replace', '$', ':9093')
+         | join(',') }}
+  tasks:
+    - name: Compute this broker's node.id (1-indexed)
+      ansible.builtin.set_fact:
+        kafka_node_id: "{{ groups['kafka'].index(inventory_hostname) + 1 }}"
+
+    - name: Wipe existing install dir
+      ansible.builtin.file:
+        path: "{{ kafka_install_dir }}"
+        state: absent
+      when: force_format | default(false) | bool
+
+    - name: Create install dir
+      ansible.builtin.file:
+        path: "{{ kafka_install_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Download Kafka tarball
+      ansible.builtin.unarchive:
+        src: "{{ kafka_download_url }}"
+        remote_src: true
+        dest: "{{ kafka_install_dir }}"
+        extra_opts: ["--strip-components=1"]
+        creates: "{{ kafka_install_dir }}/bin/kafka-server-start.sh"
+
+    - name: Ensure log dirs exist
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop: "{{ kafka_log_dirs.split(',') }}"
+
+    - name: Render server.properties (KRaft)
+      ansible.builtin.template:
+        src: kafka-server.properties.j2
+        dest: "{{ kafka_install_dir }}/config/kraft/server.properties"
+        mode: "0644"
+
+    - name: Generate or fetch the cluster UUID (on first broker only)
+      run_once: true
+      delegate_to: "{{ groups['kafka'][0] }}"
+      block:
+        - name: Generate cluster UUID if not yet cached
+          ansible.builtin.shell: |
+            set -e
+            if [ -f /opt/kafka/cluster.id ]; then
+              cat /opt/kafka/cluster.id
+            else
+              id="$({{ kafka_install_dir }}/bin/kafka-storage.sh random-uuid)"
+              echo -n "$id" > /opt/kafka/cluster.id
+              echo "$id"
+            fi
+          register: kafka_cluster_uuid_raw
+          changed_when: false
+
+    - name: Distribute cluster UUID to every broker
+      ansible.builtin.set_fact:
+        kafka_cluster_uuid: "{{ hostvars[groups['kafka'][0]].kafka_cluster_uuid_raw.stdout | trim }}"
+
+    - name: Format storage directories (only on first install or when forced)
+      ansible.builtin.shell: |
+        set -e
+        if [ ! -f {{ (kafka_log_dirs.split(',')[0]) }}/meta.properties ]; then
+          {{ kafka_install_dir }}/bin/kafka-storage.sh format \
+            -t {{ kafka_cluster_uuid }} \
+            -c {{ kafka_install_dir }}/config/kraft/server.properties \
+            --ignore-formatted
+        fi
+      args:
+        executable: /bin/bash
+      register: kafka_format
+      changed_when: "'Formatting' in kafka_format.stdout"
+
+    - name: Install systemd unit
+      ansible.builtin.template:
+        src: kafka.service.j2
+        dest: /etc/systemd/system/kafka.service
+        mode: "0644"
+      notify: restart kafka
+
+    - name: Enable + start kafka
+      ansible.builtin.systemd:
+        name: kafka
+        daemon_reload: true
+        enabled: true
+        state: started
+
+    - name: Wait for broker port
+      ansible.builtin.wait_for:
+        host: "{{ private_ip }}"
+        port: 9092
+        timeout: 120
+
+  handlers:
+    - name: restart kafka
+      ansible.builtin.systemd:
+        name: kafka
+        state: restarted

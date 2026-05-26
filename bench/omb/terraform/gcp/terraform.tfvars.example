@@ -1,0 +1,21 @@
+// Copy to terraform.tfvars and edit. Required: `project`.
+// Everything else has reasonable defaults; see variables.tf.
+
+project = "my-gcp-project-id"
+
+// region          = "us-central1"
+// zone            = "us-central1-a"
+// public_key_path = "~/.ssh/id_ed25519.pub"
+// ssh_user        = "omb"
+
+// num_instances = {
+//   kafka_broker  = 3
+//   crabka_broker = 1   // hard cap, see README
+//   client        = 4
+// }
+
+// machine_types = {
+//   kafka_broker  = "n2-standard-16"
+//   crabka_broker = "n2-standard-16"
+//   client        = "n2-standard-32"
+// }

@@ -1,0 +1,17 @@
+# Latency-sensitive small-message workload. 100 B payloads, 1
+# partition, single producer/consumer pair, fixed rate well below
+# saturation — surfaces broker queueing and wire-protocol per-message
+# overhead.
+
+name: 1 topic / 1 partition / 100B
+
+topics: 1
+partitionsPerTopic: 1
+messageSize: 100
+payloadFile: "payload/payload-100b.data"
+subscriptionsPerTopic: 1
+consumerPerSubscription: 1
+producersPerTopic: 1
+producerRate: 10000
+consumerBacklogSizeGB: 0
+testDurationMinutes: 10
