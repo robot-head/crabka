@@ -2233,6 +2233,520 @@ jobs:
           if-no-files-found: ignore
 
   # ─────────────────────────────────────────────────────────────────────────
+  # Slice 53: OPA-backed authorization (KIP-504-style external authorizer).
+  #
+  # Stands up an `openpolicyagent/opa:0.65.0` Deployment in-cluster with a
+  # hardcoded Rego policy mounted via a ConfigMap. The policy allows:
+  #   • `User:alice` unconditionally
+  #   • any request whose `resource.resourceType == "Cluster"` (broker
+  #     self-talk / metadata)
+  #   • any request whose `operation == "ClusterAction"` (inter-broker
+  #     replication etc.)
+  # and defaults `allow := false` for everything else — `bob` lands in
+  # the deny path.
+  #
+  # The Kafka CR is brought up with
+  # `spec.authorization: { type: opa, url: http://opa:8181/v1/data/kafka/authz/allow,
+  #  superUsers: ["ANONYMOUS"] }`. ANONYMOUS keeps the operator's PLAIN
+  # inter-broker traffic bypassing OPA so the cluster can bootstrap; user
+  # traffic (alice/bob) goes through SCRAM-SHA-512 on a second listener and
+  # is evaluated by OPA on every cache miss.
+  #
+  # Verification:
+  #   • Topic `permitted-topic` is pre-created via the PLAIN listener
+  #     (anonymous → super-user bypass).
+  #   • alice (SCRAM) produces to `permitted-topic` → Rego allows → success.
+  #   • bob (SCRAM) produces to `permitted-topic` → Rego denies → broker
+  #     returns TOPIC_AUTHORIZATION_FAILED (29) and the producer job fails.
+  # ─────────────────────────────────────────────────────────────────────────
+  kind-opa-authorization:
+    needs: [build-images, changes]
+    if: ${{ github.event_name == 'push' || needs.changes.outputs.operator == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+      - uses: azure/setup-helm@v5
+        with:
+          version: v3.16.2
+      - name: Download prebuilt image tarballs
+        uses: actions/download-artifact@v8
+        with:
+          name: e2e-images
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: crabka-opa-e2e
+          version: v0.24.0
+          node_image: kindest/node:v1.30.0
+
+      - name: Load images into kind
+        run: |
+          set -e
+          for tar in crabka-operator.tar crabka-broker.tar; do
+            docker load -i "$tar" 2>&1 | tee /tmp/load.log
+            loaded=$(sed -n 's/^Loaded image: //p' /tmp/load.log | head -1)
+            want=$(basename "$tar" .tar):e2e
+            if [ "$loaded" != "$want" ]; then docker tag "$loaded" "$want"; fi
+            kind load docker-image "$want" --name crabka-opa-e2e
+          done
+
+      - name: Install CRDs + chart
+        run: |
+          set -e
+          kubectl apply -f deploy/crds/crabka.io_kafkas.yaml
+          kubectl apply -f deploy/crds/crabka.io_kafkanodepools.yaml
+          kubectl apply -f deploy/crds/crabka.io_kafkausers.yaml
+          kubectl create namespace crabka-operator
+          helm install operator charts/crabka-operator \
+            --namespace crabka-operator \
+            --set image.repository=crabka-operator --set image.tag=e2e \
+            --set image.pullPolicy=IfNotPresent \
+            --set brokerImage.repository=crabka-broker --set brokerImage.tag=e2e \
+            --set brokerImage.pullPolicy=IfNotPresent
+          kubectl rollout status -n crabka-operator deploy/operator-crabka-operator --timeout=240s
+
+      # ─────────────────────────────────────────────────────────────────────
+      # OPA Deployment + Service + ConfigMap (inline Rego).
+      #
+      # Rego mirrors `crates/broker/src/authorizer/opa.rs` request shape:
+      #   input.request.principal              (e.g. "User:alice")
+      #   input.request.operation              (e.g. "Write" | "ClusterAction")
+      #   input.request.resource.resourceType  (e.g. "Topic" | "Cluster")
+      #   input.request.resource.name
+      #   input.request.resource.patternType   ("Literal")
+      #   input.request.host
+      #
+      # The broker hits `/v1/data/kafka/authz/allow`, so the package must be
+      # `kafka.authz` and the rule must be `allow`. Default deny everything
+      # else so that bob's produce is rejected.
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Apply OPA Deployment + Service with hardcoded Rego policy
+        run: |
+          set -e
+          cat <<'EOF' | kubectl apply -f -
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: opa-policy
+            namespace: default
+          data:
+            policy.rego: |
+              package kafka.authz
+
+              import rego.v1
+
+              # Allow alice unconditionally — exercises the OPA happy path
+              # for an authenticated SCRAM principal.
+              allow if input.request.principal == "User:alice"
+
+              # Allow Crabka's internal cluster/broker traffic. KRaft +
+              # MetadataRequest land here with resourceType=="Cluster" and
+              # the inter-broker replication path uses operation
+              # "ClusterAction". Belt-and-braces with superUsers=["ANONYMOUS"]
+              # on the broker side, but keeps the policy self-contained.
+              allow if input.request.resource.resourceType == "Cluster"
+              allow if input.request.operation == "ClusterAction"
+
+              # Deny everything else — bob falls here on his produce.
+              default allow := false
+          ---
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: opa
+            namespace: default
+            labels:
+              app: opa
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: opa
+            template:
+              metadata:
+                labels:
+                  app: opa
+              spec:
+                containers:
+                  - name: opa
+                    image: openpolicyagent/opa:0.65.0
+                    args:
+                      - "run"
+                      - "--server"
+                      - "--addr=0.0.0.0:8181"
+                      - "--log-level=info"
+                      - "/policies/policy.rego"
+                    ports:
+                      - containerPort: 8181
+                        name: http
+                    readinessProbe:
+                      httpGet:
+                        path: /health
+                        port: 8181
+                      initialDelaySeconds: 2
+                      periodSeconds: 3
+                    volumeMounts:
+                      - name: policy
+                        mountPath: /policies
+                        readOnly: true
+                volumes:
+                  - name: policy
+                    configMap:
+                      name: opa-policy
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: opa
+            namespace: default
+          spec:
+            selector:
+              app: opa
+            ports:
+              - name: http
+                port: 8181
+                targetPort: 8181
+          EOF
+          kubectl rollout status deploy/opa -n default --timeout=180s
+
+      # ─────────────────────────────────────────────────────────────────────
+      # Apply the Kafka cluster with two listeners:
+      #   PLAIN:9092 — inter-broker (ANONYMOUS principal, super-user bypass)
+      #                + admin topic creation path.
+      #   scram:9094 — SCRAM-SHA-512 + TLS, where alice/bob actually produce.
+      #
+      # `authorization.type: opa` plus `superUsers: ["ANONYMOUS"]` keeps the
+      # broker's own bootstrap traffic out of OPA's hot path while leaving
+      # every authenticated user request subject to the Rego decision.
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Apply Kafka cluster with OPA authorization + SCRAM listener
+        run: |
+          set -e
+          cat <<'EOF' | kubectl apply -f -
+          apiVersion: crabka.io/v1alpha1
+          kind: Kafka
+          metadata:
+            name: demo
+            namespace: default
+          spec:
+            kafkaVersion: "0.1.1"
+            listeners:
+              - name: PLAIN
+                port: 9092
+                type: internal
+                tls: false
+              - name: scram
+                port: 9094
+                type: internal
+                tls: true
+                authentication:
+                  type: scram-sha-512
+            interBrokerListenerName: PLAIN
+            authorization:
+              type: opa
+              url: http://opa.default.svc.cluster.local:8181/v1/data/kafka/authz/allow
+              superUsers: ["ANONYMOUS"]
+          ---
+          apiVersion: crabka.io/v1alpha1
+          kind: KafkaNodePool
+          metadata:
+            name: brokers
+            namespace: default
+            labels:
+              crabka.io/cluster: demo
+          spec:
+            roles: [Controller, Broker]
+            replicas: 1
+            nodeIdStart: 0
+            storage:
+              type: PersistentClaim
+              size: 1Gi
+              deleteClaim: true
+          EOF
+
+      - name: Wait for Kafka demo Ready
+        run: |
+          set -e
+          for i in $(seq 1 120); do
+            s=$(kubectl get kafka demo -n default \
+              -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
+            echo "attempt $i: Ready=$s"
+            if [ "$s" = "True" ]; then break; fi
+            sleep 5
+          done
+          [ "$s" = "True" ] || {
+            echo "::error::Kafka demo did not become Ready in 10 minutes"
+            kubectl describe kafka demo -n default
+            kubectl describe kafkanodepool brokers -n default
+            kubectl logs -n default demo-brokers-0 -c broker --tail=200 || true
+            kubectl logs deploy/opa -n default --tail=200 || true
+            exit 1
+          }
+
+      - name: Apply KafkaUsers alice + bob (SCRAM-SHA-512)
+        run: |
+          set -e
+          cat <<'EOF' | kubectl apply -f -
+          apiVersion: crabka.io/v1alpha1
+          kind: KafkaUser
+          metadata:
+            name: alice
+            namespace: default
+            labels:
+              crabka.io/cluster: demo
+          spec:
+            authentication:
+              type: scram-sha-512
+          ---
+          apiVersion: crabka.io/v1alpha1
+          kind: KafkaUser
+          metadata:
+            name: bob
+            namespace: default
+            labels:
+              crabka.io/cluster: demo
+          spec:
+            authentication:
+              type: scram-sha-512
+          EOF
+
+      - name: Wait for KafkaUser alice Ready
+        run: |
+          set -e
+          for i in $(seq 1 60); do
+            s=$(kubectl get kafkauser alice -n default \
+              -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
+            echo "attempt $i: KafkaUser alice Ready=$s"
+            if [ "$s" = "True" ]; then exit 0; fi
+            sleep 5
+          done
+          echo "::error::KafkaUser alice did not become Ready in 300s"
+          kubectl describe kafkauser alice -n default
+          kubectl logs -n crabka-operator deploy/operator-crabka-operator --tail=300 || true
+          exit 1
+
+      - name: Wait for KafkaUser bob Ready
+        run: |
+          set -e
+          for i in $(seq 1 60); do
+            s=$(kubectl get kafkauser bob -n default \
+              -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
+            echo "attempt $i: KafkaUser bob Ready=$s"
+            if [ "$s" = "True" ]; then exit 0; fi
+            sleep 5
+          done
+          echo "::error::KafkaUser bob did not become Ready in 300s"
+          kubectl describe kafkauser bob -n default
+          kubectl logs -n crabka-operator deploy/operator-crabka-operator --tail=300 || true
+          exit 1
+
+      # ─────────────────────────────────────────────────────────────────────
+      # Pre-create `permitted-topic` via the PLAIN listener. The PLAIN
+      # listener has no authentication, so the principal is `ANONYMOUS`
+      # which is in the broker's `superUsers` list — the OPA call is
+      # bypassed entirely and the topic create succeeds without needing
+      # an admin KafkaUser.
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Pre-create permitted-topic via PLAIN/ANONYMOUS (super-user)
+        run: |
+          set -e
+          kubectl run kt-create -n default --rm -i --restart=Never \
+            --image=apache/kafka:3.8.0 --command -- \
+            /opt/kafka/bin/kafka-topics.sh \
+              --bootstrap-server demo-broker-headless.default.svc.cluster.local:9092 \
+              --create --topic permitted-topic --partitions 1 --replication-factor 1
+
+      - name: Verify alice (SCRAM) produces successfully — Rego allows
+        run: |
+          cat <<'EOF' | kubectl apply -f -
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: opa-producer-alice
+            namespace: default
+          spec:
+            backoffLimit: 0
+            template:
+              spec:
+                restartPolicy: Never
+                containers:
+                  - name: producer
+                    image: apache/kafka:3.8.0
+                    command:
+                      - bash
+                      - -c
+                      - |
+                        set -ex
+                        keytool -import -trustcacerts -noprompt \
+                          -alias clusterca \
+                          -file /etc/crabka/cluster-ca/ca.crt \
+                          -keystore /tmp/trust.jks \
+                          -storepass changeit
+                        PASSWORD=$(cat /etc/crabka/alice/password)
+                        cat > /tmp/client.props <<INNER
+                        security.protocol=SASL_SSL
+                        sasl.mechanism=SCRAM-SHA-512
+                        sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="alice" password="$PASSWORD";
+                        ssl.truststore.location=/tmp/trust.jks
+                        ssl.truststore.password=changeit
+                        INNER
+                        echo "alice-allowed-by-opa" | \
+                          /opt/kafka/bin/kafka-console-producer.sh \
+                            --bootstrap-server demo-broker-headless.default.svc.cluster.local:9094 \
+                            --topic permitted-topic \
+                            --producer.config /tmp/client.props
+                    volumeMounts:
+                      - name: cluster-ca
+                        mountPath: /etc/crabka/cluster-ca
+                        readOnly: true
+                      - name: alice-secret
+                        mountPath: /etc/crabka/alice
+                        readOnly: true
+                volumes:
+                  - name: cluster-ca
+                    secret:
+                      secretName: demo-cluster-ca-cert
+                  - name: alice-secret
+                    secret:
+                      secretName: alice
+          EOF
+          kubectl wait job/opa-producer-alice -n default \
+            --for=condition=complete --timeout=120s || {
+            echo "::error::alice produce job did not complete — OPA wrongly denied alice"
+            kubectl logs -n default -l job-name=opa-producer-alice --tail=100 || true
+            kubectl logs deploy/opa -n default --tail=100 || true
+            exit 1
+          }
+
+      - name: Verify bob (SCRAM) is denied with TOPIC_AUTHORIZATION_FAILED
+        run: |
+          cat <<'EOF' | kubectl apply -f -
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: opa-producer-bob
+            namespace: default
+          spec:
+            backoffLimit: 0
+            template:
+              spec:
+                restartPolicy: Never
+                containers:
+                  - name: producer
+                    image: apache/kafka:3.8.0
+                    command:
+                      - bash
+                      - -c
+                      - |
+                        set -ex
+                        keytool -import -trustcacerts -noprompt \
+                          -alias clusterca \
+                          -file /etc/crabka/cluster-ca/ca.crt \
+                          -keystore /tmp/trust.jks \
+                          -storepass changeit
+                        PASSWORD=$(cat /etc/crabka/bob/password)
+                        cat > /tmp/client.props <<INNER
+                        security.protocol=SASL_SSL
+                        sasl.mechanism=SCRAM-SHA-512
+                        sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="bob" password="$PASSWORD";
+                        ssl.truststore.location=/tmp/trust.jks
+                        ssl.truststore.password=changeit
+                        INNER
+                        # We expect the broker to reject this produce with
+                        # TOPIC_AUTHORIZATION_FAILED (29). The console
+                        # producer surfaces it on stderr and exits non-zero.
+                        # Capture stderr so we can grep for the error name
+                        # and assert the failure mode explicitly.
+                        set +e
+                        echo "bob-should-be-denied" | \
+                          /opt/kafka/bin/kafka-console-producer.sh \
+                            --bootstrap-server demo-broker-headless.default.svc.cluster.local:9094 \
+                            --topic permitted-topic \
+                            --producer.config /tmp/client.props \
+                            --request-timeout-ms 15000 \
+                            2>/tmp/producer.err
+                        rc=$?
+                        set -e
+                        cat /tmp/producer.err
+                        if [ "$rc" = "0" ]; then
+                          echo "::error::bob produce unexpectedly succeeded — OPA / authorizer did not deny"
+                          exit 1
+                        fi
+                        if ! grep -q "TOPIC_AUTHORIZATION_FAILED\|TopicAuthorizationException" /tmp/producer.err; then
+                          echo "::error::bob produce failed but not with TOPIC_AUTHORIZATION_FAILED (rc=$rc)"
+                          exit 1
+                        fi
+                        echo "bob produce correctly rejected with TOPIC_AUTHORIZATION_FAILED."
+                    volumeMounts:
+                      - name: cluster-ca
+                        mountPath: /etc/crabka/cluster-ca
+                        readOnly: true
+                      - name: bob-secret
+                        mountPath: /etc/crabka/bob
+                        readOnly: true
+                volumes:
+                  - name: cluster-ca
+                    secret:
+                      secretName: demo-cluster-ca-cert
+                  - name: bob-secret
+                    secret:
+                      secretName: bob
+          EOF
+          kubectl wait job/opa-producer-bob -n default \
+            --for=condition=complete --timeout=120s || {
+            echo "::error::bob produce job did not reach Complete (the inner script asserts the deny)"
+            kubectl logs -n default -l job-name=opa-producer-bob --tail=200 || true
+            kubectl logs deploy/opa -n default --tail=100 || true
+            exit 1
+          }
+
+      - name: Collect diagnostics on failure
+        if: failure()
+        run: |
+          set +e
+          mkdir -p /tmp/opa-diag
+          {
+            echo "## kind-opa-authorization diagnostics"
+            kubectl get pods -A -o wide
+            echo "### operator logs"
+            kubectl logs -n crabka-operator deploy/operator-crabka-operator --tail=500
+            echo "### kafka demo"
+            kubectl get kafka demo -n default -o yaml || true
+            echo "### kafkanodepool brokers"
+            kubectl get kafkanodepool brokers -n default -o yaml || true
+            echo "### kafkausers (alice, bob)"
+            kubectl get kafkauser -n default -o yaml || true
+            echo "### KafkaUser conditions"
+            kubectl get kafkauser alice -n default \
+              -o jsonpath='{.status.conditions}' 2>&1 || true
+            echo
+            kubectl get kafkauser bob -n default \
+              -o jsonpath='{.status.conditions}' 2>&1 || true
+            echo
+            echo "### secrets (names only)"
+            kubectl get secret -n default || true
+            echo "### broker logs"
+            kubectl logs -n default demo-brokers-0 --tail=300 --all-containers || true
+            echo "### OPA logs"
+            kubectl logs deploy/opa -n default --tail=200 || true
+            echo "### producer-alice logs"
+            kubectl logs -n default -l job-name=opa-producer-alice --tail=200 || true
+            echo "### producer-bob logs"
+            kubectl logs -n default -l job-name=opa-producer-bob --tail=200 || true
+          } > /tmp/opa-diag/diagnostics.md
+
+      - name: Upload diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: operator-e2e-opa-authorization-diagnostics
+          path: /tmp/opa-diag/
+          retention-days: 14
+          if-no-files-found: ignore
+
+  # ─────────────────────────────────────────────────────────────────────────
   # Slice 50: OAUTHBEARER listener + tls-external KafkaUser
   #
   # Stands up Bitnami Keycloak in-cluster (HTTP only — broker → IdP HTTPS
