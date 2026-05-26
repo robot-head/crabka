@@ -81,6 +81,11 @@ pub struct Broker {
     /// [`BrokerHandle::controlled_shutdown`] awaits this before invoking
     /// the regular shutdown path.
     pub(crate) should_shutdown: Arc<tokio::sync::watch::Sender<bool>>,
+    /// Slice 48d (KIP-405): shared remote-storage + remote-log-metadata
+    /// reader. `Some` when `BrokerConfig::remote_log_storage_dir` is set;
+    /// the remote-log-manager copy task and the Fetch/ListOffsets
+    /// handlers share the same instance through this handle.
+    pub(crate) remote_reader: Option<Arc<crate::remote_reader::RemoteReader>>,
     handlers: HandlerTable,
 }
 
@@ -1359,25 +1364,35 @@ impl Broker {
         // + in-memory metadata manager are constructed once and shared
         // across ticks; per-topic offload is gated by `remote.storage.enable`,
         // and the task filters to partitions this broker leads.
-        if let Some(dir) = config.remote_log_storage_dir.clone() {
-            let partitions = partitions.clone();
-            let controller = controller.clone();
-            let shutdown = supervisor_shutdown.child_token();
-            let rsm: Arc<dyn crabka_remote_storage::RemoteStorageManager> =
-                Arc::new(crabka_remote_storage::LocalTieredStorage::new(dir));
-            let rlmm: Arc<dyn crabka_remote_storage::RemoteLogMetadataManager> =
-                Arc::new(crabka_remote_storage::InmemoryRemoteLogMetadataManager::new());
-            tokio::spawn(crate::remote_log_manager::run(
-                partitions,
-                controller,
-                rsm,
-                rlmm,
-                config.node_id,
-                config.broker_id,
-                crate::remote_log_manager::RemoteLogManagerConfig::default(),
-                shutdown,
-            ));
-        }
+        //
+        // Slice 48d hoists construction here so the `RemoteReader` on
+        // `Broker` and the copy task share the same RSM / RLMM pair. A
+        // single broker has exactly one of each.
+        let remote_reader: Option<Arc<crate::remote_reader::RemoteReader>> =
+            if let Some(dir) = config.remote_log_storage_dir.clone() {
+                let rsm: Arc<dyn crabka_remote_storage::RemoteStorageManager> =
+                    Arc::new(crabka_remote_storage::LocalTieredStorage::new(dir));
+                let rlmm: Arc<dyn crabka_remote_storage::RemoteLogMetadataManager> =
+                    Arc::new(crabka_remote_storage::InmemoryRemoteLogMetadataManager::new());
+
+                let partitions = partitions.clone();
+                let controller = controller.clone();
+                let shutdown = supervisor_shutdown.child_token();
+                tokio::spawn(crate::remote_log_manager::run(
+                    partitions,
+                    controller,
+                    rsm.clone(),
+                    rlmm.clone(),
+                    config.node_id,
+                    config.broker_id,
+                    crate::remote_log_manager::RemoteLogManagerConfig::default(),
+                    shutdown,
+                ));
+
+                Some(Arc::new(crate::remote_reader::RemoteReader::new(rsm, rlmm)))
+            } else {
+                None
+            };
 
         // Slice 33: TLS hot-reload watcher. Only spawn when a TLS
         // config is present — non-TLS brokers don't need it.
@@ -1498,6 +1513,7 @@ impl Broker {
             quota_buckets,
             want_shutdown: want_shutdown_tx,
             should_shutdown: should_shutdown_tx,
+            remote_reader,
             handlers,
         });
 

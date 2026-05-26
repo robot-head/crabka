@@ -3493,3 +3493,92 @@ introspection metadata).
 - **Workspace fmt + clippy `-D warnings` + tests** all green. No CRDs
   touched.
 
+## Slice 48d — Crabka core: Tiered storage remote read path (2026-05-26)
+
+- **Goal:** Fourth sub-slice of KIP-405. Serve `Fetch` requests below
+  `local_log_start_offset()` from the remote tier via the broker's
+  shared `RemoteStorageManager` + `RemoteLogMetadataManager`, and
+  surface remote earliest / by-timestamp offsets on `ListOffsets`.
+  Closes the gap left by 48c: with local-retention deleting copied
+  segments, fetching offset 0 on a tiered topic still returned
+  `OFFSET_OUT_OF_RANGE`; now it returns the actual batch from the
+  remote tier.
+- **Broker wiring (`crates/broker/src/broker.rs`):**
+  - Slice 48b/c constructed the RSM + RLMM inside `Broker::start` and
+    moved them straight into the `remote_log_manager::run` task. 48d
+    hoists construction out so the handlers can reach the same
+    instances: new `Broker.remote_reader: Option<Arc<RemoteReader>>`
+    (`None` when `BrokerConfig::remote_log_storage_dir` is unset). The
+    copy task and the new `RemoteReader` share the same Arcs.
+- **New module `crates/broker/src/remote_reader.rs`:**
+  - `RemoteReader { rsm, rlmm }` wraps the shared `Arc<dyn ...>` pair
+    and exposes three async accessors:
+    - `fetch_batch(tp, leader_epoch, offset, max_bytes)` — looks the
+      finished segment up in the RLMM, fetches its offset index via
+      RSM, positions into the `.log` data, and decodes the first
+      batch whose last offset is `>= offset`. Returns `None` when no
+      finished segment covers `(epoch, offset)` or the segment is
+      still `CopySegmentStarted`.
+    - `earliest_offset(tp)` — lowest `start_offset` across
+      `CopySegmentFinished` segments, or `None`.
+    - `offset_for_timestamp(tp, target_ts)` — walks finished segments
+      oldest-first, picks the first whose `max_timestamp_ms ≥
+      target_ts`, fetches the segment's time index, and returns
+      `start_offset + relative_offset_for_timestamp`. Conservative
+      fallback (`start_offset`) when the segment qualifies but no
+      time-index entry is past the target.
+  - Pure-logic helpers (test-isolated): `parse_offset_index`,
+    `position_for_relative_offset`, `parse_time_index`,
+    `relative_offset_for_timestamp`, `end_position_for`,
+    `first_batch_at_or_after`. They mirror `crabka_log::index`'s
+    binary-search semantics against the same on-disk byte format the
+    copy path (48b) wrote verbatim.
+  - Every blocking RSM call (`fetch_index`, `fetch_log_segment`) is
+    wrapped in `tokio::task::spawn_blocking`, matching 48b's copy path.
+- **Fetch handler (`crates/broker/src/handlers/fetch.rs`):**
+  - `do_read` unchanged; after the first read pass (and again after
+    the long-poll re-read pass), a new `try_remote_read` runs on any
+    partition whose `out.error_code == OFFSET_OUT_OF_RANGE` AND whose
+    `LogConfig.remote_storage_enable` is true. On hit, replaces the
+    error with `NONE` and fills `out.records`; on miss / error /
+    non-tiered, leaves the OOR response intact (logged at WARN).
+  - The remote-served batch counts toward the long-poll `min_bytes`
+    accumulator so it can satisfy a Fetch request without waiting on
+    `max_wait_ms`.
+  - **Read-committed scoping note:** remote batches are returned
+    unfiltered — sealed remote segments contain only committed or
+    fully-aborted transactions, but a strict read-committed consumer
+    could still see a batch from a transaction that was aborted
+    before the segment was sealed. Wiring the segment's
+    `.txnindex` (fetched via `IndexType::Transaction`) into the
+    `aborted_in_range` filter is mechanical and deferred.
+- **ListOffsets handler (`crates/broker/src/handlers/list_offsets.rs`):**
+  - EARLIEST: when tiered, returns `min(local_start, remote_start)`
+    where `remote_start = remote_reader.earliest_offset(tp)`. Falls
+    back to `local_start` when the remote tier is empty for the
+    partition. Non-tiered topics unchanged.
+  - Positive timestamp: when tiered, consults
+    `remote_reader.offset_for_timestamp(tp, ts)`; if `Some`, returns
+    that offset. Otherwise returns `-1` (the existing stub —
+    local-segment timeindex lookup remains a future cleanup).
+  - LATEST unchanged: `log_end_offset()` is the partition's true LEO
+    regardless of tiering.
+  - Topic id resolved from `controller.current_image().topic(name)`.
+    Missing topic id (recently-deleted topic) skips the remote path.
+- **Tests:** broker lib +14 (4 pure-logic helper tests +
+  `end_position_for` + `first_batch_at_or_after` + 8 integration tests
+  against `LocalTieredStorage` + `InmemoryRemoteLogMetadataManager`
+  exercising `fetch_batch` happy path / unknown segment / unfinished
+  segment, `earliest_offset` populated + empty, `offset_for_timestamp`
+  match + past-last). Workspace lib counts: broker 490 (+14).
+- **Design:** `[docs/superpowers/specs/2026-05-26-crabka-tiered-storage-remote-read-48d-design.md]`.
+- **Out of scope (48e+):** Read-committed aborted-transaction filtering
+  on remote batches (sketched above; mechanical follow-up). Local
+  timestamp index lookup on `ListOffsets` (the `-1` stub on the local
+  path is preserved; remote lookup is layered on top). Remote-tier
+  total-retention eviction (48e). `RemotePartitionDeleteMetadata`
+  cascade on `DeleteTopics` (48e). `TopicBasedRemoteLogMetadataManager`
+  (48f). Object-store RSM (48f). Operator CRD surface (48g).
+- **Workspace fmt + clippy `-D warnings` + tests** all green. No CRDs
+  touched.
+
