@@ -131,6 +131,7 @@ mod coordinator;
 pub(crate) mod delegation_token_cleanup;
 pub mod disk_scanner;
 mod error;
+pub mod fetch_session;
 pub mod file_config;
 mod handlers;
 pub(crate) mod heartbeat;

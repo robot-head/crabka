@@ -28,6 +28,9 @@ use crate::authorizer::{AuthorizationResult, authorize_topics};
 use crate::broker::Broker;
 use crate::codes;
 use crate::error::BrokerError;
+use crate::fetch_session::{
+    CachedPartitionState, FetchSessionKey, INVALID_SESSION_ID, SessionDecision,
+};
 use crate::partition::Partition;
 
 type WaitFut = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
@@ -75,6 +78,69 @@ pub(crate) async fn handle(
     let mut cur: &[u8] = req_bytes;
     let req = FetchRequest::decode(&mut cur, version)?;
 
+    // `replica_id >= 0` means follower fetch (Apache Kafka convention).
+    // KIP-903 (Kafka 3.5) moved `replica_id` into a tagged `replica_state`
+    // struct on Fetch v15+; on v0-14 the original top-level field is used.
+    // The codegen serializes whichever the negotiated version requires, so
+    // here we accept whichever field is populated. Without this fallback,
+    // every v15+ follower fetch decodes with `replica_id = -1` (the default
+    // for the deprecated top-level field), the handler treats it as a
+    // consumer fetch, clamps records at HW=0, and replication silently
+    // stalls — which is exactly the byte-compare test's failure mode.
+    let effective_replica_id = if req.replica_id >= 0 {
+        req.replica_id
+    } else {
+        req.replica_state.replica_id
+    };
+    let is_follower_fetch = effective_replica_id >= 0;
+    // isolation_level=1 (read_committed) only applies to consumer fetches.
+    // Follower fetches always see all records regardless of isolation.
+    let read_committed = !is_follower_fetch && req.isolation_level == 1;
+
+    // ── KIP-227 session classification ───────────────────────────────
+    // Decide whether this request is sessionless, opening a new
+    // session, an incremental delta on an existing one, or closing
+    // one. For incremental fetches the cache has already merged
+    // `req.topics` into the cached subscription set and removed
+    // anything in `forgotten_topics_data`, so `effective_topics`
+    // below works off the resulting full subscription.
+    let decision = broker.fetch_session_cache.classify(&req);
+    if let SessionDecision::Error { code } = decision {
+        let resp = FetchResponse {
+            error_code: code,
+            session_id: INVALID_SESSION_ID,
+            responses: Vec::new(),
+            ..Default::default()
+        };
+        let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
+        resp.encode(&mut buf, version)?;
+        return Ok(buf.freeze());
+    }
+
+    let effective_topics: Vec<EffectiveTopic> = match &decision {
+        SessionDecision::Incremental { partitions, .. } => {
+            group_cached_into_effective_topics(partitions)
+        }
+        _ => req
+            .topics
+            .iter()
+            .map(|t| EffectiveTopic {
+                topic: t.topic.clone(),
+                topic_id: t.topic_id,
+                partitions: t
+                    .partitions
+                    .iter()
+                    .map(|fp| EffectivePartition {
+                        partition: fp.partition,
+                        current_leader_epoch: fp.current_leader_epoch,
+                        fetch_offset: fp.fetch_offset,
+                        partition_max_bytes: fp.partition_max_bytes,
+                    })
+                    .collect(),
+            })
+            .collect(),
+    };
+
     // ── slice-13 ACL preamble ────────────────────────────────────────
     // Batch-authorize every topic in the request for `Read` (the
     // operation Fetch requires). Topics that come back `Deny` will
@@ -86,8 +152,7 @@ pub(crate) async fn handle(
     // keys ACLs by topic *name*, so we resolve the names here too for
     // the authorize call (and re-resolve inline below for log lookup).
     let image = controller.current_image();
-    let topic_names_for_acl: Vec<String> = req
-        .topics
+    let topic_names_for_acl: Vec<String> = effective_topics
         .iter()
         .map(|t| {
             if !t.topic.is_empty() {
@@ -122,30 +187,11 @@ pub(crate) async fn handle(
         })
         .collect();
 
-    // `replica_id >= 0` means follower fetch (Apache Kafka convention).
-    // KIP-903 (Kafka 3.5) moved `replica_id` into a tagged `replica_state`
-    // struct on Fetch v15+; on v0-14 the original top-level field is used.
-    // The codegen serializes whichever the negotiated version requires, so
-    // here we accept whichever field is populated. Without this fallback,
-    // every v15+ follower fetch decodes with `replica_id = -1` (the default
-    // for the deprecated top-level field), the handler treats it as a
-    // consumer fetch, clamps records at HW=0, and replication silently
-    // stalls — which is exactly the byte-compare test's failure mode.
-    let effective_replica_id = if req.replica_id >= 0 {
-        req.replica_id
-    } else {
-        req.replica_state.replica_id
-    };
-    let is_follower_fetch = effective_replica_id >= 0;
-    // isolation_level=1 (read_committed) only applies to consumer fetches.
-    // Follower fetches always see all records regardless of isolation.
-    let read_committed = !is_follower_fetch && req.isolation_level == 1;
-
     // Resolve every requested partition up front. We collect pending
     // reads (rather than just doing them inline) so we can re-read once
     // after a long-poll wake without re-decoding the request.
     let mut pending: Vec<PendingRead> = Vec::new();
-    for topic in &req.topics {
+    for topic in &effective_topics {
         // v ≤ 12 sends the topic name; v ≥ 13 sends only topic_id and
         // we look it up. The client populates whichever the negotiated
         // version requires.
@@ -180,6 +226,7 @@ pub(crate) async fn handle(
             let idx = fp.partition;
             let fetch_offset = fp.fetch_offset;
             let max_bytes = fp.partition_max_bytes;
+            let req_current_leader_epoch = fp.current_leader_epoch;
 
             let mut out = PartitionData {
                 partition_index: idx,
@@ -216,8 +263,8 @@ pub(crate) async fn handle(
                 let our_epoch = part
                     .current_leader_epoch
                     .load(std::sync::atomic::Ordering::Acquire);
-                if fp.current_leader_epoch >= 0 && fp.current_leader_epoch != our_epoch {
-                    out.error_code = if fp.current_leader_epoch < our_epoch {
+                if req_current_leader_epoch >= 0 && req_current_leader_epoch != our_epoch {
+                    out.error_code = if req_current_leader_epoch < our_epoch {
                         codes::FENCED_LEADER_EPOCH
                     } else {
                         codes::UNKNOWN_LEADER_EPOCH
@@ -429,16 +476,269 @@ pub(crate) async fn handle(
         broker.metrics.record_fetch(&topic_resp.topic, bytes);
     }
 
+    // ── KIP-227 response shaping + cache finalize ────────────────────
+    // Decide the response `session_id` and (for Incremental) filter
+    // out partitions whose state hasn't changed since the previous
+    // response. Then update the cache so the next request's diff
+    // comparison sees what we just sent.
+    let response_session_id = match &decision {
+        SessionDecision::Sessionless => INVALID_SESSION_ID,
+        SessionDecision::Close { session_id } => {
+            broker.fetch_session_cache.close(*session_id);
+            INVALID_SESSION_ID
+        }
+        SessionDecision::NewSession => {
+            // Snapshot what we just sent (for last_* comparison) and the
+            // request's desired state (fetch_offset/max_bytes/leader_epoch)
+            // so subsequent incremental reads know where to look.
+            let snapshot = snapshot_response_state(&effective_topics, &responses);
+            broker.fetch_session_cache.try_allocate(
+                is_follower_fetch,
+                ctx.principal.name.clone(),
+                snapshot,
+            )
+        }
+        SessionDecision::Incremental {
+            session_id,
+            partitions,
+            ..
+        } => {
+            let cached_by_key: std::collections::HashMap<
+                FetchSessionKey,
+                CachedPartitionState,
+            > = partitions.iter().cloned().collect();
+            let sent = filter_incremental_response(&mut responses, &cached_by_key);
+            broker
+                .fetch_session_cache
+                .finalize_incremental(*session_id, &sent);
+            *session_id
+        }
+        SessionDecision::Error { .. } => unreachable!("returned above"),
+    };
+
+    // Refresh KIP-227 gauges. Cheap (HashMap iteration over a few
+    // hundred entries at most) and avoids the need for a background
+    // sampling task.
+    broker
+        .metrics
+        .incremental_fetch_sessions
+        .set(i64::try_from(broker.fetch_session_cache.len()).unwrap_or(i64::MAX));
+    broker
+        .metrics
+        .incremental_fetch_partitions_cached
+        .set(i64::try_from(broker.fetch_session_cache.total_partitions_cached()).unwrap_or(i64::MAX));
+    let cur_evictions = broker.fetch_session_cache.evictions_total();
+    let prev_evictions = broker
+        .metrics
+        .incremental_fetch_session_evictions_total
+        .get();
+    if cur_evictions > prev_evictions {
+        broker
+            .metrics
+            .incremental_fetch_session_evictions_total
+            .inc_by(cur_evictions - prev_evictions);
+    }
+
     let resp = FetchResponse {
         throttle_time_ms: throttle_time_ms_val,
         error_code: 0,
-        session_id: 0,
+        session_id: response_session_id,
         responses,
         ..Default::default()
     };
     let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
     resp.encode(&mut buf, version)?;
     Ok(buf.freeze())
+}
+
+/// Projection of `FetchRequest::topics` / cached session partitions —
+/// the minimum the read loop needs. Built once at the top of the
+/// handler from either source.
+struct EffectiveTopic {
+    topic: String,
+    topic_id: WireUuid,
+    partitions: Vec<EffectivePartition>,
+}
+
+struct EffectivePartition {
+    partition: i32,
+    current_leader_epoch: i32,
+    fetch_offset: i64,
+    partition_max_bytes: i32,
+}
+
+/// Re-group the flat `(key, state)` list returned by
+/// `FetchSessionCache::classify` into per-topic chunks. Topic order is
+/// the order in which keys first appear — `HashMap` iteration order is
+/// not stable across runs but is stable within a single classify call.
+fn group_cached_into_effective_topics(
+    cached: &[(FetchSessionKey, CachedPartitionState)],
+) -> Vec<EffectiveTopic> {
+    use std::collections::HashMap;
+    let mut order: Vec<String> = Vec::new();
+    let mut by_topic: HashMap<String, EffectiveTopic> = HashMap::new();
+    for (k, s) in cached {
+        let entry = by_topic
+            .entry(k.topic_name.clone())
+            .or_insert_with(|| EffectiveTopic {
+                topic: k.topic_name.clone(),
+                topic_id: k.topic_id,
+                partitions: Vec::new(),
+            });
+        entry.partitions.push(EffectivePartition {
+            partition: k.partition,
+            current_leader_epoch: s.current_leader_epoch,
+            fetch_offset: s.fetch_offset,
+            partition_max_bytes: s.max_bytes,
+        });
+        if !order.iter().any(|t| t == &k.topic_name) {
+            order.push(k.topic_name.clone());
+        }
+    }
+    order
+        .into_iter()
+        .map(|n| by_topic.remove(&n).expect("populated above"))
+        .collect()
+}
+
+/// Walk `responses` and snapshot every `(topic, partition)` row into a
+/// `CachedPartitionState` describing what was just emitted (the `last_*`
+/// fields) merged with the client's desired state for that partition
+/// from `effective` (`fetch_offset`, `max_bytes`, `leader_epoch`). Used to
+/// seed a brand-new session.
+fn snapshot_response_state(
+    effective: &[EffectiveTopic],
+    responses: &[FetchableTopicResponse],
+) -> Vec<(FetchSessionKey, CachedPartitionState)> {
+    use std::collections::HashMap;
+    // Pre-index the desired state. Topic identity differs by wire
+    // version: v ≤ 12 carries topic name and zero topic_id, v ≥ 13
+    // carries topic_id and empty name. The server-side response always
+    // has the resolved name *and* the id, but `effective` (built from
+    // `req.topics`) may have only one or the other. Index by both so
+    // lookup succeeds in either direction.
+    let mut by_name: HashMap<(String, i32), &EffectivePartition> = HashMap::new();
+    let mut by_id: HashMap<(WireUuid, i32), &EffectivePartition> = HashMap::new();
+    for et in effective {
+        for ep in &et.partitions {
+            if !et.topic.is_empty() {
+                by_name.insert((et.topic.clone(), ep.partition), ep);
+            }
+            if et.topic_id != WireUuid::ZERO {
+                by_id.insert((et.topic_id, ep.partition), ep);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for tr in responses {
+        for p in &tr.partitions {
+            let key = FetchSessionKey {
+                topic_name: tr.topic.clone(),
+                topic_id: tr.topic_id,
+                partition: p.partition_index,
+            };
+            let mut state = CachedPartitionState {
+                last_high_watermark: p.high_watermark,
+                last_last_stable_offset: p.last_stable_offset,
+                last_log_start_offset: p.log_start_offset,
+                last_preferred_read_replica: p.preferred_read_replica,
+                last_aborted_txns_hash: hash_aborted_transactions(p.aborted_transactions.as_ref()),
+                last_error_code: p.error_code,
+                ..Default::default()
+            };
+            let ep = by_id
+                .get(&(tr.topic_id, p.partition_index))
+                .or_else(|| by_name.get(&(tr.topic.clone(), p.partition_index)));
+            if let Some(ep) = ep {
+                state.fetch_offset = ep.fetch_offset;
+                state.max_bytes = ep.partition_max_bytes;
+                state.current_leader_epoch = ep.current_leader_epoch;
+            }
+            out.push((key, state));
+        }
+    }
+    out
+}
+
+/// KIP-227 incremental-response filter. Drops partitions whose
+/// outgoing state matches the cached `last_*` snapshot (the broker
+/// already told the client these values; re-sending wastes bytes).
+/// Returns the `(key, sent_state)` list for the partitions that
+/// survived — used by the caller to update the cache's `last_*` fields
+/// to reflect what was just emitted.
+fn filter_incremental_response(
+    responses: &mut Vec<FetchableTopicResponse>,
+    cached: &std::collections::HashMap<FetchSessionKey, CachedPartitionState>,
+) -> Vec<(FetchSessionKey, CachedPartitionState)> {
+    let mut sent: Vec<(FetchSessionKey, CachedPartitionState)> = Vec::new();
+    for tr in responses.iter_mut() {
+        tr.partitions.retain(|p| {
+            let key = FetchSessionKey {
+                topic_name: tr.topic.clone(),
+                topic_id: tr.topic_id,
+                partition: p.partition_index,
+            };
+            let aborted_hash = hash_aborted_transactions(p.aborted_transactions.as_ref());
+            let records_present = p
+                .records
+                .as_ref()
+                .is_some_and(|b| <RecordBatch as Encode>::encoded_len(b, 0) > 0);
+            let changed = match cached.get(&key) {
+                Some(prev) => {
+                    records_present
+                        || p.error_code != prev.last_error_code
+                        || p.high_watermark != prev.last_high_watermark
+                        || p.last_stable_offset != prev.last_last_stable_offset
+                        || p.log_start_offset != prev.last_log_start_offset
+                        || p.preferred_read_replica != prev.last_preferred_read_replica
+                        || aborted_hash != prev.last_aborted_txns_hash
+                }
+                // Partition not in the cached set — newly added by this
+                // request. Always send it once so the client sees its
+                // initial state.
+                None => true,
+            };
+            if changed {
+                sent.push((
+                    key,
+                    CachedPartitionState {
+                        last_high_watermark: p.high_watermark,
+                        last_last_stable_offset: p.last_stable_offset,
+                        last_log_start_offset: p.log_start_offset,
+                        last_preferred_read_replica: p.preferred_read_replica,
+                        last_aborted_txns_hash: aborted_hash,
+                        last_error_code: p.error_code,
+                        ..Default::default()
+                    },
+                ));
+            }
+            changed
+        });
+    }
+    // Drop topics that ended up with no partitions.
+    responses.retain(|tr| !tr.partitions.is_empty());
+    sent
+}
+
+/// Stable hash of the aborted-transaction list for the "did anything
+/// change?" comparison. Iteration order within a single response is
+/// deterministic (the list is produced by `do_read` in offset order)
+/// so a plain `DefaultHasher` over the sequence is enough.
+fn hash_aborted_transactions(list: Option<&Vec<AbortedTransaction>>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    match list {
+        None => 0_u8.hash(&mut h),
+        Some(v) => {
+            1_u8.hash(&mut h);
+            (v.len() as u64).hash(&mut h);
+            for tx in v {
+                tx.producer_id.hash(&mut h);
+                tx.first_offset.hash(&mut h);
+            }
+        }
+    }
+    h.finish()
 }
 
 /// Hold the partition's log mutex briefly to read offsets + (optionally) a

@@ -62,6 +62,10 @@ pub struct Broker {
     /// KIP-13/KIP-124 quota buckets. Updated by the quota refresh task and
     /// consulted by the Produce/Fetch handlers and request-rate enforcement.
     pub quota_buckets: Arc<crate::quota::QuotaBuckets>,
+    /// KIP-227 incremental-fetch-session cache. Consulted by the Fetch
+    /// handler before each read; sized by
+    /// `BrokerConfig::max_incremental_fetch_session_cache_slots`.
+    pub fetch_session_cache: Arc<crate::fetch_session::FetchSessionCache>,
     /// Slice 39: Prometheus metrics. Cloned into every subsystem that
     /// emits (produce/fetch handlers, isr-maintenance loop, etc.). The
     /// `BrokerMetrics` struct internally clones cheaply (single Arc).
@@ -1423,6 +1427,12 @@ impl Broker {
             tokio::spawn(crate::throttle::run(watcher, node_id, throttle, shutdown));
         }
 
+        // KIP-227 incremental-fetch-session cache. Per-broker shared
+        // state consulted by the Fetch handler; capacity from config.
+        let fetch_session_cache = Arc::new(crate::fetch_session::FetchSessionCache::new(
+            config.max_incremental_fetch_session_cache_slots,
+        ));
+
         // KIP-13/KIP-124 quota refresh task. Always-on; every broker
         // enforces its own quotas via its own buckets (no leader gate needed).
         let quota_buckets = Arc::new(crate::quota::QuotaBuckets::new());
@@ -1511,6 +1521,7 @@ impl Broker {
             metrics_bound_addr,
             throttle_state,
             quota_buckets,
+            fetch_session_cache,
             want_shutdown: want_shutdown_tx,
             should_shutdown: should_shutdown_tx,
             remote_reader,

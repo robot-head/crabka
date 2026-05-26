@@ -68,6 +68,15 @@ pub struct BrokerMetrics {
     pub active_controller: Gauge,
     pub isr_shrinks_total: Counter,
     pub isr_expands_total: Counter,
+    /// KIP-227: current count of live incremental-fetch sessions across the
+    /// per-broker cache. Sampled periodically from `FetchSessionCache::len()`.
+    pub incremental_fetch_sessions: Gauge,
+    /// KIP-227: cumulative count of incremental-fetch sessions evicted to
+    /// make room for a new allocation. Incremented inside the cache.
+    pub incremental_fetch_session_evictions_total: Counter,
+    /// KIP-227: sum of `session.partitions.len()` across every live session.
+    /// Sampled periodically alongside `incremental_fetch_sessions`.
+    pub incremental_fetch_partitions_cached: Gauge,
 }
 
 impl BrokerMetrics {
@@ -75,6 +84,7 @@ impl BrokerMetrics {
     /// bundle. Idempotent register failures aren't a concern because we
     /// only call this once per broker process.
     #[must_use]
+    #[allow(clippy::too_many_lines)]
     pub fn new() -> Self {
         let mut registry = Registry::with_prefix("crabka_broker");
 
@@ -90,6 +100,9 @@ impl BrokerMetrics {
         let active_controller = Gauge::default();
         let isr_shrinks_total = Counter::default();
         let isr_expands_total = Counter::default();
+        let incremental_fetch_sessions = Gauge::default();
+        let incremental_fetch_session_evictions_total = Counter::default();
+        let incremental_fetch_partitions_cached = Gauge::default();
 
         registry.register(
             "topic_bytes_in",
@@ -165,6 +178,23 @@ impl BrokerMetrics {
              1_000_000 yields core occupancy.",
             partition_cpu_micros.clone(),
         );
+        registry.register(
+            "incremental_fetch_sessions",
+            "KIP-227: live incremental-fetch sessions cached by this broker (gauge).",
+            incremental_fetch_sessions.clone(),
+        );
+        registry.register(
+            "incremental_fetch_session_evictions",
+            "KIP-227: cumulative count of incremental-fetch sessions evicted from \
+             the cache to make room for a new allocation.",
+            incremental_fetch_session_evictions_total.clone(),
+        );
+        registry.register(
+            "incremental_fetch_partitions_cached",
+            "KIP-227: total (topic, partition) tuples held across every live \
+             incremental-fetch session (gauge).",
+            incremental_fetch_partitions_cached.clone(),
+        );
 
         Self {
             registry: Arc::new(Mutex::new(registry)),
@@ -180,6 +210,9 @@ impl BrokerMetrics {
             active_controller,
             isr_shrinks_total,
             isr_expands_total,
+            incremental_fetch_sessions,
+            incremental_fetch_session_evictions_total,
+            incremental_fetch_partitions_cached,
         }
     }
 
@@ -297,6 +330,9 @@ mod tests {
             "crabka_broker_partition_bytes_out_total",
             "crabka_broker_partition_disk_bytes",
             "crabka_broker_partition_cpu_micros_total",
+            "crabka_broker_incremental_fetch_sessions",
+            "crabka_broker_incremental_fetch_session_evictions_total",
+            "crabka_broker_incremental_fetch_partitions_cached",
         ] {
             assert!(buf.contains(needle), "missing {needle} in:\n{buf}");
         }
