@@ -86,6 +86,9 @@ fn supported_apis() -> Vec<ApiVersion> {
         v!(elect_leaders_request),
         v!(alter_partition_reassignments_request),
         v!(list_partition_reassignments_request),
+        // OffsetDelete (api_key 47, KIP-496): completes
+        // `kafka-consumer-groups --delete-offsets` parity.
+        v!(offset_delete_request),
         v!(describe_client_quotas_request),
         v!(alter_client_quotas_request),
         v!(describe_user_scram_credentials_request),

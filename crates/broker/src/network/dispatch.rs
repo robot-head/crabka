@@ -746,6 +746,31 @@ async fn serve_connection_stream<S>(
                 }
             }
         }
+        // OffsetDelete (47, KIP-496) needs both the authenticated
+        // principal AND the peer's `SocketAddr` so the handler can
+        // authorize `Delete` on `Group(group_id)` (whole-response deny =
+        // GROUP_AUTHORIZATION_FAILED) and then per-topic `Read` (per-partition
+        // deny = TOPIC_AUTHORIZATION_FAILED). The `&Broker`-only handler
+        // table signature can't carry that context, so this api_key
+        // intercepts inline.
+        if peek_api_key(&frame).ok() == Some(47) {
+            match handle_offset_delete_frame(&broker, &frame, &auth, &peer)
+                .instrument(req_span.clone())
+                .await
+            {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during OffsetDelete, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "OffsetDelete dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
         // DescribeCluster (60, slice-13 T19) needs both the authenticated
         // principal AND the peer's `SocketAddr` so the handler can
         // authorize `Describe` on `Cluster("kafka-cluster")` and emit
@@ -2688,6 +2713,48 @@ async fn handle_offset_fetch_frame(
     ))
 }
 
+/// Decode + dispatch an `OffsetDelete` (`api_key` 47, KIP-496) frame.
+/// Pulls the authenticated principal off the per-connection `auth` state
+/// and the peer `SocketAddr` from the accept-time capture so the handler
+/// can authorize `Delete` on `Group(group_id)` (whole-response deny =
+/// `GROUP_AUTHORIZATION_FAILED`) and then per-topic `Read` (per-partition
+/// deny = `TOPIC_AUTHORIZATION_FAILED`).
+async fn handle_offset_delete_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 47);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let principal = auth
+        .principal()
+        .cloned()
+        .unwrap_or_else(|| crabka_security::Principal {
+            name: "ANONYMOUS".to_string(),
+            auth_method: crabka_security::AuthMethod::Anonymous,
+            groups: vec![],
+        });
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let ctx = crate::handlers::RequestContext {
+        principal: &principal,
+        peer,
+        client_id,
+    };
+
+    let resp_body =
+        crate::handlers::offset_delete::handle(broker, api_version, correlation_id, body, &ctx)
+            .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
 /// Decode + dispatch an `InitProducerId` (`api_key` 22) frame. Pulls the
 /// authenticated principal off the per-connection `auth` state and the
 /// peer `SocketAddr` from the accept-time capture so the handler can
@@ -3060,6 +3127,9 @@ fn handler_body_flexible(api_key: i16, version: i16) -> bool {
         44 => version >= owned::incremental_alter_configs_request::FLEXIBLE_MIN,
         45 => version >= owned::alter_partition_reassignments_request::FLEXIBLE_MIN,
         46 => version >= owned::list_partition_reassignments_request::FLEXIBLE_MIN,
+        // 47 (OffsetDelete, KIP-496) only exists at v0, which is non-flexible.
+        // `FLEXIBLE_MIN` is `i16::MAX`, so an explicit `>=` arm triggers
+        // `clippy::absurd_extreme_comparisons`. Fall through to `_ => false`.
         48 => version >= owned::describe_client_quotas_request::FLEXIBLE_MIN,
         49 => version >= owned::alter_client_quotas_request::FLEXIBLE_MIN,
         50 => version >= owned::describe_user_scram_credentials_request::FLEXIBLE_MIN,
