@@ -1406,7 +1406,9 @@ impl Broker {
                 rlmm.clone(),
                 config.node_id,
                 config.broker_id,
-                crate::remote_log_manager::RemoteLogManagerConfig::default(),
+                crate::remote_log_manager::RemoteLogManagerConfig {
+                    interval: config.remote_log_manager_interval,
+                },
                 shutdown,
             ));
 

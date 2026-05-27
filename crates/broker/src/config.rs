@@ -327,6 +327,13 @@ pub struct BrokerConfig {
     /// - Local: `[remote_storage] storage_dir = "..."`
     /// - S3:    `[remote_storage.s3] bucket = "..." region = "..."`
     pub remote_storage_backend: Option<RemoteStorageBackend>,
+
+    /// Slice 48b (KIP-405): tick cadence of the `RemoteLogManager` copy /
+    /// retention task. Defaults to 30s (Kafka's
+    /// `remote.log.manager.task.interval.ms`). Acceptance tests lower this
+    /// so segments are tiered and locally evicted in seconds rather than
+    /// minutes; production deployments leave it at the default.
+    pub remote_log_manager_interval: std::time::Duration,
 }
 
 /// What backs the broker's `RemoteStorageManager` when tiered storage is on.
@@ -438,6 +445,9 @@ impl BrokerConfig {
             delegation_token_default_renew_period_ms: DEFAULT_DELEGATION_TOKEN_RENEW_PERIOD_MS,
             // Slice 48b: tiered storage off by default in tests.
             remote_storage_backend: None,
+            // Tests that turn tiered storage on want quick offload, so the
+            // for_tests default is well below the 30s production value.
+            remote_log_manager_interval: std::time::Duration::from_secs(2),
         }
     }
 
@@ -625,6 +635,7 @@ impl Default for BrokerConfig {
             // Slice 48b: tiered storage off by default. Operators enable it
             // via `[remote_storage] storage_dir` in `broker.toml`.
             remote_storage_backend: None,
+            remote_log_manager_interval: std::time::Duration::from_secs(30),
         }
     }
 }
