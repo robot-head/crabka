@@ -455,6 +455,88 @@ async fn alter_replica_log_dirs_preserves_records_across_move() {
     handle.shutdown().await;
 }
 
+/// Boot a broker, create a topic, produce records, shut down, then
+/// plant a `<topic>-<partition>-future/` directory in the OTHER log
+/// dir before restarting. The restart must (a) re-discover the
+/// stranded future log via `log_dir::scan_future`, (b) call
+/// `future_log::resume_move` for the real partition, and (c) drive
+/// the move to completion so `DescribeLogDirs` ends up reporting the
+/// partition in the target dir with `is_future_key=false`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_resumes_move_for_existing_partition() {
+    use bytes::Bytes;
+    use crabka_client_producer::{Producer, ProducerRecord};
+
+    let primary = tempfile::tempdir().unwrap();
+    let extra = tempfile::tempdir().unwrap();
+
+    // First boot: create topic, produce a handful of records, then
+    // shut down cleanly so the partition directory is left on disk.
+    let mut cfg = BrokerConfig::for_tests(primary.path().to_path_buf());
+    cfg.extra_log_dirs = vec![extra.path().to_path_buf()];
+    let handle = Broker::start(cfg).await.expect("first boot");
+    let addr = handle.listen_addr();
+    create_topic(addr, "t", 1).await;
+    wait_all_partitions(&handle, "t", 1).await;
+
+    let producer = Producer::builder()
+        .bootstrap(addr.to_string())
+        .build()
+        .await
+        .expect("producer");
+    for i in 0..5i32 {
+        drop(
+            producer
+                .send(ProducerRecord {
+                    topic: "t".into(),
+                    value: Some(Bytes::from(format!("v{i}"))),
+                    ..Default::default()
+                })
+                .await,
+        );
+    }
+    producer.flush().await.expect("flush");
+    producer.close().await.expect("producer close");
+
+    // Find which dir holds `t-0` and pick the OTHER as the target.
+    let primary_has_0 = primary.path().join("t-0").exists();
+    let (current_dir, target_dir) = if primary_has_0 {
+        (primary.path(), extra.path())
+    } else {
+        (extra.path(), primary.path())
+    };
+    handle.shutdown().await;
+
+    // Plant an empty future dir to simulate a crash mid-ARLD before
+    // the move task got a chance to copy anything. On restart, the
+    // broker discovers it and resumes the move, copying the
+    // already-produced batches into it.
+    let future_path = target_dir.join("t-0-future");
+    std::fs::create_dir_all(&future_path).expect("plant future dir");
+    assert!(future_path.exists());
+    assert!(
+        current_dir.join("t-0").exists(),
+        "source must still be here"
+    );
+
+    // Restart against the same dirs. `BootstrapMode::Rejoin`
+    // because the raft log from the first boot is still on disk.
+    let mut cfg = BrokerConfig::for_tests(primary.path().to_path_buf());
+    cfg.extra_log_dirs = vec![extra.path().to_path_buf()];
+    cfg.bootstrap_mode = crabka_broker::BootstrapMode::Rejoin;
+    let handle = Broker::start(cfg).await.expect("restart");
+    let addr = handle.listen_addr();
+
+    // Wait for the resumed move to converge: partition lives in
+    // target dir with no remaining future entries.
+    wait_for_move_complete(addr, target_dir, "t", &[0]).await;
+    assert_eq!(count_topic_dirs(target_dir, "t"), 1);
+    assert_eq!(count_topic_dirs(current_dir, "t"), 0);
+    assert!(!future_path.exists(), "future dir must be renamed away");
+
+    handle.shutdown().await;
+}
+
 /// Plant a `<topic>-<partition>-future` directory in one of the
 /// configured log.dirs for a topic that doesn't exist, then start the
 /// broker. The startup scan in `Broker::start` must remove the
