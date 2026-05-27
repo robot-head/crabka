@@ -4123,3 +4123,67 @@ introspection metadata).
     ("which clients ever connected, and how often?") without the
     gauge-per-connection memory footprint. Adding a gauge surface is
     a follow-up if real users want it.
+
+## Slice — KIP-559 protocol-type/name on group-coordination responses (2026-05-27)
+
+- **Goal.** Promote the KIP-559 row in the README KIP table from ⚠️ to ✅.
+  KIP-559 ("Make the Kafka Protocol Friendlier with L7 Proxies") requires
+  `protocol_type` and `protocol_name` to ride along on `JoinGroupResponse`
+  (v7+), `SyncGroupRequest` (v5+, client-side — already done), and
+  `SyncGroupResponse` (v5+). The fields let an L7 proxy (Envoy etc.)
+  route an in-flight group-coordination message without remembering the
+  prior `JoinGroup` exchange.
+- **What was missing.** `SyncGroupResponse` never carried the fields —
+  every response went out with the codec defaults (null). `JoinGroupResponse`
+  populated them on the success and static-rejoin paths but left them null
+  on the `INCONSISTENT_GROUP_PROTOCOL` and `FENCED_INSTANCE_ID` error
+  paths even though the group existed and had a recorded protocol.
+- **Handler wiring.**
+  - `handlers::sync_group::handle` now snapshots the group's recorded
+    `(protocol_type, protocol_name)` under the same lock that does the
+    member/generation validation, threads both through the error helper
+    (`encode_err` gained two `Option<String>` params), and echoes them
+    on every reply — success and error alike.
+  - `handlers::join_group::handle` populates the fields on the two
+    error paths that previously dropped them:
+    - `INCONSISTENT_GROUP_PROTOCOL` when a new joiner's `protocol_type`
+      mismatches the recorded one (the recorded type is what the
+      proxy needs to see).
+    - `FENCED_INSTANCE_ID` when another live member already owns the
+      static-membership slot.
+    - The "no protocol intersection across members" path at
+      rebalance-complete time also echoes `protocol_type` (the
+      `protocol_name` is genuinely unknown — that's the failure
+      condition — so it stays null).
+  - The bootstrap and ACL-deny paths intentionally leave the fields
+    null: the group may not exist yet and no recorded values are
+    available. The codegen marks both fields nullable on v7+, so this
+    matches Kafka's wire contract.
+- **Tests.** 4 new integration tests in
+  `tests/kip559_l7_proxy_fields.rs` using the existing in-process
+  `support::start` harness (so the client negotiates JoinGroup to v9
+  and SyncGroup to v5 — both above the KIP-559 floor):
+  - JoinGroup v9 success — `protocol_type` and `protocol_name` are
+    echoed.
+  - SyncGroup v5 success after a full Join → Sync handshake — both
+    fields are echoed on the assignment response.
+  - JoinGroup v9 `INCONSISTENT_GROUP_PROTOCOL` (23) — error response
+    still carries the *recorded* `protocol_type` (`consumer`), not the
+    rejected one (`stream`).
+  - SyncGroup v5 `UNKNOWN_MEMBER_ID` (25) — error response carries
+    both `protocol_type` and `protocol_name` from the group's recorded
+    state.
+- **README.** KIP-559 row flipped ⚠️ → ✅.
+- **Workspace fmt + `clippy -p crabka-broker --all-targets -- -D warnings`
+  + broker lib (565 tests) + new `kip559_l7_proxy_fields` (4 tests) +
+  regression sweep of `unit` (21), `static_membership` (5),
+  `admin_handlers` (6), `group_protocol_negotiation` (3)** — all green.
+- **Out of scope.**
+  - JoinGroup's null-protocol-type paths (`MEMBER_ID_REQUIRED`,
+    `GROUP_AUTHORIZATION_FAILED`, `INCONSISTENT_GROUP_PROTOCOL`-at-
+    rebalance-complete with no intersection) intentionally stay
+    nullable — there's no truthful value to emit. The wire contract
+    allows null on v7+.
+  - Other group-coordination request shapes (`Heartbeat`, `LeaveGroup`,
+    `OffsetCommit`, `OffsetFetch`) don't carry protocol fields per
+    the JVM schemas; KIP-559's scope is exactly the three covered here.

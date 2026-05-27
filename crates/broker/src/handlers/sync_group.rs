@@ -1,6 +1,11 @@
 //! `SyncGroup` (`api_key=14`). The leader supplies assignment bytes per
 //! member; non-leaders block until the leader's call arrives, then
 //! receive their own assignment.
+//!
+//! KIP-559 (v5+): the response carries `protocol_type` + `protocol_name`
+//! so an L7 proxy can route the call without remembering the prior
+//! `JoinGroup` exchange. The codegen drops both fields on v < 5, so
+//! emitting them on every path is harmless on older versions.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -32,26 +37,48 @@ pub(crate) fn handle(
         let req = SyncGroupRequest::decode(&mut cur, version)?;
 
         let Some(handle) = group_manager.find(&req.group_id) else {
-            return encode_err(version, codes::UNKNOWN_MEMBER_ID);
+            return encode_err(version, codes::UNKNOWN_MEMBER_ID, None, None);
         };
 
         // 1. Validate (member, generation) and check whether we're the leader.
-        let is_leader = {
+        //    Snapshot the group's negotiated (protocol_type, protocol_name)
+        //    so KIP-559 can echo them on every response below — including
+        //    the error paths.
+        let (is_leader, protocol_type, protocol_name) = {
             let g = handle.state.lock().await;
             // KIP-345 fence: instance id pinned elsewhere → reject.
             if req.group_instance_id.as_deref().is_some_and(|iid| {
                 g.current_member_id_for_instance(iid)
                     .is_none_or(|pinned| pinned != req.member_id)
             }) {
-                return encode_err(version, codes::FENCED_INSTANCE_ID);
+                return encode_err(
+                    version,
+                    codes::FENCED_INSTANCE_ID,
+                    g.protocol_type.clone(),
+                    g.protocol_name.clone(),
+                );
             }
             if !g.members.contains_key(&req.member_id) {
-                return encode_err(version, codes::UNKNOWN_MEMBER_ID);
+                return encode_err(
+                    version,
+                    codes::UNKNOWN_MEMBER_ID,
+                    g.protocol_type.clone(),
+                    g.protocol_name.clone(),
+                );
             }
             if g.generation_id != req.generation_id {
-                return encode_err(version, codes::ILLEGAL_GENERATION);
+                return encode_err(
+                    version,
+                    codes::ILLEGAL_GENERATION,
+                    g.protocol_type.clone(),
+                    g.protocol_name.clone(),
+                );
             }
-            g.leader_id.as_deref() == Some(&req.member_id)
+            (
+                g.leader_id.as_deref() == Some(&req.member_id),
+                g.protocol_type.clone(),
+                g.protocol_name.clone(),
+            )
         };
 
         if is_leader {
@@ -83,24 +110,44 @@ pub(crate) fn handle(
             (stable, asn)
         };
         if !state_is_stable {
-            return encode_err(version, codes::REBALANCE_IN_PROGRESS);
+            return encode_err(
+                version,
+                codes::REBALANCE_IN_PROGRESS,
+                protocol_type,
+                protocol_name,
+            );
         }
 
+        // KIP-559: the wire fields are nullable on v5+. Echo whatever
+        // the JoinGroup that preceded this SyncGroup recorded; null
+        // (None) is the schema-level default for the rare path where a
+        // group reaches SyncGroup without a recorded protocol (the
+        // member-existence checks above already gate this, but the
+        // null default is defensive).
         let resp = SyncGroupResponse {
             error_code: codes::NONE,
             assignment,
             throttle_time_ms: 0,
+            protocol_type,
+            protocol_name,
             ..Default::default()
         };
         encode(version, &resp)
     })
 }
 
-fn encode_err(version: i16, code: i16) -> Result<Bytes, BrokerError> {
+fn encode_err(
+    version: i16,
+    code: i16,
+    protocol_type: Option<String>,
+    protocol_name: Option<String>,
+) -> Result<Bytes, BrokerError> {
     let resp = SyncGroupResponse {
         error_code: code,
         assignment: Bytes::new(),
         throttle_time_ms: 0,
+        protocol_type,
+        protocol_name,
         ..Default::default()
     };
     encode(version, &resp)

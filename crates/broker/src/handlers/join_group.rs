@@ -108,17 +108,22 @@ pub(crate) async fn handle(
 
     // 2. If the group already exists with a different `protocol_type`,
     //    reject. New groups (no existing handle) accept any type.
+    //    KIP-559: echo the group's recorded protocol_type/name on the
+    //    error response so L7 proxies stay parseable.
     if let Some(existing) = broker.group_manager.find(&req.group_id) {
         let g = existing.state.lock().await;
         if let Some(existing_type) = g.protocol_type.as_deref()
             && existing_type != req.protocol_type
         {
+            let (ptype, pname) = (g.protocol_type.clone(), g.protocol_name.clone());
             drop(g);
             return encode(
                 version,
                 &JoinGroupResponse {
                     error_code: codes::INCONSISTENT_GROUP_PROTOCOL,
                     member_id: req.member_id,
+                    protocol_type: ptype,
+                    protocol_name: pname,
                     ..Default::default()
                 },
             );
@@ -135,12 +140,15 @@ pub(crate) async fn handle(
         if let Some(pinned) = g.current_member_id_for_instance(instance_id)
             && pinned != req.member_id
         {
+            let (ptype, pname) = (g.protocol_type.clone(), g.protocol_name.clone());
             drop(g);
             return encode(
                 version,
                 &JoinGroupResponse {
                     error_code: codes::FENCED_INSTANCE_ID,
                     member_id: req.member_id,
+                    protocol_type: ptype,
+                    protocol_name: pname,
                     ..Default::default()
                 },
             );
@@ -241,12 +249,17 @@ pub(crate) async fn handle(
                 g.resolve_selected_protocol_metadata(&chosen);
                 g.complete_rebalance(chosen);
             } else {
+                // KIP-559: echo the group's recorded protocol_type even on
+                // this no-intersection error path.
+                let ptype = g.protocol_type.clone();
+                drop(g);
                 handle.join_complete.notify_waiters();
                 return encode(
                     version,
                     &JoinGroupResponse {
                         error_code: codes::INCONSISTENT_GROUP_PROTOCOL,
                         member_id: req.member_id,
+                        protocol_type: ptype,
                         ..Default::default()
                     },
                 );
