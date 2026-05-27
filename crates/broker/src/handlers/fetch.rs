@@ -77,11 +77,8 @@ pub(crate) async fn handle(
     let controller = broker.controller.clone();
     let mut cur: &[u8] = req_bytes;
     let req: FetchRequest = if version < 4 {
-        crabka_protocol::kafka_3_6_2::owned::fetch_request::FetchRequest::decode(
-            &mut cur,
-            version,
-        )?
-        .into()
+        crabka_protocol::kafka_3_6_2::owned::fetch_request::FetchRequest::decode(&mut cur, version)?
+            .into()
     } else {
         FetchRequest::decode(&mut cur, version)?
     };

@@ -78,8 +78,7 @@ impl From<crate::owned::produce_response::PartitionProduceResponse>
             log_start_offset: c.log_start_offset,
             record_errors: c.record_errors.into_iter().map(Into::into).collect(),
             error_message: c.error_message,
-            ..Default::default()
-            // Defaulted: current_leader (canonical-only v10+ tagged field)
+            ..Default::default() // Defaulted: current_leader (canonical-only v10+ tagged field)
         }
     }
 }

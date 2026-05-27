@@ -45,8 +45,7 @@ pub(crate) async fn handle(
     let mut cur: &[u8] = req_bytes;
     let req: ProduceRequest = if (0..3).contains(&version) {
         crabka_protocol::kafka_3_6_2::owned::produce_request::ProduceRequest::decode(
-            &mut cur,
-            version,
+            &mut cur, version,
         )?
         .into()
     } else {

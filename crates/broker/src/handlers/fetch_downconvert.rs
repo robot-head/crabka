@@ -40,7 +40,11 @@ pub(crate) fn down_convert_for_fetch(
     };
     // Fetch v0-1 → Magic::V0 (no per-message timestamps)
     // Fetch v2-3 → Magic::V1 (KIP-32 timestamps)
-    let target = if request_version >= 2 { Magic::V1 } else { Magic::V0 };
+    let target = if request_version >= 2 {
+        Magic::V1
+    } else {
+        Magic::V0
+    };
     let bytes = v2_to_legacy(&working, target).map_err(|e| {
         tracing::warn!(error = %e, "v2_to_legacy failed during fetch down-conversion");
         codes::CORRUPT_MESSAGE
@@ -98,7 +102,10 @@ mod tests {
         let mut batch = make_batch(CompressionType::None, vec![sample_record("k", "v")]);
         batch.attributes = batch.attributes.with_control(true);
         let result = down_convert_for_fetch(&batch, 3).unwrap();
-        assert!(result.is_none(), "control batch must be dropped on legacy path");
+        assert!(
+            result.is_none(),
+            "control batch must be dropped on legacy path"
+        );
     }
 
     /// version 3 with a zstd batch returns Some(Legacy) with snappy in the wrapper

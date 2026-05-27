@@ -69,10 +69,7 @@ async fn round_trip_nonflexible(
 // ── Topic helpers ─────────────────────────────────────────────────────────────
 
 #[allow(dead_code)]
-async fn topic_id_for(
-    client: &crabka_client_core::Client,
-    name: &str,
-) -> WireUuid {
+async fn topic_id_for(client: &crabka_client_core::Client, name: &str) -> WireUuid {
     let resp = client
         .send(MetadataRequest {
             topics: Some(vec![MetadataRequestTopic {
@@ -109,7 +106,8 @@ async fn produce_batch(addr: std::net::SocketAddr, topic: &str, batch: RecordBat
         ..Default::default()
     };
     let mut body = BytesMut::new();
-    req.encode(&mut body, PRODUCE_VERSION).expect("encode ProduceRequest v9");
+    req.encode(&mut body, PRODUCE_VERSION)
+        .expect("encode ProduceRequest v9");
 
     let mut stream = TcpStream::connect(addr).await.expect("connect for produce");
     stream.set_nodelay(true).ok();
@@ -133,7 +131,10 @@ async fn produce_batch(addr: std::net::SocketAddr, topic: &str, batch: RecordBat
 
     let resp_len = stream.read_u32().await.expect("read produce resp len");
     let mut resp = vec![0u8; resp_len as usize];
-    stream.read_exact(&mut resp).await.expect("read produce resp");
+    stream
+        .read_exact(&mut resp)
+        .await
+        .expect("read produce resp");
 
     let mut cur: &[u8] = &resp;
     let _corr = cur.get_i32();
@@ -174,9 +175,12 @@ async fn fetch_v3_raw(addr: std::net::SocketAddr, topic: &str) -> Vec<u8> {
         ..Default::default()
     };
     let mut body = BytesMut::new();
-    req.encode(&mut body, FETCH_VERSION).expect("encode FetchRequest v3");
+    req.encode(&mut body, FETCH_VERSION)
+        .expect("encode FetchRequest v3");
 
-    let mut stream = TcpStream::connect(addr).await.expect("connect for fetch v3");
+    let mut stream = TcpStream::connect(addr)
+        .await
+        .expect("connect for fetch v3");
     stream.set_nodelay(true).ok();
     round_trip_nonflexible(&mut stream, 1, FETCH_VERSION, 42, &body).await
 }
@@ -251,10 +255,7 @@ async fn fetch_v3_downconverts_v2_batch_to_v0_messageset() {
     );
 
     // 5. The records field should be a Legacy MessageSet.
-    let records_payload = part
-        .records
-        .as_ref()
-        .expect("records field should be Some");
+    let records_payload = part.records.as_ref().expect("records field should be Some");
     let legacy_bytes = match records_payload {
         crabka_protocol::records::RecordsPayload::Legacy(b) => b.clone(),
         crabka_protocol::records::RecordsPayload::V2(_) => {
@@ -264,10 +265,14 @@ async fn fetch_v3_downconverts_v2_batch_to_v0_messageset() {
 
     // 6. Decode the MessageSet and verify key/value pairs.
     let mut ms_cur: &[u8] = &legacy_bytes;
-    let recs =
-        decode_message_set(&mut ms_cur, legacy_bytes.len()).expect("decode_message_set");
+    let recs = decode_message_set(&mut ms_cur, legacy_bytes.len()).expect("decode_message_set");
 
-    assert_eq!(recs.len(), 2, "expected 2 records in MessageSet; got {}", recs.len());
+    assert_eq!(
+        recs.len(),
+        2,
+        "expected 2 records in MessageSet; got {}",
+        recs.len()
+    );
     assert_eq!(
         recs[0].key.as_deref(),
         Some(b"key0".as_ref()),
@@ -354,10 +359,7 @@ async fn fetch_v3_recompresses_zstd_as_snappy() {
     );
 
     // 5. Get the raw legacy bytes.
-    let records_payload = part
-        .records
-        .as_ref()
-        .expect("records field should be Some");
+    let records_payload = part.records.as_ref().expect("records field should be Some");
     let legacy_bytes = match records_payload {
         crabka_protocol::records::RecordsPayload::Legacy(b) => b.clone(),
         crabka_protocol::records::RecordsPayload::V2(_) => {
@@ -383,7 +385,11 @@ async fn fetch_v3_recompresses_zstd_as_snappy() {
     let mut ms_cur: &[u8] = &legacy_bytes;
     let recs = decode_message_set(&mut ms_cur, legacy_bytes.len())
         .expect("decode_message_set on snappy-recompressed payload");
-    assert_eq!(recs.len(), 50, "expected 50 records after snappy decompression");
+    assert_eq!(
+        recs.len(),
+        50,
+        "expected 50 records after snappy decompression"
+    );
     assert_eq!(
         recs[0].key.as_deref(),
         Some(b"key-0000".as_ref()),

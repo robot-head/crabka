@@ -31,13 +31,16 @@ fn rust_decode<T: for<'a> Decode<'a>>(bytes: &[u8], version: i16) -> T {
     v
 }
 
-/// Oracle JSON for a default `ProduceRequest` at v0–v2.
+/// Oracle JSON for a default `ProduceRequest` covering v0–v2.
 ///
-/// v0/v1/v2 do not have `transactionalId`; only `acks`, `timeoutMs`, and `topicData` are
-/// present.  An empty `topicData` array means no records to encode, avoiding the legacy
-/// message-format complexity entirely.
+/// The JVM `ProduceRequestData` JSON deserializer requires every schema field
+/// to be present in the input — even fields the wire encoder will gate off
+/// for older versions. `transactionalId` exists on the schema at
+/// `versions: "3+"`; we supply it as `null` here (the wire encoder correctly
+/// omits it for v<3).
 fn request_oracle_value() -> serde_json::Value {
     json!({
+        "transactionalId": null,
         "acks": 0,
         "timeoutMs": 0,
         "topicData": []

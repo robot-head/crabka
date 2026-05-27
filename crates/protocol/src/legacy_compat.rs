@@ -18,10 +18,8 @@ mod produce;
 mod tests {
     use crate::kafka_3_6_2;
     use crate::owned::{
-        fetch_request::FetchRequest,
-        fetch_response::FetchResponse,
-        produce_request::ProduceRequest,
-        produce_response::ProduceResponse,
+        fetch_request::FetchRequest, fetch_response::FetchResponse,
+        produce_request::ProduceRequest, produce_response::ProduceResponse,
     };
 
     #[test]

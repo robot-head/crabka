@@ -147,9 +147,13 @@ mod tests {
         let table = supported_apis();
         let produce = table.iter().find(|v| v.api_key == 0).expect("produce");
         let fetch = table.iter().find(|v| v.api_key == 1).expect("fetch");
-        assert_eq!(produce.min_version, 0,
-            "Produce min must be 0 to advertise the legacy v0-2 support");
-        assert_eq!(fetch.min_version, 0,
-            "Fetch min must be 0 to advertise the legacy v0-3 support");
+        assert_eq!(
+            produce.min_version, 0,
+            "Produce min must be 0 to advertise the legacy v0-2 support"
+        );
+        assert_eq!(
+            fetch.min_version, 0,
+            "Fetch min must be 0 to advertise the legacy v0-3 support"
+        );
     }
 }

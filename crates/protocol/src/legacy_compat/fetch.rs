@@ -15,7 +15,11 @@ impl From<kafka_3_6_2::owned::fetch_request::FetchRequest> for FetchRequest {
             session_id: l.session_id,
             session_epoch: l.session_epoch,
             topics: l.topics.into_iter().map(Into::into).collect(),
-            forgotten_topics_data: l.forgotten_topics_data.into_iter().map(Into::into).collect(),
+            forgotten_topics_data: l
+                .forgotten_topics_data
+                .into_iter()
+                .map(Into::into)
+                .collect(),
             rack_id: l.rack_id,
             cluster_id: l.cluster_id,
             replica_state: l.replica_state.into(),

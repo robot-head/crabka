@@ -130,8 +130,7 @@ async fn produce_v0_upconverts_and_is_readable_via_fetch() {
         .await
         .expect("CreateTopics");
     assert_eq!(
-        cr.topics[0].error_code,
-        0,
+        cr.topics[0].error_code, 0,
         "CreateTopics error: {}",
         cr.topics[0].error_code
     );
@@ -187,8 +186,7 @@ async fn produce_v0_upconverts_and_is_readable_via_fetch() {
     );
     let part_resp = &produce_resp.responses[0].partition_responses[0];
     assert_eq!(
-        part_resp.error_code,
-        0,
+        part_resp.error_code, 0,
         "produce v0 error_code: {}",
         part_resp.error_code
     );

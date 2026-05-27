@@ -31,31 +31,20 @@ fn rust_decode<T: for<'a> Decode<'a>>(bytes: &[u8], version: i16) -> T {
     v
 }
 
-/// Oracle JSON for a default `FetchRequest` at v0–v2.
+/// Oracle JSON for a default `FetchRequest` covering v0–v3.
 ///
-/// v0/v1/v2 include only `replicaId`, `maxWaitMs`, `minBytes`, and `topics`.
-/// `replicaId` defaults to -1 (consumer) in the Rust struct and must be
-/// supplied explicitly in the oracle JSON because the JVM schema has no default.
-fn request_oracle_value_v0_v2() -> serde_json::Value {
+/// The JVM `FetchRequestData` JSON deserializer requires every field that
+/// appears in the schema to be present in the input — even fields the wire
+/// encoder will gate off for older versions. `maxBytes` exists on the schema
+/// at `versions: "3+"` with default `0x7fffffff`; we always supply it here
+/// (the wire encoder correctly omits it for v<3). Same logic for
+/// `replicaId`, which has no default in the JVM schema.
+fn request_oracle_value() -> serde_json::Value {
     json!({
         "replicaId": -1,
         "maxWaitMs": 0,
         "minBytes": 0,
-        "topics": []
-    })
-}
-
-/// Oracle JSON for a default `FetchRequest` at v3.
-///
-/// v3 adds `maxBytes` (schema default 0x7fffffff).  The Rust `Default`
-/// implementation sets `max_bytes` to `2_147_483_647` (i.e. `i32::MAX`), which
-/// matches the schema default, so both sides agree without special-casing.
-fn request_oracle_value_v3() -> serde_json::Value {
-    json!({
-        "replicaId": -1,
-        "maxWaitMs": 0,
-        "minBytes": 0,
-        "maxBytes": 2_147_483_647i64,
+        "maxBytes": 2_147_483_647i32,
         "topics": []
     })
 }
@@ -67,11 +56,7 @@ fn fetch_request_byte_equal_every_version() {
     for version in 0..=3i16 {
         let req = FetchRequest::default();
         let rust = rust_encode(&req, version);
-        let oracle_json = if version >= 3 {
-            request_oracle_value_v3()
-        } else {
-            request_oracle_value_v0_v2()
-        };
+        let oracle_json = request_oracle_value();
         // api_key=1 (Fetch), is_request=true
         let java = o.encode(1, version, true, &oracle_json);
         assert_eq!(

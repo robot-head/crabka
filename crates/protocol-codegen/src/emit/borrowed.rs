@@ -35,7 +35,14 @@ pub fn emit(
     emit_decode_borrow_impl(&mut primary, spec, &res_map, &parent_module);
 
     let fm = flex_min(spec);
-    emit_nested_structs_for_fields(&mut primary, &spec.fields, fm, &res_map, &parent_module, namespace);
+    emit_nested_structs_for_fields(
+        &mut primary,
+        &spec.fields,
+        fm,
+        &res_map,
+        &parent_module,
+        namespace,
+    );
 
     // Emit common structs into separate file bodies.
     let mut commons: Vec<(String, String)> = Vec::new();
