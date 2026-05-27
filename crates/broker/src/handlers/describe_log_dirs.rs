@@ -129,13 +129,19 @@ pub(crate) fn handle(
                 })
                 .collect();
 
+            let (total_bytes, usable_bytes) = log_dir_capacity(dir);
+
             results.push(DescribeLogDirsResult {
                 error_code: codes::NONE,
                 log_dir: absolute_path(dir),
                 topics,
-                // total_bytes / usable_bytes (v4+) require a portable
-                // statvfs we don't depend on yet; the generated default of
-                // -1 means "unknown", which the JVM tooling tolerates.
+                // KIP-827 (Kafka 3.3+): v4 surfaces per-dir filesystem
+                // capacity. We query the underlying filesystem via
+                // `statvfs` on unix and report `-1` (Kafka's "unknown"
+                // sentinel) on non-unix; the JVM admin tools tolerate
+                // `-1` and skip the column.
+                total_bytes,
+                usable_bytes,
                 ..Default::default()
             });
         }
@@ -213,6 +219,41 @@ fn absolute_path(dir: &std::path::Path) -> String {
         .to_string()
 }
 
+/// `(total_bytes, usable_bytes)` for the filesystem hosting `dir`,
+/// matching the KIP-827 `DescribeLogDirsResult` v4 fields. `total_bytes`
+/// is the filesystem capacity; `usable_bytes` is what's available to a
+/// non-root caller (i.e. respects the typical 5 % root reserve).
+///
+/// Returns `(-1, -1)` — the Kafka "unknown" sentinel — when the platform
+/// has no `statvfs` (Windows) or the syscall fails (path vanished mid-
+/// reconfigure, permissions). The JVM admin tools tolerate `-1` and
+/// just skip the column.
+fn log_dir_capacity(dir: &std::path::Path) -> (i64, i64) {
+    disk_stats(dir).unwrap_or((-1, -1))
+}
+
+#[cfg(unix)]
+fn disk_stats(dir: &std::path::Path) -> Option<(i64, i64)> {
+    let stat = rustix::fs::statvfs(dir).ok()?;
+    // `f_frsize` is the fragment size in bytes; multiplying by the
+    // block counts yields capacity in bytes. Both fields come back as
+    // `u64`; clamp to `i64::MAX` rather than overflow on a hypothetical
+    // exabyte-scale volume.
+    let frsize = i64::try_from(stat.f_frsize).unwrap_or(i64::MAX);
+    let total = i64::try_from(stat.f_blocks)
+        .unwrap_or(i64::MAX)
+        .saturating_mul(frsize);
+    let usable = i64::try_from(stat.f_bavail)
+        .unwrap_or(i64::MAX)
+        .saturating_mul(frsize);
+    Some((total, usable))
+}
+
+#[cfg(not(unix))]
+fn disk_stats(_dir: &std::path::Path) -> Option<(i64, i64)> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,5 +284,40 @@ mod tests {
         assert!(f.allows("t", 0));
         assert!(f.allows("t", 7));
         assert!(!f.allows("u", 0));
+    }
+
+    /// On unix, `statvfs` against any tempdir must return positive,
+    /// sensible numbers — `total_bytes >= usable_bytes > 0`. Catches
+    /// fragment-size vs block-count multiplication regressions, which
+    /// would otherwise silently report zeros (Kafka tools then
+    /// display "0 B free" and operators chase a ghost).
+    #[cfg(unix)]
+    #[test]
+    fn log_dir_capacity_returns_sensible_unix_numbers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (total, usable) = log_dir_capacity(tmp.path());
+        assert!(
+            total > 0,
+            "total_bytes must be positive on unix tempdir, got {total}"
+        );
+        assert!(
+            usable > 0,
+            "usable_bytes must be positive on unix tempdir, got {usable}"
+        );
+        assert!(
+            total >= usable,
+            "total_bytes ({total}) must be ≥ usable_bytes ({usable})",
+        );
+    }
+
+    /// Vanished path yields the Kafka "unknown" sentinel rather than
+    /// propagating the syscall error. Operators see `-1` and the JVM
+    /// tool skips the column; the alternative — a 500-like
+    /// `KafkaStorageException` — would block the whole describe.
+    #[cfg(unix)]
+    #[test]
+    fn log_dir_capacity_returns_minus_one_for_missing_path() {
+        let phantom = std::path::Path::new("/nonexistent/crabka/test/dir/should/not/exist");
+        assert_eq!(log_dir_capacity(phantom), (-1, -1));
     }
 }
