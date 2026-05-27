@@ -1,5 +1,13 @@
 # `crabka-client-producer` (slice 6) Implementation Plan
 
+## Implementation status
+
+**Slice tracked in STATUS.md as:** Not tracked as a dedicated STATUS.md header — covered implicitly by the protocol-foundation preamble or rolled into subsequent slices.
+
+**Incomplete / deferred steps:** None recorded in STATUS.md.
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Ship a full-idempotent Rust Kafka producer + the broker-side support that backs it. A JVM `kafka-console-consumer --partition 0 --from-beginning` reads records produced by the Rust client. The retrofit task converts slice 2's `ClientBuilder` and slice 5's `ConsumerBuilder` to `bon`-generated builders alongside the producer's new one.

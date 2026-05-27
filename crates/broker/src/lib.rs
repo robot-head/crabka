@@ -164,6 +164,6 @@ pub(crate) mod tls_reload;
 mod txn;
 
 pub use broker::{Broker, BrokerHandle};
-pub use config::{BootstrapMode, BrokerConfig};
+pub use config::{BootstrapMode, BrokerConfig, RemoteStorageBackend};
 pub use crabka_raft::NodeId;
 pub use error::BrokerError;

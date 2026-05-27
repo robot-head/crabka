@@ -1,5 +1,20 @@
 # Slice 16b: IP quotas + KIP-612 — Implementation Plan
 
+## Implementation status
+
+**Slice tracked in STATUS.md as:** `## Slice 16b — IP quotas + KIP-612 (2026-05-15)`
+
+**Incomplete / deferred steps (out-of-scope follow-ups):**
+
+- Known limitation: sub-1-connection-per-second rates floor to 1 (rate.max(1.0))
+- Byte-rate quotas on (ip) entity accepted by validator but not enforced
+- Per-IP bucket cache grows unbounded over broker's lifetime
+- Out of scope: IPv6 entity names
+- Connection rejection (vs delay)
+- controller_mutation_rate (KIP-599 — slice 16c)
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. Per `CLAUDE.md`, dispatch independent tasks within a batch in parallel.
 
 **Goal:** Recognize the `ip` entity type in `AlterClientQuotas`/`DescribeClientQuotas` and enforce KIP-612 `connection_creation_rate` at TCP accept — IPv4 only, accept-and-delay (never reject).

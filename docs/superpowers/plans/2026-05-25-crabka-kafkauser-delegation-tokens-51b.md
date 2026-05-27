@@ -1,5 +1,20 @@
 # Slice 51b: KafkaUser delegation-token authentication — Implementation Plan
 
+## Implementation status
+
+**Slice tracked in STATUS.md as:** ## Slice 51b — Operator + Broker: KafkaUser delegation tokens (2026-05-25)
+
+**Incomplete / deferred steps (out-of-scope follow-ups):**
+
+- Known limitations / honest follow-ups: Master-key hot-swap NOT supported (carried over from slice 51)
+- Token rotation NOT supported — renewal extends the same (token_id, hmac)
+- Cycle (renewer-set drift) is the only path that mints a fresh token
+- AdminClientLike::renew_delegation_token describes all tokens then filters by hmac (operator is super-user); O(all_tokens) per renewal on large clusters
+- Operator's inter-broker principal MUST be a super-user for act-as to fire
+- Super-user population is hardcoded to ANONYMOUS when Kafka.spec.delegationToken is set — production deployments using SASL or mTLS need a follow-up CRD field
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to execute this plan task-by-task in parallel batches where file sets don't overlap.
 
 **Goal:** Two halves in one slice — (1) broker KIP-48 act-as on `CreateDelegationToken` so a super-user can mint tokens owned by other principals; (2) operator `KafkaUser.spec.authentication.type: delegation-token` reconciler that uses act-as to manage per-user tokens.

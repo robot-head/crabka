@@ -1,5 +1,19 @@
 # Slice 51: Delegation tokens (KIP-48) — Implementation Plan
 
+## Implementation status
+
+**Slice tracked in STATUS.md as:** ## Slice 51 — Crabka core: Delegation tokens (KIP-48) (2026-05-25)
+
+**Incomplete / deferred steps (out-of-scope follow-ups):**
+
+- Known limitation: Master-key hot-swap not supported (restart-only rotation)
+- No per-token rate-limit on CreateDelegationToken
+- No operator-side KafkaUser.spec.authentication.delegation surface yet — closed by slice 51b
+- Pre-existing bugs flagged: ELIGIBLE_LEADERS_NOT_AVAILABLE = 81 in codes.rs is wrong (Kafka assigns 83)
+- authorize() returns Allow unconditionally when zero super-users AND zero ACLs exist (pre-slice-13 compat shim) — closed by slice 53
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to execute this plan task-by-task in parallel batches where file sets don't overlap.
 
 **Goal:** Implement KIP-48 delegation tokens end-to-end: 4 wire handlers (Create/Renew/Expire/Describe), raft-persisted `V1DelegationToken` / `V1DeleteDelegationToken` records, broker-wide HMAC-SHA-256 master key, SCRAM-SHA-256 lookup fallback (clients auth as token owner), `TOKEN` ACL resource type unblock, background expiry sweep.

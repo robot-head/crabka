@@ -21,4 +21,21 @@ fn main() {
         "generated/ApiVersionsRequest.owned.rs was produced against a different schemas SHA \
          ({sha}). Run tools/regenerate.sh and commit the updated files."
     );
+
+    let ns_version = fs::read_to_string(root.join("schemas/versions/kafka_3_6_2/VERSION"))
+        .expect("schemas/versions/kafka_3_6_2/VERSION must exist");
+    let ns_sha = ns_version
+        .lines()
+        .find_map(|l| l.strip_prefix("sha: "))
+        .expect("schemas/versions/kafka_3_6_2/VERSION must contain a `sha:` line");
+    let ns_one = fs::read_to_string(root.join("generated/kafka_3_6_2/ProduceRequest.owned.rs"))
+        .expect(
+            "generated/kafka_3_6_2/ProduceRequest.owned.rs must exist; run tools/regenerate.sh",
+        );
+    assert!(
+        ns_one.contains(ns_sha),
+        "generated/kafka_3_6_2/ProduceRequest.owned.rs was produced against a different SHA \
+         ({ns_sha}). Run tools/regenerate.sh and commit the updated files."
+    );
+    println!("cargo:rerun-if-changed=schemas/versions/kafka_3_6_2/VERSION");
 }

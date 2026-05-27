@@ -1,5 +1,18 @@
 # Slice 15: Partition reassignment — Implementation Plan
 
+## Implementation status
+
+**Slice tracked in STATUS.md as:** `## Slice 15 — Partition reassignment (KIP-455) (2026-05-15)`
+
+**Incomplete / deferred steps (out-of-scope follow-ups):**
+
+- Known limitation: `kafka-reassign-partitions --verify` exits 1 because it unconditionally issues IncrementalAlterConfigs resource_type=4 (broker-scoped throttle config clear) which Crabka did not implement at slice 15 (closed by slice 15b)
+- Out of scope: KIP-73 throttled replication (closed by slice 15b)
+- KIP-113 log-dir reassignment (closed by slice 45 + slice 45 follow-up)
+- KIP-841 force-elect
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Implement KIP-455 `AlterPartitionReassignments` (api_key 45) + `ListPartitionReassignments` (api_key 46) with a two-phase URP-aware state machine, cancellation, and leader handoff. JVM `kafka-reassign-partitions --execute|--verify` works end-to-end.

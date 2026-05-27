@@ -1,13 +1,12 @@
 //! `Produce` (`api_key=0`). Routes each partition's records to that
 //! partition's writer-actor and awaits the assigned base offset.
 //!
-//! MVP scope: one `RecordBatch` per (topic, partition) per request. The
-//! generated `PartitionProduceData.records` field is `Option<RecordsPayload>`,
-//! whose `V2(RecordBatch)` arm is the only one this handler accepts;
-//! a `Legacy` payload (v0/v1 `MessageSet`) is rejected with
-//! `INVALID_REQUEST` until the up-conversion slice lands. Clients that
-//! send a single v2 batch per partition (the typical case) are fully
-//! supported.
+//! One `RecordBatch` per (topic, partition) per request. The generated
+//! `PartitionProduceData.records` field is `Option<RecordsPayload>`.
+//! Versions 0-2 carry a v0/v1 `MessageSet` (legacy) which is up-converted
+//! to a v2 `RecordBatch` before append. Versions 3+ carry a native v2
+//! `RecordBatch`. Clients that send a single v2 batch per partition (the
+//! typical modern case) are fully supported.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -44,7 +43,14 @@ pub(crate) async fn handle(
     let producer_state = broker.producer_state.clone();
     let txn_coordinator = broker.txn_coordinator.clone();
     let mut cur: &[u8] = req_bytes;
-    let req = ProduceRequest::decode(&mut cur, version)?;
+    let req: ProduceRequest = if (0..3).contains(&version) {
+        crabka_protocol::kafka_3_6_2::owned::produce_request::ProduceRequest::decode(
+            &mut cur, version,
+        )?
+        .into()
+    } else {
+        ProduceRequest::decode(&mut cur, version)?
+    };
     let timeout = Duration::from_millis(u64::try_from(req.timeout_ms.max(0)).unwrap_or(0));
 
     // ── slice-13 ACL preamble ────────────────────────────────────────
@@ -226,8 +232,17 @@ pub(crate) async fn handle(
     if delay > Duration::ZERO {
         tokio::time::sleep(delay).await;
     }
-    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-    resp.encode(&mut buf, version)?;
+    let buf = if (0..3).contains(&version) {
+        let legacy_resp: crabka_protocol::kafka_3_6_2::owned::produce_response::ProduceResponse =
+            resp.into();
+        let mut b = BytesMut::with_capacity(legacy_resp.encoded_len(version));
+        legacy_resp.encode(&mut b, version)?;
+        b
+    } else {
+        let mut b = BytesMut::with_capacity(resp.encoded_len(version));
+        resp.encode(&mut b, version)?;
+        b
+    };
     Ok(buf.freeze())
 }
 
@@ -271,30 +286,16 @@ async fn process_partition(
         out.error_code = codes::INVALID_REQUEST;
         return Ok(out);
     };
-    // Up-convert v0/v1 MessageSet payloads to a v2 RecordBatch so the
-    // log write path sees a single uniform representation. Old clients
-    // (pre-Kafka-0.11 / Produce v0–v2) are the only producers that send
-    // a `Legacy` arm; converting once here lets every downstream stage
-    // — idempotent producer dedup, txn append, log append, replication
-    // — stay v2-only. Malformed legacy bytes surface as
-    // `INVALID_RECORD`.
     let mut batch = match payload {
         RecordsPayload::V2(rb) => rb,
-        RecordsPayload::Legacy(bytes) => {
-            match crabka_records_legacy::legacy_to_v2(&bytes) {
-                Ok(rb) => rb,
-                Err(e) => {
-                    tracing::warn!(
-                        topic = %topic_name,
-                        partition = idx,
-                        error = %e,
-                        "rejecting Produce: legacy MessageSet parse failed"
-                    );
-                    out.error_code = codes::INVALID_RECORD;
-                    return Ok(out);
-                }
+        RecordsPayload::Legacy(bytes) => match crabka_records_legacy::legacy_to_v2(&bytes) {
+            Ok(rb) => rb,
+            Err(e) => {
+                tracing::warn!(error = %e, "legacy_to_v2 failed");
+                out.error_code = codes::CORRUPT_MESSAGE;
+                return Ok(out);
             }
-        }
+        },
     };
 
     let part = if topic_name.is_empty() {

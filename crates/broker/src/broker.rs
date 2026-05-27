@@ -1380,9 +1380,19 @@ impl Broker {
         // Slice 48d hoists construction here so the `RemoteReader` on
         // `Broker` and the copy task share the same RSM / RLMM pair. A
         // single broker has exactly one of each.
-        let remote_reader: Option<Arc<crate::remote_reader::RemoteReader>> = if let Some(backend) =
-            config.remote_storage_backend.clone()
-        {
+        // Hoist the parameters for the slice-48f topic-backed RLMM
+        // bootstrap before `config` moves into the broker struct.
+        let kafka_swap_kickoff: Option<KafkaSwapKickoff> = config
+            .remote_log_metadata_kafka
+            .as_ref()
+            .map(|cfg| KafkaSwapKickoff {
+                cfg: cfg.clone(),
+                broker_id: config.broker_id,
+            });
+        let (remote_reader, kafka_swap_target): (
+            Option<Arc<crate::remote_reader::RemoteReader>>,
+            Option<Arc<crabka_remote_storage_topic::SwappableRlmm>>,
+        ) = if let Some(backend) = config.remote_storage_backend.clone() {
             let rsm: Arc<dyn crabka_remote_storage::RemoteStorageManager> = match backend {
                 crate::config::RemoteStorageBackend::Local { dir } => {
                     Arc::new(crabka_remote_storage::LocalTieredStorage::new(dir))
@@ -1393,8 +1403,27 @@ impl Broker {
                     })?,
                 ),
             };
-            let rlmm: Arc<dyn crabka_remote_storage::RemoteLogMetadataManager> =
+            // Slice 48f: `[remote_storage.kafka_metadata]` opts in to
+            // the topic-backed RLMM. We can't construct it inline
+            // because its `start` does a loopback `AdminClient` call
+            // to provision `__remote_log_metadata`, and the broker's
+            // listener accept loop is spawned later in this function.
+            // Boot with an in-memory placeholder behind a
+            // `SwappableRlmm` facade, then spawn a task that builds
+            // the `TopicBasedRemoteLogMetadataManager` once the
+            // listener is serving and swaps it in.
+            let placeholder: Arc<dyn crabka_remote_storage::RemoteLogMetadataManager> =
                 Arc::new(crabka_remote_storage::InmemoryRemoteLogMetadataManager::new());
+            let (rlmm, kafka_swap_target): (
+                Arc<dyn crabka_remote_storage::RemoteLogMetadataManager>,
+                Option<Arc<crabka_remote_storage_topic::SwappableRlmm>>,
+            ) = if config.remote_log_metadata_kafka.is_some() {
+                let swap = Arc::new(crabka_remote_storage_topic::SwappableRlmm::new(placeholder));
+                let typed: Arc<dyn crabka_remote_storage::RemoteLogMetadataManager> = swap.clone();
+                (typed, Some(swap))
+            } else {
+                (placeholder, None)
+            };
 
             let partitions = partitions.clone();
             let controller = controller.clone();
@@ -1406,13 +1435,18 @@ impl Broker {
                 rlmm.clone(),
                 config.node_id,
                 config.broker_id,
-                crate::remote_log_manager::RemoteLogManagerConfig::default(),
+                crate::remote_log_manager::RemoteLogManagerConfig {
+                    interval: config.remote_log_manager_interval,
+                },
                 shutdown,
             ));
 
-            Some(Arc::new(crate::remote_reader::RemoteReader::new(rsm, rlmm)))
+            (
+                Some(Arc::new(crate::remote_reader::RemoteReader::new(rsm, rlmm))),
+                kafka_swap_target,
+            )
         } else {
-            None
+            (None, None)
         };
 
         // Slice 33: TLS hot-reload watcher. Only spawn when a TLS
@@ -1596,6 +1630,28 @@ impl Broker {
             listener_tasks.push(task);
         }
 
+        // Slice 48f: now that the listener accept loops are spawned,
+        // construct the topic-backed RLMM and swap it into the live
+        // `SwappableRlmm` facade. We deliberately fire-and-forget the
+        // build task: a connect failure here surfaces as a `warn!`
+        // and the broker keeps running on the in-memory placeholder.
+        if let Some(swap) = kafka_swap_target.as_ref()
+            && let Some(kafka_cfg) = kafka_swap_kickoff.as_ref()
+        {
+            let swap = swap.clone();
+            let kafka_cfg = kafka_cfg.clone();
+            let runtime = tokio::runtime::Handle::current();
+            let shutdown_token = shutdown.clone();
+            tokio::spawn(async move {
+                tokio::select! {
+                    () = shutdown_token.cancelled() => {
+                        tracing::debug!("topic-backed RLMM bootstrap cancelled");
+                    }
+                    () = bootstrap_topic_rlmm(swap, kafka_cfg, runtime) => {}
+                }
+            });
+        }
+
         Ok(BrokerHandle {
             listen_addr,
             shutdown,
@@ -1603,6 +1659,55 @@ impl Broker {
             _broker: broker,
         })
     }
+}
+
+#[derive(Debug, Clone)]
+struct KafkaSwapKickoff {
+    cfg: crate::config::KafkaRlmmConfig,
+    broker_id: i32,
+}
+
+/// Construct the topic-backed
+/// [`crabka_remote_storage::RemoteLogMetadataManager`] against the
+/// broker's loopback listener and swap it into `swap`. On failure
+/// logs and returns; the broker stays on the in-memory placeholder.
+async fn bootstrap_topic_rlmm(
+    swap: Arc<crabka_remote_storage_topic::SwappableRlmm>,
+    cfg: KafkaSwapKickoff,
+    runtime: tokio::runtime::Handle,
+) {
+    let log_cfg = crabka_remote_storage_topic::KafkaMetadataLogConfig {
+        bootstrap: cfg.cfg.bootstrap,
+        topic: crabka_remote_storage_topic::METADATA_TOPIC.to_string(),
+        num_partitions: cfg.cfg.num_partitions,
+        replication: cfg.cfg.replication,
+        client_id: format!("crabka-rlmm-broker-{}", cfg.broker_id),
+    };
+    let log = match crabka_remote_storage_topic::KafkaMetadataEventLog::start(log_cfg).await {
+        Ok(log) => log,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "topic-backed RLMM failed to start; staying on in-memory placeholder"
+            );
+            return;
+        }
+    };
+    let manager =
+        match crabka_remote_storage_topic::TopicBasedRemoteLogMetadataManager::start(log, runtime)
+            .await
+        {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "topic-backed RLMM manager start failed; staying on in-memory placeholder"
+                );
+                return;
+            }
+        };
+    swap.swap(manager);
+    tracing::info!("topic-backed RemoteLogMetadataManager activated");
 }
 
 /// Create the partition runtime (mpsc channel + writer task + notify).

@@ -1,5 +1,18 @@
 # Slice 28: Operator — Version upgrades — Implementation plan
 
+## Implementation status
+
+**Slice tracked in STATUS.md as:** `## Slice 28 — Operator: Version upgrades (2026-05-22)`
+
+**Incomplete / deferred steps (out-of-scope follow-ups):**
+
+- Broker-side metadata.version feature-level enforcement (UpdateFeatures handler) — a Crabka-core slice
+- A kafkaVersion → image-tag mapping (image stays pool.spec.image > operator default > built-in)
+- Draining each node via slice-22 ControlledShutdown before its roll (the gate orders + waits for Ready but does not pre-drain)
+- Multi-replica pools
+
+---
+
 Design: `docs/superpowers/specs/2026-05-22-crabka-operator-version-upgrades-28-design.md`.
 
 ## Batches

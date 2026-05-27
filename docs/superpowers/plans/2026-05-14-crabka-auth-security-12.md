@@ -1,5 +1,17 @@
 # Slice 12: Auth & security — Implementation Plan
 
+## Implementation status
+
+**Slice tracked in STATUS.md as:** `## Slice 12 — auth & security (2026-05-15)`
+
+**Incomplete / deferred steps (out-of-scope follow-ups):**
+
+- raft RPC over inbound SASL/TLS deferred (controller listener needs SASL/TLS termination first)
+- Bootstrap CLI artifacts not yet consumed by broker on BootstrapMode::Bootstrap (deferred to follow-up — closed by slice 12b)
+- Out of scope: ACLs (only a super-user-name stand-in), delegation tokens, OAUTHBEARER, GSSAPI, SCRAM-SHA-256, mTLS client-auth, quotas, raft-over-SASL
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add TLS, SASL/PLAIN, SASL/SCRAM-SHA-512, multi-listener configuration, inter-broker auth, and KIP-554 `AlterUserScramCredentials` so JVM Kafka clients can connect to a Crabka broker over `SASL_SSL` and the broker authenticates inter-broker replication / raft / heartbeat traffic.

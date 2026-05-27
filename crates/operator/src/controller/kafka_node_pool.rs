@@ -253,6 +253,7 @@ fn render_init_container(
 }
 
 #[allow(clippy::too_many_arguments)] // pure render helper: each arg names one independent feature toggle, struct-ifying buys nothing
+#[allow(clippy::too_many_lines)] // linear: per-feature env / mount segments are independent
 fn render_broker_container(
     broker_image: &str,
     secret_name: &str,
@@ -264,8 +265,14 @@ fn render_broker_container(
     oauth_jwks_trust_mount: Option<&str>,
     oauth_introspection_mount_path: Option<&str>,
     delegation_token: Option<&crate::crd::kafka::DelegationTokenConfig>,
-    tier_storage_enabled: bool,
+    tiered_storage: Option<&crate::crd::kafka::TieredStorage>,
 ) -> serde_json::Value {
+    use crate::crd::kafka::TieredStorageType;
+    // Local pulls a writable emptyDir mount; S3 pulls credential env vars.
+    let tier_storage_local = matches!(
+        tiered_storage.map(|t| t.kind),
+        Some(TieredStorageType::Local)
+    );
     let mut ports = vec![json!({
         "containerPort": BROKER_PORT, "name": "kafka-internal", "protocol": "TCP"
     })];
@@ -331,6 +338,49 @@ fn render_broker_container(
             }
         }));
     }
+    // Slice 48-final (KIP-405): S3 credentials from operator-CRD →
+    // broker pod via the standard AWS env vars. `object_store`'s
+    // `AmazonS3Builder` resolves these through the AWS credential chain
+    // when the broker TOML omits explicit `access_key_id` /
+    // `secret_access_key` (which it always does on the operator path —
+    // the operator never copies the secret value into the TOML).
+    // When `credentials` is absent on the S3 spec, the env entries are
+    // omitted and the broker pod inherits whatever IRSA / instance-
+    // profile auth the cluster already has.
+    if let Some(s3) = tiered_storage
+        .filter(|t| matches!(t.kind, TieredStorageType::S3))
+        .and_then(|t| t.s3.as_ref())
+        && let Some(creds) = &s3.credentials
+    {
+        let ak_key = creds
+            .access_key_id
+            .key
+            .as_deref()
+            .unwrap_or("access-key-id");
+        let sk_key = creds
+            .secret_access_key
+            .key
+            .as_deref()
+            .unwrap_or("secret-access-key");
+        env.push(json!({
+            "name": "AWS_ACCESS_KEY_ID",
+            "valueFrom": {
+                "secretKeyRef": {
+                    "name": creds.access_key_id.name,
+                    "key": ak_key,
+                }
+            }
+        }));
+        env.push(json!({
+            "name": "AWS_SECRET_ACCESS_KEY",
+            "valueFrom": {
+                "secretKeyRef": {
+                    "name": creds.secret_access_key.name,
+                    "key": sk_key,
+                }
+            }
+        }));
+    }
     let main_script = build_main_script(metrics_enabled);
     let mut volume_mounts = vec![
         json!({ "name": "data", "mountPath": "/var/lib/crabka/data" }),
@@ -371,10 +421,12 @@ fn render_broker_container(
     }
     // Slice 48g (KIP-405): mount the `tier-storage` emptyDir
     // read-write at the broker's `remote_log_storage_dir` (matches
-    // `[remote_storage].storage_dir` in the rendered TOML). Omitted
-    // entirely when the parent `Kafka.spec.tieredStorage` is `None`
-    // so non-tiered clusters keep a byte-identical pod template.
-    if tier_storage_enabled {
+    // `[remote_storage].storage_dir` in the rendered TOML). Local-only
+    // — the S3 backend writes through `object_store` directly to the
+    // bucket and needs no pod-local scratch space. Omitted entirely
+    // when tiered storage is off (or S3), so non-Local clusters keep
+    // a byte-identical pod template.
+    if tier_storage_local {
         volume_mounts.push(json!({
             "name": "tier-storage",
             "mountPath": crate::controller::listeners::TIER_STORAGE_PATH,
@@ -451,7 +503,7 @@ fn render_storage(
     parent_name: &str,
     oauth_jwks_trust_secret: Option<&str>,
     oauth_introspection_mount: Option<&crate::controller::kafka::OauthIntrospectionMount>,
-    tier_storage_enabled: bool,
+    tier_storage_local: bool,
 ) -> (serde_json::Value, Vec<serde_json::Value>) {
     let broker_config_vol = json!({
         "name": "broker-config",
@@ -570,11 +622,12 @@ fn render_storage(
             }));
     }
     // Slice 48g (KIP-405): append a writable `tier-storage` emptyDir
-    // pod volume when the parent `Kafka.spec.tieredStorage` is set. The
-    // matching volumeMount lives in `render_broker_container`; the path
-    // (`TIER_STORAGE_PATH`) is the broker's `[remote_storage].storage_dir`.
-    // 48g uses emptyDir only — PVC support pairs with 48f.
-    if tier_storage_enabled {
+    // pod volume when the parent `Kafka.spec.tieredStorage.type == Local`.
+    // The matching volumeMount lives in `render_broker_container`; the
+    // path (`TIER_STORAGE_PATH`) is the broker's
+    // `[remote_storage].storage_dir`. S3 needs no pod-local scratch
+    // space and is skipped here.
+    if tier_storage_local {
         volumes
             .as_array_mut()
             .expect("render_storage built `volumes` via json!([...])")
@@ -683,10 +736,17 @@ pub(crate) fn render_statefulset(
     let oauth_introspection_mount_path = oauth_introspection_mount
         .as_ref()
         .map(|_| "/etc/crabka/oauth-introspection");
-    // Slice 48g (KIP-405): cluster-wide tier-storage toggle. When `Some`,
-    // the broker container gets a writable mount at `TIER_STORAGE_PATH`
-    // and the pod spec gets a matching `tier-storage` emptyDir volume.
-    let tier_storage_enabled = parent.spec.tiered_storage.is_some();
+    // Slice 48g/48-final (KIP-405): cluster-wide tier-storage selector.
+    // `Local` adds a writable `tier-storage` emptyDir + matching
+    // volumeMount at `TIER_STORAGE_PATH`. `S3` adds no pod volume — the
+    // broker writes through `object_store` directly to the bucket — but
+    // wires the configured `Secret` keys onto the pod as
+    // `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` env vars.
+    let tiered_storage = parent.spec.tiered_storage.as_ref();
+    let tier_storage_local = matches!(
+        tiered_storage.map(|t| t.kind),
+        Some(crate::crd::kafka::TieredStorageType::Local)
+    );
     let main = render_broker_container(
         broker_image,
         &secret_name,
@@ -698,7 +758,7 @@ pub(crate) fn render_statefulset(
         oauth_jwks_trust_mount,
         oauth_introspection_mount_path,
         parent.spec.delegation_token.as_ref(),
-        tier_storage_enabled,
+        tiered_storage,
     );
 
     // Merge user-provided pod metadata under operator-owned labels.
@@ -769,7 +829,7 @@ pub(crate) fn render_statefulset(
         &parent_name,
         oauth_jwks_trust_secret.as_deref(),
         oauth_introspection_mount.as_ref(),
-        tier_storage_enabled,
+        tier_storage_local,
     );
     let retention_policy = render_pvc_retention_policy(pool.spec.storage.as_ref());
 
@@ -2635,6 +2695,31 @@ mod tests {
         let mut k = parent_fixture(name);
         k.spec.tiered_storage = Some(crate::crd::kafka::TieredStorage {
             kind: crate::crd::kafka::TieredStorageType::Local,
+            s3: None,
+        });
+        k
+    }
+
+    fn parent_with_s3_tiered_storage(name: &str, with_creds: bool) -> Kafka {
+        let mut k = parent_fixture(name);
+        let credentials = with_creds.then(|| crate::crd::kafka::S3Credentials {
+            access_key_id: crate::crd::kafka::SecretKeyRef {
+                name: "crabka-s3-creds".into(),
+                key: Some("access-key-id".into()),
+            },
+            secret_access_key: crate::crd::kafka::SecretKeyRef {
+                name: "crabka-s3-creds".into(),
+                key: Some("secret-access-key".into()),
+            },
+        });
+        k.spec.tiered_storage = Some(crate::crd::kafka::TieredStorage {
+            kind: crate::crd::kafka::TieredStorageType::S3,
+            s3: Some(crate::crd::kafka::S3StorageSpec {
+                bucket: "crabka-tier".into(),
+                region: "us-east-1".into(),
+                credentials,
+                ..Default::default()
+            }),
         });
         k
     }
@@ -2678,6 +2763,111 @@ mod tests {
             mount.read_only.is_none() || mount.read_only == Some(false),
             "tier-storage mount must be writable, got read_only={:?}",
             mount.read_only
+        );
+    }
+
+    // ── Slice 48-final: S3 tiered storage env + volume gating ────────
+
+    /// S3 backend with credentials must inject AWS env vars from the
+    /// referenced Secret via `valueFrom.secretKeyRef`. The literal env
+    /// value must be empty so the secret never lands in the pod spec
+    /// JSON (same guarantee as the slice-51b delegation-token wiring).
+    #[test]
+    fn pod_template_injects_aws_credentials_env_from_secret_when_s3() {
+        let parent = parent_with_s3_tiered_storage("demo", true);
+        let pool = pool_fixture("brokers", "demo", 1);
+        let sts = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE).unwrap();
+        let pod_spec = sts.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
+        let broker = pod_spec
+            .containers
+            .iter()
+            .find(|c| c.name == "broker")
+            .expect("broker container");
+        let env = broker.env.as_ref().expect("env present");
+
+        let ak = env
+            .iter()
+            .find(|e| e.name == "AWS_ACCESS_KEY_ID")
+            .expect("AWS_ACCESS_KEY_ID env present");
+        assert!(
+            ak.value.is_none(),
+            "literal value must not be set; valueFrom only"
+        );
+        let ak_ref = ak
+            .value_from
+            .as_ref()
+            .and_then(|v| v.secret_key_ref.as_ref())
+            .expect("secretKeyRef present");
+        assert_eq!(ak_ref.name, "crabka-s3-creds");
+        assert_eq!(ak_ref.key, "access-key-id");
+
+        let sk = env
+            .iter()
+            .find(|e| e.name == "AWS_SECRET_ACCESS_KEY")
+            .expect("AWS_SECRET_ACCESS_KEY env present");
+        assert!(sk.value.is_none());
+        let sk_ref = sk
+            .value_from
+            .as_ref()
+            .and_then(|v| v.secret_key_ref.as_ref())
+            .expect("secretKeyRef present");
+        assert_eq!(sk_ref.name, "crabka-s3-creds");
+        assert_eq!(sk_ref.key, "secret-access-key");
+    }
+
+    /// S3 backend without `credentials` must produce a byte-identical
+    /// env list to the no-tier baseline modulo any other tier-storage
+    /// signal — the broker pod inherits IRSA / instance-profile auth
+    /// from the cluster, and the operator must not inject placeholder
+    /// AWS env entries.
+    #[test]
+    fn pod_template_omits_aws_credentials_env_when_s3_credentials_absent() {
+        let parent = parent_with_s3_tiered_storage("demo", false);
+        let pool = pool_fixture("brokers", "demo", 1);
+        let sts = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE).unwrap();
+        let pod_spec = sts.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
+        let broker = pod_spec
+            .containers
+            .iter()
+            .find(|c| c.name == "broker")
+            .expect("broker container");
+        let env = broker.env.as_ref().expect("env present");
+        assert!(
+            env.iter()
+                .all(|e| e.name != "AWS_ACCESS_KEY_ID" && e.name != "AWS_SECRET_ACCESS_KEY"),
+            "credentialless S3 must not inject AWS env, got: {env:?}",
+        );
+    }
+
+    /// S3 backend must NOT mount the local-tier `tier-storage`
+    /// emptyDir — that volume is meaningful only to `LocalTieredStorage`,
+    /// and shipping it on every S3 cluster would waste pod-local disk.
+    #[test]
+    fn pod_template_omits_tier_storage_volume_when_s3() {
+        let parent = parent_with_s3_tiered_storage("demo", true);
+        let pool = pool_fixture("brokers", "demo", 1);
+        let sts = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE).unwrap();
+        let pod_spec = sts.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
+        assert!(
+            pod_spec
+                .volumes
+                .as_ref()
+                .unwrap()
+                .iter()
+                .all(|v| v.name != "tier-storage"),
+            "S3 must not allocate the Local tier-storage emptyDir",
+        );
+        let broker = pod_spec
+            .containers
+            .iter()
+            .find(|c| c.name == "broker")
+            .expect("broker container");
+        assert!(
+            broker
+                .volume_mounts
+                .as_ref()
+                .is_none_or(|m| m.iter().all(|x| x.name != "tier-storage")),
+            "S3 must not mount the Local tier-storage path",
         );
     }
 

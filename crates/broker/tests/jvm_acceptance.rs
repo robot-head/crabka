@@ -7770,3 +7770,407 @@ async fn cooperative_sticky_kafka_console_consumer() {
 
     broker.shutdown().await;
 }
+
+// ---------------------------------------------------------------------------
+// MinIO-backed tiered-storage acceptance test (KIP-405 S3 backend).
+//
+// Spins up a real `minio/minio` container, points the broker at it via the
+// S3-compatible `S3RemoteStorage` backend, then drives a JVM producer +
+// consumer against a topic with `remote.storage.enable=true` and aggressive
+// `segment.bytes` / `local.retention.bytes` overrides. We assert both that
+// segment objects materialise in the MinIO bucket and that the JVM consumer
+// reads back every record — including offsets whose local segments have
+// already been evicted by `local_retention_pass`, forcing the read to come
+// from the remote tier through `RemoteReader`.
+// ---------------------------------------------------------------------------
+
+const MINIO_IMAGE: &str = "minio/minio:RELEASE.2025-09-07T16-13-09Z";
+const MINIO_CLIENT_IMAGE: &str = "minio/mc:RELEASE.2025-08-13T08-35-41Z";
+const MINIO_PORT: u16 = 9000;
+const MINIO_ACCESS_KEY: &str = "minioadmin";
+const MINIO_SECRET_KEY: &str = "minioadmin";
+const MINIO_BUCKET: &str = "crabka-tiered";
+
+/// `KIP-405` topic configs (`remote.storage.enable`, `local.retention.bytes`)
+/// landed in Apache Kafka 3.6 / Confluent Platform 7.6. The default
+/// [`KAFKA_IMAGE`] (`cp-kafka:6.1.1` / Kafka 2.7) and [`KAFKA_IMAGE_TXN`]
+/// (`cp-kafka:7.5.0` / Kafka 3.5) both predate KIP-405 — their
+/// `TopicCommand` client validates `--config` keys against the local
+/// `LogConfig.configNames` set and rejects unknown ones before sending
+/// the `CreateTopics` request, so we can't reuse them for the tiered-
+/// storage test. `cp-kafka:7.8.8` ships Kafka 3.8 where KIP-405 is GA.
+const KAFKA_IMAGE_TIERED: &str = "confluentinc/cp-kafka:7.8.8";
+
+/// Owns a `docker run -d` `MinIO` container; tears it down on drop.
+struct MinioContainer {
+    name: String,
+}
+
+impl MinioContainer {
+    fn start() -> Self {
+        // Unique name per test invocation so back-to-back runs don't see a
+        // stale container squatting on port 9000.
+        let name = format!("crabka-minio-test-{}", uuid::Uuid::new_v4().simple());
+        // Best-effort orphan reap from a prior aborted run.
+        let _ = Command::new("docker")
+            .args(["rm", "-f", &name])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        let status = Command::new("docker")
+            .args([
+                "run",
+                "-d",
+                "--rm",
+                "--name",
+                &name,
+                "-p",
+                &format!("{MINIO_PORT}:9000"),
+                "-e",
+                &format!("MINIO_ROOT_USER={MINIO_ACCESS_KEY}"),
+                "-e",
+                &format!("MINIO_ROOT_PASSWORD={MINIO_SECRET_KEY}"),
+                MINIO_IMAGE,
+                "server",
+                "/data",
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .status()
+            .expect("spawn docker run minio");
+        assert!(status.success(), "docker run minio failed");
+        wait_for_minio_ready();
+        Self { name }
+    }
+}
+
+/// Poll the published host port until `MinIO`'s HTTP listener answers, so
+/// we don't race the very-fast image's first health check.
+fn wait_for_minio_ready() {
+    let addr: std::net::SocketAddr = format!("127.0.0.1:{MINIO_PORT}")
+        .parse()
+        .expect("static addr");
+    for _ in 0..60 {
+        if std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(500))
+            .is_ok()
+        {
+            // TCP accept != fully-initialised S3 server; give the
+            // listenbuckets path a moment to come up.
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    panic!("MinIO never accepted TCP on 127.0.0.1:{MINIO_PORT}");
+}
+
+fn minio_make_bucket(bucket: &str) {
+    // `mc mb -p` is idempotent and creates parent prefixes; the inner
+    // loop retries the `alias set` so a slow MinIO startup doesn't fail
+    // the test on the first probe.
+    let script = format!(
+        "for i in 1 2 3 4 5 6 7 8 9 10; do \
+           mc alias set local http://host.docker.internal:{MINIO_PORT} {MINIO_ACCESS_KEY} {MINIO_SECRET_KEY} >/dev/null 2>&1 && break; \
+           sleep 1; \
+         done && mc mb -p local/{bucket}"
+    );
+    let out = Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "--add-host=host.docker.internal:host-gateway",
+            "--entrypoint",
+            "/bin/sh",
+            MINIO_CLIENT_IMAGE,
+            "-c",
+            &script,
+        ])
+        .output()
+        .expect("spawn mc mb");
+    assert!(
+        out.status.success(),
+        "mc mb failed: stdout={}, stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+}
+
+/// `mc ls --recursive local/<bucket>` for assertion-side bucket inspection.
+fn minio_list_objects(bucket: &str) -> String {
+    let script = format!(
+        "mc alias set local http://host.docker.internal:{MINIO_PORT} {MINIO_ACCESS_KEY} {MINIO_SECRET_KEY} >/dev/null && \
+         mc ls --recursive local/{bucket}"
+    );
+    let out = Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "--add-host=host.docker.internal:host-gateway",
+            "--entrypoint",
+            "/bin/sh",
+            MINIO_CLIENT_IMAGE,
+            "-c",
+            &script,
+        ])
+        .output()
+        .expect("spawn mc ls");
+    assert!(
+        out.status.success(),
+        "mc ls failed: stderr={}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+impl Drop for MinioContainer {
+    fn drop(&mut self) {
+        let _ = Command::new("docker")
+            .args(["rm", "-f", &self.name])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+}
+
+/// Same shape as [`start_host_broker`] but with the S3 tiered-storage
+/// backend wired in and the `RemoteLogManager` tick lowered so the
+/// acceptance loop completes in seconds rather than the 30s production
+/// default.
+async fn start_host_broker_with_minio_tier(
+    s3: crabka_remote_storage::S3Config,
+) -> (crabka_broker::BrokerHandle, tempfile::TempDir) {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("crabka_broker=debug,info")),
+        )
+        .with_test_writer()
+        .try_init();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let listen_addr: std::net::SocketAddr = LISTEN.parse().expect("static addr");
+    let controller_addr: std::net::SocketAddr = "0.0.0.0:9093".parse().expect("static addr");
+    let config = BrokerConfig {
+        broker_id: 1,
+        listen_addr,
+        advertised_listener: BOOTSTRAP.into(),
+        log_dir: dir.path().to_path_buf(),
+        log_config: LogConfig::default(),
+        node_id: 1,
+        controller_listen_addr: controller_addr,
+        controller_quorum_voters: vec![(1, controller_addr)],
+        heartbeat_interval_ms: 3_000,
+        heartbeat_timeout_ms: 9_000,
+        replica_lag_time_max_ms: 30_000,
+        controller_election_timeout: std::time::Duration::from_secs(5),
+        controller_heartbeat_interval: std::time::Duration::from_millis(500),
+        bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
+        remote_storage_backend: Some(crabka_broker::RemoteStorageBackend::S3(s3)),
+        // 1s tick so the producer's sealed segments reach S3 (and the
+        // local-retention pass evicts them) within the test's wall clock.
+        remote_log_manager_interval: std::time::Duration::from_secs(1),
+        ..BrokerConfig::default()
+    };
+    let handle = Broker::start(config).await.expect("start broker");
+    eprintln!(
+        "CRABKA[test] broker started listen={LISTEN} advertised={BOOTSTRAP} (tiered S3 backend)"
+    );
+    (handle, dir)
+}
+
+// Same multi-thread caveat as `console_producer_round_trip`: blocking
+// `Command::output()` calls would starve the broker accept loop on a
+// single-threaded runtime.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Docker"]
+#[allow(clippy::too_many_lines)]
+async fn tiered_storage_round_trip_through_minio() {
+    const TOPIC: &str = "crabka-tiered-minio-itest";
+    // 200 records of ~30 bytes each → ~6 KiB total. With `segment.bytes=2048`
+    // that rolls into ~3 sealed segments plus the active one — enough to
+    // exercise the copy path multiple times.
+    const RECORDS: usize = 200;
+
+    let _minio = MinioContainer::start();
+    minio_make_bucket(MINIO_BUCKET);
+
+    let s3 = crabka_remote_storage::S3Config {
+        bucket: MINIO_BUCKET.to_string(),
+        region: "us-east-1".to_string(),
+        prefix: None,
+        endpoint: Some(format!("http://127.0.0.1:{MINIO_PORT}")),
+        access_key_id: Some(MINIO_ACCESS_KEY.to_string()),
+        secret_access_key: Some(MINIO_SECRET_KEY.to_string()),
+        allow_http: true,
+        // Force multipart on segments above 4 KiB so the multipart code
+        // path actually fires for the small `segment.bytes=2048` test
+        // fixture. `mc ls` doesn't distinguish single-PUT from multipart-
+        // composed objects on read, so the consume assertion below
+        // covers both paths transparently.
+        multipart_threshold: 4 * 1024,
+        // MinIO permits parts < 5 MiB. Keep small so the test fixture
+        // doesn't have to bloat segments to exercise multiple parts.
+        multipart_chunk_size: 1024,
+    };
+    let (broker, _dir) = start_host_broker_with_minio_tier(s3).await;
+    nc_check_connectivity();
+
+    // Create the topic with tiering on and a tiny segment size so a modest
+    // produce batch seals several segments. `local.retention.bytes=1` forces
+    // every copied segment to be evicted from the local disk as soon as the
+    // RLM's retention pass sees its `CopySegmentFinished` state, so the
+    // subsequent consume must come from the remote tier. Uses the
+    // KIP-405-aware `cp-kafka:7.8.8` image — older clients' `TopicCommand`
+    // rejects `remote.storage.enable` / `local.retention.bytes` client-
+    // side before the request leaves the container.
+    docker_run_kafka_tool_with_image(
+        KAFKA_IMAGE_TIERED,
+        &[
+            "kafka-topics",
+            "--create",
+            "--if-not-exists",
+            "--topic",
+            TOPIC,
+            "--partitions",
+            "1",
+            "--replication-factor",
+            "1",
+            "--config",
+            "remote.storage.enable=true",
+            "--config",
+            "segment.bytes=2048",
+            "--config",
+            "local.retention.bytes=1",
+            "--config",
+            "retention.bytes=-1",
+            "--bootstrap-server",
+            BOOTSTRAP,
+        ],
+    );
+
+    // Wait for the topic-config overrides to flow from the metadata image
+    // through `ReplicatorSupervisor::reconcile` into the partition's
+    // `LogConfig`. Without this gate, the producer's first batches land in
+    // a default-config `Log` (1 GiB segments, `remote_storage_enable=false`)
+    // and the tier-copy path is never triggered. See the cleanup-policy
+    // test (`compact_log_cleaner_round_trip`) for the same pattern.
+    let cfg_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if let Some(cfg) = broker.partition_log_config_for_test(TOPIC, 0)
+            && cfg.remote_storage_enable
+            && cfg.segment_bytes == 2048
+            && cfg.local_retention_bytes == Some(1)
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() <= cfg_deadline,
+            "tiered-storage topic config never propagated within 10s; saw {:?}",
+            broker.partition_log_config_for_test(TOPIC, 0)
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    // Stream records line-by-line through the JVM console producer.
+    let mut payload = String::with_capacity(RECORDS * 12);
+    for i in 0..RECORDS {
+        use std::fmt::Write as _;
+        let _ = writeln!(payload, "record-{i:04}");
+    }
+    // Force per-record batches (same trick `compact_log_cleaner_round_trip`
+    // uses): without this, the JVM producer accumulates everything into one
+    // big batch that the broker writes into a single segment, defeating the
+    // `segment.bytes=2048` roll trigger and starving the tier-copy path.
+    let mut child = Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "-i",
+            "--add-host=host.docker.internal:host-gateway",
+            KAFKA_IMAGE,
+            "kafka-console-producer",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--topic",
+            TOPIC,
+            "--producer-property",
+            "batch.size=1",
+            "--producer-property",
+            "linger.ms=0",
+            "--producer-property",
+            "max.in.flight.requests.per.connection=1",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn producer");
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(payload.as_bytes())
+        .expect("write stdin");
+    drop(child.stdin.take());
+    let producer_out = child.wait_with_output().expect("wait producer");
+    assert!(
+        producer_out.status.success(),
+        "producer failed: {}",
+        String::from_utf8_lossy(&producer_out.stderr)
+    );
+
+    // Give the `RemoteLogManager` enough ticks (1 s interval) to (a) copy
+    // every sealed segment to MinIO and (b) run the local-retention pass.
+    // Each tick handles one segment per partition, so ≥ `RECORDS / batch`
+    // ticks plus a margin for the slowest mc handshake — 8 s in practice.
+    let mut bucket_listing = String::new();
+    let mut copied_log_objects = 0usize;
+    for _ in 0..40 {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        bucket_listing = minio_list_objects(MINIO_BUCKET);
+        copied_log_objects = bucket_listing
+            .lines()
+            .filter(|l| l.ends_with("/log"))
+            .count();
+        if copied_log_objects >= 2 {
+            break;
+        }
+    }
+    assert!(
+        copied_log_objects >= 2,
+        "expected ≥2 segment `/log` objects in MinIO after produce; \
+         saw {copied_log_objects}. Bucket listing:\n{bucket_listing}"
+    );
+
+    // Consume from offset 0. Older offsets only exist in MinIO at this
+    // point (their local segments were dropped by local_retention_pass),
+    // so the JVM consumer transparently exercises the remote-read path.
+    let consumer_out = docker_run_kafka_tool(&[
+        "kafka-console-consumer",
+        "--bootstrap-server",
+        BOOTSTRAP,
+        "--topic",
+        TOPIC,
+        "--partition",
+        "0",
+        "--from-beginning",
+        "--max-messages",
+        &RECORDS.to_string(),
+        "--timeout-ms",
+        "20000",
+    ]);
+    let stdout = String::from_utf8_lossy(&consumer_out.stdout);
+    // Spot-check a sample across the offset range — the very first
+    // records are guaranteed to come from MinIO because their segment was
+    // evicted before consume started.
+    for i in [0usize, 1, 50, 100, 150, RECORDS - 1] {
+        let needle = format!("record-{i:04}");
+        assert!(
+            stdout.contains(&needle),
+            "consumer missing {needle}; partial output:\n{}",
+            stdout.chars().take(2_000).collect::<String>()
+        );
+    }
+
+    broker.shutdown().await;
+    // `_minio` is dropped here; the container is removed via `docker rm -f`.
+}

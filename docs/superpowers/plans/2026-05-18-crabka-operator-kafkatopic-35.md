@@ -1,5 +1,13 @@
 # Crabka Operator Slice 35 — `KafkaTopic` CRD + `crates/client-admin`
 
+## Implementation status
+
+**Slice tracked in STATUS.md as:** Not tracked as a dedicated STATUS.md header — covered implicitly by the protocol-foundation preamble or rolled into subsequent slices.
+
+**Incomplete / deferred steps:** None recorded in STATUS.md.
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development`. Per CLAUDE.md, dispatch tasks within a batch in parallel; sequential between batches. Steps use checkbox (`- [ ]`) syntax.
 
 **Goal:** Add the `KafkaTopic` CRD with unidirectional reconcile (CRD wins) plus a new workspace crate `crates/client-admin` that wraps `crates/client-core`'s typed `Connection::send<R>` for the 6 admin RPCs slice 35 needs.

@@ -1,5 +1,13 @@
 # Bulletproof EOS sub-slice 10b follow-up — Implementation Plan
 
+## Implementation status
+
+**Slice tracked in STATUS.md as:** Not tracked as a dedicated STATUS.md header — covered implicitly by the protocol-foundation preamble or rolled into subsequent slices.
+
+**Incomplete / deferred steps:** None recorded in STATUS.md.
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Close the slice-10b deferrals: re-enable the 4 rust integration tests + 3 JVM acceptance tests that were marked `#[ignore]` / `--skip` because `Broker::start`'s hardcoded 5s openraft `election_timeout` forced a 10s `leader_lease`, blocking new-leader election until after the producer's 10s timeout.

@@ -755,6 +755,17 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
     let secret_api: Api<Secret> = Api::namespaced(ctx.client.clone(), &ns);
     let _cluster_id = ensure_cluster_id_secret(&secret_api, &obj).await?;
 
+    // Slice 48-final (KIP-405): shape-validate `spec.tieredStorage` before
+    // any ConfigMap render — a mis-paired discriminator (`type=S3` with no
+    // `s3` block, or an S3 spec missing `bucket`/`region`) would otherwise
+    // produce broker TOML the broker rejects at boot. Failing here keeps
+    // the broker pods on the previously-valid generation.
+    if let Some(ts) = &obj.spec.tiered_storage
+        && let Err(why) = ts.validate()
+    {
+        return Err(ReconcileError::TieredStorageInvalid(why));
+    }
+
     // Slice 28: evaluate the declared versions against the operator-
     // finalized metadata version (read from the watched object's status —
     // no extra API request). On a failure we surface KafkaVersionValid=

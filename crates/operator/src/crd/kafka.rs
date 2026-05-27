@@ -112,30 +112,140 @@ pub struct KafkaSpec {
 
 /// Slice 48g (KIP-405): cluster-wide tiered-storage configuration.
 ///
-/// The single `type` discriminator reserves space for future variants
-/// (`S3`, `Gcs`, `Azure`, …) without breaking the wire shape. Only
-/// `Local` is supported today.
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+/// The `type` discriminator picks the backend; per-backend tuning lives
+/// in the matching sibling field (`s3` for `Type = S3`, no extra field
+/// for `Local`). Mis-pairings — `type = "S3"` without `spec.s3`, or
+/// `type = "Local"` with `spec.s3` set — are rejected by the operator
+/// reconciler with a `TieredStorageInvalid` status condition.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct TieredStorage {
-    /// Backend kind. Only [`TieredStorageType::Local`] is recognised by
-    /// the broker in 48g — selecting an unsupported variant surfaces
-    /// `TieredStorageInvalid` on `Kafka.status.conditions` at reconcile
-    /// time (deferred; today only `Local` is in the enum).
+    /// Backend kind selector.
     #[serde(rename = "type")]
     pub kind: TieredStorageType,
+    /// S3-backend tuning. Required when `kind == S3`, must be absent
+    /// otherwise. The struct mirrors `crabka_remote_storage::S3Config`
+    /// — non-credential fields are rendered verbatim into the broker
+    /// TOML's `[remote_storage.s3]` block; credentials are sourced
+    /// from Kubernetes Secrets and injected as broker-pod env
+    /// (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub s3: Option<S3StorageSpec>,
 }
 
 /// Slice 48g (KIP-405): the set of RSM backends the operator knows how
 /// to render. Adding a backend means extending this enum AND the
 /// matching render path in
 /// [`crate::controller::listeners::render_broker_toml`].
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 pub enum TieredStorageType {
     /// On-pod filesystem store via `LocalTieredStorage` (slice 48a's
     /// reference RSM). Data lives at `/var/lib/crabka/remote` on the
     /// broker pod.
+    #[default]
     Local,
+    /// S3-compatible object store via `S3RemoteStorage` (slice 48-final
+    /// production RSM). Pair with a populated
+    /// [`TieredStorage::s3`] for bucket / region / credentials.
+    S3,
+}
+
+/// Slice 48-final (KIP-405): cluster-wide S3 backend configuration.
+///
+/// Non-credential fields are rendered into the broker config TOML's
+/// `[remote_storage.s3]` block verbatim and parsed back into
+/// `crabka_remote_storage::S3Config`. Credentials are NEVER rendered
+/// into TOML — when [`Self::credentials`] is set, the operator wires
+/// `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` env vars onto the
+/// broker pod via `valueFrom.secretKeyRef`, and `object_store`'s
+/// `AmazonS3Builder` picks them up through the standard AWS credential
+/// chain. When credentials are absent, the broker pod inherits whatever
+/// IAM / IRSA / instance-profile auth is wired into the cluster.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct S3StorageSpec {
+    /// S3 bucket name. Required.
+    pub bucket: String,
+    /// AWS region. Required even for non-AWS endpoints (`MinIO`, R2) —
+    /// `object_store`'s `AmazonS3Builder` rejects an empty region.
+    pub region: String,
+    /// Optional key prefix inside the bucket. Lets multiple Crabka
+    /// clusters share a bucket without colliding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
+    /// Optional custom endpoint URL (e.g. `http://minio:9000` for
+    /// `MinIO`, `https://<account>.r2.cloudflarestorage.com` for
+    /// Cloudflare R2). When `None`, the AWS S3 endpoint for the
+    /// configured region is used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    /// Optional explicit credentials. When `None`, the broker falls
+    /// back to the AWS credential chain (IRSA on EKS, instance profile
+    /// on EC2, etc.).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credentials: Option<S3Credentials>,
+    /// Allow plaintext HTTP. Off by default; flip on for `MinIO`
+    /// running without TLS. AWS S3 itself never needs this.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_http: bool,
+    /// Override the single-PUT / multipart cutoff (bytes). When unset,
+    /// the broker uses `crabka_remote_storage::DEFAULT_MULTIPART_THRESHOLD`
+    /// (100 MiB). Lower in tests to exercise the multipart path on
+    /// small fixtures.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multipart_threshold: Option<u64>,
+    /// Override the per-part size for multipart uploads (bytes). When
+    /// unset, the broker uses
+    /// `crabka_remote_storage::DEFAULT_MULTIPART_CHUNK_SIZE` (16 MiB).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multipart_chunk_size: Option<u64>,
+}
+
+impl TieredStorage {
+    /// Slice 48-final (KIP-405): shape-validate the tagged union.
+    /// Returns the offending field's description on failure; the
+    /// reconciler wraps it in [`crate::controller::common::ReconcileError::TieredStorageInvalid`].
+    /// Pure (no I/O) so it can be unit-tested without a cluster.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the discriminator and the sibling fields disagree
+    /// (e.g. `type=S3` without `s3`), or when the S3 spec is missing a
+    /// required field (`bucket`, `region`).
+    pub fn validate(&self) -> Result<(), String> {
+        match (self.kind, &self.s3) {
+            (TieredStorageType::Local, Some(_)) => Err("type=Local must not set `s3`".into()),
+            (TieredStorageType::S3, None) => {
+                Err("type=S3 requires `s3` (bucket + region at minimum)".into())
+            }
+            (TieredStorageType::Local, None) => Ok(()),
+            (TieredStorageType::S3, Some(s3)) => {
+                if s3.bucket.trim().is_empty() {
+                    return Err("s3.bucket is required and must be non-empty".into());
+                }
+                if s3.region.trim().is_empty() {
+                    return Err("s3.region is required and must be non-empty".into());
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Slice 48-final (KIP-405): S3 access-key credential pair.
+///
+/// Two [`SecretKeyRef`]s — one per AWS credential half — so an operator
+/// can hold the secret-access-key in a separate, more tightly
+/// permissioned Secret than the access-key-id if they want, while still
+/// supporting the common case of both keys in one Secret (different
+/// `key` values on the same `name`).
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct S3Credentials {
+    /// Reference to the Secret holding the `AWS_ACCESS_KEY_ID` value.
+    pub access_key_id: SecretKeyRef,
+    /// Reference to the Secret holding the `AWS_SECRET_ACCESS_KEY` value.
+    pub secret_access_key: SecretKeyRef,
 }
 
 /// Slice 51b: master-HMAC-key source for KIP-48 delegation tokens.
@@ -770,5 +880,105 @@ authorization:
         let json = r#"{"kafkaVersion":"0.1.1","tieredStorage":{"type":"Bogus"}}"#;
         let res: Result<KafkaSpec, _> = serde_json::from_str(json);
         assert!(res.is_err(), "unknown TieredStorageType must fail");
+    }
+
+    // ── Slice 48-final: S3 tiered storage CRD + validation ──────────
+
+    /// Full S3 wire shape (camelCase, nested `s3.credentials`) round-trips
+    /// through serde without losing fields.
+    #[test]
+    fn tiered_storage_s3_round_trips_through_json() {
+        let ts = TieredStorage {
+            kind: TieredStorageType::S3,
+            s3: Some(S3StorageSpec {
+                bucket: "b".into(),
+                region: "r".into(),
+                prefix: Some("p".into()),
+                endpoint: Some("http://m:9000".into()),
+                credentials: Some(S3Credentials {
+                    access_key_id: SecretKeyRef {
+                        name: "creds".into(),
+                        key: Some("ak".into()),
+                    },
+                    secret_access_key: SecretKeyRef {
+                        name: "creds".into(),
+                        key: Some("sk".into()),
+                    },
+                }),
+                allow_http: true,
+                multipart_threshold: Some(1024),
+                multipart_chunk_size: Some(512),
+            }),
+        };
+        let j = serde_json::to_string(&ts).unwrap();
+        assert!(j.contains("\"type\":\"S3\""), "got: {j}");
+        assert!(j.contains("\"s3\""), "got: {j}");
+        assert!(j.contains("\"accessKeyId\""), "got: {j}");
+        assert!(j.contains("\"secretAccessKey\""), "got: {j}");
+        assert!(j.contains("\"allowHttp\":true"), "got: {j}");
+        assert!(j.contains("\"multipartThreshold\":1024"), "got: {j}");
+        let back: TieredStorage = serde_json::from_str(&j).unwrap();
+        assert_eq!(back, ts);
+    }
+
+    /// `validate` enforces the four wire-shape rules: kind/s3 pairing,
+    /// non-empty bucket, non-empty region. Local + no s3 is the only
+    /// happy Local case; S3 + populated s3 with non-empty bucket/region
+    /// is the only happy S3 case.
+    #[test]
+    fn tiered_storage_validate_local_ok_only_without_s3() {
+        let ok = TieredStorage {
+            kind: TieredStorageType::Local,
+            s3: None,
+        };
+        assert!(ok.validate().is_ok());
+
+        let bad = TieredStorage {
+            kind: TieredStorageType::Local,
+            s3: Some(S3StorageSpec::default()),
+        };
+        assert!(
+            bad.validate().is_err(),
+            "type=Local with s3 must be rejected",
+        );
+    }
+
+    #[test]
+    fn tiered_storage_validate_s3_requires_s3_and_non_empty_bucket_region() {
+        let missing_s3 = TieredStorage {
+            kind: TieredStorageType::S3,
+            s3: None,
+        };
+        assert!(missing_s3.validate().is_err());
+
+        let missing_bucket = TieredStorage {
+            kind: TieredStorageType::S3,
+            s3: Some(S3StorageSpec {
+                bucket: String::new(),
+                region: "r".into(),
+                ..Default::default()
+            }),
+        };
+        assert!(missing_bucket.validate().is_err());
+
+        let missing_region = TieredStorage {
+            kind: TieredStorageType::S3,
+            s3: Some(S3StorageSpec {
+                bucket: "b".into(),
+                region: "  ".into(),
+                ..Default::default()
+            }),
+        };
+        assert!(missing_region.validate().is_err());
+
+        let ok = TieredStorage {
+            kind: TieredStorageType::S3,
+            s3: Some(S3StorageSpec {
+                bucket: "b".into(),
+                region: "r".into(),
+                ..Default::default()
+            }),
+        };
+        assert!(ok.validate().is_ok());
     }
 }

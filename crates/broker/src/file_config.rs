@@ -115,6 +115,29 @@ pub struct FileRemoteStorageConfig {
     pub storage_dir: Option<String>,
     /// S3-compatible backend parameters. Omit to use `storage_dir`.
     pub s3: Option<FileRemoteStorageS3Config>,
+    /// Slice 48f: opt-in to the topic-backed
+    /// [`RemoteLogMetadataManager`](crabka_remote_storage::RemoteLogMetadataManager).
+    /// When absent, the broker uses the in-memory fixture.
+    pub kafka_metadata: Option<FileKafkaRlmmConfig>,
+}
+
+/// TOML shape of `[remote_storage.kafka_metadata]`. Maps to
+/// [`crate::config::KafkaRlmmConfig`].
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FileKafkaRlmmConfig {
+    /// `host:port` the manager dials to reach its own broker.
+    pub bootstrap: String,
+    /// Partition count for `__remote_log_metadata` on first creation.
+    /// Defaults to 50 (Kafka's
+    /// `remote.log.metadata.topic.num.partitions`).
+    #[serde(default)]
+    pub num_partitions: Option<i32>,
+    /// Replication factor for `__remote_log_metadata` on first
+    /// creation. Defaults to 3 (Kafka's
+    /// `remote.log.metadata.topic.replication.factor`).
+    #[serde(default)]
+    pub replication: Option<i32>,
 }
 
 /// TOML shape of `[remote_storage.s3]`. Maps to
@@ -145,6 +168,18 @@ pub struct FileRemoteStorageS3Config {
     /// without TLS).
     #[serde(default)]
     pub allow_http: bool,
+    /// Optional override of the multipart-upload threshold (bytes). When
+    /// `None`, [`crabka_remote_storage::DEFAULT_MULTIPART_THRESHOLD`]
+    /// applies. Operators typically leave this alone; lower it to force
+    /// multipart on smaller segments for testing.
+    #[serde(default)]
+    pub multipart_threshold: Option<u64>,
+    /// Optional override of the per-part multipart chunk size (bytes).
+    /// When `None`, [`crabka_remote_storage::DEFAULT_MULTIPART_CHUNK_SIZE`]
+    /// applies. AWS requires parts ≥ 5 MiB except the last; `MinIO`
+    /// tolerates smaller values.
+    #[serde(default)]
+    pub multipart_chunk_size: Option<usize>,
 }
 
 /// TOML shape of `[authorization]`. `type` (renamed to `authz_type` on
@@ -741,10 +776,26 @@ impl FileConfig {
                             access_key_id: s3.access_key_id.clone(),
                             secret_access_key: s3.secret_access_key.clone(),
                             allow_http: s3.allow_http,
+                            multipart_threshold: s3
+                                .multipart_threshold
+                                .unwrap_or(crabka_remote_storage::DEFAULT_MULTIPART_THRESHOLD),
+                            multipart_chunk_size: s3
+                                .multipart_chunk_size
+                                .unwrap_or(crabka_remote_storage::DEFAULT_MULTIPART_CHUNK_SIZE),
                         },
                     ));
                 }
                 (None, None) => {}
+            }
+
+            // Slice 48f: `[remote_storage.kafka_metadata]` opts in to the
+            // topic-backed RLMM. Defaults to in-memory when absent.
+            if let Some(km) = &rs.kafka_metadata {
+                cfg.remote_log_metadata_kafka = Some(crate::config::KafkaRlmmConfig {
+                    bootstrap: km.bootstrap.clone(),
+                    num_partitions: km.num_partitions.unwrap_or(50),
+                    replication: km.replication.unwrap_or(3),
+                });
             }
         }
 
@@ -1377,6 +1428,45 @@ storage_dir = "/var/lib/crabka/tier"
         let mut cfg = crate::config::BrokerConfig::default();
         file.apply_to(&mut cfg).unwrap();
         assert!(cfg.remote_storage_backend.is_none());
+        assert!(cfg.remote_log_metadata_kafka.is_none());
+    }
+
+    #[test]
+    fn kafka_metadata_section_parses_with_defaults() {
+        let toml = r#"
+[remote_storage]
+storage_dir = "/tmp/tier"
+
+[remote_storage.kafka_metadata]
+bootstrap = "127.0.0.1:9092"
+"#;
+        let file: FileConfig = toml::from_str(toml).unwrap();
+        let mut cfg = crate::config::BrokerConfig::default();
+        file.apply_to(&mut cfg).unwrap();
+        let km = cfg.remote_log_metadata_kafka.expect("kafka rlmm config");
+        assert_eq!(km.bootstrap, "127.0.0.1:9092");
+        assert_eq!(km.num_partitions, 50);
+        assert_eq!(km.replication, 3);
+    }
+
+    #[test]
+    fn kafka_metadata_section_honors_overrides() {
+        let toml = r#"
+[remote_storage]
+storage_dir = "/tmp/tier"
+
+[remote_storage.kafka_metadata]
+bootstrap = "broker-0:9094"
+num_partitions = 8
+replication = 1
+"#;
+        let file: FileConfig = toml::from_str(toml).unwrap();
+        let mut cfg = crate::config::BrokerConfig::default();
+        file.apply_to(&mut cfg).unwrap();
+        let km = cfg.remote_log_metadata_kafka.expect("kafka rlmm config");
+        assert_eq!(km.bootstrap, "broker-0:9094");
+        assert_eq!(km.num_partitions, 8);
+        assert_eq!(km.replication, 1);
     }
 
     #[test]
@@ -1400,6 +1490,36 @@ allow_http = true
                 assert_eq!(s3.endpoint.as_deref(), Some("http://minio:9000"));
                 assert!(s3.allow_http);
                 assert!(s3.access_key_id.is_none());
+                // Multipart knobs default when the TOML omits them.
+                assert_eq!(
+                    s3.multipart_threshold,
+                    crabka_remote_storage::DEFAULT_MULTIPART_THRESHOLD
+                );
+                assert_eq!(
+                    s3.multipart_chunk_size,
+                    crabka_remote_storage::DEFAULT_MULTIPART_CHUNK_SIZE
+                );
+            }
+            other => panic!("expected S3 backend, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn remote_storage_s3_section_round_trips_multipart_overrides() {
+        let toml = r#"
+[remote_storage.s3]
+bucket = "b"
+region = "us-east-1"
+multipart_threshold = 8192
+multipart_chunk_size = 5242880
+"#;
+        let file: FileConfig = toml::from_str(toml).unwrap();
+        let mut cfg = crate::config::BrokerConfig::default();
+        file.apply_to(&mut cfg).unwrap();
+        match cfg.remote_storage_backend {
+            Some(crate::config::RemoteStorageBackend::S3(s3)) => {
+                assert_eq!(s3.multipart_threshold, 8192);
+                assert_eq!(s3.multipart_chunk_size, 5_242_880);
             }
             other => panic!("expected S3 backend, got {other:?}"),
         }

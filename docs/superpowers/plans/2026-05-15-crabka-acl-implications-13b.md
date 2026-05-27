@@ -1,5 +1,18 @@
 # Slice 13b: ACL implications + multi-super-user — Implementation Plan
 
+## Implementation status
+
+**Slice tracked in STATUS.md as:** `## Slice 13b — ACL implications + multi-super-user (2026-05-15)`
+
+**Incomplete / deferred steps (out-of-scope follow-ups):**
+
+- ACL audit logging
+- `User:` prefix in super-user config strings
+- `ClusterAction` implication
+- Persisted broker config
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add Kafka's operation-implication semantics to the slice-13 authorizer (Read/Write/Delete/Alter → Describe; AlterConfigs → DescribeConfigs) and rename `BrokerConfig::super_user_name: Option<String>` to `super_users: HashSet<String>` so deployments can configure multiple privileged identities.

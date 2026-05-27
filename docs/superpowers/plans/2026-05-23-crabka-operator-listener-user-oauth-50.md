@@ -1,5 +1,19 @@
 # Slice 50: Operator — Listener OAuth + `KafkaUser` tls-external — Implementation plan
 
+## Implementation status
+
+**Slice tracked in STATUS.md as:** `## Slice 50 — Operator: Listener OAuth + `KafkaUser` tls-external (2026-05-23)`
+
+**Incomplete / deferred steps (out-of-scope follow-ups):**
+
+- Listener tlsTrustedCertificates for custom CA trust to the IdP (closed by slices 49c + 50b)
+- Opaque-token introspection (closed by slices 49d + 50c)
+- KIP-368 re-authentication (maxSecondsWithoutReauthentication, closed by slices 49e + 50d)
+- PLAIN-with-OAuth-token + tokenEndpointUri (closed by slices 49f + 50e — slice 49f is indefinitely deferred per slice 49g/49h notes)
+- The remaining Strimzi long-tail — groupsClaim, fallback-username chain, validTokenType, multi-rule customClaimCheck, JWKS refresh policy knobs, jwksIgnoreKeyUse (closed by slices 49g + 50f)
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (matches the project's CLAUDE.md mandate to execute in parallel batches). Steps use the project's compact-batch style — each T is one focused PR-worth of work, file-conflict-disjoint within a batch.
 
 **Design:** `docs/superpowers/specs/2026-05-23-crabka-operator-listener-user-oauth-50-design.md`

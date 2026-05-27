@@ -1,5 +1,15 @@
 # Slice 34 — CA rotation orchestration — Implementation Plan
 
+## Implementation status
+
+**Slice tracked in STATUS.md as:** `## Slice 34 — Operator: CA rotation orchestration (2026-05-23)`
+
+**Incomplete / deferred steps (out-of-scope follow-ups):**
+
+- Clients-CA key replacement is deferred (it additionally needs re-signing every KafkaUser mTLS cert, owned by the slice-37 controller); the clients CA gets the bundle + same-key renewal + auto-prune only
+
+---
+
 **Design:** [`docs/superpowers/specs/2026-05-23-crabka-operator-ca-rotation-34-design.md`]
 **Branch:** `claude/next-slice-work-FAh6e`
 

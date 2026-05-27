@@ -1,5 +1,20 @@
 # Slice 49d: Broker — OAUTHBEARER opaque-token introspection — Implementation plan
 
+## Implementation status
+
+**Slice tracked in STATUS.md as:** ## Slice 49d — Broker: OAUTHBEARER opaque-token introspection (2026-05-24)
+
+**Incomplete / deferred steps (out-of-scope follow-ups):**
+
+- Slice 50c (operator CRD field + Secret mount for the client secret + reconciler wiring for introspectionEndpointUri / userinfoEndpointUri) — closed by slice 50c
+- Hybrid validator (try JWT first, fall back to introspection)
+- Broker-side token caching keyed by (token, exp) to amortize IdP round-trips
+- client_secret_post / private_key_jwt introspection-endpoint auth styles (HTTP Basic only)
+- Outbound mTLS to the IdP (one-way TLS via the shared trust bundle only)
+- Per-listener [oauthbearer] config (still rejected at config-load — closed by slice 49h)
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (matches the project's CLAUDE.md mandate to execute in parallel batches). Steps use the project's compact-batch style — each T is one focused PR-worth of work, file-conflict-disjoint within a batch.
 
 **Design:** `docs/superpowers/specs/2026-05-24-crabka-broker-oauth-introspection-49d-design.md`

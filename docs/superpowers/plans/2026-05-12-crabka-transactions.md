@@ -1,5 +1,13 @@
 # `crabka-transactions` (slice 9) Implementation Plan
 
+## Implementation status
+
+**Slice tracked in STATUS.md as:** Not tracked as a dedicated STATUS.md header — covered implicitly by the protocol-foundation preamble or rolled into subsequent slices.
+
+**Incomplete / deferred steps:** None recorded in STATUS.md.
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Kafka transactions (KIP-98 + full KIP-1319 v2) for Crabka. After this slice a JVM `kafka-console-producer --transactional-id <tid>` interleaves committed + aborted batches against Crabka, and `kafka-console-consumer --isolation-level read_committed` reads only the committed records.

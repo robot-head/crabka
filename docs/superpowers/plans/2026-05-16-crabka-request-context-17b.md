@@ -1,5 +1,13 @@
 # Slice 17b: RequestContext + tuple-quota plumbing — Implementation Plan
 
+## Implementation status
+
+**Slice tracked in STATUS.md as:** Not tracked as a dedicated STATUS.md header — covered implicitly by the protocol-foundation preamble or rolled into subsequent slices.
+
+**Incomplete / deferred steps:** None recorded in STATUS.md.
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. Per `CLAUDE.md`, dispatch independent tasks within a batch in parallel.
 
 **Goal:** Bundle per-request connection state (`principal`, `peer`, `client_id`) into a `RequestContext` struct passed to every inline-intercept handler. Close the slice-16 gap where 5 quota call sites pass `""` for `client_id`, defeating `(user, client-id)` tuple quotas.

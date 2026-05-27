@@ -1,5 +1,13 @@
 # Crabka Operator Slice 21 — Rolling restart on config drift
 
+## Implementation status
+
+**Slice tracked in STATUS.md as:** Not tracked as a dedicated STATUS.md header — covered implicitly by the protocol-foundation preamble or rolled into subsequent slices.
+
+**Incomplete / deferred steps:** None recorded in STATUS.md.
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development. Per CLAUDE.md, dispatch batches in parallel where file sets don't overlap. Steps use checkbox (`- [ ]`) syntax.
 
 **Goal:** Add `Kafka.spec.config` (opaque broker properties), serialize into the broker ConfigMap, propagate a sha256 of the content via pool labels into a pod-template annotation, and expose a `Rolling` status condition. Editing `spec.config` rolls the broker pod naturally via K8s.

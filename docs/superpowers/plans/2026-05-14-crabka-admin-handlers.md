@@ -1,5 +1,21 @@
 # Slice 11: Admin handlers — Implementation Plan
 
+## Implementation status
+
+**Slice tracked in STATUS.md as:** `## Slice 11 — admin handlers (2026-05-14)`
+
+**Incomplete / deferred steps (out-of-scope follow-ups):**
+
+- Rust CLI
+- ACLs
+- Quotas
+- Partition reassignments
+- ElectLeaders
+- Log compaction
+- Broker-side recompression
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add eight operator-facing handlers (AlterConfigs, IncrementalAlterConfigs, CreatePartitions, DeleteRecords, DescribeCluster, ListGroups, DescribeGroups, DeleteGroups) to `crabka-broker` so the JVM `kafka-*.sh` admin tools work against a Rust broker without skipping.

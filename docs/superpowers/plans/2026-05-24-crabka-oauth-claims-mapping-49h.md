@@ -1,5 +1,17 @@
 # Slice 49h — OAUTHBEARER claims mapping Implementation Plan
 
+## Implementation status
+
+**Slice tracked in STATUS.md as:** ## Slice 49h — Operator + Broker: OAUTHBEARER claims mapping (fallback principal chain + groups extraction) (2026-05-24)
+
+**Incomplete / deferred steps (out-of-scope follow-ups):**
+
+- Slice 49i (JWKS refresher policies — last of the long-tail clusters) — closed
+- Slice 49f (PLAIN-with-OAuth-token) — skipped indefinitely
+- Broker-side groups consumer (slice 53/54 operator authorizer plugins) — slice 53 closed (OPA bridge)
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add Strimzi's `fallbackUserNameClaim` + `fallbackUserNamePrefix` (principal-name fallback chain) and `groupsClaim` + `groupsClaimDelimiter` (groups extraction via JsonPath) on the broker + operator surfaces. Adds `Principal.groups: Vec<String>` field, populated by OAuth validators; no broker-side authorizer reads it yet (scaffolding for slice 53/54).
