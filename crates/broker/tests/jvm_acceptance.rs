@@ -7672,3 +7672,92 @@ async fn jvm_kafka_delegation_tokens_end_to_end() {
     h2.shutdown().await;
     h3.shutdown().await;
 }
+
+/// KIP-429 JVM acceptance: drive `kafka-console-consumer` with the JVM
+/// `CooperativeStickyAssignor` against Crabka. Validates that Crabka's
+/// JoinGroup vote rule accepts `cooperative-sticky` and that the broker
+/// correctly forwards the negotiated `protocol_name` so the JVM client's
+/// `AbstractCoordinator.onJoinComplete` accepts the response.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Docker"]
+async fn cooperative_sticky_kafka_console_consumer() {
+    const TOPIC: &str = "coop-jvm";
+
+    let (broker, _dir) = start_host_broker().await;
+    nc_check_connectivity();
+
+    // 1. Create the topic.
+    docker_run_kafka_tool(&[
+        "kafka-topics",
+        "--create",
+        "--topic",
+        TOPIC,
+        "--partitions",
+        "3",
+        "--replication-factor",
+        "1",
+        "--bootstrap-server",
+        BOOTSTRAP,
+    ]);
+
+    // 2. Produce 3 records via stdin.
+    let mut child = Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "-i",
+            "--add-host=host.docker.internal:host-gateway",
+            KAFKA_IMAGE,
+            "kafka-console-producer",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--topic",
+            TOPIC,
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn producer");
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(b"alpha\nbravo\ncharlie\n")
+        .expect("write stdin");
+    drop(child.stdin.take());
+    let producer_out = child.wait_with_output().expect("wait producer");
+    assert!(
+        producer_out.status.success(),
+        "producer failed: {}",
+        String::from_utf8_lossy(&producer_out.stderr)
+    );
+
+    // 3. Consume via kafka-console-consumer with CooperativeStickyAssignor.
+    let consumer_out = docker_run_kafka_tool(&[
+        "kafka-console-consumer",
+        "--bootstrap-server",
+        BOOTSTRAP,
+        "--topic",
+        TOPIC,
+        "--group",
+        "coop-jvm-group",
+        "--consumer-property",
+        "partition.assignment.strategy=org.apache.kafka.clients.consumer.CooperativeStickyAssignor",
+        "--from-beginning",
+        "--max-messages",
+        "3",
+        "--timeout-ms",
+        "15000",
+    ]);
+    let s = String::from_utf8_lossy(&consumer_out.stdout);
+    for needle in ["alpha", "bravo", "charlie"] {
+        assert!(
+            s.contains(needle),
+            "consumer didn't emit {needle}: stdout={s:?} stderr={:?}",
+            String::from_utf8_lossy(&consumer_out.stderr)
+        );
+    }
+
+    broker.shutdown().await;
+}
