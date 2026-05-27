@@ -32,8 +32,8 @@ mod codec;
 #[doc(hidden)]
 pub mod codegen_helpers;
 mod error;
-pub mod owned;
 pub mod kafka_3_6_2;
+pub mod owned;
 pub mod primitives;
 pub mod records;
 pub mod tagged_fields;

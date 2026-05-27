@@ -260,15 +260,19 @@ fn run(
         std::fs::write(protocol_src.join("mod.rs"), body)?;
     }
 
-    // Always emit the ApiKey enum regardless of CURATED — it reflects ALL schemas.
-    let api_key_src = emit::api_key_enum::emit(&specs, &schemas_sha);
-    std::fs::write(out.join("api_key.rs"), &api_key_src)?;
-    count += 1;
+    // Always emit the ApiKey enum and differential dispatch table at the top level,
+    // but NOT inside a namespace dir — those files reference top-level types and
+    // belong only in the root generated/ output.
+    if namespace.is_none() {
+        let api_key_src = emit::api_key_enum::emit(&specs, &schemas_sha);
+        std::fs::write(out.join("api_key.rs"), &api_key_src)?;
+        count += 1;
 
-    // Emit the differential dispatch table for the parameterised sweep test.
-    let diff_table = emit::differential_table::emit(&specs, &schemas_sha);
-    std::fs::write(out.join("differential_table.rs"), diff_table)?;
-    count += 1;
+        // Emit the differential dispatch table for the parameterised sweep test.
+        let diff_table = emit::differential_table::emit(&specs, &schemas_sha);
+        std::fs::write(out.join("differential_table.rs"), diff_table)?;
+        count += 1;
+    }
 
     Ok(count)
 }
