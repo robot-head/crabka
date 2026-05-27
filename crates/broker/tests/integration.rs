@@ -17,8 +17,8 @@ use crabka_protocol::owned::produce_request::{
 use crabka_protocol::records::{Record, RecordBatch};
 
 /// Build a `RecordBatch` with one entry per provided value. Codegen's
-/// `PartitionProduceData.records` is `Option<RecordBatch>` (NOT raw bytes
-/// — that was the plan's first draft), so callers pass the batch by value.
+/// `PartitionProduceData.records` is `Option<RecordsPayload>`; callers
+/// pass the batch by value and `.into()` it at the assignment site.
 fn record_batch_with_values(values: &[&str]) -> RecordBatch {
     let len_i32 = i32::try_from(values.len()).expect("test fixture small enough for i32");
     let len_i64 = i64::try_from(values.len()).expect("test fixture small enough for i64");

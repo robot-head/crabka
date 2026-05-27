@@ -16,11 +16,11 @@
 //! [`crabka-records-legacy`](../../records_legacy/index.html) crate
 //! provides the codec when an old client actually appears on the wire.
 
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes};
 
+use crate::records::RecordsError;
 use crate::records::borrowed::RecordBatch as RecordBatchBorrowed;
 use crate::records::owned::RecordBatch;
-use crate::records::{RecordsError, header::HEADER_LEN};
 
 /// Owned form of a records-field payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,13 +117,8 @@ impl crate::Decode<'_> for RecordsPayload {
         // The caller (generated codec) has already sliced the buffer to
         // exactly the records-field bytes via `get_(nullable_)bytes_owned`,
         // so we consume everything.
-        let n = buf.remaining();
-        let mut data = BytesMut::with_capacity(n);
-        // SAFETY-via-loop: copy `n` bytes from the Buf cursor into a BytesMut.
-        let mut staging = vec![0u8; n];
-        buf.copy_to_slice(&mut staging);
-        data.extend_from_slice(&staging);
-        Self::from_bytes(data.freeze()).map_err(Into::into)
+        let bytes = buf.copy_to_bytes(buf.remaining());
+        Self::from_bytes(bytes).map_err(Into::into)
     }
 }
 
@@ -193,9 +188,9 @@ impl crate::Encode for RecordsPayloadBorrowed<'_> {
 
 impl<'de> crate::DecodeBorrow<'de> for RecordsPayloadBorrowed<'de> {
     fn decode_borrow(buf: &mut &'de [u8], _version: i16) -> Result<Self, crate::ProtocolError> {
-        // Caller has sliced the buffer to exactly the records-field bytes.
-        let bytes: &'de [u8] = buf;
-        *buf = &buf[buf.len()..];
+        // Caller has sliced the buffer to exactly the records-field bytes;
+        // consume everything by swapping in an empty tail.
+        let bytes = std::mem::take(buf);
         Self::from_slice(bytes).map_err(Into::into)
     }
 }
@@ -203,19 +198,26 @@ impl<'de> crate::DecodeBorrow<'de> for RecordsPayloadBorrowed<'de> {
 /// True when `bytes` look like a v2 record batch (magic byte 2 at the
 /// well-known offset). v0 and v1 legacy `MessageSets` carry magic 0 or 1
 /// at the same offset, so this check distinguishes the two.
+///
+/// The threshold is `MAGIC_OFFSET + 1 = 17`, not the full `HEADER_LEN`:
+/// a truncated v2 batch still needs to land in the V2 arm so the
+/// downstream `RecordBatch::decode` can surface a precise error,
+/// rather than be silently misclassified as legacy.
 #[inline]
 fn looks_like_v2(bytes: &[u8]) -> bool {
     // The magic byte sits at `base_offset(8) + batch_length(4) +
     // partition_leader_epoch(4) = 16` in v2. Legacy MessageSets place
     // the first message's magic byte at `offset(8) + message_size(4) +
     // crc(4) = 16` — same index, different meaning.
-    bytes.len() >= HEADER_LEN && bytes[16] == 2
+    const MAGIC_OFFSET: usize = 16;
+    bytes.len() > MAGIC_OFFSET && bytes[MAGIC_OFFSET] == 2
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::records::{Record, RecordBatch};
+    use bytes::BytesMut;
 
     fn sample_v2() -> RecordBatch {
         RecordBatch {

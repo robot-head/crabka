@@ -3,7 +3,7 @@
 //!
 //! MVP scope: returns at most the *first* `RecordBatch` covering the
 //! requested offset for each partition. The generated
-//! `PartitionData.records` field is `Option<RecordBatch>` (the codegen
+//! `PartitionData.records` field is `Option<RecordsPayload>` (the codegen
 //! models it as a single batch wrapped in nullable bytes), so emitting a
 //! concatenated stream of batches would require bypassing the codegen.
 //! Clients pulling small batches one at a time and re-fetching from

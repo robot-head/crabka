@@ -2,11 +2,12 @@
 //! partition's writer-actor and awaits the assigned base offset.
 //!
 //! MVP scope: one `RecordBatch` per (topic, partition) per request. The
-//! generated `PartitionProduceData.records` field is already an
-//! `Option<RecordBatch>`, so if the on-wire records buffer contained
-//! multiple concatenated batches the codegen would have rejected the
-//! trailing bytes during decode. Clients that send a single batch per
-//! partition (the typical case) are fully supported.
+//! generated `PartitionProduceData.records` field is `Option<RecordsPayload>`,
+//! whose `V2(RecordBatch)` arm is the only one this handler accepts;
+//! a `Legacy` payload (v0/v1 `MessageSet`) is rejected with
+//! `INVALID_REQUEST` until the up-conversion slice lands. Clients that
+//! send a single v2 batch per partition (the typical case) are fully
+//! supported.
 
 use std::sync::Arc;
 use std::time::Duration;
