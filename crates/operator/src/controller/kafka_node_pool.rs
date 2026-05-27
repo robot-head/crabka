@@ -836,6 +836,30 @@ pub(crate) fn render_statefulset(
     }
 
     let tier_storage_persistence = tiered_storage.and_then(|t| t.persistence.as_ref());
+
+    // Slice 48i: K8s StatefulSets have a single set-wide PVC retention
+    // policy; per-template overrides don't exist. When the pool has both
+    // a data PVC and a tier PVC, their `delete_claim` flags must match
+    // (otherwise we'd silently pick one and lose data in a way the user
+    // didn't intend). Pool-Ephemeral skips this check — there's no data
+    // PVC to collide with.
+    if let Some(tp) = tier_storage_persistence {
+        let pool_data_delete_claim = match pool.spec.storage.as_ref() {
+            Some(Storage::PersistentClaim(pc)) => Some(pc.delete_claim),
+            Some(Storage::Jbod(j))             => Some(j.delete_claim),
+            _ => None,
+        };
+        if let Some(dc) = pool_data_delete_claim
+            && dc != tp.delete_claim
+        {
+            return Err(ReconcileError::TieredStorageInvalid(format!(
+                "tiered storage persistence.deleteClaim={} but pool '{}' storage.deleteClaim={}; \
+                 K8s StatefulSets have a single set-wide PVC retention policy — these must match",
+                tp.delete_claim, pool_name, dc,
+            )));
+        }
+    }
+
     let (pod_volumes, volume_claim_templates) = render_storage(
         pool.spec.storage.as_ref(),
         &pod_labels,
@@ -3010,5 +3034,85 @@ mod tests {
             tier.spec.as_ref().unwrap().storage_class_name.is_none(),
             "storageClassName must be omitted when class is None"
         );
+    }
+
+    #[test]
+    fn tier_persistence_delete_claim_mismatch_fails_validation() {
+        use crate::crd::kafka::{TieredStorage, TieredStoragePersistence, TieredStorageType};
+        use crate::crd::kafka_node_pool::{PersistentClaimSpec, Storage};
+
+        let mut parent = parent_fixture("demo");
+        parent.spec.tiered_storage = Some(TieredStorage {
+            kind: TieredStorageType::Local,
+            s3: None,
+            metadata_manager: None,
+            persistence: Some(TieredStoragePersistence {
+                size: "20Gi".into(),
+                class: None,
+                delete_claim: true,
+            }),
+        });
+        let mut pool = pool_fixture("brokers", "demo", 1);
+        pool.spec.storage = Some(Storage::PersistentClaim(PersistentClaimSpec {
+            size: "100Gi".into(),
+            class: None,
+            delete_claim: false,
+        }));
+
+        let err = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE)
+            .expect_err("must reject deleteClaim mismatch");
+        let msg = format!("{err:?}");
+        assert!(msg.contains("TieredStorageInvalid"), "got: {msg}");
+        assert!(msg.contains("deleteClaim"), "got: {msg}");
+    }
+
+    #[test]
+    fn tier_persistence_delete_claim_matching_pool_passes() {
+        use crate::crd::kafka::{TieredStorage, TieredStoragePersistence, TieredStorageType};
+        use crate::crd::kafka_node_pool::{PersistentClaimSpec, Storage};
+
+        let mut parent = parent_fixture("demo");
+        parent.spec.tiered_storage = Some(TieredStorage {
+            kind: TieredStorageType::Local,
+            s3: None,
+            metadata_manager: None,
+            persistence: Some(TieredStoragePersistence {
+                size: "20Gi".into(),
+                class: None,
+                delete_claim: false,
+            }),
+        });
+        let mut pool = pool_fixture("brokers", "demo", 1);
+        pool.spec.storage = Some(Storage::PersistentClaim(PersistentClaimSpec {
+            size: "100Gi".into(),
+            class: None,
+            delete_claim: false,
+        }));
+
+        // Should succeed; we only care that it doesn't error.
+        let _sts = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE)
+            .expect("matching deleteClaim must pass");
+    }
+
+    #[test]
+    fn tier_persistence_with_ephemeral_pool_storage_passes() {
+        use crate::crd::kafka::{TieredStorage, TieredStoragePersistence, TieredStorageType};
+
+        let mut parent = parent_fixture("demo");
+        parent.spec.tiered_storage = Some(TieredStorage {
+            kind: TieredStorageType::Local,
+            s3: None,
+            metadata_manager: None,
+            persistence: Some(TieredStoragePersistence {
+                size: "20Gi".into(),
+                class: None,
+                delete_claim: true,
+            }),
+        });
+        // pool.spec.storage stays None (ephemeral); no data PVC to collide with
+        let pool = pool_fixture("brokers", "demo", 1);
+
+        let _sts = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE)
+            .expect("ephemeral pool + tier persistence must pass regardless of tier deleteClaim");
     }
 }
