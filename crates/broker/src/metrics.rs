@@ -43,6 +43,15 @@ pub struct PartitionLabel {
     pub partition: i32,
 }
 
+/// KIP-511 client software fingerprint, attached to the
+/// `client_software_versions_total` counter on every accepted v3+
+/// `ApiVersions` handshake.
+#[derive(Debug, Clone, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct ClientSoftwareLabel {
+    pub software_name: String,
+    pub software_version: String,
+}
+
 /// Cheaply-clonable bundle of counter / gauge handles. Construct once
 /// in `Broker::start`; hand out clones (each clone is a single
 /// `Arc::clone`) to every subsystem that emits.
@@ -77,6 +86,10 @@ pub struct BrokerMetrics {
     /// KIP-227: sum of `session.partitions.len()` across every live session.
     /// Sampled periodically alongside `incremental_fetch_sessions`.
     pub incremental_fetch_partitions_cached: Gauge,
+    /// KIP-511: per-(name, version) counter of accepted v3+ `ApiVersions`
+    /// handshakes. Operators graph this to see which client libraries
+    /// and versions are connecting.
+    pub client_software_versions: Family<ClientSoftwareLabel, Counter>,
 }
 
 impl BrokerMetrics {
@@ -103,6 +116,7 @@ impl BrokerMetrics {
         let incremental_fetch_sessions = Gauge::default();
         let incremental_fetch_session_evictions_total = Counter::default();
         let incremental_fetch_partitions_cached = Gauge::default();
+        let client_software_versions: Family<ClientSoftwareLabel, Counter> = Family::default();
 
         registry.register(
             "topic_bytes_in",
@@ -195,6 +209,13 @@ impl BrokerMetrics {
              incremental-fetch session (gauge).",
             incremental_fetch_partitions_cached.clone(),
         );
+        registry.register(
+            "client_software_versions",
+            "KIP-511: cumulative count of accepted ApiVersions handshakes, \
+             labelled by client software name and version. One increment \
+             per successful v3+ ApiVersions call.",
+            client_software_versions.clone(),
+        );
 
         Self {
             registry: Arc::new(Mutex::new(registry)),
@@ -213,7 +234,20 @@ impl BrokerMetrics {
             incremental_fetch_sessions,
             incremental_fetch_session_evictions_total,
             incremental_fetch_partitions_cached,
+            client_software_versions,
         }
+    }
+
+    /// KIP-511: bump the per-(name, version) handshake counter.
+    /// Caller guarantees both inputs already passed
+    /// `handlers::api_versions::is_valid_client_info` so the label
+    /// values stay bounded.
+    pub fn record_client_software(&self, name: &str, version: &str) {
+        let lbl = ClientSoftwareLabel {
+            software_name: name.to_string(),
+            software_version: version.to_string(),
+        };
+        self.client_software_versions.get_or_create(&lbl).inc();
     }
 
     /// Convenience: record a Produce hit on `topic` with the given
