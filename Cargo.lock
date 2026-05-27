@@ -1370,6 +1370,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "crabka-records-legacy"
+version = "0.1.1"
+dependencies = [
+ "bytes",
+ "crabka-compression",
+ "crabka-protocol",
+ "crc32fast",
+ "hex",
+ "proptest",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "crabka-remote-storage"
 version = "0.1.1"
 dependencies = [
