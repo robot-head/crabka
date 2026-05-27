@@ -7791,6 +7791,16 @@ const MINIO_ACCESS_KEY: &str = "minioadmin";
 const MINIO_SECRET_KEY: &str = "minioadmin";
 const MINIO_BUCKET: &str = "crabka-tiered";
 
+/// `KIP-405` topic configs (`remote.storage.enable`, `local.retention.bytes`)
+/// landed in Apache Kafka 3.6 / Confluent Platform 7.6. The default
+/// [`KAFKA_IMAGE`] (`cp-kafka:6.1.1` / Kafka 2.7) and [`KAFKA_IMAGE_TXN`]
+/// (`cp-kafka:7.5.0` / Kafka 3.5) both predate KIP-405 — their
+/// `TopicCommand` client validates `--config` keys against the local
+/// `LogConfig.configNames` set and rejects unknown ones before sending
+/// the `CreateTopics` request, so we can't reuse them for the tiered-
+/// storage test. `cp-kafka:7.8.8` ships Kafka 3.8 where KIP-405 is GA.
+const KAFKA_IMAGE_TIERED: &str = "confluentinc/cp-kafka:7.8.8";
+
 /// Owns a `docker run -d` `MinIO` container; tears it down on drop.
 struct MinioContainer {
     name: String,
@@ -7999,28 +8009,34 @@ async fn tiered_storage_round_trip_through_minio() {
     // produce batch seals several segments. `local.retention.bytes=1` forces
     // every copied segment to be evicted from the local disk as soon as the
     // RLM's retention pass sees its `CopySegmentFinished` state, so the
-    // subsequent consume must come from the remote tier.
-    docker_run_kafka_tool(&[
-        "kafka-topics",
-        "--create",
-        "--if-not-exists",
-        "--topic",
-        TOPIC,
-        "--partitions",
-        "1",
-        "--replication-factor",
-        "1",
-        "--config",
-        "remote.storage.enable=true",
-        "--config",
-        "segment.bytes=2048",
-        "--config",
-        "local.retention.bytes=1",
-        "--config",
-        "retention.bytes=-1",
-        "--bootstrap-server",
-        BOOTSTRAP,
-    ]);
+    // subsequent consume must come from the remote tier. Uses the
+    // KIP-405-aware `cp-kafka:7.8.8` image — older clients' `TopicCommand`
+    // rejects `remote.storage.enable` / `local.retention.bytes` client-
+    // side before the request leaves the container.
+    docker_run_kafka_tool_with_image(
+        KAFKA_IMAGE_TIERED,
+        &[
+            "kafka-topics",
+            "--create",
+            "--if-not-exists",
+            "--topic",
+            TOPIC,
+            "--partitions",
+            "1",
+            "--replication-factor",
+            "1",
+            "--config",
+            "remote.storage.enable=true",
+            "--config",
+            "segment.bytes=2048",
+            "--config",
+            "local.retention.bytes=1",
+            "--config",
+            "retention.bytes=-1",
+            "--bootstrap-server",
+            BOOTSTRAP,
+        ],
+    );
 
     // Stream records line-by-line through the JVM console producer.
     let mut payload = String::with_capacity(RECORDS * 12);
