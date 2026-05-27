@@ -50,8 +50,7 @@ fn request_oracle_value() -> serde_json::Value {
         "topics": [],
         "forgottenTopicsData": [],
         "rackId": "",
-        "clusterId": null,
-        "replicaState": {"replicaId": -1, "replicaEpoch": -1}
+        "clusterId": null
     })
 }
 
