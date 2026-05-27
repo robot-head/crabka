@@ -146,7 +146,8 @@ impl LogDirRegistry {
             *entry.value_mut() = Some(reason.to_owned());
             true
         } else {
-            self.inner.insert(dir.to_path_buf(), Some(reason.to_owned()));
+            self.inner
+                .insert(dir.to_path_buf(), Some(reason.to_owned()));
             true
         };
         if flipped {
