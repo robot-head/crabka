@@ -2929,6 +2929,7 @@ mod tests {
             persistence: Some(crate::crd::kafka::TieredStoragePersistence {
                 size: size.into(),
                 class: class.map(str::to_string),
+                delete_claim: false,
             }),
         });
         k
