@@ -1,5 +1,20 @@
 # Slice 50c: Operator — Listener OAuth introspection surface — Implementation plan
 
+## Implementation status
+
+**Slice tracked in STATUS.md as:** ## Slice 50c — Operator: Listener OAuth introspection surface (2026-05-24)
+
+**Incomplete / deferred steps (out-of-scope follow-ups):**
+
+- Per-listener introspection config (still rejected with ConflictingOAuthConfig until slice 49h) — closed
+- Source-Secret reflector for instant rotation (broker reads at startup — rotation requires pod restart)
+- Cross-namespace Secret references (must live in the Kafka CR's namespace)
+- client_secret_post / private_key_jwt introspection-endpoint auth methods (slice 49d ships HTTP Basic only)
+- Outbound mTLS to the IdP (slice 49c provides one-way TLS trust only; mTLS would need a future broker slice)
+- Operator-managed Keycloak client provisioning (ops bootstrap the IdP's kafka-broker client out-of-band)
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (matches the project's CLAUDE.md mandate to execute in parallel batches). Steps use the project's compact-batch style — each T is one focused PR-worth of work, file-conflict-disjoint within a batch.
 
 **Design:** `docs/superpowers/specs/2026-05-24-crabka-operator-oauth-introspection-50c-design.md`

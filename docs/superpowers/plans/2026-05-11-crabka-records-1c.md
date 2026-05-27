@@ -1,5 +1,13 @@
 # Typed `RecordBatch` (sub-plan 1c) Implementation Plan
 
+## Implementation status
+
+**Slice tracked in STATUS.md as:** Not tracked as a dedicated STATUS.md header — covered implicitly by the protocol-foundation preamble or rolled into subsequent slices.
+
+**Incomplete / deferred steps:** None recorded in STATUS.md.
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add a typed `RecordBatch` v2 decoder/encoder to `crabka-protocol` that consumes `crabka-compression`, switching `records` fields in generated messages from opaque `Bytes` to a fully typed view.

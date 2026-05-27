@@ -1,5 +1,13 @@
 # Crabka Operator Slice 19 — `Kafka` CRD minimal (KRaft mixed-mode cluster)
 
+## Implementation status
+
+**Slice tracked in STATUS.md as:** Not tracked as a dedicated STATUS.md header — covered implicitly by the protocol-foundation preamble or rolled into subsequent slices.
+
+**Incomplete / deferred steps:** None recorded in STATUS.md.
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task. Per CLAUDE.md, dispatch the batches in parallel within each batch. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace slice 17's placeholder `Kafka` CRD with a real schema and a reconciler that materializes a single-broker KRaft mixed-mode cluster: headless `Service`, `ConfigMap`, cluster-ID `Secret`, and a `StatefulSet` running the `crabka-broker` binary. The kind-cluster e2e is upgraded to actually run a broker pod and prove it reaches Ready.

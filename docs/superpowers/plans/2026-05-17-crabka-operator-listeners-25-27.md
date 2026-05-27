@@ -1,5 +1,13 @@
 # Crabka Operator Listener Trilogy — Implementation Plan (Slices 25a / 25)
 
+## Implementation status
+
+**Slice tracked in STATUS.md as:** Not tracked as a dedicated STATUS.md header — covered implicitly by the protocol-foundation preamble or rolled into subsequent slices.
+
+**Incomplete / deferred steps:** None recorded in STATUS.md.
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. Per `CLAUDE.md`, dispatch tasks within a batch in parallel; sequential between batches.
 
 **Goal:** Add `Kafka.spec.listeners` (Strimzi-shaped) and operator reconcile for internal / NodePort / LoadBalancer external listeners. Switch the broker to a TOML `--config-file` for multi-listener config delivery. Schema accepts (but reconcile rejects) `ingress` / `route` for a future slice.

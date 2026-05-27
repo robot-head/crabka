@@ -1,5 +1,13 @@
 # Crabka Operator Slice 20 — `KafkaNodePool` CRD
 
+## Implementation status
+
+**Slice tracked in STATUS.md as:** Not tracked as a dedicated STATUS.md header — covered implicitly by the protocol-foundation preamble or rolled into subsequent slices.
+
+**Incomplete / deferred steps:** None recorded in STATUS.md.
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development. Per CLAUDE.md, dispatch batches in parallel within each batch. Steps use checkbox (`- [ ]`) syntax.
 
 **Goal:** Introduce a `KafkaNodePool` CRD as the resource that owns broker `StatefulSet`s. The `Kafka` CR becomes a parent/coordinator that owns cluster-level objects (Service, Secret, ConfigMap) and aggregates per-pool status. Slice 20 is a **refactor only** — single-replica mixed-mode pools, identical observable behavior to slice 19.

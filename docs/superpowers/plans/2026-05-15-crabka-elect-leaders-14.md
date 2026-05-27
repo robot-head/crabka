@@ -1,5 +1,19 @@
 # Slice 14: ElectLeaders + auto-rebalance — Implementation Plan
 
+## Implementation status
+
+**Slice tracked in STATUS.md as:** `## Slice 14 — ElectLeaders + auto-rebalance (2026-05-15)`
+
+**Incomplete / deferred steps (out-of-scope follow-ups):**
+
+- Manual partition reassignment (closed by slice 15)
+- Quotas (closed by slice 16)
+- Log compaction (closed by slice 18)
+- KIP-841 force-elect
+- Operator preferred-replica override
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add Kafka's operator-facing leader-election controls — manual `ElectLeaders` RPC (api_key 43, PREFERRED + UNCLEAN types per KIP-460) and a background auto-preferred-replica rebalance ticker — on top of slice 10b's automatic-on-broker-death election.

@@ -1,5 +1,13 @@
 # Bulletproof EOS sub-slice 10a Implementation Plan
 
+## Implementation status
+
+**Slice tracked in STATUS.md as:** Not tracked as a dedicated STATUS.md header — covered implicitly by the protocol-foundation preamble or rolled into subsequent slices.
+
+**Incomplete / deferred steps:** None recorded in STATUS.md.
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add High Watermark tracking on the leader, gate `acks=all` Produces on HW advance, and clamp consumer Fetch + `read_committed` LSO at HW. After this slice, a JVM producer with `acks=all` against Crabka blocks until every static-ISR replica has the batch; consumers see only fully-replicated records.

@@ -1,5 +1,20 @@
 # Slice 49c: Broker — Custom TLS trust to IdP for JWKS — Implementation plan
 
+## Implementation status
+
+**Slice tracked in STATUS.md as:** `## Slice 49c — Broker: Custom TLS trust to IdP for JWKS (2026-05-23)`
+
+**Incomplete / deferred steps (out-of-scope follow-ups):**
+
+- Operator CRD field + Secret-mounting wiring (closed by slice 50b)
+- Opaque-token introspection, which reuses this helper under a new introspection_tls_trust key (closed by slice 49d)
+- Hot reload of the trust bundle (refresher / broker restart required to pick up a rotated CA)
+- Multiple PEM paths in one key (the operator concatenates before mounting, mirroring Strimzi)
+- Cert pinning
+- mTLS to the IdP
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (matches the project's CLAUDE.md mandate to execute in parallel batches). Steps use the project's compact-batch style — each T is one focused PR-worth of work, file-conflict-disjoint within a batch.
 
 **Design:** `docs/superpowers/specs/2026-05-23-crabka-broker-jwks-tls-trust-49c-design.md`

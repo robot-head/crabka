@@ -1,5 +1,19 @@
 # Crabka Operator Slice 30 — Cluster CA + clients CA generation (plan)
 
+## Implementation status
+
+**Slice tracked in STATUS.md as:** `## Slice 30 — Operator: Cluster CA + clients CA generation (2026-05-21)`
+
+**Incomplete / deferred steps (out-of-scope follow-ups):**
+
+- Data-plane listener TLS (closed by slice 31)
+- Non-disruptive CA rotation (closed by slice 34)
+- PKCS#12 keystore output
+- MaintenanceTimeWindows
+- Scale-up/down + chain-verify deferred to a follow-up due to FIFO-mock harness's lack of stateful Secret simulation
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development`. Per CLAUDE.md, dispatch tasks within a batch in parallel; sequential between batches. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Operator owns the full PKI lifecycle — two CAs (cluster + clients), per-broker keystore signed by the cluster CA, inter-broker mTLS on by default, declarative `validityDays` / `renewalDays` / BYO toggle on `Kafka.spec.{clusterCa,clientsCa}`, and a Helm-chart-shipped CronJob that drives leaf renewal.

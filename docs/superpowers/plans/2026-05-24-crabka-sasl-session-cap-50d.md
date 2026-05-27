@@ -1,5 +1,19 @@
 # Slice 50d — SASL session-lifetime cap Implementation Plan
 
+## Implementation status
+
+**Slice tracked in STATUS.md as:** ## Slice 50d — Operator + Broker: SASL session-lifetime cap (KIP-368 ceiling) (2026-05-24)
+
+**Incomplete / deferred steps (out-of-scope follow-ups):**
+
+- Mechanism-agnostic connections.max.reauth.ms (would force re-auth on PLAIN/SCRAM)
+- Per-listener divergent caps (still rejected as ConflictingOAuthListenerConfig)
+- Client-side re-auth scheduler in Crabka's Kafka client crate (broker-only this slice)
+- New e2e workflow job
+- Semantic divergence from Strimzi (acknowledged): Strimzi's unset = no re-auth; Crabka 50d: unset = session = token exp
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Bundle a server-side cap (`[oauthbearer].max_session_lifetime_seconds`) on top of slice 49e + surface Strimzi's `maxSecondsWithoutReauthentication` field on the listener OAuth CRD, so operators can clamp OAUTHBEARER sessions tighter than the token's natural `exp`.

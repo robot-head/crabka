@@ -1,5 +1,13 @@
 # Sub-plan 1a: Codegen Generalization Implementation Plan
 
+## Implementation status
+
+**Slice tracked in STATUS.md as:** Not tracked as a dedicated STATUS.md header — covered implicitly by the protocol-foundation preamble or rolled into subsequent slices.
+
+**Incomplete / deferred steps:** None recorded in STATUS.md.
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the special-cased `ApiVersionsRequest`-only emitter in `crabka-protocol-codegen` with a real IR-walking generator that produces complete, idiomatic owned + borrowed Rust types for any Kafka 4.2 schema. Prove it against a curated 6-pair representative set spanning every IR construct the schemas use.

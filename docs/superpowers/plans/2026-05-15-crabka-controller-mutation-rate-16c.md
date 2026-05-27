@@ -1,5 +1,18 @@
 # Slice 16c: controller_mutation_rate (KIP-599) — Implementation Plan
 
+## Implementation status
+
+**Slice tracked in STATUS.md as:** `## Slice 16c — controller_mutation_rate (2026-05-15)`
+
+**Incomplete / deferred steps (out-of-scope follow-ups):**
+
+- Inherits slice 16 known limitations: client_id not threaded through HandlerTable so (user, client-id) tuple quotas don't fire (closing requires slice-16 cleanup work)
+- Per-entity bucket cache grows unbounded over broker's lifetime
+- Out of scope: IP entity (KIP-599 doesn't apply to IP)
+- Other admin operations (ACL CRUD, IncrementalAlterConfigs, AlterPartitionReassignments — KIP-599 limits to topic/partition CRUD)
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. Per `CLAUDE.md`, dispatch independent tasks within a batch in parallel.
 
 **Goal:** Implement KIP-599 `controller_mutation_rate` — a partition-mutations-per-second quota enforced on `CreateTopics`, `CreatePartitions`, `DeleteTopics`. Throttle delays via `tokio::time::sleep` (KIP-257 idiom). User + client-id entity scopes only (no IP per KIP-599).

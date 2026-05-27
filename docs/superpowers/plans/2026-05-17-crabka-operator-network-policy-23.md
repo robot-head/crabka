@@ -1,5 +1,13 @@
 # Crabka Operator Slice 23 — `Kafka.spec.networkPolicy` (NetworkPolicy generation)
 
+## Implementation status
+
+**Slice tracked in STATUS.md as:** Not tracked as a dedicated STATUS.md header — covered implicitly by the protocol-foundation preamble or rolled into subsequent slices.
+
+**Incomplete / deferred steps:** None recorded in STATUS.md.
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development`. Per CLAUDE.md, dispatch tasks within a batch in parallel; sequential between batches. Steps use checkbox (`- [ ]`) syntax.
 
 **Goal:** Surface an opt-in `Kafka.spec.networkPolicy` field that lets a cluster operator restrict ingress to broker/controller pods via a generated `networking.k8s.io/v1.NetworkPolicy`. Per-listener peer allow-lists live on the existing `Listener` struct. Operator auto-allows its own admin traffic and (when configured) the metrics scrape port.

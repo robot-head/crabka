@@ -1,5 +1,15 @@
 # Slice 17a: DescribeUserScramCredentials (api_key 50) — Implementation Plan
 
+## Implementation status
+
+**Slice tracked in STATUS.md as:** `## Slice 17a — DescribeUserScramCredentials (2026-05-15)`
+
+**Incomplete / deferred steps (out-of-scope follow-ups):**
+
+- Slice 16 `client_id` HandlerTable gap (slice 17b)
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. Per `CLAUDE.md`, dispatch independent tasks within a batch in parallel.
 
 **Goal:** Implement `DescribeUserScramCredentials` (api_key 50, KIP-554 read half) so that `kafka-configs --describe --entity-type users` and `--delete-config` exit 0 cleanly. Reuses slice 12's SCRAM credential storage; Cluster Alter authorize (matches AlterUserScramCredentials).

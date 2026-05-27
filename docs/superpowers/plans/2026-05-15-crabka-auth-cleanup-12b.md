@@ -1,5 +1,18 @@
 # Slice 12b: Auth cleanup — Implementation Plan
 
+## Implementation status
+
+**Slice tracked in STATUS.md as:** `## Slice 12b — auth cleanup (2026-05-15)`
+
+**Incomplete / deferred steps (out-of-scope follow-ups):**
+
+- mTLS (closed by later mTLS slice)
+- ACLs (closed by slice 13)
+- Per-listener controller-quorum protocol mapping
+- SCRAM rotation under live raft traffic
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Finish slice 12's two deferred items — raft transport over SASL/TLS, and `Broker::start` consumption of `crabka format --add-scram` bootstrap records.

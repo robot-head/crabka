@@ -1,5 +1,19 @@
 # Slice 43a — Rebalancer foundation — Implementation Plan
 
+## Implementation status
+
+**Slice tracked in STATUS.md as:** Slice 43a — Rebalancer foundation (2026-05-17)
+
+**Incomplete / deferred steps (out-of-scope follow-ups):**
+
+- Execute path (closed by slice 43b)
+- Persistence (closed by slice 43b)
+- Metric scraping for usage goals (closed by slice 43e)
+- Rack-aware / capacity / usage / CPU / anomaly goals (closed by slices 43c–43g)
+- Operator KafkaRebalance CRD (closed by slice 44)
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. Per `CLAUDE.md`, dispatch independent tasks within a batch in parallel.
 
 **Goal:** Land a standalone `crabka-rebalancer` binary exposing a Connect-RPC service (`GetState` / `CreateProposal` / `DryRunProposal` / `GetProposal` / `ListProposals` / stub `ExecuteProposal`) that periodically snapshots cluster state and computes replica/leader-balance proposals.

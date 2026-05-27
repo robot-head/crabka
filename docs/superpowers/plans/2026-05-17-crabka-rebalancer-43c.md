@@ -1,5 +1,17 @@
 # Slice 43c — Rebalancer topology goals — Implementation Plan
 
+## Implementation status
+
+**Slice tracked in STATUS.md as:** Slice 43c — Rebalancer topology goals (2026-05-17)
+
+**Incomplete / deferred steps (out-of-scope follow-ups):**
+
+- RackAwareDistributionGoal (soft, best-effort variant of RackAware)
+- Per-proposal goal config (requires proto change)
+- Capacity / usage / CPU / anomaly goals (closed by slices 43d–43g)
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. Per `CLAUDE.md`, dispatch independent tasks within a batch in parallel.
 
 **Goal:** Add three new goals to the rebalancer — `RackAware` (hard), `TopicReplicaDistribution` (soft), `MinTopicLeadersPerBroker` (soft) — under one new `GoalContext` field and one new CLI flag. Goal-only slice: no proto, persistence, or executor changes.

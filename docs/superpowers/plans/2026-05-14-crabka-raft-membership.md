@@ -1,5 +1,13 @@
 # Raft controller-quorum membership change — Implementation Plan
 
+## Implementation status
+
+**Slice tracked in STATUS.md as:** Not tracked as a dedicated STATUS.md header — covered implicitly by the protocol-foundation preamble or rolled into subsequent slices.
+
+**Incomplete / deferred steps:** None recorded in STATUS.md.
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Expose manual `change_membership` + `add_learner` on `ControllerHandle` (and a thin `BrokerHandle` wrapper) so tests and operators can mutate the openraft voter set at runtime. Close the 3 still-deferred slice-10b tests using this API + a multi-broker JVM bootstrap fix.

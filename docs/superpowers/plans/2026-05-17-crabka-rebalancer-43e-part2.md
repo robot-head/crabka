@@ -1,5 +1,21 @@
 # Slice 43e — Implementation Plan (Part 2: T11–T17)
 
+## Implementation status
+
+**Slice tracked in STATUS.md as:** Slice 43e — Rebalancer usage scraper + soft usage goals (2026-05-17)
+
+**Incomplete / deferred steps (out-of-scope follow-ups):**
+
+- CpuUsage soft goal + real CpuCapacity body (closed by slice 43f)
+- Discovery of scrape targets via Metadata (currently operator-supplied)
+- Per-topic resource hints in capacity config (usage metrics provide the real input now)
+- Anomaly detection (closed by slice 43g)
+- Operator KafkaRebalance CRD (closed by slice 44)
+- Known risks: memory footprint of per-series ring buffer scales with brokers × partitions × 3 metrics × (retention / scrape_interval)
+- Counter resets detected as None until two post-reset samples accumulate
+
+---
+
 > **Continuation of** [`2026-05-17-crabka-rebalancer-43e.md`](2026-05-17-crabka-rebalancer-43e.md). Part 1 (T1–T10) lives there. This file holds T11 through T17 — capacity real bodies, optimizer switch, registry growth, binary wiring, integration test, Helm chart, STATUS.
 
 Branch: `feature/rebalancer-43e`. Working dir: `/home/matt/git/crabka`.

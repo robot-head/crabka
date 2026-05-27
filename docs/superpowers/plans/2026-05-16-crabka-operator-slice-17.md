@@ -1,5 +1,13 @@
 # Crabka Operator Slice 17 — runtime scaffold + Helm chart
 
+## Implementation status
+
+**Slice tracked in STATUS.md as:** Not tracked as a dedicated STATUS.md header — covered implicitly by the protocol-foundation preamble or rolled into subsequent slices.
+
+**Incomplete / deferred steps:** None recorded in STATUS.md.
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Land an in-workspace Rust operator binary that runs in a kind cluster, watches a placeholder `Kafka` CRD, logs reconciles, and ships as a Helm chart. No broker workload yet — the controller's reconcile fn is a stub that updates status and returns. Subsequent slices fill in the workload.
