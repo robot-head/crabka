@@ -39,7 +39,7 @@ pub fn assign(
         .collect();
     let gens: BTreeMap<String, i32> = members
         .iter()
-        .map(|(id, _, _, gen)| (id.clone(), *gen))
+        .map(|(id, _, _, generation)| (id.clone(), *generation))
         .collect();
 
     // === Pass 1: prepopulateCurrentAssignments ===
@@ -132,7 +132,7 @@ fn prepopulate_current_assignments(
     // Map: (topic, partition) → (generation_id, member_id, tied)
     let mut best: HashMap<(String, i32), (i32, String, bool)> = HashMap::new();
 
-    for (id, _id_subs, owned, gen) in members {
+    for (id, _id_subs, owned, generation) in members {
         let id_subs = subs.get(id).cloned().unwrap_or_default();
         for (t, p) in owned {
             // Filter stale ownership: topic gone, partition_index out of bounds,
@@ -149,12 +149,12 @@ fn prepopulate_current_assignments(
             let key = (t.clone(), *p);
             match best.get(&key) {
                 None => {
-                    best.insert(key, (*gen, id.clone(), false));
+                    best.insert(key, (*generation, id.clone(), false));
                 }
                 Some((existing_gen, _existing_id, _tied)) => {
-                    if *gen > *existing_gen {
-                        best.insert(key, (*gen, id.clone(), false));
-                    } else if *gen == *existing_gen {
+                    if *generation > *existing_gen {
+                        best.insert(key, (*generation, id.clone(), false));
+                    } else if *generation == *existing_gen {
                         // Tie → mark as dropped.
                         let prev = best.get(&key).cloned().unwrap();
                         best.insert(key, (prev.0, prev.1, true));
