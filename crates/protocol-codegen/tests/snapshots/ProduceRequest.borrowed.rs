@@ -184,7 +184,7 @@ impl<'de> DecodeBorrow<'de> for TopicProduceData<'de> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PartitionProduceData<'a> {
     pub index: i32,
-    pub records: Option<crate::records::RecordBatchBorrowed<'a>>,
+    pub records: Option<crate::records::RecordsPayloadBorrowed<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 
@@ -212,7 +212,7 @@ impl<'a> Encode for PartitionProduceData<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 9;
         if version >= 0 { put_i32(buf, self.index) }
-        if version >= 0 { match &self.records { None => if flex { put_compact_nullable_bytes(buf, None) } else { put_nullable_bytes(buf, None) }, Some(__rb) => { let mut __rb_buf = bytes::BytesMut::new(); <crate::records::RecordBatchBorrowed as crate::Encode>::encode(__rb, &mut __rb_buf, version)?; if flex { put_compact_bytes(buf, &__rb_buf) } else { put_bytes(buf, &__rb_buf) } } } }
+        if version >= 0 { match &self.records { None => if flex { put_compact_nullable_bytes(buf, None) } else { put_nullable_bytes(buf, None) }, Some(__rb) => { let mut __rb_buf = bytes::BytesMut::new(); <crate::records::RecordsPayloadBorrowed as crate::Encode>::encode(__rb, &mut __rb_buf, version)?; if flex { put_compact_bytes(buf, &__rb_buf) } else { put_bytes(buf, &__rb_buf) } } } }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -223,7 +223,7 @@ impl<'a> Encode for PartitionProduceData<'a> {
         let flex = version >= 9;
         let mut n: usize = 0;
         if version >= 0 { n += 4; }
-        if version >= 0 { n += match &self.records { None => if flex { crate::primitives::varint::uvarint_len(0) } else { 4 }, Some(__rb) => { let __rb_len = <crate::records::RecordBatchBorrowed as crate::Encode>::encoded_len(__rb, version); if flex { crate::primitives::string_bytes::compact_bytes_len_from_size(__rb_len) } else { 4 + __rb_len } } }; }
+        if version >= 0 { n += match &self.records { None => if flex { crate::primitives::varint::uvarint_len(0) } else { 4 }, Some(__rb) => { let __rb_len = <crate::records::RecordsPayloadBorrowed as crate::Encode>::encoded_len(__rb, version); if flex { crate::primitives::string_bytes::compact_bytes_len_from_size(__rb_len) } else { 4 + __rb_len } } }; }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -237,7 +237,7 @@ impl<'de> DecodeBorrow<'de> for PartitionProduceData<'de> {
         let flex = version >= 9;
         let mut out = Self::default();
         if version >= 0 { out.index = get_i32(buf)?; }
-        if version >= 0 { out.records = { let __rb_opt = if flex { get_compact_nullable_bytes_borrowed(buf)? } else { get_nullable_bytes_borrowed(buf)? }; match __rb_opt { None => None, Some(__rb_slice) => { let mut __rb_cur = __rb_slice; Some(<crate::records::RecordBatchBorrowed as crate::DecodeBorrow>::decode_borrow(&mut __rb_cur, version)?) } } }; }
+        if version >= 0 { out.records = { let __rb_opt = if flex { get_compact_nullable_bytes_borrowed(buf)? } else { get_nullable_bytes_borrowed(buf)? }; match __rb_opt { None => None, Some(__rb_slice) => { let mut __rb_cur = __rb_slice; Some(<crate::records::RecordsPayloadBorrowed as crate::DecodeBorrow>::decode_borrow(&mut __rb_cur, version)?) } } }; }
         if flex {
             out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
                 Ok(false)

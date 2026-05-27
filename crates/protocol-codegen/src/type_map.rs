@@ -42,7 +42,7 @@ fn inner_owned(t: &str, struct_path: Option<&str>) -> String {
         "float64" => "f64".into(),
         "string" => "String".into(),
         "bytes" => "::bytes::Bytes".into(),
-        "records" => "crate::records::RecordBatch".into(),
+        "records" => "crate::records::RecordsPayload".into(),
         "uuid" => "crate::primitives::uuid::Uuid".into(),
         other => struct_path.map_or_else(|| panic!("unmapped owned type: {other}"), str::to_owned),
     }
@@ -63,7 +63,7 @@ fn inner_borrowed(t: &str, struct_path: Option<&str>) -> String {
         "float64" => "f64".into(),
         "string" => "&'a str".into(),
         "bytes" => "&'a [u8]".into(),
-        "records" => "crate::records::RecordBatchBorrowed<'a>".into(),
+        "records" => "crate::records::RecordsPayloadBorrowed<'a>".into(),
         "uuid" => "crate::primitives::uuid::Uuid".into(),
         other => struct_path.map_or_else(
             || panic!("unmapped borrowed type: {other}"),
@@ -91,7 +91,7 @@ mod tests {
         );
         assert_eq!(
             owned_type("records", false, None),
-            "crate::records::RecordBatch"
+            "crate::records::RecordsPayload"
         );
     }
 
@@ -101,7 +101,7 @@ mod tests {
         assert_eq!(borrowed_type("bytes", true, None), "Option<&'a [u8]>");
         assert_eq!(
             borrowed_type("records", false, None),
-            "crate::records::RecordBatchBorrowed<'a>"
+            "crate::records::RecordsPayloadBorrowed<'a>"
         );
     }
 

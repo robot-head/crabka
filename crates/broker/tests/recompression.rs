@@ -163,7 +163,7 @@ async fn produce_gzip(addr: SocketAddr, topic: &str, topic_id: Uuid, value: &[u8
             topic_id,
             partition_data: vec![PartitionProduceData {
                 index: 0,
-                records: Some(batch),
+                records: Some(batch.into()),
                 ..Default::default()
             }],
             ..Default::default()
@@ -214,8 +214,9 @@ async fn fetch_first_batch(addr: SocketAddr, topic: &str, topic_id: Uuid) -> Rec
     let part = &r.responses[0].partitions[0];
     assert_eq!(part.error_code, 0, "Fetch error: {}", part.error_code);
     part.records
-        .clone()
-        .expect("Fetch returned at least one batch")
+        .as_ref()
+        .and_then(|p| p.as_v2().cloned())
+        .expect("Fetch returned at least one v2 batch")
 }
 
 async fn wait_for_compression(

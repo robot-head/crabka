@@ -196,7 +196,7 @@ async fn send_one(cfg: &SenderConfig, topic: &str, partition: i32, batch: InProg
             topic_id,
             partition_data: vec![PartitionProduceData {
                 index: partition,
-                records: Some(record_batch),
+                records: Some(record_batch.into()),
                 ..Default::default()
             }],
             ..Default::default()

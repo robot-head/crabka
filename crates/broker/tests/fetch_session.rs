@@ -80,7 +80,7 @@ async fn produce(p: &support::InProcess, topic: &str, partition: i32, records: i
             topic_id,
             partition_data: vec![PartitionProduceData {
                 index: partition,
-                records: Some(one_record_batch(records)),
+                records: Some(one_record_batch(records).into()),
                 ..Default::default()
             }],
             ..Default::default()
@@ -192,7 +192,8 @@ async fn new_session_then_incremental_filters_unchanged_partitions() {
     let batch = r3.responses[0].partitions[0]
         .records
         .as_ref()
-        .expect("records present");
+        .and_then(|p| p.as_v2())
+        .expect("v2 records present");
     assert_eq!(batch.records.len(), 5);
 
     p.broker.shutdown().await;
@@ -443,7 +444,8 @@ async fn sessionless_full_fetch_round_trip() {
     let batch = r.responses[0].partitions[0]
         .records
         .as_ref()
-        .expect("records");
+        .and_then(|p| p.as_v2())
+        .expect("v2 records");
     assert_eq!(batch.records.len(), 2);
     p.broker.shutdown().await;
 }

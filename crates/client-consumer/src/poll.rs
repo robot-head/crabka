@@ -96,7 +96,14 @@ impl Consumer {
                 topic.topic.clone()
             };
             for part in &topic.partitions {
-                let Some(batch) = &part.records else { continue };
+                let Some(payload) = &part.records else {
+                    continue;
+                };
+                // Legacy MessageSet payloads are skipped here; the consumer
+                // only handles v2 batches in this slice.
+                let Some(batch) = payload.as_v2() else {
+                    continue;
+                };
                 for r in &batch.records {
                     let offset = batch.base_offset + i64::from(r.offset_delta);
                     out.push(ConsumerRecord {
