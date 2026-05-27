@@ -52,10 +52,11 @@ mod assignor;
 mod builder;
 mod commit;
 mod consumer;
+mod coordinator;
 mod error;
-mod heartbeat;
 mod poll;
 
+pub use assignor::Assignor;
 pub use builder::{AutoOffsetReset, IsolationLevel};
 pub use consumer::{Consumer, ConsumerRecord};
 pub use error::ConsumerError;

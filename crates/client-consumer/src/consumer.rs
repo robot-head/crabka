@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -18,21 +18,23 @@ use crabka_protocol::owned::offset_fetch_request::{OffsetFetchRequest, OffsetFet
 use crabka_protocol::owned::sync_group_request::{SyncGroupRequest, SyncGroupRequestAssignment};
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 
+use crate::assignor::Assignor;
 use crate::builder::{
     AutoOffsetReset, IsolationLevel, decode_assignment, decode_subscription, encode_assignment,
     encode_subscription,
 };
+use crate::coordinator::CoordinatorState;
 use crate::error::ConsumerError;
-use crate::heartbeat::RebalanceNotice;
 
 /// Subscribe-style consumer handle. Construct via [`Consumer::builder`].
-#[allow(dead_code)] // `session_timeout` / `heartbeat_interval` are kept for
-// future re-join / re-handshake support (slice 5 MVP
-// only spawns one heartbeat task at build time).
+#[allow(dead_code)] // `session_timeout` / `heartbeat_interval` / `generation_id`
+// are captured for diagnostics; the live values are owned
+// by the coordinator task post-start.
 pub struct Consumer {
     pub(crate) client: Client,
     pub(crate) group_id: String,
     pub(crate) member_id: String,
+    /// Captured at start; not kept in sync as the coordinator rejoins.
     pub(crate) generation_id: i32,
     pub(crate) subscribed_topics: Vec<String>,
     /// Current assigned partitions: `(topic, partition_index)`.
@@ -44,9 +46,10 @@ pub struct Consumer {
     pub(crate) topic_ids: Arc<Mutex<HashMap<String, WireUuid>>>,
     pub(crate) session_timeout: Duration,
     pub(crate) heartbeat_interval: Duration,
-    pub(crate) rebalance_rx: Mutex<mpsc::Receiver<RebalanceNotice>>,
-    pub(crate) heartbeat_shutdown: CancellationToken,
-    pub(crate) heartbeat_handle: Option<JoinHandle<()>>,
+    #[allow(dead_code)]
+    pub(crate) assignor: Assignor,
+    pub(crate) coordinator_shutdown: CancellationToken,
+    pub(crate) coordinator_handle: Option<JoinHandle<()>>,
     /// Controls which records are returned by `poll`.
     pub(crate) isolation_level: IsolationLevel,
 }
@@ -65,8 +68,9 @@ pub struct ConsumerRecord {
 #[bon::bon]
 impl Consumer {
     /// Build a [`Consumer`] subscribed to the given topics: resolve bootstrap,
-    /// `JoinGroup` (twice), compute the range assignment if we're the elected
-    /// leader, `SyncGroup`, prime offsets, then spawn the heartbeat task.
+    /// `JoinGroup` (twice), compute the assignment if we're the elected
+    /// leader, `SyncGroup`, prime offsets, then spawn the coordinator task
+    /// that owns the heartbeat + rebalance loop.
     #[builder(start_fn = builder, finish_fn = build)]
     #[allow(clippy::too_many_lines)]
     pub async fn start(
@@ -82,6 +86,8 @@ impl Consumer {
         #[builder(into)] subscribe: Vec<String>,
         #[builder(default = AutoOffsetReset::Latest)] auto_offset_reset: AutoOffsetReset,
         #[builder(default = IsolationLevel::ReadUncommitted)] isolation_level: IsolationLevel,
+        #[builder(default = Assignor::Range)] assignor: Assignor,
+        #[builder(into)] client_rack: Option<String>,
     ) -> Result<Self, ConsumerError> {
         if subscribe.is_empty() {
             return Err(ConsumerError::NotSubscribed);
@@ -99,6 +105,12 @@ impl Consumer {
         let session_timeout_ms = i32::try_from(session_timeout.as_millis()).unwrap_or(i32::MAX);
         let rebalance_timeout_ms = i32::try_from(rebalance_timeout.as_millis()).unwrap_or(i32::MAX);
 
+        // First JoinGroup uses empty `owned_partitions` + `generation_id=-1`:
+        // we've never been in the group before, so we have nothing to claim
+        // and no prior generation to defend against zombie ownership.
+        let subscription_bytes = encode_subscription(&subscribe, &[], -1, client_rack.as_deref());
+        let protocol_name = assignor.protocol_name().to_string();
+
         // 1. First JoinGroup — empty member_id, expect MEMBER_ID_REQUIRED (79)
         //    or a regular response; either way the broker hands us a member_id.
         let r1 = client
@@ -109,8 +121,8 @@ impl Consumer {
                 session_timeout_ms,
                 rebalance_timeout_ms,
                 protocols: vec![JoinGroupRequestProtocol {
-                    name: "range".into(),
-                    metadata: encode_subscription(&subscribe),
+                    name: protocol_name.clone(),
+                    metadata: subscription_bytes.clone(),
                     ..Default::default()
                 }],
                 ..Default::default()
@@ -136,8 +148,8 @@ impl Consumer {
                 session_timeout_ms,
                 rebalance_timeout_ms,
                 protocols: vec![JoinGroupRequestProtocol {
-                    name: "range".into(),
-                    metadata: encode_subscription(&subscribe),
+                    name: protocol_name.clone(),
+                    metadata: subscription_bytes.clone(),
                     ..Default::default()
                 }],
                 ..Default::default()
@@ -149,7 +161,7 @@ impl Consumer {
 
         // 3. Always issue a Metadata to resolve topic_ids (needed for
         //    Fetch v ≥ 13). If we are the leader, also use the partition
-        //    counts to compute the range assignment.
+        //    counts to compute the assignment.
         let md = client.send(MetadataRequest::default()).await?;
         let mut topic_ids: HashMap<String, WireUuid> = HashMap::new();
         let mut topic_partitions: HashMap<String, i32> = HashMap::new();
@@ -164,12 +176,30 @@ impl Consumer {
 
         let is_leader = r2.leader == member_id;
         let assignments_for_sync: Vec<SyncGroupRequestAssignment> = if is_leader {
-            let members: Vec<(String, Vec<String>)> = r2
-                .members
-                .iter()
-                .map(|m| (m.member_id.clone(), decode_subscription(&m.metadata)))
-                .collect();
-            let assignments = crate::assignor::range::assign(members, &topic_partitions);
+            let assignments = match assignor {
+                Assignor::Range => {
+                    let inputs: Vec<(String, Vec<String>)> = r2
+                        .members
+                        .iter()
+                        .map(|m| {
+                            let ds = decode_subscription(&m.metadata);
+                            (m.member_id.clone(), ds.topics)
+                        })
+                        .collect();
+                    crate::assignor::range::assign(inputs, &topic_partitions)
+                }
+                Assignor::CooperativeSticky => {
+                    let inputs: Vec<crate::assignor::cooperative_sticky::MemberInput> = r2
+                        .members
+                        .iter()
+                        .map(|m| {
+                            let ds = decode_subscription(&m.metadata);
+                            (m.member_id.clone(), ds.topics, ds.owned, ds.generation_id)
+                        })
+                        .collect();
+                    crate::assignor::cooperative_sticky::assign(&inputs, &topic_partitions)
+                }
+            };
             assignments
                 .into_iter()
                 .map(|(m, partitions)| SyncGroupRequestAssignment {
@@ -190,7 +220,7 @@ impl Consumer {
                 generation_id: r2.generation_id,
                 member_id: member_id.clone(),
                 protocol_type: Some("consumer".into()),
-                protocol_name: Some("range".into()),
+                protocol_name: Some(protocol_name.clone()),
                 assignments: assignments_for_sync,
                 ..Default::default()
             })
@@ -239,18 +269,29 @@ impl Consumer {
             }
         }
 
-        // 6. Spawn the heartbeat task.
-        let (notice_tx, notice_rx) = mpsc::channel(8);
+        // 6. Spawn the coordinator task (heartbeat + rebalance loop).
+        let assigned = Arc::new(Mutex::new(assigned_partitions));
+        let next_offsets = Arc::new(Mutex::new(next_offsets));
+        let topic_ids = Arc::new(Mutex::new(topic_ids));
+
         let shutdown = CancellationToken::new();
-        let hb_handle = tokio::spawn(crate::heartbeat::run(
-            client.clone(),
-            group_id.clone(),
-            member_id.clone(),
-            r2.generation_id,
+        let state = CoordinatorState {
+            client: client.clone(),
+            group_id: group_id.clone(),
+            member_id: member_id.clone(),
+            generation_id: r2.generation_id,
+            assignor,
+            subscribed_topics: subscribe.clone(),
+            assigned: Arc::clone(&assigned),
+            next_offsets: Arc::clone(&next_offsets),
+            topic_ids: Arc::clone(&topic_ids),
+            session_timeout,
+            rebalance_timeout,
             heartbeat_interval,
-            notice_tx,
-            shutdown.clone(),
-        ));
+            auto_offset_reset,
+            client_rack: client_rack.clone(),
+        };
+        let coord_handle = tokio::spawn(crate::coordinator::run(state, shutdown.clone()));
 
         Ok(Consumer {
             client,
@@ -258,14 +299,14 @@ impl Consumer {
             member_id,
             generation_id: r2.generation_id,
             subscribed_topics: subscribe,
-            assigned: Arc::new(Mutex::new(assigned_partitions)),
-            next_offsets: Arc::new(Mutex::new(next_offsets)),
-            topic_ids: Arc::new(Mutex::new(topic_ids)),
+            assigned,
+            next_offsets,
+            topic_ids,
             session_timeout,
             heartbeat_interval,
-            rebalance_rx: Mutex::new(notice_rx),
-            heartbeat_shutdown: shutdown,
-            heartbeat_handle: Some(hb_handle),
+            assignor,
+            coordinator_shutdown: shutdown,
+            coordinator_handle: Some(coord_handle),
             isolation_level,
         })
     }
@@ -301,10 +342,10 @@ impl Consumer {
         self.assigned.lock().await.clone()
     }
 
-    /// Stop the heartbeat task. Returns immediately if already shut down.
+    /// Stop the coordinator task. Returns immediately if already shut down.
     pub async fn close(mut self) -> Result<(), ConsumerError> {
-        self.heartbeat_shutdown.cancel();
-        if let Some(h) = self.heartbeat_handle.take() {
+        self.coordinator_shutdown.cancel();
+        if let Some(h) = self.coordinator_handle.take() {
             let _ = h.await;
         }
         Ok(())
