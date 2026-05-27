@@ -90,6 +90,14 @@ pub enum ReconcileError {
     /// exist but the value is zero bytes.
     #[error("oauth introspection Secret '{secret}' key '{key}' is empty")]
     EmptyOauthIntrospectionValue { secret: String, key: String },
+    /// Slice 48-final (KIP-405): `spec.tieredStorage` failed shape
+    /// validation. Concrete cases: `type = "S3"` without `spec.tieredStorage.s3`,
+    /// `type = "Local"` with `spec.tieredStorage.s3` set, or an S3 spec
+    /// missing required `bucket` / `region`. The reconciler returns this
+    /// before rendering any `ConfigMap` so the broker pod never boots
+    /// against malformed `[remote_storage]` TOML.
+    #[error("tieredStorage: {0}")]
+    TieredStorageInvalid(String),
 }
 
 /// Build a Kubernetes-style condition with `lastTransitionTime` set to
