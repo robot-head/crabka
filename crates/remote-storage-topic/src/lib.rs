@@ -52,6 +52,7 @@ pub mod log;
 pub mod manager;
 pub mod partitioning;
 pub mod serde;
+pub mod swappable;
 
 pub use error::{CodecError, MetadataLogError};
 pub use kafka_log::{
@@ -64,3 +65,4 @@ pub use log::{
 pub use manager::TopicBasedRemoteLogMetadataManager;
 pub use partitioning::metadata_partition_for;
 pub use serde::{MetadataEvent, WIRE_VERSION};
+pub use swappable::SwappableRlmm;
