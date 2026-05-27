@@ -142,6 +142,35 @@ pub struct TieredStorage {
     /// across brokers in the cluster.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata_manager: Option<MetadataManagerSpec>,
+    /// Slice 48i (KIP-405): durable storage for the local-tier
+    /// directory. Only valid with `type=Local`. When absent (default),
+    /// the operator renders an `emptyDir` for `tier-storage` (matches
+    /// 48g). When `Some`, the operator renders a `volumeClaimTemplate`
+    /// of the configured size / class so tier data survives pod
+    /// restarts — pairing with the 48f topic-backed RLMM, this closes
+    /// the "tier data is lost on pod restart" caveat 48g flagged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persistence: Option<TieredStoragePersistence>,
+}
+
+/// Slice 48i (KIP-405): PVC-backed local-tier directory.
+///
+/// Mirrors [`crate::crd::kafka_node_pool::PersistentClaimSpec`] field
+/// shapes so operators learn one schema for both the data dir and the
+/// tier-cache dir. PVC retention follows the parent
+/// `KafkaNodePool.spec.storage.deleteClaim` setting — the `StatefulSet`'s
+/// `persistentVolumeClaimRetentionPolicy` is set-wide and there is no
+/// per-template override in Kubernetes.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TieredStoragePersistence {
+    /// K8s `Quantity` (e.g., `"50Gi"`, `"500Mi"`). Non-empty;
+    /// resource-quantity well-formedness is validated by the
+    /// Kubernetes API server at SSA time.
+    pub size: String,
+    /// Storage class name. `None` = cluster default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class: Option<String>,
 }
 
 /// Slice 48g (KIP-405): the set of RSM backends the operator knows how
@@ -243,6 +272,14 @@ impl TieredStorage {
         }
         if let Some(mm) = self.metadata_manager.as_ref() {
             mm.validate()?;
+        }
+        if let Some(p) = self.persistence.as_ref() {
+            if self.kind != TieredStorageType::Local {
+                return Err("persistence is only valid with type=Local".into());
+            }
+            if p.size.trim().is_empty() {
+                return Err("persistence.size is required and must be non-empty".into());
+            }
         }
         Ok(())
     }
@@ -1029,6 +1066,7 @@ authorization:
                 multipart_chunk_size: Some(512),
             }),
             metadata_manager: None,
+            persistence: None,
         };
         let j = serde_json::to_string(&ts).unwrap();
         assert!(j.contains("\"type\":\"S3\""), "got: {j}");
@@ -1051,6 +1089,7 @@ authorization:
             kind: TieredStorageType::Local,
             s3: None,
             metadata_manager: None,
+            persistence: None,
         };
         assert!(ok.validate().is_ok());
 
@@ -1058,6 +1097,7 @@ authorization:
             kind: TieredStorageType::Local,
             s3: Some(S3StorageSpec::default()),
             metadata_manager: None,
+            persistence: None,
         };
         assert!(
             bad.validate().is_err(),
@@ -1071,6 +1111,7 @@ authorization:
             kind: TieredStorageType::S3,
             s3: None,
             metadata_manager: None,
+            persistence: None,
         };
         assert!(missing_s3.validate().is_err());
 
@@ -1082,6 +1123,7 @@ authorization:
                 ..Default::default()
             }),
             metadata_manager: None,
+            persistence: None,
         };
         assert!(missing_bucket.validate().is_err());
 
@@ -1093,6 +1135,7 @@ authorization:
                 ..Default::default()
             }),
             metadata_manager: None,
+            persistence: None,
         };
         assert!(missing_region.validate().is_err());
 
@@ -1104,6 +1147,7 @@ authorization:
                 ..Default::default()
             }),
             metadata_manager: None,
+            persistence: None,
         };
         assert!(ok.validate().is_ok());
     }
@@ -1121,6 +1165,7 @@ authorization:
                     replication: None,
                 }),
             }),
+            persistence: None,
         };
         let err = ts.validate().unwrap_err();
         assert!(err.contains("must not set `topic`"), "got: {err}");
@@ -1135,6 +1180,7 @@ authorization:
                 kind: MetadataManagerType::Topic,
                 topic: None,
             }),
+            persistence: None,
         };
         let err = ts.validate().unwrap_err();
         assert!(err.contains("requires `topic`"), "got: {err}");
@@ -1153,6 +1199,7 @@ authorization:
                     replication: None,
                 }),
             }),
+            persistence: None,
         };
         let err = ts.validate().unwrap_err();
         assert!(err.contains("bootstrap is required"), "got: {err}");
@@ -1171,6 +1218,7 @@ authorization:
                     replication: None,
                 }),
             }),
+            persistence: None,
         };
         let err = ts.validate().unwrap_err();
         assert!(err.contains("numPartitions"), "got: {err}");
@@ -1188,6 +1236,55 @@ authorization:
                     num_partitions: None,
                     replication: None,
                 }),
+            }),
+            persistence: None,
+        };
+        assert!(ts.validate().is_ok());
+    }
+
+    #[test]
+    fn persistence_requires_local_kind() {
+        let ts = TieredStorage {
+            kind: TieredStorageType::S3,
+            s3: Some(S3StorageSpec {
+                bucket: "b".into(),
+                region: "r".into(),
+                ..Default::default()
+            }),
+            metadata_manager: None,
+            persistence: Some(TieredStoragePersistence {
+                size: "50Gi".into(),
+                class: None,
+            }),
+        };
+        let err = ts.validate().unwrap_err();
+        assert!(err.contains("persistence is only valid with type=Local"));
+    }
+
+    #[test]
+    fn persistence_size_must_be_non_empty() {
+        let ts = TieredStorage {
+            kind: TieredStorageType::Local,
+            s3: None,
+            metadata_manager: None,
+            persistence: Some(TieredStoragePersistence {
+                size: "  ".into(),
+                class: None,
+            }),
+        };
+        let err = ts.validate().unwrap_err();
+        assert!(err.contains("persistence.size is required"));
+    }
+
+    #[test]
+    fn persistence_with_local_validates() {
+        let ts = TieredStorage {
+            kind: TieredStorageType::Local,
+            s3: None,
+            metadata_manager: None,
+            persistence: Some(TieredStoragePersistence {
+                size: "100Gi".into(),
+                class: Some("fast-ssd".into()),
             }),
         };
         assert!(ts.validate().is_ok());
