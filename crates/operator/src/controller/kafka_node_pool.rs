@@ -2696,6 +2696,7 @@ mod tests {
         k.spec.tiered_storage = Some(crate::crd::kafka::TieredStorage {
             kind: crate::crd::kafka::TieredStorageType::Local,
             s3: None,
+            metadata_manager: None,
         });
         k
     }
@@ -2720,6 +2721,7 @@ mod tests {
                 credentials,
                 ..Default::default()
             }),
+            metadata_manager: None,
         });
         k
     }

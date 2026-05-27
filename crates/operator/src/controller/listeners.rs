@@ -2930,6 +2930,27 @@ pub fn render_broker_toml(
                 out.push('\n');
             }
         }
+
+        // Slice 48h (KIP-405): `[remote_storage.kafka_metadata]` opts
+        // the broker pods into the topic-backed RLMM. Omitted when
+        // `metadataManager` is unset or `type = InMemory`.
+        if let Some(mm) = ts.metadata_manager.as_ref()
+            && let crate::crd::kafka::MetadataManagerType::Topic = mm.kind
+        {
+            let topic = mm
+                .topic
+                .as_ref()
+                .expect("MetadataManagerType::Topic requires metadataManager.topic");
+            let _ = writeln!(out, "[remote_storage.kafka_metadata]");
+            let _ = writeln!(out, "bootstrap = \"{}\"", toml_escape(&topic.bootstrap));
+            if let Some(np) = topic.num_partitions {
+                let _ = writeln!(out, "num_partitions = {np}");
+            }
+            if let Some(rf) = topic.replication {
+                let _ = writeln!(out, "replication = {rf}");
+            }
+            out.push('\n');
+        }
     }
 
     // Slice 53: `[authorization]` block. Folds in the slice-51b
@@ -3497,6 +3518,7 @@ mod toml_rendering_tests {
         let ts = crate::crd::kafka::TieredStorage {
             kind: crate::crd::kafka::TieredStorageType::Local,
             s3: None,
+            metadata_manager: None,
         };
         let t = render_broker_toml(
             0,
@@ -3561,6 +3583,105 @@ mod toml_rendering_tests {
     /// `[remote_storage.s3]` and round-trip through the broker's
     /// `FileConfig` so the broker pod boots against the rendered TOML.
     #[test]
+    fn render_broker_toml_emits_kafka_metadata_when_topic_rlmm_set() {
+        let mut addrs = std::collections::BTreeMap::new();
+        addrs.insert(
+            "PLAIN".into(),
+            AdvertisedAddress {
+                host: "h".into(),
+                port: 9092,
+            },
+        );
+        let ts = crate::crd::kafka::TieredStorage {
+            kind: crate::crd::kafka::TieredStorageType::Local,
+            s3: None,
+            metadata_manager: Some(crate::crd::kafka::MetadataManagerSpec {
+                kind: crate::crd::kafka::MetadataManagerType::Topic,
+                topic: Some(crate::crd::kafka::TopicMetadataManagerSpec {
+                    bootstrap: "127.0.0.1:9094".into(),
+                    num_partitions: Some(8),
+                    replication: Some(1),
+                }),
+            }),
+        };
+        let t = render_broker_toml(
+            0,
+            &[synthesized_default_listener()],
+            &addrs,
+            "PLAIN",
+            &std::collections::BTreeMap::new(),
+            None,
+            None,
+            false,
+            None,
+            Some(&ts),
+        );
+        assert!(
+            t.contains("[remote_storage.kafka_metadata]"),
+            "expected kafka_metadata block, got:\n{t}"
+        );
+        assert!(
+            t.contains("bootstrap = \"127.0.0.1:9094\""),
+            "bootstrap line missing, got:\n{t}"
+        );
+        assert!(
+            t.contains("num_partitions = 8"),
+            "num_partitions missing, got:\n{t}"
+        );
+        assert!(
+            t.contains("replication = 1"),
+            "replication missing, got:\n{t}"
+        );
+        // Round-trip through the broker's FileConfig.
+        let parsed: crabka_broker::file_config::FileConfig =
+            toml::from_str(&t).expect("rendered TOML must parse with broker FileConfig");
+        let km = parsed
+            .remote_storage
+            .expect("[remote_storage] round-trips")
+            .kafka_metadata
+            .expect("kafka_metadata round-trips");
+        assert_eq!(km.bootstrap, "127.0.0.1:9094");
+        assert_eq!(km.num_partitions, Some(8));
+        assert_eq!(km.replication, Some(1));
+    }
+
+    #[test]
+    fn render_broker_toml_omits_kafka_metadata_when_rlmm_inmemory() {
+        let mut addrs = std::collections::BTreeMap::new();
+        addrs.insert(
+            "PLAIN".into(),
+            AdvertisedAddress {
+                host: "h".into(),
+                port: 9092,
+            },
+        );
+        let ts = crate::crd::kafka::TieredStorage {
+            kind: crate::crd::kafka::TieredStorageType::Local,
+            s3: None,
+            metadata_manager: Some(crate::crd::kafka::MetadataManagerSpec {
+                kind: crate::crd::kafka::MetadataManagerType::InMemory,
+                topic: None,
+            }),
+        };
+        let t = render_broker_toml(
+            0,
+            &[synthesized_default_listener()],
+            &addrs,
+            "PLAIN",
+            &std::collections::BTreeMap::new(),
+            None,
+            None,
+            false,
+            None,
+            Some(&ts),
+        );
+        assert!(
+            !t.contains("[remote_storage.kafka_metadata]"),
+            "kafka_metadata block leaked for InMemory, got:\n{t}"
+        );
+    }
+
+    #[test]
     fn render_broker_toml_emits_remote_storage_s3_full_spec() {
         let mut addrs = std::collections::BTreeMap::new();
         addrs.insert(
@@ -3582,6 +3703,7 @@ mod toml_rendering_tests {
                 multipart_threshold: Some(4096),
                 multipart_chunk_size: Some(1024),
             }),
+            metadata_manager: None,
         };
         let t = render_broker_toml(
             0,
@@ -3657,6 +3779,7 @@ mod toml_rendering_tests {
                 region: "r".into(),
                 ..Default::default()
             }),
+            metadata_manager: None,
         };
         let t = render_broker_toml(
             0,
@@ -3723,6 +3846,7 @@ mod toml_rendering_tests {
                 prefix: Some(r#"weird"prefix\"#.into()),
                 ..Default::default()
             }),
+            metadata_manager: None,
         };
         let t = render_broker_toml(
             0,

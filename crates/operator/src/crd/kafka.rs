@@ -131,6 +131,17 @@ pub struct TieredStorage {
     /// (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub s3: Option<S3StorageSpec>,
+    /// Slice 48h (KIP-405): pick the
+    /// [`RemoteLogMetadataManager`](crabka_remote_storage::RemoteLogMetadataManager)
+    /// the broker pods run. When absent, every broker pod uses the
+    /// in-memory fixture (compatible with 48g's emptyDir-only
+    /// deployment). When set to `Topic`, the broker activates the
+    /// `crabka_remote_storage_topic::TopicBasedRemoteLogMetadataManager`
+    /// against the internal `__remote_log_metadata` topic, so
+    /// tier-segment metadata survives pod restarts and is consistent
+    /// across brokers in the cluster.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata_manager: Option<MetadataManagerSpec>,
 }
 
 /// Slice 48g (KIP-405): the set of RSM backends the operator knows how
@@ -214,11 +225,13 @@ impl TieredStorage {
     /// required field (`bucket`, `region`).
     pub fn validate(&self) -> Result<(), String> {
         match (self.kind, &self.s3) {
-            (TieredStorageType::Local, Some(_)) => Err("type=Local must not set `s3`".into()),
-            (TieredStorageType::S3, None) => {
-                Err("type=S3 requires `s3` (bucket + region at minimum)".into())
+            (TieredStorageType::Local, Some(_)) => {
+                return Err("type=Local must not set `s3`".into());
             }
-            (TieredStorageType::Local, None) => Ok(()),
+            (TieredStorageType::S3, None) => {
+                return Err("type=S3 requires `s3` (bucket + region at minimum)".into());
+            }
+            (TieredStorageType::Local, None) => {}
             (TieredStorageType::S3, Some(s3)) => {
                 if s3.bucket.trim().is_empty() {
                     return Err("s3.bucket is required and must be non-empty".into());
@@ -226,9 +239,115 @@ impl TieredStorage {
                 if s3.region.trim().is_empty() {
                     return Err("s3.region is required and must be non-empty".into());
                 }
-                Ok(())
             }
         }
+        if let Some(mm) = self.metadata_manager.as_ref() {
+            mm.validate()?;
+        }
+        Ok(())
+    }
+}
+
+/// Slice 48h (KIP-405): which
+/// [`RemoteLogMetadataManager`](crabka_remote_storage::RemoteLogMetadataManager)
+/// the broker pods use. Defaults to `InMemory` (matches 48g behavior)
+/// when this field is omitted.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MetadataManagerSpec {
+    /// Implementation selector.
+    #[serde(rename = "type")]
+    pub kind: MetadataManagerType,
+    /// Topic-backed tuning. Required when `kind == Topic`, must be
+    /// absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic: Option<TopicMetadataManagerSpec>,
+}
+
+impl MetadataManagerSpec {
+    /// Shape-validate. Pure; called by [`TieredStorage::validate`].
+    ///
+    /// # Errors
+    ///
+    /// Fails when the discriminator and `topic` field disagree, or
+    /// when a topic-backed configuration omits `bootstrap`.
+    pub fn validate(&self) -> Result<(), String> {
+        match (self.kind, &self.topic) {
+            (MetadataManagerType::InMemory, Some(_)) => {
+                Err("metadataManager.type=InMemory must not set `topic`".into())
+            }
+            (MetadataManagerType::Topic, None) => {
+                Err("metadataManager.type=Topic requires `topic` (bootstrap at minimum)".into())
+            }
+            (MetadataManagerType::InMemory, None) => Ok(()),
+            (MetadataManagerType::Topic, Some(topic)) => topic.validate(),
+        }
+    }
+}
+
+/// Slice 48h (KIP-405): the RLMM implementations the operator knows
+/// how to render.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+pub enum MetadataManagerType {
+    /// In-memory fixture from `crabka_remote_storage`. Default;
+    /// matches the 48g operator surface. Tier-segment metadata does
+    /// not survive pod restarts.
+    #[default]
+    InMemory,
+    /// Production topic-backed manager from
+    /// `crabka_remote_storage_topic`. Pair with
+    /// [`MetadataManagerSpec::topic`] for the bootstrap address and
+    /// topic-creation parameters.
+    Topic,
+}
+
+/// Slice 48h (KIP-405): topic-backed RLMM tuning. Renders into the
+/// broker TOML's `[remote_storage.kafka_metadata]` block.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TopicMetadataManagerSpec {
+    /// `host:port` the broker pod dials to reach its own listener for
+    /// publishing / consuming `__remote_log_metadata`. Typically the
+    /// pod's loopback inter-broker listener (e.g. `127.0.0.1:9094`).
+    pub bootstrap: String,
+    /// Partition count for `__remote_log_metadata` on first creation.
+    /// Defaults to 50 (Kafka's
+    /// `remote.log.metadata.topic.num.partitions`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub num_partitions: Option<i32>,
+    /// Replication factor for `__remote_log_metadata` on first
+    /// creation. Defaults to 3 (Kafka's
+    /// `remote.log.metadata.topic.replication.factor`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replication: Option<i32>,
+}
+
+impl TopicMetadataManagerSpec {
+    /// Shape-validate. Pure; called by [`MetadataManagerSpec::validate`].
+    ///
+    /// # Errors
+    ///
+    /// Fails when `bootstrap` is empty or `num_partitions` /
+    /// `replication` are non-positive.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.bootstrap.trim().is_empty() {
+            return Err("metadataManager.topic.bootstrap is required and must be non-empty".into());
+        }
+        if let Some(p) = self.num_partitions
+            && p <= 0
+        {
+            return Err(format!(
+                "metadataManager.topic.numPartitions must be > 0 (got {p})"
+            ));
+        }
+        if let Some(r) = self.replication
+            && r <= 0
+        {
+            return Err(format!(
+                "metadataManager.topic.replication must be > 0 (got {r})"
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -909,6 +1028,7 @@ authorization:
                 multipart_threshold: Some(1024),
                 multipart_chunk_size: Some(512),
             }),
+            metadata_manager: None,
         };
         let j = serde_json::to_string(&ts).unwrap();
         assert!(j.contains("\"type\":\"S3\""), "got: {j}");
@@ -930,12 +1050,14 @@ authorization:
         let ok = TieredStorage {
             kind: TieredStorageType::Local,
             s3: None,
+            metadata_manager: None,
         };
         assert!(ok.validate().is_ok());
 
         let bad = TieredStorage {
             kind: TieredStorageType::Local,
             s3: Some(S3StorageSpec::default()),
+            metadata_manager: None,
         };
         assert!(
             bad.validate().is_err(),
@@ -948,6 +1070,7 @@ authorization:
         let missing_s3 = TieredStorage {
             kind: TieredStorageType::S3,
             s3: None,
+            metadata_manager: None,
         };
         assert!(missing_s3.validate().is_err());
 
@@ -958,6 +1081,7 @@ authorization:
                 region: "r".into(),
                 ..Default::default()
             }),
+            metadata_manager: None,
         };
         assert!(missing_bucket.validate().is_err());
 
@@ -968,6 +1092,7 @@ authorization:
                 region: "  ".into(),
                 ..Default::default()
             }),
+            metadata_manager: None,
         };
         assert!(missing_region.validate().is_err());
 
@@ -978,7 +1103,93 @@ authorization:
                 region: "r".into(),
                 ..Default::default()
             }),
+            metadata_manager: None,
         };
         assert!(ok.validate().is_ok());
+    }
+
+    #[test]
+    fn metadata_manager_inmemory_with_topic_is_rejected() {
+        let ts = TieredStorage {
+            kind: TieredStorageType::Local,
+            s3: None,
+            metadata_manager: Some(MetadataManagerSpec {
+                kind: MetadataManagerType::InMemory,
+                topic: Some(TopicMetadataManagerSpec {
+                    bootstrap: "127.0.0.1:9092".into(),
+                    num_partitions: None,
+                    replication: None,
+                }),
+            }),
+        };
+        let err = ts.validate().unwrap_err();
+        assert!(err.contains("must not set `topic`"), "got: {err}");
+    }
+
+    #[test]
+    fn metadata_manager_topic_without_topic_is_rejected() {
+        let ts = TieredStorage {
+            kind: TieredStorageType::Local,
+            s3: None,
+            metadata_manager: Some(MetadataManagerSpec {
+                kind: MetadataManagerType::Topic,
+                topic: None,
+            }),
+        };
+        let err = ts.validate().unwrap_err();
+        assert!(err.contains("requires `topic`"), "got: {err}");
+    }
+
+    #[test]
+    fn metadata_manager_topic_requires_non_empty_bootstrap() {
+        let ts = TieredStorage {
+            kind: TieredStorageType::Local,
+            s3: None,
+            metadata_manager: Some(MetadataManagerSpec {
+                kind: MetadataManagerType::Topic,
+                topic: Some(TopicMetadataManagerSpec {
+                    bootstrap: "  ".into(),
+                    num_partitions: None,
+                    replication: None,
+                }),
+            }),
+        };
+        let err = ts.validate().unwrap_err();
+        assert!(err.contains("bootstrap is required"), "got: {err}");
+    }
+
+    #[test]
+    fn metadata_manager_topic_rejects_non_positive_partition_count() {
+        let ts = TieredStorage {
+            kind: TieredStorageType::Local,
+            s3: None,
+            metadata_manager: Some(MetadataManagerSpec {
+                kind: MetadataManagerType::Topic,
+                topic: Some(TopicMetadataManagerSpec {
+                    bootstrap: "127.0.0.1:9094".into(),
+                    num_partitions: Some(0),
+                    replication: None,
+                }),
+            }),
+        };
+        let err = ts.validate().unwrap_err();
+        assert!(err.contains("numPartitions"), "got: {err}");
+    }
+
+    #[test]
+    fn metadata_manager_topic_with_defaults_validates() {
+        let ts = TieredStorage {
+            kind: TieredStorageType::Local,
+            s3: None,
+            metadata_manager: Some(MetadataManagerSpec {
+                kind: MetadataManagerType::Topic,
+                topic: Some(TopicMetadataManagerSpec {
+                    bootstrap: "127.0.0.1:9094".into(),
+                    num_partitions: None,
+                    replication: None,
+                }),
+            }),
+        };
+        assert!(ts.validate().is_ok());
     }
 }
