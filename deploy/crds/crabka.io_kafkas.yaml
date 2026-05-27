@@ -602,14 +602,108 @@ spec:
                   support pairs with the production RLMM (48f).
                 nullable: true
                 properties:
-                  type:
+                  s3:
                     description: |-
-                      Backend kind. Only [`TieredStorageType::Local`] is recognised by
-                      the broker in 48g — selecting an unsupported variant surfaces
-                      `TieredStorageInvalid` on `Kafka.status.conditions` at reconcile
-                      time (deferred; today only `Local` is in the enum).
+                      S3-backend tuning. Required when `kind == S3`, must be absent
+                      otherwise. The struct mirrors `crabka_remote_storage::S3Config`
+                      — non-credential fields are rendered verbatim into the broker
+                      TOML's `[remote_storage.s3]` block; credentials are sourced
+                      from Kubernetes Secrets and injected as broker-pod env
+                      (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`).
+                    nullable: true
+                    properties:
+                      allowHttp:
+                        description: |-
+                          Allow plaintext HTTP. Off by default; flip on for `MinIO`
+                          running without TLS. AWS S3 itself never needs this.
+                        type: boolean
+                      bucket:
+                        description: S3 bucket name. Required.
+                        type: string
+                      credentials:
+                        description: |-
+                          Optional explicit credentials. When `None`, the broker falls
+                          back to the AWS credential chain (IRSA on EKS, instance profile
+                          on EC2, etc.).
+                        nullable: true
+                        properties:
+                          accessKeyId:
+                            description: Reference to the Secret holding the `AWS_ACCESS_KEY_ID` value.
+                            properties:
+                              key:
+                                description: Key within the Secret's `data`. Defaults to `secret-key`.
+                                nullable: true
+                                type: string
+                              name:
+                                description: Secret name in the same namespace as the `Kafka` CR.
+                                type: string
+                            required:
+                            - name
+                            type: object
+                          secretAccessKey:
+                            description: Reference to the Secret holding the `AWS_SECRET_ACCESS_KEY` value.
+                            properties:
+                              key:
+                                description: Key within the Secret's `data`. Defaults to `secret-key`.
+                                nullable: true
+                                type: string
+                              name:
+                                description: Secret name in the same namespace as the `Kafka` CR.
+                                type: string
+                            required:
+                            - name
+                            type: object
+                        required:
+                        - accessKeyId
+                        - secretAccessKey
+                        type: object
+                      endpoint:
+                        description: |-
+                          Optional custom endpoint URL (e.g. `http://minio:9000` for
+                          `MinIO`, `https://<account>.r2.cloudflarestorage.com` for
+                          Cloudflare R2). When `None`, the AWS S3 endpoint for the
+                          configured region is used.
+                        nullable: true
+                        type: string
+                      multipartChunkSize:
+                        description: |-
+                          Override the per-part size for multipart uploads (bytes). When
+                          unset, the broker uses
+                          `crabka_remote_storage::DEFAULT_MULTIPART_CHUNK_SIZE` (16 MiB).
+                        format: uint64
+                        minimum: 0.0
+                        nullable: true
+                        type: integer
+                      multipartThreshold:
+                        description: |-
+                          Override the single-PUT / multipart cutoff (bytes). When unset,
+                          the broker uses `crabka_remote_storage::DEFAULT_MULTIPART_THRESHOLD`
+                          (100 MiB). Lower in tests to exercise the multipart path on
+                          small fixtures.
+                        format: uint64
+                        minimum: 0.0
+                        nullable: true
+                        type: integer
+                      prefix:
+                        description: |-
+                          Optional key prefix inside the bucket. Lets multiple Crabka
+                          clusters share a bucket without colliding.
+                        nullable: true
+                        type: string
+                      region:
+                        description: |-
+                          AWS region. Required even for non-AWS endpoints (`MinIO`, R2) —
+                          `object_store`'s `AmazonS3Builder` rejects an empty region.
+                        type: string
+                    required:
+                    - bucket
+                    - region
+                    type: object
+                  type:
+                    description: Backend kind selector.
                     enum:
                     - Local
+                    - S3
                     type: string
                 required:
                 - type

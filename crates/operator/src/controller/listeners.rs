@@ -679,6 +679,14 @@ pub(crate) const INGRESS_PORT: i32 = 443;
 /// writes through one canonical location.
 pub(crate) const TIER_STORAGE_PATH: &str = "/var/lib/crabka/remote";
 
+/// Escape a string for embedding inside a TOML basic (double-quoted)
+/// string. Only `\` and `"` need escaping for our render — the operator
+/// rejects newlines and other control characters at CRD validation
+/// time, so the broker's TOML parser will never see them here.
+fn toml_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 /// The de-facto annotation that tells the (nginx) ingress controller to forward
 /// the raw TLS stream — SNI-routed — to the backend rather than terminating
 /// TLS. Harmless on controllers that ignore it; required for Kafka-over-Ingress.
@@ -2885,6 +2893,42 @@ pub fn render_broker_toml(
                 let _ = writeln!(out, "storage_dir = \"{TIER_STORAGE_PATH}\"");
                 out.push('\n');
             }
+            crate::crd::kafka::TieredStorageType::S3 => {
+                // Reconciler validation guarantees `s3` is populated when
+                // `kind == S3`; if it isn't, we'd rather panic in unit tests
+                // than emit silently-broken TOML.
+                let s3 = ts
+                    .s3
+                    .as_ref()
+                    .expect("TieredStorageType::S3 requires spec.tieredStorage.s3");
+                let _ = writeln!(out, "[remote_storage]");
+                let _ = writeln!(out);
+                let _ = writeln!(out, "[remote_storage.s3]");
+                let _ = writeln!(out, "bucket = \"{}\"", toml_escape(&s3.bucket));
+                let _ = writeln!(out, "region = \"{}\"", toml_escape(&s3.region));
+                if let Some(prefix) = &s3.prefix {
+                    let _ = writeln!(out, "prefix = \"{}\"", toml_escape(prefix));
+                }
+                if let Some(endpoint) = &s3.endpoint {
+                    let _ = writeln!(out, "endpoint = \"{}\"", toml_escape(endpoint));
+                }
+                if s3.allow_http {
+                    let _ = writeln!(out, "allow_http = true");
+                }
+                if let Some(mt) = s3.multipart_threshold {
+                    let _ = writeln!(out, "multipart_threshold = {mt}");
+                }
+                if let Some(cs) = s3.multipart_chunk_size {
+                    let _ = writeln!(out, "multipart_chunk_size = {cs}");
+                }
+                // Credentials are intentionally NOT rendered into the TOML.
+                // The operator wires AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
+                // as pod env via secretKeyRef (see `kafka_node_pool.rs`);
+                // `object_store`'s `AmazonS3Builder` picks them up through
+                // the AWS credential chain when the corresponding TOML keys
+                // are absent.
+                out.push('\n');
+            }
         }
     }
 
@@ -3452,6 +3496,7 @@ mod toml_rendering_tests {
         );
         let ts = crate::crd::kafka::TieredStorage {
             kind: crate::crd::kafka::TieredStorageType::Local,
+            s3: None,
         };
         let t = render_broker_toml(
             0,
@@ -3507,6 +3552,200 @@ mod toml_rendering_tests {
             !t.contains("[remote_storage]"),
             "no tieredStorage → no [remote_storage] block; got:\n{t}"
         );
+    }
+
+    // ── Slice 48-final: S3 tiered storage TOML render ────────────────
+
+    /// Full S3 spec — bucket, region, prefix, endpoint, `allow_http`,
+    /// multipart overrides — must render every field into
+    /// `[remote_storage.s3]` and round-trip through the broker's
+    /// `FileConfig` so the broker pod boots against the rendered TOML.
+    #[test]
+    fn render_broker_toml_emits_remote_storage_s3_full_spec() {
+        let mut addrs = std::collections::BTreeMap::new();
+        addrs.insert(
+            "PLAIN".into(),
+            AdvertisedAddress {
+                host: "h".into(),
+                port: 9092,
+            },
+        );
+        let ts = crate::crd::kafka::TieredStorage {
+            kind: crate::crd::kafka::TieredStorageType::S3,
+            s3: Some(crate::crd::kafka::S3StorageSpec {
+                bucket: "crabka-tier".into(),
+                region: "us-east-1".into(),
+                prefix: Some("cluster-a".into()),
+                endpoint: Some("http://minio.svc:9000".into()),
+                credentials: None,
+                allow_http: true,
+                multipart_threshold: Some(4096),
+                multipart_chunk_size: Some(1024),
+            }),
+        };
+        let t = render_broker_toml(
+            0,
+            &[synthesized_default_listener()],
+            &addrs,
+            "PLAIN",
+            &std::collections::BTreeMap::new(),
+            None,
+            None,
+            false,
+            None,
+            Some(&ts),
+        );
+        assert!(t.contains("[remote_storage]"), "missing block:\n{t}");
+        assert!(
+            t.contains("[remote_storage.s3]"),
+            "missing s3 subtable:\n{t}"
+        );
+        assert!(t.contains("bucket = \"crabka-tier\""), "bucket:\n{t}");
+        assert!(t.contains("region = \"us-east-1\""), "region:\n{t}");
+        assert!(t.contains("prefix = \"cluster-a\""), "prefix:\n{t}");
+        assert!(
+            t.contains("endpoint = \"http://minio.svc:9000\""),
+            "endpoint:\n{t}"
+        );
+        assert!(t.contains("allow_http = true"), "allow_http:\n{t}");
+        assert!(t.contains("multipart_threshold = 4096"), "threshold:\n{t}");
+        assert!(t.contains("multipart_chunk_size = 1024"), "chunk:\n{t}");
+        // Credentials must NEVER appear in the TOML — they're sourced
+        // from pod env via `secretKeyRef`.
+        assert!(
+            !t.contains("access_key_id"),
+            "credentials must not be rendered into TOML, got:\n{t}"
+        );
+        assert!(
+            !t.contains("secret_access_key"),
+            "credentials must not be rendered into TOML, got:\n{t}"
+        );
+        // Broker round-trip.
+        let parsed: crabka_broker::file_config::FileConfig =
+            toml::from_str(&t).expect("rendered TOML must parse with broker FileConfig");
+        let rs = parsed.remote_storage.expect("[remote_storage] round-trips");
+        let s3 = rs.s3.expect("[remote_storage.s3] round-trips");
+        assert_eq!(s3.bucket, "crabka-tier");
+        assert_eq!(s3.region, "us-east-1");
+        assert_eq!(s3.prefix.as_deref(), Some("cluster-a"));
+        assert_eq!(s3.endpoint.as_deref(), Some("http://minio.svc:9000"));
+        assert!(s3.allow_http);
+        assert_eq!(s3.multipart_threshold, Some(4096));
+        assert_eq!(s3.multipart_chunk_size, Some(1024));
+        assert!(s3.access_key_id.is_none());
+        assert!(s3.secret_access_key.is_none());
+    }
+
+    /// Minimal S3 spec — only `bucket` + `region` set. Optional fields
+    /// must be omitted from the rendered TOML so the broker falls back
+    /// to its defaults (multipart threshold / chunk size, no prefix, no
+    /// endpoint override, `allow_http = false`).
+    #[test]
+    fn render_broker_toml_emits_remote_storage_s3_minimal_spec() {
+        let mut addrs = std::collections::BTreeMap::new();
+        addrs.insert(
+            "PLAIN".into(),
+            AdvertisedAddress {
+                host: "h".into(),
+                port: 9092,
+            },
+        );
+        let ts = crate::crd::kafka::TieredStorage {
+            kind: crate::crd::kafka::TieredStorageType::S3,
+            s3: Some(crate::crd::kafka::S3StorageSpec {
+                bucket: "b".into(),
+                region: "r".into(),
+                ..Default::default()
+            }),
+        };
+        let t = render_broker_toml(
+            0,
+            &[synthesized_default_listener()],
+            &addrs,
+            "PLAIN",
+            &std::collections::BTreeMap::new(),
+            None,
+            None,
+            false,
+            None,
+            Some(&ts),
+        );
+        assert!(t.contains("[remote_storage.s3]"));
+        assert!(t.contains("bucket = \"b\""));
+        assert!(t.contains("region = \"r\""));
+        assert!(!t.contains("prefix ="), "no prefix:\n{t}");
+        assert!(!t.contains("endpoint ="), "no endpoint:\n{t}");
+        assert!(!t.contains("allow_http"), "no allow_http:\n{t}");
+        assert!(
+            !t.contains("multipart_threshold"),
+            "no multipart_threshold:\n{t}"
+        );
+        assert!(
+            !t.contains("multipart_chunk_size"),
+            "no multipart_chunk_size:\n{t}"
+        );
+        // S3 must NOT render the Local `storage_dir` key.
+        assert!(
+            !t.contains("storage_dir"),
+            "S3 must not render storage_dir:\n{t}"
+        );
+        // Broker round-trip.
+        let parsed: crabka_broker::file_config::FileConfig =
+            toml::from_str(&t).expect("rendered TOML must parse with broker FileConfig");
+        let s3 = parsed
+            .remote_storage
+            .expect("[remote_storage] round-trips")
+            .s3
+            .expect("[remote_storage.s3] round-trips");
+        assert_eq!(s3.bucket, "b");
+        assert_eq!(s3.region, "r");
+    }
+
+    /// Reserved TOML metacharacters (`"`, `\`) in a user-supplied
+    /// string field must be escaped, not pass through verbatim — a
+    /// stray quote in `prefix` would otherwise produce TOML that
+    /// fails to parse at the broker.
+    #[test]
+    fn render_broker_toml_escapes_toml_metacharacters_in_s3_strings() {
+        let mut addrs = std::collections::BTreeMap::new();
+        addrs.insert(
+            "PLAIN".into(),
+            AdvertisedAddress {
+                host: "h".into(),
+                port: 9092,
+            },
+        );
+        let ts = crate::crd::kafka::TieredStorage {
+            kind: crate::crd::kafka::TieredStorageType::S3,
+            s3: Some(crate::crd::kafka::S3StorageSpec {
+                bucket: "b".into(),
+                region: "r".into(),
+                prefix: Some(r#"weird"prefix\"#.into()),
+                ..Default::default()
+            }),
+        };
+        let t = render_broker_toml(
+            0,
+            &[synthesized_default_listener()],
+            &addrs,
+            "PLAIN",
+            &std::collections::BTreeMap::new(),
+            None,
+            None,
+            false,
+            None,
+            Some(&ts),
+        );
+        // The rendered TOML must parse; if escaping is broken the
+        // broker's FileConfig would error out before the assertion below.
+        let parsed: crabka_broker::file_config::FileConfig =
+            toml::from_str(&t).expect("escaped TOML must parse");
+        let s3 = parsed
+            .remote_storage
+            .expect("[remote_storage]")
+            .s3
+            .expect("[remote_storage.s3]");
+        assert_eq!(s3.prefix.as_deref(), Some(r#"weird"prefix\"#));
     }
 
     #[test]
