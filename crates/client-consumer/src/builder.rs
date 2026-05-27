@@ -41,119 +41,144 @@ impl IsolationLevel {
     }
 }
 
-// ── subscription / assignment codec (ConsumerProtocol v1) ─────────────────
+// ── subscription / assignment codec (ConsumerProtocol v3) ─────────────────
 
-/// Encode a `ConsumerProtocolSubscription` v1 record:
-/// version (i16=1) + topics (array<STRING>) + `user_data` (BYTES=-1).
-pub(crate) fn encode_subscription(topics: &[String]) -> Bytes {
-    use bytes::BufMut;
-    let mut buf = BytesMut::new();
-    buf.put_i16(1);
-    let n = i32::try_from(topics.len()).expect("topics fit in i32");
-    buf.put_i32(n);
-    for t in topics {
-        let len = i16::try_from(t.len()).expect("topic name fits in i16");
-        buf.put_i16(len);
-        buf.put_slice(t.as_bytes());
+use crabka_protocol::owned::consumer_protocol_assignment::{
+    ConsumerProtocolAssignment, TopicPartition as AssignTopicPartition,
+};
+use crabka_protocol::owned::consumer_protocol_subscription::{
+    ConsumerProtocolSubscription, TopicPartition as SubTopicPartition,
+};
+use crabka_protocol::{Decode, Encode};
+
+const SUBSCRIPTION_WIRE_VERSION: i16 = 3;
+const ASSIGNMENT_WIRE_VERSION: i16 = 3;
+
+pub(crate) struct DecodedSubscription {
+    pub topics: Vec<String>,
+    pub owned: Vec<(String, i32)>,
+    pub generation_id: i32,
+    pub rack_id: Option<String>,
+}
+
+fn group_by_topic(pairs: &[(String, i32)]) -> std::collections::BTreeMap<&str, Vec<i32>> {
+    let mut by_topic: std::collections::BTreeMap<&str, Vec<i32>> =
+        std::collections::BTreeMap::new();
+    for (t, p) in pairs {
+        by_topic.entry(t.as_str()).or_default().push(*p);
     }
-    buf.put_i32(-1); // user_data null
+    by_topic
+}
+
+fn peek_version(bytes: &[u8]) -> i16 {
+    if bytes.len() < 2 {
+        return 0;
+    }
+    i16::from_be_bytes([bytes[0], bytes[1]])
+}
+
+pub(crate) fn encode_subscription(
+    topics: &[String],
+    owned: &[(String, i32)],
+    generation_id: i32,
+    rack_id: Option<&str>,
+) -> Bytes {
+    use bytes::BufMut;
+    let owned_partitions: Vec<SubTopicPartition> = group_by_topic(owned)
+        .into_iter()
+        .map(|(topic, partitions)| SubTopicPartition {
+            topic: topic.to_string(),
+            partitions,
+            unknown_tagged_fields: Default::default(),
+        })
+        .collect();
+    let msg = ConsumerProtocolSubscription {
+        topics: topics.to_vec(),
+        user_data: None,
+        owned_partitions,
+        generation_id,
+        rack_id: rack_id.map(str::to_string),
+        unknown_tagged_fields: Default::default(),
+    };
+    let mut buf = BytesMut::with_capacity(2 + msg.encoded_len(SUBSCRIPTION_WIRE_VERSION));
+    buf.put_i16(SUBSCRIPTION_WIRE_VERSION);
+    msg.encode(&mut buf, SUBSCRIPTION_WIRE_VERSION)
+        .expect("ConsumerProtocolSubscription encode");
     buf.freeze()
 }
 
-pub(crate) fn decode_subscription(bytes: &[u8]) -> Vec<String> {
-    use bytes::Buf;
-    let mut cur = bytes;
-    if cur.remaining() < 2 {
-        return Vec::new();
+pub(crate) fn decode_subscription(bytes: &[u8]) -> DecodedSubscription {
+    if bytes.len() < 2 {
+        return DecodedSubscription {
+            topics: Vec::new(),
+            owned: Vec::new(),
+            generation_id: -1,
+            rack_id: None,
+        };
     }
-    let _version = cur.get_i16();
-    if cur.remaining() < 4 {
-        return Vec::new();
-    }
-    let n = cur.get_i32();
-    let cap = usize::try_from(n.max(0)).unwrap_or(0);
-    let mut out = Vec::with_capacity(cap);
-    for _ in 0..n.max(0) {
-        if cur.remaining() < 2 {
-            break;
+    let version = peek_version(bytes).clamp(0, SUBSCRIPTION_WIRE_VERSION);
+    let mut cur = &bytes[2..];
+    let msg = match ConsumerProtocolSubscription::decode(&mut cur, version) {
+        Ok(m) => m,
+        Err(_) => {
+            return DecodedSubscription {
+                topics: Vec::new(),
+                owned: Vec::new(),
+                generation_id: -1,
+                rack_id: None,
+            };
         }
-        let len = cur.get_i16();
-        let len = usize::try_from(len.max(0)).unwrap_or(0);
-        if cur.remaining() < len {
-            break;
-        }
-        let mut s = vec![0u8; len];
-        cur.copy_to_slice(&mut s);
-        if let Ok(s) = String::from_utf8(s) {
-            out.push(s);
+    };
+    let mut owned = Vec::new();
+    for tp in msg.owned_partitions {
+        for p in tp.partitions {
+            owned.push((tp.topic.clone(), p));
         }
     }
-    out
+    DecodedSubscription {
+        topics: msg.topics,
+        owned,
+        generation_id: msg.generation_id,
+        rack_id: msg.rack_id,
+    }
 }
 
-/// Encode a `ConsumerProtocolAssignment` v1:
-/// version (i16=1) + `assigned_partitions` (array<{topic, partitions: array<i32>}>)
-/// + `user_data` (BYTES=-1).
 pub(crate) fn encode_assignment(partitions: &[(String, i32)]) -> Bytes {
     use bytes::BufMut;
-    let mut by_topic: std::collections::BTreeMap<&str, Vec<i32>> =
-        std::collections::BTreeMap::new();
-    for (t, p) in partitions {
-        by_topic.entry(t.as_str()).or_default().push(*p);
-    }
-    let mut buf = BytesMut::new();
-    buf.put_i16(1);
-    let n = i32::try_from(by_topic.len()).expect("topics fit in i32");
-    buf.put_i32(n);
-    for (topic, parts) in by_topic {
-        let len = i16::try_from(topic.len()).expect("topic name fits in i16");
-        buf.put_i16(len);
-        buf.put_slice(topic.as_bytes());
-        let pn = i32::try_from(parts.len()).expect("partition count fits in i32");
-        buf.put_i32(pn);
-        for p in parts {
-            buf.put_i32(p);
-        }
-    }
-    buf.put_i32(-1);
+    let assigned_partitions: Vec<AssignTopicPartition> = group_by_topic(partitions)
+        .into_iter()
+        .map(|(topic, partitions)| AssignTopicPartition {
+            topic: topic.to_string(),
+            partitions,
+            unknown_tagged_fields: Default::default(),
+        })
+        .collect();
+    let msg = ConsumerProtocolAssignment {
+        assigned_partitions,
+        user_data: None,
+        unknown_tagged_fields: Default::default(),
+    };
+    let mut buf = BytesMut::with_capacity(2 + msg.encoded_len(ASSIGNMENT_WIRE_VERSION));
+    buf.put_i16(ASSIGNMENT_WIRE_VERSION);
+    msg.encode(&mut buf, ASSIGNMENT_WIRE_VERSION)
+        .expect("ConsumerProtocolAssignment encode");
     buf.freeze()
 }
 
 pub(crate) fn decode_assignment(bytes: &[u8]) -> Vec<(String, i32)> {
-    use bytes::Buf;
-    let mut cur = bytes;
-    if cur.remaining() < 2 {
+    if bytes.len() < 2 {
         return Vec::new();
     }
-    let _version = cur.get_i16();
-    if cur.remaining() < 4 {
-        return Vec::new();
-    }
-    let topic_count = cur.get_i32();
+    let version = peek_version(bytes).clamp(0, ASSIGNMENT_WIRE_VERSION);
+    let mut cur = &bytes[2..];
+    let msg = match ConsumerProtocolAssignment::decode(&mut cur, version) {
+        Ok(m) => m,
+        Err(_) => return Vec::new(),
+    };
     let mut out = Vec::new();
-    for _ in 0..topic_count.max(0) {
-        if cur.remaining() < 2 {
-            break;
-        }
-        let len = cur.get_i16();
-        let len = usize::try_from(len.max(0)).unwrap_or(0);
-        if cur.remaining() < len {
-            break;
-        }
-        let mut name = vec![0u8; len];
-        cur.copy_to_slice(&mut name);
-        let Ok(topic) = String::from_utf8(name) else {
-            break;
-        };
-        if cur.remaining() < 4 {
-            break;
-        }
-        let pcount = cur.get_i32();
-        for _ in 0..pcount.max(0) {
-            if cur.remaining() < 4 {
-                break;
-            }
-            out.push((topic.clone(), cur.get_i32()));
+    for tp in msg.assigned_partitions {
+        for p in tp.partitions {
+            out.push((tp.topic.clone(), p));
         }
     }
     out
@@ -165,16 +190,58 @@ mod tests {
 
     #[test]
     fn subscription_round_trip() {
-        let s = encode_subscription(&["t1".into(), "t2".into()]);
+        let s = encode_subscription(&["t1".into(), "t2".into()], &[], -1, None);
         let decoded = decode_subscription(&s);
-        assert_eq!(decoded, vec!["t1", "t2"]);
+        assert_eq!(decoded.topics, vec!["t1", "t2"]);
     }
 
     #[test]
     fn subscription_empty_round_trip() {
-        let s = encode_subscription(&[]);
+        let s = encode_subscription(&[], &[], -1, None);
         let decoded = decode_subscription(&s);
-        assert!(decoded.is_empty());
+        assert!(decoded.topics.is_empty());
+        assert!(decoded.owned.is_empty());
+        assert_eq!(decoded.generation_id, -1);
+        assert_eq!(decoded.rack_id, None);
+    }
+
+    #[test]
+    fn subscription_v3_owned_partitions_round_trip() {
+        let owned = vec![("t".into(), 0), ("t".into(), 1), ("u".into(), 0)];
+        let s = encode_subscription(&["t".into(), "u".into()], &owned, -1, None);
+        let decoded = decode_subscription(&s);
+        let mut got = decoded.owned.clone();
+        got.sort();
+        let mut want = owned.clone();
+        want.sort();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn subscription_v3_generation_and_rack_round_trip() {
+        let s = encode_subscription(&["t".into()], &[], 42, Some("rack-a"));
+        let decoded = decode_subscription(&s);
+        assert_eq!(decoded.generation_id, 42);
+        assert_eq!(decoded.rack_id.as_deref(), Some("rack-a"));
+    }
+
+    #[test]
+    fn subscription_decodes_v1_payload() {
+        use bytes::BufMut;
+        let mut buf = BytesMut::new();
+        buf.put_i16(1);
+        buf.put_i32(1);
+        let t = "t1";
+        buf.put_i16(i16::try_from(t.len()).unwrap());
+        buf.put_slice(t.as_bytes());
+        buf.put_i32(-1); // user_data null
+        buf.put_i32(0); // owned_partitions empty (v1)
+        let payload = buf.freeze();
+        let decoded = decode_subscription(&payload);
+        assert_eq!(decoded.topics, vec!["t1"]);
+        assert!(decoded.owned.is_empty());
+        assert_eq!(decoded.generation_id, -1);
+        assert_eq!(decoded.rack_id, None);
     }
 
     #[test]
