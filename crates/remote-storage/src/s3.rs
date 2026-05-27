@@ -29,9 +29,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use object_store::path::Path as ObjectPath;
-use object_store::{
-    GetOptions, GetRange, ObjectStore, ObjectStoreExt, PutPayload, WriteMultipart,
-};
+use object_store::{GetOptions, GetRange, ObjectStore, ObjectStoreExt, PutPayload, WriteMultipart};
 
 use crate::error::RemoteStorageError;
 use crate::metadata::{CustomMetadata, RemoteLogSegmentMetadata};
@@ -247,11 +245,7 @@ impl S3RemoteStorage {
     /// blocks and pushes each into the [`WriteMultipart`] buffer; `finish`
     /// flushes the tail and completes the upload (aborting on failure so
     /// we don't leak in-progress parts in the bucket).
-    fn put_path_multipart(
-        &self,
-        key: &ObjectPath,
-        path: &Path,
-    ) -> Result<(), RemoteStorageError> {
+    fn put_path_multipart(&self, key: &ObjectPath, path: &Path) -> Result<(), RemoteStorageError> {
         let file = std::fs::File::open(path)?;
         let store = self.store.clone();
         let key = key.clone();
