@@ -33,19 +33,25 @@ fn rust_decode<T: for<'a> Decode<'a>>(bytes: &[u8], version: i16) -> T {
 
 /// Oracle JSON for a default `FetchRequest` covering v0–v3.
 ///
-/// The JVM `FetchRequestData` JSON deserializer requires every field that
-/// appears in the schema to be present in the input — even fields the wire
-/// encoder will gate off for older versions. `maxBytes` exists on the schema
-/// at `versions: "3+"` with default `0x7fffffff`; we always supply it here
-/// (the wire encoder correctly omits it for v<3). Same logic for
-/// `replicaId`, which has no default in the JVM schema.
+/// The JVM `FetchRequestData` JSON deserializer requires every schema field
+/// to be present in the input — even fields the wire encoder gates off for
+/// older versions. We supply each field at its schema default; the wire
+/// encoder correctly omits version-gated ones (e.g. `maxBytes` only at v3+,
+/// `isolationLevel` only at v4+).
 fn request_oracle_value() -> serde_json::Value {
     json!({
         "replicaId": -1,
         "maxWaitMs": 0,
         "minBytes": 0,
         "maxBytes": 2_147_483_647i32,
-        "topics": []
+        "isolationLevel": 0,
+        "sessionId": 0,
+        "sessionEpoch": -1,
+        "topics": [],
+        "forgottenTopicsData": [],
+        "rackId": "",
+        "clusterId": null,
+        "replicaState": {"replicaId": -1, "replicaEpoch": -1}
     })
 }
 
