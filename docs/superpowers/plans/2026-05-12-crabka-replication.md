@@ -1,5 +1,13 @@
 # `crabka-replication` (slice 8, basic) Implementation Plan
 
+## Implementation status
+
+**Slice tracked in STATUS.md as:** Not tracked as a dedicated STATUS.md header — covered implicitly by the protocol-foundation preamble or rolled into subsequent slices.
+
+**Incomplete / deferred steps:** None recorded in STATUS.md.
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Multi-broker partition replication for Crabka. When `CreateTopics` runs with `replication_factor=N`, the controller assigns N replicas per partition via deterministic round-robin over registered brokers; each follower broker runs per-partition replication tasks that issue standard Kafka `Fetch` requests to the leader (with `replica_id` set) and appends received batches to its local `crabka-log`. After this slice, a 3-broker cluster with `replication_factor=3` has each partition's records on every replica's local disk, byte-compatible with what `kafka-dump-log` produces.

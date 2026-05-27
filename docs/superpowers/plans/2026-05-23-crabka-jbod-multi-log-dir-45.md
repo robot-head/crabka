@@ -1,5 +1,19 @@
 # Slice 45 — JBOD / multi-log-dir + DescribeLogDirs (KIP-113) — Plan
 
+## Implementation status
+
+**Slice tracked in STATUS.md as:** `## Slice 45 — Crabka core: JBOD / multi-log-dir + DescribeLogDirs (KIP-113) (2026-05-23)`
+
+**Incomplete / deferred steps (out-of-scope follow-ups):**
+
+- AlterReplicaLogDirs move + future-log catch-up (closed by 2cba97a "Intra-broker log-dir reassignment (AlterReplicaLogDirs, KIP-113)")
+- total_bytes / usable_bytes via statvfs
+- kafka-reassign-partitions per-replica log_dirs
+- Offline-dir / KAFKA_STORAGE_ERROR handling
+- Operator JBOD surface is slice 46
+
+---
+
 Design: `docs/superpowers/specs/2026-05-23-crabka-jbod-multi-log-dir-45-design.md`
 
 Scope: read + placement half of KIP-113. Intra-broker move

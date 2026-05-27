@@ -1,5 +1,19 @@
 # Slice 49e — Broker KIP-368 SASL re-authentication Implementation Plan
 
+## Implementation status
+
+**Slice tracked in STATUS.md as:** ## Slice 49e — Broker: SASL re-authentication (KIP-368) (2026-05-24)
+
+**Incomplete / deferred steps (out-of-scope follow-ups):**
+
+- Mechanism-agnostic connections.max.reauth.ms broker config (would gate PLAIN/SCRAM too)
+- Operator-side maxSecondsWithoutReauthentication CRD field — closed by slice 50d
+- Server-side cap on session_lifetime_ms (oauthbearer.max.session.lifetime.ms defense-in-depth knob) — closed by slice 50d
+- Server-side minimum check (token too-short-lived, reject auth)
+- Client-side re-auth scheduler in Crabka's Kafka client crate (broker-only this slice)
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Ship KIP-368 SASL re-authentication on the broker for OAUTHBEARER connections: surface token `exp` from the three OAuth validators, populate `SaslAuthenticateResponse.session_lifetime_ms`, add a per-connection `tokio::select!` timer that closes the connection at session expiry unless the client sends a fresh `SaslHandshake`/`SaslAuthenticate` pair (in-band re-auth — same mechanism, same principal enforced).

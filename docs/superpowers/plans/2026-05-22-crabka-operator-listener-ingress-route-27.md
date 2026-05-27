@@ -1,5 +1,19 @@
 # Slice 27 — Ingress / Route external listeners — implementation plan
 
+## Implementation status
+
+**Slice tracked in STATUS.md as:** `## Slice 27 — Operator: Ingress / Route external listeners (2026-05-22)`
+
+**Incomplete / deferred steps (out-of-scope follow-ups):**
+
+- OpenShift-assigned Route hosts (slice 27 requires an explicit host, symmetric with ingress; reading Route.status.ingress[].host back + requeue is a follow-up needing a live OpenShift API to validate)
+- BYO per-listener server cert
+- Non-SNI ingress controllers (Kafka-over-Ingress fundamentally needs raw TLS passthrough)
+- Per-listener connection limits
+- kind-e2e for ingress (MetalLB + nginx ssl-passthrough) is a CI follow-up
+
+---
+
 **Design:** [`2026-05-22-crabka-operator-listener-ingress-route-27-design.md`](../specs/2026-05-22-crabka-operator-listener-ingress-route-27-design.md)
 
 Single cohesive PR in `crates/operator` (+ chart RBAC + CRD regen). The work is

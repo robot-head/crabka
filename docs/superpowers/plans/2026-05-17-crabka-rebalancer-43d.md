@@ -1,5 +1,20 @@
 # Slice 43d — Rebalancer capacity goals — Implementation Plan
 
+## Implementation status
+
+**Slice tracked in STATUS.md as:** Slice 43d — Rebalancer capacity goals (2026-05-17)
+
+**Incomplete / deferred steps (out-of-scope follow-ups):**
+
+- Per-partition usage data + the four metric-dependent capacity goals' real bodies (closed by slice 43e)
+- CpuUsage soft goal (closed by slice 43f)
+- Per-topic resource hints in the capacity config
+- Dynamic capacity discovery
+- Capacity-aware leader election
+- Known trade: ReplicaCapacity::is_satisfied returns true unconditionally because Goal::is_satisfied(&ClusterState) signature doesn't expose GoalContext
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. Per `CLAUDE.md`, dispatch independent tasks within a batch in parallel.
 
 **Goal:** Land five new hard capacity goals (`ReplicaCapacity` fully functional + `DiskCapacity` / `NetworkInCapacity` / `NetworkOutCapacity` / `CpuCapacity` as stubs pending 43e's per-partition metrics), backed by a per-broker YAML capacity config loaded from `--broker-capacity-file`.

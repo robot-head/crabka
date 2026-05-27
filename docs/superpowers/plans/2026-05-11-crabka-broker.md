@@ -1,5 +1,13 @@
 # `crabka-broker` (slice 4) Implementation Plan
 
+## Implementation status
+
+**Slice tracked in STATUS.md as:** Not tracked as a dedicated STATUS.md header — covered implicitly by the protocol-foundation preamble or rolled into subsequent slices.
+
+**Incomplete / deferred steps:** None recorded in STATUS.md.
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Ship a single-node `crabka-broker` MVP — library + binary — that an unmodified JVM Kafka client can produce records to and consume from. Acceptance: a `broker-jvm-acceptance` CI job runs `kafka-console-producer` and `kafka-console-consumer --partition 0 --from-beginning` from the official Apache Kafka image (via testcontainers) against a Rust broker on the host.

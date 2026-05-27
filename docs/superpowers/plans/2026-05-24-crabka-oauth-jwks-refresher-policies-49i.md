@@ -1,5 +1,17 @@
 # Slice 49i — OAUTHBEARER JWKS refresher policies Implementation Plan
 
+## Implementation status
+
+**Slice tracked in STATUS.md as:** ## Slice 49i — Operator + Broker: OAUTHBEARER JWKS refresher policies (2026-05-24)
+
+**Incomplete / deferred steps (out-of-scope follow-ups):**
+
+- Per-listener JWKS refreshers (broker still has one global [oauthbearer] block)
+- Reconcile-time validation against the actual IdP (operator just renders)
+- Slice 49f (PLAIN-with-OAuth-token) — indefinitely skipped
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Final OAUTHBEARER umbrella slice. Add Strimzi's `jwksMinRefreshPauseSeconds` (on-demand JWKS refresh rate-limit), `jwksExpirySeconds` (hard cache expiry — fails closed when IdP unreachable), and `jwksIgnoreKeyUse` (filter toggle for JWKS `use=enc` keys) on the broker + operator surfaces.

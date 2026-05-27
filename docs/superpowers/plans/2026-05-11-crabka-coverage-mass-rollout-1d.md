@@ -1,5 +1,13 @@
 # Mass Rollout (sub-plan 1d) Implementation Plan
 
+## Implementation status
+
+**Slice tracked in STATUS.md as:** Not tracked as a dedicated STATUS.md header — covered implicitly by the protocol-foundation preamble or rolled into subsequent slices.
+
+**Incomplete / deferred steps:** None recorded in STATUS.md.
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Turn on codegen for every active Kafka 4.2 schema (~190 messages) and prove byte-equality with the JVM `kafka-clients` 4.2.0 for every `(api_key, version)` pair.

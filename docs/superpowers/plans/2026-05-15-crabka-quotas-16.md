@@ -1,5 +1,19 @@
 # Slice 16: Client quotas (KIP-13 + KIP-124 + KIP-257) — Implementation Plan
 
+## Implementation status
+
+**Slice tracked in STATUS.md as:** `## Slice 16 — Client quotas (2026-05-15)`
+
+**Incomplete / deferred steps (out-of-scope follow-ups):**
+
+- Known limitation: client_id is currently empty in Produce/Fetch quota lookups (HandlerTable signature does not thread it through) — user-level + default quotas work, (user, client-id) tuple quotas do not fire on data-plane paths (deferred)
+- Known limitation: kafka-configs --describe --entity-type users calls DescribeUserScramCredentials (api_key 51) after fetching quotas — closed by slice 17a
+- Known limitation: throttle_time_ms in response only set for Produce + Fetch — other handlers absorb request_percentage delay silently (deferred)
+- Out of scope: `ip` entity + KIP-612 connection_creation_rate (closed by slice 16b)
+- KIP-599 controller_mutation_rate (closed by slice 16c)
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. Per `CLAUDE.md`, dispatch independent tasks within a batch in parallel.
 
 **Goal:** Implement Kafka client quotas — `AlterClientQuotas` (api_key 49) + `DescribeClientQuotas` (api_key 48) with three quota types (`producer_byte_rate`, `consumer_byte_rate`, `request_percentage`) and four entity scopes (user / client-id / (user, client-id) / default). Enforce via the slice-15b `TokenBucket` primitive; KIP-257 server-side throttle delays via `tokio::time::sleep`.

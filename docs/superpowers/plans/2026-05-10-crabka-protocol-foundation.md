@@ -1,5 +1,15 @@
 # crabka-protocol Foundation Implementation Plan
 
+## Implementation status
+
+**Slice tracked in STATUS.md as:** "Crabka Protocol Foundation — Acceptance Gate Status (2026-05-10)" (preamble at top of STATUS.md).
+
+**Incomplete / deferred steps (out-of-scope follow-ups):**
+
+- Next step — extend codegen and tests to the remaining ~99 Kafka message types via follow-up crabka-protocol-coverage plan.
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Stand up the `crabka-protocol` crate with primitives, traits, schema-driven codegen for two API flavors (owned and borrowed), and three test layers (unit / proptest / JVM-differential), proven end-to-end on the `ApiVersions` request and response.

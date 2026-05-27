@@ -1,5 +1,18 @@
 # Slice 15b: Replication throttling (KIP-73) — Implementation Plan
 
+## Implementation status
+
+**Slice tracked in STATUS.md as:** `## Slice 15b — Replication throttling (KIP-73) (2026-05-15)`
+
+**Incomplete / deferred steps (out-of-scope follow-ups):**
+
+- Known follow-ups: DescribeConfigs config_source=2 for broker resources (canonical value is 3 DYNAMIC_BROKER_CONFIG) — JVM tools tolerate either, cleanup deferred
+- Metrics emission (replication_bytes_in/out) deferred to dedicated observability slice
+- KIP-113 log-dir throttle (replica.alter.log.dirs.io.max.bytes.per.second) accepted but not enforced
+- Out of scope: per-listener config refresh, dynamic reload of non-throttle broker configs
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. Per `CLAUDE.md`, dispatch independent tasks within a batch in parallel.
 
 **Goal:** Implement KIP-73 throttled inter-broker replication. Persist the four KIP-73 configs (2 topic-level + 2 broker-level), enforce them via a token-bucket rate limiter on the Fetch path, and surface the values via `DescribeConfigs`. Close the slice-15 T11 known-limitation gap.

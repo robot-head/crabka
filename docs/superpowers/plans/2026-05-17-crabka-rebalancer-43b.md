@@ -1,5 +1,20 @@
 # Slice 43b — Rebalancer execute path — Implementation Plan
 
+## Implementation status
+
+**Slice tracked in STATUS.md as:** Slice 43b — Rebalancer execute path (2026-05-17)
+
+**Incomplete / deferred steps (out-of-scope follow-ups):**
+
+- Multi-replica HA (later slice)
+- Metric scraping for usage goals (closed by slice 43e)
+- Rack-aware / capacity / usage / CPU / anomaly goals (closed by slices 43c–43g)
+- Operator KafkaRebalance CRD (closed by slice 44)
+- Pause/step-through
+- Adaptive throttle
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. Per `CLAUDE.md`, dispatch independent tasks within a batch in parallel.
 
 **Goal:** Land the rebalancer's execute path — `ExecuteProposal` Connect RPC drives `AlterPartitionReassignments` (KIP-455) under a `IncrementalAlterConfigs`-managed KIP-73 throttle, with progress polling, atomic on-disk persistence, restart resume, a `CancelExecution` RPC, and the production Helm chart at `charts/crabka-rebalancer/` with helm-unittest tests in CI.

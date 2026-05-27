@@ -1,5 +1,13 @@
 # Crabka Operator Slice 40 — `Kafka.spec.metricsConfig` (PodMonitor / ServiceMonitor)
 
+## Implementation status
+
+**Slice tracked in STATUS.md as:** Not tracked as a dedicated STATUS.md header — covered implicitly by the protocol-foundation preamble or rolled into subsequent slices.
+
+**Incomplete / deferred steps:** None recorded in STATUS.md.
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development`. Per CLAUDE.md, dispatch tasks within a batch in parallel; sequential between batches. Steps use checkbox (`- [ ]`) syntax.
 
 **Goal:** Surface the slice-39 broker `/metrics` endpoint through the `Kafka` CRD: opt-in prometheus-operator `PodMonitor` / `ServiceMonitor` generation with a `Kafka.spec.metricsConfig` field. Brokers expose `/metrics` on `:9404` only when opted in (zero-roll upgrade for clusters that don't use it).

@@ -1,5 +1,18 @@
 # Slice 49g — OAUTHBEARER validation policies Implementation Plan
 
+## Implementation status
+
+**Slice tracked in STATUS.md as:** ## Slice 49g — Operator + Broker: OAUTHBEARER validation policies (customClaimCheck JsonPath + validTokenType) (2026-05-24)
+
+**Incomplete / deferred steps (out-of-scope follow-ups):**
+
+- Slice 49h (claims mapping — groupsClaim, groupsClaimDelimiter, fallbackUserNameClaim, fallbackUserNamePrefix) — closed by slice 49h
+- Slice 49i (JWKS refresher policies — jwksMinRefreshPauseSeconds, jwksExpirySeconds, jwksIgnoreKeyUse) — closed by slice 49i
+- Slice 49f (PLAIN-with-OAuth-token) — skipped indefinitely
+- Semantic divergence from Strimzi (acknowledged): Crabka uses jsonpath-rust 1.0 (RFC 9535) — NOT the Jayway dialect Strimzi inherits; operators porting Strimzi expressions must rewrite filter syntax
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Ship Strimzi's full `customClaimCheck` (JsonPath expression via `jsonpath-rust`) and `validTokenType` (JWT `typ` header check) on the broker + operator surfaces. Replaces slice 50's typed `customClaimCheck: { scope, scope_claim }` stub with the full Strimzi string-expression shape.

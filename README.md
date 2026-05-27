@@ -49,19 +49,26 @@ oracle and JVM acceptance tests.
 What works today:
 
 - Single-broker and multi-broker clusters with KRaft metadata, replication, ISR
-  maintenance, leader election, and partition reassignment.
+  maintenance, leader election, partition reassignment, JBOD (multi-log-dir)
+  with intra-broker log-dir reassignment (`AlterReplicaLogDirs`, KIP-113).
 - Idempotent and transactional produce/consume (exactly-once), consumer groups
-  with the classic rebalance protocol, and log compaction.
-- TLS / mTLS, SASL (PLAIN, SCRAM-256/512, OAUTHBEARER), ACL authorization, and
-  the full client-quota surface.
+  with both the classic (eager) and cooperative-incremental (KIP-429) rebalance
+  protocols, static membership (KIP-345), incremental fetch sessions (KIP-227),
+  and log compaction.
+- TLS / mTLS, SASL (PLAIN, SCRAM-256/512, OAUTHBEARER with JWKS / signed-JWT
+  and opaque-token introspection), SASL re-authentication (KIP-368), delegation
+  tokens (KIP-48 / KIP-373), ACL authorization, the OPA cluster-authorizer
+  bridge (slice 53), and the full client-quota surface.
 - Native Rust producer / consumer / admin clients.
-- A Kubernetes operator and a Cruise-Control-equivalent rebalancer.
+- A Kubernetes operator (Strimzi-equivalent CRDs, including a tiered-storage
+  surface) and a Cruise-Control-equivalent rebalancer.
 
 Notable gaps (see the [KIP matrix](#kip-implementation-status) for detail): the
-next-gen consumer group protocol (KIP-848), tiered storage (KIP-405), share
-groups / queues (KIP-932), delegation tokens, SASL/GSSAPI (Kerberos), and
-dynamic KRaft quorum membership (KIP-853). ZooKeeper mode and ZK→KRaft migration
-are deliberately out of scope — Crabka is KRaft-only.
+next-gen consumer group protocol (KIP-848), tiered storage (KIP-405) — the
+`crabka-remote-storage-topic` (KIP-405 production RLMM) crate is in tree but
+not yet wired into the broker — share groups / queues (KIP-932), SASL/GSSAPI
+(Kerberos), and dynamic KRaft quorum membership (KIP-853). ZooKeeper mode and
+ZK→KRaft migration are deliberately out of scope — Crabka is KRaft-only.
 
 ## Architecture
 
@@ -119,7 +126,7 @@ implements it today. Legend: ✅ implemented · ⚠️ partial · ❌ not yet ·
 | JVM Java client interoperability | ✅ |
 | Native Rust producer / consumer / admin clients | ✅ |
 | Broker-side recompression (`compression.type` per topic) | ✅ |
-| Incremental fetch sessions (KIP-227) | ❌ |
+| Incremental fetch sessions (KIP-227) | ✅ |
 
 ### Storage
 
@@ -132,8 +139,8 @@ implements it today. Legend: ✅ implemented · ⚠️ partial · ❌ not yet ·
 | Leader-epoch checkpoint file (KIP-101 / KIP-279) | ✅ |
 | Log compaction (`cleanup.policy=compact`) | ✅ |
 | Multiple log directories (JBOD) + `DescribeLogDirs` (KIP-113) | ✅ |
-| Intra-broker log-dir reassignment (`AlterReplicaLogDirs`, KIP-113) | ❌ |
-| Message format v0/v1 down-conversion | ❌ |
+| Intra-broker log-dir reassignment (`AlterReplicaLogDirs`, KIP-113) | ✅ |
+| Message format v0/v1 down-conversion | ⚠️ |
 | Tiered storage (KIP-405) | ⚠️ |
 
 ### Producer
@@ -158,7 +165,7 @@ implements it today. Legend: ✅ implemented · ⚠️ partial · ❌ not yet ·
 | Classic (eager) group rebalance protocol | ✅ |
 | `isolation.level=read_committed` (LSO clamping) | ✅ |
 | Cooperative incremental rebalance (KIP-429) | ✅ |
-| Static membership (KIP-345) | ❌ |
+| Static membership (KIP-345) | ✅ |
 | `OffsetDelete` admin API (KIP-496) | ✅ |
 | Next-gen consumer group protocol (KIP-848) | ❌ |
 
@@ -220,9 +227,9 @@ implements it today. Legend: ✅ implemented · ⚠️ partial · ❌ not yet ·
 | `AlterUserScramCredentials` / `DescribeUserScramCredentials` (KIP-554) | ✅ |
 | mTLS client authentication | ✅ |
 | TLS cert hot-reload (non-disruptive rotation) | ✅ |
-| SASL re-authentication (KIP-368) | ❌ |
+| SASL re-authentication (KIP-368) | ✅ |
 | SASL/GSSAPI (Kerberos) | ❌ |
-| Delegation tokens (KIP-48 / KIP-373) | ❌ |
+| Delegation tokens (KIP-48 / KIP-373) | ✅ |
 
 ### Authorization
 
@@ -315,7 +322,7 @@ KIPs. Legend: ✅ implemented · ⚠️ partial · ❌ not yet · ⛔ out of sco
 | [KIP-32](https://cwiki.apache.org/confluence/display/KAFKA/KIP-32) | Add timestamps to messages | ✅ |
 | [KIP-82](https://cwiki.apache.org/confluence/display/KAFKA/KIP-82) | Add record headers | ✅ |
 | [KIP-219](https://cwiki.apache.org/confluence/display/KAFKA/KIP-219) | Improve quota communication (throttle-then-respond) | ⚠️ |
-| [KIP-227](https://cwiki.apache.org/confluence/display/KAFKA/KIP-227) | Incremental fetch sessions | ❌ |
+| [KIP-227](https://cwiki.apache.org/confluence/display/KAFKA/KIP-227) | Incremental fetch sessions | ✅ |
 | [KIP-482](https://cwiki.apache.org/confluence/display/KAFKA/KIP-482) | Optional tagged fields (flexible versions) | ✅ |
 | [KIP-511](https://cwiki.apache.org/confluence/display/KAFKA/KIP-511) | Collect & expose client name and version | ⚠️ |
 | [KIP-559](https://cwiki.apache.org/confluence/display/KAFKA/KIP-559) | Make the protocol friendlier with L7 proxies | ⚠️ |
@@ -340,7 +347,7 @@ KIPs. Legend: ✅ implemented · ⚠️ partial · ❌ not yet · ⛔ out of sco
 |-----|-------|:------:|
 | [KIP-62](https://cwiki.apache.org/confluence/display/KAFKA/KIP-62) | Background-thread heartbeats (session vs poll timeout) | ✅ |
 | [KIP-394](https://cwiki.apache.org/confluence/display/KAFKA/KIP-394) | Require `member.id` for initial JoinGroup | ✅ |
-| [KIP-345](https://cwiki.apache.org/confluence/display/KAFKA/KIP-345) | Static membership | ❌ |
+| [KIP-345](https://cwiki.apache.org/confluence/display/KAFKA/KIP-345) | Static membership | ✅ |
 | [KIP-429](https://cwiki.apache.org/confluence/display/KAFKA/KIP-429) | Cooperative incremental rebalance protocol | ✅ |
 | [KIP-496](https://cwiki.apache.org/confluence/display/KAFKA/KIP-496) | `OffsetDelete` admin API | ✅ |
 | [KIP-848](https://cwiki.apache.org/confluence/display/KAFKA/KIP-848) | Next-generation consumer rebalance protocol | ❌ |
@@ -351,7 +358,7 @@ KIPs. Legend: ✅ implemented · ⚠️ partial · ❌ not yet · ⛔ out of sco
 |-----|-------|:------:|
 | [KIP-204](https://cwiki.apache.org/confluence/display/KAFKA/KIP-204) | `DeleteRecords` via the Admin client | ✅ |
 | [KIP-112](https://cwiki.apache.org/confluence/display/KAFKA/KIP-112) | Handle disk failure for JBOD | ⚠️ |
-| [KIP-113](https://cwiki.apache.org/confluence/display/KAFKA/KIP-113) | Replica movement between log directories (JBOD) | ⚠️ |
+| [KIP-113](https://cwiki.apache.org/confluence/display/KAFKA/KIP-113) | Replica movement between log directories (JBOD) | ✅ |
 | [KIP-405](https://cwiki.apache.org/confluence/display/KAFKA/KIP-405) | Kafka tiered storage | ⚠️ |
 
 ### Replication & availability
@@ -407,9 +414,9 @@ KIPs. Legend: ✅ implemented · ⚠️ partial · ❌ not yet · ⛔ out of sco
 | [KIP-84](https://cwiki.apache.org/confluence/display/KAFKA/KIP-84) | SASL/SCRAM | ✅ |
 | [KIP-152](https://cwiki.apache.org/confluence/display/KAFKA/KIP-152) | SASL authentication failure diagnostics | ✅ |
 | [KIP-255](https://cwiki.apache.org/confluence/display/KAFKA/KIP-255) | SASL/OAUTHBEARER | ✅ |
-| [KIP-368](https://cwiki.apache.org/confluence/display/KAFKA/KIP-368) | Periodic SASL re-authentication | ❌ |
-| [KIP-48](https://cwiki.apache.org/confluence/display/KAFKA/KIP-48) | Delegation token support | ❌ |
-| [KIP-373](https://cwiki.apache.org/confluence/display/KAFKA/KIP-373) | Delegation tokens for other users | ❌ |
+| [KIP-368](https://cwiki.apache.org/confluence/display/KAFKA/KIP-368) | Periodic SASL re-authentication | ✅ |
+| [KIP-48](https://cwiki.apache.org/confluence/display/KAFKA/KIP-48) | Delegation token support | ✅ |
+| [KIP-373](https://cwiki.apache.org/confluence/display/KAFKA/KIP-373) | Delegation tokens for other users | ✅ |
 
 ### Authorization (ACLs)
 

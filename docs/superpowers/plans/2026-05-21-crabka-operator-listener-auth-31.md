@@ -1,5 +1,21 @@
 # Slice 31 — Operator: Listener auth wiring (TLS + SCRAM) — Implementation Plan
 
+## Implementation status
+
+**Slice tracked in STATUS.md as:** `## Slice 31 — Operator: Listener auth wiring (TLS + SCRAM) (2026-05-22)`
+
+**Incomplete / deferred steps (out-of-scope follow-ups):**
+
+- BYO server cert (brokerCertChainAndKey)
+- OAuth/OIDC listener auth (closed by slice 49 umbrella)
+- Custom authentication plugin
+- Ingress/Route listener TLS (closed by slice 27)
+- Non-disruptive auth hot-reload
+- PKCS#12 user keystore bundle (slice-37 follow-up)
+- NodePort SAN validation kind-e2e deferred
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Surface Crabka's per-listener auth (TLS, mTLS, SCRAM-SHA-512, SCRAM-SHA-256) through `Kafka.spec.listeners[].authentication`, render per-listener broker TOML, extend per-broker cert SANs for external listeners, and prove end-to-end with kind e2e for SCRAM-SSL internal, mTLS internal, and SCRAM-SSL NodePort.

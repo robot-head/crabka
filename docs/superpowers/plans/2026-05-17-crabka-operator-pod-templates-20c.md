@@ -1,5 +1,13 @@
 # Crabka Operator Slice 20c — Pod templates on `KafkaNodePool`
 
+## Implementation status
+
+**Slice tracked in STATUS.md as:** Not tracked as a dedicated STATUS.md header — covered implicitly by the protocol-foundation preamble or rolled into subsequent slices.
+
+**Incomplete / deferred steps:** None recorded in STATUS.md.
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development. Per CLAUDE.md, dispatch batches in parallel where file sets don't overlap. Steps use checkbox (`- [ ]`) syntax.
 
 **Goal:** Add `spec.template` to `KafkaNodePool` so operators can control pod-level scheduling (`affinity`, `tolerations`, `nodeSelector`) and add labels/annotations to the pod template.

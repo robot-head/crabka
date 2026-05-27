@@ -1,5 +1,21 @@
 # Slice 43e — Rebalancer usage scraper + usage goals — Implementation Plan
 
+## Implementation status
+
+**Slice tracked in STATUS.md as:** Slice 43e — Rebalancer usage scraper + soft usage goals (2026-05-17)
+
+**Incomplete / deferred steps (out-of-scope follow-ups):**
+
+- CpuUsage soft goal + real CpuCapacity body (closed by slice 43f)
+- Discovery of scrape targets via Metadata (currently operator-supplied)
+- Per-topic resource hints in capacity config (usage metrics provide the real input now)
+- Anomaly detection (closed by slice 43g)
+- Operator KafkaRebalance CRD (closed by slice 44)
+- Known risks: memory footprint of per-series ring buffer scales with brokers × partitions × 3 metrics × (retention / scrape_interval)
+- Counter resets detected as None until two post-reset samples accumulate
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. Per `CLAUDE.md`, dispatch independent tasks within a batch in parallel.
 
 **Goal:** Wire per-partition metrics emission on the broker (the `43e-core` half) and per-partition usage scraping + rolling-window storage + four soft usage goals + metric-driven bodies for three 43d capacity stubs on the rebalancer (the `43e` half) — together in one slice.

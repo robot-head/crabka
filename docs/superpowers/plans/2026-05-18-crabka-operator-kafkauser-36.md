@@ -1,5 +1,13 @@
 # Crabka Operator Slice 36 — `KafkaUser` CRD: SCRAM-SHA-512 + ACLs (plan)
 
+## Implementation status
+
+**Slice tracked in STATUS.md as:** Not tracked as a dedicated STATUS.md header — covered implicitly by the protocol-foundation preamble or rolled into subsequent slices.
+
+**Incomplete / deferred steps:** None recorded in STATUS.md.
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development`. Per CLAUDE.md, dispatch tasks within a batch in parallel; sequential between batches. Steps use checkbox (`- [ ]`) syntax.
 
 **Goal:** Land the `KafkaUser` CRD with SCRAM-SHA-512 auth + simple ACL

@@ -1,5 +1,19 @@
 # Slice 50b: Operator — Listener OAuth `tlsTrustedCertificates` — Implementation plan
 
+## Implementation status
+
+**Slice tracked in STATUS.md as:** `## Slice 50b — Operator: Listener OAuth `tlsTrustedCertificates` (2026-05-23)`
+
+**Incomplete / deferred steps (out-of-scope follow-ups):**
+
+- Source-Secret reflector for instant rotation pickup
+- Cross-namespace Secret refs
+- mTLS to the IdP
+- Per-listener [oauthbearer] config (cross-listener canonical-tuple rule still rejects divergent OAuth configs — future 49h)
+- Active managed-Secret cleanup when tlsTrustedCertificates is emptied mid-life (cascades on Kafka CR delete via owner-ref)
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (matches the project's CLAUDE.md mandate to execute in parallel batches). Steps use the project's compact-batch style — each T is one focused PR-worth of work, file-conflict-disjoint within a batch.
 
 **Design:** `docs/superpowers/specs/2026-05-23-crabka-operator-oauth-tls-trust-50b-design.md`

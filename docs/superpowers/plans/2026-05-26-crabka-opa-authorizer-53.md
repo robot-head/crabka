@@ -1,5 +1,21 @@
 # Slice 53: OPA authorizer bridge — Implementation Plan
 
+## Implementation status
+
+**Slice tracked in STATUS.md as:** ## Slice 53 — Operator + Broker: OPA-style cluster authorizer bridge (2026-05-25)
+
+**Incomplete / deferred steps (out-of-scope follow-ups):**
+
+- Known limitations / honest follow-ups: kind-opa-authorization is smoke-only — OPA wire-enforcement happy/deny paths covered by broker unit + integration tests, not e2e (would require fixing a pre-existing SCRAM-SHA-512+TLS Metadata-listener advertising issue)
+- No OPA mTLS — url is plain HTTP/HTTPS today; mTLS needs cert plumbing into reqwest::ClientBuilder
+- No OPA-bundle awareness — operators wire policy bundle into OPA externally
+- Sync→async bridge — OpaAuthorizer::authorize does block_in_place + Handle::block_on per cache miss
+- Mutex<LruCache> thundering-herd — N concurrent misses for the same key serialise on the cache write-lock
+- No decision-log shipping — broker doesn't forward OPA's decision audit log
+- Per-broker cache — same decision is re-fetched from OPA on cluster cold-start (no cross-broker warmup)
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to execute this plan task-by-task in parallel batches where file sets don't overlap.
 
 **Goal:** Replace-style cluster authorizer abstraction: `Authorizer` trait, three impls (`AllowAllAuthorizer`, `SimpleAclAuthorizer`, `OpaAuthorizer`), `Kafka.spec.authorization` operator CRD, kind-OPA e2e, and removal of the slice-51b "no super-users + no ACLs → allow" compat shim.
