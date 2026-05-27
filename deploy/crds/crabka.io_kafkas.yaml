@@ -602,6 +602,59 @@ spec:
                   support pairs with the production RLMM (48f).
                 nullable: true
                 properties:
+                  metadataManager:
+                    description: |-
+                      Slice 48h (KIP-405): pick the
+                      [`RemoteLogMetadataManager`](crabka_remote_storage::RemoteLogMetadataManager)
+                      the broker pods run. When absent, every broker pod uses the
+                      in-memory fixture (compatible with 48g's emptyDir-only
+                      deployment). When set to `Topic`, the broker activates the
+                      `crabka_remote_storage_topic::TopicBasedRemoteLogMetadataManager`
+                      against the internal `__remote_log_metadata` topic, so
+                      tier-segment metadata survives pod restarts and is consistent
+                      across brokers in the cluster.
+                    nullable: true
+                    properties:
+                      topic:
+                        description: |-
+                          Topic-backed tuning. Required when `kind == Topic`, must be
+                          absent otherwise.
+                        nullable: true
+                        properties:
+                          bootstrap:
+                            description: |-
+                              `host:port` the broker pod dials to reach its own listener for
+                              publishing / consuming `__remote_log_metadata`. Typically the
+                              pod's loopback inter-broker listener (e.g. `127.0.0.1:9094`).
+                            type: string
+                          numPartitions:
+                            description: |-
+                              Partition count for `__remote_log_metadata` on first creation.
+                              Defaults to 50 (Kafka's
+                              `remote.log.metadata.topic.num.partitions`).
+                            format: int32
+                            nullable: true
+                            type: integer
+                          replication:
+                            description: |-
+                              Replication factor for `__remote_log_metadata` on first
+                              creation. Defaults to 3 (Kafka's
+                              `remote.log.metadata.topic.replication.factor`).
+                            format: int32
+                            nullable: true
+                            type: integer
+                        required:
+                        - bootstrap
+                        type: object
+                      type:
+                        description: Implementation selector.
+                        enum:
+                        - InMemory
+                        - Topic
+                        type: string
+                    required:
+                    - type
+                    type: object
                   s3:
                     description: |-
                       S3-backend tuning. Required when `kind == S3`, must be absent
