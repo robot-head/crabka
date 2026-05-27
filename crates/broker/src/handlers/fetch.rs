@@ -75,6 +75,7 @@ pub(crate) async fn handle(
 ) -> Result<Bytes, BrokerError> {
     let partitions = broker.partitions.clone();
     let controller = broker.controller.clone();
+    let log_dir_status = broker.log_dir_status.clone();
     let mut cur: &[u8] = req_bytes;
     let req: FetchRequest = if version < 4 {
         crabka_protocol::kafka_3_6_2::owned::fetch_request::FetchRequest::decode(&mut cur, version)?
@@ -287,6 +288,30 @@ pub(crate) async fn handle(
                     });
                     continue;
                 }
+            }
+
+            // KIP-113 offline-dir handling: refuse to read partitions on
+            // a log dir flagged offline. The Log handle is still open and
+            // a read would (probably) succeed against the page cache,
+            // but serving stale bytes from a dir we've told the rest of
+            // the cluster is unhealthy hides the failure.
+            if let Some(part) = part_opt.as_ref()
+                && log_dir_status.is_offline(&part.log_dir.load())
+            {
+                out.error_code = codes::KAFKA_STORAGE_ERROR;
+                pending.push(PendingRead {
+                    topic_name: topic_name.clone(),
+                    topic_id,
+                    partition_index: idx,
+                    fetch_offset,
+                    max_bytes,
+                    read_committed,
+                    is_follower_fetch,
+                    partition: None,
+                    out,
+                    cpu_micros: 0,
+                });
+                continue;
             }
 
             // Restore follower-fetch HW maintenance (slice-10a removed this

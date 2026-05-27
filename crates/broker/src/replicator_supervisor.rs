@@ -83,6 +83,7 @@ pub(crate) fn materialize_partition(
     partition: i32,
     log_dirs: &[PathBuf],
     log_config: &LogConfig,
+    log_dir_status: &crate::log_dir_status::LogDirRegistry,
 ) -> Result<(), String> {
     use dashmap::mapref::entry::Entry;
 
@@ -103,7 +104,13 @@ pub(crate) fn materialize_partition(
                 .parent()
                 .expect("placed partition dir always has a parent log.dir")
                 .to_path_buf();
-            let part = spawn_partition(topic.to_string(), partition, owning_dir, log);
+            let part = spawn_partition(
+                topic.to_string(),
+                partition,
+                owning_dir,
+                log,
+                log_dir_status.clone(),
+            );
             slot.insert(part);
             Ok(())
         }
@@ -163,6 +170,11 @@ pub(crate) struct ReplicatorSupervisor {
     /// KIP-73: broker-wide throttle state forwarded to each spawned
     /// replicator so they can consult the follower-in token bucket.
     throttle_state: Arc<ThrottleState>,
+    /// KIP-113 runtime offline-dir registry. Forwarded into each
+    /// `materialize_partition` + spawned `Replicator::Config` so the
+    /// partition writer's storage-failure path can flip the dir
+    /// offline broker-wide.
+    log_dir_status: crate::log_dir_status::LogDirRegistry,
 }
 
 impl ReplicatorSupervisor {
@@ -180,6 +192,7 @@ impl ReplicatorSupervisor {
         inter_broker_listener_protocol: crabka_security::ListenerProtocol,
         inter_broker_listener_name: String,
         throttle_state: Arc<ThrottleState>,
+        log_dir_status: crate::log_dir_status::LogDirRegistry,
     ) -> Self {
         Self {
             node_id,
@@ -196,6 +209,7 @@ impl ReplicatorSupervisor {
             inter_broker_listener_protocol,
             inter_broker_listener_name,
             throttle_state,
+            log_dir_status,
         }
     }
 
@@ -338,6 +352,7 @@ impl ReplicatorSupervisor {
                 inter_broker_listener_protocol: self.inter_broker_listener_protocol,
                 throttle_state: self.throttle_state.clone(),
                 controller: self.controller.clone(),
+                log_dir_status: self.log_dir_status.clone(),
             }));
         }
 
@@ -358,6 +373,7 @@ impl ReplicatorSupervisor {
             partition,
             &self.log_dirs,
             &self.log_config,
+            &self.log_dir_status,
         )
     }
 
@@ -483,6 +499,7 @@ mod tests {
             0,
             &[dir.path().to_path_buf()],
             &LogConfig::default(),
+            &crate::log_dir_status::LogDirRegistry::default(),
         )
         .expect("materialize");
         let part = partitions
@@ -593,6 +610,7 @@ mod tests {
             0,
             &[dir.path().to_path_buf()],
             &LogConfig::default(),
+            &crate::log_dir_status::LogDirRegistry::default(),
         )
         .expect("materialize");
 
@@ -647,6 +665,7 @@ mod tests {
             0,
             &[dir.path().to_path_buf()],
             &LogConfig::default(),
+            &crate::log_dir_status::LogDirRegistry::default(),
         )
         .expect("materialize");
 

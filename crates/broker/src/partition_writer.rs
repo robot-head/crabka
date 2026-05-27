@@ -12,8 +12,33 @@ use arc_swap::ArcSwap;
 use crabka_log::Log;
 use tokio::sync::{Notify, mpsc};
 
+use crate::log_dir_status::LogDirRegistry;
 use crate::partition::{ProduceJob, SwapOutcome, WriterMessage};
 use crate::replica_state::ReplicaState;
+
+/// Inspect a `BrokerError` returned by a partition-writer mutation
+/// (`append`, `append_at`, `truncate_to`, `reset_to`, `compact`,
+/// `trim_to_offset`) and, if it looks like an underlying storage
+/// failure (a `LogError::Io(_)`), mark the partition's owning log dir
+/// offline on the broker-wide registry.
+///
+/// We err on the side of pessimism: any `io::Error` propagated by the
+/// log layer is a credible "the disk just went sideways" signal. A
+/// false positive (e.g. a transient `ENOENT` from a misconfigured
+/// scratch path) costs one partition's availability — KIP-113 fail-over
+/// elsewhere on the cluster keeps the topic live. A false negative
+/// silently corrupts produce acks, which is the failure mode this
+/// whole slice exists to prevent.
+fn flag_storage_failure(
+    err: &crate::error::BrokerError,
+    log_dir: &ArcSwap<PathBuf>,
+    log_dir_status: &LogDirRegistry,
+) {
+    if let crate::error::BrokerError::Log(crabka_log::LogError::Io(io_err)) = err {
+        let dir = log_dir.load();
+        log_dir_status.mark_offline(&dir, &format!("partition write/fsync failed: {io_err}"));
+    }
+}
 
 /// Loop on the receive side of the partition's `WriterMessage` channel.
 /// Exits when the channel closes (every sender dropped).
@@ -25,6 +50,7 @@ pub async fn run(
     append_notify: Arc<Notify>,
     replica_state: Arc<tokio::sync::Mutex<ReplicaState>>,
     hw_advance_notify: Arc<Notify>,
+    log_dir_status: LogDirRegistry,
 ) {
     while let Some(msg) = rx.recv().await {
         match msg {
@@ -55,6 +81,9 @@ pub async fn run(
                         .map_err(crate::error::BrokerError::from)
                 };
                 let ok = result.is_ok();
+                if let Err(ref e) = result {
+                    flag_storage_failure(e, &log_dir, &log_dir_status);
+                }
                 // If the receiver dropped, the handler timed out — that's
                 // fine, we don't care if the ack is ignored.
                 let _ = ack.send(result);
@@ -88,6 +117,9 @@ pub async fn run(
                         .map_err(crate::error::BrokerError::from)
                 };
                 let ok = result.is_ok();
+                if let Err(ref e) = result {
+                    flag_storage_failure(e, &log_dir, &log_dir_status);
+                }
                 let _ = ack.send(result);
                 if ok {
                     append_notify.notify_waiters();
@@ -99,6 +131,9 @@ pub async fn run(
                     log.truncate_to(offset)
                         .map_err(crate::error::BrokerError::from)
                 };
+                if let Err(ref e) = result {
+                    flag_storage_failure(e, &log_dir, &log_dir_status);
+                }
                 let _ = ack.send(result);
                 // No `append_notify` — truncate doesn't deliver new data.
             }
@@ -108,6 +143,9 @@ pub async fn run(
                     log.reset_to(new_base)
                         .map_err(crate::error::BrokerError::from)
                 };
+                if let Err(ref e) = result {
+                    flag_storage_failure(e, &log_dir, &log_dir_status);
+                }
                 let _ = ack.send(result);
                 // No `append_notify` — reset_to drops data rather than
                 // delivering it.
@@ -118,6 +156,9 @@ pub async fn run(
                     log.trim_to_offset(new_start)
                         .map_err(crate::error::BrokerError::from)
                 };
+                if let Err(ref e) = result {
+                    flag_storage_failure(e, &log_dir, &log_dir_status);
+                }
                 let _ = ack.send(result);
                 // No `append_notify` — trim drops data rather than producing it.
             }
@@ -130,6 +171,9 @@ pub async fn run(
                     let mut log = log.lock().expect("log mutex poisoned");
                     log.compact().map_err(crate::error::BrokerError::from)
                 };
+                if let Err(ref e) = result {
+                    flag_storage_failure(e, &log_dir, &log_dir_status);
+                }
                 let _ = ack.send(result);
                 // No `append_notify` — compaction doesn't produce new
                 // records, only consolidates existing ones at the same
@@ -286,6 +330,7 @@ mod tests {
                 crate::replica_state::ReplicaState::new(),
             )),
             Arc::new(Notify::new()),
+            crate::log_dir_status::LogDirRegistry::default(),
         ));
 
         let (ack, ack_rx) = oneshot::channel();
@@ -330,6 +375,7 @@ mod tests {
                 crate::replica_state::ReplicaState::new(),
             )),
             Arc::new(Notify::new()),
+            crate::log_dir_status::LogDirRegistry::default(),
         ));
 
         // Subscribe BEFORE sending so we don't miss the notification.
@@ -370,6 +416,7 @@ mod tests {
                 crate::replica_state::ReplicaState::new(),
             )),
             Arc::new(Notify::new()),
+            crate::log_dir_status::LogDirRegistry::default(),
         ));
 
         // First replicate batch must start at offset 0 to match the
@@ -404,6 +451,7 @@ mod tests {
                 crate::replica_state::ReplicaState::new(),
             )),
             Arc::new(Notify::new()),
+            crate::log_dir_status::LogDirRegistry::default(),
         ));
 
         // Wrong offset — log_end_offset is 0 but we claim 7.
@@ -442,6 +490,7 @@ mod tests {
                 crate::replica_state::ReplicaState::new(),
             )),
             Arc::new(Notify::new()),
+            crate::log_dir_status::LogDirRegistry::default(),
         ));
 
         // Produce two batches so the log has some data.
@@ -491,6 +540,7 @@ mod tests {
             append_notify.clone(),
             replica_state.clone(),
             hw_advance_notify.clone(),
+            crate::log_dir_status::LogDirRegistry::default(),
         ));
 
         let waiter = hw_advance_notify.notified();
@@ -534,6 +584,7 @@ mod tests {
             append_notify,
             replica_state,
             hw_advance_notify,
+            crate::log_dir_status::LogDirRegistry::default(),
         ));
 
         let new_cfg = LogConfig {
@@ -584,6 +635,7 @@ mod tests {
             append_notify,
             replica_state,
             hw_advance_notify,
+            crate::log_dir_status::LogDirRegistry::default(),
         ));
 
         let (ack, ack_rx) = tokio::sync::oneshot::channel();
@@ -621,6 +673,7 @@ mod tests {
             append_notify.clone(),
             replica_state.clone(),
             hw_advance_notify.clone(),
+            crate::log_dir_status::LogDirRegistry::default(),
         ));
 
         let (ack, ack_rx) = oneshot::channel();

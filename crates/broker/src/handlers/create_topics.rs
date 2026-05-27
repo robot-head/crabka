@@ -103,6 +103,7 @@ pub(crate) async fn handle(
     let node_id = broker.config.node_id;
     let log_dirs = broker.config.all_log_dirs();
     let log_config = broker.config.log_config.clone();
+    let log_dir_status = broker.log_dir_status.clone();
     let partitions_map = broker.partitions.clone();
 
     {
@@ -249,6 +250,7 @@ pub(crate) async fn handle(
                             p_i32,
                             &log_dirs,
                             &log_config,
+                            &log_dir_status,
                         ) {
                             tracing::error!(
                                 topic = %name, partition = p_i32, error = %e,

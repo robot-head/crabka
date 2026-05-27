@@ -72,6 +72,10 @@ pub(crate) struct Config {
     /// Controller handle used to read the current metadata image each
     /// Fetch round (for `follower.replication.throttled.replicas` lookup).
     pub controller: Arc<ControllerHandle>,
+    /// KIP-113 runtime offline-dir registry. Forwarded into
+    /// `spawn_partition` so the per-partition writer can flip the
+    /// owning dir offline on a segment-write / fsync failure.
+    pub log_dir_status: crate::log_dir_status::LogDirRegistry,
 }
 
 /// Entry point: drive a single (topic, partition) replication loop until
@@ -115,7 +119,13 @@ fn ensure_local_partition(cfg: &Config) -> Result<(), String> {
         .parent()
         .expect("placed partition dir always has a parent log.dir")
         .to_path_buf();
-    let part = spawn_partition(cfg.topic.clone(), cfg.partition, owning_dir, log);
+    let part = spawn_partition(
+        cfg.topic.clone(),
+        cfg.partition,
+        owning_dir,
+        log,
+        cfg.log_dir_status.clone(),
+    );
     cfg.partitions
         .insert((cfg.topic.clone(), cfg.partition), part);
     Ok(())

@@ -1023,7 +1023,13 @@ impl Broker {
         for (topic, partition_id, owning_dir) in log_dir::scan_all(&scan_dirs)? {
             let dir = log_dir::partition_dir(&owning_dir, &topic, partition_id);
             let log = crabka_log::Log::open(&dir, config.log_config.clone())?;
-            let part = spawn_partition(topic.clone(), partition_id, owning_dir, log);
+            let part = spawn_partition(
+                topic.clone(),
+                partition_id,
+                owning_dir,
+                log,
+                log_dir_status.clone(),
+            );
             partitions.insert((topic.clone(), partition_id), part);
         }
 
@@ -1087,6 +1093,7 @@ impl Broker {
             inter_listener_proto,
             config.inter_broker_listener_name.clone(),
             throttle_state.clone(),
+            log_dir_status.clone(),
         );
         let supervisor_handle = supervisor.spawn();
 
@@ -1746,6 +1753,7 @@ pub(crate) fn spawn_partition(
     partition_id: i32,
     log_dir: std::path::PathBuf,
     log: crabka_log::Log,
+    log_dir_status: crate::log_dir_status::LogDirRegistry,
 ) -> Arc<Partition> {
     let log = Arc::new(Mutex::new(log));
     let (tx, rx) = tokio::sync::mpsc::channel::<WriterMessage>(64);
@@ -1764,6 +1772,7 @@ pub(crate) fn spawn_partition(
         notify.clone(),
         replica_state.clone(),
         hw_advance_notify.clone(),
+        log_dir_status,
     ));
     Arc::new(Partition {
         topic,
