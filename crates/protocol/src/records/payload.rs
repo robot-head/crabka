@@ -296,4 +296,115 @@ mod tests {
         assert_eq!(p.as_v2(), Some(&rb));
         assert!(p.as_legacy().is_none());
     }
+
+    fn legacy_bytes() -> Bytes {
+        let mut buf = vec![0u8; 24];
+        buf[16] = 1;
+        for (i, b) in (b'a'..=b'h').enumerate() {
+            buf[17 + i % 7] = b;
+        }
+        Bytes::from(buf)
+    }
+
+    #[test]
+    fn legacy_payload_len_and_encode_owned() {
+        let bytes = legacy_bytes();
+        let p = RecordsPayload::from_bytes(bytes.clone()).unwrap();
+        assert_eq!(p.payload_len(), bytes.len());
+        assert!(p.as_v2().is_none());
+        assert_eq!(p.as_legacy(), Some(&bytes));
+
+        let mut out = BytesMut::new();
+        p.encode_to(&mut out).unwrap();
+        assert_eq!(&out[..], &bytes[..]);
+    }
+
+    #[test]
+    fn legacy_roundtrip_via_traits() {
+        let bytes = legacy_bytes();
+        let p = RecordsPayload::from_bytes(bytes.clone()).unwrap();
+        let mut buf = BytesMut::new();
+        <RecordsPayload as crate::Encode>::encode(&p, &mut buf, 0).unwrap();
+        assert_eq!(
+            <RecordsPayload as crate::Encode>::encoded_len(&p, 0),
+            bytes.len()
+        );
+        let mut cur: &[u8] = &buf;
+        let back = <RecordsPayload as crate::Decode>::decode(&mut cur, 0).unwrap();
+        assert!(matches!(back, RecordsPayload::Legacy(_)));
+        assert_eq!(back.as_legacy().unwrap(), &bytes);
+    }
+
+    #[test]
+    fn owned_default_is_empty_v2() {
+        let p = RecordsPayload::default();
+        assert!(matches!(p, RecordsPayload::V2(_)));
+    }
+
+    #[test]
+    fn looks_like_v2_rejects_short_buffer() {
+        // Too short to peek the magic byte at offset 16; must fall through to Legacy.
+        let short = Bytes::from_static(&[0u8; 10]);
+        let p = RecordsPayload::from_bytes(short.clone()).unwrap();
+        assert_eq!(p.as_legacy(), Some(&short));
+    }
+
+    #[test]
+    fn borrowed_legacy_roundtrip() {
+        let bytes = legacy_bytes();
+        let p = RecordsPayloadBorrowed::from_slice(&bytes).unwrap();
+        assert!(matches!(p, RecordsPayloadBorrowed::Legacy(_)));
+        assert_eq!(p.payload_len(), bytes.len());
+
+        let mut out = BytesMut::new();
+        p.encode_to(&mut out).unwrap();
+        assert_eq!(&out[..], &bytes[..]);
+
+        let owned = p.to_owned().unwrap();
+        match owned {
+            RecordsPayload::Legacy(b) => assert_eq!(&b[..], &bytes[..]),
+            RecordsPayload::V2(_) => panic!("expected Legacy"),
+        }
+    }
+
+    #[test]
+    fn borrowed_v2_payload_len_and_encode() {
+        let rb = sample_v2();
+        let mut buf = BytesMut::new();
+        rb.encode(&mut buf).unwrap();
+        let frozen = buf.freeze();
+        let p = RecordsPayloadBorrowed::from_slice(&frozen).unwrap();
+        assert_eq!(p.payload_len(), frozen.len());
+
+        let mut out = BytesMut::new();
+        p.encode_to(&mut out).unwrap();
+        assert_eq!(&out[..], &frozen[..]);
+    }
+
+    #[test]
+    fn borrowed_encode_decode_via_traits() {
+        let rb = sample_v2();
+        let mut buf = BytesMut::new();
+        rb.encode(&mut buf).unwrap();
+        let frozen = buf.freeze();
+
+        let p = RecordsPayloadBorrowed::from_slice(&frozen).unwrap();
+        let mut out = BytesMut::new();
+        <RecordsPayloadBorrowed as crate::Encode>::encode(&p, &mut out, 0).unwrap();
+        assert_eq!(
+            <RecordsPayloadBorrowed as crate::Encode>::encoded_len(&p, 0),
+            frozen.len()
+        );
+
+        let mut cur: &[u8] = &out;
+        let back =
+            <RecordsPayloadBorrowed as crate::DecodeBorrow>::decode_borrow(&mut cur, 0).unwrap();
+        assert!(matches!(back, RecordsPayloadBorrowed::V2(_)));
+    }
+
+    #[test]
+    fn borrowed_default_is_empty_v2() {
+        let p = RecordsPayloadBorrowed::default();
+        assert!(matches!(p, RecordsPayloadBorrowed::V2(_)));
+    }
 }
