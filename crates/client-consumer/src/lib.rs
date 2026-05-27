@@ -52,8 +52,8 @@ mod assignor;
 mod builder;
 mod commit;
 mod consumer;
+mod coordinator;
 mod error;
-mod heartbeat;
 mod poll;
 
 pub use builder::{AutoOffsetReset, IsolationLevel};

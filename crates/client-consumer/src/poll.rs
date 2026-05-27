@@ -14,24 +14,15 @@ use crate::error::ConsumerError;
 
 impl Consumer {
     /// Returns at most one batch's worth of records per assigned partition,
-    /// or an empty vec on timeout. If the heartbeat task signalled a
-    /// rebalance, this returns `Err(CommitInvalid)`; the caller should drop
-    /// any in-flight commits and rebuild the consumer.
+    /// or an empty vec on timeout. Rebalances are handled transparently by
+    /// the internal coordinator task, which mutates the live `assigned`
+    /// snapshot in place; `poll()` simply reads it on each call.
     pub async fn poll(&mut self, timeout: Duration) -> Result<Vec<ConsumerRecord>, ConsumerError> {
-        // 1. Drain any rebalance notices first.
-        {
-            let mut rebalance_rx = self.rebalance_rx.lock().await;
-            if let Ok(notice) = rebalance_rx.try_recv() {
-                tracing::info!(?notice, "rebalance notice received during poll");
-                return Err(ConsumerError::CommitInvalid);
-            }
-        }
-
-        // 2. Resolve any i64::MAX sentinels (auto.offset.reset=Latest) via
+        // 1. Resolve any i64::MAX sentinels (auto.offset.reset=Latest) via
         //    ListOffsets(timestamp=-1).
         self.resolve_latest_sentinels().await?;
 
-        // 3. Build a FetchRequest covering every assigned partition.
+        // 2. Build a FetchRequest covering every assigned partition.
         let assigned = self.assigned.lock().await.clone();
         if assigned.is_empty() {
             tokio::time::sleep(timeout).await;
@@ -82,7 +73,7 @@ impl Consumer {
             })
             .await?;
 
-        // 4. Decode each partition's RecordBatch, advance next-offsets.
+        // 3. Decode each partition's RecordBatch, advance next-offsets.
         //
         // The wire-level `records` field can carry multiple concatenated
         // RecordBatches, but the generated FetchResponse codec decodes a
