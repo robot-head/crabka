@@ -8,8 +8,12 @@
 #![allow(dead_code)] // codes are consumed by handlers in Phase E.
 
 pub const NONE: i16 = 0;
-pub const UNKNOWN_SERVER_ERROR: i16 = 1;
-pub const OFFSET_OUT_OF_RANGE: i16 = 2;
+pub const UNKNOWN_SERVER_ERROR: i16 = -1;
+pub const OFFSET_OUT_OF_RANGE: i16 = 1;
+/// `CORRUPT_MESSAGE` (2) — the broker received a record batch whose bytes
+/// are malformed or whose CRC/magic does not match any supported format.
+/// Corresponds to `CORRUPT_MESSAGE` in the Apache Kafka error table.
+pub const CORRUPT_MESSAGE: i16 = 2;
 pub const UNKNOWN_TOPIC_OR_PARTITION: i16 = 3;
 pub const INVALID_FETCH_SIZE: i16 = 4;
 pub const LEADER_NOT_AVAILABLE: i16 = 5;

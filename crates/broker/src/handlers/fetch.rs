@@ -76,7 +76,12 @@ pub(crate) async fn handle(
     let partitions = broker.partitions.clone();
     let controller = broker.controller.clone();
     let mut cur: &[u8] = req_bytes;
-    let req = FetchRequest::decode(&mut cur, version)?;
+    let req: FetchRequest = if version < 4 {
+        crabka_protocol::kafka_3_6_2::owned::fetch_request::FetchRequest::decode(&mut cur, version)?
+            .into()
+    } else {
+        FetchRequest::decode(&mut cur, version)?
+    };
 
     // `replica_id >= 0` means follower fetch (Apache Kafka convention).
     // KIP-903 (Kafka 3.5) moved `replica_id` into a tagged `replica_state`
@@ -112,8 +117,7 @@ pub(crate) async fn handle(
             responses: Vec::new(),
             ..Default::default()
         };
-        let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-        resp.encode(&mut buf, version)?;
+        let buf = encode_fetch_response(resp, version)?;
         return Ok(buf.freeze());
     }
 
@@ -387,6 +391,39 @@ pub(crate) async fn handle(
 
     let mut responses = group_into_topic_responses(pending);
 
+    // Down-convert v2 batches to legacy MessageSet bytes for Fetch v0-3.
+    // Control batches are dropped (records set to None); zstd-compressed
+    // batches are re-compressed as snappy (v0/v1 has no zstd codec).
+    if version < 4 {
+        for topic_resp in &mut responses {
+            for part in &mut topic_resp.partitions {
+                if let Some(payload) = part.records.take() {
+                    if let Some(batch) = payload.as_v2().cloned() {
+                        match crate::handlers::fetch_downconvert::down_convert_for_fetch(
+                            &batch, version,
+                        ) {
+                            Ok(Some(converted)) => {
+                                // Only store the payload if it has content.
+                                if converted.payload_len() > 0 {
+                                    part.records = Some(converted);
+                                }
+                            }
+                            Ok(None) => {
+                                // Control batch dropped — records stays None.
+                            }
+                            Err(error_code) => {
+                                part.error_code = error_code;
+                            }
+                        }
+                    } else {
+                        // Already Legacy bytes (shouldn't happen but preserve).
+                        part.records = Some(payload);
+                    }
+                }
+            }
+        }
+    }
+
     // KIP-73 leader-side throttle: only applies to follower (inter-broker)
     // fetch requests. Consumer fetches have replica_id < 0.
     if is_follower_fetch {
@@ -543,9 +580,7 @@ pub(crate) async fn handle(
         responses,
         ..Default::default()
     };
-    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-    resp.encode(&mut buf, version)?;
-    Ok(buf.freeze())
+    Ok(encode_fetch_response(resp, version)?.freeze())
 }
 
 /// Projection of `FetchRequest::topics` / cached session partitions —
@@ -1084,6 +1119,26 @@ fn group_into_topic_responses(pending: Vec<PendingRead>) -> Vec<FetchableTopicRe
             }
         })
         .collect()
+}
+
+/// Encode a `FetchResponse` into a `BytesMut`, choosing the legacy
+/// `kafka_3_6_2` codec for Fetch v0-3 and the current canonical codec
+/// for v4+. The version boundary mirrors the request-decode boundary.
+fn encode_fetch_response(
+    resp: FetchResponse,
+    version: i16,
+) -> Result<BytesMut, crate::error::BrokerError> {
+    if version < 4 {
+        let legacy: crabka_protocol::kafka_3_6_2::owned::fetch_response::FetchResponse =
+            resp.into();
+        let mut buf = BytesMut::with_capacity(legacy.encoded_len(version));
+        legacy.encode(&mut buf, version)?;
+        Ok(buf)
+    } else {
+        let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
+        resp.encode(&mut buf, version)?;
+        Ok(buf)
+    }
 }
 
 #[cfg(test)]

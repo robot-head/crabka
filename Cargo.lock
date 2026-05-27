@@ -1048,6 +1048,7 @@ dependencies = [
  "crabka-metadata",
  "crabka-protocol",
  "crabka-raft",
+ "crabka-records-legacy",
  "crabka-remote-storage",
  "crabka-remote-storage-topic",
  "crabka-security",

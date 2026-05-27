@@ -75,7 +75,58 @@ fn curated_borrowed_snapshots() {
     let specs = ir::load_dir(&schemas_dir()).unwrap();
     for name in CURATED {
         let spec = specs.iter().find(|s| s.name == *name).unwrap();
-        let em = emit::borrowed::emit(spec, "test").unwrap();
+        let em = emit::borrowed::emit(spec, "test", None).unwrap();
         check_emitted("borrowed", &em, name);
+    }
+}
+
+const CURATED_KAFKA_3_6_2: &[&str] = &[
+    "ProduceRequest",
+    "ProduceResponse",
+    "FetchRequest",
+    "FetchResponse",
+];
+
+fn ns_schemas_dir(ns: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("protocol")
+        .join("schemas")
+        .join("versions")
+        .join(ns)
+}
+
+fn ns_snap_dir(ns: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/snapshots")
+        .join(ns)
+}
+
+#[test]
+fn curated_owned_snapshots_kafka_3_6_2() {
+    let specs = ir::load_dir(&ns_schemas_dir("kafka_3_6_2")).unwrap();
+    for name in CURATED_KAFKA_3_6_2 {
+        let spec = specs.iter().find(|s| s.name == *name).unwrap();
+        let em = emit::owned::emit(spec, "test").unwrap();
+        let base = ns_snap_dir("kafka_3_6_2");
+        check(&base.join(format!("{name}.owned.rs")), &em.primary);
+        for (cs_name, body) in &em.commons {
+            check(&base.join(format!("common/{cs_name}.owned.rs")), body);
+        }
+    }
+}
+
+#[test]
+fn curated_borrowed_snapshots_kafka_3_6_2() {
+    let specs = ir::load_dir(&ns_schemas_dir("kafka_3_6_2")).unwrap();
+    for name in CURATED_KAFKA_3_6_2 {
+        let spec = specs.iter().find(|s| s.name == *name).unwrap();
+        let em = emit::borrowed::emit(spec, "test", None).unwrap();
+        let base = ns_snap_dir("kafka_3_6_2");
+        check(&base.join(format!("{name}.borrowed.rs")), &em.primary);
+        for (cs_name, body) in &em.commons {
+            check(&base.join(format!("common/{cs_name}.borrowed.rs")), body);
+        }
     }
 }

@@ -23,6 +23,7 @@ path = "src/bin/broker.rs"
 
 [dependencies]
 crabka-protocol = { version = "0.1", path = "../protocol", default-features = false }
+crabka-records-legacy = { version = "0.1", path = "../records-legacy" }
 crabka-log = { version = "0.1", path = "../log" }
 crabka-compression = { version = "0.1", path = "../compression", default-features = false }
 crabka-raft = { version = "0.1", path = "../raft" }
@@ -76,6 +77,9 @@ lru.workspace = true
 crabka-broker = { version = "0.1", path = ".", features = ["test-helpers"] }
 crabka-client-consumer = { version = "0.1", path = "../client-consumer" }
 crabka-client-producer = { version = "0.1", path = "../client-producer" }
+crabka-records-legacy = { version = "0.1", path = "../records-legacy" }
+crabka-protocol = { version = "0.1", path = "../protocol", default-features = false }
+bytes = { workspace = true }
 rustls.workspace = true
 rustls-pki-types.workspace = true
 tempfile = { workspace = true }

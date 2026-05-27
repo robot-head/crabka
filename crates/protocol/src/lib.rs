@@ -32,6 +32,8 @@ mod codec;
 #[doc(hidden)]
 pub mod codegen_helpers;
 mod error;
+pub mod kafka_3_6_2;
+pub mod legacy_compat;
 pub mod owned;
 pub mod primitives;
 pub mod records;
