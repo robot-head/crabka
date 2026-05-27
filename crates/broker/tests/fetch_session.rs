@@ -1,0 +1,449 @@
+//! KIP-227 incremental fetch session round-trip tests against an
+//! in-process broker. Drives the wire protocol directly through the
+//! shared `Client` so the exact `session_id` / `session_epoch` paths
+//! are exercised end-to-end.
+
+mod support;
+
+use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
+use crabka_protocol::owned::fetch_request::{
+    FetchPartition, FetchRequest, FetchTopic, ForgottenTopic,
+};
+use crabka_protocol::owned::metadata_request::{MetadataRequest, MetadataRequestTopic};
+use crabka_protocol::owned::produce_request::{
+    PartitionProduceData, ProduceRequest, TopicProduceData,
+};
+use crabka_protocol::primitives::uuid::Uuid as WireUuid;
+use crabka_protocol::records::{Record, RecordBatch};
+
+const FETCH_SESSION_ID_NOT_FOUND: i16 = 70;
+const INVALID_FETCH_SESSION_EPOCH: i16 = 71;
+
+fn one_record_batch(n: i32) -> RecordBatch {
+    let mut b = RecordBatch {
+        last_offset_delta: (n - 1).max(0),
+        ..RecordBatch::default()
+    };
+    for i in 0..n {
+        b.records.push(Record {
+            offset_delta: i,
+            ..Default::default()
+        });
+    }
+    b
+}
+
+async fn create_topic(p: &support::InProcess, name: &str, num_partitions: i32) {
+    let resp = p
+        .client
+        .send(CreateTopicsRequest {
+            topics: vec![CreatableTopic {
+                name: name.into(),
+                num_partitions,
+                replication_factor: 1,
+                ..Default::default()
+            }],
+            timeout_ms: 5_000,
+            ..Default::default()
+        })
+        .await
+        .expect("CreateTopics");
+    assert_eq!(resp.topics[0].error_code, 0, "CreateTopics for {name}");
+}
+
+async fn topic_id_for(p: &support::InProcess, name: &str) -> WireUuid {
+    let resp = p
+        .client
+        .send(MetadataRequest {
+            topics: Some(vec![MetadataRequestTopic {
+                name: Some(name.into()),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        })
+        .await
+        .expect("Metadata");
+    resp.topics
+        .iter()
+        .find(|t| t.name.as_deref() == Some(name))
+        .map(|t| t.topic_id)
+        .unwrap_or_default()
+}
+
+async fn produce(p: &support::InProcess, topic: &str, partition: i32, records: i32) {
+    let topic_id = topic_id_for(p, topic).await;
+    let req = ProduceRequest {
+        acks: 1,
+        timeout_ms: 5_000,
+        topic_data: vec![TopicProduceData {
+            name: topic.into(),
+            topic_id,
+            partition_data: vec![PartitionProduceData {
+                index: partition,
+                records: Some(one_record_batch(records)),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let resp = p.client.send(req).await.expect("Produce");
+    assert_eq!(
+        resp.responses[0].partition_responses[0].error_code, 0,
+        "Produce error"
+    );
+}
+
+fn fetch_partition(partition: i32, offset: i64) -> FetchPartition {
+    FetchPartition {
+        partition,
+        fetch_offset: offset,
+        partition_max_bytes: 1_048_576,
+        ..Default::default()
+    }
+}
+
+fn fetch_topic(name: &str, topic_id: WireUuid, partitions: Vec<FetchPartition>) -> FetchTopic {
+    FetchTopic {
+        topic: name.into(),
+        topic_id,
+        partitions,
+        ..Default::default()
+    }
+}
+
+/// (1) New session opens, (2) immediate incremental is empty, (3) one
+/// produced batch shows up on the next incremental as only-that-partition.
+#[tokio::test]
+async fn new_session_then_incremental_filters_unchanged_partitions() {
+    let p = support::start().await;
+    create_topic(&p, "t", 3).await;
+    let tid = topic_id_for(&p, "t").await;
+
+    // (1) New session — session_id=0, session_epoch=0.
+    let r1 = p
+        .client
+        .send(FetchRequest {
+            max_wait_ms: 100,
+            min_bytes: 0,
+            session_id: 0,
+            session_epoch: 0,
+            topics: vec![fetch_topic(
+                "t",
+                tid,
+                vec![
+                    fetch_partition(0, 0),
+                    fetch_partition(1, 0),
+                    fetch_partition(2, 0),
+                ],
+            )],
+            ..Default::default()
+        })
+        .await
+        .expect("Fetch new-session");
+    assert_eq!(r1.error_code, 0, "no top-level error");
+    assert!(r1.session_id > 0, "broker allocated a session id");
+    assert_eq!(r1.responses.len(), 1, "new session emits full response");
+    assert_eq!(r1.responses[0].partitions.len(), 3, "all 3 partitions");
+    let sid = r1.session_id;
+
+    // (2) Immediate incremental: nothing changed → empty response.
+    let r2 = p
+        .client
+        .send(FetchRequest {
+            max_wait_ms: 0,
+            min_bytes: 0,
+            session_id: sid,
+            session_epoch: 1,
+            topics: vec![],
+            forgotten_topics_data: vec![],
+            ..Default::default()
+        })
+        .await
+        .expect("Fetch incremental empty");
+    assert_eq!(r2.error_code, 0);
+    assert_eq!(r2.session_id, sid, "session id echoed");
+    assert!(
+        r2.responses.is_empty(),
+        "no partition changed → no topics in response, got {:?}",
+        r2.responses
+    );
+
+    // (3) Produce one batch to t-0 → next incremental returns only t-0.
+    produce(&p, "t", 0, 5).await;
+    let r3 = p
+        .client
+        .send(FetchRequest {
+            max_wait_ms: 200,
+            min_bytes: 1,
+            session_id: sid,
+            session_epoch: 2,
+            topics: vec![],
+            forgotten_topics_data: vec![],
+            ..Default::default()
+        })
+        .await
+        .expect("Fetch incremental after produce");
+    assert_eq!(r3.error_code, 0);
+    assert_eq!(r3.session_id, sid);
+    assert_eq!(r3.responses.len(), 1);
+    assert_eq!(r3.responses[0].partitions.len(), 1);
+    assert_eq!(r3.responses[0].partitions[0].partition_index, 0);
+    let batch = r3.responses[0].partitions[0]
+        .records
+        .as_ref()
+        .expect("records present");
+    assert_eq!(batch.records.len(), 5);
+
+    p.broker.shutdown().await;
+}
+
+/// Forgotten partitions are dropped from the cached subscription and
+/// never reappear on subsequent fetches, even after produce.
+#[tokio::test]
+async fn forgotten_topics_drop_partitions_from_subscription() {
+    let p = support::start().await;
+    create_topic(&p, "t", 3).await;
+    let tid = topic_id_for(&p, "t").await;
+
+    // Open a session covering t-0..t-2.
+    let r1 = p
+        .client
+        .send(FetchRequest {
+            max_wait_ms: 100,
+            min_bytes: 0,
+            session_id: 0,
+            session_epoch: 0,
+            topics: vec![fetch_topic(
+                "t",
+                tid,
+                vec![
+                    fetch_partition(0, 0),
+                    fetch_partition(1, 0),
+                    fetch_partition(2, 0),
+                ],
+            )],
+            ..Default::default()
+        })
+        .await
+        .expect("new session");
+    let sid = r1.session_id;
+    assert!(sid > 0);
+
+    // Forget t-1.
+    let r2 = p
+        .client
+        .send(FetchRequest {
+            max_wait_ms: 0,
+            min_bytes: 0,
+            session_id: sid,
+            session_epoch: 1,
+            topics: vec![],
+            forgotten_topics_data: vec![ForgottenTopic {
+                topic: "t".into(),
+                topic_id: tid,
+                partitions: vec![1],
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("forget t-1");
+    assert_eq!(r2.error_code, 0);
+    assert_eq!(r2.session_id, sid);
+
+    // Produce to t-1 — should NOT reappear in the next incremental.
+    produce(&p, "t", 1, 4).await;
+    // Also produce to t-2 — that one SHOULD appear.
+    produce(&p, "t", 2, 2).await;
+
+    let r3 = p
+        .client
+        .send(FetchRequest {
+            max_wait_ms: 200,
+            min_bytes: 1,
+            session_id: sid,
+            session_epoch: 2,
+            topics: vec![],
+            forgotten_topics_data: vec![],
+            ..Default::default()
+        })
+        .await
+        .expect("after produce");
+    assert_eq!(r3.error_code, 0);
+    let mut seen_partitions: Vec<i32> = r3
+        .responses
+        .iter()
+        .flat_map(|t| t.partitions.iter().map(|p| p.partition_index))
+        .collect();
+    seen_partitions.sort_unstable();
+    assert_eq!(
+        seen_partitions,
+        vec![2],
+        "t-1 forgotten, only t-2 should appear (t-0 had no new data)"
+    );
+
+    p.broker.shutdown().await;
+}
+
+/// Wrong `session_id` → `FETCH_SESSION_ID_NOT_FOUND` at the top level,
+/// no per-partition rows.
+#[tokio::test]
+async fn unknown_session_id_returns_not_found() {
+    let p = support::start().await;
+    let r = p
+        .client
+        .send(FetchRequest {
+            max_wait_ms: 0,
+            min_bytes: 0,
+            session_id: 999_999,
+            session_epoch: 1,
+            topics: vec![],
+            ..Default::default()
+        })
+        .await
+        .expect("Fetch unknown sid");
+    assert_eq!(r.error_code, FETCH_SESSION_ID_NOT_FOUND);
+    assert_eq!(r.session_id, 0);
+    assert!(r.responses.is_empty());
+    p.broker.shutdown().await;
+}
+
+/// Stale epoch on a valid session → `INVALID_FETCH_SESSION_EPOCH`.
+#[tokio::test]
+async fn stale_session_epoch_returns_invalid_epoch() {
+    let p = support::start().await;
+    create_topic(&p, "t", 1).await;
+    let tid = topic_id_for(&p, "t").await;
+
+    let r1 = p
+        .client
+        .send(FetchRequest {
+            session_id: 0,
+            session_epoch: 0,
+            topics: vec![fetch_topic("t", tid, vec![fetch_partition(0, 0)])],
+            ..Default::default()
+        })
+        .await
+        .expect("new session");
+    let sid = r1.session_id;
+    assert!(sid > 0);
+
+    // Broker expects epoch=1; send 99.
+    let r2 = p
+        .client
+        .send(FetchRequest {
+            session_id: sid,
+            session_epoch: 99,
+            topics: vec![],
+            ..Default::default()
+        })
+        .await
+        .expect("stale epoch");
+    assert_eq!(r2.error_code, INVALID_FETCH_SESSION_EPOCH);
+    assert_eq!(r2.session_id, 0);
+    assert!(r2.responses.is_empty());
+    p.broker.shutdown().await;
+}
+
+/// Closing a session (epoch=-1) returns a full response and drops the
+/// cache entry. A subsequent request with the same id is `NOT_FOUND`.
+#[tokio::test]
+async fn close_session_drops_cache_entry() {
+    let p = support::start().await;
+    create_topic(&p, "t", 1).await;
+    let tid = topic_id_for(&p, "t").await;
+
+    let r1 = p
+        .client
+        .send(FetchRequest {
+            session_id: 0,
+            session_epoch: 0,
+            topics: vec![fetch_topic("t", tid, vec![fetch_partition(0, 0)])],
+            ..Default::default()
+        })
+        .await
+        .expect("new session");
+    let sid = r1.session_id;
+    assert!(sid > 0);
+
+    // Close: session_id=sid, session_epoch=-1. Broker serves the request
+    // sessionless-style (session_id=0 in response) and removes the entry.
+    let r2 = p
+        .client
+        .send(FetchRequest {
+            session_id: sid,
+            session_epoch: -1,
+            topics: vec![fetch_topic("t", tid, vec![fetch_partition(0, 0)])],
+            ..Default::default()
+        })
+        .await
+        .expect("close");
+    assert_eq!(r2.error_code, 0);
+    assert_eq!(r2.session_id, 0, "close → response session_id=0");
+
+    // Re-using sid afterwards is NOT_FOUND.
+    let r3 = p
+        .client
+        .send(FetchRequest {
+            session_id: sid,
+            session_epoch: 1,
+            topics: vec![],
+            ..Default::default()
+        })
+        .await
+        .expect("after close");
+    assert_eq!(r3.error_code, FETCH_SESSION_ID_NOT_FOUND);
+    p.broker.shutdown().await;
+}
+
+/// `session_id=0` with a stray epoch (not 0 and not -1) is a wire error.
+#[tokio::test]
+async fn sessionless_zero_id_with_stray_epoch_is_invalid() {
+    let p = support::start().await;
+    let r = p
+        .client
+        .send(FetchRequest {
+            session_id: 0,
+            session_epoch: 7,
+            topics: vec![],
+            ..Default::default()
+        })
+        .await
+        .expect("stray");
+    assert_eq!(r.error_code, INVALID_FETCH_SESSION_EPOCH);
+    assert_eq!(r.session_id, 0);
+    p.broker.shutdown().await;
+}
+
+/// Sessionless (`session_id=0`, session_epoch=-1) returns a full
+/// response with `session_id=0` — the legacy path is unchanged.
+#[tokio::test]
+async fn sessionless_full_fetch_round_trip() {
+    let p = support::start().await;
+    create_topic(&p, "t", 1).await;
+    let tid = topic_id_for(&p, "t").await;
+    produce(&p, "t", 0, 2).await;
+
+    let r = p
+        .client
+        .send(FetchRequest {
+            max_wait_ms: 100,
+            min_bytes: 1,
+            session_id: 0,
+            session_epoch: -1,
+            topics: vec![fetch_topic("t", tid, vec![fetch_partition(0, 0)])],
+            ..Default::default()
+        })
+        .await
+        .expect("sessionless");
+    assert_eq!(r.error_code, 0);
+    assert_eq!(r.session_id, 0, "sessionless → no allocation");
+    assert_eq!(r.responses.len(), 1);
+    let batch = r.responses[0].partitions[0]
+        .records
+        .as_ref()
+        .expect("records");
+    assert_eq!(batch.records.len(), 2);
+    p.broker.shutdown().await;
+}

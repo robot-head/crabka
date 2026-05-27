@@ -139,6 +139,17 @@ pub const ELECTION_NOT_NEEDED: i16 = 84;
 pub const INVALID_REPLICA_ASSIGNMENT: i16 = 39;
 pub const NO_REASSIGNMENT_IN_PROGRESS: i16 = 85;
 
+// KIP-227 incremental-fetch-session codes.
+/// Returned at the top level of a `FetchResponse` when the request carried
+/// a non-zero `session_id` that is not present in the broker's session cache
+/// (evicted, never existed, or already closed).
+pub const FETCH_SESSION_ID_NOT_FOUND: i16 = 70;
+/// Returned at the top level of a `FetchResponse` when the request's
+/// `session_epoch` does not match the cached session's current epoch, or
+/// when `session_id == 0` and `session_epoch` is neither `0` (new session)
+/// nor `-1` (sessionless full fetch).
+pub const INVALID_FETCH_SESSION_EPOCH: i16 = 71;
+
 // Slice 51 additions — KIP-48 delegation-token codes. Numbers from
 // org.apache.kafka.common.protocol.Errors. Note the existing slice 14
 // ELIGIBLE_LEADERS_NOT_AVAILABLE = 81 is incorrect (Kafka says 83) but
