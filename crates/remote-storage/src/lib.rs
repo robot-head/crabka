@@ -56,5 +56,7 @@ pub use metadata::{
     TopicIdPartition,
 };
 pub use metadata_manager::RemoteLogMetadataManager;
-pub use s3::{S3Config, S3RemoteStorage};
+pub use s3::{
+    DEFAULT_MULTIPART_CHUNK_SIZE, DEFAULT_MULTIPART_THRESHOLD, S3Config, S3RemoteStorage,
+};
 pub use storage_manager::{IndexType, LogSegmentData, RemoteStorageManager};

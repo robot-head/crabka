@@ -8001,6 +8001,15 @@ async fn tiered_storage_round_trip_through_minio() {
         access_key_id: Some(MINIO_ACCESS_KEY.to_string()),
         secret_access_key: Some(MINIO_SECRET_KEY.to_string()),
         allow_http: true,
+        // Force multipart on segments above 4 KiB so the multipart code
+        // path actually fires for the small `segment.bytes=2048` test
+        // fixture. `mc ls` doesn't distinguish single-PUT from multipart-
+        // composed objects on read, so the consume assertion below
+        // covers both paths transparently.
+        multipart_threshold: 4 * 1024,
+        // MinIO permits parts < 5 MiB. Keep small so the test fixture
+        // doesn't have to bloat segments to exercise multiple parts.
+        multipart_chunk_size: 1024,
     };
     let (broker, _dir) = start_host_broker_with_minio_tier(s3).await;
     nc_check_connectivity();
