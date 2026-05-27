@@ -1,5 +1,5 @@
 //! `RecordsPayload`: the wire-field type for any Kafka message whose schema
-//! declares a `records` field (Fetch, Produce, FetchSnapshot, ShareFetch).
+//! declares a `records` field (`Fetch`, `Produce`, `FetchSnapshot`, `ShareFetch`).
 //!
 //! Kafka's records-field is "opaque bytes" at the protocol layer; the
 //! contents may be a v2 `RecordBatch` (current) or a v0/v1 `MessageSet`
@@ -175,7 +175,7 @@ impl<'a> RecordsPayloadBorrowed<'a> {
     }
 }
 
-impl<'a> Default for RecordsPayloadBorrowed<'a> {
+impl Default for RecordsPayloadBorrowed<'_> {
     fn default() -> Self {
         Self::V2(RecordBatchBorrowed::default())
     }
@@ -201,7 +201,7 @@ impl<'de> crate::DecodeBorrow<'de> for RecordsPayloadBorrowed<'de> {
 }
 
 /// True when `bytes` look like a v2 record batch (magic byte 2 at the
-/// well-known offset). v0 and v1 legacy MessageSets carry magic 0 or 1
+/// well-known offset). v0 and v1 legacy `MessageSets` carry magic 0 or 1
 /// at the same offset, so this check distinguishes the two.
 #[inline]
 fn looks_like_v2(bytes: &[u8]) -> bool {
