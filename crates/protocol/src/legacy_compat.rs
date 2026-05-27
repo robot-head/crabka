@@ -2,6 +2,14 @@
 //! `kafka_3_6_2`-namespaced flavors emitted from the vendored 3.6.2
 //! schemas. Used by the wire-router branches for Produce v0–2 and
 //! Fetch v0–3.
+//!
+//! ## Unknown tagged fields
+//!
+//! All conversions in this module drop `unknown_tagged_fields` via
+//! `..Default::default()`. This is deliberate: the legacy decoders only
+//! handle Produce v0–2 / Fetch v0–3, which predate the KIP-482 tagged-fields
+//! mechanism. Any tagged data on either side of a bridge is unreachable
+//! by the wire format at these versions, so silently dropping it is safe.
 
 mod fetch;
 mod produce;
