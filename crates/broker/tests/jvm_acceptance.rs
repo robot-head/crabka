@@ -8038,15 +8038,39 @@ async fn tiered_storage_round_trip_through_minio() {
         ],
     );
 
+    // Wait for the topic-config overrides to flow from the metadata image
+    // through `ReplicatorSupervisor::reconcile` into the partition's
+    // `LogConfig`. Without this gate, the producer's first batches land in
+    // a default-config `Log` (1 GiB segments, `remote_storage_enable=false`)
+    // and the tier-copy path is never triggered. See the cleanup-policy
+    // test (`compact_log_cleaner_round_trip`) for the same pattern.
+    let cfg_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if let Some(cfg) = broker.partition_log_config_for_test(TOPIC, 0)
+            && cfg.remote_storage_enable
+            && cfg.segment_bytes == 2048
+            && cfg.local_retention_bytes == Some(1)
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() <= cfg_deadline,
+            "tiered-storage topic config never propagated within 10s; saw {:?}",
+            broker.partition_log_config_for_test(TOPIC, 0)
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
     // Stream records line-by-line through the JVM console producer.
     let mut payload = String::with_capacity(RECORDS * 12);
     for i in 0..RECORDS {
         use std::fmt::Write as _;
         let _ = writeln!(payload, "record-{i:04}");
     }
-    // Force tiny producer batches so each `--config segment.bytes=2048`
-    // window only holds a handful of records and the partition rolls
-    // several sealed segments instead of one giant one.
+    // Force per-record batches (same trick `compact_log_cleaner_round_trip`
+    // uses): without this, the JVM producer accumulates everything into one
+    // big batch that the broker writes into a single segment, defeating the
+    // `segment.bytes=2048` roll trigger and starving the tier-copy path.
     let mut child = Command::new("docker")
         .args([
             "run",
@@ -8060,9 +8084,11 @@ async fn tiered_storage_round_trip_through_minio() {
             "--topic",
             TOPIC,
             "--producer-property",
-            "batch.size=512",
+            "batch.size=1",
             "--producer-property",
-            "linger.ms=5",
+            "linger.ms=0",
+            "--producer-property",
+            "max.in.flight.requests.per.connection=1",
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
