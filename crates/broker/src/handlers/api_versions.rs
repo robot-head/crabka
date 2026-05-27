@@ -1,5 +1,14 @@
 //! `ApiVersions` (`api_key=18`). Returns the (min, max) supported version
 //! range for every API key this broker handles.
+//!
+//! KIP-511 (v3+): the request carries `client_software_name` and
+//! `client_software_version`. The broker validates both against
+//! `[a-zA-Z0-9](?:[a-zA-Z0-9\-.]*[a-zA-Z0-9])?` and rejects the call with
+//! `INVALID_REQUEST` if either is empty or malformed (mirrors
+//! `ApiVersionsRequest.isValid` on the JVM). Accepted v3+ handshakes
+//! bump a per-(name, version) Prometheus counter
+//! (`crabka_broker_client_software_versions_total`) so operators can see
+//! which client libraries are connecting.
 
 use bytes::{Bytes, BytesMut};
 use futures_util::future::BoxFuture;
@@ -115,16 +124,72 @@ fn supported_apis() -> Vec<ApiVersion> {
     ]
 }
 
+/// KIP-511 client-information validity check. Matches the JVM
+/// `ApiVersionsRequest.isValid` regex
+/// `[a-zA-Z0-9](?:[a-zA-Z0-9\-.]*[a-zA-Z0-9])?`:
+///
+/// - non-empty
+/// - first and last chars are `[a-zA-Z0-9]`
+/// - interior chars are `[a-zA-Z0-9\-.]`
+///
+/// A single alphanumeric char is valid (the optional middle group lets the
+/// first and last char coincide). Implemented as a byte scan rather than
+/// a `regex` dependency — every Kafka-client name in the wild stays within
+/// ASCII so we don't need full UTF-8 char-class semantics.
+#[must_use]
+pub(crate) fn is_valid_client_info(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    let is_alnum = |b: u8| b.is_ascii_alphanumeric();
+    let is_interior = |b: u8| b.is_ascii_alphanumeric() || b == b'-' || b == b'.';
+    match bytes.len() {
+        0 => false,
+        1 => is_alnum(bytes[0]),
+        n => {
+            is_alnum(bytes[0])
+                && is_alnum(bytes[n - 1])
+                && bytes[1..n - 1].iter().all(|&b| is_interior(b))
+        }
+    }
+}
+
 pub(crate) fn handle(
-    _broker: &Broker,
+    broker: &Broker,
     version: i16,
     _correlation_id: i32,
     req_bytes: &[u8],
 ) -> BoxFuture<'static, Result<Bytes, BrokerError>> {
     let req_bytes = req_bytes.to_vec();
+    let metrics = broker.metrics.clone();
     Box::pin(async move {
         let mut cur: &[u8] = &req_bytes;
-        let _req = ApiVersionsRequest::decode(&mut cur, version)?;
+        let req = ApiVersionsRequest::decode(&mut cur, version)?;
+
+        // KIP-511: validate client-info fields on v3+. The codegen
+        // leaves both as empty strings on earlier versions, so the
+        // check would always fire — gate it on the version range that
+        // actually carries the fields. On reject, return a degraded
+        // response (error code, empty api_keys); clients are expected
+        // to retry with a fixed name/version or give up.
+        if version >= 3
+            && (!is_valid_client_info(&req.client_software_name)
+                || !is_valid_client_info(&req.client_software_version))
+        {
+            let resp = ApiVersionsResponse {
+                error_code: codes::INVALID_REQUEST,
+                api_keys: Vec::new(),
+                throttle_time_ms: 0,
+                ..Default::default()
+            };
+            let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
+            resp.encode(&mut buf, version)?;
+            return Ok(buf.freeze());
+        }
+
+        // Accepted handshake. Bump the per-(name, version) counter on
+        // v3+ only; older requests don't carry the fields.
+        if version >= 3 {
+            metrics.record_client_software(&req.client_software_name, &req.client_software_version);
+        }
 
         let resp = ApiVersionsResponse {
             error_code: codes::NONE,
@@ -155,5 +220,54 @@ mod tests {
             fetch.min_version, 0,
             "Fetch min must be 0 to advertise the legacy v0-3 support"
         );
+    }
+
+    // ── KIP-511 client-info validation ─────────────────────────────────────
+
+    #[test]
+    fn valid_client_info_accepts_typical_names() {
+        for s in [
+            "apache-kafka-java",
+            "crabka-client-core",
+            "librdkafka",
+            "kafka-python",
+            "node-rdkafka",
+            "Sarama",
+            "3.6.2",
+            "0.0.0",
+            "1.0.0-SNAPSHOT",
+            "a", // single alnum char — allowed
+            "1.2.3.4",
+        ] {
+            assert!(is_valid_client_info(s), "{s:?} should be valid");
+        }
+    }
+
+    #[test]
+    fn valid_client_info_rejects_empty() {
+        assert!(!is_valid_client_info(""));
+    }
+
+    #[test]
+    fn valid_client_info_rejects_leading_or_trailing_special() {
+        for s in ["-leading", "trailing-", ".dotstart", "dotend.", "-only-"] {
+            assert!(!is_valid_client_info(s), "{s:?} should be rejected");
+        }
+    }
+
+    #[test]
+    fn valid_client_info_rejects_disallowed_interior_chars() {
+        for s in [
+            "has space",
+            "has/slash",
+            "has\\backslash",
+            "has;semi",
+            "has@at",
+            "has(paren)",
+            "has\"quote",
+            "café", // non-ASCII alphanumeric — KIP-511 regex is ASCII-only
+        ] {
+            assert!(!is_valid_client_info(s), "{s:?} should be rejected");
+        }
     }
 }

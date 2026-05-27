@@ -4054,3 +4054,72 @@ introspection metadata).
     (`AllowAll` is constant-time; `SimpleAcl` walks a small ACL list;
     `OPA` already caches decisions). Bulk authorization is a
     future-Authorizer extension, not a KIP-430 requirement.
+
+## Slice — KIP-511 client software name/version validation + Prometheus surface (2026-05-27)
+
+- **Goal.** Promote the KIP-511 row in the README from ⚠️ → ✅ by:
+  1. Validating the `client_software_name` / `client_software_version`
+     fields the JVM `ApiVersionsRequest` v3+ adds, per Apache Kafka's
+     `ApiVersionsRequest.isValid` (regex
+     `[a-zA-Z0-9](?:[a-zA-Z0-9\-.]*[a-zA-Z0-9])?` plus non-empty); on
+     reject return `INVALID_REQUEST (42)` with an empty `api_keys` list.
+  2. Surfacing the accepted (name, version) tuple as a labelled
+     Prometheus counter so operators can graph which client libraries
+     are connecting (`crabka_broker_client_software_versions_total`,
+     labels `software_name` + `software_version`).
+- **Helper.** `handlers::api_versions::is_valid_client_info(&str) -> bool`.
+  Byte-scan implementation (no `regex` dependency) covering empty,
+  leading/trailing-special-char, disallowed interior char, and
+  non-ASCII inputs.
+- **Wire path.** `handlers::api_versions::handle` now decodes the
+  request (instead of discarding `_req`). On v ≥ 3 the validity gate
+  fires before the API list is built; valid handshakes bump the
+  counter via `BrokerMetrics::record_client_software`. v0-2 paths skip
+  both gates since the codegen leaves the fields empty.
+- **Metric.** New `ClientSoftwareLabel { software_name, software_version }`
+  + `client_software_versions: Family<…, Counter>` on `BrokerMetrics`.
+  Registered as `client_software_versions` (the `_total` suffix is
+  applied by `prometheus-client` at encoding). The label values are
+  guaranteed bounded because the validator runs first — the counter
+  can only see strings matching the KIP-511 regex.
+- **Tests.**
+  - 4 unit tests in `handlers::api_versions::tests`: accepts typical
+    client/version names; rejects empty; rejects leading/trailing
+    `-`/`.`; rejects disallowed interior chars (spaces, slashes,
+    quotes, non-ASCII alphanumerics like `café`).
+  - 9 integration tests in `tests/client_software_versions.rs` driving
+    raw `ApiVersions` requests against an in-process broker with the
+    Prometheus exporter bound on `127.0.0.1:0`:
+    - valid v3 round-trip returns `error_code = 0` and a populated
+      `api_keys` list.
+    - empty name → `INVALID_REQUEST` + empty `api_keys`.
+    - empty version → `INVALID_REQUEST`.
+    - invalid char in name (space) → `INVALID_REQUEST`.
+    - leading dash in version → `INVALID_REQUEST`.
+    - pre-v3 requests with empty name/version still succeed (the JVM
+      contract — v0-2 don't carry the fields).
+    - `/metrics` scrape shows three labelled series with the right
+      counts after driving `(name=crabka-it, version=1.0.0) × 2`,
+      `(name=crabka-it, version=1.0.1)`, and `(name=another-lib,
+      version=9.9.9)`.
+    - Rejected v3 handshakes do *not* add a labelled row.
+    - Pre-v3 handshakes do *not* add an empty-string row.
+- **README.** KIP-511 row flipped ⚠️ → ✅ in the protocol-features
+  KIP table.
+- **Workspace fmt + `clippy --workspace --all-targets -- -D warnings` +
+  broker lib (571 tests) + the new `client_software_versions`
+  integration suite (9 tests)** all green. Adjacent integration suites
+  (`unit`, `auth_handlers`, `acl_handlers`, `metrics`) unchanged.
+- **Out of scope.**
+  - The Prometheus counter label cardinality is governed entirely by
+    the universe of validated (name, version) pairs the broker has
+    ever seen; for normal fleets this is small (handful of client
+    libraries × a few releases). A counter-based DOS via thousands of
+    bogus version strings is foreclosed by the KIP-511 regex (max
+    label cardinality is dominated by what real clients send).
+  - The JVM also exposes `software-name` / `software-version` on per-
+    connection JMX gauges (one set per live socket). Crabka's
+    cumulative counter answers the operationally-interesting question
+    ("which clients ever connected, and how often?") without the
+    gauge-per-connection memory footprint. Adding a gauge surface is
+    a follow-up if real users want it.
