@@ -652,15 +652,25 @@ fn render_storage(
 }
 
 /// Build the `StatefulSet`'s `persistentVolumeClaimRetentionPolicy`
-/// block when storage is `PersistentClaim`. Returns `None` for
-/// `Ephemeral` (no PVCs to retain).
-fn render_pvc_retention_policy(storage: Option<&Storage>) -> Option<serde_json::Value> {
-    // A StatefulSet's retention policy applies set-wide to every
-    // volumeClaimTemplate, so JBOD's single `delete_claim` covers all disks.
+/// block when any PVC is in play. Returns `None` only when neither
+/// the pool's data storage nor the tier-storage cache is a PVC.
+///
+/// A `StatefulSet`'s retention policy applies set-wide to every
+/// `volumeClaimTemplate`. Validation upstream (Task 2) ensures that
+/// when both data and tier PVCs exist, their `delete_claim` flags
+/// match — so we can pick the pool's value when present and the tier
+/// value otherwise.
+fn render_pvc_retention_policy(
+    storage: Option<&Storage>,
+    tier_persistence: Option<&crate::crd::kafka::TieredStoragePersistence>,
+) -> Option<serde_json::Value> {
     let delete_claim = match storage {
         Some(Storage::PersistentClaim(pc)) => pc.delete_claim,
         Some(Storage::Jbod(j)) => j.delete_claim,
-        _ => return None,
+        _ => match tier_persistence {
+            Some(p) => p.delete_claim,
+            None => return None,
+        },
     };
     Some(json!({
         "whenDeleted": if delete_claim { "Delete" } else { "Retain" },
@@ -846,7 +856,7 @@ pub(crate) fn render_statefulset(
     if let Some(tp) = tier_storage_persistence {
         let pool_data_delete_claim = match pool.spec.storage.as_ref() {
             Some(Storage::PersistentClaim(pc)) => Some(pc.delete_claim),
-            Some(Storage::Jbod(j))             => Some(j.delete_claim),
+            Some(Storage::Jbod(j)) => Some(j.delete_claim),
             _ => None,
         };
         if let Some(dc) = pool_data_delete_claim
@@ -869,7 +879,8 @@ pub(crate) fn render_statefulset(
         tier_storage_local,
         tier_storage_persistence,
     );
-    let retention_policy = render_pvc_retention_policy(pool.spec.storage.as_ref());
+    let retention_policy =
+        render_pvc_retention_policy(pool.spec.storage.as_ref(), tier_storage_persistence);
 
     let mut sts_spec = json!({
         "serviceName": service_name,
@@ -3114,5 +3125,53 @@ mod tests {
 
         let _sts = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE)
             .expect("ephemeral pool + tier persistence must pass regardless of tier deleteClaim");
+    }
+
+    #[test]
+    fn ephemeral_pool_with_tier_persistence_emits_retention_policy() {
+        use crate::crd::kafka::{TieredStorage, TieredStoragePersistence, TieredStorageType};
+
+        let mut parent = parent_fixture("demo");
+        parent.spec.tiered_storage = Some(TieredStorage {
+            kind: TieredStorageType::Local,
+            s3: None,
+            metadata_manager: None,
+            persistence: Some(TieredStoragePersistence {
+                size: "20Gi".into(),
+                class: None,
+                delete_claim: true,
+            }),
+        });
+        // pool.spec.storage = None  → ephemeral; no data PVC
+        let pool = pool_fixture("brokers", "demo", 1);
+        let sts = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE).unwrap();
+        let policy = sts
+            .spec
+            .as_ref()
+            .unwrap()
+            .persistent_volume_claim_retention_policy
+            .as_ref()
+            .expect("policy must exist when tier PVC is present");
+        assert_eq!(
+            policy.when_deleted.as_deref(),
+            Some("Delete"),
+            "delete_claim=true should map to whenDeleted=Delete"
+        );
+        assert_eq!(policy.when_scaled.as_deref(), Some("Retain"));
+    }
+
+    #[test]
+    fn ephemeral_pool_without_tier_persistence_emits_no_retention_policy() {
+        let parent = parent_fixture("demo");
+        let pool = pool_fixture("brokers", "demo", 1);
+        let sts = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE).unwrap();
+        assert!(
+            sts.spec
+                .as_ref()
+                .unwrap()
+                .persistent_volume_claim_retention_policy
+                .is_none(),
+            "no PVCs => no retention policy"
+        );
     }
 }
