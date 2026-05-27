@@ -47,12 +47,17 @@
 #![doc(html_root_url = "https://docs.rs/crabka-remote-storage-topic/0.1.1")]
 
 pub mod error;
+pub mod kafka_log;
 pub mod log;
 pub mod manager;
 pub mod partitioning;
 pub mod serde;
 
 pub use error::{CodecError, MetadataLogError};
+pub use kafka_log::{
+    DEFAULT_NUM_PARTITIONS, DEFAULT_REPLICATION, KafkaMetadataEventLog, KafkaMetadataLogConfig,
+    METADATA_TOPIC,
+};
 pub use log::{
     InProcessMetadataEventLog, MetadataEventLog, MetadataEventRecord, MetadataEventStream,
 };
