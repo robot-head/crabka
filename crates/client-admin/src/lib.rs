@@ -12,11 +12,13 @@ use thiserror::Error;
 
 pub mod configs;
 pub mod delegation_tokens;
+pub mod log_dirs;
 pub mod quotas;
 pub mod topics;
 pub mod users;
 
 pub use configs::{AlterConfigsOutcome, IncrementalAlterOp, TopicConfigOverrides};
+pub use log_dirs::{AlterReplicaLogDirOutcome, LogDirInfo, LogDirPartitionInfo, LogDirTopicInfo};
 pub use quotas::{QuotaOp, UserQuotaConfig, diff_user_quotas};
 pub use topics::{
     CreatePartitionsOp, CreatePartitionsOutcome, CreateTopicOutcome, CreateTopicSpec,

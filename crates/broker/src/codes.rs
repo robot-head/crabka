@@ -15,6 +15,17 @@ pub const INVALID_FETCH_SIZE: i16 = 4;
 pub const LEADER_NOT_AVAILABLE: i16 = 5;
 pub const NOT_LEADER_OR_FOLLOWER: i16 = 6;
 pub const REQUEST_TIMED_OUT: i16 = 7;
+/// `REPLICA_NOT_AVAILABLE` (11, KIP-113) — the targeted replica is not
+/// hosted on this broker. Used by `AlterReplicaLogDirs` when the client
+/// names a `(topic, partition)` the broker doesn't own.
+pub const REPLICA_NOT_AVAILABLE: i16 = 11;
+/// `KAFKA_STORAGE_ERROR` (56, KIP-113) — a log-dir-level I/O failure
+/// (open, rename, remove) or a concurrent move with a conflicting target.
+pub const KAFKA_STORAGE_ERROR: i16 = 56;
+/// `LOG_DIR_NOT_FOUND` (57, KIP-113) — the destination directory in an
+/// `AlterReplicaLogDirs` request is not one of this broker's configured
+/// `log.dirs`.
+pub const LOG_DIR_NOT_FOUND: i16 = 57;
 pub const COORDINATOR_NOT_AVAILABLE: i16 = 15;
 pub const NOT_COORDINATOR: i16 = 16;
 pub const INVALID_TOPIC_EXCEPTION: i16 = 17;

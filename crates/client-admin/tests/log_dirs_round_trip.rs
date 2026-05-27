@@ -1,0 +1,153 @@
+// rustc 1.95 clippy ICEs on annotate-snippets in pedantic lints on these
+// raw-wire test files; match the opt-out used by `round_trip.rs`.
+#![allow(clippy::pedantic)]
+#![cfg(not(target_os = "windows"))]
+
+//! Integration test: drive KIP-113 (`AlterReplicaLogDirs` +
+//! `DescribeLogDirs`) through `AdminClient` so the typed admin
+//! wrappers in `crates/client-admin/src/log_dirs.rs` get exercised
+//! end-to-end against a live broker.
+
+use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
+
+use crabka_broker::{Broker, BrokerConfig};
+use crabka_client_admin::AdminClient;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn admin_log_dirs_alter_then_describe_converges() {
+    let primary = tempfile::tempdir().unwrap();
+    let extra = tempfile::tempdir().unwrap();
+    let mut cfg = BrokerConfig::for_tests(primary.path().to_path_buf());
+    cfg.extra_log_dirs = vec![extra.path().to_path_buf()];
+    let handle = Broker::start(cfg).await.expect("broker start");
+    let bootstrap = handle.listen_addr().to_string();
+
+    let mut admin = AdminClient::connect(&[bootstrap]).await.expect("connect");
+
+    // Create a 2-partition topic so KIP-113 placement spreads them
+    // across both configured log.dirs.
+    admin
+        .create_topics(
+            &[crabka_client_admin::CreateTopicSpec {
+                name: "t".to_string(),
+                partitions: 2,
+                replicas: 1,
+                configs: BTreeMap::new(),
+            }],
+            5_000,
+        )
+        .await
+        .expect("create_topics");
+
+    // Wait until both partitions are physically materialized on disk.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if handle.has_partition("t", 0).await && handle.has_partition("t", 1).await {
+            break;
+        }
+        assert!(Instant::now() <= deadline, "partitions never materialized");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // Initial DescribeLogDirs reports both dirs, no future logs.
+    let initial = admin.describe_log_dirs(None).await.expect("describe");
+    assert_eq!(initial.len(), 2, "one result per configured log dir");
+    for d in &initial {
+        assert!(d.error.is_none(), "log dir error: {:?}", d.error);
+        for t in &d.topics {
+            for p in &t.partitions {
+                assert!(!p.is_future_key, "no future logs before alter");
+                assert!(p.partition_size >= 0);
+            }
+        }
+    }
+
+    // Move both partitions into `extra`. AlterReplicaLogDirs picks the
+    // last entry per (topic, partition) on the wire if listed twice —
+    // we list each only once.
+    let mut assignments: BTreeMap<String, Vec<(String, Vec<i32>)>> = BTreeMap::new();
+    assignments.insert(
+        extra.path().to_string_lossy().to_string(),
+        vec![("t".to_string(), vec![0, 1])],
+    );
+    let outcomes = admin
+        .alter_replica_log_dirs(&assignments)
+        .await
+        .expect("alter");
+    assert_eq!(outcomes.len(), 2, "one outcome per partition");
+    for o in &outcomes {
+        assert!(
+            o.error.is_none(),
+            "alter error for {}-{}: {:?}",
+            o.topic,
+            o.partition,
+            o.error
+        );
+    }
+
+    // Poll DescribeLogDirs through the admin client until both
+    // partitions live in `extra` with `is_future_key=false`.
+    let target_canon = std::fs::canonicalize(extra.path()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let resp = admin.describe_log_dirs(None).await.expect("describe poll");
+        let mut current_in_target: Vec<i32> = Vec::new();
+        let mut any_future = false;
+        for d in &resp {
+            let d_canon = std::fs::canonicalize(&d.log_dir)
+                .unwrap_or_else(|_| std::path::PathBuf::from(&d.log_dir));
+            if d_canon != target_canon {
+                continue;
+            }
+            for t in &d.topics {
+                if t.name != "t" {
+                    continue;
+                }
+                for p in &t.partitions {
+                    if p.is_future_key {
+                        any_future = true;
+                    } else {
+                        current_in_target.push(p.partition_index);
+                    }
+                }
+            }
+        }
+        current_in_target.sort_unstable();
+        current_in_target.dedup();
+        if !any_future && current_in_target == vec![0, 1] {
+            break;
+        }
+        assert!(
+            Instant::now() <= deadline,
+            "move never completed: in_target={current_in_target:?} any_future={any_future}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // Filtered describe — request only topic "t" — should still see
+    // both partitions in the target dir.
+    let mut filter: BTreeMap<String, Vec<i32>> = BTreeMap::new();
+    filter.insert("t".to_string(), vec![]); // empty = all partitions
+    let filtered = admin
+        .describe_log_dirs(Some(&filter))
+        .await
+        .expect("filtered describe");
+    let mut filtered_in_target: Vec<i32> = Vec::new();
+    for d in &filtered {
+        let d_canon = std::fs::canonicalize(&d.log_dir)
+            .unwrap_or_else(|_| std::path::PathBuf::from(&d.log_dir));
+        if d_canon != target_canon {
+            continue;
+        }
+        for t in &d.topics {
+            for p in &t.partitions {
+                filtered_in_target.push(p.partition_index);
+            }
+        }
+    }
+    filtered_in_target.sort_unstable();
+    assert_eq!(filtered_in_target, vec![0, 1]);
+
+    handle.shutdown().await;
+}

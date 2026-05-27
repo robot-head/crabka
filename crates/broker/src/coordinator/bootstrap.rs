@@ -39,6 +39,10 @@ pub async fn bootstrap(
         log_dir::place_partition_dir(&config.all_log_dirs(), OFFSETS_TOPIC, OFFSETS_PARTITION);
     std::fs::create_dir_all(&topic_dir)?;
     let log = crabka_log::Log::open(&topic_dir, config.log_config.clone())?;
+    let owning_dir = topic_dir
+        .parent()
+        .expect("placed partition dir always has a parent log.dir")
+        .to_path_buf();
 
     // Register the topic via the metadata quorum. Tolerate `TopicExists`
     // because on broker restart the record is already in the replicated log.
@@ -73,7 +77,12 @@ pub async fn bootstrap(
     replay_records(&log, group_manager).await?;
 
     // Spawn a writer + register the partition handle.
-    let partition = spawn_partition(OFFSETS_TOPIC.to_string(), OFFSETS_PARTITION, log);
+    let partition = spawn_partition(
+        OFFSETS_TOPIC.to_string(),
+        OFFSETS_PARTITION,
+        owning_dir,
+        log,
+    );
     partitions.insert((OFFSETS_TOPIC.into(), OFFSETS_PARTITION), partition);
     Ok(())
 }

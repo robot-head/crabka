@@ -30,6 +30,7 @@ crabka-metadata = { version = "0.1", path = "../metadata" }
 crabka-remote-storage = { version = "0.1", path = "../remote-storage" }
 crabka-client-core = { version = "0.1", path = "../client-core" }
 crabka-security.workspace = true
+arc-swap.workspace = true
 async-trait.workspace = true
 rustls.workspace = true
 tokio-rustls.workspace = true
