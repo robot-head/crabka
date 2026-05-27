@@ -16,7 +16,11 @@ use crate::name_conv;
 use crate::resolve::{self, Resolution, StructKind};
 use crate::type_map;
 
-pub fn emit(spec: &MessageSpec, schemas_version: &str) -> Result<EmittedMessage, EmitError> {
+pub fn emit(
+    spec: &MessageSpec,
+    schemas_version: &str,
+    namespace: Option<&str>,
+) -> Result<EmittedMessage, EmitError> {
     // Build resolution map — validates that all struct references resolve.
     let res_map = resolve::resolve_message(spec)?;
 
@@ -26,12 +30,12 @@ pub fn emit(spec: &MessageSpec, schemas_version: &str) -> Result<EmittedMessage,
     emit_imports(&mut primary, spec, &res_map);
     emit_constants(&mut primary, spec);
     emit_struct(&mut primary, spec, &res_map, &parent_module);
-    emit_to_owned_impl(&mut primary, spec, &res_map);
+    emit_to_owned_impl(&mut primary, spec, &res_map, namespace);
     emit_encode_impl(&mut primary, spec, &res_map);
     emit_decode_borrow_impl(&mut primary, spec, &res_map, &parent_module);
 
     let fm = flex_min(spec);
-    emit_nested_structs_for_fields(&mut primary, &spec.fields, fm, &res_map, &parent_module);
+    emit_nested_structs_for_fields(&mut primary, &spec.fields, fm, &res_map, &parent_module, namespace);
 
     // Emit common structs into separate file bodies.
     let mut commons: Vec<(String, String)> = Vec::new();
@@ -70,6 +74,7 @@ pub fn emit(spec: &MessageSpec, schemas_version: &str) -> Result<EmittedMessage,
             &common_res_map,
             &cs_parent_module,
             schemas_version,
+            namespace,
         );
         commons.push((cs.name.clone(), body));
     }
@@ -86,6 +91,7 @@ fn emit_common_struct_file_borrowed(
     res_map: &HashMap<String, Resolution>,
     parent_module: &str,
     schemas_version: &str,
+    namespace: Option<&str>,
 ) -> String {
     let types = used_field_types_recursive(fields);
     let has_flex = flex_min_val < i16::MAX;
@@ -192,6 +198,7 @@ fn emit_common_struct_file_borrowed(
         flex_min_val,
         res_map,
         parent_module,
+        namespace,
     );
 
     out
@@ -869,7 +876,12 @@ fn borrowed_zero(base: &str) -> String {
 
 // ── to_owned() impl ────────────────────────────────────────────────────────
 
-fn emit_to_owned_impl(out: &mut String, spec: &MessageSpec, res_map: &HashMap<String, Resolution>) {
+fn emit_to_owned_impl(
+    out: &mut String,
+    spec: &MessageSpec,
+    res_map: &HashMap<String, Resolution>,
+    namespace: Option<&str>,
+) {
     let type_name = name_conv::type_name(&spec.name);
     let module_name = name_conv::module_name(&spec.name);
     let lt = if spec_needs_lifetime(spec, res_map) {
@@ -882,12 +894,16 @@ fn emit_to_owned_impl(out: &mut String, spec: &MessageSpec, res_map: &HashMap<St
     } else {
         ""
     };
+    let owned_root = match namespace {
+        None => "crate::owned".to_string(),
+        Some(ns) => format!("crate::{ns}::owned"),
+    };
     writeln!(
         out,
         "
 impl{impl_lt} {type_name}{lt} {{
-    pub fn to_owned(&self) -> crate::owned::{module_name}::{type_name} {{
-        crate::owned::{module_name}::{type_name} {{"
+    pub fn to_owned(&self) -> {owned_root}::{module_name}::{type_name} {{
+        {owned_root}::{module_name}::{type_name} {{"
     )
     .unwrap();
 
@@ -1613,6 +1629,7 @@ fn emit_nested_structs_for_fields(
     flex_min_val: i16,
     res_map: &HashMap<String, Resolution>,
     parent_module: &str,
+    namespace: Option<&str>,
 ) {
     for f in fields {
         if !f.fields.is_empty() {
@@ -1624,6 +1641,7 @@ fn emit_nested_structs_for_fields(
                 flex_min_val,
                 res_map,
                 parent_module,
+                namespace,
             );
         }
     }
@@ -1637,6 +1655,7 @@ fn emit_nested_struct(
     flex_min_val: i16,
     res_map: &HashMap<String, Resolution>,
     parent_module: &str,
+    namespace: Option<&str>,
 ) {
     // Only add <'a> lifetime if the struct actually has string/bytes/borrowed-struct fields.
     let has_lifetime = needs_lifetime(fields, res_map);
@@ -1701,7 +1720,11 @@ impl{lt} Default for {struct_name}{lt} {{
     writeln!(out, "        }}\n    }}\n}}").unwrap();
 
     // to_owned() on nested struct — the owned type lives in the parent message's owned module.
-    let module_path = format!("crate::owned::{parent_module}");
+    let owned_root = match namespace {
+        None => "crate::owned".to_string(),
+        Some(ns) => format!("crate::{ns}::owned"),
+    };
+    let module_path = format!("{owned_root}::{parent_module}");
     writeln!(
         out,
         "
@@ -1779,7 +1802,7 @@ impl<'de> DecodeBorrow<'de> for {struct_name}{lt_de} {{
     writeln!(out, "        Ok(out)\n    }}\n}}").unwrap();
 
     // Recurse into deeper nesting
-    emit_nested_structs_for_fields(out, fields, flex_min_val, res_map, parent_module);
+    emit_nested_structs_for_fields(out, fields, flex_min_val, res_map, parent_module, namespace);
 }
 
 // ── primitive encode/decode call generators ────────────────────────────────

@@ -145,7 +145,7 @@ fn run(
             continue;
         }
         let owned_em = emit::owned::emit(s, &schemas_sha)?;
-        let borrowed_em = emit::borrowed::emit(s, &schemas_sha)?;
+        let borrowed_em = emit::borrowed::emit(s, &schemas_sha, namespace)?;
         std::fs::write(out.join(format!("{}.owned.rs", s.name)), &owned_em.primary)?;
         std::fs::write(
             out.join(format!("{}.borrowed.rs", s.name)),
