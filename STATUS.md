@@ -3762,11 +3762,21 @@ introspection metadata).
   green.
 - **README updated:** `OffsetDelete` and KIP-496 rows flipped from ❌
   to ✅.
-- **Out of scope:** JVM acceptance test (the JVM AdminClient
-  expects the broker to return the principal name on a successful
-  `DescribeGroups` call so its `--delete-offsets` flow goes through
-  the group's Describe ACL implication — covered by slice 13b's
-  `Read` ⇒ `Describe` implication, which already applies here. A
-  dedicated `kafka-consumer-groups --delete-offsets` JVM test
-  belongs to a follow-up that also exercises the JVM tool's
-  retry/refresh quirks.)
+- **JVM acceptance test (follow-up, 2026-05-27):**
+  `kafka_consumer_groups_delete_offsets` in
+  `crates/broker/tests/jvm_acceptance.rs` drives
+  `kafka-consumer-groups --delete-offsets --group G --topic T`
+  against `cp-kafka:6.1.1`. The test creates a 2-partition topic,
+  produces one record, consumes with `--max-messages 1 --group G`
+  so the group commits then transitions to `Empty` (KIP-496
+  subscription guard skips Empty groups), pre-asserts that
+  `--describe` shows the committed offset, runs `--delete-offsets`
+  via a piped-stdin `docker run` (defensive `"y\n"` for any Y/N
+  prompt the JVM CLI may emit), asserts success + the table's
+  `"Successful"` row, then re-runs `--describe` and asserts no
+  data line both starts with `G` and contains `T`. AdminClient
+  pre-call path (`FindCoordinator` → `DescribeGroups` →
+  `OffsetDelete`) is served by existing slices; no ACLs seeded so
+  the slice-13b `Read` ⇒ `Describe` implication applies via the
+  no-ACL bypass. Closes the only documented gap in the original
+  slice.
