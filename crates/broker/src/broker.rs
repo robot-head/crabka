@@ -98,6 +98,12 @@ pub struct Broker {
     /// the remote-log-manager copy task and the Fetch/ListOffsets
     /// handlers share the same instance through this handle.
     pub(crate) remote_reader: Option<Arc<crate::remote_reader::RemoteReader>>,
+    /// KIP-113 (offline-dir handling): per-log-dir online/offline status,
+    /// built by a writability probe at `Broker::start` time. Handlers
+    /// (today: `DescribeLogDirs`; future: produce/fetch) read this via
+    /// [`crate::log_dir_status::LogDirRegistry::is_offline`] before
+    /// touching the dir.
+    pub(crate) log_dir_status: crate::log_dir_status::LogDirRegistry,
     handlers: HandlerTable,
 }
 
@@ -999,11 +1005,22 @@ impl Broker {
             }
         }
 
-        // 3. Scan + recover partitions on disk. Partition state is still
+        // 3. Probe every configured log dir for writability. KIP-113
+        //    offline-dir handling: a single bad dir on a JBOD broker
+        //    must not take down the whole broker — it just gets marked
+        //    offline so `DescribeLogDirs` surfaces it with
+        //    `KAFKA_STORAGE_ERROR` and JBOD placement skips it.
+        let log_dir_status = crate::log_dir_status::LogDirRegistry::probe(&config.all_log_dirs());
+
+        // 4. Scan + recover partitions on disk. Partition state is still
         //    a local-disk concern; the metadata image is sourced from
         //    `controller.current_image()` whenever a handler needs it.
+        //    Skip dirs marked offline by the probe — `scan_all` would
+        //    fail the whole startup on the first IO error, and we want
+        //    to keep recovering partitions on the surviving dirs.
         let partitions: Arc<DashMap<(String, i32), Arc<Partition>>> = Arc::new(DashMap::new());
-        for (topic, partition_id, owning_dir) in log_dir::scan_all(&config.all_log_dirs())? {
+        let scan_dirs = log_dir_status.online_subset(&config.all_log_dirs());
+        for (topic, partition_id, owning_dir) in log_dir::scan_all(&scan_dirs)? {
             let dir = log_dir::partition_dir(&owning_dir, &topic, partition_id);
             let log = crabka_log::Log::open(&dir, config.log_config.clone())?;
             let part = spawn_partition(topic.clone(), partition_id, owning_dir, log);
@@ -1019,6 +1036,7 @@ impl Broker {
             &controller,
             &partitions,
             group_manager.as_ref(),
+            &log_dir_status,
         )
         .await?;
 
@@ -1053,11 +1071,14 @@ impl Broker {
             .iter()
             .find(|l| l.name == config.inter_broker_listener_name)
             .map_or(crabka_security::ListenerProtocol::Plaintext, |l| l.protocol);
+        // KIP-113 offline-dir handling: feed the supervisor the online
+        // subset so newly materialized partitions never land on a dir
+        // the startup probe flagged unwritable.
         let supervisor = crate::replicator_supervisor::ReplicatorSupervisor::new(
             config.node_id,
             controller.clone(),
             partitions.clone(),
-            config.all_log_dirs(),
+            log_dir_status.online_subset(&config.all_log_dirs()),
             config.log_config.clone(),
             format!("crabka-broker-{}-replicator", config.broker_id),
             supervisor_shutdown.clone(),
@@ -1615,6 +1636,7 @@ impl Broker {
             want_shutdown: want_shutdown_tx,
             should_shutdown: should_shutdown_tx,
             remote_reader,
+            log_dir_status,
             handlers,
         });
 

@@ -140,6 +140,7 @@ pub(crate) mod isr_maintenance;
 pub(crate) mod leader_election;
 pub mod leader_rebalance;
 mod log_dir;
+mod log_dir_status;
 pub mod metrics;
 pub(crate) mod metrics_server;
 pub mod network;

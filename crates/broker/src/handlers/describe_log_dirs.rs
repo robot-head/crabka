@@ -56,6 +56,7 @@ pub(crate) fn handle(
     let log_dirs = broker.config.all_log_dirs();
     let partitions = broker.partitions.clone();
     let future_logs = broker.future_logs.clone();
+    let log_dir_status = broker.log_dir_status.clone();
     Box::pin(async move {
         let mut cur: &[u8] = &req_bytes;
         let req = DescribeLogDirsRequest::decode(&mut cur, version)?;
@@ -72,6 +73,23 @@ pub(crate) fn handle(
 
         let mut results = Vec::with_capacity(log_dirs.len());
         for dir in &log_dirs {
+            // KIP-113 offline-dir handling: a dir the startup probe
+            // flagged unwritable is reported with
+            // `error_code = KAFKA_STORAGE_ERROR`, no partition scan,
+            // and `-1` for capacity. The JVM `kafka-log-dirs` tool
+            // expects this shape — it prints the dir as
+            // "OFFLINE: …" rather than a row of zeros.
+            if log_dir_status.is_offline(dir) {
+                results.push(DescribeLogDirsResult {
+                    error_code: codes::KAFKA_STORAGE_ERROR,
+                    log_dir: absolute_path(dir),
+                    topics: Vec::new(),
+                    total_bytes: -1,
+                    usable_bytes: -1,
+                    ..Default::default()
+                });
+                continue;
+            }
             // Group the partitions physically present in this dir by topic.
             let mut by_topic: BTreeMap<String, Vec<DescribeLogDirsPartition>> = BTreeMap::new();
             let discovered = log_dir::scan(dir).unwrap_or_default();
