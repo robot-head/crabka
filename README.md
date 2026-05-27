@@ -134,7 +134,7 @@ implements it today. Legend: ✅ implemented · ⚠️ partial · ❌ not yet ·
 | Multiple log directories (JBOD) + `DescribeLogDirs` (KIP-113) | ✅ |
 | Intra-broker log-dir reassignment (`AlterReplicaLogDirs`, KIP-113) | ❌ |
 | Message format v0/v1 down-conversion | ❌ |
-| Tiered storage (KIP-405) | ❌ |
+| Tiered storage (KIP-405) | ⚠️ |
 
 ### Producer
 
@@ -157,7 +157,7 @@ implements it today. Legend: ✅ implemented · ⚠️ partial · ❌ not yet ·
 | `OffsetCommit` / `OffsetFetch` | ✅ |
 | Classic (eager) group rebalance protocol | ✅ |
 | `isolation.level=read_committed` (LSO clamping) | ✅ |
-| Cooperative incremental rebalance (KIP-429) | ❌ |
+| Cooperative incremental rebalance (KIP-429) | ✅ |
 | Static membership (KIP-345) | ❌ |
 | `OffsetDelete` admin API (KIP-496) | ✅ |
 | Next-gen consumer group protocol (KIP-848) | ❌ |
@@ -341,7 +341,7 @@ KIPs. Legend: ✅ implemented · ⚠️ partial · ❌ not yet · ⛔ out of sco
 | [KIP-62](https://cwiki.apache.org/confluence/display/KAFKA/KIP-62) | Background-thread heartbeats (session vs poll timeout) | ✅ |
 | [KIP-394](https://cwiki.apache.org/confluence/display/KAFKA/KIP-394) | Require `member.id` for initial JoinGroup | ✅ |
 | [KIP-345](https://cwiki.apache.org/confluence/display/KAFKA/KIP-345) | Static membership | ❌ |
-| [KIP-429](https://cwiki.apache.org/confluence/display/KAFKA/KIP-429) | Cooperative incremental rebalance protocol | ❌ |
+| [KIP-429](https://cwiki.apache.org/confluence/display/KAFKA/KIP-429) | Cooperative incremental rebalance protocol | ✅ |
 | [KIP-496](https://cwiki.apache.org/confluence/display/KAFKA/KIP-496) | `OffsetDelete` admin API | ✅ |
 | [KIP-848](https://cwiki.apache.org/confluence/display/KAFKA/KIP-848) | Next-generation consumer rebalance protocol | ❌ |
 
@@ -352,7 +352,7 @@ KIPs. Legend: ✅ implemented · ⚠️ partial · ❌ not yet · ⛔ out of sco
 | [KIP-204](https://cwiki.apache.org/confluence/display/KAFKA/KIP-204) | `DeleteRecords` via the Admin client | ✅ |
 | [KIP-112](https://cwiki.apache.org/confluence/display/KAFKA/KIP-112) | Handle disk failure for JBOD | ⚠️ |
 | [KIP-113](https://cwiki.apache.org/confluence/display/KAFKA/KIP-113) | Replica movement between log directories (JBOD) | ⚠️ |
-| [KIP-405](https://cwiki.apache.org/confluence/display/KAFKA/KIP-405) | Kafka tiered storage | ❌ |
+| [KIP-405](https://cwiki.apache.org/confluence/display/KAFKA/KIP-405) | Kafka tiered storage | ⚠️ |
 
 ### Replication & availability
 

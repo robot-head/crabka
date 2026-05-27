@@ -179,9 +179,10 @@ fn apply_group_metadata(g: &mut Group, v: GroupMetadataValue, replay_timestamp_m
             m.client_host,
             session_timeout,
             rebalance_timeout,
-            m.subscription,
+            Vec::new(),
         )
         .with_instance_id(m.group_instance_id.clone());
+        member.protocol_metadata = m.subscription;
         member.assignment = Some(m.assignment);
         if let Some(iid) = m.group_instance_id {
             g.static_members.insert(iid, m.member_id.clone());

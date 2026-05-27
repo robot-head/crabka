@@ -12,8 +12,12 @@ workspace = true
 
 [dependencies]
 bytes = { workspace = true }
+object_store = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

@@ -1380,31 +1380,40 @@ impl Broker {
         // Slice 48d hoists construction here so the `RemoteReader` on
         // `Broker` and the copy task share the same RSM / RLMM pair. A
         // single broker has exactly one of each.
-        let remote_reader: Option<Arc<crate::remote_reader::RemoteReader>> =
-            if let Some(dir) = config.remote_log_storage_dir.clone() {
-                let rsm: Arc<dyn crabka_remote_storage::RemoteStorageManager> =
-                    Arc::new(crabka_remote_storage::LocalTieredStorage::new(dir));
-                let rlmm: Arc<dyn crabka_remote_storage::RemoteLogMetadataManager> =
-                    Arc::new(crabka_remote_storage::InmemoryRemoteLogMetadataManager::new());
-
-                let partitions = partitions.clone();
-                let controller = controller.clone();
-                let shutdown = supervisor_shutdown.child_token();
-                tokio::spawn(crate::remote_log_manager::run(
-                    partitions,
-                    controller,
-                    rsm.clone(),
-                    rlmm.clone(),
-                    config.node_id,
-                    config.broker_id,
-                    crate::remote_log_manager::RemoteLogManagerConfig::default(),
-                    shutdown,
-                ));
-
-                Some(Arc::new(crate::remote_reader::RemoteReader::new(rsm, rlmm)))
-            } else {
-                None
+        let remote_reader: Option<Arc<crate::remote_reader::RemoteReader>> = if let Some(backend) =
+            config.remote_storage_backend.clone()
+        {
+            let rsm: Arc<dyn crabka_remote_storage::RemoteStorageManager> = match backend {
+                crate::config::RemoteStorageBackend::Local { dir } => {
+                    Arc::new(crabka_remote_storage::LocalTieredStorage::new(dir))
+                }
+                crate::config::RemoteStorageBackend::S3(cfg) => Arc::new(
+                    crabka_remote_storage::S3RemoteStorage::from_s3_config(&cfg).map_err(|e| {
+                        BrokerError::Startup(format!("remote_storage.s3 builder failed: {e}"))
+                    })?,
+                ),
             };
+            let rlmm: Arc<dyn crabka_remote_storage::RemoteLogMetadataManager> =
+                Arc::new(crabka_remote_storage::InmemoryRemoteLogMetadataManager::new());
+
+            let partitions = partitions.clone();
+            let controller = controller.clone();
+            let shutdown = supervisor_shutdown.child_token();
+            tokio::spawn(crate::remote_log_manager::run(
+                partitions,
+                controller,
+                rsm.clone(),
+                rlmm.clone(),
+                config.node_id,
+                config.broker_id,
+                crate::remote_log_manager::RemoteLogManagerConfig::default(),
+                shutdown,
+            ));
+
+            Some(Arc::new(crate::remote_reader::RemoteReader::new(rsm, rlmm)))
+        } else {
+            None
+        };
 
         // Slice 33: TLS hot-reload watcher. Only spawn when a TLS
         // config is present — non-TLS brokers don't need it.

@@ -17,7 +17,6 @@ use crate::codes;
 use crate::coordinator::group::{AddMemberOutcome, GroupState, Member};
 use crate::error::BrokerError;
 
-const SUPPORTED_PROTOCOL: &str = "range";
 const DEFAULT_SESSION_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_REBALANCE_TIMEOUT_MS: u64 = 60_000;
 /// Mirror of Apache Kafka's `group.initial.rebalance.delay.ms` default.
@@ -59,22 +58,7 @@ pub(crate) async fn handle(
         }
     }
 
-    // 1. Reject proposals that don't include `range`. (For the MVP we
-    //    only negotiate `range`; we don't run a real protocol-set
-    //    intersection.)
-    let proposes_range = req.protocols.iter().any(|p| p.name == SUPPORTED_PROTOCOL);
-    if !proposes_range {
-        return encode(
-            version,
-            &JoinGroupResponse {
-                error_code: codes::INCONSISTENT_GROUP_PROTOCOL,
-                member_id: req.member_id,
-                ..Default::default()
-            },
-        );
-    }
-
-    // 2. Empty member_id on first join → broker generates one (KIP-394).
+    // 1. Empty member_id on first join → broker generates one (KIP-394).
     //    KIP-345: for static members, derive the bootstrap id from the
     //    instance id so debug logs are readable, and check the
     //    static-members index first — if the instance id is already
@@ -122,6 +106,25 @@ pub(crate) async fn handle(
         );
     }
 
+    // 2. If the group already exists with a different `protocol_type`,
+    //    reject. New groups (no existing handle) accept any type.
+    if let Some(existing) = broker.group_manager.find(&req.group_id) {
+        let g = existing.state.lock().await;
+        if let Some(existing_type) = g.protocol_type.as_deref()
+            && existing_type != req.protocol_type
+        {
+            drop(g);
+            return encode(
+                version,
+                &JoinGroupResponse {
+                    error_code: codes::INCONSISTENT_GROUP_PROTOCOL,
+                    member_id: req.member_id,
+                    ..Default::default()
+                },
+            );
+        }
+    }
+
     let handle = broker.group_manager.get_or_create(&req.group_id);
 
     // 3. KIP-345 fence check. If the request carries a `group_instance_id`
@@ -147,12 +150,11 @@ pub(crate) async fn handle(
     // 4. Add member. The outcome distinguishes a true join (rebalance
     //    required) from a static-rejoin into a `Stable` group (skip the
     //    rebalance and return the cached assignment immediately).
-    let protocol_md = req
+    let protocols: Vec<(String, bytes::Bytes)> = req
         .protocols
         .iter()
-        .find(|p| p.name == SUPPORTED_PROTOCOL)
-        .map(|p| p.metadata.clone())
-        .unwrap_or_default();
+        .map(|p| (p.name.clone(), p.metadata.clone()))
+        .collect();
     let session_timeout = Duration::from_millis(
         u64::try_from(req.session_timeout_ms).unwrap_or(DEFAULT_SESSION_TIMEOUT_MS),
     );
@@ -171,7 +173,7 @@ pub(crate) async fn handle(
                 String::new(), // client_host; unused in MVP
                 session_timeout,
                 rebalance_timeout,
-                protocol_md,
+                protocols,
             )
             .with_instance_id(req.group_instance_id.clone()),
         );
@@ -229,11 +231,26 @@ pub(crate) async fn handle(
 
     // 5. Complete the rebalance if we're the one who fell out of the
     //    wait first. (Multiple JoinGroup handlers race; whoever wins
-    //    transitions the state under the mutex.)
+    //    transitions the state under the mutex.) Run the vote rule
+    //    over the proposed protocol sets; empty intersection surfaces
+    //    `INCONSISTENT_GROUP_PROTOCOL` to this member.
     {
         let mut g = handle.state.lock().await;
         if matches!(g.state, GroupState::PreparingRebalance) && !g.members.is_empty() {
-            g.complete_rebalance(SUPPORTED_PROTOCOL);
+            if let Some(chosen) = crate::coordinator::group::select_protocol(&g.members) {
+                g.resolve_selected_protocol_metadata(&chosen);
+                g.complete_rebalance(chosen);
+            } else {
+                handle.join_complete.notify_waiters();
+                return encode(
+                    version,
+                    &JoinGroupResponse {
+                        error_code: codes::INCONSISTENT_GROUP_PROTOCOL,
+                        member_id: req.member_id,
+                        ..Default::default()
+                    },
+                );
+            }
             handle.join_complete.notify_waiters();
         }
     }

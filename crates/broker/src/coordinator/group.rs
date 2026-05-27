@@ -41,8 +41,13 @@ pub struct Member {
     pub rebalance_timeout: Duration,
     pub last_heartbeat: Instant,
     /// Encoded `ConsumerProtocolSubscription` bytes (a `subscription` field
-    /// from `JoinGroupRequest`). Opaque to the broker.
+    /// from `JoinGroupRequest`). Opaque to the broker. This is the metadata
+    /// for the selected protocol — populated after `select_protocol` picks a
+    /// winner via [`Group::resolve_selected_protocol_metadata`].
     pub protocol_metadata: Bytes,
+    /// Full list of `(protocol_name, metadata)` pairs the member proposed in
+    /// its `JoinGroupRequest`. Used to negotiate the group protocol.
+    pub protocols: Vec<(String, Bytes)>,
     /// Encoded `ConsumerProtocolAssignment` bytes — populated by the leader
     /// in `SyncGroup`. `None` until then.
     pub assignment: Option<Bytes>,
@@ -56,8 +61,12 @@ impl Member {
         host: impl Into<String>,
         session_timeout: Duration,
         rebalance_timeout: Duration,
-        protocol_metadata: Bytes,
+        protocols: Vec<(String, Bytes)>,
     ) -> Self {
+        let protocol_metadata = protocols
+            .first()
+            .map(|(_, b)| b.clone())
+            .unwrap_or_default();
         Self {
             member_id: member_id.into(),
             group_instance_id: None,
@@ -67,6 +76,7 @@ impl Member {
             rebalance_timeout,
             last_heartbeat: Instant::now(),
             protocol_metadata,
+            protocols,
             assignment: None,
         }
     }
@@ -101,6 +111,44 @@ pub enum AddMemberOutcome {
     /// `group.instance.id`. The caller must reject with
     /// `FENCED_INSTANCE_ID`. No state change happened.
     Fenced { live_member_id: String },
+}
+
+/// Pick the protocol name with the most first-place votes among names
+/// proposed by every member. Ties broken lexicographically. Returns
+/// `None` if the intersection is empty (or there are no members).
+#[must_use]
+pub fn select_protocol(members: &HashMap<String, Member>) -> Option<String> {
+    if members.is_empty() {
+        return None;
+    }
+    let mut iter = members.values();
+    let first = iter.next()?;
+    let mut intersection: std::collections::HashSet<String> =
+        first.protocols.iter().map(|(n, _)| n.clone()).collect();
+    for m in iter {
+        let names: std::collections::HashSet<String> =
+            m.protocols.iter().map(|(n, _)| n.clone()).collect();
+        intersection = intersection.intersection(&names).cloned().collect();
+    }
+    if intersection.is_empty() {
+        return None;
+    }
+    let mut votes: HashMap<&str, usize> = HashMap::new();
+    for m in members.values() {
+        if let Some((name, _)) = m.protocols.first()
+            && intersection.contains(name)
+        {
+            *votes.entry(name.as_str()).or_insert(0) += 1;
+        }
+    }
+    intersection
+        .iter()
+        .max_by(|a, b| {
+            let va = votes.get(a.as_str()).copied().unwrap_or(0);
+            let vb = votes.get(b.as_str()).copied().unwrap_or(0);
+            va.cmp(&vb).then_with(|| b.cmp(a))
+        })
+        .cloned()
 }
 
 /// A committed offset entry. Keyed by `(topic, partition)` in
@@ -252,6 +300,17 @@ impl Group {
         self.rebalance_deadline = None;
     }
 
+    /// Set each member's `protocol_metadata` to its proposal for `name`.
+    /// Members that didn't propose `name` retain their existing metadata
+    /// (should not happen if called after a successful `select_protocol`).
+    pub fn resolve_selected_protocol_metadata(&mut self, name: &str) {
+        for m in self.members.values_mut() {
+            if let Some((_, bytes)) = m.protocols.iter().find(|(n, _)| n == name) {
+                m.protocol_metadata = bytes.clone();
+            }
+        }
+    }
+
     /// Called when the leader's `SyncGroup` arrives with assignments.
     /// Stores each member's `assignment` and transitions to `Stable`.
     pub fn install_assignments(&mut self, assignments: HashMap<String, Bytes>) {
@@ -320,7 +379,21 @@ mod tests {
             "127.0.0.1",
             Duration::from_secs(30),
             Duration::from_mins(1),
-            Bytes::new(),
+            vec![("range".into(), Bytes::new())],
+        )
+    }
+
+    fn member_with_protocols(id: &str, protocols: Vec<(&str, &[u8])>) -> Member {
+        Member::new(
+            id,
+            "test-client",
+            "127.0.0.1",
+            Duration::from_secs(30),
+            Duration::from_mins(1),
+            protocols
+                .into_iter()
+                .map(|(n, b)| (n.to_string(), Bytes::copy_from_slice(b)))
+                .collect(),
         )
     }
 
@@ -460,6 +533,87 @@ mod tests {
         g.remove_member("m1");
         assert_eq!(g.current_member_id_for_instance("inst-a"), Some("m2"));
         assert!(g.members.contains_key("m2"));
+    }
+
+    #[test]
+    fn select_protocol_single_member_picks_first() {
+        let mut members = HashMap::new();
+        members.insert(
+            "m1".to_string(),
+            member_with_protocols("m1", vec![("range", b""), ("cooperative_sticky", b"")]),
+        );
+        assert_eq!(select_protocol(&members).as_deref(), Some("range"));
+    }
+
+    #[test]
+    fn select_protocol_intersection_empty_returns_none() {
+        let mut members = HashMap::new();
+        members.insert(
+            "m1".to_string(),
+            member_with_protocols("m1", vec![("range", b"")]),
+        );
+        members.insert(
+            "m2".to_string(),
+            member_with_protocols("m2", vec![("cooperative_sticky", b"")]),
+        );
+        assert_eq!(select_protocol(&members), None);
+    }
+
+    #[test]
+    fn select_protocol_max_votes_wins() {
+        let mut members = HashMap::new();
+        members.insert(
+            "m1".to_string(),
+            member_with_protocols("m1", vec![("range", b""), ("cooperative_sticky", b"")]),
+        );
+        members.insert(
+            "m2".to_string(),
+            member_with_protocols("m2", vec![("range", b""), ("cooperative_sticky", b"")]),
+        );
+        members.insert(
+            "m3".to_string(),
+            member_with_protocols("m3", vec![("cooperative_sticky", b""), ("range", b"")]),
+        );
+        assert_eq!(select_protocol(&members).as_deref(), Some("range"));
+    }
+
+    #[test]
+    fn select_protocol_tie_breaks_lexicographically() {
+        let mut members = HashMap::new();
+        members.insert(
+            "m1".to_string(),
+            member_with_protocols("m1", vec![("range", b""), ("cooperative_sticky", b"")]),
+        );
+        members.insert(
+            "m2".to_string(),
+            member_with_protocols("m2", vec![("cooperative_sticky", b""), ("range", b"")]),
+        );
+        assert_eq!(
+            select_protocol(&members).as_deref(),
+            Some("cooperative_sticky")
+        );
+    }
+
+    #[test]
+    fn select_protocol_empty_members_returns_none() {
+        let members = HashMap::new();
+        assert_eq!(select_protocol(&members), None);
+    }
+
+    #[test]
+    fn resolve_metadata_updates_each_member() {
+        let mut g = Group::new("g");
+        g.add_member(member_with_protocols(
+            "m1",
+            vec![("range", b"r1"), ("cooperative_sticky", b"c1")],
+        ));
+        g.add_member(member_with_protocols(
+            "m2",
+            vec![("range", b"r2"), ("cooperative_sticky", b"c2")],
+        ));
+        g.resolve_selected_protocol_metadata("cooperative_sticky");
+        assert_eq!(g.members["m1"].protocol_metadata.as_ref(), b"c1");
+        assert_eq!(g.members["m2"].protocol_metadata.as_ref(), b"c2");
     }
 
     #[test]
