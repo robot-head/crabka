@@ -7678,6 +7678,10 @@ async fn jvm_kafka_delegation_tokens_end_to_end() {
 /// `JoinGroup` vote rule accepts `cooperative-sticky` and that the broker
 /// correctly forwards the negotiated `protocol_name` so the JVM client's
 /// `AbstractCoordinator.onJoinComplete` accepts the response.
+///
+/// Uses `cp-kafka:7.5.0` (= [`KAFKA_IMAGE_TXN`]): the cooperative-sticky
+/// assignor in `cp-kafka:6.1.1` (Kafka 2.7) had several rebalance race
+/// fixes that didn't land until Kafka 3.x.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker"]
 async fn cooperative_sticky_kafka_console_consumer() {
@@ -7734,22 +7738,27 @@ async fn cooperative_sticky_kafka_console_consumer() {
     );
 
     // 3. Consume via kafka-console-consumer with CooperativeStickyAssignor.
-    let consumer_out = docker_run_kafka_tool(&[
-        "kafka-console-consumer",
-        "--bootstrap-server",
-        BOOTSTRAP,
-        "--topic",
-        TOPIC,
-        "--group",
-        "coop-jvm-group",
-        "--consumer-property",
-        "partition.assignment.strategy=org.apache.kafka.clients.consumer.CooperativeStickyAssignor",
-        "--from-beginning",
-        "--max-messages",
-        "3",
-        "--timeout-ms",
-        "15000",
-    ]);
+    //    Use cp-kafka:7.5.0 (Kafka 3.5) — cooperative-sticky in 2.7 had
+    //    rebalance races that masked broker correctness issues.
+    let consumer_out = docker_run_kafka_tool_with_image(
+        KAFKA_IMAGE_TXN,
+        &[
+            "kafka-console-consumer",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--topic",
+            TOPIC,
+            "--group",
+            "coop-jvm-group",
+            "--consumer-property",
+            "partition.assignment.strategy=org.apache.kafka.clients.consumer.CooperativeStickyAssignor",
+            "--from-beginning",
+            "--max-messages",
+            "3",
+            "--timeout-ms",
+            "30000",
+        ],
+    );
     let s = String::from_utf8_lossy(&consumer_out.stdout);
     for needle in ["alpha", "bravo", "charlie"] {
         assert!(
