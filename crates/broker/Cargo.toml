@@ -26,7 +26,6 @@ crabka-protocol = { version = "0.1", path = "../protocol", default-features = fa
 crabka-records-legacy = { version = "0.1", path = "../records-legacy" }
 crabka-log = { version = "0.1", path = "../log" }
 crabka-compression = { version = "0.1", path = "../compression", default-features = false }
-crabka-records-legacy = { version = "0.1", path = "../records-legacy", default-features = false, features = ["gzip", "snappy", "lz4"] }
 crabka-raft = { version = "0.1", path = "../raft" }
 crabka-metadata = { version = "0.1", path = "../metadata" }
 crabka-remote-storage = { version = "0.1", path = "../remote-storage" }

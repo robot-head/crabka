@@ -44,7 +44,7 @@ pub const INVALID_REPLICATION_FACTOR: i16 = 38;
 pub const NOT_CONTROLLER: i16 = 41;
 pub const INVALID_REQUEST: i16 = 42;
 /// Kafka error 87. Returned when a Produce payload is structurally
-/// malformed — e.g. a legacy v0/v1 MessageSet that fails CRC, has
+/// malformed — e.g. a legacy v0/v1 `MessageSet` that fails CRC, has
 /// nested compression, or otherwise can't be parsed into v2 records.
 pub const INVALID_RECORD: i16 = 87;
 

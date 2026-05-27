@@ -1,7 +1,7 @@
-//! Slice 3 — Produce up-conversion from v0/v1 MessageSet to v2.
+//! Slice 3 — Produce up-conversion from v0/v1 `MessageSet` to v2.
 //!
 //! The broker's Produce handler now accepts a `RecordsPayload::Legacy`
-//! arm: incoming v0/v1 MessageSet bytes are passed through
+//! arm: incoming v0/v1 `MessageSet` bytes are passed through
 //! `crabka_records_legacy::legacy_to_v2` and the resulting v2 batch is
 //! handed to the existing log-append path. These tests exercise the
 //! conversion without going through the wire protocol's version
@@ -59,15 +59,15 @@ async fn topic_id_for(p: &support::InProcess, name: &str) -> Uuid {
         .expect("topic in Metadata response")
 }
 
-/// Build a flat (uncompressed) v1 MessageSet carrying `values` as
+/// Build a flat (uncompressed) v1 `MessageSet` carrying `values` as
 /// successive records at offsets 0..N-1.
 fn build_v1_message_set(values: &[&[u8]]) -> Bytes {
     let recs: Vec<ParsedRecord> = values
         .iter()
         .enumerate()
         .map(|(i, v)| ParsedRecord {
-            offset: i as i64,
-            timestamp: Some(1_700_000_000 + i as i64),
+            offset: i64::try_from(i).expect("offset fits in i64"),
+            timestamp: Some(1_700_000_000 + i64::try_from(i).expect("ts offset fits in i64")),
             key: None,
             value: Some(Bytes::copy_from_slice(v)),
         })
@@ -102,7 +102,10 @@ async fn produce_v1_message_set_is_upconverted_and_round_trips() {
     };
     let resp = p.client.send(req).await.expect("Produce");
     let pr = &resp.responses[0].partition_responses[0];
-    assert_eq!(pr.error_code, 0, "Produce up-conversion must succeed: {pr:?}");
+    assert_eq!(
+        pr.error_code, 0,
+        "Produce up-conversion must succeed: {pr:?}"
+    );
 
     // Fetch the stored records back and verify they survived the
     // up-conversion. The wire response is v2, so the fetched batch

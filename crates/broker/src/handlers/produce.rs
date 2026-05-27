@@ -292,7 +292,7 @@ async fn process_partition(
             Ok(rb) => rb,
             Err(e) => {
                 tracing::warn!(error = %e, "legacy_to_v2 failed");
-                out.error_code = codes::CORRUPT_MESSAGE;
+                out.error_code = codes::INVALID_RECORD;
                 return Ok(out);
             }
         },
