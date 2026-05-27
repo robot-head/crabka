@@ -5,18 +5,22 @@
 //! contribution is: ordered acks back to producers + waking long-poll
 //! Fetch consumers via a shared `Notify` after every successful append.
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use arc_swap::ArcSwap;
 use crabka_log::Log;
 use tokio::sync::{Notify, mpsc};
 
-use crate::partition::{ProduceJob, WriterMessage};
+use crate::partition::{ProduceJob, SwapOutcome, WriterMessage};
 use crate::replica_state::ReplicaState;
 
 /// Loop on the receive side of the partition's `WriterMessage` channel.
 /// Exits when the channel closes (every sender dropped).
+#[allow(clippy::too_many_lines)]
 pub async fn run(
     log: Arc<Mutex<Log>>,
+    log_dir: Arc<ArcSwap<PathBuf>>,
     mut rx: mpsc::Receiver<WriterMessage>,
     append_notify: Arc<Notify>,
     replica_state: Arc<tokio::sync::Mutex<ReplicaState>>,
@@ -140,8 +144,109 @@ pub async fn run(
                 };
                 let _ = ack.send(result);
             }
+            WriterMessage::SwapFutureLog {
+                target_log_dir,
+                future_log,
+                future_path,
+                target_partition_path,
+                ack,
+            } => {
+                let result = swap_future_log(
+                    &log,
+                    &log_dir,
+                    target_log_dir,
+                    &future_log,
+                    &future_path,
+                    &target_partition_path,
+                );
+                let _ = ack.send(result);
+                // No `append_notify` — swap doesn't deliver new data,
+                // and consumers re-read from the swapped `log` against
+                // identical offsets.
+            }
         }
     }
+}
+
+/// KIP-113 intra-broker log-dir swap. Called from the writer task —
+/// holds the partition's `log` mutex for the duration of the rename so
+/// no other appender sees a half-swapped state.
+///
+/// The future log MUST be caught up: its LEO == the current log's LEO.
+/// If a producer slipped a batch in between the caller's catch-up
+/// check and this writer cycle, we report `NotCaughtUp` so the
+/// replicator loop drains the lag and retries.
+fn swap_future_log(
+    log: &Arc<Mutex<Log>>,
+    log_dir: &Arc<ArcSwap<PathBuf>>,
+    target_log_dir: PathBuf,
+    future_log: &Arc<Mutex<Log>>,
+    future_path: &std::path::Path,
+    target_partition_path: &std::path::Path,
+) -> Result<SwapOutcome, crate::error::BrokerError> {
+    // Acquire both logs under the writer's serialization and re-check
+    // the caught-up invariant. If the future log fell behind between
+    // the caller's check and this cycle, refuse the swap and let the
+    // replicator catch up.
+    let mut log_guard = log.lock().expect("log mutex poisoned");
+    let config = log_guard.config_snapshot();
+    let current_leo = log_guard.log_end_offset();
+    let mut future_guard = future_log.lock().expect("future log mutex poisoned");
+    if future_guard.log_end_offset() < current_leo {
+        return Ok(SwapOutcome::NotCaughtUp);
+    }
+
+    let source_partition_path = log_guard.dir().to_path_buf();
+
+    // Release segment file descriptors on both Logs before mutating
+    // the filesystem. `Log::close` consumes the value, so we move
+    // both out via `mem::replace` against throwaway Logs anchored to
+    // a sacrificial `*.tomb` directory we delete at the end.
+    let tomb_dir = future_path.with_extension("crabka-swap-tomb");
+    std::fs::create_dir_all(&tomb_dir)?;
+    let old_current =
+        std::mem::replace(&mut *log_guard, Log::open(&tomb_dir, config.clone())?);
+    old_current.close();
+    let old_future =
+        std::mem::replace(&mut *future_guard, Log::open(&tomb_dir, config.clone())?);
+    old_future.close();
+    drop(future_guard);
+
+    // Atomically promote the future dir into the canonical
+    // `<topic>-<partition>` slot under the target log.dir, then
+    // remove the source dir. If the rename fails, reopen the source
+    // so the partition keeps serving and bubble the error.
+    if let Err(e) = std::fs::rename(future_path, target_partition_path) {
+        // Best-effort recovery: reopen the original log in the
+        // source dir so the partition keeps serving against the
+        // pre-swap location.
+        match Log::open(&source_partition_path, config) {
+            Ok(reopened) => *log_guard = reopened,
+            Err(reopen_err) => {
+                tracing::error!(
+                    error = %reopen_err,
+                    "swap_future_log: rename failed AND source reopen failed; \
+                     partition is offline until restart"
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(&tomb_dir);
+        return Err(crate::error::BrokerError::from(e));
+    }
+
+    if let Err(e) = std::fs::remove_dir_all(&source_partition_path) {
+        tracing::warn!(
+            source = %source_partition_path.display(),
+            error = %e,
+            "swap_future_log: failed to remove source partition dir; \
+             partition is live at target, source will be cleaned on next restart"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&tomb_dir);
+
+    *log_guard = Log::open(target_partition_path, config)?;
+    log_dir.store(Arc::new(target_log_dir));
+    Ok(SwapOutcome::Swapped)
 }
 
 #[cfg(test)]
@@ -176,6 +281,7 @@ mod tests {
         let notify = Arc::new(Notify::new());
         let writer = tokio::spawn(run(
             log.clone(),
+            Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             rx,
             notify.clone(),
             Arc::new(tokio::sync::Mutex::new(
@@ -219,6 +325,7 @@ mod tests {
         let notify = Arc::new(Notify::new());
         let writer = tokio::spawn(run(
             log.clone(),
+            Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             rx,
             notify.clone(),
             Arc::new(tokio::sync::Mutex::new(
@@ -258,6 +365,7 @@ mod tests {
         let notify = Arc::new(Notify::new());
         let writer = tokio::spawn(run(
             log.clone(),
+            Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             rx,
             notify.clone(),
             Arc::new(tokio::sync::Mutex::new(
@@ -291,6 +399,7 @@ mod tests {
         let notify = Arc::new(Notify::new());
         let writer = tokio::spawn(run(
             log.clone(),
+            Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             rx,
             notify.clone(),
             Arc::new(tokio::sync::Mutex::new(
@@ -328,6 +437,7 @@ mod tests {
         let notify = Arc::new(Notify::new());
         let writer = tokio::spawn(run(
             log.clone(),
+            Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             rx,
             notify.clone(),
             Arc::new(tokio::sync::Mutex::new(
@@ -378,6 +488,7 @@ mod tests {
         let hw_advance_notify = Arc::new(Notify::new());
         let writer = tokio::spawn(run(
             log.clone(),
+            Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             rx,
             append_notify.clone(),
             replica_state.clone(),
@@ -420,6 +531,7 @@ mod tests {
         let hw_advance_notify = Arc::new(Notify::new());
         let writer = tokio::spawn(run(
             log.clone(),
+            Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             rx,
             append_notify,
             replica_state,
@@ -469,6 +581,7 @@ mod tests {
         let hw_advance_notify = Arc::new(Notify::new());
         let writer = tokio::spawn(run(
             log.clone(),
+            Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             rx,
             append_notify,
             replica_state,
@@ -505,6 +618,7 @@ mod tests {
         let hw_advance_notify = Arc::new(Notify::new());
         let writer = tokio::spawn(run(
             log.clone(),
+            Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             rx,
             append_notify.clone(),
             replica_state.clone(),

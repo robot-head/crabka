@@ -6,10 +6,28 @@ use std::path::{Path, PathBuf};
 
 use crate::error::BrokerError;
 
+/// Suffix appended to a future-log partition directory while a
+/// KIP-113 intra-broker move is in progress. The directory at
+/// `<target_log_dir>/<topic>-<partition><FUTURE_SUFFIX>` accumulates
+/// copied batches until the future log catches up and is renamed
+/// in-place to `<topic>-<partition>`. Mirrors Apache Kafka's
+/// `LogManager.FutureDirSuffix` so cp-kafka tooling expectations
+/// (`kafka-log-dirs`) line up byte-for-byte on disk.
+pub const FUTURE_SUFFIX: &str = "-future";
+
 /// Build the directory path for a (topic, partition).
 #[must_use]
 pub fn partition_dir(log_dir: &Path, topic: &str, partition: i32) -> PathBuf {
     log_dir.join(format!("{topic}-{partition}"))
+}
+
+/// Build the future-log directory path for a (topic, partition) in
+/// `log_dir`. Used by `AlterReplicaLogDirs` / KIP-113 — the future
+/// log accumulates copied batches and is atomically renamed to the
+/// canonical `<topic>-<partition>` on swap.
+#[must_use]
+pub fn future_partition_dir(log_dir: &Path, topic: &str, partition: i32) -> PathBuf {
+    log_dir.join(format!("{topic}-{partition}{FUTURE_SUFFIX}"))
 }
 
 /// Parse `<topic>-<partition>` from a directory name.
@@ -30,6 +48,17 @@ pub fn parse_partition_dir(name: &str) -> Option<(String, i32)> {
     Some((topic.to_string(), partition))
 }
 
+/// Parse a `<topic>-<partition>-future` directory name back to
+/// `(topic, partition)`. Strips the [`FUTURE_SUFFIX`] then defers to
+/// [`parse_partition_dir`] so the topic-name handling stays in one
+/// place. Returns `None` if the name doesn't carry the suffix or the
+/// stripped remainder isn't a valid partition directory.
+#[must_use]
+pub fn parse_future_partition_dir(name: &str) -> Option<(String, i32)> {
+    let base = name.strip_suffix(FUTURE_SUFFIX)?;
+    parse_partition_dir(base)
+}
+
 /// Walk `log_dir` and return every `(topic, partition)` whose directory
 /// exists. Used at broker startup to repopulate the metadata image +
 /// partition registry from whatever was on disk last run.
@@ -48,6 +77,32 @@ pub fn scan(log_dir: &Path) -> Result<Vec<(String, i32)>, BrokerError> {
             continue; // non-UTF-8 dir name: ignore
         };
         if let Some((topic, partition)) = parse_partition_dir(&name) {
+            out.push((topic, partition));
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// Walk `log_dir` and return every `(topic, partition)` whose
+/// future-log directory (`<topic>-<partition>-future`) is present.
+/// Used by `DescribeLogDirs` to surface in-progress KIP-113 moves
+/// with `is_future_key=true`, and by broker startup to resume moves
+/// that were interrupted by a crash.
+pub fn scan_future(log_dir: &Path) -> Result<Vec<(String, i32)>, BrokerError> {
+    if !log_dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(log_dir)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        if let Some((topic, partition)) = parse_future_partition_dir(&name) {
             out.push((topic, partition));
         }
     }
@@ -250,6 +305,66 @@ mod tests {
                 ("foo".to_string(), 0, a.path().to_path_buf()),
             ]
         );
+    }
+
+    #[test]
+    fn future_partition_dir_round_trips() {
+        let p = future_partition_dir(Path::new("/tmp"), "foo", 7);
+        let name = p
+            .file_name()
+            .expect("path has a file name")
+            .to_str()
+            .expect("file name is utf-8");
+        assert_eq!(name, "foo-7-future");
+        assert_eq!(
+            parse_future_partition_dir(name),
+            Some(("foo".to_string(), 7))
+        );
+    }
+
+    #[test]
+    fn parse_future_rejects_non_future_name() {
+        // Plain partition dir has no `-future` suffix.
+        assert_eq!(parse_future_partition_dir("foo-7"), None);
+        // Suffix present but the remainder isn't a partition dir.
+        assert_eq!(parse_future_partition_dir("garbage-future"), None);
+    }
+
+    #[test]
+    fn scan_does_not_pick_up_future_dirs() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("foo-0")).unwrap();
+        std::fs::create_dir(dir.path().join("foo-1-future")).unwrap();
+        let out = scan(dir.path()).expect("scan ok");
+        assert_eq!(out, vec![("foo".into(), 0)]);
+    }
+
+    #[test]
+    fn scan_future_returns_only_future_dirs() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("foo-0")).unwrap();
+        std::fs::create_dir(dir.path().join("foo-1-future")).unwrap();
+        std::fs::create_dir(dir.path().join("bar-3-future")).unwrap();
+        let mut out = scan_future(dir.path()).expect("scan_future ok");
+        out.sort();
+        assert_eq!(out, vec![("bar".into(), 3), ("foo".into(), 1)]);
+    }
+
+    #[test]
+    fn scan_future_missing_dir_is_empty() {
+        let dir = tempdir().unwrap();
+        let missing = dir.path().join("nope");
+        assert!(scan_future(&missing).expect("ok").is_empty());
+    }
+
+    #[test]
+    fn count_partitions_ignores_future_dirs() {
+        // KIP-113 placement should not see future-log dirs as load —
+        // they are transient state belonging to an in-flight move.
+        let dir = tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("foo-0")).unwrap();
+        std::fs::create_dir(dir.path().join("foo-1-future")).unwrap();
+        assert_eq!(count_partitions(dir.path()), 1);
     }
 
     #[test]

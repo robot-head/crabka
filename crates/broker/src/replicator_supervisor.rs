@@ -99,7 +99,11 @@ pub(crate) fn materialize_partition(
             let dir = crate::log_dir::place_partition_dir(log_dirs, topic, partition);
             std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
             let log = Log::open(&dir, log_config.clone()).map_err(|e| format!("Log::open: {e}"))?;
-            let part = spawn_partition(topic.to_string(), partition, log);
+            let owning_dir = dir
+                .parent()
+                .expect("placed partition dir always has a parent log.dir")
+                .to_path_buf();
+            let part = spawn_partition(topic.to_string(), partition, owning_dir, log);
             slot.insert(part);
             Ok(())
         }

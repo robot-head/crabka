@@ -357,6 +357,28 @@ async fn serve_connection_stream<S>(
         // so this case is intercepted inline like the SASL frames are.
         // Returning `Some` short-circuits the normal `dispatch_one()` path
         // for this frame.
+        // AlterReplicaLogDirs (34) needs the connection's authenticated
+        // principal and the peer `SocketAddr` so it can enforce the
+        // Cluster Alter ACL gate (KIP-113). Intercepted inline like
+        // AlterUserScramCredentials (51).
+        if peek_api_key(&frame).ok() == Some(34) {
+            match handle_alter_replica_log_dirs_frame(&broker, &frame, &auth, &peer)
+                .instrument(req_span.clone())
+                .await
+            {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during ARLD, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "ARLD dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
         if peek_api_key(&frame).ok() == Some(51) {
             match handle_alter_user_scram_credentials_frame(&broker, &frame, &auth, &peer)
                 .instrument(req_span.clone())
@@ -1370,6 +1392,105 @@ async fn handle_sasl_frame(
         response_bytes,
         close_after,
     })
+}
+
+/// Decode + dispatch an `AlterReplicaLogDirs` (`api_key` 34) frame.
+/// Pulls the authenticated principal + peer `SocketAddr` off the
+/// connection so the handler can enforce KIP-113's Cluster Alter ACL
+/// gate. On Deny, every `(topic, partition)` listed in the request
+/// receives `CLUSTER_AUTHORIZATION_FAILED` in the response.
+async fn handle_alter_replica_log_dirs_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    use std::collections::BTreeMap;
+
+    use crabka_protocol::owned::alter_replica_log_dirs_request::AlterReplicaLogDirsRequest;
+    use crabka_protocol::owned::alter_replica_log_dirs_response::{
+        AlterReplicaLogDirPartitionResult, AlterReplicaLogDirTopicResult,
+        AlterReplicaLogDirsResponse,
+    };
+    use crabka_protocol::{Decode, Encode};
+
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 34);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let principal = auth
+        .principal()
+        .cloned()
+        .unwrap_or_else(|| crabka_security::Principal {
+            name: "ANONYMOUS".to_string(),
+            auth_method: crabka_security::AuthMethod::Anonymous,
+            groups: vec![],
+        });
+
+    let image = broker.controller.current_image();
+    let authorized = broker.config.authorizer.authorize(
+        &image,
+        &crate::authorizer::AuthorizationRequest {
+            principal: &principal,
+            host: peer,
+            resource_type: crabka_metadata::ResourceType::Cluster,
+            resource_name: "kafka-cluster",
+            operation: crabka_metadata::AclOperation::Alter,
+        },
+    ) == crate::authorizer::AuthorizationResult::Allow;
+
+    if !authorized {
+        // Stamp CLUSTER_AUTHORIZATION_FAILED on every partition the
+        // client listed and skip the move machinery entirely.
+        let mut cur: &[u8] = body;
+        let req = AlterReplicaLogDirsRequest::decode(&mut cur, api_version)?;
+        let mut by_topic: BTreeMap<String, Vec<AlterReplicaLogDirPartitionResult>> =
+            BTreeMap::new();
+        for dir in req.dirs {
+            for topic in dir.topics {
+                for partition_index in topic.partitions {
+                    by_topic.entry(topic.name.clone()).or_default().push(
+                        AlterReplicaLogDirPartitionResult {
+                            partition_index,
+                            error_code: codes::CLUSTER_AUTHORIZATION_FAILED,
+                            ..Default::default()
+                        },
+                    );
+                }
+            }
+        }
+        let results: Vec<_> = by_topic
+            .into_iter()
+            .map(|(name, partitions)| AlterReplicaLogDirTopicResult {
+                topic_name: name,
+                partitions,
+                ..Default::default()
+            })
+            .collect();
+        let resp = AlterReplicaLogDirsResponse {
+            throttle_time_ms: 0,
+            results,
+            ..Default::default()
+        };
+        let mut buf = BytesMut::with_capacity(resp.encoded_len(api_version));
+        resp.encode(&mut buf, api_version)?;
+        return Ok(encode_response(
+            api_key,
+            correlation_id,
+            body_flexible,
+            &buf.freeze(),
+        ));
+    }
+
+    let resp_body =
+        crate::handlers::alter_replica_log_dirs::handle(broker, api_version, correlation_id, body)
+            .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
 }
 
 /// Decode + dispatch an `AlterUserScramCredentials` (`api_key` 51) frame.
@@ -3115,6 +3236,7 @@ fn handler_body_flexible(api_key: i16, version: i16) -> bool {
         31 => version >= owned::delete_acls_request::FLEXIBLE_MIN,
         32 => version >= owned::describe_configs_request::FLEXIBLE_MIN,
         33 => version >= owned::alter_configs_request::FLEXIBLE_MIN,
+        34 => version >= owned::alter_replica_log_dirs_request::FLEXIBLE_MIN,
         35 => version >= owned::describe_log_dirs_request::FLEXIBLE_MIN,
         36 => version >= owned::sasl_authenticate_request::FLEXIBLE_MIN,
         37 => version >= owned::create_partitions_request::FLEXIBLE_MIN,

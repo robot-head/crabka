@@ -32,6 +32,14 @@ pub struct Broker {
     /// Wrapped in `Arc` so handlers cloning the field share the same
     /// underlying map. `DashMap::clone` is a deep copy by default.
     pub(crate) partitions: Arc<DashMap<(String, i32), Arc<Partition>>>,
+    /// KIP-113 (`AlterReplicaLogDirs`): in-progress intra-broker
+    /// log-dir moves. One entry per `(topic, partition)` currently
+    /// being copied to a different log.dir. `DescribeLogDirs` reads
+    /// this to surface `is_future_key=true` rows; the
+    /// `AlterReplicaLogDirs` handler reads it to make a second
+    /// request for the same partition idempotent (or reject a
+    /// conflicting target).
+    pub(crate) future_logs: Arc<DashMap<(String, i32), Arc<crate::future_log::FutureLogState>>>,
     pub(crate) group_manager: Arc<crate::coordinator::GroupManager>,
     pub(crate) producer_ids: Arc<crate::producer_id_manager::ProducerIdManager>,
     pub(crate) producer_state: Arc<crate::producer_state::ProducerState>,
@@ -994,7 +1002,7 @@ impl Broker {
         for (topic, partition_id, owning_dir) in log_dir::scan_all(&config.all_log_dirs())? {
             let dir = log_dir::partition_dir(&owning_dir, &topic, partition_id);
             let log = crabka_log::Log::open(&dir, config.log_config.clone())?;
-            let part = spawn_partition(topic.clone(), partition_id, log);
+            let part = spawn_partition(topic.clone(), partition_id, owning_dir, log);
             partitions.insert((topic.clone(), partition_id), part);
         }
 
@@ -1493,10 +1501,49 @@ impl Broker {
         {
             config.advertised_listener = format!("{host}:{}", listen_addr.port());
         }
+        let future_logs: Arc<DashMap<(String, i32), Arc<crate::future_log::FutureLogState>>> =
+            Arc::new(DashMap::new());
+
+        // KIP-113: resume any interrupted intra-broker moves left on
+        // disk as `<topic>-<partition>-future` dirs.
+        for owning_dir in config.all_log_dirs() {
+            let futures = log_dir::scan_future(&owning_dir).unwrap_or_default();
+            for (topic, partition_id) in futures {
+                if !partitions.contains_key(&(topic.clone(), partition_id)) {
+                    // Stranded future dir — partition is no longer
+                    // hosted (e.g. topic deleted). Remove the leftover.
+                    let stranded = log_dir::future_partition_dir(&owning_dir, &topic, partition_id);
+                    if let Err(e) = std::fs::remove_dir_all(&stranded) {
+                        tracing::warn!(
+                            path = %stranded.display(),
+                            error = %e,
+                            "failed to remove stranded future-log dir"
+                        );
+                    }
+                    continue;
+                }
+                if let Err(e) = crate::future_log::resume_move(
+                    &partitions,
+                    &future_logs,
+                    &owning_dir,
+                    &config.log_config,
+                    &topic,
+                    partition_id,
+                ) {
+                    tracing::warn!(
+                        topic = %topic, partition = partition_id,
+                        error = ?e,
+                        "failed to resume interrupted log-dir move"
+                    );
+                }
+            }
+        }
+
         let broker = Arc::new(Self {
             config,
             controller,
             partitions,
+            future_logs,
             group_manager: group_manager.clone(),
             producer_ids,
             producer_state,
@@ -1539,9 +1586,18 @@ impl Broker {
 }
 
 /// Create the partition runtime (mpsc channel + writer task + notify).
+///
+/// `log_dir` is the parent `log.dir` that owns the partition (i.e. the
+/// configured directory, not the `<topic>-<partition>` subdirectory).
+/// Stored on the `Partition` so KIP-113 (`AlterReplicaLogDirs`) can
+/// reject moves whose target is the partition's current dir without
+/// reaching into the `Log` mutex on the hot path, and so
+/// `DescribeLogDirs` can attribute the partition to a dir even when
+/// the path is not stable across canonicalisation.
 pub(crate) fn spawn_partition(
     topic: String,
     partition_id: i32,
+    log_dir: std::path::PathBuf,
     log: crabka_log::Log,
 ) -> Arc<Partition> {
     let log = Arc::new(Mutex::new(log));
@@ -1553,8 +1609,10 @@ pub(crate) fn spawn_partition(
     let hw_advance_notify = Arc::new(tokio::sync::Notify::new());
     let current_leader = Arc::new(AtomicU64::new(0));
     let current_leader_epoch = Arc::new(AtomicI32::new(0));
+    let log_dir = Arc::new(arc_swap::ArcSwap::from_pointee(log_dir));
     let writer = tokio::spawn(crate::partition_writer::run(
         log.clone(),
+        log_dir.clone(),
         rx,
         notify.clone(),
         replica_state.clone(),
@@ -1563,6 +1621,7 @@ pub(crate) fn spawn_partition(
     Arc::new(Partition {
         topic,
         partition_id,
+        log_dir,
         log,
         writer_tx: tx,
         append_notify: notify,

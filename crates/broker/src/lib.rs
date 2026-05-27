@@ -132,6 +132,7 @@ pub(crate) mod delegation_token_cleanup;
 pub mod disk_scanner;
 mod error;
 pub mod file_config;
+pub(crate) mod future_log;
 mod handlers;
 pub(crate) mod heartbeat;
 pub(crate) mod isr_maintenance;

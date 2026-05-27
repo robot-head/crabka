@@ -1,0 +1,450 @@
+//! KIP-113 (`AlterReplicaLogDirs`): intra-broker log-dir reassignment.
+//!
+//! When the `AlterReplicaLogDirs` handler accepts a move
+//! `(topic, partition) → target log.dir`, it asks this module to:
+//!
+//! 1. Open a fresh `crabka_log::Log` at
+//!    `<target_log_dir>/<topic>-<partition>-future/`.
+//! 2. Spawn a per-move replicator task that reads batches from the
+//!    partition's current `Log` and appends them to the future log via
+//!    `Log::append_at`, preserving leader-assigned offsets.
+//! 3. Once `future_log.LEO == current_log.LEO`, ask the partition
+//!    writer to swap atomically via `WriterMessage::SwapFutureLog`.
+//!
+//! The on-disk `*-future` directory is the only persisted state. A
+//! crash mid-move leaves it behind; broker startup re-discovers it via
+//! `log_dir::scan_future` and re-spawns the replicator.
+
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use crabka_log::{Log, LogConfig};
+use dashmap::DashMap;
+use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, warn};
+
+use crate::error::BrokerError;
+use crate::log_dir;
+use crate::partition::{Partition, SwapOutcome, WriterMessage};
+
+/// One in-progress intra-broker log-dir move. Inserted into
+/// `Broker.future_logs` keyed by `(topic, partition)`.
+///
+/// Fields are held to keep ownership of the future log alive and to
+/// allow `DescribeLogDirs` + future cancellation paths to consult the
+/// move's state through the registry; the writer task consumes them
+/// indirectly via the `SwapFutureLog` message, which Rust's dead-code
+/// pass can't see through.
+#[allow(dead_code)]
+#[derive(Debug)]
+pub struct FutureLogState {
+    /// Parent `log.dir` the move targets — one of the broker's
+    /// configured `log.dirs`. Used by the handler to make a duplicate
+    /// `AlterReplicaLogDirs` for the same `(topic, partition)`
+    /// idempotent (or reject a conflicting target).
+    pub target_log_dir: PathBuf,
+    /// The future log's `<target>/<topic>-<partition>-future` path.
+    pub future_path: PathBuf,
+    /// The future log itself. Shared with the replicator task and the
+    /// `SwapFutureLog` writer message so all three hold the same
+    /// `Arc<Mutex<Log>>`.
+    pub future_log: Arc<Mutex<Log>>,
+    /// Cancelled by the swap to unwind the replicator task. Also
+    /// cancelled if a follow-up `AlterReplicaLogDirs` cancels an
+    /// in-progress move (not implemented; future work).
+    pub cancel: CancellationToken,
+    /// Kept alive so the replicator task is reaped when the entry is
+    /// removed from the registry.
+    pub task: std::sync::Mutex<Option<JoinHandle<()>>>,
+}
+
+/// Why a [`start_move`] / [`resume_move`] call could not be honoured.
+/// Translated to the wire error codes
+/// [`crate::codes::LOG_DIR_NOT_FOUND`],
+/// [`crate::codes::REPLICA_NOT_AVAILABLE`],
+/// [`crate::codes::KAFKA_STORAGE_ERROR`] by the handler.
+#[derive(Debug)]
+pub enum MoveError {
+    /// Target path is not one of this broker's configured `log.dirs`.
+    LogDirNotFound,
+    /// The named partition is not hosted on this broker.
+    ReplicaNotAvailable,
+    /// A different move is already in flight for this partition with
+    /// a different target. Matches Kafka — a second alter only takes
+    /// effect after the first move completes (or is cancelled).
+    AlreadyMoving,
+    /// `crabka_log::Log::open` or `mkdir` failed while staging the
+    /// future log. The inner error is held for tracing / future use;
+    /// the handler maps every storage failure to `KAFKA_STORAGE_ERROR`
+    /// on the wire.
+    Storage(#[allow(dead_code)] BrokerError),
+}
+
+impl From<BrokerError> for MoveError {
+    fn from(e: BrokerError) -> Self {
+        MoveError::Storage(e)
+    }
+}
+
+impl From<crabka_log::LogError> for MoveError {
+    fn from(e: crabka_log::LogError) -> Self {
+        MoveError::Storage(BrokerError::from(e))
+    }
+}
+
+impl From<std::io::Error> for MoveError {
+    fn from(e: std::io::Error) -> Self {
+        MoveError::Storage(BrokerError::from(e))
+    }
+}
+
+/// Maximum bytes pulled from the source log per replication iteration.
+/// Picked to fit comfortably inside a single batch hand-off while still
+/// making progress on large segments.
+const MOVE_READ_CHUNK_BYTES: usize = 1 << 20; // 1 MiB
+
+/// Backoff between failed catch-up attempts in the replicator loop.
+const MOVE_RETRY_BACKOFF: Duration = Duration::from_millis(50);
+
+/// Start (or no-op-confirm) a move of `(topic, partition)` to
+/// `target_log_dir`. Returns immediately after spawning the replicator
+/// task; the `AlterReplicaLogDirs` handler can then ack success.
+///
+/// Idempotency: if a move with the same target is already in flight,
+/// returns `Ok(())` without spawning a second task. A move with a
+/// *different* target returns `Err(MoveError::AlreadyMoving)`.
+pub fn start_move(
+    partitions: &Arc<DashMap<(String, i32), Arc<Partition>>>,
+    future_logs: &Arc<DashMap<(String, i32), Arc<FutureLogState>>>,
+    all_log_dirs: &[PathBuf],
+    log_config: &LogConfig,
+    topic: &str,
+    partition: i32,
+    target_log_dir: &Path,
+) -> Result<(), MoveError> {
+    // (1) Validate the target is a configured log.dir. Path comparison
+    //     is canonical-form to side-step trailing-slash / `.` quirks.
+    let target_canon = canonicalize_or_self(target_log_dir);
+    let target_match = all_log_dirs
+        .iter()
+        .find(|d| canonicalize_or_self(d) == target_canon)
+        .cloned();
+    let Some(target_log_dir) = target_match else {
+        return Err(MoveError::LogDirNotFound);
+    };
+
+    // (2) Partition must be hosted on this broker.
+    let key = (topic.to_string(), partition);
+    let part = partitions
+        .get(&key)
+        .map(|e| e.value().clone())
+        .ok_or(MoveError::ReplicaNotAvailable)?;
+
+    // (3) Already in the target dir? No-op success.
+    let current_log_dir = part.log_dir.load_full();
+    if canonicalize_or_self(&current_log_dir) == canonicalize_or_self(&target_log_dir) {
+        return Ok(());
+    }
+
+    // (4) Already moving? Idempotent for same target, conflict for
+    //     different target.
+    if let Some(existing) = future_logs.get(&key).map(|e| e.value().clone()) {
+        if canonicalize_or_self(&existing.target_log_dir) == canonicalize_or_self(&target_log_dir) {
+            return Ok(());
+        }
+        return Err(MoveError::AlreadyMoving);
+    }
+
+    // (5) Open the future log at <target>/<topic>-<partition>-future.
+    let future_path = log_dir::future_partition_dir(&target_log_dir, topic, partition);
+    std::fs::create_dir_all(&future_path)?;
+    let future_log = Arc::new(Mutex::new(Log::open(&future_path, log_config.clone())?));
+
+    spawn_move(
+        partitions,
+        future_logs,
+        &target_log_dir,
+        future_path,
+        future_log,
+        topic,
+        partition,
+        &part,
+    );
+    Ok(())
+}
+
+/// Recover an interrupted move discovered on disk at broker startup
+/// (a `<topic>-<partition>-future` directory in a configured log.dir
+/// whose corresponding partition exists). Re-opens the future log
+/// and re-spawns the replicator, picking up at whatever offset the
+/// future log already holds.
+pub fn resume_move(
+    partitions: &Arc<DashMap<(String, i32), Arc<Partition>>>,
+    future_logs: &Arc<DashMap<(String, i32), Arc<FutureLogState>>>,
+    target_log_dir: &Path,
+    log_config: &LogConfig,
+    topic: &str,
+    partition: i32,
+) -> Result<(), MoveError> {
+    let key = (topic.to_string(), partition);
+    let part = partitions
+        .get(&key)
+        .map(|e| e.value().clone())
+        .ok_or(MoveError::ReplicaNotAvailable)?;
+    let future_path = log_dir::future_partition_dir(target_log_dir, topic, partition);
+    let future_log = Arc::new(Mutex::new(Log::open(&future_path, log_config.clone())?));
+    spawn_move(
+        partitions,
+        future_logs,
+        target_log_dir,
+        future_path,
+        future_log,
+        topic,
+        partition,
+        &part,
+    );
+    Ok(())
+}
+
+/// Shared between [`start_move`] and [`resume_move`]: build the
+/// `FutureLogState`, insert it into the registry, and spawn the
+/// per-move replicator task.
+#[allow(clippy::too_many_arguments)]
+fn spawn_move(
+    partitions: &Arc<DashMap<(String, i32), Arc<Partition>>>,
+    future_logs: &Arc<DashMap<(String, i32), Arc<FutureLogState>>>,
+    target_log_dir: &Path,
+    future_path: PathBuf,
+    future_log: Arc<Mutex<Log>>,
+    topic: &str,
+    partition: i32,
+    part: &Arc<Partition>,
+) {
+    let cancel = CancellationToken::new();
+    let target_partition_path = log_dir::partition_dir(target_log_dir, topic, partition);
+    let task = tokio::spawn(replicator_loop(
+        part.clone(),
+        future_log.clone(),
+        future_path.clone(),
+        target_partition_path,
+        target_log_dir.to_path_buf(),
+        cancel.clone(),
+        partitions.clone(),
+        future_logs.clone(),
+        topic.to_string(),
+        partition,
+    ));
+    let state = Arc::new(FutureLogState {
+        target_log_dir: target_log_dir.to_path_buf(),
+        future_path,
+        future_log,
+        cancel,
+        task: std::sync::Mutex::new(Some(task)),
+    });
+    future_logs.insert((topic.to_string(), partition), state);
+}
+
+/// Replicator task body: incrementally copy batches from
+/// `part.log` to `future_log`, then ask the partition writer to swap.
+#[allow(clippy::too_many_arguments)]
+async fn replicator_loop(
+    part: Arc<Partition>,
+    future_log: Arc<Mutex<Log>>,
+    future_path: PathBuf,
+    target_partition_path: PathBuf,
+    target_log_dir: PathBuf,
+    cancel: CancellationToken,
+    _partitions: Arc<DashMap<(String, i32), Arc<Partition>>>,
+    future_logs: Arc<DashMap<(String, i32), Arc<FutureLogState>>>,
+    topic: String,
+    partition: i32,
+) {
+    debug!(
+        topic = %topic, partition,
+        target = %target_log_dir.display(),
+        "future-log replicator started"
+    );
+    loop {
+        if cancel.is_cancelled() {
+            break;
+        }
+        // Read whatever is missing from the future log up to the
+        // source's current LEO.
+        let advance = match catch_up(&part, &future_log) {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(
+                    topic = %topic, partition,
+                    error = %e,
+                    "future-log replicator catch-up failed; retrying"
+                );
+                tokio::select! {
+                    () = cancel.cancelled() => break,
+                    () = tokio::time::sleep(MOVE_RETRY_BACKOFF) => continue,
+                }
+            }
+        };
+
+        if !advance.caught_up {
+            // Make forward progress, then immediately re-check. We
+            // only wait on `append_notify` once we believe we are
+            // caught up.
+            continue;
+        }
+
+        // We believe we're caught up; ask the writer to swap.
+        let (ack_tx, ack_rx) = oneshot::channel();
+        let send = part
+            .writer_tx
+            .send(WriterMessage::SwapFutureLog {
+                target_log_dir: target_log_dir.clone(),
+                future_log: future_log.clone(),
+                future_path: future_path.clone(),
+                target_partition_path: target_partition_path.clone(),
+                ack: ack_tx,
+            })
+            .await;
+        if send.is_err() {
+            warn!(
+                topic = %topic, partition,
+                "future-log replicator: partition writer is dead; aborting move"
+            );
+            break;
+        }
+        match ack_rx.await {
+            Ok(Ok(SwapOutcome::Swapped)) => {
+                debug!(topic = %topic, partition, "future-log swap complete");
+                break;
+            }
+            Ok(Ok(SwapOutcome::NotCaughtUp)) => {
+                // Producers wrote in between catch_up and the writer
+                // receiving the message — loop and try again.
+            }
+            Ok(Err(e)) => {
+                warn!(
+                    topic = %topic, partition,
+                    error = %e,
+                    "future-log swap failed; aborting move (partition continues on source dir)"
+                );
+                break;
+            }
+            Err(_) => {
+                warn!(topic = %topic, partition, "future-log swap ack dropped");
+                break;
+            }
+        }
+
+        // Wait for the next append (or cancellation) before retrying.
+        tokio::select! {
+            () = cancel.cancelled() => break,
+            () = part.append_notify.notified() => {}
+        }
+    }
+    // Whatever the outcome, the future-log entry is no longer useful.
+    future_logs.remove(&(topic, partition));
+}
+
+/// One catch-up iteration: read whatever the future log is missing,
+/// up to `MOVE_READ_CHUNK_BYTES`, and append it. Returns whether the
+/// future log was caught up at the end of the iteration (i.e. nothing
+/// was read AND `future.LEO >= source.LEO`).
+struct CatchUpProgress {
+    caught_up: bool,
+}
+
+fn catch_up(
+    part: &Arc<Partition>,
+    future_log: &Arc<Mutex<Log>>,
+) -> Result<CatchUpProgress, BrokerError> {
+    // Snapshot offsets cheaply; the partition log mutex is dropped
+    // immediately after each helper.
+    let current_leo = part.log_end_offset();
+    let future_leo = future_log
+        .lock()
+        .expect("future log mutex poisoned")
+        .log_end_offset();
+    if future_leo >= current_leo {
+        return Ok(CatchUpProgress { caught_up: true });
+    }
+
+    // Pull the next chunk of batches from the source.
+    let read = {
+        let log = part.log.lock().expect("log mutex poisoned");
+        log.read(future_leo, MOVE_READ_CHUNK_BYTES)?
+    };
+    if read.batches.is_empty() {
+        // Source advanced its log_start past `future_leo` (retention
+        // or trim). Treat as caught up for this iteration; on the
+        // next pass `future_leo` will equal `current_leo` and we'll
+        // swap. Realistically the future log would need to be reset
+        // — KIP-113 doesn't specify this corner; we treat it as a
+        // soft no-op.
+        return Ok(CatchUpProgress { caught_up: true });
+    }
+
+    let mut future = future_log.lock().expect("future log mutex poisoned");
+    for mut batch in read.batches {
+        let base = batch.base_offset;
+        future
+            .append_at(&mut batch, base)
+            .map_err(BrokerError::from)?;
+    }
+    Ok(CatchUpProgress { caught_up: false })
+}
+
+/// Canonicalize a path for equality comparisons; falls back to the
+/// lexical path when canonicalisation fails (the directory may not
+/// exist yet — fine for log-dir comparisons since we compare via the
+/// configured value as well).
+fn canonicalize_or_self(p: &Path) -> PathBuf {
+    std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn move_error_log_dir_not_found_when_target_unknown() {
+        // Empty broker — no partitions, no log dirs. `start_move`
+        // returns LogDirNotFound before it ever looks at the
+        // partition map.
+        let partitions = Arc::new(DashMap::new());
+        let future_logs = Arc::new(DashMap::new());
+        let log_dirs: Vec<PathBuf> = vec![];
+        let bogus = tempdir().unwrap();
+        let err = start_move(
+            &partitions,
+            &future_logs,
+            &log_dirs,
+            &LogConfig::default(),
+            "t",
+            0,
+            bogus.path(),
+        )
+        .expect_err("expected LogDirNotFound");
+        assert!(matches!(err, MoveError::LogDirNotFound));
+    }
+
+    #[test]
+    fn move_error_replica_not_available_when_partition_missing() {
+        let partitions = Arc::new(DashMap::new());
+        let future_logs = Arc::new(DashMap::new());
+        let dir = tempdir().unwrap();
+        let err = start_move(
+            &partitions,
+            &future_logs,
+            &[dir.path().to_path_buf()],
+            &LogConfig::default(),
+            "t",
+            0,
+            dir.path(),
+        )
+        .expect_err("expected ReplicaNotAvailable");
+        assert!(matches!(err, MoveError::ReplicaNotAvailable));
+    }
+}

@@ -171,6 +171,15 @@ impl Log {
         })
     }
 
+    /// Directory this log was opened against. The broker's intra-broker
+    /// log-dir reassignment (KIP-113) reads this to determine the
+    /// current owning `log.dir` of a partition without re-implementing
+    /// the directory-layout convention.
+    #[must_use]
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
     /// First absolute offset still in the log.
     #[must_use]
     pub fn log_start_offset(&self) -> i64 {
