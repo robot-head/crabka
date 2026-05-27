@@ -447,4 +447,134 @@ mod tests {
         .expect_err("expected ReplicaNotAvailable");
         assert!(matches!(err, MoveError::ReplicaNotAvailable));
     }
+
+    /// Build a `Partition` rooted at `<log_dir>/<topic>-<partition>`
+    /// without going through `Broker::start`. Returns the parent dir
+    /// and the `Arc<Partition>`.
+    fn fixture_partition(log_dir: &Path, topic: &str, partition: i32) -> Arc<Partition> {
+        let part_dir = log_dir::partition_dir(log_dir, topic, partition);
+        std::fs::create_dir_all(&part_dir).unwrap();
+        let log = Log::open(&part_dir, LogConfig::default()).unwrap();
+        crate::broker::spawn_partition(topic.to_string(), partition, log_dir.to_path_buf(), log)
+    }
+
+    #[tokio::test]
+    async fn start_move_to_current_dir_is_noop() {
+        // Asking to move a partition to the directory it already
+        // lives in returns success without touching `future_logs`.
+        let primary = tempdir().unwrap();
+        let extra = tempdir().unwrap();
+        let log_dirs = vec![primary.path().to_path_buf(), extra.path().to_path_buf()];
+        let partitions = Arc::new(DashMap::new());
+        let future_logs = Arc::new(DashMap::new());
+        let part = fixture_partition(primary.path(), "t", 0);
+        partitions.insert(("t".to_string(), 0), part);
+
+        start_move(
+            &partitions,
+            &future_logs,
+            &log_dirs,
+            &LogConfig::default(),
+            "t",
+            0,
+            primary.path(),
+        )
+        .expect("noop should succeed");
+        assert!(
+            future_logs.is_empty(),
+            "noop must not register a future log"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_move_idempotent_for_same_target() {
+        // Two ARLD calls with the same target while the first move is
+        // still in flight collapse to one — second call returns Ok(())
+        // and the registry still has one entry.
+        let primary = tempdir().unwrap();
+        let extra = tempdir().unwrap();
+        let log_dirs = vec![primary.path().to_path_buf(), extra.path().to_path_buf()];
+        let partitions = Arc::new(DashMap::new());
+        let future_logs = Arc::new(DashMap::new());
+        let part = fixture_partition(primary.path(), "t", 0);
+        partitions.insert(("t".to_string(), 0), part);
+
+        // Plant a registry entry as if a prior ARLD already kicked off
+        // a move — exercises the "already moving, same target" branch
+        // without racing the replicator's swap-and-remove.
+        let future_path = log_dir::future_partition_dir(extra.path(), "t", 0);
+        std::fs::create_dir_all(&future_path).unwrap();
+        let future_log = Arc::new(Mutex::new(
+            Log::open(&future_path, LogConfig::default()).unwrap(),
+        ));
+        future_logs.insert(
+            ("t".to_string(), 0),
+            Arc::new(FutureLogState {
+                target_log_dir: extra.path().to_path_buf(),
+                future_path: future_path.clone(),
+                future_log,
+                cancel: CancellationToken::new(),
+                task: std::sync::Mutex::new(None),
+            }),
+        );
+
+        start_move(
+            &partitions,
+            &future_logs,
+            &log_dirs,
+            &LogConfig::default(),
+            "t",
+            0,
+            extra.path(),
+        )
+        .expect("same-target alter must be idempotent");
+        assert_eq!(future_logs.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn start_move_rejects_conflicting_target() {
+        // ARLD for `(t, 0)` to dir A, then again to dir B while the
+        // first move is still registered → AlreadyMoving.
+        let primary = tempdir().unwrap();
+        let extra = tempdir().unwrap();
+        let third = tempdir().unwrap();
+        let log_dirs = vec![
+            primary.path().to_path_buf(),
+            extra.path().to_path_buf(),
+            third.path().to_path_buf(),
+        ];
+        let partitions = Arc::new(DashMap::new());
+        let future_logs = Arc::new(DashMap::new());
+        let part = fixture_partition(primary.path(), "t", 0);
+        partitions.insert(("t".to_string(), 0), part);
+
+        // Plant a registry entry pointing at `extra`.
+        let future_path = log_dir::future_partition_dir(extra.path(), "t", 0);
+        std::fs::create_dir_all(&future_path).unwrap();
+        let future_log = Arc::new(Mutex::new(
+            Log::open(&future_path, LogConfig::default()).unwrap(),
+        ));
+        future_logs.insert(
+            ("t".to_string(), 0),
+            Arc::new(FutureLogState {
+                target_log_dir: extra.path().to_path_buf(),
+                future_path,
+                future_log,
+                cancel: CancellationToken::new(),
+                task: std::sync::Mutex::new(None),
+            }),
+        );
+
+        let err = start_move(
+            &partitions,
+            &future_logs,
+            &log_dirs,
+            &LogConfig::default(),
+            "t",
+            0,
+            third.path(),
+        )
+        .expect_err("conflicting-target alter must reject");
+        assert!(matches!(err, MoveError::AlreadyMoving));
+    }
 }

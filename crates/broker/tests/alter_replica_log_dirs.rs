@@ -326,3 +326,170 @@ async fn alter_replica_log_dirs_rejects_unknown_replica() {
 
     handle.shutdown().await;
 }
+
+/// Boot a two-dir broker with `SimpleAclAuthorizer` + no super-users +
+/// no ACL grants — every authorize() returns Deny. Cluster.Alter on
+/// AlterReplicaLogDirs (api_key 34) must come back as
+/// CLUSTER_AUTHORIZATION_FAILED for every listed partition.
+#[tokio::test]
+async fn alter_replica_log_dirs_denied_without_cluster_alter() {
+    use crabka_broker::authorizer::SimpleAclAuthorizer;
+
+    let primary = tempfile::tempdir().unwrap();
+    let extra = tempfile::tempdir().unwrap();
+    let mut cfg = BrokerConfig::for_tests(primary.path().to_path_buf());
+    cfg.extra_log_dirs = vec![extra.path().to_path_buf()];
+    // Default authorizer for `for_tests` is AllowAll; swap in a deny-
+    // everything SimpleAclAuthorizer (empty super-users + empty ACL
+    // image) so the Cluster Alter gate engages.
+    cfg.super_users = std::collections::HashSet::new();
+    cfg.authorizer = std::sync::Arc::new(SimpleAclAuthorizer::new(cfg.super_users.clone()));
+    let handle = Broker::start(cfg).await.expect("broker start");
+    let addr = handle.listen_addr();
+
+    // We never create the topic — irrelevant; the ACL gate fires
+    // before the partition lookup, so the per-partition row is
+    // CLUSTER_AUTHORIZATION_FAILED regardless of whether the replica
+    // exists locally.
+    let resp = alter_replica_log_dirs(addr, extra.path(), "t", vec![0, 1]).await;
+    let topic = resp
+        .results
+        .iter()
+        .find(|t| t.topic_name == "t")
+        .expect("topic in response");
+    assert_eq!(topic.partitions.len(), 2);
+    for p in &topic.partitions {
+        // 31 == CLUSTER_AUTHORIZATION_FAILED
+        assert_eq!(
+            p.error_code, 31,
+            "partition {} must be denied, got {}",
+            p.partition_index, p.error_code
+        );
+    }
+
+    handle.shutdown().await;
+}
+
+/// Produce a few batches, move the partition to the other dir, then
+/// consume and verify every produced record survives. Exercises the
+/// `catch_up` batch-copy path in `future_log.rs` (the empty-log move
+/// hits zero-batch catch-up, which doesn't run the `append_at` loop).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn alter_replica_log_dirs_preserves_records_across_move() {
+    use bytes::Bytes;
+    use crabka_client_consumer::{AutoOffsetReset, Consumer};
+    use crabka_client_producer::{Producer, ProducerRecord};
+
+    let (handle, primary, extra, addr) = start_two_dir_broker().await;
+    create_topic(addr, "t", 1).await;
+    wait_all_partitions(&handle, "t", 1).await;
+
+    let bootstrap = addr.to_string();
+    let producer = Producer::builder()
+        .bootstrap(bootstrap.clone())
+        .build()
+        .await
+        .expect("producer build");
+    for i in 0..50i32 {
+        // `Producer::send` returns a `oneshot::Receiver` for the ack;
+        // drop it and let `flush` synchronize before the alter. This
+        // matches the pattern in `crates/broker/tests/durability.rs`.
+        drop(
+            producer
+                .send(ProducerRecord {
+                    topic: "t".into(),
+                    value: Some(Bytes::from(format!("v{i}"))),
+                    ..Default::default()
+                })
+                .await,
+        );
+    }
+    producer.flush().await.expect("flush");
+
+    // Pick the OTHER dir as the move target.
+    let primary_has_0 = primary.path().join("t-0").exists();
+    let target_dir = if primary_has_0 {
+        extra.path()
+    } else {
+        primary.path()
+    };
+
+    let resp = alter_replica_log_dirs(addr, target_dir, "t", vec![0]).await;
+    let topic = resp
+        .results
+        .iter()
+        .find(|t| t.topic_name == "t")
+        .expect("topic");
+    assert_eq!(topic.partitions[0].error_code, 0);
+    wait_for_move_complete(addr, target_dir, "t", &[0]).await;
+
+    let mut consumer = Consumer::builder()
+        .bootstrap(bootstrap)
+        .group_id("arld-move-consumer")
+        .auto_offset_reset(AutoOffsetReset::Earliest)
+        .subscribe(["t".to_string()])
+        .build()
+        .await
+        .expect("consumer build");
+
+    let mut consumed: Vec<String> = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while consumed.len() < 50 && Instant::now() < deadline {
+        for r in consumer
+            .poll(Duration::from_millis(200))
+            .await
+            .expect("poll")
+        {
+            if let Some(v) = r.value {
+                consumed.push(String::from_utf8(v.to_vec()).unwrap());
+            }
+        }
+    }
+    consumed.sort();
+    let mut expected: Vec<String> = (0..50).map(|i| format!("v{i}")).collect();
+    expected.sort();
+    assert_eq!(consumed, expected, "all records survived the move");
+
+    producer.close().await.unwrap();
+    consumer.close().await.unwrap();
+    handle.shutdown().await;
+}
+
+/// Plant a `<topic>-<partition>-future` directory in one of the
+/// configured log.dirs for a topic that doesn't exist, then start the
+/// broker. The startup scan in `Broker::start` must remove the
+/// stranded future dir; `DescribeLogDirs` reports no future entries.
+#[tokio::test]
+async fn startup_cleans_up_stranded_future_dir() {
+    let primary = tempfile::tempdir().unwrap();
+    let extra = tempfile::tempdir().unwrap();
+
+    // Stranded future dir: topic "ghost" was never created.
+    let stranded = extra.path().join("ghost-0-future");
+    std::fs::create_dir_all(&stranded).unwrap();
+    assert!(stranded.exists());
+
+    let mut cfg = BrokerConfig::for_tests(primary.path().to_path_buf());
+    cfg.extra_log_dirs = vec![extra.path().to_path_buf()];
+    let handle = Broker::start(cfg).await.expect("broker start");
+    let addr = handle.listen_addr();
+
+    // Broker startup must have swept the stranded future dir.
+    assert!(
+        !stranded.exists(),
+        "startup must remove stranded future dir at {}",
+        stranded.display()
+    );
+
+    // DescribeLogDirs surfaces no future entries.
+    let resp = describe_log_dirs(addr).await;
+    let any_future = resp
+        .results
+        .iter()
+        .flat_map(|r| r.topics.iter())
+        .flat_map(|t| t.partitions.iter())
+        .any(|p| p.is_future_key);
+    assert!(!any_future, "no future entries should remain after sweep");
+
+    handle.shutdown().await;
+}
