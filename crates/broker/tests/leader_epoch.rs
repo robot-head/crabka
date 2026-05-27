@@ -107,7 +107,7 @@ async fn fenced_leader_epoch_truncates_zombie_writes() {
                 topic_id,
                 partition_data: vec![PartitionProduceData {
                     index: 0,
-                    records: Some(record("v0")),
+                    records: Some(record("v0").into()),
                     ..Default::default()
                 }],
                 ..Default::default()
@@ -212,7 +212,7 @@ async fn epoch_checkpoint_byte_compat() {
                 topic_id,
                 partition_data: vec![PartitionProduceData {
                     index: 0,
-                    records: Some(record("v0")),
+                    records: Some(record("v0").into()),
                     ..Default::default()
                 }],
                 ..Default::default()
@@ -233,7 +233,7 @@ async fn epoch_checkpoint_byte_compat() {
                 topic_id,
                 partition_data: vec![PartitionProduceData {
                     index: 0,
-                    records: Some(record("v1")),
+                    records: Some(record("v1").into()),
                     ..Default::default()
                 }],
                 ..Default::default()

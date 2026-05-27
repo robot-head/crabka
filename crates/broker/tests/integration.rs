@@ -110,7 +110,7 @@ async fn end_to_end_create_produce_fetch_delete() {
                 topic_id,
                 partition_data: vec![PartitionProduceData {
                     index: 0,
-                    records: Some(record_batch_with_values(&["a", "b", "c"])),
+                    records: Some(record_batch_with_values(&["a", "b", "c"]).into()),
                     ..Default::default()
                 }],
                 ..Default::default()
@@ -169,7 +169,8 @@ async fn end_to_end_create_produce_fetch_delete() {
     let batch = part
         .records
         .as_ref()
-        .expect("records present after produce");
+        .and_then(|p| p.as_v2())
+        .expect("v2 records present after produce");
     assert_eq!(batch.records.len(), 3);
 
     p.broker.shutdown().await;

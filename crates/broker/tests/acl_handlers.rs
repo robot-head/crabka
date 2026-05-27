@@ -608,15 +608,18 @@ fn single_record_produce_request(topic: &str, partition: i32, value: &[u8]) -> P
             name: topic.to_string(),
             partition_data: vec![PartitionProduceData {
                 index: partition,
-                records: Some(RecordBatch {
-                    last_offset_delta: 0,
-                    records: vec![Record {
-                        offset_delta: 0,
-                        value: Some(bytes::Bytes::copy_from_slice(value)),
+                records: Some(
+                    RecordBatch {
+                        last_offset_delta: 0,
+                        records: vec![Record {
+                            offset_delta: 0,
+                            value: Some(bytes::Bytes::copy_from_slice(value)),
+                            ..Default::default()
+                        }],
                         ..Default::default()
-                    }],
-                    ..Default::default()
-                }),
+                    }
+                    .into(),
+                ),
                 ..Default::default()
             }],
             ..Default::default()

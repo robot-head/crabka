@@ -158,7 +158,7 @@ async fn replication_factor_three_propagates_to_all_followers() {
                 topic_id,
                 partition_data: vec![PartitionProduceData {
                     index: 0,
-                    records: Some(batch),
+                    records: Some(batch.into()),
                     ..Default::default()
                 }],
                 ..Default::default()
@@ -289,7 +289,7 @@ async fn out_of_range_truncates_and_recovers() {
                     topic_id,
                     partition_data: vec![PartitionProduceData {
                         index: 0,
-                        records: Some(batch),
+                        records: Some(batch.into()),
                         ..Default::default()
                     }],
                     ..Default::default()

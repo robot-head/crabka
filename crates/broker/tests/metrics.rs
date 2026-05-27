@@ -109,7 +109,7 @@ async fn produce_one(addr: std::net::SocketAddr) -> u64 {
     };
     let part = PartitionProduceData {
         index: 0,
-        records: Some(batch),
+        records: Some(batch.into()),
         ..Default::default()
     };
     let req = ProduceRequest {

@@ -216,7 +216,7 @@ async fn produce_record(addr: SocketAddr, topic: &str, topic_id: Uuid, key: &[u8
             topic_id,
             partition_data: vec![PartitionProduceData {
                 index: 0,
-                records: Some(batch),
+                records: Some(batch.into()),
                 ..Default::default()
             }],
             ..Default::default()
@@ -296,7 +296,7 @@ async fn fetch_all(addr: SocketAddr, topic: &str, topic_id: Uuid) -> Vec<FlatRec
                     "Fetch partition error: {}",
                     part_resp.error_code
                 );
-                if let Some(batch) = &part_resp.records {
+                if let Some(batch) = part_resp.records.as_ref().and_then(|p| p.as_v2()) {
                     got_any = true;
                     let batch_last_abs = batch.base_offset + i64::from(batch.last_offset_delta);
                     for record in &batch.records {

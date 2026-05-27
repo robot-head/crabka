@@ -78,7 +78,7 @@ async fn produce(client: &Client, topic: &str, values: &[&str]) {
                     topic_id,
                     partition_data: vec![PartitionProduceData {
                         index: 0,
-                        records: Some(record_batch_with_values(values)),
+                        records: Some(record_batch_with_values(values).into()),
                         ..Default::default()
                     }],
                     ..Default::default()

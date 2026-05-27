@@ -217,7 +217,7 @@ async fn produce_assigns_base_offsets() {
             topic_id,
             partition_data: vec![PartitionProduceData {
                 index: 0,
-                records: Some(one_record_batch(3)),
+                records: Some(one_record_batch(3).into()),
                 ..Default::default()
             }],
             ..Default::default()
@@ -239,7 +239,7 @@ async fn produce_assigns_base_offsets() {
             topic_id,
             partition_data: vec![PartitionProduceData {
                 index: 0,
-                records: Some(one_record_batch(2)),
+                records: Some(one_record_batch(2).into()),
                 ..Default::default()
             }],
             ..Default::default()
@@ -263,7 +263,7 @@ async fn produce_to_unknown_topic_returns_3() {
             name: "nope".into(),
             partition_data: vec![PartitionProduceData {
                 index: 0,
-                records: Some(one_record_batch(1)),
+                records: Some(one_record_batch(1).into()),
                 ..Default::default()
             }],
             ..Default::default()
@@ -289,7 +289,7 @@ async fn produce_then_fetch_round_trip() {
             topic_id,
             partition_data: vec![PartitionProduceData {
                 index: 0,
-                records: Some(one_record_batch(3)),
+                records: Some(one_record_batch(3).into()),
                 ..Default::default()
             }],
             ..Default::default()
@@ -322,7 +322,8 @@ async fn produce_then_fetch_round_trip() {
     let batch = part
         .records
         .as_ref()
-        .expect("records must be present after produce");
+        .and_then(|p| p.as_v2())
+        .expect("v2 records must be present after produce");
     assert_eq!(batch.records.len(), 3);
 
     p.broker.shutdown().await;
@@ -671,7 +672,7 @@ async fn idempotent_produce_dedups_duplicate_batch() {
             topic_id: idem_id,
             partition_data: vec![PartitionProduceData {
                 index: 0,
-                records: Some(one_batch_with_producer(pid, 0, 0, &["a", "b", "c"])),
+                records: Some(one_batch_with_producer(pid, 0, 0, &["a", "b", "c"]).into()),
                 ..Default::default()
             }],
             ..Default::default()
@@ -713,7 +714,7 @@ async fn out_of_order_returns_45() {
             topic_id: ooo_id,
             partition_data: vec![PartitionProduceData {
                 index: 0,
-                records: Some(one_batch_with_producer(pid, 0, base_seq, &["x", "y"])),
+                records: Some(one_batch_with_producer(pid, 0, base_seq, &["x", "y"]).into()),
                 ..Default::default()
             }],
             ..Default::default()
