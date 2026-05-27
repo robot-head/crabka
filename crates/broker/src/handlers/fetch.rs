@@ -3,7 +3,7 @@
 //!
 //! MVP scope: returns at most the *first* `RecordBatch` covering the
 //! requested offset for each partition. The generated
-//! `PartitionData.records` field is `Option<RecordBatch>` (the codegen
+//! `PartitionData.records` field is `Option<RecordsPayload>` (the codegen
 //! models it as a single batch wrapped in nullable bytes), so emitting a
 //! concatenated stream of batches would require bypassing the codegen.
 //! Clients pulling small batches one at a time and re-fetching from
@@ -21,7 +21,7 @@ use crabka_protocol::owned::fetch_response::{
     AbortedTransaction, FetchResponse, FetchableTopicResponse, PartitionData,
 };
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
-use crabka_protocol::records::RecordBatch;
+use crabka_protocol::records::{RecordBatch, RecordsPayload};
 use crabka_protocol::{Decode, Encode};
 
 use crate::authorizer::{AuthorizationResult, authorize_topics};
@@ -404,7 +404,7 @@ pub(crate) async fn handle(
             for (pi, part) in topic_resp.partitions.iter().enumerate() {
                 if throttle.leader.contains(part.partition_index, follower_id) {
                     let chunk_bytes =
-                        part.records.as_ref().map_or(0, RecordBatch::encoded_len) as u64;
+                        part.records.as_ref().map_or(0, RecordsPayload::payload_len) as u64;
                     throttled_byte_count += chunk_bytes;
                     throttled_idxs.push((ti, pi));
                 }
@@ -452,7 +452,7 @@ pub(crate) async fn handle(
         }
         let mut bytes: u64 = 0;
         for p in &topic_resp.partitions {
-            let partition_bytes = p.records.as_ref().map_or(0, RecordBatch::encoded_len) as u64;
+            let partition_bytes = p.records.as_ref().map_or(0, RecordsPayload::payload_len) as u64;
             broker.metrics.record_partition_fetch(
                 &topic_resp.topic,
                 p.partition_index,
@@ -676,10 +676,7 @@ fn filter_incremental_response(
                 partition: p.partition_index,
             };
             let aborted_hash = hash_aborted_transactions(p.aborted_transactions.as_ref());
-            let records_present = p
-                .records
-                .as_ref()
-                .is_some_and(|b| <RecordBatch as Encode>::encoded_len(b, 0) > 0);
+            let records_present = p.records.as_ref().is_some_and(|b| b.payload_len() > 0);
             let changed = match cached.get(&key) {
                 Some(prev) => {
                     records_present
@@ -870,7 +867,7 @@ async fn do_read(
     let bytes_est = batch_opt
         .as_ref()
         .map_or(0, |b| <RecordBatch as Encode>::encoded_len(b, 0));
-    out.records = batch_opt;
+    out.records = batch_opt.map(RecordsPayload::from);
     Ok(bytes_est)
 }
 
@@ -915,7 +912,7 @@ async fn try_remote_read(broker: &Broker, p: &mut PendingRead, part: &Partition)
             // `log_start_offset` / HW / LSO stay at whatever `do_read`
             // wrote out (the local view); the remote tier doesn't change
             // those pointers.
-            p.out.records = Some(batch);
+            p.out.records = Some(batch.into());
             Some(bytes_est)
         }
         Ok(None) => None,
@@ -1005,7 +1002,7 @@ fn truncate_throttled_responses(
     let mut remaining = budget;
     for &(ti, pi) in throttled_idxs {
         let part = &mut responses[ti].partitions[pi];
-        let chunk_size = part.records.as_ref().map_or(0, RecordBatch::encoded_len) as u64;
+        let chunk_size = part.records.as_ref().map_or(0, RecordsPayload::payload_len) as u64;
         if chunk_size <= remaining {
             remaining -= chunk_size;
         } else {
@@ -1022,7 +1019,7 @@ fn sum_response_bytes(responses: &[FetchableTopicResponse]) -> u64 {
     responses
         .iter()
         .flat_map(|t| t.partitions.iter())
-        .map(|p| p.records.as_ref().map_or(0, RecordBatch::encoded_len) as u64)
+        .map(|p| p.records.as_ref().map_or(0, RecordsPayload::payload_len) as u64)
         .sum()
 }
 

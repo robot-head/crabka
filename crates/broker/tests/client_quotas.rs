@@ -445,11 +445,14 @@ async fn drive_produce_sasl(
             name: topic.to_string(),
             partition_data: vec![PartitionProduceData {
                 index: 0,
-                records: Some(RecordBatch {
-                    last_offset_delta: i32::try_from(count - 1).unwrap(),
-                    records,
-                    ..Default::default()
-                }),
+                records: Some(
+                    RecordBatch {
+                        last_offset_delta: i32::try_from(count - 1).unwrap(),
+                        records,
+                        ..Default::default()
+                    }
+                    .into(),
+                ),
                 ..Default::default()
             }],
             ..Default::default()

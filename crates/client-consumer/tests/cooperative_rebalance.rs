@@ -353,7 +353,7 @@ async fn produce_to_partition(client: &Client, topic: &str, partition: i32, valu
                     topic_id,
                     partition_data: vec![PartitionProduceData {
                         index: partition,
-                        records: Some(record_batch_with_values(values)),
+                        records: Some(record_batch_with_values(values).into()),
                         ..Default::default()
                     }],
                     ..Default::default()

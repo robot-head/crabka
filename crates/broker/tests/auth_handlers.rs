@@ -2607,7 +2607,7 @@ mod two_broker_sasl {
                     topic_id,
                     partition_data: vec![PartitionProduceData {
                         index: 0,
-                        records: Some(batch),
+                        records: Some(batch.into()),
                         ..Default::default()
                     }],
                     ..Default::default()

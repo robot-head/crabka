@@ -189,7 +189,7 @@ pub struct PartitionSnapshot<'a> {
     pub snapshot_id: SnapshotId,
     pub size: i64,
     pub position: i64,
-    pub unaligned_records: crate::records::RecordBatchBorrowed<'a>,
+    pub unaligned_records: crate::records::RecordsPayloadBorrowed<'a>,
     pub current_leader: LeaderIdAndEpoch,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
@@ -232,7 +232,7 @@ impl<'a> Encode for PartitionSnapshot<'a> {
         if version >= 0 { self.snapshot_id.encode(buf, version)? }
         if version >= 0 { put_i64(buf, self.size) }
         if version >= 0 { put_i64(buf, self.position) }
-        if version >= 0 { { let mut __rb_buf = bytes::BytesMut::new(); <crate::records::RecordBatchBorrowed as crate::Encode>::encode(&self.unaligned_records, &mut __rb_buf, version)?; if flex { put_compact_bytes(buf, &__rb_buf) } else { put_bytes(buf, &__rb_buf) } } }
+        if version >= 0 { { let mut __rb_buf = bytes::BytesMut::new(); <crate::records::RecordsPayloadBorrowed as crate::Encode>::encode(&self.unaligned_records, &mut __rb_buf, version)?; if flex { put_compact_bytes(buf, &__rb_buf) } else { put_bytes(buf, &__rb_buf) } } }
         if flex {
             let mut tagged = WriteTaggedFields::new();
             if !(crate::codegen_helpers::is_default(&self.current_leader)) {
@@ -251,7 +251,7 @@ impl<'a> Encode for PartitionSnapshot<'a> {
         if version >= 0 { n += self.snapshot_id.encoded_len(version); }
         if version >= 0 { n += 8; }
         if version >= 0 { n += 8; }
-        if version >= 0 { n += { let __rb_len = <crate::records::RecordBatchBorrowed as crate::Encode>::encoded_len(&(self.unaligned_records), version); if flex { crate::primitives::string_bytes::compact_bytes_len_from_size(__rb_len) } else { 4 + __rb_len } }; }
+        if version >= 0 { n += { let __rb_len = <crate::records::RecordsPayloadBorrowed as crate::Encode>::encoded_len(&(self.unaligned_records), version); if flex { crate::primitives::string_bytes::compact_bytes_len_from_size(__rb_len) } else { 4 + __rb_len } }; }
         if flex {
             let mut known_pairs: Vec<(u32, usize)> = Vec::new();
             if !(crate::codegen_helpers::is_default(&self.current_leader)) {
@@ -272,7 +272,7 @@ impl<'de> DecodeBorrow<'de> for PartitionSnapshot<'de> {
         if version >= 0 { out.snapshot_id = SnapshotId::decode_borrow(buf, version)?; }
         if version >= 0 { out.size = get_i64(buf)?; }
         if version >= 0 { out.position = get_i64(buf)?; }
-        if version >= 0 { out.unaligned_records = { let __rb_slice = if flex { get_compact_bytes_borrowed(buf)? } else { get_bytes_borrowed(buf)? }; let mut __rb_cur = __rb_slice; <crate::records::RecordBatchBorrowed as crate::DecodeBorrow>::decode_borrow(&mut __rb_cur, version)? }; }
+        if version >= 0 { out.unaligned_records = { let __rb_slice = if flex { get_compact_bytes_borrowed(buf)? } else { get_bytes_borrowed(buf)? }; let mut __rb_cur = __rb_slice; <crate::records::RecordsPayloadBorrowed as crate::DecodeBorrow>::decode_borrow(&mut __rb_cur, version)? }; }
         if flex {
             // Pre-declare typed slots for known tagged fields.
             let mut tag_current_leader = None;

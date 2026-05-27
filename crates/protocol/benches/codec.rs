@@ -94,7 +94,7 @@ fn make_produce_request(num_topics: usize, partitions_per_topic: usize) -> Produ
                 .map(|p| PartitionProduceData {
                     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
                     index: p as i32,
-                    records: Some(make_record_batch(8, 64)),
+                    records: Some(make_record_batch(8, 64).into()),
                     unknown_tagged_fields: UnknownTaggedFields::default(),
                 })
                 .collect(),
