@@ -52,6 +52,13 @@ const KAFKA_IMAGE: &str = "confluentinc/cp-kafka:6.1.1";
 /// requires that flag is gated behind `CRABKA_RUN_TXN_JVM_TEST` and
 /// deferred to slice 10 pending a custom Java snippet harness.
 const KAFKA_IMAGE_TXN: &str = "confluentinc/cp-kafka:7.5.0";
+/// Kafka 0.10.1 console tools (Confluent Platform 3.1.2), used by the
+/// slice-2d legacy-client acceptance tests (`jvm_legacy_010_*`). The
+/// 0.10.x-era producer emits v1 `MessageSet` (KIP-32 per-message
+/// timestamps) by default; the consumer negotiates Fetch v0–3. This
+/// exercises the broker's `kafka_3_6_2`-namespace handlers and the
+/// up/down-conversion paths landed in slices 2b+2c (#226).
+const KAFKA_IMAGE_LEGACY: &str = "confluentinc/cp-kafka:3.1.2";
 
 /// Spawn the broker, listening on `LISTEN`. The advertised listener is
 /// `host.docker.internal:9092`; inside the cp-kafka containers we add a
@@ -8173,4 +8180,414 @@ async fn tiered_storage_round_trip_through_minio() {
 
     broker.shutdown().await;
     // `_minio` is dropped here; the container is removed via `docker rm -f`.
+}
+/// Slice 2d test 1: pure-legacy round-trip.
+///
+/// A Kafka 0.10.1 console-producer (cp-kafka:3.1.2) sends 3 records
+/// via Produce v0–2 with v1 `MessageSet` records. A Kafka 0.10.1
+/// console-consumer reads them back via Fetch v0–3. Exercises both
+/// up-conversion (Produce handler) and down-conversion (Fetch
+/// handler) end-to-end.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Docker"]
+async fn jvm_legacy_010_round_trip() {
+    const TOPIC: &str = "legacy-010-round-trip";
+
+    let (broker, _dir) = start_host_broker().await;
+    nc_check_connectivity();
+
+    // 1. Create the topic via the modern AdminClient. The 0.10.x-era
+    //    kafka-topics tool used --zookeeper, not --bootstrap-server,
+    //    so we can't drive it from a 3.1.2 image without standing up
+    //    Zookeeper. Use 6.1.1's AdminClient for setup.
+    docker_run_kafka_tool(&[
+        "kafka-topics",
+        "--create",
+        "--if-not-exists",
+        "--topic",
+        TOPIC,
+        "--partitions",
+        "1",
+        "--replication-factor",
+        "1",
+        "--bootstrap-server",
+        BOOTSTRAP,
+    ]);
+
+    // 2. Produce 3 records via the 0.10.1 console-producer.
+    let mut child = Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "-i",
+            "--add-host=host.docker.internal:host-gateway",
+            KAFKA_IMAGE_LEGACY,
+            "kafka-console-producer",
+            "--broker-list",
+            BOOTSTRAP,
+            "--topic",
+            TOPIC,
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn legacy producer");
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(b"alpha\nbravo\ncharlie\n")
+        .expect("write stdin");
+    drop(child.stdin.take());
+    let producer_out = child.wait_with_output().expect("wait legacy producer");
+    assert!(
+        producer_out.status.success(),
+        "legacy producer failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&producer_out.stdout),
+        String::from_utf8_lossy(&producer_out.stderr),
+    );
+
+    // 3. Consume them back via the 0.10.1 console-consumer.
+    //    0.10.0 added `--new-consumer` + `--bootstrap-server`; the
+    //    old `--zookeeper` mode is unusable without ZK. Use the new
+    //    consumer with --partition 0 to bypass group coordination.
+    //    The 0.10.x console-consumer can exit non-zero after
+    //    --max-messages is satisfied, so we don't assert on exit
+    //    status — we only assert that stdout contains the records.
+    let consumer_out = Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "--add-host=host.docker.internal:host-gateway",
+            KAFKA_IMAGE_LEGACY,
+            "kafka-console-consumer",
+            "--new-consumer",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--topic",
+            TOPIC,
+            "--partition",
+            "0",
+            "--from-beginning",
+            "--max-messages",
+            "3",
+            "--timeout-ms",
+            "10000",
+        ])
+        .stderr(Stdio::piped())
+        .stdout(Stdio::piped())
+        .output()
+        .expect("spawn legacy consumer");
+    let s = String::from_utf8_lossy(&consumer_out.stdout);
+    let stderr = String::from_utf8_lossy(&consumer_out.stderr);
+    for needle in ["alpha", "bravo", "charlie"] {
+        assert!(
+            s.contains(needle),
+            "legacy consumer didn't emit {needle}: status={} stdout={s:?} stderr={stderr:?}",
+            consumer_out.status,
+        );
+    }
+
+    broker.shutdown().await;
+}
+
+/// Slice 2d test 2: legacy producer, modern consumer.
+///
+/// A Kafka 0.10.1 console-producer sends 3 records; a Kafka 2.6
+/// console-consumer (cp-kafka:6.1.1) reads them back via Fetch v11+.
+/// Validates that what the up-conversion writes to the log is a
+/// well-formed v2 `RecordBatch` that a modern client can decode —
+/// not just bytes a Crabka broker accepts on its own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Docker"]
+async fn jvm_legacy_010_produce_modern_consume() {
+    const TOPIC: &str = "legacy-010-produce-modern-consume";
+
+    let (broker, _dir) = start_host_broker().await;
+    nc_check_connectivity();
+
+    docker_run_kafka_tool(&[
+        "kafka-topics",
+        "--create",
+        "--if-not-exists",
+        "--topic",
+        TOPIC,
+        "--partitions",
+        "1",
+        "--replication-factor",
+        "1",
+        "--bootstrap-server",
+        BOOTSTRAP,
+    ]);
+
+    // Produce via legacy.
+    let mut child = Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "-i",
+            "--add-host=host.docker.internal:host-gateway",
+            KAFKA_IMAGE_LEGACY,
+            "kafka-console-producer",
+            "--broker-list",
+            BOOTSTRAP,
+            "--topic",
+            TOPIC,
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn legacy producer");
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(b"alpha\nbravo\ncharlie\n")
+        .expect("write stdin");
+    drop(child.stdin.take());
+    let producer_out = child.wait_with_output().expect("wait legacy producer");
+    assert!(
+        producer_out.status.success(),
+        "legacy producer failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&producer_out.stdout),
+        String::from_utf8_lossy(&producer_out.stderr),
+    );
+
+    // Consume via modern (cp-kafka:6.1.1, uses Fetch v11+).
+    let consumer_out = docker_run_kafka_tool(&[
+        "kafka-console-consumer",
+        "--bootstrap-server",
+        BOOTSTRAP,
+        "--topic",
+        TOPIC,
+        "--partition",
+        "0",
+        "--from-beginning",
+        "--max-messages",
+        "3",
+        "--timeout-ms",
+        "10000",
+    ]);
+    let s = String::from_utf8_lossy(&consumer_out.stdout);
+    for needle in ["alpha", "bravo", "charlie"] {
+        assert!(
+            s.contains(needle),
+            "modern consumer didn't emit {needle}: stdout={s:?}"
+        );
+    }
+
+    broker.shutdown().await;
+}
+
+/// Slice 2d test 3: modern producer, legacy consumer.
+///
+/// A Kafka 2.6 console-producer (cp-kafka:6.1.1) sends 3 records via
+/// Produce v9. A Kafka 0.10.1 console-consumer (cp-kafka:3.1.2) reads
+/// them via Fetch v0–3. Validates that the bytes
+/// `down_convert_for_fetch` emits are parseable as a v0/v1
+/// `MessageSet` by a real Kafka 0.10.x client — the load-bearing
+/// concern for down-conversion correctness.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Docker"]
+async fn jvm_modern_produce_legacy_010_consume() {
+    const TOPIC: &str = "modern-produce-legacy-010-consume";
+
+    let (broker, _dir) = start_host_broker().await;
+    nc_check_connectivity();
+
+    docker_run_kafka_tool(&[
+        "kafka-topics",
+        "--create",
+        "--if-not-exists",
+        "--topic",
+        TOPIC,
+        "--partitions",
+        "1",
+        "--replication-factor",
+        "1",
+        "--bootstrap-server",
+        BOOTSTRAP,
+    ]);
+
+    // Produce via modern (cp-kafka:6.1.1, Produce v9).
+    let mut child = Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "-i",
+            "--add-host=host.docker.internal:host-gateway",
+            KAFKA_IMAGE,
+            "kafka-console-producer",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--topic",
+            TOPIC,
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn modern producer");
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(b"alpha\nbravo\ncharlie\n")
+        .expect("write stdin");
+    drop(child.stdin.take());
+    let producer_out = child.wait_with_output().expect("wait modern producer");
+    assert!(
+        producer_out.status.success(),
+        "modern producer failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&producer_out.stdout),
+        String::from_utf8_lossy(&producer_out.stderr),
+    );
+
+    // Consume via legacy (cp-kafka:3.1.2, Fetch v0-3).
+    // The 0.10.x console-consumer can exit non-zero after
+    // --max-messages is satisfied, so we don't assert on exit
+    // status — we only assert that stdout contains the records.
+    let consumer_out = Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "--add-host=host.docker.internal:host-gateway",
+            KAFKA_IMAGE_LEGACY,
+            "kafka-console-consumer",
+            "--new-consumer",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--topic",
+            TOPIC,
+            "--partition",
+            "0",
+            "--from-beginning",
+            "--max-messages",
+            "3",
+            "--timeout-ms",
+            "10000",
+        ])
+        .stderr(Stdio::piped())
+        .stdout(Stdio::piped())
+        .output()
+        .expect("spawn legacy consumer");
+    let s = String::from_utf8_lossy(&consumer_out.stdout);
+    let stderr = String::from_utf8_lossy(&consumer_out.stderr);
+    for needle in ["alpha", "bravo", "charlie"] {
+        assert!(
+            s.contains(needle),
+            "legacy consumer didn't emit {needle}: status={} stdout={s:?} stderr={stderr:?}",
+            consumer_out.status,
+        );
+    }
+
+    broker.shutdown().await;
+}
+
+/// Slice 2d test 4: gzip-compressed legacy round-trip.
+///
+/// A Kafka 0.10.1 console-producer with `compression.type=gzip`
+/// sends ~50 records as a single outer-wrapped gzip `MessageSet`
+/// (the v0/v1 way of representing compressed batches). A Kafka 2.6
+/// console-consumer (cp-kafka:6.1.1) reads them back. Validates the
+/// gzip path through `legacy_to_v2` (decompress legacy → re-emit as
+/// a v2 `RecordBatch` with the same compression marker).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Docker"]
+async fn jvm_legacy_010_compressed_round_trip() {
+    const TOPIC: &str = "legacy-010-compressed-round-trip";
+
+    let (broker, _dir) = start_host_broker().await;
+    nc_check_connectivity();
+
+    docker_run_kafka_tool(&[
+        "kafka-topics",
+        "--create",
+        "--if-not-exists",
+        "--topic",
+        TOPIC,
+        "--partitions",
+        "1",
+        "--replication-factor",
+        "1",
+        "--bootstrap-server",
+        BOOTSTRAP,
+    ]);
+
+    // 50 newline-separated records to give gzip something to compress.
+    let mut input = String::with_capacity(50 * 12);
+    {
+        use std::fmt::Write as _;
+        for i in 0..50 {
+            writeln!(input, "record-{i:03}").unwrap();
+        }
+    }
+
+    // Produce via legacy with gzip.
+    let mut child = Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "-i",
+            "--add-host=host.docker.internal:host-gateway",
+            KAFKA_IMAGE_LEGACY,
+            "kafka-console-producer",
+            "--broker-list",
+            BOOTSTRAP,
+            "--topic",
+            TOPIC,
+            "--producer-property",
+            "compression.type=gzip",
+            "--producer-property",
+            "batch.size=131072", // 128 KiB — enough to batch all 50 records together
+            "--producer-property",
+            "linger.ms=100", // give the producer time to batch
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn legacy producer");
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(input.as_bytes())
+        .expect("write stdin");
+    drop(child.stdin.take());
+    let producer_out = child.wait_with_output().expect("wait legacy producer");
+    assert!(
+        producer_out.status.success(),
+        "legacy gzip producer failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&producer_out.stdout),
+        String::from_utf8_lossy(&producer_out.stderr),
+    );
+
+    // Consume all 50 via modern.
+    let consumer_out = docker_run_kafka_tool(&[
+        "kafka-console-consumer",
+        "--bootstrap-server",
+        BOOTSTRAP,
+        "--topic",
+        TOPIC,
+        "--partition",
+        "0",
+        "--from-beginning",
+        "--max-messages",
+        "50",
+        "--timeout-ms",
+        "15000",
+    ]);
+    let s = String::from_utf8_lossy(&consumer_out.stdout);
+    for i in 0..50 {
+        let needle = format!("record-{i:03}");
+        assert!(
+            s.contains(&needle),
+            "modern consumer didn't emit {needle} after legacy gzip produce"
+        );
+    }
+
+    broker.shutdown().await;
 }
