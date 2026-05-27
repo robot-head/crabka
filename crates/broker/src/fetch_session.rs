@@ -269,13 +269,33 @@ impl FetchSessionCache {
 
         // Merge request topics — updates existing entries' desired
         // offset/max_bytes, adds new entries with default `last_*`.
+        //
+        // The cache key carries both `topic_name` and `topic_id`. After
+        // `try_allocate` (via the handler's resolution) both fields are
+        // populated. The wire request, however, only carries one of them:
+        // Fetch v ≤ 12 sends the name and leaves `topic_id` zero; v ≥ 13
+        // sends the id and leaves `topic` empty. A naive `entry((name, id, p))`
+        // lookup would treat the partial-key request as a *new* partition and
+        // shadow the cached entry with a default-state copy (max_bytes=0),
+        // which then breaks subsequent reads. Find the cached key by either
+        // half-identity first; only fall back to a brand-new key when the
+        // partition truly isn't in the cache.
         for t in &req.topics {
             for fp in &t.partitions {
-                let key = FetchSessionKey {
+                let existing_key = session
+                    .partitions
+                    .keys()
+                    .find(|k| {
+                        k.partition == fp.partition
+                            && ((!t.topic.is_empty() && k.topic_name == t.topic)
+                                || (t.topic_id != WireUuid::ZERO && k.topic_id == t.topic_id))
+                    })
+                    .cloned();
+                let key = existing_key.unwrap_or_else(|| FetchSessionKey {
                     topic_name: t.topic.clone(),
                     topic_id: t.topic_id,
                     partition: fp.partition,
-                };
+                });
                 let entry = session.partitions.entry(key).or_default();
                 entry.fetch_offset = fp.fetch_offset;
                 entry.max_bytes = fp.partition_max_bytes;
@@ -596,6 +616,111 @@ mod tests {
             }
             other => panic!("expected Error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn incremental_merge_matches_cached_key_by_topic_id_only() {
+        // Reproduces the broker-jvm-acceptance regression: a v ≥ 13 client
+        // opens a session, the broker resolves and caches `(name, id, p)`;
+        // then the client sends an incremental that only carries `topic_id`
+        // (empty `topic`). The merge must update the cached entry — not
+        // insert a duplicate with default `max_bytes`, which would silently
+        // drop bytes from the subsequent read.
+        let cache = FetchSessionCache::new(10);
+        let tid = WireUuid([7u8; 16]);
+        let cached_key = FetchSessionKey {
+            topic_name: "t".into(),
+            topic_id: tid,
+            partition: 0,
+        };
+        let id = cache.try_allocate(
+            false,
+            "alice".into(),
+            vec![(
+                cached_key.clone(),
+                CachedPartitionState {
+                    fetch_offset: 5,
+                    max_bytes: 1024,
+                    ..Default::default()
+                },
+            )],
+        );
+
+        // v ≥ 13 incremental: topic_id set, topic_name empty, new fetch_offset.
+        let r = req(
+            id,
+            1,
+            vec![FetchTopic {
+                topic: String::new(),
+                topic_id: tid,
+                partitions: vec![FetchPartition {
+                    partition: 0,
+                    fetch_offset: 42,
+                    partition_max_bytes: 2048,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            vec![],
+        );
+        let SessionDecision::Incremental { partitions, .. } = cache.classify(&r) else {
+            panic!("expected Incremental");
+        };
+        assert_eq!(partitions.len(), 1, "no duplicate entry created");
+        let (k, s) = &partitions[0];
+        assert_eq!(k.topic_name, "t", "cached name preserved");
+        assert_eq!(k.topic_id, tid);
+        assert_eq!(s.fetch_offset, 42, "fetch_offset updated");
+        assert_eq!(s.max_bytes, 2048, "max_bytes updated");
+    }
+
+    #[test]
+    fn incremental_merge_matches_cached_key_by_topic_name_only() {
+        // Mirror case for v ≤ 12 clients: cache has (name, id, p) after
+        // server-side resolution; request carries name only, id ZERO.
+        let cache = FetchSessionCache::new(10);
+        let tid = WireUuid([9u8; 16]);
+        let cached_key = FetchSessionKey {
+            topic_name: "t".into(),
+            topic_id: tid,
+            partition: 0,
+        };
+        let id = cache.try_allocate(
+            false,
+            "alice".into(),
+            vec![(
+                cached_key.clone(),
+                CachedPartitionState {
+                    fetch_offset: 5,
+                    max_bytes: 1024,
+                    ..Default::default()
+                },
+            )],
+        );
+
+        let r = req(
+            id,
+            1,
+            vec![FetchTopic {
+                topic: "t".into(),
+                topic_id: WireUuid::ZERO,
+                partitions: vec![FetchPartition {
+                    partition: 0,
+                    fetch_offset: 99,
+                    partition_max_bytes: 4096,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            vec![],
+        );
+        let SessionDecision::Incremental { partitions, .. } = cache.classify(&r) else {
+            panic!("expected Incremental");
+        };
+        assert_eq!(partitions.len(), 1);
+        let (_, s) = &partitions[0];
+        assert_eq!(s.fetch_offset, 99);
+        assert_eq!(s.max_bytes, 4096);
     }
 
     #[test]
