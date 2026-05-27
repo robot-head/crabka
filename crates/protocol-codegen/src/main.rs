@@ -1,32 +1,36 @@
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
 
 use crabka_protocol_codegen::{emit, ir, name_conv, validate};
 
-fn main() -> ExitCode {
+fn parse_args() -> (PathBuf, PathBuf, Option<String>) {
+    let mut positional: Vec<String> = Vec::new();
+    let mut namespace: Option<String> = None;
     let mut args = std::env::args().skip(1);
-    let Some(schemas) = args.next() else {
-        return usage();
-    };
-    let Some(out) = args.next() else {
-        return usage();
-    };
-    match run(&PathBuf::from(schemas), &PathBuf::from(out)) {
-        Ok(n) => {
-            eprintln!("Generated {n} files");
-            ExitCode::SUCCESS
-        }
-        Err(e) => {
-            eprintln!("error: {e}");
-            ExitCode::FAILURE
+    while let Some(a) = args.next() {
+        if a == "--namespace" {
+            namespace = Some(args.next().expect("--namespace requires a value"));
+        } else {
+            positional.push(a);
         }
     }
+    assert_eq!(
+        positional.len(),
+        2,
+        "usage: codegen [--namespace NAME] <schemas> <out>"
+    );
+    (
+        PathBuf::from(&positional[0]),
+        PathBuf::from(&positional[1]),
+        namespace,
+    )
 }
 
-fn usage() -> ExitCode {
-    eprintln!("usage: crabka-protocol-codegen <schemas-dir> <out-dir>");
-    ExitCode::from(2)
+fn main() -> Result<(), RunError> {
+    let (schemas, out, namespace) = parse_args();
+    let count = run(&schemas, &out, namespace.as_deref())?;
+    eprintln!("Emitted {count} message specs.");
+    Ok(())
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -69,10 +73,11 @@ fn write_wrapper(
     flavor: emit::wrappers::Flavor,
     schemas_version: &str,
     protocol_src: &Path,
+    namespace: Option<&str>,
 ) -> std::io::Result<()> {
     use emit::wrappers::Flavor;
     let snake = name_conv::module_name(&spec.name);
-    let body = emit::wrappers::emit(spec, flavor, schemas_version);
+    let body = emit::wrappers::emit(spec, flavor, schemas_version, namespace);
     let dir = protocol_src.join(match flavor {
         Flavor::Owned => "owned",
         Flavor::Borrowed => "borrowed",
@@ -105,7 +110,11 @@ fn write_common_wrapper(
 }
 
 #[allow(clippy::too_many_lines)]
-fn run(schemas: &std::path::Path, out: &std::path::Path) -> Result<usize, RunError> {
+fn run(
+    schemas: &std::path::Path,
+    out: &std::path::Path,
+    namespace: Option<&str>,
+) -> Result<usize, RunError> {
     let schemas_sha = read_schemas_sha(schemas)?;
     let specs = ir::load_dir(schemas)?;
     validate::validate(&specs)?;
@@ -115,7 +124,16 @@ fn run(schemas: &std::path::Path, out: &std::path::Path) -> Result<usize, RunErr
     let common_borrowed_dir = out.join("common").join("borrowed");
 
     // Derive the protocol/src directory so we can write wrappers and mod.rs.
-    let protocol_src = protocol_src_from_out(out);
+    let protocol_src = match namespace {
+        None => protocol_src_from_out(out),
+        Some(ns) => out
+            .parent()
+            .expect("out must have a parent") // generated/
+            .parent()
+            .expect("out parent must have a parent") // crates/protocol/
+            .join("src")
+            .join(ns),
+    };
 
     // Track all unique common-struct names emitted (for the common/mod.rs).
     let mut all_common_owned = std::collections::BTreeSet::<String>::new();
@@ -162,12 +180,14 @@ fn run(schemas: &std::path::Path, out: &std::path::Path) -> Result<usize, RunErr
                 emit::wrappers::Flavor::Owned,
                 &schemas_sha,
                 &protocol_src,
+                namespace,
             )?;
             write_wrapper(
                 s,
                 emit::wrappers::Flavor::Borrowed,
                 &schemas_sha,
                 &protocol_src,
+                namespace,
             )?;
             count += 2;
         }
@@ -233,6 +253,12 @@ fn run(schemas: &std::path::Path, out: &std::path::Path) -> Result<usize, RunErr
     std::fs::write(protocol_src.join("owned").join("mod.rs"), owned_mod)?;
     std::fs::write(protocol_src.join("borrowed").join("mod.rs"), borrowed_mod)?;
     count += 2;
+
+    // When namespaced, write the namespace-level mod.rs declaring the two flavor mods.
+    if let Some(_ns) = namespace {
+        let body = "pub mod owned;\npub mod borrowed;\n";
+        std::fs::write(protocol_src.join("mod.rs"), body)?;
+    }
 
     // Always emit the ApiKey enum regardless of CURATED — it reflects ALL schemas.
     let api_key_src = emit::api_key_enum::emit(&specs, &schemas_sha);

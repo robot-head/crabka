@@ -61,7 +61,12 @@ pub fn allow_header() -> &'static str {
 
 /// Emit a wrapper body for one message + flavor.
 #[must_use]
-pub fn emit(spec: &MessageSpec, flavor: Flavor, schemas_version: &str) -> String {
+pub fn emit(
+    spec: &MessageSpec,
+    flavor: Flavor,
+    schemas_version: &str,
+    namespace: Option<&str>,
+) -> String {
     let type_name = name_conv::type_name(&spec.name);
     let suffix = match flavor {
         Flavor::Owned => "owned",
@@ -82,9 +87,13 @@ pub fn emit(spec: &MessageSpec, flavor: Flavor, schemas_version: &str) -> String
     out.push_str(allow_header());
     writeln!(out).unwrap();
     writeln!(out).unwrap();
+    let path_prefix = match namespace {
+        None => String::new(),
+        Some(ns) => format!("{ns}/"),
+    };
     writeln!(
         out,
-        "include!(concat!(\n    env!(\"CARGO_MANIFEST_DIR\"),\n    \"/generated/{type_name}.{suffix}.rs\"\n));"
+        "include!(concat!(\n    env!(\"CARGO_MANIFEST_DIR\"),\n    \"/generated/{path_prefix}{type_name}.{suffix}.rs\"\n));"
     )
     .unwrap();
     writeln!(out).unwrap();
