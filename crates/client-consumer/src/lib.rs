@@ -56,6 +56,7 @@ mod coordinator;
 mod error;
 mod poll;
 
+pub use assignor::Assignor;
 pub use builder::{AutoOffsetReset, IsolationLevel};
 pub use consumer::{Consumer, ConsumerRecord};
 pub use error::ConsumerError;
