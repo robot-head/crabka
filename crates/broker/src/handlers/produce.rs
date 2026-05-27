@@ -271,12 +271,29 @@ async fn process_partition(
         out.error_code = codes::INVALID_REQUEST;
         return Ok(out);
     };
-    // v0/v1 up-conversion lands in a follow-up slice; for now require v2.
+    // Up-convert v0/v1 MessageSet payloads to a v2 RecordBatch so the
+    // log write path sees a single uniform representation. Old clients
+    // (pre-Kafka-0.11 / Produce v0–v2) are the only producers that send
+    // a `Legacy` arm; converting once here lets every downstream stage
+    // — idempotent producer dedup, txn append, log append, replication
+    // — stay v2-only. Malformed legacy bytes surface as
+    // `INVALID_RECORD`.
     let mut batch = match payload {
         RecordsPayload::V2(rb) => rb,
-        RecordsPayload::Legacy(_) => {
-            out.error_code = codes::INVALID_REQUEST;
-            return Ok(out);
+        RecordsPayload::Legacy(bytes) => {
+            match crabka_records_legacy::legacy_to_v2(&bytes) {
+                Ok(rb) => rb,
+                Err(e) => {
+                    tracing::warn!(
+                        topic = %topic_name,
+                        partition = idx,
+                        error = %e,
+                        "rejecting Produce: legacy MessageSet parse failed"
+                    );
+                    out.error_code = codes::INVALID_RECORD;
+                    return Ok(out);
+                }
+            }
         }
     };
 
