@@ -214,11 +214,25 @@ fn now_ms() -> i64 {
 
 /// Returns `Some(error_code)` if the request should be rejected.
 async fn validate(req: &OffsetCommitRequest, handle: &Arc<GroupHandle>) -> Option<i16> {
-    if req.member_id.is_empty() {
+    // KIP-345: a request that supplies a `group.instance.id` with an empty
+    // `member_id` is a static-only commit — resolve via the static index.
+    if req.member_id.is_empty() && req.group_instance_id.is_none() {
+        // Simple consumer (no group membership) — no validation needed.
         return None;
     }
     let g = handle.state.lock().await;
-    if !g.members.contains_key(&req.member_id) {
+    // KIP-345 fence: if instance id is set, it must resolve and (if
+    // member_id is also set) match.
+    if let Some(iid) = req.group_instance_id.as_deref() {
+        match g.current_member_id_for_instance(iid) {
+            None => return Some(codes::UNKNOWN_MEMBER_ID),
+            Some(pinned) => {
+                if !req.member_id.is_empty() && pinned != req.member_id {
+                    return Some(codes::FENCED_INSTANCE_ID);
+                }
+            }
+        }
+    } else if !g.members.contains_key(&req.member_id) {
         return Some(codes::UNKNOWN_MEMBER_ID);
     }
     if g.generation_id != req.generation_id_or_member_epoch {

@@ -38,6 +38,13 @@ pub(crate) fn handle(
         // 1. Validate (member, generation) and check whether we're the leader.
         let is_leader = {
             let g = handle.state.lock().await;
+            // KIP-345 fence: instance id pinned elsewhere → reject.
+            if req.group_instance_id.as_deref().is_some_and(|iid| {
+                g.current_member_id_for_instance(iid)
+                    .is_none_or(|pinned| pinned != req.member_id)
+            }) {
+                return encode_err(version, codes::FENCED_INSTANCE_ID);
+            }
             if !g.members.contains_key(&req.member_id) {
                 return encode_err(version, codes::UNKNOWN_MEMBER_ID);
             }

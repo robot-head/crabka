@@ -33,7 +33,16 @@ pub(crate) fn handle(
                 // informative code first. `let-else` can't chain like this,
                 // so split membership / generation / state into a flat
                 // sequence of guards before mutating.
-                if !g.members.contains_key(&req.member_id) {
+                // KIP-345 fence: a Heartbeat carrying a `group.instance.id`
+                // pinned to a different member id (or to no member at all)
+                // is rejected before any other validation.
+                let instance_fenced = req.group_instance_id.as_deref().is_some_and(|iid| {
+                    g.current_member_id_for_instance(iid)
+                        .is_none_or(|pinned| pinned != req.member_id)
+                });
+                if instance_fenced {
+                    codes::FENCED_INSTANCE_ID
+                } else if !g.members.contains_key(&req.member_id) {
                     codes::UNKNOWN_MEMBER_ID
                 } else if g.generation_id != req.generation_id {
                     codes::ILLEGAL_GENERATION
