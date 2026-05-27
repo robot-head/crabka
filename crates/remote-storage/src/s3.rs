@@ -23,16 +23,32 @@
 //! Keys mirror [`LocalTieredStorage`](crate::LocalTieredStorage)'s
 //! directory layout so the two backends are observationally equivalent.
 
+use std::io::Read;
 use std::path::Path;
 use std::sync::Arc;
 
 use bytes::Bytes;
 use object_store::path::Path as ObjectPath;
-use object_store::{GetOptions, GetRange, ObjectStore, ObjectStoreExt, PutPayload};
+use object_store::{GetOptions, GetRange, ObjectStore, ObjectStoreExt, PutPayload, WriteMultipart};
 
 use crate::error::RemoteStorageError;
 use crate::metadata::{CustomMetadata, RemoteLogSegmentMetadata};
 use crate::storage_manager::{IndexType, LogSegmentData, RemoteStorageManager};
+
+/// Default threshold above which [`S3RemoteStorage::put_path`] switches
+/// from a single PUT to a streaming multipart upload. 100 MiB. AWS's hard
+/// cap on single-PUT objects is 5 GiB; defaulting well below that keeps
+/// us comfortably inside the single-PUT regime for the common segment
+/// sizes (Kafka's default `segment.bytes` is 1 GiB) while ensuring
+/// segments at the upper end (or operator-bumped `segment.bytes`) never
+/// silently exceed the cap.
+pub const DEFAULT_MULTIPART_THRESHOLD: u64 = 100 * 1024 * 1024;
+
+/// Default per-part size for multipart uploads. 16 MiB. AWS requires every
+/// part except the last to be at least 5 MiB and caps the total parts at
+/// 10 000, so 16 MiB scales to a ~160 GiB segment before bumping into the
+/// part-count limit — far beyond any realistic Kafka segment.
+pub const DEFAULT_MULTIPART_CHUNK_SIZE: usize = 16 * 1024 * 1024;
 
 /// A [`RemoteStorageManager`] backed by any S3-compatible object store.
 ///
@@ -45,6 +61,10 @@ pub struct S3RemoteStorage {
     /// Optional key prefix (joined with `/` to every object key). Lets
     /// multiple Crabka clusters share a bucket safely.
     prefix: Option<String>,
+    /// File-size threshold above which uploads switch to S3 multipart.
+    multipart_threshold: u64,
+    /// Per-part size used by the multipart path.
+    multipart_chunk_size: usize,
 }
 
 impl std::fmt::Debug for S3RemoteStorage {
@@ -84,15 +104,62 @@ pub struct S3Config {
     /// Allow plaintext HTTP (off-by-default; required by `MinIO` running
     /// without TLS).
     pub allow_http: bool,
+    /// Files at least this large are uploaded via S3 multipart instead of
+    /// a single PUT. Defaults to [`DEFAULT_MULTIPART_THRESHOLD`] (100 MiB).
+    /// Lower this in tests to exercise the multipart path against
+    /// segment-sized fixtures.
+    pub multipart_threshold: u64,
+    /// Per-part size used when multipart upload kicks in. Defaults to
+    /// [`DEFAULT_MULTIPART_CHUNK_SIZE`] (16 MiB). Must be ≥ 5 MiB (AWS
+    /// minimum) except for the last part; smaller values are accepted by
+    /// `MinIO` and convenient in tests.
+    pub multipart_chunk_size: usize,
+}
+
+impl Default for S3Config {
+    /// Produces a placeholder `S3Config` so callers can use `..Default::default()`
+    /// to fill in just the tuning knobs. The bucket / region / endpoint /
+    /// credential fields are stubs — every real caller overrides them.
+    fn default() -> Self {
+        Self {
+            bucket: String::new(),
+            prefix: None,
+            region: String::new(),
+            endpoint: None,
+            access_key_id: None,
+            secret_access_key: None,
+            allow_http: false,
+            multipart_threshold: DEFAULT_MULTIPART_THRESHOLD,
+            multipart_chunk_size: DEFAULT_MULTIPART_CHUNK_SIZE,
+        }
+    }
 }
 
 impl S3RemoteStorage {
     /// Wrap an arbitrary `ObjectStore` (e.g.
     /// `object_store::memory::InMemory` for tests). Use
-    /// [`Self::from_s3_config`] for the production S3 path.
+    /// [`Self::from_s3_config`] for the production S3 path. Multipart
+    /// tuning falls back to the [`DEFAULT_MULTIPART_THRESHOLD`] /
+    /// [`DEFAULT_MULTIPART_CHUNK_SIZE`] constants; call
+    /// [`Self::with_multipart_tuning`] to override in tests.
     #[must_use]
     pub fn with_store(store: Arc<dyn ObjectStore>, prefix: Option<String>) -> Self {
-        Self { store, prefix }
+        Self {
+            store,
+            prefix,
+            multipart_threshold: DEFAULT_MULTIPART_THRESHOLD,
+            multipart_chunk_size: DEFAULT_MULTIPART_CHUNK_SIZE,
+        }
+    }
+
+    /// Override the multipart threshold + chunk size. Returns `self` for
+    /// chaining. Tests use this to force the multipart path on small
+    /// fixtures; production typically leaves the defaults alone.
+    #[must_use]
+    pub fn with_multipart_tuning(mut self, threshold: u64, chunk_size: usize) -> Self {
+        self.multipart_threshold = threshold;
+        self.multipart_chunk_size = chunk_size;
+        self
     }
 
     /// Build an `AmazonS3` client from `cfg` and wrap it.
@@ -119,6 +186,8 @@ impl S3RemoteStorage {
         Ok(Self {
             store: Arc::new(store),
             prefix: cfg.prefix.clone(),
+            multipart_threshold: cfg.multipart_threshold,
+            multipart_chunk_size: cfg.multipart_chunk_size,
         })
     }
 
@@ -161,9 +230,44 @@ impl S3RemoteStorage {
     }
 
     fn put_path(&self, key: &ObjectPath, path: &Path) -> Result<(), RemoteStorageError> {
-        let bytes = std::fs::read(path)?;
-        Self::block(self.store.put(key, PutPayload::from(bytes)))?;
-        Ok(())
+        let len = std::fs::metadata(path)?.len();
+        if len < self.multipart_threshold {
+            // Single-PUT path: read the whole file into memory, one request.
+            let bytes = std::fs::read(path)?;
+            Self::block(self.store.put(key, PutPayload::from(bytes)))?;
+            return Ok(());
+        }
+        self.put_path_multipart(key, path)
+    }
+
+    /// Streaming multipart upload for files at or above
+    /// [`Self::multipart_threshold`]. Reads the file in `multipart_chunk_size`
+    /// blocks and pushes each into the [`WriteMultipart`] buffer; `finish`
+    /// flushes the tail and completes the upload (aborting on failure so
+    /// we don't leak in-progress parts in the bucket).
+    fn put_path_multipart(&self, key: &ObjectPath, path: &Path) -> Result<(), RemoteStorageError> {
+        let file = std::fs::File::open(path)?;
+        let store = self.store.clone();
+        let key = key.clone();
+        let chunk_size = self.multipart_chunk_size;
+        Self::block(async move {
+            let upload = store.put_multipart(&key).await?;
+            let mut writer = WriteMultipart::new_with_chunk_size(upload, chunk_size);
+            let mut file = file;
+            let mut buf = vec![0u8; chunk_size];
+            loop {
+                let n =
+                    Read::read(&mut file, &mut buf).map_err(|e| object_store::Error::Generic {
+                        store: "S3RemoteStorage",
+                        source: Box::new(e),
+                    })?;
+                if n == 0 {
+                    break;
+                }
+                writer.write(&buf[..n]);
+            }
+            writer.finish().await.map(|_| ())
+        })
     }
 
     fn put_bytes(&self, key: &ObjectPath, bytes: Bytes) -> Result<(), RemoteStorageError> {
@@ -515,5 +619,119 @@ mod tests {
             key.as_ref().starts_with("c/"),
             "expected prefix to be applied, got {key:?}",
         );
+    }
+
+    fn write_log_segment(dir: &std::path::Path, len: usize) -> PathBuf {
+        let p = dir.join("00.log");
+        let mut f = std::fs::File::create(&p).unwrap();
+        // Deterministic, position-sensitive bytes so the round-trip
+        // assertion catches both reordering bugs and truncation.
+        let bytes: Vec<u8> = (0..len).map(|i| u8::try_from(i % 251).unwrap()).collect();
+        f.write_all(&bytes).unwrap();
+        p
+    }
+
+    /// Files at or above `multipart_threshold` flow through
+    /// `put_path_multipart`. We pick a chunk size that yields multiple
+    /// non-trailing parts so the inner loop's tail-flush + finish path is
+    /// exercised. The `InMemory` backend implements `put_multipart` /
+    /// `complete` end-to-end, so a successful round-trip proves the
+    /// multipart wire calls are stitched correctly (per-part offsets and
+    /// the final concatenation).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn put_path_uses_multipart_above_threshold_and_round_trips() {
+        // 100 KiB segment, 8 KiB threshold → multipart, 4 KiB chunks
+        // → 25 parts (last one full, no tail).
+        const SEG_LEN: usize = 100 * 1024;
+        const CHUNK: usize = 4 * 1024;
+        let store = S3RemoteStorage::with_store(Arc::new(InMemory::new()), None)
+            .with_multipart_tuning(8 * 1024, CHUNK);
+        let src = TempDir::new().unwrap();
+        let md = sample_metadata(40);
+        let log_path = write_log_segment(src.path(), SEG_LEN);
+        let data = LogSegmentData {
+            log_segment: log_path,
+            offset_index: write_file(src.path(), "00.index", b"OFFSET-IDX"),
+            time_index: write_file(src.path(), "00.timeindex", b"TIME-IDX"),
+            transaction_index: None,
+            producer_snapshot_index: Some(write_file(src.path(), "00.snapshot", b"SNAP")),
+            leader_epoch_index: Bytes::from_static(b"EPOCH-BYTES"),
+        };
+        tokio::task::spawn_blocking(move || {
+            store.copy_log_segment_data(&md, &data).unwrap();
+            let fetched = store.fetch_log_segment(&md, 0, None).unwrap();
+            assert_eq!(fetched.len(), SEG_LEN);
+            for (i, b) in fetched.iter().enumerate() {
+                assert_eq!(*b, u8::try_from(i % 251).unwrap(), "byte mismatch at {i}");
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    /// Multipart path with a tail chunk strictly smaller than
+    /// `chunk_size`. `WriteMultipart::finish` is supposed to flush the
+    /// partially-filled buffer as the final part; this test asserts that
+    /// happens (otherwise the last `tail_len` bytes would be silently
+    /// dropped from the uploaded object).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn multipart_flushes_partial_tail_chunk() {
+        const CHUNK: usize = 4 * 1024;
+        const SEG_LEN: usize = 3 * CHUNK + 137; // 3 full parts + tail
+        let store = S3RemoteStorage::with_store(Arc::new(InMemory::new()), None)
+            .with_multipart_tuning(1024, CHUNK);
+        let src = TempDir::new().unwrap();
+        let md = sample_metadata(41);
+        let log_path = write_log_segment(src.path(), SEG_LEN);
+        let data = LogSegmentData {
+            log_segment: log_path,
+            offset_index: write_file(src.path(), "00.index", b"OFFSET-IDX"),
+            time_index: write_file(src.path(), "00.timeindex", b"TIME-IDX"),
+            transaction_index: None,
+            producer_snapshot_index: None,
+            leader_epoch_index: Bytes::from_static(b"EPOCH-BYTES"),
+        };
+        tokio::task::spawn_blocking(move || {
+            store.copy_log_segment_data(&md, &data).unwrap();
+            let fetched = store.fetch_log_segment(&md, 0, None).unwrap();
+            assert_eq!(fetched.len(), SEG_LEN);
+            assert_eq!(
+                fetched.last().copied(),
+                Some(u8::try_from((SEG_LEN - 1) % 251).unwrap()),
+                "tail byte was dropped",
+            );
+        })
+        .await
+        .unwrap();
+    }
+
+    /// Files strictly below the threshold MUST still take the single-PUT
+    /// path even when multipart tuning is wired up. We exercise that by
+    /// raising the threshold above the fixture size; a regression that
+    /// inverted the branch would surface as a hang or multipart-specific
+    /// error against a backend without multipart support (and would also
+    /// be a latency regression in production).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn put_path_stays_on_single_put_below_threshold() {
+        let store = S3RemoteStorage::with_store(Arc::new(InMemory::new()), None)
+            .with_multipart_tuning(1024 * 1024, 4 * 1024);
+        let src = TempDir::new().unwrap();
+        let md = sample_metadata(42);
+        let log_path = write_log_segment(src.path(), 10); // ten bytes, well under 1 MiB
+        let data = LogSegmentData {
+            log_segment: log_path,
+            offset_index: write_file(src.path(), "00.index", b"OFFSET-IDX"),
+            time_index: write_file(src.path(), "00.timeindex", b"TIME-IDX"),
+            transaction_index: None,
+            producer_snapshot_index: None,
+            leader_epoch_index: Bytes::from_static(b"EPOCH-BYTES"),
+        };
+        tokio::task::spawn_blocking(move || {
+            store.copy_log_segment_data(&md, &data).unwrap();
+            let fetched = store.fetch_log_segment(&md, 0, None).unwrap();
+            assert_eq!(fetched.len(), 10);
+        })
+        .await
+        .unwrap();
     }
 }

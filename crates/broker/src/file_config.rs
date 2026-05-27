@@ -145,6 +145,18 @@ pub struct FileRemoteStorageS3Config {
     /// without TLS).
     #[serde(default)]
     pub allow_http: bool,
+    /// Optional override of the multipart-upload threshold (bytes). When
+    /// `None`, [`crabka_remote_storage::DEFAULT_MULTIPART_THRESHOLD`]
+    /// applies. Operators typically leave this alone; lower it to force
+    /// multipart on smaller segments for testing.
+    #[serde(default)]
+    pub multipart_threshold: Option<u64>,
+    /// Optional override of the per-part multipart chunk size (bytes).
+    /// When `None`, [`crabka_remote_storage::DEFAULT_MULTIPART_CHUNK_SIZE`]
+    /// applies. AWS requires parts ≥ 5 MiB except the last; `MinIO`
+    /// tolerates smaller values.
+    #[serde(default)]
+    pub multipart_chunk_size: Option<usize>,
 }
 
 /// TOML shape of `[authorization]`. `type` (renamed to `authz_type` on
@@ -741,6 +753,12 @@ impl FileConfig {
                             access_key_id: s3.access_key_id.clone(),
                             secret_access_key: s3.secret_access_key.clone(),
                             allow_http: s3.allow_http,
+                            multipart_threshold: s3
+                                .multipart_threshold
+                                .unwrap_or(crabka_remote_storage::DEFAULT_MULTIPART_THRESHOLD),
+                            multipart_chunk_size: s3
+                                .multipart_chunk_size
+                                .unwrap_or(crabka_remote_storage::DEFAULT_MULTIPART_CHUNK_SIZE),
                         },
                     ));
                 }
@@ -1400,6 +1418,36 @@ allow_http = true
                 assert_eq!(s3.endpoint.as_deref(), Some("http://minio:9000"));
                 assert!(s3.allow_http);
                 assert!(s3.access_key_id.is_none());
+                // Multipart knobs default when the TOML omits them.
+                assert_eq!(
+                    s3.multipart_threshold,
+                    crabka_remote_storage::DEFAULT_MULTIPART_THRESHOLD
+                );
+                assert_eq!(
+                    s3.multipart_chunk_size,
+                    crabka_remote_storage::DEFAULT_MULTIPART_CHUNK_SIZE
+                );
+            }
+            other => panic!("expected S3 backend, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn remote_storage_s3_section_round_trips_multipart_overrides() {
+        let toml = r#"
+[remote_storage.s3]
+bucket = "b"
+region = "us-east-1"
+multipart_threshold = 8192
+multipart_chunk_size = 5242880
+"#;
+        let file: FileConfig = toml::from_str(toml).unwrap();
+        let mut cfg = crate::config::BrokerConfig::default();
+        file.apply_to(&mut cfg).unwrap();
+        match cfg.remote_storage_backend {
+            Some(crate::config::RemoteStorageBackend::S3(s3)) => {
+                assert_eq!(s3.multipart_threshold, 8192);
+                assert_eq!(s3.multipart_chunk_size, 5_242_880);
             }
             other => panic!("expected S3 backend, got {other:?}"),
         }
