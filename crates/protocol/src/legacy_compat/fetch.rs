@@ -100,7 +100,7 @@ impl From<crate::owned::fetch_response::FetchableTopicResponse>
     fn from(c: crate::owned::fetch_response::FetchableTopicResponse) -> Self {
         Self {
             topic: c.topic,
-            // topic_id (v13+) not present in legacy schema
+            topic_id: c.topic_id,
             partitions: c.partitions.into_iter().map(Into::into).collect(),
             ..Default::default()
         }
