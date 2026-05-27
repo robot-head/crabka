@@ -74,6 +74,7 @@ pub(crate) mod describe_user_scram_credentials;
 pub(crate) mod elect_leaders;
 pub(crate) mod expire_delegation_token;
 pub(crate) mod fetch;
+pub(crate) mod fetch_downconvert;
 pub(crate) mod find_coordinator;
 pub(crate) mod heartbeat;
 pub(crate) mod incremental_alter_configs;
