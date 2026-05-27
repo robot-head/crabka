@@ -29,8 +29,18 @@ fn supported_apis() -> Vec<ApiVersion> {
     }
     vec![
         v!(api_versions_request),
-        v!(produce_request),
-        v!(fetch_request),
+        ApiVersion {
+            api_key: owned::produce_request::API_KEY,
+            min_version: crabka_protocol::kafka_3_6_2::owned::produce_request::MIN_VERSION,
+            max_version: owned::produce_request::MAX_VERSION,
+            ..Default::default()
+        },
+        ApiVersion {
+            api_key: owned::fetch_request::API_KEY,
+            min_version: crabka_protocol::kafka_3_6_2::owned::fetch_request::MIN_VERSION,
+            max_version: owned::fetch_request::MAX_VERSION,
+            ..Default::default()
+        },
         v!(list_offsets_request),
         v!(metadata_request),
         v!(find_coordinator_request),
@@ -126,4 +136,20 @@ pub(crate) fn handle(
         resp.encode(&mut buf, version)?;
         Ok(buf.freeze())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn api_versions_advertises_legacy_produce_and_fetch_min() {
+        let table = supported_apis();
+        let produce = table.iter().find(|v| v.api_key == 0).expect("produce");
+        let fetch = table.iter().find(|v| v.api_key == 1).expect("fetch");
+        assert_eq!(produce.min_version, 0,
+            "Produce min must be 0 to advertise the legacy v0-2 support");
+        assert_eq!(fetch.min_version, 0,
+            "Fetch min must be 0 to advertise the legacy v0-3 support");
+    }
 }
