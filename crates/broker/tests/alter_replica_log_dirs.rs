@@ -170,9 +170,7 @@ fn count_topic_dirs(dir: &std::path::Path, topic: &str) -> usize {
         .filter(|e| {
             e.file_name()
                 .to_str()
-                .map(|n| {
-                    n.starts_with(&prefix) && !n.ends_with("-future")
-                })
+                .map(|n| n.starts_with(&prefix) && !n.ends_with("-future"))
                 .unwrap_or(false)
         })
         .count()

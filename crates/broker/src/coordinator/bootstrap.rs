@@ -77,8 +77,12 @@ pub async fn bootstrap(
     replay_records(&log, group_manager).await?;
 
     // Spawn a writer + register the partition handle.
-    let partition =
-        spawn_partition(OFFSETS_TOPIC.to_string(), OFFSETS_PARTITION, owning_dir, log);
+    let partition = spawn_partition(
+        OFFSETS_TOPIC.to_string(),
+        OFFSETS_PARTITION,
+        owning_dir,
+        log,
+    );
     partitions.insert((OFFSETS_TOPIC.into(), OFFSETS_PARTITION), partition);
     Ok(())
 }

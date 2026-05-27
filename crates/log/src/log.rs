@@ -928,6 +928,16 @@ mod tests {
     }
 
     #[test]
+    fn dir_returns_open_path() {
+        // The broker's KIP-113 move machinery reads this back to
+        // determine a partition's current owning `log.dir` without
+        // re-implementing the directory-layout convention.
+        let dir = tempdir().unwrap();
+        let log = Log::open(dir.path(), LogConfig::default()).unwrap();
+        assert_eq!(log.dir(), dir.path());
+    }
+
+    #[test]
     fn open_creates_log_file() {
         let dir = tempdir().unwrap();
         let log = Log::open(dir.path(), LogConfig::default()).unwrap();

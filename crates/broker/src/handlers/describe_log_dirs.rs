@@ -191,13 +191,15 @@ fn future_offset_lag(
         return 0;
     };
     let current_leo = part.log_end_offset();
-    let future_leo = future_logs.get(&(topic.to_string(), partition)).map_or(0, |e| {
-        e.value()
-            .future_log
-            .lock()
-            .expect("future log mutex poisoned")
-            .log_end_offset()
-    });
+    let future_leo = future_logs
+        .get(&(topic.to_string(), partition))
+        .map_or(0, |e| {
+            e.value()
+                .future_log
+                .lock()
+                .expect("future log mutex poisoned")
+                .log_end_offset()
+        });
     (current_leo - future_leo).max(0)
 }
 

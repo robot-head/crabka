@@ -11,7 +11,7 @@ use crabka_protocol::owned::{
     alter_replica_log_dirs_request::{
         AlterReplicaLogDir, AlterReplicaLogDirTopic, AlterReplicaLogDirsRequest,
     },
-    describe_log_dirs_request::{DescribeLogDirsRequest, DescribableLogDirTopic},
+    describe_log_dirs_request::{DescribableLogDirTopic, DescribeLogDirsRequest},
 };
 
 use crate::{AdminClient, AdminError, KafkaError, kafka_error_name};

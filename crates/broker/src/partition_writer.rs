@@ -204,11 +204,9 @@ fn swap_future_log(
     // a sacrificial `*.tomb` directory we delete at the end.
     let tomb_dir = future_path.with_extension("crabka-swap-tomb");
     std::fs::create_dir_all(&tomb_dir)?;
-    let old_current =
-        std::mem::replace(&mut *log_guard, Log::open(&tomb_dir, config.clone())?);
+    let old_current = std::mem::replace(&mut *log_guard, Log::open(&tomb_dir, config.clone())?);
     old_current.close();
-    let old_future =
-        std::mem::replace(&mut *future_guard, Log::open(&tomb_dir, config.clone())?);
+    let old_future = std::mem::replace(&mut *future_guard, Log::open(&tomb_dir, config.clone())?);
     old_future.close();
     drop(future_guard);
 
