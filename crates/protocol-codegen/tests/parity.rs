@@ -22,7 +22,7 @@ fn every_vendored_schema_emits_clean() {
         if let Err(e) = emit::owned::emit(spec, "test") {
             failures.push(format!("owned::{}: {e}", spec.name));
         }
-        if let Err(e) = emit::borrowed::emit(spec, "test") {
+        if let Err(e) = emit::borrowed::emit(spec, "test", None) {
             failures.push(format!("borrowed::{}: {e}", spec.name));
         }
     }
