@@ -3869,3 +3869,98 @@ introspection metadata).
     matrix JVM scans — matches JVM on tested workloads, may diverge
     on pathological asymmetric multi-topic subscriptions; flagged
     via FIXME).
+
+## Slice 48f-alt — Tiered storage S3 backend (KIP-405) (2026-05-27)
+
+- **Goal.** Land a production-ready `RemoteStorageManager` backed by an
+  S3-compatible object store. Completes the second-to-last gap on the
+  KIP-405 stack (the last being 48f `TopicBasedRemoteLogMetadataManager`
+  for multi-broker-safe metadata). With this, Crabka tiers segments to
+  real cloud storage instead of just a filesystem.
+- **New backend.** `crates/remote-storage/src/s3.rs` →
+  `S3RemoteStorage` implementing the existing
+  `RemoteStorageManager` SPI. Built on the
+  [`object_store`](https://docs.rs/object_store/) crate (Apache,
+  multi-backend), so it works against AWS S3, MinIO, Cloudflare R2,
+  and (via S3 compatibility) GCS.
+  - `S3RemoteStorage::with_store(Arc<dyn ObjectStore>, prefix)` — wraps
+    any `ObjectStore` (used by the unit tests against
+    `object_store::memory::InMemory`).
+  - `S3RemoteStorage::from_s3_config(&S3Config)` — production path; builds
+    an `AmazonS3` client from bucket/region/endpoint/credentials.
+- **Sync trait over async client.** The existing `RemoteStorageManager`
+  trait is blocking (it mirrors Kafka's JVM API; the broker drives it
+  from `spawn_blocking`). `object_store` is async. Bridge: a private
+  `S3RemoteStorage::block` helper uses `tokio::task::block_in_place` +
+  `tokio::runtime::Handle::current().block_on(...)` to drive the async
+  call without an extra runtime. Returns a clean error if called outside
+  a Tokio context (defense-in-depth — production calls always come from
+  `spawn_blocking`).
+- **Object-key layout** mirrors `LocalTieredStorage`'s on-disk layout so
+  the two backends are observationally equivalent and tests written
+  against the local store apply unchanged:
+  ```
+  <prefix?>/<topic_id>_<partition>/<segment_uuid>/log
+  <prefix?>/<topic_id>_<partition>/<segment_uuid>/offset_index
+  <prefix?>/<topic_id>_<partition>/<segment_uuid>/time_index
+  <prefix?>/<topic_id>_<partition>/<segment_uuid>/producer_snapshot
+  <prefix?>/<topic_id>_<partition>/<segment_uuid>/leader_epoch
+  <prefix?>/<topic_id>_<partition>/<segment_uuid>/txn_index
+  ```
+  Optional `prefix` lets multiple Crabka clusters share a single
+  bucket safely.
+- **`BrokerConfig` shape.** Replaced `remote_log_storage_dir:
+  Option<PathBuf>` with `remote_storage_backend:
+  Option<RemoteStorageBackend>` — a two-variant enum:
+  - `RemoteStorageBackend::Local { dir }` (former behaviour)
+  - `RemoteStorageBackend::S3(S3Config)` (new)
+
+  Per CLAUDE.md greenfield rules, no compat shim. `Broker::start`
+  constructs the appropriate impl based on the variant; S3 builder
+  failures surface as `BrokerError::Startup`.
+- **TOML surface.** `[remote_storage]` now accepts either
+  `storage_dir = "..."` (local) or a nested `[remote_storage.s3]` table:
+  ```toml
+  [remote_storage.s3]
+  bucket = "crabka-prod"
+  region = "us-east-1"
+  prefix = "cluster-a"             # optional
+  endpoint = "http://minio:9000"   # optional, for non-AWS
+  allow_http = true                # optional, default false
+  # access_key_id / secret_access_key omitted → use AWS credential chain
+  ```
+  Setting both `storage_dir` and `[remote_storage.s3]` errors at load
+  time via new `FileConfigError::InvalidConfig`.
+- **Credentials.** Explicit `access_key_id` + `secret_access_key` fields
+  are supported; when omitted, `object_store` falls back to the AWS
+  SDK's standard credential chain (env vars, instance profile, …).
+- **Tests:**
+  - 8 unit tests in `s3.rs` against the in-memory `ObjectStore`:
+    copy-then-fetch full segment; partial byte-range reads;
+    fetch-each-index-type; not-found-before-copy; missing-optional
+    txn-index; idempotent delete; isolation by segment id; prefix
+    application. All `#[tokio::test(flavor = "multi_thread")]` to
+    satisfy the `block_in_place` runtime requirement.
+  - 4 new `file_config` unit tests: local backend parses;
+    no-section leaves backend `None`; S3 section parses with all
+    fields; both-set rejected with a clear error.
+- **New workspace dep.** `object_store = "0.13"` with the `aws`
+  feature. Pulls `reqwest`/`hyper` (already in tree via other crates),
+  `aws-credential-types`, and `quick-xml`. Always-on per packaging
+  decision (Crabka ships one binary that supports both backends).
+- **Out of scope (deferred):**
+  - 48f `TopicBasedRemoteLogMetadataManager` — multi-broker-safe RLMM
+    via the internal `__remote_log_metadata` topic. The current
+    `InmemoryRemoteLogMetadataManager` is still the only option; for
+    multi-broker correctness this is the remaining gap.
+  - JVM-acceptance test against MinIO — straightforward follow-up
+    (boot MinIO via `docker run` in `tests/jvm_acceptance.rs`).
+  - Operator CRD surface for S3 credentials (`KafkaCluster.spec`
+    extension) — slice 48g extension.
+  - Multipart uploads for very-large segments. `object_store::put`
+    handles the common-case single-PUT path; segments above
+    `object_store`'s default multipart threshold (5 GiB on AWS) would
+    need `put_multipart` — not exercised by tested workloads.
+- **README + STATUS.** `Tiered storage (KIP-405)` row flipped from ❌
+  to ⚠️ in both the feature matrix and the KIP table; remaining ⚠️
+  reflects the in-memory RLMM gap (48f).

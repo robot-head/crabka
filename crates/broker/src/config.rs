@@ -316,14 +316,31 @@ pub struct BrokerConfig {
     /// (`delegation.token.expiry.time.ms` in Kafka).
     pub delegation_token_default_renew_period_ms: i64,
 
-    /// Slice 48b (KIP-405): root directory for the local tiered-storage
-    /// reference `RemoteStorageManager`. `Some(dir)` enables tiered storage
-    /// broker-wide (collapsing Kafka's `remote.log.storage.system.enable`
-    /// plus the RSM directory config into one knob) and spawns the
-    /// `RemoteLogManager` copy task; per-topic offload is still gated by
-    /// `remote.storage.enable`. `None` (default) leaves tiered storage off.
-    /// TOML: `[remote_storage] storage_dir = "..."`.
-    pub remote_log_storage_dir: Option<PathBuf>,
+    /// Slice 48b (KIP-405): tiered-storage backend selection. `Some(_)`
+    /// enables tiered storage broker-wide (collapsing Kafka's
+    /// `remote.log.storage.system.enable` plus the RSM selection into one
+    /// knob) and spawns the `RemoteLogManager` copy task; per-topic
+    /// offload is still gated by `remote.storage.enable`. `None`
+    /// (default) leaves tiered storage off.
+    ///
+    /// TOML:
+    /// - Local: `[remote_storage] storage_dir = "..."`
+    /// - S3:    `[remote_storage.s3] bucket = "..." region = "..."`
+    pub remote_storage_backend: Option<RemoteStorageBackend>,
+}
+
+/// What backs the broker's `RemoteStorageManager` when tiered storage is on.
+#[derive(Debug, Clone)]
+pub enum RemoteStorageBackend {
+    /// Filesystem-backed `LocalTieredStorage`. Useful for tests, single-
+    /// node dev setups, and shared-filesystem multi-broker deployments.
+    Local {
+        /// Root directory for the segment store.
+        dir: PathBuf,
+    },
+    /// S3-compatible `S3RemoteStorage`. Production backend; works with
+    /// AWS S3, `MinIO`, Cloudflare R2, and GCS via S3 compatibility.
+    S3(crabka_remote_storage::S3Config),
 }
 
 /// Slice 51 (KIP-48): default hard upper bound on delegation-token lifetime.
@@ -420,7 +437,7 @@ impl BrokerConfig {
                 DEFAULT_DELEGATION_TOKEN_EXPIRY_CHECK_INTERVAL_MS,
             delegation_token_default_renew_period_ms: DEFAULT_DELEGATION_TOKEN_RENEW_PERIOD_MS,
             // Slice 48b: tiered storage off by default in tests.
-            remote_log_storage_dir: None,
+            remote_storage_backend: None,
         }
     }
 
@@ -607,7 +624,7 @@ impl Default for BrokerConfig {
             delegation_token_default_renew_period_ms: DEFAULT_DELEGATION_TOKEN_RENEW_PERIOD_MS,
             // Slice 48b: tiered storage off by default. Operators enable it
             // via `[remote_storage] storage_dir` in `broker.toml`.
-            remote_log_storage_dir: None,
+            remote_storage_backend: None,
         }
     }
 }

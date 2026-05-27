@@ -31,6 +31,11 @@ pub enum FileConfigError {
     /// log a single string.
     #[error("OPA authorizer configuration error: {0}")]
     OpaConfig(String),
+    /// A TOML section's contents conflict in a way only the apply step
+    /// can diagnose — e.g. `[remote_storage]` carrying both `storage_dir`
+    /// (local backend) and `[remote_storage.s3]` (object-store backend).
+    #[error("invalid config: {0}")]
+    InvalidConfig(String),
 }
 
 /// Top-level shape of `broker.toml`. `serde(deny_unknown_fields)` is
@@ -98,13 +103,48 @@ pub struct FileConfig {
 }
 
 /// TOML shape of `[remote_storage]`. Maps to
-/// [`crate::BrokerConfig::remote_log_storage_dir`].
+/// [`crate::BrokerConfig::remote_storage_backend`].
+///
+/// Exactly one of `storage_dir` (local filesystem) or `[remote_storage.s3]`
+/// (S3-compatible object store) should be set. Setting both errors at
+/// load time.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct FileRemoteStorageConfig {
-    /// Root directory for the local tiered-storage store. `Some` enables
-    /// tiered storage broker-wide; absent leaves it off.
+    /// Root directory for the local `LocalTieredStorage` backend.
     pub storage_dir: Option<String>,
+    /// S3-compatible backend parameters. Omit to use `storage_dir`.
+    pub s3: Option<FileRemoteStorageS3Config>,
+}
+
+/// TOML shape of `[remote_storage.s3]`. Maps to
+/// [`crabka_remote_storage::S3Config`].
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct FileRemoteStorageS3Config {
+    /// S3 bucket name.
+    pub bucket: String,
+    /// AWS region. Required even for non-AWS endpoints (use any value).
+    pub region: String,
+    /// Optional key prefix inside the bucket (lets multiple clusters
+    /// share a bucket).
+    #[serde(default)]
+    pub prefix: Option<String>,
+    /// Optional custom endpoint URL (e.g. `MinIO` or Cloudflare R2).
+    #[serde(default)]
+    pub endpoint: Option<String>,
+    /// Explicit access key id. Falls back to the AWS credential chain
+    /// (env vars, instance profile, …) when omitted.
+    #[serde(default)]
+    pub access_key_id: Option<String>,
+    /// Explicit secret access key. Falls back to the AWS credential chain
+    /// when omitted.
+    #[serde(default)]
+    pub secret_access_key: Option<String>,
+    /// Allow plaintext HTTP (off-by-default; required by `MinIO` running
+    /// without TLS).
+    #[serde(default)]
+    pub allow_http: bool,
 }
 
 /// TOML shape of `[authorization]`. `type` (renamed to `authz_type` on
@@ -673,12 +713,39 @@ impl FileConfig {
             cfg.super_users.extend(vec.iter().cloned());
         }
 
-        // Slice 48b: a configured `[remote_storage] storage_dir` enables
-        // tiered storage broker-wide.
-        if let Some(rs) = &self.remote_storage
-            && let Some(dir) = &rs.storage_dir
-        {
-            cfg.remote_log_storage_dir = Some(std::path::PathBuf::from(dir));
+        // Slice 48b: `[remote_storage]` enables tiered storage broker-
+        // wide. Either `storage_dir` (local filesystem) or
+        // `[remote_storage.s3]` (S3-compatible object store) selects the
+        // backend. Both set → error.
+        if let Some(rs) = &self.remote_storage {
+            match (&rs.storage_dir, &rs.s3) {
+                (Some(_), Some(_)) => {
+                    return Err(FileConfigError::InvalidConfig(
+                        "[remote_storage] cannot set both `storage_dir` (local) \
+                         and `[remote_storage.s3]` (object store)"
+                            .into(),
+                    ));
+                }
+                (Some(dir), None) => {
+                    cfg.remote_storage_backend = Some(crate::config::RemoteStorageBackend::Local {
+                        dir: std::path::PathBuf::from(dir),
+                    });
+                }
+                (None, Some(s3)) => {
+                    cfg.remote_storage_backend = Some(crate::config::RemoteStorageBackend::S3(
+                        crabka_remote_storage::S3Config {
+                            bucket: s3.bucket.clone(),
+                            region: s3.region.clone(),
+                            prefix: s3.prefix.clone(),
+                            endpoint: s3.endpoint.clone(),
+                            access_key_id: s3.access_key_id.clone(),
+                            secret_access_key: s3.secret_access_key.clone(),
+                            allow_http: s3.allow_http,
+                        },
+                    ));
+                }
+                (None, None) => {}
+            }
         }
 
         // Slice 53: pluggable cluster authorizer. When `[authorization]`
@@ -1296,18 +1363,66 @@ storage_dir = "/var/lib/crabka/tier"
         let file: FileConfig = toml::from_str(toml).unwrap();
         let mut cfg = crate::config::BrokerConfig::default();
         file.apply_to(&mut cfg).unwrap();
-        assert_eq!(
-            cfg.remote_log_storage_dir,
-            Some(std::path::PathBuf::from("/var/lib/crabka/tier"))
-        );
+        match cfg.remote_storage_backend {
+            Some(crate::config::RemoteStorageBackend::Local { dir }) => {
+                assert_eq!(dir, std::path::PathBuf::from("/var/lib/crabka/tier"));
+            }
+            other => panic!("expected Local backend, got {other:?}"),
+        }
     }
 
     #[test]
-    fn no_remote_storage_section_leaves_dir_none() {
+    fn no_remote_storage_section_leaves_backend_none() {
         let file: FileConfig = toml::from_str("broker_id = 1").unwrap();
         let mut cfg = crate::config::BrokerConfig::default();
         file.apply_to(&mut cfg).unwrap();
-        assert!(cfg.remote_log_storage_dir.is_none());
+        assert!(cfg.remote_storage_backend.is_none());
+    }
+
+    #[test]
+    fn remote_storage_s3_section_parses() {
+        let toml = r#"
+[remote_storage.s3]
+bucket = "crabka-prod"
+region = "us-east-1"
+prefix = "cluster-a"
+endpoint = "http://minio:9000"
+allow_http = true
+"#;
+        let file: FileConfig = toml::from_str(toml).unwrap();
+        let mut cfg = crate::config::BrokerConfig::default();
+        file.apply_to(&mut cfg).unwrap();
+        match cfg.remote_storage_backend {
+            Some(crate::config::RemoteStorageBackend::S3(s3)) => {
+                assert_eq!(s3.bucket, "crabka-prod");
+                assert_eq!(s3.region, "us-east-1");
+                assert_eq!(s3.prefix.as_deref(), Some("cluster-a"));
+                assert_eq!(s3.endpoint.as_deref(), Some("http://minio:9000"));
+                assert!(s3.allow_http);
+                assert!(s3.access_key_id.is_none());
+            }
+            other => panic!("expected S3 backend, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn remote_storage_local_and_s3_together_rejected() {
+        let toml = r#"
+[remote_storage]
+storage_dir = "/tmp/tier"
+
+[remote_storage.s3]
+bucket = "b"
+region = "us-east-1"
+"#;
+        let file: FileConfig = toml::from_str(toml).unwrap();
+        let mut cfg = crate::config::BrokerConfig::default();
+        let err = file.apply_to(&mut cfg).unwrap_err();
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("cannot set both"),
+            "expected backend-conflict error, got: {rendered}"
+        );
     }
 
     #[test]
