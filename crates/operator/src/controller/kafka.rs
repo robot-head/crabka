@@ -760,10 +760,36 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
     // `s3` block, or an S3 spec missing `bucket`/`region`) would otherwise
     // produce broker TOML the broker rejects at boot. Failing here keeps
     // the broker pods on the previously-valid generation.
-    if let Some(ts) = &obj.spec.tiered_storage
-        && let Err(why) = ts.validate()
-    {
-        return Err(ReconcileError::TieredStorageInvalid(why));
+    //
+    // Slice 48j: surface the failure as a `TieredStorageReady=False`
+    // condition on `Kafka.status.conditions[]` (matching the OAuth-
+    // validation pattern) so operators see *why* their spec was rejected
+    // instead of having to read controller logs. The happy path emits
+    // `TieredStorageReady=True` so a transition from invalid → valid
+    // clears the condition.
+    let kafka_api_for_ts: Api<Kafka> = Api::namespaced(ctx.client.clone(), &ns);
+    if let Some(ts) = &obj.spec.tiered_storage {
+        match ts.validate() {
+            Ok(()) => {
+                let cond = condition(
+                    "TieredStorageReady",
+                    "True",
+                    "Validated",
+                    "tieredStorage spec is well-formed",
+                );
+                patch_status_with_condition(&kafka_api_for_ts, &name, cond).await?;
+            }
+            Err(why) => {
+                let cond = condition(
+                    "TieredStorageReady",
+                    "False",
+                    "TieredStorageInvalid",
+                    &format!("tieredStorage: {why}"),
+                );
+                patch_status_with_condition(&kafka_api_for_ts, &name, cond).await?;
+                return Err(ReconcileError::TieredStorageInvalid(why));
+            }
+        }
     }
 
     // Slice 28: evaluate the declared versions against the operator-
