@@ -54,4 +54,9 @@ pub enum RemoteStorageError {
     /// Constructor / argument validation failed.
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
+
+    /// A backend (e.g. an object store) raised an error that doesn't map
+    /// cleanly to one of the structured variants above.
+    #[error("remote storage backend error: {0}")]
+    Backend(String),
 }

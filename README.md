@@ -134,7 +134,7 @@ implements it today. Legend: ✅ implemented · ⚠️ partial · ❌ not yet ·
 | Multiple log directories (JBOD) + `DescribeLogDirs` (KIP-113) | ✅ |
 | Intra-broker log-dir reassignment (`AlterReplicaLogDirs`, KIP-113) | ❌ |
 | Message format v0/v1 down-conversion | ❌ |
-| Tiered storage (KIP-405) | ❌ |
+| Tiered storage (KIP-405) | ⚠️ |
 
 ### Producer
 
@@ -352,7 +352,7 @@ KIPs. Legend: ✅ implemented · ⚠️ partial · ❌ not yet · ⛔ out of sco
 | [KIP-204](https://cwiki.apache.org/confluence/display/KAFKA/KIP-204) | `DeleteRecords` via the Admin client | ✅ |
 | [KIP-112](https://cwiki.apache.org/confluence/display/KAFKA/KIP-112) | Handle disk failure for JBOD | ⚠️ |
 | [KIP-113](https://cwiki.apache.org/confluence/display/KAFKA/KIP-113) | Replica movement between log directories (JBOD) | ⚠️ |
-| [KIP-405](https://cwiki.apache.org/confluence/display/KAFKA/KIP-405) | Kafka tiered storage | ❌ |
+| [KIP-405](https://cwiki.apache.org/confluence/display/KAFKA/KIP-405) | Kafka tiered storage | ⚠️ |
 
 ### Replication & availability
 

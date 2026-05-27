@@ -44,6 +44,7 @@ mod inmemory;
 mod local;
 mod metadata;
 mod metadata_manager;
+mod s3;
 mod storage_manager;
 
 pub use error::RemoteStorageError;
@@ -55,4 +56,5 @@ pub use metadata::{
     TopicIdPartition,
 };
 pub use metadata_manager::RemoteLogMetadataManager;
+pub use s3::{S3Config, S3RemoteStorage};
 pub use storage_manager::{IndexType, LogSegmentData, RemoteStorageManager};
