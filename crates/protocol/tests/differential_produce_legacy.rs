@@ -36,7 +36,7 @@ fn rust_decode<T: for<'a> Decode<'a>>(bytes: &[u8], version: i16) -> T {
 /// v0/v1/v2 do not have `transactionalId`; only `acks`, `timeoutMs`, and `topicData` are
 /// present.  An empty `topicData` array means no records to encode, avoiding the legacy
 /// message-format complexity entirely.
-fn request_oracle_value_legacy() -> serde_json::Value {
+fn request_oracle_value() -> serde_json::Value {
     json!({
         "acks": 0,
         "timeoutMs": 0,
@@ -46,71 +46,27 @@ fn request_oracle_value_legacy() -> serde_json::Value {
 
 #[test]
 #[ignore = "requires JVM oracle"]
-fn produce_request_v0_byte_equal() {
+fn produce_request_byte_equal_every_version() {
     let mut o = oracle::shared();
-    let req = ProduceRequest::default();
-    let rust = rust_encode(&req, 0);
-    let oracle_json = request_oracle_value_legacy();
-    // api_key=0 (Produce), is_request=true
-    let java = o.encode(0, 0, true, &oracle_json);
-    assert_eq!(
-        rust,
-        java,
-        "ProduceRequest v0 byte mismatch\n  rust: {}\n  java: {}",
-        hex::encode(&rust),
-        hex::encode(&java),
-    );
-    // Verify decode roundtrip
-    let decoded: ProduceRequest = rust_decode(&rust, 0);
-    let re_encoded = rust_encode(&decoded, 0);
-    assert_eq!(
-        rust, re_encoded,
-        "ProduceRequest v0 roundtrip mismatch after decode"
-    );
-}
-
-#[test]
-#[ignore = "requires JVM oracle"]
-fn produce_request_v1_byte_equal() {
-    let mut o = oracle::shared();
-    let req = ProduceRequest::default();
-    let rust = rust_encode(&req, 1);
-    let oracle_json = request_oracle_value_legacy();
-    let java = o.encode(0, 1, true, &oracle_json);
-    assert_eq!(
-        rust,
-        java,
-        "ProduceRequest v1 byte mismatch\n  rust: {}\n  java: {}",
-        hex::encode(&rust),
-        hex::encode(&java),
-    );
-    let decoded: ProduceRequest = rust_decode(&rust, 1);
-    let re_encoded = rust_encode(&decoded, 1);
-    assert_eq!(
-        rust, re_encoded,
-        "ProduceRequest v1 roundtrip mismatch after decode"
-    );
-}
-
-#[test]
-#[ignore = "requires JVM oracle"]
-fn produce_request_v2_byte_equal() {
-    let mut o = oracle::shared();
-    let req = ProduceRequest::default();
-    let rust = rust_encode(&req, 2);
-    let oracle_json = request_oracle_value_legacy();
-    let java = o.encode(0, 2, true, &oracle_json);
-    assert_eq!(
-        rust,
-        java,
-        "ProduceRequest v2 byte mismatch\n  rust: {}\n  java: {}",
-        hex::encode(&rust),
-        hex::encode(&java),
-    );
-    let decoded: ProduceRequest = rust_decode(&rust, 2);
-    let re_encoded = rust_encode(&decoded, 2);
-    assert_eq!(
-        rust, re_encoded,
-        "ProduceRequest v2 roundtrip mismatch after decode"
-    );
+    for version in 0..=2i16 {
+        let req = ProduceRequest::default();
+        let rust = rust_encode(&req, version);
+        let oracle_json = request_oracle_value();
+        // api_key=0 (Produce), is_request=true
+        let java = o.encode(0, version, true, &oracle_json);
+        assert_eq!(
+            rust,
+            java,
+            "ProduceRequest v{version} byte mismatch\n  rust: {}\n  java: {}",
+            hex::encode(&rust),
+            hex::encode(&java),
+        );
+        // Verify decode roundtrip
+        let decoded: ProduceRequest = rust_decode(&rust, version);
+        let re_encoded = rust_encode(&decoded, version);
+        assert_eq!(
+            rust, re_encoded,
+            "ProduceRequest v{version} roundtrip mismatch after decode"
+        );
+    }
 }

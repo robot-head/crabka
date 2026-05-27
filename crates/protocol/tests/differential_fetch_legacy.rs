@@ -62,94 +62,31 @@ fn request_oracle_value_v3() -> serde_json::Value {
 
 #[test]
 #[ignore = "requires JVM oracle"]
-fn fetch_request_v0_byte_equal() {
+fn fetch_request_byte_equal_every_version() {
     let mut o = oracle::shared();
-    let req = FetchRequest::default();
-    let rust = rust_encode(&req, 0);
-    let oracle_json = request_oracle_value_v0_v2();
-    // api_key=1 (Fetch), is_request=true
-    let java = o.encode(1, 0, true, &oracle_json);
-    assert_eq!(
-        rust,
-        java,
-        "FetchRequest v0 byte mismatch\n  rust: {}\n  java: {}",
-        hex::encode(&rust),
-        hex::encode(&java),
-    );
-    // Verify decode roundtrip
-    let decoded: FetchRequest = rust_decode(&rust, 0);
-    let re_encoded = rust_encode(&decoded, 0);
-    assert_eq!(
-        rust, re_encoded,
-        "FetchRequest v0 roundtrip mismatch after decode"
-    );
-}
-
-#[test]
-#[ignore = "requires JVM oracle"]
-fn fetch_request_v1_byte_equal() {
-    let mut o = oracle::shared();
-    let req = FetchRequest::default();
-    let rust = rust_encode(&req, 1);
-    let oracle_json = request_oracle_value_v0_v2();
-    let java = o.encode(1, 1, true, &oracle_json);
-    assert_eq!(
-        rust,
-        java,
-        "FetchRequest v1 byte mismatch\n  rust: {}\n  java: {}",
-        hex::encode(&rust),
-        hex::encode(&java),
-    );
-    let decoded: FetchRequest = rust_decode(&rust, 1);
-    let re_encoded = rust_encode(&decoded, 1);
-    assert_eq!(
-        rust, re_encoded,
-        "FetchRequest v1 roundtrip mismatch after decode"
-    );
-}
-
-#[test]
-#[ignore = "requires JVM oracle"]
-fn fetch_request_v2_byte_equal() {
-    let mut o = oracle::shared();
-    let req = FetchRequest::default();
-    let rust = rust_encode(&req, 2);
-    let oracle_json = request_oracle_value_v0_v2();
-    let java = o.encode(1, 2, true, &oracle_json);
-    assert_eq!(
-        rust,
-        java,
-        "FetchRequest v2 byte mismatch\n  rust: {}\n  java: {}",
-        hex::encode(&rust),
-        hex::encode(&java),
-    );
-    let decoded: FetchRequest = rust_decode(&rust, 2);
-    let re_encoded = rust_encode(&decoded, 2);
-    assert_eq!(
-        rust, re_encoded,
-        "FetchRequest v2 roundtrip mismatch after decode"
-    );
-}
-
-#[test]
-#[ignore = "requires JVM oracle"]
-fn fetch_request_v3_byte_equal() {
-    let mut o = oracle::shared();
-    let req = FetchRequest::default();
-    let rust = rust_encode(&req, 3);
-    let oracle_json = request_oracle_value_v3();
-    let java = o.encode(1, 3, true, &oracle_json);
-    assert_eq!(
-        rust,
-        java,
-        "FetchRequest v3 byte mismatch\n  rust: {}\n  java: {}",
-        hex::encode(&rust),
-        hex::encode(&java),
-    );
-    let decoded: FetchRequest = rust_decode(&rust, 3);
-    let re_encoded = rust_encode(&decoded, 3);
-    assert_eq!(
-        rust, re_encoded,
-        "FetchRequest v3 roundtrip mismatch after decode"
-    );
+    for version in 0..=3i16 {
+        let req = FetchRequest::default();
+        let rust = rust_encode(&req, version);
+        let oracle_json = if version >= 3 {
+            request_oracle_value_v3()
+        } else {
+            request_oracle_value_v0_v2()
+        };
+        // api_key=1 (Fetch), is_request=true
+        let java = o.encode(1, version, true, &oracle_json);
+        assert_eq!(
+            rust,
+            java,
+            "FetchRequest v{version} byte mismatch\n  rust: {}\n  java: {}",
+            hex::encode(&rust),
+            hex::encode(&java),
+        );
+        // Verify decode roundtrip
+        let decoded: FetchRequest = rust_decode(&rust, version);
+        let re_encoded = rust_encode(&decoded, version);
+        assert_eq!(
+            rust, re_encoded,
+            "FetchRequest v{version} roundtrip mismatch after decode"
+        );
+    }
 }
