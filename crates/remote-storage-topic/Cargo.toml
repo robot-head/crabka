@@ -11,7 +11,7 @@ description = "Topic-backed RemoteLogMetadataManager for Crabka (KIP-405 product
 workspace = true
 
 [dependencies]
-crabka-remote-storage = { path = "../remote-storage" }
+crabka-remote-storage = { version = "0.1", path = "../remote-storage" }
 async-trait = { workspace = true }
 bytes = { workspace = true }
 futures-util = { workspace = true }
