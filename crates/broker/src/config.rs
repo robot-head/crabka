@@ -334,6 +334,31 @@ pub struct BrokerConfig {
     /// so segments are tiered and locally evicted in seconds rather than
     /// minutes; production deployments leave it at the default.
     pub remote_log_manager_interval: std::time::Duration,
+
+    /// Slice 48f (KIP-405): which
+    /// [`RemoteLogMetadataManager`](crabka_remote_storage::RemoteLogMetadataManager)
+    /// implementation to construct when tiered storage is enabled.
+    /// `None` (default) keeps the in-memory fixture used by every
+    /// 48a-48e test path; `Some(KafkaRlmmConfig)` swaps in the
+    /// production [`crabka_remote_storage_topic::TopicBasedRemoteLogMetadataManager`]
+    /// backed by `__remote_log_metadata`.
+    pub remote_log_metadata_kafka: Option<KafkaRlmmConfig>,
+}
+
+/// Slice 48f: parameters for the topic-backed
+/// [`RemoteLogMetadataManager`](crabka_remote_storage::RemoteLogMetadataManager).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KafkaRlmmConfig {
+    /// `host:port` the manager dials to reach its own broker (loopback
+    /// in a single-broker setup, the inter-broker listener in a
+    /// multi-broker setup).
+    pub bootstrap: String,
+    /// Partition count to create `__remote_log_metadata` with on first
+    /// startup. Ignored when the topic already exists.
+    pub num_partitions: i32,
+    /// Replication factor to create `__remote_log_metadata` with on
+    /// first startup. Ignored when the topic already exists.
+    pub replication: i32,
 }
 
 /// What backs the broker's `RemoteStorageManager` when tiered storage is on.
@@ -448,6 +473,8 @@ impl BrokerConfig {
             // Tests that turn tiered storage on want quick offload, so the
             // for_tests default is well below the 30s production value.
             remote_log_manager_interval: std::time::Duration::from_secs(2),
+            // Slice 48f: tests use the in-memory RLMM fixture.
+            remote_log_metadata_kafka: None,
         }
     }
 
@@ -636,6 +663,9 @@ impl Default for BrokerConfig {
             // via `[remote_storage] storage_dir` in `broker.toml`.
             remote_storage_backend: None,
             remote_log_manager_interval: std::time::Duration::from_secs(30),
+            // Slice 48f: production default keeps the in-memory RLMM
+            // until the operator opts into the topic-backed manager.
+            remote_log_metadata_kafka: None,
         }
     }
 }

@@ -115,6 +115,29 @@ pub struct FileRemoteStorageConfig {
     pub storage_dir: Option<String>,
     /// S3-compatible backend parameters. Omit to use `storage_dir`.
     pub s3: Option<FileRemoteStorageS3Config>,
+    /// Slice 48f: opt-in to the topic-backed
+    /// [`RemoteLogMetadataManager`](crabka_remote_storage::RemoteLogMetadataManager).
+    /// When absent, the broker uses the in-memory fixture.
+    pub kafka_metadata: Option<FileKafkaRlmmConfig>,
+}
+
+/// TOML shape of `[remote_storage.kafka_metadata]`. Maps to
+/// [`crate::config::KafkaRlmmConfig`].
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FileKafkaRlmmConfig {
+    /// `host:port` the manager dials to reach its own broker.
+    pub bootstrap: String,
+    /// Partition count for `__remote_log_metadata` on first creation.
+    /// Defaults to 50 (Kafka's
+    /// `remote.log.metadata.topic.num.partitions`).
+    #[serde(default)]
+    pub num_partitions: Option<i32>,
+    /// Replication factor for `__remote_log_metadata` on first
+    /// creation. Defaults to 3 (Kafka's
+    /// `remote.log.metadata.topic.replication.factor`).
+    #[serde(default)]
+    pub replication: Option<i32>,
 }
 
 /// TOML shape of `[remote_storage.s3]`. Maps to
@@ -764,6 +787,16 @@ impl FileConfig {
                 }
                 (None, None) => {}
             }
+
+            // Slice 48f: `[remote_storage.kafka_metadata]` opts in to the
+            // topic-backed RLMM. Defaults to in-memory when absent.
+            if let Some(km) = &rs.kafka_metadata {
+                cfg.remote_log_metadata_kafka = Some(crate::config::KafkaRlmmConfig {
+                    bootstrap: km.bootstrap.clone(),
+                    num_partitions: km.num_partitions.unwrap_or(50),
+                    replication: km.replication.unwrap_or(3),
+                });
+            }
         }
 
         // Slice 53: pluggable cluster authorizer. When `[authorization]`
@@ -1395,6 +1428,45 @@ storage_dir = "/var/lib/crabka/tier"
         let mut cfg = crate::config::BrokerConfig::default();
         file.apply_to(&mut cfg).unwrap();
         assert!(cfg.remote_storage_backend.is_none());
+        assert!(cfg.remote_log_metadata_kafka.is_none());
+    }
+
+    #[test]
+    fn kafka_metadata_section_parses_with_defaults() {
+        let toml = r#"
+[remote_storage]
+storage_dir = "/tmp/tier"
+
+[remote_storage.kafka_metadata]
+bootstrap = "127.0.0.1:9092"
+"#;
+        let file: FileConfig = toml::from_str(toml).unwrap();
+        let mut cfg = crate::config::BrokerConfig::default();
+        file.apply_to(&mut cfg).unwrap();
+        let km = cfg.remote_log_metadata_kafka.expect("kafka rlmm config");
+        assert_eq!(km.bootstrap, "127.0.0.1:9092");
+        assert_eq!(km.num_partitions, 50);
+        assert_eq!(km.replication, 3);
+    }
+
+    #[test]
+    fn kafka_metadata_section_honors_overrides() {
+        let toml = r#"
+[remote_storage]
+storage_dir = "/tmp/tier"
+
+[remote_storage.kafka_metadata]
+bootstrap = "broker-0:9094"
+num_partitions = 8
+replication = 1
+"#;
+        let file: FileConfig = toml::from_str(toml).unwrap();
+        let mut cfg = crate::config::BrokerConfig::default();
+        file.apply_to(&mut cfg).unwrap();
+        let km = cfg.remote_log_metadata_kafka.expect("kafka rlmm config");
+        assert_eq!(km.bootstrap, "broker-0:9094");
+        assert_eq!(km.num_partitions, 8);
+        assert_eq!(km.replication, 1);
     }
 
     #[test]

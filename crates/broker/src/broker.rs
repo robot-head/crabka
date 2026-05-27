@@ -1393,6 +1393,26 @@ impl Broker {
                     })?,
                 ),
             };
+            // Slice 48f: `[remote_storage.kafka_metadata]` opts in to
+            // the topic-backed RLMM, but actually constructing it
+            // requires the broker's listener accept loop to be up
+            // first so the manager's loopback `AdminClient` call to
+            // provision `__remote_log_metadata` can complete. That
+            // bootstrap-ordering wiring is the final step of slice
+            // 48f; until it lands, every broker uses the in-memory
+            // RLMM and the topic-backed-config field is recognized +
+            // logged so operators get the warning surface.
+            if config.remote_log_metadata_kafka.is_some() {
+                tracing::warn!(
+                    "remote_log_metadata_kafka is configured but the \
+                     topic-backed RLMM is not yet wired into broker \
+                     startup; falling back to the in-memory \
+                     RemoteLogMetadataManager. The Kafka adapter ships \
+                     in `crabka-remote-storage-topic` and can be \
+                     instantiated directly in test setups today; \
+                     production wiring lands in the slice-48f follow-up."
+                );
+            }
             let rlmm: Arc<dyn crabka_remote_storage::RemoteLogMetadataManager> =
                 Arc::new(crabka_remote_storage::InmemoryRemoteLogMetadataManager::new());
 
