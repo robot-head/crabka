@@ -1,0 +1,45 @@
+[package]
+name = "crabka-records-legacy"
+version.workspace = true
+edition.workspace = true
+rust-version = "1.95.0"
+license = "Apache-2.0"
+authors = ["The Crabka Authors"]
+description = "Kafka v0/v1 MessageSet (legacy) codec and v2 RecordBatch bridge"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-records-legacy"
+readme = "README.md"
+keywords = ["kafka", "wire-protocol", "messageset", "down-conversion"]
+categories = ["encoding", "parser-implementations"]
+include = [
+    "src/**/*",
+    "Cargo.toml",
+    "LICENSE",
+    "NOTICE",
+]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[lints]
+workspace = true
+
+[features]
+default = ["gzip", "snappy", "lz4", "zstd"]
+gzip   = ["crabka-compression/gzip"]
+snappy = ["crabka-compression/snappy"]
+lz4    = ["crabka-compression/lz4"]
+zstd   = ["crabka-compression/zstd"]
+
+[dependencies]
+bytes = { workspace = true }
+thiserror = { workspace = true }
+crc32fast = { workspace = true }
+crabka-compression = { version = "0.1", path = "../compression", default-features = false }
+crabka-protocol = { version = "0.1", path = "../protocol", default-features = false }
+
+[dev-dependencies]
+proptest = { workspace = true }
+hex = { workspace = true }
