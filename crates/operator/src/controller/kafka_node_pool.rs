@@ -504,6 +504,7 @@ fn render_storage(
     oauth_jwks_trust_secret: Option<&str>,
     oauth_introspection_mount: Option<&crate::controller::kafka::OauthIntrospectionMount>,
     tier_storage_local: bool,
+    tier_storage_persistence: Option<&crate::crd::kafka::TieredStoragePersistence>,
 ) -> (serde_json::Value, Vec<serde_json::Value>) {
     let broker_config_vol = json!({
         "name": "broker-config",
@@ -535,7 +536,7 @@ fn render_storage(
             "defaultMode": 0o400_i32,
         }
     });
-    let (mut volumes, templates) = match storage {
+    let (mut volumes, mut templates) = match storage {
         None | Some(Storage::Ephemeral) => {
             let volumes = json!([
                 { "name": "data", "emptyDir": {} },
@@ -621,20 +622,31 @@ fn render_storage(
                 }
             }));
     }
-    // Slice 48g (KIP-405): append a writable `tier-storage` emptyDir
-    // pod volume when the parent `Kafka.spec.tieredStorage.type == Local`.
-    // The matching volumeMount lives in `render_broker_container`; the
-    // path (`TIER_STORAGE_PATH`) is the broker's
-    // `[remote_storage].storage_dir`. S3 needs no pod-local scratch
-    // space and is skipped here.
+    // Slice 48g (KIP-405): append a writable `tier-storage` volume
+    // when the parent `Kafka.spec.tieredStorage.type == Local`. Slice
+    // 48i extends this: when `spec.tieredStorage.persistence` is set,
+    // render a `volumeClaimTemplate` named `tier-storage` instead of
+    // an `emptyDir`, and let the StatefulSet controller mount the
+    // bound PVC into each pod automatically (so the explicit
+    // pod-volume entry must NOT be added in the PVC case, exactly as
+    // for the data PVC). S3 adds no pod-local volume.
     if tier_storage_local {
-        volumes
-            .as_array_mut()
-            .expect("render_storage built `volumes` via json!([...])")
-            .push(json!({
-                "name": "tier-storage",
-                "emptyDir": {}
-            }));
+        if let Some(p) = tier_storage_persistence {
+            templates.push(pvc_template(
+                "tier-storage",
+                &p.size,
+                p.class.as_deref(),
+                pod_labels,
+            ));
+        } else {
+            volumes
+                .as_array_mut()
+                .expect("render_storage built `volumes` via json!([...])")
+                .push(json!({
+                    "name": "tier-storage",
+                    "emptyDir": {}
+                }));
+        }
     }
     (volumes, templates)
 }
@@ -823,6 +835,7 @@ pub(crate) fn render_statefulset(
         }
     }
 
+    let tier_storage_persistence = tiered_storage.and_then(|t| t.persistence.as_ref());
     let (pod_volumes, volume_claim_templates) = render_storage(
         pool.spec.storage.as_ref(),
         &pod_labels,
@@ -830,6 +843,7 @@ pub(crate) fn render_statefulset(
         oauth_jwks_trust_secret.as_deref(),
         oauth_introspection_mount.as_ref(),
         tier_storage_local,
+        tier_storage_persistence,
     );
     let retention_policy = render_pvc_retention_policy(pool.spec.storage.as_ref());
 
@@ -2697,6 +2711,7 @@ mod tests {
             kind: crate::crd::kafka::TieredStorageType::Local,
             s3: None,
             metadata_manager: None,
+            persistence: None,
         });
         k
     }
@@ -2722,6 +2737,7 @@ mod tests {
                 ..Default::default()
             }),
             metadata_manager: None,
+            persistence: None,
         });
         k
     }
@@ -2899,6 +2915,99 @@ mod tests {
                 .as_ref()
                 .is_none_or(|m| m.iter().all(|x| x.name != "tier-storage")),
             "non-tiered cluster must not mount tier-storage",
+        );
+    }
+
+    // ── Slice 48i: tier-storage PVC tests ────────────────────────────
+
+    fn parent_with_tier_storage_pvc(name: &str, size: &str, class: Option<&str>) -> Kafka {
+        let mut k = parent_fixture(name);
+        k.spec.tiered_storage = Some(crate::crd::kafka::TieredStorage {
+            kind: crate::crd::kafka::TieredStorageType::Local,
+            s3: None,
+            metadata_manager: None,
+            persistence: Some(crate::crd::kafka::TieredStoragePersistence {
+                size: size.into(),
+                class: class.map(str::to_string),
+            }),
+        });
+        k
+    }
+
+    #[test]
+    fn pod_template_emits_pvc_template_when_tier_persistence_set() {
+        let parent = parent_with_tier_storage_pvc("demo", "50Gi", Some("fast-ssd"));
+        let pool = pool_fixture("brokers", "demo", 1);
+        let sts = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE).unwrap();
+        // Pod-level volume entry must NOT be added — the StatefulSet
+        // controller mounts the bound PVC automatically.
+        let pod_spec = sts.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
+        assert!(
+            pod_spec
+                .volumes
+                .as_ref()
+                .unwrap()
+                .iter()
+                .all(|v| v.name != "tier-storage"),
+            "explicit pod-volume `tier-storage` must not exist when PVC-backed"
+        );
+        // The volumeClaimTemplate is present with the configured size + class.
+        let tmpls = sts
+            .spec
+            .as_ref()
+            .unwrap()
+            .volume_claim_templates
+            .as_ref()
+            .expect("volumeClaimTemplates");
+        let tier = tmpls
+            .iter()
+            .find(|t| t.metadata.name.as_deref() == Some("tier-storage"))
+            .expect("tier-storage volumeClaimTemplate");
+        let spec = tier.spec.as_ref().expect("template spec");
+        let req = spec
+            .resources
+            .as_ref()
+            .and_then(|r| r.requests.as_ref())
+            .expect("resources.requests");
+        assert_eq!(req.get("storage").map(|q| q.0.as_str()), Some("50Gi"));
+        assert_eq!(spec.storage_class_name.as_deref(), Some("fast-ssd"));
+        // Mount inside the broker container still lands at the canonical path.
+        let broker = pod_spec
+            .containers
+            .iter()
+            .find(|c| c.name == "broker")
+            .expect("broker container");
+        let mount = broker
+            .volume_mounts
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|m| m.name == "tier-storage")
+            .expect("tier-storage mount");
+        assert_eq!(
+            mount.mount_path,
+            crate::controller::listeners::TIER_STORAGE_PATH
+        );
+    }
+
+    #[test]
+    fn pod_template_pvc_template_omits_storage_class_when_unset() {
+        let parent = parent_with_tier_storage_pvc("demo", "25Gi", None);
+        let pool = pool_fixture("brokers", "demo", 1);
+        let sts = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE).unwrap();
+        let tier = sts
+            .spec
+            .as_ref()
+            .unwrap()
+            .volume_claim_templates
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|t| t.metadata.name.as_deref() == Some("tier-storage"))
+            .expect("tier-storage volumeClaimTemplate");
+        assert!(
+            tier.spec.as_ref().unwrap().storage_class_name.is_none(),
+            "storageClassName must be omitted when class is None"
         );
     }
 }

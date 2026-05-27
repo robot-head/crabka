@@ -3519,6 +3519,7 @@ mod toml_rendering_tests {
             kind: crate::crd::kafka::TieredStorageType::Local,
             s3: None,
             metadata_manager: None,
+            persistence: None,
         };
         let t = render_broker_toml(
             0,
@@ -3603,6 +3604,7 @@ mod toml_rendering_tests {
                     replication: Some(1),
                 }),
             }),
+            persistence: None,
         };
         let t = render_broker_toml(
             0,
@@ -3662,6 +3664,7 @@ mod toml_rendering_tests {
                 kind: crate::crd::kafka::MetadataManagerType::InMemory,
                 topic: None,
             }),
+            persistence: None,
         };
         let t = render_broker_toml(
             0,
@@ -3704,6 +3707,7 @@ mod toml_rendering_tests {
                 multipart_chunk_size: Some(1024),
             }),
             metadata_manager: None,
+            persistence: None,
         };
         let t = render_broker_toml(
             0,
@@ -3780,6 +3784,7 @@ mod toml_rendering_tests {
                 ..Default::default()
             }),
             metadata_manager: None,
+            persistence: None,
         };
         let t = render_broker_toml(
             0,
@@ -3847,6 +3852,7 @@ mod toml_rendering_tests {
                 ..Default::default()
             }),
             metadata_manager: None,
+            persistence: None,
         };
         let t = render_broker_toml(
             0,

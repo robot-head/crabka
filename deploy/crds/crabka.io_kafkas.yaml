@@ -655,6 +655,30 @@ spec:
                     required:
                     - type
                     type: object
+                  persistence:
+                    description: |-
+                      Slice 48i (KIP-405): durable storage for the local-tier
+                      directory. Only valid with `type=Local`. When absent (default),
+                      the operator renders an `emptyDir` for `tier-storage` (matches
+                      48g). When `Some`, the operator renders a `volumeClaimTemplate`
+                      of the configured size / class so tier data survives pod
+                      restarts — pairing with the 48f topic-backed RLMM, this closes
+                      the "tier data is lost on pod restart" caveat 48g flagged.
+                    nullable: true
+                    properties:
+                      class:
+                        description: Storage class name. `None` = cluster default.
+                        nullable: true
+                        type: string
+                      size:
+                        description: |-
+                          K8s `Quantity` (e.g., `"50Gi"`, `"500Mi"`). Non-empty;
+                          resource-quantity well-formedness is validated by the
+                          Kubernetes API server at SSA time.
+                        type: string
+                    required:
+                    - size
+                    type: object
                   s3:
                     description: |-
                       S3-backend tuning. Required when `kind == S3`, must be absent
