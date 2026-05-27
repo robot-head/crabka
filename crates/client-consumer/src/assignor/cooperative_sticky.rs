@@ -45,12 +45,8 @@ pub fn assign(
     // === Pass 1: prepopulateCurrentAssignments ===
     // Resolve zombie conflicts by generation_id; build current_assignment
     // filtered against the live subscription + partition counts.
-    let current_assignment = prepopulate_current_assignments(
-        &members,
-        &subs,
-        &gens,
-        topic_partitions,
-    );
+    let current_assignment =
+        prepopulate_current_assignments(&members, &subs, &gens, topic_partitions);
 
     // Map (topic, partition) → previous owner among the live, still-subscribed
     // members. Used both by the cooperative adjustment and by the sticky
@@ -74,19 +70,9 @@ pub fn assign(
     };
 
     let raw_assignment = if all_equal {
-        constrained_assign(
-            &member_ids,
-            &subs,
-            &current_assignment,
-            topic_partitions,
-        )
+        constrained_assign(&member_ids, &subs, &current_assignment, topic_partitions)
     } else {
-        general_assign(
-            &member_ids,
-            &subs,
-            &current_assignment,
-            topic_partitions,
-        )
+        general_assign(&member_ids, &subs, &current_assignment, topic_partitions)
     };
 
     // === Pass 3: cooperative adjustment ===
@@ -230,10 +216,7 @@ fn constrained_assign(
     let mut out: HashMap<String, Vec<(String, i32)>> = HashMap::new();
     let mut taken: HashSet<(String, i32)> = HashSet::new();
     for id in member_ids {
-        let mut owned: Vec<(String, i32)> = current_assignment
-            .get(id)
-            .cloned()
-            .unwrap_or_default();
+        let mut owned: Vec<(String, i32)> = current_assignment.get(id).cloned().unwrap_or_default();
         owned.sort();
         let target = *targets.get(id).unwrap_or(&0);
         let kept: Vec<(String, i32)> = owned.into_iter().take(target).collect();
@@ -314,7 +297,9 @@ fn general_assign(
     sorted_partitions.sort_by(|a, b| {
         let sa = subscribers_per_topic.get(&a.0).map_or(0, BTreeSet::len);
         let sb = subscribers_per_topic.get(&b.0).map_or(0, BTreeSet::len);
-        sa.cmp(&sb).then_with(|| a.0.cmp(&b.0)).then_with(|| a.1.cmp(&b.1))
+        sa.cmp(&sb)
+            .then_with(|| a.0.cmp(&b.0))
+            .then_with(|| a.1.cmp(&b.1))
     });
 
     // Initialise per-member new assignment.
@@ -496,10 +481,7 @@ mod tests {
             &topic_parts,
         );
         assert_eq!(a["m1"].len(), 4);
-        assert_eq!(
-            a["m1"],
-            tp(&[("t", 0), ("t", 1), ("t", 2), ("t", 3)])
-        );
+        assert_eq!(a["m1"], tp(&[("t", 0), ("t", 1), ("t", 2), ("t", 3)]));
     }
 
     #[test]
@@ -606,24 +588,9 @@ mod tests {
         // Now feed phase-1 output back as owned and re-assign.
         let phase2 = assign(
             vec![
-                (
-                    "m1".to_string(),
-                    topics(&["t"]),
-                    phase1["m1"].clone(),
-                    6,
-                ),
-                (
-                    "m2".to_string(),
-                    topics(&["t"]),
-                    phase1["m2"].clone(),
-                    6,
-                ),
-                (
-                    "m3".to_string(),
-                    topics(&["t"]),
-                    phase1["m3"].clone(),
-                    6,
-                ),
+                ("m1".to_string(), topics(&["t"]), phase1["m1"].clone(), 6),
+                ("m2".to_string(), topics(&["t"]), phase1["m2"].clone(), 6),
+                ("m3".to_string(), topics(&["t"]), phase1["m3"].clone(), 6),
             ],
             &topic_parts,
         );
@@ -674,8 +641,7 @@ mod tests {
             assert_eq!(t, "t1");
         }
         // m1 gets both t2 partitions (only it can hold them).
-        let m1_t2: Vec<&(String, i32)> =
-            a["m1"].iter().filter(|(t, _)| t == "t2").collect();
+        let m1_t2: Vec<&(String, i32)> = a["m1"].iter().filter(|(t, _)| t == "t2").collect();
         assert_eq!(m1_t2.len(), 2);
         assert_eq!(total_assigned(&a), 4);
         // Balanced: 2/2.

@@ -3780,3 +3780,92 @@ introspection metadata).
   the slice-13b `Read` ⇒ `Describe` implication applies via the
   no-ACL bypass. Closes the only documented gap in the original
   slice.
+
+## Slice — Cooperative incremental rebalance (KIP-429) (2026-05-27)
+
+- **Broker protocol negotiation.** Dropped the `SUPPORTED_PROTOCOL =
+  "range"` whitelist in `handlers/join_group.rs`. New pure
+  `coordinator::group::select_protocol(&members) -> Option<String>`
+  intersects each member's proposed protocol list and picks the name
+  with the most first-place votes (lex tiebreak), returning
+  `INCONSISTENT_GROUP_PROTOCOL (23)` to the requesting member on empty
+  intersection. New `Group::resolve_selected_protocol_metadata(name)`
+  rewires each `Member.protocol_metadata` to the winner's proposal so
+  the leader's `SyncGroup` sees the right bytes. `protocol_type`
+  consistency now enforced — joining a `consumer` group with
+  `protocol_type=stream` is rejected.
+- **`Member` shape.** Gained `protocols: Vec<(String, Bytes)>`; the
+  constructor takes the full proposal list and derives
+  `protocol_metadata` lazily.
+- **ConsumerProtocol v3 codec.** Client-side `builder.rs` switched
+  from hand-rolled to the generated `ConsumerProtocolSubscription` /
+  `ConsumerProtocolAssignment` codecs. Wire encoding pinned to v3
+  (`owned_partitions` + `generation_id` + `rack_id`); decoder peeks
+  the version prefix and defaults missing fields safely.
+- **Cooperative-sticky assignor.** New
+  `assignor::cooperative_sticky::assign(...)` ports the JVM
+  `AbstractStickyAssignor` + `CooperativeStickyAssignor` (Kafka 3.x):
+  generation-id zombie resolution, all-subscriptions-equal branch
+  into `ConstrainedAssignmentBuilder`, general-branch rarity-sorted
+  placement with sticky-prefer-prev, final balance pass, and the
+  cooperative phase-1 adjustment that *omits* any `(t,p)` moving from
+  a still-live previous owner so phase-2 picks it up after revocation.
+  13 unit tests covering the matrix.
+- **Continuous coordinator task.** New `coordinator.rs` replaces the
+  one-shot `heartbeat.rs` — owns join/sync/heartbeat/rejoin in a
+  single `select!` loop. On REBALANCE_IN_PROGRESS / UNKNOWN_MEMBER_ID
+  it runs Join+Sync, computes revoked/added against the live `assigned`
+  snapshot, and for cooperative groups fires an immediate phase-2
+  Join+Sync after revocation. Offsets prime via batched OffsetFetch
+  before partitions are installed.
+- **`poll()` no longer returns `Err(CommitInvalid)` on rebalance.**
+  Rebalances are transparent — the coordinator mutates the shared
+  `assigned` / `next_offsets` in place. Matches JVM
+  `KafkaConsumer.poll()` semantics. `heartbeat.rs` deleted; old
+  `mpsc::Sender<RebalanceNotice>` channel removed.
+- **Builder options.** `Consumer::builder()` gained
+  `.assignor(Assignor)` (`Range` default | `CooperativeSticky`) and
+  `.client_rack(impl Into<String>)` (threaded into the subscription's
+  `rack_id`). `Assignor` re-exported at crate root.
+- **Tests.**
+  - 5 broker integration tests in `tests/group_protocol_negotiation.rs`:
+    empty-intersection rejection, vote-by-majority, lex-tiebreak,
+    single-member, protocol_type-mismatch. *Real finding:* the
+    broker's per-connection serial dispatch means racing-member
+    tests must use one `Client` (= one TCP connection) per member,
+    otherwise member B's request can't reach the broker during
+    member A's `INITIAL_REBALANCE_DELAY` wait.
+  - 3 broker-side coordinator unit tests + 6 protocol-vote unit
+    tests in `coordinator/group.rs`.
+  - 13 cooperative-sticky assignor unit tests covering steady-state,
+    partial-revocation + phase-2 convergence, zombie ties, multi-topic
+    asymmetric subscriptions, topology changes.
+  - 3 client-side integration tests in
+    `client-consumer/tests/cooperative_rebalance.rs`: 3-member
+    converges to balanced 2/2/2 with no overlap; `poll()` stays
+    error-free across mid-stream rebalance with no record loss; single-
+    member steady-state sanity check. *Real finding:* during the phase-1
+    + phase-2 round-trip, `Fetch` can race the broker's state churn
+    and surface a transport-level `ClientError::Timeout` (~30s) —
+    the test tolerates this and asserts on rebalance-specific errors
+    only. The KIP-429 transparency contract is specifically about
+    dropping `CommitInvalid` on rebalance, not about masking
+    underlying transport timeouts.
+  - 1 JVM acceptance test (`tests/jvm_acceptance.rs`):
+    `kafka-console-consumer
+    --consumer-property
+    partition.assignment.strategy=…CooperativeStickyAssignor`
+    against Crabka — produce 3 + consume back round-trip.
+- **README + STATUS.** Cooperative incremental rebalance row flipped
+  ❌ → ✅ in both the feature matrix and the KIP table.
+- **Out of scope (deferred to follow-ups):**
+  - KIP-848 next-gen consumer-group protocol.
+  - Rolling-upgrade mixed-protocol groups (eager + cooperative
+    members simultaneously). The vote rule handles selection
+    correctly, but cross-protocol revocation under mixed membership
+    has subtle race conditions that warrant a dedicated slice.
+  - JVM-byte-identical multi-hop balance correction (the assignor
+    uses endpoint-to-endpoint moves rather than the full pairwise
+    matrix JVM scans — matches JVM on tested workloads, may diverge
+    on pathological asymmetric multi-topic subscriptions; flagged
+    via FIXME).

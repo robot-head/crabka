@@ -157,7 +157,7 @@ implements it today. Legend: ✅ implemented · ⚠️ partial · ❌ not yet ·
 | `OffsetCommit` / `OffsetFetch` | ✅ |
 | Classic (eager) group rebalance protocol | ✅ |
 | `isolation.level=read_committed` (LSO clamping) | ✅ |
-| Cooperative incremental rebalance (KIP-429) | ❌ |
+| Cooperative incremental rebalance (KIP-429) | ✅ |
 | Static membership (KIP-345) | ❌ |
 | `OffsetDelete` admin API (KIP-496) | ✅ |
 | Next-gen consumer group protocol (KIP-848) | ❌ |
@@ -341,7 +341,7 @@ KIPs. Legend: ✅ implemented · ⚠️ partial · ❌ not yet · ⛔ out of sco
 | [KIP-62](https://cwiki.apache.org/confluence/display/KAFKA/KIP-62) | Background-thread heartbeats (session vs poll timeout) | ✅ |
 | [KIP-394](https://cwiki.apache.org/confluence/display/KAFKA/KIP-394) | Require `member.id` for initial JoinGroup | ✅ |
 | [KIP-345](https://cwiki.apache.org/confluence/display/KAFKA/KIP-345) | Static membership | ❌ |
-| [KIP-429](https://cwiki.apache.org/confluence/display/KAFKA/KIP-429) | Cooperative incremental rebalance protocol | ❌ |
+| [KIP-429](https://cwiki.apache.org/confluence/display/KAFKA/KIP-429) | Cooperative incremental rebalance protocol | ✅ |
 | [KIP-496](https://cwiki.apache.org/confluence/display/KAFKA/KIP-496) | `OffsetDelete` admin API | ✅ |
 | [KIP-848](https://cwiki.apache.org/confluence/display/KAFKA/KIP-848) | Next-generation consumer rebalance protocol | ❌ |
 

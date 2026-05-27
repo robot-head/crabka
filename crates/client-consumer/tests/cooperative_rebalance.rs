@@ -67,9 +67,7 @@ async fn cooperative_three_member_partial_revocation() {
             break (a1, a2, a3);
         }
         if Instant::now() >= deadline {
-            panic!(
-                "did not reach balanced 2/2/2 within deadline: m1={a1:?} m2={a2:?} m3={a3:?}"
-            );
+            panic!("did not reach balanced 2/2/2 within deadline: m1={a1:?} m2={a2:?} m3={a3:?}");
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     };
@@ -178,9 +176,7 @@ async fn cooperative_transparent_to_poll() {
                 crabka_client_consumer::ConsumerError::CommitInvalid
                 | crabka_client_consumer::ConsumerError::RebalanceFailed(_),
             ) => {
-                panic!(
-                    "m1.poll surfaced a rebalance-specific error — KIP-429 violation"
-                );
+                panic!("m1.poll surfaced a rebalance-specific error — KIP-429 violation");
             }
             Err(e) => {
                 // Transient transport error (e.g. fetch timeout while the
@@ -417,11 +413,7 @@ async fn wait_for_assignment_count(consumer: &Consumer, expected: usize, timeout
 /// Wait until the union of all consumers' assignments has `expected` unique
 /// `(topic, partition)` entries. Used to confirm a cooperative rebalance has
 /// settled before introducing the next membership change.
-async fn wait_for_total_assignment(
-    consumers: &[&Consumer],
-    expected: usize,
-    timeout: Duration,
-) {
+async fn wait_for_total_assignment(consumers: &[&Consumer], expected: usize, timeout: Duration) {
     let deadline = Instant::now() + timeout;
     loop {
         let mut union: HashSet<(String, i32)> = HashSet::new();

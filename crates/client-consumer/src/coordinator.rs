@@ -33,8 +33,9 @@ use crabka_protocol::owned::sync_group_request::{SyncGroupRequest, SyncGroupRequ
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 
 use crate::assignor::{Assignor, RebalanceProtocol};
-use crate::builder::{AutoOffsetReset, decode_assignment, decode_subscription, encode_assignment,
-    encode_subscription};
+use crate::builder::{
+    AutoOffsetReset, decode_assignment, decode_subscription, encode_assignment, encode_subscription,
+};
 use crate::error::ConsumerError;
 
 /// Mutable state owned exclusively by the coordinator task.
@@ -146,8 +147,7 @@ async fn heartbeat_once(state: &CoordinatorState) -> HeartbeatOutcome {
 /// the second (phase 2) to receive the freshly placed ones. See KIP-429.
 async fn rejoin(state: &mut CoordinatorState) -> Result<(), ConsumerError> {
     let owned: Vec<(String, i32)> = state.assigned.lock().await.clone();
-    let (new_assignment, new_generation, _protocol_name) =
-        join_and_sync(state, &owned).await?;
+    let (new_assignment, new_generation, _protocol_name) = join_and_sync(state, &owned).await?;
 
     let old_set: HashSet<(String, i32)> = owned.iter().cloned().collect();
     let new_set: HashSet<(String, i32)> = new_assignment.iter().cloned().collect();
@@ -190,10 +190,8 @@ async fn rejoin(state: &mut CoordinatorState) -> Result<(), ConsumerError> {
                 state.generation_id = new_generation;
 
                 // Phase 2: rejoin with the reduced owned-set.
-                let owned_after_revoke: Vec<(String, i32)> =
-                    state.assigned.lock().await.clone();
-                let (assignment2, gen2, _) =
-                    join_and_sync(state, &owned_after_revoke).await?;
+                let owned_after_revoke: Vec<(String, i32)> = state.assigned.lock().await.clone();
+                let (assignment2, gen2, _) = join_and_sync(state, &owned_after_revoke).await?;
                 let owned_after_revoke_set: HashSet<(String, i32)> =
                     owned_after_revoke.iter().cloned().collect();
                 let added2: Vec<(String, i32)> = assignment2
@@ -233,8 +231,7 @@ async fn join_and_sync(
     state: &mut CoordinatorState,
     owned: &[(String, i32)],
 ) -> Result<(Vec<(String, i32)>, i32, String), ConsumerError> {
-    let session_timeout_ms =
-        i32::try_from(state.session_timeout.as_millis()).unwrap_or(i32::MAX);
+    let session_timeout_ms = i32::try_from(state.session_timeout.as_millis()).unwrap_or(i32::MAX);
     let rebalance_timeout_ms =
         i32::try_from(state.rebalance_timeout.as_millis()).unwrap_or(i32::MAX);
 
@@ -262,7 +259,10 @@ async fn join_and_sync(
 
     // First join: if we have no member_id, expect MEMBER_ID_REQUIRED (79)
     // and capture the broker-assigned id, then issue a second join.
-    let r1 = state.client.send(make_join(state.member_id.clone())).await?;
+    let r1 = state
+        .client
+        .send(make_join(state.member_id.clone()))
+        .await?;
     let join_resp = if r1.error_code == 0 {
         r1
     } else if r1.error_code == 79 {
