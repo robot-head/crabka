@@ -11,8 +11,11 @@
 // + Fetch handlers landing in Tasks 15-16; keep this allow until then.
 #![allow(dead_code)]
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+
+use arc_swap::ArcSwap;
 
 use crabka_log::{AbortedTxn, Log, ReadOutput};
 use crabka_protocol::records::RecordBatch;
@@ -100,6 +103,36 @@ pub enum WriterMessage {
         new_start: i64,
         ack: oneshot::Sender<Result<(), BrokerError>>,
     },
+    /// Atomically swap the partition's `Log` to a future log that has
+    /// fully caught up. Sent by the KIP-113 move task in
+    /// `future_log.rs` once `future_log.LEO == current_log.LEO`. The
+    /// writer re-checks the invariant under its own lock, then:
+    /// 1. drops the current `Log`,
+    /// 2. `fs::rename`s `future_path` → `target_partition_path`,
+    /// 3. removes the source partition directory,
+    /// 4. re-opens `Log` at `target_partition_path` and stores it,
+    /// 5. updates `Partition.log_dir` to `target_log_dir`.
+    ///
+    /// If the future log fell behind during the request hop, returns
+    /// `Ok(SwapOutcome::NotCaughtUp)` so the caller can loop once more.
+    SwapFutureLog {
+        target_log_dir: PathBuf,
+        future_log: Arc<Mutex<Log>>,
+        future_path: PathBuf,
+        target_partition_path: PathBuf,
+        ack: oneshot::Sender<Result<SwapOutcome, BrokerError>>,
+    },
+}
+
+/// Result of a [`WriterMessage::SwapFutureLog`] handling cycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwapOutcome {
+    /// The swap succeeded; the partition is now serving from the
+    /// target log dir and the source dir has been removed.
+    Swapped,
+    /// The future log was behind the current log when the writer
+    /// re-checked. The caller should resume replication and retry.
+    NotCaughtUp,
 }
 
 /// Returned by `await_hw_at_least` when the deadline elapses before
@@ -119,6 +152,14 @@ pub struct HwTimeout;
 pub struct Partition {
     pub topic: String,
     pub partition_id: i32,
+    /// Parent `log.dir` currently owning the partition (the parent of
+    /// `log.lock().dir()` — i.e. the configured directory, not the
+    /// `<topic>-<partition>` subdirectory). Updated by
+    /// [`WriterMessage::SwapFutureLog`] as the last step of a KIP-113
+    /// move. `ArcSwap` so readers (e.g. `DescribeLogDirs`,
+    /// `AlterReplicaLogDirs` validation) see the swap atomically
+    /// without taking the `log` mutex.
+    pub log_dir: Arc<ArcSwap<PathBuf>>,
     pub log: Arc<Mutex<Log>>,
     pub writer_tx: mpsc::Sender<WriterMessage>,
     pub append_notify: Arc<Notify>,
@@ -504,6 +545,7 @@ mod tests {
         let p = Partition {
             topic: "t".into(),
             partition_id: 0,
+            log_dir: Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             log: Arc::new(Mutex::new(log)),
             writer_tx: tx,
             append_notify: Arc::new(Notify::new()),
@@ -539,6 +581,7 @@ mod tests {
         let p = Partition {
             topic: "t".into(),
             partition_id: 0,
+            log_dir: Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             log: Arc::new(Mutex::new(log)),
             writer_tx: tx,
             append_notify: Arc::new(Notify::new()),
@@ -560,6 +603,7 @@ mod tests {
         let p = Partition {
             topic: "t".into(),
             partition_id: 0,
+            log_dir: Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             log: Arc::new(Mutex::new(log)),
             writer_tx: tx,
             append_notify: Arc::new(Notify::new()),
@@ -594,6 +638,7 @@ mod tests {
         let p = Partition {
             topic: "t".into(),
             partition_id: 0,
+            log_dir: Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             log: Arc::new(Mutex::new(log)),
             writer_tx: tx,
             append_notify: Arc::new(Notify::new()),
@@ -616,6 +661,7 @@ mod tests {
         let p = Partition {
             topic: "t".into(),
             partition_id: 0,
+            log_dir: Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             log: Arc::new(Mutex::new(log)),
             writer_tx: tx,
             append_notify: Arc::new(Notify::new()),
@@ -645,6 +691,7 @@ mod tests {
         let p = Partition {
             topic: "t".into(),
             partition_id: 0,
+            log_dir: Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             log: Arc::new(Mutex::new(log)),
             writer_tx: tx,
             append_notify: Arc::new(Notify::new()),

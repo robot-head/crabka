@@ -114,10 +114,26 @@ pub(crate) async fn handle(
     //    only when the request carries a non-default generation_id that
     //    differs from the group's current generation_id (classic protocol).
     //    TODO(KIP-1319 v4+): implement per-member epoch tracking and
-    //    surface STALE_MEMBER_EPOCH (82) when supplied epoch < current.
+    //    surface STALE_MEMBER_EPOCH (113) when supplied epoch < current.
     if version >= 3 && req.generation_id >= 0 {
         let group_handle = group_manager.get_or_create(&req.group_id);
         let g = group_handle.state.lock().await;
+        // KIP-345 fence: instance id (if present) must resolve to the
+        // request's member id when both are set.
+        if let Some(iid) = req.group_instance_id.as_deref() {
+            match g.current_member_id_for_instance(iid) {
+                None => {
+                    drop(g);
+                    return encode_err_all(version, &req, codes::UNKNOWN_MEMBER_ID);
+                }
+                Some(pinned) => {
+                    if !req.member_id.is_empty() && pinned != req.member_id {
+                        drop(g);
+                        return encode_err_all(version, &req, codes::FENCED_INSTANCE_ID);
+                    }
+                }
+            }
+        }
         if g.generation_id >= 0 && req.generation_id != g.generation_id {
             drop(g);
             return encode_err_all(version, &req, codes::ILLEGAL_GENERATION);

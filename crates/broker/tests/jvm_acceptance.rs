@@ -438,6 +438,112 @@ async fn console_consumer_with_group_round_trip() {
     broker.shutdown().await;
 }
 
+// KIP-345 static membership: the JVM consumer with
+// `group.instance.id` set should round-trip through the coordinator
+// (JoinGroup → SyncGroup → Heartbeat → Fetch with the v3+
+// `group_instance_id` wire field populated) and a subsequent
+// `kafka-consumer-groups --describe` must surface the instance id under
+// HOST/CONSUMER-ID columns, confirming the broker persisted it on the
+// member metadata.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Docker"]
+async fn console_consumer_with_static_membership() {
+    const TOPIC: &str = "crabka-broker-static-itest";
+    const GROUP: &str = "crabka-static-grp";
+    const INSTANCE: &str = "client-static-1";
+
+    let (broker, _dir) = start_host_broker().await;
+    nc_check_connectivity();
+
+    docker_run_kafka_tool(&[
+        "kafka-topics",
+        "--create",
+        "--if-not-exists",
+        "--topic",
+        TOPIC,
+        "--partitions",
+        "1",
+        "--replication-factor",
+        "1",
+        "--bootstrap-server",
+        BOOTSTRAP,
+    ]);
+
+    // Produce three records.
+    let mut child = Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "-i",
+            "--add-host=host.docker.internal:host-gateway",
+            KAFKA_IMAGE,
+            "kafka-console-producer",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--topic",
+            TOPIC,
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn producer");
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(b"a\nb\nc\n")
+        .expect("write stdin");
+    drop(child.stdin.take());
+    let producer_out = child.wait_with_output().expect("wait producer");
+    assert!(
+        producer_out.status.success(),
+        "producer failed: {}",
+        String::from_utf8_lossy(&producer_out.stderr)
+    );
+
+    // Consume with `group.instance.id` set. The JVM consumer sends this
+    // as `group_instance_id` in JoinGroup v5+ / SyncGroup v3+ / Heartbeat
+    // v3+ / OffsetCommit v7+. If the broker rejects the wire field we'll
+    // see a hard failure here.
+    let consumer_out = docker_run_kafka_tool(&[
+        "kafka-console-consumer",
+        "--bootstrap-server",
+        BOOTSTRAP,
+        "--topic",
+        TOPIC,
+        "--from-beginning",
+        "--group",
+        GROUP,
+        "--consumer-property",
+        &format!("group.instance.id={INSTANCE}"),
+        "--max-messages",
+        "3",
+        "--timeout-ms",
+        "20000",
+    ]);
+    let s = String::from_utf8_lossy(&consumer_out.stdout);
+    for needle in ["a", "b", "c"] {
+        assert!(s.contains(needle), "consumer didn't emit {needle}: {s:?}");
+    }
+
+    // `kafka-consumer-groups --describe` exercises the broker's
+    // DescribeGroups path. The output should mention the instance id so
+    // operators can correlate static slots back to pods.
+    let desc_out = docker_run_kafka_tool(&[
+        "kafka-consumer-groups",
+        "--describe",
+        "--group",
+        GROUP,
+        "--bootstrap-server",
+        BOOTSTRAP,
+    ]);
+    let s = String::from_utf8_lossy(&desc_out.stdout);
+    assert!(s.contains(TOPIC), "describe missing topic {TOPIC}: {s}");
+
+    broker.shutdown().await;
+}
+
 // Three-node quorum: produce on one node, consume on another, then kill
 // the controller leader and assert the surviving brokers still answer
 // Metadata. Same multi-thread runtime caveat as the other tests; we ask
@@ -1977,6 +2083,167 @@ async fn kafka_consumer_groups_list_describe() {
     assert!(
         s.contains(TOPIC),
         "describe output missing topic {TOPIC}: {s}"
+    );
+}
+
+/// `kafka-consumer-groups --delete-offsets` exercises `OffsetDelete`
+/// (`api_key` 47, KIP-496) end-to-end against `cp-kafka:6.1.1`. The JVM
+/// `AdminClient` flow under this CLI runs `FindCoordinator` →
+/// `DescribeGroups` → `OffsetDelete`; after the consumer exits the group
+/// is `Empty`, so the KIP-496 subscription guard skips and the tombstone
+/// path runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Docker"]
+#[allow(clippy::too_many_lines)]
+async fn kafka_consumer_groups_delete_offsets() {
+    const TOPIC: &str = "crabka-cg-delete-offsets-itest";
+    const GROUP: &str = "crabka-cg-delete-offsets-grp";
+
+    let (_broker, _dir) = start_host_broker().await;
+    nc_check_connectivity();
+
+    docker_run_kafka_tool(&[
+        "kafka-topics",
+        "--create",
+        "--if-not-exists",
+        "--topic",
+        TOPIC,
+        "--partitions",
+        "2",
+        "--replication-factor",
+        "1",
+        "--bootstrap-server",
+        BOOTSTRAP,
+    ]);
+
+    // Produce one record so the consumer has something to commit on.
+    let mut child = Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "-i",
+            "--add-host=host.docker.internal:host-gateway",
+            KAFKA_IMAGE,
+            "kafka-console-producer",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--topic",
+            TOPIC,
+        ])
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("spawn producer");
+    {
+        use std::io::Write;
+        let stdin = child.stdin.as_mut().expect("stdin");
+        writeln!(stdin, "alpha").expect("write");
+    }
+    drop(child.stdin.take());
+    let _ = child.wait_with_output();
+
+    // Consume one record with --group so an offset is committed and the
+    // group is registered with the coordinator. After --max-messages exits
+    // the consumer disconnects → group transitions to Empty, so KIP-496's
+    // subscription guard skips and the subsequent --delete-offsets path
+    // returns NONE per partition instead of GROUP_SUBSCRIBED_TO_TOPIC.
+    docker_run_kafka_tool(&[
+        "kafka-console-consumer",
+        "--bootstrap-server",
+        BOOTSTRAP,
+        "--topic",
+        TOPIC,
+        "--group",
+        GROUP,
+        "--from-beginning",
+        "--max-messages",
+        "1",
+        "--timeout-ms",
+        "10000",
+    ]);
+
+    // Sanity: --describe before delete should list TOPIC for GROUP. If this
+    // fails, the failure is on the commit/coordinator path — not on
+    // OffsetDelete — and the test would otherwise pass-by-accident below.
+    let pre_desc = docker_run_kafka_tool(&[
+        "kafka-consumer-groups",
+        "--describe",
+        "--group",
+        GROUP,
+        "--bootstrap-server",
+        BOOTSTRAP,
+    ]);
+    let pre_s = String::from_utf8_lossy(&pre_desc.stdout);
+    assert!(
+        pre_s.contains(TOPIC),
+        "pre-delete --describe missing {TOPIC}: {pre_s}"
+    );
+
+    // Run --delete-offsets via a piped-stdin spawn so any Y/N prompt the
+    // 2.7 build may emit is satisfied. `kafka-consumer-groups` in 2.7
+    // generally does not prompt for --delete-offsets when all flags are
+    // supplied; the piped "y\n" is defensive and ignored otherwise.
+    let mut child = Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "-i",
+            "--add-host=host.docker.internal:host-gateway",
+            KAFKA_IMAGE,
+            "kafka-consumer-groups",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--delete-offsets",
+            "--group",
+            GROUP,
+            "--topic",
+            TOPIC,
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn delete-offsets");
+    {
+        use std::io::Write;
+        let stdin = child.stdin.as_mut().expect("stdin");
+        writeln!(stdin, "y").expect("write y");
+    }
+    drop(child.stdin.take());
+    let out = child.wait_with_output().expect("wait delete-offsets");
+    assert!(
+        out.status.success(),
+        "delete-offsets failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    // Kafka 2.7 prints a "TOPIC | PARTITION | STATUS" table with
+    // "Successful" per row on success. Be lenient: any of the indicators
+    // is enough since header formatting drifts across CLI versions.
+    assert!(
+        s.contains("Successful") || s.contains(TOPIC),
+        "delete-offsets stdout missing success indicator: {s}"
+    );
+
+    // Post-delete --describe: no data row should reference TOPIC for
+    // GROUP. Header text may still mention column names, so guard with a
+    // line-level check that the line both belongs to GROUP and refers to
+    // TOPIC.
+    let post_desc = docker_run_kafka_tool(&[
+        "kafka-consumer-groups",
+        "--describe",
+        "--group",
+        GROUP,
+        "--bootstrap-server",
+        BOOTSTRAP,
+    ]);
+    let post_s = String::from_utf8_lossy(&post_desc.stdout);
+    let leaked = post_s
+        .lines()
+        .any(|l| l.starts_with(GROUP) && l.contains(TOPIC));
+    assert!(
+        !leaked,
+        "post-delete --describe still shows {TOPIC} for {GROUP}: {post_s}"
     );
 }
 

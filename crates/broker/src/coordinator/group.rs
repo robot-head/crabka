@@ -30,6 +30,11 @@ pub enum GroupState {
 #[allow(clippy::struct_field_names)]
 pub struct Member {
     pub member_id: String,
+    /// KIP-345 static-membership pin. When `Some`, the broker preserves
+    /// this member's slot across session timeouts and matches reconnecting
+    /// clients by `group_instance_id` rather than minting a fresh
+    /// `member_id`.
+    pub group_instance_id: Option<String>,
     pub client_id: String,
     pub host: String,
     pub session_timeout: Duration,
@@ -55,6 +60,7 @@ impl Member {
     ) -> Self {
         Self {
             member_id: member_id.into(),
+            group_instance_id: None,
             client_id: client_id.into(),
             host: host.into(),
             session_timeout,
@@ -64,6 +70,37 @@ impl Member {
             assignment: None,
         }
     }
+
+    /// Builder-style: pin a `group.instance.id` (KIP-345 static membership).
+    #[must_use]
+    pub fn with_instance_id(mut self, instance_id: Option<String>) -> Self {
+        self.group_instance_id = instance_id;
+        self
+    }
+
+    #[must_use]
+    pub fn is_static(&self) -> bool {
+        self.group_instance_id.is_some()
+    }
+}
+
+/// Outcome of [`Group::add_member`] — drives the `JoinGroup` handler's
+/// fast-path decisions for KIP-345 static-rejoin.
+#[derive(Debug, PartialEq, Eq)]
+pub enum AddMemberOutcome {
+    /// Brand-new member added; group transitioned to `PreparingRebalance`
+    /// if it was previously `Empty` or `Stable`.
+    NewMember,
+    /// A static member with this `group.instance.id` already existed and
+    /// has been replaced in-place. The prior `member_id` (which the new
+    /// session may or may not match) is returned. If the group was
+    /// `Stable` the state is preserved — the new session reuses the
+    /// cached assignment without forcing a rebalance.
+    StaticRejoin { prior_member_id: String },
+    /// A *different* live `member_id` is currently pinned to this
+    /// `group.instance.id`. The caller must reject with
+    /// `FENCED_INSTANCE_ID`. No state change happened.
+    Fenced { live_member_id: String },
 }
 
 /// A committed offset entry. Keyed by `(topic, partition)` in
@@ -88,6 +125,12 @@ pub struct Group {
     pub leader_id: Option<String>,
     pub protocol_name: Option<String>,
     pub members: HashMap<String, Member>,
+    /// KIP-345 secondary index: `group.instance.id` → current `member_id`.
+    /// Mirrors the `group_instance_id` field on entries in `members`. Used
+    /// to look up a static member's slot when a reconnecting client either
+    /// omits its `member_id` (KIP-394 bootstrap) or supplies a stale one
+    /// from a prior session.
+    pub static_members: HashMap<String, String>,
     pub committed_offsets: HashMap<(String, i32), OffsetEntry>,
     pub rebalance_deadline: Option<Instant>,
 }
@@ -103,24 +146,88 @@ impl Group {
             leader_id: None,
             protocol_name: None,
             members: HashMap::new(),
+            static_members: HashMap::new(),
             committed_offsets: HashMap::new(),
             rebalance_deadline: None,
         }
     }
 
-    /// Add or refresh a member. Transitions to `PreparingRebalance` if
-    /// currently `Empty` or `Stable`.
-    pub fn add_member(&mut self, member: Member) {
-        let was_first_join = matches!(self.state, GroupState::Empty | GroupState::Stable);
+    /// Look up the current `member_id` pinned to a `group.instance.id`,
+    /// if any. KIP-345 entry point used by every group RPC handler.
+    #[must_use]
+    pub fn current_member_id_for_instance(&self, instance_id: &str) -> Option<&str> {
+        self.static_members.get(instance_id).map(String::as_str)
+    }
+
+    /// Add or refresh a member.
+    ///
+    /// **Dynamic** (no `group_instance_id`): inserted; transitions to
+    /// `PreparingRebalance` if previously `Empty` or `Stable`. Returns
+    /// [`AddMemberOutcome::NewMember`].
+    ///
+    /// **Static** (KIP-345, `group_instance_id` set): three cases.
+    /// 1. The instance id is new → behaves like a dynamic add. Returns
+    ///    [`AddMemberOutcome::NewMember`].
+    /// 2. The instance id maps to an existing live `member_id` that
+    ///    matches the incoming `member.member_id` (or the incoming id is
+    ///    different but the leader-side bootstrap-rejoin path supplied a
+    ///    fresh id for the same instance) → the slot is replaced
+    ///    in-place; the prior `assignment` and the group's `state` are
+    ///    preserved (no rebalance triggered on `Stable` rejoin). Returns
+    ///    [`AddMemberOutcome::StaticRejoin`] with the prior member id.
+    /// 3. The instance id maps to a different live `member_id` and the
+    ///    caller did not request a takeover → the caller must reject
+    ///    with `FENCED_INSTANCE_ID`. Returns [`AddMemberOutcome::Fenced`].
+    ///    The handler decides whether a non-empty mismatching
+    ///    `req.member_id` is a real fence or a legitimate replacement;
+    ///    `add_member` itself always performs the takeover unless the
+    ///    caller pre-checks with [`Self::current_member_id_for_instance`].
+    pub fn add_member(&mut self, member: Member) -> AddMemberOutcome {
+        if let Some(instance_id) = member.group_instance_id.clone() {
+            if let Some(prior_member_id) = self.static_members.get(&instance_id).cloned() {
+                // Static rejoin: replace slot in-place, preserve assignment.
+                let prior = self.members.remove(&prior_member_id);
+                let mut next = member;
+                if let Some(p) = prior {
+                    // Inherit the previously installed assignment so a
+                    // Stable-state rejoin can short-circuit the rebalance.
+                    if next.assignment.is_none() {
+                        next.assignment = p.assignment;
+                    }
+                }
+                self.static_members
+                    .insert(instance_id, next.member_id.clone());
+                self.members.insert(next.member_id.clone(), next);
+                // Crucially: do NOT touch self.state. Static rejoin from
+                // Stable stays Stable; from PreparingRebalance stays
+                // PreparingRebalance.
+                return AddMemberOutcome::StaticRejoin { prior_member_id };
+            }
+            // Brand-new instance id: pin it and fall through to a
+            // dynamic-style add.
+            self.static_members
+                .insert(instance_id, member.member_id.clone());
+        }
+        let was_first_or_stable = matches!(self.state, GroupState::Empty | GroupState::Stable);
         self.members.insert(member.member_id.clone(), member);
-        if was_first_join {
+        if was_first_or_stable {
             self.state = GroupState::PreparingRebalance;
         }
+        AddMemberOutcome::NewMember
     }
 
     /// Remove a member; transitions to `Empty` if no members remain.
+    /// KIP-345: clears the static-membership index entry too.
     pub fn remove_member(&mut self, member_id: &str) {
-        self.members.remove(member_id);
+        if let Some(m) = self.members.remove(member_id)
+            && let Some(ref iid) = m.group_instance_id
+        {
+            // Only clear the index entry if it still points at *this*
+            // member_id — a takeover may have already repointed it.
+            if self.static_members.get(iid).map(String::as_str) == Some(member_id) {
+                self.static_members.remove(iid);
+            }
+        }
         if self.members.is_empty() {
             self.state = GroupState::Empty;
             self.leader_id = None;
@@ -156,10 +263,15 @@ impl Group {
         self.state = GroupState::Stable;
     }
 
-    /// Drop any member whose `last_heartbeat` is older than its
-    /// `session_timeout`. Returns the dropped member IDs. Transitions to
-    /// `PreparingRebalance` if any were dropped and the group still has
-    /// members; to `Empty` if it became empty.
+    /// Drop any **dynamic** member whose `last_heartbeat` is older than
+    /// its `session_timeout`. Returns the dropped member IDs.
+    /// Transitions to `PreparingRebalance` if any were dropped and the
+    /// group still has members; to `Empty` if it became empty.
+    ///
+    /// KIP-345: static members (`group_instance_id.is_some()`) are
+    /// **skipped** — their slot is preserved across the session timeout
+    /// so a restarting client reclaims its assignment on rejoin without
+    /// kicking the rest of the group into a rebalance.
     pub fn expire_dead_members(&mut self, now: Instant) -> Vec<String> {
         // Real Kafka only expires members once the group is `Stable` — i.e.,
         // after SyncGroup has completed and the consumers are heartbeating.
@@ -175,10 +287,13 @@ impl Group {
         let dropped: Vec<String> = self
             .members
             .iter()
-            .filter(|(_, m)| now.duration_since(m.last_heartbeat) > m.session_timeout)
+            .filter(|(_, m)| {
+                !m.is_static() && now.duration_since(m.last_heartbeat) > m.session_timeout
+            })
             .map(|(id, _)| id.clone())
             .collect();
         for id in &dropped {
+            // Dynamic members only — no static_members entry to clear.
             self.members.remove(id);
         }
         if !dropped.is_empty() {
@@ -248,6 +363,103 @@ mod tests {
         g.remove_member("m1");
         assert_eq!(g.state, GroupState::Empty);
         assert!(g.leader_id.is_none());
+    }
+
+    fn static_member(member_id: &str, instance_id: &str) -> Member {
+        sample_member(member_id).with_instance_id(Some(instance_id.to_string()))
+    }
+
+    #[test]
+    fn static_rejoin_preserves_stable_state_and_assignment() {
+        let mut g = Group::new("g");
+        let outcome = g.add_member(static_member("m1", "inst-a"));
+        assert_eq!(outcome, AddMemberOutcome::NewMember);
+        g.complete_rebalance("range");
+        let mut a = HashMap::new();
+        a.insert("m1".into(), Bytes::from_static(b"assignment-bytes"));
+        g.install_assignments(a);
+        assert_eq!(g.state, GroupState::Stable);
+
+        // Rejoin with the same instance id but a fresh `member_id` (the
+        // client restarted; KIP-394 bootstrap gave it a new id).
+        let outcome = g.add_member(static_member("m2", "inst-a"));
+        assert_eq!(
+            outcome,
+            AddMemberOutcome::StaticRejoin {
+                prior_member_id: "m1".into()
+            }
+        );
+        // State preserved: no rebalance kicked off.
+        assert_eq!(g.state, GroupState::Stable);
+        assert_eq!(g.members.len(), 1);
+        // New member inherited the prior assignment.
+        assert!(g.members.contains_key("m2"));
+        assert_eq!(
+            g.members["m2"].assignment.as_deref(),
+            Some(b"assignment-bytes" as &[u8])
+        );
+        // Index repointed.
+        assert_eq!(g.current_member_id_for_instance("inst-a"), Some("m2"));
+    }
+
+    #[test]
+    fn static_member_timeout_is_suppressed() {
+        let mut g = Group::new("g");
+        let mut m = static_member("m1", "inst-a");
+        m.session_timeout = Duration::from_millis(1);
+        m.last_heartbeat = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
+        g.add_member(m);
+        g.complete_rebalance("range");
+        g.state = GroupState::Stable;
+
+        let dropped = g.expire_dead_members(Instant::now());
+        assert!(dropped.is_empty(), "static member must NOT be expired");
+        assert_eq!(g.state, GroupState::Stable);
+        assert!(g.members.contains_key("m1"));
+        // Index entry retained.
+        assert_eq!(g.current_member_id_for_instance("inst-a"), Some("m1"));
+    }
+
+    #[test]
+    fn dynamic_member_timeout_still_drops_in_mixed_group() {
+        let mut g = Group::new("g");
+        g.add_member(static_member("static-1", "inst-a"));
+        let mut dyn_m = sample_member("dyn-1");
+        dyn_m.session_timeout = Duration::from_millis(1);
+        dyn_m.last_heartbeat = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
+        g.add_member(dyn_m);
+        g.complete_rebalance("range");
+        g.state = GroupState::Stable;
+
+        let dropped = g.expire_dead_members(Instant::now());
+        assert_eq!(dropped, vec!["dyn-1".to_string()]);
+        assert_eq!(g.state, GroupState::PreparingRebalance);
+        assert!(g.members.contains_key("static-1"));
+    }
+
+    #[test]
+    fn remove_static_member_clears_index() {
+        let mut g = Group::new("g");
+        g.add_member(static_member("m1", "inst-a"));
+        assert_eq!(g.current_member_id_for_instance("inst-a"), Some("m1"));
+        g.remove_member("m1");
+        assert_eq!(g.current_member_id_for_instance("inst-a"), None);
+        assert_eq!(g.state, GroupState::Empty);
+    }
+
+    #[test]
+    fn static_takeover_does_not_clear_index_for_prior_id() {
+        // After a takeover, the index points at the new id. Removing the
+        // *prior* id (e.g. via a stale LeaveGroup from the old session)
+        // must NOT wipe the index entry.
+        let mut g = Group::new("g");
+        g.add_member(static_member("m1", "inst-a"));
+        g.add_member(static_member("m2", "inst-a"));
+        assert_eq!(g.current_member_id_for_instance("inst-a"), Some("m2"));
+        // m1 is no longer in members (replaced), so this is a no-op.
+        g.remove_member("m1");
+        assert_eq!(g.current_member_id_for_instance("inst-a"), Some("m2"));
+        assert!(g.members.contains_key("m2"));
     }
 
     #[test]

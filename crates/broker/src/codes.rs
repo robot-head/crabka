@@ -15,6 +15,17 @@ pub const INVALID_FETCH_SIZE: i16 = 4;
 pub const LEADER_NOT_AVAILABLE: i16 = 5;
 pub const NOT_LEADER_OR_FOLLOWER: i16 = 6;
 pub const REQUEST_TIMED_OUT: i16 = 7;
+/// `REPLICA_NOT_AVAILABLE` (11, KIP-113) — the targeted replica is not
+/// hosted on this broker. Used by `AlterReplicaLogDirs` when the client
+/// names a `(topic, partition)` the broker doesn't own.
+pub const REPLICA_NOT_AVAILABLE: i16 = 11;
+/// `KAFKA_STORAGE_ERROR` (56, KIP-113) — a log-dir-level I/O failure
+/// (open, rename, remove) or a concurrent move with a conflicting target.
+pub const KAFKA_STORAGE_ERROR: i16 = 56;
+/// `LOG_DIR_NOT_FOUND` (57, KIP-113) — the destination directory in an
+/// `AlterReplicaLogDirs` request is not one of this broker's configured
+/// `log.dirs`.
+pub const LOG_DIR_NOT_FOUND: i16 = 57;
 pub const COORDINATOR_NOT_AVAILABLE: i16 = 15;
 pub const NOT_COORDINATOR: i16 = 16;
 pub const INVALID_TOPIC_EXCEPTION: i16 = 17;
@@ -56,7 +67,16 @@ pub const INVALID_TXN_STATE: i16 = 24;
 pub const INVALID_TXN_TIMEOUT: i16 = 48;
 pub const CONCURRENT_TRANSACTIONS: i16 = 49;
 pub const TRANSACTION_COORDINATOR_FENCED: i16 = 50;
-pub const STALE_MEMBER_EPOCH: i16 = 82;
+
+/// `FENCED_INSTANCE_ID` (82, KIP-345) — another client is currently pinned
+/// to the same `group.instance.id`. The losing client must exit; the broker
+/// fences it across `JoinGroup`, `SyncGroup`, `Heartbeat`, `OffsetCommit`,
+/// `TxnOffsetCommit`, and `LeaveGroup`.
+pub const FENCED_INSTANCE_ID: i16 = 82;
+
+/// `STALE_MEMBER_EPOCH` (113, KIP-848) — the supplied member epoch is older
+/// than the coordinator's current epoch for the consumer group member.
+pub const STALE_MEMBER_EPOCH: i16 = 113;
 
 // Slice 11 additions — admin handler codes.
 /// `INVALID_CONFIG` (40) — a config key/value pair is invalid or unknown.
@@ -138,6 +158,17 @@ pub const ELECTION_NOT_NEEDED: i16 = 84;
 // Slice 15 additions — partition reassignment codes (KIP-455).
 pub const INVALID_REPLICA_ASSIGNMENT: i16 = 39;
 pub const NO_REASSIGNMENT_IN_PROGRESS: i16 = 85;
+
+// KIP-227 incremental-fetch-session codes.
+/// Returned at the top level of a `FetchResponse` when the request carried
+/// a non-zero `session_id` that is not present in the broker's session cache
+/// (evicted, never existed, or already closed).
+pub const FETCH_SESSION_ID_NOT_FOUND: i16 = 70;
+/// Returned at the top level of a `FetchResponse` when the request's
+/// `session_epoch` does not match the cached session's current epoch, or
+/// when `session_id == 0` and `session_epoch` is neither `0` (new session)
+/// nor `-1` (sessionless full fetch).
+pub const INVALID_FETCH_SESSION_EPOCH: i16 = 71;
 
 // Slice 51 additions — KIP-48 delegation-token codes. Numbers from
 // org.apache.kafka.common.protocol.Errors. Note the existing slice 14

@@ -13,6 +13,13 @@ use crate::codes;
 use crate::coordinator::group::GroupState;
 use crate::error::BrokerError;
 
+/// Normalised `(member_id, group_instance_id)` pair from either the
+/// v0–v2 single-member shape or the v3+ `MemberIdentity` list.
+struct MemberIdentityIn {
+    member_id: String,
+    group_instance_id: Option<String>,
+}
+
 pub(crate) fn handle(
     broker: &Broker,
     version: i16,
@@ -36,33 +43,73 @@ pub(crate) fn handle(
             return encode(version, &resp);
         };
 
-        // v0-v2 uses the single `member_id`; v3+ uses the `members` list of
-        // (member_id, group_instance_id). Build a unified `Vec<String>`.
-        let to_remove: Vec<String> = if req.member_id.is_empty() {
-            req.members.iter().map(|m| m.member_id.clone()).collect()
+        // v0-v2 uses the single `member_id`; v3+ uses the `members` list
+        // of `MemberIdentity { member_id, group_instance_id, reason }`.
+        // Normalize both shapes into a single `Vec<MemberIdentityIn>`.
+        let inputs: Vec<MemberIdentityIn> = if version >= 3 {
+            req.members
+                .iter()
+                .map(|m| MemberIdentityIn {
+                    member_id: m.member_id.clone(),
+                    group_instance_id: m.group_instance_id.clone(),
+                })
+                .collect()
         } else {
-            vec![req.member_id.clone()]
+            vec![MemberIdentityIn {
+                member_id: req.member_id.clone(),
+                group_instance_id: None,
+            }]
         };
 
-        let mut member_responses: Vec<MemberResponse> = Vec::with_capacity(to_remove.len());
+        let mut member_responses: Vec<MemberResponse> = Vec::with_capacity(inputs.len());
+        let mut any_removed = false;
         {
             let mut g = handle.state.lock().await;
-            for mid in &to_remove {
-                let code = if g.members.contains_key(mid) {
-                    g.remove_member(mid);
-                    codes::NONE
-                } else {
-                    codes::UNKNOWN_MEMBER_ID
-                };
+            for ident in &inputs {
+                // KIP-345 resolution rules:
+                // - instance_id set + member_id empty → look up via static
+                //   index. Missing → UNKNOWN_MEMBER_ID.
+                // - instance_id set + member_id set → look up via static
+                //   index. Mismatch → FENCED_INSTANCE_ID.
+                // - instance_id None → look up by member_id directly.
+                let (resolved_id, code): (Option<String>, i16) =
+                    match (ident.group_instance_id.as_deref(), ident.member_id.as_str()) {
+                        (Some(iid), "") => match g.current_member_id_for_instance(iid) {
+                            Some(pinned) => (Some(pinned.to_string()), codes::NONE),
+                            None => (None, codes::UNKNOWN_MEMBER_ID),
+                        },
+                        (Some(iid), mid) => match g.current_member_id_for_instance(iid) {
+                            Some(pinned) if pinned == mid => {
+                                (Some(pinned.to_string()), codes::NONE)
+                            }
+                            Some(_) => (None, codes::FENCED_INSTANCE_ID),
+                            None => (None, codes::UNKNOWN_MEMBER_ID),
+                        },
+                        (None, mid) => {
+                            if g.members.contains_key(mid) {
+                                (Some(mid.to_string()), codes::NONE)
+                            } else {
+                                (None, codes::UNKNOWN_MEMBER_ID)
+                            }
+                        }
+                    };
+
+                if let Some(id) = resolved_id {
+                    g.remove_member(&id);
+                    any_removed = true;
+                }
                 member_responses.push(MemberResponse {
-                    member_id: mid.clone(),
-                    group_instance_id: None,
+                    member_id: ident.member_id.clone(),
+                    group_instance_id: ident.group_instance_id.clone(),
                     error_code: code,
                     ..Default::default()
                 });
             }
-            // If group still has members and was Stable, kick a new rebalance.
-            if !g.members.is_empty() && matches!(g.state, GroupState::Stable) {
+            // KIP-345: LeaveGroup is an *intentional* removal — even for
+            // static members, it triggers a rebalance if the group is
+            // still Stable with surviving members. (The suppression rule
+            // only applies to session-timeout-driven removal.)
+            if any_removed && !g.members.is_empty() && matches!(g.state, GroupState::Stable) {
                 g.state = GroupState::PreparingRebalance;
                 g.rebalance_deadline = Some(
                     std::time::Instant::now()

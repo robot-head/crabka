@@ -51,6 +51,7 @@ pub(crate) mod alter_client_quotas;
 pub(crate) mod alter_configs;
 pub(crate) mod alter_partition;
 pub(crate) mod alter_partition_reassignments;
+pub(crate) mod alter_replica_log_dirs;
 pub(crate) mod alter_user_scram_credentials;
 pub(crate) mod api_versions;
 pub(crate) mod broker_heartbeat;

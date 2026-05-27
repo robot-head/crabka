@@ -39,6 +39,10 @@ pub async fn bootstrap(
         log_dir::place_partition_dir(&config.all_log_dirs(), OFFSETS_TOPIC, OFFSETS_PARTITION);
     std::fs::create_dir_all(&topic_dir)?;
     let log = crabka_log::Log::open(&topic_dir, config.log_config.clone())?;
+    let owning_dir = topic_dir
+        .parent()
+        .expect("placed partition dir always has a parent log.dir")
+        .to_path_buf();
 
     // Register the topic via the metadata quorum. Tolerate `TopicExists`
     // because on broker restart the record is already in the replicated log.
@@ -73,7 +77,12 @@ pub async fn bootstrap(
     replay_records(&log, group_manager).await?;
 
     // Spawn a writer + register the partition handle.
-    let partition = spawn_partition(OFFSETS_TOPIC.to_string(), OFFSETS_PARTITION, log);
+    let partition = spawn_partition(
+        OFFSETS_TOPIC.to_string(),
+        OFFSETS_PARTITION,
+        owning_dir,
+        log,
+    );
     partitions.insert((OFFSETS_TOPIC.into(), OFFSETS_PARTITION), partition);
     Ok(())
 }
@@ -156,6 +165,7 @@ fn apply_group_metadata(g: &mut Group, v: GroupMetadataValue, replay_timestamp_m
     // `Member::new` so they don't immediately time out; the client will
     // re-join anyway after a coordinator restart.
     g.members.clear();
+    g.static_members.clear();
     for m in v.members {
         let session_timeout = std::time::Duration::from_millis(
             u64::try_from(m.session_timeout_ms.max(0)).unwrap_or(30_000),
@@ -170,8 +180,12 @@ fn apply_group_metadata(g: &mut Group, v: GroupMetadataValue, replay_timestamp_m
             session_timeout,
             rebalance_timeout,
             m.subscription,
-        );
+        )
+        .with_instance_id(m.group_instance_id.clone());
         member.assignment = Some(m.assignment);
+        if let Some(iid) = m.group_instance_id {
+            g.static_members.insert(iid, m.member_id.clone());
+        }
         g.members.insert(m.member_id, member);
     }
     g.state = if g.members.is_empty() {

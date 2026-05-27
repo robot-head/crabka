@@ -266,6 +266,15 @@ pub struct BrokerConfig {
     /// `for_tests` so unit tests don't fight over port allocation.
     pub metrics_listen_addr: Option<SocketAddr>,
 
+    /// KIP-227: maximum number of incremental-fetch sessions kept in the
+    /// per-broker cache. Each session tracks the (topic, partition) set a
+    /// client is subscribed to so subsequent fetches can be deltas. When
+    /// full, a non-privileged (consumer) session is evicted LRU; privileged
+    /// (follower-fetch) sessions are evicted only by other privileged
+    /// sessions. Matches Apache Kafka's `max.incremental.fetch.session.cache.slots`
+    /// (default 1000).
+    pub max_incremental_fetch_session_cache_slots: usize,
+
     /// Slice 43e: partition disk-usage scan cadence, in seconds. `0`
     /// disables the scanner entirely (no background task spawned).
     /// Production default: 60s. The scanner walks every known
@@ -401,6 +410,7 @@ impl BrokerConfig {
             // background task doesn't tick during short-lived fixtures.
             // The dedicated 43e integration test enables it explicitly.
             partition_disk_scan_interval_secs: 0,
+            max_incremental_fetch_session_cache_slots: 1000,
             // Slice 51: tests opt into delegation tokens by setting
             // `delegation_token_secret_key`; default off keeps the
             // four DT RPCs returning DELEGATION_TOKEN_AUTH_DISABLED.
@@ -586,6 +596,7 @@ impl Default for BrokerConfig {
             // metrics by default.
             metrics_listen_addr: None,
             partition_disk_scan_interval_secs: 60,
+            max_incremental_fetch_session_cache_slots: 1000,
             // Slice 51: master key off by default. Operators flip this on
             // via `CRABKA_DELEGATION_TOKEN_SECRET_KEY` env var or the
             // `[delegation_token] secret_key` TOML stanza.
