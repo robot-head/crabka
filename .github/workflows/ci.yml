@@ -222,3 +222,42 @@ jobs:
           disable_search: true
           flags: broker-jvm-acceptance
           fail_ci_if_error: true
+
+  # Non-ignored broker + client-admin integration tests (the
+  # in-process Broker-driven suites under `crates/broker/tests/*.rs`
+  # and `crates/client-admin/tests/*.rs`). These don't show up in the
+  # `unit` flag — that flag's `cargo llvm-cov --lib --bins` only walks
+  # in-`src/` tests — so before this job KIP-113 handler + dispatch
+  # branches that are only exercised end-to-end appeared as uncovered
+  # in the patch view. Two `--no-report` runs share a profraw set,
+  # then a single `report` produces the lcov.
+  broker-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.95.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: broker-integration
+      - uses: arduino/setup-protoc@v3
+        with:
+          version: "31.x"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Broker + client-admin integration coverage
+        run: |
+          mkdir -p coverage
+          cargo llvm-cov clean --workspace
+          cargo llvm-cov --no-report -p crabka-broker --tests
+          cargo llvm-cov --no-report -p crabka-client-admin --tests
+          cargo llvm-cov report --lcov --output-path coverage/broker-integration.lcov
+      - uses: codecov/codecov-action@v6
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage/broker-integration.lcov
+          disable_search: true
+          flags: broker-integration
+          fail_ci_if_error: true
