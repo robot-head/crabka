@@ -5,6 +5,111 @@ All notable changes to `crabka-protocol` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] — 2026-05-27
+
+
+### <!-- 0 -->🚀 Features
+
+
+- Add crate skeleton
+
+- Add ProtocolError
+
+- Add Encode/Decode traits
+
+- Add fixed-width integer primitives
+
+- Add varint/varlong/uvarint primitives
+
+- Add string/bytes/compact primitives
+
+- Add UUID primitive
+
+- Add KIP-482 tagged-fields support
+
+- Vendor Kafka 4.2.0 message schemas
+
+- Hand-write owned::ApiVersionsRequest
+
+- Hand-write owned::ApiVersionsResponse
+
+- Wire generated ApiVersionsRequest into protocol crate
+
+- Borrowed flavor for ApiVersionsRequest
+
+- Borrowed-flavor codegen for ApiVersionsRequest
+
+- IR-walking owned emitter (primitives only)
+
+- Owned emitter supports primitive arrays
+
+- IR-walking borrowed emitter
+
+- Turn on generation for Metadata request/response
+
+- Turn on generation for Produce request/response
+
+- Turn on generation for OffsetCommit request/response
+
+- Turn on generation for Request/Response headers
+
+- CommonStructs emission + DescribeGroups support
+
+- Central ApiKey enum
+
+
+### <!-- 1 -->🐛 Bug Fixes
+
+
+- Struct Default honors schema-level non-null defaults
+
+- Use ..Default::default() in ApiVersionsResponse literal
+
+
+### <!-- 10 -->💼 Other
+
+
+- Fail build on schema/generated drift
+
+
+### <!-- 2 -->🚜 Refactor
+
+
+- Share is_default helper via crabka-protocol
+
+
+### <!-- 3 -->📚 Documentation
+
+
+- Crate-level rustdoc and CONTRIBUTING
+
+
+### <!-- 6 -->🧪 Testing
+
+
+- JVM oracle subprocess wrapper
+
+- Byte-equality differential vs JVM oracle for ApiVersions
+
+- Proptest round-trip for ApiVersions request/response
+
+- Corpus replay harness with ApiVersions sample
+
+- Pick oracle wrapper by host OS, not file existence
+
+- Spawn oracle via `sh` to avoid ENOEXEC
+
+
+### <!-- 7 -->⚙️ Miscellaneous Tasks
+
+
+- Rust + clippy + fmt matrix and JVM differential job
+
+- Clean up clippy pedantic warnings
+
+- Expand microbenchmark coverage across crates ([#138](https://github.com/robot-head/crabka/pull/138))
+
+
 ## [0.1.0] — 2026-05-11
 
 ### Added
