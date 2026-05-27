@@ -80,7 +80,7 @@ async fn produce(p: &support::InProcess, topic: &str, partition: i32, records: i
             topic_id,
             partition_data: vec![PartitionProduceData {
                 index: partition,
-                records: Some(one_record_batch(records)),
+                records: Some(one_record_batch(records).into()),
                 ..Default::default()
             }],
             ..Default::default()

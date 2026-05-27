@@ -676,10 +676,7 @@ fn filter_incremental_response(
                 partition: p.partition_index,
             };
             let aborted_hash = hash_aborted_transactions(p.aborted_transactions.as_ref());
-            let records_present = p
-                .records
-                .as_ref()
-                .is_some_and(|b| <RecordBatch as Encode>::encoded_len(b, 0) > 0);
+            let records_present = p.records.as_ref().is_some_and(|b| b.payload_len() > 0);
             let changed = match cached.get(&key) {
                 Some(prev) => {
                     records_present
