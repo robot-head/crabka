@@ -1,21 +1,26 @@
 //! `DescribeCluster` (`api_key=60`). Pure projection over the metadata
 //! image. Authorizes `Describe` on `Cluster("kafka-cluster")`; on Deny
 //! returns a whole-response `error_code = CLUSTER_AUTHORIZATION_FAILED` (31).
-//! The `cluster_authorized_operations` field is set to `i32::MIN`
-//! (Apache Kafka's "not present" sentinel).
+//!
+//! KIP-430: when the request's `include_cluster_authorized_operations`
+//! flag is set, the response carries a bitfield of the cluster
+//! operations the principal is authorized for; otherwise the field is
+//! left at `i32::MIN` (Kafka's "not present" sentinel).
 
 use bytes::{Bytes, BytesMut};
 
-use crabka_metadata::AclOperation;
-use crabka_protocol::Encode;
+use crabka_metadata::{AclOperation, ResourceType};
+use crabka_protocol::owned::describe_cluster_request::DescribeClusterRequest;
 use crabka_protocol::owned::describe_cluster_response::{
     DescribeClusterBroker, DescribeClusterResponse,
 };
+use crabka_protocol::{Decode, Encode};
 
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 use crate::broker::Broker;
 use crate::codes;
 use crate::error::BrokerError;
+use crate::handlers::authorized_operations::authorized_operations_bits;
 
 // `async` for symmetry with other handlers that do await `controller.submit_change`;
 // DescribeCluster is read-only so it never suspends.
@@ -24,10 +29,13 @@ pub(crate) async fn handle(
     broker: &Broker,
     version: i16,
     _correlation_id: i32,
-    _req_bytes: &[u8],
+    req_bytes: &[u8],
     ctx: &crate::handlers::RequestContext<'_>,
 ) -> Result<Bytes, BrokerError> {
     let image = broker.controller.current_image();
+
+    let mut cur: &[u8] = req_bytes;
+    let req = DescribeClusterRequest::decode(&mut cur, version)?;
 
     // ── slice-13 ACL preamble ────────────────────────────────────────
     // Whole-request Cluster Describe gate. On Deny, return
@@ -70,13 +78,28 @@ pub(crate) async fn handle(
         })
         .collect();
 
+    // KIP-430: only populate the bitfield when the client asked for it;
+    // otherwise leave the wire-default `i32::MIN` ("not present") sentinel.
+    let cluster_authorized_operations = if req.include_cluster_authorized_operations {
+        authorized_operations_bits(
+            broker.config.authorizer.as_ref(),
+            &image,
+            ctx.principal,
+            ctx.peer,
+            ResourceType::Cluster,
+            "kafka-cluster",
+        )
+    } else {
+        i32::MIN
+    };
+
     let resp = DescribeClusterResponse {
         error_code: codes::NONE,
         error_message: None,
         cluster_id: image.cluster_id().to_string(),
         controller_id,
         brokers,
-        cluster_authorized_operations: i32::MIN,
+        cluster_authorized_operations,
         throttle_time_ms: 0,
         ..Default::default()
     };

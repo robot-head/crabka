@@ -243,7 +243,7 @@ implements it today. Legend: ✅ implemented · ⚠️ partial · ❌ not yet ·
 | `CreateAcls` / `DeleteAcls` / `DescribeAcls` (KIP-140) | ✅ |
 | Multiple super-users (`super.users`-style) | ✅ |
 | Host filters | ✅ |
-| Authorized-operations in describe responses (KIP-430) | ❌ |
+| Authorized-operations in describe responses (KIP-430) | ✅ |
 
 ### Quotas
 
@@ -403,7 +403,7 @@ KIPs. Legend: ✅ implemented · ⚠️ partial · ❌ not yet · ⛔ out of sco
 | [KIP-554](https://cwiki.apache.org/confluence/display/KAFKA/KIP-554) | Broker-side SCRAM config API | ✅ |
 | [KIP-700](https://cwiki.apache.org/confluence/display/KAFKA/KIP-700) | `DescribeCluster` API | ✅ |
 | [KIP-516](https://cwiki.apache.org/confluence/display/KAFKA/KIP-516) | Topic identifiers | ⚠️ |
-| [KIP-430](https://cwiki.apache.org/confluence/display/KAFKA/KIP-430) | Authorized operations in describe responses | ❌ |
+| [KIP-430](https://cwiki.apache.org/confluence/display/KAFKA/KIP-430) | Authorized operations in describe responses | ✅ |
 
 ### Security & authentication
 
