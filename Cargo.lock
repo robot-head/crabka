@@ -1397,6 +1397,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "crabka-remote-storage-topic"
+version = "0.1.1"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "crabka-remote-storage",
+ "futures-util",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "crabka-security"
 version = "0.1.1"
 dependencies = [

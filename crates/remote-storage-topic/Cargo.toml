@@ -1,0 +1,25 @@
+[package]
+name = "crabka-remote-storage-topic"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version = "1.95.0"
+description = "Topic-backed RemoteLogMetadataManager for Crabka (KIP-405 production default, slice 48f)"
+
+[lints]
+workspace = true
+
+[dependencies]
+crabka-remote-storage = { version = "0.1", path = "../remote-storage" }
+async-trait = { workspace = true }
+bytes = { workspace = true }
+futures-util = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync", "rt", "macros"] }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util", "time"] }
