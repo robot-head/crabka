@@ -3964,3 +3964,93 @@ introspection metadata).
 - **README + STATUS.** `Tiered storage (KIP-405)` row flipped from ❌
   to ⚠️ in both the feature matrix and the KIP table; remaining ⚠️
   reflects the in-memory RLMM gap (48f).
+
+## Slice — Authorized operations in describe responses (KIP-430) (2026-05-27)
+
+- **Goal.** Surface the `authorized_operations` bitfield on the three
+  describe-style responses Kafka decorates with it: `Metadata` (per-
+  topic v8+, plus the cluster-level v8-10 carry-along), `DescribeCluster`
+  (cluster-level all versions), and `DescribeGroups` (per-group v3+).
+  The bits report which Kafka-supported operations the connecting
+  principal is authorized for on the given resource, as a `1 << op.code()`
+  field; the field stays at `i32::MIN` ("not present") unless the
+  request opts in via the matching `include_*` flag. Closes the last
+  ❌ in the Authorization section of the README feature matrix.
+- **Helper (`crates/broker/src/handlers/authorized_operations.rs`).**
+  Pure-logic `supported_operations(rt) -> &'static [AclOperation]`
+  enumerating the operations whose Allow decision contributes to the
+  bitfield per resource, mirroring Kafka's
+  `AclEntry.supportedOperations(...)`:
+  - Topic: Read, Write, Create, Delete, Alter, Describe,
+    DescribeConfigs, AlterConfigs.
+  - Group: Read, Describe, Delete.
+  - Cluster: Create, Alter, Describe, ClusterAction, AlterConfigs,
+    DescribeConfigs, IdempotentWrite.
+  - TransactionalId: Describe, Write.
+  - DelegationToken: Describe.
+
+  `authorized_operations_bits(authorizer, image, principal, host, rt, name)`
+  loops the set, asks the broker's pluggable `Authorizer`, and ORs
+  `1 << operation_to_wire(op)` into the bitfield on Allow. Bit positions
+  reuse `handlers::acl_wire::operation_to_wire`, the same `i8`
+  discriminants the ACL handlers serialize, so JVM clients read the
+  field unchanged.
+- **Handler wiring.**
+  - `metadata.rs`: when `req.include_topic_authorized_operations` is
+    set, each Allow `MetadataResponseTopic` row carries the per-topic
+    bitfield. When `req.include_cluster_authorized_operations` is set,
+    the top-level `cluster_authorized_operations` carries the cluster
+    bitfield (the codec drops this field outside v8-10). Default
+    (flags absent) leaves the schema-level `i32::MIN` sentinel.
+  - `describe_cluster.rs`: handler now decodes the request body to
+    read `include_cluster_authorized_operations`. Populates the
+    cluster bitfield when set; sentinel otherwise. (The handler
+    previously ignored its `req_bytes`.)
+  - `describe_groups.rs`: per-`DescribedGroup` row populates
+    `authorized_operations` from the Group resource bitfield when
+    `req.include_authorized_operations` is set. Error rows
+    (`GROUP_AUTHORIZATION_FAILED`, `GROUP_ID_NOT_FOUND`) keep the
+    sentinel by default — no Allow path means no bits to report.
+- **Tests.**
+  - 11 helper unit tests covering: supported-op sets per resource match
+    Kafka's; `AllowAllAuthorizer` yields the full mask on every
+    resource type; `SimpleAclAuthorizer` with no ACLs yields 0;
+    super-user gets the full mask; an `Allow Read` ACL on Topic /
+    Group sets only Read|Describe (implication table preserved);
+    `Deny` collapses both Read and the Describe-via-implication bit;
+    bit positions equal Kafka's `AclOperation.code()`.
+  - 7 broker integration tests (`tests/authorized_operations.rs`)
+    against an in-process plaintext broker with `ANONYMOUS` as the
+    super-user:
+    - Each of Metadata-per-topic / DescribeCluster /
+      DescribeGroups asserts the wire-default `i32::MIN` when the
+      `include_*` flag is *not* set.
+    - Same three endpoints assert the full per-resource mask when
+      the flag is set (super-user driver → every supported bit).
+    - Metadata pinned to v9 round-trips the cluster-level field
+      (which the codec drops outside v8-10) and confirms the full
+      cluster mask on opt-in.
+- **No new wire codes / records.** Every required field already lived
+  in the codegen'd `MetadataRequest` / `MetadataResponse` /
+  `DescribeClusterRequest` / `DescribeClusterResponse` /
+  `DescribeGroupsRequest` / `DescribeGroupsResponse` structs from prior
+  schema vendoring; only the handlers were dark.
+- **README.** `Authorized-operations in describe responses (KIP-430)`
+  row flipped ❌ → ✅ in both the feature matrix and the KIP table.
+- **Workspace clippy `-D warnings`, fmt, broker lib (565 tests) + new
+  `authorized_operations` integration suite (7 tests)** all green.
+- **Out of scope.**
+  - The TransactionalId and DelegationToken bitfields are *computable*
+    by the helper but aren't yet surfaced on any response — those
+    KIPs (transactional-id describe, delegation-token describe)
+    don't expose an authorized-operations field today. The helper's
+    coverage of those resource types is groundwork for if/when they
+    grow one.
+  - Per-resource batch-authorize fast paths (Kafka's
+    `Authorizer.authorize(List<...>)`). The helper iterates
+    operation-by-operation against the single-shot trait; for the
+    common 7-op cluster case that's seven Authorize calls per
+    describe response. Acceptable for the current authorizers
+    (`AllowAll` is constant-time; `SimpleAcl` walks a small ACL list;
+    `OPA` already caches decisions). Bulk authorization is a
+    future-Authorizer extension, not a KIP-430 requirement.

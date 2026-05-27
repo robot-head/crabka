@@ -1,6 +1,11 @@
 //! `DescribeGroups` (`api_key=15`). One entry per requested `group_id`.
 //! Members include their current assignment bytes; the `protocol_type` is
 //! reported from the group's stored value (defaulting to "consumer").
+//!
+//! KIP-430: when `include_authorized_operations` is set on the request,
+//! each Allow row carries a bitfield of the group operations the
+//! principal may perform; rows that auth-fail or aren't found stay at
+//! the `i32::MIN` "not present" sentinel.
 
 use bytes::{Bytes, BytesMut};
 
@@ -16,6 +21,7 @@ use crate::broker::Broker;
 use crate::codes;
 use crate::coordinator::group::GroupState;
 use crate::error::BrokerError;
+use crate::handlers::authorized_operations::authorized_operations_bits;
 
 pub(crate) async fn handle(
     broker: &Broker,
@@ -71,6 +77,21 @@ pub(crate) async fn handle(
                 ..Default::default()
             })
             .collect();
+        // KIP-430: bitfield of group operations alice@host is authorized
+        // for, when the request opted in. Otherwise the wire-default
+        // `i32::MIN` "not present" sentinel is preserved.
+        let authorized = if req.include_authorized_operations {
+            authorized_operations_bits(
+                broker.config.authorizer.as_ref(),
+                &image,
+                ctx.principal,
+                ctx.peer,
+                ResourceType::Group,
+                snap.group_id.as_str(),
+            )
+        } else {
+            i32::MIN
+        };
         groups.push(DescribedGroup {
             group_id: snap.group_id,
             protocol_type: snap.protocol_type.unwrap_or_else(|| "consumer".into()),
@@ -78,6 +99,7 @@ pub(crate) async fn handle(
             group_state: state_str.into(),
             error_code: codes::NONE,
             members,
+            authorized_operations: authorized,
             ..Default::default()
         });
     }

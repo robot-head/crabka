@@ -54,6 +54,9 @@ pub(crate) mod alter_partition_reassignments;
 pub(crate) mod alter_replica_log_dirs;
 pub(crate) mod alter_user_scram_credentials;
 pub(crate) mod api_versions;
+// KIP-430: authorized-operations bitfield helper used by metadata,
+// describe_cluster, describe_groups when the request opts in.
+pub(crate) mod authorized_operations;
 pub(crate) mod broker_heartbeat;
 pub(crate) mod create_acls;
 pub(crate) mod create_delegation_token;

@@ -5,7 +5,7 @@
 
 use bytes::{Bytes, BytesMut};
 
-use crabka_metadata::AclOperation;
+use crabka_metadata::{AclOperation, ResourceType};
 use crabka_protocol::owned::metadata_request::MetadataRequest;
 use crabka_protocol::owned::metadata_response::{
     MetadataResponse, MetadataResponseBroker, MetadataResponsePartition, MetadataResponseTopic,
@@ -17,6 +17,7 @@ use crate::authorizer::{AuthorizationResult, authorize_topics};
 use crate::broker::Broker;
 use crate::codes;
 use crate::error::BrokerError;
+use crate::handlers::authorized_operations::authorized_operations_bits;
 
 #[allow(clippy::too_many_lines)] // T12 ACL preamble + asymmetric loop
 #[allow(clippy::unused_async)] // Handler is wholly sync but we keep the
@@ -150,12 +151,28 @@ pub(crate) async fn handle(
                         ..Default::default()
                     })
                     .collect();
+                // KIP-430: per-topic bitfield, only when the client opted
+                // in. Schema gates the field on version (v8+) so the
+                // value is harmlessly dropped on the wire below v8.
+                let topic_authorized_operations = if req.include_topic_authorized_operations {
+                    authorized_operations_bits(
+                        broker.config.authorizer.as_ref(),
+                        &image,
+                        ctx.principal,
+                        ctx.peer,
+                        ResourceType::Topic,
+                        name.as_str(),
+                    )
+                } else {
+                    i32::MIN
+                };
                 topics_out.push(MetadataResponseTopic {
                     error_code: codes::NONE,
                     name: Some(name.clone()),
                     topic_id: WireUuid(t.topic_id.into_bytes()),
                     partitions,
                     is_internal: false,
+                    topic_authorized_operations,
                     ..Default::default()
                 });
             }
@@ -169,12 +186,30 @@ pub(crate) async fn handle(
         .and_then(|id| i32::try_from(id).ok())
         .unwrap_or(-1);
 
+    // KIP-430: the cluster-level field only exists on the wire for v8-10;
+    // the codegen drops it on other versions. Compute when the opt-in
+    // flag is set so the response carries the value on the in-range
+    // versions, leaving the default `i32::MIN` otherwise.
+    let cluster_authorized_operations = if req.include_cluster_authorized_operations {
+        authorized_operations_bits(
+            broker.config.authorizer.as_ref(),
+            &image,
+            ctx.principal,
+            ctx.peer,
+            ResourceType::Cluster,
+            "kafka-cluster",
+        )
+    } else {
+        i32::MIN
+    };
+
     let resp = MetadataResponse {
         throttle_time_ms: 0,
         brokers,
         cluster_id: Some(image.cluster_id().to_string()),
         controller_id,
         topics: topics_out,
+        cluster_authorized_operations,
         ..Default::default()
     };
     tracing::info!(
