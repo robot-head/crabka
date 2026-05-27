@@ -7,7 +7,7 @@
 **Incomplete / deferred steps (out-of-scope follow-ups):**
 
 - AlterReplicaLogDirs move + future-log catch-up (closed by 2cba97a "Intra-broker log-dir reassignment (AlterReplicaLogDirs, KIP-113)")
-- total_bytes / usable_bytes via statvfs
+- total_bytes / usable_bytes via statvfs (closed by claude/funny-carson-4ECQg-statvfs: rustix::fs::statvfs in handlers/describe_log_dirs.rs)
 - kafka-reassign-partitions per-replica log_dirs
 - Offline-dir / KAFKA_STORAGE_ERROR handling
 - Operator JBOD surface is slice 46
