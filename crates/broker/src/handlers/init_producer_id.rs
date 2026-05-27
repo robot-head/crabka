@@ -45,6 +45,7 @@ pub(crate) async fn handle(
     let controller = broker.controller.clone();
     let log_dirs = broker.config.all_log_dirs();
     let log_config = broker.config.log_config.clone();
+    let log_dir_status = broker.log_dir_status.clone();
 
     let mut cur: &[u8] = req_bytes;
     let req = InitProducerIdRequest::decode(&mut cur, version)?;
@@ -122,6 +123,7 @@ pub(crate) async fn handle(
                     txn_partition,
                     &log_dirs,
                     &log_config,
+                    &log_dir_status,
                 )
                 .map_err(BrokerError::Txn)?;
                 handle_transactional(&coord, tid, &req).await?

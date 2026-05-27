@@ -455,7 +455,13 @@ mod tests {
         let part_dir = log_dir::partition_dir(log_dir, topic, partition);
         std::fs::create_dir_all(&part_dir).unwrap();
         let log = Log::open(&part_dir, LogConfig::default()).unwrap();
-        crate::broker::spawn_partition(topic.to_string(), partition, log_dir.to_path_buf(), log)
+        crate::broker::spawn_partition(
+            topic.to_string(),
+            partition,
+            log_dir.to_path_buf(),
+            log,
+            crate::log_dir_status::LogDirRegistry::default(),
+        )
     }
 
     #[tokio::test]

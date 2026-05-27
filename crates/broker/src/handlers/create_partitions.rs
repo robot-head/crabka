@@ -36,6 +36,7 @@ pub(crate) async fn handle(
     let partitions_map = broker.partitions.clone();
     let log_dirs = broker.config.all_log_dirs();
     let log_config = broker.config.log_config.clone();
+    let log_dir_status = broker.log_dir_status.clone();
 
     let image = controller.current_image();
 
@@ -170,9 +171,14 @@ pub(crate) async fn handle(
                     if !replicas.contains(&node_id) {
                         continue;
                     }
-                    if let Err(e) =
-                        materialize_partition(&partitions_map, &t.name, *p, &log_dirs, &log_config)
-                    {
+                    if let Err(e) = materialize_partition(
+                        &partitions_map,
+                        &t.name,
+                        *p,
+                        &log_dirs,
+                        &log_config,
+                        &log_dir_status,
+                    ) {
                         tracing::error!(
                             topic = %t.name, partition = *p, error = %e,
                             "CreatePartitions: materialize after quorum commit failed"

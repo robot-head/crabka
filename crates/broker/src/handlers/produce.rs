@@ -42,6 +42,7 @@ pub(crate) async fn handle(
     let controller = broker.controller.clone();
     let producer_state = broker.producer_state.clone();
     let txn_coordinator = broker.txn_coordinator.clone();
+    let log_dir_status = broker.log_dir_status.clone();
     let mut cur: &[u8] = req_bytes;
     let req: ProduceRequest = if (0..3).contains(&version) {
         crabka_protocol::kafka_3_6_2::owned::produce_request::ProduceRequest::decode(
@@ -196,6 +197,7 @@ pub(crate) async fn handle(
                     &partitions,
                     &txn_coordinator,
                     &producer_state,
+                    &log_dir_status,
                 ))
                 .await?;
             let micros = u64::try_from(monitor.cumulative().total_poll_duration.as_micros())
@@ -263,6 +265,7 @@ async fn process_partition(
     partitions: &Arc<DashMap<(String, i32), Arc<Partition>>>,
     txn_coordinator: &Arc<crate::txn::coordinator::TxnCoordinator>,
     producer_state: &Arc<crate::producer_state::ProducerState>,
+    log_dir_status: &crate::log_dir_status::LogDirRegistry,
 ) -> Result<PartitionProduceResponse, BrokerError> {
     let idx = part_data.index;
     let mut out = PartitionProduceResponse {
@@ -309,6 +312,18 @@ async fn process_partition(
         out.error_code = codes::UNKNOWN_TOPIC_OR_PARTITION;
         return Ok(out);
     };
+
+    // KIP-113 offline-dir handling: if the partition's owning log dir
+    // has been flipped offline (either by the startup probe or by a
+    // runtime fsync failure on any partition in this dir), refuse the
+    // append immediately with KAFKA_STORAGE_ERROR. The partition's
+    // writer task would otherwise queue the work, fail at fsync, and
+    // bounce the same error back via the ack — same outcome, more
+    // latency and a wasted disk attempt.
+    if log_dir_status.is_offline(&part.log_dir.load()) {
+        out.error_code = codes::KAFKA_STORAGE_ERROR;
+        return Ok(out);
+    }
 
     // Stamp the current leader epoch onto the batch — this becomes
     // the `partition_leader_epoch` carried on the wire and used by

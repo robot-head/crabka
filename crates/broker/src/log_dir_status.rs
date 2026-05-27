@@ -122,6 +122,44 @@ impl LogDirRegistry {
             .cloned()
             .collect()
     }
+
+    /// Runtime offline-flip: mark `dir` offline with `reason` because a
+    /// live write / fsync to it just failed. Idempotent — calling this
+    /// on an already-offline dir is a no-op (the original reason
+    /// stands). Calling this on a dir that was never probed inserts a
+    /// fresh offline entry, which is the right thing for partitions
+    /// materialized on a dir the operator added after broker start
+    /// (not supported yet, but the registry shape is friendly).
+    ///
+    /// Returns `true` when the call actually flipped the dir
+    /// (previously online or unknown) — useful for logging the
+    /// transition exactly once.
+    pub fn mark_offline(&self, dir: &Path, reason: &str) -> bool {
+        // `entry()` would short-circuit on Vacant, but the existing
+        // entry's value is `Option<String>`; we want to flip `None` →
+        // `Some(reason)` without overwriting a pre-existing
+        // `Some(other_reason)`.
+        let flipped = if let Some(mut entry) = self.inner.get_mut(dir) {
+            if entry.value().is_some() {
+                return false;
+            }
+            *entry.value_mut() = Some(reason.to_owned());
+            true
+        } else {
+            self.inner
+                .insert(dir.to_path_buf(), Some(reason.to_owned()));
+            true
+        };
+        if flipped {
+            tracing::error!(
+                log_dir = %dir.display(),
+                reason = %reason,
+                "log dir flipped to OFFLINE at runtime; subsequent produce/fetch on partitions \
+                 in this dir will return KAFKA_STORAGE_ERROR until broker restart",
+            );
+        }
+        flipped
+    }
 }
 
 impl std::fmt::Debug for LogDirRegistry {
@@ -238,5 +276,57 @@ mod tests {
     fn unknown_dir_is_not_offline() {
         let reg = LogDirRegistry::default();
         assert!(!reg.is_offline(Path::new("/never/probed/anywhere")));
+    }
+
+    /// Runtime flip on a previously-online dir: registry transitions
+    /// `None` → `Some(reason)`, `is_offline` returns `true`,
+    /// `offline()` includes the new entry, and `online_subset` no
+    /// longer contains the dir. `mark_offline` returns `true` to
+    /// signal the actual transition happened.
+    #[test]
+    fn mark_offline_flips_online_dir_and_returns_true() {
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
+        let reg = LogDirRegistry::probe(std::slice::from_ref(&dir));
+        assert!(!reg.is_offline(&dir));
+
+        let flipped = reg.mark_offline(&dir, "EIO from segment fsync");
+        assert!(flipped, "first mark_offline must flip and return true");
+
+        assert!(reg.is_offline(&dir));
+        let offline = reg.offline();
+        assert_eq!(offline.len(), 1);
+        assert_eq!(offline[0].0, dir);
+        assert_eq!(offline[0].1, "EIO from segment fsync");
+        assert!(reg.online_subset(&[dir]).is_empty());
+    }
+
+    /// `mark_offline` is idempotent: a second call returns `false` and
+    /// the original reason wins. Lets callers log the offline-flip
+    /// exactly once per dir even if a hundred partitions on the same
+    /// dir all hit fsync errors simultaneously.
+    #[test]
+    fn mark_offline_is_idempotent() {
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
+        let reg = LogDirRegistry::probe(std::slice::from_ref(&dir));
+        let first = reg.mark_offline(&dir, "first reason");
+        let second = reg.mark_offline(&dir, "second reason");
+        assert!(first, "first call must flip");
+        assert!(!second, "second call must be a no-op");
+        assert_eq!(reg.offline()[0].1, "first reason");
+    }
+
+    /// Marking an unknown dir (never probed) offline still records
+    /// the entry — useful when a partition was materialized on a dir
+    /// that the broker hasn't probed (operator added the dir
+    /// post-start; not supported yet but the registry is
+    /// future-proofed).
+    #[test]
+    fn mark_offline_on_unknown_dir_inserts_entry() {
+        let reg = LogDirRegistry::default();
+        let ghost = Path::new("/tmp/crabka-ghost-dir");
+        assert!(reg.mark_offline(ghost, "synthetic test"));
+        assert!(reg.is_offline(ghost));
     }
 }

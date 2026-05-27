@@ -93,6 +93,7 @@ pub async fn bootstrap(
         OFFSETS_PARTITION,
         owning_dir,
         log,
+        log_dir_status.clone(),
     );
     partitions.insert((OFFSETS_TOPIC.into(), OFFSETS_PARTITION), partition);
     Ok(())
