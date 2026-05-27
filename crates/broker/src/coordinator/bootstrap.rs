@@ -34,9 +34,20 @@ pub async fn bootstrap(
     controller: &Arc<ControllerHandle>,
     partitions: &Arc<dashmap::DashMap<(String, i32), Arc<Partition>>>,
     group_manager: &GroupManager,
+    log_dir_status: &crate::log_dir_status::LogDirRegistry,
 ) -> Result<(), BrokerError> {
-    let topic_dir =
-        log_dir::place_partition_dir(&config.all_log_dirs(), OFFSETS_TOPIC, OFFSETS_PARTITION);
+    // KIP-113 offline-dir handling: exclude dirs flagged offline by the
+    // startup probe; placing `__consumer_offsets-N` on a known-bad dir
+    // would fail immediately at `Log::open` below and leave the broker
+    // unable to bootstrap the group coordinator.
+    let placement_dirs = log_dir_status.online_subset(&config.all_log_dirs());
+    if placement_dirs.is_empty() {
+        return Err(BrokerError::Io(std::io::Error::other(
+            "every configured log.dir failed the startup writability probe; \
+             cannot bootstrap the group-coordinator partition",
+        )));
+    }
+    let topic_dir = log_dir::place_partition_dir(&placement_dirs, OFFSETS_TOPIC, OFFSETS_PARTITION);
     std::fs::create_dir_all(&topic_dir)?;
     let log = crabka_log::Log::open(&topic_dir, config.log_config.clone())?;
     let owning_dir = topic_dir
@@ -239,7 +250,8 @@ mod tests {
         let partitions: Arc<dashmap::DashMap<(String, i32), Arc<Partition>>> =
             Arc::new(dashmap::DashMap::new());
         let gm = GroupManager::new();
-        bootstrap(&config, &controller, &partitions, &gm)
+        let log_dir_status = crate::log_dir_status::LogDirRegistry::probe(&config.all_log_dirs());
+        bootstrap(&config, &controller, &partitions, &gm, &log_dir_status)
             .await
             .unwrap();
         let topic_dir = log_dir::partition_dir(&config.log_dir, OFFSETS_TOPIC, OFFSETS_PARTITION);
