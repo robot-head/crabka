@@ -56,7 +56,16 @@ pub const INVALID_TXN_STATE: i16 = 24;
 pub const INVALID_TXN_TIMEOUT: i16 = 48;
 pub const CONCURRENT_TRANSACTIONS: i16 = 49;
 pub const TRANSACTION_COORDINATOR_FENCED: i16 = 50;
-pub const STALE_MEMBER_EPOCH: i16 = 82;
+
+/// `FENCED_INSTANCE_ID` (82, KIP-345) — another client is currently pinned
+/// to the same `group.instance.id`. The losing client must exit; the broker
+/// fences it across `JoinGroup`, `SyncGroup`, `Heartbeat`, `OffsetCommit`,
+/// `TxnOffsetCommit`, and `LeaveGroup`.
+pub const FENCED_INSTANCE_ID: i16 = 82;
+
+/// `STALE_MEMBER_EPOCH` (113, KIP-848) — the supplied member epoch is older
+/// than the coordinator's current epoch for the consumer group member.
+pub const STALE_MEMBER_EPOCH: i16 = 113;
 
 // Slice 11 additions — admin handler codes.
 /// `INVALID_CONFIG` (40) — a config key/value pair is invalid or unknown.

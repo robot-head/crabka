@@ -14,7 +14,7 @@ use crabka_protocol::{Decode, Encode};
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 use crate::broker::Broker;
 use crate::codes;
-use crate::coordinator::group::{GroupState, Member};
+use crate::coordinator::group::{AddMemberOutcome, GroupState, Member};
 use crate::error::BrokerError;
 
 const SUPPORTED_PROTOCOL: &str = "range";
@@ -75,7 +75,42 @@ pub(crate) async fn handle(
     }
 
     // 2. Empty member_id on first join → broker generates one (KIP-394).
+    //    KIP-345: for static members, derive the bootstrap id from the
+    //    instance id so debug logs are readable, and check the
+    //    static-members index first — if the instance id is already
+    //    pinned, the broker can skip the bootstrap dance and use the
+    //    existing slot's member_id.
     if req.member_id.is_empty() {
+        if let Some(instance_id) = req.group_instance_id.as_deref() {
+            // If the static member already has a slot, hand its current
+            // `member_id` back so the client can immediately re-Join with
+            // it. (Kafka's bootstrap dance still requires one round-trip,
+            // but the assigned id is stable across reconnects.)
+            if let Some(existing) = broker.group_manager.find(&req.group_id) {
+                let g = existing.state.lock().await;
+                if let Some(mid) = g.current_member_id_for_instance(instance_id) {
+                    let id = mid.to_string();
+                    drop(g);
+                    return encode(
+                        version,
+                        &JoinGroupResponse {
+                            error_code: codes::MEMBER_ID_REQUIRED,
+                            member_id: id,
+                            ..Default::default()
+                        },
+                    );
+                }
+            }
+            let new_id = format!("{instance_id}-{}", Uuid::new_v4());
+            return encode(
+                version,
+                &JoinGroupResponse {
+                    error_code: codes::MEMBER_ID_REQUIRED,
+                    member_id: new_id,
+                    ..Default::default()
+                },
+            );
+        }
         let new_id = format!("crabka-{}", Uuid::new_v4());
         return encode(
             version,
@@ -89,7 +124,29 @@ pub(crate) async fn handle(
 
     let handle = broker.group_manager.get_or_create(&req.group_id);
 
-    // 3. Add member, transition to PreparingRebalance, set deadline.
+    // 3. KIP-345 fence check. If the request carries a `group_instance_id`
+    //    that's already pinned to a *different* live member id, reject
+    //    with `FENCED_INSTANCE_ID` — another client owns this slot.
+    if let Some(instance_id) = req.group_instance_id.as_deref() {
+        let g = handle.state.lock().await;
+        if let Some(pinned) = g.current_member_id_for_instance(instance_id)
+            && pinned != req.member_id
+        {
+            drop(g);
+            return encode(
+                version,
+                &JoinGroupResponse {
+                    error_code: codes::FENCED_INSTANCE_ID,
+                    member_id: req.member_id,
+                    ..Default::default()
+                },
+            );
+        }
+    }
+
+    // 4. Add member. The outcome distinguishes a true join (rebalance
+    //    required) from a static-rejoin into a `Stable` group (skip the
+    //    rebalance and return the cached assignment immediately).
     let protocol_md = req
         .protocols
         .iter()
@@ -102,20 +159,61 @@ pub(crate) async fn handle(
     let rebalance_timeout = Duration::from_millis(
         u64::try_from(req.rebalance_timeout_ms).unwrap_or(DEFAULT_REBALANCE_TIMEOUT_MS),
     );
+    let static_rejoin_to_stable;
     {
         let mut g = handle.state.lock().await;
         g.protocol_type = Some(req.protocol_type.clone());
-        g.add_member(Member::new(
-            req.member_id.clone(),
-            String::new(), // client_id not threaded through the body; header-level only
-            String::new(), // client_host; unused in MVP
-            session_timeout,
-            rebalance_timeout,
-            protocol_md,
-        ));
-        if g.rebalance_deadline.is_none() {
+        let pre_state = g.state;
+        let outcome = g.add_member(
+            Member::new(
+                req.member_id.clone(),
+                String::new(), // client_id not threaded through the body; header-level only
+                String::new(), // client_host; unused in MVP
+                session_timeout,
+                rebalance_timeout,
+                protocol_md,
+            )
+            .with_instance_id(req.group_instance_id.clone()),
+        );
+        static_rejoin_to_stable = matches!(outcome, AddMemberOutcome::StaticRejoin { .. })
+            && matches!(pre_state, GroupState::Stable);
+        if !static_rejoin_to_stable && g.rebalance_deadline.is_none() {
             g.rebalance_deadline = Some(std::time::Instant::now() + rebalance_timeout);
         }
+    }
+
+    // 5. KIP-345 headline path: a static rejoin into a `Stable` group
+    //    skips the rebalance wait entirely. Build the response from the
+    //    preserved group state — the new session reclaims the cached
+    //    assignment and the generation_id does NOT advance.
+    if static_rejoin_to_stable {
+        let g = handle.state.lock().await;
+        let is_leader = g.leader_id.as_deref() == Some(&req.member_id);
+        let members: Vec<JoinGroupResponseMember> = if is_leader {
+            g.members
+                .values()
+                .map(|m| JoinGroupResponseMember {
+                    member_id: m.member_id.clone(),
+                    group_instance_id: m.group_instance_id.clone(),
+                    metadata: m.protocol_metadata.clone(),
+                    ..Default::default()
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let resp = JoinGroupResponse {
+            error_code: codes::NONE,
+            generation_id: g.generation_id,
+            protocol_type: g.protocol_type.clone(),
+            protocol_name: g.protocol_name.clone(),
+            leader: g.leader_id.clone().unwrap_or_default(),
+            member_id: req.member_id,
+            members,
+            throttle_time_ms: 0,
+            ..Default::default()
+        };
+        return encode(version, &resp);
     }
 
     // 4. Wait on the per-group join-complete notify.
@@ -149,6 +247,7 @@ pub(crate) async fn handle(
                 .values()
                 .map(|m| JoinGroupResponseMember {
                     member_id: m.member_id.clone(),
+                    group_instance_id: m.group_instance_id.clone(),
                     metadata: m.protocol_metadata.clone(),
                     ..Default::default()
                 })

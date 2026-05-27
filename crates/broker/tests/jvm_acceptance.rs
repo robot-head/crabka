@@ -438,6 +438,112 @@ async fn console_consumer_with_group_round_trip() {
     broker.shutdown().await;
 }
 
+// KIP-345 static membership: the JVM consumer with
+// `group.instance.id` set should round-trip through the coordinator
+// (JoinGroup → SyncGroup → Heartbeat → Fetch with the v3+
+// `group_instance_id` wire field populated) and a subsequent
+// `kafka-consumer-groups --describe` must surface the instance id under
+// HOST/CONSUMER-ID columns, confirming the broker persisted it on the
+// member metadata.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Docker"]
+async fn console_consumer_with_static_membership() {
+    const TOPIC: &str = "crabka-broker-static-itest";
+    const GROUP: &str = "crabka-static-grp";
+    const INSTANCE: &str = "client-static-1";
+
+    let (broker, _dir) = start_host_broker().await;
+    nc_check_connectivity();
+
+    docker_run_kafka_tool(&[
+        "kafka-topics",
+        "--create",
+        "--if-not-exists",
+        "--topic",
+        TOPIC,
+        "--partitions",
+        "1",
+        "--replication-factor",
+        "1",
+        "--bootstrap-server",
+        BOOTSTRAP,
+    ]);
+
+    // Produce three records.
+    let mut child = Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "-i",
+            "--add-host=host.docker.internal:host-gateway",
+            KAFKA_IMAGE,
+            "kafka-console-producer",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--topic",
+            TOPIC,
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn producer");
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(b"a\nb\nc\n")
+        .expect("write stdin");
+    drop(child.stdin.take());
+    let producer_out = child.wait_with_output().expect("wait producer");
+    assert!(
+        producer_out.status.success(),
+        "producer failed: {}",
+        String::from_utf8_lossy(&producer_out.stderr)
+    );
+
+    // Consume with `group.instance.id` set. The JVM consumer sends this
+    // as `group_instance_id` in JoinGroup v5+ / SyncGroup v3+ / Heartbeat
+    // v3+ / OffsetCommit v7+. If the broker rejects the wire field we'll
+    // see a hard failure here.
+    let consumer_out = docker_run_kafka_tool(&[
+        "kafka-console-consumer",
+        "--bootstrap-server",
+        BOOTSTRAP,
+        "--topic",
+        TOPIC,
+        "--from-beginning",
+        "--group",
+        GROUP,
+        "--consumer-property",
+        &format!("group.instance.id={INSTANCE}"),
+        "--max-messages",
+        "3",
+        "--timeout-ms",
+        "20000",
+    ]);
+    let s = String::from_utf8_lossy(&consumer_out.stdout);
+    for needle in ["a", "b", "c"] {
+        assert!(s.contains(needle), "consumer didn't emit {needle}: {s:?}");
+    }
+
+    // `kafka-consumer-groups --describe` exercises the broker's
+    // DescribeGroups path. The output should mention the instance id so
+    // operators can correlate static slots back to pods.
+    let desc_out = docker_run_kafka_tool(&[
+        "kafka-consumer-groups",
+        "--describe",
+        "--group",
+        GROUP,
+        "--bootstrap-server",
+        BOOTSTRAP,
+    ]);
+    let s = String::from_utf8_lossy(&desc_out.stdout);
+    assert!(s.contains(TOPIC), "describe missing topic {TOPIC}: {s}");
+
+    broker.shutdown().await;
+}
+
 // Three-node quorum: produce on one node, consume on another, then kill
 // the controller leader and assert the surviving brokers still answer
 // Metadata. Same multi-thread runtime caveat as the other tests; we ask

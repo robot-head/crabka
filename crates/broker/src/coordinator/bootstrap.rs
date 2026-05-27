@@ -156,6 +156,7 @@ fn apply_group_metadata(g: &mut Group, v: GroupMetadataValue, replay_timestamp_m
     // `Member::new` so they don't immediately time out; the client will
     // re-join anyway after a coordinator restart.
     g.members.clear();
+    g.static_members.clear();
     for m in v.members {
         let session_timeout = std::time::Duration::from_millis(
             u64::try_from(m.session_timeout_ms.max(0)).unwrap_or(30_000),
@@ -170,8 +171,12 @@ fn apply_group_metadata(g: &mut Group, v: GroupMetadataValue, replay_timestamp_m
             session_timeout,
             rebalance_timeout,
             m.subscription,
-        );
+        )
+        .with_instance_id(m.group_instance_id.clone());
         member.assignment = Some(m.assignment);
+        if let Some(iid) = m.group_instance_id {
+            g.static_members.insert(iid, m.member_id.clone());
+        }
         g.members.insert(m.member_id, member);
     }
     g.state = if g.members.is_empty() {
