@@ -503,10 +503,8 @@ pub(crate) async fn handle(
             partitions,
             ..
         } => {
-            let cached_by_key: std::collections::HashMap<
-                FetchSessionKey,
-                CachedPartitionState,
-            > = partitions.iter().cloned().collect();
+            let cached_by_key: std::collections::HashMap<FetchSessionKey, CachedPartitionState> =
+                partitions.iter().cloned().collect();
             let sent = filter_incremental_response(&mut responses, &cached_by_key);
             broker
                 .fetch_session_cache
@@ -523,10 +521,9 @@ pub(crate) async fn handle(
         .metrics
         .incremental_fetch_sessions
         .set(i64::try_from(broker.fetch_session_cache.len()).unwrap_or(i64::MAX));
-    broker
-        .metrics
-        .incremental_fetch_partitions_cached
-        .set(i64::try_from(broker.fetch_session_cache.total_partitions_cached()).unwrap_or(i64::MAX));
+    broker.metrics.incremental_fetch_partitions_cached.set(
+        i64::try_from(broker.fetch_session_cache.total_partitions_cached()).unwrap_or(i64::MAX),
+    );
     let cur_evictions = broker.fetch_session_cache.evictions_total();
     let prev_evictions = broker
         .metrics

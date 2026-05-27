@@ -131,7 +131,11 @@ async fn new_session_then_incremental_filters_unchanged_partitions() {
             topics: vec![fetch_topic(
                 "t",
                 tid,
-                vec![fetch_partition(0, 0), fetch_partition(1, 0), fetch_partition(2, 0)],
+                vec![
+                    fetch_partition(0, 0),
+                    fetch_partition(1, 0),
+                    fetch_partition(2, 0),
+                ],
             )],
             ..Default::default()
         })
@@ -213,7 +217,11 @@ async fn forgotten_topics_drop_partitions_from_subscription() {
             topics: vec![fetch_topic(
                 "t",
                 tid,
-                vec![fetch_partition(0, 0), fetch_partition(1, 0), fetch_partition(2, 0)],
+                vec![
+                    fetch_partition(0, 0),
+                    fetch_partition(1, 0),
+                    fetch_partition(2, 0),
+                ],
             )],
             ..Default::default()
         })
