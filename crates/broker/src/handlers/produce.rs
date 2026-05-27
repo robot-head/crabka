@@ -20,6 +20,7 @@ use crabka_protocol::owned::produce_response::{
     PartitionProduceResponse, ProduceResponse, TopicProduceResponse,
 };
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
+use crabka_protocol::records::RecordsPayload;
 use crabka_protocol::{Decode, Encode};
 use tokio::sync::oneshot;
 
@@ -121,7 +122,7 @@ pub(crate) async fn handle(
         .topic_data
         .iter()
         .flat_map(|t| t.partition_data.iter())
-        .map(|p| p.records.as_ref().map_or(0, |r| r.encoded_len() as u64))
+        .map(|p| p.records.as_ref().map_or(0, |r| r.payload_len() as u64))
         .sum();
 
     for topic in req.topic_data {
@@ -149,7 +150,7 @@ pub(crate) async fn handle(
         if !topic_name.is_empty() {
             let mut topic_bytes: u64 = 0;
             for p in &topic.partition_data {
-                let partition_bytes = p.records.as_ref().map_or(0, |r| r.encoded_len() as u64);
+                let partition_bytes = p.records.as_ref().map_or(0, |r| r.payload_len() as u64);
                 broker
                     .metrics
                     .record_partition_produce(&topic_name, p.index, partition_bytes);
@@ -265,9 +266,17 @@ async fn process_partition(
 
     // Either there's a single decoded RecordBatch to append, or
     // the field was null / undecodable → INVALID_REQUEST.
-    let Some(mut batch) = part_data.records else {
+    let Some(payload) = part_data.records else {
         out.error_code = codes::INVALID_REQUEST;
         return Ok(out);
+    };
+    // v0/v1 up-conversion lands in a follow-up slice; for now require v2.
+    let mut batch = match payload {
+        RecordsPayload::V2(rb) => rb,
+        RecordsPayload::Legacy(_) => {
+            out.error_code = codes::INVALID_REQUEST;
+            return Ok(out);
+        }
     };
 
     let part = if topic_name.is_empty() {

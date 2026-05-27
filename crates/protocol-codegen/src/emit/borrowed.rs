@@ -223,7 +223,7 @@ fn is_struct_type(t: &str) -> bool {
 fn needs_lifetime(fields: &[crate::ir::FieldSpec], res_map: &HashMap<String, Resolution>) -> bool {
     fields.iter().any(|f| {
         let base = base_type(&f.field_type);
-        matches!(base, "string" | "bytes" | "records")  // records borrows via RecordBatchBorrowed<'a>
+        matches!(base, "string" | "bytes" | "records")  // records borrows via RecordsPayloadBorrowed<'a>
             // Inline nested struct with borrowed fields.
             || (is_struct_type(base) && !f.fields.is_empty() && needs_lifetime(&f.fields, res_map))
             // Common-struct reference: consult the resolution to see if it has '<'a>'.
@@ -1860,7 +1860,7 @@ fn encode_call(
         ("records", false) => format!(
             "{{ \
                 let mut __rb_buf = bytes::BytesMut::new(); \
-                <crate::records::RecordBatchBorrowed as crate::Encode>::encode(&{expr}, &mut __rb_buf, version)?; \
+                <crate::records::RecordsPayloadBorrowed as crate::Encode>::encode(&{expr}, &mut __rb_buf, version)?; \
                 if flex {{ put_compact_bytes(buf, &__rb_buf) }} else {{ put_bytes(buf, &__rb_buf) }} \
             }}"
         ),
@@ -1869,7 +1869,7 @@ fn encode_call(
                 None => if flex {{ put_compact_nullable_bytes(buf, None) }} else {{ put_nullable_bytes(buf, None) }}, \
                 Some(__rb) => {{ \
                     let mut __rb_buf = bytes::BytesMut::new(); \
-                    <crate::records::RecordBatchBorrowed as crate::Encode>::encode(__rb, &mut __rb_buf, version)?; \
+                    <crate::records::RecordsPayloadBorrowed as crate::Encode>::encode(__rb, &mut __rb_buf, version)?; \
                     if flex {{ put_compact_bytes(buf, &__rb_buf) }} else {{ put_bytes(buf, &__rb_buf) }} \
                 }} \
             }}"
@@ -1953,14 +1953,14 @@ fn encoded_len_expr(
              else {{ 4 + b.len() }} }}"
         ),
         ("records", false) => format!(
-            "{{ let __rb_len = <crate::records::RecordBatchBorrowed as crate::Encode>::encoded_len(&({expr}), version); \
+            "{{ let __rb_len = <crate::records::RecordsPayloadBorrowed as crate::Encode>::encoded_len(&({expr}), version); \
                if flex {{ crate::primitives::string_bytes::compact_bytes_len_from_size(__rb_len) }} \
                else {{ 4 + __rb_len }} }}"
         ),
         ("records", true) => format!(
             "match &{expr} {{ \
                 None => if flex {{ crate::primitives::varint::uvarint_len(0) }} else {{ 4 }}, \
-                Some(__rb) => {{ let __rb_len = <crate::records::RecordBatchBorrowed as crate::Encode>::encoded_len(__rb, version); \
+                Some(__rb) => {{ let __rb_len = <crate::records::RecordsPayloadBorrowed as crate::Encode>::encoded_len(__rb, version); \
                     if flex {{ crate::primitives::string_bytes::compact_bytes_len_from_size(__rb_len) }} \
                     else {{ 4 + __rb_len }} }} \
             }}"
@@ -2046,7 +2046,7 @@ fn decode_borrow_call(
         ("records", false) => "{ \
             let __rb_slice = if flex { get_compact_bytes_borrowed(buf)? } else { get_bytes_borrowed(buf)? }; \
             let mut __rb_cur = __rb_slice; \
-            <crate::records::RecordBatchBorrowed as crate::DecodeBorrow>::decode_borrow(&mut __rb_cur, version)? \
+            <crate::records::RecordsPayloadBorrowed as crate::DecodeBorrow>::decode_borrow(&mut __rb_cur, version)? \
         }".into(),
         ("records", true) => "{ \
             let __rb_opt = if flex { get_compact_nullable_bytes_borrowed(buf)? } else { get_nullable_bytes_borrowed(buf)? }; \
@@ -2054,7 +2054,7 @@ fn decode_borrow_call(
                 None => None, \
                 Some(__rb_slice) => { \
                     let mut __rb_cur = __rb_slice; \
-                    Some(<crate::records::RecordBatchBorrowed as crate::DecodeBorrow>::decode_borrow(&mut __rb_cur, version)?) \
+                    Some(<crate::records::RecordsPayloadBorrowed as crate::DecodeBorrow>::decode_borrow(&mut __rb_cur, version)?) \
                 } \
             } \
         }".into(),

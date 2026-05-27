@@ -143,7 +143,7 @@ pub struct PartitionData {
     pub acknowledge_error_code: i16,
     pub acknowledge_error_message: Option<String>,
     pub current_leader: LeaderIdAndEpoch,
-    pub records: Option<crate::records::RecordBatch>,
+    pub records: Option<crate::records::RecordsPayload>,
     pub acquired_records: Vec<AcquiredRecords>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
@@ -157,7 +157,7 @@ impl Encode for PartitionData {
         if version >= 0 { put_i16(buf, self.acknowledge_error_code) }
         if version >= 0 { if flex { put_compact_nullable_string(buf, self.acknowledge_error_message.as_deref()) } else { put_nullable_string(buf, self.acknowledge_error_message.as_deref()) } }
         if version >= 0 { self.current_leader.encode(buf, version)? }
-        if version >= 0 { match &self.records { None => if flex { put_compact_nullable_bytes(buf, None) } else { put_nullable_bytes(buf, None) }, Some(__rb) => { let mut __rb_buf = bytes::BytesMut::new(); <crate::records::RecordBatch as crate::Encode>::encode(__rb, &mut __rb_buf, version)?; if flex { put_compact_bytes(buf, &__rb_buf) } else { put_bytes(buf, &__rb_buf) } } } }
+        if version >= 0 { match &self.records { None => if flex { put_compact_nullable_bytes(buf, None) } else { put_nullable_bytes(buf, None) }, Some(__rb) => { let mut __rb_buf = bytes::BytesMut::new(); <crate::records::RecordsPayload as crate::Encode>::encode(__rb, &mut __rb_buf, version)?; if flex { put_compact_bytes(buf, &__rb_buf) } else { put_bytes(buf, &__rb_buf) } } } }
         if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.acquired_records).len(), flex); for it in &self.acquired_records { it.encode(buf, version)?; } } }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -174,7 +174,7 @@ impl Encode for PartitionData {
         if version >= 0 { n += 2; }
         if version >= 0 { n += if flex { compact_nullable_string_len(self.acknowledge_error_message.as_deref()) } else { nullable_string_len(self.acknowledge_error_message.as_deref()) }; }
         if version >= 0 { n += self.current_leader.encoded_len(version); }
-        if version >= 0 { n += match &self.records { None => if flex { crate::primitives::varint::uvarint_len(0) } else { 4 }, Some(__rb) => { let __rb_len = <crate::records::RecordBatch as crate::Encode>::encoded_len(__rb, version); if flex { crate::primitives::string_bytes::compact_bytes_len_from_size(__rb_len) } else { 4 + __rb_len } } }; }
+        if version >= 0 { n += match &self.records { None => if flex { crate::primitives::varint::uvarint_len(0) } else { 4 }, Some(__rb) => { let __rb_len = <crate::records::RecordsPayload as crate::Encode>::encoded_len(__rb, version); if flex { crate::primitives::string_bytes::compact_bytes_len_from_size(__rb_len) } else { 4 + __rb_len } } }; }
         if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.acquired_records).len(), flex); let body: usize = (self.acquired_records).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
@@ -194,7 +194,7 @@ impl<'de> Decode<'de> for PartitionData {
         if version >= 0 { out.acknowledge_error_code = get_i16(buf)?; }
         if version >= 0 { out.acknowledge_error_message = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? }; }
         if version >= 0 { out.current_leader = LeaderIdAndEpoch::decode(buf, version)?; }
-        if version >= 0 { out.records = { let __rb_opt = if flex { get_compact_nullable_bytes_owned(buf)? } else { get_nullable_bytes_owned(buf)? }; match __rb_opt { None => None, Some(__rb_bytes) => { let mut __rb_cur: &[u8] = &__rb_bytes; Some(<crate::records::RecordBatch as crate::Decode>::decode(&mut __rb_cur, version)?) } } }; }
+        if version >= 0 { out.records = { let __rb_opt = if flex { get_compact_nullable_bytes_owned(buf)? } else { get_nullable_bytes_owned(buf)? }; match __rb_opt { None => None, Some(__rb_bytes) => { let mut __rb_cur: &[u8] = &__rb_bytes; Some(<crate::records::RecordsPayload as crate::Decode>::decode(&mut __rb_cur, version)?) } } }; }
         if version >= 0 { out.acquired_records = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(AcquiredRecords::decode(buf, version)?); } v }; }
         if flex {
             out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {

@@ -293,7 +293,7 @@ async fn handle_response(resp: &FetchResponse, cfg: &Config) -> LoopAction {
 
     match part_resp.error_code {
         codes::NONE => {
-            if let Some(batch) = &part_resp.records {
+            if let Some(batch) = part_resp.records.as_ref().and_then(|p| p.as_v2()) {
                 let Some(entry) = cfg.partitions.get(&(cfg.topic.clone(), cfg.partition)) else {
                     warn!(topic = %cfg.topic, partition = cfg.partition,
                         "replicator: local partition vanished between fetches");

@@ -1469,7 +1469,7 @@ fn encode_call(
         ("records", false) => format!(
             "{{ \
                 let mut __rb_buf = bytes::BytesMut::new(); \
-                <crate::records::RecordBatch as crate::Encode>::encode(&{expr}, &mut __rb_buf, version)?; \
+                <crate::records::RecordsPayload as crate::Encode>::encode(&{expr}, &mut __rb_buf, version)?; \
                 if flex {{ put_compact_bytes(buf, &__rb_buf) }} else {{ put_bytes(buf, &__rb_buf) }} \
             }}"
         ),
@@ -1478,7 +1478,7 @@ fn encode_call(
                 None => if flex {{ put_compact_nullable_bytes(buf, None) }} else {{ put_nullable_bytes(buf, None) }}, \
                 Some(__rb) => {{ \
                     let mut __rb_buf = bytes::BytesMut::new(); \
-                    <crate::records::RecordBatch as crate::Encode>::encode(__rb, &mut __rb_buf, version)?; \
+                    <crate::records::RecordsPayload as crate::Encode>::encode(__rb, &mut __rb_buf, version)?; \
                     if flex {{ put_compact_bytes(buf, &__rb_buf) }} else {{ put_bytes(buf, &__rb_buf) }} \
                 }} \
             }}"
@@ -1560,14 +1560,14 @@ fn encoded_len_expr(
             "if flex {{ compact_nullable_bytes_len({expr}.as_deref()) }} else {{ nullable_bytes_len({expr}.as_deref()) }}"
         ),
         ("records", false) => format!(
-            "{{ let __rb_len = <crate::records::RecordBatch as crate::Encode>::encoded_len(&{expr}, version); \
+            "{{ let __rb_len = <crate::records::RecordsPayload as crate::Encode>::encoded_len(&{expr}, version); \
                if flex {{ crate::primitives::string_bytes::compact_bytes_len_from_size(__rb_len) }} \
                else {{ 4 + __rb_len }} }}"
         ),
         ("records", true) => format!(
             "match &{expr} {{ \
                 None => if flex {{ crate::primitives::varint::uvarint_len(0) }} else {{ 4 }}, \
-                Some(__rb) => {{ let __rb_len = <crate::records::RecordBatch as crate::Encode>::encoded_len(__rb, version); \
+                Some(__rb) => {{ let __rb_len = <crate::records::RecordsPayload as crate::Encode>::encoded_len(__rb, version); \
                     if flex {{ crate::primitives::string_bytes::compact_bytes_len_from_size(__rb_len) }} \
                     else {{ 4 + __rb_len }} }} \
             }}"
@@ -1643,7 +1643,7 @@ fn decode_call(schema_type: &str, nullable: bool, res_map: &HashMap<String, Reso
         ("records", false) => "{ \
             let __rb_bytes = if flex { get_compact_bytes_owned(buf)? } else { get_bytes_owned(buf)? }; \
             let mut __rb_cur: &[u8] = &__rb_bytes; \
-            <crate::records::RecordBatch as crate::Decode>::decode(&mut __rb_cur, version)? \
+            <crate::records::RecordsPayload as crate::Decode>::decode(&mut __rb_cur, version)? \
         }".into(),
         ("records", true) => "{ \
             let __rb_opt = if flex { get_compact_nullable_bytes_owned(buf)? } else { get_nullable_bytes_owned(buf)? }; \
@@ -1651,7 +1651,7 @@ fn decode_call(schema_type: &str, nullable: bool, res_map: &HashMap<String, Reso
                 None => None, \
                 Some(__rb_bytes) => { \
                     let mut __rb_cur: &[u8] = &__rb_bytes; \
-                    Some(<crate::records::RecordBatch as crate::Decode>::decode(&mut __rb_cur, version)?) \
+                    Some(<crate::records::RecordsPayload as crate::Decode>::decode(&mut __rb_cur, version)?) \
                 } \
             } \
         }".into(),
