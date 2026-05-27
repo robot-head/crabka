@@ -237,22 +237,19 @@ pub(crate) async fn handle(
     {
         let mut g = handle.state.lock().await;
         if matches!(g.state, GroupState::PreparingRebalance) && !g.members.is_empty() {
-            match crate::coordinator::group::select_protocol(&g.members) {
-                Some(chosen) => {
-                    g.resolve_selected_protocol_metadata(&chosen);
-                    g.complete_rebalance(chosen);
-                }
-                None => {
-                    handle.join_complete.notify_waiters();
-                    return encode(
-                        version,
-                        &JoinGroupResponse {
-                            error_code: codes::INCONSISTENT_GROUP_PROTOCOL,
-                            member_id: req.member_id,
-                            ..Default::default()
-                        },
-                    );
-                }
+            if let Some(chosen) = crate::coordinator::group::select_protocol(&g.members) {
+                g.resolve_selected_protocol_metadata(&chosen);
+                g.complete_rebalance(chosen);
+            } else {
+                handle.join_complete.notify_waiters();
+                return encode(
+                    version,
+                    &JoinGroupResponse {
+                        error_code: codes::INCONSISTENT_GROUP_PROTOCOL,
+                        member_id: req.member_id,
+                        ..Default::default()
+                    },
+                );
             }
             handle.join_complete.notify_waiters();
         }

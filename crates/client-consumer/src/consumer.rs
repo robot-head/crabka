@@ -189,7 +189,7 @@ impl Consumer {
                     crate::assignor::range::assign(inputs, &topic_partitions)
                 }
                 Assignor::CooperativeSticky => {
-                    let inputs: Vec<(String, Vec<String>, Vec<(String, i32)>, i32)> = r2
+                    let inputs: Vec<crate::assignor::cooperative_sticky::MemberInput> = r2
                         .members
                         .iter()
                         .map(|m| {
@@ -197,7 +197,7 @@ impl Consumer {
                             (m.member_id.clone(), ds.topics, ds.owned, ds.generation_id)
                         })
                         .collect();
-                    crate::assignor::cooperative_sticky::assign(inputs, &topic_partitions)
+                    crate::assignor::cooperative_sticky::assign(&inputs, &topic_partitions)
                 }
             };
             assignments

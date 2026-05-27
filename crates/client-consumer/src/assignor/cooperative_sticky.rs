@@ -6,11 +6,14 @@
 //! `ConstrainedAssignmentBuilder`. Returns the partitions each member
 //! should be holding *after this rebalance round*. When a partition
 //! would have to move off a still-living owner, it is omitted entirely
-//! (phase-1 of the two-phase cooperative protocol); the owner will see
-//! its loss on the next SyncGroup, revoke, and a follow-up rebalance
+//! (`phase-1` of the two-phase cooperative protocol); the owner will see
+//! its loss on the next `SyncGroup`, revoke, and a follow-up rebalance
 //! places the released partition.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+
+/// One member's input to [`assign`]: `(member_id, subscribed_topics, owned_partitions, generation_id)`.
+pub type MemberInput = (String, Vec<String>, Vec<(String, i32)>, i32);
 
 /// Cooperative-sticky assignment per KIP-429.
 ///
@@ -19,10 +22,10 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 ///
 /// Output: per-member assigned partitions for THIS rebalance round. Cooperative semantics
 /// mean partitions being moved from a still-active owner are omitted — the next rebalance
-/// (phase 2) will place them after the owner revokes.
+/// (`phase-2`) will place them after the owner revokes.
 #[must_use]
 pub fn assign(
-    members: Vec<(String, Vec<String>, Vec<(String, i32)>, i32)>,
+    members: &[MemberInput],
     topic_partitions: &HashMap<String, i32>,
 ) -> HashMap<String, Vec<(String, i32)>> {
     if members.is_empty() {
@@ -46,7 +49,7 @@ pub fn assign(
     // Resolve zombie conflicts by generation_id; build current_assignment
     // filtered against the live subscription + partition counts.
     let current_assignment =
-        prepopulate_current_assignments(&members, &subs, &gens, topic_partitions);
+        prepopulate_current_assignments(members, &subs, &gens, topic_partitions);
 
     // Map (topic, partition) → previous owner among the live, still-subscribed
     // members. Used both by the cooperative adjustment and by the sticky
@@ -105,10 +108,10 @@ pub fn assign(
     adjusted
 }
 
-/// Build current_assignment filtered to live topics/subscriptions, with
-/// zombie conflicts resolved by generation_id.
+/// Build `current_assignment` filtered to live topics/subscriptions, with
+/// zombie conflicts resolved by `generation_id`.
 fn prepopulate_current_assignments(
-    members: &[(String, Vec<String>, Vec<(String, i32)>, i32)],
+    members: &[MemberInput],
     subs: &BTreeMap<String, BTreeSet<String>>,
     _gens: &BTreeMap<String, i32>,
     topic_partitions: &HashMap<String, i32>,
@@ -264,6 +267,9 @@ fn constrained_assign(
 
 /// `AbstractStickyAssignor.generalAssign` — the four-pass general
 /// algorithm used when subscriptions are non-uniform.
+// Byte-port of the JVM constrained algorithm; splitting would obscure
+// the four-pass structure.
+#[allow(clippy::too_many_lines)]
 fn general_assign(
     member_ids: &[String],
     subs: &BTreeMap<String, BTreeSet<String>>,
@@ -286,7 +292,7 @@ fn general_assign(
     // Step 2: enumerate all partitions (only of topics that have ≥1 subscriber)
     // and sort by rarity (ascending subscriber count), tiebreak (topic, partition).
     let mut sorted_partitions: Vec<(String, i32)> = Vec::new();
-    for (t, _) in &subscribers_per_topic {
+    for t in subscribers_per_topic.keys() {
         let Some(&n) = topic_partitions.get(t) else {
             continue;
         };
@@ -477,7 +483,7 @@ mod tests {
         let mut topic_parts = HashMap::new();
         topic_parts.insert("t".to_string(), 4);
         let a = assign(
-            vec![("m1".to_string(), topics(&["t"]), vec![], 0)],
+            &[("m1".to_string(), topics(&["t"]), vec![], 0)],
             &topic_parts,
         );
         assert_eq!(a["m1"].len(), 4);
@@ -489,7 +495,7 @@ mod tests {
         let mut topic_parts = HashMap::new();
         topic_parts.insert("t".to_string(), 4);
         let a = assign(
-            vec![
+            &[
                 ("m1".to_string(), topics(&["t"]), vec![], 0),
                 ("m2".to_string(), topics(&["t"]), vec![], 0),
             ],
@@ -507,7 +513,7 @@ mod tests {
         let owned_m1 = tp(&[("t", 0), ("t", 1)]);
         let owned_m2 = tp(&[("t", 2), ("t", 3)]);
         let a = assign(
-            vec![
+            &[
                 ("m1".to_string(), topics(&["t"]), owned_m1.clone(), 5),
                 ("m2".to_string(), topics(&["t"]), owned_m2.clone(), 5),
             ],
@@ -531,7 +537,7 @@ mod tests {
         let owned_m2 = tp(&[("t", 4), ("t", 5), ("t", 6), ("t", 7)]);
         // partition 8 is brand new (unowned).
         let a = assign(
-            vec![
+            &[
                 ("m1".to_string(), topics(&["t"]), owned_m1.clone(), 5),
                 ("m2".to_string(), topics(&["t"]), owned_m2.clone(), 5),
                 ("m3".to_string(), topics(&["t"]), vec![], 5),
@@ -567,7 +573,7 @@ mod tests {
         let mut topic_parts = HashMap::new();
         topic_parts.insert("t".to_string(), 9);
         let phase1 = assign(
-            vec![
+            &[
                 (
                     "m1".to_string(),
                     topics(&["t"]),
@@ -587,7 +593,7 @@ mod tests {
 
         // Now feed phase-1 output back as owned and re-assign.
         let phase2 = assign(
-            vec![
+            &[
                 ("m1".to_string(), topics(&["t"]), phase1["m1"].clone(), 6),
                 ("m2".to_string(), topics(&["t"]), phase1["m2"].clone(), 6),
                 ("m3".to_string(), topics(&["t"]), phase1["m3"].clone(), 6),
@@ -609,7 +615,7 @@ mod tests {
         let mut topic_parts = HashMap::new();
         topic_parts.insert("t".to_string(), 4);
         let a = assign(
-            vec![(
+            &[(
                 "m2".to_string(),
                 topics(&["t"]),
                 tp(&[("t", 2), ("t", 3)]),
@@ -630,7 +636,7 @@ mod tests {
         topic_parts.insert("t1".to_string(), 2);
         topic_parts.insert("t2".to_string(), 2);
         let a = assign(
-            vec![
+            &[
                 ("m1".to_string(), topics(&["t1", "t2"]), vec![], 0),
                 ("m2".to_string(), topics(&["t1"]), vec![], 0),
             ],
@@ -660,7 +666,7 @@ mod tests {
         let mut topic_parts = HashMap::new();
         topic_parts.insert("t".to_string(), 4);
         let a = assign(
-            vec![
+            &[
                 (
                     "m1".to_string(),
                     topics(&["t"]),
@@ -686,7 +692,7 @@ mod tests {
         let mut topic_parts = HashMap::new();
         topic_parts.insert("t".to_string(), 4);
         let a = assign(
-            vec![
+            &[
                 (
                     "m1".to_string(),
                     topics(&["t"]),
@@ -717,7 +723,7 @@ mod tests {
         let mut topic_parts = HashMap::new();
         topic_parts.insert("newt".to_string(), 3);
         let a = assign(
-            vec![
+            &[
                 ("m1".to_string(), topics(&["newt"]), vec![], 5),
                 ("m2".to_string(), topics(&["newt"]), vec![], 5),
             ],
@@ -735,7 +741,7 @@ mod tests {
         let mut topic_parts = HashMap::new();
         topic_parts.insert("t".to_string(), 3);
         let a = assign(
-            vec![(
+            &[(
                 "m1".to_string(),
                 topics(&["t"]),
                 tp(&[("t", 0), ("t", 5)]),
@@ -751,7 +757,7 @@ mod tests {
     #[test]
     fn empty_members_returns_empty() {
         let topic_parts = HashMap::new();
-        let a = assign(vec![], &topic_parts);
+        let a = assign(&[], &topic_parts);
         assert!(a.is_empty());
     }
 
@@ -761,7 +767,7 @@ mod tests {
         let mut topic_parts = HashMap::new();
         topic_parts.insert("t".to_string(), 2);
         let a = assign(
-            vec![
+            &[
                 ("m1".to_string(), topics(&["t"]), vec![], 0),
                 ("m2".to_string(), vec![], vec![], 0),
             ],

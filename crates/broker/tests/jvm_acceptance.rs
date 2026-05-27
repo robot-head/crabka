@@ -7675,7 +7675,7 @@ async fn jvm_kafka_delegation_tokens_end_to_end() {
 
 /// KIP-429 JVM acceptance: drive `kafka-console-consumer` with the JVM
 /// `CooperativeStickyAssignor` against Crabka. Validates that Crabka's
-/// JoinGroup vote rule accepts `cooperative-sticky` and that the broker
+/// `JoinGroup` vote rule accepts `cooperative-sticky` and that the broker
 /// correctly forwards the negotiated `protocol_name` so the JVM client's
 /// `AbstractCoordinator.onJoinComplete` accepts the response.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

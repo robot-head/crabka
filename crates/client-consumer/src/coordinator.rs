@@ -99,14 +99,13 @@ pub(crate) async fn run(mut state: CoordinatorState, shutdown: CancellationToken
                     continue;
                 }
                 match heartbeat_once(&state).await {
-                    HeartbeatOutcome::Ok => {}
+                    HeartbeatOutcome::Ok | HeartbeatOutcome::Transient => {}
                     HeartbeatOutcome::NeedRejoin => needs_rejoin = true,
                     HeartbeatOutcome::RejoinFromScratch => {
                         state.member_id.clear();
                         state.generation_id = -1;
                         needs_rejoin = true;
                     }
-                    HeartbeatOutcome::Transient => {}
                 }
             }
         }
@@ -162,7 +161,7 @@ async fn rejoin(state: &mut CoordinatorState) -> Result<(), ConsumerError> {
             // partition has a committed position.
             {
                 let mut a = state.assigned.lock().await;
-                *a = new_assignment.clone();
+                a.clone_from(&new_assignment);
             }
             {
                 let mut off = state.next_offsets.lock().await;
@@ -172,7 +171,20 @@ async fn rejoin(state: &mut CoordinatorState) -> Result<(), ConsumerError> {
             state.generation_id = new_generation;
         }
         RebalanceProtocol::Cooperative => {
-            if !revoked.is_empty() {
+            if revoked.is_empty() {
+                // Pure additions: merge into the existing assigned set.
+                // No phase 2 needed because no member needed to revoke.
+                {
+                    let mut a = state.assigned.lock().await;
+                    for p in &added {
+                        if !a.contains(p) {
+                            a.push(p.clone());
+                        }
+                    }
+                }
+                prime_offsets(state, &added).await?;
+                state.generation_id = new_generation;
+            } else {
                 // Phase 1: drop the partitions we're losing, then
                 // immediately rejoin so the leader can place them on
                 // whoever needs them in phase 2. Keeping kept partitions
@@ -205,19 +217,6 @@ async fn rejoin(state: &mut CoordinatorState) -> Result<(), ConsumerError> {
                 }
                 prime_offsets(state, &added2).await?;
                 state.generation_id = gen2;
-            } else {
-                // Pure additions: merge into the existing assigned set.
-                // No phase 2 needed because no member needed to revoke.
-                {
-                    let mut a = state.assigned.lock().await;
-                    for p in &added {
-                        if !a.contains(p) {
-                            a.push(p.clone());
-                        }
-                    }
-                }
-                prime_offsets(state, &added).await?;
-                state.generation_id = new_generation;
             }
         }
     }
@@ -227,6 +226,9 @@ async fn rejoin(state: &mut CoordinatorState) -> Result<(), ConsumerError> {
 /// Issue `JoinGroup` (handling the `MEMBER_ID_REQUIRED` two-step when
 /// our `member_id` is empty), assign as leader if we won the election,
 /// then `SyncGroup`. Returns `(assignment, generation_id, protocol_name)`.
+// Sequential join/sync state machine; splitting fragments the linear
+// MEMBER_ID_REQUIRED → leader-assign → SyncGroup flow.
+#[allow(clippy::too_many_lines)]
 async fn join_and_sync(
     state: &mut CoordinatorState,
     owned: &[(String, i32)],
@@ -272,7 +274,7 @@ async fn join_and_sync(
                 "broker did not assign a member_id".into(),
             ));
         }
-        state.member_id = assigned_id.clone();
+        state.member_id.clone_from(&assigned_id);
         let r2 = state.client.send(make_join(assigned_id)).await?;
         if r2.error_code != 0 {
             return Err(ConsumerError::Server(r2.error_code));
@@ -284,7 +286,7 @@ async fn join_and_sync(
 
     // The broker may have refreshed our member_id on this join too.
     if !join_resp.member_id.is_empty() {
-        state.member_id = join_resp.member_id.clone();
+        state.member_id.clone_from(&join_resp.member_id);
     }
     let chosen_protocol = join_resp
         .protocol_name
@@ -330,11 +332,11 @@ async fn join_and_sync(
                 crate::assignor::range::assign(inputs, &topic_partitions)
             }
             Assignor::CooperativeSticky => {
-                let inputs: Vec<(String, Vec<String>, Vec<(String, i32)>, i32)> = decoded
+                let inputs: Vec<crate::assignor::cooperative_sticky::MemberInput> = decoded
                     .into_iter()
                     .map(|(id, sub)| (id, sub.topics, sub.owned, sub.generation_id))
                     .collect();
-                crate::assignor::cooperative_sticky::assign(inputs, &topic_partitions)
+                crate::assignor::cooperative_sticky::assign(&inputs, &topic_partitions)
             }
         };
         assignments

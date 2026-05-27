@@ -66,9 +66,10 @@ async fn cooperative_three_member_partial_revocation() {
         if a1.len() == 2 && a2.len() == 2 && a3.len() == 2 {
             break (a1, a2, a3);
         }
-        if Instant::now() >= deadline {
-            panic!("did not reach balanced 2/2/2 within deadline: m1={a1:?} m2={a2:?} m3={a3:?}");
-        }
+        assert!(
+            Instant::now() < deadline,
+            "did not reach balanced 2/2/2 within deadline: m1={a1:?} m2={a2:?} m3={a3:?}"
+        );
         tokio::time::sleep(Duration::from_millis(250)).await;
     };
 
@@ -95,6 +96,8 @@ async fn cooperative_three_member_partial_revocation() {
     broker.shutdown().await;
 }
 
+// Linear two-phase scenario; splitting fragments the produce/consume narrative.
+#[allow(clippy::too_many_lines)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cooperative_transparent_to_poll() {
     let dir = TempDir::new().unwrap();
@@ -280,7 +283,7 @@ async fn cooperative_single_member_steady_state() {
 // ── helpers (inlined from `integration.rs` patterns) ──────────────────────
 
 fn value_string(v: Option<&Bytes>) -> String {
-    String::from_utf8_lossy(v.map(Bytes::as_ref).unwrap_or(&[])).into_owned()
+    String::from_utf8_lossy(v.map_or(&[], Bytes::as_ref)).into_owned()
 }
 
 fn record_batch_with_values(values: &[&str]) -> RecordBatch {
@@ -400,12 +403,10 @@ async fn wait_for_assignment_count(consumer: &Consumer, expected: usize, timeout
         if n == expected {
             return;
         }
-        if Instant::now() >= deadline {
-            panic!(
-                "waited {:?} for assignment count {expected}, last={n}",
-                timeout
-            );
-        }
+        assert!(
+            Instant::now() < deadline,
+            "waited {timeout:?} for assignment count {expected}, last={n}"
+        );
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 }
@@ -425,13 +426,11 @@ async fn wait_for_total_assignment(consumers: &[&Consumer], expected: usize, tim
         if union.len() == expected {
             return;
         }
-        if Instant::now() >= deadline {
-            panic!(
-                "waited {:?} for union-assignment {expected}, last={}",
-                timeout,
-                union.len()
-            );
-        }
+        assert!(
+            Instant::now() < deadline,
+            "waited {timeout:?} for union-assignment {expected}, last={}",
+            union.len()
+        );
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 }

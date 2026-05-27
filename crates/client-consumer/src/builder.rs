@@ -49,7 +49,7 @@ use crabka_protocol::owned::consumer_protocol_assignment::{
 use crabka_protocol::owned::consumer_protocol_subscription::{
     ConsumerProtocolSubscription, TopicPartition as SubTopicPartition,
 };
-use crabka_protocol::{Decode, Encode};
+use crabka_protocol::{Decode, Encode, UnknownTaggedFields};
 
 const SUBSCRIPTION_WIRE_VERSION: i16 = 3;
 const ASSIGNMENT_WIRE_VERSION: i16 = 3;
@@ -58,6 +58,10 @@ pub(crate) struct DecodedSubscription {
     pub topics: Vec<String>,
     pub owned: Vec<(String, i32)>,
     pub generation_id: i32,
+    // Part of the ConsumerProtocolSubscription v3 wire surface; kept here
+    // for symmetry with the wire form and round-trip tests, even though
+    // the coordinator does not currently consult it for assignment.
+    #[allow(dead_code)]
     pub rack_id: Option<String>,
 }
 
@@ -89,7 +93,7 @@ pub(crate) fn encode_subscription(
         .map(|(topic, partitions)| SubTopicPartition {
             topic: topic.to_string(),
             partitions,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         })
         .collect();
     let msg = ConsumerProtocolSubscription {
@@ -98,7 +102,7 @@ pub(crate) fn encode_subscription(
         owned_partitions,
         generation_id,
         rack_id: rack_id.map(str::to_string),
-        unknown_tagged_fields: Default::default(),
+        unknown_tagged_fields: UnknownTaggedFields::default(),
     };
     let mut buf = BytesMut::with_capacity(2 + msg.encoded_len(SUBSCRIPTION_WIRE_VERSION));
     buf.put_i16(SUBSCRIPTION_WIRE_VERSION);
@@ -118,16 +122,13 @@ pub(crate) fn decode_subscription(bytes: &[u8]) -> DecodedSubscription {
     }
     let version = peek_version(bytes).clamp(0, SUBSCRIPTION_WIRE_VERSION);
     let mut cur = &bytes[2..];
-    let msg = match ConsumerProtocolSubscription::decode(&mut cur, version) {
-        Ok(m) => m,
-        Err(_) => {
-            return DecodedSubscription {
-                topics: Vec::new(),
-                owned: Vec::new(),
-                generation_id: -1,
-                rack_id: None,
-            };
-        }
+    let Ok(msg) = ConsumerProtocolSubscription::decode(&mut cur, version) else {
+        return DecodedSubscription {
+            topics: Vec::new(),
+            owned: Vec::new(),
+            generation_id: -1,
+            rack_id: None,
+        };
     };
     let mut owned = Vec::new();
     for tp in msg.owned_partitions {
@@ -150,13 +151,13 @@ pub(crate) fn encode_assignment(partitions: &[(String, i32)]) -> Bytes {
         .map(|(topic, partitions)| AssignTopicPartition {
             topic: topic.to_string(),
             partitions,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         })
         .collect();
     let msg = ConsumerProtocolAssignment {
         assigned_partitions,
         user_data: None,
-        unknown_tagged_fields: Default::default(),
+        unknown_tagged_fields: UnknownTaggedFields::default(),
     };
     let mut buf = BytesMut::with_capacity(2 + msg.encoded_len(ASSIGNMENT_WIRE_VERSION));
     buf.put_i16(ASSIGNMENT_WIRE_VERSION);
@@ -171,9 +172,8 @@ pub(crate) fn decode_assignment(bytes: &[u8]) -> Vec<(String, i32)> {
     }
     let version = peek_version(bytes).clamp(0, ASSIGNMENT_WIRE_VERSION);
     let mut cur = &bytes[2..];
-    let msg = match ConsumerProtocolAssignment::decode(&mut cur, version) {
-        Ok(m) => m,
-        Err(_) => return Vec::new(),
+    let Ok(msg) = ConsumerProtocolAssignment::decode(&mut cur, version) else {
+        return Vec::new();
     };
     let mut out = Vec::new();
     for tp in msg.assigned_partitions {
