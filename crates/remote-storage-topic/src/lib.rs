@@ -1,4 +1,4 @@
-//! Topic-backed [`RemoteLogMetadataManager`] for Crabka — slice 48f
+//! Topic-backed [`RemoteLogMetadataManager`](crabka_remote_storage::RemoteLogMetadataManager) for Crabka — slice 48f
 //! of the KIP-405 tiered-storage roadmap.
 //!
 //! This crate ships [`TopicBasedRemoteLogMetadataManager`], the
@@ -28,21 +28,29 @@
 //!   codec for the three event variants.
 //! - [`metadata_partition_for`] — the
 //!   `TopicIdPartition → metadata-topic-partition` hash.
+//! - [`KafkaMetadataEventLog`] — the production [`MetadataEventLog`]
+//!   adapter that wires the trait to
+//!   [`crabka_client_producer`] / [`crabka_client_consumer`] /
+//!   [`crabka_client_admin`], persisting events in the
+//!   `__remote_log_metadata` topic.
+//! - [`SwappableRlmm`] — the hot-swap facade the broker boots behind so
+//!   it can start on the in-memory placeholder and upgrade to the
+//!   topic-backed manager once its listener is serving.
+//!   `Broker::start` selects the topic-backed manager via the
+//!   `[remote_storage.kafka_metadata]` config section.
 //!
 //! ## What this crate does NOT do (yet)
 //!
-//! - **No Kafka-backed `MetadataEventLog` adapter.** The production
-//!   adapter that wires the trait to
-//!   [`crabka_client_producer`] / [`crabka_client_consumer`] /
-//!   [`crabka_client_admin`] lands in the follow-up broker-integration
-//!   PR.
-//! - **No broker wiring.** `Broker::start` still constructs
-//!   [`crabka_remote_storage::InmemoryRemoteLogMetadataManager`] as
-//!   today; the config knob that selects the topic-backed
-//!   implementation lands with the Kafka adapter.
+//! - **No per-broker metadata-partition assignment.** Every broker
+//!   consumes all `__remote_log_metadata` partitions; restricting the
+//!   consumed set to a broker's leader/follower assignments is a
+//!   follow-up.
 //! - **No log compaction or snapshot** of the metadata topic — every
 //!   restart re-reads from offset 0. Snapshot/fast-bootstrap is a
 //!   future optimization.
+//! - **No auth on the internal metadata client.** The manager connects
+//!   to its own broker over plaintext loopback; TLS / SASL on the
+//!   inter-broker metadata connection is a follow-up.
 
 #![doc(html_root_url = "https://docs.rs/crabka-remote-storage-topic/0.1.1")]
 

@@ -448,6 +448,17 @@ impl BrokerHandle {
         Ok(last_offset)
     }
 
+    /// Test-only: read the `tiered_storage_rlmm_topic_backed` gauge. `1`
+    /// once the slice-48f bootstrap has swapped the in-memory placeholder
+    /// for the topic-backed [`crabka_remote_storage::RemoteLogMetadataManager`],
+    /// `0` before that (or when `remote_log_metadata_kafka` is unset).
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[must_use]
+    #[allow(clippy::used_underscore_binding)]
+    pub fn rlmm_topic_backed_active_for_test(&self) -> bool {
+        self._broker.metrics.tiered_storage_rlmm_topic_backed.get() == 1
+    }
+
     /// Test-only: submit a [`crabka_metadata::MetadataRecord`] directly to
     /// this broker's controller, bypassing the public Kafka APIs. Used by
     /// Task-14 integration tests to provision a SCRAM credential before the
