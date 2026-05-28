@@ -85,6 +85,18 @@ pub const FENCED_INSTANCE_ID: i16 = 82;
 /// `STALE_MEMBER_EPOCH` (113, KIP-848) — the supplied member epoch is older
 /// than the coordinator's current epoch for the consumer group member.
 pub const STALE_MEMBER_EPOCH: i16 = 113;
+/// `FENCED_MEMBER_EPOCH` (110, KIP-848) — the supplied member epoch is
+/// newer than the coordinator's; the consumer must rejoin from epoch 0.
+pub const FENCED_MEMBER_EPOCH: i16 = 110;
+/// `UNSUPPORTED_ASSIGNOR` (111, KIP-848) — the requested `server_assignor`
+/// is not enabled on this broker.
+pub const UNSUPPORTED_ASSIGNOR: i16 = 111;
+/// `UNRELEASED_INSTANCE_ID` (114, KIP-848 + KIP-345) — the static
+/// `instance_id` is still bound to a live member of the group.
+pub const UNRELEASED_INSTANCE_ID: i16 = 114;
+/// `UNKNOWN_SUBSCRIPTION_ID` (117, KIP-848) — the consumer's persisted
+/// subscription identifier was not found by the coordinator.
+pub const UNKNOWN_SUBSCRIPTION_ID: i16 = 117;
 
 // Slice 11 additions — admin handler codes.
 /// `INVALID_CONFIG` (40) — a config key/value pair is invalid or unknown.
