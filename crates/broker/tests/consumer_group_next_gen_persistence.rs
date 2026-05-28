@@ -6,7 +6,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crabka_broker::{Broker, BrokerConfig};
+use crabka_broker::{BootstrapMode, Broker, BrokerConfig};
 use crabka_client_core::Client;
 use crabka_protocol::owned::consumer_group_heartbeat_request::ConsumerGroupHeartbeatRequest;
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
@@ -30,8 +30,13 @@ async fn create_topic(client: &Client, name: &str, partitions: i32) {
     assert_eq!(code, 0, "create_topic {name} failed with error_code {code}");
 }
 
+fn rejoin_config(log_dir: std::path::PathBuf) -> BrokerConfig {
+    let mut cfg = BrokerConfig::for_tests(log_dir);
+    cfg.bootstrap_mode = BootstrapMode::Rejoin;
+    cfg
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "next-gen persistence write not yet wired; tracked as 64a follow-up"]
 async fn replay_preserves_group_epoch_and_members() {
     let dir = tempfile::TempDir::new().unwrap();
     let log_dir = dir.path().to_path_buf();
@@ -69,9 +74,7 @@ async fn replay_preserves_group_epoch_and_members() {
     }
 
     {
-        let broker = Broker::start(BrokerConfig::for_tests(log_dir))
-            .await
-            .unwrap();
+        let broker = Broker::start(rejoin_config(log_dir)).await.unwrap();
         let bootstrap = broker.listen_addr().to_string();
         let client = Arc::new(
             Client::builder()
@@ -95,7 +98,6 @@ async fn replay_preserves_group_epoch_and_members() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "next-gen persistence write not yet wired; tracked as 64a follow-up"]
 async fn next_gen_state_cleared_after_leave_then_restart() {
     let dir = tempfile::TempDir::new().unwrap();
     let log_dir = dir.path().to_path_buf();
@@ -138,9 +140,7 @@ async fn next_gen_state_cleared_after_leave_then_restart() {
     }
 
     {
-        let broker = Broker::start(BrokerConfig::for_tests(log_dir))
-            .await
-            .unwrap();
+        let broker = Broker::start(rejoin_config(log_dir)).await.unwrap();
         let bootstrap = broker.listen_addr().to_string();
         let client = Arc::new(
             Client::builder()

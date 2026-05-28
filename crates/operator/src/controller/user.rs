@@ -97,6 +97,7 @@ pub async fn reconcile(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Action,
                 reason: "MissingClusterLabel",
                 message: "metadata.labels[\"crabka.io/cluster\"] is required",
                 scram_sha512: false,
+                scram_sha256: false,
                 tls: prior_tls,
                 external: prior_external,
                 tls_cert_not_after: prior_tls_not_after.clone(),
@@ -120,6 +121,7 @@ pub async fn reconcile(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Action,
                 reason: "InvalidSpec",
                 message: &msg,
                 scram_sha512: false,
+                scram_sha256: false,
                 tls: prior_tls,
                 external: prior_external,
                 tls_cert_not_after: prior_tls_not_after.clone(),
@@ -146,6 +148,7 @@ pub async fn reconcile(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Action,
                 reason: "ClusterNotReady",
                 message: &format!("Kafka/{cluster} not Ready or no internal listener"),
                 scram_sha512: false,
+                scram_sha256: false,
                 tls: prior_tls,
                 external: prior_external,
                 tls_cert_not_after: prior_tls_not_after.clone(),
@@ -172,20 +175,30 @@ pub async fn reconcile(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Action,
         // Best-effort cleanup; errors are logged but don't block finalizer removal.
         if let Ok(client) = ctx.admin_client_for(&cluster, &bootstrap).await {
             let mut admin = client.lock().await;
-            if matches!(&obj.spec.authentication, Authentication::ScramSha512(_)) {
-                match admin
-                    .alter_user_scram_credentials_sha512(
-                        &[],
-                        &[ScramDeletion {
-                            username: name.clone(),
-                        }],
-                    )
-                    .await
-                {
-                    Ok(_) => {}
-                    Err(e) => {
-                        tracing::warn!(error = %e, %name, "scram delete during finalizer failed");
-                    }
+            // Slice 36b: SCRAM-SHA-256 + SCRAM-SHA-512 both reach
+            // `alter_user_scram_credentials_*` for the finalizer
+            // deletion — the broker stores credentials per mechanism,
+            // so we tear down whichever mechanism this user used.
+            let scram_finalizer = match &obj.spec.authentication {
+                Authentication::ScramSha512(_) => Some(true),
+                Authentication::ScramSha256(_) => Some(false),
+                _ => None,
+            };
+            if let Some(is_sha512) = scram_finalizer {
+                let deletion = ScramDeletion {
+                    username: name.clone(),
+                };
+                let result = if is_sha512 {
+                    admin
+                        .alter_user_scram_credentials_sha512(&[], &[deletion])
+                        .await
+                } else {
+                    admin
+                        .alter_user_scram_credentials_sha256(&[], &[deletion])
+                        .await
+                };
+                if let Err(e) = result {
+                    tracing::warn!(error = %e, %name, "scram delete during finalizer failed");
                 }
             }
             // Slice 51b: delegation-token finalizer — expire every token
@@ -259,8 +272,24 @@ pub async fn reconcile(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Action,
     // from the certificate at mTLS handshake time.
     let secret_api: Api<Secret> = Api::namespaced(ctx.client.clone(), &ns);
     let tls_not_after: Option<String> = match &obj.spec.authentication {
-        Authentication::ScramSha512(s) => {
-            let password_len = s.password_length.unwrap_or(32);
+        Authentication::ScramSha512(_) | Authentication::ScramSha256(_) => {
+            // Slice 36b: SCRAM-SHA-256 + SCRAM-SHA-512 share the
+            // password-secret + admin-client + status-patch flow; the
+            // only difference is which `_sha256` / `_sha512` admin
+            // method we call. Pluck the per-variant knobs here.
+            let (password_len, iterations, is_sha512) = match &obj.spec.authentication {
+                Authentication::ScramSha512(s) => (
+                    s.password_length.unwrap_or(32),
+                    s.iterations.unwrap_or(DEFAULT_SCRAM_ITERATIONS),
+                    true,
+                ),
+                Authentication::ScramSha256(s) => (
+                    s.password_length.unwrap_or(32),
+                    s.iterations.unwrap_or(DEFAULT_SCRAM_ITERATIONS),
+                    false,
+                ),
+                _ => unreachable!(),
+            };
             let password = match ensure_password_secret(&secret_api, &obj, password_len).await {
                 Ok(p) => p,
                 Err(e) => {
@@ -268,7 +297,6 @@ pub async fn reconcile(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Action,
                     return Ok(Action::requeue(Duration::from_secs(15)));
                 }
             };
-            let iterations = s.iterations.unwrap_or(DEFAULT_SCRAM_ITERATIONS);
 
             // 7. Connect + upsert SCRAM (within the SCRAM arm). The
             // admin connection is opened again below for ACL + quota
@@ -282,16 +310,20 @@ pub async fn reconcile(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Action,
                 }
             };
             let mut admin = admin_handle.lock().await;
-            let outcomes = admin
-                .alter_user_scram_credentials_sha512(
-                    &[ScramUpsertion {
-                        username: name.clone(),
-                        password,
-                        iterations,
-                    }],
-                    &[],
-                )
-                .await;
+            let upsertions = [ScramUpsertion {
+                username: name.clone(),
+                password,
+                iterations,
+            }];
+            let outcomes = if is_sha512 {
+                admin
+                    .alter_user_scram_credentials_sha512(&upsertions, &[])
+                    .await
+            } else {
+                admin
+                    .alter_user_scram_credentials_sha256(&upsertions, &[])
+                    .await
+            };
             let outcomes = match outcomes {
                 Ok(v) => v,
                 Err(e) => {
@@ -315,6 +347,7 @@ pub async fn reconcile(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Action,
                         reason: "BrokerError",
                         message: &format!("AlterUserScramCredentials: {} ({})", err.name, err.code),
                         scram_sha512: false,
+                        scram_sha256: false,
                         tls: prior_tls,
                         external: prior_external,
                         tls_cert_not_after: prior_tls_not_after.clone(),
@@ -515,7 +548,8 @@ pub async fn reconcile(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Action,
         false
     };
 
-    let is_scram = matches!(&obj.spec.authentication, Authentication::ScramSha512(_));
+    let is_scram_sha512 = matches!(&obj.spec.authentication, Authentication::ScramSha512(_));
+    let is_scram_sha256 = matches!(&obj.spec.authentication, Authentication::ScramSha256(_));
     let is_tls = matches!(&obj.spec.authentication, Authentication::Tls(_));
     let is_external = matches!(&obj.spec.authentication, Authentication::TlsExternal);
     patch_status(
@@ -526,7 +560,8 @@ pub async fn reconcile(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Action,
             status: "True",
             reason: "Ready",
             message: "user in sync",
-            scram_sha512: is_scram,
+            scram_sha512: is_scram_sha512,
+            scram_sha256: is_scram_sha256,
             tls: is_tls && tls_not_after.is_some(),
             external: is_external,
             tls_cert_not_after: tls_not_after.clone(),
@@ -557,7 +592,7 @@ pub async fn reconcile(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Action,
     // `Authentication::DelegationToken(dt)` arm above).
     #[allow(clippy::match_same_arms)]
     let requeue = match &obj.spec.authentication {
-        Authentication::ScramSha512(_) => Duration::from_mins(1),
+        Authentication::ScramSha512(_) | Authentication::ScramSha256(_) => Duration::from_mins(1),
         Authentication::Tls(_) => Duration::from_hours(6),
         Authentication::TlsExternal => Duration::from_mins(1),
         Authentication::DelegationToken(_) => unreachable!(
@@ -644,6 +679,7 @@ async fn user_broker_error(
             reason: "BrokerError",
             message: &detail,
             scram_sha512: false,
+            scram_sha256: false,
             tls: prior_tls,
             external: prior_external,
             tls_cert_not_after: prior_tls_not_after,
@@ -677,7 +713,7 @@ pub(crate) fn entry_to_exact_filter(e: &AclEntry) -> AclEntryFilter {
 #[allow(clippy::match_same_arms)]
 pub(crate) fn principal_for(name: &str, auth: &Authentication) -> String {
     match auth {
-        Authentication::ScramSha512(_) => format!("User:{name}"),
+        Authentication::ScramSha512(_) | Authentication::ScramSha256(_) => format!("User:{name}"),
         Authentication::Tls(_) => user_tls::tls_principal(name),
         // `tls-external` credentials are managed out-of-band (OIDC for
         // OAUTHBEARER, or an external CA whose certs carry the bare
@@ -924,6 +960,9 @@ struct StatusPatch<'a> {
     reason: &'a str,
     message: &'a str,
     scram_sha512: bool,
+    /// Slice 36b: `true` iff SCRAM-SHA-256 credentials are
+    /// provisioned. Mirrors `scram_sha512`.
+    scram_sha256: bool,
     tls: bool,
     /// True iff this is a credential-less (`tls-external`) user that
     /// has reached Ready. Sticky in `patch_status`.
@@ -947,7 +986,7 @@ async fn patch_status(
     };
     // Once any credential (SCRAM password or TLS cert) is provisioned,
     // the secret name == metadata.name.
-    let secret_name = if p.scram_sha512 || p.tls {
+    let secret_name = if p.scram_sha512 || p.scram_sha256 || p.tls {
         Some(name.to_string())
     } else {
         p.obj.status.as_ref().and_then(|s| s.secret.clone())
@@ -959,6 +998,7 @@ async fn patch_status(
             "username": name,
             "secret": secret_name,
             "scramSha512": p.scram_sha512 || p.obj.status.as_ref().is_some_and(|s| s.scram_sha512),
+            "scramSha256": p.scram_sha256 || p.obj.status.as_ref().is_some_and(|s| s.scram_sha256),
             "tls": p.tls || p.obj.status.as_ref().is_some_and(|s| s.tls),
             "external": p.external || p.obj.status.as_ref().is_some_and(|s| s.external),
             "tlsCertNotAfter": p.tls_cert_not_after,

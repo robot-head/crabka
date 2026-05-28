@@ -29,6 +29,9 @@ use crate::{AdminClient, AdminError, KafkaError, kafka_error_name};
 /// is exercised by this slice (slice 32 ships SCRAM-SHA-256 in the
 /// broker; surfacing it via the operator is a follow-up).
 const SCRAM_SHA_512_WIRE: i8 = 2;
+/// Slice 36b: SCRAM mechanism byte for SCRAM-SHA-256 (1, KIP-554).
+/// Paired with the `*_sha256` builders/helpers below.
+const SCRAM_SHA_256_WIRE: i8 = 1;
 
 /// Default PBKDF2 iteration count for new SCRAM credentials. Matches
 /// Kafka's `org.apache.kafka.common.security.scram.internals.ScramFormatter`
@@ -144,6 +147,28 @@ impl AdminClient {
         Ok(parse_alter_scram_results(resp))
     }
 
+    /// Slice 36b: SCRAM-SHA-256 sibling of
+    /// [`Self::alter_user_scram_credentials_sha512`]. Iteration counts,
+    /// salt generation, and salted-password derivation are identical
+    /// to the SHA-512 path; only the mechanism wire byte and HMAC
+    /// algorithm differ.
+    ///
+    /// # Errors
+    ///
+    /// Same as `_sha512`: returns [`AdminError::Protocol`] when the
+    /// system RNG fails, otherwise propagates the broker's
+    /// per-username outcome rows.
+    pub async fn alter_user_scram_credentials_sha256(
+        &mut self,
+        upsertions: &[ScramUpsertion],
+        deletions: &[ScramDeletion],
+    ) -> Result<Vec<ScramUserOutcome>, AdminError> {
+        let rng = SystemRandom::new();
+        let req = build_alter_scram_request_sha256(upsertions, deletions, &rng)?;
+        let resp = self.conn.send(req).await?;
+        Ok(parse_alter_scram_results(resp))
+    }
+
     /// List ACLs matching `filter`. The broker's response is
     /// resource-grouped on the wire (one block per `(resource_type,
     /// resource_name, pattern_type)`); we flatten back into `AclEntry`
@@ -245,6 +270,39 @@ fn build_alter_scram_request_sha512(
     deletions: &[ScramDeletion],
     rng: &SystemRandom,
 ) -> Result<AlterUserScramCredentialsRequest, AdminError> {
+    build_alter_scram_request(
+        upsertions,
+        deletions,
+        rng,
+        SaslMechanism::ScramSha512,
+        SCRAM_SHA_512_WIRE,
+    )
+}
+
+/// Slice 36b: SCRAM-SHA-256 sibling of
+/// [`build_alter_scram_request_sha512`]. Pulled into
+/// [`build_alter_scram_request`] so the two helpers can't drift.
+fn build_alter_scram_request_sha256(
+    upsertions: &[ScramUpsertion],
+    deletions: &[ScramDeletion],
+    rng: &SystemRandom,
+) -> Result<AlterUserScramCredentialsRequest, AdminError> {
+    build_alter_scram_request(
+        upsertions,
+        deletions,
+        rng,
+        SaslMechanism::ScramSha256,
+        SCRAM_SHA_256_WIRE,
+    )
+}
+
+fn build_alter_scram_request(
+    upsertions: &[ScramUpsertion],
+    deletions: &[ScramDeletion],
+    rng: &SystemRandom,
+    mechanism: SaslMechanism,
+    wire_mechanism: i8,
+) -> Result<AlterUserScramCredentialsRequest, AdminError> {
     let mut wire_upserts = Vec::with_capacity(upsertions.len());
     for u in upsertions {
         let mut salt = vec![0u8; 16];
@@ -252,13 +310,13 @@ fn build_alter_scram_request_sha512(
             .map_err(|_| AdminError::Protocol("system RNG failure".into()))?;
         let salted = crabka_security::pbkdf2_salted(
             u.password.as_bytes(),
-            SaslMechanism::ScramSha512,
+            mechanism,
             u32::try_from(u.iterations.max(0)).unwrap_or(0),
             &salt,
         );
         wire_upserts.push(ScramCredentialUpsertion {
             name: u.username.clone(),
-            mechanism: SCRAM_SHA_512_WIRE,
+            mechanism: wire_mechanism,
             iterations: u.iterations,
             salt: Bytes::from(salt),
             salted_password: Bytes::from(salted),
@@ -269,7 +327,7 @@ fn build_alter_scram_request_sha512(
         .iter()
         .map(|d| ScramCredentialDeletion {
             name: d.username.clone(),
-            mechanism: SCRAM_SHA_512_WIRE,
+            mechanism: wire_mechanism,
             ..Default::default()
         })
         .collect();

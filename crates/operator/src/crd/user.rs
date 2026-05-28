@@ -82,6 +82,13 @@ pub struct KafkaUserQuotas {
 pub enum Authentication {
     #[serde(rename = "scram-sha-512")]
     ScramSha512(ScramSha512Auth),
+    /// Slice 36b: SCRAM-SHA-256 sibling of `ScramSha512`. The operator
+    /// provisions the password Secret + ACLs + quotas exactly as for
+    /// SHA-512; the only differences on the wire are the mechanism
+    /// byte (1 vs 2) and the HMAC algorithm. Pair with broker-side
+    /// `enabled_sasl_mechanisms` covering `ScramSha256`.
+    #[serde(rename = "scram-sha-256")]
+    ScramSha256(ScramSha256Auth),
     #[serde(rename = "tls")]
     Tls(TlsAuth),
     /// Slice 50: credential-less user. The operator provisions ACLs +
@@ -133,7 +140,7 @@ fn authentication_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema 
         "properties": {
             "type": {
                 "type": "string",
-                "enum": ["scram-sha-512", "tls", "tls-external", "delegation-token"],
+                "enum": ["scram-sha-512", "scram-sha-256", "tls", "tls-external", "delegation-token"],
             },
             // SCRAM
             "iterations": { "type": "integer", "minimum": 4096, "maximum": 1_000_000 },
@@ -155,6 +162,27 @@ fn authentication_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ScramSha512Auth {
+    /// PBKDF2 iteration count. Defaults to 8192 on the controller side
+    /// (matches `crabka_client_admin::DEFAULT_SCRAM_ITERATIONS`); the
+    /// broker rejects values < 4096.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 4096, max = 1_000_000))]
+    pub iterations: Option<i32>,
+
+    /// Raw-password length (bytes) for the operator-generated secret.
+    /// Defaults to 32 bytes (44 base64 chars). Ignored on reconcile if
+    /// a Secret with key `password` already exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 16, max = 256))]
+    pub password_length: Option<u16>,
+}
+
+/// Slice 36b: SCRAM-SHA-256 sibling of [`ScramSha512Auth`]. Same field
+/// shape; the only semantic difference is the wire mechanism + HMAC
+/// algorithm picked up by the reconciler's match arm.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ScramSha256Auth {
     /// PBKDF2 iteration count. Defaults to 8192 on the controller side
     /// (matches `crabka_client_admin::DEFAULT_SCRAM_ITERATIONS`); the
     /// broker rejects values < 4096.
@@ -316,6 +344,10 @@ pub struct KafkaUserStatus {
     /// True once SCRAM-SHA-512 credentials are provisioned.
     #[serde(default)]
     pub scram_sha512: bool,
+
+    /// Slice 36b: true once SCRAM-SHA-256 credentials are provisioned.
+    #[serde(default)]
+    pub scram_sha256: bool,
 
     /// True once the spec's `quotas` (if any) have been reflected in the
     /// broker's `(user)` client-quota state. False when `spec.quotas`
@@ -629,6 +661,36 @@ mod tests {
         assert_eq!(v, serde_json::json!({"type": "scram-sha-512"}));
         let back: Authentication = serde_json::from_value(v).unwrap();
         assert_eq!(back, auth);
+    }
+
+    #[test]
+    fn authentication_scram_sha256_round_trips_with_overrides() {
+        // Slice 36b: `scram-sha-256` sibling of the existing SHA-512
+        // round-trip test. Cover both the empty-defaults shape AND the
+        // explicit-overrides shape to lock the schema (a `passwordLength`
+        // change between releases would silently roll every user's
+        // Secret).
+        let auth_default = Authentication::ScramSha256(ScramSha256Auth::default());
+        let v = serde_json::to_value(&auth_default).unwrap();
+        assert_eq!(v, serde_json::json!({"type": "scram-sha-256"}));
+        let back: Authentication = serde_json::from_value(v).unwrap();
+        assert_eq!(back, auth_default);
+
+        let auth_overrides = Authentication::ScramSha256(ScramSha256Auth {
+            iterations: Some(16_384),
+            password_length: Some(64),
+        });
+        let v = serde_json::to_value(&auth_overrides).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({
+                "type": "scram-sha-256",
+                "iterations": 16_384,
+                "passwordLength": 64,
+            }),
+        );
+        let back: Authentication = serde_json::from_value(v).unwrap();
+        assert_eq!(back, auth_overrides);
     }
 
     #[test]

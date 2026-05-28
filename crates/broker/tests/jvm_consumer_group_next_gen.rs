@@ -99,7 +99,7 @@ fn docker_run(image: &str, args: &[&str]) -> std::process::Output {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "next-gen client/broker integration depth required; tracked as 64a follow-up"]
+#[ignore = "kafka-clients 4.0 consumer times out fetching despite group.version=1 advertisement — deeper integration tracked as separate slice"]
 async fn jvm_kip848_single_consumer_round_trip() {
     let (_broker, _dir) = start_host_broker().await;
     create_topic("kip848-rt", 1);
@@ -133,7 +133,7 @@ async fn jvm_kip848_single_consumer_round_trip() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "next-gen client/broker integration depth required; tracked as 64a follow-up"]
+#[ignore = "kafka-clients 4.0 consumer times out fetching despite group.version=1 advertisement — deeper integration tracked as separate slice"]
 async fn jvm_kip848_describe_group() {
     let (_broker, _dir) = start_host_broker().await;
     create_topic("kip848-d", 1);
@@ -175,7 +175,7 @@ async fn jvm_kip848_describe_group() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "next-gen client/broker integration depth required; tracked as 64a follow-up"]
+#[ignore = "kafka-clients 4.0 consumer times out fetching despite group.version=1 advertisement — deeper integration tracked as separate slice"]
 async fn jvm_kip848_delete_group() {
     let (_broker, _dir) = start_host_broker().await;
     create_topic("kip848-del", 1);
@@ -213,7 +213,7 @@ async fn jvm_kip848_delete_group() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "next-gen client/broker integration depth required; tracked as 64a follow-up"]
+#[ignore = "kafka-clients 4.0 consumer times out fetching despite group.version=1 advertisement — deeper integration tracked as separate slice"]
 async fn jvm_kip848_coexists_with_classic() {
     let (_broker, _dir) = start_host_broker().await;
     create_topic("kip848-coex", 1);
