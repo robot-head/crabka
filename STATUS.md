@@ -4604,18 +4604,26 @@ introspection metadata).
     `crates/broker/tests/consumer_group_next_gen.rs` covering
     single-member lifecycle, two-member rebalance, classic-group type lock,
     kill-switch config, describe round trip, stale-epoch rejection.
-  - 4 JVM-acceptance tests in
+  - 4 ignored JVM-acceptance tests in
     `crates/broker/tests/jvm_consumer_group_next_gen.rs` driving
-    `apache/kafka:4.0.0` with `group.protocol=consumer`.
+    `apache/kafka:4.0.0` with `group.protocol=consumer`. The Kafka 4.0
+    `kafka-console-consumer` falls back to the classic protocol against
+    the current broker — engaging the next-gen path end-to-end requires
+    the persistence write path below plus alignment of the heartbeat-loop
+    response shape with what kafka-clients 4.0 actually waits on.
   - 2 ignored bootstrap-replay tests in
     `crates/broker/tests/consumer_group_next_gen_persistence.rs` —
     documented intent; actor does not yet write KIP-848 records to
     `__consumer_offsets`. Tracked as 64a follow-up.
-- CI: `apache/kafka:4.0.0` preloaded; new test binary
-  `jvm_consumer_group_next_gen` registered with `cargo llvm-cov` in the
-  `broker-jvm-acceptance` job.
+- CI: `apache/kafka:4.0.0` preloaded; the JVM-acceptance binary is
+  carried but not yet invoked by `broker-jvm-acceptance` until the
+  next-gen integration depth lands.
 - Out of scope (follow-up slices):
   - Actor → `__consumer_offsets` persistence write path (64a follow-up).
+  - JVM-client integration depth — heartbeat-loop response shape,
+    offset-fetch `member_epoch` plumbing, anything else needed to keep
+    `apache/kafka:4.0.0` clients on the next-gen path end-to-end
+    (64a follow-up; runs the four `jvm_kip848_*` tests today).
   - Rack-aware `UniformAssignor` (64b).
   - Custom server-side assignor plugin point (64c).
   - Group migration policy classic → next-gen (64d).

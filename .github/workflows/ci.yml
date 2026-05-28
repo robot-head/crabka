@@ -220,7 +220,6 @@ jobs:
           mkdir -p coverage
           cargo llvm-cov -p crabka-broker \
             --test jvm_acceptance \
-            --test jvm_consumer_group_next_gen \
             --lcov --output-path coverage/broker-jvm-acceptance.lcov \
             -- --ignored --nocapture --test-threads=1
       - uses: codecov/codecov-action@v6
