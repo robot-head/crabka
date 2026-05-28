@@ -63,7 +63,8 @@ pub use handshake::{DuplexStream, RaftHandshakeError, RaftListenerHandshake};
 pub use network::OutboundDialer;
 pub use types::{AppData, AppDataResponse, Node, NodeId, Raft, TypeConfig};
 pub use wire::{
-    API_KEY_APPEND_ENTRIES, API_KEY_INSTALL_SNAPSHOT, API_KEY_VOTE, CrabkaAppendEntriesRequest,
-    CrabkaAppendEntriesResponse, CrabkaInstallSnapshotRequest, CrabkaInstallSnapshotResponse,
-    CrabkaLogEntry, CrabkaVoteRequest, CrabkaVoteResponse, PayloadKind,
+    API_KEY_APPEND_ENTRIES, API_KEY_INSTALL_SNAPSHOT, API_KEY_METADATA_FETCH, API_KEY_VOTE,
+    CrabkaAppendEntriesRequest, CrabkaAppendEntriesResponse, CrabkaInstallSnapshotRequest,
+    CrabkaInstallSnapshotResponse, CrabkaLogEntry, CrabkaMetadataFetchRequest,
+    CrabkaMetadataFetchResponse, CrabkaVoteRequest, CrabkaVoteResponse, PayloadKind,
 };
