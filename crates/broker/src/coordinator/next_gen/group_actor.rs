@@ -401,3 +401,222 @@ fn build_describe(state: &GroupState) -> DescribeView {
             .collect(),
     }
 }
+
+// ---------------------------------------------------------------------------
+// PendingRecords — collects mutations for one group-state transition and
+// encodes them as a single RecordBatch ready for OffsetsLog::append.
+// ---------------------------------------------------------------------------
+
+use bytes::Bytes;
+use crabka_protocol::records::{Record, RecordBatch};
+
+use super::persistence::{
+    encode_key, CurrentMemberAssignmentValue, GroupMetadataValue, MemberMetadataValue, NextGenKey,
+    TargetAssignmentMemberValue, TargetAssignmentMetadataValue,
+};
+
+#[derive(Debug, Default, Clone)]
+pub(crate) struct PendingRecords {
+    pub group_metadata: Option<GroupMetadataValue>,
+    /// `Some(value)` writes the record; `None` writes a tombstone (null value).
+    pub member_metadata: Vec<(String, Option<MemberMetadataValue>)>,
+    pub target_metadata: Option<TargetAssignmentMetadataValue>,
+    pub target_per_member: Vec<(String, Option<TargetAssignmentMemberValue>)>,
+    pub current_per_member: Vec<(String, Option<CurrentMemberAssignmentValue>)>,
+}
+
+impl PendingRecords {
+    pub fn is_empty(&self) -> bool {
+        self.group_metadata.is_none()
+            && self.member_metadata.is_empty()
+            && self.target_metadata.is_none()
+            && self.target_per_member.is_empty()
+            && self.current_per_member.is_empty()
+    }
+
+    pub fn into_batch(self, group_id: &str, now_ms: i64) -> RecordBatch {
+        let mut records: Vec<Record> = Vec::new();
+        let mut push = |key: Bytes, value: Option<Bytes>| {
+            let delta = i32::try_from(records.len()).expect("batch size fits i32");
+            records.push(Record {
+                offset_delta: delta,
+                timestamp_delta: 0,
+                key: Some(key),
+                value,
+                ..Default::default()
+            });
+        };
+
+        if let Some(v) = self.group_metadata {
+            push(
+                encode_key(&NextGenKey::GroupMetadata {
+                    group_id: group_id.into(),
+                }),
+                Some(v.encode()),
+            );
+        }
+        for (member_id, v) in self.member_metadata {
+            push(
+                encode_key(&NextGenKey::MemberMetadata {
+                    group_id: group_id.into(),
+                    member_id,
+                }),
+                v.map(|x| x.encode()),
+            );
+        }
+        if let Some(v) = self.target_metadata {
+            push(
+                encode_key(&NextGenKey::TargetAssignmentMetadata {
+                    group_id: group_id.into(),
+                }),
+                Some(v.encode()),
+            );
+        }
+        for (member_id, v) in self.target_per_member {
+            push(
+                encode_key(&NextGenKey::TargetAssignmentMember {
+                    group_id: group_id.into(),
+                    member_id,
+                }),
+                v.map(|x| x.encode()),
+            );
+        }
+        for (member_id, v) in self.current_per_member {
+            push(
+                encode_key(&NextGenKey::CurrentMemberAssignment {
+                    group_id: group_id.into(),
+                    member_id,
+                }),
+                v.map(|x| x.encode()),
+            );
+        }
+
+        let last_delta = i32::try_from(records.len().saturating_sub(1)).unwrap_or(0);
+        RecordBatch {
+            max_timestamp: now_ms,
+            records,
+            last_offset_delta: last_delta,
+            ..RecordBatch::default()
+        }
+    }
+
+    /// Build a batch without consuming self.
+    pub fn clone_into_batch(&self, group_id: &str, now_ms: i64) -> RecordBatch {
+        self.clone().into_batch(group_id, now_ms)
+    }
+}
+
+/// Snapshot a `GroupState` into a `GroupSeed` suitable for restoring a
+/// freshly-respawned actor. Mirrors what bootstrap replay would produce.
+pub(crate) fn snapshot_seed(state: &super::group_state::GroupState) -> super::GroupSeed {
+    use crate::coordinator::next_gen::persistence as p;
+    let mut members = std::collections::HashMap::new();
+    let mut target_per_member = std::collections::HashMap::new();
+    let mut current_per_member = std::collections::HashMap::new();
+    for (mid, m) in &state.members {
+        let mm = p::MemberMetadataValue {
+            instance_id: m.instance_id.clone(),
+            rack_id: m.rack_id.clone(),
+            client_id: m.client_id.clone(),
+            client_host: m.client_host.clone(),
+            subscribed_topic_names: m.subscribed_topic_names.iter().cloned().collect(),
+            server_assignor: m.server_assignor.clone(),
+            rebalance_timeout_ms: i32::try_from(m.rebalance_timeout.as_millis()).unwrap_or(60_000),
+        };
+        members.insert(mid.clone(), mm);
+
+        let cur = p::CurrentMemberAssignmentValue {
+            member_epoch: m.member_epoch,
+            previous_member_epoch: m.previous_member_epoch,
+            state: m.assignment_state,
+            assigned_partitions: m
+                .assigned_partitions
+                .iter()
+                .map(|(tid, parts)| p::AssignedTopicPartitions {
+                    topic_id: *tid,
+                    partitions: parts.clone(),
+                })
+                .collect(),
+            partitions_pending_revocation: m
+                .partitions_pending_revocation
+                .iter()
+                .map(|(tid, parts)| p::AssignedTopicPartitions {
+                    topic_id: *tid,
+                    partitions: parts.clone(),
+                })
+                .collect(),
+        };
+        current_per_member.insert(mid.clone(), cur);
+
+        if let Some(target) = state.target.per_member.get(mid) {
+            let tv = p::TargetAssignmentMemberValue {
+                topic_partitions: target
+                    .iter()
+                    .map(|(tid, parts)| p::AssignedTopicPartitions {
+                        topic_id: *tid,
+                        partitions: parts.clone(),
+                    })
+                    .collect(),
+            };
+            target_per_member.insert(mid.clone(), tv);
+        }
+    }
+    super::GroupSeed {
+        group_epoch: state.group_epoch,
+        target_epoch: state.target.epoch,
+        members,
+        target_per_member,
+        current_per_member,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pending_records_empty_yields_empty_batch() {
+        let p = PendingRecords::default();
+        let batch = p.into_batch("g", 0);
+        assert!(batch.records.is_empty());
+    }
+
+    #[test]
+    fn pending_records_offset_deltas_are_sequential() {
+        let p = PendingRecords {
+            group_metadata: Some(GroupMetadataValue { epoch: 1 }),
+            member_metadata: vec![(
+                "m1".into(),
+                Some(MemberMetadataValue {
+                    instance_id: None,
+                    rack_id: None,
+                    client_id: "c".into(),
+                    client_host: "h".into(),
+                    subscribed_topic_names: vec!["t".into()],
+                    server_assignor: None,
+                    rebalance_timeout_ms: 60_000,
+                }),
+            )],
+            target_metadata: Some(TargetAssignmentMetadataValue {
+                assignment_epoch: 1,
+            }),
+            ..Default::default()
+        };
+        let batch = p.into_batch("g", 0);
+        assert_eq!(batch.records.len(), 3);
+        let deltas: Vec<i32> = batch.records.iter().map(|r| r.offset_delta).collect();
+        assert_eq!(deltas, vec![0, 1, 2]);
+        assert_eq!(batch.last_offset_delta, 2);
+    }
+
+    #[test]
+    fn pending_records_tombstone_omits_value() {
+        let p = PendingRecords {
+            member_metadata: vec![("m1".into(), None)],
+            ..Default::default()
+        };
+        let batch = p.into_batch("g", 0);
+        assert_eq!(batch.records.len(), 1);
+        assert!(batch.records[0].value.is_none());
+    }
+}
