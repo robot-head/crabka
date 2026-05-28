@@ -57,32 +57,39 @@ async fn cooperative_three_member_partial_revocation() {
     tokio::time::sleep(Duration::from_millis(500)).await;
     let m3 = build_cooperative_consumer(&bootstrap, "coop-grp-1", "m3", "coop6").await;
 
-    // Wait for the final settled assignment: each member owns exactly 2.
+    // Wait for the final settled assignment: each member owns exactly 2,
+    // with no overlaps and full coverage of the 6 partitions. The
+    // count-only predicate isn't enough — during a phase-1/phase-2
+    // cooperative transition the three `assignment()` snapshots are not
+    // taken atomically, so 2/2/2 can transiently appear while a
+    // partition is mid-handoff (the same one momentarily showing on the
+    // outgoing AND incoming member). Folding the no-overlap + full-cover
+    // invariants into the loop condition lets the test ride out that
+    // window instead of failing on a snapshot from it.
     let deadline = Instant::now() + Duration::from_secs(30);
-    let (a1, a2, a3) = loop {
+    let union = loop {
         let a1 = m1.assignment().await;
         let a2 = m2.assignment().await;
         let a3 = m3.assignment().await;
-        if a1.len() == 2 && a2.len() == 2 && a3.len() == 2 {
-            break (a1, a2, a3);
+
+        let mut union: HashSet<(String, i32)> = HashSet::new();
+        let mut overlap = false;
+        for tp in a1.iter().chain(a2.iter()).chain(a3.iter()) {
+            if !union.insert(tp.clone()) {
+                overlap = true;
+            }
+        }
+
+        if a1.len() == 2 && a2.len() == 2 && a3.len() == 2 && !overlap && union.len() == 6 {
+            break union;
         }
         assert!(
             Instant::now() < deadline,
-            "did not reach balanced 2/2/2 within deadline: m1={a1:?} m2={a2:?} m3={a3:?}"
+            "did not reach balanced 2/2/2 with no overlaps within deadline: \
+             m1={a1:?} m2={a2:?} m3={a3:?}"
         );
         tokio::time::sleep(Duration::from_millis(250)).await;
     };
-
-    // Union covers all 6 partitions of `coop6`, with no overlaps.
-    let mut union: HashSet<(String, i32)> = HashSet::new();
-    let mut overlap_count = 0;
-    for tp in a1.iter().chain(a2.iter()).chain(a3.iter()) {
-        if !union.insert(tp.clone()) {
-            overlap_count += 1;
-        }
-    }
-    assert_eq!(overlap_count, 0, "no overlapping assignments allowed");
-    assert_eq!(union.len(), 6, "union covers all 6 partitions");
     for (t, _) in &union {
         assert_eq!(t, "coop6", "all owned partitions are from coop6");
     }

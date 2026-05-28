@@ -3,9 +3,10 @@
 //! Eleven keys are recognized. Five propagate live to `Log.config`
 //! (`retention.ms`, `retention.bytes`, `segment.bytes`, `cleanup.policy`,
 //! `compression.type`), plus the slice-48c tiered-storage local-retention
-//! pair (`local.retention.ms`, `local.retention.bytes`). One is accepted
-//! but not yet enforced: `min.insync.replicas` (integers >= 1 accepted but
-//! not yet enforced — see the design spec for the rationale). Two are
+//! pair (`local.retention.ms`, `local.retention.bytes`). One is read by
+//! the produce hot path's pre-flight gate: `min.insync.replicas`
+//! (integers >= 1) — `acks=-1` produces against a partition whose ISR is
+//! already smaller fail fast with `NOT_ENOUGH_REPLICAS` (19). Two are
 //! KIP-73 throttle keys (`leader.replication.throttled.replicas`,
 //! `follower.replication.throttled.replicas`) validated via
 //! `ThrottledReplicas::parse`. One is the KIP-841 unclean-recovery toggle
