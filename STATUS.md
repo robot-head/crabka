@@ -4628,3 +4628,55 @@ introspection metadata).
   - Custom server-side assignor plugin point (64c).
   - Group migration policy classic → next-gen (64d).
   - Share groups KIP-932.
+
+## Slice — KIP-584 read-side: ApiVersions feature surface (2026-05-28)
+
+- **Goal.** Wire the read-side `ApiVersions` v3+ feature surface end
+  to end (`supported_features`, `finalized_features`,
+  `finalized_features_epoch`), but emit it in the "no advertised
+  features, unknown epoch" state until `UpdateFeatures` (api_key 57)
+  lands. JVM admin tools (`kafka-features --describe`,
+  `Admin.describeFeatures`) consume this state as
+  `MetadataVersion.UNKNOWN` and skip per-level validation —
+  preserving compatibility with every JVM client version Crabka
+  tests against (cp-kafka 3.1/6.1/7.5, apache/kafka 4.0). The
+  README KIP-584 row stays ⚠️ because real feature advertisement
+  + the write side are follow-up slices.
+- **Helper functions.** `supported_feature_keys()` and
+  `finalized_feature_keys()` in `handlers/api_versions.rs` return
+  `Vec::new()`; `FINALIZED_FEATURES_EPOCH = -1`. The hook is in
+  place for the follow-up slice to populate without touching the
+  handler shape.
+- **JVM regression — recorded.** The first push of this slice
+  advertised a `metadata.version` entry in both feature lists with
+  `finalized_features_epoch = 0`. JVM admin clients call
+  `MetadataVersion.fromFeatureLevel(N)` on every finalized level
+  and throw `IllegalArgumentException` for any `N` their enum
+  doesn't enumerate. That took down 19 `broker-jvm-acceptance`
+  tests (kafka-acls, kafka-configs, kafka-leader-election,
+  kafka-reassign-partitions, every SASL/SCRAM matrix entry, and
+  more) on the first push. Advertising `supported_features` alone
+  with `max_version` above the connecting client's known
+  `MetadataVersion` enum hit the same wall on the second push.
+  Documented in the module-level doc on
+  `handlers/api_versions.rs::FINALIZED_FEATURES_EPOCH` + the
+  integration-test module doc as the regression guard.
+- **Tests.**
+  - 1 handler-level unit test
+    (`feature_surface_is_empty_with_unknown_epoch`) asserts both
+    helper functions return empty and the epoch is `-1`.
+  - 1 integration test
+    (`tests/api_versions_features.rs::v3_response_feature_surface_is_empty_with_unknown_epoch`)
+    sends `ApiVersions` v3 and asserts `supported_features` empty,
+    `finalized_features` empty, `finalized_features_epoch == -1`.
+- **Workspace fmt + `clippy -p crabka-broker --lib --tests -- -D warnings`
+  + broker lib (api_versions row) + new `api_versions_features`
+  (1 test)** — all green locally.
+- **Out of scope.**
+  - `UpdateFeatures` (api_key 57) admin RPC.
+  - Populating real feature levels. Doing so safely needs either
+    a per-client-version negotiation path (track each connection's
+    advertised client_software_version against a static map of
+    "highest MetadataVersion this client enumerates") or a
+    Raft-tracked finalized-features state with a real monotonic
+    epoch — both follow-up slices.
