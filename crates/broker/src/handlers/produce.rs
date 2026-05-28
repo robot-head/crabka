@@ -198,6 +198,7 @@ pub(crate) async fn handle(
                     &txn_coordinator,
                     &producer_state,
                     &log_dir_status,
+                    &broker.metrics,
                 ))
                 .await?;
             let micros = u64::try_from(monitor.cumulative().total_poll_duration.as_micros())
@@ -266,6 +267,7 @@ async fn process_partition(
     txn_coordinator: &Arc<crate::txn::coordinator::TxnCoordinator>,
     producer_state: &Arc<crate::producer_state::ProducerState>,
     log_dir_status: &crate::log_dir_status::LogDirRegistry,
+    metrics: &crate::metrics::BrokerMetrics,
 ) -> Result<PartitionProduceResponse, BrokerError> {
     let idx = part_data.index;
     let mut out = PartitionProduceResponse {
@@ -292,7 +294,15 @@ async fn process_partition(
     let mut batch = match payload {
         RecordsPayload::V2(rb) => rb,
         RecordsPayload::Legacy(bytes) => match crabka_records_legacy::legacy_to_v2(&bytes) {
-            Ok(rb) => rb,
+            Ok(rb) => {
+                // Slice 12g: account this Produce-path up-conversion. Kept
+                // inside the success arm so failed conversions (counted as
+                // INVALID_RECORD errors) don't double-count.
+                if !topic_name.is_empty() {
+                    metrics.record_produce_message_conversion(topic_name);
+                }
+                rb
+            }
             Err(e) => {
                 tracing::warn!(error = %e, "legacy_to_v2 failed");
                 out.error_code = codes::INVALID_RECORD;

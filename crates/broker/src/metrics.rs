@@ -113,6 +113,19 @@ pub struct BrokerMetrics {
     /// against clusters that asked for `metadataManager: Topic` to catch
     /// a stuck bootstrap.
     pub tiered_storage_rlmm_topic_backed: Gauge,
+    /// Slice 12g: per-topic counter of v0/v1 → v2 record-batch
+    /// up-conversions on the Produce path. Mirrors Kafka's
+    /// `BrokerTopicMetrics.ProduceMessageConversionsPerSec`. Bumped
+    /// once per partition's slice of a Produce request whose
+    /// `records` field arrived as a legacy `MessageSet`.
+    pub produce_message_conversions: Family<TopicLabel, Counter>,
+    /// Slice 12g: per-topic counter of v2 → v0/v1 record-batch
+    /// down-conversions on the Fetch path. Mirrors Kafka's
+    /// `BrokerTopicMetrics.FetchMessageConversionsPerSec`. Bumped
+    /// once per partition's slice of a Fetch response whose response
+    /// payload was down-converted to satisfy a legacy (`Fetch v < 4`)
+    /// client.
+    pub fetch_message_conversions: Family<TopicLabel, Counter>,
 }
 
 impl BrokerMetrics {
@@ -143,6 +156,8 @@ impl BrokerMetrics {
         let incremental_fetch_partitions_cached = Gauge::default();
         let client_software_versions: Family<ClientSoftwareLabel, Counter> = Family::default();
         let tiered_storage_rlmm_topic_backed = Gauge::default();
+        let produce_message_conversions: Family<TopicLabel, Counter> = Family::default();
+        let fetch_message_conversions: Family<TopicLabel, Counter> = Family::default();
 
         registry.register(
             "topic_bytes_in",
@@ -268,6 +283,24 @@ impl BrokerMetrics {
              never asked for `metadataManager: Topic`.",
             tiered_storage_rlmm_topic_backed.clone(),
         );
+        registry.register(
+            "produce_message_conversions",
+            "Slice 12g: cumulative count of v0/v1 → v2 record-batch \
+             up-conversions on the Produce path, per topic. Mirrors \
+             Kafka's BrokerTopicMetrics.ProduceMessageConversionsPerSec; \
+             rate(...) lets operators spot the overhead of legacy \
+             producers in the cluster.",
+            produce_message_conversions.clone(),
+        );
+        registry.register(
+            "fetch_message_conversions",
+            "Slice 12g: cumulative count of v2 → v0/v1 record-batch \
+             down-conversions on the Fetch path, per topic. Mirrors \
+             Kafka's BrokerTopicMetrics.FetchMessageConversionsPerSec; \
+             rate(...) lets operators spot the overhead of legacy \
+             consumers in the cluster.",
+            fetch_message_conversions.clone(),
+        );
 
         Self {
             registry: Arc::new(Mutex::new(registry)),
@@ -290,6 +323,8 @@ impl BrokerMetrics {
             incremental_fetch_partitions_cached,
             client_software_versions,
             tiered_storage_rlmm_topic_backed,
+            produce_message_conversions,
+            fetch_message_conversions,
         }
     }
 
@@ -371,6 +406,26 @@ impl BrokerMetrics {
         self.replication_bytes_in.get_or_create(&lbl).inc_by(bytes);
     }
 
+    /// Slice 12g: account one v0/v1 → v2 up-conversion on the Produce
+    /// path (the partition's `records` field arrived as a legacy
+    /// `MessageSet` and was decoded into a v2 `RecordBatch`).
+    pub fn record_produce_message_conversion(&self, topic: &str) {
+        let lbl = TopicLabel {
+            topic: topic.to_string(),
+        };
+        self.produce_message_conversions.get_or_create(&lbl).inc();
+    }
+
+    /// Slice 12g: account one v2 → v0/v1 down-conversion on the Fetch
+    /// path (a legacy client's Fetch v < 4 response is being assembled
+    /// from a v2 record batch).
+    pub fn record_fetch_message_conversion(&self, topic: &str) {
+        let lbl = TopicLabel {
+            topic: topic.to_string(),
+        };
+        self.fetch_message_conversions.get_or_create(&lbl).inc();
+    }
+
     /// Slice 48k: account bytes this broker served to a follower as the
     /// partition leader (inter-broker `Fetch` round-trip, leader side).
     /// Called from the `Fetch` handler when `replica_id >= 0`.
@@ -421,6 +476,8 @@ mod tests {
         m.record_partition_cpu_micros("topic-a", 0, 250);
         m.record_replication_in("topic-a", 0, 4096);
         m.record_replication_out("topic-a", 0, 8192);
+        m.record_produce_message_conversion("topic-a");
+        m.record_fetch_message_conversion("topic-a");
         m.partition_disk_bytes
             .get_or_create(&PartitionLabel {
                 topic: "topic-a".into(),
@@ -455,6 +512,8 @@ mod tests {
             "crabka_broker_replication_bytes_in_total",
             "crabka_broker_replication_bytes_out_total",
             "crabka_broker_tiered_storage_rlmm_topic_backed",
+            "crabka_broker_produce_message_conversions_total",
+            "crabka_broker_fetch_message_conversions_total",
         ] {
             assert!(buf.contains(needle), "missing {needle} in:\n{buf}");
         }
@@ -557,6 +616,37 @@ mod tests {
         // SwappableRlmm swap.
         m.tiered_storage_rlmm_topic_backed.set(1);
         assert_eq!(m.tiered_storage_rlmm_topic_backed.get(), 1);
+    }
+
+    #[test]
+    fn message_conversion_helpers_accumulate_per_topic() {
+        let m = BrokerMetrics::new();
+        m.record_produce_message_conversion("orders");
+        m.record_produce_message_conversion("orders");
+        m.record_produce_message_conversion("payments");
+        m.record_fetch_message_conversion("orders");
+        m.record_fetch_message_conversion("payments");
+        m.record_fetch_message_conversion("payments");
+
+        let orders = TopicLabel {
+            topic: "orders".into(),
+        };
+        let payments = TopicLabel {
+            topic: "payments".into(),
+        };
+        assert_eq!(
+            m.produce_message_conversions.get_or_create(&orders).get(),
+            2
+        );
+        assert_eq!(
+            m.produce_message_conversions.get_or_create(&payments).get(),
+            1
+        );
+        assert_eq!(m.fetch_message_conversions.get_or_create(&orders).get(), 1);
+        assert_eq!(
+            m.fetch_message_conversions.get_or_create(&payments).get(),
+            2
+        );
     }
 
     #[test]

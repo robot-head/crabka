@@ -432,6 +432,15 @@ pub(crate) async fn handle(
                                 if converted.payload_len() > 0 {
                                     part.records = Some(converted);
                                 }
+                                // Slice 12g: account this Fetch-path
+                                // down-conversion. Counted even when the
+                                // converted batch was empty (drops + control
+                                // skips) — the work happened.
+                                if !topic_resp.topic.is_empty() {
+                                    broker
+                                        .metrics
+                                        .record_fetch_message_conversion(&topic_resp.topic);
+                                }
                             }
                             Ok(None) => {
                                 // Control batch dropped — records stays None.
