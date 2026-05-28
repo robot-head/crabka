@@ -1,10 +1,9 @@
 //! KIP-630 metadata snapshot artifact: `<offset>-<epoch>.checkpoint`.
 //!
-//! Slice S1: the self-contained format layer — image ⇄ record sequence,
-//! the `.checkpoint` filename grammar, and the canonical on-disk bytes
-//! (header/data/footer Kafka `RecordBatch`es). Later slices (S2/S5) wire
-//! these into snapshot generation, log truncation, and `FetchSnapshot`
-//! serving, so not every helper is consumed yet.
+//! The format layer: image ⇄ record sequence, the `.checkpoint` filename
+//! grammar, and the canonical on-disk bytes (header/data/footer Kafka
+//! `RecordBatch`es), plus the `persist`/`load_latest` helpers that write
+//! and recover the artifact and its `.meta` sidecar.
 
 #![allow(dead_code)]
 
