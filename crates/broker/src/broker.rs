@@ -1035,13 +1035,28 @@ impl Broker {
 
         // Group coordinator bootstrap (slice 5).
         let group_manager = Arc::new(crate::coordinator::GroupManager::new());
-        let next_gen_coord =
-            std::sync::Arc::new(crate::coordinator::next_gen::NextGenCoordinator::new(
+        let offsets_log: std::sync::Arc<dyn crate::coordinator::next_gen::offsets_log::OffsetsLog> =
+            match crate::coordinator::next_gen::offsets_log::ProductionOffsetsLog::from_partitions(&partitions) {
+                Some(p) => std::sync::Arc::new(p),
+                None => {
+                    tracing::warn!(
+                        "__consumer_offsets-0 not present at NextGenCoordinator construction; \
+                         next-gen group state will be in-memory only until bootstrap completes"
+                    );
+                    std::sync::Arc::new(
+                        crate::coordinator::next_gen::offsets_log::fake::InMemoryOffsetsLog::default(),
+                    )
+                }
+            };
+        let next_gen_coord = std::sync::Arc::new(
+            crate::coordinator::next_gen::NextGenCoordinator::new(
                 config.next_gen_consumer_group.clone(),
                 std::sync::Arc::new(crate::coordinator::next_gen::ImageMetadataProvider {
                     controller: controller.clone(),
                 }),
-            ));
+                offsets_log,
+            ),
+        );
         group_manager.set_next_gen(next_gen_coord);
         let producer_ids = Arc::new(crate::producer_id_manager::ProducerIdManager::new());
         let producer_state = Arc::new(crate::producer_state::ProducerState::new());

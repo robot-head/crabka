@@ -19,6 +19,7 @@ use crate::codes;
 
 use super::config::NextGenConfig;
 use super::group_state::{GroupState, MemberState};
+use super::offsets_log::OffsetsLog;
 use super::persistence::MemberAssignmentState;
 use super::reconciler::{self, ReconcileInput};
 
@@ -71,9 +72,18 @@ impl GroupActorHandle {
         group_id: String,
         config: Arc<NextGenConfig>,
         metadata_provider: Arc<dyn MetadataProvider>,
+        offsets_log: Arc<dyn OffsetsLog>,
+        coordinator: Arc<super::NextGenCoordinator>,
     ) -> Self {
         let (tx, rx) = mpsc::channel(64);
-        let task = tokio::spawn(actor_loop(group_id, config, metadata_provider, rx));
+        let task = tokio::spawn(actor_loop(
+            group_id,
+            config,
+            metadata_provider,
+            offsets_log,
+            coordinator,
+            rx,
+        ));
         Self { tx, _task: task }
     }
 }
@@ -86,8 +96,11 @@ async fn actor_loop(
     group_id: String,
     config: Arc<NextGenConfig>,
     metadata: Arc<dyn MetadataProvider>,
+    offsets_log: Arc<dyn OffsetsLog>,
+    coordinator: Arc<super::NextGenCoordinator>,
     mut rx: mpsc::Receiver<GroupActorMessage>,
 ) {
+    let _ = (&offsets_log, &coordinator);
     let mut state = GroupState::new(group_id);
     let mut tick = tokio::time::interval(config.heartbeat_interval);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
