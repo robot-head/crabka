@@ -9,9 +9,11 @@ use bytes::Bytes;
 use tracing::debug;
 
 use crabka_client_core::Client;
+use crabka_protocol::owned::metadata_request::{MetadataRequest, MetadataRequestTopic};
 use crabka_protocol::owned::produce_request::{
     PartitionProduceData, ProduceRequest, TopicProduceData,
 };
+use crabka_protocol::primitives::uuid::Uuid;
 use crabka_protocol::records::{Record, RecordBatch};
 
 use crate::state_topic::error::StateTopicError;
@@ -45,7 +47,24 @@ pub(crate) async fn produce_state(
     let key_bytes = Bytes::copy_from_slice(key.as_bytes());
     let mut last_transient: Option<i16> = None;
     for attempt in 0..PRODUCE_RETRY_ATTEMPTS {
-        match send_once(client, topic, &key_bytes, value.clone()).await {
+        // KIP-516: Produce v13+ keys partition routing by `topic_id`.
+        // Resolve it via Metadata on each attempt — also nudges the
+        // broker to load the topic into its data plane if it hasn't
+        // yet, which addresses the post-create transient window.
+        let topic_id = match resolve_topic_id(client, topic).await {
+            Ok(Some(id)) => id,
+            Ok(None) => {
+                last_transient = Some(3);
+                debug!(
+                    attempt,
+                    topic, "metadata returned no topic_id; retrying after backoff"
+                );
+                tokio::time::sleep(PRODUCE_RETRY_BACKOFF).await;
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+        match send_once(client, topic, topic_id, &key_bytes, value.clone()).await {
             Ok(()) => return Ok(()),
             Err(StateTopicError::ProduceErrorCode { code }) if is_transient_produce_code(code) => {
                 last_transient = Some(code);
@@ -63,9 +82,32 @@ pub(crate) async fn produce_state(
     })
 }
 
+/// Resolve a topic's UUID via Metadata. Returns `Ok(None)` when the
+/// metadata response has no entry for the topic (the topic exists in
+/// the controller's metadata image but hasn't propagated to the broker
+/// we're talking to — treat as transient and retry).
+async fn resolve_topic_id(client: &Client, topic: &str) -> Result<Option<Uuid>, StateTopicError> {
+    let resp = client
+        .send(MetadataRequest {
+            topics: Some(vec![MetadataRequestTopic {
+                name: Some(topic.into()),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        })
+        .await?;
+    Ok(resp
+        .topics
+        .iter()
+        .find(|t| t.name.as_deref() == Some(topic))
+        .map(|t| t.topic_id)
+        .filter(|id| *id != Uuid::default()))
+}
+
 async fn send_once(
     client: &Client,
     topic: &str,
+    topic_id: Uuid,
     key: &Bytes,
     value: Option<Bytes>,
 ) -> Result<(), StateTopicError> {
@@ -84,6 +126,7 @@ async fn send_once(
         timeout_ms: 10_000,
         topic_data: vec![TopicProduceData {
             name: topic.into(),
+            topic_id,
             partition_data: vec![PartitionProduceData {
                 index: 0,
                 records: Some(batch.into()),
