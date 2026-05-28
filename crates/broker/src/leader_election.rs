@@ -3,17 +3,126 @@
 //! the dead broker is leader, picks the first alive ISR replica as new
 //! leader, bumps `leader_epoch`, and emits the new `PartitionRecord`s
 //! through openraft.
+//!
+//! KIP-841: when ISR becomes empty and the topic's
+//! `unclean.leader.election.enable` is `true`, the scan falls through to
+//! an out-of-ISR pick (first alive replica, singleton-ISR) — accepting
+//! possible data loss in exchange for availability. Default `false`
+//! preserves Kafka's safe-by-default behavior (partition unavailable
+//! until a former ISR member returns).
 
 #![allow(dead_code)]
 
 use std::sync::Arc;
 
-use crabka_metadata::{MetadataRecord, PartitionRecord};
+use crabka_metadata::{MetadataImage, MetadataRecord, PartitionRecord};
 use crabka_raft::{ControllerHandle, NodeId};
 use tracing::warn;
 
+use crate::config_keys::UNCLEAN_LEADER_ELECTION_ENABLE;
 use crate::error::BrokerError;
 use crate::heartbeat::controller_state::ControllerLivenessState;
+
+/// Read `unclean.leader.election.enable` for a topic, defaulting to
+/// `false` when the key is unset or unparseable. Centralized so the
+/// failover path and any future caller stay consistent.
+fn unclean_election_enabled(image: &MetadataImage, topic: &str) -> bool {
+    image
+        .topic_config(topic)
+        .and_then(|m| m.get(UNCLEAN_LEADER_ELECTION_ENABLE))
+        .is_some_and(|v| v == "true")
+}
+
+/// Compute the failover `MetadataRecord` changes for `dead` against
+/// `image`. Pure — no I/O beyond `liveness.is_alive` lookups. Extracted
+/// so the failover policy (including the KIP-841 unclean toggle) is
+/// unit-testable without spinning up a controller.
+pub(crate) async fn compute_failover_changes(
+    image: &MetadataImage,
+    dead: NodeId,
+    liveness: &ControllerLivenessState,
+) -> Vec<MetadataRecord> {
+    let mut changes: Vec<MetadataRecord> = Vec::new();
+    for topic in image.topics() {
+        for pr in image.partitions_of(&topic.name) {
+            if !pr.replicas.contains(&dead) && !pr.isr.contains(&dead) {
+                continue;
+            }
+            // Compute the new ISR after dropping the dead broker AND any
+            // other replicas that aren't alive.
+            let mut alive_isr: Vec<NodeId> = Vec::with_capacity(pr.isr.len());
+            for n in &pr.isr {
+                if *n != dead && liveness.is_alive(*n).await {
+                    alive_isr.push(*n);
+                }
+            }
+            let needs_election = pr.leader == dead;
+            if needs_election {
+                if let Some(&new_leader) = alive_isr.first() {
+                    changes.push(MetadataRecord::V1Partition(PartitionRecord {
+                        topic: pr.topic.clone(),
+                        partition: pr.partition,
+                        leader: new_leader,
+                        replicas: pr.replicas.clone(),
+                        isr: alive_isr,
+                        leader_epoch: pr.leader_epoch + 1,
+                        adding_replicas: pr.adding_replicas.clone(),
+                        removing_replicas: pr.removing_replicas.clone(),
+                    }));
+                } else if unclean_election_enabled(image, &pr.topic) {
+                    // KIP-841: ISR is dead but operator has opted into
+                    // possible data loss. Pick the first alive replica
+                    // (in or out of ISR) and elect with singleton-ISR.
+                    let mut elected: Option<NodeId> = None;
+                    for &n in &pr.replicas {
+                        if n != dead && liveness.is_alive(n).await {
+                            elected = Some(n);
+                            break;
+                        }
+                    }
+                    if let Some(new_leader) = elected {
+                        warn!(
+                            topic = %pr.topic, partition = pr.partition, leader = new_leader,
+                            "unclean leader election: ISR empty, electing out-of-ISR replica (possible data loss)"
+                        );
+                        changes.push(MetadataRecord::V1Partition(PartitionRecord {
+                            topic: pr.topic.clone(),
+                            partition: pr.partition,
+                            leader: new_leader,
+                            replicas: pr.replicas.clone(),
+                            isr: vec![new_leader],
+                            leader_epoch: pr.leader_epoch + 1,
+                            adding_replicas: pr.adding_replicas.clone(),
+                            removing_replicas: pr.removing_replicas.clone(),
+                        }));
+                    } else {
+                        warn!(
+                            topic = %pr.topic, partition = pr.partition,
+                            "unclean leader election enabled but no alive replica; partition unavailable"
+                        );
+                    }
+                } else {
+                    warn!(
+                        topic = %pr.topic, partition = pr.partition,
+                        "no live ISR replica; partition unavailable (unclean.leader.election.enable=false)"
+                    );
+                }
+            } else if alive_isr.len() < pr.isr.len() {
+                changes.push(MetadataRecord::V1Partition(PartitionRecord {
+                    topic: pr.topic.clone(),
+                    partition: pr.partition,
+                    leader: pr.leader,
+                    replicas: pr.replicas.clone(),
+                    isr: alive_isr,
+                    leader_epoch: pr.leader_epoch,
+                    adding_replicas: pr.adding_replicas.clone(),
+                    removing_replicas: pr.removing_replicas.clone(),
+                }));
+            }
+        }
+    }
+    changes
+}
 
 /// Called when the liveness ticker observes `AliveToDead(dead)`. Scans
 /// every partition where `dead` is leader OR in the ISR; proposes
@@ -36,53 +145,7 @@ pub(crate) async fn on_broker_dead(
     }
 
     let image = controller.current_image();
-    let mut changes: Vec<MetadataRecord> = Vec::new();
-    for topic in image.topics() {
-        for pr in image.partitions_of(&topic.name) {
-            if !pr.replicas.contains(&dead) && !pr.isr.contains(&dead) {
-                continue;
-            }
-            // Compute the new ISR after dropping the dead broker AND any
-            // other replicas that aren't alive.
-            let mut alive_isr: Vec<NodeId> = Vec::with_capacity(pr.isr.len());
-            for n in &pr.isr {
-                if *n != dead && liveness.is_alive(*n).await {
-                    alive_isr.push(*n);
-                }
-            }
-            let needs_election = pr.leader == dead;
-            if needs_election {
-                let Some(&new_leader) = alive_isr.first() else {
-                    warn!(
-                        topic = %pr.topic, partition = pr.partition,
-                        "no live ISR replica; partition unavailable"
-                    );
-                    continue;
-                };
-                changes.push(MetadataRecord::V1Partition(PartitionRecord {
-                    topic: pr.topic.clone(),
-                    partition: pr.partition,
-                    leader: new_leader,
-                    replicas: pr.replicas.clone(),
-                    isr: alive_isr,
-                    leader_epoch: pr.leader_epoch + 1,
-                    adding_replicas: pr.adding_replicas.clone(),
-                    removing_replicas: pr.removing_replicas.clone(),
-                }));
-            } else if alive_isr.len() < pr.isr.len() {
-                changes.push(MetadataRecord::V1Partition(PartitionRecord {
-                    topic: pr.topic.clone(),
-                    partition: pr.partition,
-                    leader: pr.leader,
-                    replicas: pr.replicas.clone(),
-                    isr: alive_isr,
-                    leader_epoch: pr.leader_epoch,
-                    adding_replicas: pr.adding_replicas.clone(),
-                    removing_replicas: pr.removing_replicas.clone(),
-                }));
-            }
-        }
-    }
+    let changes = compute_failover_changes(&image, dead, liveness).await;
     if !changes.is_empty() {
         controller
             .submit_change(changes)
@@ -452,5 +515,174 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err, ElectError::UnknownTopicOrPartition);
+    }
+
+    // ── KIP-841: automatic-failover + unclean.leader.election.enable ────────
+
+    use super::compute_failover_changes;
+    use crate::config_keys::UNCLEAN_LEADER_ELECTION_ENABLE;
+    use crabka_metadata::TopicConfigRecord;
+    use std::collections::BTreeMap;
+
+    /// Apply a `V1TopicConfig` override on top of an existing image —
+    /// matches the runtime path where `AlterConfigs` writes the record.
+    fn set_topic_config(img: &mut MetadataImage, topic: &str, key: &str, value: &str) {
+        let mut overrides = BTreeMap::new();
+        overrides.insert(key.into(), value.into());
+        img.apply(&MetadataRecord::V1TopicConfig(TopicConfigRecord {
+            topic: topic.into(),
+            overrides,
+        }));
+    }
+
+    /// Extract the single-element `PartitionRecord` from a one-entry change
+    /// list. Panics if the list is empty or carries a non-partition record.
+    fn one_partition_change(changes: &[MetadataRecord]) -> &PartitionRecord {
+        assert_eq!(
+            changes.len(),
+            1,
+            "expected exactly one change, got {changes:?}"
+        );
+        match &changes[0] {
+            MetadataRecord::V1Partition(pr) => pr,
+            other => panic!("expected V1Partition, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn failover_picks_alive_isr_member_when_available() {
+        // Leader 1 dies, ISR {1, 2, 3}, both 2 and 3 alive — pick 2.
+        let img = img_with_partition("t", 0, /*leader*/ 1, &[1, 2, 3], &[1, 2, 3]);
+        let l = ControllerLivenessState::new(Duration::from_secs(10));
+        for n in [2u64, 3] {
+            l.record_heartbeat(n).await;
+        }
+        let changes = compute_failover_changes(&img, /*dead=*/ 1, &l).await;
+        let pr = one_partition_change(&changes);
+        assert_eq!(pr.leader, 2);
+        assert_eq!(pr.isr, vec![2, 3]);
+        assert_eq!(pr.leader_epoch, 6, "leader_epoch must bump on election");
+    }
+
+    #[tokio::test]
+    async fn failover_leaves_partition_unavailable_when_unclean_disabled() {
+        // ISR is just {1}, broker 1 dies, brokers 2/3 alive. With
+        // `unclean.leader.election.enable=false` (the default) the
+        // controller must not elect — partition stays unavailable.
+        let img = img_with_partition("t", 0, /*leader*/ 1, &[1, 2, 3], &[1]);
+        let l = ControllerLivenessState::new(Duration::from_secs(10));
+        for n in [2u64, 3] {
+            l.record_heartbeat(n).await;
+        }
+        let changes = compute_failover_changes(&img, /*dead=*/ 1, &l).await;
+        assert!(
+            changes.is_empty(),
+            "default-off must not emit any change, got {changes:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn failover_elects_unclean_when_topic_opts_in() {
+        // Same setup, but `unclean.leader.election.enable=true` on the
+        // topic. Controller must elect the first alive out-of-ISR replica
+        // (broker 2) as leader with singleton ISR.
+        let mut img = img_with_partition("t", 0, /*leader*/ 1, &[1, 2, 3], &[1]);
+        set_topic_config(&mut img, "t", UNCLEAN_LEADER_ELECTION_ENABLE, "true");
+        let l = ControllerLivenessState::new(Duration::from_secs(10));
+        for n in [2u64, 3] {
+            l.record_heartbeat(n).await;
+        }
+        let changes = compute_failover_changes(&img, /*dead=*/ 1, &l).await;
+        let pr = one_partition_change(&changes);
+        assert_eq!(pr.leader, 2, "must elect first alive replica (broker 2)");
+        assert_eq!(
+            pr.isr,
+            vec![2],
+            "unclean election installs singleton ISR (KIP-841)",
+        );
+        assert_eq!(pr.leader_epoch, 6);
+    }
+
+    #[tokio::test]
+    async fn failover_unclean_skips_when_no_alive_replica() {
+        // Unclean opt-in but ALL replicas dead — no election possible.
+        let mut img = img_with_partition("t", 0, /*leader*/ 1, &[1, 2, 3], &[1]);
+        set_topic_config(&mut img, "t", UNCLEAN_LEADER_ELECTION_ENABLE, "true");
+        let l = ControllerLivenessState::new(Duration::from_secs(10));
+        // No heartbeats — nobody alive.
+        let changes = compute_failover_changes(&img, /*dead=*/ 1, &l).await;
+        assert!(
+            changes.is_empty(),
+            "no alive replica → no election, got {changes:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn failover_unclean_false_string_keeps_default_safe_behavior() {
+        // Explicit `false` must behave the same as unset.
+        let mut img = img_with_partition("t", 0, /*leader*/ 1, &[1, 2, 3], &[1]);
+        set_topic_config(&mut img, "t", UNCLEAN_LEADER_ELECTION_ENABLE, "false");
+        let l = ControllerLivenessState::new(Duration::from_secs(10));
+        for n in [2u64, 3] {
+            l.record_heartbeat(n).await;
+        }
+        let changes = compute_failover_changes(&img, /*dead=*/ 1, &l).await;
+        assert!(changes.is_empty(), "explicit `false` keeps safe default");
+    }
+
+    #[tokio::test]
+    async fn failover_unclean_does_not_pick_dead_broker_itself() {
+        // Edge case: `dead` is in `replicas`. The unclean fallback must
+        // skip it — otherwise we'd re-elect the dead broker.
+        let mut img = img_with_partition("t", 0, /*leader*/ 1, &[1, 2, 3], &[1]);
+        set_topic_config(&mut img, "t", UNCLEAN_LEADER_ELECTION_ENABLE, "true");
+        let l = ControllerLivenessState::new(Duration::from_secs(10));
+        // Only broker 3 alive — broker 2 also dead.
+        l.record_heartbeat(3).await;
+        let changes = compute_failover_changes(&img, /*dead=*/ 1, &l).await;
+        let pr = one_partition_change(&changes);
+        assert_eq!(pr.leader, 3);
+        assert_eq!(pr.isr, vec![3]);
+    }
+
+    #[tokio::test]
+    async fn failover_unclean_does_not_apply_when_isr_still_has_alive_member() {
+        // Leader 1 dies. ISR {1, 2} but 2 is alive — clean path picks
+        // broker 2 even if unclean is enabled. (The unclean branch only
+        // fires when alive_isr is empty.)
+        let mut img = img_with_partition("t", 0, /*leader*/ 1, &[1, 2, 3], &[1, 2]);
+        set_topic_config(&mut img, "t", UNCLEAN_LEADER_ELECTION_ENABLE, "true");
+        let l = ControllerLivenessState::new(Duration::from_secs(10));
+        for n in [2u64, 3] {
+            l.record_heartbeat(n).await;
+        }
+        let changes = compute_failover_changes(&img, /*dead=*/ 1, &l).await;
+        let pr = one_partition_change(&changes);
+        assert_eq!(pr.leader, 2);
+        assert_eq!(
+            pr.isr,
+            vec![2],
+            "clean ISR-only election keeps the surviving ISR member, not a singleton-of-some-other-replica",
+        );
+    }
+
+    #[tokio::test]
+    async fn failover_shrinks_isr_for_partitions_where_dead_is_non_leader() {
+        // Broker 2 dies; partition's leader is 1 (still alive). The
+        // dead member must be dropped from ISR without bumping the
+        // leader_epoch (the leader isn't changing).
+        let img = img_with_partition("t", 0, /*leader*/ 1, &[1, 2, 3], &[1, 2, 3]);
+        let l = ControllerLivenessState::new(Duration::from_secs(10));
+        for n in [1u64, 3] {
+            l.record_heartbeat(n).await;
+        }
+        let changes = compute_failover_changes(&img, /*dead=*/ 2, &l).await;
+        let pr = one_partition_change(&changes);
+        assert_eq!(pr.leader, 1, "leader unchanged");
+        assert_eq!(pr.isr, vec![1, 3]);
+        assert_eq!(
+            pr.leader_epoch, 5,
+            "non-leader-change must NOT bump leader_epoch"
+        );
     }
 }
