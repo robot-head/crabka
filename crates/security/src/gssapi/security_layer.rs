@@ -59,6 +59,17 @@ pub fn decode_choice(bytes: &[u8]) -> Result<LayerChoice, LayerError> {
     })
 }
 
+/// Client side: read the server's offered-layer bitmask (first byte).
+///
+/// # Errors
+/// Returns [`LayerError::Short`] if the offer is empty.
+pub fn decode_offer_layers(bytes: &[u8]) -> Result<SecurityLayer, LayerError> {
+    if bytes.is_empty() {
+        return Err(LayerError::Short);
+    }
+    Ok(SecurityLayer(bytes[0]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
