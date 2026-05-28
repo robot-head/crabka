@@ -81,10 +81,7 @@ impl NextGenConfig {
     /// Resolve a registered assignor by name. Cloning an `Arc` is cheap.
     #[must_use]
     pub fn find_assignor(&self, name: &str) -> Option<Arc<dyn Assignor>> {
-        self.assignors
-            .iter()
-            .find(|a| a.name() == name)
-            .cloned()
+        self.assignors.iter().find(|a| a.name() == name).cloned()
     }
 
     /// `true` when a client may legally request this name via
@@ -108,11 +105,7 @@ mod tests {
         fn name(&self) -> &'static str {
             self.0
         }
-        fn assign(
-            &self,
-            _members: &[MemberSubscription],
-            _topics: &TopicMetadata,
-        ) -> Assignment {
+        fn assign(&self, _members: &[MemberSubscription], _topics: &TopicMetadata) -> Assignment {
             HashMap::new()
         }
     }
@@ -158,7 +151,10 @@ mod tests {
         let mut cfg = NextGenConfig::default();
         cfg.register_assignor(Arc::new(TestAssignor("y"))).unwrap();
         for name in ["uniform", "range", "y", "ghost"] {
-            assert_eq!(cfg.assignor_enabled(name), cfg.find_assignor(name).is_some());
+            assert_eq!(
+                cfg.assignor_enabled(name),
+                cfg.find_assignor(name).is_some()
+            );
         }
     }
 }

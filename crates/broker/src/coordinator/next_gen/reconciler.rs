@@ -118,8 +118,8 @@ pub fn membership_topic_ids(group: &GroupState, input: &ReconcileInput) -> HashS
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::assignor::UniformAssignor;
+    use super::*;
     use crate::coordinator::next_gen::group_state::MemberState;
     use crate::coordinator::next_gen::persistence::MemberAssignmentState;
     use std::time::{Duration, Instant};
