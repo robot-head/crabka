@@ -173,6 +173,11 @@ pub struct BrokerConfig {
     /// (`[oauthbearer].jwks_endpoint_uri`) selects the signed-JWT validator.
     pub oauthbearer_validator: crabka_security::OAuthBearerValidator,
 
+    /// SASL/GSSAPI (Kerberos) configuration. `Some` only when `Gssapi` is in
+    /// `enabled_sasl_mechanisms`; carries the service keytab path,
+    /// `auth_to_local` rules, and KDC/realm settings for the initiate path.
+    pub gssapi: Option<crabka_security::gssapi::GssapiConfig>,
+
     /// Slice 49b: JWKS endpoint to fetch OAUTHBEARER signing keys from. `Some`
     /// only when `oauthbearer_validator` is the signed variant. When set,
     /// `Broker::start` spawns a background refresher that fetches this URL and
@@ -435,6 +440,7 @@ impl BrokerConfig {
             tls_config: None,
             enabled_sasl_mechanisms: vec![],
             oauthbearer_validator: crabka_security::OAuthBearerValidator::default(),
+            gssapi: None,
             oauthbearer_jwks_endpoint: None,
             oauthbearer_jwks_refresh_interval: std::time::Duration::from_mins(5),
             oauthbearer_idp_tls_trust: None,
@@ -629,6 +635,7 @@ impl Default for BrokerConfig {
             tls_config: None,
             enabled_sasl_mechanisms: vec![],
             oauthbearer_validator: crabka_security::OAuthBearerValidator::default(),
+            gssapi: None,
             oauthbearer_jwks_endpoint: None,
             oauthbearer_jwks_refresh_interval: std::time::Duration::from_mins(5),
             oauthbearer_idp_tls_trust: None,

@@ -1559,6 +1559,7 @@ dependencies = [
  "jsonpath-rust",
  "pbkdf2 0.13.0-rc.10",
  "rcgen",
+ "regex",
  "ring",
  "rustls",
  "rustls-pki-types",

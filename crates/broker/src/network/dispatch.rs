@@ -1535,6 +1535,20 @@ async fn handle_sasl_frame(
                         )
                         .await
                     }
+                    // GSSAPI is not advertised in `enabled_sasl_mechanisms`
+                    // until the server-side broker wiring (later GSSAPI
+                    // task), so the preceding SaslHandshake never selects it
+                    // and this arm is unreachable at runtime. Reject defensively
+                    // rather than panic in the dispatch hot path.
+                    crabka_security::SaslMechanism::Gssapi => {
+                        crabka_protocol::owned::sasl_authenticate_response::SaslAuthenticateResponse {
+                            error_code: codes::UNSUPPORTED_SASL_MECHANISM,
+                            error_message: Some("GSSAPI not yet wired on this listener".into()),
+                            auth_bytes: Bytes::new(),
+                            session_lifetime_ms: 0,
+                            ..Default::default()
+                        }
+                    }
                 }
             } else {
                 crabka_protocol::owned::sasl_authenticate_response::SaslAuthenticateResponse {

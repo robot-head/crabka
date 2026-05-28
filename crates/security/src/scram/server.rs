@@ -180,7 +180,7 @@ impl ScramServerExchange {
                 &proof,
                 auth_message.as_bytes(),
             ),
-            SaslMechanism::Plain | SaslMechanism::OAuthBearer => {
+            SaslMechanism::Plain | SaslMechanism::OAuthBearer | SaslMechanism::Gssapi => {
                 return StepResult::Failed(AuthError::MalformedMessage);
             }
         };

@@ -308,6 +308,13 @@ fn exchange_for_mechanism(m: SaslMechanism) -> SaslExchange {
         // The token arrives in the first SaslAuthenticate; no pre-built
         // state needed (slice 49).
         SaslMechanism::OAuthBearer => SaslExchange::OAuthBearer,
+        // GSSAPI is not yet advertised in `enabled_sasl_mechanisms` (the
+        // server accept state machine + broker wiring land in later GSSAPI
+        // tasks), so the handshake's `enabled.contains(&m)` gate never
+        // reaches this arm. Task 6 adds the real `SaslExchange::Gssapi`.
+        SaslMechanism::Gssapi => {
+            unreachable!("GSSAPI handshake reached before server wiring is in place")
+        }
     }
 }
 

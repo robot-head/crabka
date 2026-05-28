@@ -192,6 +192,11 @@ where
         SaslMechanism::OAuthBearer => Err(InterBrokerError::Sasl(
             "OAUTHBEARER is not supported for inter-broker authentication".to_string(),
         )),
+        // GSSAPI inter-broker initiate is wired in a later GSSAPI task; until
+        // then it is not a usable inter-broker mechanism.
+        SaslMechanism::Gssapi => Err(InterBrokerError::Sasl(
+            "GSSAPI is not yet wired for inter-broker authentication".to_string(),
+        )),
     }
 }
 

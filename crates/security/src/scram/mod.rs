@@ -28,7 +28,7 @@ pub fn scram_hash_len(mechanism: SaslMechanism) -> usize {
     match mechanism {
         SaslMechanism::ScramSha256 => 32,
         SaslMechanism::ScramSha512 => 64,
-        SaslMechanism::Plain | SaslMechanism::OAuthBearer => {
+        SaslMechanism::Plain | SaslMechanism::OAuthBearer | SaslMechanism::Gssapi => {
             panic!("scram_hash_len called with non-SCRAM mechanism {mechanism:?}")
         }
     }
@@ -67,7 +67,7 @@ pub fn hash_scram_password_with_salt(
                 pbkdf2::pbkdf2_hmac_array::<Sha256, 32>(password, &salt, iterations);
             derive_keys_sha256(&salted)
         }
-        SaslMechanism::Plain | SaslMechanism::OAuthBearer => {
+        SaslMechanism::Plain | SaslMechanism::OAuthBearer | SaslMechanism::Gssapi => {
             panic!("hash_scram_password called with non-SCRAM mechanism {mechanism:?}");
         }
     };
@@ -106,7 +106,7 @@ pub fn pbkdf2_salted(
             let arr: [u8; 32] = pbkdf2::pbkdf2_hmac_array::<Sha256, 32>(password, salt, iterations);
             arr.to_vec()
         }
-        SaslMechanism::Plain | SaslMechanism::OAuthBearer => {
+        SaslMechanism::Plain | SaslMechanism::OAuthBearer | SaslMechanism::Gssapi => {
             panic!("pbkdf2_salted called with non-SCRAM mechanism {mechanism:?}");
         }
     }
@@ -135,7 +135,7 @@ pub fn derive_keys_from_salted(mechanism: SaslMechanism, salted: &[u8]) -> (Vec<
     match mechanism {
         SaslMechanism::ScramSha512 => derive_keys_sha512(salted),
         SaslMechanism::ScramSha256 => derive_keys_sha256(salted),
-        SaslMechanism::Plain | SaslMechanism::OAuthBearer => {
+        SaslMechanism::Plain | SaslMechanism::OAuthBearer | SaslMechanism::Gssapi => {
             panic!("derive_keys_from_salted called with non-SCRAM mechanism {mechanism:?}");
         }
     }
