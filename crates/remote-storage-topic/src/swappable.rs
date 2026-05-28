@@ -6,7 +6,7 @@
 //! [`crabka_remote_storage::InmemoryRemoteLogMetadataManager`] *after*
 //! the broker's listener accept loop is serving, so the manager's
 //! loopback `AdminClient` call to provision `__remote_log_metadata`
-//! has a server to talk to. Until [`Self::swap`] is called, every RLMM
+//! has a server to talk to. Until [`SwappableRlmm::swap`] is called, every RLMM
 //! method delegates to the placeholder; after the swap, every call
 //! delegates to the new implementation.
 //!

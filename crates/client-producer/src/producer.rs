@@ -509,7 +509,16 @@ impl Producer {
         }
 
         let partition = match record.partition {
-            Some(p) => p,
+            Some(p) => {
+                // Produce v13 omits the topic name on the wire and carries
+                // only `topic_id`, so the metadata cache must hold the topic
+                // even when the caller pins the partition itself. The
+                // partitioner path populates it via `partition_for`; mirror
+                // that here so explicit-partition sends resolve a non-zero
+                // `topic_id` instead of failing with UNKNOWN_TOPIC_OR_PARTITION.
+                self.partitions_for(&record.topic).await;
+                p
+            }
             None => {
                 self.partition_for(&record.topic, record.key.as_deref())
                     .await
