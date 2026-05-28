@@ -817,6 +817,27 @@ async fn serve_connection_stream<S>(
                 }
             }
         }
+        // DescribeProducers (61, KIP-664) needs the principal + peer
+        // for per-topic `Read` ACL evaluation. Intercepts inline with
+        // the other principal-aware describe-style handlers.
+        if peek_api_key(&frame).ok() == Some(61) {
+            match handle_describe_producers_frame(&broker, &frame, &auth, &peer)
+                .instrument(req_span.clone())
+                .await
+            {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during DescribeProducers, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "DescribeProducers dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
         // DescribeTopicPartitions (75, KIP-966) needs the principal +
         // peer for per-topic `Describe` ACL evaluation, so it intercepts
         // inline alongside DescribeCluster / DescribeGroups.
@@ -1599,6 +1620,52 @@ async fn handle_describe_cluster_frame(
     let resp_body =
         crate::handlers::describe_cluster::handle(broker, api_version, correlation_id, body, &ctx)
             .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch a `DescribeProducers` (`api_key` 61, KIP-664) frame.
+/// The handler needs the authenticated principal and peer `SocketAddr`
+/// for per-topic `Read` ACL evaluation, which the `&Broker`-only handler
+/// table signature can't carry; this helper builds the
+/// [`crate::handlers::RequestContext`] and forwards.
+async fn handle_describe_producers_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 61);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let principal = auth
+        .principal()
+        .cloned()
+        .unwrap_or_else(|| crabka_security::Principal {
+            name: "ANONYMOUS".to_string(),
+            auth_method: crabka_security::AuthMethod::Anonymous,
+            groups: vec![],
+        });
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let ctx = crate::handlers::RequestContext {
+        principal: &principal,
+        peer,
+        client_id,
+    };
+
+    let resp_body = crate::handlers::describe_producers::handle(
+        broker,
+        api_version,
+        correlation_id,
+        body,
+        &ctx,
+    )
+    .await?;
     Ok(encode_response(
         api_key,
         correlation_id,
@@ -3326,6 +3393,8 @@ fn handler_body_flexible(api_key: i16, version: i16) -> bool {
         51 => version >= owned::alter_user_scram_credentials_request::FLEXIBLE_MIN,
         56 => version >= owned::alter_partition_request::FLEXIBLE_MIN,
         60 => version >= owned::describe_cluster_request::FLEXIBLE_MIN,
+        // DescribeProducers (61, KIP-664) is flexible from v0.
+        61 => version >= owned::describe_producers_request::FLEXIBLE_MIN,
         63 => version >= owned::broker_heartbeat_request::FLEXIBLE_MIN,
         // KIP-714 client-metrics push pair; both are flexible from v0.
         71 => version >= owned::get_telemetry_subscriptions_request::FLEXIBLE_MIN,

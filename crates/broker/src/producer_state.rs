@@ -132,6 +132,30 @@ impl ProducerState {
             .value()
             .clone()
     }
+
+    /// Read-only snapshot of every active producer entry on
+    /// `(topic, partition)`. Returns an empty list when the partition
+    /// has no entries — i.e. no idempotent or transactional producer
+    /// has produced to it yet. Used by the
+    /// `DescribeProducers` admin handler (`api_key=61`, KIP-664) to
+    /// surface per-partition producer-state to admin clients
+    /// (`kafka-admin --describe-producers`, etc.).
+    ///
+    /// The snapshot drops the mutex before returning, so callers don't
+    /// hold the per-partition lock across response encoding.
+    pub async fn snapshot(&self, topic: &str, partition: i32) -> Vec<(i64, ProducerEntry)> {
+        // Cheaper to bypass `handle` (which inserts on miss): a snapshot
+        // for an unknown partition should report "no producers", not
+        // wire up an empty entry. `get` returns `None` for un-tracked
+        // partitions, which we map to an empty result.
+        let Some(entry_ref) = self.by_partition.get(&(topic.to_string(), partition)) else {
+            return Vec::new();
+        };
+        let handle = entry_ref.value().clone();
+        drop(entry_ref);
+        let state = handle.lock().await;
+        state.entries.iter().map(|(pid, e)| (*pid, *e)).collect()
+    }
 }
 
 #[cfg(test)]

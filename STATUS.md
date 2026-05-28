@@ -4346,3 +4346,79 @@ introspection metadata).
     Adding them would let the broker actively reject bogus pushes,
     but a silent ack is operationally indistinguishable from
     "accepted and discarded" in our no-op pipeline.
+
+## Slice — DescribeProducers admin API (KIP-664) (2026-05-28)
+
+- **Goal.** Implement `DescribeProducers` (api_key 61, KIP-664) — the
+  admin RPC that surfaces the broker's in-memory producer-state
+  snapshot. JVM `Admin.describeProducers` and
+  `kafka-transactions --describe-producers` use it to debug stuck
+  idempotent / transactional producers. Adds a new ✅ row to the KIP
+  table.
+- **What was missing.** The schemas were vendored and the codegen
+  produced `DescribeProducersRequest` / `DescribeProducersResponse`,
+  but no handler existed and `ApiVersions` didn't advertise the api_key.
+  The broker has tracked per-`(topic, partition)` producer state since
+  slice 10a (idempotent dedup) — exposing it through the wire was a
+  one-handler addition.
+- **Handler.** New `crates/broker/src/handlers/describe_producers.rs`:
+  - **Snapshot helper.** Added `ProducerState::snapshot(topic, partition)`
+    returning `Vec<(producer_id, ProducerEntry)>`. Bypasses `handle()`
+    (which inserts on miss) by using the underlying `DashMap::get`;
+    unknown partitions report "no producers" instead of materialising
+    an empty entry. The mutex is dropped before encoding the
+    response so callers don't hold per-partition locks across
+    response build.
+  - **ACL.** Per-topic `Read` on `Topic(name)` via the existing
+    `authorize_topics` batch helper (KIP-664 mirrors the `Fetch`
+    security model). Deny → per-partition
+    `TOPIC_AUTHORIZATION_FAILED (29)` on every requested partition
+    of the denied topic.
+  - **Existence.** `image.partition(name, idx)` combines topic +
+    partition bounds in one lookup; on miss the row carries
+    `UNKNOWN_TOPIC_OR_PARTITION (3)`.
+  - **Field mapping.** `producer_id` (i64), `producer_epoch` (widened
+    from the broker's stored i16 → wire i32), `last_sequence`, and
+    `last_timestamp` come straight from `ProducerEntry`.
+    `coordinator_epoch` and `current_txn_start_offset` stay at the
+    `-1` sentinel — Crabka doesn't yet wire per-`(topic, partition)`
+    txn bookkeeping into producer-state, so emitting "no current txn"
+    is honest.
+- **Dispatch.** Inline-intercept block in `network::dispatch::run_session`
+  for `api_key == 61` plus `handle_describe_producers_frame` (mirrors
+  the other principal-aware describe-style handlers).
+  `handler_body_flexible` returns true (the schema is
+  `flexibleVersions: 0+`). `ApiVersions::supported_apis()` advertises
+  `(61, 0, 0)`.
+- **Tests.** 5 integration tests in `tests/describe_producers.rs`:
+  - `empty_partition_returns_no_active_producers` — fresh partition
+    with no traffic returns `error_code = 0` and an empty
+    `active_producers` list.
+  - `after_idempotent_produce_describe_returns_the_producer` —
+    after `InitProducerId` + `Produce(3 records, base_seq=0)`, the
+    handler returns the producer's id, epoch, `last_sequence = 2`
+    (base_seq + last_offset_delta), and `coordinator_epoch /
+    current_txn_start_offset = -1`.
+  - `multiple_producers_on_same_partition_all_surfaced` — two
+    `InitProducerId` calls each followed by a Produce; both
+    producers appear in the response.
+  - `unknown_topic_returns_unknown_topic_or_partition` — request
+    for a non-existent topic returns
+    `UNKNOWN_TOPIC_OR_PARTITION (3)` on every requested partition.
+  - `out_of_range_partition_returns_unknown_topic_or_partition` —
+    request for `partition = 5` on a single-partition topic
+    surfaces error 3 on that row only; partition 0 still succeeds.
+- **README.** New KIP-664 ✅ row in the protocol-features KIP table.
+- **Workspace fmt + `clippy -p crabka-broker --all-targets -- -D warnings`
+  + broker lib (604 tests) + new `describe_producers` (5 tests) +
+  regression sweep of `unit`, `describe_topic_partitions`,
+  `acl_handlers`, `client_telemetry`** — all green.
+- **Out of scope.**
+  - `coordinator_epoch` and `current_txn_start_offset` are emitted as
+    `-1` until a future slice threads per-`(topic, partition)` txn
+    state into `ProducerState`. JVM clients display "—" for these
+    sentinels rather than failing, so this is a safe partial.
+  - Transaction-aware ordering inside the snapshot. The current
+    helper iterates the underlying `HashMap`, so producer rows come
+    back in non-deterministic order. The JVM admin sorts client-side;
+    no broker-side guarantee is documented in KIP-664.
