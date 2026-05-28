@@ -37,7 +37,10 @@ pub(crate) fn supported_features() -> &'static [SupportedFeature] {
 
 /// Look up a supported feature by name.
 pub(crate) fn lookup(name: &str) -> Option<SupportedFeature> {
-    supported_features().iter().copied().find(|f| f.name == name)
+    supported_features()
+        .iter()
+        .copied()
+        .find(|f| f.name == name)
 }
 
 #[cfg(test)]

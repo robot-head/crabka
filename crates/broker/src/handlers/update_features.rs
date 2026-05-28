@@ -216,7 +216,9 @@ fn finalize(results: Vec<UpdatableFeatureResult>, version: i16) -> UpdateFeature
         results
             .iter()
             .find(|r| r.error_code != codes::NONE)
-            .map_or((codes::NONE, None), |r| (r.error_code, r.error_message.clone()))
+            .map_or((codes::NONE, None), |r| {
+                (r.error_code, r.error_message.clone())
+            })
     } else {
         (codes::NONE, None)
     };
@@ -248,9 +250,19 @@ mod tests {
 
     #[test]
     fn row_sets_message_only_on_error() {
-        assert!(row("metadata.version".into(), codes::NONE, "x").error_message.is_none());
+        assert!(
+            row("metadata.version".into(), codes::NONE, "x")
+                .error_message
+                .is_none()
+        );
         assert_eq!(
-            row("metadata.version".into(), codes::INVALID_UPDATE_VERSION, "bad").error_message.as_deref(),
+            row(
+                "metadata.version".into(),
+                codes::INVALID_UPDATE_VERSION,
+                "bad"
+            )
+            .error_message
+            .as_deref(),
             Some("bad"),
         );
     }

@@ -34,7 +34,11 @@ async fn finalizes_metadata_version_and_surfaces_in_api_versions() {
         .await
         .expect("UpdateFeatures");
     assert_eq!(resp.error_code, 0, "{resp:?}");
-    if let Some(row) = resp.results.iter().find(|r| r.feature == "metadata.version") {
+    if let Some(row) = resp
+        .results
+        .iter()
+        .find(|r| r.feature == "metadata.version")
+    {
         assert_eq!(row.error_code, 0, "{resp:?}");
     }
 
@@ -62,7 +66,11 @@ async fn finalizes_metadata_version_and_surfaces_in_api_versions() {
 /// Assert a row carries `code`, tolerant of the wire version: on
 /// `UpdateFeatures` v2 the `results` array is not encoded, so the handler
 /// promotes the first non-zero row error to the top-level `error_code`.
-fn assert_feature_error(resp: &crabka_protocol::owned::update_features_response::UpdateFeaturesResponse, feature: &str, code: i16) {
+fn assert_feature_error(
+    resp: &crabka_protocol::owned::update_features_response::UpdateFeaturesResponse,
+    feature: &str,
+    code: i16,
+) {
     if let Some(row) = resp.results.iter().find(|r| r.feature == feature) {
         assert_eq!(row.error_code, code, "per-row error: {resp:?}");
     } else {
