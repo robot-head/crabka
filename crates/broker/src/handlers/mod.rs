@@ -73,6 +73,8 @@ pub(crate) mod describe_configs;
 pub(crate) mod describe_delegation_token;
 pub(crate) mod describe_groups;
 pub(crate) mod describe_log_dirs;
+// KIP-966 paginated topic listing (api_key 75).
+pub(crate) mod describe_topic_partitions;
 pub(crate) mod describe_user_scram_credentials;
 pub(crate) mod elect_leaders;
 pub(crate) mod expire_delegation_token;

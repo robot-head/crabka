@@ -121,6 +121,10 @@ fn supported_apis() -> Vec<ApiVersion> {
         v!(renew_delegation_token_request),
         v!(expire_delegation_token_request),
         v!(describe_delegation_token_request),
+        // DescribeTopicPartitions (KIP-966) — paginated topic listing
+        // used by JVM admin clients 3.7+ in place of fanned-out Metadata
+        // calls for `kafka-topics --describe`.
+        v!(describe_topic_partitions_request),
     ]
 }
 

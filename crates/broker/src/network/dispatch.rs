@@ -817,6 +817,27 @@ async fn serve_connection_stream<S>(
                 }
             }
         }
+        // DescribeTopicPartitions (75, KIP-966) needs the principal +
+        // peer for per-topic `Describe` ACL evaluation, so it intercepts
+        // inline alongside DescribeCluster / DescribeGroups.
+        if peek_api_key(&frame).ok() == Some(75) {
+            match handle_describe_topic_partitions_frame(&broker, &frame, &auth, &peer)
+                .instrument(req_span.clone())
+                .await
+            {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during DescribeTopicPartitions, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "DescribeTopicPartitions dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
         // DescribeAcls (29, slice-13 T7) needs both the authenticated
         // principal AND the peer's `SocketAddr` for host-based ACL
         // matching; neither is reachable from the `&Broker`-only handler
@@ -1578,6 +1599,52 @@ async fn handle_describe_cluster_frame(
     let resp_body =
         crate::handlers::describe_cluster::handle(broker, api_version, correlation_id, body, &ctx)
             .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch a `DescribeTopicPartitions` (`api_key` 75, KIP-966)
+/// frame. Mirrors `handle_describe_cluster_frame`'s shape; the handler
+/// needs the authenticated principal and peer `SocketAddr` for per-topic
+/// `Describe` ACL evaluation, which the `&Broker`-only handler table
+/// can't carry.
+async fn handle_describe_topic_partitions_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 75);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let principal = auth
+        .principal()
+        .cloned()
+        .unwrap_or_else(|| crabka_security::Principal {
+            name: "ANONYMOUS".to_string(),
+            auth_method: crabka_security::AuthMethod::Anonymous,
+            groups: vec![],
+        });
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let ctx = crate::handlers::RequestContext {
+        principal: &principal,
+        peer,
+        client_id,
+    };
+
+    let resp_body = crate::handlers::describe_topic_partitions::handle(
+        broker,
+        api_version,
+        correlation_id,
+        body,
+        &ctx,
+    )
+    .await?;
     Ok(encode_response(
         api_key,
         correlation_id,
@@ -3260,6 +3327,8 @@ fn handler_body_flexible(api_key: i16, version: i16) -> bool {
         56 => version >= owned::alter_partition_request::FLEXIBLE_MIN,
         60 => version >= owned::describe_cluster_request::FLEXIBLE_MIN,
         63 => version >= owned::broker_heartbeat_request::FLEXIBLE_MIN,
+        // DescribeTopicPartitions (75, KIP-966) is flexible from v0.
+        75 => version >= owned::describe_topic_partitions_request::FLEXIBLE_MIN,
         _ => false,
     }
 }
