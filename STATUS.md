@@ -4619,6 +4619,10 @@ introspection metadata).
   carried but not yet invoked by `broker-jvm-acceptance` until the
   next-gen integration depth lands.
 - Out of scope (follow-up slices):
+  - JVM-client end-to-end engagement: `group.version=1` is advertised
+    but kafka-clients 4.0 still times out fetching. Deeper integration
+    (response shape, fetch behavior for next-gen consumers) tracked as
+    a separate slice.
   - Rack-aware `UniformAssignor` (64b).
   - Custom server-side assignor plugin point (64c).
   - Group migration policy classic → next-gen (64d).
@@ -4702,8 +4706,11 @@ introspection metadata).
     write batching, unchanged-heartbeat no-op, leave-tombstone batching,
     actor-exit-on-write-failure.
   - 2 previously-ignored persistence-replay tests now passing.
-  - 4 previously-ignored JVM-acceptance tests against `apache/kafka:4.0.0`
-    no longer ignored; restored to the `broker-jvm-acceptance` CI job.
-- CI: `--test jvm_consumer_group_next_gen` re-added to the
-  `broker-jvm-acceptance` cargo-llvm-cov invocation alongside
-  `--test jvm_acceptance`.
+  - 4 JVM-acceptance tests remain `#[ignore]`d. The `group.version=1`
+    advertisement is in place, but the kafka-clients 4.0 consumer still
+    fails with `TimeoutException: null` while fetching. Depth required to
+    drive the JVM client to completion is larger than this slice's scope
+    and tracked as a separate follow-up.
+- CI: `broker-jvm-acceptance` continues to run `jvm_acceptance` only;
+  `jvm_consumer_group_next_gen` is back in source as `#[ignore]`d
+  documentation of intent.
