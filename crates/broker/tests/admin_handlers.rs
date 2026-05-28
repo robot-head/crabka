@@ -34,6 +34,7 @@ use crabka_protocol::owned::delete_records_request::{
     DeleteRecordsPartition, DeleteRecordsRequest, DeleteRecordsTopic,
 };
 use crabka_protocol::owned::describe_cluster_request::DescribeClusterRequest;
+use crabka_protocol::owned::list_config_resources_request::ListConfigResourcesRequest;
 use crabka_protocol::owned::list_groups_request::ListGroupsRequest;
 use crabka_protocol::owned::metadata_request::{MetadataRequest, MetadataRequestTopic};
 use crabka_protocol::owned::produce_request::{
@@ -527,6 +528,55 @@ async fn describe_cluster_lists_brokers() {
     assert_eq!(resp.error_code, 0, "describe_cluster error_code");
     assert_eq!(resp.brokers.len(), 1, "expected exactly 1 broker");
     assert_eq!(resp.controller_id, 1, "expected controller_id == 1");
+}
+
+// ── ListConfigResources (api_key 74, KIP-1142) ─────────────────────────────
+
+/// ListConfigResources v1 with empty `resource_types` returns the default
+/// set: every topic + every broker (+ empty client-metrics). Verifies the
+/// dispatch glue, the ACL gate's allow path, and the response encoding —
+/// the pure `collect_resources` helper has its own unit tests in
+/// `crates/broker/src/handlers/list_config_resources.rs`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn list_config_resources_default_set_includes_topics_and_brokers() {
+    const RESOURCE_TYPE_BROKER: i8 = 4;
+
+    let cluster = start_n_node(1).await.expect("start_n_node");
+    let (_, cfg, _dir) = &cluster[0];
+    let client = build_client(cfg.listen_addr).await;
+
+    create_topic_helper(&client, "t-lcr-a", 1).await;
+    create_topic_helper(&client, "t-lcr-b", 1).await;
+
+    let resp = client
+        .send(ListConfigResourcesRequest::default())
+        .await
+        .expect("list_config_resources");
+    assert_eq!(resp.error_code, 0, "list_config_resources error_code");
+
+    // Default set on a 1-broker cluster with two topics: 2 topic entries
+    // (type 2) + 1 broker entry (type 4) + 0 client-metrics entries.
+    let topics: Vec<&str> = resp
+        .config_resources
+        .iter()
+        .filter(|r| r.resource_type == RESOURCE_TYPE_TOPIC)
+        .map(|r| r.resource_name.as_str())
+        .collect();
+    assert!(
+        topics.contains(&"t-lcr-a") && topics.contains(&"t-lcr-b"),
+        "expected both seeded topics in response, got {topics:?}"
+    );
+    let brokers: Vec<&str> = resp
+        .config_resources
+        .iter()
+        .filter(|r| r.resource_type == RESOURCE_TYPE_BROKER)
+        .map(|r| r.resource_name.as_str())
+        .collect();
+    assert_eq!(
+        brokers,
+        vec!["1"],
+        "expected exactly broker '1', got {brokers:?}"
+    );
 }
 
 // ── ListGroups (api_key 16) ──────────────────────────────────────────────────
