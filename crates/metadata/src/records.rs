@@ -157,6 +157,18 @@ pub struct DeleteDelegationTokenRecord {
     pub token_id: String,
 }
 
+/// KIP-853: finalizes the cluster-wide kraft.version feature level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KRaftVersionRecord {
+    pub kraft_version: u16,
+}
+
+/// KIP-853: full snapshot of the controller voter set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VotersRecord {
+    pub voters: crate::voters::VoterSet,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum MetadataRecord {
@@ -174,6 +186,8 @@ pub enum MetadataRecord {
     V1DelegationToken(DelegationTokenRecord),
     V1DeleteDelegationToken(DeleteDelegationTokenRecord),
     V1UnregisterBroker(UnregisterBrokerRecord),
+    V1KRaftVersion(KRaftVersionRecord),
+    V1Voters(VotersRecord),
 }
 
 #[cfg(test)]
@@ -375,5 +389,28 @@ mod tests {
             token_id: "tok-abc".into(),
         });
         assert_eq!(round_trip(&r), r);
+    }
+
+    #[test]
+    fn voters_record_round_trips() {
+        let rec = MetadataRecord::V1Voters(VotersRecord {
+            voters: crate::voters::VoterSet::from_voters([crate::voters::Voter {
+                id: 7,
+                directory_id: uuid::Uuid::from_u128(7),
+                endpoints: vec![crate::voters::VoterEndpoint {
+                    name: "CONTROLLER".into(),
+                    host: "h".into(),
+                    port: 1,
+                }],
+                kraft_version: crate::voters::KRaftVersionRange::default(),
+            }]),
+        });
+        assert_eq!(round_trip(&rec), rec);
+    }
+
+    #[test]
+    fn kraft_version_record_round_trips() {
+        let rec = MetadataRecord::V1KRaftVersion(KRaftVersionRecord { kraft_version: 1 });
+        assert_eq!(round_trip(&rec), rec);
     }
 }
