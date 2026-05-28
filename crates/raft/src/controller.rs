@@ -798,8 +798,12 @@ impl Controller {
         // 8. Snapshot trigger pump. openraft's policy is
         //    `SnapshotPolicy::Never`, so the Kafka-faithful heuristics live
         //    here: only the current leader fires, and only when the on-disk
-        //    metadata-log byte size since the last snapshot crosses
-        //    `max_bytes_between_snapshots` or the interval elapses.
+        //    metadata-log has grown by `max_bytes_between_snapshots` since the
+        //    last snapshot, or the interval elapses. The byte signal is a
+        //    delta against a baseline captured at the previous trigger —
+        //    purge only deletes sealed segments, so the active segment keeps
+        //    the absolute on-disk size above the threshold and a raw
+        //    comparison would re-fire on every tick.
         let raft_for_snap = raft.clone();
         let shutdown_for_snap = shutdown.clone();
         let meta_dir = config.log_dir.join("@metadata-0");
@@ -808,6 +812,7 @@ impl Controller {
         let snapshot_task = tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_millis(500));
             let mut last_snapshot_at = tokio::time::Instant::now();
+            let mut bytes_at_last_snapshot = dir_log_bytes(&meta_dir);
             loop {
                 tokio::select! {
                     () = shutdown_for_snap.cancelled() => break,
@@ -817,12 +822,14 @@ impl Controller {
                             continue;
                         }
                         let log_bytes = dir_log_bytes(&meta_dir);
+                        let bytes_grown = log_bytes.saturating_sub(bytes_at_last_snapshot);
                         let interval_elapsed =
                             interval > Duration::ZERO && last_snapshot_at.elapsed() >= interval;
-                        if (log_bytes >= max_bytes || interval_elapsed)
+                        if (bytes_grown >= max_bytes || interval_elapsed)
                             && raft_for_snap.trigger().snapshot().await.is_ok()
                         {
                             last_snapshot_at = tokio::time::Instant::now();
+                            bytes_at_last_snapshot = log_bytes;
                         }
                     }
                 }

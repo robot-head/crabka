@@ -82,15 +82,7 @@ async fn snapshot_then_restart_recovers_image() {
         // serialize the checkpoint to disk before we tear the node down.
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         loop {
-            let has_checkpoint =
-                std::fs::read_dir(dir.path().join("@metadata-0")).is_ok_and(|rd| {
-                    rd.filter_map(Result::ok).any(|e| {
-                        e.file_name()
-                            .to_str()
-                            .is_some_and(|n| n.ends_with(".checkpoint"))
-                    })
-                });
-            if has_checkpoint {
+            if has_checkpoint(&dir.path().join("@metadata-0")) {
                 break;
             }
             assert!(
@@ -157,14 +149,7 @@ async fn lagging_learner_catches_up_via_snapshot() {
     let snap_dir = dir1.path().join("@metadata-0");
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
-        let has_checkpoint = std::fs::read_dir(&snap_dir).is_ok_and(|rd| {
-            rd.filter_map(Result::ok).any(|e| {
-                e.file_name()
-                    .to_str()
-                    .is_some_and(|n| n.ends_with(".checkpoint"))
-            })
-        });
-        if has_checkpoint {
+        if has_checkpoint(&snap_dir) {
             break;
         }
         assert!(
@@ -209,15 +194,8 @@ async fn lagging_learner_catches_up_via_snapshot() {
     // snapshot dir can only have come from install_snapshot — proof the
     // catch-up took the InstallSnapshot path, not append-entries.
     let learner_snap_dir = dir2.path().join("@metadata-0");
-    let learner_has_checkpoint = std::fs::read_dir(&learner_snap_dir).is_ok_and(|rd| {
-        rd.filter_map(Result::ok).any(|e| {
-            e.file_name()
-                .to_str()
-                .is_some_and(|n| n.ends_with(".checkpoint"))
-        })
-    });
     assert!(
-        learner_has_checkpoint,
+        has_checkpoint(&learner_snap_dir),
         "learner must have persisted an installed checkpoint"
     );
 
