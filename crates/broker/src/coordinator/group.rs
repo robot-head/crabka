@@ -254,7 +254,8 @@ impl Group {
                     }
                 }
                 let new_member_id = next.member_id.clone();
-                self.static_members.insert(instance_id, new_member_id.clone());
+                self.static_members
+                    .insert(instance_id, new_member_id.clone());
                 self.members.insert(new_member_id.clone(), next);
                 // If this static rejoin lands during PreparingRebalance,
                 // count the (potentially renamed) member as joined so the
