@@ -228,6 +228,9 @@ mod tests {
             },
             metrics: rebal_metrics,
             in_flight: Arc::new(tokio::sync::Mutex::new(None)),
+            state_topic: std::sync::Arc::new(
+                crate::state_topic::fake::InMemoryBackend::new_loaded(),
+            ),
         };
 
         let goal_registry = GoalRegistry::default_registry();

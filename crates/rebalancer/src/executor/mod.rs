@@ -45,6 +45,11 @@ pub struct ExecutorState {
     pub config: ExecutorConfig,
     pub metrics: RebalancerMetrics,
     pub in_flight: Arc<Mutex<Option<ExecutionHandle>>>,
+    /// State backend for in-flight executor state. Production: topic-backed
+    /// `StateTopic`; tests: `fake::InMemoryBackend`. Replaces the
+    /// slice-43b `{data_dir}/in_flight.json` file. (`data_dir` is now used
+    /// only by the anomaly store.)
+    pub state_topic: Arc<dyn crate::state_topic::StateBackend>,
 }
 
 /// Handle to an active execution task.
@@ -116,9 +121,10 @@ impl<C: ClientFacade + ?Sized + 'static> Execution<C> {
         // we resume directly into `ClearThrottle` we still commit the
         // intended terminal status.
         let mut terminal: Option<(ProposalStatus, Option<String>)> = match phase {
-            Phase::ClearThrottle => InFlightFile::load(&self.state.config.data_dir)
-                .ok()
-                .flatten()
+            Phase::ClearThrottle => self
+                .state
+                .state_topic
+                .loaded()
                 .and_then(|f| f.target_terminal_status.map(|s| (s, f.failure_reason))),
             _ => None,
         };
@@ -128,7 +134,7 @@ impl<C: ClientFacade + ?Sized + 'static> Execution<C> {
         let (init_target, init_reason) = terminal
             .as_ref()
             .map_or((None, None), |(s, r)| (Some(*s), r.clone()));
-        let _ = self.persist_phase(phase, init_target, init_reason);
+        let _ = self.persist_phase(phase, init_target, init_reason).await;
 
         loop {
             // Cancel-from-any-phase short-circuits to Cancelled. The
@@ -150,7 +156,9 @@ impl<C: ClientFacade + ?Sized + 'static> Execution<C> {
                 };
                 terminal = Some((ProposalStatus::Cancelled, cancel_note.clone()));
                 phase = Phase::ClearThrottle;
-                let _ = self.persist_phase(phase, Some(ProposalStatus::Cancelled), cancel_note);
+                let _ = self
+                    .persist_phase(phase, Some(ProposalStatus::Cancelled), cancel_note)
+                    .await;
                 continue;
             }
 
@@ -158,34 +166,38 @@ impl<C: ClientFacade + ?Sized + 'static> Execution<C> {
                 Phase::ApplyThrottle => match self.do_apply_throttle().await {
                     Ok(()) => {
                         phase = Phase::Submit;
-                        let _ = self.persist_phase(phase, None, None);
+                        let _ = self.persist_phase(phase, None, None).await;
                     }
                     Err(e) => {
                         let reason = format!("ApplyThrottle: {e}");
                         terminal = Some((ProposalStatus::Failed, Some(reason.clone())));
                         phase = Phase::ClearThrottle;
-                        let _ =
-                            self.persist_phase(phase, Some(ProposalStatus::Failed), Some(reason));
+                        let _ = self
+                            .persist_phase(phase, Some(ProposalStatus::Failed), Some(reason))
+                            .await;
                     }
                 },
                 Phase::Submit => match self.do_submit().await {
                     Ok(()) => {
                         phase = Phase::Wait;
-                        let _ = self.persist_phase(phase, None, None);
+                        let _ = self.persist_phase(phase, None, None).await;
                     }
                     Err(e) => {
                         let reason = format!("Submit: {e}");
                         terminal = Some((ProposalStatus::Failed, Some(reason.clone())));
                         phase = Phase::ClearThrottle;
-                        let _ =
-                            self.persist_phase(phase, Some(ProposalStatus::Failed), Some(reason));
+                        let _ = self
+                            .persist_phase(phase, Some(ProposalStatus::Failed), Some(reason))
+                            .await;
                     }
                 },
                 Phase::Wait => match self.do_wait().await {
                     WaitOutcome::Completed => {
                         terminal = Some((ProposalStatus::Completed, None));
                         phase = Phase::ClearThrottle;
-                        let _ = self.persist_phase(phase, Some(ProposalStatus::Completed), None);
+                        let _ = self
+                            .persist_phase(phase, Some(ProposalStatus::Completed), None)
+                            .await;
                     }
                     WaitOutcome::Cancelled => {
                         let cancel_note = match self.cancel_in_flight().await {
@@ -200,8 +212,9 @@ impl<C: ClientFacade + ?Sized + 'static> Execution<C> {
                         };
                         terminal = Some((ProposalStatus::Cancelled, cancel_note.clone()));
                         phase = Phase::ClearThrottle;
-                        let _ =
-                            self.persist_phase(phase, Some(ProposalStatus::Cancelled), cancel_note);
+                        let _ = self
+                            .persist_phase(phase, Some(ProposalStatus::Cancelled), cancel_note)
+                            .await;
                     }
                     WaitOutcome::DeadlineExceeded => {
                         let mut reason = String::from("Wait: deadline exceeded");
@@ -214,15 +227,17 @@ impl<C: ClientFacade + ?Sized + 'static> Execution<C> {
                         }
                         terminal = Some((ProposalStatus::Failed, Some(reason.clone())));
                         phase = Phase::ClearThrottle;
-                        let _ =
-                            self.persist_phase(phase, Some(ProposalStatus::Failed), Some(reason));
+                        let _ = self
+                            .persist_phase(phase, Some(ProposalStatus::Failed), Some(reason))
+                            .await;
                     }
                     WaitOutcome::Error(e) => {
                         let reason = format!("Wait: {e}");
                         terminal = Some((ProposalStatus::Failed, Some(reason.clone())));
                         phase = Phase::ClearThrottle;
-                        let _ =
-                            self.persist_phase(phase, Some(ProposalStatus::Failed), Some(reason));
+                        let _ = self
+                            .persist_phase(phase, Some(ProposalStatus::Failed), Some(reason))
+                            .await;
                     }
                 },
                 Phase::ClearThrottle => {
@@ -238,7 +253,7 @@ impl<C: ClientFacade + ?Sized + 'static> Execution<C> {
                             (*s, r.as_deref())
                         });
                     self.commit_terminal(status, reason);
-                    let _ = self.cleanup_in_flight_file();
+                    let _ = self.cleanup_in_flight_file().await;
                     return;
                 }
             }
@@ -296,7 +311,7 @@ impl<C: ClientFacade + ?Sized + 'static> Execution<C> {
         clear_throttle(self.client.as_ref(), &self.targets).await
     }
 
-    fn persist_phase(
+    async fn persist_phase(
         &self,
         phase: Phase,
         target: Option<ProposalStatus>,
@@ -310,11 +325,19 @@ impl<C: ClientFacade + ?Sized + 'static> Execution<C> {
         );
         f.target_terminal_status = target;
         f.failure_reason = reason;
-        f.write(&self.state.config.data_dir)
+        self.state
+            .state_topic
+            .write(&f)
+            .await
+            .map_err(StateError::Backend)
     }
 
-    fn cleanup_in_flight_file(&self) -> Result<(), StateError> {
-        InFlightFile::delete(&self.state.config.data_dir)
+    async fn cleanup_in_flight_file(&self) -> Result<(), StateError> {
+        self.state
+            .state_topic
+            .delete()
+            .await
+            .map_err(StateError::Backend)
     }
 
     fn commit_terminal(&self, status: ProposalStatus, reason: Option<&str>) {
@@ -385,6 +408,7 @@ mod tests {
             config: cfg(dir),
             metrics,
             in_flight: Arc::new(Mutex::new(None)),
+            state_topic: Arc::new(crate::state_topic::fake::InMemoryBackend::new_loaded()),
         }
     }
 
@@ -447,7 +471,8 @@ mod tests {
         assert_eq!(after.status, ProposalStatus::Completed);
         assert!(after.terminated_at_ms > 0);
 
-        assert!(InFlightFile::load(dir.path()).unwrap().is_none());
+        // After a clean terminal the backend should have been tombstoned.
+        assert!(state.state_topic.loaded().is_none());
     }
 
     #[tokio::test]
@@ -523,22 +548,37 @@ mod tests {
             "cancel-before-Submit must produce Cancelled, not {:?}",
             after.status
         );
-        assert!(InFlightFile::load(dir.path()).unwrap().is_none());
+        // After cancellation the backend should have been tombstoned.
+        assert!(state.state_topic.loaded().is_none());
     }
 
     #[tokio::test]
     async fn resume_from_clear_throttle_commits_target_terminal() {
         let dir = tempfile::tempdir().unwrap();
         let p = proposal_with_movements("p1", vec![mv("t", 0, vec![1], vec![2])]);
-        let state = state_with_store(dir.path(), p.clone());
 
-        let mut f = InFlightFile::new(p.id.clone(), Phase::ClearThrottle, 1, 50_000_000);
-        f.target_terminal_status = Some(ProposalStatus::Completed);
-        f.write(dir.path()).unwrap();
+        // Pre-seed the backend with a ClearThrottle in-flight record so
+        // the executor resumes with the correct terminal target.
+        let mut in_flight = InFlightFile::new(p.id.clone(), Phase::ClearThrottle, 1, 50_000_000);
+        in_flight.target_terminal_status = Some(ProposalStatus::Completed);
+
+        let backend = Arc::new(crate::state_topic::fake::InMemoryBackend::new_loaded());
+        *backend.state.lock().unwrap() = Some(in_flight.clone());
+
+        let store = Arc::new(ProposalStore::new(20));
+        store.insert(p.clone());
+        let mut registry = prometheus_client::registry::Registry::with_prefix("crabka_rebalancer");
+        let metrics = RebalancerMetrics::register(&mut registry);
+        let state = ExecutorState {
+            store,
+            config: cfg(dir.path()),
+            metrics,
+            in_flight: Arc::new(Mutex::new(None)),
+            state_topic: backend,
+        };
 
         let client = Arc::new(MockClient::new());
         let cancel = CancellationToken::new();
-        let in_flight = InFlightFile::load(dir.path()).unwrap().unwrap();
         let exec = Execution::resume(client.clone(), state.clone(), p, &in_flight, cancel);
         exec.run().await;
 

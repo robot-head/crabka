@@ -41,6 +41,8 @@ pub struct AppState {
     pub client_facade: Arc<dyn crate::executor::phases::ClientFacade>,
     // new in 43g:
     pub anomaly_store: Arc<crate::detector::AnomalyStore>,
+    // new in 43i: gates /readyz and execute_proposal
+    pub state_topic: Arc<dyn crate::state_topic::StateBackend>,
 }
 
 /// Convert a `ClusterState` into the proto `GetStateResponse`.
@@ -282,6 +284,12 @@ pub async fn execute_proposal(
     Extension(state): Extension<Arc<AppState>>,
     req: ConnectRequest<pb::ExecuteProposalRequest>,
 ) -> Result<ConnectResponse<pb::ExecuteProposalResponse>, ConnectError> {
+    if !state.state_topic.is_loaded() {
+        return Err(ConnectError::new(
+            Code::Unavailable,
+            "state topic not yet loaded; retry shortly",
+        ));
+    }
     let inner = req.0;
     let id = inner.id;
     let throttle_bytes_per_sec = inner
@@ -318,35 +326,35 @@ pub async fn execute_proposal(
 
     let now = now_ms();
 
-    // Write `in_flight.json` BEFORE mutating `proposals.json`. Recovery
-    // keys off `in_flight.json`'s existence; persisting `proposals.json`
-    // first opens a crash window where the proposal is `Executing` but
-    // no recovery marker exists, leaving the proposal orphaned.
+    // Persist the initial in-flight record to the state topic BEFORE mutating
+    // proposals.json. Recovery keys off the topic record; writing proposals.json
+    // first opens a crash window where the proposal is `Executing` but no
+    // recovery marker exists, leaving the proposal orphaned.
     let in_flight_file = InFlightFile::new(
         id.clone(),
         Phase::ApplyThrottle,
         now,
         throttle_bytes_per_sec,
     );
-    if let Err(e) = in_flight_file.write(&state.executor.config.data_dir) {
+    if let Err(e) = state.state_topic.write(&in_flight_file).await {
         return Err(ConnectError::new(
             Code::Internal,
-            format!("failed to persist in_flight.json: {e}"),
+            format!("failed to persist in-flight state to topic: {e}"),
         ));
     }
 
-    let updated = state
-        .store
-        .mutate(&id, |p| {
-            p.status = ProposalStatus::Executing;
-            p.started_at_ms = now;
-            p.throttle_bytes_per_sec = throttle_bytes_per_sec;
-        })
-        .ok_or_else(|| {
-            // Clean up the in_flight.json we just wrote — we're aborting before launch.
-            let _ = InFlightFile::delete(&state.executor.config.data_dir);
-            ConnectError::new(Code::Internal, "store.mutate vanished")
-        })?;
+    let Some(updated) = state.store.mutate(&id, |p| {
+        p.status = ProposalStatus::Executing;
+        p.started_at_ms = now;
+        p.throttle_bytes_per_sec = throttle_bytes_per_sec;
+    }) else {
+        // Best-effort cleanup: tombstone the state topic record we just wrote.
+        let topic = state.state_topic.clone();
+        tokio::spawn(async move {
+            let _ = topic.delete().await;
+        });
+        return Err(ConnectError::new(Code::Internal, "store.mutate vanished"));
+    };
 
     let cancel = CancellationToken::new();
     let executor_state = state.executor.clone();
@@ -523,6 +531,9 @@ mod tests {
             },
             metrics: metrics.clone(),
             in_flight: Arc::new(tokio::sync::Mutex::new(None)),
+            state_topic: std::sync::Arc::new(
+                crate::state_topic::fake::InMemoryBackend::new_loaded(),
+            ),
         };
         let client_facade: Arc<dyn ClientFacade> = Arc::new(NoopClient);
         Arc::new(AppState {
@@ -540,6 +551,7 @@ mod tests {
             executor,
             client_facade,
             anomaly_store: Arc::new(crate::detector::AnomalyStore::new(20)),
+            state_topic: Arc::new(crate::state_topic::fake::InMemoryBackend::new_loaded()),
         })
     }
 

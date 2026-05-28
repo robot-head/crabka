@@ -21,6 +21,8 @@ pub enum StateError {
     Json(#[from] serde_json::Error),
     #[error("schema version {found} not supported (expected {expected})")]
     UnsupportedVersion { found: u32, expected: u32 },
+    #[error("state backend: {0}")]
+    Backend(#[from] crate::state_topic::StateTopicError),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

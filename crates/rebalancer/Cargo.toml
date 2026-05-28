@@ -16,6 +16,8 @@ path = "src/bin/rebalancer.rs"
 
 [dependencies]
 crabka-client-core = { version = "0.1", path = "../client-core" }
+crabka-client-admin = { version = "0.1", path = "../client-admin" }
+bytes.workspace = true
 crabka-protocol = { version = "0.1", path = "../protocol", default-features = false }
 crabka-metadata = { version = "0.1", path = "../metadata" }
 connectrpc-axum.workspace = true

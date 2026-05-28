@@ -33,6 +33,7 @@ use crabka_rebalancer::metrics::RebalancerMetrics;
 use crabka_rebalancer::model::{Movement, ProposalStore};
 use crabka_rebalancer::pb;
 use crabka_rebalancer::scraper::UsageStore;
+use crabka_rebalancer::state_topic::StateBackend as _;
 use prometheus_client::registry::Registry;
 use tempfile::TempDir;
 
@@ -132,6 +133,7 @@ fn build_state(snapshot: SharedSnapshot) -> (Arc<AppState>, Registry) {
         },
         metrics: metrics.clone(),
         in_flight: Arc::new(tokio::sync::Mutex::new(None)),
+        state_topic: Arc::new(crabka_rebalancer::state_topic::fake::InMemoryBackend::new_loaded()),
     };
     let state = Arc::new(AppState {
         snapshot,
@@ -148,6 +150,7 @@ fn build_state(snapshot: SharedSnapshot) -> (Arc<AppState>, Registry) {
         executor,
         client_facade,
         anomaly_store: Arc::new(crabka_rebalancer::detector::AnomalyStore::new(200)),
+        state_topic: Arc::new(crabka_rebalancer::state_topic::fake::InMemoryBackend::new_loaded()),
     });
     (state, registry)
 }
@@ -447,13 +450,12 @@ async fn get_state_returns_unavailable_before_first_snapshot() {
 /// synthetic proposal directly (replicas `[1]` -> `[1]`) to exercise
 /// the executor's wire path. The plan is a no-op from the broker's
 /// perspective — `ApplyThrottle` / `Submit` / `Wait` / `ClearThrottle`
-/// still all fire, `in_flight.json` is written and then cleaned up,
+/// still all fire, the state backend is written and then tombstoned,
 /// and the proposal reaches a terminal status.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn execute_proposal_settles_against_real_broker() {
     use crabka_rebalancer::executor::Execution;
     use crabka_rebalancer::executor::client_impl::LiveClient;
-    use crabka_rebalancer::executor::state::InFlightFile;
     use crabka_rebalancer::model::proposal::{Proposal, ProposalStatus, ProposalSummary};
     use std::time::Instant;
 
@@ -493,6 +495,7 @@ async fn execute_proposal_settles_against_real_broker() {
 
     let mut registry = prometheus_client::registry::Registry::with_prefix("crabka_rebalancer");
     let metrics = RebalancerMetrics::register(&mut registry);
+    let backend = Arc::new(crabka_rebalancer::state_topic::fake::InMemoryBackend::new_loaded());
     let executor_state = ExecutorState {
         store: store.clone(),
         config: ExecutorConfig {
@@ -504,6 +507,7 @@ async fn execute_proposal_settles_against_real_broker() {
         },
         metrics,
         in_flight: Arc::new(tokio::sync::Mutex::new(None)),
+        state_topic: backend.clone(),
     };
     let live_client = Arc::new(LiveClient::new(client));
 
@@ -529,7 +533,8 @@ async fn execute_proposal_settles_against_real_broker() {
         ),
         "expected terminal status, got {final_status:?}"
     );
-    assert!(InFlightFile::load(dir.path()).unwrap().is_none());
+    // After terminal the backend must be tombstoned.
+    assert!(backend.loaded().is_none());
 
     tokio::time::timeout(Duration::from_secs(30), broker.shutdown())
         .await
@@ -537,14 +542,13 @@ async fn execute_proposal_settles_against_real_broker() {
 }
 
 /// Cancelling an in-flight execution drives it to a terminal status
-/// and cleans up the `in_flight.json` marker. We don't insist on
+/// and cleans up the state backend. We don't insist on
 /// `Cancelled` specifically — a single-broker no-op plan may race
 /// to `Completed` before the cancel token fires.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cancel_clears_throttle_and_reverts() {
     use crabka_rebalancer::executor::Execution;
     use crabka_rebalancer::executor::client_impl::LiveClient;
-    use crabka_rebalancer::executor::state::InFlightFile;
     use crabka_rebalancer::model::proposal::{Proposal, ProposalStatus, ProposalSummary};
 
     let (broker, bootstrap, _broker_dir) = boot_broker().await;
@@ -582,6 +586,7 @@ async fn cancel_clears_throttle_and_reverts() {
 
     let mut registry = prometheus_client::registry::Registry::with_prefix("crabka_rebalancer");
     let metrics = RebalancerMetrics::register(&mut registry);
+    let backend = Arc::new(crabka_rebalancer::state_topic::fake::InMemoryBackend::new_loaded());
     let executor_state = ExecutorState {
         store: store.clone(),
         config: ExecutorConfig {
@@ -593,6 +598,7 @@ async fn cancel_clears_throttle_and_reverts() {
         },
         metrics,
         in_flight: Arc::new(tokio::sync::Mutex::new(None)),
+        state_topic: backend.clone(),
     };
     let live_client = Arc::new(LiveClient::new(client));
     let cancel = tokio_util::sync::CancellationToken::new();
@@ -613,17 +619,18 @@ async fn cancel_clears_throttle_and_reverts() {
         "expected terminal status, got {:?}",
         after.status
     );
-    assert!(InFlightFile::load(dir.path()).unwrap().is_none());
+    // After terminal the backend must be tombstoned.
+    assert!(backend.loaded().is_none());
 
     tokio::time::timeout(Duration::from_secs(30), broker.shutdown())
         .await
         .expect("broker shutdown within 30s");
 }
 
-/// Simulate a restart-while-executing: an `in_flight.json` exists on
-/// disk pointing at `Submit`, and the resume path picks up where it
-/// left off, drives the state machine to terminal, and removes the
-/// marker file.
+/// Simulate a restart-while-executing: the state backend contains an
+/// in-flight record pointing at `Submit`, and the resume path picks up
+/// where it left off, drives the state machine to terminal, and
+/// tombstones the backend entry.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn restart_resumes_in_flight_plan() {
     use crabka_rebalancer::executor::Execution;
@@ -664,9 +671,10 @@ async fn restart_resumes_in_flight_plan() {
     };
     store.insert(proposal.clone());
 
-    InFlightFile::new(proposal.id.clone(), Phase::Submit, 1, 50_000_000)
-        .write(dir.path())
-        .unwrap();
+    // Seed the backend as if a previous run persisted Submit phase.
+    let in_flight = InFlightFile::new(proposal.id.clone(), Phase::Submit, 1, 50_000_000);
+    let backend = Arc::new(crabka_rebalancer::state_topic::fake::InMemoryBackend::new_loaded());
+    *backend.state.lock().unwrap() = Some(in_flight.clone());
 
     let mut registry = prometheus_client::registry::Registry::with_prefix("crabka_rebalancer");
     let metrics = RebalancerMetrics::register(&mut registry);
@@ -681,10 +689,10 @@ async fn restart_resumes_in_flight_plan() {
         },
         metrics,
         in_flight: Arc::new(tokio::sync::Mutex::new(None)),
+        state_topic: backend.clone(),
     };
     let live_client = Arc::new(LiveClient::new(client));
     let cancel = tokio_util::sync::CancellationToken::new();
-    let in_flight = InFlightFile::load(dir.path()).unwrap().unwrap();
     let exec = Execution::resume(live_client, executor_state, proposal, &in_flight, cancel);
     let _ = tokio::time::timeout(Duration::from_secs(10), exec.run()).await;
 
@@ -697,7 +705,8 @@ async fn restart_resumes_in_flight_plan() {
         "expected terminal status after resume, got {:?}",
         after.status
     );
-    assert!(InFlightFile::load(dir.path()).unwrap().is_none());
+    // After terminal the backend must be tombstoned.
+    assert!(backend.loaded().is_none());
 
     tokio::time::timeout(Duration::from_secs(30), broker.shutdown())
         .await
