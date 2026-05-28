@@ -4,6 +4,7 @@
 //! for multi-replica HA (slice 43j).
 
 mod error;
+pub(crate) mod producer;
 pub(crate) mod serde_format;
 pub(crate) mod topic_admin;
 
