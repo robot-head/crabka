@@ -175,6 +175,10 @@ pub(crate) struct ReplicatorSupervisor {
     /// partition writer's storage-failure path can flip the dir
     /// offline broker-wide.
     log_dir_status: crate::log_dir_status::LogDirRegistry,
+    /// Slice 48k: broker-wide metrics handle. Each spawned replicator
+    /// clones this so it can increment `replication_bytes_in` after a
+    /// successful follower-side append.
+    metrics: crate::metrics::BrokerMetrics,
 }
 
 impl ReplicatorSupervisor {
@@ -193,6 +197,7 @@ impl ReplicatorSupervisor {
         inter_broker_listener_name: String,
         throttle_state: Arc<ThrottleState>,
         log_dir_status: crate::log_dir_status::LogDirRegistry,
+        metrics: crate::metrics::BrokerMetrics,
     ) -> Self {
         Self {
             node_id,
@@ -210,6 +215,7 @@ impl ReplicatorSupervisor {
             inter_broker_listener_name,
             throttle_state,
             log_dir_status,
+            metrics,
         }
     }
 
@@ -353,6 +359,7 @@ impl ReplicatorSupervisor {
                 throttle_state: self.throttle_state.clone(),
                 controller: self.controller.clone(),
                 log_dir_status: self.log_dir_status.clone(),
+                metrics: self.metrics.clone(),
             }));
         }
 

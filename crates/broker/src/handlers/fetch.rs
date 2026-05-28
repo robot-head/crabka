@@ -520,6 +520,21 @@ pub(crate) async fn handle(
                 p.partition_index,
                 partition_bytes,
             );
+            // Slice 48k: when this Fetch arrived from a follower
+            // (`replica_id >= 0`), the bytes leaving the leader are
+            // replication outbound, not consumer outbound. We emit a
+            // separate counter rather than splitting `partition_bytes_out`
+            // — the existing counter keeps its established semantics
+            // (rebalancer + general broker outbound) and operators get a
+            // dedicated `replication_bytes_out` counter for inter-broker
+            // traffic.
+            if is_follower_fetch {
+                broker.metrics.record_replication_out(
+                    &topic_resp.topic,
+                    p.partition_index,
+                    partition_bytes,
+                );
+            }
             // Slice 43f: drain the per-partition CPU accumulator. Tracks
             // actual poll duration across both the first read pass and any
             // long-poll re-reads, attributing only on-CPU time.

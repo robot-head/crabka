@@ -64,6 +64,19 @@ pub struct BrokerMetrics {
     pub topic_fetch_requests: Family<TopicLabel, Counter>,
     pub partition_bytes_in: Family<PartitionLabel, Counter>,
     pub partition_bytes_out: Family<PartitionLabel, Counter>,
+    /// Slice 48k: cumulative bytes this broker accepted from a partition
+    /// leader as a follower (`Fetch(replica_id >= 0)` round-trip). Mirrors
+    /// Kafka's `BrokerTopicMetrics.replicationBytesInPerSec`. Operators
+    /// graph `rate(replication_bytes_in_total[1m])` to spot ISR fall-behind
+    /// caused by ingest, not by client read load.
+    pub replication_bytes_in: Family<PartitionLabel, Counter>,
+    /// Slice 48k: cumulative bytes this broker served *to* a follower
+    /// (i.e. the leader-side outbound for inter-broker `Fetch`). Mirrors
+    /// Kafka's `BrokerTopicMetrics.replicationBytesOutPerSec`. Operators
+    /// graph the per-partition rate to attribute leader outbound to
+    /// followers vs. consumers (the latter still rolls up to
+    /// `partition_bytes_out`).
+    pub replication_bytes_out: Family<PartitionLabel, Counter>,
     pub partition_disk_bytes: Family<PartitionLabel, Gauge>,
     /// Cumulative handler-thread microseconds spent processing each
     /// (topic, partition). Exported as
@@ -107,6 +120,8 @@ impl BrokerMetrics {
         let topic_fetch_requests: Family<TopicLabel, Counter> = Family::default();
         let partition_bytes_in: Family<PartitionLabel, Counter> = Family::default();
         let partition_bytes_out: Family<PartitionLabel, Counter> = Family::default();
+        let replication_bytes_in: Family<PartitionLabel, Counter> = Family::default();
+        let replication_bytes_out: Family<PartitionLabel, Counter> = Family::default();
         let partition_disk_bytes: Family<PartitionLabel, Gauge> = Family::default();
         let partition_cpu_micros: Family<PartitionLabel, Counter> = Family::default();
         let partitions_led = Gauge::default();
@@ -180,6 +195,22 @@ impl BrokerMetrics {
             partition_bytes_out.clone(),
         );
         registry.register(
+            "replication_bytes_in",
+            "Bytes received from the partition leader by this broker as a \
+             follower (cumulative). Rate(...) for follower throughput; \
+             plotted alongside partition_bytes_in surfaces ingest vs. \
+             replication-driven traffic.",
+            replication_bytes_in.clone(),
+        );
+        registry.register(
+            "replication_bytes_out",
+            "Bytes this broker served to followers as the partition leader \
+             (cumulative). Rate(...) for leader-out-to-followers throughput; \
+             together with partition_bytes_out (consumer reads) it attributes \
+             outbound traffic to its source.",
+            replication_bytes_out.clone(),
+        );
+        registry.register(
             "partition_disk_bytes",
             "On-disk size of a partition's log directory (gauge). Updated by \
              the broker's periodic disk scanner; suppress if scanner is disabled.",
@@ -225,6 +256,8 @@ impl BrokerMetrics {
             topic_fetch_requests,
             partition_bytes_in,
             partition_bytes_out,
+            replication_bytes_in,
+            replication_bytes_out,
             partition_disk_bytes,
             partition_cpu_micros,
             partitions_led,
@@ -302,6 +335,34 @@ impl BrokerMetrics {
         self.partition_bytes_out.get_or_create(&lbl).inc_by(bytes);
     }
 
+    /// Slice 48k: account bytes this broker received from the partition
+    /// leader as a follower (inter-broker `Fetch` round-trip, follower
+    /// side). Called from the replicator after a successful append.
+    pub fn record_replication_in(&self, topic: &str, partition: i32, bytes: u64) {
+        if bytes == 0 {
+            return;
+        }
+        let lbl = PartitionLabel {
+            topic: topic.to_string(),
+            partition,
+        };
+        self.replication_bytes_in.get_or_create(&lbl).inc_by(bytes);
+    }
+
+    /// Slice 48k: account bytes this broker served to a follower as the
+    /// partition leader (inter-broker `Fetch` round-trip, leader side).
+    /// Called from the `Fetch` handler when `replica_id >= 0`.
+    pub fn record_replication_out(&self, topic: &str, partition: i32, bytes: u64) {
+        if bytes == 0 {
+            return;
+        }
+        let lbl = PartitionLabel {
+            topic: topic.to_string(),
+            partition,
+        };
+        self.replication_bytes_out.get_or_create(&lbl).inc_by(bytes);
+    }
+
     /// Convenience: account handler-thread microseconds spent on a
     /// partition. Called from the produce / fetch hot paths around the
     /// per-partition work. No-ops on zero so we don't allocate a label
@@ -336,6 +397,8 @@ mod tests {
         m.record_partition_produce("topic-a", 0, 100);
         m.record_partition_fetch("topic-a", 0, 50);
         m.record_partition_cpu_micros("topic-a", 0, 250);
+        m.record_replication_in("topic-a", 0, 4096);
+        m.record_replication_out("topic-a", 0, 8192);
         m.partition_disk_bytes
             .get_or_create(&PartitionLabel {
                 topic: "topic-a".into(),
@@ -367,6 +430,8 @@ mod tests {
             "crabka_broker_incremental_fetch_sessions",
             "crabka_broker_incremental_fetch_session_evictions_total",
             "crabka_broker_incremental_fetch_partitions_cached",
+            "crabka_broker_replication_bytes_in_total",
+            "crabka_broker_replication_bytes_out_total",
         ] {
             assert!(buf.contains(needle), "missing {needle} in:\n{buf}");
         }
@@ -457,5 +522,31 @@ mod tests {
         };
         // Helper short-circuits at 0; the label entry isn't created.
         assert_eq!(m.partition_cpu_micros.get_or_create(&lbl).get(), 0);
+    }
+
+    #[test]
+    fn replication_helpers_accumulate_per_partition() {
+        let m = BrokerMetrics::new();
+        // Two appends from the same leader partition.
+        m.record_replication_in("orders", 3, 1_500);
+        m.record_replication_in("orders", 3, 2_500);
+        // Different partition stays independent.
+        m.record_replication_in("orders", 4, 100);
+        // Outbound side: bytes this broker served to its followers.
+        m.record_replication_out("orders", 3, 4_000);
+        m.record_replication_out("orders", 4, 0); // no-op
+
+        let lbl3 = PartitionLabel {
+            topic: "orders".into(),
+            partition: 3,
+        };
+        let lbl4 = PartitionLabel {
+            topic: "orders".into(),
+            partition: 4,
+        };
+        assert_eq!(m.replication_bytes_in.get_or_create(&lbl3).get(), 4_000);
+        assert_eq!(m.replication_bytes_in.get_or_create(&lbl4).get(), 100);
+        assert_eq!(m.replication_bytes_out.get_or_create(&lbl3).get(), 4_000);
+        assert_eq!(m.replication_bytes_out.get_or_create(&lbl4).get(), 0);
     }
 }
