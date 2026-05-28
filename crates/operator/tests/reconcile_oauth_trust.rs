@@ -649,7 +649,7 @@ async fn statefulset_mounts_oauth_jwks_trust_secret_when_trust_certs_present() {
         .unwrap_or_else(|| panic!("oauth-jwks-trust mount present; body = {body}"));
     assert_eq!(
         trust_mount["mountPath"], "/etc/crabka/oauth-jwks-trust",
-        "mount path is the slice-49c contract; body = {body}",
+        "mount path contract; body = {body}",
     );
     assert_eq!(
         trust_mount["readOnly"], true,

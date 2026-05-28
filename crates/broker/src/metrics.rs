@@ -317,7 +317,7 @@ impl BrokerMetrics {
         // so the registered name omits it.
         registry.register(
             "messages_in",
-            "Slice 12j: cumulative count of records received from \
+            "Cumulative count of records received from \
              producers, per topic. Mirrors Kafka's \
              BrokerTopicMetrics.MessagesInPerSec. Legacy v0/v1 \
              produce payloads are not counted (their per-record body \
@@ -341,7 +341,7 @@ impl BrokerMetrics {
         );
         registry.register(
             "topic_failed_produce_requests",
-            "Slice 12k: cumulative count of Produce partition \
+            "Cumulative count of Produce partition \
              responses that returned a non-zero error code, per \
              topic. Mirrors Kafka's \
              BrokerTopicMetrics.FailedProduceRequestsPerSec. \
@@ -352,7 +352,7 @@ impl BrokerMetrics {
         );
         registry.register(
             "topic_failed_fetch_requests",
-            "Slice 12k: cumulative count of Fetch partition \
+            "Cumulative count of Fetch partition \
              responses that returned a non-zero error code, per \
              topic. Mirrors Kafka's \
              BrokerTopicMetrics.FailedFetchRequestsPerSec. Pairs \
@@ -366,14 +366,14 @@ impl BrokerMetrics {
         );
         registry.register(
             "partitions_total",
-            "Slice 8b: total number of partitions (leader + follower \
+            "Total number of partitions (leader + follower \
              replicas) this broker hosts. Mirrors Kafka's \
              ReplicaManager.PartitionCount.",
             partitions_total.clone(),
         );
         registry.register(
             "under_replicated_partitions",
-            "Slice 8b: count of partitions this broker leads whose ISR \
+            "Count of partitions this broker leads whose ISR \
              is smaller than the assigned replica set. Mirrors Kafka's \
              ReplicaManager.UnderReplicatedPartitions; alert on > 0 \
              to spot stuck followers before they fail an unclean \
@@ -382,7 +382,7 @@ impl BrokerMetrics {
         );
         registry.register(
             "under_min_isr_partition_count",
-            "Slice 8c: count of partitions this broker leads whose ISR \
+            "Count of partitions this broker leads whose ISR \
              is strictly less than the topic's min.insync.replicas. \
              Mirrors Kafka's ReplicaManager.UnderMinIsrPartitionCount; \
              alert on > 0 — these partitions reject acks=all produces \
@@ -391,7 +391,7 @@ impl BrokerMetrics {
         );
         registry.register(
             "offline_partitions_count",
-            "Slice 8c: count of partitions this broker leads that have \
+            "Count of partitions this broker leads that have \
              no live leader (leader dead with no eligible ISR \
              replacement). Mirrors Kafka's \
              ReplicaManager.OfflinePartitionsCount; alert on > 0 — \
@@ -406,7 +406,7 @@ impl BrokerMetrics {
         );
         registry.register(
             "controller_leader_changes",
-            "Slice 7c: cumulative count of distinct controller-leader \
+            "Cumulative count of distinct controller-leader \
              transitions this broker has observed (any change in the \
              raft leader, including this broker becoming or ceasing \
              to be leader). Mirrors Kafka's \
@@ -497,7 +497,7 @@ impl BrokerMetrics {
         );
         registry.register(
             "successful_authentication",
-            "Slice 12l: cumulative count of SaslAuthenticate frames per \
+            "Cumulative count of SaslAuthenticate frames per \
              mechanism that ended in a successful auth state transition. \
              Mirrors Kafka's \
              kafka.network:type=Selector,name=successful-authentication-total. \
@@ -509,7 +509,7 @@ impl BrokerMetrics {
         );
         registry.register(
             "failed_authentication",
-            "Slice 12l: cumulative count of SaslAuthenticate frames per \
+            "Cumulative count of SaslAuthenticate frames per \
              mechanism that returned a non-zero error code. Mirrors \
              Kafka's failed-authentication-total. ILLEGAL_SASL_STATE \
              rejects (SaslAuthenticate without prior SaslHandshake) \
@@ -518,7 +518,7 @@ impl BrokerMetrics {
         );
         registry.register(
             "api_requests",
-            "Slice 12h: cumulative count of dispatched requests per \
+            "Cumulative count of dispatched requests per \
              Kafka API key (variant name from the `ApiKey` enum, e.g. \
              Produce / Fetch / DescribeQuorum). Unknown api keys land \
              under the `Unknown` label. Mirrors Kafka's \
@@ -528,7 +528,7 @@ impl BrokerMetrics {
         );
         registry.register(
             "unsupported_api_requests",
-            "Slice 12i: cumulative count of requests the dispatcher \
+            "Cumulative count of requests the dispatcher \
              answered with the synthetic UNSUPPORTED_VERSION response \
              because no handler matched the api_key. Labelled with \
              the ApiKey variant name (or `Unknown` for unrecognised \
@@ -538,9 +538,9 @@ impl BrokerMetrics {
         );
         registry.register(
             "tiered_storage_rlmm_topic_backed",
-            "Slice 48l (KIP-405): 1 when this broker is answering remote-log \
+            "KIP-405: 1 when this broker is answering remote-log \
              metadata queries from the durable __remote_log_metadata topic \
-             (slice 48f production RLMM); 0 while still on the in-memory \
+             (production RLMM); 0 while still on the in-memory \
              placeholder. Bumped to 1 by the bootstrap task after a \
              successful SwappableRlmm swap; stays at 0 for clusters that \
              never asked for `metadataManager: Topic`.",
@@ -548,7 +548,7 @@ impl BrokerMetrics {
         );
         registry.register(
             "produce_message_conversions",
-            "Slice 12g: cumulative count of v0/v1 → v2 record-batch \
+            "Cumulative count of v0/v1 → v2 record-batch \
              up-conversions on the Produce path, per topic. Mirrors \
              Kafka's BrokerTopicMetrics.ProduceMessageConversionsPerSec; \
              rate(...) lets operators spot the overhead of legacy \
@@ -557,7 +557,7 @@ impl BrokerMetrics {
         );
         registry.register(
             "fetch_message_conversions",
-            "Slice 12g: cumulative count of v2 → v0/v1 record-batch \
+            "Cumulative count of v2 → v0/v1 record-batch \
              down-conversions on the Fetch path, per topic. Mirrors \
              Kafka's BrokerTopicMetrics.FetchMessageConversionsPerSec; \
              rate(...) lets operators spot the overhead of legacy \
@@ -566,7 +566,7 @@ impl BrokerMetrics {
         );
         registry.register(
             "unclean_leader_elections",
-            "Slice 10c (KIP-841): cumulative count of unclean leader \
+            "KIP-841: cumulative count of unclean leader \
              elections driven by this broker (as controller leader). An \
              unclean election is one where the new leader was picked \
              from outside the ISR because the partition's ISR was empty \

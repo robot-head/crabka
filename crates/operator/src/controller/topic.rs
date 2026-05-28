@@ -234,7 +234,7 @@ pub async fn reconcile(obj: Arc<KafkaTopic>, ctx: Arc<Context>) -> Result<Action
                     &obj,
                     "False",
                     "ImmutableFieldChanged",
-                    "spec.replicas change requires partition reassignment (slice 43+)",
+                    "spec.replicas change requires partition reassignment",
                     cur.topic_id.map(|u| u.to_string()),
                     false,
                 )

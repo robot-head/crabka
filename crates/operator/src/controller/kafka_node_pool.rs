@@ -50,7 +50,7 @@ pub(crate) const METRICS_PORT: i32 = 9404;
 pub enum PoolValidationError {
     #[error("spec.roles must equal {{Controller, Broker}}; got {0:?}")]
     RolesNotMixed(Vec<NodeRole>),
-    #[error("spec.replicas={0} is unsupported in slice 20 (only 1 allowed)")]
+    #[error("spec.replicas={0} is unsupported (only 1 allowed)")]
     ReplicasNotOne(i32),
     #[error("spec.nodeIdStart={0} is out of range 0..=999999")]
     NodeIdOutOfRange(i32),
@@ -1133,7 +1133,7 @@ fn condition_for_validation_error(err: &PoolValidationError) -> KafkaCondition {
         ),
         PoolValidationError::ReplicasNotOne(n) => (
             "UnsupportedReplicaCount",
-            format!("spec.replicas={n} is unsupported in slice 20 (only 1 allowed)"),
+            format!("spec.replicas={n} is unsupported (only 1 allowed)"),
         ),
         PoolValidationError::NodeIdOutOfRange(n) => (
             "NodeIdOutOfRange",

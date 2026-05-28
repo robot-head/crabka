@@ -1139,7 +1139,7 @@ async fn transactional_console_producer_eos() {
              CRABKA_RUN_TXN_JVM_TEST=1 to run. Reason: cp-kafka \
              verifiable-producer doesn't support --transactional-id; \
              this test needs a custom Java snippet harness which is \
-             deferred to slice 10."
+             not yet implemented."
         );
         return;
     }
@@ -6230,7 +6230,7 @@ async fn jvm_kafka_reassign_partitions_with_throttle_end_to_end() {
     );
     assert!(
         verify_out.status.success(),
-        "kafka-reassign-partitions --verify failed (slice 15b should fix this): stderr={}",
+        "kafka-reassign-partitions --verify failed: stderr={}",
         String::from_utf8_lossy(&verify_out.stderr)
     );
 

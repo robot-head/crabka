@@ -386,7 +386,7 @@ async fn kafka_applies_service_configmap_secret_no_statefulset() {
     assert_eq!(
         observed.len(),
         17,
-        "expected exactly 17 requests (slice 30 includes CA + keystore calls), \
+        "expected exactly 17 requests (includes CA + keystore calls), \
          saw {}: {:?}",
         observed.len(),
         methods_and_uris,

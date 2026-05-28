@@ -100,7 +100,7 @@ impl CrabkaStateMachine {
 fn snapshot_unsupported(verb: &'static str) -> StorageError<NodeId> {
     let io_err = io::Error::new(
         io::ErrorKind::Unsupported,
-        format!("snapshots deferred to a future slice ({verb})"),
+        format!("snapshots are not implemented ({verb})"),
     );
     StorageIOError::read_snapshot(None, AnyError::new(&io_err)).into()
 }

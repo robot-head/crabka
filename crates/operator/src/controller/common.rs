@@ -42,7 +42,7 @@ pub enum ReconcileError {
     MissingUid,
     #[error("serde error: {0}")]
     Serde(#[from] serde_json::Error),
-    #[error("spec.replicas={0} is unsupported (only 1 allowed in slice 20)")]
+    #[error("spec.replicas={0} is unsupported (only 1 allowed)")]
     UnsupportedReplicas(i32),
     #[error("cluster-id secret malformed: {0}")]
     MalformedSecret(String),
@@ -797,11 +797,11 @@ mod config_hash_tests {
         // lets an in-place config-only upgrade avoid a
         // hash-driven roll (the e2e job `kind-upgrade` asserts this
         // against a real config-only cluster).
-        let slice24_form = "log.retention.hours=24\n";
+        let config_only_form = "log.retention.hours=24\n";
         assert_eq!(
             h,
-            config_hash(slice24_form),
-            "combined hash for empty listeners must equal slice-24 config_hash(spec.config)"
+            config_hash(config_only_form),
+            "combined hash for empty listeners must equal config_hash(spec.config)"
         );
 
         let mut spec_b = spec_a.clone();

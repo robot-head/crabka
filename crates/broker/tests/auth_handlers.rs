@@ -282,7 +282,7 @@ async fn metadata_response_carries_listener_endpoints() {
     let bootstrap = plaintext_addr.to_string();
     let client = Client::builder()
         .bootstrap(&bootstrap)
-        .client_id("crabka-task11-test")
+        .client_id("crabka-auth-test")
         .build()
         .await
         .expect("client build");

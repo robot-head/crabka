@@ -253,7 +253,7 @@ async fn topic_compression_lz4_recompresses_producer_gzip_batch() {
     wait_for_compression(&handle, TOPIC, Some(CompressionType::Lz4)).await;
 
     let topic_id = get_topic_id(addr, TOPIC).await;
-    let payload = b"slice-67 broker-side recompression smoke";
+    let payload = b"broker-side recompression smoke";
     produce_gzip(addr, TOPIC, topic_id, payload).await;
 
     let served = fetch_first_batch(addr, TOPIC, topic_id).await;

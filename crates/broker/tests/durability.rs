@@ -234,7 +234,7 @@ async fn consumer_clamps_at_hw_when_followers_lag() {
 // plain `lso` for rf=1 (HW = LEO immediately). Previously flaked with the
 // `INVALID_TXN_STATE` race fixed in `Producer::flush` (it now waits for
 // in-flight Produce batches before `EndTxn`).
-async fn read_committed_under_rf1_unchanged_from_slice9() {
+async fn read_committed_under_rf1_unchanged() {
     let (broker, bootstrap, _dir) = boot_single().await;
     create_topic(&broker, &bootstrap, "rctxn", 1).await;
 

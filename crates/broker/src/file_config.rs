@@ -1709,7 +1709,7 @@ super_users = ["admin"]
 
         assert!(
             cfg.super_users.contains("admin"),
-            "[authorization].super_users must populate BrokerConfig.super_users for slice-51 act-as parity"
+            "[authorization].super_users must populate BrokerConfig.super_users for act-as parity"
         );
         // `admin` is a super-user → bypass returns Allow even with an
         // empty MetadataImage (no ACLs). This is the SimpleAclAuthorizer

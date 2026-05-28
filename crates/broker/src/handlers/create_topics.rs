@@ -378,7 +378,7 @@ mod replica_assignment_tests {
     }
 
     #[test]
-    fn rf_one_single_broker_preserves_slice7_shape() {
+    fn rf_one_single_broker_preserves_replica_shape() {
         let bs = vec![1u64];
         let out = round_robin_replicas(&bs, 2, 1);
         assert_eq!(out, vec![vec![1u64], vec![1u64]]);

@@ -201,7 +201,7 @@ impl openraft::network::RaftNetwork<TypeConfig> for CrabkaRaftNetworkConn {
     > {
         let err = std::io::Error::new(
             std::io::ErrorKind::Unsupported,
-            "install_snapshot is deferred in slice 7",
+            "install_snapshot is not implemented",
         );
         Err(RPCError::Network(NetworkError::new(&err)))
     }

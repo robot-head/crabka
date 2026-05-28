@@ -1001,7 +1001,7 @@ async fn super_user_can_renew_other_owners_token() {
         assert_eq!(
             renew_resp.error_code, 0,
             "super-user Renew of another owner's token must succeed; got {} \
-             (slice 51c super-user bypass regressed)",
+             (super-user bypass regressed)",
             renew_resp.error_code,
         );
         assert!(
@@ -1031,7 +1031,7 @@ async fn super_user_can_renew_other_owners_token() {
         assert_eq!(
             expire_resp.error_code, 0,
             "super-user Expire of another owner's token must succeed; got {} \
-             (slice 51c super-user bypass regressed)",
+             (super-user bypass regressed)",
             expire_resp.error_code,
         );
 
