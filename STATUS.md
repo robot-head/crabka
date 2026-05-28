@@ -4763,3 +4763,68 @@ introspection metadata).
 - CI: `broker-jvm-acceptance` continues to run `jvm_acceptance` only;
   `jvm_consumer_group_next_gen` is back in source as `#[ignore]`d
   documentation of intent.
+
+## Slice 12l — broker(metrics): SASL successful/failed authentication counters (2026-05-28)
+
+- **Goal.** Mirror Kafka's
+  `kafka.network:type=Selector,name={successful,failed}-authentication-total`
+  as per-mechanism Prometheus counters. Operators alert on
+  `rate(failed_authentication_total[5m]) > 0` per mechanism to
+  catch credential-rotation gaps, OAuthBearer JWKS outages, or
+  brute-force scans; the success-rate ratio per mechanism is the
+  canonical view of auth health.
+- **New label set.** `SaslMechanismLabel { mechanism: String }`
+  with cardinality bounded by `SaslMechanism::*` + 1. The
+  `mechanism` value is the canonical Kafka wire name from
+  `crabka_security::SaslMechanism::wire_name` (`"PLAIN"`,
+  `"SCRAM-SHA-256"`, `"SCRAM-SHA-512"`, `"OAUTHBEARER"`).
+  `ILLEGAL_SASL_STATE` rejects (`SaslAuthenticate` without prior
+  `SaslHandshake`) land under the `"Unknown"` sentinel so unknown
+  mechanism strings never appear in the cardinality budget.
+- **Wiring.** Two `Family<SaslMechanismLabel, Counter>` fields on
+  `BrokerMetrics` registered as `successful_authentication` /
+  `failed_authentication` (`_total` appended by
+  prometheus-client). Single helper
+  `record_authentication(mechanism, success: bool)` dispatches to
+  the correct family. Wired at exactly one point — the SASL leg
+  of `network::dispatch::handle_sasl_frame` after the
+  PLAIN/SCRAM/OAUTHBEARER handler returns: success ⇔
+  `resp.error_code == 0`, mechanism resolved from the prior
+  `Negotiating` / `Reauthenticating` state (with `mech_opt.map_or`
+  pulling the `"Unknown"` sentinel when no handshake ran).
+- **Tests.**
+  - 1 new unit test
+    `record_authentication_splits_success_and_failure_per_mechanism`
+    asserts independent per-mechanism accumulation, that a
+    success bump doesn't lazily allocate a failure entry, and
+    that the `Unknown` sentinel is countable.
+  - Extended `registry_has_broker_prefix_and_all_metrics` to
+    bump PLAIN-success, SCRAM-512-failure, and Unknown-failure
+    and assert both `crabka_broker_successful_authentication_total`
+    and `crabka_broker_failed_authentication_total` appear in
+    the encoded text.
+  - 1 new end-to-end integration test
+    `sasl_plain_authentication_metrics_tick_for_success_and_failure`
+    in `tests/auth_handlers.rs`: boots a SASL_PLAINTEXT broker
+    with the metrics listener bound, runs one happy-path PLAIN
+    session and one wrong-password session, then scrapes
+    `/metrics` and asserts
+    `successful_authentication_total{mechanism="PLAIN"} 1` and
+    `failed_authentication_total{mechanism="PLAIN"} 1`. Validates
+    the full dispatch → counter → renderer chain.
+- **`cargo test -p crabka-broker --lib metrics` (17 pass, +1 new)
+  + `cargo test --test auth_handlers` (30 pass, +1 new) + `--test
+  metrics --test raft_sasl` regression sweep (5 pass) + `cargo
+  clippy -p crabka-broker --lib --tests -- -D warnings` + `cargo
+  fmt --check`** — all green.
+- **Out of scope.**
+  - Re-auth (KIP-368) accounting. The slice-49e re-auth path goes
+    through the same `handle_sasl_frame` dispatcher, so re-auth
+    attempts already get counted; documenting whether re-auth
+    should be a separate counter family (vs. rolled into the
+    initial-auth total) is a follow-up.
+  - `expired_connections_killed_total` for the slice-50d
+    session-lifetime ceiling. The ceiling kicks at the dispatch
+    layer when an authenticated connection's `expires_at_ms`
+    elapses; a separate counter family there is a small
+    follow-up slice.

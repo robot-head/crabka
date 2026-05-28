@@ -64,6 +64,21 @@ pub struct ApiKeyLabel {
     pub api_key: String,
 }
 
+/// Slice 12l: SASL mechanism fingerprint, paired with the
+/// `{successful,failed}_authentication_total` counter families.
+/// `mechanism` is the canonical Kafka wire name from
+/// [`crabka_security::SaslMechanism::wire_name`] (`"PLAIN"`,
+/// `"SCRAM-SHA-256"`, `"SCRAM-SHA-512"`, `"OAUTHBEARER"`) when the
+/// `SaslAuthenticate` frame arrived in a valid sequence; the
+/// `"Unknown"` sentinel covers `ILLEGAL_SASL_STATE` rejects where
+/// no prior `SaslHandshake` ran and the mechanism is unset.
+/// Cardinality is bounded by `SaslMechanism::*` + 1 — a tight set
+/// regardless of client population.
+#[derive(Debug, Clone, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct SaslMechanismLabel {
+    pub mechanism: String,
+}
+
 /// Cheaply-clonable bundle of counter / gauge handles. Construct once
 /// in `Broker::start`; hand out clones (each clone is a single
 /// `Arc::clone`) to every subsystem that emits.
@@ -175,6 +190,22 @@ pub struct BrokerMetrics {
     /// handshakes. Operators graph this to see which client libraries
     /// and versions are connecting.
     pub client_software_versions: Family<ClientSoftwareLabel, Counter>,
+    /// Slice 12l: cumulative count of completed `SaslAuthenticate`
+    /// frames per mechanism that ended in a successful auth state
+    /// transition. Mirrors Kafka's
+    /// `kafka.network:type=Selector,name=successful-authentication-total`.
+    /// Paired with `failed_authentication` so operators compute the
+    /// auth failure ratio per mechanism at scrape time.
+    pub successful_authentication: Family<SaslMechanismLabel, Counter>,
+    /// Slice 12l: cumulative count of `SaslAuthenticate` frames per
+    /// mechanism that returned a non-zero error code. Mirrors
+    /// Kafka's `failed-authentication-total`. The `"Unknown"`
+    /// mechanism label covers `ILLEGAL_SASL_STATE` rejects where
+    /// the connection sent `SaslAuthenticate` without first
+    /// completing a `SaslHandshake`; per-mechanism failures land
+    /// under the canonical wire name (`PLAIN`, `SCRAM-SHA-256`,
+    /// `SCRAM-SHA-512`, `OAUTHBEARER`).
+    pub failed_authentication: Family<SaslMechanismLabel, Counter>,
     /// Slice 12h: per-Kafka-API request counter. Bumped once per
     /// dispatched request from the network dispatcher, labelled by
     /// the `ApiKey` variant name (or `"Unknown"` for unrecognised
@@ -261,6 +292,8 @@ impl BrokerMetrics {
         let incremental_fetch_session_evictions_total = Counter::default();
         let incremental_fetch_partitions_cached = Gauge::default();
         let client_software_versions: Family<ClientSoftwareLabel, Counter> = Family::default();
+        let successful_authentication: Family<SaslMechanismLabel, Counter> = Family::default();
+        let failed_authentication: Family<SaslMechanismLabel, Counter> = Family::default();
         let api_requests: Family<ApiKeyLabel, Counter> = Family::default();
         let unsupported_api_requests: Family<ApiKeyLabel, Counter> = Family::default();
         let tiered_storage_rlmm_topic_backed = Gauge::default();
@@ -463,6 +496,27 @@ impl BrokerMetrics {
             client_software_versions.clone(),
         );
         registry.register(
+            "successful_authentication",
+            "Slice 12l: cumulative count of SaslAuthenticate frames per \
+             mechanism that ended in a successful auth state transition. \
+             Mirrors Kafka's \
+             kafka.network:type=Selector,name=successful-authentication-total. \
+             Labelled by the canonical SASL mechanism wire name \
+             (PLAIN, SCRAM-SHA-256, SCRAM-SHA-512, OAUTHBEARER). \
+             Paired with failed_authentication so rate(...) ratios \
+             expose per-mechanism credential-failure rates.",
+            successful_authentication.clone(),
+        );
+        registry.register(
+            "failed_authentication",
+            "Slice 12l: cumulative count of SaslAuthenticate frames per \
+             mechanism that returned a non-zero error code. Mirrors \
+             Kafka's failed-authentication-total. ILLEGAL_SASL_STATE \
+             rejects (SaslAuthenticate without prior SaslHandshake) \
+             land under the `Unknown` mechanism label.",
+            failed_authentication.clone(),
+        );
+        registry.register(
             "api_requests",
             "Slice 12h: cumulative count of dispatched requests per \
              Kafka API key (variant name from the `ApiKey` enum, e.g. \
@@ -553,6 +607,8 @@ impl BrokerMetrics {
             incremental_fetch_session_evictions_total,
             incremental_fetch_partitions_cached,
             client_software_versions,
+            successful_authentication,
+            failed_authentication,
             api_requests,
             unsupported_api_requests,
             tiered_storage_rlmm_topic_backed,
@@ -572,6 +628,24 @@ impl BrokerMetrics {
             software_version: version.to_string(),
         };
         self.client_software_versions.get_or_create(&lbl).inc();
+    }
+
+    /// Slice 12l: account one completed `SaslAuthenticate` frame on
+    /// `mechanism`. `success = true` increments
+    /// `successful_authentication_total`; `success = false`
+    /// increments `failed_authentication_total`. The mechanism
+    /// label is the canonical Kafka wire name; pass `"Unknown"`
+    /// for the `ILLEGAL_SASL_STATE` reject (no prior handshake)
+    /// to keep cardinality bounded.
+    pub fn record_authentication(&self, mechanism: &str, success: bool) {
+        let lbl = SaslMechanismLabel {
+            mechanism: mechanism.to_string(),
+        };
+        if success {
+            self.successful_authentication.get_or_create(&lbl).inc();
+        } else {
+            self.failed_authentication.get_or_create(&lbl).inc();
+        }
     }
 
     /// Slice 12h: account one dispatched request for `api_key`. The
@@ -788,6 +862,9 @@ mod tests {
         m.record_fetch_message_conversion("topic-a");
         m.record_failed_produce("topic-a");
         m.record_failed_fetch("topic-a");
+        m.record_authentication("PLAIN", true);
+        m.record_authentication("SCRAM-SHA-512", false);
+        m.record_authentication("Unknown", false);
         m.record_unclean_leader_election();
         m.record_api_request(0); // Produce
         m.record_api_request(999); // unknown → "Unknown" label
@@ -844,6 +921,8 @@ mod tests {
             "crabka_broker_messages_in_total",
             "crabka_broker_topic_failed_produce_requests_total",
             "crabka_broker_topic_failed_fetch_requests_total",
+            "crabka_broker_successful_authentication_total",
+            "crabka_broker_failed_authentication_total",
         ] {
             assert!(buf.contains(needle), "missing {needle} in:\n{buf}");
         }
@@ -893,6 +972,35 @@ mod tests {
         m.record_produce_messages("t", 3);
         m.record_produce_messages("t", 7);
         assert_eq!(m.topic_messages_in.get_or_create(&lbl).get(), 10);
+    }
+
+    #[test]
+    fn record_authentication_splits_success_and_failure_per_mechanism() {
+        let m = BrokerMetrics::new();
+        let plain = SaslMechanismLabel {
+            mechanism: "PLAIN".to_string(),
+        };
+        let scram = SaslMechanismLabel {
+            mechanism: "SCRAM-SHA-256".to_string(),
+        };
+        let unknown = SaslMechanismLabel {
+            mechanism: "Unknown".to_string(),
+        };
+        m.record_authentication("PLAIN", true);
+        m.record_authentication("PLAIN", true);
+        m.record_authentication("PLAIN", false);
+        m.record_authentication("SCRAM-SHA-256", true);
+        m.record_authentication("Unknown", false);
+        // PLAIN: 2 successes, 1 failure.
+        assert_eq!(m.successful_authentication.get_or_create(&plain).get(), 2);
+        assert_eq!(m.failed_authentication.get_or_create(&plain).get(), 1);
+        // SCRAM-SHA-256: 1 success, 0 failures (must not lazily
+        // allocate a failure entry from the success bump).
+        assert_eq!(m.successful_authentication.get_or_create(&scram).get(), 1);
+        // ILLEGAL_SASL_STATE: 0 successes, 1 failure under the
+        // `Unknown` sentinel.
+        assert_eq!(m.failed_authentication.get_or_create(&unknown).get(), 1);
+        assert_eq!(m.successful_authentication.get_or_create(&unknown).get(), 0,);
     }
 
     #[test]
