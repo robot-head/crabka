@@ -126,6 +126,16 @@ pub struct BrokerMetrics {
     /// payload was down-converted to satisfy a legacy (`Fetch v < 4`)
     /// client.
     pub fetch_message_conversions: Family<TopicLabel, Counter>,
+    /// Slice 10c (KIP-841): cumulative count of unclean leader
+    /// elections this broker, as controller leader, has driven —
+    /// i.e. elections that picked an out-of-ISR replica as the new
+    /// leader because the topic had
+    /// `unclean.leader.election.enable=true` and the ISR was empty
+    /// at failover time. Mirrors Kafka's
+    /// `ControllerStats.UncleanLeaderElectionsPerSec`. An operator
+    /// alert on `rate(unclean_leader_elections_total[5m]) > 0`
+    /// flags the data-loss footgun.
+    pub unclean_leader_elections_total: Counter,
 }
 
 impl BrokerMetrics {
@@ -158,6 +168,7 @@ impl BrokerMetrics {
         let tiered_storage_rlmm_topic_backed = Gauge::default();
         let produce_message_conversions: Family<TopicLabel, Counter> = Family::default();
         let fetch_message_conversions: Family<TopicLabel, Counter> = Family::default();
+        let unclean_leader_elections_total = Counter::default();
 
         registry.register(
             "topic_bytes_in",
@@ -301,6 +312,20 @@ impl BrokerMetrics {
              consumers in the cluster.",
             fetch_message_conversions.clone(),
         );
+        registry.register(
+            "unclean_leader_elections",
+            "Slice 10c (KIP-841): cumulative count of unclean leader \
+             elections driven by this broker (as controller leader). An \
+             unclean election is one where the new leader was picked \
+             from outside the ISR because the partition's ISR was empty \
+             at failover time and the topic had \
+             unclean.leader.election.enable=true. Each such election \
+             accepts possible data loss. Mirrors Kafka's \
+             ControllerStats.UncleanLeaderElectionsPerSec; an operator \
+             alert on rate(unclean_leader_elections_total[5m]) > 0 \
+             flags the data-loss footgun.",
+            unclean_leader_elections_total.clone(),
+        );
 
         Self {
             registry: Arc::new(Mutex::new(registry)),
@@ -325,6 +350,7 @@ impl BrokerMetrics {
             tiered_storage_rlmm_topic_backed,
             produce_message_conversions,
             fetch_message_conversions,
+            unclean_leader_elections_total,
         }
     }
 
@@ -426,6 +452,13 @@ impl BrokerMetrics {
         self.fetch_message_conversions.get_or_create(&lbl).inc();
     }
 
+    /// Slice 10c (KIP-841): account one unclean leader election (an
+    /// election that picked an out-of-ISR replica because the ISR was
+    /// empty and the topic had `unclean.leader.election.enable=true`).
+    pub fn record_unclean_leader_election(&self) {
+        self.unclean_leader_elections_total.inc();
+    }
+
     /// Slice 48k: account bytes this broker served to a follower as the
     /// partition leader (inter-broker `Fetch` round-trip, leader side).
     /// Called from the `Fetch` handler when `replica_id >= 0`.
@@ -478,6 +511,7 @@ mod tests {
         m.record_replication_out("topic-a", 0, 8192);
         m.record_produce_message_conversion("topic-a");
         m.record_fetch_message_conversion("topic-a");
+        m.record_unclean_leader_election();
         m.partition_disk_bytes
             .get_or_create(&PartitionLabel {
                 topic: "topic-a".into(),
@@ -514,6 +548,7 @@ mod tests {
             "crabka_broker_tiered_storage_rlmm_topic_backed",
             "crabka_broker_produce_message_conversions_total",
             "crabka_broker_fetch_message_conversions_total",
+            "crabka_broker_unclean_leader_elections_total",
         ] {
             assert!(buf.contains(needle), "missing {needle} in:\n{buf}");
         }
