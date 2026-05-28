@@ -49,6 +49,14 @@ pub struct FileConfig {
     /// [`crate::BrokerConfig::extra_log_dirs`].
     #[serde(default)]
     pub extra_log_dirs: Vec<String>,
+    /// KIP-392: this broker's rack id. Maps to `BrokerConfig::rack`.
+    #[serde(default)]
+    pub rack: Option<String>,
+
+    /// KIP-392: replica selector name (`"leader"` | `"rack-aware"`).
+    /// Maps to `BrokerConfig::replica_selector`.
+    #[serde(default)]
+    pub replica_selector: Option<String>,
     pub inter_broker_listener_name: Option<String>,
     #[serde(default)]
     pub listeners: Vec<FileListener>,
@@ -486,6 +494,17 @@ impl FileConfig {
             && cfg.broker_id == defaults.broker_id
         {
             cfg.broker_id = id;
+        }
+        if let Some(rack) = self.rack {
+            cfg.rack = Some(rack);
+        }
+        if let Some(sel) = self.replica_selector {
+            cfg.replica_selector = crate::replica_selector::ReplicaSelectorKind::from_config_str(
+                &sel,
+            )
+            .map_err(|bad| {
+                FileConfigError::InvalidConfig(format!("unknown replica_selector: {bad}"))
+            })?;
         }
         if let Some(ld) = self.log_dir
             && cfg.log_dir == defaults.log_dir
@@ -1823,5 +1842,31 @@ expire_after_ms = 60000
             cfg.authorizer.authorize(&img, &req),
             AuthorizationResult::Allow
         );
+    }
+
+    #[test]
+    fn apply_to_parses_rack_and_replica_selector() {
+        use crate::replica_selector::ReplicaSelectorKind;
+        let src = r#"
+broker_id = 0
+rack = "az-1"
+replica_selector = "rack-aware"
+"#;
+        let cfg: FileConfig = toml::from_str(src).expect("parse");
+        let mut broker = crate::config::BrokerConfig::default();
+        cfg.apply_to(&mut broker).expect("apply");
+        assert_eq!(broker.rack.as_deref(), Some("az-1"));
+        assert_eq!(broker.replica_selector, ReplicaSelectorKind::RackAware);
+    }
+
+    #[test]
+    fn apply_to_rejects_unknown_replica_selector() {
+        let src = r#"
+broker_id = 0
+replica_selector = "nonsense"
+"#;
+        let cfg: FileConfig = toml::from_str(src).expect("parse");
+        let mut broker = crate::config::BrokerConfig::default();
+        assert!(cfg.apply_to(&mut broker).is_err());
     }
 }
