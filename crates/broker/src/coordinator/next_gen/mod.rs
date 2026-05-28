@@ -63,6 +63,7 @@ impl NextGenCoordinator {
     }
 
     /// Fetch the most recently cached seed for `group_id`, if any.
+    #[must_use]
     pub fn cached_seed(&self, group_id: &str) -> Option<GroupSeed> {
         self.seeds_cache.get(group_id).map(|e| e.value().clone())
     }

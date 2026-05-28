@@ -6,7 +6,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crabka_broker::{Broker, BrokerConfig, BootstrapMode};
+use crabka_broker::{BootstrapMode, Broker, BrokerConfig};
 use crabka_client_core::Client;
 use crabka_protocol::owned::consumer_group_heartbeat_request::ConsumerGroupHeartbeatRequest;
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
@@ -74,9 +74,7 @@ async fn replay_preserves_group_epoch_and_members() {
     }
 
     {
-        let broker = Broker::start(rejoin_config(log_dir))
-            .await
-            .unwrap();
+        let broker = Broker::start(rejoin_config(log_dir)).await.unwrap();
         let bootstrap = broker.listen_addr().to_string();
         let client = Arc::new(
             Client::builder()
@@ -142,9 +140,7 @@ async fn next_gen_state_cleared_after_leave_then_restart() {
     }
 
     {
-        let broker = Broker::start(rejoin_config(log_dir))
-            .await
-            .unwrap();
+        let broker = Broker::start(rejoin_config(log_dir)).await.unwrap();
         let bootstrap = broker.listen_addr().to_string();
         let client = Arc::new(
             Client::builder()

@@ -118,14 +118,16 @@ async fn replay_records(
         let mut advanced_to = next;
         for batch in &out.batches {
             for record in &batch.records {
-                let Some(key_bytes) = &record.key else { continue };
+                let Some(key_bytes) = &record.key else {
+                    continue;
+                };
                 let key = persistence::parse_key(key_bytes)?;
                 match &record.value {
                     Some(value_bytes) => {
                         apply_record(group_manager, key, value_bytes, batch).await?;
                     }
                     None => {
-                        apply_tombstone(group_manager, key).await?;
+                        apply_tombstone(group_manager, key);
                     }
                 }
             }
@@ -246,15 +248,11 @@ fn apply_next_gen_record(
 /// (the classic coordinator's snapshot is rebuilt fresh on restart); we
 /// only need to honor next-gen tombstones so leave/eviction semantics
 /// survive a broker restart.
-async fn apply_tombstone(group_manager: &GroupManager, key: Key) -> Result<(), BrokerError> {
-    match key {
-        Key::OffsetCommit { .. } | Key::GroupMetadata { .. } => Ok(()),
-        Key::NextGen(ng_key) => {
-            if let Some(ng_coord) = group_manager.next_gen().cloned() {
-                ng_coord.replay_next_gen_tombstone(&ng_key);
-            }
-            Ok(())
-        }
+fn apply_tombstone(group_manager: &GroupManager, key: Key) {
+    if let Key::NextGen(ng_key) = key
+        && let Some(ng_coord) = group_manager.next_gen().cloned()
+    {
+        ng_coord.replay_next_gen_tombstone(&ng_key);
     }
 }
 

@@ -26,6 +26,7 @@ pub struct ProductionOffsetsLog {
 }
 
 impl ProductionOffsetsLog {
+    #[must_use]
     pub fn new(partitions: Arc<DashMap<(String, i32), Arc<Partition>>>) -> Self {
         Self { partitions }
     }
@@ -68,7 +69,8 @@ impl OffsetsLog for ProductionOffsetsLog {
 }
 
 pub mod fake {
-    use super::*;
+    use super::{BrokerError, OFFSETS_PARTITION, OFFSETS_TOPIC, OffsetsLog, async_trait};
+    use crabka_protocol::records::RecordBatch;
     use tokio::sync::Mutex;
 
     #[derive(Debug, Default)]
@@ -109,8 +111,10 @@ mod tests {
     async fn fake_records_in_order() {
         let log = fake::InMemoryOffsetsLog::default();
         let b1 = RecordBatch::default();
-        let mut b2 = RecordBatch::default();
-        b2.max_timestamp = 42;
+        let b2 = RecordBatch {
+            max_timestamp: 42,
+            ..Default::default()
+        };
         log.append(b1.clone()).await.unwrap();
         log.append(b2.clone()).await.unwrap();
         let got = log.batches().await;

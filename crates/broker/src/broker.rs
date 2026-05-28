@@ -1041,15 +1041,14 @@ impl Broker {
                     partitions.clone(),
                 ),
             );
-        let next_gen_coord = std::sync::Arc::new(
-            crate::coordinator::next_gen::NextGenCoordinator::new(
+        let next_gen_coord =
+            std::sync::Arc::new(crate::coordinator::next_gen::NextGenCoordinator::new(
                 config.next_gen_consumer_group.clone(),
                 std::sync::Arc::new(crate::coordinator::next_gen::ImageMetadataProvider {
                     controller: controller.clone(),
                 }),
                 offsets_log,
-            ),
-        );
+            ));
         group_manager.set_next_gen(next_gen_coord);
         let producer_ids = Arc::new(crate::producer_id_manager::ProducerIdManager::new());
         let producer_state = Arc::new(crate::producer_state::ProducerState::new());
