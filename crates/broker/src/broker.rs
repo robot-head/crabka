@@ -925,38 +925,6 @@ impl Broker {
         //    fails the next caller's request will surface the error and
         //    membership reconciliation can retry later.
         {
-            // Per-listener endpoints (Task 11): every configured listener's
-            // advertised `host:port` + protocol becomes a `BrokerEndpoint`
-            // on the broker's self-registration record. Clients on
-            // `Metadata` v9+ pick the right endpoint for their connection;
-            // legacy callers continue reading the top-level `host`/`port`.
-            let endpoints: Vec<crabka_metadata::BrokerEndpoint> = config
-                .effective_listeners()
-                .iter()
-                .map(|l| {
-                    let (host, port) = parse_advertised_host_port(&l.advertised);
-                    crabka_metadata::BrokerEndpoint {
-                        name: l.name.clone(),
-                        host,
-                        port,
-                        protocol: l.protocol,
-                    }
-                })
-                .collect();
-            let self_reg = crabka_metadata::MetadataRecord::V1BrokerRegistration(
-                crabka_metadata::BrokerRegistrationRecord {
-                    node_id: config.node_id,
-                    host: config
-                        .advertised_listener
-                        .split(':')
-                        .next()
-                        .unwrap_or("127.0.0.1")
-                        .to_string(),
-                    port: config.listen_addr.port(),
-                    rack: None,
-                    endpoints,
-                },
-            );
             let mut leader_rx = controller.watch_leader();
             let deadline = std::time::Instant::now() + std::time::Duration::from_mins(2);
             while leader_rx.borrow().is_none() {
@@ -971,8 +939,45 @@ impl Broker {
                 )
                 .await;
             }
-            if let Err(e) = controller.submit_change(vec![self_reg]).await {
-                tracing::warn!(error = %e, "self-registration failed; continuing");
+
+            // Controller-only nodes never register — they host no data and
+            // must not appear as brokers in Metadata/DescribeCluster.
+            if config.is_broker() {
+                // Per-listener endpoints (Task 11): every configured listener's
+                // advertised `host:port` + protocol becomes a `BrokerEndpoint`
+                // on the broker's self-registration record. Clients on
+                // `Metadata` v9+ pick the right endpoint for their connection;
+                // legacy callers continue reading the top-level `host`/`port`.
+                let endpoints: Vec<crabka_metadata::BrokerEndpoint> = config
+                    .effective_listeners()
+                    .iter()
+                    .map(|l| {
+                        let (host, port) = parse_advertised_host_port(&l.advertised);
+                        crabka_metadata::BrokerEndpoint {
+                            name: l.name.clone(),
+                            host,
+                            port,
+                            protocol: l.protocol,
+                        }
+                    })
+                    .collect();
+                let self_reg = crabka_metadata::MetadataRecord::V1BrokerRegistration(
+                    crabka_metadata::BrokerRegistrationRecord {
+                        node_id: config.node_id,
+                        host: config
+                            .advertised_listener
+                            .split(':')
+                            .next()
+                            .unwrap_or("127.0.0.1")
+                            .to_string(),
+                        port: config.listen_addr.port(),
+                        rack: None,
+                        endpoints,
+                    },
+                );
+                if let Err(e) = controller.submit_change(vec![self_reg]).await {
+                    tracing::warn!(error = %e, "self-registration failed; continuing");
+                }
             }
 
             // 2b. First-start bootstrap-records submit (slice 12b).

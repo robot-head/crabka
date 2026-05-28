@@ -900,6 +900,16 @@ mod tests {
     }
 
     #[test]
+    fn controller_only_does_not_register() {
+        let c = BrokerConfig {
+            roles: vec![NodeRole::Controller],
+            ..BrokerConfig::default()
+        };
+        // Registration is gated on is_broker(); a controller-only node skips it.
+        assert!(!c.is_broker());
+    }
+
+    #[test]
     fn rejects_controller_tls_without_config() {
         let c = BrokerConfig {
             controller_listener_protocol: ListenerProtocol::Ssl,
