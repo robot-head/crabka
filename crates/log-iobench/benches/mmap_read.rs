@@ -12,15 +12,14 @@
 //! `Segment::read_log_range`) against several mmap variants on the *same*
 //! files:
 //!
-//!   * `pread_to_vec`     — current behaviour: fresh Vec per read.
-//!   * `pread_reuse_buf`  — same syscall, buffer reused across reads.
-//!   * `mmap_once_copy`   — map once, copy the range into a Vec each read
-//!                          (what Crabka would still need today, since the
-//!                          wire path re-encodes every batch).
-//!   * `mmap_once_borrow` — map once, read the range in place with no copy
-//!                          (the zero-copy *upper bound* — only reachable if
-//!                          a sendfile/splice-style path skipped decode).
-//!   * `mmap_per_call`    — map+unmap each read (lazy-mapping overhead).
+//! - `pread_to_vec` — current behaviour: fresh Vec per read.
+//! - `pread_reuse_buf` — same syscall, buffer reused across reads.
+//! - `mmap_once_copy` — map once, copy the range into a Vec each read (what
+//!   Crabka would still need today, since the wire path re-encodes every batch).
+//! - `mmap_once_borrow` — map once, read the range in place with no copy (the
+//!   zero-copy *upper bound* — only reachable if a sendfile/splice-style path
+//!   skipped decode).
+//! - `mmap_per_call` — map+unmap each read (lazy-mapping overhead).
 //!
 //! Finally `full_path_decoded` runs the real `Log::read` so the I/O numbers
 //! can be read against the cost of the decode/re-encode round trip they sit
@@ -89,7 +88,10 @@ fn build_log() -> (TempDir, Log, PathBuf, u64) {
         .filter(|p| p.extension().is_some_and(|x| x == "log"))
         .collect();
     logs.sort();
-    let chosen = logs.into_iter().next().expect("at least one sealed segment");
+    let chosen = logs
+        .into_iter()
+        .next()
+        .expect("at least one sealed segment");
     let size = std::fs::metadata(&chosen).unwrap().len();
     assert!(size >= READ_LEN as u64, "sealed segment too small: {size}");
     (dir, log, chosen, size)
@@ -106,7 +108,9 @@ fn pread_into(file: &File, start: u64, len: usize, buf: &mut Vec<u8>) {
 
 /// Sum bytes so the optimizer can't elide the read of a borrowed slice.
 fn checksum(bytes: &[u8]) -> u64 {
-    bytes.iter().fold(0u64, |acc, &b| acc.wrapping_add(u64::from(b)))
+    bytes
+        .iter()
+        .fold(0u64, |acc, &b| acc.wrapping_add(u64::from(b)))
 }
 
 fn bench_segment_io(c: &mut Criterion) {
