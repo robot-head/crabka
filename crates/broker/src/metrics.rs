@@ -150,6 +150,15 @@ pub struct BrokerMetrics {
     /// gives operators per-API request throughput across the
     /// broker without needing to slice the dashboard by handler.
     pub api_requests: Family<ApiKeyLabel, Counter>,
+    /// Slice 12i: per-Kafka-API counter of requests the dispatcher
+    /// answered with the synthetic `UNSUPPORTED_VERSION` response
+    /// because no handler matched the `api_key` (or, for unknown
+    /// `api_key`s, the dispatcher didn't recognise the key at all).
+    /// Operators alert on `rate(unsupported_api_requests_total[5m]) > 0`
+    /// to catch clients on `api_key`/version pairs the broker
+    /// doesn't speak — frequently the smoking gun for upgrade-skew
+    /// or misconfigured clients.
+    pub unsupported_api_requests: Family<ApiKeyLabel, Counter>,
     /// Slice 48l (KIP-405): `1` when this broker has finished swapping in
     /// the topic-backed `RemoteLogMetadataManager` (slice 48f) and is
     /// answering metadata queries from the durable
@@ -217,6 +226,7 @@ impl BrokerMetrics {
         let incremental_fetch_partitions_cached = Gauge::default();
         let client_software_versions: Family<ClientSoftwareLabel, Counter> = Family::default();
         let api_requests: Family<ApiKeyLabel, Counter> = Family::default();
+        let unsupported_api_requests: Family<ApiKeyLabel, Counter> = Family::default();
         let tiered_storage_rlmm_topic_backed = Gauge::default();
         let produce_message_conversions: Family<TopicLabel, Counter> = Family::default();
         let fetch_message_conversions: Family<TopicLabel, Counter> = Family::default();
@@ -382,6 +392,16 @@ impl BrokerMetrics {
             api_requests.clone(),
         );
         registry.register(
+            "unsupported_api_requests",
+            "Slice 12i: cumulative count of requests the dispatcher \
+             answered with the synthetic UNSUPPORTED_VERSION response \
+             because no handler matched the api_key. Labelled with \
+             the ApiKey variant name (or `Unknown` for unrecognised \
+             keys). Alert on rate(...) > 0 to catch upgrade-skew or \
+             misconfigured clients.",
+            unsupported_api_requests.clone(),
+        );
+        registry.register(
             "tiered_storage_rlmm_topic_backed",
             "Slice 48l (KIP-405): 1 when this broker is answering remote-log \
              metadata queries from the durable __remote_log_metadata topic \
@@ -449,6 +469,7 @@ impl BrokerMetrics {
             incremental_fetch_partitions_cached,
             client_software_versions,
             api_requests,
+            unsupported_api_requests,
             tiered_storage_rlmm_topic_backed,
             produce_message_conversions,
             fetch_message_conversions,
@@ -480,6 +501,21 @@ impl BrokerMetrics {
             api_key: name.to_string(),
         };
         self.api_requests.get_or_create(&lbl).inc();
+    }
+
+    /// Slice 12i: account one request the dispatcher rejected with
+    /// `UNSUPPORTED_VERSION` because no handler matched `api_key`
+    /// (e.g. unknown `api_key`, or known `api_key` with no version
+    /// negotiated). Mirrors the labelling of `record_api_request`.
+    pub fn record_unsupported_api_request(&self, api_key: i16) {
+        let name: &'static str = match crabka_protocol::api_key::ApiKey::from_i16(api_key) {
+            Some(k) => k.into(),
+            None => "Unknown",
+        };
+        let lbl = ApiKeyLabel {
+            api_key: name.to_string(),
+        };
+        self.unsupported_api_requests.get_or_create(&lbl).inc();
     }
 
     /// Convenience: record a Produce hit on `topic` with the given
@@ -630,6 +666,7 @@ mod tests {
         m.record_unclean_leader_election();
         m.record_api_request(0); // Produce
         m.record_api_request(999); // unknown → "Unknown" label
+        m.record_unsupported_api_request(999);
         m.partition_disk_bytes
             .get_or_create(&PartitionLabel {
                 topic: "topic-a".into(),
@@ -676,6 +713,7 @@ mod tests {
             "crabka_broker_fetch_message_conversions_total",
             "crabka_broker_unclean_leader_elections_total",
             "crabka_broker_api_requests_total",
+            "crabka_broker_unsupported_api_requests_total",
         ] {
             assert!(buf.contains(needle), "missing {needle} in:\n{buf}");
         }
@@ -809,6 +847,32 @@ mod tests {
             m.fetch_message_conversions.get_or_create(&payments).get(),
             2
         );
+    }
+
+    #[test]
+    fn unsupported_api_requests_counter_is_disjoint_from_api_requests() {
+        let m = BrokerMetrics::new();
+        // Slice 12i invariant: `record_unsupported_api_request` bumps
+        // only the `unsupported_api_requests` family — operators
+        // expect `api_requests` to count *every* dispatched frame and
+        // `unsupported_api_requests` to count just the ones that hit
+        // the synthetic UNSUPPORTED_VERSION arm.
+        m.record_unsupported_api_request(0); // Produce, unsupported
+        m.record_unsupported_api_request(999); // truly unknown
+
+        let produce = ApiKeyLabel {
+            api_key: "Produce".into(),
+        };
+        let unknown = ApiKeyLabel {
+            api_key: "Unknown".into(),
+        };
+        assert_eq!(m.unsupported_api_requests.get_or_create(&produce).get(), 1);
+        assert_eq!(m.unsupported_api_requests.get_or_create(&unknown).get(), 1);
+        // `record_unsupported_api_request` does NOT also bump
+        // `api_requests`; the dispatcher already did that for the
+        // request in question via `record_api_request`.
+        assert_eq!(m.api_requests.get_or_create(&produce).get(), 0);
+        assert_eq!(m.api_requests.get_or_create(&unknown).get(), 0);
     }
 
     #[test]

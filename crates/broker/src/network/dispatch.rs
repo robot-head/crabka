@@ -3564,6 +3564,9 @@ async fn dispatch_one(broker: &Broker, frame: &[u8]) -> Result<Bytes, BrokerErro
         h(broker, api_version, correlation_id, body).await?
     } else {
         tracing::warn!(api_key, api_version, "unsupported api, returning error");
+        // Slice 12i: account this synthetic UNSUPPORTED_VERSION
+        // response so operators can alert on a non-zero rate.
+        broker.metrics.record_unsupported_api_request(api_key);
         // Build a synthetic UNSUPPORTED_VERSION response: just a 2-byte
         // error code + an empty body. Most Kafka responses begin with
         // `error_code: i16` at offset 0; clients that don't expect
