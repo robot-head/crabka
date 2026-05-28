@@ -103,6 +103,16 @@ pub struct BrokerMetrics {
     /// handshakes. Operators graph this to see which client libraries
     /// and versions are connecting.
     pub client_software_versions: Family<ClientSoftwareLabel, Counter>,
+    /// Slice 48l (KIP-405): `1` when this broker has finished swapping in
+    /// the topic-backed `RemoteLogMetadataManager` (slice 48f) and is
+    /// answering metadata queries from the durable
+    /// `__remote_log_metadata` topic; `0` while still on the in-memory
+    /// placeholder (the default until a configured
+    /// `[remote_storage.kafka_metadata]` bootstrap completes). Operators
+    /// alert on `min_over_time(tiered_storage_rlmm_topic_backed[5m]) == 0`
+    /// against clusters that asked for `metadataManager: Topic` to catch
+    /// a stuck bootstrap.
+    pub tiered_storage_rlmm_topic_backed: Gauge,
 }
 
 impl BrokerMetrics {
@@ -132,6 +142,7 @@ impl BrokerMetrics {
         let incremental_fetch_session_evictions_total = Counter::default();
         let incremental_fetch_partitions_cached = Gauge::default();
         let client_software_versions: Family<ClientSoftwareLabel, Counter> = Family::default();
+        let tiered_storage_rlmm_topic_backed = Gauge::default();
 
         registry.register(
             "topic_bytes_in",
@@ -247,6 +258,16 @@ impl BrokerMetrics {
              per successful v3+ ApiVersions call.",
             client_software_versions.clone(),
         );
+        registry.register(
+            "tiered_storage_rlmm_topic_backed",
+            "Slice 48l (KIP-405): 1 when this broker is answering remote-log \
+             metadata queries from the durable __remote_log_metadata topic \
+             (slice 48f production RLMM); 0 while still on the in-memory \
+             placeholder. Bumped to 1 by the bootstrap task after a \
+             successful SwappableRlmm swap; stays at 0 for clusters that \
+             never asked for `metadataManager: Topic`.",
+            tiered_storage_rlmm_topic_backed.clone(),
+        );
 
         Self {
             registry: Arc::new(Mutex::new(registry)),
@@ -268,6 +289,7 @@ impl BrokerMetrics {
             incremental_fetch_session_evictions_total,
             incremental_fetch_partitions_cached,
             client_software_versions,
+            tiered_storage_rlmm_topic_backed,
         }
     }
 
@@ -432,6 +454,7 @@ mod tests {
             "crabka_broker_incremental_fetch_partitions_cached",
             "crabka_broker_replication_bytes_in_total",
             "crabka_broker_replication_bytes_out_total",
+            "crabka_broker_tiered_storage_rlmm_topic_backed",
         ] {
             assert!(buf.contains(needle), "missing {needle} in:\n{buf}");
         }
@@ -522,6 +545,18 @@ mod tests {
         };
         // Helper short-circuits at 0; the label entry isn't created.
         assert_eq!(m.partition_cpu_micros.get_or_create(&lbl).get(), 0);
+    }
+
+    #[test]
+    fn tiered_storage_rlmm_topic_backed_defaults_zero_and_can_be_set() {
+        let m = BrokerMetrics::new();
+        // Default for a fresh broker (in-memory placeholder, or no
+        // tiered-storage at all) is `0`.
+        assert_eq!(m.tiered_storage_rlmm_topic_backed.get(), 0);
+        // The slice-48f bootstrap task bumps it to `1` after a successful
+        // SwappableRlmm swap.
+        m.tiered_storage_rlmm_topic_backed.set(1);
+        assert_eq!(m.tiered_storage_rlmm_topic_backed.get(), 1);
     }
 
     #[test]
