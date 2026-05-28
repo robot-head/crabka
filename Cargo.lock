@@ -1087,6 +1087,7 @@ dependencies = [
  "uuid",
  "wincode",
  "wiremock",
+ "zerocopy",
 ]
 
 [[package]]
