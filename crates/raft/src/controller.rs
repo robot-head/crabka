@@ -604,8 +604,10 @@ impl Controller {
         //    cluster id. Falls back to `Uuid::nil()` for legacy
         //    single-node tests that don't set it.
         let log_store = Arc::new(RaftLogStore::open(config.log_dir.clone()).await?);
+        let snapshot_dir = config.log_dir.join("@metadata-0");
         let state_machine = Arc::new(CrabkaStateMachine::new(
             config.cluster_id.unwrap_or_else(Uuid::nil),
+            snapshot_dir,
         ));
 
         // 2. openraft engine config. Times are millis; we widen the

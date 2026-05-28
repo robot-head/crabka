@@ -29,16 +29,20 @@ use crabka_metadata::MetadataImage;
 use crate::types::{AppData, AppDataResponse, Node, NodeId, TypeConfig};
 
 pub(crate) struct CrabkaStateMachine {
+    cluster_id: Uuid,
+    snapshot_dir: std::path::PathBuf,
     image: watch::Sender<Arc<MetadataImage>>,
     last_applied: Mutex<Option<LogId<NodeId>>>,
     last_membership: Mutex<StoredMembership<NodeId, Node>>,
 }
 
 impl CrabkaStateMachine {
-    pub(crate) fn new(cluster_id: Uuid) -> Self {
+    pub(crate) fn new(cluster_id: Uuid, snapshot_dir: std::path::PathBuf) -> Self {
         let initial = Arc::new(MetadataImage::new(cluster_id));
         let (image, _rx) = watch::channel(initial);
         Self {
+            cluster_id,
+            snapshot_dir,
             image,
             last_applied: Mutex::new(None),
             last_membership: Mutex::new(StoredMembership::default()),
@@ -187,7 +191,7 @@ mod tests {
 
     #[tokio::test]
     async fn apply_publishes_image_to_watcher() {
-        let sm = Arc::new(CrabkaStateMachine::new(Uuid::nil()));
+        let sm = Arc::new(CrabkaStateMachine::new(Uuid::nil(), std::env::temp_dir()));
         let mut rx = sm.watch_image();
         let log_id = LogId {
             leader_id: openraft::LeaderId::new(1, 1),
