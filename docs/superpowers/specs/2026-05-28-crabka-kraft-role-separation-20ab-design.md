@@ -145,31 +145,49 @@ The raft log is persisted in a crabka `Log` wrapped by `RaftLogStore`
 (`crates/raft/src/log_store.rs`); committed entries are readable as an ordered
 offset→entry stream via `read_range` (currently `pub(crate)` — to be exposed).
 
-- Add a `ControllerHandle` method to read a committed offset range as records, e.g.
-  `async fn metadata_records(&self, fetch_offset: u64, max_bytes: usize) -> MetadataFetchSlice`
-  returning `{ records, log_start_offset, high_watermark }` where `high_watermark` =
-  last *applied* (committed) index.
-- Special-case the **Fetch handler** (`crates/broker/src/handlers/fetch.rs`): when the
-  requested topic is `__cluster_metadata` and partition `0`, read from the controller
-  handle instead of the `partitions` DashMap, and serialize a `PartitionData` whose
-  record batches carry the metadata records (§4.3). Only controllers (voters) can serve
-  this; a broker-only node receiving such a Fetch returns `NOT_LEADER_OR_FOLLOWER`-style
-  redirection toward the quorum.
+**Transport decision (refined during planning):** the observer fetches over the existing
+**controller listener** (port 9093) via a new crabka RPC, *not* via the broker's
+client-listener Kafka Fetch handler. Rationale: crabka's controller listener already
+speaks a bespoke authenticated RPC protocol (`API_KEY_SUBMIT_CHANGE`, AppendEntries,
+Vote) over `OutboundDialer` (TLS/SASL wired, slice 12), and `controller_quorum_voters`
+already carries the controller-listener addresses. Layering Kafka Fetch onto a separate
+client listener would require discovering controllers' client (9092) addresses and a new
+config surface for no parity gain — the metadata-fetch transport is internal
+crabka↔crabka and is not a surface JVM tools exercise (clients never fetch
+`__cluster_metadata`; `kafka-metadata-quorum --describe` uses `DescribeQuorum`, §6).
+
+- Expose `RaftLogStore::read_range` and stash an `Arc<RaftLogStore>` clone in
+  `ControllerHandle` (the store is already an `Arc` used as the openraft storage adapter).
+- Add a `ControllerHandle` method to read a committed offset range as Kafka-encoded
+  records: `async fn metadata_records(&self, fetch_offset: u64, max_bytes: usize) ->
+  MetadataFetchSlice` returning `{ records, log_start_offset, high_watermark }` where
+  `high_watermark` = last *applied* (committed) index and `records` are produced by the
+  §4.3 bridge. The fetch offset is the openraft log index (§4.4).
+- Add a new controller-listener RPC `API_KEY_METADATA_FETCH` (mirroring the
+  `API_KEY_SUBMIT_CHANGE` request/response pattern in `crates/raft/src/wire.rs` +
+  dispatch in `crates/raft/src/server.rs`). The server handler calls `metadata_records`;
+  only voters serve it, and a non-voter returns a leader hint so the observer can retarget
+  the quorum.
 
 ### 4.2 Observer fetcher on the broker
 
-Adapt the existing replica fetcher (`crates/broker/src/replicator.rs`) into a
-`MetadataObserver`:
-- targets the controller quorum (leader, with failover to other voters) and
-  `__cluster_metadata`-0,
-- tracks its own fetch offset = number of records applied,
-- on each `FetchResponse`, decodes record batches into `MetadataRecord`s and feeds them
-  through `MetadataImage::validate` + `MetadataImage::apply` (both already public and
-  incremental/idempotent), publishing each new image via the existing
-  `watch::Sender<Arc<MetadataImage>>` so handlers observe updates with no change.
+Add a `MetadataObserver` (`crates/broker/src/metadata_observer.rs`) — a controller-RPC
+client loop (mirroring `ControllerHandle::forward_submit_to`, *not* the Kafka replica
+fetcher):
+- targets the controller quorum from `controller_quorum_voters` (leader, with failover
+  to other voters), issuing `API_KEY_METADATA_FETCH` RPCs through `OutboundDialer`,
+- tracks its own fetch offset = next openraft log index to fetch,
+- on each response, decodes the Kafka records into `MetadataRecord`s via the §4.3 bridge
+  and feeds them through `MetadataImage::validate` + `MetadataImage::apply` (both already
+  public and incremental/idempotent), publishing each new image via a
+  `watch::Sender<Arc<MetadataImage>>` it owns.
 
-The observer replaces, for broker-only nodes, the role the openraft state-machine apply
-loop plays for voters.
+Handlers read the current image through a `MetadataSource` abstraction backed by either
+the `Controller`'s state-machine watch (voters) or the `MetadataObserver`'s watch
+(broker-only nodes), so handler code is unchanged. The observer replaces, for broker-only
+nodes, the role the openraft state-machine apply loop plays for voters — and broker-only
+nodes therefore do **not** start a `Controller` at all (the raft-membership change Plan 1
+deferred).
 
 ### 4.3 Serialization bridge (`__cluster_metadata` wire schema)
 
