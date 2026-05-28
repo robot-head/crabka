@@ -111,6 +111,21 @@ impl Broker {
     pub(crate) fn handlers(&self) -> &HandlerTable {
         &self.handlers
     }
+
+    /// Test-only: clone the controller handle so the `auto_join` unit test can
+    /// build `AutoJoinParams` without reaching into private fields.
+    #[cfg(test)]
+    pub(crate) fn controller_for_test(&self) -> Arc<crabka_raft::ControllerHandle> {
+        self.controller.clone()
+    }
+
+    /// Test-only: clone the shared inter-broker client (same reason).
+    #[cfg(test)]
+    pub(crate) fn inter_broker_client_for_test(
+        &self,
+    ) -> Arc<crate::network::client::InterBrokerClient> {
+        self.inter_broker_client.clone()
+    }
 }
 
 /// Lifecycle handle returned by [`Broker::start`]. Drop or call
@@ -141,6 +156,16 @@ impl BrokerHandle {
     #[allow(clippy::used_underscore_binding)]
     pub fn metrics_addr(&self) -> Option<SocketAddr> {
         self._broker.metrics_bound_addr
+    }
+
+    /// The actual `SocketAddr` this broker's controller listener bound to
+    /// (resolves the OS-assigned port when `controller_listen_addr` used port
+    /// 0). KIP-853 dynamic-voters tests read this to point joiners at the
+    /// bootstrap broker's real controller endpoint.
+    #[must_use]
+    #[allow(clippy::used_underscore_binding)]
+    pub fn controller_addr(&self) -> SocketAddr {
+        self._broker.controller.controller_bound_addr()
     }
 
     /// Current Raft leader id as observed by this broker's controller.
@@ -514,6 +539,67 @@ impl BrokerHandle {
     #[allow(clippy::used_underscore_binding)]
     pub fn controller_image_for_test(&self) -> std::sync::Arc<crabka_metadata::MetadataImage> {
         self._broker.controller.current_image()
+    }
+
+    /// Test-only: clone the inner `Arc<Broker>`. Used by the `auto_join`
+    /// unit test (and dynamic-voters integration tests) that need to drive
+    /// broker-internal background routines directly.
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[must_use]
+    #[allow(clippy::used_underscore_binding)]
+    pub fn broker_arc_for_test(&self) -> Arc<Broker> {
+        self._broker.clone()
+    }
+
+    /// Test-only: the controller voter set's size as seen by this broker's
+    /// committed `MetadataImage`. KIP-853 dynamic-voters tests poll this to
+    /// observe auto-join growing / `remove_voter` shrinking the quorum.
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[must_use]
+    #[allow(clippy::used_underscore_binding)]
+    pub fn voter_count_for_test(&self) -> usize {
+        self._broker.controller.current_image().voters().len()
+    }
+
+    /// Test-only: the controller voter ids as seen by this broker's
+    /// committed `MetadataImage`. Used to pick a follower to remove in the
+    /// dynamic-voters shrink test.
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[must_use]
+    #[allow(clippy::used_underscore_binding)]
+    pub fn voter_ids_for_test(&self) -> std::collections::BTreeSet<crabka_raft::NodeId> {
+        self._broker.controller.current_image().voters().ids()
+    }
+
+    /// Test-only: the `directory_id` of voter `id` from this broker's
+    /// committed `MetadataImage`, if present. `remove_voter` needs the
+    /// voter's directory id to disambiguate.
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[must_use]
+    #[allow(clippy::used_underscore_binding)]
+    pub fn voter_directory_id_for_test(&self, id: crabka_raft::NodeId) -> Option<uuid::Uuid> {
+        self._broker
+            .controller
+            .current_image()
+            .voters()
+            .get(id)
+            .map(|v| v.directory_id)
+    }
+
+    /// Test-only: run the KIP-853 `remove_voter` reconfiguration on this
+    /// broker's controller (must be the raft leader). Returns the coordinator
+    /// outcome so the dynamic-voters test can assert `Committed`.
+    ///
+    /// # Errors
+    ///
+    /// Forwards the underlying raft error.
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[allow(clippy::used_underscore_binding)]
+    pub async fn remove_voter_for_test(
+        &self,
+        req: crabka_raft::reconfig::RemoveVoter,
+    ) -> Result<crabka_raft::reconfig::ReconfigOutcome, crabka_raft::RaftError> {
+        self._broker.controller.remove_voter(req).await
     }
 
     /// Test-only: return the current leader node-id for `(topic, partition)`
@@ -984,6 +1070,38 @@ impl Broker {
         // authenticated connection. The `set` cannot fail in practice
         // because we hold the only writer; swallow the `SetError` defensively.
         let _ = controller_cell.set(controller.clone());
+
+        // 1b. KIP-853 controller auto-join. Spawned BEFORE the leader-wait in
+        //     step 2: a `Join` broker's empty raft log keeps it in openraft's
+        //     Learner state with no leader, so `Broker::start` would block in
+        //     step 2 forever. The auto-join loop concurrently sends
+        //     `AddRaftVoter(self)` to a `bootstrap_servers` entry; the leader's
+        //     handler runs `add_learner` (replicating the log to us) and
+        //     promotes us — at which point step 2's `watch_leader` fires and
+        //     start proceeds. `run` returns immediately when `auto_join` is
+        //     disabled (bootstrap / standalone brokers), so this is a cheap
+        //     no-op there. The loop advertises the controller's REAL bound
+        //     address, known now that `Controller::start` has bound the
+        //     listener.
+        // The joiner sends `AddRaftVoter` to a bootstrap server's *client*
+        // data-plane listener (where api_key 80 is served), so it speaks the
+        // inter-broker listener protocol — not the controller-listener
+        // protocol that openraft RPCs use.
+        let auto_join_protocol = config
+            .effective_listeners()
+            .iter()
+            .find(|l| l.name == config.inter_broker_listener_name)
+            .map_or(crabka_security::ListenerProtocol::Plaintext, |l| l.protocol);
+        tokio::spawn(crate::auto_join::run(crate::auto_join::AutoJoinParams {
+            auto_join: config.auto_join,
+            node_id: config.node_id,
+            directory_id: config.directory_id,
+            cluster_id: config.cluster_id,
+            bootstrap_servers: config.bootstrap_servers.clone(),
+            listener_protocol: auto_join_protocol,
+            controller: controller.clone(),
+            inter_broker_client: inter_broker_client.clone(),
+        }));
 
         // 2. Wait for a leader, then submit a self-registration record so
         //    other brokers can discover us. Best-effort: if the submit

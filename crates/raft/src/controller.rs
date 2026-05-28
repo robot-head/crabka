@@ -89,6 +89,12 @@ pub struct ControllerHandle {
     /// `Controller::start` substitutes `PlaintextDialer` — equivalent
     /// to a bare `Connection::connect`.
     dialer: Arc<dyn OutboundDialer>,
+    /// The address the controller listener actually bound to. When
+    /// `ControllerConfig::controller_listen_addr` uses port 0 (OS-assigned,
+    /// the norm in tests) this carries the resolved port. KIP-853 auto-join
+    /// advertises this in the `AddRaftVoter` request so the leader's
+    /// `add_learner` can dial the joiner back.
+    controller_bound_addr: SocketAddr,
 }
 
 impl ControllerHandle {
@@ -96,6 +102,15 @@ impl ControllerHandle {
     #[must_use]
     pub fn current_image(&self) -> Arc<MetadataImage> {
         self.state_machine.current_image()
+    }
+
+    /// The address the controller listener actually bound to (the
+    /// resolved port when `controller_listen_addr` requested port 0).
+    /// KIP-853 auto-join advertises this so the leader can dial the
+    /// joiner back to replicate the log.
+    #[must_use]
+    pub fn controller_bound_addr(&self) -> SocketAddr {
+        self.controller_bound_addr
     }
 
     /// Subscribe to leader-id changes. The receiver's initial value is
@@ -733,6 +748,7 @@ impl Controller {
             observer_lag_bound: config.observer_lag_bound,
             reconfig_lock: Mutex::new(()),
             dialer,
+            controller_bound_addr: actual_addr,
         })
     }
 }
