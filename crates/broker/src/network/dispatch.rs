@@ -3538,6 +3538,11 @@ fn peek_client_id(frame: &[u8]) -> Option<&str> {
 async fn dispatch_one(broker: &Broker, frame: &[u8]) -> Result<Bytes, BrokerError> {
     let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
     let body_flexible = handler_body_flexible(api_key, api_version);
+    // Slice 12h: account this dispatched request before any handler
+    // work. Counter bumps even for the UNSUPPORTED_VERSION
+    // synthetic-response path below, so operators see traffic from
+    // misconfigured clients alongside healthy traffic.
+    broker.metrics.record_api_request(api_key);
     tracing::info!(
         api_key,
         api_version,
