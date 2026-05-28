@@ -100,7 +100,6 @@ async fn actor_loop(
     coordinator: Arc<super::NextGenCoordinator>,
     mut rx: mpsc::Receiver<GroupActorMessage>,
 ) {
-    let _ = (&offsets_log, &coordinator);
     let mut state = GroupState::new(group_id);
     let mut tick = tokio::time::interval(config.heartbeat_interval);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -110,8 +109,33 @@ async fn actor_loop(
                 let Some(msg) = msg else { break };
                 match msg {
                     GroupActorMessage::Heartbeat { request, client_host, reply } => {
-                        let resp = handle_heartbeat(&mut state, &config, &*metadata, &request, &client_host);
-                        let _ = reply.send(resp);
+                        match handle_heartbeat(
+                            &mut state,
+                            &config,
+                            &*metadata,
+                            &*offsets_log,
+                            &coordinator,
+                            &request,
+                            &client_host,
+                        )
+                        .await
+                        {
+                            Ok(resp) => {
+                                let _ = reply.send(resp);
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    group_id = %state.group_id,
+                                    error = %e,
+                                    "next-gen actor exiting after log-write failure",
+                                );
+                                let _ = reply.send(ConsumerGroupHeartbeatResponse {
+                                    error_code: codes::COORDINATOR_LOAD_IN_PROGRESS,
+                                    ..Default::default()
+                                });
+                                break;
+                            }
+                        }
                     }
                     GroupActorMessage::OffsetValidate { member_id, member_epoch, reply } => {
                         let result = match state.members.get(&member_id) {
@@ -190,61 +214,96 @@ fn apply_seed(state: &mut GroupState, seed: super::GroupSeed) {
     state.dirty = false;
 }
 
-fn handle_heartbeat(
-    state: &mut GroupState,
+async fn handle_heartbeat(
+    state: &mut super::group_state::GroupState,
     config: &NextGenConfig,
     metadata: &dyn MetadataProvider,
+    offsets_log: &dyn OffsetsLog,
+    coordinator: &super::NextGenCoordinator,
     req: &ConsumerGroupHeartbeatRequest,
     client_host: &str,
-) -> ConsumerGroupHeartbeatResponse {
+) -> Result<ConsumerGroupHeartbeatResponse, crate::error::BrokerError> {
     let now = Instant::now();
+    let now_ms = chrono_now_ms();
+
+    // ─── Leave path ──────────────────────────────────────────────
     if req.member_epoch == -1 {
+        let mut pending = PendingRecords::default();
+        if state.members.get(&req.member_id).is_some() {
+            pending.member_metadata.push((req.member_id.clone(), None));
+            pending
+                .target_per_member
+                .push((req.member_id.clone(), None));
+            pending
+                .current_per_member
+                .push((req.member_id.clone(), None));
+        }
         state.remove_member(&req.member_id);
         state.bump_epoch();
-        return base_resp(0, req.member_epoch, config);
+        pending.group_metadata = Some(GroupMetadataValue {
+            epoch: state.group_epoch,
+        });
+        flush_pending(state, &pending, offsets_log, coordinator, now_ms).await?;
+        return Ok(base_resp(0, req.member_epoch, config));
     }
-    if let Some(name) = req.server_assignor.as_deref()
-        && !config.assignor_enabled(name)
-    {
-        return error_resp(codes::UNSUPPORTED_ASSIGNOR, config);
+
+    // ─── Validate assignor selection ─────────────────────────────
+    if let Some(name) = req.server_assignor.as_deref() {
+        if !config.assignor_enabled(name) {
+            return Ok(error_resp(codes::UNSUPPORTED_ASSIGNOR, config));
+        }
     }
+
+    // ─── First-join path ─────────────────────────────────────────
     if req.member_epoch == 0 && req.member_id.is_empty() {
         let new_member_id = uuid::Uuid::new_v4().to_string();
-        if let Some(iid) = req.instance_id.as_deref()
-            && let Some(existing) = state.current_member_for_instance(iid)
-            && state
-                .members
-                .get(existing)
-                .is_some_and(|m| m.member_epoch != 0)
-        {
-            return error_resp(codes::UNRELEASED_INSTANCE_ID, config);
+        if let Some(iid) = req.instance_id.as_deref() {
+            if let Some(existing) = state.current_member_for_instance(iid) {
+                if state
+                    .members
+                    .get(existing)
+                    .is_some_and(|m| m.member_epoch != 0)
+                {
+                    return Ok(error_resp(codes::UNRELEASED_INSTANCE_ID, config));
+                }
+            }
         }
         let m = build_member(&new_member_id, req, client_host, now);
         state.add_or_update_member(m);
         run_reconcile(state, config, metadata);
         state.advance_member_epoch(&new_member_id);
-        return build_assignment_resp(state, &new_member_id, config);
+        let pending = snapshot_pending_after_change(state, &[new_member_id.clone()]);
+        flush_pending(state, &pending, offsets_log, coordinator, now_ms).await?;
+        return Ok(build_assignment_resp(state, &new_member_id, config));
     }
+
+    // ─── Existing-member: validate epoch ─────────────────────────
     let cur_epoch = state
         .members
         .get(&req.member_id)
-        .map_or(-2, |m| m.member_epoch);
+        .map(|m| m.member_epoch)
+        .unwrap_or(-2);
     if cur_epoch == -2 {
-        return error_resp(codes::UNKNOWN_MEMBER_ID, config);
+        return Ok(error_resp(codes::UNKNOWN_MEMBER_ID, config));
     }
     if req.member_epoch < cur_epoch {
-        return error_resp(codes::STALE_MEMBER_EPOCH, config);
+        return Ok(error_resp(codes::STALE_MEMBER_EPOCH, config));
     }
     if req.member_epoch > cur_epoch {
-        return error_resp(codes::FENCED_MEMBER_EPOCH, config);
+        return Ok(error_resp(codes::FENCED_MEMBER_EPOCH, config));
     }
+
+    // ─── Steady-state: update last_seen / subscription / owned ───
+    let mut subscription_changed = false;
+    let mut became_dirty = false;
     if let Some(m) = state.members.get_mut(&req.member_id) {
         m.last_seen = now;
         if let Some(ref names) = req.subscribed_topic_names {
             let set: std::collections::HashSet<String> = names.iter().cloned().collect();
             if set != m.subscribed_topic_names {
                 m.subscribed_topic_names = set;
-                state.dirty = true;
+                became_dirty = true;
+                subscription_changed = true;
             }
         }
         if let Some(ref tp) = req.topic_partitions {
@@ -258,11 +317,21 @@ fn handle_heartbeat(
             }
         }
     }
+    if became_dirty {
+        state.dirty = true;
+    }
+    let was_dirty = state.dirty;
     run_reconcile(state, config, metadata);
-    if state.target.epoch > cur_epoch {
+    let epoch_advanced = state.target.epoch > cur_epoch;
+    if epoch_advanced {
         state.advance_member_epoch(&req.member_id);
     }
-    build_assignment_resp(state, &req.member_id, config)
+    let any_change = subscription_changed || was_dirty || epoch_advanced;
+    if any_change {
+        let pending = snapshot_pending_after_change(state, &[req.member_id.clone()]);
+        flush_pending(state, &pending, offsets_log, coordinator, now_ms).await?;
+    }
+    Ok(build_assignment_resp(state, &req.member_id, config))
 }
 
 fn run_reconcile(state: &mut GroupState, config: &NextGenConfig, metadata: &dyn MetadataProvider) {
@@ -568,6 +637,105 @@ pub(crate) fn snapshot_seed(state: &super::group_state::GroupState) -> super::Gr
         target_per_member,
         current_per_member,
     }
+}
+
+fn chrono_now_ms() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| i64::try_from(d.as_millis()).unwrap_or(0))
+        .unwrap_or(0)
+}
+
+/// Build a `PendingRecords` set reflecting the state changes for the
+/// listed `affected_members`. Always includes the current group epoch
+/// and (if non-zero) target epoch.
+fn snapshot_pending_after_change(
+    state: &super::group_state::GroupState,
+    affected_members: &[String],
+) -> PendingRecords {
+    use crate::coordinator::next_gen::persistence as p;
+    let mut pending = PendingRecords::default();
+    pending.group_metadata = Some(p::GroupMetadataValue {
+        epoch: state.group_epoch,
+    });
+    if state.target.epoch > 0 {
+        pending.target_metadata = Some(p::TargetAssignmentMetadataValue {
+            assignment_epoch: state.target.epoch,
+        });
+    }
+    for mid in affected_members {
+        if let Some(m) = state.members.get(mid) {
+            pending.member_metadata.push((
+                mid.clone(),
+                Some(p::MemberMetadataValue {
+                    instance_id: m.instance_id.clone(),
+                    rack_id: m.rack_id.clone(),
+                    client_id: m.client_id.clone(),
+                    client_host: m.client_host.clone(),
+                    subscribed_topic_names: m.subscribed_topic_names.iter().cloned().collect(),
+                    server_assignor: m.server_assignor.clone(),
+                    rebalance_timeout_ms: i32::try_from(m.rebalance_timeout.as_millis())
+                        .unwrap_or(60_000),
+                }),
+            ));
+            pending.current_per_member.push((
+                mid.clone(),
+                Some(p::CurrentMemberAssignmentValue {
+                    member_epoch: m.member_epoch,
+                    previous_member_epoch: m.previous_member_epoch,
+                    state: m.assignment_state,
+                    assigned_partitions: m
+                        .assigned_partitions
+                        .iter()
+                        .map(|(tid, parts)| p::AssignedTopicPartitions {
+                            topic_id: *tid,
+                            partitions: parts.clone(),
+                        })
+                        .collect(),
+                    partitions_pending_revocation: m
+                        .partitions_pending_revocation
+                        .iter()
+                        .map(|(tid, parts)| p::AssignedTopicPartitions {
+                            topic_id: *tid,
+                            partitions: parts.clone(),
+                        })
+                        .collect(),
+                }),
+            ));
+            if let Some(target) = state.target.per_member.get(mid) {
+                pending.target_per_member.push((
+                    mid.clone(),
+                    Some(p::TargetAssignmentMemberValue {
+                        topic_partitions: target
+                            .iter()
+                            .map(|(tid, parts)| p::AssignedTopicPartitions {
+                                topic_id: *tid,
+                                partitions: parts.clone(),
+                            })
+                            .collect(),
+                    }),
+                ));
+            }
+        }
+    }
+    pending
+}
+
+async fn flush_pending(
+    state: &super::group_state::GroupState,
+    pending: &PendingRecords,
+    offsets_log: &dyn OffsetsLog,
+    coordinator: &super::NextGenCoordinator,
+    now_ms: i64,
+) -> Result<(), crate::error::BrokerError> {
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let batch = pending.clone_into_batch(&state.group_id, now_ms);
+    offsets_log.append(batch).await?;
+    coordinator.update_cache(&state.group_id, snapshot_seed(state));
+    Ok(())
 }
 
 #[cfg(test)]
