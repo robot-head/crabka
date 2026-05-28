@@ -85,6 +85,19 @@ pub struct BrokerMetrics {
     pub topic_messages_in: Family<TopicLabel, Counter>,
     pub topic_produce_requests: Family<TopicLabel, Counter>,
     pub topic_fetch_requests: Family<TopicLabel, Counter>,
+    /// Slice 12k: per-topic counter of Produce partition responses
+    /// that carried a non-zero error code. Mirrors Kafka's
+    /// `BrokerTopicMetrics.FailedProduceRequestsPerSec`. Incremented
+    /// once per failed partition (matching the JVM's per-row mark),
+    /// so a request whose two partitions both fail bumps the topic
+    /// counter by 2. Topic-level authorization denials and
+    /// unknown-topic responses count, mirroring JVM behavior.
+    pub topic_failed_produce_requests: Family<TopicLabel, Counter>,
+    /// Slice 12k: per-topic counter of Fetch partition responses
+    /// that carried a non-zero error code. Mirrors Kafka's
+    /// `BrokerTopicMetrics.FailedFetchRequestsPerSec`. Pairs with
+    /// `topic_fetch_requests` to surface error rate.
+    pub topic_failed_fetch_requests: Family<TopicLabel, Counter>,
     pub partition_bytes_in: Family<PartitionLabel, Counter>,
     pub partition_bytes_out: Family<PartitionLabel, Counter>,
     /// Slice 48k: cumulative bytes this broker accepted from a partition
@@ -227,6 +240,8 @@ impl BrokerMetrics {
         let topic_messages_in: Family<TopicLabel, Counter> = Family::default();
         let topic_produce_requests: Family<TopicLabel, Counter> = Family::default();
         let topic_fetch_requests: Family<TopicLabel, Counter> = Family::default();
+        let topic_failed_produce_requests: Family<TopicLabel, Counter> = Family::default();
+        let topic_failed_fetch_requests: Family<TopicLabel, Counter> = Family::default();
         let partition_bytes_in: Family<PartitionLabel, Counter> = Family::default();
         let partition_bytes_out: Family<PartitionLabel, Counter> = Family::default();
         let replication_bytes_in: Family<PartitionLabel, Counter> = Family::default();
@@ -290,6 +305,26 @@ impl BrokerMetrics {
             "Fetch requests handled, per topic (cumulative). One \
              increment per topic per Fetch request.",
             topic_fetch_requests.clone(),
+        );
+        registry.register(
+            "topic_failed_produce_requests",
+            "Slice 12k: cumulative count of Produce partition \
+             responses that returned a non-zero error code, per \
+             topic. Mirrors Kafka's \
+             BrokerTopicMetrics.FailedProduceRequestsPerSec. \
+             Operators alert on rate(...) > 0 to catch quota / ACL \
+             / NOT_ENOUGH_REPLICAS storms; the ratio against \
+             topic_produce_requests yields the per-topic error rate.",
+            topic_failed_produce_requests.clone(),
+        );
+        registry.register(
+            "topic_failed_fetch_requests",
+            "Slice 12k: cumulative count of Fetch partition \
+             responses that returned a non-zero error code, per \
+             topic. Mirrors Kafka's \
+             BrokerTopicMetrics.FailedFetchRequestsPerSec. Pairs \
+             with topic_fetch_requests for per-topic error rate.",
+            topic_failed_fetch_requests.clone(),
         );
         registry.register(
             "partitions_led",
@@ -497,6 +532,8 @@ impl BrokerMetrics {
             topic_messages_in,
             topic_produce_requests,
             topic_fetch_requests,
+            topic_failed_produce_requests,
+            topic_failed_fetch_requests,
             partition_bytes_in,
             partition_bytes_out,
             replication_bytes_in,
@@ -606,6 +643,27 @@ impl BrokerMetrics {
         if bytes > 0 {
             self.topic_bytes_out.get_or_create(&lbl).inc_by(bytes);
         }
+    }
+
+    /// Slice 12k: record a single failed Produce partition response
+    /// for `topic`. Callers bump once per partition whose response
+    /// carries a non-zero error code — mirrors the JVM's per-row
+    /// `failedProduceRequestRate.mark()`.
+    pub fn record_failed_produce(&self, topic: &str) {
+        let lbl = TopicLabel {
+            topic: topic.to_string(),
+        };
+        self.topic_failed_produce_requests.get_or_create(&lbl).inc();
+    }
+
+    /// Slice 12k: record a single failed Fetch partition response
+    /// for `topic`. Same per-partition semantics as
+    /// `record_failed_produce`.
+    pub fn record_failed_fetch(&self, topic: &str) {
+        let lbl = TopicLabel {
+            topic: topic.to_string(),
+        };
+        self.topic_failed_fetch_requests.get_or_create(&lbl).inc();
     }
 
     /// Convenience: account a partition's slice of a Produce request.
@@ -728,6 +786,8 @@ mod tests {
         m.record_replication_out("topic-a", 0, 8192);
         m.record_produce_message_conversion("topic-a");
         m.record_fetch_message_conversion("topic-a");
+        m.record_failed_produce("topic-a");
+        m.record_failed_fetch("topic-a");
         m.record_unclean_leader_election();
         m.record_api_request(0); // Produce
         m.record_api_request(999); // unknown → "Unknown" label
@@ -782,6 +842,8 @@ mod tests {
             "crabka_broker_api_requests_total",
             "crabka_broker_unsupported_api_requests_total",
             "crabka_broker_messages_in_total",
+            "crabka_broker_topic_failed_produce_requests_total",
+            "crabka_broker_topic_failed_fetch_requests_total",
         ] {
             assert!(buf.contains(needle), "missing {needle} in:\n{buf}");
         }
@@ -863,6 +925,36 @@ mod tests {
             m.partition_disk_bytes.get_or_create(&lbl_p0).get(),
             1_000_000
         );
+    }
+
+    #[test]
+    fn failed_request_counters_track_per_topic_and_per_call() {
+        // Slice 12k: `record_failed_produce` / `record_failed_fetch`
+        // are bumped once per failed partition row. Two calls on
+        // `t-good` and one on `t-bad` must land on the right labels
+        // and yield independent series.
+        let m = BrokerMetrics::new();
+        m.record_failed_produce("t-good");
+        m.record_failed_produce("t-good");
+        m.record_failed_produce("t-bad");
+        m.record_failed_fetch("t-good");
+
+        let good = TopicLabel {
+            topic: "t-good".into(),
+        };
+        let bad = TopicLabel {
+            topic: "t-bad".into(),
+        };
+        assert_eq!(
+            m.topic_failed_produce_requests.get_or_create(&good).get(),
+            2
+        );
+        assert_eq!(m.topic_failed_produce_requests.get_or_create(&bad).get(), 1);
+        assert_eq!(m.topic_failed_fetch_requests.get_or_create(&good).get(), 1);
+        // t-bad never saw a failed fetch — series is materialized by
+        // `get_or_create` at read time but its value is 0, which is
+        // what `rate(failed_fetch{topic="t-bad"}[1m])` should compute.
+        assert_eq!(m.topic_failed_fetch_requests.get_or_create(&bad).get(), 0);
     }
 
     #[test]

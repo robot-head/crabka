@@ -235,6 +235,14 @@ pub(crate) async fn handle(
                 broker
                     .metrics
                     .record_partition_cpu_micros(&topic_name, idx, micros);
+                // Slice 12k: per-partition failure accounting. Bumps
+                // once per partition whose response carries a non-zero
+                // error code (TOPIC_AUTHORIZATION_FAILED,
+                // NOT_ENOUGH_REPLICAS, INVALID_RECORD, etc.) —
+                // mirrors JVM's `failedProduceRequestRate.mark()`.
+                if out.error_code != 0 {
+                    broker.metrics.record_failed_produce(&topic_name);
+                }
             }
             partition_results.push(out);
         }
