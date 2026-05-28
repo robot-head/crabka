@@ -66,6 +66,19 @@ pub struct DeleteTopicRecord {
     pub name: String,
 }
 
+/// KIP-185 / `UnregisterBroker` (`api_key` 64). Marks a broker as
+/// permanently unregistered: the admin operator confirms the broker is
+/// gone for good and asks the cluster to drop its registration entry
+/// from the metadata image. Subsequent `Metadata` responses no longer
+/// advertise the broker's endpoints; clients stop routing to it.
+///
+/// Idempotent — applying twice (or against an unknown `node_id`) is a
+/// no-op.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnregisterBrokerRecord {
+    pub node_id: NodeId,
+}
+
 /// Mutable topic configuration overrides. Authoritative target state:
 /// each `V1TopicConfig` record fully replaces the previous override map
 /// for `topic`. Empty map = clear all overrides. Merging happens at the
@@ -160,6 +173,7 @@ pub enum MetadataRecord {
     V1ClientQuota(ClientQuotaRecord),
     V1DelegationToken(DelegationTokenRecord),
     V1DeleteDelegationToken(DeleteDelegationTokenRecord),
+    V1UnregisterBroker(UnregisterBrokerRecord),
 }
 
 #[cfg(test)]
@@ -233,6 +247,12 @@ mod tests {
         let r = MetadataRecord::V1DeleteTopic(DeleteTopicRecord {
             name: "doomed".into(),
         });
+        assert_eq!(round_trip(&r), r);
+    }
+
+    #[test]
+    fn unregister_broker_round_trip() {
+        let r = MetadataRecord::V1UnregisterBroker(UnregisterBrokerRecord { node_id: 42 });
         assert_eq!(round_trip(&r), r);
     }
 

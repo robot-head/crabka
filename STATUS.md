@@ -4504,3 +4504,65 @@ introspection metadata).
   - Promoting `TRANSACTIONAL_ID_NOT_FOUND = 75` from an inline const
     to `codes.rs`. It's used by exactly one handler today; the
     codes module already holds the heavy hitters.
+
+## Slice — UnregisterBroker admin API (KIP-185) (2026-05-28)
+
+- **Goal.** Land `UnregisterBroker` (api_key 64). Admin RPC operators
+  use to permanently drop a dead broker from the cluster's metadata
+  image; after the record commits through Raft, `Metadata` responses
+  no longer advertise the broker's endpoints and clients stop routing
+  to it. Adds a new ✅ row to the KIP table for KIP-185.
+- **Metadata model.** New `MetadataRecord::V1UnregisterBroker(UnregisterBrokerRecord)`
+  variant. The image `apply` arm is one line — `self.brokers.remove(node_id)` —
+  idempotent against unknown ids (the JVM admin behaves the same way).
+  Validate is unconditional `Ok`; the handler-side existence check +
+  Cluster:Alter ACL gate provide all the pre-validation we need.
+- **Handler.** `crates/broker/src/handlers/unregister_broker.rs`:
+  - `Alter` on `Cluster("kafka-cluster")` — Deny → whole-response
+    `CLUSTER_AUTHORIZATION_FAILED (31)` with `"unregister-broker
+    denied"` message.
+  - Negative `broker_id` → `INVALID_REQUEST (42)` with an explanatory
+    message; refuses the silent `as u64` cast.
+  - Unknown `broker_id` (not in `image.brokers`) → `INVALID_REQUEST (42)`
+    with `"broker N is not registered"` message — matches JVM
+    `KafkaApis.handleUnregisterBroker` which surfaces
+    `BrokerIdNotRegisteredException` as `INVALID_REQUEST`.
+  - Success path: `controller.submit_change(vec![V1UnregisterBroker(...)])`
+    through Raft. Submit failure → `UNKNOWN_SERVER_ERROR (-1)` with
+    the controller's error string.
+- **Wiring.** Inline-intercept in `network::dispatch::run_session` for
+  `api_key == 64`; handler signature uses `RequestContext` (principal
+  + peer for ACL). `handler_body_flexible` returns true (flexible
+  from v0). `ApiVersions::supported_apis()` advertises `(64, 0, 0)`.
+- **Tests.**
+  - 1 unit round-trip test in `crates/metadata/src/records.rs` for
+    `V1UnregisterBroker`.
+  - 4 integration tests in `tests/unregister_broker.rs`:
+    - `unregister_known_broker_drops_it_from_metadata` — pre-call
+      Metadata shows broker 1; after the call (polled to 5 s for
+      Raft commit) Metadata shows zero brokers.
+    - `unregister_unknown_broker_returns_invalid_request` —
+      `broker_id = 999` returns 42 with a message naming the
+      broker and "not registered".
+    - `unregister_negative_broker_id_rejected` — `broker_id = -1`
+      returns 42 with a message about the sign requirement.
+    - `unregister_is_idempotent_on_repeat_call` — second call
+      against the now-removed broker returns 42 (existence check
+      fails); the underlying image apply is itself idempotent so
+      a stale concurrent re-submit wouldn't break anything.
+- **README.** New KIP-185 row added as ✅ in the protocol-features
+  KIP table.
+- **Workspace fmt + `clippy --workspace --all-targets -- -D warnings`
+  + broker lib (621 tests) + metadata lib (60 tests) + new
+  `unregister_broker` (4 tests)** — all green.
+- **Out of scope.**
+  - Cascading cleanup of partition leadership held by the unregistered
+    broker. The broker's heartbeats stop and the existing
+    leader-rebalancer / `AlterPartition` flow handles failover; this
+    slice just removes the registration record so clients stop
+    discovering the dead broker.
+  - The matching `BROKER_ID_NOT_REGISTERED` error code (Kafka 4.x's
+    own dedicated code). JVM brokers surface
+    `BrokerIdNotRegisteredException` as `INVALID_REQUEST` (42) on
+    the wire, so the message-level diagnostic is the discriminating
+    signal anyway.

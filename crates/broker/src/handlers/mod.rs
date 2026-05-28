@@ -113,6 +113,8 @@ pub(crate) mod produce;
 pub(crate) mod push_telemetry;
 pub(crate) mod renew_delegation_token;
 pub(crate) mod sync_group;
+// KIP-185 admin RPC to permanently drop a broker registration (api_key 64).
+pub(crate) mod unregister_broker;
 
 /// Build the dispatch table. Phase E registers concrete handlers; for
 /// now this is an empty table so the dispatch loop can still look up.

@@ -25,5 +25,5 @@ pub use records::{
     BrokerConfigRecord, BrokerEndpoint, BrokerRegistrationRecord, ClientQuotaRecord,
     DelegationTokenRecord, DeleteDelegationTokenRecord, DeleteScramCredentialRecord,
     DeleteTopicRecord, MetadataRecord, NodeId, PartitionRecord, QuotaEntity, ScramCredentialRecord,
-    TopicConfigRecord, TopicRecord,
+    TopicConfigRecord, TopicRecord, UnregisterBrokerRecord,
 };
