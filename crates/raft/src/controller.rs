@@ -28,6 +28,31 @@ use crate::server;
 use crate::state_machine::CrabkaStateMachine;
 use crate::types::{AppData, Node, NodeId, Raft};
 
+/// Crabka-native view of the openraft node's current quorum state.
+/// Surfaced by [`ControllerHandle::quorum_state`] for the broker's
+/// `DescribeQuorum` admin handler so callers don't have to depend on
+/// openraft types directly.
+#[derive(Debug, Clone)]
+pub struct QuorumState {
+    /// Raft term — used as the `KRaft` `leader_epoch` on the wire.
+    pub current_term: u64,
+    /// Index of the last log entry applied to this node's state machine.
+    /// Used as `KRaft` `high_watermark` on the wire. `0` until the first
+    /// commit (the same value openraft treats as "no log applied yet").
+    pub last_applied_index: u64,
+    /// Current cluster leader. `None` mid-election.
+    pub current_leader: Option<NodeId>,
+    /// Voter ids in the current membership config.
+    pub voters: Vec<NodeId>,
+    /// Per-voter `matched` log index from openraft's `replication` map.
+    /// Populated ONLY on the leader — openraft only knows peers'
+    /// progress when this node is acknowledging their `AppendEntries`
+    /// replies. On followers (and during elections) the map is empty
+    /// and callers should fall back to the JVM `-1` ("Unknown")
+    /// sentinel for each voter.
+    pub per_voter_matched_index: BTreeMap<NodeId, u64>,
+}
+
 /// Handle returned by [`Controller::start`]. Carries the live openraft
 /// node, the state machine, a leader-id watcher, and the background task
 /// join handles. Drop is NOT a clean shutdown — call [`Self::shutdown`]
@@ -77,6 +102,37 @@ impl ControllerHandle {
     #[must_use]
     pub fn watch_image(&self) -> watch::Receiver<Arc<MetadataImage>> {
         self.state_machine.watch_image()
+    }
+
+    /// Snapshot the openraft node's current quorum state in
+    /// Crabka-native terms. Used by the broker's `DescribeQuorum`
+    /// (`api_key=55`, KIP-595) handler to fill `leader_epoch`,
+    /// `high_watermark`, and per-voter `log_end_offset` for
+    /// `kafka-metadata-quorum --describe`. Cheap — a clone of
+    /// openraft's `RaftMetrics` watch value.
+    #[must_use]
+    pub fn quorum_state(&self) -> QuorumState {
+        let m = self.raft.metrics().borrow().clone();
+        let voters: Vec<NodeId> = m.membership_config.membership().voter_ids().collect();
+        // openraft populates `replication` only on the current leader;
+        // on a follower the map is empty and per-voter `log_end_offset`
+        // stays at the `Unknown` sentinel for each peer.
+        let per_voter_matched_index: BTreeMap<NodeId, u64> = m
+            .replication
+            .as_ref()
+            .map(|repl| {
+                repl.iter()
+                    .map(|(nid, log_id_opt)| (*nid, log_id_opt.as_ref().map_or(0, |lid| lid.index)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        QuorumState {
+            current_term: m.current_term,
+            last_applied_index: m.last_applied.as_ref().map_or(0, |lid| lid.index),
+            current_leader: m.current_leader,
+            voters,
+            per_voter_matched_index,
+        }
     }
 
     /// Submit a batch of metadata records.

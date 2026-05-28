@@ -570,12 +570,27 @@ async fn describe_quorum_reports_cluster_metadata_voter_set() {
         pd.leader_id, 1,
         "1-broker cluster: bootstrap voter id=1 is leader"
     );
+    assert!(
+        pd.leader_epoch >= 1,
+        "openraft term must be >= 1 once a leader is elected; got {}",
+        pd.leader_epoch,
+    );
+    assert!(
+        pd.high_watermark >= 0,
+        "last_applied_index is non-negative once any record applies; got {}",
+        pd.high_watermark,
+    );
     assert_eq!(
         pd.current_voters.len(),
         1,
         "single voter for 1-broker cluster"
     );
     assert_eq!(pd.current_voters[0].replica_id, 1);
+    assert!(
+        pd.current_voters[0].log_end_offset >= 0,
+        "leader knows its own matched index; got {}",
+        pd.current_voters[0].log_end_offset,
+    );
     assert!(
         pd.observers.is_empty(),
         "Crabka has no observer-role concept"
