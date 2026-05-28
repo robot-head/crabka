@@ -68,6 +68,15 @@ pub trait AdminClientLike: Send {
         upsertions: &[ScramUpsertion],
         deletions: &[ScramDeletion],
     ) -> Result<Vec<ScramUserOutcome>, AdminError>;
+    /// Slice 36b: SCRAM-SHA-256 sibling of
+    /// [`Self::alter_user_scram_credentials_sha512`]. The operator
+    /// calls this when a `KafkaUser.spec.authentication.type ==
+    /// scram-sha-256`.
+    async fn alter_user_scram_credentials_sha256(
+        &mut self,
+        upsertions: &[ScramUpsertion],
+        deletions: &[ScramDeletion],
+    ) -> Result<Vec<ScramUserOutcome>, AdminError>;
     async fn describe_acls(&mut self, filter: &AclEntryFilter)
     -> Result<Vec<AclEntry>, AdminError>;
     async fn create_acls(
@@ -156,6 +165,13 @@ impl AdminClientLike for AdminClient {
         deletions: &[ScramDeletion],
     ) -> Result<Vec<ScramUserOutcome>, AdminError> {
         AdminClient::alter_user_scram_credentials_sha512(self, upsertions, deletions).await
+    }
+    async fn alter_user_scram_credentials_sha256(
+        &mut self,
+        upsertions: &[ScramUpsertion],
+        deletions: &[ScramDeletion],
+    ) -> Result<Vec<ScramUserOutcome>, AdminError> {
+        AdminClient::alter_user_scram_credentials_sha256(self, upsertions, deletions).await
     }
     async fn describe_acls(
         &mut self,
