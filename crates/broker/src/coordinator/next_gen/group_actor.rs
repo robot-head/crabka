@@ -773,6 +773,203 @@ async fn flush_pending(
 mod tests {
     use super::*;
 
+    use crate::coordinator::next_gen::config::NextGenConfig;
+    use crate::coordinator::next_gen::offsets_log::fake::InMemoryOffsetsLog;
+    use crate::coordinator::next_gen::reconciler::ReconcileInput;
+    use crate::coordinator::next_gen::NextGenCoordinator;
+    use std::sync::Arc;
+
+    #[derive(Debug)]
+    struct StaticMetadata {
+        input: ReconcileInput,
+    }
+    impl MetadataProvider for StaticMetadata {
+        fn snapshot(&self) -> ReconcileInput {
+            self.input.clone()
+        }
+    }
+
+    fn empty_metadata() -> Arc<dyn MetadataProvider> {
+        Arc::new(StaticMetadata {
+            input: ReconcileInput::default(),
+        })
+    }
+
+    fn make_coordinator() -> (Arc<NextGenCoordinator>, Arc<InMemoryOffsetsLog>) {
+        let log = Arc::new(InMemoryOffsetsLog::default());
+        let coord = Arc::new(NextGenCoordinator::new(
+            NextGenConfig::default(),
+            empty_metadata(),
+            log.clone(),
+        ));
+        (coord, log)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn first_join_emits_one_batch() {
+        let (coord, log) = make_coordinator();
+        let handle = coord.get_or_create("g");
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::Heartbeat {
+                request: ConsumerGroupHeartbeatRequest {
+                    group_id: "g".into(),
+                    member_id: String::new(),
+                    member_epoch: 0,
+                    subscribed_topic_names: Some(vec!["t".into()]),
+                    rebalance_timeout_ms: 60_000,
+                    ..Default::default()
+                },
+                client_host: String::new(),
+                reply: tx,
+            })
+            .await
+            .unwrap();
+        let resp = rx.await.unwrap();
+        assert_eq!(resp.error_code, 0);
+        let batches = log.batches().await;
+        assert_eq!(batches.len(), 1, "first join should write exactly one batch");
+        // Minimum: k3 (group metadata) + k5 (member metadata) + k8 (current).
+        assert!(batches[0].records.len() >= 3);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unchanged_heartbeat_emits_no_batch() {
+        let (coord, log) = make_coordinator();
+        let handle = coord.get_or_create("g");
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::Heartbeat {
+                request: ConsumerGroupHeartbeatRequest {
+                    group_id: "g".into(),
+                    member_id: String::new(),
+                    member_epoch: 0,
+                    subscribed_topic_names: Some(vec!["t".into()]),
+                    rebalance_timeout_ms: 60_000,
+                    ..Default::default()
+                },
+                client_host: String::new(),
+                reply: tx,
+            })
+            .await
+            .unwrap();
+        let resp1 = rx.await.unwrap();
+        let mid = resp1.member_id.clone().unwrap();
+        let batches_after_join = log.batches().await.len();
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::Heartbeat {
+                request: ConsumerGroupHeartbeatRequest {
+                    group_id: "g".into(),
+                    member_id: mid,
+                    member_epoch: resp1.member_epoch,
+                    subscribed_topic_names: Some(vec!["t".into()]),
+                    rebalance_timeout_ms: 60_000,
+                    ..Default::default()
+                },
+                client_host: String::new(),
+                reply: tx,
+            })
+            .await
+            .unwrap();
+        let _ = rx.await.unwrap();
+        let batches_after_steady = log.batches().await.len();
+        assert_eq!(
+            batches_after_steady, batches_after_join,
+            "steady-state heartbeat should not write"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn leave_emits_tombstone_batch() {
+        let (coord, log) = make_coordinator();
+        let handle = coord.get_or_create("g");
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::Heartbeat {
+                request: ConsumerGroupHeartbeatRequest {
+                    group_id: "g".into(),
+                    member_id: String::new(),
+                    member_epoch: 0,
+                    subscribed_topic_names: Some(vec!["t".into()]),
+                    rebalance_timeout_ms: 60_000,
+                    ..Default::default()
+                },
+                client_host: String::new(),
+                reply: tx,
+            })
+            .await
+            .unwrap();
+        let mid = rx.await.unwrap().member_id.unwrap();
+        let pre_leave = log.batches().await.len();
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::Heartbeat {
+                request: ConsumerGroupHeartbeatRequest {
+                    group_id: "g".into(),
+                    member_id: mid,
+                    member_epoch: -1,
+                    ..Default::default()
+                },
+                client_host: String::new(),
+                reply: tx,
+            })
+            .await
+            .unwrap();
+        let _ = rx.await.unwrap();
+        let batches = log.batches().await;
+        assert_eq!(batches.len(), pre_leave + 1);
+        let leave_batch = &batches[batches.len() - 1];
+        assert!(
+            leave_batch.records.iter().any(|r| r.value.is_none()),
+            "leave batch must contain at least one tombstone"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn actor_exits_on_append_error() {
+        let (coord, log) = make_coordinator();
+        let handle = coord.get_or_create("g");
+        log.fail_next
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let _ = handle
+            .tx
+            .send(GroupActorMessage::Heartbeat {
+                request: ConsumerGroupHeartbeatRequest {
+                    group_id: "g".into(),
+                    member_id: String::new(),
+                    member_epoch: 0,
+                    subscribed_topic_names: Some(vec!["t".into()]),
+                    rebalance_timeout_ms: 60_000,
+                    ..Default::default()
+                },
+                client_host: String::new(),
+                reply: tx,
+            })
+            .await;
+        let resp = rx.await.unwrap();
+        assert_eq!(resp.error_code, codes::COORDINATOR_LOAD_IN_PROGRESS);
+
+        // Wait briefly for the actor to drain.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            handle.tx.is_closed(),
+            "actor mpsc should be closed after exit"
+        );
+
+        // get_or_create should respawn a fresh actor.
+        let fresh = coord.get_or_create("g");
+        assert!(!fresh.tx.is_closed());
+    }
+
     #[test]
     fn pending_records_empty_yields_empty_batch() {
         let p = PendingRecords::default();
