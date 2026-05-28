@@ -1076,7 +1076,9 @@ mod tests {
     // Slice 64c: custom assignor registry
     // ---------------------------------------------------------------------
 
-    use crate::coordinator::next_gen::assignor::{Assignment, Assignor, MemberSubscription, TopicMetadata};
+    use crate::coordinator::next_gen::assignor::{
+        Assignment, Assignor, MemberSubscription, TopicMetadata,
+    };
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[derive(Debug)]
@@ -1087,11 +1089,7 @@ mod tests {
         fn name(&self) -> &'static str {
             "counting"
         }
-        fn assign(
-            &self,
-            _members: &[MemberSubscription],
-            _topics: &TopicMetadata,
-        ) -> Assignment {
+        fn assign(&self, _members: &[MemberSubscription], _topics: &TopicMetadata) -> Assignment {
             self.calls.fetch_add(1, Ordering::SeqCst);
             std::collections::HashMap::new()
         }
