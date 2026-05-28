@@ -1523,6 +1523,16 @@ async fn handle_sasl_frame(
                     ..Default::default()
                 }
             };
+            // Slice 12l: account this SaslAuthenticate frame in the
+            // per-mechanism success/failure counters. The mechanism
+            // is the one selected by the preceding SaslHandshake;
+            // ILLEGAL_SASL_STATE rejects (no prior handshake) land
+            // under the `Unknown` sentinel so the metric stays
+            // bounded.
+            let mech_label = mech_opt.map_or("Unknown", crabka_security::SaslMechanism::wire_name);
+            broker
+                .metrics
+                .record_authentication(mech_label, resp.error_code == 0);
             let close = resp.error_code != 0;
             let mut buf = BytesMut::with_capacity(resp.encoded_len(api_version));
             resp.encode(&mut buf, api_version)?;
