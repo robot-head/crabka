@@ -572,6 +572,7 @@ impl Controller {
         let listener_task = tokio::spawn(server::run(
             listener,
             raft.clone(),
+            log_store.clone(),
             shutdown.clone(),
             config.handshake.clone(),
         ));
