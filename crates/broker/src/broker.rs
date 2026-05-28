@@ -908,8 +908,48 @@ impl Broker {
         // the same records are submitted through raft after a leader is
         // elected (step 2b below). A `Join` node has no seed set and relies
         // on `bootstrap_servers` + auto-join instead.
-        let bootstrap_records = crate::bootstrap::load_bootstrap_records(&config.log_dir)?;
-        let initial_voters = crate::bootstrap::initial_voters(&bootstrap_records);
+        let mut bootstrap_records = crate::bootstrap::load_bootstrap_records(&config.log_dir)?;
+        let mut initial_voters = crate::bootstrap::initial_voters(&bootstrap_records);
+
+        // KIP-853 standalone self-bootstrap: a `Bootstrap` node with no seeded
+        // `VotersRecord` (an in-process/single-node start that didn't run
+        // `format --standalone`) forms a single-voter cluster of itself. Seed
+        // both the openraft membership (`initial_voters`) and the metadata log
+        // (a `V1Voters` record submitted after election in step 2b) so the two
+        // stay in lockstep. Multi-node clusters seed voters via `format` or
+        // grow via auto-join (`BootstrapMode::Join`), so neither path lands here.
+        if initial_voters.is_empty()
+            && matches!(config.bootstrap_mode, crate::BootstrapMode::Bootstrap)
+        {
+            let self_voter = crabka_metadata::Voter {
+                id: config.node_id,
+                directory_id: config.directory_id,
+                endpoints: vec![crabka_metadata::VoterEndpoint {
+                    name: "CONTROLLER".to_string(),
+                    host: config.controller_listen_addr.ip().to_string(),
+                    port: config.controller_listen_addr.port(),
+                }],
+                kraft_version: crabka_metadata::KRaftVersionRange::default(),
+            };
+            let voters = crabka_metadata::VoterSet::from_voters([self_voter]);
+            tracing::info!(
+                node_id = config.node_id,
+                "KIP-853 standalone self-bootstrap: forming single-voter cluster"
+            );
+            bootstrap_records.insert(
+                0,
+                crabka_metadata::MetadataRecord::V1Voters(crabka_metadata::VotersRecord {
+                    voters: voters.clone(),
+                }),
+            );
+            bootstrap_records.insert(
+                0,
+                crabka_metadata::MetadataRecord::V1KRaftVersion(
+                    crabka_metadata::KRaftVersionRecord { kraft_version: 1 },
+                ),
+            );
+            initial_voters = voters;
+        }
 
         let controller_cfg = crabka_raft::ControllerConfig {
             node_id: config.node_id,
