@@ -235,6 +235,13 @@ pub(crate) async fn handle(
                 broker
                     .metrics
                     .record_partition_cpu_micros(&topic_name, idx, micros);
+                // Slice 12k: bump the per-topic failed-produce counter
+                // once per non-NONE partition response. Matches
+                // Kafka's BrokerTopicMetrics.FailedProduceRequestsPerSec
+                // semantics (per-failed-partition despite the name).
+                if out.error_code != codes::NONE {
+                    broker.metrics.record_failed_produce_partition(&topic_name);
+                }
             }
             partition_results.push(out);
         }

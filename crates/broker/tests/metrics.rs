@@ -140,6 +140,54 @@ async fn produce_one(addr: std::net::SocketAddr) -> u64 {
     body.len() as u64
 }
 
+/// Slice 12k: produce to a topic that doesn't exist. The
+/// per-partition response carries `UNKNOWN_TOPIC_OR_PARTITION` and
+/// the broker bumps `failed_produce_requests_total{topic=<name>}`.
+async fn produce_one_to_missing_topic(addr: std::net::SocketAddr, topic_name: &str) {
+    use crabka_protocol::records::{Record, RecordBatch};
+    let batch = RecordBatch {
+        records: vec![Record {
+            offset_delta: 0,
+            value: Some(bytes::Bytes::from_static(b"x")),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let req = ProduceRequest {
+        acks: 1,
+        timeout_ms: 5_000,
+        topic_data: vec![TopicProduceData {
+            name: topic_name.into(),
+            partition_data: vec![PartitionProduceData {
+                index: 0,
+                records: Some(batch.into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let mut body = BytesMut::new();
+    req.encode(&mut body, PRODUCE_VERSION).unwrap();
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    let resp = round_trip(&mut stream, 0, PRODUCE_VERSION, 1, true, &body)
+        .await
+        .unwrap();
+    let mut cur: &[u8] = &resp;
+    let r = ProduceResponse::decode(&mut cur, PRODUCE_VERSION).unwrap();
+    let topic = r.responses.into_iter().next().expect("one topic in resp");
+    let part = topic
+        .partition_responses
+        .into_iter()
+        .next()
+        .expect("one partition in resp");
+    assert_eq!(
+        part.error_code,
+        crabka_broker::codes::UNKNOWN_TOPIC_OR_PARTITION,
+        "expected UNKNOWN_TOPIC_OR_PARTITION on missing topic, got: {part:?}",
+    );
+}
+
 async fn fetch_one(addr: std::net::SocketAddr) {
     use crabka_protocol::owned::fetch_response::FetchResponse;
     let req = FetchRequest {
@@ -227,6 +275,12 @@ async fn metrics_endpoint_serves_openmetrics_and_counters_tick() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     produce_one(kafka_addr).await;
     fetch_one(kafka_addr).await;
+    // Slice 12k: also exercise the failed-Produce path against a
+    // topic that doesn't exist. The partition response carries
+    // `UNKNOWN_TOPIC_OR_PARTITION` and the per-topic failed counter
+    // ticks up.
+    const MISSING: &str = "metrics-it-missing";
+    produce_one_to_missing_topic(kafka_addr, MISSING).await;
 
     // Allow the gauge updater (1s tick) to set partitions_led at
     // least once.
@@ -251,6 +305,25 @@ async fn metrics_endpoint_serves_openmetrics_and_counters_tick() {
     assert!(
         body.contains(&messages_needle),
         "messages_in_total should be 1 for the lone produced record, body:\n{body}"
+    );
+    // Slice 12k: the failed-Produce path to a missing topic bumps
+    // `failed_produce_requests_total{topic=<missing>}` exactly once
+    // (single Produce request, single partition response with
+    // `UNKNOWN_TOPIC_OR_PARTITION`).
+    let failed_needle =
+        format!("crabka_broker_failed_produce_requests_total{{topic=\"{MISSING}\"}} 1");
+    assert!(
+        body.contains(&failed_needle),
+        "failed_produce_requests_total{{topic=\"{MISSING}\"}} must be 1, body:\n{body}"
+    );
+    // And the happy-path topic must NOT appear in the failed family:
+    // a labelled entry for TOPIC would mean a regression where a
+    // successful Produce path is mis-attributed as failed.
+    let happy_failed_needle =
+        format!("crabka_broker_failed_produce_requests_total{{topic=\"{TOPIC}\"}}");
+    assert!(
+        !body.contains(&happy_failed_needle),
+        "happy-path Produce must not bump failed_produce_requests_total for {TOPIC}, body:\n{body}"
     );
     assert!(
         body.contains(&format!(

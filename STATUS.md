@@ -4728,6 +4728,64 @@ introspection metadata).
     without re-parsing every record, so a record-count counter
     there would either re-decode (expensive) or live behind a
     separate index — both follow-up slices.
+
+## Slice 12k — broker(metrics): failed_produce_requests_total per-topic counter (2026-05-28)
+
+- **Goal.** Pair the existing `topic_produce_requests_total` (a
+  request-arrival counter) with a failure counter mirroring Kafka's
+  `BrokerTopicMetrics.FailedProduceRequestsPerSec`. Operators alert
+  on `rate(failed_produce_requests_total[5m]) > 0` per topic to
+  catch ACL regressions, txn-coordinator outages, storage failures,
+  or producer-id epoch fence-offs without scraping per-partition
+  error series.
+- **Wiring.** New `topic_failed_produce_requests: Family<TopicLabel, Counter>`
+  on `BrokerMetrics`, registered as `failed_produce_requests`
+  (`_total` appended by prometheus-client). Helper
+  `record_failed_produce_partition(topic)` skips empty topic names
+  (v ≥ 13 unknown-topic_id resolution) so we don't allocate a
+  phantom `topic=""` series. Wired from `handlers/produce.rs`
+  right after `process_partition` returns, alongside the
+  partition-cpu-micros bump: if `out.error_code != codes::NONE`,
+  bump once. Per-partition semantics — a single Produce request
+  with N failed partitions bumps the counter N times, matching
+  what Kafka's `BrokerTopicMetrics.FailedProduceRequestsPerSec`
+  has always done despite the per-request name.
+- **Tests.**
+  - 1 new unit test
+    `record_failed_produce_partition_increments_per_call_and_skips_empty`
+    asserts the helper accumulates and that empty topic names
+    no-op.
+  - Extended `registry_has_broker_prefix_and_all_metrics` to bump
+    the new counter and assert `crabka_broker_failed_produce_requests_total`
+    appears in the encoded text.
+  - Extended `metrics_endpoint_serves_openmetrics_and_counters_tick`
+    integration test to send a second Produce to a topic that
+    doesn't exist and assert
+    `failed_produce_requests_total{topic=MISSING} 1` post-scrape,
+    while the happy-path TOPIC remains absent from the failed
+    family (so a regression mis-attributing success as failure
+    would fail the test).
+- **Side fix.** Three call sites in
+  `coordinator/next_gen/group_actor.rs` (two production
+  initializers + one unit-test initializer) were missing the
+  `subscribed_topic_regex` field added to `MemberMetadataValue` in
+  PR #270. Main was broken at HEAD when this slice started; added
+  the missing initializer (cloned from `MemberState`) in all
+  three places so the broker builds again.
+- **`cargo test -p crabka-broker --lib metrics` (16 pass, +1 new)
+  + `cargo test -p crabka-broker --test metrics` (2 pass with the
+  new failure-path assertion) + `cargo test --test integration
+  --test legacy_produce --test produce_legacy_upconvert`
+  regression sweep (5 pass) + `cargo clippy -p crabka-broker --lib
+  --tests -- -D warnings` + `cargo fmt --check`** — all green.
+- **Out of scope.**
+  - `failed_fetch_requests_total`. The Fetch handler's error paths
+    are wider (per-partition errors interleave with the share-cache
+    path, the down-conversion gate, and IO-bound storage errors).
+    Worth a dedicated follow-up slice.
+  - `bytes_rejected_total`. ACL/quota-rejected bytes. Needs
+    instrumentation in the throttle and ACL preambles.
+
 ## Slice 64a follow-up — KIP-848 persistence + JVM-client gating (2026-05-28)
 
 - New `coordinator/next_gen/offsets_log.rs` — `OffsetsLog` trait,

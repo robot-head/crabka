@@ -83,6 +83,17 @@ pub struct BrokerMetrics {
     /// counter still tracks how often legacy batches arrive, so
     /// operators can detect under-counting from a legacy fleet.
     pub topic_messages_in: Family<TopicLabel, Counter>,
+    /// Slice 12k: cumulative count of Produce partition responses that
+    /// carried a non-NONE error code, per topic. Mirrors Kafka's
+    /// `BrokerTopicMetrics.FailedProduceRequestsPerSec` — the Kafka
+    /// name is per-request, but the implementation has always been
+    /// per-failed-partition-response (one bump per
+    /// `PartitionProduceResponse.error_code != 0`), so we count the
+    /// same way. Operators alert on
+    /// `rate(failed_produce_requests_total[5m]) > 0` to catch ACL
+    /// regressions, txn-coordinator outages, or storage failures
+    /// without having to scrape per-partition error series.
+    pub topic_failed_produce_requests: Family<TopicLabel, Counter>,
     pub topic_produce_requests: Family<TopicLabel, Counter>,
     pub topic_fetch_requests: Family<TopicLabel, Counter>,
     pub partition_bytes_in: Family<PartitionLabel, Counter>,
@@ -225,6 +236,7 @@ impl BrokerMetrics {
         let topic_bytes_in: Family<TopicLabel, Counter> = Family::default();
         let topic_bytes_out: Family<TopicLabel, Counter> = Family::default();
         let topic_messages_in: Family<TopicLabel, Counter> = Family::default();
+        let topic_failed_produce_requests: Family<TopicLabel, Counter> = Family::default();
         let topic_produce_requests: Family<TopicLabel, Counter> = Family::default();
         let topic_fetch_requests: Family<TopicLabel, Counter> = Family::default();
         let partition_bytes_in: Family<PartitionLabel, Counter> = Family::default();
@@ -278,6 +290,18 @@ impl BrokerMetrics {
              legacy-arrival rate so operators can detect \
              under-counting.",
             topic_messages_in.clone(),
+        );
+        registry.register(
+            "failed_produce_requests",
+            "Slice 12k: cumulative count of Produce partition responses \
+             that carried a non-NONE error code, per topic. Mirrors \
+             Kafka's BrokerTopicMetrics.FailedProduceRequestsPerSec. \
+             One increment per failed PartitionProduceResponse, so a \
+             single Produce request with N failed partitions bumps the \
+             counter N times. Alert on \
+             rate(failed_produce_requests_total[5m]) > 0 to catch ACL \
+             regressions, txn-coordinator outages, or storage failures.",
+            topic_failed_produce_requests.clone(),
         );
         registry.register(
             "topic_produce_requests",
@@ -495,6 +519,7 @@ impl BrokerMetrics {
             topic_bytes_in,
             topic_bytes_out,
             topic_messages_in,
+            topic_failed_produce_requests,
             topic_produce_requests,
             topic_fetch_requests,
             partition_bytes_in,
@@ -593,6 +618,23 @@ impl BrokerMetrics {
             topic: topic.to_string(),
         };
         self.topic_messages_in.get_or_create(&lbl).inc_by(messages);
+    }
+
+    /// Slice 12k: account one failed Produce partition response on
+    /// `topic` (any `PartitionProduceResponse.error_code != NONE`).
+    /// Mirrors Kafka's `BrokerTopicMetrics.FailedProduceRequestsPerSec`,
+    /// which has always been per-failed-partition-response despite
+    /// the name. Empty topic name is a no-op (v ≥ 13 with an unknown
+    /// `topic_id` resolves to "" and we don't want a phantom series
+    /// keyed on the empty string).
+    pub fn record_failed_produce_partition(&self, topic: &str) {
+        if topic.is_empty() {
+            return;
+        }
+        let lbl = TopicLabel {
+            topic: topic.to_string(),
+        };
+        self.topic_failed_produce_requests.get_or_create(&lbl).inc();
     }
 
     /// Convenience: record a Fetch hit on `topic` with the bytes
@@ -720,6 +762,7 @@ mod tests {
         let m = BrokerMetrics::new();
         m.record_produce("topic-a", 100);
         m.record_produce_messages("topic-a", 5);
+        m.record_failed_produce_partition("topic-a");
         m.record_fetch("topic-a", 50);
         m.record_partition_produce("topic-a", 0, 100);
         m.record_partition_fetch("topic-a", 0, 50);
@@ -782,6 +825,7 @@ mod tests {
             "crabka_broker_api_requests_total",
             "crabka_broker_unsupported_api_requests_total",
             "crabka_broker_messages_in_total",
+            "crabka_broker_failed_produce_requests_total",
         ] {
             assert!(buf.contains(needle), "missing {needle} in:\n{buf}");
         }
@@ -831,6 +875,21 @@ mod tests {
         m.record_produce_messages("t", 3);
         m.record_produce_messages("t", 7);
         assert_eq!(m.topic_messages_in.get_or_create(&lbl).get(), 10);
+    }
+
+    #[test]
+    fn record_failed_produce_partition_increments_per_call_and_skips_empty() {
+        let m = BrokerMetrics::new();
+        let lbl = TopicLabel {
+            topic: "t".to_string(),
+        };
+        // Empty topic name (v ≥ 13 unknown topic_id resolution) is a
+        // no-op so we don't allocate a phantom `topic=""` series.
+        m.record_failed_produce_partition("");
+        m.record_failed_produce_partition("t");
+        m.record_failed_produce_partition("t");
+        m.record_failed_produce_partition("t");
+        assert_eq!(m.topic_failed_produce_requests.get_or_create(&lbl).get(), 3,);
     }
 
     #[test]
