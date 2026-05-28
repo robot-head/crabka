@@ -401,6 +401,29 @@ impl Partition {
         self.replica_state.lock().await.hw
     }
 
+    /// KIP-392: record the high watermark the leader reported in a follower
+    /// Fetch response, so consumer reads served from this follower are bounded
+    /// correctly. Clamps to the local log end (never expose records we have not
+    /// replicated yet) and only advances `hw` (HW is monotonic). Fires
+    /// `hw_advance_notify` when it advances so a consumer parked at the old HW
+    /// wakes.
+    pub async fn set_follower_hw(&self, reported_hw: i64) {
+        let log_end = self.log_end_offset();
+        let new_hw = reported_hw.min(log_end);
+        let advanced = {
+            let mut st = self.replica_state.lock().await;
+            if new_hw > st.hw {
+                st.hw = new_hw;
+                true
+            } else {
+                false
+            }
+        };
+        if advanced {
+            self.hw_advance_notify.notify_waiters();
+        }
+    }
+
     /// Install (or reinstall) the ISR membership and seed non-leader
     /// follower entries to 0. Called by the replicator supervisor
     /// when this broker materializes a partition where it's the leader.
@@ -677,6 +700,86 @@ mod tests {
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(50);
         let result = p.await_hw_at_least(100, deadline).await;
         assert!(matches!(result, Err(crate::partition::HwTimeout)));
+    }
+
+    #[tokio::test]
+    async fn set_follower_hw_clamps_advances_and_notifies() {
+        use crabka_protocol::records::{Attributes, Record, RecordBatch};
+
+        let dir = tempdir().expect("tempdir");
+        let log = Log::open(dir.path(), LogConfig::default()).expect("open log");
+        let (tx, _rx) = mpsc::channel::<WriterMessage>(1);
+        let writer = tokio::spawn(async {});
+        let hw_advance_notify = Arc::new(Notify::new());
+        let p = Partition {
+            topic: "t".into(),
+            partition_id: 0,
+            log_dir: Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
+            log: Arc::new(Mutex::new(log)),
+            writer_tx: tx,
+            append_notify: Arc::new(Notify::new()),
+            replica_state: Arc::new(tokio::sync::Mutex::new(
+                crate::replica_state::ReplicaState::new(),
+            )),
+            hw_advance_notify: hw_advance_notify.clone(),
+            current_leader: Arc::new(AtomicU64::new(0)),
+            current_leader_epoch: Arc::new(AtomicI32::new(0)),
+            _writer_handle: Arc::new(writer),
+        };
+
+        // Append a 3-record batch so log_end_offset() == 3.
+        let mut batch = RecordBatch {
+            base_offset: 0,
+            partition_leader_epoch: -1,
+            attributes: Attributes::default(),
+            last_offset_delta: 2,
+            base_timestamp: 1_700_000_000,
+            max_timestamp: 1_700_000_000,
+            producer_id: -1,
+            producer_epoch: -1,
+            base_sequence: -1,
+            records: (0..3)
+                .map(|i| Record {
+                    attributes: 0,
+                    offset_delta: i,
+                    timestamp_delta: 0,
+                    key: None,
+                    value: Some(bytes::Bytes::from_static(b"v")),
+                    headers: vec![],
+                })
+                .collect(),
+        };
+        p.log
+            .lock()
+            .expect("log mutex")
+            .append(&mut batch)
+            .expect("append");
+        assert_eq!(p.log_end_offset(), 3);
+
+        // reported_hw below log_end: stored verbatim, notify fires.
+        // A `Notified` future does not register with the `Notify` until it is
+        // first polled, and `notify_waiters()` only wakes already-registered
+        // waiters — so poll once (Pending) to register BEFORE advancing HW.
+        let waiter = hw_advance_notify.notified();
+        tokio::pin!(waiter);
+        assert!(
+            futures_util::poll!(&mut waiter).is_pending(),
+            "waiter registers on first poll"
+        );
+        p.set_follower_hw(2).await;
+        assert_eq!(p.high_watermark().await, 2);
+        assert!(
+            futures_util::poll!(&mut waiter).is_ready(),
+            "notify should fire when HW advances"
+        );
+
+        // reported_hw above log_end: clamped to log_end (3).
+        p.set_follower_hw(100).await;
+        assert_eq!(p.high_watermark().await, 3);
+
+        // reported_hw below current HW: no regression.
+        p.set_follower_hw(1).await;
+        assert_eq!(p.high_watermark().await, 3);
     }
 
     #[tokio::test]

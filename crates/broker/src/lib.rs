@@ -159,6 +159,7 @@ pub mod raft_handshake;
 pub(crate) mod reassignment;
 pub(crate) mod remote_log_manager;
 pub(crate) mod remote_reader;
+pub mod replica_selector;
 pub(crate) mod replica_state;
 mod replicator;
 mod replicator_supervisor;
