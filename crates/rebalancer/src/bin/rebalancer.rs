@@ -351,7 +351,7 @@ async fn main() -> anyhow::Result<()> {
                     "starting metrics scraper"
                 );
                 let scraper = crabka_rebalancer::scraper::Scraper::new(
-                    targets,
+                    crabka_rebalancer::scraper::TargetSource::Static(targets),
                     std::time::Duration::from_secs(args.metrics_scrape_interval_secs),
                     usage_store.clone(),
                     shutdown.clone(),

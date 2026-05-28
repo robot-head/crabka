@@ -6,7 +6,7 @@ pub mod targets;
 pub mod window;
 
 pub use parse::{MetricKind, ParsedSample};
-pub use targets::{ScrapeTarget, TargetParseError, parse_targets};
+pub use targets::{ScrapeTarget, TargetParseError, TargetSource, parse_targets};
 pub use window::{UsageStore, Window, WindowConfig};
 
 use std::collections::HashMap;
@@ -50,21 +50,21 @@ pub fn classify(prev: Option<bool>, current: bool) -> ScrapeLogLevel {
 }
 
 pub struct Scraper {
-    targets: Vec<ScrapeTarget>,
+    source: TargetSource,
     interval: Duration,
     store: Arc<UsageStore>,
     http: reqwest::Client,
     shutdown: CancellationToken,
     /// Per-broker last-scrape outcome for edge-triggered logging.
-    /// `Some(true)` = last scrape ok, `Some(false)` = last scrape failed,
-    /// absent = never scraped successfully or unsuccessfully yet.
+    /// Pruned each tick: brokers that disappear from `source.current()`
+    /// are dropped on the next iteration.
     last_ok: HashMap<i32, bool>,
 }
 
 impl Scraper {
     #[must_use]
     pub fn new(
-        targets: Vec<ScrapeTarget>,
+        source: TargetSource,
         interval: Duration,
         store: Arc<UsageStore>,
         shutdown: CancellationToken,
@@ -74,7 +74,7 @@ impl Scraper {
             .build()
             .expect("reqwest client");
         Self {
-            targets,
+            source,
             interval,
             store,
             http,
@@ -84,13 +84,8 @@ impl Scraper {
     }
 
     pub async fn run(mut self) {
-        info!(
-            target_count = self.targets.len(),
-            interval_secs = self.interval.as_secs(),
-            "scraper started"
-        );
+        info!(interval_secs = self.interval.as_secs(), "scraper started");
         let mut ticker = tokio::time::interval(self.interval);
-        // Don't skip the first tick — pull metrics immediately on startup.
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
@@ -111,9 +106,17 @@ impl Scraper {
                 .map_or(0, |d| d.as_millis()),
         )
         .unwrap_or(0);
-        // Clone the targets out so we can mutate `self.last_ok` inside the
-        // loop without holding a borrow on `self.targets`.
-        let targets = self.targets.clone();
+        // Refresh targets each tick — `TargetSource::Discovered` may have
+        // gained or lost brokers since the last iteration.
+        let targets = self.source.current();
+        // Prune stale `last_ok` entries: any broker_id no longer in the
+        // current target list dropped out of the snapshot or was removed
+        // from the static config.
+        {
+            use std::collections::HashSet;
+            let current_ids: HashSet<i32> = targets.iter().map(|t| t.broker_id).collect();
+            self.last_ok.retain(|id, _| current_ids.contains(id));
+        }
         for target in &targets {
             let url = format!("http://{}/metrics", target.addr);
             let (ok, outcome) = match self.http.get(&url).send().await {
@@ -242,5 +245,73 @@ mod tests {
                 ScrapeLogLevel::Recovered,
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn tick_once_prunes_last_ok_for_brokers_no_longer_in_source() {
+        use crate::model::{BrokerView, ClusterState};
+        use arc_swap::ArcSwap;
+
+        let snapshot: Arc<ArcSwap<Option<ClusterState>>> =
+            Arc::new(ArcSwap::from_pointee(Some(ClusterState {
+                cluster_id: None,
+                snapshot_at_ms: 0,
+                brokers: vec![
+                    BrokerView {
+                        id: 1,
+                        host: "127.0.0.1".into(),
+                        port: 1,
+                        rack: None,
+                    },
+                    BrokerView {
+                        id: 2,
+                        host: "127.0.0.1".into(),
+                        port: 1,
+                        rack: None,
+                    },
+                ],
+                partitions: vec![],
+                in_flight_reassignments: vec![],
+            })));
+
+        let store = Arc::new(UsageStore::new(WindowConfig {
+            scrape_interval: Duration::from_secs(1),
+            retention: Duration::from_mins(1),
+        }));
+        let mut scraper = Scraper::new(
+            TargetSource::Discovered {
+                snapshot: snapshot.clone(),
+                metrics_port: 1, // bogus port — scrapes will fail but that's fine
+            },
+            Duration::from_millis(50),
+            store,
+            CancellationToken::new(),
+        );
+
+        // First tick: scrape both brokers (they'll fail; we don't care).
+        scraper.tick_once().await;
+        assert_eq!(scraper.last_ok.len(), 2);
+        assert!(scraper.last_ok.contains_key(&1));
+        assert!(scraper.last_ok.contains_key(&2));
+
+        // Snapshot loses broker 2.
+        snapshot.store(Arc::new(Some(ClusterState {
+            cluster_id: None,
+            snapshot_at_ms: 0,
+            brokers: vec![BrokerView {
+                id: 1,
+                host: "127.0.0.1".into(),
+                port: 1,
+                rack: None,
+            }],
+            partitions: vec![],
+            in_flight_reassignments: vec![],
+        })));
+
+        scraper.tick_once().await;
+        // last_ok should now only contain broker 1.
+        assert_eq!(scraper.last_ok.len(), 1);
+        assert!(scraper.last_ok.contains_key(&1));
+        assert!(!scraper.last_ok.contains_key(&2));
     }
 }
