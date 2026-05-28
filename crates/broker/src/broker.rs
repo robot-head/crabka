@@ -1265,6 +1265,27 @@ impl Broker {
                         })
                         .count();
                     m.partitions_led.set(i64::try_from(led).unwrap_or(i64::MAX));
+                    // Slice 8b: total replicas this broker hosts (leader
+                    // + follower). Cheap: just the DashMap length.
+                    let total = partitions_for_gauge.len();
+                    m.partitions_total
+                        .set(i64::try_from(total).unwrap_or(i64::MAX));
+                    // Slice 8b: per-leader URP count, sampled from the
+                    // current MetadataImage. URP = ISR.len() < replicas.len()
+                    // among partitions this broker leads. Read-only walk
+                    // of the image; matches Kafka's
+                    // ReplicaManager.UnderReplicatedPartitions semantics.
+                    let image = controller_for_gauge.current_image();
+                    let mut urp: usize = 0;
+                    for topic in image.topics() {
+                        for pr in image.partitions_of(&topic.name) {
+                            if pr.leader == node_id && pr.isr.len() < pr.replicas.len() {
+                                urp += 1;
+                            }
+                        }
+                    }
+                    m.under_replicated_partitions
+                        .set(i64::try_from(urp).unwrap_or(i64::MAX));
                     let is_ctrl_leader = controller_for_gauge
                         .watch_leader()
                         .borrow()
