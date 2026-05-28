@@ -20,11 +20,24 @@ impl Node {
     /// endpoint named "CONTROLLER"; falls back to the first endpoint.
     #[must_use]
     pub fn controller_addr(&self) -> Option<std::net::SocketAddr> {
-        self.endpoints
+        let endpoint = self
+            .endpoints
             .iter()
             .find(|e| e.name == "CONTROLLER")
-            .or_else(|| self.endpoints.first())
-            .and_then(|e| format!("{}:{}", e.host, e.port).parse().ok())
+            .or_else(|| self.endpoints.first())?;
+        match format!("{}:{}", endpoint.host, endpoint.port).parse() {
+            Ok(addr) => Some(addr),
+            Err(error) => {
+                tracing::warn!(
+                    endpoint = %endpoint.name,
+                    host = %endpoint.host,
+                    port = endpoint.port,
+                    %error,
+                    "controller endpoint host:port failed to parse as a SocketAddr"
+                );
+                None
+            }
+        }
     }
 }
 

@@ -44,6 +44,7 @@ use openraft::raft::{
     VoteRequest, VoteResponse,
 };
 use openraft::{LogId, Vote};
+use tracing::warn;
 
 use crabka_client_core::{ClientError, Connection, ConnectionOptions};
 
@@ -157,10 +158,18 @@ impl openraft::network::RaftNetworkFactory<TypeConfig> for CrabkaRaftNetworkFact
         // the CONTROLLER endpoint. A node with no resolvable controller
         // endpoint yields an empty addr — `connect` then fails to parse it
         // and surfaces `Unreachable`, which is the correct backoff behavior.
-        let addr = node
-            .controller_addr()
-            .map(|a| a.to_string())
-            .unwrap_or_default();
+        let addr = if let Some(a) = node.controller_addr() {
+            a.to_string()
+        } else {
+            warn!(
+                target_node = target,
+                directory_id = %node.directory_id,
+                endpoints = ?node.endpoints,
+                "raft node has no resolvable controller endpoint; connection will fail \
+                 and openraft will back off"
+            );
+            String::new()
+        };
         CrabkaRaftNetworkConn {
             target,
             addr,
