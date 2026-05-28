@@ -41,6 +41,7 @@ pub(crate) async fn compute_failover_changes(
     image: &MetadataImage,
     dead: NodeId,
     liveness: &ControllerLivenessState,
+    metrics: &crate::metrics::BrokerMetrics,
 ) -> Vec<MetadataRecord> {
     let mut changes: Vec<MetadataRecord> = Vec::new();
     for topic in image.topics() {
@@ -85,6 +86,10 @@ pub(crate) async fn compute_failover_changes(
                             topic = %pr.topic, partition = pr.partition, leader = new_leader,
                             "unclean leader election: ISR empty, electing out-of-ISR replica (possible data loss)"
                         );
+                        // Slice 10c (KIP-841): account this election so
+                        // operators can alert on a non-zero rate of unclean
+                        // failovers in their cluster.
+                        metrics.record_unclean_leader_election();
                         changes.push(MetadataRecord::V1Partition(PartitionRecord {
                             topic: pr.topic.clone(),
                             partition: pr.partition,
@@ -135,6 +140,7 @@ pub(crate) async fn on_broker_dead(
     node_id: NodeId,
     dead: NodeId,
     liveness: &Arc<ControllerLivenessState>,
+    metrics: &crate::metrics::BrokerMetrics,
 ) -> Result<(), BrokerError> {
     let is_controller_leader = controller
         .watch_leader()
@@ -145,7 +151,7 @@ pub(crate) async fn on_broker_dead(
     }
 
     let image = controller.current_image();
-    let changes = compute_failover_changes(&image, dead, liveness).await;
+    let changes = compute_failover_changes(&image, dead, liveness, metrics).await;
     if !changes.is_empty() {
         controller
             .submit_change(changes)
@@ -557,7 +563,13 @@ mod tests {
         for n in [2u64, 3] {
             l.record_heartbeat(n).await;
         }
-        let changes = compute_failover_changes(&img, /*dead=*/ 1, &l).await;
+        let changes = compute_failover_changes(
+            &img,
+            /*dead=*/ 1,
+            &l,
+            &crate::metrics::BrokerMetrics::new(),
+        )
+        .await;
         let pr = one_partition_change(&changes);
         assert_eq!(pr.leader, 2);
         assert_eq!(pr.isr, vec![2, 3]);
@@ -574,7 +586,13 @@ mod tests {
         for n in [2u64, 3] {
             l.record_heartbeat(n).await;
         }
-        let changes = compute_failover_changes(&img, /*dead=*/ 1, &l).await;
+        let changes = compute_failover_changes(
+            &img,
+            /*dead=*/ 1,
+            &l,
+            &crate::metrics::BrokerMetrics::new(),
+        )
+        .await;
         assert!(
             changes.is_empty(),
             "default-off must not emit any change, got {changes:?}",
@@ -592,7 +610,8 @@ mod tests {
         for n in [2u64, 3] {
             l.record_heartbeat(n).await;
         }
-        let changes = compute_failover_changes(&img, /*dead=*/ 1, &l).await;
+        let metrics = crate::metrics::BrokerMetrics::new();
+        let changes = compute_failover_changes(&img, /*dead=*/ 1, &l, &metrics).await;
         let pr = one_partition_change(&changes);
         assert_eq!(pr.leader, 2, "must elect first alive replica (broker 2)");
         assert_eq!(
@@ -601,6 +620,23 @@ mod tests {
             "unclean election installs singleton ISR (KIP-841)",
         );
         assert_eq!(pr.leader_epoch, 6);
+        // Slice 10c: each unclean election bumps the counter exactly once.
+        assert_eq!(metrics.unclean_leader_elections_total.get(), 1);
+    }
+
+    #[tokio::test]
+    async fn failover_clean_does_not_bump_unclean_counter() {
+        // Clean failover (ISR non-empty with an alive member) must not
+        // bump the unclean-election counter — the metric is reserved
+        // for the KIP-841 data-loss footgun path.
+        let img = img_with_partition("t", 0, /*leader*/ 1, &[1, 2, 3], &[1, 2, 3]);
+        let l = ControllerLivenessState::new(Duration::from_secs(10));
+        for n in [2u64, 3] {
+            l.record_heartbeat(n).await;
+        }
+        let metrics = crate::metrics::BrokerMetrics::new();
+        let _ = compute_failover_changes(&img, /*dead=*/ 1, &l, &metrics).await;
+        assert_eq!(metrics.unclean_leader_elections_total.get(), 0);
     }
 
     #[tokio::test]
@@ -610,7 +646,13 @@ mod tests {
         set_topic_config(&mut img, "t", UNCLEAN_LEADER_ELECTION_ENABLE, "true");
         let l = ControllerLivenessState::new(Duration::from_secs(10));
         // No heartbeats — nobody alive.
-        let changes = compute_failover_changes(&img, /*dead=*/ 1, &l).await;
+        let changes = compute_failover_changes(
+            &img,
+            /*dead=*/ 1,
+            &l,
+            &crate::metrics::BrokerMetrics::new(),
+        )
+        .await;
         assert!(
             changes.is_empty(),
             "no alive replica → no election, got {changes:?}",
@@ -626,7 +668,13 @@ mod tests {
         for n in [2u64, 3] {
             l.record_heartbeat(n).await;
         }
-        let changes = compute_failover_changes(&img, /*dead=*/ 1, &l).await;
+        let changes = compute_failover_changes(
+            &img,
+            /*dead=*/ 1,
+            &l,
+            &crate::metrics::BrokerMetrics::new(),
+        )
+        .await;
         assert!(changes.is_empty(), "explicit `false` keeps safe default");
     }
 
@@ -639,7 +687,13 @@ mod tests {
         let l = ControllerLivenessState::new(Duration::from_secs(10));
         // Only broker 3 alive — broker 2 also dead.
         l.record_heartbeat(3).await;
-        let changes = compute_failover_changes(&img, /*dead=*/ 1, &l).await;
+        let changes = compute_failover_changes(
+            &img,
+            /*dead=*/ 1,
+            &l,
+            &crate::metrics::BrokerMetrics::new(),
+        )
+        .await;
         let pr = one_partition_change(&changes);
         assert_eq!(pr.leader, 3);
         assert_eq!(pr.isr, vec![3]);
@@ -656,7 +710,13 @@ mod tests {
         for n in [2u64, 3] {
             l.record_heartbeat(n).await;
         }
-        let changes = compute_failover_changes(&img, /*dead=*/ 1, &l).await;
+        let changes = compute_failover_changes(
+            &img,
+            /*dead=*/ 1,
+            &l,
+            &crate::metrics::BrokerMetrics::new(),
+        )
+        .await;
         let pr = one_partition_change(&changes);
         assert_eq!(pr.leader, 2);
         assert_eq!(
@@ -676,7 +736,13 @@ mod tests {
         for n in [1u64, 3] {
             l.record_heartbeat(n).await;
         }
-        let changes = compute_failover_changes(&img, /*dead=*/ 2, &l).await;
+        let changes = compute_failover_changes(
+            &img,
+            /*dead=*/ 2,
+            &l,
+            &crate::metrics::BrokerMetrics::new(),
+        )
+        .await;
         let pr = one_partition_change(&changes);
         assert_eq!(pr.leader, 1, "leader unchanged");
         assert_eq!(pr.isr, vec![1, 3]);

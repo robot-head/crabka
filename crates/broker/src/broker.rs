@@ -1139,6 +1139,7 @@ impl Broker {
         let controller_for_ticker = controller.clone();
         let ticker_node_id = config.node_id;
         let ticker_shutdown = supervisor_shutdown.child_token();
+        let metrics_for_ticker = metrics.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
             loop {
@@ -1158,6 +1159,7 @@ impl Broker {
                                 ticker_node_id,
                                 n,
                                 &liveness_for_ticker,
+                                &metrics_for_ticker,
                             )
                             .await
                             {
