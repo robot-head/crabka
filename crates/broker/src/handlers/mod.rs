@@ -90,6 +90,8 @@ pub(crate) mod elect_leaders;
 pub(crate) mod expire_delegation_token;
 pub(crate) mod fetch;
 pub(crate) mod fetch_downconvert;
+// KIP-630 controller-snapshot fetch (api_key 59).
+pub(crate) mod fetch_snapshot;
 pub(crate) mod find_coordinator;
 // KIP-714 client telemetry. Pair of no-op handlers — `get` advertises
 // "no metrics subscribed" so well-behaved clients skip `push` entirely;

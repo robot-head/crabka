@@ -215,6 +215,19 @@ pub const DELEGATION_TOKEN_REQUEST_NOT_ALLOWED: i16 = 64;
 pub const DELEGATION_TOKEN_AUTHORIZATION_FAILED: i16 = 65;
 pub const DELEGATION_TOKEN_EXPIRED: i16 = 66;
 
+// KIP-630 FetchSnapshot (api_key 59) codes.
+/// `SNAPSHOT_NOT_FOUND` (98) — the requested `__cluster_metadata` snapshot
+/// does not exist (the controller has not generated one yet).
+pub const SNAPSHOT_NOT_FOUND: i16 = 98;
+/// `POSITION_OUT_OF_RANGE` (99) — reserved for a strict snapshot-position
+/// bounds check; `read_snapshot_range` clamps past-EOF reads to an empty
+/// end-of-snapshot page, so the `FetchSnapshot` handler does not emit this.
+#[allow(dead_code)]
+pub const POSITION_OUT_OF_RANGE: i16 = 99;
+/// `INCONSISTENT_CLUSTER_ID` (104) — the request's `cluster_id` does not
+/// match this cluster's id.
+pub const INCONSISTENT_CLUSTER_ID: i16 = 104;
+
 /// Map an internal [`crate::error::BrokerError`] to a wire-level code.
 /// Most internal errors map to `UNKNOWN_SERVER_ERROR`; specific variants
 /// pick more meaningful codes.
