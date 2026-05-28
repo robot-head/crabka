@@ -357,26 +357,27 @@ pub(crate) async fn handle(
             // only encodes at Fetch v11+ (where `rack_id` first appears), so
             // older clients are unaffected. `-1` (the default) means
             // "use the leader".
-            if !is_follower_fetch && !req.rack_id.is_empty() {
-                if let Some(pr) = image.partition(&topic_name, idx) {
-                    let isr: std::collections::HashSet<crabka_metadata::NodeId> =
-                        pr.isr.iter().copied().collect();
-                    let views: Vec<crate::replica_selector::ReplicaView> = pr
-                        .replicas
-                        .iter()
-                        .map(|&nid| crate::replica_selector::ReplicaView {
-                            node_id: i32::try_from(nid).unwrap_or(-1),
-                            rack: image.broker(nid).and_then(|b| b.rack.clone()),
-                            in_isr: isr.contains(&nid),
-                        })
-                        .collect();
-                    let leader_id = i32::try_from(pr.leader).unwrap_or(-1);
-                    out.preferred_read_replica = broker.config.replica_selector.select(
-                        Some(req.rack_id.as_str()),
-                        leader_id,
-                        &views,
-                    );
-                }
+            if !is_follower_fetch
+                && !req.rack_id.is_empty()
+                && let Some(pr) = image.partition(&topic_name, idx)
+            {
+                let isr: std::collections::HashSet<crabka_metadata::NodeId> =
+                    pr.isr.iter().copied().collect();
+                let views: Vec<crate::replica_selector::ReplicaView> = pr
+                    .replicas
+                    .iter()
+                    .map(|&nid| crate::replica_selector::ReplicaView {
+                        node_id: i32::try_from(nid).unwrap_or(-1),
+                        rack: image.broker(nid).and_then(|b| b.rack.clone()),
+                        in_isr: isr.contains(&nid),
+                    })
+                    .collect();
+                let leader_id = i32::try_from(pr.leader).unwrap_or(-1);
+                out.preferred_read_replica = broker.config.replica_selector.select(
+                    Some(req.rack_id.as_str()),
+                    leader_id,
+                    &views,
+                );
             }
 
             pending.push(PendingRead {

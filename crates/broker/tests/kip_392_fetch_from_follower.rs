@@ -19,6 +19,9 @@
 //! selector on each broker. The blast radius stays in this file.
 
 #![cfg(not(target_os = "windows"))]
+// Rust 1.95 annotate-snippets ICE on `clippy::pedantic` in test files; the
+// sibling integration tests allow it wholesale for the same reason.
+#![allow(clippy::pedantic)]
 #![allow(clippy::manual_assert, clippy::cast_possible_truncation)]
 
 use std::collections::BTreeSet;
