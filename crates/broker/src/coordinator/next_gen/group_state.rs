@@ -16,6 +16,13 @@ pub struct MemberState {
     pub client_id: String,
     pub client_host: String,
     pub subscribed_topic_names: HashSet<String>,
+    /// KIP-848 v1+ `subscribed_topic_regex`. When set, the reconciler
+    /// resolves it against the metadata image and unions the match with
+    /// `subscribed_topic_names`. `None` means "no regex" — exact-name
+    /// subscription only. Not persisted on `__consumer_offsets` yet;
+    /// the client re-supplies it on every heartbeat so a coordinator
+    /// failover loses at most one heartbeat interval of state.
+    pub subscribed_topic_regex: Option<String>,
     pub server_assignor: Option<String>,
     pub rebalance_timeout: Duration,
     pub member_epoch: i32,
@@ -63,13 +70,16 @@ impl GroupState {
         if let Some(iid) = m.instance_id.clone() {
             self.instance_to_member.insert(iid, m.member_id.clone());
         }
-        let cached: Option<HashSet<String>> = self
-            .members
-            .get(&m.member_id)
-            .map(|prev| prev.subscribed_topic_names.clone());
-        let subscription_changed = cached
-            .as_ref()
-            .is_none_or(|prev| prev != &m.subscribed_topic_names);
+        let cached: Option<(HashSet<String>, Option<String>)> =
+            self.members.get(&m.member_id).map(|prev| {
+                (
+                    prev.subscribed_topic_names.clone(),
+                    prev.subscribed_topic_regex.clone(),
+                )
+            });
+        let subscription_changed = cached.as_ref().is_none_or(|(names, regex)| {
+            names != &m.subscribed_topic_names || regex != &m.subscribed_topic_regex
+        });
         self.members.insert(m.member_id.clone(), m);
         if subscription_changed {
             self.dirty = true;
@@ -160,6 +170,7 @@ mod tests {
             client_id: "c".into(),
             client_host: "/127.0.0.1".into(),
             subscribed_topic_names: HashSet::new(),
+            subscribed_topic_regex: None,
             server_assignor: None,
             rebalance_timeout: Duration::from_mins(1),
             member_epoch: 0,
