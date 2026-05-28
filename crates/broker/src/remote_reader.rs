@@ -17,6 +17,32 @@ use crabka_remote_storage::{
     RemoteStorageError, RemoteStorageManager, TopicIdPartition,
 };
 use tracing::warn;
+use zerocopy::byteorder::{I64, U32};
+use zerocopy::{BigEndian, FromBytes, Immutable, KnownLayout, Unaligned};
+
+/// 8 bytes per entry: rel u32 BE + pos u32 BE. Mirrors
+/// `crabka_log::index::OffsetEntryRaw` so the remote-tier copy of an
+/// `OffsetIndex` file decodes through the same byte layout the local index
+/// was written with.
+#[derive(Debug, Clone, Copy, FromBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+struct OffsetIndexEntry {
+    relative_offset: U32<BigEndian>,
+    position: U32<BigEndian>,
+}
+
+const _: () = assert!(std::mem::size_of::<OffsetIndexEntry>() == 8);
+
+/// 12 bytes per entry: ts i64 BE + rel u32 BE. Mirrors
+/// `crabka_log::index::TimeEntryRaw`.
+#[derive(Debug, Clone, Copy, FromBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+struct TimeIndexEntry {
+    timestamp: I64<BigEndian>,
+    relative_offset: U32<BigEndian>,
+}
+
+const _: () = assert!(std::mem::size_of::<TimeIndexEntry>() == 12);
 
 /// Holds the broker's shared `RSM` + `RLMM` and serves remote reads.
 pub(crate) struct RemoteReader {
@@ -192,13 +218,12 @@ pub(crate) fn end_position_for(
 /// pos u32 BE).
 #[must_use]
 pub(crate) fn parse_offset_index(bytes: &[u8]) -> Vec<(u32, u32)> {
-    bytes
-        .chunks_exact(8)
-        .map(|c| {
-            let rel = u32::from_be_bytes([c[0], c[1], c[2], c[3]]);
-            let pos = u32::from_be_bytes([c[4], c[5], c[6], c[7]]);
-            (rel, pos)
-        })
+    let truncated_len = (bytes.len() / 8) * 8;
+    let entries = <[OffsetIndexEntry]>::ref_from_bytes(&bytes[..truncated_len])
+        .expect("len is multiple of 8 and OffsetIndexEntry is Unaligned");
+    entries
+        .iter()
+        .map(|e| (e.relative_offset.get(), e.position.get()))
         .collect()
 }
 
@@ -217,13 +242,12 @@ pub(crate) fn position_for_relative_offset(entries: &[(u32, u32)], target_rel: u
 /// u32 BE).
 #[must_use]
 pub(crate) fn parse_time_index(bytes: &[u8]) -> Vec<(i64, u32)> {
-    bytes
-        .chunks_exact(12)
-        .map(|c| {
-            let ts = i64::from_be_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]);
-            let rel = u32::from_be_bytes([c[8], c[9], c[10], c[11]]);
-            (ts, rel)
-        })
+    let truncated_len = (bytes.len() / 12) * 12;
+    let entries = <[TimeIndexEntry]>::ref_from_bytes(&bytes[..truncated_len])
+        .expect("len is multiple of 12 and TimeIndexEntry is Unaligned");
+    entries
+        .iter()
+        .map(|e| (e.timestamp.get(), e.relative_offset.get()))
         .collect()
 }
 
