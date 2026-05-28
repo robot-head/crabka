@@ -74,6 +74,9 @@ jsonpath-rust = { workspace = true }
 base64.workspace = true
 # Slice 53: bounded decision cache for the OPA authorizer.
 lru.workspace = true
+# Slice 48d zero-copy: cast remote-tier OffsetIndex/TimeIndex byte buffers
+# to typed entry slices instead of per-entry from_be_bytes() in a hot path.
+zerocopy.workspace = true
 
 [dev-dependencies]
 crabka-broker = { version = "0.1", path = ".", features = ["test-helpers"] }

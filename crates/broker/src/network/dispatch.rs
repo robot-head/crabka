@@ -397,6 +397,28 @@ async fn serve_connection_stream<S>(
                 }
             }
         }
+        // UpdateFeatures (api_key 57, KIP-584) needs the authenticated
+        // principal AND the peer `SocketAddr` for the Cluster:Alter ACL gate,
+        // which the `&Broker`-only handler-table signature can't carry, so it
+        // intercepts inline.
+        if peek_api_key(&frame).ok() == Some(57) {
+            match handle_update_features_frame(&broker, &frame, &auth, &peer)
+                .instrument(req_span.clone())
+                .await
+            {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during UpdateFeatures, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "UpdateFeatures dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
         // Produce (0, slice-13 T10) needs both the authenticated
         // principal AND the peer's `SocketAddr` so the handler can
         // batch-authorize every topic in the request for `Write` and
@@ -1581,6 +1603,16 @@ async fn handle_sasl_frame(
                     ..Default::default()
                 }
             };
+            // Slice 12l: account this SaslAuthenticate frame in the
+            // per-mechanism success/failure counters. The mechanism
+            // is the one selected by the preceding SaslHandshake;
+            // ILLEGAL_SASL_STATE rejects (no prior handshake) land
+            // under the `Unknown` sentinel so the metric stays
+            // bounded.
+            let mech_label = mech_opt.map_or("Unknown", crabka_security::SaslMechanism::wire_name);
+            broker
+                .metrics
+                .record_authentication(mech_label, resp.error_code == 0);
             let close = resp.error_code != 0;
             let mut buf = BytesMut::with_capacity(resp.encoded_len(api_version));
             resp.encode(&mut buf, api_version)?;
@@ -1736,6 +1768,55 @@ async fn handle_alter_user_scram_credentials_frame(
     };
 
     let resp = crate::handlers::alter_user_scram_credentials::handle(broker, req, &ctx).await;
+    let mut buf = BytesMut::with_capacity(resp.encoded_len(api_version));
+    resp.encode(&mut buf, api_version)?;
+    let resp_body = buf.freeze();
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch an `UpdateFeatures` (`api_key` 57, KIP-584) frame.
+/// Pulls the authenticated principal off the per-connection `auth` state and
+/// the peer `SocketAddr` from the accept-time capture so the handler can
+/// authorize `Alter` on `Cluster("kafka-cluster")`.
+async fn handle_update_features_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    use crabka_protocol::{Decode, Encode};
+
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 57);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let mut cur: &[u8] = body;
+    let req = crabka_protocol::owned::update_features_request::UpdateFeaturesRequest::decode(
+        &mut cur,
+        api_version,
+    )?;
+
+    let principal = auth
+        .principal()
+        .cloned()
+        .unwrap_or_else(|| crabka_security::Principal {
+            name: "ANONYMOUS".to_string(),
+            auth_method: crabka_security::AuthMethod::Anonymous,
+            groups: vec![],
+        });
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let ctx = crate::handlers::RequestContext {
+        principal: &principal,
+        peer,
+        client_id,
+    };
+
+    let resp = crate::handlers::update_features::handle(broker, req, api_version, &ctx).await;
     let mut buf = BytesMut::with_capacity(resp.encoded_len(api_version));
     resp.encode(&mut buf, api_version)?;
     let resp_body = buf.freeze();
@@ -3874,6 +3955,8 @@ fn handler_body_flexible(api_key: i16, version: i16) -> bool {
         // DescribeQuorum (55, KIP-595) is flexible from v0.
         55 => version >= owned::describe_quorum_request::FLEXIBLE_MIN,
         56 => version >= owned::alter_partition_request::FLEXIBLE_MIN,
+        // UpdateFeatures (57, KIP-584) is flexible from v0.
+        57 => version >= owned::update_features_request::FLEXIBLE_MIN,
         60 => version >= owned::describe_cluster_request::FLEXIBLE_MIN,
         // DescribeProducers (61, KIP-664) is flexible from v0.
         61 => version >= owned::describe_producers_request::FLEXIBLE_MIN,

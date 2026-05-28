@@ -122,6 +122,10 @@ pub(crate) mod renew_delegation_token;
 pub(crate) mod sync_group;
 // KIP-185 admin RPC to permanently drop a broker registration (api_key 64).
 pub(crate) mod unregister_broker;
+// KIP-584 feature finalization (api_key 57). Intercepted inline in
+// `network::dispatch` so the handler receives the per-connection principal +
+// peer `SocketAddr` for the Cluster:Alter ACL gate.
+pub(crate) mod update_features;
 pub(crate) mod update_raft_voter;
 
 /// Build the dispatch table. Phase E registers concrete handlers; for

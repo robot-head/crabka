@@ -1,0 +1,30 @@
+[package]
+name = "crabka-log-iobench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version = "1.95.0"
+description = "Bench-only crate: compares the log segment read path against mmap variants"
+publish = false
+
+# Intentionally does NOT enable `[lints] workspace = true`: the workspace
+# forbids `unsafe_code`, but `memmap2::Mmap::map` is `unsafe` by contract.
+# This crate exists solely to benchmark mmap against the current read path,
+# so it opts out of the forbid rather than weakening the project-wide policy.
+[lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+
+[dependencies]
+crabka-log = { version = "0.1", path = "../log" }
+crabka-protocol = { version = "0.1", path = "../protocol", default-features = false }
+bytes = { workspace = true }
+memmap2 = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+criterion = { version = "4.6.0", package = "codspeed-criterion-compat" }
+
+[[bench]]
+name = "mmap_read"
+harness = false

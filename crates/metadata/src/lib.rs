@@ -25,7 +25,8 @@ pub use image::{DelegationToken, EntityKey, MetadataImage, ThrottleKind, canonic
 pub use records::{
     BrokerConfigRecord, BrokerEndpoint, BrokerRegistrationRecord, ClientQuotaRecord,
     DelegationTokenRecord, DeleteDelegationTokenRecord, DeleteScramCredentialRecord,
-    DeleteTopicRecord, KRaftVersionRecord, MetadataRecord, NodeId, PartitionRecord, QuotaEntity,
-    ScramCredentialRecord, TopicConfigRecord, TopicRecord, UnregisterBrokerRecord, VotersRecord,
+    DeleteTopicRecord, FeatureLevelRecord, KRaftVersionRecord, MetadataRecord, NodeId,
+    PartitionRecord, QuotaEntity, ScramCredentialRecord, TopicConfigRecord, TopicRecord,
+    UnregisterBrokerRecord, VotersRecord,
 };
 pub use voters::{KRaftVersionRange, Voter, VoterEndpoint, VoterSet};

@@ -169,6 +169,17 @@ pub struct VotersRecord {
     pub voters: crate::voters::VoterSet,
 }
 
+/// KIP-584 finalized feature level. `level` is the finalized
+/// `max_version_level` for `name`. `level == 0` is the KIP-584 sentinel
+/// for "delete this finalized feature" — `MetadataImage::apply` removes the
+/// entry rather than storing a zero. Replacement semantics: a later record
+/// with the same `name` overwrites the previous level.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeatureLevelRecord {
+    pub name: String,
+    pub level: i16,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum MetadataRecord {
@@ -188,6 +199,7 @@ pub enum MetadataRecord {
     V1UnregisterBroker(UnregisterBrokerRecord),
     V1KRaftVersion(KRaftVersionRecord),
     V1Voters(VotersRecord),
+    V1FeatureLevel(FeatureLevelRecord),
 }
 
 #[cfg(test)]
@@ -199,6 +211,15 @@ mod tests {
     fn round_trip(r: &MetadataRecord) -> MetadataRecord {
         let bytes = <SerdeCompat<MetadataRecord>>::serialize(r).unwrap();
         <SerdeCompat<MetadataRecord>>::deserialize(&bytes).unwrap()
+    }
+
+    #[test]
+    fn feature_level_round_trip() {
+        let r = MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+            name: "metadata.version".into(),
+            level: 1,
+        });
+        assert_eq!(round_trip(&r), r);
     }
 
     #[test]

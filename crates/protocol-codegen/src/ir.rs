@@ -184,16 +184,33 @@ pub fn load_dir(dir: &Path) -> Result<Vec<MessageSpec>, IrError> {
     Ok(out)
 }
 
-/// Strip JavaScript-style `//` line comments. Naive but adequate for these schemas:
-/// quoted strings in the schemas do not contain `//`.
+/// Strip JavaScript-style `//` line comments, ignoring `//` that appears inside
+/// a double-quoted JSON string (so string values like URLs survive intact).
 fn strip_line_comments(src: &str) -> String {
     let mut out = String::with_capacity(src.len());
     for line in src.lines() {
-        if let Some(idx) = line.find("//") {
-            out.push_str(&line[..idx]);
-        } else {
-            out.push_str(line);
+        let bytes = line.as_bytes();
+        let mut in_str = false;
+        let mut escaped = false;
+        let mut i = 0;
+        while i < bytes.len() {
+            let b = bytes[i];
+            if in_str {
+                if escaped {
+                    escaped = false;
+                } else if b == b'\\' {
+                    escaped = true;
+                } else if b == b'"' {
+                    in_str = false;
+                }
+            } else if b == b'"' {
+                in_str = true;
+            } else if b == b'/' && bytes.get(i + 1) == Some(&b'/') {
+                break;
+            }
+            i += 1;
         }
+        out.push_str(&line[..i]);
         out.push('\n');
     }
     out
@@ -237,5 +254,13 @@ mod tests {
         assert!(!out.contains("hi"));
         assert!(!out.contains("trailing"));
         assert!(out.contains("\"x\": 1"));
+    }
+
+    #[test]
+    fn comment_strip_preserves_double_slash_in_string() {
+        let src = "{ \"default\": \"http://example.com\" } // tail";
+        let out = strip_line_comments(src);
+        assert!(out.contains("http://example.com"));
+        assert!(!out.contains("tail"));
     }
 }

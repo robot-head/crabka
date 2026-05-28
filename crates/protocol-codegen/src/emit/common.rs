@@ -25,10 +25,11 @@ pub fn format_int_literal(s: &str, suffix: &str) -> String {
     let decimal_string: String;
     let (negative, digits): (bool, &str) =
         if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-            // Parse the hex digits as u64 then convert to signed decimal.
+            // Parse the hex digits as u64 then reinterpret the bits at the target
+            // type's width. A 32-bit constant like `0xffffffff` for an `i32` field
+            // means -1, not 4_294_967_295 (which would overflow the literal).
             if let Ok(v) = u64::from_str_radix(hex, 16) {
-                #[allow(clippy::cast_possible_wrap)]
-                let signed = v as i64;
+                let signed = hex_to_signed(v, suffix);
                 if negative_in || signed < 0 {
                     decimal_string = format!("{}", signed.unsigned_abs());
                     (true, &decimal_string)
@@ -62,5 +63,56 @@ pub fn format_int_literal(s: &str, suffix: &str) -> String {
         format!("-{underscored}{suffix}")
     } else {
         format!("{underscored}{suffix}")
+    }
+}
+
+/// Reinterpret the bits of a hex literal at the width of its Rust type suffix
+/// (e.g. `"i32"`, `"i64"`). For a signed suffix the top bit of that width sign-
+/// extends, so `0xffffffff` with `"i32"` yields `-1`. Unsigned suffixes and
+/// 64-bit widths are returned unchanged.
+fn hex_to_signed(v: u64, suffix: &str) -> i64 {
+    let bits: u32 = suffix.trim_start_matches(['i', 'u']).parse().unwrap_or(64);
+    if bits >= 64 {
+        #[allow(clippy::cast_possible_wrap)]
+        return v as i64;
+    }
+    let mask = (1u64 << bits) - 1;
+    let x = v & mask;
+    #[allow(clippy::cast_possible_wrap)]
+    if suffix.starts_with('i') && (x & (1u64 << (bits - 1))) != 0 {
+        (x as i64) - (1i64 << bits)
+    } else {
+        x as i64
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decimal_literals() {
+        assert_eq!(format_int_literal("0", "i32"), "0i32");
+        assert_eq!(format_int_literal("-1", "i32"), "-1i32");
+        assert_eq!(format_int_literal("2147483647", "i32"), "2_147_483_647i32");
+        assert_eq!(
+            format_int_literal("-2147483648", "i32"),
+            "-2_147_483_648i32"
+        );
+    }
+
+    #[test]
+    fn hex_positive_normalizes_to_decimal() {
+        assert_eq!(format_int_literal("0x7fffffff", "i32"), "2_147_483_647i32");
+        assert_eq!(format_int_literal("0X10", "i32"), "16i32");
+    }
+
+    #[test]
+    fn hex_high_bit_is_sign_extended_to_target_width() {
+        // 0xffffffff as i32 is -1, not 4_294_967_295 (which would overflow i32).
+        assert_eq!(format_int_literal("0xffffffff", "i32"), "-1i32");
+        assert_eq!(format_int_literal("0x80000000", "i32"), "-2_147_483_648i32");
+        // Same 32-bit pattern widened to i64 is a large positive value.
+        assert_eq!(format_int_literal("0xffffffff", "i64"), "4_294_967_295i64");
     }
 }

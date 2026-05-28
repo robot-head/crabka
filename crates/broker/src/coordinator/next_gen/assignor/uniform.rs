@@ -18,6 +18,7 @@ use std::collections::HashMap;
 
 use super::{Assignment, Assignor, MemberSubscription, TopicMetadata};
 
+#[derive(Debug)]
 pub struct UniformAssignor;
 
 impl Assignor for UniformAssignor {

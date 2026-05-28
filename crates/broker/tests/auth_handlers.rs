@@ -336,6 +336,77 @@ async fn sasl_plain_happy_path() {
     result.expect("SASL/PLAIN session must succeed end-to-end");
 }
 
+/// Slice 12l: SASL PLAIN — one happy-path + one wrong-password
+/// session ticks both `successful_authentication_total` and
+/// `failed_authentication_total` per-mechanism counters on the
+/// `/metrics` scrape. Validates the end-to-end wire path from the
+/// `SaslAuthenticate` dispatch site through to the rendered
+/// Prometheus text.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sasl_plain_authentication_metrics_tick_for_success_and_failure() {
+    let log_dir = tempfile::tempdir().unwrap();
+    let mut cfg = BrokerConfig::for_tests(log_dir.path().to_path_buf());
+    cfg.listeners = vec![ListenerSpec {
+        name: "SASL_PLAINTEXT".to_string(),
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        advertised: "127.0.0.1:0".to_string(),
+        protocol: ListenerProtocol::SaslPlaintext,
+        tls_config: None,
+        sasl_mechanisms: None,
+    }];
+    cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
+    cfg.enabled_sasl_mechanisms = vec![SaslMechanism::Plain];
+    cfg.plain_credentials
+        .insert("alice".to_string(), "wonderland".to_string());
+    cfg.metrics_listen_addr = Some("127.0.0.1:0".parse().unwrap());
+
+    let handle = Broker::start(cfg).await.expect("broker must start");
+    let addr = handle.listen_addr();
+    let metrics_addr = handle
+        .metrics_addr()
+        .expect("metrics server should be bound");
+
+    // 1. Happy path — must tick `successful_authentication_total`.
+    drive_sasl_plain_session(addr, "alice", b"wonderland")
+        .await
+        .expect("happy-path PLAIN session");
+    // 2. Wrong password — must tick `failed_authentication_total`.
+    let bad = drive_sasl_plain_session(addr, "alice", b"hunter2").await;
+    assert!(bad.is_err(), "wrong password must fail: {bad:?}");
+
+    let body = scrape_metrics(metrics_addr).await;
+    handle.shutdown().await;
+
+    let success_needle = "crabka_broker_successful_authentication_total{mechanism=\"PLAIN\"} 1";
+    let failed_needle = "crabka_broker_failed_authentication_total{mechanism=\"PLAIN\"} 1";
+    assert!(
+        body.contains(success_needle),
+        "missing or wrong-value {success_needle} in:\n{body}"
+    );
+    assert!(
+        body.contains(failed_needle),
+        "missing or wrong-value {failed_needle} in:\n{body}"
+    );
+}
+
+/// HTTP GET `/metrics` against `addr` and return the response body
+/// (sans HTTP head). Mirrors the helper in `tests/metrics.rs` but
+/// kept inline here to avoid pulling a cross-test module.
+async fn scrape_metrics(addr: SocketAddr) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let req = format!(
+        "GET /metrics HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\nAccept: */*\r\n\r\n",
+    );
+    stream.write_all(req.as_bytes()).await.unwrap();
+    stream.flush().await.unwrap();
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).await.unwrap();
+    let s = String::from_utf8(buf).unwrap();
+    let body_start = s.find("\r\n\r\n").map_or(0, |i| i + 4);
+    s[body_start..].to_string()
+}
+
 /// Negative path: wrong password ⇒ `SaslAuthenticate` responds with
 /// `error_code = SASL_AUTHENTICATION_FAILED` (58) and the broker closes
 /// the connection. `drive_sasl_plain_session` surfaces the failure as an

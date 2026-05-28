@@ -486,6 +486,17 @@ impl BrokerHandle {
         Ok(last_offset)
     }
 
+    /// Test-only: read the `tiered_storage_rlmm_topic_backed` gauge. `1`
+    /// once the slice-48f bootstrap has swapped the in-memory placeholder
+    /// for the topic-backed [`crabka_remote_storage::RemoteLogMetadataManager`],
+    /// `0` before that (or when `remote_log_metadata_kafka` is unset).
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[must_use]
+    #[allow(clippy::used_underscore_binding)]
+    pub fn rlmm_topic_backed_active_for_test(&self) -> bool {
+        self._broker.metrics.tiered_storage_rlmm_topic_backed.get() == 1
+    }
+
     /// Test-only: submit a [`crabka_metadata::MetadataRecord`] directly to
     /// this broker's controller, bypassing the public Kafka APIs. Used by
     /// Task-14 integration tests to provision a SCRAM credential before the
@@ -889,8 +900,25 @@ impl Broker {
     /// Build a `Broker`, scan the log dir, spawn partition writers for
     /// every existing `<topic>-<partition>/`, bind the TCP listener, and
     /// return the handle.
+    pub async fn start(config: BrokerConfig) -> Result<BrokerHandle, BrokerError> {
+        Self::start_with_controller_listener(config, None).await
+    }
+
+    /// Like [`Self::start`], but adopts a caller-supplied, already-bound
+    /// controller listener instead of binding `controller_listen_addr`.
+    ///
+    /// This threads the listener through to
+    /// [`crabka_raft::Controller::start_with_listener`] so test harnesses
+    /// can eliminate the bind-and-drop TOCTOU race on the controller port.
+    /// The listener's local address MUST equal
+    /// `config.controller_listen_addr`. The data-plane listeners still
+    /// bind from `config` — pass `127.0.0.1:0` there and read the bound
+    /// port back via [`BrokerHandle::listen_addr`] to avoid that race too.
     #[allow(clippy::too_many_lines)] // sequential bring-up; splitting hurts readability more than it helps
-    pub async fn start(mut config: BrokerConfig) -> Result<BrokerHandle, BrokerError> {
+    pub async fn start_with_controller_listener(
+        mut config: BrokerConfig,
+        controller_listener: Option<tokio::net::TcpListener>,
+    ) -> Result<BrokerHandle, BrokerError> {
         // 0a. Install the rustls crypto provider exactly once per process.
         //     `rustls 0.23` with `default-features = false` does NOT auto-install
         //     a provider; without this the `ServerConfig::builder()` call below
@@ -1060,7 +1088,7 @@ impl Broker {
             handshake: handshake_opt,
         };
         let controller = Arc::new(
-            crabka_raft::Controller::start(controller_cfg)
+            crabka_raft::Controller::start_with_listener(controller_cfg, controller_listener)
                 .await
                 .map_err(|e| BrokerError::Startup(e.to_string()))?,
         );
