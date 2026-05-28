@@ -55,6 +55,7 @@ pub fn reconcile_if_dirty(
     ReconcileOutcome::Recomputed
 }
 
+#[must_use]
 pub fn membership_topic_ids(group: &GroupState, input: &ReconcileInput) -> HashSet<Uuid> {
     let mut out = HashSet::new();
     for m in group.members.values() {
@@ -85,7 +86,7 @@ mod tests {
             client_host: "/127.0.0.1".into(),
             subscribed_topic_names: sub,
             server_assignor: None,
-            rebalance_timeout: Duration::from_secs(60),
+            rebalance_timeout: Duration::from_mins(1),
             member_epoch: 0,
             previous_member_epoch: 0,
             assignment_state: MemberAssignmentState::Stable,

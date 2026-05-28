@@ -4,12 +4,12 @@
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
-use crabka_protocol::primitives::uuid::Uuid;
 use crabka_protocol::ProtocolError;
+use crabka_protocol::primitives::uuid::Uuid;
 
 use crate::coordinator::persistence::{
-    get_bytes, get_i16, get_i32, get_nullable_string, get_string, put_bytes,
-    put_nullable_string, put_string,
+    get_bytes, get_i16, get_i32, get_nullable_string, get_string, put_bytes, put_nullable_string,
+    put_string,
 };
 use crate::error::BrokerError;
 
@@ -57,6 +57,7 @@ pub fn parse_key(version: i16, mut buf: &[u8]) -> Result<NextGenKey, BrokerError
     Ok(key)
 }
 
+#[must_use]
 pub fn encode_key(key: &NextGenKey) -> Bytes {
     let mut buf = BytesMut::new();
     match key {
@@ -64,7 +65,10 @@ pub fn encode_key(key: &NextGenKey) -> Bytes {
             buf.put_i16(KEY_GROUP_METADATA);
             put_string(&mut buf, group_id);
         }
-        NextGenKey::MemberMetadata { group_id, member_id } => {
+        NextGenKey::MemberMetadata {
+            group_id,
+            member_id,
+        } => {
             buf.put_i16(KEY_MEMBER_METADATA);
             put_string(&mut buf, group_id);
             put_string(&mut buf, member_id);
@@ -73,12 +77,18 @@ pub fn encode_key(key: &NextGenKey) -> Bytes {
             buf.put_i16(KEY_TARGET_ASSIGNMENT_METADATA);
             put_string(&mut buf, group_id);
         }
-        NextGenKey::TargetAssignmentMember { group_id, member_id } => {
+        NextGenKey::TargetAssignmentMember {
+            group_id,
+            member_id,
+        } => {
             buf.put_i16(KEY_TARGET_ASSIGNMENT_MEMBER);
             put_string(&mut buf, group_id);
             put_string(&mut buf, member_id);
         }
-        NextGenKey::CurrentMemberAssignment { group_id, member_id } => {
+        NextGenKey::CurrentMemberAssignment {
+            group_id,
+            member_id,
+        } => {
             buf.put_i16(KEY_CURRENT_MEMBER_ASSIGNMENT);
             put_string(&mut buf, group_id);
             put_string(&mut buf, member_id);
@@ -87,12 +97,13 @@ pub fn encode_key(key: &NextGenKey) -> Bytes {
     buf.freeze()
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GroupMetadataValue {
     pub epoch: i32,
 }
 
 impl GroupMetadataValue {
+    #[must_use]
     pub fn encode(&self) -> Bytes {
         let mut buf = BytesMut::new();
         buf.put_i16(0);
@@ -119,6 +130,7 @@ pub struct MemberMetadataValue {
 }
 
 impl MemberMetadataValue {
+    #[must_use]
     pub fn encode(&self) -> Bytes {
         let mut buf = BytesMut::new();
         buf.put_i16(0);
@@ -161,12 +173,13 @@ impl MemberMetadataValue {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TargetAssignmentMetadataValue {
     pub assignment_epoch: i32,
 }
 
 impl TargetAssignmentMetadataValue {
+    #[must_use]
     pub fn encode(&self) -> Bytes {
         let mut buf = BytesMut::new();
         buf.put_i16(0);
@@ -193,6 +206,7 @@ pub struct TargetAssignmentMemberValue {
 }
 
 impl TargetAssignmentMemberValue {
+    #[must_use]
     pub fn encode(&self) -> Bytes {
         let mut buf = BytesMut::new();
         buf.put_i16(0);
@@ -268,6 +282,7 @@ pub struct CurrentMemberAssignmentValue {
 }
 
 impl CurrentMemberAssignmentValue {
+    #[must_use]
     pub fn encode(&self) -> Bytes {
         let mut buf = BytesMut::new();
         buf.put_i16(0);
@@ -333,7 +348,10 @@ fn decode_topic_partitions(buf: &mut &[u8]) -> Result<Vec<AssignedTopicPartition
         for _ in 0..pn.max(0) {
             partitions.push(get_i32(buf)?);
         }
-        out.push(AssignedTopicPartitions { topic_id, partitions });
+        out.push(AssignedTopicPartitions {
+            topic_id,
+            partitions,
+        });
     }
     Ok(out)
 }
@@ -364,8 +382,13 @@ mod tests {
 
     #[test]
     fn target_assignment_metadata_roundtrip() {
-        let v = TargetAssignmentMetadataValue { assignment_epoch: 12 };
-        assert_eq!(TargetAssignmentMetadataValue::decode(&v.encode()).unwrap(), v);
+        let v = TargetAssignmentMetadataValue {
+            assignment_epoch: 12,
+        };
+        assert_eq!(
+            TargetAssignmentMetadataValue::decode(&v.encode()).unwrap(),
+            v
+        );
     }
 
     #[test]
@@ -391,7 +414,10 @@ mod tests {
             }],
             partitions_pending_revocation: vec![],
         };
-        assert_eq!(CurrentMemberAssignmentValue::decode(&v.encode()).unwrap(), v);
+        assert_eq!(
+            CurrentMemberAssignmentValue::decode(&v.encode()).unwrap(),
+            v
+        );
     }
 
     #[test]
@@ -401,7 +427,10 @@ mod tests {
 
     #[test]
     fn key_roundtrip_member_metadata() {
-        let k = NextGenKey::MemberMetadata { group_id: "g".into(), member_id: "m".into() };
+        let k = NextGenKey::MemberMetadata {
+            group_id: "g".into(),
+            member_id: "m".into(),
+        };
         let kb = encode_key(&k);
         let mut r = &kb[..];
         let v = bytes::Buf::get_i16(&mut r);

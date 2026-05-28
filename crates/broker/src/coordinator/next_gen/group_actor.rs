@@ -97,7 +97,7 @@ async fn actor_loop(
                 let Some(msg) = msg else { break };
                 match msg {
                     GroupActorMessage::Heartbeat { request, client_host, reply } => {
-                        let resp = handle_heartbeat(&mut state, &config, &*metadata, request, &client_host);
+                        let resp = handle_heartbeat(&mut state, &config, &*metadata, &request, &client_host);
                         let _ = reply.send(resp);
                     }
                     GroupActorMessage::OffsetValidate { member_id, member_epoch, reply } => {
@@ -169,7 +169,8 @@ fn apply_seed(state: &mut GroupState, seed: super::GroupSeed) {
                 m.assigned_partitions.insert(tp.topic_id, tp.partitions);
             }
             for tp in cur.partitions_pending_revocation {
-                m.partitions_pending_revocation.insert(tp.topic_id, tp.partitions);
+                m.partitions_pending_revocation
+                    .insert(tp.topic_id, tp.partitions);
             }
         }
     }
@@ -180,7 +181,7 @@ fn handle_heartbeat(
     state: &mut GroupState,
     config: &NextGenConfig,
     metadata: &dyn MetadataProvider,
-    req: ConsumerGroupHeartbeatRequest,
+    req: &ConsumerGroupHeartbeatRequest,
     client_host: &str,
 ) -> ConsumerGroupHeartbeatResponse {
     let now = Instant::now();
@@ -189,27 +190,32 @@ fn handle_heartbeat(
         state.bump_epoch();
         return base_resp(0, req.member_epoch, config);
     }
-    if let Some(name) = req.server_assignor.as_deref() {
-        if !config.assignor_enabled(name) {
-            return error_resp(codes::UNSUPPORTED_ASSIGNOR, config);
-        }
+    if let Some(name) = req.server_assignor.as_deref()
+        && !config.assignor_enabled(name)
+    {
+        return error_resp(codes::UNSUPPORTED_ASSIGNOR, config);
     }
     if req.member_epoch == 0 && req.member_id.is_empty() {
         let new_member_id = uuid::Uuid::new_v4().to_string();
-        if let Some(iid) = req.instance_id.as_deref() {
-            if let Some(existing) = state.current_member_for_instance(iid) {
-                if state.members.get(existing).is_some_and(|m| m.member_epoch != 0) {
-                    return error_resp(codes::UNRELEASED_INSTANCE_ID, config);
-                }
-            }
+        if let Some(iid) = req.instance_id.as_deref()
+            && let Some(existing) = state.current_member_for_instance(iid)
+            && state
+                .members
+                .get(existing)
+                .is_some_and(|m| m.member_epoch != 0)
+        {
+            return error_resp(codes::UNRELEASED_INSTANCE_ID, config);
         }
-        let m = build_member(&new_member_id, &req, client_host, now);
+        let m = build_member(&new_member_id, req, client_host, now);
         state.add_or_update_member(m);
         run_reconcile(state, config, metadata);
         state.advance_member_epoch(&new_member_id);
         return build_assignment_resp(state, &new_member_id, config);
     }
-    let cur_epoch = state.members.get(&req.member_id).map(|m| m.member_epoch).unwrap_or(-2);
+    let cur_epoch = state
+        .members
+        .get(&req.member_id)
+        .map_or(-2, |m| m.member_epoch);
     if cur_epoch == -2 {
         return error_resp(codes::UNKNOWN_MEMBER_ID, config);
     }
@@ -257,7 +263,13 @@ fn pick_assignor(state: &GroupState, config: &NextGenConfig) -> String {
         .members
         .values()
         .find_map(|m| m.server_assignor.clone())
-        .unwrap_or_else(|| config.assignors.first().cloned().unwrap_or_else(|| "uniform".into()))
+        .unwrap_or_else(|| {
+            config
+                .assignors
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "uniform".into())
+        })
 }
 
 fn build_member(
@@ -326,17 +338,22 @@ fn build_assignment_resp(
     // (`topic_partitions` on the request side).  Using the target here
     // (rather than the client-acked subset) ensures new members learn their
     // initial assignment on the very first heartbeat.
-    let target_partitions = state.target.per_member.get(member_id).cloned().unwrap_or_default();
+    let target_partitions = state
+        .target
+        .per_member
+        .get(member_id)
+        .cloned()
+        .unwrap_or_default();
     let assignment = Some(RespAssignment {
         topic_partitions: target_partitions
             .iter()
-            .map(|(tid, parts)| {
-                crabka_protocol::owned::common::topic_partitions::TopicPartitions {
+            .map(
+                |(tid, parts)| crabka_protocol::owned::common::topic_partitions::TopicPartitions {
                     topic_id: *tid,
                     partitions: parts.clone(),
                     ..Default::default()
-                }
-            })
+                },
+            )
             .collect(),
         ..Default::default()
     });

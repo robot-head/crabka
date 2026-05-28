@@ -1,5 +1,5 @@
-//! `ConsumerGroupDescribe` (api_key 69) — returns one DescribedGroup per
-//! requested group_id. Uses the actor's `Describe` view to render.
+//! `ConsumerGroupDescribe` (`api_key` 69) — returns one `DescribedGroup` per
+//! requested `group_id`. Uses the actor's `Describe` view to render.
 
 use bytes::{Bytes, BytesMut};
 use futures_util::future::BoxFuture;
@@ -66,18 +66,15 @@ pub(crate) fn handle(
                 described.push(row);
                 continue;
             }
-            match rx.await {
-                Ok(view) => {
-                    row.group_state = match view.members.len() {
-                        0 => "EMPTY".into(),
-                        _ => "STABLE".into(),
-                    };
-                    described.push(row);
-                }
-                Err(_) => {
-                    row.error_code = codes::UNKNOWN_SERVER_ERROR;
-                    described.push(row);
-                }
+            if let Ok(view) = rx.await {
+                row.group_state = match view.members.len() {
+                    0 => "EMPTY".into(),
+                    _ => "STABLE".into(),
+                };
+                described.push(row);
+            } else {
+                row.error_code = codes::UNKNOWN_SERVER_ERROR;
+                described.push(row);
             }
         }
         let resp = ConsumerGroupDescribeResponse {

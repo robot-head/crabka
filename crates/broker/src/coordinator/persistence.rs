@@ -389,7 +389,7 @@ mod tests {
                 assert_eq!(topic, "topic");
                 assert_eq!(partition, 7);
             }
-            k @ Key::GroupMetadata { .. } | k @ Key::NextGen(_) => {
+            k @ (Key::GroupMetadata { .. } | Key::NextGen(_)) => {
                 panic!("expected OffsetCommit, got {k:?}")
             }
         }
@@ -400,7 +400,7 @@ mod tests {
         let key = GroupMetadataValue::encode_key("grp");
         match parse_key(&key).unwrap() {
             Key::GroupMetadata { group_id } => assert_eq!(group_id, "grp"),
-            k @ Key::OffsetCommit { .. } | k @ Key::NextGen(_) => {
+            k @ (Key::OffsetCommit { .. } | Key::NextGen(_)) => {
                 panic!("expected GroupMetadata, got {k:?}")
             }
         }

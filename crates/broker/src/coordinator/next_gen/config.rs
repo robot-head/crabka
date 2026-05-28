@@ -26,12 +26,12 @@ impl Default for NextGenConfig {
     fn default() -> Self {
         Self {
             rebalance_protocols: vec![RebalanceProtocol::Classic, RebalanceProtocol::Consumer],
-            session_timeout: Duration::from_millis(45_000),
-            heartbeat_interval: Duration::from_millis(5_000),
-            min_session_timeout: Duration::from_millis(45_000),
-            max_session_timeout: Duration::from_millis(60_000),
-            min_heartbeat_interval: Duration::from_millis(5_000),
-            max_heartbeat_interval: Duration::from_millis(15_000),
+            session_timeout: Duration::from_secs(45),
+            heartbeat_interval: Duration::from_secs(5),
+            min_session_timeout: Duration::from_secs(45),
+            max_session_timeout: Duration::from_mins(1),
+            min_heartbeat_interval: Duration::from_secs(5),
+            max_heartbeat_interval: Duration::from_secs(15),
             assignors: vec!["uniform".into(), "range".into()],
             max_size: 200,
         }
@@ -39,10 +39,13 @@ impl Default for NextGenConfig {
 }
 
 impl NextGenConfig {
+    #[must_use]
     pub fn next_gen_enabled(&self) -> bool {
-        self.rebalance_protocols.contains(&RebalanceProtocol::Consumer)
+        self.rebalance_protocols
+            .contains(&RebalanceProtocol::Consumer)
     }
 
+    #[must_use]
     pub fn assignor_enabled(&self, name: &str) -> bool {
         self.assignors.iter().any(|a| a == name)
     }

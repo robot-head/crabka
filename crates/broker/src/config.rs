@@ -449,7 +449,7 @@ impl BrokerConfig {
             oauthbearer_jwks_min_on_demand_pause: std::time::Duration::from_secs(1),
             oauthbearer_jwks_ignore_key_use: false,
             auto_leader_rebalance_enable: false, // tests opt in explicitly
-            next_gen_consumer_group: Default::default(),
+            next_gen_consumer_group: crate::coordinator::next_gen::config::NextGenConfig::default(),
             leader_imbalance_check_interval_secs: 300,
             leader_imbalance_per_broker_percentage: 10,
             #[cfg(any(test, feature = "test-helpers"))]
@@ -643,7 +643,7 @@ impl Default for BrokerConfig {
             oauthbearer_jwks_min_on_demand_pause: std::time::Duration::from_secs(1),
             oauthbearer_jwks_ignore_key_use: false,
             auto_leader_rebalance_enable: true,
-            next_gen_consumer_group: Default::default(),
+            next_gen_consumer_group: crate::coordinator::next_gen::config::NextGenConfig::default(),
             leader_imbalance_check_interval_secs: 300,
             leader_imbalance_per_broker_percentage: 10,
             #[cfg(any(test, feature = "test-helpers"))]

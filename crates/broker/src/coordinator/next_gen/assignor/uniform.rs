@@ -12,11 +12,7 @@ impl Assignor for UniformAssignor {
         "uniform"
     }
 
-    fn assign(
-        &self,
-        members: &[MemberSubscription],
-        topics: &TopicMetadata,
-    ) -> Assignment {
+    fn assign(&self, members: &[MemberSubscription], topics: &TopicMetadata) -> Assignment {
         let mut out: Assignment = HashMap::new();
         for m in members {
             out.insert(m.member_id.clone(), HashMap::new());
@@ -27,12 +23,13 @@ impl Assignor for UniformAssignor {
                 .filter(|m| m.subscribed_topic_ids.contains(topic_id))
                 .map(|m| m.member_id.as_str())
                 .collect();
-            subscribers.sort();
+            subscribers.sort_unstable();
             if subscribers.is_empty() {
                 continue;
             }
             for p in 0..*partition_count {
-                let idx = (p as usize) % subscribers.len();
+                let idx =
+                    usize::try_from(p).expect("partition index non-negative") % subscribers.len();
                 let mid = subscribers[idx].to_string();
                 out.get_mut(&mid)
                     .expect("inserted above")
@@ -78,10 +75,7 @@ mod tests {
         let topics = TopicMetadata {
             partitions_per_topic: [(t, 4)].into(),
         };
-        let a = UniformAssignor.assign(
-            &[member("m1", &[t]), member("m2", &[t])],
-            &topics,
-        );
+        let a = UniformAssignor.assign(&[member("m1", &[t]), member("m2", &[t])], &topics);
         assert_eq!(a["m1"][&t], vec![0, 2]);
         assert_eq!(a["m2"][&t], vec![1, 3]);
     }
@@ -92,12 +86,9 @@ mod tests {
         let topics = TopicMetadata {
             partitions_per_topic: [(t, 2)].into(),
         };
-        let a = UniformAssignor.assign(
-            &[member("m1", &[t]), member("m2", &[])],
-            &topics,
-        );
+        let a = UniformAssignor.assign(&[member("m1", &[t]), member("m2", &[])], &topics);
         assert_eq!(a["m1"][&t], vec![0, 1]);
-        assert!(a["m2"].get(&t).is_none() || a["m2"][&t].is_empty());
+        assert!(!a["m2"].contains_key(&t) || a["m2"][&t].is_empty());
     }
 
     #[test]
@@ -107,7 +98,7 @@ mod tests {
             partitions_per_topic: [(t, 0)].into(),
         };
         let a = UniformAssignor.assign(&[member("m1", &[t])], &topics);
-        assert!(a["m1"].get(&t).is_none() || a["m1"][&t].is_empty());
+        assert!(!a["m1"].contains_key(&t) || a["m1"][&t].is_empty());
     }
 
     #[test]

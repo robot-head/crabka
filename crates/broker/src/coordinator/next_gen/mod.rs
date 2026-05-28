@@ -43,6 +43,7 @@ impl NextGenCoordinator {
         }
     }
 
+    #[must_use]
     pub fn group_type(&self, group_id: &str) -> Option<GroupType> {
         self.group_types.get(group_id).map(|e| *e.value())
     }
@@ -59,6 +60,7 @@ impl NextGenCoordinator {
             .or_insert(GroupType::NextGen);
     }
 
+    #[must_use]
     pub fn get_or_create(&self, group_id: &str) -> Arc<GroupActorHandle> {
         if let Some(h) = self.groups.get(group_id) {
             return h.value().clone();
@@ -75,6 +77,7 @@ impl NextGenCoordinator {
             .clone()
     }
 
+    #[must_use]
     pub fn find(&self, group_id: &str) -> Option<Arc<GroupActorHandle>> {
         self.groups.get(group_id).map(|e| e.value().clone())
     }
@@ -96,19 +99,38 @@ impl NextGenCoordinator {
         let mut seed = self.seeds.entry(group_id.into()).or_default();
         seed.group_epoch = v.epoch;
     }
-    pub fn replay_member_metadata(&self, group_id: &str, member_id: &str, v: persistence::MemberMetadataValue) {
+    pub fn replay_member_metadata(
+        &self,
+        group_id: &str,
+        member_id: &str,
+        v: persistence::MemberMetadataValue,
+    ) {
         let mut seed = self.seeds.entry(group_id.into()).or_default();
         seed.members.insert(member_id.into(), v);
     }
-    pub fn replay_target_assignment_metadata(&self, group_id: &str, v: persistence::TargetAssignmentMetadataValue) {
+    pub fn replay_target_assignment_metadata(
+        &self,
+        group_id: &str,
+        v: persistence::TargetAssignmentMetadataValue,
+    ) {
         let mut seed = self.seeds.entry(group_id.into()).or_default();
         seed.target_epoch = v.assignment_epoch;
     }
-    pub fn replay_target_assignment_member(&self, group_id: &str, member_id: &str, v: persistence::TargetAssignmentMemberValue) {
+    pub fn replay_target_assignment_member(
+        &self,
+        group_id: &str,
+        member_id: &str,
+        v: persistence::TargetAssignmentMemberValue,
+    ) {
         let mut seed = self.seeds.entry(group_id.into()).or_default();
         seed.target_per_member.insert(member_id.into(), v);
     }
-    pub fn replay_current_member_assignment(&self, group_id: &str, member_id: &str, v: persistence::CurrentMemberAssignmentValue) {
+    pub fn replay_current_member_assignment(
+        &self,
+        group_id: &str,
+        member_id: &str,
+        v: persistence::CurrentMemberAssignmentValue,
+    ) {
         let mut seed = self.seeds.entry(group_id.into()).or_default();
         seed.current_per_member.insert(member_id.into(), v);
     }
@@ -118,7 +140,9 @@ impl NextGenCoordinator {
         for gid in group_ids {
             if let Some((_, seed)) = self.seeds.remove(&gid) {
                 let handle = self.get_or_create(&gid);
-                let _ = handle.tx.try_send(group_actor::GroupActorMessage::Seed(seed));
+                let _ = handle
+                    .tx
+                    .try_send(group_actor::GroupActorMessage::Seed(seed));
             }
         }
     }
@@ -131,7 +155,8 @@ pub struct ImageMetadataProvider {
 
 impl std::fmt::Debug for ImageMetadataProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ImageMetadataProvider").finish_non_exhaustive()
+        f.debug_struct("ImageMetadataProvider")
+            .finish_non_exhaustive()
     }
 }
 
@@ -161,6 +186,8 @@ pub struct GroupSeed {
     pub group_epoch: i32,
     pub target_epoch: i32,
     pub members: std::collections::HashMap<String, persistence::MemberMetadataValue>,
-    pub target_per_member: std::collections::HashMap<String, persistence::TargetAssignmentMemberValue>,
-    pub current_per_member: std::collections::HashMap<String, persistence::CurrentMemberAssignmentValue>,
+    pub target_per_member:
+        std::collections::HashMap<String, persistence::TargetAssignmentMemberValue>,
+    pub current_per_member:
+        std::collections::HashMap<String, persistence::CurrentMemberAssignmentValue>,
 }

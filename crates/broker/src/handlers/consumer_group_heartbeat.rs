@@ -1,4 +1,4 @@
-//! `ConsumerGroupHeartbeat` (api_key 68) — KIP-848 next-gen consumer
+//! `ConsumerGroupHeartbeat` (`api_key` 68) — KIP-848 next-gen consumer
 //! group protocol. Routes the request to the per-group actor in
 //! `NextGenCoordinator`.
 
@@ -53,7 +53,9 @@ pub(crate) fn handle(
         {
             return encode(version, &error(codes::COORDINATOR_LOAD_IN_PROGRESS));
         }
-        let resp = rx.await.unwrap_or_else(|_| error(codes::UNKNOWN_SERVER_ERROR));
+        let resp = rx
+            .await
+            .unwrap_or_else(|_| error(codes::UNKNOWN_SERVER_ERROR));
         encode(version, &resp)
     })
 }

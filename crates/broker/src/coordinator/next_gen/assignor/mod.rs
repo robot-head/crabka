@@ -2,8 +2,8 @@
 //! members + subscriptions + topic metadata to per-member partition
 //! assignments.
 
-pub mod uniform;
 pub mod range;
+pub mod uniform;
 
 use std::collections::HashMap;
 
@@ -25,13 +25,10 @@ pub type Assignment = HashMap<String, HashMap<Uuid, Vec<i32>>>;
 
 pub trait Assignor: Send + Sync {
     fn name(&self) -> &'static str;
-    fn assign(
-        &self,
-        members: &[MemberSubscription],
-        topics: &TopicMetadata,
-    ) -> Assignment;
+    fn assign(&self, members: &[MemberSubscription], topics: &TopicMetadata) -> Assignment;
 }
 
+#[must_use]
 pub fn select(name: &str) -> Option<Box<dyn Assignor>> {
     match name {
         "uniform" => Some(Box::new(uniform::UniformAssignor)),

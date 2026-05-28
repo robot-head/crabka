@@ -67,8 +67,9 @@ impl GroupState {
             .members
             .get(&m.member_id)
             .map(|prev| prev.subscribed_topic_names.clone());
-        let subscription_changed =
-            cached.as_ref().is_none_or(|prev| prev != &m.subscribed_topic_names);
+        let subscription_changed = cached
+            .as_ref()
+            .is_none_or(|prev| prev != &m.subscribed_topic_names);
         self.members.insert(m.member_id.clone(), m);
         if subscription_changed {
             self.dirty = true;
@@ -77,10 +78,10 @@ impl GroupState {
 
     pub fn remove_member(&mut self, member_id: &str) -> Option<MemberState> {
         let m = self.members.remove(member_id)?;
-        if let Some(ref iid) = m.instance_id {
-            if self.instance_to_member.get(iid).map(String::as_str) == Some(member_id) {
-                self.instance_to_member.remove(iid);
-            }
+        if let Some(ref iid) = m.instance_id
+            && self.instance_to_member.get(iid).map(String::as_str) == Some(member_id)
+        {
+            self.instance_to_member.remove(iid);
         }
         self.dirty = true;
         Some(m)
@@ -160,7 +161,7 @@ mod tests {
             client_host: "/127.0.0.1".into(),
             subscribed_topic_names: HashSet::new(),
             server_assignor: None,
-            rebalance_timeout: Duration::from_secs(60),
+            rebalance_timeout: Duration::from_mins(1),
             member_epoch: 0,
             previous_member_epoch: 0,
             assignment_state: MemberAssignmentState::Stable,
@@ -210,10 +211,10 @@ mod tests {
     fn evict_expired_drops_old_members() {
         let mut g = GroupState::new("g");
         let mut m = member("m1");
-        m.last_seen = Instant::now() - Duration::from_secs(120);
+        m.last_seen = Instant::now().checked_sub(Duration::from_mins(2)).unwrap();
         g.add_or_update_member(m);
         g.add_or_update_member(member("m2"));
-        let evicted = g.evict_expired(Instant::now(), Duration::from_secs(60));
+        let evicted = g.evict_expired(Instant::now(), Duration::from_mins(1));
         assert_eq!(evicted, vec!["m1".to_string()]);
         assert!(g.members.contains_key("m2"));
     }
@@ -231,7 +232,10 @@ mod tests {
         let m = &g.members["m1"];
         assert_eq!(m.partitions_pending_revocation[&t], vec![2]);
         assert_eq!(m.assigned_partitions[&t], vec![0, 1]);
-        assert_eq!(m.assignment_state, MemberAssignmentState::UnrevokedPartitions);
+        assert_eq!(
+            m.assignment_state,
+            MemberAssignmentState::UnrevokedPartitions
+        );
     }
 
     #[test]

@@ -1,5 +1,5 @@
 //! `RangeAssignor` — assigns contiguous partition ranges per topic.
-//! Matches classic RangeAssignor semantics for co-partitioning across
+//! Matches classic `RangeAssignor` semantics for co-partitioning across
 //! topics with equal partition counts.
 
 use std::collections::HashMap;
@@ -13,17 +13,12 @@ impl Assignor for RangeAssignor {
         "range"
     }
 
-    fn assign(
-        &self,
-        members: &[MemberSubscription],
-        topics: &TopicMetadata,
-    ) -> Assignment {
+    fn assign(&self, members: &[MemberSubscription], topics: &TopicMetadata) -> Assignment {
         let mut out: Assignment = HashMap::new();
         for m in members {
             out.insert(m.member_id.clone(), HashMap::new());
         }
-        let mut sorted_topics: Vec<_> =
-            topics.partitions_per_topic.iter().collect();
+        let mut sorted_topics: Vec<_> = topics.partitions_per_topic.iter().collect();
         sorted_topics.sort_by_key(|(id, _)| id.0);
         for (topic_id, partition_count) in sorted_topics {
             let mut subscribers: Vec<&str> = members
@@ -31,17 +26,17 @@ impl Assignor for RangeAssignor {
                 .filter(|m| m.subscribed_topic_ids.contains(topic_id))
                 .map(|m| m.member_id.as_str())
                 .collect();
-            subscribers.sort();
+            subscribers.sort_unstable();
             if subscribers.is_empty() {
                 continue;
             }
-            let n = subscribers.len() as i32;
+            let n = i32::try_from(subscribers.len()).expect("member count fits i32");
             let p = *partition_count;
             let per_member = p / n;
             let remainder = p % n;
             let mut cursor = 0;
             for (i, sub) in subscribers.iter().enumerate() {
-                let extra = if (i as i32) < remainder { 1 } else { 0 };
+                let extra = i32::from(i32::try_from(i).expect("index fits i32") < remainder);
                 let take = per_member + extra;
                 if take == 0 {
                     continue;
@@ -79,10 +74,7 @@ mod tests {
         let topics = TopicMetadata {
             partitions_per_topic: [(t, 6)].into(),
         };
-        let a = RangeAssignor.assign(
-            &[member("m1", &[t]), member("m2", &[t])],
-            &topics,
-        );
+        let a = RangeAssignor.assign(&[member("m1", &[t]), member("m2", &[t])], &topics);
         assert_eq!(a["m1"][&t], vec![0, 1, 2]);
         assert_eq!(a["m2"][&t], vec![3, 4, 5]);
     }
@@ -109,10 +101,7 @@ mod tests {
         let topics = TopicMetadata {
             partitions_per_topic: [(t1, 4), (t2, 4)].into(),
         };
-        let a = RangeAssignor.assign(
-            &[member("m1", &[t1, t2]), member("m2", &[t1, t2])],
-            &topics,
-        );
+        let a = RangeAssignor.assign(&[member("m1", &[t1, t2]), member("m2", &[t1, t2])], &topics);
         assert_eq!(a["m1"][&t1], vec![0, 1]);
         assert_eq!(a["m1"][&t2], vec![0, 1]);
         assert_eq!(a["m2"][&t1], vec![2, 3]);
@@ -131,7 +120,7 @@ mod tests {
         );
         assert_eq!(a["m1"][&t], vec![0]);
         assert_eq!(a["m2"][&t], vec![1]);
-        assert!(a["m3"].get(&t).is_none() || a["m3"][&t].is_empty());
+        assert!(!a["m3"].contains_key(&t) || a["m3"][&t].is_empty());
     }
 
     #[test]
@@ -140,10 +129,7 @@ mod tests {
         let topics = TopicMetadata {
             partitions_per_topic: [(t, 4)].into(),
         };
-        let a = RangeAssignor.assign(
-            &[member("m1", &[t]), member("m2", &[])],
-            &topics,
-        );
+        let a = RangeAssignor.assign(&[member("m1", &[t]), member("m2", &[])], &topics);
         assert_eq!(a["m1"][&t], vec![0, 1, 2, 3]);
     }
 
@@ -153,14 +139,8 @@ mod tests {
         let topics = TopicMetadata {
             partitions_per_topic: [(t, 6)].into(),
         };
-        let a1 = RangeAssignor.assign(
-            &[member("m1", &[t]), member("m2", &[t])],
-            &topics,
-        );
-        let a2 = RangeAssignor.assign(
-            &[member("m2", &[t]), member("m1", &[t])],
-            &topics,
-        );
+        let a1 = RangeAssignor.assign(&[member("m1", &[t]), member("m2", &[t])], &topics);
+        let a2 = RangeAssignor.assign(&[member("m2", &[t]), member("m1", &[t])], &topics);
         assert_eq!(a1, a2);
     }
 }
