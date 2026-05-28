@@ -72,7 +72,7 @@ struct Args {
     #[arg(long, default_value_t = 1)]
     broker_id: i32,
 
-    /// KRaft `process.roles`, comma-separated (`controller`, `broker`).
+    /// `KRaft` `process.roles`, comma-separated (`controller`, `broker`).
     /// Defaults to the combined set when unset. The operator normally sets
     /// this via the `[process]` section of `--config-file` instead.
     #[arg(

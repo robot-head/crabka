@@ -13,7 +13,7 @@ use crate::BrokerError;
 
 pub use crabka_raft::BootstrapMode;
 
-/// KRaft `process.roles`. A node is a metadata-quorum `Controller`, a data
+/// `KRaft` `process.roles`. A node is a metadata-quorum `Controller`, a data
 /// `Broker`, or both. Default is the combined set `[Controller, Broker]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NodeRole {
@@ -57,7 +57,7 @@ pub struct BrokerConfig {
     /// Broker id reported in `Metadata` responses. Default: 1.
     pub broker_id: i32,
 
-    /// KRaft `process.roles`. Controls whether this node is a metadata
+    /// `KRaft` `process.roles`. Controls whether this node is a metadata
     /// quorum voter (`Controller`), hosts data partitions + registers as a
     /// broker (`Broker`), or both. Default: `[Controller, Broker]`.
     pub roles: Vec<NodeRole>,

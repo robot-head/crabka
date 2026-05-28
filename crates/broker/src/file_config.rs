@@ -101,7 +101,7 @@ pub struct FileConfig {
     #[serde(default)]
     pub authorization: Option<FileAuthorizationConfig>,
 
-    /// `[process]` section — KRaft `process.roles`. Absent / empty leaves
+    /// `[process]` section — `KRaft` `process.roles`. Absent / empty leaves
     /// the `BrokerConfig` default `[Controller, Broker]`.
     #[serde(default)]
     pub process: Option<FileProcessConfig>,
@@ -271,7 +271,7 @@ pub struct FileDelegationTokenConfig {
     pub default_renew_period_ms: Option<i64>,
 }
 
-/// `[process]` TOML section — KRaft `process.roles`.
+/// `[process]` TOML section — `KRaft` `process.roles`.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct FileProcessConfig {
