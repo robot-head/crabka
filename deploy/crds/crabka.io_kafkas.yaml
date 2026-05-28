@@ -795,6 +795,71 @@ spec:
                 required:
                 - type
                 type: object
+              tracing:
+                description: |-
+                  Slice 42b: distributed-tracing wiring for the broker pods. When
+                  `Some`, the operator renders the matching `CRABKA_OTLP_*` env
+                  vars onto every broker pod — the broker's slice-42 telemetry
+                  pipeline reads them via [`TelemetryConfig::from_env`] and
+                  installs the OTLP tracer at startup. When `None`, no OTLP env
+                  vars are emitted and the broker leaves tracing off (the
+                  slice-42 default).
+                nullable: true
+                properties:
+                  otlp:
+                    description: OTLP-backend tuning. Required when `kind == Otlp`.
+                    nullable: true
+                    properties:
+                      endpoint:
+                        description: |-
+                          Required. OTLP collector endpoint (`scheme://host:port`).
+                          Rendered as `CRABKA_OTLP_ENDPOINT`; turning the field on
+                          implicitly sets `CRABKA_OTLP_ENABLED=true` as well.
+                        type: string
+                      protocol:
+                        description: |-
+                          Slice 42b: OTLP wire protocol selector. Mirrors the broker's
+                          internal `OtlpProtocol` enum and the `OTEL_EXPORTER_OTLP_PROTOCOL`
+                          spec values.
+                        enum:
+                        - grpc
+                        - http_protobuf
+                        nullable: true
+                        type: string
+                      sampleRatio:
+                        description: |-
+                          Optional sampling ratio in `[0.0, 1.0]`. Rendered as
+                          `CRABKA_OTLP_SAMPLE_RATIO`. Defaults to the broker's `1.0`
+                          (sample every trace).
+                        format: double
+                        nullable: true
+                        type: number
+                      serviceName:
+                        description: |-
+                          Optional `service.name` resource attribute. Rendered as
+                          `OTEL_SERVICE_NAME`. Defaults to the broker's
+                          `"crabka-broker"`.
+                        nullable: true
+                        type: string
+                      timeoutSecs:
+                        description: |-
+                          Optional export timeout in seconds. Rendered as
+                          `CRABKA_OTLP_TIMEOUT_SECS`. Defaults to the broker's `10`.
+                        format: uint64
+                        minimum: 0.0
+                        nullable: true
+                        type: integer
+                    required:
+                    - endpoint
+                    type: object
+                  type:
+                    description: Tracing backend selector.
+                    enum:
+                    - Otlp
+                    type: string
+                required:
+                - type
+                type: object
             required:
             - kafkaVersion
             type: object

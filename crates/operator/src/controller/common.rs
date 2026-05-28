@@ -98,6 +98,14 @@ pub enum ReconcileError {
     /// against malformed `[remote_storage]` TOML.
     #[error("tieredStorage: {0}")]
     TieredStorageInvalid(String),
+
+    /// Slice 42b: `spec.tracing` failed shape validation. Concrete
+    /// cases: `type = "Otlp"` without an `otlp` block; `otlp.endpoint`
+    /// empty; `sampleRatio` outside `[0.0, 1.0]`; `timeoutSecs = 0`.
+    /// The reconciler returns this before rendering any pod template
+    /// so the broker pod never boots with broken OTLP env vars.
+    #[error("tracing: {0}")]
+    TracingInvalid(String),
 }
 
 /// Build a Kubernetes-style condition with `lastTransitionTime` set to
@@ -778,6 +786,7 @@ mod config_hash_tests {
             delegation_token: None,
             authorization: None,
             tiered_storage: None,
+            tracing: None,
         };
         let h = combined_config_hash(&spec_a, None, None, None);
         let h_again = combined_config_hash(&spec_a, None, None, None);
@@ -823,6 +832,7 @@ mod config_hash_tests {
             delegation_token: None,
             authorization: None,
             tiered_storage: None,
+            tracing: None,
         };
         let h_off = combined_config_hash(&spec_off, None, None, None);
 
@@ -870,6 +880,7 @@ mod config_hash_tests {
             delegation_token: None,
             authorization: None,
             tiered_storage: None,
+            tracing: None,
         };
         let h_none = combined_config_hash(&spec, None, None, None);
         let h_a = combined_config_hash(
@@ -908,6 +919,7 @@ mod config_hash_tests {
             delegation_token: None,
             authorization: None,
             tiered_storage: None,
+            tracing: None,
         };
         let h1 = combined_config_hash(&spec, Some("ca-pem"), None, None);
         let h2 = combined_config_hash(&spec, Some("ca-pem"), None, None);
@@ -935,6 +947,7 @@ mod config_hash_tests {
                 delegation_token: None,
                 authorization: None,
                 tiered_storage: None,
+                tracing: None,
             },
         );
         k.meta_mut().namespace = Some("default".into());
@@ -991,6 +1004,7 @@ mod config_hash_tests {
             delegation_token: None,
             authorization: None,
             tiered_storage: None,
+            tracing: None,
         };
         // No explicit pin => slice-24 collapse preserved (== config_hash of
         // the empty config part).
@@ -1026,6 +1040,7 @@ mod config_hash_tests {
                 delegation_token: None,
                 authorization: None,
                 tiered_storage: None,
+                tracing: None,
             },
         );
         k.meta_mut().namespace = Some("default".into());
