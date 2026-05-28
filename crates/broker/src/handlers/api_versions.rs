@@ -125,6 +125,14 @@ fn supported_apis() -> Vec<ApiVersion> {
         // used by JVM admin clients 3.7+ in place of fanned-out Metadata
         // calls for `kafka-topics --describe`.
         v!(describe_topic_partitions_request),
+        // KIP-714 client-metrics push handshake. Crabka exposes its own
+        // broker-side observability — these handlers return "no metrics
+        // subscribed" so clients skip the push entirely. Advertising is
+        // still important: clients query `ApiVersions` to learn the
+        // broker supports the API at all, and absence flips them into
+        // legacy-fallback paths we don't need.
+        v!(get_telemetry_subscriptions_request),
+        v!(push_telemetry_request),
     ]
 }
 

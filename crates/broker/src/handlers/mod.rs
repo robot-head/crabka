@@ -81,6 +81,11 @@ pub(crate) mod expire_delegation_token;
 pub(crate) mod fetch;
 pub(crate) mod fetch_downconvert;
 pub(crate) mod find_coordinator;
+// KIP-714 client telemetry. Pair of no-op handlers — `get` advertises
+// "no metrics subscribed" so well-behaved clients skip `push` entirely;
+// `push` is wired defensively in case a client races the subscription
+// re-fetch.
+pub(crate) mod get_telemetry_subscriptions;
 pub(crate) mod heartbeat;
 pub(crate) mod incremental_alter_configs;
 pub(crate) mod init_producer_id;
@@ -95,6 +100,8 @@ pub(crate) mod offset_delete;
 pub(crate) mod offset_fetch;
 pub(crate) mod offset_for_leader_epoch;
 pub(crate) mod produce;
+// KIP-714 client-metrics push, paired with get_telemetry_subscriptions.
+pub(crate) mod push_telemetry;
 pub(crate) mod renew_delegation_token;
 pub(crate) mod sync_group;
 
@@ -200,5 +207,10 @@ pub(crate) fn build_table() -> HandlerTable {
     t.register(56, alter_partition::handle);
     // 60 (DescribeCluster) intercepted inline — see comment above.
     t.register(63, broker_heartbeat::handle);
+    // KIP-714 (client metrics push). Both handlers are no-ops: get returns
+    // an empty subscription so JVM clients skip push; push silently
+    // discards anything that races the subscription re-fetch.
+    t.register(71, get_telemetry_subscriptions::handle);
+    t.register(72, push_telemetry::handle);
     t
 }

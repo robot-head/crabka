@@ -4272,3 +4272,77 @@ introspection metadata).
     calls (when one response truncates) is the client's job; the
     broker just emits a cursor and lets the client keep asking. No
     broker change needed.
+
+## Slice — KIP-714 client telemetry handshake (no-op subscription) (2026-05-28)
+
+- **Goal.** Implement the `GetTelemetrySubscriptions` (api_key 71) +
+  `PushTelemetry` (api_key 72) handshake so JVM clients running
+  Kafka 3.7+ stop hitting `UNSUPPORTED_VERSION` against Crabka and
+  fall into their "broker says no metrics subscribed → don't push"
+  fast path. Promotes the KIP-714 row in the README from ❌ to ⚠️ —
+  the protocol handshake is now sound but Crabka still doesn't
+  *consume* the OTel metrics blob (and doesn't intend to: broker-side
+  observability lives on Prometheus and the OTLP trace pipeline from
+  slice 42).
+- **Two new handlers** in `crates/broker/src/handlers/`:
+  - `get_telemetry_subscriptions.rs`. Decodes the request; if the
+    client sent `client_instance_id = nil` it assigns a fresh v4 UUID
+    (clients cache this and present it on subsequent calls); otherwise
+    echoes `nil` per the schema convention ("Assigned client instance
+    id if `ClientInstanceId` was 0 in the request, else 0").
+    `requested_metrics` is always emitted as an empty array — KIP-714's
+    "no subscription" signal that JVM clients consume to skip the
+    push entirely. `accepted_compression_types` is empty,
+    `telemetry_max_bytes` is `0`, and `push_interval_ms` is `300_000`
+    (5 minutes, matching the JVM `client.telemetry.push.interval.ms`
+    default) to keep race-window clients from spinning.
+  - `push_telemetry.rs`. Decodes the request (so a malformed body
+    still surfaces a protocol error rather than a silent ack),
+    silently discards the `metrics: bytes` payload, and returns
+    `error_code = 0`. Defensive — JVM clients shouldn't reach this
+    code path against an empty subscription, but a client racing the
+    subscription re-fetch can still arrive, and silent ack is the
+    friendliest answer (no retry storm).
+- **Wiring.** Both handlers register through the table dispatch
+  (`HandlerTable::register`), not the inline-intercept path —
+  neither one needs `RequestContext` for ACL evaluation.
+  `handler_body_flexible` returns true for both api_keys (both are
+  flexible from v0). `api_versions::supported_apis()` advertises
+  `(71, 0, 0)` and `(72, 0, 0)`.
+- **No new error codes.** The KIP-714 `UNKNOWN_SUBSCRIPTION_ID (117)`
+  and `TELEMETRY_TOO_LARGE (114)` codes aren't needed for this
+  minimal handshake (the broker never claims to have a subscription
+  to mismatch and never enforces a size limit).
+- **Tests.** 4 integration tests in `tests/client_telemetry.rs`:
+  - `api_versions_advertises_telemetry_apis` — round-trip
+    confirms keys 71 and 72 in the advertised set.
+  - `get_telemetry_subscriptions_with_nil_id_returns_assigned_id_and_empty_subscription`
+    — request `client_instance_id = nil` → response has a non-nil
+    UUID, empty `requested_metrics` / `accepted_compression_types`,
+    zero `telemetry_max_bytes`, and `push_interval_ms ≥ 60s`.
+  - `get_telemetry_subscriptions_with_set_id_echoes_nil` — request
+    with a set id → response carries `nil` per the asymmetric schema
+    convention.
+  - `push_telemetry_accepts_no_op_with_arbitrary_payload` — push
+    with garbage `metrics` bytes returns `error_code = 0`.
+- **README.** `Client metrics push (KIP-714)` row flipped ❌ → ⚠️ in
+  both the feature matrix and the KIP table. The ⚠️ (not ✅)
+  reflects that Crabka doesn't actually *ingest* the OTel
+  `MetricsData` payload — only acknowledges the wire handshake.
+- **Workspace fmt + `clippy -p crabka-broker --all-targets -- -D warnings`
+  + broker lib (593 tests) + new `client_telemetry` (4 tests) + regression
+  sweep of `unit`, `describe_topic_partitions`, `client_software_versions`** —
+  all green.
+- **Out of scope.**
+  - **Subscription configuration.** The JVM broker takes a
+    `ClientMetricsResource` CR-style configuration that names
+    metrics-prefix patterns clients should push. Crabka doesn't
+    implement that yet; every client gets the empty subscription
+    unconditionally. A follow-up would add a `client.metrics.subscriptions`
+    config knob that drives `requested_metrics`, and a metrics
+    pipeline (OTel collector) on the broker side to ingest the
+    pushes.
+  - **`UNKNOWN_SUBSCRIPTION_ID` / `TELEMETRY_TOO_LARGE` codes.**
+    Adding them would let the broker actively reject bogus pushes,
+    but a silent ack is operationally indistinguishable from
+    "accepted and discarded" in our no-op pipeline.
