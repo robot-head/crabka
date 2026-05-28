@@ -58,7 +58,12 @@ pub enum InitStep {
 
 /// Server side: drive GSS context establishment from client tokens, then
 /// wrap/unwrap the RFC 4752 security-layer negotiation messages.
-pub trait GssAcceptor: Send {
+///
+/// `Send + Sync` so a live `GssapiServerExchange` can live inside the
+/// per-connection `ConnectionAuth` state, which the broker's request-handling
+/// future holds across `.await` points (the `wrap`/`unwrap`/`src_principal`
+/// methods take `&self` and serialise interior mutability behind a mutex).
+pub trait GssAcceptor: Send + Sync {
     fn accept(&mut self, client_token: &[u8]) -> Result<AcceptStep, GssError>;
     fn wrap(&self, plaintext: &[u8], confidential: bool) -> Result<Vec<u8>, GssError>;
     fn unwrap(&self, token: &[u8]) -> Result<Vec<u8>, GssError>;

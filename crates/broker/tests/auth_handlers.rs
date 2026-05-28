@@ -2431,6 +2431,81 @@ async fn drive_inter_broker_client_plain(
 }
 
 // ────────────────────────────────────────────────────────────────────────
+// Task 8: SASL/GSSAPI handshake advertisement (no Docker / no KDC).
+// ────────────────────────────────────────────────────────────────────────
+
+/// A broker with GSSAPI enabled advertises GSSAPI in its `SaslHandshake`
+/// response and accepts the handshake (`error_code = 0`), leaving the
+/// connection in GSSAPI negotiation. The actual GSS context exchange needs a
+/// live KDC and is covered by the E2E parity tests (Task 10); this case only
+/// proves the mechanism is wired through handshake advertisement and that the
+/// keytab is not touched until the first `SaslAuthenticate` round.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gssapi_handshake_advertised_when_enabled() {
+    let log_dir = tempfile::tempdir().unwrap();
+    let mut cfg = BrokerConfig::for_tests(log_dir.path().to_path_buf());
+    cfg.listeners = vec![ListenerSpec {
+        name: "SASL_PLAINTEXT".to_string(),
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        advertised: "127.0.0.1:0".to_string(),
+        protocol: ListenerProtocol::SaslPlaintext,
+        tls_config: None,
+        sasl_mechanisms: None,
+    }];
+    cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
+    cfg.enabled_sasl_mechanisms = vec![SaslMechanism::Gssapi];
+    cfg.gssapi = Some(crabka_security::gssapi::GssapiConfig {
+        // Points at the committed fixture, but the handshake path never reads
+        // it (the acceptor is built lazily on the first SaslAuthenticate).
+        keytab_path: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../security/tests/fixtures/kdc/kafka.keytab"),
+        service_name: "kafka".to_string(),
+        principal_to_local_rules: vec![],
+        realm: Some("CRABKA.TEST".to_string()),
+        kdc: None,
+    });
+
+    let handle = Broker::start(cfg).await.expect("broker must start");
+    let addr = handle.listen_addr();
+
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    let mut corr = 0;
+
+    // ApiVersions (pre-auth) so the connection is in a clean state.
+    let av_req = ApiVersionsRequest::default();
+    let mut av_body = BytesMut::new();
+    av_req.encode(&mut av_body, 0).unwrap();
+    let av = round_trip(&mut stream, 18, 0, corr, false, &av_body)
+        .await
+        .unwrap();
+    corr += 1;
+    let mut cur: &[u8] = &av;
+    ApiVersionsResponse::decode(&mut cur, 0).unwrap();
+
+    // SaslHandshake v1, mechanism = "GSSAPI".
+    let sh_req = SaslHandshakeRequest {
+        mechanism: "GSSAPI".to_string(),
+        ..Default::default()
+    };
+    let mut sh_body = BytesMut::new();
+    sh_req.encode(&mut sh_body, 1).unwrap();
+    let sh = round_trip(&mut stream, 17, 1, corr, false, &sh_body)
+        .await
+        .unwrap();
+    let mut cur: &[u8] = &sh;
+    let sh_resp = SaslHandshakeResponse::decode(&mut cur, 1).unwrap();
+
+    handle.shutdown().await;
+
+    assert_eq!(sh_resp.error_code, 0, "GSSAPI handshake must succeed");
+    assert!(
+        sh_resp.mechanisms.iter().any(|m| m == "GSSAPI"),
+        "GSSAPI must be advertised; got {:?}",
+        sh_resp.mechanisms
+    );
+}
+
+// ────────────────────────────────────────────────────────────────────────
 // Task 17: InterBrokerClient wired into replicator / heartbeat — proves a
 // two-broker cluster with a SASL_PLAINTEXT inter-broker listener
 // authenticates outbound fetch + heartbeat traffic and replicates records

@@ -21,6 +21,7 @@ pub enum ServerExchangeError {
     State(&'static str),
 }
 
+#[derive(Debug)]
 enum State {
     AcceptingContext,
     OfferingLayer, // context done, next step emits the offer
@@ -32,6 +33,17 @@ pub struct GssapiServerExchange {
     acceptor: Box<dyn GssAcceptor>,
     state: State,
     max_recv_size: u32,
+}
+
+// `acceptor` is a trait object with no `Debug` bound; print the observable
+// negotiation state instead so `SaslExchange`/`ConnectionAuth` can derive `Debug`.
+impl std::fmt::Debug for GssapiServerExchange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GssapiServerExchange")
+            .field("state", &self.state)
+            .field("max_recv_size", &self.max_recv_size)
+            .finish_non_exhaustive()
+    }
 }
 
 impl GssapiServerExchange {

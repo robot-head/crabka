@@ -124,6 +124,16 @@ pub enum SaslExchange {
     /// awaiting the client's single-`\x01` final message before failing the
     /// connection with `SASL_AUTHENTICATION_FAILED`.
     OAuthBearerFailed,
+    /// GSSAPI post-handshake / pre-first-token. The acceptor (and thus the
+    /// live `GssapiServerExchange`) is built lazily on the first
+    /// `SaslAuthenticate` round, once the client's AP-REQ arrives — mirroring
+    /// the SCRAM `ScramPending` pattern (we don't want to read the keytab
+    /// until a client actually starts a GSSAPI exchange).
+    GssapiPending,
+    /// GSSAPI multi-round in flight: the live RFC 4752 server state machine
+    /// (GSS context establishment → security-layer negotiation). Boxed to
+    /// keep the `sspi`-backed acceptor off the hot enum size.
+    Gssapi(Box<crabka_security::gssapi::server::GssapiServerExchange>),
 }
 
 impl ConnectionAuth {
@@ -193,6 +203,12 @@ const UNSUPPORTED_SASL_MECHANISM: i16 = 33;
 /// `SASL_AUTHENTICATION_FAILED` (58) — credential check rejected by the
 /// broker. The caller closes the connection after writing the response.
 const SASL_AUTHENTICATION_FAILED: i16 = 58;
+
+/// RFC 4752 server "maximum message size" advertised in the auth-only
+/// security-layer offer. 64 KiB matches the JVM broker's default SASL receive
+/// buffer; with confidentiality/integrity disabled it only bounds the size of
+/// the (empty) wrapped payloads, so the exact value is not load-bearing.
+const GSSAPI_MAX_RECV_SIZE: u32 = 0x1_0000;
 
 /// Handles `SaslHandshake` (`api_key` 17).
 ///
@@ -308,13 +324,10 @@ fn exchange_for_mechanism(m: SaslMechanism) -> SaslExchange {
         // The token arrives in the first SaslAuthenticate; no pre-built
         // state needed (slice 49).
         SaslMechanism::OAuthBearer => SaslExchange::OAuthBearer,
-        // GSSAPI is not yet advertised in `enabled_sasl_mechanisms` (the
-        // server accept state machine + broker wiring land in later GSSAPI
-        // tasks), so the handshake's `enabled.contains(&m)` gate never
-        // reaches this arm. Task 6 adds the real `SaslExchange::Gssapi`.
-        SaslMechanism::Gssapi => {
-            unreachable!("GSSAPI handshake reached before server wiring is in place")
-        }
+        // GSSAPI exchange is built lazily on the first SaslAuthenticate
+        // round, once the client's AP-REQ arrives (we defer reading the
+        // keytab until then). Until then we sit in `GssapiPending`.
+        SaslMechanism::Gssapi => SaslExchange::GssapiPending,
     }
 }
 
@@ -537,6 +550,169 @@ fn synthesize_token_scram_credential(
         SaslMechanism::ScramSha256,
         TOKEN_SCRAM_ITERS,
         salt,
+    )
+}
+
+/// SASL/GSSAPI (Kerberos, RFC 4752) `SaslAuthenticate` handler.
+///
+/// Multi-round, driven over Kafka's `SaslAuthenticate` (`api_key` 36) wire
+/// envelope. The opaque GSS/SASL tokens ride in `auth_bytes` both ways:
+///
+/// Round 1 (client AP-REQ):
+///   - `auth_bytes` = the GSS initial context token (AP-REQ). We build the
+///     `sspi`-backed acceptor from the broker's keytab now that an exchange
+///     has actually started, feed the token to a fresh
+///     [`GssapiServerExchange`], and emit the server's context token (AP-REP)
+///     as the response `auth_bytes`. `auth` transitions
+///     `Negotiating { exchange: GssapiPending }` →
+///     `Negotiating { exchange: Gssapi(..) }`, still unauthenticated.
+///
+/// Middle round(s) (security-layer negotiation, RFC 4752):
+///   - the server emits its GSS-wrapped auth-only offer, the client replies
+///     with its GSS-wrapped choice. Each `ServerStep::Challenge` becomes a
+///     success response carrying the next token; `auth` stays `Negotiating`.
+///
+/// Final round (client layer choice):
+///   - the exchange yields `ServerStep::Done { principal }`. We map the raw
+///     Kerberos principal through `auth_to_local`, transition to
+///     `Authenticated`, and reply with empty `auth_bytes` + `error_code = 0`.
+///
+/// Any GSS/codec error returns `SASL_AUTHENTICATION_FAILED` (58) and the
+/// dispatcher closes the connection.
+pub fn handle_authenticate_gssapi(
+    req: &SaslAuthenticateRequest,
+    auth: &mut ConnectionAuth,
+    config: &crabka_security::gssapi::GssapiConfig,
+) -> SaslAuthenticateResponse {
+    use crabka_security::gssapi::server::{GssapiServerExchange, ServerStep};
+
+    // Round 1: still `GssapiPending` — build the acceptor-backed exchange now
+    // that the first client token (AP-REQ) has arrived.
+    if let ConnectionAuth::Negotiating {
+        exchange: SaslExchange::GssapiPending,
+        mechanism,
+        pending_token_expiry_ms: _,
+    } = auth
+    {
+        let mech = *mechanism;
+        let keytab = config.keytab_path.to_string_lossy();
+        let acceptor = match crabka_security::gssapi::provider::SspiAcceptor::new(
+            &keytab,
+            &config.service_name,
+        ) {
+            Ok(a) => a,
+            Err(e) => return fail_authenticate(&format!("GSSAPI acceptor init failed: {e}")),
+        };
+        let mut exchange = GssapiServerExchange::new(Box::new(acceptor), GSSAPI_MAX_RECV_SIZE);
+        let step = match exchange.step(&req.auth_bytes) {
+            Ok(s) => s,
+            Err(e) => return fail_authenticate(&format!("GSSAPI accept failed: {e}")),
+        };
+        return match step {
+            ServerStep::Challenge(token) => {
+                *auth = ConnectionAuth::Negotiating {
+                    mechanism: mech,
+                    exchange: SaslExchange::Gssapi(Box::new(exchange)),
+                    pending_token_expiry_ms: None,
+                };
+                gssapi_challenge_response(token)
+            }
+            // GSSAPI always negotiates the security layer after context
+            // establishment, so round 1 never completes the exchange.
+            ServerStep::Done { principal } => finish_gssapi(&principal, mech, config, auth),
+        };
+    }
+
+    // Subsequent rounds: the exchange already exists.
+    if let ConnectionAuth::Negotiating {
+        exchange: SaslExchange::Gssapi(exchange),
+        mechanism,
+        pending_token_expiry_ms: _,
+    } = auth
+    {
+        let mech = *mechanism;
+        let step = match exchange.step(&req.auth_bytes) {
+            Ok(s) => s,
+            Err(e) => return fail_authenticate(&format!("GSSAPI step failed: {e}")),
+        };
+        return match step {
+            ServerStep::Challenge(token) => gssapi_challenge_response(token),
+            ServerStep::Done { principal } => finish_gssapi(&principal, mech, config, auth),
+        };
+    }
+
+    fail_authenticate("not in GSSAPI negotiation")
+}
+
+/// A non-terminal GSSAPI round: hand the next token back to the client with
+/// `error_code = 0`; the connection stays open and `auth` stays `Negotiating`.
+fn gssapi_challenge_response(token: Vec<u8>) -> SaslAuthenticateResponse {
+    SaslAuthenticateResponse {
+        error_code: 0,
+        error_message: None,
+        auth_bytes: bytes::Bytes::from(token),
+        session_lifetime_ms: 0,
+        ..Default::default()
+    }
+}
+
+/// Map the authenticated Kerberos principal through `auth_to_local` and, on
+/// success, transition `auth` to `Authenticated`.
+fn finish_gssapi(
+    raw_principal: &str,
+    mech: SaslMechanism,
+    config: &crabka_security::gssapi::GssapiConfig,
+    auth: &mut ConnectionAuth,
+) -> SaslAuthenticateResponse {
+    let short = match map_gssapi_principal(raw_principal, config) {
+        Ok(s) => s,
+        Err(e) => return fail_authenticate(&format!("GSSAPI principal mapping failed: {e}")),
+    };
+    *auth = ConnectionAuth::Authenticated {
+        principal: Principal {
+            name: short,
+            auth_method: crabka_security::AuthMethod::SaslGssapi,
+            groups: vec![],
+        },
+        mechanism: mech,
+        // GSSAPI sessions have no broker-imposed expiry (the ticket lifetime is
+        // enforced by the KDC at context-establishment time, not re-checked
+        // mid-session). KIP-368 re-auth, if configured, rides the same
+        // SaslHandshake path as the other mechanisms.
+        expires_at_ms: None,
+        authenticated_via_token: false,
+    };
+    SaslAuthenticateResponse {
+        error_code: 0,
+        error_message: None,
+        auth_bytes: bytes::Bytes::new(),
+        session_lifetime_ms: 0,
+        ..Default::default()
+    }
+}
+
+/// Apply the configured `auth_to_local` rules to a raw Kerberos principal.
+///
+/// `sspi` recovers the principal lower-cased (e.g. `alice@crabka.test`); we
+/// re-canonicalise the realm to upper-case before matching because Kerberos
+/// realms are conventionally upper-case and both the configured default realm
+/// and the `auth_to_local` rules are written against the upper-case form. When
+/// no default realm is configured we fall back to the principal's own realm,
+/// so a single-component principal in its own realm maps to its primary via
+/// the implicit `DEFAULT` rule.
+fn map_gssapi_principal(
+    raw: &str,
+    config: &crabka_security::gssapi::GssapiConfig,
+) -> Result<String, crabka_security::gssapi::name::NameError> {
+    let (head, realm_raw) = raw.rsplit_once('@').unwrap_or((raw, ""));
+    let realm = realm_raw.to_uppercase();
+    let components: Vec<&str> = head.split('/').collect();
+    let default_realm = config.realm.as_deref().unwrap_or(&realm);
+    crabka_security::gssapi::name::apply(
+        &config.principal_to_local_rules,
+        &realm,
+        &components,
+        default_realm,
     )
 }
 
