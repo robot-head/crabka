@@ -311,12 +311,12 @@ async fn handle_response(resp: &FetchResponse, cfg: &Config) -> LoopAction {
 
     match part_resp.error_code {
         codes::NONE => {
+            let Some(entry) = cfg.partitions.get(&(cfg.topic.clone(), cfg.partition)) else {
+                warn!(topic = %cfg.topic, partition = cfg.partition,
+                    "replicator: local partition vanished between fetches");
+                return LoopAction::Continue;
+            };
             if let Some(batch) = part_resp.records.as_ref().and_then(|p| p.as_v2()) {
-                let Some(entry) = cfg.partitions.get(&(cfg.topic.clone(), cfg.partition)) else {
-                    warn!(topic = %cfg.topic, partition = cfg.partition,
-                        "replicator: local partition vanished between fetches");
-                    return LoopAction::Continue;
-                };
                 // Capture byte count before the move into replicate_batch
                 // so the metrics update only fires on a successful append.
                 let batch_bytes = batch.encoded_len();
@@ -331,6 +331,13 @@ async fn handle_response(resp: &FetchResponse, cfg: &Config) -> LoopAction {
                     );
                 }
             }
+            // KIP-392: record the leader's high watermark so consumer reads
+            // served from this follower are bounded correctly. Done on every
+            // successful response, including empty ones.
+            entry
+                .value()
+                .set_follower_hw(part_resp.high_watermark)
+                .await;
             LoopAction::Continue
         }
         codes::OFFSET_OUT_OF_RANGE => {
