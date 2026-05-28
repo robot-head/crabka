@@ -26,7 +26,7 @@ pub struct TopicMetadata {
     /// partition has at least one replica. Empty (or the key missing
     /// entirely) for partitions whose replicas have no rack info — the
     /// assignor then falls back to its non-rack-aware behavior.
-    /// Populated by the coordinator's metadata snapshot (slice 64b).
+    /// Populated by the coordinator's metadata snapshot.
     pub partition_racks: HashMap<(Uuid, i32), Vec<String>>,
 }
 

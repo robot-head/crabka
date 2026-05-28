@@ -1,6 +1,6 @@
 //! `KafkaUser` CRD. Strimzi-shaped — SCRAM-SHA-512 + mTLS
-//! authentication (slices 36, 37), simple ACL authorization, and
-//! optional per-user quotas (slice 38).
+//! authentication, simple ACL authorization, and
+//! optional per-user quotas.
 
 use kube::CustomResource;
 use schemars::JsonSchema;
@@ -27,7 +27,7 @@ pub struct KafkaUserSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authorization: Option<Authorization>,
 
-    /// Slice 38: optional per-user client quotas (KIP-13/124/257).
+    /// Optional per-user client quotas (KIP-13/124/257).
     /// Maps onto Kafka's `(user)` quota entity via `AlterClientQuotas`
     /// (`api_key` 49). Absent → operator does not touch the broker's
     /// quota state; present → the operator drives the broker's quota
@@ -82,7 +82,7 @@ pub struct KafkaUserQuotas {
 pub enum Authentication {
     #[serde(rename = "scram-sha-512")]
     ScramSha512(ScramSha512Auth),
-    /// Slice 36b: SCRAM-SHA-256 sibling of `ScramSha512`. The operator
+    /// SCRAM-SHA-256 sibling of `ScramSha512`. The operator
     /// provisions the password Secret + ACLs + quotas exactly as for
     /// SHA-512; the only differences on the wire are the mechanism
     /// byte (1 vs 2) and the HMAC algorithm. Pair with broker-side
@@ -91,14 +91,14 @@ pub enum Authentication {
     ScramSha256(ScramSha256Auth),
     #[serde(rename = "tls")]
     Tls(TlsAuth),
-    /// Slice 50: credential-less user. The operator provisions ACLs +
+    /// Credential-less user. The operator provisions ACLs +
     /// quotas under `User:<metadata.name>` but does not create a Secret
     /// or issue a cert — credentials are managed out-of-band (e.g. an
     /// OIDC provider for SASL/OAUTHBEARER, or a CA outside Crabka for
     /// mTLS). Mirrors Strimzi's `tls-external`.
     #[serde(rename = "tls-external")]
     TlsExternal,
-    /// Slice 51b: KIP-48 delegation-token authentication. The operator
+    /// KIP-48 delegation-token authentication. The operator
     /// acts-as a super-user to mint a token owned by this user, persists
     /// `(token-id, hmac)` into a Secret, and periodically renews ahead
     /// of expiry.
@@ -106,7 +106,7 @@ pub enum Authentication {
     DelegationToken(DelegationTokenAuth),
 }
 
-/// Slice 51b: per-user knobs that flow into `CreateDelegationToken` and
+/// Per-user knobs that flow into `CreateDelegationToken` and
 /// the operator's renew loop. The reconciler mints the token via the
 /// admin client (operator acts-as a super-user), persists
 /// `(token-id, hmac)` into the user's Secret, and renews ahead of
@@ -148,7 +148,7 @@ fn authentication_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema 
             // TLS
             "validityDays": { "type": "integer", "minimum": 1, "maximum": 36500 },
             "renewalDays": { "type": "integer", "minimum": 1, "maximum": 3650 },
-            // Delegation token (slice 51b)
+            // Delegation token
             "renewers": {
                 "type": "array",
                 "items": { "type": "string", "pattern": "^User:.+$" },
@@ -177,7 +177,7 @@ pub struct ScramSha512Auth {
     pub password_length: Option<u16>,
 }
 
-/// Slice 36b: SCRAM-SHA-256 sibling of [`ScramSha512Auth`]. Same field
+/// SCRAM-SHA-256 sibling of [`ScramSha512Auth`]. Same field
 /// shape; the only semantic difference is the wire mechanism + HMAC
 /// algorithm picked up by the reconciler's match arm.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
@@ -345,7 +345,7 @@ pub struct KafkaUserStatus {
     #[serde(default)]
     pub scram_sha512: bool,
 
-    /// Slice 36b: true once SCRAM-SHA-256 credentials are provisioned.
+    /// True once SCRAM-SHA-256 credentials are provisioned.
     #[serde(default)]
     pub scram_sha256: bool,
 
@@ -360,7 +360,7 @@ pub struct KafkaUserStatus {
     #[serde(default)]
     pub tls: bool,
 
-    /// Slice 50: `true` once a credential-less user
+    /// `true` once a credential-less user
     /// (`type: tls-external`) has been reconciled. Surfaces in
     /// `kubectl describe ku` so operators can tell at a glance that
     /// the operator does not own this user's credentials.
@@ -380,7 +380,7 @@ pub struct KafkaUserStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_principal: Option<String>,
 
-    /// Slice 51b: persisted `token_id` (UUID) of the operator-managed
+    /// Persisted `token_id` (UUID) of the operator-managed
     /// delegation token for this user. Used across reconciles to find
     /// the same token via `DescribeDelegationToken`. Present once the
     /// operator has successfully issued a token via
@@ -388,14 +388,14 @@ pub struct KafkaUserStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delegation_token_id: Option<String>,
 
-    /// Slice 51b: current `expiry_timestamp_ms` of the operator-managed
+    /// Current `expiry_timestamp_ms` of the operator-managed
     /// delegation token (extended on each successful renew). Compared
     /// against `now` to decide when to renew per
     /// `spec.authentication.renewBeforeExpiryMs`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delegation_token_expiry_timestamp_ms: Option<i64>,
 
-    /// Slice 51b: token's absolute upper bound (`max_timestamp_ms`).
+    /// Token's absolute upper bound (`max_timestamp_ms`).
     /// Renew can never push `expiry_timestamp_ms` past this — the
     /// operator stops renewing and surfaces `TokenExpiring` once
     /// further extension is impossible.
@@ -665,7 +665,7 @@ mod tests {
 
     #[test]
     fn authentication_scram_sha256_round_trips_with_overrides() {
-        // Slice 36b: `scram-sha-256` sibling of the existing SHA-512
+        // `scram-sha-256` sibling of the existing SHA-512
         // round-trip test. Cover both the empty-defaults shape AND the
         // explicit-overrides shape to lock the schema (a `passwordLength`
         // change between releases would silently roll every user's

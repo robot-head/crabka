@@ -1,5 +1,5 @@
-//! Slice 40: `Kafka.spec.metricsConfig` — operator-side surface for the
-//! broker's slice-39 Prometheus `/metrics` endpoint.
+//! `Kafka.spec.metricsConfig` — operator-side surface for the
+//! broker's Prometheus `/metrics` endpoint.
 
 use std::collections::BTreeMap;
 

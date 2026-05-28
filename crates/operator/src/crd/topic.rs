@@ -1,4 +1,4 @@
-//! Slice 35: `KafkaTopic` CRD. Strimzi-shaped; unidirectional
+//! `KafkaTopic` CRD. Strimzi-shaped; unidirectional
 //! reconciliation (CRD wins).
 
 use std::collections::BTreeMap;
@@ -33,8 +33,7 @@ pub struct KafkaTopicSpec {
     pub partitions: i32,
 
     /// Replication factor. Changes rejected with
-    /// `ImmutableFieldChanged` until partition reassignment lands
-    /// (slice 43+).
+    /// `ImmutableFieldChanged` until partition reassignment lands.
     #[schemars(range(min = 1, max = 1_000))]
     pub replicas: i32,
 

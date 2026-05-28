@@ -10,7 +10,7 @@
 //!    JWS (`alg: none`) and extract the connection principal from a claim.
 //!    This mirrors Kafka's `OAuthBearerUnsecuredValidatorCallbackHandler`,
 //!    the built-in development/testing validator. Signed-token (JWKS)
-//!    validation is a follow-up slice.
+//!    validation is handled separately.
 
 use std::sync::Arc;
 
@@ -24,7 +24,7 @@ use crate::jwks::JwksHandle;
 use crate::{AuthError, AuthMethod, Principal};
 
 /// Outcome of an OAUTHBEARER validation: the authenticated principal plus the
-/// token's expiry. The expiry is what slice 49e populates as
+/// token's expiry. The expiry populates
 /// `SaslAuthenticateResponse.session_lifetime_ms` and what the dispatch loop
 /// uses to schedule per-connection re-auth deadlines (KIP-368).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,7 +81,7 @@ pub fn parse_client_initial_response(bytes: &[u8]) -> Result<ClientInitialRespon
                 .ok_or(AuthError::MalformedMessage)?;
             token = Some(t.to_string());
         }
-        // Other keys (host, port, SASL extensions) are not used this slice.
+        // Other keys (host, port, SASL extensions) are not used here.
     }
 
     let token = token.ok_or(AuthError::MalformedMessage)?;
@@ -122,25 +122,25 @@ pub struct UnsecuredJwsValidator {
     /// Tolerance, in milliseconds, applied to the `exp` / `iat` temporal
     /// checks to absorb clock drift between the client and broker.
     pub allowable_clock_skew_ms: i64,
-    /// Slice 49g: precompiled `JsonPath` expression evaluated against the
+    /// Precompiled `JsonPath` expression evaluated against the
     /// token's claim set. Token is rejected when the expression yields
     /// empty/null/false. Compile once at validator construction.
     pub custom_claim_check: Option<JpQuery>,
-    /// Slice 49g: when set, the JWT `typ` header field must equal this
+    /// When set, the JWT `typ` header field must equal this
     /// string. Ignored when unset.
     pub valid_token_type: Option<String>,
-    /// Slice 49h: alternate claim name to read the principal name from
+    /// Alternate claim name to read the principal name from
     /// when `principal_claim_name` is absent or empty. Strimzi's
     /// "service-account fallback" — `sub` typically holds a UUID,
     /// `client_id` is the readable name.
     pub fallback_user_name_claim: Option<String>,
-    /// Slice 49h: prepended to the resolved principal name ONLY when
+    /// Prepended to the resolved principal name ONLY when
     /// the fallback claim fires. Strimzi convention: "service-account-".
     pub fallback_user_name_prefix: Option<String>,
-    /// Slice 49h: precompiled `JsonPath` expression extracting group
+    /// Precompiled `JsonPath` expression extracting group
     /// memberships from the token claims. Compile-once-at-startup.
     pub groups_claim: Option<JpQuery>,
-    /// Slice 49h: when `groups_claim` resolves to a string (not an
+    /// When `groups_claim` resolves to a string (not an
     /// array), split on this delimiter. Common: "," or " ".
     pub groups_claim_delimiter: Option<String>,
 }
@@ -180,7 +180,7 @@ impl UnsecuredJwsValidator {
             return Err(AuthError::InvalidToken);
         }
         if !sig.is_empty() {
-            // Signed token — needs JWKS signature verification (slice 49b).
+            // Signed token — needs JWKS signature verification.
             return Err(AuthError::InvalidToken);
         }
 
@@ -188,7 +188,7 @@ impl UnsecuredJwsValidator {
         if header.get("alg").and_then(Value::as_str) != Some("none") {
             return Err(AuthError::InvalidToken);
         }
-        // Slice 49g: optional JWT `typ` header check (JWT-mode validator only).
+        // Optional JWT `typ` header check (JWT-mode validator only).
         if let Some(expected_typ) = &self.valid_token_type
             && header.get("typ").and_then(Value::as_str) != Some(expected_typ.as_str())
         {
@@ -209,14 +209,14 @@ impl UnsecuredJwsValidator {
             return Err(AuthError::InvalidToken);
         }
 
-        // Slice 49g: optional JsonPath custom_claim_check.
+        // Optional JsonPath custom_claim_check.
         if let Some(path) = &self.custom_claim_check
             && !evaluate_custom_claim_check(path, &claims)
         {
             return Err(AuthError::InvalidToken);
         }
 
-        // Slice 49h: primary → fallback → reject. Prefix applied only
+        // Primary → fallback → reject. Prefix applied only
         // when fallback fires.
         let (raw_name, used_fallback) = if let Some(n) = claims
             .get(&self.principal_claim_name)
@@ -245,7 +245,7 @@ impl UnsecuredJwsValidator {
             raw_name
         };
 
-        // Slice 49h: groups extraction.
+        // Groups extraction.
         let groups = match &self.groups_claim {
             Some(path) => extract_groups(path, &claims, self.groups_claim_delimiter.as_deref()),
             None => Vec::new(),
@@ -262,7 +262,7 @@ impl UnsecuredJwsValidator {
     }
 }
 
-/// Slice 49h: extract group memberships from token claims using a
+/// Extract group memberships from token claims using a
 /// precompiled `JsonPath`. Each result element is interpreted per its
 /// JSON type:
 /// - `String`: if `delimiter` is set, split + trim + drop empty;
@@ -365,7 +365,7 @@ pub fn invalid_token_json() -> String {
 
 /// Validates a *signed* JWS bearer token (`RS256` / `ES256`) against a JWKS
 /// key set fetched from the identity provider, then checks the standard JWT
-/// claims and derives the connection principal (slice 49b).
+/// claims and derives the connection principal.
 ///
 /// The key set lives behind a [`JwksHandle`] so the broker's background
 /// refresher can rotate keys without restarting the broker or taking a lock;
@@ -380,24 +380,24 @@ pub struct SignedJwsValidator {
     pub valid_issuer: Option<String>,
     /// When set, the token `aud` claim must contain this value.
     pub expected_audience: Option<String>,
-    /// Slice 49g: precompiled `JsonPath` `custom_claim_check`. See
+    /// Precompiled `JsonPath` `custom_claim_check`. See
     /// [`UnsecuredJwsValidator`] for semantics.
     pub custom_claim_check: Option<JpQuery>,
-    /// Slice 49g: JWT `typ` header check. Ignored when unset.
+    /// JWT `typ` header check. Ignored when unset.
     pub valid_token_type: Option<String>,
-    /// Slice 49h: alternate principal claim. See [`UnsecuredJwsValidator`].
+    /// Alternate principal claim. See [`UnsecuredJwsValidator`].
     pub fallback_user_name_claim: Option<String>,
-    /// Slice 49h: prepended to the principal name only on fallback.
+    /// Prepended to the principal name only on fallback.
     pub fallback_user_name_prefix: Option<String>,
-    /// Slice 49h: precompiled `JsonPath` extracting group memberships.
+    /// Precompiled `JsonPath` extracting group memberships.
     pub groups_claim: Option<JpQuery>,
-    /// Slice 49h: delimiter when `groups_claim` resolves to a string.
+    /// Delimiter when `groups_claim` resolves to a string.
     pub groups_claim_delimiter: Option<String>,
-    /// Slice 49i: hard cache-expiry threshold, in milliseconds. When set,
+    /// Hard cache-expiry threshold, in milliseconds. When set,
     /// the validator rejects tokens if the paired refresher has not had a
     /// successful fetch within this window (using
-    /// [`JwksHandle::last_successful_fetch_ms`]). `None` = no expiry check
-    /// (slice 49b behavior). Fails closed on prolonged `IdP` outage so a
+    /// [`JwksHandle::last_successful_fetch_ms`]). `None` = no expiry check.
+    /// Fails closed on prolonged `IdP` outage so a
     /// rotated-out key can't keep signing valid tokens indefinitely.
     pub expiry_ms: Option<i64>,
     /// The live JWKS, swapped in by the broker's refresher.
@@ -456,17 +456,17 @@ impl SignedJwsValidator {
         if alg != "RS256" && alg != "ES256" {
             return Err(AuthError::InvalidToken);
         }
-        // Slice 49g: optional JWT `typ` check (JWT-mode validator only).
+        // Optional JWT `typ` check (JWT-mode validator only).
         if let Some(expected_typ) = &self.valid_token_type
             && header.get("typ").and_then(Value::as_str) != Some(expected_typ.as_str())
         {
             return Err(AuthError::InvalidToken);
         }
 
-        // Slice 49i: hard cache-expiry. If the last successful refresh is
+        // Hard cache-expiry. If the last successful refresh is
         // older than `expiry_ms`, reject all tokens until the refresher
         // succeeds again. The `last_fetch > 0` guard skips this on a
-        // never-fetched handle so the slice-49b "broker is still starting
+        // never-fetched handle so the "broker is still starting
         // up" path stays open (the verify-level check below will reject
         // anyway because the key set is empty).
         if let Some(expiry_ms) = self.expiry_ms {
@@ -488,7 +488,7 @@ impl SignedJwsValidator {
         let sig = B64URL
             .decode(sig_b64)
             .map_err(|_| AuthError::InvalidToken)?;
-        // Slice 49i: on any verify failure (unknown kid or bad signature)
+        // On any verify failure (unknown kid or bad signature)
         // signal the refresher to attempt an on-demand JWKS fetch — the
         // signing key may have rotated since the last periodic refresh.
         // The current token still rejects; a subsequent reconnect will
@@ -541,14 +541,14 @@ impl SignedJwsValidator {
             return Err(AuthError::InvalidToken);
         }
 
-        // Slice 49g: optional JsonPath custom_claim_check.
+        // Optional JsonPath custom_claim_check.
         if let Some(path) = &self.custom_claim_check
             && !evaluate_custom_claim_check(path, claims)
         {
             return Err(AuthError::InvalidToken);
         }
 
-        // Slice 49h: primary → fallback → reject. Prefix on fallback only.
+        // Primary → fallback → reject. Prefix on fallback only.
         let (raw_name, used_fallback) = if let Some(n) = claims
             .get(&self.principal_claim_name)
             .and_then(Value::as_str)
@@ -593,16 +593,16 @@ impl SignedJwsValidator {
 }
 
 /// The broker's configured OAUTHBEARER token validator: the
-/// development-only unsecured-JWS path (slice 49), production signed-JWT
-/// validation against a JWKS endpoint (slice 49b), or RFC 7662 opaque-token
-/// introspection (slice 49d). Defaults to unsecured.
+/// development-only unsecured-JWS path, production signed-JWT
+/// validation against a JWKS endpoint, or RFC 7662 opaque-token
+/// introspection. Defaults to unsecured.
 #[derive(Debug, Clone)]
 pub enum OAuthBearerValidator {
     /// Unsecured JWS (`alg:none`) — development / testing only.
     Unsecured(UnsecuredJwsValidator),
     /// Signed JWS verified against a JWKS key set.
     Signed(SignedJwsValidator),
-    /// RFC 7662 opaque-token introspection (slice 49d).
+    /// RFC 7662 opaque-token introspection.
     Introspection(IntrospectionValidator),
 }
 
@@ -668,7 +668,7 @@ pub enum IntrospectionError {
     Parse,
 }
 
-/// RFC 7662 opaque-token introspection validator (slice 49d). Calls the
+/// RFC 7662 opaque-token introspection validator. Calls the
 /// introspection endpoint per token (no caching — RFC 7662 §4 discourages
 /// caching without explicit lifetime info; SASL is once per connection so
 /// the cost is acceptable). Optionally calls OIDC userinfo after a
@@ -681,7 +681,7 @@ pub struct IntrospectionValidator {
     /// for generic OAuth flows; commonly `client_id` for Keycloak
     /// client-credentials.
     pub principal_claim_name: String,
-    /// Slice 49g: precompiled `JsonPath` `custom_claim_check`. See
+    /// Precompiled `JsonPath` `custom_claim_check`. See
     /// [`UnsecuredJwsValidator`] for semantics. Introspection has no JWT
     /// header, so there is no `valid_token_type` field here.
     pub custom_claim_check: Option<JpQuery>,
@@ -692,15 +692,15 @@ pub struct IntrospectionValidator {
     /// Clock-skew tolerance for `exp`/`iat`/`nbf` checks on
     /// introspection-response timestamps (when present).
     pub allowable_clock_skew_ms: i64,
-    /// Slice 49h: alternate principal claim. See [`UnsecuredJwsValidator`].
+    /// Alternate principal claim. See [`UnsecuredJwsValidator`].
     pub fallback_user_name_claim: Option<String>,
-    /// Slice 49h: prepended to the principal name only on fallback.
+    /// Prepended to the principal name only on fallback.
     pub fallback_user_name_prefix: Option<String>,
-    /// Slice 49h: precompiled `JsonPath` extracting group memberships,
+    /// Precompiled `JsonPath` extracting group memberships,
     /// evaluated against the merged claims (introspection + optional
     /// userinfo).
     pub groups_claim: Option<JpQuery>,
-    /// Slice 49h: delimiter when `groups_claim` resolves to a string.
+    /// Delimiter when `groups_claim` resolves to a string.
     pub groups_claim_delimiter: Option<String>,
 }
 
@@ -742,15 +742,14 @@ impl IntrospectionValidator {
         {
             merge_userinfo_over_introspection(&mut claims, ui);
         }
-        // Slice 49g: optional JsonPath custom_claim_check (replaces slice-50
-        // scope check). Evaluated against the merged claims (introspection
-        // plus optional userinfo).
+        // Optional JsonPath custom_claim_check. Evaluated against the merged
+        // claims (introspection plus optional userinfo).
         if let Some(path) = &self.custom_claim_check
             && !evaluate_custom_claim_check(path, &claims)
         {
             return Err(AuthError::InvalidToken);
         }
-        // Slice 49h: primary → fallback → reject. Prefix on fallback only.
+        // Primary → fallback → reject. Prefix on fallback only.
         let (raw_name, used_fallback) = if let Some(n) = claims
             .get(&self.principal_claim_name)
             .and_then(Value::as_str)
@@ -855,7 +854,7 @@ mod tests {
     }
 
     /// Build an unsecured-JWS from an explicit header + claim object (so
-    /// callers can drive the `typ` header for slice-49g tests). The
+    /// callers can drive the `typ` header for `typ`-check tests). The
     /// signature segment is left empty per `alg:none`.
     fn make_unsecured_jws_with_header(
         header: &serde_json::Value,
@@ -1002,7 +1001,7 @@ mod tests {
         );
     }
 
-    // ---- Slice 49g: custom_claim_check (JsonPath) + valid_token_type ---
+    // ---- custom_claim_check (JsonPath) + valid_token_type ---
 
     #[test]
     fn unsecured_validate_rejects_when_custom_claim_check_fails() {
@@ -1083,7 +1082,7 @@ mod tests {
         assert!(v.validate(&token, now_ms).is_ok());
     }
 
-    // ---- Slice 49h: name fallback chain + groups extraction --------------
+    // ---- name fallback chain + groups extraction --------------
 
     #[test]
     fn unsecured_validate_uses_primary_principal_claim_when_present() {
@@ -1278,7 +1277,7 @@ mod tests {
         assert_eq!(invalid_token_json(), "{\"status\":\"invalid_token\"}");
     }
 
-    // ---- SignedJwsValidator (slice 49b) -------------------------------------
+    // ---- SignedJwsValidator -------------------------------------
 
     use crate::jwks::{Jwks, JwksHandle, mint_es256, mint_rs256, mint_rs256_with_header};
 
@@ -1401,7 +1400,7 @@ mod tests {
         );
     }
 
-    // ---- Slice 49g: SignedJwsValidator custom_claim_check + valid_token_type
+    // ---- SignedJwsValidator custom_claim_check + valid_token_type
 
     #[test]
     fn signed_validate_rejects_when_custom_claim_check_fails() {
@@ -1520,7 +1519,7 @@ mod tests {
         );
     }
 
-    // ---- Slice 49h: signed-validator parity --------------------------------
+    // ---- signed-validator parity --------------------------------
 
     #[test]
     fn signed_validate_falls_back_to_alt_claim_when_primary_absent() {
@@ -1552,7 +1551,7 @@ mod tests {
         );
     }
 
-    // ---- Slice 49i: cache expiry + signal-on-verify-failure ----------------
+    // ---- cache expiry + signal-on-verify-failure ----------------
 
     /// Build a signed validator whose paired `JwksHandle` carries explicit
     /// `last_successful_fetch_ms` and a fresh signal channel. Returns the
@@ -1821,7 +1820,7 @@ mod introspection_tests {
         ));
     }
 
-    // ---- Slice 49g: IntrospectionValidator custom_claim_check -------------
+    // ---- IntrospectionValidator custom_claim_check -------------
 
     #[tokio::test]
     async fn introspection_validate_rejects_when_custom_claim_check_fails() {
@@ -2021,7 +2020,7 @@ mod introspection_tests {
         assert_eq!(outcome.expires_at_ms, Some(exp_secs * 1000));
     }
 
-    // ---- Slice 49h: introspection parity -----------------------------------
+    // ---- introspection parity -----------------------------------
 
     #[tokio::test]
     async fn introspection_validate_extracts_groups_from_introspection_response() {

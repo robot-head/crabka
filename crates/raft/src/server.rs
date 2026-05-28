@@ -331,7 +331,7 @@ async fn dispatch(api_key: i16, body: &[u8], raft: &Raft) -> Result<Bytes, RaftE
 /// follower has wrapped the bincode-encoded `Vec<MetadataRecord>` in a
 /// `CrabkaSubmitChangeRequest`; we hand the records to the local raft
 /// (which is presumably the leader) via `client_write`, then translate
-/// the openraft response into the slice-7 `error_code` enum:
+/// the openraft response into the `error_code` enum:
 ///
 /// - `0`: applied cleanly (no per-record rejections).
 /// - `1`: not leader (the response carries `leader_hint` so the

@@ -72,7 +72,7 @@ impl Jwks {
     /// about). A document that is not valid JSON or lacks a `keys` array is an
     /// error.
     ///
-    /// Slice 49i: when `ignore_key_use` is `false` (the default), keys with
+    /// When `ignore_key_use` is `false` (the default), keys with
     /// `use=enc` are filtered out (encryption-only keys are unsuitable for
     /// signature verification). When `true`, all keys are kept regardless of
     /// `use`. Strimzi exposes the same toggle; some identity providers serve
@@ -166,7 +166,7 @@ impl Jwks {
 /// Parse a single JWK object into a `(kid, key)` pair, or `None` for an
 /// unsupported / malformed key (skipped, not fatal). `use` is honored when
 /// present: a key explicitly marked for encryption (`use: "enc"`) is skipped
-/// unless `ignore_key_use` is true (slice 49i).
+/// unless `ignore_key_use` is true.
 fn parse_one_jwk(jwk: &Value, ignore_key_use: bool) -> Option<(String, JwkKey)> {
     if !ignore_key_use && jwk.get("use").and_then(Value::as_str) == Some("enc") {
         return None;
@@ -219,12 +219,12 @@ fn left_pad_32(bytes: &[u8]) -> Option<[u8; 32]> {
 
 /// A cheaply-clonable, atomically-swappable holder for the live [`Jwks`].
 ///
-/// Mirrors slice 33's `DynamicServerConfig`: the broker's background JWKS
+/// Mirrors `DynamicServerConfig`: the broker's background JWKS
 /// refresher [`store`](JwksHandle::store)s a freshly-fetched key set while
 /// validators [`load`](JwksHandle::load) the current one with no lock. Cloning
 /// a handle shares the same underlying cell.
 ///
-/// Slice 49i: handles paired with a refresher additionally carry a shared
+/// Handles paired with a refresher additionally carry a shared
 /// `last_successful_fetch_ms` counter (for hard cache-expiry checks in the
 /// signed validator) and a `signal_tx` mpsc sender (for fire-and-forget
 /// on-demand refresh requests when validators encounter unknown-kid /
@@ -233,11 +233,11 @@ fn left_pad_32(bytes: &[u8]) -> Option<[u8; 32]> {
 #[derive(Debug, Clone)]
 pub struct JwksHandle {
     keys: Arc<ArcSwap<Jwks>>,
-    /// Slice 49i: epoch ms of last successful refresh. Validators
+    /// Epoch ms of last successful refresh. Validators
     /// check this against `expiry_ms` to fail closed on stale cache.
     /// `0` sentinel = never successfully fetched (initial state).
     last_successful_fetch_ms: Arc<std::sync::atomic::AtomicI64>,
-    /// Slice 49i: fire-and-forget signal sender to the refresher.
+    /// Fire-and-forget signal sender to the refresher.
     /// Validator calls `signal_refresh()` on verify failure (unknown
     /// kid or bad signature). `None` when the validator isn't paired
     /// with a refresher (e.g., default-constructed `JwksHandle` in
@@ -259,7 +259,7 @@ impl JwksHandle {
         }
     }
 
-    /// Slice 49i: wrap an initial key set WITH the shared timestamp counter
+    /// Wrap an initial key set WITH the shared timestamp counter
     /// and signal sender pre-wired. The refresher constructs its own
     /// `(signal_tx, signal_rx)` pair and passes `signal_tx` here; the
     /// refresher holds `signal_rx` and a clone of the shared
@@ -290,7 +290,7 @@ impl JwksHandle {
         self.keys.load_full()
     }
 
-    /// Slice 49i: epoch-ms timestamp of last successful JWKS fetch. `0` if no
+    /// Epoch-ms timestamp of last successful JWKS fetch. `0` if no
     /// fetch has succeeded yet (initial state). Validators compare against
     /// `now_ms - expiry_ms` to enforce hard cache expiry.
     #[must_use]
@@ -299,7 +299,7 @@ impl JwksHandle {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Slice 49i: fire-and-forget signal to the refresher that an on-demand
+    /// Fire-and-forget signal to the refresher that an on-demand
     /// refresh is requested (e.g., unknown-kid token). Non-blocking — drops
     /// silently if the channel is full (signals coalesce; one is enough).
     /// No-op when `signal_tx` is `None` (default-constructed handles).
@@ -599,7 +599,7 @@ mod tests {
         assert_eq!(h.load().len(), 1);
     }
 
-    // ---- Slice 49i: ignore_key_use filter + handle helpers ------------------
+    // ---- ignore_key_use filter + handle helpers ------------------
 
     #[test]
     fn parse_jwks_filters_use_enc_by_default() {

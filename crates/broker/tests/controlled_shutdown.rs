@@ -2,7 +2,7 @@
 // elect_leaders.rs / acl_handlers.rs preamble).
 #![allow(clippy::pedantic)]
 
-//! Slice 22 — `BrokerHandle::controlled_shutdown` integration test.
+//! `BrokerHandle::controlled_shutdown` integration test.
 //!
 //! A 3-broker PLAINTEXT cluster, rf=3 topic on which broker 1 is the
 //! preferred leader of every partition. `controlled_shutdown(broker 1)`

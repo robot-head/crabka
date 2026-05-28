@@ -4,7 +4,7 @@
 //! 1. **Materializes the local on-disk partition** for any
 //!    `(topic, partition)` where this broker is in `replicas`,
 //!    regardless of leader/follower role. The `CreateTopics` handler
-//!    used to do this itself, but with slice-8 round-robin placement
+//!    used to do this itself, but with round-robin replica placement
 //!    the broker that handles the request usually isn't the partition
 //!    leader — so the lazy supervisor-driven path is the only one
 //!    that materializes the partition on the leader broker reliably.
@@ -175,7 +175,7 @@ pub(crate) struct ReplicatorSupervisor {
     /// partition writer's storage-failure path can flip the dir
     /// offline broker-wide.
     log_dir_status: crate::log_dir_status::LogDirRegistry,
-    /// Slice 48k: broker-wide metrics handle. Each spawned replicator
+    /// Broker-wide metrics handle. Each spawned replicator
     /// clones this so it can increment `replication_bytes_in` after a
     /// successful follower-side append.
     metrics: crate::metrics::BrokerMetrics,
@@ -246,7 +246,7 @@ impl ReplicatorSupervisor {
             else {
                 continue;
             };
-            // Slice-10b: always sync the partition's cached leader + epoch.
+            // Always sync the partition's cached leader + epoch.
             // `Partition::install_leader_change` is idempotent (atomic stores
             // no-op on equal writes).
             part.install_leader_change(part_record.leader, part_record.leader_epoch)
@@ -331,8 +331,8 @@ impl ReplicatorSupervisor {
             // Prefer the inter-broker listener's endpoint when the leader
             // has projected it onto its registration record. Fall back to
             // the legacy top-level host/port for brokers that haven't
-            // refreshed onto slice-12 yet (or PLAINTEXT-only deployments
-            // where the synthesized endpoint matches anyway).
+            // projected a per-listener endpoint yet (or PLAINTEXT-only
+            // deployments where the synthesized endpoint matches anyway).
             let (leader_host, leader_port) = broker
                 .endpoints
                 .iter()

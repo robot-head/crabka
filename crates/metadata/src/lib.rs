@@ -17,6 +17,7 @@ pub mod acl;
 mod error;
 mod image;
 mod records;
+pub mod voters;
 
 pub use acl::{AclEntry, AclEntryFilter, AclOperation, PatternType, PermissionType, ResourceType};
 pub use error::MetadataError;
@@ -24,6 +25,8 @@ pub use image::{DelegationToken, EntityKey, MetadataImage, ThrottleKind, canonic
 pub use records::{
     BrokerConfigRecord, BrokerEndpoint, BrokerRegistrationRecord, ClientQuotaRecord,
     DelegationTokenRecord, DeleteDelegationTokenRecord, DeleteScramCredentialRecord,
-    DeleteTopicRecord, FeatureLevelRecord, MetadataRecord, NodeId, PartitionRecord, QuotaEntity,
-    ScramCredentialRecord, TopicConfigRecord, TopicRecord, UnregisterBrokerRecord,
+    DeleteTopicRecord, FeatureLevelRecord, KRaftVersionRecord, MetadataRecord, NodeId,
+    PartitionRecord, QuotaEntity, ScramCredentialRecord, TopicConfigRecord, TopicRecord,
+    UnregisterBrokerRecord, VotersRecord,
 };
+pub use voters::{KRaftVersionRange, Voter, VoterEndpoint, VoterSet};

@@ -28,15 +28,17 @@ use crate::types::NodeId;
 ///    it during `Raft::new`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BootstrapMode {
-    /// Cold-boot the first voter of a fresh cluster. `Controller::start`
-    /// calls `raft.initialize({(self.node_id, self.controller_listen_addr)})`,
-    /// producing a singleton-voter cluster that elects this broker as
-    /// leader on its first timeout.
+    /// Cold-boot the first voter of a fresh cluster. This node holds the
+    /// initial `VotersRecord`; `Controller::start` calls `raft.initialize`
+    /// with [`ControllerConfig::initial_voters`], producing the seed
+    /// membership that elects this broker as leader on its first timeout.
     Bootstrap,
 
-    /// Cold-boot a subsequent voter. `Controller::start` skips `initialize`
-    /// and the raft engine sits in Learner state waiting for the bootstrap
-    /// broker to add it via `add_learner` + `change_membership`.
+    /// Cold-boot a subsequent voter with an empty start. `Controller::start`
+    /// skips `initialize`; the engine sits in Learner state and discovers
+    /// the leader via [`ControllerConfig::bootstrap_servers`], then
+    /// auto-joins (issuing `AddVoter` for itself once caught up) when
+    /// [`ControllerConfig::auto_join`] is set.
     Join,
 
     /// Restart a previously-formatted broker. The on-disk raft log encodes
@@ -48,7 +50,16 @@ pub enum BootstrapMode {
 #[derive(Clone)]
 pub struct ControllerConfig {
     pub node_id: NodeId,
-    pub voters: Vec<(NodeId, SocketAddr)>,
+    /// Endpoints used only to discover the leader at cold start (KIP-853 dynamic).
+    pub bootstrap_servers: Vec<SocketAddr>,
+    /// This replica's stable directory id (generated at format time).
+    pub directory_id: Uuid,
+    /// Issue `AddVoter` for self once caught up as an observer.
+    pub auto_join: bool,
+    /// Max allowed lag (in log entries) for an observer to be promotable.
+    pub observer_lag_bound: u64,
+    /// Initial voter set for the bootstrapping node only; empty for joiners.
+    pub initial_voters: crabka_metadata::VoterSet,
     pub controller_listen_addr: SocketAddr,
     pub log_dir: PathBuf,
     pub election_timeout: Duration,
@@ -76,7 +87,11 @@ impl std::fmt::Debug for ControllerConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ControllerConfig")
             .field("node_id", &self.node_id)
-            .field("voters", &self.voters)
+            .field("bootstrap_servers", &self.bootstrap_servers)
+            .field("directory_id", &self.directory_id)
+            .field("auto_join", &self.auto_join)
+            .field("observer_lag_bound", &self.observer_lag_bound)
+            .field("initial_voters", &self.initial_voters)
             .field("controller_listen_addr", &self.controller_listen_addr)
             .field("log_dir", &self.log_dir)
             .field("election_timeout", &self.election_timeout)
@@ -93,10 +108,25 @@ impl std::fmt::Debug for ControllerConfig {
 impl ControllerConfig {
     #[must_use]
     pub fn for_tests(node_id: NodeId, log_dir: PathBuf) -> Self {
+        let listen: SocketAddr = "127.0.0.1:0".parse().expect("static");
+        let directory_id = Uuid::from_u128(u128::from(node_id));
         Self {
             node_id,
-            voters: vec![(node_id, "127.0.0.1:0".parse().expect("static"))],
-            controller_listen_addr: "127.0.0.1:0".parse().expect("static"),
+            bootstrap_servers: vec![],
+            directory_id,
+            auto_join: false,
+            observer_lag_bound: 1000,
+            initial_voters: crabka_metadata::VoterSet::from_voters([crabka_metadata::Voter {
+                id: node_id,
+                directory_id,
+                endpoints: vec![crabka_metadata::VoterEndpoint {
+                    name: "CONTROLLER".into(),
+                    host: listen.ip().to_string(),
+                    port: listen.port(),
+                }],
+                kraft_version: crabka_metadata::KRaftVersionRange::default(),
+            }]),
+            controller_listen_addr: listen,
             log_dir,
             election_timeout: Duration::from_secs(1),
             heartbeat_interval: Duration::from_millis(200),

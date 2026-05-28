@@ -102,7 +102,7 @@ pub const UNRELEASED_INSTANCE_ID: i16 = 114;
 /// subscription identifier was not found by the coordinator.
 pub const UNKNOWN_SUBSCRIPTION_ID: i16 = 117;
 
-// Slice 11 additions — admin handler codes.
+// Admin handler codes.
 /// `INVALID_CONFIG` (40) — a config key/value pair is invalid or unknown.
 pub const INVALID_CONFIG: i16 = 40;
 /// `NON_EMPTY_GROUP` (68) — group still has live members; cannot be deleted.
@@ -118,7 +118,7 @@ pub const GROUP_SUBSCRIBED_TO_TOPIC: i16 = 86;
 /// types; `INVALID_REQUEST` is the correct response.
 pub const INVALID_RESOURCE_TYPE: i16 = INVALID_REQUEST;
 
-// Slice 12 additions — `AlterUserScramCredentials` (KIP-554) result codes.
+// `AlterUserScramCredentials` (KIP-554) result codes.
 /// `CLUSTER_AUTHORIZATION_FAILED` (31) — principal lacks cluster-level
 /// authorization. Used as a stand-in for ACL by the
 /// `AlterUserScramCredentials` handler when the request principal is not the
@@ -135,8 +135,8 @@ pub const RESOURCE_NOT_FOUND_USER: i16 = 83;
 /// `UNACCEPTABLE_CREDENTIAL` (78) — per-user error when an upsertion carries
 /// invalid SCRAM parameters (iterations < 4096, empty salt, `salted_password`
 /// of the wrong length, or an unknown mechanism). Canonical Apache Kafka
-/// assigns code 78 to this error; the slice-12 plan/spec listed 74, but that
-/// value is already taken by `FENCED_LEADER_EPOCH` — `78` is correct.
+/// assigns code 78 to this error; note that code 74 is already taken by
+/// `FENCED_LEADER_EPOCH` — `78` is correct.
 pub const UNACCEPTABLE_CREDENTIAL: i16 = 78;
 /// `DUPLICATE_RESOURCE` (84) — per-user error when the same
 /// `(user, mechanism)` appears twice in one `AlterUserScramCredentials`
@@ -153,7 +153,7 @@ pub const INVALID_UPDATE_VERSION: i16 = 95;
 /// or timed out).
 pub const FEATURE_UPDATE_FAILED: i16 = 96;
 
-// Slice 13 additions — ACL authorization codes.
+// ACL authorization codes.
 /// `TOPIC_AUTHORIZATION_FAILED` (29) — principal lacks permission on the topic.
 pub const TOPIC_AUTHORIZATION_FAILED: i16 = 29;
 /// `GROUP_AUTHORIZATION_FAILED` (30) — principal lacks permission on the group.
@@ -163,7 +163,7 @@ pub const GROUP_AUTHORIZATION_FAILED: i16 = 30;
 /// request (e.g. when a prior resource already failed with an auth error).
 pub const OPERATION_NOT_ATTEMPTED: i16 = 55;
 
-// Slice 10a additions — bulletproof EOS / acks=all codes.
+// Bulletproof EOS / acks=all codes.
 /// Per-partition error returned by `acks=all` Produce when the request
 /// completes without enough in-sync replicas confirming the write. The
 /// record is durably on the leader's log; the producer should retry.
@@ -184,12 +184,12 @@ pub const FENCED_LEADER_EPOCH: i16 = 74;
 /// view. Metadata propagation lag — caller retries after a brief wait.
 pub const UNKNOWN_LEADER_EPOCH: i16 = 75;
 
-// Slice 14 additions — leader election codes.
+// Leader election codes.
 pub const PREFERRED_LEADER_NOT_AVAILABLE: i16 = 80;
 pub const ELIGIBLE_LEADERS_NOT_AVAILABLE: i16 = 81;
 pub const ELECTION_NOT_NEEDED: i16 = 84;
 
-// Slice 15 additions — partition reassignment codes (KIP-455).
+// Partition reassignment codes (KIP-455).
 pub const INVALID_REPLICA_ASSIGNMENT: i16 = 39;
 pub const NO_REASSIGNMENT_IN_PROGRESS: i16 = 85;
 
@@ -204,10 +204,10 @@ pub const FETCH_SESSION_ID_NOT_FOUND: i16 = 70;
 /// nor `-1` (sessionless full fetch).
 pub const INVALID_FETCH_SESSION_EPOCH: i16 = 71;
 
-// Slice 51 additions — KIP-48 delegation-token codes. Numbers from
-// org.apache.kafka.common.protocol.Errors. Note the existing slice 14
-// ELIGIBLE_LEADERS_NOT_AVAILABLE = 81 is incorrect (Kafka says 83) but
-// pre-dates this slice; flagged for a separate fix.
+// KIP-48 delegation-token codes. Numbers from
+// org.apache.kafka.common.protocol.Errors. Note the existing
+// ELIGIBLE_LEADERS_NOT_AVAILABLE = 81 is incorrect (Kafka says 83);
+// flagged for a separate fix.
 pub const DELEGATION_TOKEN_AUTH_DISABLED: i16 = 61;
 pub const DELEGATION_TOKEN_NOT_FOUND: i16 = 62;
 pub const DELEGATION_TOKEN_OWNER_MISMATCH: i16 = 63;

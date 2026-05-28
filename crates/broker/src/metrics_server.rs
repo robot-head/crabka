@@ -1,4 +1,4 @@
-//! Prometheus `/metrics` HTTP server (slice 39). Mirrors the operator
+//! Prometheus `/metrics` HTTP server. Mirrors the operator
 //! crate's `health` pattern: a small axum app exposing one route.
 //! Returns `OpenMetrics` text on success; 500 on encoder failure.
 //!

@@ -1,6 +1,6 @@
-//! Slice 30: integration tests for CA + broker-keystore reconciliation.
+//! Integration tests for CA + broker-keystore reconciliation.
 //!
-//! Test list (Task 10):
+//! Test list:
 //!   1. `default_flow_creates_cluster_ca_clients_ca_and_broker_keystore`
 //!   2. `broker_leaf_certs_chain_to_cluster_ca`
 //!   3. `scale_up_adds_entries_does_not_reissue_existing`
@@ -554,8 +554,8 @@ async fn byo_mode_without_pre_existing_secrets_errors_gracefully() {
             path_substr: format!("/namespaces/{ns}/secrets"),
             response: json_response(201, &fake_secret_body_cluster_id(&secret_name, ns)),
         },
-        // 3b. Slice 34: pools are listed before the CA reconcile (rollout
-        // convergence check), so the BYO-missing early-out now sees a pool LIST.
+        // 3b. Pools are listed before the CA reconcile (rollout
+        // convergence check), so the BYO-missing early-out sees a pool LIST.
         MockRule {
             method: Method::GET,
             path_substr: format!("/namespaces/{ns}/kafkanodepools"),

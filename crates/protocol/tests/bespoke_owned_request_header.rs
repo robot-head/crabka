@@ -1,6 +1,6 @@
 // Bespoke tests for the owned RequestHeader wrapper that go beyond the standard
 // min/max-version roundtrip. Relocated here from the hand-written wrapper as
-// part of making wrappers uniformly generated (sub-plan 1d, Task 1).
+// part of making wrappers uniformly generated.
 
 use bytes::BytesMut;
 use crabka_protocol::owned::request_header::{MAX_VERSION, MIN_VERSION, RequestHeader};

@@ -258,7 +258,7 @@ impl Partition {
 
     /// Truncate the log to `offset`, dropping all records at offsets
     /// `>= offset`. Used by the replicator's `OFFSET_OUT_OF_RANGE`
-    /// recovery path; on slice 8 we always call this with `offset == 0`
+    /// recovery path; currently always called with `offset == 0`
     /// (truncate everything).
     pub async fn truncate_to(&self, offset: i64) -> Result<(), BrokerError> {
         let (ack_tx, ack_rx) = oneshot::channel();

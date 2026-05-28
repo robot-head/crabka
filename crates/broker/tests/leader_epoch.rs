@@ -1,7 +1,7 @@
-//! In-process integration tests for slice-10b KIP-101 leader-epoch
+//! In-process integration tests for KIP-101 leader-epoch
 //! fencing + .leader-epoch-checkpoint byte format.
 //!
-//! Windows-gated like other slice-7/8/9/10 multi-broker tests.
+//! Windows-gated like the other multi-broker tests.
 
 #![cfg(not(target_os = "windows"))]
 #![allow(clippy::cast_possible_truncation, clippy::default_trait_access)]

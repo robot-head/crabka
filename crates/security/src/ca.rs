@@ -1,6 +1,6 @@
 //! Pure X.509 CA + leaf-cert generation for the operator's
-//! clients-CA bootstrap (slice 37). Reusable by inter-broker mTLS
-//! (slice 30) and cert hot-reload tests (slice 33).
+//! clients-CA bootstrap. Reusable by inter-broker mTLS
+//! and cert hot-reload tests.
 //!
 //! No async, no I/O — these helpers return PEM-encoded material
 //! that callers persist to Kubernetes Secrets, files, or anywhere

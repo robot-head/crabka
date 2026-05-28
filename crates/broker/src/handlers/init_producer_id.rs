@@ -1,10 +1,10 @@
 //! `InitProducerId` (`api_key=22`). Hands out `(producer_id, producer_epoch)`
 //! to a producer, or initialises / re-initialises a transactional producer.
 //!
-//! Non-transactional path: slice-6 idempotent-producer support.
-//! Transactional path:     slice-9 coordinator routing (Task 12).
+//! Non-transactional path: idempotent-producer support.
+//! Transactional path:     coordinator routing.
 //!
-//! ## slice-13 ACL preamble
+//! ## ACL preamble
 //!
 //! Two distinct authorize gates branch off `req.transactional_id`:
 //!
@@ -50,7 +50,7 @@ pub(crate) async fn handle(
     let mut cur: &[u8] = req_bytes;
     let req = InitProducerIdRequest::decode(&mut cur, version)?;
 
-    // ── slice-13 ACL preamble ────────────────────────────────────────
+    // ── ACL preamble ────────────────────────────────────────
     // Branch on whether this is an idempotent-only or transactional
     // request and gate on the appropriate resource/operation.
     {
@@ -86,7 +86,7 @@ pub(crate) async fn handle(
 
     let resp = match req.transactional_id.as_deref() {
         None | Some("") => {
-            // Non-transactional path (slice-6 idempotence).
+            // Non-transactional path (idempotence).
             let (pid, epoch) = producer_ids.allocate();
             InitProducerIdResponse {
                 throttle_time_ms: 0,

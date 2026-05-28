@@ -1,9 +1,9 @@
-//! Slice 53: ACL-based authorizer (slice-13 logic, behind the
-//! [`Authorizer`] trait). Super-user bypass + deny-wins-over-allow +
-//! LITERAL/PREFIXED matching + principal/host/operation wildcards.
+//! ACL-based authorizer behind the [`Authorizer`] trait. Super-user
+//! bypass + deny-wins-over-allow + LITERAL/PREFIXED matching +
+//! principal/host/operation wildcards.
 //!
-//! The slice-13 "empty super-users AND no ACLs ⇒ Allow" compat shim is
-//! DELETED — that case now lives in [`super::AllowAllAuthorizer`].
+//! There is no "empty super-users AND no ACLs ⇒ Allow" compat shim —
+//! that case lives in [`super::AllowAllAuthorizer`].
 //! [`SimpleAclAuthorizer`] with an empty image + empty super-users
 //! denies everything (default-deny), which matches Kafka's
 //! `StandardAuthorizer` once an authorizer is explicitly configured.
@@ -177,10 +177,10 @@ mod tests {
 
     #[test]
     fn empty_image_with_no_super_users_defaults_to_deny() {
-        // Slice 53: the slice-13 compat shim that returned Allow in this
-        // case is gone — `SimpleAclAuthorizer` is now default-deny when
-        // nothing matches. Operators who want "allow everything" should
-        // configure `AllowAllAuthorizer` explicitly.
+        // There is no compat shim that returns Allow in this case —
+        // `SimpleAclAuthorizer` is default-deny when nothing matches.
+        // Operators who want "allow everything" should configure
+        // `AllowAllAuthorizer` explicitly.
         let img = img();
         let a = alice();
         let h = addr();
@@ -407,8 +407,8 @@ mod tests {
         let map = authorize_topics(&auth, &img, &a, &h, AclOperation::Read, ["t1", "t2", "t3"]);
         assert_eq!(map.get("t1").copied(), Some(AuthorizationResult::Allow));
         assert_eq!(map.get("t2").copied(), Some(AuthorizationResult::Deny));
-        // t3: no matching ACL → Deny by default (slice-53 default-deny;
-        // the slice-13 shim that allowed in this case is gone).
+        // t3: no matching ACL → Deny by default (default-deny; there is
+        // no shim that allows in this case).
         assert_eq!(map.get("t3").copied(), Some(AuthorizationResult::Deny));
     }
 
@@ -689,7 +689,7 @@ mod tests {
             AuthorizationResult::Allow,
         );
         // alice is not a super-user and the image has no matching ACL,
-        // so default-deny applies (slice-53: no more compat shim).
+        // so default-deny applies (no compat shim).
         assert_eq!(
             auth.authorize(&img, &req(&alice, &h, "foo", AclOperation::Write)),
             AuthorizationResult::Deny,

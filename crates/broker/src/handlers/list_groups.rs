@@ -1,7 +1,7 @@
 //! `ListGroups` (`api_key=16`). Returns every known group from
 //! `GroupManager::list_groups`. The optional `states_filter` (v4+) is
-//! honored; the optional `types_filter` (v5+) is ignored — this slice
-//! has no group types beyond "consumer".
+//! honored; the optional `types_filter` (v5+) is ignored — there
+//! are no group types beyond "consumer".
 
 use bytes::{Bytes, BytesMut};
 
@@ -35,7 +35,7 @@ pub(crate) async fn handle(
 
     let mut groups: Vec<ListedGroup> = Vec::with_capacity(snapshots.len());
     for s in snapshots {
-        // ── slice-13 ACL preamble ────────────────────────────────────
+        // ── ACL preamble ────────────────────────────────────
         // Per-group `Describe` check. On Deny the group is silently
         // omitted from the response (no per-group error_code). With the
         // default `AllowAllAuthorizer` every group passes; with

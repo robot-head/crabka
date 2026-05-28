@@ -10,7 +10,7 @@
 #![allow(clippy::unnecessary_unwrap)]
 #![allow(clippy::type_complexity)]
 
-//! Slice 17b. Broker-level integration test for (user, client-id) tuple quota
+//! Broker-level integration test for (user, client-id) tuple quota
 //! end-to-end enforcement.
 //!
 //! Tests:
@@ -19,9 +19,9 @@
 //!    as (alice, app-x) → `throttle_time_ms > 0`; produce ~4 KB as
 //!    (alice, other) → `throttle_time_ms == 0` (no quota match).
 //!
-//! This test covers the end-to-end fix from T3 (slice-17b): the Produce
+//! This test covers the end-to-end fix: the Produce
 //! handler must forward `ctx.client_id` to the quota lookup rather than "".
-//! Before T3 the tuple lookup always received client_id="" → no tuple match →
+//! Otherwise the tuple lookup always received client_id="" → no tuple match →
 //! throttle_time_ms == 0 for both cases.
 //!
 //! Gated to non-Windows to match the multi-broker test convention from
@@ -486,8 +486,8 @@ async fn drive_produce_sasl_with_client_id(
 /// The second assertion verifies that the tuple quota does NOT fire on an
 /// unmatched client_id, i.e., there is no `(user=alice)` fallback quota set.
 ///
-/// This test covers the end-to-end fix in T3 (slice-17b): the Produce handler
-/// must pass `ctx.client_id` to the quota lookup. Before T3 the handler always
+/// This test covers the end-to-end fix: the Produce handler
+/// must pass `ctx.client_id` to the quota lookup. Otherwise the handler always
 /// passed `""` → no tuple quota ever matched → both produces would return
 /// `throttle_time_ms == 0`.
 ///

@@ -5,7 +5,7 @@
 //! Cluster formation is driven by `BootstrapMode`: one broker boots as
 //! the singleton voter (`Bootstrap`), remaining fresh brokers skip
 //! `initialize` (`Join`), and restarted brokers replay their on-disk log
-//! (`Rejoin`). Snapshot replay is deferred to a later slice.
+//! (`Rejoin`). Snapshot replay is not implemented.
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -44,6 +44,11 @@ pub struct QuorumState {
     pub current_leader: Option<NodeId>,
     /// Voter ids in the current membership config.
     pub voters: Vec<NodeId>,
+    /// Full voter node identities (directory id + endpoints + kraft.version)
+    /// in the current membership config, keyed by node id. Mirrors `voters`
+    /// but carries the KIP-853 voter metadata the `DescribeQuorum` /
+    /// dynamic-reconfiguration paths need.
+    pub voter_nodes: BTreeMap<NodeId, Node>,
     /// Per-voter `matched` log index from openraft's `replication` map.
     /// Populated ONLY on the leader — openraft only knows peers'
     /// progress when this node is acknowledging their `AppendEntries`
@@ -65,21 +70,31 @@ pub struct ControllerHandle {
     shutdown: CancellationToken,
     listener_task: Mutex<Option<JoinHandle<()>>>,
     leader_pump_task: Mutex<Option<JoinHandle<()>>>,
-    /// Static voter map cloned from `ControllerConfig::voters`. Used by
-    /// `submit_change` to forward writes to the current leader when the
-    /// local node is a follower — the local openraft instance returns
-    /// `ForwardToLeader` and we dial the leader's controller listener
-    /// directly via the slice-7 `API_KEY_SUBMIT_CHANGE` RPC.
-    voters: Vec<(NodeId, SocketAddr)>,
     client_id: String,
+    /// This node's own raft id. Used by [`ReconfigOps::is_leader`] to compare
+    /// against the leader reported by `quorum_state`.
+    self_node_id: NodeId,
+    /// Max allowed observer lag (in log entries) before an `AddVoter`
+    /// candidate may be promoted. Cloned from `ControllerConfig`.
+    observer_lag_bound: u64,
+    /// Serializes KIP-853 reconfigurations. A single in-flight add/remove/
+    /// update at a time so the membership change and the authoritative
+    /// `V1Voters` record stay in lockstep.
+    reconfig_lock: Mutex<()>,
     /// Outbound dialer cloned from the factory at construction time.
     /// `forward_submit_to` uses it to reach the leader's controller
     /// listener with the same TLS / SASL handshake that openraft's
-    /// `AppendEntries` / `Vote` RPCs ride on top of (slice 12). For the
-    /// legacy PLAINTEXT path the broker doesn't inject a dialer, and
+    /// `AppendEntries` / `Vote` RPCs ride on top of. For the PLAINTEXT
+    /// path the broker doesn't inject a dialer, and
     /// `Controller::start` substitutes `PlaintextDialer` — equivalent
     /// to a bare `Connection::connect`.
     dialer: Arc<dyn OutboundDialer>,
+    /// The address the controller listener actually bound to. When
+    /// `ControllerConfig::controller_listen_addr` uses port 0 (OS-assigned,
+    /// the norm in tests) this carries the resolved port. KIP-853 auto-join
+    /// advertises this in the `AddRaftVoter` request so the leader's
+    /// `add_learner` can dial the joiner back.
+    controller_bound_addr: SocketAddr,
 }
 
 impl ControllerHandle {
@@ -87,6 +102,15 @@ impl ControllerHandle {
     #[must_use]
     pub fn current_image(&self) -> Arc<MetadataImage> {
         self.state_machine.current_image()
+    }
+
+    /// The address the controller listener actually bound to (the
+    /// resolved port when `controller_listen_addr` requested port 0).
+    /// KIP-853 auto-join advertises this so the leader can dial the
+    /// joiner back to replicate the log.
+    #[must_use]
+    pub fn controller_bound_addr(&self) -> SocketAddr {
+        self.controller_bound_addr
     }
 
     /// Subscribe to leader-id changes. The receiver's initial value is
@@ -113,7 +137,17 @@ impl ControllerHandle {
     #[must_use]
     pub fn quorum_state(&self) -> QuorumState {
         let m = self.raft.metrics().borrow().clone();
-        let voters: Vec<NodeId> = m.membership_config.membership().voter_ids().collect();
+        let membership = m.membership_config.membership();
+        let voters: Vec<NodeId> = membership.voter_ids().collect();
+        // openraft's `nodes()` yields `(&NodeId, &Node)` for every member
+        // (voters + learners). Restrict to the voter ids so `voter_nodes`
+        // mirrors `voters`.
+        let voter_set: std::collections::BTreeSet<NodeId> = voters.iter().copied().collect();
+        let voter_nodes: BTreeMap<NodeId, Node> = membership
+            .nodes()
+            .filter(|(nid, _)| voter_set.contains(nid))
+            .map(|(nid, node)| (*nid, node.clone()))
+            .collect();
         // openraft populates `replication` only on the current leader;
         // on a follower the map is empty and per-voter `log_end_offset`
         // stays at the `Unknown` sentinel for each peer.
@@ -131,6 +165,7 @@ impl ControllerHandle {
             last_applied_index: m.last_applied.as_ref().map_or(0, |lid| lid.index),
             current_leader: m.current_leader,
             voters,
+            voter_nodes,
             per_voter_matched_index,
         }
     }
@@ -170,7 +205,7 @@ impl ControllerHandle {
                     // derive `serde`, so we carry the rendered string
                     // through `AppDataResponse` and reconstruct here.
                     // The "topic '<name>' already exists" prefix is the
-                    // only signal we need for slice 7's
+                    // only signal we need for the
                     // `TopicExists`-vs-`InvalidRecord` discrimination.
                     if let Some(msg) = resp.data.rejected.into_iter().next() {
                         let err = if let Some(rest) = msg.strip_prefix("topic '")
@@ -190,7 +225,7 @@ impl ControllerHandle {
                     last_known_leader = f.leader_id;
                     // If openraft tells us who the leader is and it isn't
                     // us, forward the change directly to the leader's
-                    // controller listener via the slice-7
+                    // controller listener via the
                     // `API_KEY_SUBMIT_CHANGE` RPC. Otherwise (transient
                     // `leader_id: None` during election) fall through to
                     // the retry loop.
@@ -250,14 +285,16 @@ impl ControllerHandle {
         }
     }
 
-    /// Register a non-voting raft learner at `addr` with id `node_id`. Blocks
-    /// until the leader has replicated up to its current commit index to the
-    /// new node (so a subsequent [`Self::change_membership`] promotion won't
-    /// stall waiting for catch-up). Pair with [`Self::change_membership`] to
-    /// turn a learner into a voter:
+    /// Register a non-voting raft learner with id `node_id` and the KIP-853
+    /// voter identity `node` (directory id + endpoints + kraft.version range).
+    /// Blocks until the leader has replicated up to its current commit index
+    /// to the new node (so a subsequent [`Self::change_membership`] promotion
+    /// won't stall waiting for catch-up). Pair with [`Self::change_membership`]
+    /// to turn a learner into a voter:
     ///
     /// ```ignore
-    /// controller.add_learner(4, "127.0.0.1:9094".parse().unwrap()).await?;
+    /// let node = Node { directory_id, endpoints, kraft_version };
+    /// controller.add_learner(4, node).await?;
     /// controller.change_membership([1, 2, 3, 4].into_iter().collect()).await?;
     /// ```
     ///
@@ -267,12 +304,9 @@ impl ControllerHandle {
     /// - `RaftError::ChangeRejected` if openraft rejects (e.g., the learner
     ///   never catches up within openraft's internal deadline).
     /// - `RaftError::Shutdown` if the raft engine has been shut down.
-    pub async fn add_learner(&self, node_id: NodeId, addr: SocketAddr) -> Result<(), RaftError> {
+    pub async fn add_learner(&self, node_id: NodeId, node: Node) -> Result<(), RaftError> {
         use openraft::error::ClientWriteError;
         use openraft::error::RaftError as ORE;
-        let node = openraft::BasicNode {
-            addr: addr.to_string(),
-        };
         match self.raft.add_learner(node_id, node, true).await {
             Ok(_) => Ok(()),
             Err(ORE::APIError(ClientWriteError::ForwardToLeader(f))) => Err(RaftError::NotLeader {
@@ -285,10 +319,67 @@ impl ControllerHandle {
         }
     }
 
+    /// Add a single voter (KIP-853 `AddVoter`). The candidate must already be
+    /// reachable as a learner; the coordinator registers it, waits for it to
+    /// catch up within `observer_lag_bound`, promotes it, and writes the
+    /// authoritative `V1Voters` record. Serialized against other
+    /// reconfigurations by the per-handle lock.
+    ///
+    /// # Errors
+    ///
+    /// Surfaces the coordinator's guard errors ([`RaftError::ReconfigInProgress`],
+    /// [`RaftError::VoterNotCaughtUp`]) and any underlying raft failure.
+    pub async fn add_voter(
+        &self,
+        req: crate::reconfig::AddVoter,
+    ) -> Result<crate::reconfig::ReconfigOutcome, RaftError> {
+        crate::reconfig::Coordinator::new(self, &self.reconfig_lock, self.observer_lag_bound)
+            .add_voter(req)
+            .await
+    }
+
+    /// Remove a single voter (KIP-853 `RemoveVoter`), refusing to drop the
+    /// last voter. Serialized against other reconfigurations.
+    ///
+    /// # Errors
+    ///
+    /// Surfaces the coordinator's guard errors ([`RaftError::ReconfigInProgress`],
+    /// [`RaftError::ReconfigRejected`]) and any underlying raft failure.
+    pub async fn remove_voter(
+        &self,
+        req: crate::reconfig::RemoveVoter,
+    ) -> Result<crate::reconfig::ReconfigOutcome, RaftError> {
+        crate::reconfig::Coordinator::new(self, &self.reconfig_lock, self.observer_lag_bound)
+            .remove_voter(req)
+            .await
+    }
+
+    /// Update a voter's endpoints / supported version range (KIP-853
+    /// `UpdateVoter`). Serialized against other reconfigurations.
+    ///
+    /// # Errors
+    ///
+    /// Surfaces the coordinator's guard errors ([`RaftError::ReconfigInProgress`],
+    /// [`RaftError::ReconfigRejected`]) and any underlying raft failure.
+    pub async fn update_voter(
+        &self,
+        req: crate::reconfig::UpdateVoter,
+    ) -> Result<crate::reconfig::ReconfigOutcome, RaftError> {
+        crate::reconfig::Coordinator::new(self, &self.reconfig_lock, self.observer_lag_bound)
+            .update_voter(req)
+            .await
+    }
+
+    /// Resolve a voter's controller listener address from openraft's current
+    /// membership config. KIP-853 voters carry their endpoints in the `Node`
+    /// payload, so the address is read directly from the replicated
+    /// membership rather than a static config-time list.
     fn voter_addr(&self, node_id: NodeId) -> Option<SocketAddr> {
-        self.voters
-            .iter()
-            .find_map(|(id, addr)| (*id == node_id).then_some(*addr))
+        let m = self.raft.metrics().borrow().clone();
+        m.membership_config
+            .membership()
+            .get_node(&node_id)
+            .and_then(Node::controller_addr)
     }
 
     /// Open a one-shot authenticated connection to the leader's
@@ -298,12 +389,12 @@ impl ControllerHandle {
     ///
     /// Routes through [`OutboundDialer::dial`] so the same TLS / SASL
     /// handshake openraft's `AppendEntries` / `Vote` RPCs ride on top
-    /// of (slice 12) applies here too. For the legacy PLAINTEXT path,
+    /// of applies here too. For the PLAINTEXT path,
     /// `Controller::start` substitutes `PlaintextDialer`, which is
     /// byte-equivalent to a bare `Connection::connect`.
     ///
-    /// A fresh connection per call mirrors the pre-slice-12b raw
-    /// `TcpStream::connect` behaviour — `submit_change` forwarding is
+    /// A fresh connection per call mirrors a raw
+    /// `TcpStream::connect` — `submit_change` forwarding is
     /// rare (only on follower-side writes) and reusing the openraft
     /// network factory's cache from here would complicate ownership for
     /// negligible gain.
@@ -356,8 +447,8 @@ impl ControllerHandle {
         let resp = crate::wire::CrabkaSubmitChangeResponse::decode_v0(&mut cur)?;
         match resp.error_code {
             0 => Ok(()),
-            // `error_code = 2` => leader rejected at apply-time. Slice 7
-            // collapses the typed `MetadataError` into a generic
+            // `error_code = 2` => leader rejected at apply-time. We
+            // collapse the typed `MetadataError` into a generic
             // `TopicExists` here since the wire only carries an error
             // code; the topic name is what the caller had in hand.
             2 => Err(RaftError::Metadata(
@@ -410,6 +501,69 @@ impl ControllerHandle {
     }
 }
 
+#[async_trait::async_trait]
+impl crate::reconfig::ReconfigOps for ControllerHandle {
+    fn current_voters(&self) -> crabka_metadata::VoterSet {
+        // Rebuild a `VoterSet` from the replicated membership's voter nodes.
+        let voters = self
+            .quorum_state()
+            .voter_nodes
+            .into_iter()
+            .map(|(id, node)| crabka_metadata::Voter {
+                id,
+                directory_id: node.directory_id,
+                endpoints: node.endpoints,
+                kraft_version: node.kraft_version,
+            });
+        crabka_metadata::VoterSet::from_voters(voters)
+    }
+
+    fn leader(&self) -> Option<NodeId> {
+        self.quorum_state().current_leader
+    }
+
+    fn is_leader(&self) -> bool {
+        self.quorum_state().current_leader == Some(self.self_node_id)
+    }
+
+    fn leader_last_index(&self) -> u64 {
+        // openraft's metrics don't expose a separate `last_log_index` we can
+        // read cheaply here; `last_applied_index` is the high-watermark this
+        // node has committed and is a safe (never-overshooting) basis for the
+        // observer-lag check.
+        self.quorum_state().last_applied_index
+    }
+
+    fn observer_index(&self, id: NodeId) -> Option<u64> {
+        // openraft only populates `replication` on the leader, and learners
+        // may be absent. Returning `None` is conservative — the lag check
+        // then treats the candidate as fully behind (lag == leader_last_index)
+        // and refuses promotion until catch-up is observed.
+        self.quorum_state()
+            .per_voter_matched_index
+            .get(&id)
+            .copied()
+    }
+
+    async fn add_learner(&self, id: NodeId, node: crate::Node) -> Result<(), RaftError> {
+        ControllerHandle::add_learner(self, id, node).await
+    }
+
+    async fn change_membership(
+        &self,
+        ids: std::collections::BTreeSet<NodeId>,
+    ) -> Result<(), RaftError> {
+        ControllerHandle::change_membership(self, ids).await
+    }
+
+    async fn submit_records(
+        &self,
+        records: Vec<crabka_metadata::MetadataRecord>,
+    ) -> Result<(), RaftError> {
+        ControllerHandle::submit_change(self, records).await
+    }
+}
+
 /// Zero-sized factory for [`ControllerHandle`]s. Kept as a unit struct
 /// (rather than a free function) so callers and rustdoc can hang
 /// trait-style documentation off a stable type name.
@@ -424,8 +578,26 @@ impl Controller {
     /// `Join` skips initialize and waits for an external `add_learner`;
     /// `Rejoin` skips initialize and relies on the on-disk raft log.
     /// Mismatches between mode and log state return `RaftError::Startup`.
-    #[allow(clippy::too_many_lines)]
     pub async fn start(config: ControllerConfig) -> Result<ControllerHandle, RaftError> {
+        Self::start_with_listener(config, None).await
+    }
+
+    /// Like [`Self::start`], but adopts a caller-supplied, already-bound
+    /// controller listener instead of binding `controller_listen_addr`
+    /// itself.
+    ///
+    /// Test harnesses use this to defeat the bind-and-drop TOCTOU race:
+    /// the test binds an ephemeral port, hands the live `TcpListener`
+    /// here (never dropping it), so no other process can claim the port
+    /// in the gap between probe and bind. The supplied listener's local
+    /// address MUST equal `config.controller_listen_addr` — the bootstrap
+    /// membership record and the voter map are built from the config
+    /// value, so a mismatch would advertise an unreachable dial address.
+    #[allow(clippy::too_many_lines)]
+    pub async fn start_with_listener(
+        config: ControllerConfig,
+        prebound: Option<tokio::net::TcpListener>,
+    ) -> Result<ControllerHandle, RaftError> {
         // 1. Log + state machine. The cluster UUID is injected from the
         //    operator (via `BrokerConfig::cluster_id`) so every broker in
         //    the same `KafkaCluster` reports a matching `MetadataImage`
@@ -451,13 +623,12 @@ impl Controller {
             ..Default::default()
         };
 
-        // 3. Network factory. Sees each peer addr through the voter map
-        //    surfaced to openraft via `Node` (the `addr` string lives in
-        //    `BasicNode`).
-        // Use the injected dialer if the broker provided one (slice-12
-        // inter-broker TLS / SASL), otherwise fall back to plain
-        // `TcpStream::connect`. This keeps every existing PLAINTEXT-only
-        // test path identical to slice 11.
+        // 3. Network factory. Resolves each peer addr from the KIP-853
+        //    voter `Node` surfaced by openraft membership (the CONTROLLER
+        //    endpoint via `Node::controller_addr`).
+        // Use the injected dialer if the broker provided one
+        // (inter-broker TLS / SASL), otherwise fall back to plain
+        // `TcpStream::connect` for the PLAINTEXT path.
         let dialer: Arc<dyn OutboundDialer> = config
             .dialer
             .clone()
@@ -486,13 +657,30 @@ impl Controller {
         let log_is_empty = log_store.last_log_id().await.is_none();
         match (config.bootstrap_mode, log_is_empty) {
             (BootstrapMode::Bootstrap, true) => {
-                // Singleton-voter init. We become leader on our first
-                // election timeout, no contention, no split-vote.
-                let self_node = openraft::BasicNode {
-                    addr: config.controller_listen_addr.to_string(),
-                };
-                let members: BTreeMap<NodeId, Node> =
-                    [(config.node_id, self_node)].into_iter().collect();
+                // Seed-membership init from the operator-supplied initial
+                // voter set (KIP-853 dynamic). The bootstrap node holds the
+                // initial `VotersRecord`; openraft replicates it as the first
+                // membership log entry. A single-voter seed self-elects on the
+                // first election timeout with no contention.
+                if config.initial_voters.is_empty() {
+                    return Err(RaftError::Startup(
+                        "Bootstrap mode requires a non-empty initial_voters set".into(),
+                    ));
+                }
+                let members: BTreeMap<NodeId, Node> = config
+                    .initial_voters
+                    .iter()
+                    .map(|v| {
+                        (
+                            v.id,
+                            Node {
+                                directory_id: v.directory_id,
+                                endpoints: v.endpoints.clone(),
+                                kraft_version: v.kraft_version,
+                            },
+                        )
+                    })
+                    .collect();
                 raft.initialize(members)
                     .await
                     .map_err(|e| RaftError::Openraft(format!("bootstrap initialize: {e:?}")))?;
@@ -521,11 +709,16 @@ impl Controller {
             }
         }
 
-        // 6. Controller listener. Bind first so we surface a clear error
-        //    if the port is taken, then hand it off to the accept loop.
-        let listener = tokio::net::TcpListener::bind(config.controller_listen_addr)
-            .await
-            .map_err(|e| RaftError::Storage(crabka_log::LogError::Io(e)))?;
+        // 6. Controller listener. Adopt the caller-supplied listener when
+        //    present (test harness handoff); otherwise bind here so we
+        //    surface a clear error if the port is taken, then hand it off
+        //    to the accept loop.
+        let listener = match prebound {
+            Some(l) => l,
+            None => tokio::net::TcpListener::bind(config.controller_listen_addr)
+                .await
+                .map_err(|e| RaftError::Storage(crabka_log::LogError::Io(e)))?,
+        };
         let actual_addr = listener
             .local_addr()
             .map_err(|e| RaftError::Storage(crabka_log::LogError::Io(e)))?;
@@ -572,9 +765,12 @@ impl Controller {
             shutdown,
             listener_task: Mutex::new(Some(listener_task)),
             leader_pump_task: Mutex::new(Some(leader_pump_task)),
-            voters: config.voters.clone(),
             client_id: config.client_id.clone(),
+            self_node_id: config.node_id,
+            observer_lag_bound: config.observer_lag_bound,
+            reconfig_lock: Mutex::new(()),
             dialer,
+            controller_bound_addr: actual_addr,
         })
     }
 }

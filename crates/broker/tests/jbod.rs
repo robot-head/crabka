@@ -3,7 +3,7 @@
 #![allow(clippy::pedantic)]
 #![cfg(not(target_os = "windows"))]
 
-//! Slice 45 — JBOD / multi-log-dir + DescribeLogDirs (KIP-113) end-to-end.
+//! JBOD / multi-log-dir + DescribeLogDirs (KIP-113) end-to-end.
 //!
 //! Boots a single broker with two log directories, creates a 6-partition
 //! topic, and asserts:

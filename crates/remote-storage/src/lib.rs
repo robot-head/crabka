@@ -24,10 +24,9 @@
 //!
 //! ## What this crate does NOT do (yet)
 //!
-//! This is slice 48a: the foundation only. There is **no broker wiring** —
+//! This crate is the foundation layer only. There is **no broker wiring** —
 //! no copy task, no remote read path on `Fetch`, no local-vs-remote
-//! retention split, and no broker/topic config. Those land in later
-//! tiered-storage sub-slices (48b+). See
+//! retention split, and no broker/topic config. See
 //! `docs/superpowers/specs/2026-05-25-crabka-tiered-storage-roadmap-design.md`.
 //!
 //! The SPIs are intentionally **synchronous** — they mirror Kafka's

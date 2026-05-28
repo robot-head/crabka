@@ -3,8 +3,8 @@
 //! pushed to it.
 //!
 //! Crabka exposes its own broker-side observability via Prometheus
-//! (`crabka_broker_*` metrics on `/metrics`) and OTLP tracing (slice 42)
-//! — it has no use for ingesting client-side metrics. The minimal-viable
+//! (`crabka_broker_*` metrics on `/metrics`) and OTLP tracing
+//! — it has no use for ingesting client-side metrics. The
 //! KIP-714 handshake therefore tells every client "no metrics
 //! subscribed" via an empty `requested_metrics` array. Per KIP-714, the
 //! JVM client treats an empty subscription as "don't push" and skips

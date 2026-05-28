@@ -37,7 +37,7 @@ pub(crate) async fn handle(
     let mut cur: &[u8] = req_bytes;
     let req = OffsetCommitRequest::decode(&mut cur, version)?;
 
-    // ── slice-13 ACL preamble ────────────────────────────────────────────
+    // ── ACL preamble ────────────────────────────────────────────
     // Step 1: `Read` on `Group(group_id)`. On Deny → whole-response
     // `error_code = GROUP_AUTHORIZATION_FAILED (30)` (with per-topic/
     // per-partition rows reflecting the error too).
@@ -112,7 +112,7 @@ pub(crate) async fn handle(
         }
     }
 
-    // ── slice-13 ACL preamble ────────────────────────────────────────────
+    // ── ACL preamble ────────────────────────────────────────────
     // Step 2: `Read` on each `Topic(topic_name)`. On Deny → per-partition
     // `error_code = TOPIC_AUTHORIZATION_FAILED (29)` on the affected rows.
     let topic_decisions = {

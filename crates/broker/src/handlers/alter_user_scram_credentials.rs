@@ -14,10 +14,10 @@
 //!   (32 for SHA-256, 64 for SHA-512) else `UNACCEPTABLE_CREDENTIAL`.
 //! - Unknown mechanism wire value → `UNACCEPTABLE_CREDENTIAL`.
 //!
-//! Authorization (slice-13): `Alter` on `Cluster("kafka-cluster")`. On Deny,
+//! Authorization: `Alter` on `Cluster("kafka-cluster")`. On Deny,
 //! every per-user result is `CLUSTER_AUTHORIZATION_FAILED` (31). The
-//! authorizer's super-user bypass still handles slice-12 tests (they configure
-//! `super_users`, which short-circuits inside `authorize` → ALLOW).
+//! authorizer's super-user bypass short-circuits inside `authorize` → ALLOW
+//! when `super_users` is configured.
 //!
 //! Duplicate detection: the same `(user, mechanism)` appearing twice in one
 //! request (either two upsertions, two deletions, or one of each) gets
@@ -58,11 +58,11 @@ pub(crate) async fn handle(
     req: AlterUserScramCredentialsRequest,
     ctx: &crate::handlers::RequestContext<'_>,
 ) -> AlterUserScramCredentialsResponse {
-    // ── slice-13 ACL preamble ────────────────────────────────────────
+    // ── ACL preamble ────────────────────────────────────────
     // Whole-request Cluster Alter gate. On Deny, every per-user row
     // reports CLUSTER_AUTHORIZATION_FAILED. The authorizer's super-user
-    // bypass still handles slice-12 tests (they configure
-    // `super_users`, which short-circuits inside `authorize` → ALLOW).
+    // bypass short-circuits inside `authorize` → ALLOW when `super_users`
+    // is configured.
     let image = broker.controller.current_image();
     let authorized = broker.config.authorizer.authorize(
         &image,

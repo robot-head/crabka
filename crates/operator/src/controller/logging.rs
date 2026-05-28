@@ -1,4 +1,4 @@
-//! Slice 41: logging resolution — compose the broker's `RUST_LOG` env-filter
+//! Logging resolution — compose the broker's `RUST_LOG` env-filter
 //! from `Kafka.spec.logging`.
 //!
 //! `inline` loggers are composed by a pure, deterministic function
@@ -6,7 +6,7 @@
 //! user-managed `ConfigMap` at reconcile time. The resolved filter is
 //! rendered into the broker `ConfigMap` (`rust.log` key) by
 //! [`crate::controller::common::render_configmap`] and folded into the
-//! slice-21 config hash so a change rolls the cluster.
+//! config hash so a change rolls the cluster.
 
 use std::collections::BTreeMap;
 
@@ -191,7 +191,7 @@ pub async fn resolve_logging(
 }
 
 /// Map a [`LoggingOutcome`] to the cluster's `LoggingReady` condition.
-/// Mirrors the slice-40 `MetricsReady` shape: `Disabled` surfaces a
+/// Mirrors the `MetricsReady` shape: `Disabled` surfaces a
 /// `False`/`Disabled` condition rather than omitting it.
 #[must_use]
 pub fn condition_for(outcome: &LoggingOutcome) -> KafkaCondition {

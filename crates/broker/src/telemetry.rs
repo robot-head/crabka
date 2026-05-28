@@ -1,4 +1,4 @@
-//! Broker tracing + OTLP distributed-tracing pipeline (slice 42).
+//! Broker tracing + OTLP distributed-tracing pipeline.
 //!
 //! The broker always installs a `tracing_subscriber` `fmt` layer (stdout,
 //! gated by the usual `RUST_LOG` `EnvFilter`). When OTLP export is

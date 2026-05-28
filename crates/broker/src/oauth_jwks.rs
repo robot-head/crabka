@@ -1,5 +1,4 @@
-//! Background JWKS refresher for SASL/OAUTHBEARER signed-token validation
-//! (slice 49b).
+//! Background JWKS refresher for SASL/OAUTHBEARER signed-token validation.
 //!
 //! `crates/security` is I/O-free: it parses a JWKS *string* and verifies tokens
 //! against an in-memory key set held behind a [`JwksHandle`]. This module is the
@@ -31,7 +30,7 @@ pub(crate) enum FetchError {
 
 /// Fetch and parse a JWKS document from `endpoint` (HTTP or HTTPS). A 10s
 /// timeout caps a hung identity provider; non-2xx responses are errors.
-/// Slice 49i: `ignore_key_use` threads through to the JWKS parser — when
+/// `ignore_key_use` threads through to the JWKS parser — when
 /// false, `use=enc` keys are filtered out.
 pub(crate) async fn fetch_jwks(
     client: &reqwest::Client,
@@ -50,7 +49,7 @@ pub(crate) async fn fetch_jwks(
 
 /// Periodically refreshes a [`JwksHandle`] from a JWKS endpoint.
 ///
-/// Slice 49i: the loop additionally serves on-demand refresh requests
+/// The loop additionally serves on-demand refresh requests
 /// triggered by validators that encountered an unknown-kid or
 /// bad-signature token (received via [`signal_rx`](Self::signal_rx)).
 /// On-demand refreshes are rate-limited by
@@ -67,30 +66,30 @@ pub(crate) struct JwksRefresher {
     pub interval: Duration,
     /// Cancels the task on broker shutdown.
     pub shutdown: CancellationToken,
-    /// Slice 49c (semantic broadened in 49d): optional PEM path; when
+    /// Optional PEM path; when
     /// `Some`, the rustls `ClientConfig` used by reqwest is built from
     /// this file and replaces the default webpki-roots trust store. When
-    /// `None`, reqwest's webpki-roots default applies (slice 49b
-    /// behavior). The bundle is shared with the introspection client when
-    /// configured — operator slice 50b's `tlsTrustedCertificates` flows
+    /// `None`, reqwest's webpki-roots default applies. The bundle is
+    /// shared with the introspection client when
+    /// configured — the operator's `tlsTrustedCertificates` flows
     /// through `idp_tls_trust` and is used for JWKS, introspection, and
     /// userinfo HTTPS.
     pub tls_trust: Option<PathBuf>,
-    /// Slice 49i: receives signals from validators on verify-failure to
+    /// Receives signals from validators on verify-failure to
     /// trigger an on-demand refresh (subject to `min_on_demand_pause`).
     /// Capacity 1 + `try_send` on the producer side ⇒ signals coalesce.
     pub signal_rx: mpsc::Receiver<()>,
-    /// Slice 49i: minimum pause between on-demand refreshes. Strimzi
+    /// Minimum pause between on-demand refreshes. Strimzi
     /// default 1 second. Periodic refresh (`interval`) is unaffected.
     pub min_on_demand_pause: Duration,
-    /// Slice 49i: shared timestamp counter. Refresher updates after each
+    /// Shared timestamp counter. Refresher updates after each
     /// successful fetch; validators read for cache-expiry check. Shared
     /// (`Arc<AtomicI64>`) with the paired `JwksHandle`.
     pub last_successful_fetch_ms: Arc<AtomicI64>,
-    /// Slice 49i: tracks the last on-demand-refresh epoch ms for
+    /// Tracks the last on-demand-refresh epoch ms for
     /// rate-limiting. Independent of periodic refresh.
     pub last_on_demand_refresh_ms: Arc<AtomicI64>,
-    /// Slice 49i: when true, accept JWKS keys regardless of `use` field.
+    /// When true, accept JWKS keys regardless of `use` field.
     /// Default false (filter out `use=enc`). Threads to
     /// [`Jwks::from_json`].
     pub ignore_key_use: bool,
@@ -101,7 +100,7 @@ impl JwksRefresher {
     /// `tokio::interval` ticks at t=0), so keys are available shortly after
     /// startup; a failed fetch logs a warning and leaves the previous key set
     /// in place — a transient identity-provider outage never crashes the broker.
-    /// Slice 49i: on-demand refresh signals from validators race with the
+    /// On-demand refresh signals from validators race with the
     /// periodic tick in the same `select!`; the on-demand arm consults
     /// `last_on_demand_refresh_ms` against `min_on_demand_pause` and drops
     /// the signal silently when within the window.
@@ -140,7 +139,7 @@ impl JwksRefresher {
                 _ = tick.tick() => {
                     self.refresh_and_swap(&client).await;
                 }
-                // Slice 49i: on-demand refresh triggered by validator
+                // On-demand refresh triggered by validator
                 // signal. Subject to `min_on_demand_pause` rate-limit.
                 // Signals coalesce via mpsc capacity 1 + `try_send`.
                 Some(()) = self.signal_rx.recv() => {
@@ -171,7 +170,7 @@ impl JwksRefresher {
         }
     }
 
-    /// Slice 49i: extracted from the loop so the periodic + on-demand arms
+    /// Extracted from the loop so the periodic + on-demand arms
     /// both call it. Updates `last_successful_fetch_ms` only on success
     /// (failure leaves the timestamp untouched so the cache ages toward
     /// expiry and validators eventually start failing closed).
@@ -196,7 +195,7 @@ impl JwksRefresher {
     }
 }
 
-/// Slice 49i: current Unix epoch in milliseconds, saturating on overflow
+/// Current Unix epoch in milliseconds, saturating on overflow
 /// or pre-epoch clock skew. Used by the refresher to populate the shared
 /// timestamp counter read by validators for cache-expiry checks.
 fn current_epoch_ms() -> i64 {
@@ -231,8 +230,8 @@ mod tests {
 
     const JWKS_BODY: &str = r#"{"keys":[{"kty":"EC","crv":"P-256","kid":"k1","x":"f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU","y":"x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0"}]}"#;
 
-    /// Slice 49i: pick the on-demand-refresh-relevant slots out of a
-    /// `JwksRefresher` so the simple slice-49b refresher tests can stay
+    /// Pick the on-demand-refresh-relevant slots out of a
+    /// `JwksRefresher` so the simple refresher tests can stay
     /// terse. `signal_rx` is given but never sent on in these tests;
     /// `min_on_demand_pause` is irrelevant; the timestamps are isolated
     /// per test.
@@ -446,7 +445,7 @@ mod tests {
         srv_shutdown.cancel();
     }
 
-    // ---- Slice 49i: on-demand refresh + cache-expiry timestamp -------------
+    // ---- On-demand refresh + cache-expiry timestamp -------------
 
     /// Serve a fixed body but track how many HTTP requests have hit the
     /// `/jwks` route. Returns a shared `AtomicUsize` so the test can assert

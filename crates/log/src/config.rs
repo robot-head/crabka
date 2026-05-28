@@ -50,7 +50,7 @@ pub struct LogConfig {
     /// Cleanup policy. Defaults to `Delete`. See [`CleanupPolicy`].
     pub cleanup_policy: CleanupPolicy,
 
-    /// Slice 67: broker-side recompression target. `None` is Kafka's
+    /// Broker-side recompression target. `None` is Kafka's
     /// `compression.type=producer` (pass-through — store the batch
     /// exactly as the producer sent it). `Some(c)` forces every batch
     /// the broker accepts on this partition to be re-encoded to `c`
@@ -59,17 +59,17 @@ pub struct LogConfig {
     /// to `Some(_)`; `producer` (the default) maps to `None`.
     pub compression_type: Option<CompressionType>,
 
-    /// Slice 48b (KIP-405): when `true`, this partition's sealed segments
+    /// When `true`, this partition's sealed segments (KIP-405)
     /// are eligible to be copied to the remote tier by the broker's
     /// `RemoteLogManager`. Maps to Kafka's per-topic `remote.storage.enable`.
     /// Default `false` (Kafka's default — tiered storage is opt-in per topic).
     pub remote_storage_enable: bool,
 
-    /// Slice 48c (KIP-405): local-disk time-retention window for tiered
-    /// partitions. `None` inherits `retention_ms`. Default `None`.
+    /// Local-disk time-retention window for tiered
+    /// partitions (KIP-405). `None` inherits `retention_ms`. Default `None`.
     pub local_retention_ms: Option<Duration>,
 
-    /// Slice 48c (KIP-405): local-disk size budget for tiered partitions.
+    /// Local-disk size budget for tiered partitions (KIP-405).
     /// `None` inherits `retention_bytes`. Default `None`.
     pub local_retention_bytes: Option<u64>,
 }

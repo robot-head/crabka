@@ -1,6 +1,6 @@
 //! Allocates `(producer_id, producer_epoch)` pairs. Single-broker MVP:
-//! the id space is a single monotonic counter. Slice 9 (transactions)
-//! will revisit when transactional ids enter the picture.
+//! the id space is a single monotonic counter. Transactions
+//! will revisit this when transactional ids enter the picture.
 
 use std::sync::atomic::{AtomicI16, AtomicI64, Ordering};
 
@@ -42,7 +42,7 @@ impl ProducerIdManager {
     /// re-initialising under the same `transactional_id`. Returns the new
     /// epoch.
     ///
-    /// Slice 9: transactional producers will use this on `InitProducerId` re-init.
+    /// Transactional producers use this on `InitProducerId` re-init.
     #[allow(dead_code)]
     pub fn bump_epoch(&self, pid: i64) -> Option<i16> {
         self.epochs

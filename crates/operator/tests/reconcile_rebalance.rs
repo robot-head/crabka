@@ -1,4 +1,4 @@
-//! Slice 44: reconcile-level tests for the `KafkaRebalance` controller.
+//! Reconcile-level tests for the `KafkaRebalance` controller.
 //!
 //! Drive the controller's annotation-driven state machine against a faked
 //! `crabka-rebalancer` (the `FakeRebalancerClient`) and assert both the

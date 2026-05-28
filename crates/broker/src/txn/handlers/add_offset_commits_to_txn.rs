@@ -32,8 +32,8 @@ pub(crate) fn handle(
         let mut cur: &[u8] = &req_bytes;
         let req = AddOffsetsToTxnRequest::decode(&mut cur, version)?;
 
-        // Mirror Task 12/13's race-fix pattern: refresh leader-partition view
-        // from the current metadata image before checking coordinator-ness.
+        // Refresh leader-partition view from the current metadata image
+        // before checking coordinator-ness, to avoid a race.
         coord
             .refresh_leader_partitions(&controller.current_image())
             .await;

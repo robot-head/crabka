@@ -51,6 +51,7 @@ mod error;
 pub mod handshake;
 mod log_store;
 mod network;
+pub mod reconfig;
 mod server;
 mod state_machine;
 mod types;
@@ -61,6 +62,7 @@ pub use controller::{Controller, ControllerHandle, QuorumState};
 pub use error::RaftError;
 pub use handshake::{DuplexStream, RaftHandshakeError, RaftListenerHandshake};
 pub use network::OutboundDialer;
+pub use reconfig::{AddVoter, ReconfigOutcome, RemoveVoter, UpdateVoter};
 pub use types::{AppData, AppDataResponse, Node, NodeId, Raft, TypeConfig};
 pub use wire::{
     API_KEY_APPEND_ENTRIES, API_KEY_INSTALL_SNAPSHOT, API_KEY_VOTE, CrabkaAppendEntriesRequest,

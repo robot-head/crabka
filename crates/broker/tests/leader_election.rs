@@ -1,7 +1,7 @@
-//! In-process integration tests for slice-10b leader election +
+//! In-process integration tests for leader election +
 //! KIP-101 leader-epoch + ISR shrink/expand.
 //!
-//! Windows-gated like slice-7/8/9 multi-broker tests: openraft +
+//! Windows-gated like the other multi-broker tests: openraft +
 //! `tokio` scheduling on Windows runners cause flakes that have
 //! nothing to do with the protocol being tested.
 

@@ -1,11 +1,11 @@
-//! Slice 38: client-quota admin RPCs.
+//! Client-quota admin RPCs.
 //!
 //! Two admin operations the `KafkaUser` reconciler drives:
 //! `DescribeClientQuotas` (`api_key` 48) reads the current set of
 //! quota keys → values for a single (user) entity;
 //! `AlterClientQuotas` (`api_key` 49) upserts and/or removes those keys.
 //!
-//! Slice 38 only exposes the per-user shape (entity `[("user", Some(name))]`).
+//! Only the per-user shape is exposed (entity `[("user", Some(name))]`).
 //! Per-`client-id`, per-`ip`, and tuple entities (e.g. `(user, client-id)`)
 //! are reserved for later operator surfaces.
 

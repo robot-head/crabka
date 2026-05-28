@@ -1,4 +1,4 @@
-//! Slice 30 + 34: cluster CA + clients CA lifecycle and rotation.
+//! Cluster CA + clients CA lifecycle and rotation.
 //!
 //! Owns:
 //! - the per-cluster `cluster CA` Secret pair (private key + public cert),
@@ -6,7 +6,7 @@
 //! - the per-cluster broker-keystore Secret (`<cluster>-kafka-brokers`),
 //! - `reconcile_ca` — the per-CA create / reuse / **rotate** entrypoint the
 //!   `Kafka` reconciler calls each pass, plus the pure rotation state machine
-//!   (`plan_ca_rotation`) and trust-bundle helpers (slice 34),
+//!   (`plan_ca_rotation`) and trust-bundle helpers,
 //! - the pure `renew_if_expiring` predicate (used by `reconcile_ca` and the
 //!   `ca-renewal-check` `CronJob` subcommand),
 //! - the `run_renewal_check` entrypoint for the `CronJob`.
@@ -34,7 +34,7 @@ pub(crate) const CLIENTS_CA_KEY_SUFFIX: &str = "-clients-ca";
 pub(crate) const CLIENTS_CA_CERT_SUFFIX: &str = "-clients-ca-cert";
 pub(crate) const BROKER_KEYSTORE_SUFFIX: &str = "-kafka-brokers";
 
-// Slice 34: rotation bookkeeping.
+// Rotation bookkeeping.
 /// Annotation on the cert Secret tracking the monotonic generation of the
 /// *active signing cert* (bumped on same-key renewal and on key promotion).
 pub(crate) const ANN_CERT_GENERATION: &str = "crabka.io/ca-cert-generation";
@@ -78,7 +78,7 @@ pub(crate) fn broker_keystore_name(cluster: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Slice 34: trust-bundle helpers (pure)
+// Trust-bundle helpers (pure)
 // ---------------------------------------------------------------------------
 
 const BEGIN_CERT: &str = "-----BEGIN CERTIFICATE-----";
@@ -130,7 +130,7 @@ pub(crate) fn prune_expired(blocks: &[String], now: OffsetDateTime) -> Vec<Strin
 }
 
 // ---------------------------------------------------------------------------
-// Slice 34: rotation state machine (pure)
+// Rotation state machine (pure)
 // ---------------------------------------------------------------------------
 
 /// Staged key-replacement phase, persisted in the cert Secret's
@@ -197,7 +197,7 @@ pub(crate) struct RotationInputs {
 pub(crate) enum RefuseReason {
     /// `generateCertificateAuthority=false` — the operator never touches BYO CAs.
     Byo,
-    /// Key replacement is unsupported for the clients CA in this slice.
+    /// Key replacement is unsupported for the clients CA.
     ClientsCaKeyReplace,
 }
 
@@ -217,7 +217,7 @@ pub(crate) enum CaRotationPlan {
     Refuse(RefuseReason),
 }
 
-/// Pure rotation decision. See the slice-34 design's decision table.
+/// Pure rotation decision. See the CA-rotation design's decision table.
 pub(crate) fn plan_ca_rotation(state: &CaState, inp: &RotationInputs) -> CaRotationPlan {
     // BYO: never rotate. A forced request is refused (and the annotation is
     // stripped by the caller, with a Warning Event).
@@ -338,8 +338,8 @@ pub(crate) struct CaReconcileOutcome {
     pub refused: Option<RefuseReason>,
 }
 
-/// Reconcile one CA: create-if-missing (slice-30 path), reuse + rotate
-/// (slice 34), or surface `ByoCaMissing`. Make exactly the slice-30 I/O
+/// Reconcile one CA: create-if-missing, reuse + rotate,
+/// or surface `ByoCaMissing`. Make exactly the create-path I/O
 /// (`GET key`, `GET cert`, then on create `PATCH key`, `PATCH cert`) plus, only
 /// when a rotation step fires, an extra cert/key `PATCH`.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -420,7 +420,7 @@ pub(crate) async fn reconcile_ca(
     }
 
     // Create a fresh single-cert CA (generation 0, idle). Byte-identical to the
-    // slice-30 create path apart from the added generation annotation.
+    // create path apart from the added generation annotation.
     let material = match which {
         WhichCa::Cluster => generate_cluster_ca(&cn, spec.validity_days)?,
         WhichCa::Clients => generate_clients_ca(&cn, spec.validity_days)?,
@@ -1098,7 +1098,7 @@ async fn flag_ca_if_expiring(
     let ns = kafka.meta().namespace.clone().unwrap_or_default();
     if spec.generate_certificate_authority {
         // Operator-managed CA within renewalDays: nudge the reconciler to run a
-        // same-key renewal (slice 34). The reconciler owns the actual rotation
+        // same-key renewal. The reconciler owns the actual rotation
         // (it has the rollout machinery); the CronJob only stamps a one-shot
         // annotation. Idempotent — skip if already stamped so repeated CronJob
         // runs don't churn the CR.

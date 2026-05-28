@@ -1,6 +1,6 @@
 // Bespoke tests for borrowed DescribeGroups wrappers. The hand-written tests
 // checked .groups.len() which the generated min/max test doesn't assert on.
-// Relocated from hand-written wrappers (sub-plan 1d, Task 1).
+// Relocated from hand-written wrappers.
 
 use bytes::BytesMut;
 use crabka_protocol::borrowed::describe_groups_request::{

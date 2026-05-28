@@ -4,11 +4,11 @@
 //! These tests exercise the full end-to-end transactional path:
 //! producer init → begin → send → commit/abort → consumer isolation.
 //!
-//! Windows-gated like slice-7/8 multi-node tests: openraft + tokio
+//! Windows-gated like the other multi-node tests: openraft + tokio
 //! scheduling on Windows runners causes intermittent
 //! `INVALID_TXN_STATE` errors during `InitProducerId`. The transactional
 //! control plane is platform-correct; the gate avoids a flaky CI
-//! signal until the slice-7 Windows scheduling work is addressed.
+//! signal until the Windows scheduling work is addressed.
 
 use std::time::Duration;
 
