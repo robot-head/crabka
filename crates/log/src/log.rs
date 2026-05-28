@@ -1064,6 +1064,60 @@ mod tests {
     }
 
     #[test]
+    fn log_read_raw_spans_multiple_segments() {
+        // A tiny `segment_bytes` forces a roll partway through, so the
+        // read must walk at least one sealed segment AND the active
+        // segment — exercising the multi-chunk `BytesMut` concat path
+        // that `log_read_raw_spans_and_is_byte_exact` (default ~1 GiB
+        // segments) never reaches.
+        let dir = tempdir().unwrap();
+        let config = LogConfig {
+            segment_bytes: 100, // tiny: roll after roughly each batch
+            ..LogConfig::default()
+        };
+        let mut log = Log::open(dir.path(), config).unwrap();
+
+        let n: i64 = 6;
+        let mut wire = bytes::BytesMut::new();
+        let mut expected_bases = Vec::new();
+        for off in 0..n {
+            let mut b = test_batch_at(off);
+            let base = log.append(&mut b).unwrap();
+            expected_bases.push(base);
+            b.encode(&mut wire).unwrap();
+        }
+        let wire = wire.freeze();
+
+        // The roll must actually have happened: at least one sealed
+        // segment plus the active segment.
+        assert!(
+            !log.segments.is_empty(),
+            "expected >=1 sealed segment (segment roll); got 0"
+        );
+        assert!(log.active.is_some());
+
+        let log_end = log.log_end_offset();
+        let r = log.read_raw(0, log_end, 10 * 1024 * 1024).unwrap();
+        assert_eq!(r.start_offset, 0);
+        assert_eq!(r.total, wire.len());
+        assert_eq!(
+            &r.bytes[..],
+            &wire[..],
+            "raw bytes must be byte-exact across the segment seam"
+        );
+
+        // Decode back to N batches with the expected base offsets.
+        let mut cur: &[u8] = &r.bytes;
+        let mut bases = Vec::new();
+        while !cur.is_empty() {
+            let b = crabka_protocol::records::RecordBatch::decode(&mut cur).unwrap();
+            bases.push(b.base_offset);
+        }
+        assert_eq!(bases, expected_bases);
+        drop(dir);
+    }
+
+    #[test]
     fn open_empty_dir_creates_first_segment() {
         let dir = tempdir().unwrap();
         let log = Log::open(dir.path(), LogConfig::default()).unwrap();

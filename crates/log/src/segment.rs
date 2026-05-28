@@ -266,7 +266,7 @@ impl Segment {
             return Ok(RawSegmentRead::empty());
         }
         let target_rel = u32::try_from((fetch_offset - self.base_offset).max(0))
-            .map_err(|_| LogError::BadSegmentName("target offset out of range".into()))?;
+            .map_err(|_| LogError::Corrupt("read_raw target offset out of range".into()))?;
         let start_pos = u64::from(self.offset_index.lookup(target_rel));
 
         let first_read = max_bytes.max(HEADER_LEN);
