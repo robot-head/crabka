@@ -1679,12 +1679,13 @@ impl Broker {
             let kafka_cfg = kafka_cfg.clone();
             let runtime = tokio::runtime::Handle::current();
             let shutdown_token = shutdown.clone();
+            let metrics_for_bootstrap = broker.metrics.clone();
             tokio::spawn(async move {
                 tokio::select! {
                     () = shutdown_token.cancelled() => {
                         tracing::debug!("topic-backed RLMM bootstrap cancelled");
                     }
-                    () = bootstrap_topic_rlmm(swap, kafka_cfg, runtime) => {}
+                    () = bootstrap_topic_rlmm(swap, kafka_cfg, runtime, metrics_for_bootstrap) => {}
                 }
             });
         }
@@ -1712,6 +1713,7 @@ async fn bootstrap_topic_rlmm(
     swap: Arc<crabka_remote_storage_topic::SwappableRlmm>,
     cfg: KafkaSwapKickoff,
     runtime: tokio::runtime::Handle,
+    metrics: crate::metrics::BrokerMetrics,
 ) {
     let log_cfg = crabka_remote_storage_topic::KafkaMetadataLogConfig {
         bootstrap: cfg.cfg.bootstrap,
@@ -1744,6 +1746,7 @@ async fn bootstrap_topic_rlmm(
             }
         };
     swap.swap(manager);
+    metrics.tiered_storage_rlmm_topic_backed.set(1);
     tracing::info!("topic-backed RemoteLogMetadataManager activated");
 }
 
