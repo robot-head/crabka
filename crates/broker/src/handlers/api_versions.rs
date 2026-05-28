@@ -99,6 +99,9 @@ fn supported_apis() -> Vec<ApiVersion> {
         v!(alter_partition_request),
         v!(describe_cluster_request),
         v!(broker_heartbeat_request),
+        // UnregisterBroker (KIP-185) — admin RPC to permanently drop a
+        // broker registration from the cluster's metadata image.
+        v!(unregister_broker_request),
         v!(alter_user_scram_credentials_request),
         v!(describe_acls_request),
         v!(create_acls_request),

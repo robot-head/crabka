@@ -879,6 +879,26 @@ async fn serve_connection_stream<S>(
                 }
             }
         }
+        // UnregisterBroker (64, KIP-185) needs the principal + peer for
+        // Cluster:Alter ACL evaluation.
+        if peek_api_key(&frame).ok() == Some(64) {
+            match handle_unregister_broker_frame(&broker, &frame, &auth, &peer)
+                .instrument(req_span.clone())
+                .await
+            {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during UnregisterBroker, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "UnregisterBroker dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
         // DescribeTopicPartitions (75, KIP-966) needs the principal +
         // peer for per-topic `Describe` ACL evaluation, so it intercepts
         // inline alongside DescribeCluster / DescribeGroups.
@@ -1829,6 +1849,44 @@ async fn handle_list_transactions_frame(
 
     let resp_body =
         crate::handlers::list_transactions::handle(broker, api_version, correlation_id, body, &ctx)
+            .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch an `UnregisterBroker` (`api_key` 64, KIP-185) frame.
+/// `Alter` on `Cluster`; Deny → `CLUSTER_AUTHORIZATION_FAILED`.
+async fn handle_unregister_broker_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 64);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let principal = auth
+        .principal()
+        .cloned()
+        .unwrap_or_else(|| crabka_security::Principal {
+            name: "ANONYMOUS".to_string(),
+            auth_method: crabka_security::AuthMethod::Anonymous,
+            groups: vec![],
+        });
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let ctx = crate::handlers::RequestContext {
+        principal: &principal,
+        peer,
+        client_id,
+    };
+
+    let resp_body =
+        crate::handlers::unregister_broker::handle(broker, api_version, correlation_id, body, &ctx)
             .await?;
     Ok(encode_response(
         api_key,
@@ -3646,6 +3704,8 @@ fn handler_body_flexible(api_key: i16, version: i16) -> bool {
         // DescribeProducers (61, KIP-664) is flexible from v0.
         61 => version >= owned::describe_producers_request::FLEXIBLE_MIN,
         63 => version >= owned::broker_heartbeat_request::FLEXIBLE_MIN,
+        // UnregisterBroker (64, KIP-185) — flexible from v0.
+        64 => version >= owned::unregister_broker_request::FLEXIBLE_MIN,
         // DescribeTransactions (65, KIP-664) and ListTransactions (66) — both flexible from v0.
         65 => version >= owned::describe_transactions_request::FLEXIBLE_MIN,
         66 => version >= owned::list_transactions_request::FLEXIBLE_MIN,

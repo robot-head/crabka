@@ -288,6 +288,7 @@ impl MetadataImage {
     /// Infallible — pre-validation against the current image happens
     /// in the controller before submitting to Raft. Apply must never
     /// fail on a committed entry.
+    #[allow(clippy::too_many_lines)] // exhaustive match over MetadataRecord
     pub fn apply(&mut self, rec: &MetadataRecord) {
         match rec {
             MetadataRecord::V1Topic(t) => {
@@ -391,6 +392,11 @@ impl MetadataImage {
             MetadataRecord::V1DeleteDelegationToken(rec) => {
                 self.delegation_tokens.remove(&rec.token_id);
             }
+            MetadataRecord::V1UnregisterBroker(rec) => {
+                // Idempotent: applying against an unknown `node_id` is
+                // a no-op.
+                self.brokers.remove(&rec.node_id);
+            }
         }
     }
 
@@ -450,7 +456,11 @@ impl MetadataImage {
             // handler-side checks (KIP-48 §protocol errors), so the
             // image-level validate is unconditional Ok.
             | MetadataRecord::V1DelegationToken(_)
-            | MetadataRecord::V1DeleteDelegationToken(_) => Ok(()),
+            | MetadataRecord::V1DeleteDelegationToken(_)
+            // UnregisterBroker (KIP-185 / api_key 64). The handler-side
+            // existence check + Cluster:Alter ACL gate provide all the
+            // pre-validation we need; image-level apply is idempotent.
+            | MetadataRecord::V1UnregisterBroker(_) => Ok(()),
         }
     }
 }
