@@ -4619,11 +4619,6 @@ introspection metadata).
   carried but not yet invoked by `broker-jvm-acceptance` until the
   next-gen integration depth lands.
 - Out of scope (follow-up slices):
-  - Actor → `__consumer_offsets` persistence write path (64a follow-up).
-  - JVM-client integration depth — heartbeat-loop response shape,
-    offset-fetch `member_epoch` plumbing, anything else needed to keep
-    `apache/kafka:4.0.0` clients on the next-gen path end-to-end
-    (64a follow-up; runs the four `jvm_kip848_*` tests today).
   - Rack-aware `UniformAssignor` (64b).
   - Custom server-side assignor plugin point (64c).
   - Group migration policy classic → next-gen (64d).
@@ -4680,3 +4675,35 @@ introspection metadata).
     "highest MetadataVersion this client enumerates") or a
     Raft-tracked finalized-features state with a real monotonic
     epoch — both follow-up slices.
+## Slice 64a follow-up — KIP-848 persistence + JVM-client gating (2026-05-28)
+
+- New `coordinator/next_gen/offsets_log.rs` — `OffsetsLog` trait,
+  `ProductionOffsetsLog` (resolves `__consumer_offsets-0` lazily on each
+  append because the partition isn't registered until bootstrap runs),
+  `fake::InMemoryOffsetsLog`.
+- `GroupActor` now writes affected v3/v5/v6/v7/v8 records to
+  `__consumer_offsets-0` as a single `RecordBatch` per mutation (join,
+  leave, subscription change, reconciliation, session-timeout eviction).
+  Writes happen before the heartbeat reply.
+- On `OffsetsLog::append` failure, the actor exits and the next
+  `NextGenCoordinator::get_or_create` call respawns a fresh actor seeded
+  from a coordinator-owned `seeds_cache` populated by every successful
+  write.
+- Bootstrap replay now honors tombstones (records with `value=None`)
+  for next-gen keys via `replay_next_gen_tombstone`, which scrubs the
+  matching seed/seeds_cache entries — without this, leave/eviction
+  semantics were silently dropped on restart.
+- `ApiVersions` advertises `group.version=1` in both `supported_features`
+  and `finalized_features` when next-gen is enabled — kafka-clients 4.0
+  needs this finalized feature (KIP-584) to engage KIP-848 instead of
+  falling back to classic.
+- Tests:
+  - 7 new actor unit tests covering `PendingRecords` encoding, first-join
+    write batching, unchanged-heartbeat no-op, leave-tombstone batching,
+    actor-exit-on-write-failure.
+  - 2 previously-ignored persistence-replay tests now passing.
+  - 4 previously-ignored JVM-acceptance tests against `apache/kafka:4.0.0`
+    no longer ignored; restored to the `broker-jvm-acceptance` CI job.
+- CI: `--test jvm_consumer_group_next_gen` re-added to the
+  `broker-jvm-acceptance` cargo-llvm-cov invocation alongside
+  `--test jvm_acceptance`.
