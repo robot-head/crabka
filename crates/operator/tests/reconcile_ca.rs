@@ -2,9 +2,9 @@
 //!
 //! Test list (Task 10):
 //!   1. `default_flow_creates_cluster_ca_clients_ca_and_broker_keystore`
-//!   2. `broker_leaf_certs_chain_to_cluster_ca`  (TODO: slice-30 follow-up)
-//!   3. `scale_up_adds_entries_does_not_reissue_existing`  (TODO: slice-30 follow-up)
-//!   4. `scale_down_prunes_entries`  (TODO: slice-30 follow-up)
+//!   2. `broker_leaf_certs_chain_to_cluster_ca`
+//!   3. `scale_up_adds_entries_does_not_reissue_existing`
+//!   4. `scale_down_prunes_entries`
 //!   5. `byo_mode_adopts_pre_existing_secrets_does_not_overwrite`
 //!   6. `byo_mode_without_pre_existing_secrets_errors_gracefully`
 //!   7. `reconciler_does_not_renew_valid_leaf_certs`
@@ -25,6 +25,7 @@ use shared::{
     MockRule, build_ctx, fake_ca_secret, fake_configmap_body, fake_kafka_body,
     fake_keystore_secret, fake_pool_list_body, fake_service_body, json_response, not_found_body,
 };
+use x509_parser::pem::parse_x509_pem;
 
 // ---------------------------------------------------------------------------
 // CR + context builders
@@ -326,23 +327,6 @@ async fn default_flow_creates_cluster_ca_clients_ca_and_broker_keystore() {
         "all preloaded rules must have been consumed"
     );
 }
-
-// ---------------------------------------------------------------------------
-// Tests 2, 3, 4 — TODO: slice-30 follow-up
-//
-// Test 2 (broker leaf certs chain to cluster CA): requires x509-parsing the
-//   leaf cert from the keystore PATCH body and verifying the signature chain.
-//   Deferred because the FIFO mock returns a hand-crafted empty Secret body on
-//   the keystore PATCH; the operator writes the real certs but the mock response
-//   does not echo them back. The test would need to intercept the PATCH *request*
-//   body (not the response) and parse certs from it — possible but not yet plumbed.
-//
-// Tests 3 & 4 (scale-up / scale-down): require a two-reconcile sequence where
-//   the second GET for the keystore returns what was PATCHed in the first
-//   reconcile. This needs either an Arc<Mutex<Option<Secret>>> in the mock state
-//   or hand-crafting a pre-seeded keystore body for the second reconcile call.
-//   Deferred to a follow-up task.
-// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // Test 5: BYO mode adopts pre-existing Secrets, doesn't overwrite them
@@ -899,6 +883,673 @@ async fn reconciler_does_not_renew_valid_leaf_certs() {
         ca_patches.is_empty(),
         "reconciler must not PATCH CA Secrets when they already exist: {ca_patches:?}",
     );
+
+    assert_eq!(
+        state.remaining_rules(),
+        0,
+        "all preloaded rules must have been consumed"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Shared helpers for tests 2, 3, 4
+// ---------------------------------------------------------------------------
+
+fn pool_item(cluster: &str, ns: &str, pool_name: &str, node_id: i32) -> serde_json::Value {
+    json!({
+        "apiVersion": "crabka.io/v1alpha1",
+        "kind": "KafkaNodePool",
+        "metadata": {
+            "name": pool_name, "namespace": ns,
+            "uid": format!("{pool_name}-uid"),
+            "labels": { "crabka.io/cluster": cluster }
+        },
+        "spec": { "roles": ["Controller", "Broker"], "replicas": 1, "nodeIdStart": node_id },
+        "status": { "conditions": [], "replicas": 1, "readyReplicas": 1 }
+    })
+}
+
+fn pool_body_resp(cluster: &str, ns: &str, pool_name: &str, node_id: i32) -> serde_json::Value {
+    json!({
+        "apiVersion": "crabka.io/v1alpha1",
+        "kind": "KafkaNodePool",
+        "metadata": {
+            "name": pool_name, "namespace": ns,
+            "uid": format!("{pool_name}-uid"),
+            "labels": { "crabka.io/cluster": cluster }
+        },
+        "spec": { "roles": ["Controller", "Broker"], "replicas": 1, "nodeIdStart": node_id },
+        "status": { "conditions": [] }
+    })
+}
+
+fn broker_sans(
+    cluster: &str,
+    pool_name: &str,
+    ns: &str,
+) -> Vec<crabka_security::ca::SubjectAltName> {
+    vec![
+        crabka_security::ca::SubjectAltName::Dns(format!(
+            "{cluster}-{pool_name}-0.{cluster}-broker-headless.{ns}.svc.cluster.local"
+        )),
+        crabka_security::ca::SubjectAltName::Dns(format!("{cluster}-{pool_name}-0")),
+        crabka_security::ca::SubjectAltName::Dns(format!(
+            "{cluster}-broker-headless.{ns}.svc.cluster.local"
+        )),
+        crabka_security::ca::SubjectAltName::Ip(std::net::IpAddr::V4(
+            std::net::Ipv4Addr::LOCALHOST,
+        )),
+    ]
+}
+
+/// Locate the keystore PATCH in the observed request log and return its
+/// `data` map (raw base64-encoded values). Panics if no PATCH was issued.
+fn keystore_patch_data<B: AsRef<[u8]>>(
+    observed: &[http::Request<B>],
+    keystore_name: &str,
+) -> serde_json::Map<String, serde_json::Value> {
+    let patch = observed
+        .iter()
+        .find(|r| r.method() == Method::PATCH && r.uri().to_string().contains(keystore_name))
+        .expect("keystore PATCH must be present");
+    let body: serde_json::Value =
+        serde_json::from_slice(patch.body().as_ref()).expect("keystore PATCH body is JSON");
+    body.pointer("/data")
+        .and_then(|v| v.as_object())
+        .cloned()
+        .unwrap_or_else(|| panic!("keystore PATCH body has no /data object, body = {body}"))
+}
+
+// ---------------------------------------------------------------------------
+// Test 2: broker leaf certs chain to cluster CA
+//
+// One pool → one broker leaf. The leaf cert written to the keystore PATCH must:
+//   1. Parse as a valid X.509 cert.
+//   2. Carry an `issuer` DN equal to the cluster CA's `subject` DN.
+//   3. Verify signature against the cluster CA public key (chain-to-root).
+//   4. List the expected pod-FQDN / pod-name / headless / 127.0.0.1 SANs.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn broker_leaf_certs_chain_to_cluster_ca() {
+    let ns = "ns2";
+    let name = "c2";
+    let pool_name = "brokers";
+    let cluster_ca_key = format!("{name}-cluster-ca");
+    let cluster_ca_cert = format!("{name}-cluster-ca-cert");
+    let clients_ca_key = format!("{name}-clients-ca");
+    let clients_ca_cert = format!("{name}-clients-ca-cert");
+    let keystore_name = format!("{name}-kafka-brokers");
+    let svc_name = format!("{name}-broker-headless");
+    let cm_name = format!("{name}-broker-config");
+    let secret_name = format!("{name}-cluster-id");
+
+    // BYO so the cluster CA stays stable and we control the PEM directly.
+    let cluster_ca_mat =
+        crabka_security::ca::generate_cluster_ca("c2-cluster-ca", 365).expect("cluster CA gen");
+    let clients_ca_mat =
+        crabka_security::ca::generate_clients_ca("c2-clients-ca", 365).expect("clients CA gen");
+
+    let pool_one = pool_item(name, ns, pool_name, 0);
+    let pool_resp = pool_body_resp(name, ns, pool_name, 0);
+
+    let rules = vec![
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/services/{svc_name}"),
+            response: json_response(200, &fake_service_body(&svc_name, ns)),
+        },
+        secret_rule_404(Method::GET, format!("/secrets/{secret_name}")),
+        MockRule {
+            method: Method::POST,
+            path_substr: format!("/namespaces/{ns}/secrets"),
+            response: json_response(201, &fake_secret_body_cluster_id(&secret_name, ns)),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{cluster_ca_key}"),
+            response: json_response(
+                200,
+                &fake_ca_secret_with_pem(&cluster_ca_key, ns, &cluster_ca_mat.key_pem),
+            ),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{cluster_ca_cert}"),
+            response: json_response(
+                200,
+                &fake_ca_secret_with_pem(&cluster_ca_cert, ns, &cluster_ca_mat.cert_pem),
+            ),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{clients_ca_key}"),
+            response: json_response(
+                200,
+                &fake_ca_secret_with_pem(&clients_ca_key, ns, &clients_ca_mat.key_pem),
+            ),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{clients_ca_cert}"),
+            response: json_response(
+                200,
+                &fake_ca_secret_with_pem(&clients_ca_cert, ns, &clients_ca_mat.cert_pem),
+            ),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/namespaces/{ns}/kafkanodepools"),
+            response: json_response(200, &fake_pool_list_body(&[pool_one])),
+        },
+        secret_rule_404(Method::GET, format!("/secrets/{keystore_name}")),
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/secrets/{keystore_name}"),
+            response: json_response(200, &fake_keystore_secret(&keystore_name, ns)),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/configmaps/{cm_name}"),
+            response: json_response(200, &fake_configmap_body(&cm_name, ns)),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/kafkanodepools/{pool_name}?"),
+            response: json_response(200, &pool_resp),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/kafkas/{name}/status"),
+            response: json_response(200, &fake_kafka_body(name, ns)),
+        },
+    ];
+
+    let (ctx, state) = build_ctx(ns, rules);
+    let kafka = kafka_cr_byo(name, ns);
+    reconcile(Arc::new(kafka), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    let data = keystore_patch_data(&observed, &keystore_name);
+
+    let crt_b64 = data
+        .get("0.crt")
+        .and_then(|v| v.as_str())
+        .expect("keystore PATCH must contain data['0.crt']");
+    let leaf_pem_bytes = base64::engine::general_purpose::STANDARD
+        .decode(crt_b64)
+        .expect("0.crt is base64");
+    let leaf_pem = std::str::from_utf8(&leaf_pem_bytes).expect("leaf PEM is utf-8");
+
+    let (_, leaf_pem_block) = parse_x509_pem(leaf_pem.as_bytes()).expect("leaf parses as PEM");
+    let leaf = leaf_pem_block
+        .parse_x509()
+        .expect("leaf PEM decodes to X509Certificate");
+
+    let (_, ca_pem_block) =
+        parse_x509_pem(cluster_ca_mat.cert_pem.as_bytes()).expect("cluster CA parses as PEM");
+    let ca = ca_pem_block
+        .parse_x509()
+        .expect("cluster CA PEM decodes to X509Certificate");
+
+    // (2) Issuer of leaf == subject of cluster CA.
+    assert_eq!(
+        leaf.issuer(),
+        ca.subject(),
+        "leaf issuer DN must match cluster CA subject DN; leaf issuer = {}, ca subject = {}",
+        leaf.issuer(),
+        ca.subject(),
+    );
+
+    // (3) Signature chain-to-root.
+    leaf.verify_signature(Some(ca.public_key()))
+        .expect("leaf cert must verify against cluster CA public key");
+
+    // (4) Expected SAN list (pod_fqdn, pod_name, headless FQDN, 127.0.0.1).
+    let san_ext = leaf
+        .extensions()
+        .iter()
+        .find_map(|e| match e.parsed_extension() {
+            x509_parser::extensions::ParsedExtension::SubjectAlternativeName(san) => Some(san),
+            _ => None,
+        })
+        .expect("leaf must carry a SubjectAlternativeName extension");
+    let dns_names: Vec<String> = san_ext
+        .general_names
+        .iter()
+        .filter_map(|gn| match gn {
+            x509_parser::extensions::GeneralName::DNSName(s) => Some((*s).to_owned()),
+            _ => None,
+        })
+        .collect();
+    let has_ip_localhost = san_ext.general_names.iter().any(|gn| {
+        matches!(gn, x509_parser::extensions::GeneralName::IPAddress(b) if *b == [127, 0, 0, 1])
+    });
+
+    let pod_name = format!("{name}-{pool_name}-0");
+    let pod_fqdn = format!("{pod_name}.{name}-broker-headless.{ns}.svc.cluster.local");
+    let headless_fqdn = format!("{name}-broker-headless.{ns}.svc.cluster.local");
+    assert!(
+        dns_names.contains(&pod_fqdn),
+        "SANs must include pod FQDN {pod_fqdn}; got DNS={dns_names:?}",
+    );
+    assert!(
+        dns_names.contains(&pod_name),
+        "SANs must include pod short-name {pod_name}; got DNS={dns_names:?}",
+    );
+    assert!(
+        dns_names.contains(&headless_fqdn),
+        "SANs must include headless FQDN {headless_fqdn}; got DNS={dns_names:?}",
+    );
+    assert!(
+        has_ip_localhost,
+        "SANs must include 127.0.0.1; got GNs={:?}",
+        san_ext.general_names,
+    );
+
+    assert_eq!(
+        state.remaining_rules(),
+        0,
+        "all preloaded rules must have been consumed"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 3: scale-up adds entries, does not reissue existing
+//
+// Pre-seed keystore with brokers 0, 1, 2. Configure pool list with 4 pools
+// (broker 0..=3). After reconcile, the keystore PATCH must contain:
+//   - 0.crt, 1.crt, 2.crt byte-identical to the pre-seeded entries
+//     (and matching keys / digests likewise);
+//   - new 3.crt, 3.key, 3.sans-digest entries for the added broker.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn scale_up_adds_entries_does_not_reissue_existing() {
+    let ns = "ns3";
+    let name = "c3";
+    let cluster_ca_key = format!("{name}-cluster-ca");
+    let cluster_ca_cert = format!("{name}-cluster-ca-cert");
+    let clients_ca_key = format!("{name}-clients-ca");
+    let clients_ca_cert = format!("{name}-clients-ca-cert");
+    let keystore_name = format!("{name}-kafka-brokers");
+    let svc_name = format!("{name}-broker-headless");
+    let cm_name = format!("{name}-broker-config");
+    let secret_name = format!("{name}-cluster-id");
+
+    let cluster_ca_mat =
+        crabka_security::ca::generate_cluster_ca("c3-cluster-ca", 365).expect("cluster CA gen");
+    let clients_ca_mat =
+        crabka_security::ca::generate_clients_ca("c3-clients-ca", 365).expect("clients CA gen");
+
+    // Pre-issue leaf certs for brokers 0, 1, 2 against the BYO cluster CA with
+    // the SAN list the reconciler will compute. Matching SAN digests trigger
+    // the reuse path in `ensure_broker_keystore`.
+    let mut pre_data = serde_json::Map::new();
+    let pool_names = ["pool-a", "pool-b", "pool-c"];
+    let mut original_certs: std::collections::BTreeMap<i32, Vec<u8>> =
+        std::collections::BTreeMap::new();
+    for (i, pool) in pool_names.iter().enumerate() {
+        let id = i32::try_from(i).unwrap();
+        let sans = broker_sans(name, pool, ns);
+        let leaf = crabka_security::ca::issue_broker_cert(
+            &cluster_ca_mat.cert_pem,
+            &cluster_ca_mat.key_pem,
+            &format!("{name}-{pool}-0"),
+            &sans,
+            &[],
+            365,
+        )
+        .expect("leaf cert gen");
+        let digest = compute_san_digest(&sans, &[]);
+        let crt_b64 = base64::engine::general_purpose::STANDARD.encode(leaf.cert_pem.as_bytes());
+        let key_b64 = base64::engine::general_purpose::STANDARD.encode(leaf.key_pem.as_bytes());
+        let dig_b64 = base64::engine::general_purpose::STANDARD.encode(digest.as_bytes());
+        pre_data.insert(format!("{id}.crt"), json!(crt_b64));
+        pre_data.insert(format!("{id}.key"), json!(key_b64));
+        pre_data.insert(format!("{id}.sans-digest"), json!(dig_b64));
+        original_certs.insert(id, leaf.cert_pem.into_bytes());
+    }
+    let pre_seeded_keystore = json!({
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": { "name": &keystore_name, "namespace": ns, "uid": "ks-uid" },
+        "type": "Opaque",
+        "data": pre_data
+    });
+
+    // 4 pools: brokers 0, 1, 2 already provisioned + new broker 3.
+    let new_pool = "pool-d";
+    let pool_items: Vec<serde_json::Value> = (0_usize..4)
+        .map(|i| {
+            let pname = if i < pool_names.len() {
+                pool_names[i]
+            } else {
+                new_pool
+            };
+            pool_item(name, ns, pname, i32::try_from(i).unwrap())
+        })
+        .collect();
+
+    let mut rules = vec![
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/services/{svc_name}"),
+            response: json_response(200, &fake_service_body(&svc_name, ns)),
+        },
+        secret_rule_404(Method::GET, format!("/secrets/{secret_name}")),
+        MockRule {
+            method: Method::POST,
+            path_substr: format!("/namespaces/{ns}/secrets"),
+            response: json_response(201, &fake_secret_body_cluster_id(&secret_name, ns)),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{cluster_ca_key}"),
+            response: json_response(
+                200,
+                &fake_ca_secret_with_pem(&cluster_ca_key, ns, &cluster_ca_mat.key_pem),
+            ),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{cluster_ca_cert}"),
+            response: json_response(
+                200,
+                &fake_ca_secret_with_pem(&cluster_ca_cert, ns, &cluster_ca_mat.cert_pem),
+            ),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{clients_ca_key}"),
+            response: json_response(
+                200,
+                &fake_ca_secret_with_pem(&clients_ca_key, ns, &clients_ca_mat.key_pem),
+            ),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{clients_ca_cert}"),
+            response: json_response(
+                200,
+                &fake_ca_secret_with_pem(&clients_ca_cert, ns, &clients_ca_mat.cert_pem),
+            ),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/namespaces/{ns}/kafkanodepools"),
+            response: json_response(200, &fake_pool_list_body(&pool_items)),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{keystore_name}"),
+            response: json_response(200, &pre_seeded_keystore),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/secrets/{keystore_name}"),
+            response: json_response(200, &pre_seeded_keystore),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/configmaps/{cm_name}"),
+            response: json_response(200, &fake_configmap_body(&cm_name, ns)),
+        },
+    ];
+    // One pool owner-ref-adopt PATCH per pool.
+    for (id, pname) in [0, 1, 2, 3].iter().zip(
+        pool_names
+            .iter()
+            .map(|s| (*s).to_string())
+            .chain(std::iter::once(new_pool.to_string())),
+    ) {
+        rules.push(MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/kafkanodepools/{pname}?"),
+            response: json_response(200, &pool_body_resp(name, ns, &pname, *id)),
+        });
+    }
+    rules.push(MockRule {
+        method: Method::PATCH,
+        path_substr: format!("/kafkas/{name}/status"),
+        response: json_response(200, &fake_kafka_body(name, ns)),
+    });
+
+    let (ctx, state) = build_ctx(ns, rules);
+    let kafka = kafka_cr_byo(name, ns);
+    reconcile(Arc::new(kafka), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    let data = keystore_patch_data(&observed, &keystore_name);
+
+    // Existing brokers 0, 1, 2: cert bytes byte-identical to pre-seed.
+    for id in 0..3i32 {
+        let crt_b64 = data
+            .get(&format!("{id}.crt"))
+            .and_then(|v| v.as_str())
+            .unwrap_or_else(|| panic!("keystore PATCH missing data['{id}.crt']"));
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(crt_b64)
+            .expect("base64");
+        assert_eq!(
+            bytes, original_certs[&id],
+            "broker {id} cert must be byte-identical (reuse path), not reissued"
+        );
+    }
+
+    // New broker 3: cert + key + digest present.
+    for k in ["3.crt", "3.key", "3.sans-digest"] {
+        assert!(
+            data.get(k).and_then(|v| v.as_str()).is_some(),
+            "scale-up: keystore PATCH must add data['{k}'], got keys = {:?}",
+            data.keys().collect::<Vec<_>>(),
+        );
+    }
+    // New broker 3's cert must also chain to the cluster CA (sanity).
+    let new_crt_b64 = data["3.crt"].as_str().unwrap();
+    let new_pem_bytes = base64::engine::general_purpose::STANDARD
+        .decode(new_crt_b64)
+        .unwrap();
+    let new_pem = std::str::from_utf8(&new_pem_bytes).expect("utf-8 PEM");
+    let (_, leaf_block) = parse_x509_pem(new_pem.as_bytes()).expect("new leaf parses as PEM");
+    let leaf = leaf_block.parse_x509().expect("new leaf decodes to X509");
+    let (_, ca_block) =
+        parse_x509_pem(cluster_ca_mat.cert_pem.as_bytes()).expect("cluster CA parses as PEM");
+    let ca = ca_block.parse_x509().expect("CA decodes to X509");
+    leaf.verify_signature(Some(ca.public_key()))
+        .expect("new leaf must chain to cluster CA");
+
+    assert_eq!(
+        state.remaining_rules(),
+        0,
+        "all preloaded rules must have been consumed"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 4: scale-down prunes entries
+//
+// Pre-seed keystore with brokers 0, 1, 2, 3. Configure pool list with only 3
+// pools (broker 0..=2). After reconcile, the keystore PATCH must:
+//   - keep 0.crt, 1.crt, 2.crt byte-identical (reuse path), and
+//   - drop 3.crt, 3.key, 3.sans-digest entirely (prune path).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn scale_down_prunes_entries() {
+    let ns = "ns4";
+    let name = "c4";
+    let cluster_ca_key = format!("{name}-cluster-ca");
+    let cluster_ca_cert = format!("{name}-cluster-ca-cert");
+    let clients_ca_key = format!("{name}-clients-ca");
+    let clients_ca_cert = format!("{name}-clients-ca-cert");
+    let keystore_name = format!("{name}-kafka-brokers");
+    let svc_name = format!("{name}-broker-headless");
+    let cm_name = format!("{name}-broker-config");
+    let secret_name = format!("{name}-cluster-id");
+
+    let cluster_ca_mat =
+        crabka_security::ca::generate_cluster_ca("c4-cluster-ca", 365).expect("cluster CA gen");
+    let clients_ca_mat =
+        crabka_security::ca::generate_clients_ca("c4-clients-ca", 365).expect("clients CA gen");
+
+    // Pre-issue 4 brokers (0..=3). The "removed" broker (id 3) uses a pool name
+    // that won't be in the post-scale-down pool list.
+    let kept_pool_names = ["pool-a", "pool-b", "pool-c"];
+    let removed_pool_name = "pool-d";
+    let mut pre_data = serde_json::Map::new();
+    let mut original_certs: std::collections::BTreeMap<i32, Vec<u8>> =
+        std::collections::BTreeMap::new();
+    for i in 0_usize..4 {
+        let id = i32::try_from(i).unwrap();
+        let pname = if i < kept_pool_names.len() {
+            kept_pool_names[i]
+        } else {
+            removed_pool_name
+        };
+        let sans = broker_sans(name, pname, ns);
+        let leaf = crabka_security::ca::issue_broker_cert(
+            &cluster_ca_mat.cert_pem,
+            &cluster_ca_mat.key_pem,
+            &format!("{name}-{pname}-0"),
+            &sans,
+            &[],
+            365,
+        )
+        .expect("leaf cert gen");
+        let digest = compute_san_digest(&sans, &[]);
+        let crt_b64 = base64::engine::general_purpose::STANDARD.encode(leaf.cert_pem.as_bytes());
+        let key_b64 = base64::engine::general_purpose::STANDARD.encode(leaf.key_pem.as_bytes());
+        let dig_b64 = base64::engine::general_purpose::STANDARD.encode(digest.as_bytes());
+        pre_data.insert(format!("{id}.crt"), json!(crt_b64));
+        pre_data.insert(format!("{id}.key"), json!(key_b64));
+        pre_data.insert(format!("{id}.sans-digest"), json!(dig_b64));
+        original_certs.insert(id, leaf.cert_pem.into_bytes());
+    }
+    let pre_seeded_keystore = json!({
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": { "name": &keystore_name, "namespace": ns, "uid": "ks-uid" },
+        "type": "Opaque",
+        "data": pre_data
+    });
+
+    // Pool list now contains only 3 pools (0..=2). Broker 3's pool is gone.
+    let pool_items: Vec<serde_json::Value> = (0_usize..3)
+        .map(|i| pool_item(name, ns, kept_pool_names[i], i32::try_from(i).unwrap()))
+        .collect();
+
+    let mut rules = vec![
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/services/{svc_name}"),
+            response: json_response(200, &fake_service_body(&svc_name, ns)),
+        },
+        secret_rule_404(Method::GET, format!("/secrets/{secret_name}")),
+        MockRule {
+            method: Method::POST,
+            path_substr: format!("/namespaces/{ns}/secrets"),
+            response: json_response(201, &fake_secret_body_cluster_id(&secret_name, ns)),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{cluster_ca_key}"),
+            response: json_response(
+                200,
+                &fake_ca_secret_with_pem(&cluster_ca_key, ns, &cluster_ca_mat.key_pem),
+            ),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{cluster_ca_cert}"),
+            response: json_response(
+                200,
+                &fake_ca_secret_with_pem(&cluster_ca_cert, ns, &cluster_ca_mat.cert_pem),
+            ),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{clients_ca_key}"),
+            response: json_response(
+                200,
+                &fake_ca_secret_with_pem(&clients_ca_key, ns, &clients_ca_mat.key_pem),
+            ),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{clients_ca_cert}"),
+            response: json_response(
+                200,
+                &fake_ca_secret_with_pem(&clients_ca_cert, ns, &clients_ca_mat.cert_pem),
+            ),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/namespaces/{ns}/kafkanodepools"),
+            response: json_response(200, &fake_pool_list_body(&pool_items)),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{keystore_name}"),
+            response: json_response(200, &pre_seeded_keystore),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/secrets/{keystore_name}"),
+            response: json_response(200, &pre_seeded_keystore),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/configmaps/{cm_name}"),
+            response: json_response(200, &fake_configmap_body(&cm_name, ns)),
+        },
+    ];
+    for (id, pname) in [0i32, 1, 2].iter().zip(kept_pool_names.iter()) {
+        rules.push(MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/kafkanodepools/{pname}?"),
+            response: json_response(200, &pool_body_resp(name, ns, pname, *id)),
+        });
+    }
+    rules.push(MockRule {
+        method: Method::PATCH,
+        path_substr: format!("/kafkas/{name}/status"),
+        response: json_response(200, &fake_kafka_body(name, ns)),
+    });
+
+    let (ctx, state) = build_ctx(ns, rules);
+    let kafka = kafka_cr_byo(name, ns);
+    reconcile(Arc::new(kafka), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    let data = keystore_patch_data(&observed, &keystore_name);
+
+    // Remaining brokers 0, 1, 2: byte-identical to pre-seed (reuse path).
+    for id in 0..3i32 {
+        let crt_b64 = data
+            .get(&format!("{id}.crt"))
+            .and_then(|v| v.as_str())
+            .unwrap_or_else(|| panic!("keystore PATCH missing data['{id}.crt']"));
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(crt_b64)
+            .expect("base64");
+        assert_eq!(
+            bytes, original_certs[&id],
+            "broker {id} cert must be byte-identical after scale-down (reuse path)",
+        );
+    }
+
+    // Removed broker 3: all three entries pruned.
+    for k in ["3.crt", "3.key", "3.sans-digest"] {
+        assert!(
+            !data.contains_key(k),
+            "scale-down: keystore PATCH must drop data['{k}'], got keys = {:?}",
+            data.keys().collect::<Vec<_>>(),
+        );
+    }
 
     assert_eq!(
         state.remaining_rules(),
