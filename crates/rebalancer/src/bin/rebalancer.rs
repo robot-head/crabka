@@ -14,7 +14,6 @@ use tracing::{info, warn};
 use crabka_rebalancer::api::GoalRegistry;
 use crabka_rebalancer::api::handlers::AppState;
 use crabka_rebalancer::executor::client_impl::LiveClient;
-use crabka_rebalancer::executor::state::InFlightFile;
 use crabka_rebalancer::executor::{Execution, ExecutionHandle, ExecutorConfig, ExecutorState};
 use crabka_rebalancer::goals::GoalContext;
 use crabka_rebalancer::health::{HealthState, new_registry};
@@ -369,49 +368,77 @@ async fn main() -> anyhow::Result<()> {
     let live_client: Arc<dyn crabka_rebalancer::executor::phases::ClientFacade> =
         Arc::new(LiveClient::new(client.clone()));
 
-    // Recovery on startup: replay in_flight.json if present.
-    if let Some(in_flight) = InFlightFile::load(&args.data_dir)? {
-        info!(
-            proposal_id = %in_flight.proposal_id,
-            phase = ?in_flight.phase,
-            "recovering in-flight execution"
-        );
-        if let Some(proposal) = store.get(&in_flight.proposal_id) {
-            let prop_for_resume = store
-                .mutate(&in_flight.proposal_id, |p| {
-                    p.status = ProposalStatus::Executing;
-                })
-                .unwrap_or(proposal);
-            let cancel = CancellationToken::new();
-            let handle_cancel = cancel.clone();
-            let exec_state = executor_state.clone();
-            let exec_client = live_client.clone();
-            let in_flight_for_resume = in_flight.clone();
-            let task = tokio::spawn(async move {
-                Execution::resume(
-                    exec_client,
-                    exec_state,
-                    prop_for_resume,
-                    &in_flight_for_resume,
-                    cancel,
-                )
-                .run()
-                .await;
-            });
-            *in_flight_slot.lock().await = Some(ExecutionHandle {
-                proposal_id: in_flight.proposal_id.clone(),
-                task,
-                cancel: handle_cancel,
-                started_at: std::time::Instant::now(),
-            });
-        } else {
-            warn!(
-                proposal_id = %in_flight.proposal_id,
-                "in_flight.json references unknown proposal; clearing"
-            );
-            let _ = InFlightFile::delete(&args.data_dir);
+    // Recovery on startup: resume an in-flight execution from the state topic.
+    // We spawn a background task that polls until the loader has finished its
+    // initial replay (is_loaded() == true), then checks for a stored record.
+    // This preserves fast boot-to-/healthz latency — recovery happens
+    // out-of-band of the synchronous startup path.
+    tokio::spawn({
+        let state_topic = state_topic.clone();
+        let store = store.clone();
+        let in_flight_slot = in_flight_slot.clone();
+        let exec_state = executor_state.clone();
+        let exec_client = live_client.clone();
+        let shutdown = shutdown.clone();
+        let load_timeout = Duration::from_secs(args.state_load_timeout_secs);
+        async move {
+            let start = std::time::Instant::now();
+            while !state_topic.is_loaded() {
+                if start.elapsed() > load_timeout {
+                    warn!(
+                        timeout_secs = load_timeout.as_secs(),
+                        "state-topic load did not converge within timeout; \
+                         skipping in-flight recovery"
+                    );
+                    return;
+                }
+                if shutdown.is_cancelled() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            if let Some(in_flight) = state_topic.loaded() {
+                info!(
+                    proposal_id = %in_flight.proposal_id,
+                    phase = ?in_flight.phase,
+                    "resuming in-flight executor state from state topic"
+                );
+                if let Some(proposal) = store.get(&in_flight.proposal_id) {
+                    let prop_for_resume = store
+                        .mutate(&in_flight.proposal_id, |p| {
+                            p.status = ProposalStatus::Executing;
+                        })
+                        .unwrap_or(proposal);
+                    let cancel = CancellationToken::new();
+                    let handle_cancel = cancel.clone();
+                    let in_flight_for_resume = in_flight.clone();
+                    let task = tokio::spawn(async move {
+                        Execution::resume(
+                            exec_client,
+                            exec_state,
+                            prop_for_resume,
+                            &in_flight_for_resume,
+                            cancel,
+                        )
+                        .run()
+                        .await;
+                    });
+                    *in_flight_slot.lock().await = Some(ExecutionHandle {
+                        proposal_id: in_flight.proposal_id.clone(),
+                        task,
+                        cancel: handle_cancel,
+                        started_at: std::time::Instant::now(),
+                    });
+                } else {
+                    warn!(
+                        proposal_id = %in_flight.proposal_id,
+                        "state topic references unknown proposal; clearing"
+                    );
+                    let _ = state_topic.delete().await;
+                }
+            }
         }
-    }
+    });
 
     // Load broker capacity config (optional).
     let broker_capacities = if args.broker_capacity_file.is_empty() {
