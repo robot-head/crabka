@@ -9,7 +9,7 @@
 //!
 //! Lifecycle:
 //!
-//! - [`Self::start`]: read the metadata log's high-water marks,
+//! - [`TopicBasedRemoteLogMetadataManager::start`]: read the metadata log's high-water marks,
 //!   spawn the consumer pump, then block the caller until the pump
 //!   has applied every event that was already in the log at start
 //!   time (initial catch-up). After `start` returns, reads from this
@@ -19,7 +19,7 @@
 //!   the published offset to the inner cache. The sync return implies
 //!   "the event has been recorded and is visible to local reads".
 //! - Read calls: pure local lookups against the inner cache.
-//! - Drop / [`Self::shutdown`]: cancel the consumer pump.
+//! - Drop / [`TopicBasedRemoteLogMetadataManager::shutdown`]: cancel the consumer pump.
 
 use std::sync::Arc;
 

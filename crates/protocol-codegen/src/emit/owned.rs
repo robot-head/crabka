@@ -286,9 +286,16 @@ fn uses_nullable_bytes_recursive(fields: &[FieldSpec]) -> bool {
 fn uses_non_nullable_bytes_recursive(fields: &[FieldSpec]) -> bool {
     fields.iter().any(|f| {
         let base = base_type(&f.field_type);
-        let here = base == "bytes" && f.nullable_versions.is_none();
+        let here = base == "bytes" && needs_non_nullable_codec(f);
         here || uses_non_nullable_bytes_recursive(&f.fields)
     })
+}
+
+/// True if a field needs the non-nullable codec for at least some versions:
+/// either it is never nullable, or its nullable range is narrower than its own
+/// version range (so a per-version split emits a non-nullable branch).
+fn needs_non_nullable_codec(f: &FieldSpec) -> bool {
+    f.nullable_versions.is_none() || nullable_split_cond(f).is_some()
 }
 
 fn uses_nullable_records_recursive(fields: &[FieldSpec]) -> bool {
@@ -302,7 +309,7 @@ fn uses_nullable_records_recursive(fields: &[FieldSpec]) -> bool {
 fn uses_non_nullable_records_recursive(fields: &[FieldSpec]) -> bool {
     fields.iter().any(|f| {
         let base = base_type(&f.field_type);
-        let here = base == "records" && f.nullable_versions.is_none();
+        let here = base == "records" && needs_non_nullable_codec(f);
         here || uses_non_nullable_records_recursive(&f.fields)
     })
 }
@@ -1057,19 +1064,17 @@ fn emit_encode_one(
         String::new()
     };
     let flex_suffix = if force_non_flex { " }" } else { "" };
-    // Version-conditional nullability: field is nullable only starting at nullable_versions.min.
-    // If that minimum is later than the field's own first version, we need to switch codec.
-    let nullable_min = f.nullable_versions.map(|r| r.min);
-    let needs_version_split = nullable_min.is_some_and(|nmin| nmin > f.versions.min);
-    if needs_version_split {
-        let nmin = nullable_min.unwrap();
+    // Version-conditional nullability: the field is nullable only within its
+    // nullableVersions range. Where that range is narrower than the field's own
+    // versions (on either end), switch codec per version.
+    if let Some(ncond) = nullable_split_cond(f) {
         let nullable_body = encode_call(&f.field_type, &format!("self.{field}"), true, res_map);
         // For the non-nullable path, the Rust type is still Option<T> so we must unwrap.
         let non_nullable_body =
             encode_call_option_as_non_nullable(&f.field_type, &format!("self.{field}"), res_map);
         writeln!(
             out,
-            "{indent}if {cond} {{ {flex_prefix}if version >= {nmin} {{ {nullable_body} }} else {{ {non_nullable_body} }}{flex_suffix} }}"
+            "{indent}if {cond} {{ {flex_prefix}if {ncond} {{ {nullable_body} }} else {{ {non_nullable_body} }}{flex_suffix} }}"
         ).unwrap();
     } else {
         let body = encode_call(
@@ -1101,10 +1106,7 @@ fn emit_encoded_len_one(
         String::new()
     };
     let flex_suffix = if force_non_flex { " }" } else { "" };
-    let nullable_min = f.nullable_versions.map(|r| r.min);
-    let needs_version_split = nullable_min.is_some_and(|nmin| nmin > f.versions.min);
-    if needs_version_split {
-        let nmin = nullable_min.unwrap();
+    if let Some(ncond) = nullable_split_cond(f) {
         let nullable_body =
             encoded_len_expr(&f.field_type, &format!("self.{field}"), true, res_map);
         // For the non-nullable path, the Rust type is still Option<T> so unwrap.
@@ -1115,7 +1117,7 @@ fn emit_encoded_len_one(
         );
         writeln!(
             out,
-            "{indent}if {cond} {{ n += {flex_prefix}if version >= {nmin} {{ {nullable_body} }} else {{ {non_nullable_body} }}{flex_suffix}; }}"
+            "{indent}if {cond} {{ n += {flex_prefix}if {ncond} {{ {nullable_body} }} else {{ {non_nullable_body} }}{flex_suffix}; }}"
         ).unwrap();
     } else {
         let body = encoded_len_expr(
@@ -1148,10 +1150,7 @@ fn emit_decode_one(
         String::new()
     };
     let flex_suffix = if force_non_flex { " }" } else { "" };
-    let nullable_min = f.nullable_versions.map(|r| r.min);
-    let needs_version_split = nullable_min.is_some_and(|nmin| nmin > f.versions.min);
-    if needs_version_split {
-        let nmin = nullable_min.unwrap();
+    if let Some(ncond) = nullable_split_cond(f) {
         let nullable_call = decode_call(&f.field_type, true, res_map);
         let non_nullable_call = decode_call(&f.field_type, false, res_map);
         // Non-nullable decode returns a bare value; we must wrap it to match the Option type.
@@ -1159,7 +1158,7 @@ fn emit_decode_one(
             wrap_non_nullable_for_option(&f.field_type, &non_nullable_call, res_map);
         writeln!(
             out,
-            "{indent}if {cond} {{ out.{field} = {flex_prefix}if version >= {nmin} {{ {nullable_call} }} else {{ {non_nullable_wrapped} }}{flex_suffix}; }}"
+            "{indent}if {cond} {{ out.{field} = {flex_prefix}if {ncond} {{ {nullable_call} }} else {{ {non_nullable_wrapped} }}{flex_suffix}; }}"
         ).unwrap();
     } else {
         let call = decode_call(&f.field_type, is_nullable(f), res_map);
@@ -1316,6 +1315,14 @@ fn encode_call_option_as_non_nullable(
              else {{ put_string(buf, ({expr}).as_deref().unwrap_or(\"\")) }}"
         ),
         "uuid" => format!("crate::primitives::uuid::put_uuid(buf, ({expr}).unwrap_or_default())"),
+        // `records` can't go through `unwrap_or_default()` (that would move out of
+        // `&self`), so match by reference and encode an empty payload for None.
+        "records" => format!(
+            "match &{expr} {{ \
+                None => {{ let __rb_buf = bytes::BytesMut::new(); if flex {{ put_compact_bytes(buf, &__rb_buf) }} else {{ put_bytes(buf, &__rb_buf) }} }}, \
+                Some(__rb) => {{ let mut __rb_buf = bytes::BytesMut::new(); <crate::records::RecordsPayload as crate::Encode>::encode(__rb, &mut __rb_buf, version)?; if flex {{ put_compact_bytes(buf, &__rb_buf) }} else {{ put_bytes(buf, &__rb_buf) }} }} \
+            }}"
+        ),
         _ => encode_call(
             schema_type,
             &format!("({expr}).unwrap_or_default()"),
@@ -1355,6 +1362,12 @@ fn encoded_len_expr_option_as_non_nullable(
              else {{ string_len(({expr}).as_deref().unwrap_or(\"\")) }}"
         ),
         "uuid" => "16".into(),
+        "records" => format!(
+            "match &{expr} {{ \
+                None => if flex {{ crate::primitives::string_bytes::compact_bytes_len_from_size(0) }} else {{ 4 }}, \
+                Some(__rb) => {{ let __rb_len = <crate::records::RecordsPayload as crate::Encode>::encoded_len(__rb, version); if flex {{ crate::primitives::string_bytes::compact_bytes_len_from_size(__rb_len) }} else {{ 4 + __rb_len }} }} \
+            }}"
+        ),
         _ => encoded_len_expr(
             schema_type,
             &format!("({expr}).unwrap_or_default()"),
@@ -1666,6 +1679,30 @@ fn is_tagged(f: &FieldSpec) -> bool {
 }
 fn is_nullable(f: &FieldSpec) -> bool {
     f.nullable_versions.is_some()
+}
+
+/// Version condition under which a field uses its NULLABLE codec.
+///
+/// A field is nullable only within its `nullableVersions` range. Where that
+/// range is narrower than the field's own version range (on either end), the
+/// codec must switch between nullable and non-nullable per version. Returns
+/// `Some(cond)` for that boundary expression, or `None` when nullability is
+/// constant across the whole field range (use `is_nullable(f)` directly).
+fn nullable_split_cond(f: &FieldSpec) -> Option<String> {
+    let r = f.nullable_versions?;
+    let need_lower = r.min > f.versions.min;
+    let need_upper = r.max < f.versions.max;
+    if !need_lower && !need_upper {
+        return None;
+    }
+    let mut parts = Vec::new();
+    if need_lower {
+        parts.push(format!("version >= {}", r.min));
+    }
+    if need_upper {
+        parts.push(format!("version <= {}", r.max));
+    }
+    Some(parts.join(" && "))
 }
 
 fn version_cond(r: VersionRange, version_var: &str) -> String {

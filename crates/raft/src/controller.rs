@@ -424,8 +424,26 @@ impl Controller {
     /// `Join` skips initialize and waits for an external `add_learner`;
     /// `Rejoin` skips initialize and relies on the on-disk raft log.
     /// Mismatches between mode and log state return `RaftError::Startup`.
-    #[allow(clippy::too_many_lines)]
     pub async fn start(config: ControllerConfig) -> Result<ControllerHandle, RaftError> {
+        Self::start_with_listener(config, None).await
+    }
+
+    /// Like [`Self::start`], but adopts a caller-supplied, already-bound
+    /// controller listener instead of binding `controller_listen_addr`
+    /// itself.
+    ///
+    /// Test harnesses use this to defeat the bind-and-drop TOCTOU race:
+    /// the test binds an ephemeral port, hands the live `TcpListener`
+    /// here (never dropping it), so no other process can claim the port
+    /// in the gap between probe and bind. The supplied listener's local
+    /// address MUST equal `config.controller_listen_addr` — the bootstrap
+    /// membership record and the voter map are built from the config
+    /// value, so a mismatch would advertise an unreachable dial address.
+    #[allow(clippy::too_many_lines)]
+    pub async fn start_with_listener(
+        config: ControllerConfig,
+        prebound: Option<tokio::net::TcpListener>,
+    ) -> Result<ControllerHandle, RaftError> {
         // 1. Log + state machine. The cluster UUID is injected from the
         //    operator (via `BrokerConfig::cluster_id`) so every broker in
         //    the same `KafkaCluster` reports a matching `MetadataImage`
@@ -520,11 +538,16 @@ impl Controller {
             }
         }
 
-        // 6. Controller listener. Bind first so we surface a clear error
-        //    if the port is taken, then hand it off to the accept loop.
-        let listener = tokio::net::TcpListener::bind(config.controller_listen_addr)
-            .await
-            .map_err(|e| RaftError::Storage(crabka_log::LogError::Io(e)))?;
+        // 6. Controller listener. Adopt the caller-supplied listener when
+        //    present (test harness handoff); otherwise bind here so we
+        //    surface a clear error if the port is taken, then hand it off
+        //    to the accept loop.
+        let listener = match prebound {
+            Some(l) => l,
+            None => tokio::net::TcpListener::bind(config.controller_listen_addr)
+                .await
+                .map_err(|e| RaftError::Storage(crabka_log::LogError::Io(e)))?,
+        };
         let actual_addr = listener
             .local_addr()
             .map_err(|e| RaftError::Storage(crabka_log::LogError::Io(e)))?;
