@@ -511,6 +511,20 @@ impl BrokerConfig {
     /// - `inter_broker_listener_name` does not match any listener name.
     /// - A SASL listener is declared while `enabled_sasl_mechanisms` is empty.
     pub fn validate(&self) -> Result<(), BrokerError> {
+        if self.roles.is_empty() {
+            return Err(BrokerError::EmptyRoles);
+        }
+        if !self.is_controller()
+            && self
+                .controller_quorum_voters
+                .iter()
+                .any(|(id, _)| *id == self.node_id)
+        {
+            return Err(BrokerError::NonControllerIsVoter {
+                node_id: self.node_id,
+            });
+        }
+
         let listeners = self.effective_listeners();
 
         // Bind-address collisions.
@@ -851,6 +865,38 @@ mod tests {
         };
         assert!(c.is_broker());
         assert!(!c.is_controller());
+    }
+
+    #[test]
+    fn rejects_empty_roles() {
+        let c = BrokerConfig {
+            roles: vec![],
+            ..BrokerConfig::default()
+        };
+        assert!(matches!(c.validate(), Err(BrokerError::EmptyRoles)));
+    }
+
+    #[test]
+    fn rejects_broker_only_node_listed_as_its_own_voter() {
+        // node_id 1 is in the default single-voter quorum; a broker-only
+        // node must not be a voter of itself.
+        let c = BrokerConfig {
+            roles: vec![NodeRole::Broker],
+            node_id: 1,
+            controller_quorum_voters: vec![(1, "127.0.0.1:9093".parse().unwrap())],
+            ..BrokerConfig::default()
+        };
+        assert!(matches!(
+            c.validate(),
+            Err(BrokerError::NonControllerIsVoter { node_id: 1 })
+        ));
+    }
+
+    #[test]
+    fn combined_default_passes_role_validation() {
+        BrokerConfig::default()
+            .validate()
+            .expect("combined default validates");
     }
 
     #[test]
