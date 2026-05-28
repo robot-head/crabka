@@ -172,14 +172,26 @@ pub(crate) async fn handle(
         // Kafka's BrokerTopicMetrics semantics.
         if !topic_name.is_empty() {
             let mut topic_bytes: u64 = 0;
+            // Slice 12j: also tally records-per-batch for
+            // `messages_in_total`. V2 payloads expose
+            // `records.len()` directly; legacy MessageSet payloads
+            // remain opaque here and the upconversion-time slice
+            // (12g) already counts those arrivals.
+            let mut topic_messages: u64 = 0;
             for p in &topic.partition_data {
                 let partition_bytes = p.records.as_ref().map_or(0, |r| r.payload_len() as u64);
                 broker
                     .metrics
                     .record_partition_produce(&topic_name, p.index, partition_bytes);
                 topic_bytes += partition_bytes;
+                if let Some(rb) = p.records.as_ref().and_then(RecordsPayload::as_v2) {
+                    topic_messages += rb.records.len() as u64;
+                }
             }
             broker.metrics.record_produce(&topic_name, topic_bytes);
+            broker
+                .metrics
+                .record_produce_messages(&topic_name, topic_messages);
         }
 
         let mut partition_results: Vec<PartitionProduceResponse> =

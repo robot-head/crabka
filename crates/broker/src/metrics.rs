@@ -72,6 +72,17 @@ pub struct BrokerMetrics {
     pub registry: SharedRegistry,
     pub topic_bytes_in: Family<TopicLabel, Counter>,
     pub topic_bytes_out: Family<TopicLabel, Counter>,
+    /// Slice 12j: cumulative count of records received from producers,
+    /// per topic. Sums `RecordBatch.records.len()` for every batch on
+    /// the Produce path. Mirrors Kafka's
+    /// `BrokerTopicMetrics.MessagesInPerSec`; pairs with
+    /// `topic_bytes_in` to surface both volume and message rate.
+    /// Legacy (v0/v1) producers don't contribute — `RecordsPayload`
+    /// keeps their bytes opaque until the v2 conversion, so we
+    /// count there. The accompanying `produce_message_conversions`
+    /// counter still tracks how often legacy batches arrive, so
+    /// operators can detect under-counting from a legacy fleet.
+    pub topic_messages_in: Family<TopicLabel, Counter>,
     pub topic_produce_requests: Family<TopicLabel, Counter>,
     pub topic_fetch_requests: Family<TopicLabel, Counter>,
     pub partition_bytes_in: Family<PartitionLabel, Counter>,
@@ -213,6 +224,7 @@ impl BrokerMetrics {
 
         let topic_bytes_in: Family<TopicLabel, Counter> = Family::default();
         let topic_bytes_out: Family<TopicLabel, Counter> = Family::default();
+        let topic_messages_in: Family<TopicLabel, Counter> = Family::default();
         let topic_produce_requests: Family<TopicLabel, Counter> = Family::default();
         let topic_fetch_requests: Family<TopicLabel, Counter> = Family::default();
         let partition_bytes_in: Family<PartitionLabel, Counter> = Family::default();
@@ -251,6 +263,21 @@ impl BrokerMetrics {
             "topic_bytes_out",
             "Bytes delivered to fetchers, per topic (cumulative).",
             topic_bytes_out.clone(),
+        );
+        // Renders as `crabka_broker_messages_in_total`. Suffix `_total`
+        // is appended automatically by prometheus-client for Counter,
+        // so the registered name omits it.
+        registry.register(
+            "messages_in",
+            "Slice 12j: cumulative count of records received from \
+             producers, per topic. Mirrors Kafka's \
+             BrokerTopicMetrics.MessagesInPerSec. Legacy v0/v1 \
+             produce payloads are not counted (their per-record body \
+             stays opaque on the Produce path); the paired \
+             produce_message_conversions counter tracks the \
+             legacy-arrival rate so operators can detect \
+             under-counting.",
+            topic_messages_in.clone(),
         );
         registry.register(
             "topic_produce_requests",
@@ -467,6 +494,7 @@ impl BrokerMetrics {
             registry: Arc::new(Mutex::new(registry)),
             topic_bytes_in,
             topic_bytes_out,
+            topic_messages_in,
             topic_produce_requests,
             topic_fetch_requests,
             partition_bytes_in,
@@ -549,6 +577,22 @@ impl BrokerMetrics {
         if bytes > 0 {
             self.topic_bytes_in.get_or_create(&lbl).inc_by(bytes);
         }
+    }
+
+    /// Slice 12j: account `messages` records received on the Produce
+    /// path for `topic`. Mirrors Kafka's
+    /// `BrokerTopicMetrics.MessagesInPerSec`. Called once per
+    /// `RecordBatch` with the batch's record count. Zero is a
+    /// legitimate value (legacy batches whose record count we can't
+    /// cheaply derive without a full conversion) and is a no-op.
+    pub fn record_produce_messages(&self, topic: &str, messages: u64) {
+        if messages == 0 {
+            return;
+        }
+        let lbl = TopicLabel {
+            topic: topic.to_string(),
+        };
+        self.topic_messages_in.get_or_create(&lbl).inc_by(messages);
     }
 
     /// Convenience: record a Fetch hit on `topic` with the bytes
@@ -675,6 +719,7 @@ mod tests {
     async fn registry_has_broker_prefix_and_all_metrics() {
         let m = BrokerMetrics::new();
         m.record_produce("topic-a", 100);
+        m.record_produce_messages("topic-a", 5);
         m.record_fetch("topic-a", 50);
         m.record_partition_produce("topic-a", 0, 100);
         m.record_partition_fetch("topic-a", 0, 50);
@@ -736,6 +781,7 @@ mod tests {
             "crabka_broker_unclean_leader_elections_total",
             "crabka_broker_api_requests_total",
             "crabka_broker_unsupported_api_requests_total",
+            "crabka_broker_messages_in_total",
         ] {
             assert!(buf.contains(needle), "missing {needle} in:\n{buf}");
         }
@@ -768,6 +814,23 @@ mod tests {
         m.record_produce("t", 2048);
         assert_eq!(m.topic_produce_requests.get_or_create(&lbl).get(), 2);
         assert_eq!(m.topic_bytes_in.get_or_create(&lbl).get(), 3072);
+    }
+
+    #[test]
+    fn record_produce_messages_sums_across_calls_and_skips_zero() {
+        let m = BrokerMetrics::new();
+        let lbl = TopicLabel {
+            topic: "t".to_string(),
+        };
+        // Zero is a no-op (legacy batches; the v2-conversion-time
+        // counter tracks those arrivals separately).
+        m.record_produce_messages("t", 0);
+        // The label entry is intentionally NOT eagerly created on a
+        // zero-bump; rate(...) over a never-seen topic should yield
+        // 0, not a phantom series.
+        m.record_produce_messages("t", 3);
+        m.record_produce_messages("t", 7);
+        assert_eq!(m.topic_messages_in.get_or_create(&lbl).get(), 10);
     }
 
     #[test]

@@ -4679,6 +4679,55 @@ introspection metadata).
     "highest MetadataVersion this client enumerates") or a
     Raft-tracked finalized-features state with a real monotonic
     epoch — both follow-up slices.
+
+## Slice 12j — broker(metrics): messages_in_total per-topic counter (2026-05-28)
+
+- **Goal.** Pair the existing `topic_bytes_in_total` counter with a
+  record-count counter, mirroring Kafka's
+  `BrokerTopicMetrics.MessagesInPerSec`. Operators graph
+  `rate(messages_in_total[1m])` to see records-per-second per topic
+  alongside the bytes-per-second view — the two together expose
+  payload-size skew (huge batches vs. high-frequency small writes).
+- **Wiring.** New `topic_messages_in: Family<TopicLabel, Counter>`
+  on `BrokerMetrics`, registered as `messages_in` (prometheus-client
+  appends the `_total` suffix). Convenience helper
+  `record_produce_messages(topic, n)` is a no-op on `n == 0` so we
+  don't allocate a phantom series for topics whose only arrivals are
+  legacy MessageSet batches. Wired from `handlers/produce.rs`
+  alongside the existing topic-bytes accounting: each
+  `partition_data` batch contributes
+  `RecordsPayload::as_v2().records.len()`. Legacy (v0/v1) payloads
+  stay opaque on the Produce path, so they don't contribute; the
+  paired slice-12g `produce_message_conversions` counter tracks
+  legacy-batch arrivals so operators can detect any under-counting.
+- **Tests.**
+  - 1 new unit test `record_produce_messages_sums_across_calls_and_skips_zero`
+    asserts the helper accumulates across calls and that zero-bumps
+    are no-ops.
+  - Extended `registry_has_broker_prefix_and_all_metrics` to bump
+    the new counter and assert `crabka_broker_messages_in_total`
+    appears in the encoded text.
+  - Extended `metrics_endpoint_serves_openmetrics_and_counters_tick`
+    integration test to assert
+    `messages_in_total{topic=TOPIC} 1` after a single produce-one
+    call. End-to-end through `Broker::start` → producer → metrics
+    scrape, validating the wire path lands in Prometheus exactly
+    once per record (not per batch).
+- **`cargo test -p crabka-broker --lib metrics` (15 pass, +1 new)
+  + `cargo test -p crabka-broker --test metrics` (2 pass, with the
+  new assertion) + `cargo clippy -p crabka-broker --lib --tests -- -D warnings`
+  + `cargo fmt --check`** — all green.
+- **Out of scope.**
+  - Counting messages in legacy (v0/v1) MessageSet payloads. Doing
+    so cheaply would need a legacy-format counter accessor on
+    `RecordsPayload::Legacy(Bytes)`. The slice-12g conversion
+    counter already lets operators detect any legacy-arrival rate
+    that would matter for the messages-in delta.
+  - A matching `messages_out_total` Fetch-path counter. The Fetch
+    handler ships record-batch bytes verbatim from the log
+    without re-parsing every record, so a record-count counter
+    there would either re-decode (expensive) or live behind a
+    separate index — both follow-up slices.
 ## Slice 64a follow-up — KIP-848 persistence + JVM-client gating (2026-05-28)
 
 - New `coordinator/next_gen/offsets_log.rs` — `OffsetsLog` trait,
