@@ -143,6 +143,16 @@ pub const UNACCEPTABLE_CREDENTIAL: i16 = 78;
 /// request (either two upsertions, two deletions, or one of each).
 pub const DUPLICATE_RESOURCE: i16 = 84;
 
+/// `INVALID_UPDATE_VERSION` (95, KIP-584) — a feature-level update in
+/// `UpdateFeatures` is outside the broker's supported range, or attempts an
+/// unguarded downgrade / deletion of a finalized feature.
+pub const INVALID_UPDATE_VERSION: i16 = 95;
+
+/// `FEATURE_UPDATE_FAILED` (96, KIP-584) — the cluster failed to persist a
+/// validated feature update (e.g., the metadata write to Raft was rejected
+/// or timed out).
+pub const FEATURE_UPDATE_FAILED: i16 = 96;
+
 // Slice 13 additions — ACL authorization codes.
 /// `TOPIC_AUTHORIZATION_FAILED` (29) — principal lacks permission on the topic.
 pub const TOPIC_AUTHORIZATION_FAILED: i16 = 29;
