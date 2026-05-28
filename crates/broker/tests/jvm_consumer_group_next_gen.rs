@@ -121,7 +121,7 @@ async fn jvm_kip848_single_consumer_round_trip() {
             "bash",
             "-c",
             &format!(
-                "/opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server {BOOTSTRAP} --topic kip848-rt --group g-rt --consumer-property group.protocol=consumer --from-beginning --timeout-ms 8000 --max-messages 3"
+                "/opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server {BOOTSTRAP} --topic kip848-rt --group g-rt --group-protocol consumer --from-beginning --timeout-ms 8000 --max-messages 3"
             ),
         ],
     );
@@ -153,7 +153,7 @@ async fn jvm_kip848_describe_group() {
             "bash",
             "-c",
             &format!(
-                "/opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server {BOOTSTRAP} --topic kip848-d --group g-d --consumer-property group.protocol=consumer --from-beginning --timeout-ms 6000 --max-messages 2"
+                "/opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server {BOOTSTRAP} --topic kip848-d --group g-d --group-protocol consumer --from-beginning --timeout-ms 6000 --max-messages 2"
             ),
         ],
     );
@@ -195,7 +195,7 @@ async fn jvm_kip848_delete_group() {
             "bash",
             "-c",
             &format!(
-                "/opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server {BOOTSTRAP} --topic kip848-del --group g-del --consumer-property group.protocol=consumer --from-beginning --timeout-ms 4000 --max-messages 1"
+                "/opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server {BOOTSTRAP} --topic kip848-del --group g-del --group-protocol consumer --from-beginning --timeout-ms 4000 --max-messages 1"
             ),
         ],
     );
@@ -246,7 +246,7 @@ async fn jvm_kip848_coexists_with_classic() {
             "bash",
             "-c",
             &format!(
-                "/opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server {BOOTSTRAP} --topic kip848-coex --group g-next --consumer-property group.protocol=consumer --from-beginning --timeout-ms 5000 --max-messages 2"
+                "/opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server {BOOTSTRAP} --topic kip848-coex --group g-next --group-protocol consumer --from-beginning --timeout-ms 5000 --max-messages 2"
             ),
         ],
     );
