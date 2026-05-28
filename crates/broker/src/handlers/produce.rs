@@ -27,8 +27,23 @@ use tokio::sync::oneshot;
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize_topics};
 use crate::broker::Broker;
 use crate::codes;
+use crate::config_keys::MIN_INSYNC_REPLICAS;
 use crate::error::BrokerError;
 use crate::partition::{Partition, ProduceJob, WriterMessage};
+
+/// Resolve `min.insync.replicas` for a topic from the metadata image.
+/// Defaults to `1` (Kafka's default — every cluster has at least the
+/// leader in ISR), and silently falls back to `1` on malformed values
+/// (the `AlterConfigs` validator already rejected invalid values, so
+/// any non-parseable string here is a corrupt metadata image — safer
+/// to err toward the permissive default than to wedge produce).
+fn topic_min_insync_replicas(image: &crabka_metadata::MetadataImage, topic: &str) -> i32 {
+    image
+        .topic_config(topic)
+        .and_then(|m| m.get(MIN_INSYNC_REPLICAS))
+        .and_then(|v| v.parse::<i32>().ok())
+        .unwrap_or(1)
+}
 
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn handle(
@@ -198,6 +213,7 @@ pub(crate) async fn handle(
                     &txn_coordinator,
                     &producer_state,
                     &log_dir_status,
+                    &image,
                 ))
                 .await?;
             let micros = u64::try_from(monitor.cumulative().total_poll_duration.as_micros())
@@ -266,6 +282,7 @@ async fn process_partition(
     txn_coordinator: &Arc<crate::txn::coordinator::TxnCoordinator>,
     producer_state: &Arc<crate::producer_state::ProducerState>,
     log_dir_status: &crate::log_dir_status::LogDirRegistry,
+    image: &Arc<crabka_metadata::MetadataImage>,
 ) -> Result<PartitionProduceResponse, BrokerError> {
     let idx = part_data.index;
     let mut out = PartitionProduceResponse {
@@ -323,6 +340,24 @@ async fn process_partition(
     if log_dir_status.is_offline(&part.log_dir.load()) {
         out.error_code = codes::KAFKA_STORAGE_ERROR;
         return Ok(out);
+    }
+
+    // `min.insync.replicas` pre-flight check (KIP-91 / KAFKA-3197).
+    // Only `acks=-1` (`all`) cares: with `acks=0`/`1` the leader never
+    // waits for followers, so the threshold is meaningless. When the
+    // image's ISR is already smaller than the configured threshold,
+    // there's no chance the post-append HW gate will satisfy "all
+    // in-sync replicas ack" — fail fast with NOT_ENOUGH_REPLICAS (19)
+    // before queueing work on the writer. Default `1` matches Apache
+    // Kafka and preserves the legacy "any-ISR-counts" behavior.
+    if acks == -1
+        && let Some(pr) = image.partition(topic_name, idx)
+    {
+        let min_isr = topic_min_insync_replicas(image, topic_name);
+        if i32::try_from(pr.isr.len()).unwrap_or(i32::MAX) < min_isr {
+            out.error_code = codes::NOT_ENOUGH_REPLICAS;
+            return Ok(out);
+        }
     }
 
     // Stamp the current leader epoch onto the batch — this becomes
@@ -592,6 +627,96 @@ fn consume_producer_quota(
 
 #[cfg(test)]
 mod tests {
+    use super::{MIN_INSYNC_REPLICAS, topic_min_insync_replicas};
+    use crabka_metadata::{
+        MetadataImage, MetadataRecord, PartitionRecord, TopicConfigRecord, TopicRecord,
+    };
+    use std::collections::BTreeMap;
+    use uuid::Uuid;
+
+    fn image_with_topic(topic: &str, isr: &[u64]) -> MetadataImage {
+        let mut img = MetadataImage::new(Uuid::nil());
+        img.apply(&MetadataRecord::V1Topic(TopicRecord {
+            name: topic.into(),
+            topic_id: Uuid::nil(),
+            partitions: 1,
+            replication_factor: i16::try_from(isr.len().max(1)).unwrap(),
+        }));
+        img.apply(&MetadataRecord::V1Partition(PartitionRecord {
+            topic: topic.into(),
+            partition: 0,
+            leader: *isr.first().unwrap_or(&1),
+            replicas: isr.to_vec(),
+            isr: isr.to_vec(),
+            leader_epoch: 0,
+            adding_replicas: vec![],
+            removing_replicas: vec![],
+        }));
+        img
+    }
+
+    fn set_min_isr(img: &mut MetadataImage, topic: &str, n: i32) {
+        let mut o = BTreeMap::new();
+        o.insert(MIN_INSYNC_REPLICAS.into(), n.to_string());
+        img.apply(&MetadataRecord::V1TopicConfig(TopicConfigRecord {
+            topic: topic.into(),
+            overrides: o,
+        }));
+    }
+
+    #[test]
+    fn topic_min_isr_defaults_to_one_when_unset() {
+        let img = image_with_topic("t", &[1, 2, 3]);
+        assert_eq!(topic_min_insync_replicas(&img, "t"), 1);
+    }
+
+    #[test]
+    fn topic_min_isr_reads_override_when_set() {
+        let mut img = image_with_topic("t", &[1, 2, 3]);
+        set_min_isr(&mut img, "t", 3);
+        assert_eq!(topic_min_insync_replicas(&img, "t"), 3);
+    }
+
+    #[test]
+    fn topic_min_isr_default_one_on_unknown_topic() {
+        let img = MetadataImage::new(Uuid::nil());
+        assert_eq!(
+            topic_min_insync_replicas(&img, "ghost"),
+            1,
+            "missing topic_config must default to 1, not crash",
+        );
+    }
+
+    #[test]
+    fn topic_min_isr_default_one_on_malformed_value() {
+        let mut img = image_with_topic("t", &[1, 2, 3]);
+        let mut o = BTreeMap::new();
+        o.insert(MIN_INSYNC_REPLICAS.into(), "not-a-number".into());
+        img.apply(&MetadataRecord::V1TopicConfig(TopicConfigRecord {
+            topic: "t".into(),
+            overrides: o,
+        }));
+        assert_eq!(
+            topic_min_insync_replicas(&img, "t"),
+            1,
+            "unparseable value must fall back to permissive default 1",
+        );
+    }
+
+    #[test]
+    fn topic_min_isr_handles_topic_config_without_min_isr_key() {
+        // Topic has *some* override (e.g. retention.ms) but no
+        // min.insync.replicas — still defaults to 1.
+        let mut img = image_with_topic("t", &[1, 2, 3]);
+        let mut o = BTreeMap::new();
+        o.insert("retention.ms".into(), "60000".into());
+        img.apply(&MetadataRecord::V1TopicConfig(TopicConfigRecord {
+            topic: "t".into(),
+            overrides: o,
+        }));
+        assert_eq!(topic_min_insync_replicas(&img, "t"), 1);
+    }
+
     #[test]
     fn consume_producer_quota_tuple_match_overage_throttles() {
         use crabka_metadata::{ClientQuotaRecord, MetadataImage, MetadataRecord, QuotaEntity};
