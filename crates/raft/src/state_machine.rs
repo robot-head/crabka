@@ -2,12 +2,12 @@
 //! synchronous + infallible; we swap the `Arc<MetadataImage>` after
 //! mutating a fresh clone so readers always observe a consistent view.
 //!
-//! Snapshot generation (`build_snapshot`/`get_current_snapshot`) and
+//! Snapshot generation (`build_snapshot`/`get_current_snapshot`),
 //! recovery (seeding the image from the newest on-disk checkpoint at
-//! construction) are implemented here. The receiving side —
-//! `begin_receiving_snapshot`/`install_snapshot` for follower catch-up
-//! over openraft's `InstallSnapshot` RPC — is not yet wired, so those
-//! methods return a typed "Unsupported" `StorageError`.
+//! construction), and install (`begin_receiving_snapshot`/
+//! `install_snapshot`, rebuilding the image from a snapshot streamed over
+//! openraft's `InstallSnapshot` RPC for follower catch-up) are all
+//! implemented here.
 
 #![allow(dead_code)]
 
@@ -127,17 +127,6 @@ impl CrabkaStateMachine {
             rejected,
         }
     }
-}
-
-/// Helper: build a `StorageError` describing a snapshot operation that
-/// isn't implemented. We surface `io::ErrorKind::Unsupported` so callers
-/// (and logs) can distinguish "deferred feature" from a real I/O fault.
-fn snapshot_unsupported(verb: &'static str) -> StorageError<NodeId> {
-    let io_err = io::Error::new(
-        io::ErrorKind::Unsupported,
-        format!("snapshots are not implemented ({verb})"),
-    );
-    StorageIOError::read_snapshot(None, AnyError::new(&io_err)).into()
 }
 
 /// Map a snapshot-build/persist `RaftError` into an openraft write-side
