@@ -64,11 +64,15 @@ What works today:
   surface) and a Cruise-Control-equivalent rebalancer.
 
 Notable gaps (see the [KIP matrix](#kip-implementation-status) for detail): the
-next-gen consumer group protocol (KIP-848), tiered storage (KIP-405) — the
-`crabka-remote-storage-topic` (KIP-405 production RLMM) crate is in tree but
-not yet wired into the broker — share groups / queues (KIP-932), SASL/GSSAPI
-(Kerberos), and dynamic KRaft quorum membership (KIP-853). ZooKeeper mode and
-ZK→KRaft migration are deliberately out of scope — Crabka is KRaft-only.
+next-gen consumer group protocol (KIP-848) is in progress — broker-side
+foundations, `__consumer_offsets` persistence, a rack-aware `UniformAssignor`,
+and `subscribed_topic_regex` are in tree; classic→next-gen group migration and
+the pluggable server-side assignor surface are still pending. Tiered storage
+(KIP-405) is partial: the `crabka-remote-storage-topic` (KIP-405 production
+RLMM) crate is in tree but not yet wired into the broker. Share groups /
+queues (KIP-932), SASL/GSSAPI (Kerberos), and dynamic KRaft quorum membership
+(KIP-853) are not yet implemented. ZooKeeper mode and ZK→KRaft migration are
+deliberately out of scope — Crabka is KRaft-only.
 
 ## Architecture
 
@@ -167,7 +171,7 @@ implements it today. Legend: ✅ implemented · ⚠️ partial · ❌ not yet ·
 | Cooperative incremental rebalance (KIP-429) | ✅ |
 | Static membership (KIP-345) | ✅ |
 | `OffsetDelete` admin API (KIP-496) | ✅ |
-| Next-gen consumer group protocol (KIP-848) | ❌ |
+| Next-gen consumer group protocol (KIP-848) | ⚠️ |
 
 ### Replication & durability
 
@@ -350,7 +354,7 @@ KIPs. Legend: ✅ implemented · ⚠️ partial · ❌ not yet · ⛔ out of sco
 | [KIP-345](https://cwiki.apache.org/confluence/display/KAFKA/KIP-345) | Static membership | ✅ |
 | [KIP-429](https://cwiki.apache.org/confluence/display/KAFKA/KIP-429) | Cooperative incremental rebalance protocol | ✅ |
 | [KIP-496](https://cwiki.apache.org/confluence/display/KAFKA/KIP-496) | `OffsetDelete` admin API | ✅ |
-| [KIP-848](https://cwiki.apache.org/confluence/display/KAFKA/KIP-848) | Next-generation consumer rebalance protocol | ❌ |
+| [KIP-848](https://cwiki.apache.org/confluence/display/KAFKA/KIP-848) | Next-generation consumer rebalance protocol | ⚠️ |
 
 ### Storage & log
 
