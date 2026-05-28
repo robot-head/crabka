@@ -140,6 +140,11 @@ fn supported_apis() -> Vec<ApiVersion> {
         // legacy-fallback paths we don't need.
         v!(get_telemetry_subscriptions_request),
         v!(push_telemetry_request),
+        // ListConfigResources (KIP-1142) — typed enumeration of every
+        // configurable resource (topics + brokers + client_metrics). v0
+        // is the legacy ListClientMetricsResources surface (KIP-714); v1
+        // adds the `resource_types` filter.
+        v!(list_config_resources_request),
     ]
 }
 
