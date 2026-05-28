@@ -404,7 +404,7 @@ KIPs. Legend: ✅ implemented · ⚠️ partial · ❌ not yet · ⛔ out of sco
 | [KIP-700](https://cwiki.apache.org/confluence/display/KAFKA/KIP-700) | `DescribeCluster` API | ✅ |
 | [KIP-516](https://cwiki.apache.org/confluence/display/KAFKA/KIP-516) | Topic identifiers | ⚠️ |
 | [KIP-430](https://cwiki.apache.org/confluence/display/KAFKA/KIP-430) | Authorized operations in describe responses | ✅ |
-| [KIP-664](https://cwiki.apache.org/confluence/display/KAFKA/KIP-664) | `DescribeProducers` admin API | ✅ |
+| [KIP-664](https://cwiki.apache.org/confluence/display/KAFKA/KIP-664) | `DescribeProducers` / `ListTransactions` / `DescribeTransactions` admin APIs | ✅ |
 | [KIP-966](https://cwiki.apache.org/confluence/display/KAFKA/KIP-966) | `DescribeTopicPartitions` admin API | ✅ |
 
 ### Security & authentication

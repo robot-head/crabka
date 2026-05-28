@@ -75,6 +75,8 @@ pub(crate) mod describe_groups;
 pub(crate) mod describe_log_dirs;
 // KIP-664 producer-state introspection (api_key 61).
 pub(crate) mod describe_producers;
+// KIP-664 transaction introspection (api_key 65).
+pub(crate) mod describe_transactions;
 // KIP-966 paginated topic listing (api_key 75).
 pub(crate) mod describe_topic_partitions;
 pub(crate) mod describe_user_scram_credentials;
@@ -95,7 +97,9 @@ pub(crate) mod join_group;
 pub(crate) mod leave_group;
 pub(crate) mod list_groups;
 pub(crate) mod list_offsets;
+// KIP-664 transaction-summary admin RPC (api_key 66).
 pub(crate) mod list_partition_reassignments;
+pub(crate) mod list_transactions;
 pub(crate) mod metadata;
 pub(crate) mod offset_commit;
 pub(crate) mod offset_delete;

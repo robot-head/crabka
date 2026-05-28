@@ -98,6 +98,25 @@ impl TxnCoordinator {
         self.pid_to_tid.get(&pid).map(|e| e.value().clone())
     }
 
+    /// Snapshot every locally-coordinated `TxnEntry`. Used by the KIP-664
+    /// admin handlers (`ListTransactions`, `DescribeTransactions`) to
+    /// expose the in-memory txn-state map. Each entry is locked + cloned
+    /// in turn so the snapshot is internally consistent per-tid but not
+    /// across the entire batch — acceptable for an admin introspection
+    /// API (Apache Kafka's JVM coordinator has the same property).
+    pub(crate) async fn snapshot(&self) -> Vec<TxnEntry> {
+        // Collect the `Arc<Mutex<_>>` handles first so we don't hold the
+        // DashMap shard locks while taking the inner async mutex.
+        let handles: Vec<Arc<Mutex<TxnEntry>>> =
+            self.state.iter().map(|e| e.value().clone()).collect();
+        let mut out = Vec::with_capacity(handles.len());
+        for h in handles {
+            let entry = h.lock().await;
+            out.push(entry.clone());
+        }
+        out
+    }
+
     /// Persist `entry` to the corresponding `__transaction_state` partition
     /// log, then update the in-memory map. The batch is appended via the
     /// partition's writer task (ordered with all other produce appends).
