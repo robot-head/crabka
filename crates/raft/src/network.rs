@@ -153,9 +153,17 @@ impl openraft::network::RaftNetworkFactory<TypeConfig> for CrabkaRaftNetworkFact
     type Network = CrabkaRaftNetworkConn;
 
     async fn new_client(&mut self, target: NodeId, node: &Node) -> Self::Network {
+        // KIP-853 voter nodes carry their listener endpoints; openraft dials
+        // the CONTROLLER endpoint. A node with no resolvable controller
+        // endpoint yields an empty addr — `connect` then fails to parse it
+        // and surfaces `Unreachable`, which is the correct backoff behavior.
+        let addr = node
+            .controller_addr()
+            .map(|a| a.to_string())
+            .unwrap_or_default();
         CrabkaRaftNetworkConn {
             target,
-            addr: node.addr.clone(),
+            addr,
             factory: self.clone(),
         }
     }

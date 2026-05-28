@@ -7,9 +7,26 @@ use crabka_metadata::MetadataRecord;
 
 pub type NodeId = u64;
 
-/// `BasicNode` from openraft carries the network address. We use it
-/// directly rather than wrapping.
-pub type Node = openraft::BasicNode;
+/// KIP-853 voter node identity used by openraft membership.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Node {
+    pub directory_id: uuid::Uuid,
+    pub endpoints: Vec<crabka_metadata::VoterEndpoint>,
+    pub kraft_version: crabka_metadata::KRaftVersionRange,
+}
+
+impl Node {
+    /// The controller RPC endpoint openraft dials. By convention the first
+    /// endpoint named "CONTROLLER"; falls back to the first endpoint.
+    #[must_use]
+    pub fn controller_addr(&self) -> Option<std::net::SocketAddr> {
+        self.endpoints
+            .iter()
+            .find(|e| e.name == "CONTROLLER")
+            .or_else(|| self.endpoints.first())
+            .and_then(|e| format!("{}:{}", e.host, e.port).parse().ok())
+    }
+}
 
 /// What we ask Raft to replicate. A batch of `MetadataRecord`s so
 /// `submit_change` can group related records (Topic + N Partitions)
@@ -47,3 +64,28 @@ openraft::declare_raft_types!(
 /// Re-export the openraft-derived `Raft` alias so adapters can name it
 /// without re-stating the type config.
 pub type Raft = openraft::Raft<TypeConfig>;
+
+#[cfg(test)]
+mod node_tests {
+    use super::*;
+    #[test]
+    fn node_controller_addr_prefers_controller_listener() {
+        let n = Node {
+            directory_id: uuid::Uuid::nil(),
+            endpoints: vec![
+                crabka_metadata::VoterEndpoint {
+                    name: "PLAINTEXT".into(),
+                    host: "127.0.0.1".into(),
+                    port: 9092,
+                },
+                crabka_metadata::VoterEndpoint {
+                    name: "CONTROLLER".into(),
+                    host: "127.0.0.1".into(),
+                    port: 9093,
+                },
+            ],
+            kraft_version: crabka_metadata::KRaftVersionRange::default(),
+        };
+        assert_eq!(n.controller_addr().unwrap().port(), 9093);
+    }
+}

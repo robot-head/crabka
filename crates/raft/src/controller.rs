@@ -44,6 +44,11 @@ pub struct QuorumState {
     pub current_leader: Option<NodeId>,
     /// Voter ids in the current membership config.
     pub voters: Vec<NodeId>,
+    /// Full voter node identities (directory id + endpoints + kraft.version)
+    /// in the current membership config, keyed by node id. Mirrors `voters`
+    /// but carries the KIP-853 voter metadata the `DescribeQuorum` /
+    /// dynamic-reconfiguration paths need.
+    pub voter_nodes: BTreeMap<NodeId, Node>,
     /// Per-voter `matched` log index from openraft's `replication` map.
     /// Populated ONLY on the leader — openraft only knows peers'
     /// progress when this node is acknowledging their `AppendEntries`
@@ -65,12 +70,6 @@ pub struct ControllerHandle {
     shutdown: CancellationToken,
     listener_task: Mutex<Option<JoinHandle<()>>>,
     leader_pump_task: Mutex<Option<JoinHandle<()>>>,
-    /// Static voter map cloned from `ControllerConfig::voters`. Used by
-    /// `submit_change` to forward writes to the current leader when the
-    /// local node is a follower — the local openraft instance returns
-    /// `ForwardToLeader` and we dial the leader's controller listener
-    /// directly via the slice-7 `API_KEY_SUBMIT_CHANGE` RPC.
-    voters: Vec<(NodeId, SocketAddr)>,
     client_id: String,
     /// Outbound dialer cloned from the factory at construction time.
     /// `forward_submit_to` uses it to reach the leader's controller
@@ -113,7 +112,17 @@ impl ControllerHandle {
     #[must_use]
     pub fn quorum_state(&self) -> QuorumState {
         let m = self.raft.metrics().borrow().clone();
-        let voters: Vec<NodeId> = m.membership_config.membership().voter_ids().collect();
+        let membership = m.membership_config.membership();
+        let voters: Vec<NodeId> = membership.voter_ids().collect();
+        // openraft's `nodes()` yields `(&NodeId, &Node)` for every member
+        // (voters + learners). Restrict to the voter ids so `voter_nodes`
+        // mirrors `voters`.
+        let voter_set: std::collections::BTreeSet<NodeId> = voters.iter().copied().collect();
+        let voter_nodes: BTreeMap<NodeId, Node> = membership
+            .nodes()
+            .filter(|(nid, _)| voter_set.contains(nid))
+            .map(|(nid, node)| (*nid, node.clone()))
+            .collect();
         // openraft populates `replication` only on the current leader;
         // on a follower the map is empty and per-voter `log_end_offset`
         // stays at the `Unknown` sentinel for each peer.
@@ -131,6 +140,7 @@ impl ControllerHandle {
             last_applied_index: m.last_applied.as_ref().map_or(0, |lid| lid.index),
             current_leader: m.current_leader,
             voters,
+            voter_nodes,
             per_voter_matched_index,
         }
     }
@@ -250,14 +260,16 @@ impl ControllerHandle {
         }
     }
 
-    /// Register a non-voting raft learner at `addr` with id `node_id`. Blocks
-    /// until the leader has replicated up to its current commit index to the
-    /// new node (so a subsequent [`Self::change_membership`] promotion won't
-    /// stall waiting for catch-up). Pair with [`Self::change_membership`] to
-    /// turn a learner into a voter:
+    /// Register a non-voting raft learner with id `node_id` and the KIP-853
+    /// voter identity `node` (directory id + endpoints + kraft.version range).
+    /// Blocks until the leader has replicated up to its current commit index
+    /// to the new node (so a subsequent [`Self::change_membership`] promotion
+    /// won't stall waiting for catch-up). Pair with [`Self::change_membership`]
+    /// to turn a learner into a voter:
     ///
     /// ```ignore
-    /// controller.add_learner(4, "127.0.0.1:9094".parse().unwrap()).await?;
+    /// let node = Node { directory_id, endpoints, kraft_version };
+    /// controller.add_learner(4, node).await?;
     /// controller.change_membership([1, 2, 3, 4].into_iter().collect()).await?;
     /// ```
     ///
@@ -267,12 +279,9 @@ impl ControllerHandle {
     /// - `RaftError::ChangeRejected` if openraft rejects (e.g., the learner
     ///   never catches up within openraft's internal deadline).
     /// - `RaftError::Shutdown` if the raft engine has been shut down.
-    pub async fn add_learner(&self, node_id: NodeId, addr: SocketAddr) -> Result<(), RaftError> {
+    pub async fn add_learner(&self, node_id: NodeId, node: Node) -> Result<(), RaftError> {
         use openraft::error::ClientWriteError;
         use openraft::error::RaftError as ORE;
-        let node = openraft::BasicNode {
-            addr: addr.to_string(),
-        };
         match self.raft.add_learner(node_id, node, true).await {
             Ok(_) => Ok(()),
             Err(ORE::APIError(ClientWriteError::ForwardToLeader(f))) => Err(RaftError::NotLeader {
@@ -285,10 +294,16 @@ impl ControllerHandle {
         }
     }
 
+    /// Resolve a voter's controller listener address from openraft's current
+    /// membership config. KIP-853 voters carry their endpoints in the `Node`
+    /// payload, so the address is read directly from the replicated
+    /// membership rather than a static config-time list.
     fn voter_addr(&self, node_id: NodeId) -> Option<SocketAddr> {
-        self.voters
-            .iter()
-            .find_map(|(id, addr)| (*id == node_id).then_some(*addr))
+        let m = self.raft.metrics().borrow().clone();
+        m.membership_config
+            .membership()
+            .get_node(&node_id)
+            .and_then(Node::controller_addr)
     }
 
     /// Open a one-shot authenticated connection to the leader's
@@ -451,9 +466,9 @@ impl Controller {
             ..Default::default()
         };
 
-        // 3. Network factory. Sees each peer addr through the voter map
-        //    surfaced to openraft via `Node` (the `addr` string lives in
-        //    `BasicNode`).
+        // 3. Network factory. Resolves each peer addr from the KIP-853
+        //    voter `Node` surfaced by openraft membership (the CONTROLLER
+        //    endpoint via `Node::controller_addr`).
         // Use the injected dialer if the broker provided one (slice-12
         // inter-broker TLS / SASL), otherwise fall back to plain
         // `TcpStream::connect`. This keeps every existing PLAINTEXT-only
@@ -486,13 +501,30 @@ impl Controller {
         let log_is_empty = log_store.last_log_id().await.is_none();
         match (config.bootstrap_mode, log_is_empty) {
             (BootstrapMode::Bootstrap, true) => {
-                // Singleton-voter init. We become leader on our first
-                // election timeout, no contention, no split-vote.
-                let self_node = openraft::BasicNode {
-                    addr: config.controller_listen_addr.to_string(),
-                };
-                let members: BTreeMap<NodeId, Node> =
-                    [(config.node_id, self_node)].into_iter().collect();
+                // Seed-membership init from the operator-supplied initial
+                // voter set (KIP-853 dynamic). The bootstrap node holds the
+                // initial `VotersRecord`; openraft replicates it as the first
+                // membership log entry. A single-voter seed self-elects on the
+                // first election timeout with no contention.
+                if config.initial_voters.is_empty() {
+                    return Err(RaftError::Startup(
+                        "Bootstrap mode requires a non-empty initial_voters set".into(),
+                    ));
+                }
+                let members: BTreeMap<NodeId, Node> = config
+                    .initial_voters
+                    .iter()
+                    .map(|v| {
+                        (
+                            v.id,
+                            Node {
+                                directory_id: v.directory_id,
+                                endpoints: v.endpoints.clone(),
+                                kraft_version: v.kraft_version,
+                            },
+                        )
+                    })
+                    .collect();
                 raft.initialize(members)
                     .await
                     .map_err(|e| RaftError::Openraft(format!("bootstrap initialize: {e:?}")))?;
@@ -572,7 +604,6 @@ impl Controller {
             shutdown,
             listener_task: Mutex::new(Some(listener_task)),
             leader_pump_task: Mutex::new(Some(leader_pump_task)),
-            voters: config.voters.clone(),
             client_id: config.client_id.clone(),
             dialer,
         })
