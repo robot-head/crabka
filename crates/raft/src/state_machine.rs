@@ -27,7 +27,7 @@ use uuid::Uuid;
 use crabka_metadata::MetadataImage;
 
 use crate::error::RaftError;
-use crate::snapshot::{SnapshotId, SnapshotWriter};
+use crate::snapshot::{SnapshotId, SnapshotReader, SnapshotWriter};
 use crate::types::{AppData, AppDataResponse, Node, NodeId, TypeConfig};
 
 pub(crate) struct CrabkaStateMachine {
@@ -40,14 +40,45 @@ pub(crate) struct CrabkaStateMachine {
 
 impl CrabkaStateMachine {
     pub(crate) fn new(cluster_id: Uuid, snapshot_dir: std::path::PathBuf) -> Self {
-        let initial = Arc::new(MetadataImage::new(cluster_id));
-        let (image, _rx) = watch::channel(initial);
+        // Recover from the newest on-disk checkpoint if one exists: rebuild
+        // the image from its records and adopt its applied position +
+        // membership. openraft reapplies only the log entries *after*
+        // `last_applied`, and `purge` deletes the log behind the snapshot,
+        // so seeding here is the only way a restarted node recovers state
+        // committed before the last checkpoint. A missing/empty snapshot
+        // dir yields the fresh empty image.
+        let (image_value, last_applied, last_membership) = Self::recover(cluster_id, &snapshot_dir);
+        let (image, _rx) = watch::channel(Arc::new(image_value));
         Self {
             cluster_id,
             snapshot_dir,
             image,
-            last_applied: Mutex::new(None),
-            last_membership: Mutex::new(StoredMembership::default()),
+            last_applied: Mutex::new(last_applied),
+            last_membership: Mutex::new(last_membership),
+        }
+    }
+
+    fn recover(
+        cluster_id: Uuid,
+        snapshot_dir: &std::path::Path,
+    ) -> (
+        MetadataImage,
+        Option<LogId<NodeId>>,
+        StoredMembership<NodeId, Node>,
+    ) {
+        match crate::snapshot::load_latest(snapshot_dir) {
+            Ok(Some((_, bytes, meta))) => {
+                let records = SnapshotReader::read_records(&bytes)
+                    .expect("checkpoint records must decode on recovery");
+                let image = MetadataImage::from_records(cluster_id, &records);
+                (image, meta.last_log_id, meta.last_membership)
+            }
+            Ok(None) => (
+                MetadataImage::new(cluster_id),
+                None,
+                StoredMembership::default(),
+            ),
+            Err(e) => panic!("failed to load metadata checkpoint on recovery: {e}"),
         }
     }
 

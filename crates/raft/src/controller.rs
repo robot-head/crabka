@@ -170,6 +170,26 @@ impl ControllerHandle {
         }
     }
 
+    /// Manually trigger a metadata snapshot on this node. openraft's
+    /// snapshot policy is [`SnapshotPolicy::Never`], so checkpoints are
+    /// only ever produced through this path (a later slice owns the
+    /// Kafka-faithful trigger heuristics). Returns once openraft has
+    /// accepted the request; the build runs asynchronously in the
+    /// engine. After the build completes openraft purges the log behind
+    /// the snapshot (we keep zero in-snapshot logs).
+    ///
+    /// # Errors
+    ///
+    /// `RaftError::Openraft` if the raft engine is shut down or in a
+    /// fatal state.
+    pub async fn trigger_snapshot(&self) -> Result<(), RaftError> {
+        self.raft
+            .trigger()
+            .snapshot()
+            .await
+            .map_err(|e| RaftError::Openraft(format!("{e:?}")))
+    }
+
     /// Submit a batch of metadata records.
     ///
     /// Returns `Ok(())` once the records are committed AND applied on
@@ -622,6 +642,13 @@ impl Controller {
             election_timeout_max: election_max,
             heartbeat_interval: heartbeat,
             install_snapshot_timeout: 5_000,
+            // Never auto-snapshot — a later slice owns the Kafka-faithful
+            // trigger heuristics; checkpoints come only via
+            // `ControllerHandle::trigger_snapshot`. Keep zero in-snapshot
+            // logs so a completed snapshot immediately drives `purge`,
+            // compacting the metadata log behind the checkpoint.
+            snapshot_policy: openraft::SnapshotPolicy::Never,
+            max_in_snapshot_log_to_keep: 0,
             ..Default::default()
         };
 
