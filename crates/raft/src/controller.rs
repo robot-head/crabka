@@ -80,6 +80,10 @@ pub struct ControllerHandle {
     /// `Controller::start` substitutes `PlaintextDialer` — equivalent
     /// to a bare `Connection::connect`.
     dialer: Arc<dyn OutboundDialer>,
+    /// Clone of the openraft storage adapter. Used by
+    /// [`Self::metadata_records`] to serve committed log entries to
+    /// broker-only observers over `API_KEY_METADATA_FETCH`.
+    log_store: Arc<RaftLogStore>,
 }
 
 impl ControllerHandle {
@@ -132,6 +136,41 @@ impl ControllerHandle {
             current_leader: m.current_leader,
             voters,
             per_voter_matched_index,
+        }
+    }
+
+    /// Read committed `__cluster_metadata` entries starting at
+    /// `fetch_offset` (an openraft log index), encoded as Kafka record
+    /// batches for an observer. Entries beyond the current high watermark
+    /// (last applied/committed index) are never served. `max_bytes` caps
+    /// the encoded payload (at least one batch is always emitted so the
+    /// observer makes progress).
+    #[must_use]
+    pub async fn metadata_records(
+        &self,
+        fetch_offset: u64,
+        max_bytes: usize,
+    ) -> crate::metadata_fetch::MetadataFetchSlice {
+        let high_watermark = self
+            .raft
+            .metrics()
+            .borrow()
+            .last_applied
+            .as_ref()
+            .map_or(0, |l| l.index);
+        let log_start_offset = self.log_store.log_start_index().await;
+        let entries = if fetch_offset > high_watermark {
+            Vec::new()
+        } else {
+            self.log_store
+                .read_range(fetch_offset..=high_watermark)
+                .await
+        };
+        let records = crate::metadata_fetch::encode_committed_records(&entries, max_bytes);
+        crate::metadata_fetch::MetadataFetchSlice {
+            records,
+            log_start_offset,
+            high_watermark,
         }
     }
 
@@ -575,6 +614,7 @@ impl Controller {
             voters: config.voters.clone(),
             client_id: config.client_id.clone(),
             dialer,
+            log_store: log_store.clone(),
         })
     }
 }
@@ -629,6 +669,51 @@ mod bootstrap_mode_tests {
                 panic!("Rejoin on empty log must error but succeeded");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn metadata_records_serves_committed_topic() {
+        use crabka_metadata::{MetadataRecord, TopicRecord, from_kafka_record};
+        use crabka_protocol::records::RecordBatch;
+        use uuid::Uuid;
+
+        let dir = TempDir::new().unwrap();
+        let cfg = ControllerConfig {
+            bootstrap_mode: BootstrapMode::Bootstrap,
+            ..ControllerConfig::for_tests(1, dir.path().to_path_buf())
+        };
+        let ctrl = Controller::start(cfg).await.expect("bootstrap");
+        // Wait to become leader.
+        let mut leader_rx = ctrl.watch_leader();
+        while leader_rx.borrow().is_none() {
+            leader_rx.changed().await.unwrap();
+        }
+        ctrl.submit_change(vec![MetadataRecord::V1Topic(TopicRecord {
+            name: "t".into(),
+            topic_id: Uuid::new_v4(),
+            partitions: 1,
+            replication_factor: 1,
+        })])
+        .await
+        .expect("submit");
+
+        let slice = ctrl.metadata_records(0, usize::MAX).await;
+        assert!(slice.high_watermark >= 1);
+        // Decode the batches and confirm topic "t" is present somewhere.
+        let mut buf: &[u8] = &slice.records;
+        let mut found = false;
+        while !buf.is_empty() {
+            let batch = RecordBatch::decode(&mut buf).expect("decode");
+            for r in &batch.records {
+                if let Ok(MetadataRecord::V1Topic(t)) = from_kafka_record(r) {
+                    if t.name == "t" {
+                        found = true;
+                    }
+                }
+            }
+        }
+        assert!(found, "topic 't' must appear in fetched metadata records");
+        ctrl.shutdown().await;
     }
 
     #[tokio::test]
