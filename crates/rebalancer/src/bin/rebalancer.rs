@@ -190,8 +190,9 @@ struct Args {
     )]
     state_topic_name: String,
 
-    /// Replication factor for the state topic at create time. Capped at
-    /// broker count by the broker if the cluster has fewer brokers.
+    /// Replication factor for the state topic at create time. On
+    /// `INVALID_REPLICATION_FACTOR` the binary retries topic creation
+    /// with RF=1 to support single-broker dev clusters.
     #[arg(
         long,
         env = "CRABKA_REBALANCER_STATE_TOPIC_REPLICATION",
