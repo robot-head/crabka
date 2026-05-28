@@ -20,7 +20,10 @@
 use std::path::PathBuf;
 
 use clap::Args;
-use crabka_metadata::{AclEntry, MetadataRecord, ScramCredentialRecord};
+use crabka_metadata::{
+    AclEntry, KRaftVersionRange, KRaftVersionRecord, MetadataRecord, ScramCredentialRecord, Voter,
+    VoterEndpoint, VoterSet, VotersRecord,
+};
 use crabka_security::SaslMechanism;
 use crabka_security::scram::hash_scram_password_with_salt;
 use ring::rand::{SecureRandom, SystemRandom};
@@ -62,6 +65,20 @@ pub struct FormatArgs {
     /// Pattern defaults to `Literal`.
     #[arg(long, value_parser = parse_acl_spec)]
     add_acl: Vec<AclEntry>,
+    /// This node's raft id. Required with `--standalone` (KIP-853 needs
+    /// to know which voter this node *is* when seeding the singleton set).
+    #[arg(long)]
+    node_id: Option<crabka_metadata::NodeId>,
+    /// Format this node as the sole initial controller voter.
+    #[arg(long, conflicts_with = "initial_controllers")]
+    standalone: bool,
+    /// Explicit initial controllers: `id@host:port:dir-uuid`, comma-separated.
+    #[arg(long, value_delimiter = ',')]
+    initial_controllers: Vec<String>,
+    /// This node's controller listener (`host:port`) — written into the
+    /// `VotersRecord` when `--standalone`.
+    #[arg(long)]
+    controller_listener: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -182,6 +199,87 @@ fn parse_acl_spec(spec: &str) -> Result<AclEntry, String> {
     })
 }
 
+/// Parse one `--initial-controllers` entry: `id@host:port:dir-uuid`.
+///
+/// The directory uuid is the trailing colon-delimited field, so we split
+/// it off the right first, then peel `host:port` off the remainder.
+fn parse_initial_controller(spec: &str) -> Result<Voter, String> {
+    let (id_part, rest) = spec.split_once('@').ok_or("missing '@'")?;
+    let id: crabka_metadata::NodeId = id_part.parse().map_err(|_| "bad id")?;
+    let (host_port, dir_part) = rest.rsplit_once(':').ok_or("missing directory uuid")?;
+    let dir: Uuid = dir_part.parse().map_err(|_| "bad directory uuid")?;
+    let (host, port) = host_port.rsplit_once(':').ok_or("missing host:port")?;
+    let port: u16 = port.parse().map_err(|_| "bad port")?;
+    Ok(Voter {
+        id,
+        directory_id: dir,
+        endpoints: vec![VoterEndpoint {
+            name: "CONTROLLER".into(),
+            host: host.to_string(),
+            port,
+        }],
+        kraft_version: KRaftVersionRange::default(),
+    })
+}
+
+/// Derive the initial controller voter set from the format args.
+///
+/// - `--standalone`: a singleton set holding just this node (requires
+///   `--node-id` + `--controller-listener`).
+/// - `--initial-controllers`: the explicitly-listed voters.
+/// - neither: an empty set — this node is a joiner that relies on auto-join
+///   to enter an already-bootstrapped cluster.
+fn build_initial_voters(args: &FormatArgs, directory_id: Uuid) -> Result<VoterSet, String> {
+    if args.standalone {
+        let id = args.node_id.ok_or("--standalone requires --node-id")?;
+        let listener = args
+            .controller_listener
+            .as_deref()
+            .ok_or("--standalone requires --controller-listener")?;
+        let (host, port) = listener
+            .rsplit_once(':')
+            .ok_or("--controller-listener must be host:port")?;
+        let port: u16 = port.parse().map_err(|_| "bad --controller-listener port")?;
+        Ok(VoterSet::from_voters([Voter {
+            id,
+            directory_id,
+            endpoints: vec![VoterEndpoint {
+                name: "CONTROLLER".into(),
+                host: host.to_string(),
+                port,
+            }],
+            kraft_version: KRaftVersionRange::default(),
+        }]))
+    } else if !args.initial_controllers.is_empty() {
+        let voters: Result<Vec<_>, _> = args
+            .initial_controllers
+            .iter()
+            .map(|s| parse_initial_controller(s))
+            .collect();
+        Ok(VoterSet::from_voters(voters?))
+    } else {
+        Ok(VoterSet::default())
+    }
+}
+
+/// Persist `meta.properties.json` — the broker recovers `directory_id`
+/// from it on every boot (KIP-853 voter identity).
+fn write_meta_properties(
+    log_dir: &std::path::Path,
+    cluster_id: Uuid,
+    directory_id: Uuid,
+) -> Result<(), String> {
+    let meta = serde_json::json!({
+        "cluster_id": cluster_id.to_string(),
+        "directory_id": directory_id.to_string(),
+        "version": 1,
+    });
+    let bytes = serde_json::to_vec_pretty(&meta)
+        .map_err(|e| format!("serialize meta.properties.json: {e}"))?;
+    std::fs::write(log_dir.join("meta.properties.json"), bytes)
+        .map_err(|e| format!("write meta.properties.json: {e}"))
+}
+
 /// Human-readable manifest written to `<log_dir>/bootstrap.json`.
 #[derive(Debug, Serialize)]
 struct BootstrapManifest {
@@ -233,11 +331,39 @@ pub async fn run(args: FormatArgs) -> i32 {
 
     let cluster_id = args.cluster_id.unwrap_or_else(Uuid::new_v4);
 
+    // KIP-853: generate + persist this replica's stable directory id. The
+    // broker reads it back from `meta.properties.json` on every boot; it is
+    // the identity component of every `Voter` this node ever appears as.
+    let directory_id = Uuid::new_v4();
+    if let Err(e) = write_meta_properties(&args.log_dir, cluster_id, directory_id) {
+        eprintln!("crabka format: {e}");
+        return EXIT_BOOTSTRAP_FAIL;
+    }
+
+    // KIP-853 dynamic-voter seed records. These lead the bootstrap record
+    // stream (before SCRAM/ACL) so the controller's first committed batch
+    // establishes the kraft.version + initial membership.
+    let initial_voters = match build_initial_voters(&args, directory_id) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("crabka format: {e}");
+            return EXIT_BOOTSTRAP_FAIL;
+        }
+    };
+    let mut records: Vec<MetadataRecord> = Vec::new();
+    records.push(MetadataRecord::V1KRaftVersion(KRaftVersionRecord {
+        kraft_version: 1,
+    }));
+    if !initial_voters.is_empty() {
+        records.push(MetadataRecord::V1Voters(VotersRecord {
+            voters: initial_voters,
+        }));
+    }
+
     // Build the seed records. Each `--add-scram` is hashed *here* (CLI
     // side) using `hash_scram_password_with_salt` from `crabka-security`
     // so the on-disk record carries the stretched keys, never the plain
     // password.
-    let mut records: Vec<MetadataRecord> = Vec::with_capacity(args.add_scram.len());
     for spec in &args.add_scram {
         if spec.iterations < MIN_SCRAM_ITERATIONS {
             eprintln!(
@@ -434,6 +560,27 @@ mod tests {
     fn parse_acl_spec_unknown_key_errors() {
         let s = "principal=User:admin,host=*,bogus=x";
         assert!(parse_acl_spec(s).is_err());
+    }
+
+    #[test]
+    fn parses_initial_controller_spec() {
+        let v =
+            parse_initial_controller("3@host:9093:00000000-0000-0000-0000-000000000003").unwrap();
+        assert_eq!(v.id, 3);
+        assert_eq!(v.endpoints[0].name, "CONTROLLER");
+        assert_eq!(v.endpoints[0].host, "host");
+        assert_eq!(v.endpoints[0].port, 9093);
+        assert_eq!(v.directory_id, Uuid::from_u128(3));
+    }
+
+    #[test]
+    fn rejects_initial_controller_without_at() {
+        assert!(parse_initial_controller("3:host:9093:uuid").is_err());
+    }
+
+    #[test]
+    fn rejects_initial_controller_bad_uuid() {
+        assert!(parse_initial_controller("3@host:9093:not-a-uuid").is_err());
     }
 
     #[test]

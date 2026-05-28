@@ -110,6 +110,21 @@ impl Broker {
     pub(crate) fn handlers(&self) -> &HandlerTable {
         &self.handlers
     }
+
+    /// Test-only: clone the controller handle so the `auto_join` unit test can
+    /// build `AutoJoinParams` without reaching into private fields.
+    #[cfg(test)]
+    pub(crate) fn controller_for_test(&self) -> Arc<crabka_raft::ControllerHandle> {
+        self.controller.clone()
+    }
+
+    /// Test-only: clone the shared inter-broker client (same reason).
+    #[cfg(test)]
+    pub(crate) fn inter_broker_client_for_test(
+        &self,
+    ) -> Arc<crate::network::client::InterBrokerClient> {
+        self.inter_broker_client.clone()
+    }
 }
 
 /// Lifecycle handle returned by [`Broker::start`]. Drop or call
@@ -140,6 +155,16 @@ impl BrokerHandle {
     #[allow(clippy::used_underscore_binding)]
     pub fn metrics_addr(&self) -> Option<SocketAddr> {
         self._broker.metrics_bound_addr
+    }
+
+    /// The actual `SocketAddr` this broker's controller listener bound to
+    /// (resolves the OS-assigned port when `controller_listen_addr` used port
+    /// 0). KIP-853 dynamic-voters tests read this to point joiners at the
+    /// bootstrap broker's real controller endpoint.
+    #[must_use]
+    #[allow(clippy::used_underscore_binding)]
+    pub fn controller_addr(&self) -> SocketAddr {
+        self._broker.controller.controller_bound_addr()
     }
 
     /// Current Raft leader id as observed by this broker's controller.
@@ -221,9 +246,22 @@ impl BrokerHandle {
         node_id: crabka_raft::NodeId,
         addr: std::net::SocketAddr,
     ) -> Result<(), BrokerError> {
+        // KIP-853: openraft membership now keys on the full `Node` identity.
+        // This `SocketAddr`-shaped convenience wrapper (used by integration
+        // tests) synthesizes a single CONTROLLER endpoint and derives the
+        // directory id from the node id, matching the `for_tests` convention.
+        let node = crabka_raft::Node {
+            directory_id: uuid::Uuid::from_u128(u128::from(node_id)),
+            endpoints: vec![crabka_metadata::VoterEndpoint {
+                name: "CONTROLLER".into(),
+                host: addr.ip().to_string(),
+                port: addr.port(),
+            }],
+            kraft_version: crabka_metadata::KRaftVersionRange::default(),
+        };
         self._broker
             .controller
-            .add_learner(node_id, addr)
+            .add_learner(node_id, node)
             .await
             .map_err(|e| BrokerError::Replication(format!("add_learner: {e}")))
     }
@@ -511,6 +549,67 @@ impl BrokerHandle {
     #[allow(clippy::used_underscore_binding)]
     pub fn controller_image_for_test(&self) -> std::sync::Arc<crabka_metadata::MetadataImage> {
         self._broker.controller.current_image()
+    }
+
+    /// Test-only: clone the inner `Arc<Broker>`. Used by the `auto_join`
+    /// unit test (and dynamic-voters integration tests) that need to drive
+    /// broker-internal background routines directly.
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[must_use]
+    #[allow(clippy::used_underscore_binding)]
+    pub fn broker_arc_for_test(&self) -> Arc<Broker> {
+        self._broker.clone()
+    }
+
+    /// Test-only: the controller voter set's size as seen by this broker's
+    /// committed `MetadataImage`. KIP-853 dynamic-voters tests poll this to
+    /// observe auto-join growing / `remove_voter` shrinking the quorum.
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[must_use]
+    #[allow(clippy::used_underscore_binding)]
+    pub fn voter_count_for_test(&self) -> usize {
+        self._broker.controller.current_image().voters().len()
+    }
+
+    /// Test-only: the controller voter ids as seen by this broker's
+    /// committed `MetadataImage`. Used to pick a follower to remove in the
+    /// dynamic-voters shrink test.
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[must_use]
+    #[allow(clippy::used_underscore_binding)]
+    pub fn voter_ids_for_test(&self) -> std::collections::BTreeSet<crabka_raft::NodeId> {
+        self._broker.controller.current_image().voters().ids()
+    }
+
+    /// Test-only: the `directory_id` of voter `id` from this broker's
+    /// committed `MetadataImage`, if present. `remove_voter` needs the
+    /// voter's directory id to disambiguate.
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[must_use]
+    #[allow(clippy::used_underscore_binding)]
+    pub fn voter_directory_id_for_test(&self, id: crabka_raft::NodeId) -> Option<uuid::Uuid> {
+        self._broker
+            .controller
+            .current_image()
+            .voters()
+            .get(id)
+            .map(|v| v.directory_id)
+    }
+
+    /// Test-only: run the KIP-853 `remove_voter` reconfiguration on this
+    /// broker's controller (must be the raft leader). Returns the coordinator
+    /// outcome so the dynamic-voters test can assert `Committed`.
+    ///
+    /// # Errors
+    ///
+    /// Forwards the underlying raft error.
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[allow(clippy::used_underscore_binding)]
+    pub async fn remove_voter_for_test(
+        &self,
+        req: crabka_raft::reconfig::RemoveVoter,
+    ) -> Result<crabka_raft::reconfig::ReconfigOutcome, crabka_raft::RaftError> {
+        self._broker.controller.remove_voter(req).await
     }
 
     /// Test-only: return the current leader node-id for `(topic, partition)`
@@ -917,9 +1016,61 @@ impl Broker {
                 "localhost".to_string(),
             )) as Arc<dyn crabka_raft::OutboundDialer>);
 
+        // KIP-853: the bootstrap records carry the seed `VotersRecord`. Load
+        // them once here so the cold-boot voter set feeds `ControllerConfig`;
+        // the same records are submitted through raft after a leader is
+        // elected (step 2b below). A `Join` node has no seed set and relies
+        // on `bootstrap_servers` + auto-join instead.
+        let mut bootstrap_records = crate::bootstrap::load_bootstrap_records(&config.log_dir)?;
+        let mut initial_voters = crate::bootstrap::initial_voters(&bootstrap_records);
+
+        // KIP-853 standalone self-bootstrap: a `Bootstrap` node with no seeded
+        // `VotersRecord` (an in-process/single-node start that didn't run
+        // `format --standalone`) forms a single-voter cluster of itself. Seed
+        // both the openraft membership (`initial_voters`) and the metadata log
+        // (a `V1Voters` record submitted after election in step 2b) so the two
+        // stay in lockstep. Multi-node clusters seed voters via `format` or
+        // grow via auto-join (`BootstrapMode::Join`), so neither path lands here.
+        if initial_voters.is_empty()
+            && matches!(config.bootstrap_mode, crate::BootstrapMode::Bootstrap)
+        {
+            let self_voter = crabka_metadata::Voter {
+                id: config.node_id,
+                directory_id: config.directory_id,
+                endpoints: vec![crabka_metadata::VoterEndpoint {
+                    name: "CONTROLLER".to_string(),
+                    host: config.controller_listen_addr.ip().to_string(),
+                    port: config.controller_listen_addr.port(),
+                }],
+                kraft_version: crabka_metadata::KRaftVersionRange::default(),
+            };
+            let voters = crabka_metadata::VoterSet::from_voters([self_voter]);
+            tracing::info!(
+                node_id = config.node_id,
+                "KIP-853 standalone self-bootstrap: forming single-voter cluster"
+            );
+            bootstrap_records.insert(
+                0,
+                crabka_metadata::MetadataRecord::V1Voters(crabka_metadata::VotersRecord {
+                    voters: voters.clone(),
+                }),
+            );
+            bootstrap_records.insert(
+                0,
+                crabka_metadata::MetadataRecord::V1KRaftVersion(
+                    crabka_metadata::KRaftVersionRecord { kraft_version: 1 },
+                ),
+            );
+            initial_voters = voters;
+        }
+
         let controller_cfg = crabka_raft::ControllerConfig {
             node_id: config.node_id,
-            voters: config.controller_quorum_voters.clone(),
+            bootstrap_servers: config.bootstrap_servers.clone(),
+            directory_id: config.directory_id,
+            auto_join: config.auto_join,
+            observer_lag_bound: config.observer_lag_bound,
+            initial_voters,
             controller_listen_addr: config.controller_listen_addr,
             log_dir: config.log_dir.join("__cluster_metadata"),
             // Sourced from `BrokerConfig` — see the docstrings there for
@@ -946,6 +1097,38 @@ impl Broker {
         // authenticated connection. The `set` cannot fail in practice
         // because we hold the only writer; swallow the `SetError` defensively.
         let _ = controller_cell.set(controller.clone());
+
+        // 1b. KIP-853 controller auto-join. Spawned BEFORE the leader-wait in
+        //     step 2: a `Join` broker's empty raft log keeps it in openraft's
+        //     Learner state with no leader, so `Broker::start` would block in
+        //     step 2 forever. The auto-join loop concurrently sends
+        //     `AddRaftVoter(self)` to a `bootstrap_servers` entry; the leader's
+        //     handler runs `add_learner` (replicating the log to us) and
+        //     promotes us — at which point step 2's `watch_leader` fires and
+        //     start proceeds. `run` returns immediately when `auto_join` is
+        //     disabled (bootstrap / standalone brokers), so this is a cheap
+        //     no-op there. The loop advertises the controller's REAL bound
+        //     address, known now that `Controller::start` has bound the
+        //     listener.
+        // The joiner sends `AddRaftVoter` to a bootstrap server's *client*
+        // data-plane listener (where api_key 80 is served), so it speaks the
+        // inter-broker listener protocol — not the controller-listener
+        // protocol that openraft RPCs use.
+        let auto_join_protocol = config
+            .effective_listeners()
+            .iter()
+            .find(|l| l.name == config.inter_broker_listener_name)
+            .map_or(crabka_security::ListenerProtocol::Plaintext, |l| l.protocol);
+        tokio::spawn(crate::auto_join::run(crate::auto_join::AutoJoinParams {
+            auto_join: config.auto_join,
+            node_id: config.node_id,
+            directory_id: config.directory_id,
+            cluster_id: config.cluster_id,
+            bootstrap_servers: config.bootstrap_servers.clone(),
+            listener_protocol: auto_join_protocol,
+            controller: controller.clone(),
+            inter_broker_client: inter_broker_client.clone(),
+        }));
 
         // 2. Wait for a leader, then submit a self-registration record so
         //    other brokers can discover us. Best-effort: if the submit
@@ -1021,14 +1204,19 @@ impl Broker {
             //     Missing-file is treated as empty (handled by the loader),
             //     so the legacy zero-record path is a no-op and existing
             //     deployments / tests are byte-identical.
-            if matches!(config.bootstrap_mode, crate::BootstrapMode::Bootstrap) {
-                let records = crate::bootstrap::load_bootstrap_records(&config.log_dir)?;
-                if !records.is_empty() {
-                    tracing::info!(count = records.len(), "submitting bootstrap records");
-                    controller.submit_change(records).await.map_err(|e| {
+            if matches!(config.bootstrap_mode, crate::BootstrapMode::Bootstrap)
+                && !bootstrap_records.is_empty()
+            {
+                tracing::info!(
+                    count = bootstrap_records.len(),
+                    "submitting bootstrap records"
+                );
+                controller
+                    .submit_change(bootstrap_records)
+                    .await
+                    .map_err(|e| {
                         BrokerError::Replication(format!("bootstrap submit failed: {e}"))
                     })?;
-                }
             }
         }
 

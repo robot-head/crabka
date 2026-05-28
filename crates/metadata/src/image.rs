@@ -65,6 +65,8 @@ pub struct MetadataImage {
     acls_prefixed: HashMap<ResourceType, Vec<AclEntry>>,
     client_quotas: HashMap<EntityKey, BTreeMap<String, f64>>,
     delegation_tokens: HashMap<String, DelegationToken>,
+    kraft_version: u16,
+    voters: crate::voters::VoterSet,
     feature_levels: BTreeMap<String, i16>,
     /// KIP-584 finalized-features epoch. `-1` until the first
     /// `V1FeatureLevel` record applies, then monotonically increasing
@@ -95,6 +97,8 @@ impl MetadataImage {
             acls_prefixed: HashMap::new(),
             client_quotas: HashMap::new(),
             delegation_tokens: HashMap::new(),
+            kraft_version: 0,
+            voters: crate::voters::VoterSet::default(),
             feature_levels: BTreeMap::new(),
             features_epoch: -1,
         }
@@ -208,6 +212,16 @@ impl MetadataImage {
 
     pub fn brokers(&self) -> impl Iterator<Item = &BrokerRegistrationRecord> {
         self.brokers.values()
+    }
+
+    #[must_use]
+    pub fn kraft_version(&self) -> u16 {
+        self.kraft_version
+    }
+
+    #[must_use]
+    pub fn voters(&self) -> &crate::voters::VoterSet {
+        &self.voters
     }
 
     /// Iterate every ACL that could possibly match `(rt, rn)`:
@@ -419,6 +433,12 @@ impl MetadataImage {
                 // a no-op.
                 self.brokers.remove(&rec.node_id);
             }
+            MetadataRecord::V1KRaftVersion(r) => {
+                self.kraft_version = r.kraft_version;
+            }
+            MetadataRecord::V1Voters(r) => {
+                self.voters = r.voters.clone();
+            }
             MetadataRecord::V1FeatureLevel(rec) => {
                 if rec.level == 0 {
                     self.feature_levels.remove(&rec.name);
@@ -492,6 +512,11 @@ impl MetadataImage {
             // existence check + Cluster:Alter ACL gate provide all the
             // pre-validation we need; image-level apply is idempotent.
             | MetadataRecord::V1UnregisterBroker(_)
+            // KIP-853: voter-set / kraft.version records are validated by
+            // the reconfiguration coordinator before submission; the
+            // image-level apply is an unconditional replacement.
+            | MetadataRecord::V1KRaftVersion(_)
+            | MetadataRecord::V1Voters(_)
             // KIP-584: feature-level admission is fully gated by the
             // UpdateFeatures handler (supported-range + downgrade checks);
             // image-level apply is an idempotent map upsert.
@@ -1285,6 +1310,24 @@ mod tests {
         let mut ids: Vec<&str> = bob_visible.iter().map(|t| t.token_id.as_str()).collect();
         ids.sort_unstable();
         assert_eq!(ids, vec!["a-2", "b-1"]);
+    }
+
+    #[test]
+    fn applies_voters_and_version() {
+        let mut image = MetadataImage::default();
+        image.apply(&MetadataRecord::V1KRaftVersion(
+            crate::records::KRaftVersionRecord { kraft_version: 1 },
+        ));
+        image.apply(&MetadataRecord::V1Voters(crate::records::VotersRecord {
+            voters: crate::voters::VoterSet::from_voters([crate::voters::Voter {
+                id: 1,
+                directory_id: uuid::Uuid::nil(),
+                endpoints: vec![],
+                kraft_version: crate::voters::KRaftVersionRange::default(),
+            }]),
+        }));
+        assert_eq!(image.kraft_version(), 1);
+        assert!(image.voters().contains(1));
     }
 
     #[test]

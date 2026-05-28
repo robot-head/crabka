@@ -91,10 +91,11 @@ pub async fn bind_and_drop_ports(n: usize) -> (Vec<SocketAddr>, Vec<SocketAddr>)
 }
 
 /// Build a `BrokerConfig` for broker `i` (0-indexed) in an `n`-broker
-/// cluster using the supplied ephemeral port lists + voter map. All
-/// callers want the same `BrokerConfig::for_tests`-style short raft
-/// timings; this helper centralizes the boilerplate so individual tests
-/// don't drift on field values when `BrokerConfig` grows.
+/// cluster using the supplied ephemeral port lists + static voter map.
+/// This is the *static-voter* bootstrap-then-join helper, kept for tests
+/// (like `elect_leaders`) that drive `add_learner` / `change_membership`
+/// manually and need to layer extra config overrides per broker — a flow
+/// that `start_n_node`'s auto-join path can't accommodate.
 pub fn broker_config(
     i: usize,
     client_addrs: &[SocketAddr],
@@ -115,88 +116,134 @@ pub fn broker_config(
     cfg
 }
 
-/// Boot an `n`-broker cluster with ephemeral ports + short raft timings
-/// using a deterministic bootstrap-then-join pattern:
+/// Build a `BrokerConfig` for broker 0 (the bootstrap node). It binds a
+/// concrete (pre-bound) controller port so its self-bootstrap seed advertises
+/// a reachable endpoint, and an ephemeral client listener.
+fn bootstrap_broker_config(
+    bootstrap_client_addr: SocketAddr,
+    bootstrap_controller_addr: SocketAddr,
+    log_dir: &std::path::Path,
+) -> BrokerConfig {
+    let mut cfg = BrokerConfig::for_tests(log_dir.to_path_buf());
+    cfg.broker_id = 1;
+    cfg.node_id = 1;
+    // Bind a concrete (pre-bound) client port. The broker self-registers its
+    // `advertised_listener` host:port into the controller image *before* it
+    // binds its listeners and rewrites a `:0` advertised port to the real one
+    // — so a `:0` here would register port 0 and break the inter-broker
+    // heartbeat / replication dial. Give it a real port up front.
+    cfg.listen_addr = bootstrap_client_addr;
+    cfg.advertised_listener = bootstrap_client_addr.to_string();
+    cfg.directory_id = uuid::Uuid::from_u128(1);
+    cfg.bootstrap_mode = BootstrapMode::Bootstrap;
+    cfg.controller_listen_addr = bootstrap_controller_addr;
+    cfg.auto_join = false;
+    cfg.bootstrap_servers = vec![];
+    cfg
+}
+
+/// Build a `BrokerConfig` for a joiner (broker `i`, 0-indexed, `i >= 1`).
+/// Joiners boot in `Join` mode with `auto_join` enabled and
+/// `bootstrap_servers` pointing at the bootstrap broker's **client** listener
+/// — that's where the `AddRaftVoter` (`api_key` 80) handler lives (the
+/// controller listener only serves raft RPCs). They bind ephemeral ports for
+/// both listeners; auto-join advertises their *real* bound controller addr to
+/// the leader so its `add_learner` can dial them back.
+fn joiner_broker_config(
+    i: usize,
+    own_client_addr: SocketAddr,
+    bootstrap_client_addr: SocketAddr,
+    log_dir: &std::path::Path,
+) -> BrokerConfig {
+    let mut cfg = BrokerConfig::for_tests(log_dir.to_path_buf());
+    cfg.broker_id = i32::try_from(i + 1).unwrap();
+    cfg.node_id = u64::try_from(i + 1).unwrap();
+    // Concrete (pre-bound) client port for self-registration — see the note in
+    // `bootstrap_broker_config`. The controller listener can stay `:0` because
+    // auto-join advertises its *real bound* controller addr to the leader.
+    cfg.listen_addr = own_client_addr;
+    cfg.advertised_listener = own_client_addr.to_string();
+    cfg.directory_id = uuid::Uuid::from_u128(u128::from(cfg.node_id));
+    cfg.bootstrap_mode = BootstrapMode::Join;
+    cfg.controller_listen_addr = "127.0.0.1:0".parse().unwrap();
+    cfg.auto_join = true;
+    cfg.bootstrap_servers = vec![bootstrap_client_addr];
+    cfg
+}
+
+/// Boot an `n`-broker cluster with ephemeral ports + short raft timings via
+/// KIP-853 auto-join:
 ///
-/// * Phase 1: broker 0 boots alone in `Bootstrap` mode — singleton voter,
-///   trivially elects itself with no split-vote risk.
-/// * Phase 2: brokers 1..n start in `Join` mode — their `Broker::start`
-///   blocks waiting for a raft leader to appear.
-/// * Phase 3: the bootstrap broker calls `add_learner` for each joiner,
-///   then promotes them all to voters via a single `change_membership`.
-///   The joiners' `watch_leader` fires and their `Broker::start` returns.
+/// * Broker 0 boots in `Bootstrap` mode on a concrete controller port. Its
+///   standalone self-bootstrap forms a single-voter cluster of itself and it
+///   self-elects on the first election timeout (no contention).
+/// * Brokers 1..n boot in `Join` mode with `auto_join = true` and
+///   `bootstrap_servers = [broker0_client_addr]`. Each runs the auto-join
+///   loop, sending `AddRaftVoter(self)` to broker 0's client listener (the
+///   leader), which replicates the log, promotes them, and commits the new
+///   `V1Voters` set.
 ///
-/// Returns `(handle, config, tempdir)` triples preserving spawn order;
-/// `cluster[0]` is `broker_id` 1.
+/// Blocks until the leader's committed voter set reaches size `n`. Returns
+/// `(handle, config, tempdir)` triples preserving spawn order; `cluster[0]`
+/// is `broker_id` 1.
 pub async fn start_n_node(
     n: u64,
 ) -> Result<Vec<(BrokerHandle, BrokerConfig, TempDir)>, BrokerError> {
     init_tracing();
 
     let n_usize = usize::try_from(n).unwrap();
+
+    // Pre-bind concrete client ports for every broker (and one concrete
+    // controller port for broker 0's self-bootstrap seed). The broker
+    // self-registers its advertised client `host:port` into the controller
+    // image *before* binding its listeners, so a `:0` advertised port would
+    // register port 0 and break the inter-broker heartbeat / replication dial.
+    // The bind-and-drop trick avoids the TIME_WAIT trap of fixed ports across
+    // back-to-back cluster boots.
     let (client_addrs, controller_addrs) = bind_and_drop_ports(n_usize).await;
-    let voters: Vec<(u64, SocketAddr)> = (0..n)
-        .map(|i| (i + 1, controller_addrs[usize::try_from(i).unwrap()]))
-        .collect();
+    let bootstrap_controller_addr = controller_addrs[0];
 
-    // Phase 1: bootstrap broker 0 alone. Initializes as singleton voter,
-    // becomes leader on first election timeout (no contention).
+    // Broker 0: bootstrap. Must be up (and leader) before joiners can join.
     let dir0 = TempDir::new().unwrap();
-    let cfg0 = broker_config(
-        0,
-        &client_addrs,
-        &controller_addrs,
-        &voters,
-        dir0.path(),
-        BootstrapMode::Bootstrap,
-    );
+    let cfg0 = bootstrap_broker_config(client_addrs[0], bootstrap_controller_addr, dir0.path());
     let broker0 = Broker::start(cfg0.clone()).await?;
+    // The joiners send `AddRaftVoter` to the leader's *client* data-plane
+    // listener (that's where api_key 80 is served), not its controller
+    // listener — so point them at broker 0's bound client address.
+    let bootstrap_client_addr = broker0.listen_addr();
 
-    // Phase 2: spawn brokers 1..n in Join mode. Their Broker::start
-    // blocks on watch_leader; we'll add_learner + change_membership below
-    // to make them part of the cluster.
-    let mut join_handles = Vec::with_capacity(n_usize.saturating_sub(1));
-    let mut join_metas: Vec<(TempDir, BrokerConfig)> =
-        Vec::with_capacity(n_usize.saturating_sub(1));
-    for i in 1..n_usize {
-        let dir = TempDir::new().unwrap();
-        let cfg = broker_config(
-            i,
-            &client_addrs,
-            &controller_addrs,
-            &voters,
-            dir.path(),
-            BootstrapMode::Join,
-        );
-        let cfg_clone = cfg.clone();
-        join_handles.push(tokio::spawn(async move { Broker::start(cfg_clone).await }));
-        join_metas.push((dir, cfg));
-    }
-
-    // Phase 3: add each Join broker as a learner, then promote them all
-    // to voters in a single change_membership. The bootstrap broker
-    // replicates the existing log to each follower as part of add_learner.
-    for (idx, addr) in controller_addrs
-        .iter()
-        .enumerate()
-        .skip(1)
-        .take(n_usize - 1)
-    {
-        broker0
-            .add_learner(u64::try_from(idx + 1).unwrap(), *addr)
-            .await?;
-    }
-    let target_voters: std::collections::BTreeSet<u64> =
-        (1..=u64::try_from(n_usize).unwrap()).collect();
-    broker0.change_membership(target_voters).await?;
-
-    // Now join brokers' watch_leader fires and Broker::start returns.
+    // Brokers 1..n: join via auto-join. Their `Broker::start` returns once
+    // openraft hands them their first leader (the auto-join task keeps running
+    // in the background, driving the join, until they're voters).
     let mut out: Vec<(BrokerHandle, BrokerConfig, TempDir)> = Vec::with_capacity(n_usize);
     out.push((broker0, cfg0, dir0));
-    for (h, (dir, cfg)) in join_handles.into_iter().zip(join_metas) {
-        let broker = h.await.expect("broker spawn join")?;
+    for (i, &own_client_addr) in client_addrs.iter().enumerate().take(n_usize).skip(1) {
+        let dir = TempDir::new().unwrap();
+        let mut cfg = joiner_broker_config(i, own_client_addr, bootstrap_client_addr, dir.path());
+        let broker = Broker::start(cfg.clone()).await?;
+        // The controller listener used `:0`; record its real bound port so
+        // tests that read `cfg.controller_listen_addr` get the resolved value.
+        cfg.controller_listen_addr = broker.controller_addr();
         out.push((broker, cfg, dir));
     }
+
+    // Wait for the bootstrap broker's committed voter set to reach `n`. This is
+    // what proves auto-join converged. Bounded so a stuck join fails the test
+    // rather than hanging forever.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        if out[0].0.voter_count_for_test() >= n_usize {
+            break;
+        }
+        if std::time::Instant::now() > deadline {
+            return Err(BrokerError::Startup(format!(
+                "auto-join did not reach {n_usize} voters within 30s (have {})",
+                out[0].0.voter_count_for_test()
+            )));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
     Ok(out)
 }
 

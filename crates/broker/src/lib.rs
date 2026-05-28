@@ -121,6 +121,7 @@
 #![doc(html_root_url = "https://docs.rs/crabka-broker/0.0.0")]
 
 pub mod authorizer;
+pub(crate) mod auto_join;
 pub mod bootstrap;
 mod broker;
 pub(crate) mod cleaner;

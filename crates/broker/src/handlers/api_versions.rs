@@ -196,6 +196,12 @@ fn supported_apis() -> Vec<ApiVersion> {
         // KIP-848 next-gen consumer group protocol.
         v!(consumer_group_heartbeat_request),
         v!(consumer_group_describe_request),
+        // KIP-853 dynamic-quorum reconfiguration — `kafka-metadata-quorum
+        // --add-controller / --remove-controller` and the controller
+        // auto-join path.
+        v!(add_raft_voter_request),
+        v!(remove_raft_voter_request),
+        v!(update_raft_voter_request),
     ]
 }
 
@@ -328,6 +334,33 @@ mod tests {
             fetch.min_version, 0,
             "Fetch min must be 0 to advertise the legacy v0-3 support"
         );
+    }
+
+    #[test]
+    fn api_versions_advertises_kip853_rpcs_and_describe_quorum_v2() {
+        use crabka_protocol::owned;
+        let table = supported_apis();
+        let by_key = |k: i16| table.iter().find(|v| v.api_key == k);
+
+        for (key, max) in [
+            (80i16, owned::add_raft_voter_request::MAX_VERSION),
+            (81, owned::remove_raft_voter_request::MAX_VERSION),
+            (82, owned::update_raft_voter_request::MAX_VERSION),
+        ] {
+            let v = by_key(key).unwrap_or_else(|| panic!("api_key {key} advertised"));
+            assert_eq!(v.min_version, 0);
+            assert_eq!(v.max_version, max, "api_key {key} max matches codegen");
+        }
+
+        // DescribeQuorum (55) max follows its schema const — now v2 (KIP-853
+        // adds VoterDirectoryId + Nodes).
+        let dq = by_key(55).expect("describe_quorum advertised");
+        assert_eq!(
+            dq.max_version,
+            owned::describe_quorum_request::MAX_VERSION,
+            "DescribeQuorum max tracks the codegen const",
+        );
+        assert_eq!(dq.max_version, 2, "DescribeQuorum is v2 after KIP-853");
     }
 
     // ── KIP-511 client-info validation ─────────────────────────────────────
