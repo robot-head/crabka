@@ -16,7 +16,9 @@
 
 ## Implementation deviations from the spec (read first)
 
-Two spec details change here because the codebase lacks the prerequisite state — these are intentional and noted inline in the relevant tasks:
+**api_key is 93, not 70 (discovered during Task 1).** crabka already assigns api_key **70** to `ControllerRegistration` (matching real Kafka). Generating GetReplicaLogInfo at 70 silently clobbers it. GetReplicaLogInfo is therefore assigned **api_key 93** (next free slot). This RPC is internal controller→broker (both crabka), so the key choice does not affect external Kafka-tool byte-exactness. **All references to "70" in Tasks 4/5/6 below mean 93.** Also note crabka uses its own `crate::primitives::uuid::Uuid([u8; 16])`, NOT the external `uuid` crate. Confirmed generated field names: request `GetReplicaLogInfoRequest { broker_id: i32, topic_partitions: Vec<TopicPartitions> }`, `TopicPartitions { topic_id: Uuid, partitions: Vec<i32> }`; response `GetReplicaLogInfoResponse { broker_epoch: i64, topic_partition_log_info_list: Vec<TopicPartitionLogInfo> }`, `TopicPartitionLogInfo { topic_id, partition_log_info: Vec<PartitionLogInfo> }`, `PartitionLogInfo { partition, last_written_leader_epoch, current_leader_epoch, log_end_offset: i64, error_code: i16, error_message: Option<String> }`.
+
+Two further spec details change here because the codebase lacks the prerequisite state — these are intentional and noted inline in the relevant tasks:
 
 1. **Broker-epoch fencing is dropped.** The spec proposed discarding a `GetReplicaLogInfo` response whose `BrokerEpoch` no longer matches the broker's registration epoch. crabka's `BrokerRegistrationRecord` (`crates/metadata/src/records.rs`) carries **no broker epoch**, and heartbeats send `broker_epoch: 0`. So fencing is `CurrentLeaderEpoch`-only: abort a recovery as stale if any responding replica reports a `CurrentLeaderEpoch` higher than the controller's known `leader_epoch` for the partition (a newer leader already exists). The response still carries `BrokerEpoch` for wire-exactness; we just don't compare it.
 
