@@ -964,7 +964,7 @@ impl Broker {
                         .unwrap_or("127.0.0.1")
                         .to_string(),
                     port: config.listen_addr.port(),
-                    rack: None,
+                    rack: config.rack.clone(),
                     endpoints,
                 },
             );
