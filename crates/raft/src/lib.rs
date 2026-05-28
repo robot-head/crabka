@@ -50,6 +50,7 @@ mod controller;
 mod error;
 pub mod handshake;
 mod log_store;
+mod metadata_fetch;
 mod network;
 mod server;
 mod state_machine;
@@ -60,6 +61,7 @@ pub use config::{BootstrapMode, ControllerConfig};
 pub use controller::{Controller, ControllerHandle, QuorumState};
 pub use error::RaftError;
 pub use handshake::{DuplexStream, RaftHandshakeError, RaftListenerHandshake};
+pub use metadata_fetch::{MetadataFetchSlice, encode_committed_records};
 pub use network::OutboundDialer;
 pub use types::{AppData, AppDataResponse, Node, NodeId, Raft, TypeConfig};
 pub use wire::{
