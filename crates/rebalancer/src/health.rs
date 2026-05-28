@@ -12,11 +12,14 @@ use prometheus_client::registry::Registry;
 use tokio::sync::Mutex;
 
 use crate::ingest::SharedSnapshot;
+use crate::state_topic::StateBackend;
 
 #[derive(Clone)]
 pub struct HealthState {
     pub snapshot: SharedSnapshot,
     pub registry: Arc<Mutex<Registry>>,
+    /// Gate `/readyz` on the state topic being fully loaded.
+    pub state_topic: Arc<dyn StateBackend>,
 }
 
 pub fn router(state: HealthState) -> Router {
@@ -33,11 +36,13 @@ async fn healthz() -> impl IntoResponse {
 
 async fn readyz(State(s): State<HealthState>) -> impl IntoResponse {
     let g = s.snapshot.load();
-    if (*g).is_some() {
-        (StatusCode::OK, "ready")
-    } else {
-        (StatusCode::SERVICE_UNAVAILABLE, "no snapshot yet")
+    if (*g).is_none() {
+        return (StatusCode::SERVICE_UNAVAILABLE, "no snapshot yet");
     }
+    if !s.state_topic.is_loaded() {
+        return (StatusCode::SERVICE_UNAVAILABLE, "state topic loading");
+    }
+    (StatusCode::OK, "ready")
 }
 
 async fn metrics(State(s): State<HealthState>) -> impl IntoResponse {
@@ -73,6 +78,7 @@ mod tests {
         HealthState {
             snapshot: crate::ingest::new_shared_snapshot(),
             registry: Arc::new(Mutex::new(new_registry())),
+            state_topic: Arc::new(crate::state_topic::fake::InMemoryBackend::new_loaded()),
         }
     }
 

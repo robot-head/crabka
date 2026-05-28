@@ -150,6 +150,7 @@ fn build_state(snapshot: SharedSnapshot) -> (Arc<AppState>, Registry) {
         executor,
         client_facade,
         anomaly_store: Arc::new(crabka_rebalancer::detector::AnomalyStore::new(200)),
+        state_topic: Arc::new(crabka_rebalancer::state_topic::fake::InMemoryBackend::new_loaded()),
     });
     (state, registry)
 }

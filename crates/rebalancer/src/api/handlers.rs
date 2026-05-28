@@ -41,6 +41,8 @@ pub struct AppState {
     pub client_facade: Arc<dyn crate::executor::phases::ClientFacade>,
     // new in 43g:
     pub anomaly_store: Arc<crate::detector::AnomalyStore>,
+    // new in 43i: gates /readyz and execute_proposal
+    pub state_topic: Arc<dyn crate::state_topic::StateBackend>,
 }
 
 /// Convert a `ClusterState` into the proto `GetStateResponse`.
@@ -282,6 +284,12 @@ pub async fn execute_proposal(
     Extension(state): Extension<Arc<AppState>>,
     req: ConnectRequest<pb::ExecuteProposalRequest>,
 ) -> Result<ConnectResponse<pb::ExecuteProposalResponse>, ConnectError> {
+    if !state.state_topic.is_loaded() {
+        return Err(ConnectError::new(
+            Code::Unavailable,
+            "state topic not yet loaded; retry shortly",
+        ));
+    }
     let inner = req.0;
     let id = inner.id;
     let throttle_bytes_per_sec = inner
@@ -543,6 +551,7 @@ mod tests {
             executor,
             client_facade,
             anomaly_store: Arc::new(crate::detector::AnomalyStore::new(20)),
+            state_topic: Arc::new(crate::state_topic::fake::InMemoryBackend::new_loaded()),
         })
     }
 

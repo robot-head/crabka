@@ -15,6 +15,17 @@ use tracing::{debug, info, warn};
 use crate::state_topic::error::StateTopicError;
 use crate::state_topic::{LoadedState, STATE_KEY, serde_format};
 
+/// Kafka partition error codes treated as "topic exists but has no records
+/// visible yet" — counts as a quiet poll rather than a hard error. Covers
+/// transient windows between `ensure_topic` returning and the partition log
+/// accepting consumer fetches (`LEADER_NOT_AVAILABLE`, `UNKNOWN_TOPIC_OR_PARTITION`
+/// if the local router hasn't caught up yet).
+const TRANSIENT_EMPTY_CODES: &[i16] = &[
+    3, // UNKNOWN_TOPIC_OR_PARTITION — topic just created, router not yet updated
+    5, // LEADER_NOT_AVAILABLE — leader election in progress
+    9, // REPLICA_NOT_AVAILABLE — partition replica not yet available
+];
+
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 const QUIET_POLLS_TO_DECLARE_LOADED: u32 = 5;
 const MAX_BYTES_PER_FETCH: i32 = 1 << 20; // 1 MiB
@@ -68,9 +79,7 @@ impl StateTopicLoader {
                         quiet_polls = 0;
                     } else {
                         quiet_polls += 1;
-                        if quiet_polls >= QUIET_POLLS_TO_DECLARE_LOADED
-                            && !self.state.is_loaded()
-                        {
+                        if quiet_polls >= QUIET_POLLS_TO_DECLARE_LOADED && !self.state.is_loaded() {
                             info!("state-topic load reached steady state; marking loaded");
                             self.state.mark_loaded();
                         }
@@ -84,10 +93,7 @@ impl StateTopicLoader {
         }
     }
 
-    async fn poll_once(
-        &self,
-        fetch_offset: i64,
-    ) -> Result<Vec<FetchedRecord>, StateTopicError> {
+    async fn poll_once(&self, fetch_offset: i64) -> Result<Vec<FetchedRecord>, StateTopicError> {
         let req = FetchRequest {
             replica_id: -1,
             max_wait_ms: 0,
@@ -110,10 +116,22 @@ impl StateTopicLoader {
         for t in &resp.responses {
             for p in &t.partitions {
                 if p.error_code != 0 {
+                    if TRANSIENT_EMPTY_CODES.contains(&p.error_code) {
+                        // Transient: topic/partition not yet visible to this
+                        // broker. Treat as empty — the caller counts it as a
+                        // quiet poll.
+                        debug!(
+                            error_code = p.error_code,
+                            "state-topic fetch: transient partition error; treating as empty"
+                        );
+                        continue;
+                    }
                     return Err(StateTopicError::FetchErrorCode { code: p.error_code });
                 }
                 let Some(payload) = &p.records else { continue };
-                let RecordsPayload::V2(batch) = payload else { continue };
+                let RecordsPayload::V2(batch) = payload else {
+                    continue;
+                };
                 for r in &batch.records {
                     let off = batch.base_offset + i64::from(r.offset_delta);
                     out.push((

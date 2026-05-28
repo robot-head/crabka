@@ -7,7 +7,7 @@ mod error;
 pub mod loader;
 pub(crate) mod producer;
 pub(crate) mod serde_format;
-pub(crate) mod topic_admin;
+pub mod topic_admin;
 
 pub use error::StateTopicError;
 pub use loader::StateTopicLoader;

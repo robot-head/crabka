@@ -180,6 +180,35 @@ struct Args {
     #[arg(long, env = "CRABKA_ANOMALY_RING_BUFFER_SIZE", default_value_t = 200)]
     anomaly_ring_buffer_size: usize,
 
+    /// Name of the internal compacted topic the rebalancer uses to
+    /// persist executor state. Survives pod restart. Created on first
+    /// startup with `cleanup.policy=compact`, single partition.
+    #[arg(
+        long,
+        env = "CRABKA_REBALANCER_STATE_TOPIC",
+        default_value = "__crabka_rebalancer_state"
+    )]
+    state_topic_name: String,
+
+    /// Replication factor for the state topic at create time. Capped at
+    /// broker count by the broker if the cluster has fewer brokers.
+    #[arg(
+        long,
+        env = "CRABKA_REBALANCER_STATE_TOPIC_REPLICATION",
+        default_value_t = 3
+    )]
+    state_topic_replication: i16,
+
+    /// Soft deadline for state-topic load at startup; the loader emits
+    /// a WARN and keeps retrying past this. `/readyz` stays 503 until
+    /// the load completes successfully.
+    #[arg(
+        long,
+        env = "CRABKA_REBALANCER_STATE_LOAD_TIMEOUT_SECS",
+        default_value_t = 60
+    )]
+    state_load_timeout_secs: u64,
+
     /// Default KIP-73 throttle (bytes/sec, per broker direction) when
     /// `ExecuteProposalRequest.throttle_bytes_per_sec` is unset.
     #[arg(
@@ -265,16 +294,75 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let in_flight_slot: Arc<Mutex<Option<ExecutionHandle>>> = Arc::new(Mutex::new(None));
-    // TODO(43i Task 6): replace with the topic-backed StateTopic once binary
-    // wiring lands. The fake is compile-correct but doesn't survive restarts.
+
+    // Slice 43i: ensure the state topic exists; spawn the background loader.
+    // `topic_admin::ensure_topic` takes `&mut crabka_client_admin::AdminClient`.
+    // We connect a short-lived admin client just for topic creation; the
+    // `StateTopic` and `StateTopicLoader` then run on the main `Client`.
+    {
+        let addrs: Vec<String> = args
+            .bootstrap_servers
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .collect();
+        let mut admin = crabka_client_admin::AdminClient::connect(&addrs)
+            .await
+            .map_err(|e| anyhow::anyhow!("admin client connect: {e}"))?;
+        crabka_rebalancer::state_topic::topic_admin::ensure_topic(
+            &mut admin,
+            &args.state_topic_name,
+            args.state_topic_replication,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("ensure state topic: {e}"))?;
+    }
+
+    let arc_client = Arc::new(client.clone());
+    let loaded_state = crabka_rebalancer::state_topic::LoadedState::new();
     let state_topic: Arc<dyn crabka_rebalancer::state_topic::StateBackend> =
-        Arc::new(crabka_rebalancer::state_topic::fake::InMemoryBackend::new_loaded());
+        Arc::new(crabka_rebalancer::state_topic::StateTopic::new(
+            arc_client.clone(),
+            args.state_topic_name.clone(),
+            loaded_state.clone(),
+        ));
+
+    let loader = crabka_rebalancer::state_topic::StateTopicLoader {
+        client: arc_client.clone(),
+        topic: args.state_topic_name.clone(),
+        state: loaded_state.clone(),
+        shutdown: shutdown.clone(),
+    };
+    tokio::spawn(loader.run());
+
+    // Soft deadline: warn if the loader hasn't converged within the configured
+    // timeout. The loader keeps retrying; /readyz stays 503 until it finishes.
+    {
+        let warn_state = loaded_state.clone();
+        let timeout_secs = args.state_load_timeout_secs;
+        let topic_for_warn = args.state_topic_name.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(timeout_secs)).await;
+            if !warn_state.is_loaded() {
+                warn!(
+                    topic = %topic_for_warn,
+                    timeout_secs,
+                    "state topic has not loaded within the soft deadline; /readyz will remain 503"
+                );
+            }
+        });
+    }
+
+    info!(
+        topic = %args.state_topic_name,
+        "state topic ready; loader spawned"
+    );
+
     let executor_state = ExecutorState {
         store: store.clone(),
         config: executor_config,
         metrics: metrics.clone(),
         in_flight: in_flight_slot.clone(),
-        state_topic,
+        state_topic: state_topic.clone(),
     };
 
     let live_client: Arc<dyn crabka_rebalancer::executor::phases::ClientFacade> =
@@ -456,12 +544,14 @@ async fn main() -> anyhow::Result<()> {
         executor: executor_state,
         client_facade: live_client,
         anomaly_store: anomaly_store.clone(),
+        state_topic: state_topic.clone(),
     });
 
     let connect_router = crabka_rebalancer::api::router(app_state);
     let health_router = crabka_rebalancer::health::router(HealthState {
         snapshot: snapshot.clone(),
         registry,
+        state_topic,
     });
     let app = connect_router.merge(health_router);
 
