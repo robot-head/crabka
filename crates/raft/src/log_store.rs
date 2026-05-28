@@ -137,6 +137,23 @@ impl RaftLogStore {
         Ok(())
     }
 
+    /// Compact the log behind a snapshot: drop cached entries at or below
+    /// `index`, record `index` as the purged-through point, and advance
+    /// the on-disk log start offset to `index + 1` (the first retained
+    /// offset), physically deleting any sealed segment fully behind it.
+    pub(crate) async fn purge_upto(&self, index: u64) -> Result<(), RaftError> {
+        let mut cache = self.cache.lock().await;
+        let mut log = self.log.lock().await;
+        cache.entries.retain(|&k, _| k > index);
+        cache.last_purged = cache.last_purged.max(index);
+        // `delete_local_segments_through(first_retained)` both removes the
+        // sealed segments fully behind the snapshot AND advances the
+        // in-memory `log_start_offset` to the first retained offset.
+        let first_retained = i64::try_from(index).unwrap_or(i64::MAX).saturating_add(1);
+        log.delete_local_segments_through(first_retained)?;
+        Ok(())
+    }
+
     pub(crate) async fn save_vote(&self, vote: &Vote<NodeId>) -> Result<(), RaftError> {
         let bytes = <SerdeCompat<Vote<NodeId>>>::serialize(vote)?;
         tokio::fs::write(&self.vote_path, &bytes)
@@ -189,11 +206,12 @@ impl RaftLogStorage<TypeConfig> for Arc<RaftLogStore> {
     async fn get_log_state(&mut self) -> Result<LogState<TypeConfig>, StorageError<NodeId>> {
         let last_log_id = self.last_log_id().await;
         let last_purged = self.last_purged().await;
-        // Snapshots not implemented. We never purge, so last_purged_log_id
-        // tracks only what truncate-from-below would do.
+        // `last_purged` is the highest index purged through (inclusive), so
+        // `last_purged_log_id.index == last_purged`. The leader_id is lost
+        // by compaction; openraft only consumes the index here.
         let last_purged_log_id = (last_purged > 0).then(|| LogId {
             leader_id: openraft::LeaderId::new(0, 0),
-            index: last_purged - 1,
+            index: last_purged,
         });
         Ok(LogState {
             last_purged_log_id,
@@ -236,9 +254,10 @@ impl RaftLogStorage<TypeConfig> for Arc<RaftLogStore> {
             .map_err(|e| err_write(&e))
     }
 
-    async fn purge(&mut self, _log_id: LogId<NodeId>) -> Result<(), StorageError<NodeId>> {
-        // Snapshots not implemented, so purge is a no-op.
-        Ok(())
+    async fn purge(&mut self, log_id: LogId<NodeId>) -> Result<(), StorageError<NodeId>> {
+        RaftLogStore::purge_upto(self, log_id.index)
+            .await
+            .map_err(|e| err_write(&e))
     }
 
     async fn get_log_reader(&mut self) -> Self::LogReader {
@@ -276,5 +295,36 @@ mod tests {
         }
         let store2 = RaftLogStore::open(dir_path).await.unwrap();
         assert_eq!(store2.last_log_id().await.unwrap().index, 1);
+    }
+
+    #[tokio::test]
+    async fn purge_advances_log_start_offset() {
+        let dir = TempDir::new().unwrap();
+        let mut store = Arc::new(RaftLogStore::open(dir.path().to_path_buf()).await.unwrap());
+        let entries: Vec<Entry<TypeConfig>> = (1..=5)
+            .map(|i| Entry {
+                log_id: LogId {
+                    leader_id: LeaderId::new(1, 1),
+                    index: i,
+                },
+                payload: EntryPayload::<TypeConfig>::Blank,
+            })
+            .collect();
+        RaftLogStore::append(&store, entries).await.unwrap();
+
+        RaftLogStorage::purge(
+            &mut store,
+            LogId {
+                leader_id: LeaderId::new(1, 1),
+                index: 3,
+            },
+        )
+        .await
+        .unwrap();
+
+        let state = RaftLogStorage::get_log_state(&mut store).await.unwrap();
+        assert_eq!(state.last_purged_log_id.map(|l| l.index), Some(3));
+        // Entries at or below the purge point are gone from the cache.
+        assert!(store.read_range(..).await.iter().all(|e| e.log_id.index > 3));
     }
 }
