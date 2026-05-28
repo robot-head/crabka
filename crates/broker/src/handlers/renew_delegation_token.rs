@@ -1,4 +1,4 @@
-//! Slice 51 (KIP-48): `RenewDelegationToken` (`api_key` 39).
+//! KIP-48: `RenewDelegationToken` (`api_key` 39).
 //!
 //! Per spec §1.3: caller must be SASL-authenticated; the request's
 //! `hmac` selects an existing token by HMAC bytes; only the owner, a
@@ -9,7 +9,7 @@
 //!
 //! The super-user bypass matches Kafka's `DelegationTokenManager.
 //! isAuthorizedToOperateOnToken` (via `SecurityUtils.isAuthorized`),
-//! and is what slice 51b's operator relies on: the operator is a
+//! and is what the operator relies on: the operator is a
 //! super-user that mints tokens on behalf of `KafkaUser` principals
 //! via act-as, then must be able to renew/expire them despite being
 //! neither the owner nor a listed renewer.
@@ -46,7 +46,7 @@ pub(crate) async fn handle<S: BuildHasher>(
         return err_response(crate::codes::DELEGATION_TOKEN_NOT_FOUND);
     };
 
-    // KIP-48: super-users bypass the owner/renewer gate. Slice 51b's
+    // KIP-48: super-users bypass the owner/renewer gate. The
     // operator-driven issuance flow depends on this — the operator is
     // a super-user that mints tokens via act-as for other principals,
     // so it is neither the owner nor a listed renewer when it later
@@ -101,7 +101,6 @@ mod tests {
     use crabka_raft::ControllerHandle;
     use crabka_security::{AuthMethod, KafkaPrincipal, Principal, SaslMechanism};
     use std::collections::HashSet;
-    use std::net::SocketAddr;
     use std::sync::Arc;
     use std::time::Duration;
     use tempfile::TempDir;
@@ -120,19 +119,11 @@ mod tests {
 
     /// Spin up a single-voter `Controller` for tests, wait for leader.
     async fn test_controller(log_dir: std::path::PathBuf) -> Arc<ControllerHandle> {
-        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let cfg = crabka_raft::ControllerConfig {
-            node_id: 1,
-            voters: vec![(1, addr)],
-            controller_listen_addr: addr,
-            log_dir,
             election_timeout: Duration::from_millis(200),
             heartbeat_interval: Duration::from_millis(50),
             client_id: "test".into(),
-            bootstrap_mode: crabka_raft::BootstrapMode::Bootstrap,
-            cluster_id: None,
-            dialer: None,
-            handshake: None,
+            ..crabka_raft::ControllerConfig::for_tests(1, log_dir)
         };
         let handle = Arc::new(crabka_raft::Controller::start(cfg).await.unwrap());
         let mut rx = handle.watch_leader();
@@ -355,10 +346,10 @@ mod tests {
         controller.cancel().await;
     }
 
-    /// Slice 51c regression: a super-user caller may renew a token they
+    /// A super-user caller may renew a token they
     /// neither own nor are listed as a renewer on. This mirrors Kafka's
     /// `DelegationTokenManager.isAuthorizedToOperateOnToken` and is the
-    /// load-bearing gate for slice 51b's operator flow — the operator
+    /// load-bearing gate for the operator flow — the operator
     /// is a super-user that act-as-mints tokens on behalf of `KafkaUser`
     /// principals, then must be able to renew them ahead of expiry.
     #[tokio::test]
@@ -407,7 +398,7 @@ mod tests {
         controller.cancel().await;
     }
 
-    /// Slice 51c regression: a non-super-user caller who is also not the
+    /// A non-super-user caller who is also not the
     /// owner and not a listed renewer must still be rejected with
     /// `DELEGATION_TOKEN_OWNER_MISMATCH`. Guards against accidentally
     /// widening the bypass beyond `super_users`.

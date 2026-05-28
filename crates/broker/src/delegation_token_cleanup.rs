@@ -1,4 +1,4 @@
-//! Slice 51 (KIP-48): background sweep that tombstones expired
+//! KIP-48: background sweep that tombstones expired
 //! delegation tokens.
 //!
 //! Spawned from [`Broker::start`] only when

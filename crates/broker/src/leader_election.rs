@@ -86,7 +86,7 @@ pub(crate) async fn compute_failover_changes(
                             topic = %pr.topic, partition = pr.partition, leader = new_leader,
                             "unclean leader election: ISR empty, electing out-of-ISR replica (possible data loss)"
                         );
-                        // Slice 10c (KIP-841): account this election so
+                        // KIP-841: account this election so
                         // operators can alert on a non-zero rate of unclean
                         // failovers in their cluster.
                         metrics.record_unclean_leader_election();
@@ -161,8 +161,8 @@ pub(crate) async fn on_broker_dead(
     Ok(())
 }
 
-/// Called when the liveness ticker observes `DeadToAlive(alive)`. For
-/// slice-10b this is a no-op — ISR expand happens organically via
+/// Called when the liveness ticker observes `DeadToAlive(alive)`. This
+/// is a no-op — ISR expand happens organically via
 /// `isr_maintenance` once the rejoined broker's replicator catches up.
 /// The hook is here for future enhancements (e.g. auto-rebalance).
 #[allow(clippy::unused_async)]
@@ -620,7 +620,7 @@ mod tests {
             "unclean election installs singleton ISR (KIP-841)",
         );
         assert_eq!(pr.leader_epoch, 6);
-        // Slice 10c: each unclean election bumps the counter exactly once.
+        // Each unclean election bumps the counter exactly once.
         assert_eq!(metrics.unclean_leader_elections_total.get(), 1);
     }
 

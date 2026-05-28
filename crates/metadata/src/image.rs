@@ -17,8 +17,8 @@ use crate::records::{
 
 pub type EntityKey = Vec<(String, Option<String>)>;
 
-/// Slice 51 (KIP-48): In-memory image type for a single delegation
-/// token. Mirrors [`DelegationTokenRecord`] minus any tombstone
+/// In-memory image type for a single delegation
+/// token (KIP-48). Mirrors [`DelegationTokenRecord`] minus any tombstone
 /// concerns — tombstones are handled as removals on the apply path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DelegationToken {
@@ -65,6 +65,14 @@ pub struct MetadataImage {
     acls_prefixed: HashMap<ResourceType, Vec<AclEntry>>,
     client_quotas: HashMap<EntityKey, BTreeMap<String, f64>>,
     delegation_tokens: HashMap<String, DelegationToken>,
+    kraft_version: u16,
+    voters: crate::voters::VoterSet,
+    feature_levels: BTreeMap<String, i16>,
+    /// KIP-584 finalized-features epoch. `-1` until the first
+    /// `V1FeatureLevel` record applies, then monotonically increasing
+    /// (one bump per applied record). Deterministic across replicas
+    /// because records apply in committed-log order on every node.
+    features_epoch: i64,
 }
 
 /// Selects which KIP-73 throttle rate config key to read.
@@ -89,6 +97,10 @@ impl MetadataImage {
             acls_prefixed: HashMap::new(),
             client_quotas: HashMap::new(),
             delegation_tokens: HashMap::new(),
+            kraft_version: 0,
+            voters: crate::voters::VoterSet::default(),
+            feature_levels: BTreeMap::new(),
+            features_epoch: -1,
         }
     }
 
@@ -202,6 +214,16 @@ impl MetadataImage {
         self.brokers.values()
     }
 
+    #[must_use]
+    pub fn kraft_version(&self) -> u16 {
+        self.kraft_version
+    }
+
+    #[must_use]
+    pub fn voters(&self) -> &crate::voters::VoterSet {
+        &self.voters
+    }
+
     /// Iterate every ACL that could possibly match `(rt, rn)`:
     /// - all literal entries at `(rt, rn)`
     /// - all prefixed entries whose `resource_name` is a prefix of `rn`
@@ -233,13 +255,13 @@ impl MetadataImage {
             .chain(self.acls_prefixed.values().flatten())
     }
 
-    /// Slice 51 (KIP-48): lookup a delegation token by its `token_id`.
+    /// Look up a delegation token by its `token_id` (KIP-48).
     #[must_use]
     pub fn delegation_token_by_id(&self, token_id: &str) -> Option<&DelegationToken> {
         self.delegation_tokens.get(token_id)
     }
 
-    /// Slice 51 (KIP-48): all tokens owned by `owner` (exact match on
+    /// All tokens owned by `owner` (KIP-48; exact match on
     /// the owning [`KafkaPrincipal`]). Order is unspecified.
     #[must_use]
     pub fn delegation_tokens_by_owner(&self, owner: &KafkaPrincipal) -> Vec<&DelegationToken> {
@@ -249,9 +271,9 @@ impl MetadataImage {
             .collect()
     }
 
-    /// Slice 51 (KIP-48): tokens that `principal` is allowed to see via
+    /// Tokens that `principal` is allowed to see via
     /// `DescribeDelegationToken` without `DescribeToken` permission —
-    /// either as the owner or as a listed renewer. Order is
+    /// either as the owner or as a listed renewer (KIP-48). Order is
     /// unspecified.
     #[must_use]
     pub fn delegation_tokens_visible_to(
@@ -264,23 +286,37 @@ impl MetadataImage {
             .collect()
     }
 
-    /// Slice 51 (KIP-48): every delegation token currently in the
-    /// image. Used by `DescribeDelegationToken` for callers with
+    /// Every delegation token currently in the
+    /// image (KIP-48). Used by `DescribeDelegationToken` for callers with
     /// `DescribeToken` permission on the cluster.
     pub fn all_delegation_tokens(&self) -> impl Iterator<Item = &DelegationToken> {
         self.delegation_tokens.values()
     }
 
-    /// Slice 51 (KIP-48): lookup a delegation token by its HMAC bytes.
+    /// KIP-48: lookup a delegation token by its HMAC bytes.
     /// `RenewDelegationToken` / `ExpireDelegationToken` identify a token
-    /// by HMAC on the wire (not by `token_id`), and the upcoming SCRAM
-    /// delegation-token fallback (slice 51 T8) needs the same lookup at
+    /// by HMAC on the wire (not by `token_id`), and the SCRAM
+    /// delegation-token fallback needs the same lookup at
     /// the auth path. Implementation is a linear scan over the small
     /// (per-broker, in-memory) token map — clarity over an explicit
     /// `HMAC→token_id` index until cardinality justifies it.
     #[must_use]
     pub fn delegation_token_by_hmac(&self, hmac: &[u8]) -> Option<&DelegationToken> {
         self.delegation_tokens.values().find(|t| t.hmac == hmac)
+    }
+
+    /// KIP-584: finalized feature levels, keyed by feature name. Empty
+    /// until an `UpdateFeatures` call lands a `V1FeatureLevel` record.
+    #[must_use]
+    pub fn finalized_features(&self) -> &BTreeMap<String, i16> {
+        &self.feature_levels
+    }
+
+    /// KIP-584 finalized-features epoch. `-1` ("unknown") until the first
+    /// feature is finalized.
+    #[must_use]
+    pub fn finalized_features_epoch(&self) -> i64 {
+        self.features_epoch
     }
 
     /// Apply one record. Returns the previous record (for `V1Topic` /
@@ -382,7 +418,7 @@ impl MetadataImage {
                     }
                 }
             }
-            // Slice 51 (KIP-48): replacement semantics — same
+            // Replacement semantics (KIP-48) — same
             // `token_id` overwrites the prior entry (used by Create
             // and Renew). Tombstone removes by `token_id`.
             MetadataRecord::V1DelegationToken(rec) => {
@@ -396,6 +432,21 @@ impl MetadataImage {
                 // Idempotent: applying against an unknown `node_id` is
                 // a no-op.
                 self.brokers.remove(&rec.node_id);
+            }
+            MetadataRecord::V1KRaftVersion(r) => {
+                self.kraft_version = r.kraft_version;
+            }
+            MetadataRecord::V1Voters(r) => {
+                self.voters = r.voters.clone();
+            }
+            MetadataRecord::V1FeatureLevel(rec) => {
+                if rec.level == 0 {
+                    self.feature_levels.remove(&rec.name);
+                } else {
+                    self.feature_levels.insert(rec.name.clone(), rec.level);
+                }
+                // Monotonic epoch: -1 -> 0 on the first record, then +1.
+                self.features_epoch = self.features_epoch.saturating_add(1).max(0);
             }
         }
     }
@@ -451,7 +502,7 @@ impl MetadataImage {
             | MetadataRecord::V1DeleteAccessControlEntry(_)
             | MetadataRecord::V1BrokerConfig(_)
             | MetadataRecord::V1ClientQuota(_)
-            // Slice 51 (KIP-48): delegation-token records have no
+            // Delegation-token records have no
             // topic-store concerns and admission is gated by the
             // handler-side checks (KIP-48 §protocol errors), so the
             // image-level validate is unconditional Ok.
@@ -460,7 +511,16 @@ impl MetadataImage {
             // UnregisterBroker (KIP-185 / api_key 64). The handler-side
             // existence check + Cluster:Alter ACL gate provide all the
             // pre-validation we need; image-level apply is idempotent.
-            | MetadataRecord::V1UnregisterBroker(_) => Ok(()),
+            | MetadataRecord::V1UnregisterBroker(_)
+            // KIP-853: voter-set / kraft.version records are validated by
+            // the reconfiguration coordinator before submission; the
+            // image-level apply is an unconditional replacement.
+            | MetadataRecord::V1KRaftVersion(_)
+            | MetadataRecord::V1Voters(_)
+            // KIP-584: feature-level admission is fully gated by the
+            // UpdateFeatures handler (supported-range + downgrade checks);
+            // image-level apply is an idempotent map upsert.
+            | MetadataRecord::V1FeatureLevel(_) => Ok(()),
         }
     }
 }
@@ -471,11 +531,53 @@ mod tests {
     use crate::acl::{AclEntryFilter, AclOperation, PermissionType};
     use crate::records::{
         BrokerConfigRecord, ClientQuotaRecord, DeleteDelegationTokenRecord,
-        DeleteScramCredentialRecord, DeleteTopicRecord, QuotaEntity, ScramCredentialRecord,
+        DeleteScramCredentialRecord, DeleteTopicRecord, FeatureLevelRecord, QuotaEntity,
+        ScramCredentialRecord,
     };
 
     fn img() -> MetadataImage {
         MetadataImage::new(Uuid::nil())
+    }
+
+    #[test]
+    fn fresh_image_has_no_features_and_unknown_epoch() {
+        let m = img();
+        assert!(m.finalized_features().is_empty());
+        assert_eq!(m.finalized_features_epoch(), -1);
+    }
+
+    #[test]
+    fn apply_feature_level_sets_level_and_bumps_epoch() {
+        let mut m = img();
+        m.apply(&MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+            name: "metadata.version".into(),
+            level: 1,
+        }));
+        assert_eq!(m.finalized_features().get("metadata.version"), Some(&1));
+        assert_eq!(m.finalized_features_epoch(), 0);
+
+        // A second apply bumps the epoch again (monotonic).
+        m.apply(&MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+            name: "metadata.version".into(),
+            level: 1,
+        }));
+        assert_eq!(m.finalized_features_epoch(), 1);
+    }
+
+    #[test]
+    fn apply_feature_level_zero_deletes_entry() {
+        let mut m = img();
+        m.apply(&MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+            name: "metadata.version".into(),
+            level: 1,
+        }));
+        m.apply(&MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+            name: "metadata.version".into(),
+            level: 0,
+        }));
+        assert!(m.finalized_features().get("metadata.version").is_none());
+        // Epoch still advanced — it is monotonic, not a count of live features.
+        assert_eq!(m.finalized_features_epoch(), 1);
     }
 
     fn topic(name: &str, partitions: i32) -> MetadataRecord {
@@ -1208,6 +1310,24 @@ mod tests {
         let mut ids: Vec<&str> = bob_visible.iter().map(|t| t.token_id.as_str()).collect();
         ids.sort_unstable();
         assert_eq!(ids, vec!["a-2", "b-1"]);
+    }
+
+    #[test]
+    fn applies_voters_and_version() {
+        let mut image = MetadataImage::default();
+        image.apply(&MetadataRecord::V1KRaftVersion(
+            crate::records::KRaftVersionRecord { kraft_version: 1 },
+        ));
+        image.apply(&MetadataRecord::V1Voters(crate::records::VotersRecord {
+            voters: crate::voters::VoterSet::from_voters([crate::voters::Voter {
+                id: 1,
+                directory_id: uuid::Uuid::nil(),
+                endpoints: vec![],
+                kraft_version: crate::voters::KRaftVersionRange::default(),
+            }]),
+        }));
+        assert_eq!(image.kraft_version(), 1);
+        assert!(image.voters().contains(1));
     }
 
     #[test]

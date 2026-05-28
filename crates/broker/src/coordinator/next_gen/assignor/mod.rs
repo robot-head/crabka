@@ -5,6 +5,9 @@
 pub mod range;
 pub mod uniform;
 
+pub use range::RangeAssignor;
+pub use uniform::UniformAssignor;
+
 use std::collections::HashMap;
 
 use crabka_protocol::primitives::uuid::Uuid;
@@ -23,22 +26,13 @@ pub struct TopicMetadata {
     /// partition has at least one replica. Empty (or the key missing
     /// entirely) for partitions whose replicas have no rack info — the
     /// assignor then falls back to its non-rack-aware behavior.
-    /// Populated by the coordinator's metadata snapshot (slice 64b).
+    /// Populated by the coordinator's metadata snapshot.
     pub partition_racks: HashMap<(Uuid, i32), Vec<String>>,
 }
 
 pub type Assignment = HashMap<String, HashMap<Uuid, Vec<i32>>>;
 
-pub trait Assignor: Send + Sync {
+pub trait Assignor: Send + Sync + std::fmt::Debug {
     fn name(&self) -> &'static str;
     fn assign(&self, members: &[MemberSubscription], topics: &TopicMetadata) -> Assignment;
-}
-
-#[must_use]
-pub fn select(name: &str) -> Option<Box<dyn Assignor>> {
-    match name {
-        "uniform" => Some(Box::new(uniform::UniformAssignor)),
-        "range" => Some(Box::new(range::RangeAssignor)),
-        _ => None,
-    }
 }

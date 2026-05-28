@@ -4,7 +4,7 @@
 //! reads the current overrides from the metadata image, applies the ops,
 //! validates the result, and submits the merged map.
 //!
-//! Slice-11 scope:
+//! Supported operations:
 //! - SET (0)    — set/replace
 //! - DELETE (1) — remove
 //! - APPEND (2) and SUBTRACT (3) are list-valued operations. None of our
@@ -88,7 +88,7 @@ pub(crate) async fn handle(
             ..Default::default()
         };
 
-        // ── slice-13 ACL preamble ────────────────────────────────────────
+        // ── ACL preamble ────────────────────────────────────────
         // Per-resource authorization based on resource_type.
         // Topic (2) → AlterConfigs on Topic(resource_name) → TOPIC_AUTHORIZATION_FAILED on Deny.
         // Broker (4) → AlterConfigs on Cluster("kafka-cluster") → CLUSTER_AUTHORIZATION_FAILED on Deny.

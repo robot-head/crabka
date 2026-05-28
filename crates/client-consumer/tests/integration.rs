@@ -3,7 +3,7 @@
 //! and reads them back; commits survive a broker restart.
 //!
 //! `flavor = "multi_thread", worker_threads = 2` is mandatory here for the
-//! same reason as the slice-4 JVM acceptance tests: a single-threaded
+//! same reason as the JVM acceptance tests: a single-threaded
 //! runtime can't drive both the broker's accept loop and the test body
 //! when the test makes synchronous-style blocking calls into the broker.
 
@@ -63,7 +63,7 @@ async fn topic_id_for(client: &Client, name: &str) -> crabka_protocol::primitive
 }
 
 async fn produce(client: &Client, topic: &str, values: &[&str]) {
-    // Retry on UNKNOWN_TOPIC_OR_PARTITION (3) up to 5 times: slice-7's
+    // Retry on UNKNOWN_TOPIC_OR_PARTITION (3) up to 5 times: the
     // openraft state-machine apply has occasionally-visible-late timing
     // on slow CI runners (especially Windows), and producers immediately
     // following CreateTopics can race the metadata propagation.

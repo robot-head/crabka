@@ -48,7 +48,7 @@ pub struct Broker {
     pub(crate) txn_coordinator: Arc<crate::txn::coordinator::TxnCoordinator>,
     pub(crate) supervisor_shutdown: tokio_util::sync::CancellationToken,
     pub(crate) supervisor_handle: tokio::sync::Mutex<Option<JoinHandle<()>>>,
-    /// Slice 43e: handle for the periodic disk-usage scanner spawned when
+    /// Handle for the periodic disk-usage scanner spawned when
     /// `BrokerConfig::partition_disk_scan_interval_secs > 0`. Retained on
     /// the struct so [`BrokerHandle::shutdown`] can await it after
     /// cancelling `supervisor_shutdown`. `None` when the scanner is
@@ -57,7 +57,7 @@ pub struct Broker {
     pub(crate) liveness: Arc<crate::heartbeat::controller_state::ControllerLivenessState>,
     /// `Some` when `BrokerConfig::tls_config` is set. Per-listener
     /// accept loops snapshot the current `Arc<ServerConfig>` via
-    /// `current()` and wrap it in a fresh `TlsAcceptor`. Slice 33's
+    /// `current()` and wrap it in a fresh `TlsAcceptor`. The TLS
     /// hot-reload path swaps the inner config without restart.
     pub(crate) tls_dynamic: Option<Arc<crabka_security::DynamicServerConfig>>,
     /// Shared outbound dialer used by the replicator, raft transport,
@@ -76,26 +76,26 @@ pub struct Broker {
     /// handler before each read; sized by
     /// `BrokerConfig::max_incremental_fetch_session_cache_slots`.
     pub fetch_session_cache: Arc<crate::fetch_session::FetchSessionCache>,
-    /// Slice 39: Prometheus metrics. Cloned into every subsystem that
+    /// Prometheus metrics. Cloned into every subsystem that
     /// emits (produce/fetch handlers, isr-maintenance loop, etc.). The
     /// `BrokerMetrics` struct internally clones cheaply (single Arc).
     pub metrics: crate::metrics::BrokerMetrics,
-    /// Slice 39: the actual `SocketAddr` the `/metrics` HTTP server is
+    /// The actual `SocketAddr` the `/metrics` HTTP server is
     /// bound to. Populated only when `BrokerConfig::metrics_listen_addr`
     /// is `Some`; useful for tests that pass `127.0.0.1:0` and need to
     /// discover the OS-assigned port.
     pub(crate) metrics_bound_addr: Option<SocketAddr>,
-    /// Slice 22 (controlled shutdown). Set to `true` by
+    /// Controlled shutdown. Set to `true` by
     /// [`BrokerHandle::controlled_shutdown`]; the heartbeat client reads
     /// this every tick and stamps `want_shut_down=true` onto outbound
     /// `BrokerHeartbeat` requests.
     pub(crate) want_shutdown: Arc<tokio::sync::watch::Sender<bool>>,
-    /// Slice 22 (controlled shutdown). Set to `true` by the heartbeat
+    /// Controlled shutdown. Set to `true` by the heartbeat
     /// client when the controller responds `should_shut_down=true`;
     /// [`BrokerHandle::controlled_shutdown`] awaits this before invoking
     /// the regular shutdown path.
     pub(crate) should_shutdown: Arc<tokio::sync::watch::Sender<bool>>,
-    /// Slice 48d (KIP-405): shared remote-storage + remote-log-metadata
+    /// KIP-405: shared remote-storage + remote-log-metadata
     /// reader. `Some` when `BrokerConfig::remote_log_storage_dir` is set;
     /// the remote-log-manager copy task and the Fetch/ListOffsets
     /// handlers share the same instance through this handle.
@@ -112,6 +112,21 @@ pub struct Broker {
 impl Broker {
     pub(crate) fn handlers(&self) -> &HandlerTable {
         &self.handlers
+    }
+
+    /// Test-only: clone the controller handle so the `auto_join` unit test can
+    /// build `AutoJoinParams` without reaching into private fields.
+    #[cfg(test)]
+    pub(crate) fn controller_for_test(&self) -> Arc<dyn crate::metadata_source::MetadataSource> {
+        self.controller.clone()
+    }
+
+    /// Test-only: clone the shared inter-broker client (same reason).
+    #[cfg(test)]
+    pub(crate) fn inter_broker_client_for_test(
+        &self,
+    ) -> Arc<crate::network::client::InterBrokerClient> {
+        self.inter_broker_client.clone()
     }
 }
 
@@ -135,7 +150,7 @@ impl BrokerHandle {
         self.listen_addr
     }
 
-    /// Slice 39: the actual bound address of the Prometheus `/metrics`
+    /// The actual bound address of the Prometheus `/metrics`
     /// HTTP server, if one is configured. Tests pass `127.0.0.1:0` in
     /// `BrokerConfig::metrics_listen_addr` and read the OS-assigned
     /// port back through this accessor.
@@ -145,12 +160,22 @@ impl BrokerHandle {
         self._broker.metrics_bound_addr
     }
 
+    /// The actual `SocketAddr` this broker's controller listener bound to
+    /// (resolves the OS-assigned port when `controller_listen_addr` used port
+    /// 0). KIP-853 dynamic-voters tests read this to point joiners at the
+    /// bootstrap broker's real controller endpoint.
+    #[must_use]
+    #[allow(clippy::used_underscore_binding)]
+    pub fn controller_addr(&self) -> SocketAddr {
+        self._broker.controller.controller_bound_addr()
+    }
+
     /// Current Raft leader id as observed by this broker's controller.
     /// Returns `None` before the first leader is elected. Trivial
     /// passthrough to [`crabka_raft::ControllerHandle::watch_leader`].
     ///
     /// `async fn` even though the underlying `watch::Receiver::borrow` is
-    /// synchronous — the slice-7 test plan and broker public API expect
+    /// synchronous — the broker public API expects
     /// `controller_leader_id().await`, and keeping the signature async
     /// preserves room for a future implementation that waits for the
     /// first non-`None` value via `watch::Receiver::changed`.
@@ -173,8 +198,8 @@ impl BrokerHandle {
     }
 
     /// This broker's own registration endpoints, as stored in the
-    /// quorum-replicated [`crabka_metadata::MetadataImage`]. Used by
-    /// Task-11 integration tests to verify per-listener endpoints were
+    /// quorum-replicated [`crabka_metadata::MetadataImage`]. Integration
+    /// tests verify per-listener endpoints were
     /// projected from `BrokerConfig::effective_listeners()` onto the
     /// self-registration record. Returns the cloned endpoint list (or
     /// empty if the broker has not yet self-registered).
@@ -224,9 +249,22 @@ impl BrokerHandle {
         node_id: crabka_raft::NodeId,
         addr: std::net::SocketAddr,
     ) -> Result<(), BrokerError> {
+        // KIP-853: openraft membership now keys on the full `Node` identity.
+        // This `SocketAddr`-shaped convenience wrapper (used by integration
+        // tests) synthesizes a single CONTROLLER endpoint and derives the
+        // directory id from the node id, matching the `for_tests` convention.
+        let node = crabka_raft::Node {
+            directory_id: uuid::Uuid::from_u128(u128::from(node_id)),
+            endpoints: vec![crabka_metadata::VoterEndpoint {
+                name: "CONTROLLER".into(),
+                host: addr.ip().to_string(),
+                port: addr.port(),
+            }],
+            kraft_version: crabka_metadata::KRaftVersionRange::default(),
+        };
         self._broker
             .controller
-            .add_learner(node_id, addr)
+            .add_learner(node_id, node)
             .await
             .map_err(|e| BrokerError::Replication(format!("add_learner: {e}")))
     }
@@ -384,7 +422,7 @@ impl BrokerHandle {
 
     /// Test-only: full `LogConfig` snapshot for `(topic, partition)`.
     /// Returns `None` if the partition is not hosted on this broker.
-    /// Used by slice-18's compaction integration test to wait for
+    /// Used by the compaction integration test to wait for
     /// `cleanup.policy=compact` + `segment.bytes` overrides to propagate
     /// from the metadata image through the supervisor's reconcile loop.
     #[cfg(any(test, feature = "test-helpers"))]
@@ -450,10 +488,21 @@ impl BrokerHandle {
         Ok(last_offset)
     }
 
+    /// Test-only: read the `tiered_storage_rlmm_topic_backed` gauge. `1`
+    /// once the slice-48f bootstrap has swapped the in-memory placeholder
+    /// for the topic-backed [`crabka_remote_storage::RemoteLogMetadataManager`],
+    /// `0` before that (or when `remote_log_metadata_kafka` is unset).
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[must_use]
+    #[allow(clippy::used_underscore_binding)]
+    pub fn rlmm_topic_backed_active_for_test(&self) -> bool {
+        self._broker.metrics.tiered_storage_rlmm_topic_backed.get() == 1
+    }
+
     /// Test-only: submit a [`crabka_metadata::MetadataRecord`] directly to
     /// this broker's controller, bypassing the public Kafka APIs. Used by
-    /// Task-14 integration tests to provision a SCRAM credential before the
-    /// `AlterUserScramCredentials` handler (Task 15) exists. Returns an
+    /// integration tests to provision a SCRAM credential before the
+    /// `AlterUserScramCredentials` handler exists. Returns an
     /// error if the submit fails (e.g., this broker is not the raft leader
     /// and forwarding fails).
     ///
@@ -517,6 +566,67 @@ impl BrokerHandle {
         self._broker.controller.quorum_state().voters
     }
 
+    /// Test-only: clone the inner `Arc<Broker>`. Used by the `auto_join`
+    /// unit test (and dynamic-voters integration tests) that need to drive
+    /// broker-internal background routines directly.
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[must_use]
+    #[allow(clippy::used_underscore_binding)]
+    pub fn broker_arc_for_test(&self) -> Arc<Broker> {
+        self._broker.clone()
+    }
+
+    /// Test-only: the controller voter set's size as seen by this broker's
+    /// committed `MetadataImage`. KIP-853 dynamic-voters tests poll this to
+    /// observe auto-join growing / `remove_voter` shrinking the quorum.
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[must_use]
+    #[allow(clippy::used_underscore_binding)]
+    pub fn voter_count_for_test(&self) -> usize {
+        self._broker.controller.current_image().voters().len()
+    }
+
+    /// Test-only: the controller voter ids as seen by this broker's
+    /// committed `MetadataImage`. Used to pick a follower to remove in the
+    /// dynamic-voters shrink test.
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[must_use]
+    #[allow(clippy::used_underscore_binding)]
+    pub fn voter_ids_for_test(&self) -> std::collections::BTreeSet<crabka_raft::NodeId> {
+        self._broker.controller.current_image().voters().ids()
+    }
+
+    /// Test-only: the `directory_id` of voter `id` from this broker's
+    /// committed `MetadataImage`, if present. `remove_voter` needs the
+    /// voter's directory id to disambiguate.
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[must_use]
+    #[allow(clippy::used_underscore_binding)]
+    pub fn voter_directory_id_for_test(&self, id: crabka_raft::NodeId) -> Option<uuid::Uuid> {
+        self._broker
+            .controller
+            .current_image()
+            .voters()
+            .get(id)
+            .map(|v| v.directory_id)
+    }
+
+    /// Test-only: run the KIP-853 `remove_voter` reconfiguration on this
+    /// broker's controller (must be the raft leader). Returns the coordinator
+    /// outcome so the dynamic-voters test can assert `Committed`.
+    ///
+    /// # Errors
+    ///
+    /// Forwards the underlying raft error.
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[allow(clippy::used_underscore_binding)]
+    pub async fn remove_voter_for_test(
+        &self,
+        req: crabka_raft::reconfig::RemoveVoter,
+    ) -> Result<crabka_raft::reconfig::ReconfigOutcome, crabka_raft::RaftError> {
+        self._broker.controller.remove_voter(req).await
+    }
+
     /// Test-only: return the current leader node-id for `(topic, partition)`
     /// as seen by this broker's metadata image. Returns `None` if the
     /// partition is not yet in the image or the leader field is `0` (no
@@ -560,7 +670,7 @@ impl BrokerHandle {
             .cloned()
     }
 
-    /// Slice 33: rebuild the TLS server config from the cert/key paths
+    /// Rebuild the TLS server config from the cert/key paths
     /// in `BrokerConfig::tls_config` *right now*, bypassing the
     /// periodic mtime watcher. New TLS handshakes after this call see
     /// the rebuilt config; in-flight handshakes are unaffected.
@@ -654,7 +764,7 @@ impl BrokerHandle {
         if let Some(h) = self._broker.supervisor_handle.lock().await.take() {
             let _ = h.await;
         }
-        // Slice 43e: drain the disk-usage scanner if it was spawned.
+        // Drain the disk-usage scanner if it was spawned.
         // The scanner observes the same `supervisor_shutdown` cancellation
         // its sibling tasks do; awaiting the handle here ensures the
         // background tick is fully wound down before we tear the rest
@@ -773,7 +883,7 @@ impl crate::quota::ImageWatcher for QuotaControllerAdapter {
     }
 }
 
-/// Slice 51 (KIP-48): wraps a real [`crabka_raft::ControllerHandle`] so it
+/// KIP-48: wraps a real [`crabka_raft::ControllerHandle`] so it
 /// can satisfy the [`crate::delegation_token_cleanup::DelegationTokenController`]
 /// trait required by the delegation-token expiry sweep. Every broker runs
 /// the sweep; raft serializes duplicate tombstones so each becomes a no-op.
@@ -804,8 +914,25 @@ impl Broker {
     /// Build a `Broker`, scan the log dir, spawn partition writers for
     /// every existing `<topic>-<partition>/`, bind the TCP listener, and
     /// return the handle.
+    pub async fn start(config: BrokerConfig) -> Result<BrokerHandle, BrokerError> {
+        Self::start_with_controller_listener(config, None).await
+    }
+
+    /// Like [`Self::start`], but adopts a caller-supplied, already-bound
+    /// controller listener instead of binding `controller_listen_addr`.
+    ///
+    /// This threads the listener through to
+    /// [`crabka_raft::Controller::start_with_listener`] so test harnesses
+    /// can eliminate the bind-and-drop TOCTOU race on the controller port.
+    /// The listener's local address MUST equal
+    /// `config.controller_listen_addr`. The data-plane listeners still
+    /// bind from `config` — pass `127.0.0.1:0` there and read the bound
+    /// port back via [`BrokerHandle::listen_addr`] to avoid that race too.
     #[allow(clippy::too_many_lines)] // sequential bring-up; splitting hurts readability more than it helps
-    pub async fn start(mut config: BrokerConfig) -> Result<BrokerHandle, BrokerError> {
+    pub async fn start_with_controller_listener(
+        mut config: BrokerConfig,
+        controller_listener: Option<tokio::net::TcpListener>,
+    ) -> Result<BrokerHandle, BrokerError> {
         // 0a. Install the rustls crypto provider exactly once per process.
         //     `rustls 0.23` with `default-features = false` does NOT auto-install
         //     a provider; without this the `ServerConfig::builder()` call below
@@ -819,7 +946,7 @@ impl Broker {
 
         // 0c. Build the dynamic TLS server config up front so we can
         //     fail fast on bad cert / key paths before bringing up any
-        //     state. Wrapped in a `DynamicServerConfig` so slice 33's
+        //     state. Wrapped in a `DynamicServerConfig` so the TLS
         //     hot-reload path can swap certs without restart.
         let tls_dynamic = match &config.tls_config {
             Some(tls) => Some(
@@ -852,7 +979,7 @@ impl Broker {
         //    connection. The controller owns its own listener bound to
         //    `controller_listen_addr`.
         //
-        //    Slice 12b raft dialer + handshake wiring:
+        //    Raft dialer + handshake wiring:
         //
         //    Replication + heartbeat dials route through the data-plane
         //    inter-broker listener (which speaks SASL/TLS when
@@ -904,10 +1031,67 @@ impl Broker {
                 "localhost".to_string(),
             )) as Arc<dyn crabka_raft::OutboundDialer>);
 
-        let metadata: Arc<dyn crate::metadata_source::MetadataSource> = if config.is_controller() {
+        // KIP-853: the bootstrap records carry the seed `VotersRecord`. Load
+        // them once here so the cold-boot voter set feeds `ControllerConfig`;
+        // the same records are submitted through raft after a leader is
+        // elected (step 2b below). A `Join` node has no seed set and relies
+        // on `bootstrap_servers` + auto-join instead. Broker-only nodes never
+        // run a controller, so the records stay unused (step 2b is gated on
+        // having a non-empty set and `Bootstrap` mode).
+        let mut bootstrap_records = crate::bootstrap::load_bootstrap_records(&config.log_dir)?;
+
+        let controller: Arc<dyn crate::metadata_source::MetadataSource> = if config.is_controller()
+        {
+            let mut initial_voters = crate::bootstrap::initial_voters(&bootstrap_records);
+
+            // KIP-853 standalone self-bootstrap: a `Bootstrap` node with no
+            // seeded `VotersRecord` (an in-process/single-node start that
+            // didn't run `format --standalone`) forms a single-voter cluster
+            // of itself. Seed both the openraft membership (`initial_voters`)
+            // and the metadata log (a `V1Voters` record submitted after
+            // election in step 2b) so the two stay in lockstep. Multi-node
+            // clusters seed voters via `format` or grow via auto-join
+            // (`BootstrapMode::Join`), so neither path lands here.
+            if initial_voters.is_empty()
+                && matches!(config.bootstrap_mode, crate::BootstrapMode::Bootstrap)
+            {
+                let self_voter = crabka_metadata::Voter {
+                    id: config.node_id,
+                    directory_id: config.directory_id,
+                    endpoints: vec![crabka_metadata::VoterEndpoint {
+                        name: "CONTROLLER".to_string(),
+                        host: config.controller_listen_addr.ip().to_string(),
+                        port: config.controller_listen_addr.port(),
+                    }],
+                    kraft_version: crabka_metadata::KRaftVersionRange::default(),
+                };
+                let voters = crabka_metadata::VoterSet::from_voters([self_voter]);
+                tracing::info!(
+                    node_id = config.node_id,
+                    "KIP-853 standalone self-bootstrap: forming single-voter cluster"
+                );
+                bootstrap_records.insert(
+                    0,
+                    crabka_metadata::MetadataRecord::V1Voters(crabka_metadata::VotersRecord {
+                        voters: voters.clone(),
+                    }),
+                );
+                bootstrap_records.insert(
+                    0,
+                    crabka_metadata::MetadataRecord::V1KRaftVersion(
+                        crabka_metadata::KRaftVersionRecord { kraft_version: 1 },
+                    ),
+                );
+                initial_voters = voters;
+            }
+
             let controller_cfg = crabka_raft::ControllerConfig {
                 node_id: config.node_id,
-                voters: config.controller_quorum_voters.clone(),
+                bootstrap_servers: config.bootstrap_servers.clone(),
+                directory_id: config.directory_id,
+                auto_join: config.auto_join,
+                observer_lag_bound: config.observer_lag_bound,
+                initial_voters,
                 controller_listen_addr: config.controller_listen_addr,
                 log_dir: config.log_dir.join("__cluster_metadata"),
                 // Sourced from `BrokerConfig` — see the docstrings there for
@@ -923,8 +1107,8 @@ impl Broker {
                 dialer: raft_dialer.clone(),
                 handshake: handshake_opt,
             };
-            let controller = Arc::new(
-                crabka_raft::Controller::start(controller_cfg)
+            let handle = Arc::new(
+                crabka_raft::Controller::start_with_listener(controller_cfg, controller_listener)
                     .await
                     .map_err(|e| BrokerError::Startup(e.to_string()))?,
             );
@@ -933,14 +1117,16 @@ impl Broker {
             // accept loop) can perform SCRAM credential lookups on the next
             // authenticated connection. The `set` cannot fail in practice
             // because we hold the only writer; swallow the `SetError` defensively.
-            let _ = controller_cell.set(controller.clone());
-            controller as Arc<dyn crate::metadata_source::MetadataSource>
+            let _ = controller_cell.set(handle.clone());
+            handle as Arc<dyn crate::metadata_source::MetadataSource>
         } else {
             // Broker-only node: no openraft voter. Keep the `MetadataImage`
             // current by fetching `__cluster_metadata` from the controller
             // quorum (the observer), and forward writes to the quorum leader.
             // `controller_cell` is left unset — a broker-only node runs no
             // controller listener, so nothing performs SCRAM lookups on it.
+            // The caller-supplied `controller_listener` (if any) goes unused.
+            drop(controller_listener);
             let dialer = raft_dialer
                 .clone()
                 .expect("broker-only node requires a raft dialer");
@@ -965,7 +1151,43 @@ impl Broker {
                 Arc::new(forwarder),
             )) as Arc<dyn crate::metadata_source::MetadataSource>
         };
-        let controller = metadata;
+
+        // 1b. KIP-853 controller auto-join. Spawned BEFORE the leader-wait in
+        //     step 2: a `Join` broker's empty raft log keeps it in openraft's
+        //     Learner state with no leader, so `Broker::start` would block in
+        //     step 2 forever. The auto-join loop concurrently sends
+        //     `AddRaftVoter(self)` to a `bootstrap_servers` entry; the leader's
+        //     handler runs `add_learner` (replicating the log to us) and
+        //     promotes us — at which point step 2's `watch_leader` fires and
+        //     start proceeds. `run` returns immediately when `auto_join` is
+        //     disabled (bootstrap / standalone brokers), so this is a cheap
+        //     no-op there. The loop advertises the controller's REAL bound
+        //     address, known now that `Controller::start` has bound the
+        //     listener.
+        // The joiner sends `AddRaftVoter` to a bootstrap server's *client*
+        // data-plane listener (where api_key 80 is served), so it speaks the
+        // inter-broker listener protocol — not the controller-listener
+        // protocol that openraft RPCs use.
+        // Auto-join grows the controller *voter* quorum, so only nodes that
+        // run a controller participate. A broker-only node is a pure observer
+        // and never joins the quorum.
+        if config.is_controller() {
+            let auto_join_protocol = config
+                .effective_listeners()
+                .iter()
+                .find(|l| l.name == config.inter_broker_listener_name)
+                .map_or(crabka_security::ListenerProtocol::Plaintext, |l| l.protocol);
+            tokio::spawn(crate::auto_join::run(crate::auto_join::AutoJoinParams {
+                auto_join: config.auto_join,
+                node_id: config.node_id,
+                directory_id: config.directory_id,
+                cluster_id: config.cluster_id,
+                bootstrap_servers: config.bootstrap_servers.clone(),
+                listener_protocol: auto_join_protocol,
+                controller: controller.clone(),
+                inter_broker_client: inter_broker_client.clone(),
+            }));
+        }
 
         // 2. Wait for a leader, then submit a self-registration record so
         //    other brokers can discover us. Best-effort: if the submit
@@ -1027,7 +1249,7 @@ impl Broker {
                 }
             }
 
-            // 2b. First-start bootstrap-records submit (slice 12b).
+            // 2b. First-start bootstrap-records submit.
             //
             //     On a fresh-cluster cold boot (`BootstrapMode::Bootstrap`),
             //     consume `log_dir/bootstrap.records.bin` if present and submit
@@ -1046,14 +1268,19 @@ impl Broker {
             //     Missing-file is treated as empty (handled by the loader),
             //     so the legacy zero-record path is a no-op and existing
             //     deployments / tests are byte-identical.
-            if matches!(config.bootstrap_mode, crate::BootstrapMode::Bootstrap) {
-                let records = crate::bootstrap::load_bootstrap_records(&config.log_dir)?;
-                if !records.is_empty() {
-                    tracing::info!(count = records.len(), "submitting bootstrap records");
-                    controller.submit_change(records).await.map_err(|e| {
+            if matches!(config.bootstrap_mode, crate::BootstrapMode::Bootstrap)
+                && !bootstrap_records.is_empty()
+            {
+                tracing::info!(
+                    count = bootstrap_records.len(),
+                    "submitting bootstrap records"
+                );
+                controller
+                    .submit_change(bootstrap_records)
+                    .await
+                    .map_err(|e| {
                         BrokerError::Replication(format!("bootstrap submit failed: {e}"))
                     })?;
-                }
             }
         }
 
@@ -1089,7 +1316,7 @@ impl Broker {
             }
         }
 
-        // Group coordinator bootstrap (slice 5).
+        // Group coordinator bootstrap.
         let group_manager = Arc::new(crate::coordinator::GroupManager::new());
         let offsets_log: std::sync::Arc<dyn crate::coordinator::next_gen::offsets_log::OffsetsLog> =
             std::sync::Arc::new(
@@ -1149,7 +1376,7 @@ impl Broker {
             .find(|l| l.name == config.inter_broker_listener_name)
             .map_or(crabka_security::ListenerProtocol::Plaintext, |l| l.protocol);
 
-        // Slice 48k: build the broker metrics handle early so the
+        // Build the broker metrics handle early so the
         // replicator supervisor (constructed next) can clone it; the
         // `/metrics` HTTP listener and any other later consumers
         // still reuse the same `metrics` value.
@@ -1271,7 +1498,7 @@ impl Broker {
             let controller_seed = controller.clone();
             let seed_shutdown = supervisor_shutdown.child_token();
             let metrics_seed = metrics.clone();
-            // Slice 7c: track the leader value across `changed()`
+            // Track the leader value across `changed()`
             // notifications so we only bump the counter on actual
             // transitions (the watch may signal-without-change in some
             // raft impls; ignore those).
@@ -1301,12 +1528,12 @@ impl Broker {
             });
         }
 
-        // Slice 39: build the Prometheus metrics registry + handles
+        // Build the Prometheus metrics registry + handles
         // *before* spawning subsystems that emit. Each subsystem clones
         // a cheap `BrokerMetrics` (single Arc bump). The HTTP
         // `/metrics` server is spawned only when configured; ISR
         // maintenance / produce / fetch always update counters.
-        // (Slice 48k: the `BrokerMetrics` value itself was constructed
+        // (The `BrokerMetrics` value itself was constructed
         // earlier so the replicator supervisor could share it.)
         let metrics_bound_addr = if let Some(addr) = config.metrics_listen_addr {
             let shutdown = supervisor_shutdown.child_token();
@@ -1347,24 +1574,24 @@ impl Broker {
                         })
                         .count();
                     m.partitions_led.set(i64::try_from(led).unwrap_or(i64::MAX));
-                    // Slice 8b: total replicas this broker hosts (leader
+                    // Total replicas this broker hosts (leader
                     // + follower). Cheap: just the DashMap length.
                     let total = partitions_for_gauge.len();
                     m.partitions_total
                         .set(i64::try_from(total).unwrap_or(i64::MAX));
-                    // Slice 8b: per-leader URP count, sampled from the
+                    // Per-leader URP count, sampled from the
                     // current MetadataImage. URP = ISR.len() < replicas.len()
                     // among partitions this broker leads. Read-only walk
                     // of the image; matches Kafka's
                     // ReplicaManager.UnderReplicatedPartitions semantics.
                     //
-                    // Slice 8c: same walk also tallies UnderMinIsr (ISR <
+                    // The same walk also tallies UnderMinIsr (ISR <
                     // topic's min.insync.replicas) and Offline (leader is
                     // a dead broker, no live ISR replacement) so all three
                     // health gauges land in lockstep from a single image
                     // snapshot. Defaults to min.insync.replicas=1 when the
                     // topic config is missing or unparseable, matching the
-                    // slice-251 produce-path gate.
+                    // produce-path gate.
                     let image = controller_for_gauge.current_image();
                     let mut urp: usize = 0;
                     let mut under_min_isr: usize = 0;
@@ -1390,7 +1617,7 @@ impl Broker {
                             // sentinel — the controller leaves a
                             // PartitionRecord pointing at the dead
                             // broker until a successor election (or
-                            // an unclean election, slice 10c) runs.
+                            // an unclean election) runs.
                             // Only count partitions in the local
                             // broker's owned set so the metric stays
                             // per-broker; cluster-wide rollup can
@@ -1435,7 +1662,7 @@ impl Broker {
             },
         ));
 
-        // Slice 43e: periodic per-partition disk-usage scanner. Walks
+        // Periodic per-partition disk-usage scanner. Walks
         // the log dir each tick and updates `partition_disk_bytes` for
         // the rebalancer's usage scraper. `0` disables entirely. The
         // `JoinHandle` is retained on the `Broker` so shutdown can drain
@@ -1452,12 +1679,12 @@ impl Broker {
             None
         };
 
-        // Slice 49b: OAUTHBEARER JWKS refresher. Spawned only when a JWKS
+        // OAUTHBEARER JWKS refresher. Spawned only when a JWKS
         // endpoint is configured (signed-token validation). It shares the
         // validator's key handle, so a successful fetch rotates the keys the
         // SaslAuthenticate path reads — no restart, no lock. The first fetch
         // fires immediately on spawn. Child token of supervisor_shutdown.
-        // Slice 49i: consume the parked signal_rx + shared rate-limit /
+        // Consume the parked signal_rx + shared rate-limit /
         // expiry-timestamp state from `apply_to`; on-demand refresh + cache
         // expiry are wired here so the validator's `JwksHandle` and the
         // refresher point at the same Arc-shared cells.
@@ -1532,7 +1759,7 @@ impl Broker {
             ));
         }
 
-        // Slice-18: per-broker log compaction ticker. Always-on; the
+        // Per-broker log compaction ticker. Always-on; the
         // cleaner internally filters to (leader && cleanup.policy=compact)
         // partitions so brokers with no compact topics pay nothing.
         {
@@ -1552,16 +1779,16 @@ impl Broker {
             ));
         }
 
-        // Slice 48b (KIP-405): tiered-storage copy path. Only spawn when a
+        // KIP-405: tiered-storage copy path. Only spawn when a
         // remote-storage directory is configured. The reference local store
         // + in-memory metadata manager are constructed once and shared
         // across ticks; per-topic offload is gated by `remote.storage.enable`,
         // and the task filters to partitions this broker leads.
         //
-        // Slice 48d hoists construction here so the `RemoteReader` on
+        // Construction is hoisted here so the `RemoteReader` on
         // `Broker` and the copy task share the same RSM / RLMM pair. A
         // single broker has exactly one of each.
-        // Hoist the parameters for the slice-48f topic-backed RLMM
+        // Hoist the parameters for the topic-backed RLMM
         // bootstrap before `config` moves into the broker struct.
         let kafka_swap_kickoff: Option<KafkaSwapKickoff> = config
             .remote_log_metadata_kafka
@@ -1584,7 +1811,7 @@ impl Broker {
                     })?,
                 ),
             };
-            // Slice 48f: `[remote_storage.kafka_metadata]` opts in to
+            // `[remote_storage.kafka_metadata]` opts in to
             // the topic-backed RLMM. We can't construct it inline
             // because its `start` does a loopback `AdminClient` call
             // to provision `__remote_log_metadata`, and the broker's
@@ -1630,7 +1857,7 @@ impl Broker {
             (None, None)
         };
 
-        // Slice 33: TLS hot-reload watcher. Only spawn when a TLS
+        // TLS hot-reload watcher. Only spawn when a TLS
         // config is present — non-TLS brokers don't need it.
         if let (Some(dynamic), Some(tls_cfg_owned)) =
             (tls_dynamic.clone(), config.tls_config.clone())
@@ -1677,7 +1904,7 @@ impl Broker {
             tokio::spawn(crate::quota::run(watcher, buckets, shutdown));
         }
 
-        // Slice 51 (KIP-48): delegation-token expiry sweep. Only spawn
+        // KIP-48: delegation-token expiry sweep. Only spawn
         // when a master key is configured — without it the four
         // delegation-token RPCs all return DELEGATION_TOKEN_AUTH_DISABLED
         // and the image never has any tokens to expire. Every broker
@@ -1812,7 +2039,7 @@ impl Broker {
             listener_tasks.push(task);
         }
 
-        // Slice 48f: now that the listener accept loops are spawned,
+        // Now that the listener accept loops are spawned,
         // construct the topic-backed RLMM and swap it into the live
         // `SwappableRlmm` facade. We deliberately fire-and-forget the
         // build task: a connect failure here surfaces as a `warn!`
@@ -1979,8 +2206,8 @@ async fn accept_loop(
                 match accept {
                     Ok((stream, peer)) => {
                         tracing::debug!(%peer, name = %spec.name, "accepted connection");
-                        // KIP-612 connection_creation_rate enforcement (slice 16b).
-                        // IPv4 only — slice 13 ACL parity. IPv6 peers skip the quota check.
+                        // KIP-612 connection_creation_rate enforcement.
+                        // IPv4 only, for ACL parity. IPv6 peers skip the quota check.
                         if let std::net::IpAddr::V4(peer_ipv4) = peer.ip() {
                             let image = broker.controller.current_image();
                             if let Some((entity_key, rate)) =

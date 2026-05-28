@@ -1,0 +1,129 @@
+#![cfg(not(target_os = "windows"))]
+#![allow(clippy::pedantic)]
+
+//! KIP-584 `UpdateFeatures` (api_key 57) write path. Finalizing
+//! `metadata.version` lands a Raft-persisted `V1FeatureLevel` record and
+//! surfaces the finalized feature + a real epoch through `ApiVersions`.
+//! Validation rejects unsupported features and out-of-range levels;
+//! `validate_only` runs all checks without persisting.
+
+mod support;
+
+use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
+use crabka_protocol::owned::update_features_request::{FeatureUpdateKey, UpdateFeaturesRequest};
+
+fn metadata_version_update(level: i16) -> UpdateFeaturesRequest {
+    UpdateFeaturesRequest {
+        feature_updates: vec![FeatureUpdateKey {
+            feature: "metadata.version".into(),
+            max_version_level: level,
+            upgrade_type: 1,
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn finalizes_metadata_version_and_surfaces_in_api_versions() {
+    let p = support::start().await;
+
+    let resp = p
+        .client
+        .send(metadata_version_update(1))
+        .await
+        .expect("UpdateFeatures");
+    assert_eq!(resp.error_code, 0, "{resp:?}");
+    if let Some(row) = resp
+        .results
+        .iter()
+        .find(|r| r.feature == "metadata.version")
+    {
+        assert_eq!(row.error_code, 0, "{resp:?}");
+    }
+
+    // ApiVersions now surfaces the finalized feature with a real epoch.
+    let av = p
+        .client
+        .send(ApiVersionsRequest {
+            client_software_name: "crabka-test".into(),
+            client_software_version: "0.0.0".into(),
+            ..Default::default()
+        })
+        .await
+        .expect("ApiVersions");
+    let fin = av
+        .finalized_features
+        .iter()
+        .find(|f| f.name == "metadata.version")
+        .expect("metadata.version finalized");
+    assert_eq!(fin.max_version_level, 1, "{av:?}");
+    assert!(av.finalized_features_epoch >= 0, "{av:?}");
+
+    p.broker.shutdown().await;
+}
+
+/// Assert a row carries `code`, tolerant of the wire version: on
+/// `UpdateFeatures` v2 the `results` array is not encoded, so the handler
+/// promotes the first non-zero row error to the top-level `error_code`.
+fn assert_feature_error(
+    resp: &crabka_protocol::owned::update_features_response::UpdateFeaturesResponse,
+    feature: &str,
+    code: i16,
+) {
+    if let Some(row) = resp.results.iter().find(|r| r.feature == feature) {
+        assert_eq!(row.error_code, code, "per-row error: {resp:?}");
+    } else {
+        assert_eq!(resp.error_code, code, "promoted top-level error: {resp:?}");
+    }
+}
+
+#[tokio::test]
+async fn rejects_unsupported_feature() {
+    let p = support::start().await;
+    let mut req = metadata_version_update(1);
+    req.feature_updates[0].feature = "not.a.feature".into();
+    let resp = p.client.send(req).await.expect("UpdateFeatures");
+    // INVALID_REQUEST (42) for an unsupported feature.
+    assert_feature_error(&resp, "not.a.feature", 42);
+    p.broker.shutdown().await;
+}
+
+#[tokio::test]
+async fn rejects_level_above_supported_max() {
+    let p = support::start().await;
+    let resp = p
+        .client
+        .send(metadata_version_update(99))
+        .await
+        .expect("UpdateFeatures");
+    // INVALID_UPDATE_VERSION (95) for a level above the supported max.
+    assert_feature_error(&resp, "metadata.version", 95);
+    p.broker.shutdown().await;
+}
+
+#[tokio::test]
+async fn validate_only_does_not_persist() {
+    let p = support::start().await;
+    let mut req = metadata_version_update(1);
+    req.validate_only = true;
+    let resp = p.client.send(req).await.expect("UpdateFeatures");
+    assert_eq!(resp.error_code, 0, "{resp:?}");
+
+    // Nothing finalized.
+    let av = p
+        .client
+        .send(ApiVersionsRequest {
+            client_software_name: "crabka-test".into(),
+            client_software_version: "0.0.0".into(),
+            ..Default::default()
+        })
+        .await
+        .expect("ApiVersions");
+    assert!(
+        av.finalized_features.is_empty(),
+        "validate_only must not persist: {av:?}",
+    );
+    assert_eq!(av.finalized_features_epoch, -1, "{av:?}");
+    p.broker.shutdown().await;
+}

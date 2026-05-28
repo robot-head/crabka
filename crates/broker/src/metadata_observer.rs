@@ -239,7 +239,7 @@ mod tests {
         while leader_rx.borrow().is_none() {
             leader_rx.changed().await.unwrap();
         }
-        let ctrl_addr = ctrl.listen_addr();
+        let ctrl_addr = ctrl.controller_bound_addr();
         ctrl.submit_change(vec![MetadataRecord::V1Topic(TopicRecord {
             name: "observed".into(),
             topic_id: Uuid::new_v4(),

@@ -4,8 +4,8 @@
 //! registered broker and drives a periodic liveness ticker that emits
 //! `LivenessTransition` events when a broker goes dead or comes alive.
 
-// Items are consumed by the BrokerHeartbeat handler (Task 13) and the
-// liveness ticker spawn (Task 14). Allow dead_code until those land.
+// Items are consumed by the BrokerHeartbeat handler and the liveness
+// ticker spawn. Allow dead_code until those land.
 #![allow(dead_code)]
 
 use std::collections::{HashMap, HashSet};

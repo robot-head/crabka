@@ -52,6 +52,7 @@ pub mod handshake;
 mod log_store;
 mod metadata_fetch;
 mod network;
+pub mod reconfig;
 mod server;
 mod state_machine;
 mod types;
@@ -63,6 +64,7 @@ pub use error::RaftError;
 pub use handshake::{DuplexStream, RaftHandshakeError, RaftListenerHandshake};
 pub use metadata_fetch::{MetadataFetchSlice, encode_committed_records};
 pub use network::{OutboundDialer, PlaintextDialer};
+pub use reconfig::{AddVoter, ReconfigOutcome, RemoveVoter, UpdateVoter};
 pub use types::{AppData, AppDataResponse, Node, NodeId, Raft, TypeConfig};
 pub use wire::{
     API_KEY_APPEND_ENTRIES, API_KEY_INSTALL_SNAPSHOT, API_KEY_METADATA_FETCH,

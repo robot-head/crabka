@@ -13,7 +13,7 @@ workspace = true
 [features]
 default = []
 # Exposes test-only `BrokerHandle::test_truncate_local_log` /
-# `test_advance_log_start` for slice-8 replication integration tests.
+# `test_advance_log_start` for the replication integration tests.
 # Pulls in `crabka-log/test-helpers` to reach `Log::test_set_log_start_offset`.
 test-helpers = ["crabka-log/test-helpers"]
 
@@ -59,21 +59,24 @@ uuid = { workspace = true }
 futures-util = { workspace = true }
 prometheus-client.workspace = true
 axum.workspace = true
-# Slice 49b: fetch the OAUTHBEARER JWKS over HTTP(S). The `rustls` feature
-# reuses the rustls + aws-lc-rs crypto stack already in the workspace dep graph.
-# Slice 49d: `json` (Response::json) + `form` (RequestBuilder::form) for the
+# Fetch the OAUTHBEARER JWKS over HTTP(S). The `rustls` feature reuses the
+# rustls + aws-lc-rs crypto stack already in the workspace dep graph.
+# `json` (Response::json) + `form` (RequestBuilder::form) are for the
 # RFC 7662 introspection POST; direct `serde_json` dep for the response value.
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "form"] }
 serde_json = { workspace = true }
-# Slice 49g: compile customClaimCheck JsonPath expressions at config-load
+# Compile customClaimCheck JsonPath expressions at config-load
 # and inject into the OAUTHBEARER validators.
 jsonpath-rust = { workspace = true }
-# Slice 51 (KIP-48): base64-encode delegation-token HMAC bytes when
+# KIP-48: base64-encode delegation-token HMAC bytes when
 # synthesizing a SCRAM credential for token authentication
 # (`network::auth::synthesize_token_scram_credential`).
 base64.workspace = true
-# Slice 53: bounded decision cache for the OPA authorizer.
+# Bounded decision cache for the OPA authorizer.
 lru.workspace = true
+# Zero-copy: cast remote-tier OffsetIndex/TimeIndex byte buffers
+# to typed entry slices instead of per-entry from_be_bytes() in a hot path.
+zerocopy.workspace = true
 
 [dev-dependencies]
 crabka-broker = { version = "0.1", path = ".", features = ["test-helpers"] }
@@ -87,22 +90,22 @@ rustls-pki-types.workspace = true
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 tokio-rustls.workspace = true
-# Slice 12 T15 tests: client-side PBKDF2 of the SCRAM password to build
-# `AlterUserScramCredentials` upsertions.
+# Client-side PBKDF2 of the SCRAM password to build
+# `AlterUserScramCredentials` upsertions in tests.
 pbkdf2 = { workspace = true }
 sha2 = { workspace = true }
-# Slice 39 metrics tests: exercise the axum Router::oneshot helper.
+# Metrics tests: exercise the axum Router::oneshot helper.
 tower.workspace = true
-# Slice 49b: mint ES256 tokens + build the matching JWK for the signed
+# Mint ES256 tokens + build the matching JWK for the signed
 # OAUTHBEARER wire test.
 ring.workspace = true
-# Slice 49c T3: generate a self-signed cert with 127.0.0.1 SAN on the
+# Generate a self-signed cert with 127.0.0.1 SAN on the
 # fly for the HTTPS JWKS-refresher integration tests.
 rcgen.workspace = true
-# Slice 51 T4: scoped env-var mutation in tests for the delegation-token
+# Scoped env-var mutation in tests for the delegation-token
 # secret-key env-wins-over-TOML check. The workspace forbids `unsafe_code`,
 # so direct `std::env::set_var` (unsafe under edition 2024) isn't available.
 temp-env = "0.3"
-# Slice 53: mock OPA server for OpaAuthorizer unit tests — wiremock
+# Mock OPA server for OpaAuthorizer unit tests — wiremock
 # answers HTTP on a random local port and lets us assert call counts.
 wiremock = "0.6"

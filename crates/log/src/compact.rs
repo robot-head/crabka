@@ -10,8 +10,8 @@
 //! Records with `key.is_none()` are dropped (matches Kafka's
 //! `LogCleaner`). Tombstones (records with `key.is_some()` and
 //! `value.is_none()`) are treated like any other value and are kept
-//! as the most-recent entry for their key. Slice 18b adds
-//! `delete.retention.ms` to age them out.
+//! as the most-recent entry for their key. `delete.retention.ms`
+//! ages them out.
 
 use std::collections::HashMap;
 use std::fs::OpenOptions;

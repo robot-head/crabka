@@ -2,7 +2,7 @@ use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// Crabka cluster spec. Slice 20: spec carries only the version label;
+/// Crabka cluster spec. The spec carries only the version label;
 /// broker pods are described by sibling `KafkaNodePool`s labeled
 /// `crabka.io/cluster=<this name>`.
 #[derive(CustomResource, Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
@@ -26,67 +26,66 @@ pub struct KafkaSpec {
     /// `inter.broker.protocol.version`). When unset, tracks
     /// `kafkaVersion`'s `major.minor`; when set, pins the metadata version
     /// for the safe two-step upgrade. Validated against `kafkaVersion` and
-    /// the finalized `status.metadataVersion` (slice 28) — an invalid value
+    /// the finalized `status.metadataVersion` — an invalid value
     /// surfaces `KafkaVersionValid=False` and blocks the roll.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata_version: Option<String>,
     /// Opaque broker properties (`server.properties`-style key/value
-    /// pairs). Slice 25 passes these through to the broker's
+    /// pairs). These are passed through to the broker's
     /// `[server_properties]` TOML table; the broker currently treats
-    /// them as inert. Changes propagate through the slice-21 config
+    /// them as inert. Changes propagate through the config
     /// hash.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config: Option<std::collections::BTreeMap<String, String>>,
-    /// Slice 25: named listeners. Empty (or absent) synthesizes a
-    /// single internal `PLAIN` listener on port 9092 (slice 19/20
-    /// compatibility default).
+    /// Named listeners. Empty (or absent) synthesizes a
+    /// single internal `PLAIN` listener on port 9092.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub listeners: Vec<crate::crd::Listener>,
-    /// Slice 25: name of the listener used for inter-broker traffic.
+    /// Name of the listener used for inter-broker traffic.
     /// When `None`, the operator picks the first `internal` listener;
     /// when `listeners` is empty, the synthesized default `"PLAIN"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inter_broker_listener_name: Option<String>,
-    /// Slice 40: Prometheus scrape configuration. When `None`, brokers do
+    /// Prometheus scrape configuration. When `None`, brokers do
     /// not bind `/metrics` and no `PodMonitor` / `ServiceMonitor` is
     /// rendered. When `Some`, the broker `StatefulSet` gains a `metrics`
     /// container port (TCP 9404) and the resources requested by
     /// `pod_monitor` / `service_monitor` are SSA-applied.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metrics_config: Option<crate::crd::MetricsConfig>,
-    /// Slice 23: opt-in `NetworkPolicy` generation. When `None`, no
+    /// Opt-in `NetworkPolicy` generation. When `None`, no
     /// `NetworkPolicy` is generated. When `Some` (even `{}`), the operator
     /// renders a cluster-level `NetworkPolicy` gating ingress to broker /
     /// controller pods.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network_policy: Option<crate::crd::NetworkPolicySpec>,
-    /// Slice 30: per-cluster CA used for inter-broker mTLS + broker certs.
+    /// Per-cluster CA used for inter-broker mTLS + broker certs.
     /// Absent → fully-defaulted `CertificateAuthority` (operator-generated,
     /// 365/30 days).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cluster_ca: Option<crate::crd::CertificateAuthority>,
-    /// Slice 30: per-cluster CA used to sign `KafkaUser` TLS certs (slice
-    /// 37). Absent → fully-defaulted `CertificateAuthority`.
+    /// Per-cluster CA used to sign `KafkaUser` TLS certs.
+    /// Absent → fully-defaulted `CertificateAuthority`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clients_ca: Option<crate::crd::CertificateAuthority>,
-    /// Slice 41: broker log configuration. When `None`, brokers use their
+    /// Broker log configuration. When `None`, brokers use their
     /// built-in default `RUST_LOG` filter. When `Some`, the operator
     /// composes (inline) or reads (external) a `tracing` env-filter string,
     /// renders it into the broker `ConfigMap` (`rust.log` key), wires it
     /// into each broker pod's `RUST_LOG` env, and rolls the cluster on
-    /// change via the slice-21 config hash.
+    /// change via the config hash.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logging: Option<crate::crd::Logging>,
-    /// Slice 51b: delegation-token master HMAC key source. When `None`,
+    /// Delegation-token master HMAC key source. When `None`,
     /// the broker rejects all KIP-48 delegation-token RPCs with err 61
     /// `DELEGATION_TOKEN_AUTH_DISABLED`. When `Some`, the operator
     /// injects `CRABKA_DELEGATION_TOKEN_SECRET_KEY` into each broker
     /// pod via a `valueFrom.secretKeyRef`, baking the key into the
-    /// rendered `StatefulSet` so the slice-21 SSA reconcile doesn't
+    /// rendered `StatefulSet` so the SSA reconcile doesn't
     /// race with out-of-band `kubectl set env` patches.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delegation_token: Option<DelegationTokenConfig>,
-    /// Slice 53: cluster-level authorizer selection. When `None`, the
+    /// Cluster-level authorizer selection. When `None`, the
     /// broker uses the default `AllowAll` authorizer (no ACL checks).
     /// When `Some`, the operator renders the `[authorization]` TOML
     /// section so the broker builds the matching `Arc<dyn Authorizer>`
@@ -96,30 +95,30 @@ pub struct KafkaSpec {
     /// `ANONYMOUS` allow); operators opt in explicitly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authorization: Option<Authorization>,
-    /// Slice 48g (KIP-405): cluster-wide tiered storage. When `Some`,
+    /// KIP-405: cluster-wide tiered storage. When `Some`,
     /// every broker pod boots with the local-tier RSM enabled, an
     /// `emptyDir` mounted at `/var/lib/crabka/remote` (the broker's
     /// `remote_log_storage_dir`), and `[remote_storage]` rendered in
     /// the broker TOML. Per-topic enablement is unchanged
     /// (`KafkaTopic.spec.config["remote.storage.enable"] = "true"`).
     ///
-    /// 48g uses `emptyDir`; with `InmemoryRemoteLogMetadataManager` as
-    /// the only RLMM, tier data does not survive pod restarts. PVC
-    /// support pairs with the production RLMM (48f).
+    /// The `emptyDir` default with `InmemoryRemoteLogMetadataManager`
+    /// as the only RLMM means tier data does not survive pod restarts.
+    /// PVC support pairs with the production RLMM.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tiered_storage: Option<TieredStorage>,
-    /// Slice 42b: distributed-tracing wiring for the broker pods. When
+    /// Distributed-tracing wiring for the broker pods. When
     /// `Some`, the operator renders the matching `CRABKA_OTLP_*` env
-    /// vars onto every broker pod — the broker's slice-42 telemetry
+    /// vars onto every broker pod — the broker's telemetry
     /// pipeline reads them via [`TelemetryConfig::from_env`] and
     /// installs the OTLP tracer at startup. When `None`, no OTLP env
     /// vars are emitted and the broker leaves tracing off (the
-    /// slice-42 default).
+    /// default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tracing: Option<Tracing>,
 }
 
-/// Slice 48g (KIP-405): cluster-wide tiered-storage configuration.
+/// KIP-405: cluster-wide tiered-storage configuration.
 ///
 /// The `type` discriminator picks the backend; per-backend tuning lives
 /// in the matching sibling field (`s3` for `Type = S3`, no extra field
@@ -140,10 +139,10 @@ pub struct TieredStorage {
     /// (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub s3: Option<S3StorageSpec>,
-    /// Slice 48h (KIP-405): pick the
+    /// KIP-405: pick the
     /// [`RemoteLogMetadataManager`](crabka_remote_storage::RemoteLogMetadataManager)
     /// the broker pods run. When absent, every broker pod uses the
-    /// in-memory fixture (compatible with 48g's emptyDir-only
+    /// in-memory fixture (compatible with the emptyDir-only
     /// deployment). When set to `Topic`, the broker activates the
     /// `crabka_remote_storage_topic::TopicBasedRemoteLogMetadataManager`
     /// against the internal `__remote_log_metadata` topic, so
@@ -151,18 +150,18 @@ pub struct TieredStorage {
     /// across brokers in the cluster.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata_manager: Option<MetadataManagerSpec>,
-    /// Slice 48i (KIP-405): durable storage for the local-tier
+    /// KIP-405: durable storage for the local-tier
     /// directory. Only valid with `type=Local`. When absent (default),
-    /// the operator renders an `emptyDir` for `tier-storage` (matches
-    /// 48g). When `Some`, the operator renders a `volumeClaimTemplate`
+    /// the operator renders an `emptyDir` for `tier-storage`.
+    /// When `Some`, the operator renders a `volumeClaimTemplate`
     /// of the configured size / class so tier data survives pod
-    /// restarts — pairing with the 48f topic-backed RLMM, this closes
-    /// the "tier data is lost on pod restart" caveat 48g flagged.
+    /// restarts — pairing with the topic-backed RLMM, this closes
+    /// the "tier data is lost on pod restart" caveat.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub persistence: Option<TieredStoragePersistence>,
 }
 
-/// Slice 48i (KIP-405): PVC-backed local-tier directory.
+/// KIP-405: PVC-backed local-tier directory.
 ///
 /// Mirrors [`crate::crd::kafka_node_pool::PersistentClaimSpec`] field
 /// shapes so operators learn one schema for both the data dir and the
@@ -190,24 +189,24 @@ pub struct TieredStoragePersistence {
     pub delete_claim: bool,
 }
 
-/// Slice 48g (KIP-405): the set of RSM backends the operator knows how
+/// KIP-405: the set of RSM backends the operator knows how
 /// to render. Adding a backend means extending this enum AND the
 /// matching render path in
 /// [`crate::controller::listeners::render_broker_toml`].
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 pub enum TieredStorageType {
-    /// On-pod filesystem store via `LocalTieredStorage` (slice 48a's
+    /// On-pod filesystem store via `LocalTieredStorage` (the
     /// reference RSM). Data lives at `/var/lib/crabka/remote` on the
     /// broker pod.
     #[default]
     Local,
-    /// S3-compatible object store via `S3RemoteStorage` (slice 48-final
+    /// S3-compatible object store via `S3RemoteStorage` (the
     /// production RSM). Pair with a populated
     /// [`TieredStorage::s3`] for bucket / region / credentials.
     S3,
 }
 
-/// Slice 48-final (KIP-405): cluster-wide S3 backend configuration.
+/// KIP-405: cluster-wide S3 backend configuration.
 ///
 /// Non-credential fields are rendered into the broker config TOML's
 /// `[remote_storage.s3]` block verbatim and parsed back into
@@ -259,7 +258,7 @@ pub struct S3StorageSpec {
 }
 
 impl TieredStorage {
-    /// Slice 48-final (KIP-405): shape-validate the tagged union.
+    /// KIP-405: shape-validate the tagged union.
     /// Returns the offending field's description on failure; the
     /// reconciler wraps it in [`crate::controller::common::ReconcileError::TieredStorageInvalid`].
     /// Pure (no I/O) so it can be unit-tested without a cluster.
@@ -302,9 +301,9 @@ impl TieredStorage {
     }
 }
 
-/// Slice 48h (KIP-405): which
+/// KIP-405: which
 /// [`RemoteLogMetadataManager`](crabka_remote_storage::RemoteLogMetadataManager)
-/// the broker pods use. Defaults to `InMemory` (matches 48g behavior)
+/// the broker pods use. Defaults to `InMemory`
 /// when this field is omitted.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -339,13 +338,12 @@ impl MetadataManagerSpec {
     }
 }
 
-/// Slice 48h (KIP-405): the RLMM implementations the operator knows
+/// KIP-405: the RLMM implementations the operator knows
 /// how to render.
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 pub enum MetadataManagerType {
-    /// In-memory fixture from `crabka_remote_storage`. Default;
-    /// matches the 48g operator surface. Tier-segment metadata does
-    /// not survive pod restarts.
+    /// In-memory fixture from `crabka_remote_storage`. Default.
+    /// Tier-segment metadata does not survive pod restarts.
     #[default]
     InMemory,
     /// Production topic-backed manager from
@@ -355,7 +353,7 @@ pub enum MetadataManagerType {
     Topic,
 }
 
-/// Slice 48h (KIP-405): topic-backed RLMM tuning. Renders into the
+/// KIP-405: topic-backed RLMM tuning. Renders into the
 /// broker TOML's `[remote_storage.kafka_metadata]` block.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -405,8 +403,8 @@ impl TopicMetadataManagerSpec {
     }
 }
 
-/// Slice 42b: cluster-wide distributed-tracing configuration. Maps to
-/// the slice-42 broker's `CRABKA_OTLP_*` env-var contract: the operator
+/// Cluster-wide distributed-tracing configuration. Maps to
+/// the broker's `CRABKA_OTLP_*` env-var contract: the operator
 /// renders one env entry per populated field on every broker pod, and
 /// the broker's `TelemetryConfig::from_env` picks them up at startup.
 ///
@@ -424,7 +422,7 @@ pub struct Tracing {
     pub otlp: Option<OtlpTracing>,
 }
 
-/// Slice 42b: the tracing backends the operator knows how to render.
+/// The tracing backends the operator knows how to render.
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 pub enum TracingType {
     /// OpenTelemetry OTLP exporter. Pair with [`Tracing::otlp`] for the
@@ -433,7 +431,7 @@ pub enum TracingType {
     Otlp,
 }
 
-/// Slice 42b: OTLP-specific tracing parameters. Each populated field is
+/// OTLP-specific tracing parameters. Each populated field is
 /// rendered as a separate env var on every broker pod.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -463,7 +461,7 @@ pub struct OtlpTracing {
     pub timeout_secs: Option<u64>,
 }
 
-/// Slice 42b: OTLP wire protocol selector. Mirrors the broker's
+/// OTLP wire protocol selector. Mirrors the broker's
 /// internal `OtlpProtocol` enum and the `OTEL_EXPORTER_OTLP_PROTOCOL`
 /// spec values.
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
@@ -523,7 +521,7 @@ impl Tracing {
     }
 }
 
-/// Slice 48-final (KIP-405): S3 access-key credential pair.
+/// KIP-405: S3 access-key credential pair.
 ///
 /// Two [`SecretKeyRef`]s — one per AWS credential half — so an operator
 /// can hold the secret-access-key in a separate, more tightly
@@ -539,12 +537,12 @@ pub struct S3Credentials {
     pub secret_access_key: SecretKeyRef,
 }
 
-/// Slice 51b: master-HMAC-key source for KIP-48 delegation tokens.
+/// Master-HMAC-key source for KIP-48 delegation tokens.
 ///
 /// The operator wires the referenced Secret key as the broker pod's
 /// `CRABKA_DELEGATION_TOKEN_SECRET_KEY` env var (env wins over TOML in
-/// slice 51's broker config layer). Required for delegation-token
-/// `KafkaUser` support (slice 51b). If unset on the parent `Kafka`,
+/// the broker config layer). Required for delegation-token
+/// `KafkaUser` support. If unset on the parent `Kafka`,
 /// the broker rejects all delegation-token RPCs with err 61
 /// `DELEGATION_TOKEN_AUTH_DISABLED`.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
@@ -556,7 +554,7 @@ pub struct DelegationTokenConfig {
     pub secret_key_ref: SecretKeyRef,
 }
 
-/// Slice 51b: minimal namespaced Secret-key reference (name + optional
+/// Minimal namespaced Secret-key reference (name + optional
 /// data-map key, defaulting to `secret-key`).
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -568,7 +566,7 @@ pub struct SecretKeyRef {
     pub key: Option<String>,
 }
 
-/// Slice 53: cluster-level authorizer selection on `Kafka.spec.authorization`.
+/// Cluster-level authorizer selection on `Kafka.spec.authorization`.
 ///
 /// Tagged on `type` to pick the broker-side `Arc<dyn Authorizer>` impl.
 /// `None` on the parent spec means `AllowAll` (no `[authorization]` TOML
@@ -590,7 +588,7 @@ pub enum Authorization {
     Opa(OpaAuthorization),
 }
 
-/// Slice 53: `type: simple` config for `Kafka.spec.authorization`. Drives the
+/// `type: simple` config for `Kafka.spec.authorization`. Drives the
 /// broker's `SimpleAclAuthorizer`. Distinct from the per-user
 /// `crate::crd::user::SimpleAuthorization` (which carries ACL rules for one
 /// `KafkaUser`): this one is cluster-wide and only carries the super-user
@@ -604,7 +602,7 @@ pub struct SimpleAuthorization {
     pub super_users: Vec<String>,
 }
 
-/// Slice 53: `type: opa` config for `Kafka.spec.authorization`. Drives the
+/// `type: opa` config for `Kafka.spec.authorization`. Drives the
 /// broker's `OpaAuthorizer` — an HTTP-backed authorizer with an LRU+TTL
 /// decision cache. No `derive(Default)` because `url` has no sensible default.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
@@ -677,7 +675,7 @@ pub struct KafkaStatus {
     /// Mirrors `StatefulSet.status.readyReplicas`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ready_replicas: Option<i32>,
-    /// Slice 25: per-listener resolved addresses. Populated once
+    /// Per-listener resolved addresses. Populated once
     /// `ListenersReady=True`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub listeners: Vec<crate::crd::ListenerStatus>,
@@ -685,10 +683,10 @@ pub struct KafkaStatus {
     pub cluster_ca: Option<crate::crd::CertificateAuthorityStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clients_ca: Option<crate::crd::CertificateAuthorityStatus>,
-    /// Slice 28: echo of `spec.kafkaVersion`, for observability.
+    /// Echo of `spec.kafkaVersion`, for observability.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kafka_version: Option<String>,
-    /// Slice 28: the operator-finalized metadata version. Advances only
+    /// The operator-finalized metadata version. Advances only
     /// when version validation passes; drives the downgrade-window check on
     /// the next reconcile.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1021,10 +1019,10 @@ mod tests {
         );
     }
 
-    // Slice 53: `Kafka.spec.authorization` round-trip tests.
+    // `Kafka.spec.authorization` round-trip tests.
     //
-    // Pin the wire shape of the slice-53 authorizer-selection CRD
-    // alongside its sibling enums on `KafkaSpec`. Mirrors the slice-51b
+    // Pin the wire shape of the authorizer-selection CRD
+    // alongside its sibling enums on `KafkaSpec`. Mirrors the
     // `delegationToken` round-trip pattern: deserialize Strimzi-shape
     // YAML, assert the typed Rust value, then re-serialize and assert
     // optional fields are omitted (so the rendered TOML stays minimal
@@ -1145,7 +1143,7 @@ authorization:
         assert_eq!(back, spec);
     }
 
-    // ── Slice 48g: tieredStorage round-trip tests ─────────────────────
+    // ── tieredStorage round-trip tests ─────────────────────
 
     #[test]
     fn tiered_storage_round_trips_through_json() {
@@ -1177,7 +1175,7 @@ authorization:
         assert!(res.is_err(), "unknown TieredStorageType must fail");
     }
 
-    // ── Slice 48-final: S3 tiered storage CRD + validation ──────────
+    // ── S3 tiered storage CRD + validation ──────────
 
     /// Full S3 wire shape (camelCase, nested `s3.credentials`) round-trips
     /// through serde without losing fields.
@@ -1452,7 +1450,7 @@ authorization:
         assert!(!p.delete_claim);
     }
 
-    // ── Slice 42b: tracing validation ────────────────────────────────
+    // ── tracing validation ────────────────────────────────
 
     #[test]
     fn tracing_otlp_without_otlp_block_is_rejected() {

@@ -100,7 +100,7 @@ impl Consumer {
                     continue;
                 };
                 // Legacy MessageSet payloads are skipped here; the consumer
-                // only handles v2 batches in this slice.
+                // only handles v2 batches.
                 let Some(batch) = payload.as_v2() else {
                     continue;
                 };

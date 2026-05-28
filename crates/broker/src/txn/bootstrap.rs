@@ -1,7 +1,7 @@
 //! Lazy creation of the `__transaction_state` internal topic.
-//! Mirrors slice-5's `__consumer_offsets` bootstrap.
+//! Mirrors the `__consumer_offsets` bootstrap.
 
-#![allow(dead_code)] // wired in Task 11 (FindCoordinator-TXN handler)
+#![allow(dead_code)] // wired in by the FindCoordinator-TXN handler
 
 use std::sync::Arc;
 

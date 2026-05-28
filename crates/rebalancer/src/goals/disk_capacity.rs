@@ -1,7 +1,6 @@
 //! Hard goal: enforce a per-broker `disk_bytes` limit using the
 //! scraped `UsageStore::disk_bytes_avg` for each (broker, topic,
-//! partition) the broker hosts. Slice 43e wires the real body; the
-//! 43d stub returning empty Vec is replaced.
+//! partition) the broker hosts.
 
 use std::collections::HashMap;
 

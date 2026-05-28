@@ -21,9 +21,9 @@ pub const API_KEY_APPEND_ENTRIES: i16 = 1000;
 pub const API_KEY_VOTE: i16 = 1001;
 pub const API_KEY_INSTALL_SNAPSHOT: i16 = 1002;
 /// Forward a `Controller::submit_change` from a follower to the leader.
-/// Slice-7-only RPC: the body is the bincode-encoded `Vec<MetadataRecord>`
-/// and the response carries a single `error_code` (0 = applied,
-/// non-zero = openraft / metadata-validation failure).
+/// The body is the bincode-encoded `Vec<MetadataRecord>` and the
+/// response carries a single `error_code` (0 = applied, non-zero =
+/// openraft / metadata-validation failure).
 pub const API_KEY_SUBMIT_CHANGE: i16 = 1003;
 
 /// Payload kind discriminator inside `AppendEntries.entries[].payload`.
@@ -44,7 +44,7 @@ pub struct CrabkaLogEntry {
     /// engine compares full `LogId` (term + `node_id` + index), and a
     /// mismatched `node_id` trips an internal debug-assert when the entry
     /// is already committed locally. Encoded as `i64` to leave room for
-    /// the slice-7 `NodeId = u64` range without sign issues.
+    /// the `NodeId = u64` range without sign issues.
     pub log_node_id: i64,
     pub payload_kind: i8,
     pub payload: Bytes,

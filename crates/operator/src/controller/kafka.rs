@@ -1,6 +1,6 @@
 //! Kafka CRD reconciler.
 //!
-//! Slice 20: `Kafka` is a parent/coordinator. It owns the cluster-level
+//! `Kafka` is a parent/coordinator. It owns the cluster-level
 //! `Service`, `ConfigMap`, and cluster-id `Secret`. Broker
 //! `StatefulSet`s live on sibling `KafkaNodePool`s (one per pool, owned
 //! by the pool). The `Kafka` reconciler aggregates per-pool status and
@@ -165,7 +165,7 @@ pub async fn run(ctx: Context) -> anyhow::Result<()> {
             }
             .into_iter()
         })
-        // Slice 25/11: Node changes (e.g. ExternalIP added/removed) may
+        // Node changes (e.g. ExternalIP added/removed) may
         // invalidate a Kafka's advertised-listener TOML for NodePort
         // listeners. We return empty here and rely on the periodic requeue
         // to pick up the change, avoiding a flood of reconciles on large
@@ -196,7 +196,7 @@ pub(crate) struct BrokerInfo {
 }
 
 /// Walk pools (in caller-provided order) and emit one `BrokerInfo` per
-/// pool. Slice-20 enforces `replicas == 1`, so each pool maps to
+/// pool. The operator enforces `replicas == 1`, so each pool maps to
 /// exactly one broker whose id is the pool's `nodeIdStart`.
 pub(crate) fn enumerate_brokers(
     cluster_name: &str,
@@ -381,7 +381,7 @@ async fn apply_external_services(
     Ok(())
 }
 
-/// Slice 50b. Return the single canonical OAuth listener config (if any).
+/// Return the single canonical OAuth listener config (if any).
 /// `validate_listeners` already rejects divergent per-listener OAuth
 /// configs, so the first OAuth listener's config is the canonical one
 /// for the whole cluster.
@@ -392,7 +392,7 @@ fn canonical_oauth_config(listeners: &[Listener]) -> Option<ListenerAuthenticati
     })
 }
 
-/// Slice 50b. Compute the managed OAUTHBEARER trust Secret's name from
+/// Compute the managed OAUTHBEARER trust Secret's name from
 /// the parent Kafka CR's listeners. Returns `Some(name)` when at least
 /// one OAuth listener has a non-empty `tls_trusted_certificates`, else
 /// `None`. The naming is deterministic
@@ -409,7 +409,7 @@ pub(crate) fn oauth_jwks_trust_secret_name(kafka: &Kafka) -> Option<String> {
     Some(format!("{}-oauth-jwks-trust", kafka.name_any()))
 }
 
-/// Slice 50c. Describes the source Secret the operator mounts into
+/// Describes the source Secret the operator mounts into
 /// broker pods for OAUTHBEARER introspection client-secret. Returned
 /// by [`reconcile_oauth_introspection_secret`] (validating, async,
 /// runs in `reconcile_kafka`) and re-derived deterministically from
@@ -422,7 +422,7 @@ pub(crate) struct OauthIntrospectionMount {
     pub key: String,
 }
 
-/// Slice 50c. Derives the OAUTHBEARER introspection client-secret
+/// Derives the OAUTHBEARER introspection client-secret
 /// mount from the parent Kafka CR's listeners. `Some` when at least
 /// one OAuth listener has `accessTokenIsJwt: false` and a
 /// `clientSecret` ref; `None` when no OAuth listener uses
@@ -442,7 +442,7 @@ pub(crate) fn oauth_introspection_secret_mount(kafka: &Kafka) -> Option<OauthInt
     })
 }
 
-/// Slice 50b. Build the managed oauth-jwks-trust Secret from the
+/// Build the managed oauth-jwks-trust Secret from the
 /// canonical OAuth config's `tls_trusted_certificates`. Returns the
 /// Secret's name (so the `StatefulSet` can mount it), or `None` when no
 /// managed Secret is needed (no OAuth listener, or no trust certs
@@ -488,7 +488,7 @@ async fn reconcile_oauth_jwks_trust(
     Ok(Some(managed_name))
 }
 
-/// Slice 50b. Server-side apply the managed `{kafka}-oauth-jwks-trust`
+/// Server-side apply the managed `{kafka}-oauth-jwks-trust`
 /// Secret with the concatenated PEM bundle under key `ca.crt`. Owner-
 /// ref'd to the parent `Kafka` so deleting the CR cascades the Secret.
 async fn upsert_oauth_trust_secret(
@@ -515,13 +515,13 @@ async fn upsert_oauth_trust_secret(
     apply_object(secret_api, managed_name, &secret).await
 }
 
-/// Slice 50c. Validate the OAUTHBEARER introspection client-secret
-/// Secret + key exist (no managed-Secret upsert — T5's pod template
+/// Validate the OAUTHBEARER introspection client-secret
+/// Secret + key exist (no managed-Secret upsert — the pod template
 /// mounts the source Secret directly via projected items). Returns
 /// the mount info for the `StatefulSet` renderer, or `None` when
 /// introspection is not configured (JWT mode or no oauth listener).
 ///
-/// The `_kafka` arg mirrors the slice-50b sibling's signature for
+/// The `_kafka` arg mirrors the sibling's signature for
 /// call-site symmetry but is unused here: there is no managed Secret
 /// to owner-ref — the source Secret stays user-owned.
 async fn reconcile_oauth_introspection_secret(
@@ -731,7 +731,7 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
         obj.spec.inter_broker_listener_name.as_deref(),
     );
 
-    // Effective listeners: synthesize the slice-19/20 default when
+    // Effective listeners: synthesize the default when
     // `spec.listeners` is empty.
     let effective_listeners: Vec<Listener> = if obj.spec.listeners.is_empty() {
         vec![synthesized_default_listener()]
@@ -755,13 +755,13 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
     let secret_api: Api<Secret> = Api::namespaced(ctx.client.clone(), &ns);
     let _cluster_id = ensure_cluster_id_secret(&secret_api, &obj).await?;
 
-    // Slice 48-final (KIP-405): shape-validate `spec.tieredStorage` before
+    // KIP-405: shape-validate `spec.tieredStorage` before
     // any ConfigMap render — a mis-paired discriminator (`type=S3` with no
     // `s3` block, or an S3 spec missing `bucket`/`region`) would otherwise
     // produce broker TOML the broker rejects at boot. Failing here keeps
     // the broker pods on the previously-valid generation.
     //
-    // Slice 48j: surface the failure as a `TieredStorageReady=False`
+    // Surface the failure as a `TieredStorageReady=False`
     // condition on `Kafka.status.conditions[]` (matching the OAuth-
     // validation pattern) so operators see *why* their spec was rejected
     // instead of having to read controller logs. The happy path emits
@@ -792,9 +792,9 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
         }
     }
 
-    // Slice 42b: validate `spec.tracing` before rendering pods. Same
-    // pattern as the tiered-storage `TieredStorageReady` condition
-    // (slice 48j): emit a `TracingReady` condition on validation
+    // Validate `spec.tracing` before rendering pods. Same
+    // pattern as the tiered-storage `TieredStorageReady` condition:
+    // emit a `TracingReady` condition on validation
     // pass/fail so operators see *why* their OTLP spec was rejected
     // instead of having to read controller logs.
     if let Some(tr) = &obj.spec.tracing {
@@ -821,7 +821,7 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
         }
     }
 
-    // Slice 28: evaluate the declared versions against the operator-
+    // Evaluate the declared versions against the operator-
     // finalized metadata version (read from the watched object's status —
     // no extra API request). On a failure we surface KafkaVersionValid=
     // False, do not inject the new metadata version, and do not advance the
@@ -856,14 +856,14 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
     };
     // Only an explicit, valid pin enters the config hash (a defaulted
     // metadata version rolls via the pod-template image change instead,
-    // and including it would break the slice-24 empty-hash collapse).
+    // and including it would break the empty-hash collapse).
     let explicit_pin: Option<&str> = if resolved_metadata.is_some() {
         obj.spec.metadata_version.as_deref()
     } else {
         None
     };
 
-    // Slice 41: resolve spec.logging into a RUST_LOG env-filter (inline
+    // Resolve spec.logging into a RUST_LOG env-filter (inline
     // composed in-process, external read from a user ConfigMap). A transient
     // API error propagates and requeues; a user error (bad level, missing
     // ConfigMap/key) surfaces LoggingReady=False without rolling and leaves
@@ -872,7 +872,7 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
     let logging_filter = logging_outcome.filter().map(str::to_string);
     let logging_condition = logging::condition_for(&logging_outcome);
 
-    // Pool list — needed up front for the slice-34 CA rotation convergence
+    // Pool list — needed up front for the CA rotation convergence
     // check (whether the previous rotation step's roll has finished), and
     // reused below for status rollup + owner-ref adoption.
     let pool_api: Api<KafkaNodePool> = Api::namespaced(ctx.client.clone(), &ns);
@@ -880,11 +880,11 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
     let pools = pool_api.list(&lp).await?;
     let rollout_converged = pools_converged(pools.iter());
 
-    // Slice 34: reconcile both CAs with rotation. The cluster CA drives the
+    // Reconcile both CAs with rotation. The cluster CA drives the
     // staged key-replacement machine + the config-hash; the clients CA only
     // creates / same-key-renews (its truststore is hot-reloaded). force-* and
     // CronJob `ca-renew-after` annotations target the cluster CA. On
-    // BYO-missing, surface a False condition and requeue (slice-30 behaviour).
+    // BYO-missing, surface a False condition and requeue.
     let cr_anns = obj.meta().annotations.clone().unwrap_or_default();
     let force_renew = cr_anns.contains_key(cluster_ca::ANN_FORCE_RENEW)
         || cr_anns.contains_key(cluster_ca::ANN_RENEW_AFTER);
@@ -997,9 +997,9 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
         &cluster_ca_outcome.rotation_message,
     );
 
-    // Slice 34: the config-hash covers the cluster-CA *trust bundle* (not just
+    // The config-hash covers the cluster-CA *trust bundle* (not just
     // the signing cert), so adding / promoting / pruning a trust anchor rolls
-    // the cluster, while same-key leaf renewal (slice-33 hot-reload) does not.
+    // the cluster, while same-key leaf renewal (hot-reload) does not.
     let cfg_hash = common::combined_config_hash(
         &obj.spec,
         Some(&cluster_ca_outcome.trust_bundle_pem),
@@ -1023,7 +1023,7 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
         listeners_ready_cond =
             condition("ListenersReady", "False", "ListenersInvalid", &e.message());
     } else {
-        // Slice 50b: assemble the OAUTHBEARER JWKS TLS trust bundle (if any).
+        // Assemble the OAUTHBEARER JWKS TLS trust bundle (if any).
         // Failures here surface as Ready=False and short-circuit before
         // any per-broker objects are rendered (an OAuth listener with a
         // broken trust spec is not safe to bring brokers up against).
@@ -1056,8 +1056,8 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
             Err(e) => return Err(e),
         }
 
-        // Slice 50c: validate the OAUTHBEARER introspection client-secret
-        // Secret (when introspection is configured). T5's pod template
+        // Validate the OAUTHBEARER introspection client-secret
+        // Secret (when introspection is configured). The pod template
         // derives the same mount independently via
         // `oauth_introspection_secret_mount`, so we don't need to thread
         // the value through here — calling
@@ -1176,7 +1176,7 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
         )
         .await?;
 
-        // Slice 30: build per-broker TLS render map (paths inside the
+        // Build per-broker TLS render map (paths inside the
         // mounted broker-tls volume).
         let tls_per_broker: std::collections::BTreeMap<i32, listeners::BrokerTlsRender> = brokers
             .iter()
@@ -1226,10 +1226,10 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
         };
 
         // Optimization: when every effective listener is internal (e.g. the
-        // synthesized slice-19 default), `compute_advertised` only needs
+        // synthesized default), `compute_advertised` only needs
         // `pod_fqdn` (from `BrokerInfo`), so we skip per-broker object
         // rendering and the Pod/Node/Service reads entirely. This preserves
-        // the slice-24 request sequence exactly.
+        // the internal-only request sequence exactly.
         let has_external = effective_listeners
             .iter()
             .any(|l| l.type_ != ListenerType::Internal);
@@ -1333,7 +1333,7 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
         Some(Err(_)) => condition("MetricsReady", "False", "Error", "metrics reconcile failed"),
     };
 
-    // Slice 23: NetworkPolicy reconcile (opt-in via spec.networkPolicy).
+    // NetworkPolicy reconcile (opt-in via spec.networkPolicy).
     // Inter-broker port: the listener whose name matches the effective
     // inter-broker name. Falls back to the synthesized default's BROKER_PORT
     // (defensive only; effective_listeners is always non-empty).
@@ -1479,13 +1479,13 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
 /// observes config drift. Uses a server-side apply with the operator's
 /// field manager so the patch wins over any out-of-band manual edits.
 ///
-/// Slice 28: the per-pool hash is planned by [`common::plan_rollout`] so an
+/// The per-pool hash is planned by [`common::plan_rollout`] so an
 /// established multi-pool cluster rolls one node at a time (ordered by
 /// `(node_id_start, name)`, gated on each pool reaching Ready) rather than
 /// rolling every pool at once. Initial bring-up still applies the hash to
 /// every pool in parallel — a `KRaft` controller quorum needs all controllers
 /// up together. The owner-ref is applied to every pool every reconcile
-/// regardless, so the request count is unchanged from the slice-21 form.
+/// regardless, so the request count is unchanged.
 async fn adopt_pools<'a>(
     pool_api: &Api<KafkaNodePool>,
     parent: &Kafka,
@@ -1575,7 +1575,7 @@ async fn emit_weak_auth_event(
     .await
 }
 
-/// Slice 34: Warning Event when a forced CA rotation can't be honored (BYO CA
+/// Warning Event when a forced CA rotation can't be honored (BYO CA
 /// or clients-CA key replacement). Fire-and-forget at the call site.
 async fn emit_ca_rotation_refused_event(
     client: &kube::Client,
@@ -1597,7 +1597,7 @@ async fn emit_ca_rotation_refused_event(
     .await
 }
 
-/// Slice 34: "no roll in flight" — every pool carries the same (non-empty)
+/// "No roll in flight" — every pool carries the same (non-empty)
 /// `crabka.io/config-hash` label and every pool's broker is Ready. The CA
 /// rotation state machine advances a staged phase only when this holds, so
 /// trust distribution finishes before the new key is promoted (and promotion
@@ -1626,7 +1626,7 @@ pub(crate) fn pools_converged<'a>(pools: impl IntoIterator<Item = &'a KafkaNodeP
     !any || (hashes.len() == 1 && !hashes.contains(&None) && all_ready)
 }
 
-/// Slice 34: remove one-shot rotation-trigger annotations from the `Kafka` CR
+/// Remove one-shot rotation-trigger annotations from the `Kafka` CR
 /// (JSON Merge Patch with `null` values deletes the keys).
 async fn strip_annotations(
     kafka_api: &Api<Kafka>,
@@ -1728,10 +1728,10 @@ mod tests {
         assert_eq!(reason, "Stable");
     }
 
-    // Slice 50b: pure helper — picks the first OAuth listener as canonical.
+    // Pure helper — picks the first OAuth listener as canonical.
     // The reconcile-level no-op cases (no OAuth listener / empty
     // tls_trusted_certificates) are exercised through this helper plus the
-    // length check; the network-touching paths are covered by T6's
+    // length check; the network-touching paths are covered by the
     // integration tests.
 
     fn listener_with_auth(name: &str, auth: Option<ListenerAuthentication>) -> Listener {
@@ -1867,9 +1867,9 @@ mod tests {
         assert!(got.tls_trusted_certificates.is_empty());
     }
 
-    // Slice 50c: pure helper — derives the introspection client-secret
+    // Pure helper — derives the introspection client-secret
     // mount from the CR's listeners. The async, apiserver-touching
-    // `reconcile_oauth_introspection_secret` path is covered by T6's
+    // `reconcile_oauth_introspection_secret` path is covered by the
     // integration tests.
 
     #[test]
@@ -1895,7 +1895,7 @@ mod tests {
     #[test]
     fn oauth_introspection_secret_mount_returns_none_when_client_secret_absent_introspection_mode()
     {
-        // Introspection mode but clientSecret omitted (would fail T3's
+        // Introspection mode but clientSecret omitted (would fail
         // validation, but the helper should still handle it gracefully —
         // the pool reconciler must not panic on an invalid-but-applied CR).
         let mut cfg = sample_oauth_cfg_introspection("oauth-cs", "client-secret");

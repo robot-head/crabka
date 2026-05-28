@@ -69,8 +69,8 @@ pub struct Producer {
     pub(crate) producer_epoch: i16,
     // The following config knobs are also copied into `SenderConfig` at
     // construction time. They live on `Producer` for diagnostic
-    // introspection and to support future reconnect / re-init flows
-    // (Task 17+). Suppressing the dead-code warning is honest about
+    // introspection and to support future reconnect / re-init flows.
+    // Suppressing the dead-code warning is honest about
     // their current role.
     #[allow(dead_code)]
     pub(crate) acks: Acks,
@@ -509,7 +509,16 @@ impl Producer {
         }
 
         let partition = match record.partition {
-            Some(p) => p,
+            Some(p) => {
+                // Produce v13 omits the topic name on the wire and carries
+                // only `topic_id`, so the metadata cache must hold the topic
+                // even when the caller pins the partition itself. The
+                // partitioner path populates it via `partition_for`; mirror
+                // that here so explicit-partition sends resolve a non-zero
+                // `topic_id` instead of failing with UNKNOWN_TOPIC_OR_PARTITION.
+                self.partitions_for(&record.topic).await;
+                p
+            }
             None => {
                 self.partition_for(&record.topic, record.key.as_deref())
                     .await
@@ -553,7 +562,7 @@ impl Producer {
 
     /// Return the partition count for `topic`, fetching metadata on cache
     /// miss. Falls back to `1` if the broker reports an error or the
-    /// topic is absent — Task 17 / production code can revisit retry
+    /// topic is absent — production code can revisit retry
     /// policy here.
     async fn partitions_for(&self, topic: &str) -> i32 {
         {

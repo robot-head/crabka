@@ -1,4 +1,4 @@
-//! `RemoteLogManager` — KIP-405 tiered-storage copy path (slice 48b).
+//! `RemoteLogManager` — KIP-405 tiered-storage copy path.
 //!
 //! Every `interval`, walks the partition registry and, for each partition
 //! where this broker is the leader and the topic has
@@ -69,15 +69,7 @@ pub(crate) async fn run(
                 return;
             }
         }
-        tick_all(
-            &partitions,
-            &*controller,
-            &rsm,
-            rlmm.as_ref(),
-            node_id,
-            broker_id,
-        )
-        .await;
+        tick_all(&partitions, &*controller, &rsm, &rlmm, node_id, broker_id).await;
     }
 }
 
@@ -85,7 +77,7 @@ async fn tick_all(
     partitions: &DashMap<(String, i32), Arc<Partition>>,
     controller: &dyn crate::metadata_source::MetadataSource,
     rsm: &Arc<dyn RemoteStorageManager>,
-    rlmm: &dyn RemoteLogMetadataManager,
+    rlmm: &Arc<dyn RemoteLogMetadataManager>,
     node_id: NodeId,
     broker_id: i32,
 ) {
@@ -130,7 +122,7 @@ pub(crate) async fn copy_eligible(
     leader_epoch: i32,
     exports: Vec<SegmentExport>,
     rsm: &Arc<dyn RemoteStorageManager>,
-    rlmm: &dyn RemoteLogMetadataManager,
+    rlmm: &Arc<dyn RemoteLogMetadataManager>,
 ) -> usize {
     let known: HashSet<i64> = match rlmm.list_remote_log_segments(tp) {
         Ok(list) => list
@@ -156,7 +148,7 @@ pub(crate) async fn copy_eligible(
     copied
 }
 
-/// Slice 48c: compute the highest `target` to pass to
+/// Compute the highest `target` to pass to
 /// [`crabka_log::Log::delete_local_segments_through`] given the
 /// partition's local sealed-segment exports and the per-topic
 /// local-retention settings. Returns `None` when nothing is deletable.
@@ -206,7 +198,7 @@ pub(crate) fn local_retention_target(
     delete_through_last.map(|last| last + 1)
 }
 
-/// Slice 48c: after the copy pass, drop local sealed segments whose
+/// After the copy pass, drop local sealed segments whose
 /// remote copy is `CopySegmentFinished` and that fall outside the
 /// per-topic local-retention window. Returns the count of segments
 /// physically removed from disk.
@@ -218,7 +210,7 @@ pub(crate) async fn local_retention_pass(
     partition: &Partition,
     exports: &[SegmentExport],
     log_config: &LogConfig,
-    rlmm: &dyn RemoteLogMetadataManager,
+    rlmm: &Arc<dyn RemoteLogMetadataManager>,
     now_ms: i64,
 ) -> usize {
     let effective_local_ms = log_config
@@ -272,7 +264,7 @@ pub(crate) async fn local_retention_pass(
     }
 }
 
-/// Slice 48e (KIP-405): compute the set of finished remote segments whose
+/// KIP-405: compute the set of finished remote segments whose
 /// total-retention window has expired (by time or by size budget), in
 /// oldest-first order. Mirrors [`local_retention_target`]'s walk; **stops at
 /// the first non-deletable segment** so the remaining remote prefix stays
@@ -318,7 +310,7 @@ pub(crate) fn remote_retention_eviction_set(
     out
 }
 
-/// Slice 48e (KIP-405): evict remote segments past the topic's total
+/// KIP-405: evict remote segments past the topic's total
 /// retention window (`retention.ms` / `retention.bytes`). For each
 /// deletable segment, runs the lifecycle:
 /// `CopySegmentFinished` → `DeleteSegmentStarted` → RSM delete →
@@ -332,7 +324,7 @@ pub(crate) async fn remote_retention_pass(
     broker_id: i32,
     log_config: &LogConfig,
     rsm: &Arc<dyn RemoteStorageManager>,
-    rlmm: &dyn RemoteLogMetadataManager,
+    rlmm: &Arc<dyn RemoteLogMetadataManager>,
     now_ms: i64,
 ) -> usize {
     let retention_ms = log_config
@@ -370,7 +362,7 @@ pub(crate) async fn remote_retention_pass(
     deleted
 }
 
-/// Slice 48e (KIP-405): cascade the
+/// KIP-405: cascade the
 /// [`DeletePartitionMarked` → `DeletePartitionStarted` →
 /// `DeletePartitionFinished`] lifecycle for `tp`, deleting every remote
 /// segment along the way. Run as a detached task from the `DeleteTopics`
@@ -385,21 +377,25 @@ pub(crate) async fn cascade_remote_partition_delete(
     rlmm: Arc<dyn RemoteLogMetadataManager>,
 ) {
     if let Err(e) = put_partition_state(
-        rlmm.as_ref(),
+        &rlmm,
         &tp,
         RemotePartitionDeleteState::DeletePartitionMarked,
         broker_id,
-    ) {
+    )
+    .await
+    {
         warn!(topic = %tp.topic, partition = tp.partition, error = %e,
               "remote-log-manager: failed to mark partition deleted");
         return;
     }
     if let Err(e) = put_partition_state(
-        rlmm.as_ref(),
+        &rlmm,
         &tp,
         RemotePartitionDeleteState::DeletePartitionStarted,
         broker_id,
-    ) {
+    )
+    .await
+    {
         warn!(topic = %tp.topic, partition = tp.partition, error = %e,
               "remote-log-manager: failed to start partition delete");
         return;
@@ -418,32 +414,62 @@ pub(crate) async fn cascade_remote_partition_delete(
         if md.state() == RemoteLogSegmentState::DeleteSegmentFinished {
             continue;
         }
-        let _ = delete_one_segment(&tp, broker_id, &md, &rsm, rlmm.as_ref()).await;
+        let _ = delete_one_segment(&tp, broker_id, &md, &rsm, &rlmm).await;
     }
 
     if let Err(e) = put_partition_state(
-        rlmm.as_ref(),
+        &rlmm,
         &tp,
         RemotePartitionDeleteState::DeletePartitionFinished,
         broker_id,
-    ) {
+    )
+    .await
+    {
         warn!(topic = %tp.topic, partition = tp.partition, error = %e,
               "remote-log-manager: failed to finish partition delete");
     }
 }
 
-fn put_partition_state(
-    rlmm: &dyn RemoteLogMetadataManager,
+/// Run one blocking [`RemoteLogMetadataManager`] mutation on the blocking
+/// pool. The topic-backed manager's synchronous SPI methods bridge to a
+/// Tokio runtime via `block_on`, which panics if invoked on a runtime
+/// worker thread; `spawn_blocking` hands them a thread that is allowed to
+/// block (for the in-memory manager the closure is a cheap no-op there).
+/// Mirrors the `spawn_blocking` wrapping already used for the blocking
+/// [`RemoteStorageManager`] SPI in this module.
+async fn rlmm_mutate<F>(
+    rlmm: &Arc<dyn RemoteLogMetadataManager>,
+    op: F,
+) -> Result<(), crabka_remote_storage::RemoteStorageError>
+where
+    F: FnOnce(
+            &dyn RemoteLogMetadataManager,
+        ) -> Result<(), crabka_remote_storage::RemoteStorageError>
+        + Send
+        + 'static,
+{
+    let rlmm = Arc::clone(rlmm);
+    match tokio::task::spawn_blocking(move || op(rlmm.as_ref())).await {
+        Ok(res) => res,
+        Err(e) => Err(crabka_remote_storage::RemoteStorageError::Backend(format!(
+            "RLMM mutation task panicked: {e}"
+        ))),
+    }
+}
+
+async fn put_partition_state(
+    rlmm: &Arc<dyn RemoteLogMetadataManager>,
     tp: &TopicIdPartition,
     state: RemotePartitionDeleteState,
     broker_id: i32,
 ) -> Result<(), crabka_remote_storage::RemoteStorageError> {
-    rlmm.put_remote_partition_delete_metadata(RemotePartitionDeleteMetadata {
+    let md = RemotePartitionDeleteMetadata {
         topic_id_partition: tp.clone(),
         state,
         event_timestamp_ms: now_ms(),
         broker_id,
-    })
+    };
+    rlmm_mutate(rlmm, move |m| m.put_remote_partition_delete_metadata(md)).await
 }
 
 /// Drive one `CopySegmentFinished` (or in-flight) segment through the
@@ -455,7 +481,7 @@ async fn delete_one_segment(
     broker_id: i32,
     md: &RemoteLogSegmentMetadata,
     rsm: &Arc<dyn RemoteStorageManager>,
-    rlmm: &dyn RemoteLogMetadataManager,
+    rlmm: &Arc<dyn RemoteLogMetadataManager>,
 ) -> bool {
     let id = md.remote_log_segment_id().clone();
     // Transition to DeleteSegmentStarted unless the segment is already
@@ -468,7 +494,8 @@ async fn delete_one_segment(
             state: RemoteLogSegmentState::DeleteSegmentStarted,
             broker_id,
         };
-        if let Err(e) = rlmm.update_remote_log_segment_metadata(upd) {
+        if let Err(e) = rlmm_mutate(rlmm, move |m| m.update_remote_log_segment_metadata(upd)).await
+        {
             warn!(topic = %tp.topic, partition = tp.partition, base = md.start_offset(),
                   error = %e,
                   "remote-log-manager: failed to record DeleteSegmentStarted");
@@ -502,7 +529,7 @@ async fn delete_one_segment(
         state: RemoteLogSegmentState::DeleteSegmentFinished,
         broker_id,
     };
-    if let Err(e) = rlmm.update_remote_log_segment_metadata(upd) {
+    if let Err(e) = rlmm_mutate(rlmm, move |m| m.update_remote_log_segment_metadata(upd)).await {
         warn!(topic = %tp.topic, partition = tp.partition, base = md.start_offset(),
               error = %e, "remote-log-manager: failed to record DeleteSegmentFinished");
         return false;
@@ -522,7 +549,7 @@ async fn copy_one(
     leader_epoch: i32,
     ex: &SegmentExport,
     rsm: &Arc<dyn RemoteStorageManager>,
-    rlmm: &dyn RemoteLogMetadataManager,
+    rlmm: &Arc<dyn RemoteLogMetadataManager>,
 ) -> bool {
     let id = RemoteLogSegmentId::new(tp.clone(), Uuid::new_v4());
     let epochs: BTreeMap<i32, i64> = if ex.leader_epochs.is_empty() {
@@ -551,7 +578,9 @@ async fn copy_one(
         }
     };
 
-    if let Err(e) = rlmm.add_remote_log_segment_metadata(metadata.clone()) {
+    let md_started = metadata.clone();
+    if let Err(e) = rlmm_mutate(rlmm, move |m| m.add_remote_log_segment_metadata(md_started)).await
+    {
         warn!(topic = %tp.topic, partition = tp.partition, base = ex.base_offset,
               error = %e, "remote-log-manager: failed to record CopySegmentStarted");
         return false;
@@ -582,7 +611,8 @@ async fn copy_one(
             state: RemoteLogSegmentState::CopySegmentFinished,
             broker_id,
         };
-        if let Err(e) = rlmm.update_remote_log_segment_metadata(upd) {
+        if let Err(e) = rlmm_mutate(rlmm, move |m| m.update_remote_log_segment_metadata(upd)).await
+        {
             warn!(topic = %tp.topic, partition = tp.partition, base = ex.base_offset,
                   error = %e, "remote-log-manager: failed to record CopySegmentFinished");
             return false;
@@ -610,7 +640,7 @@ async fn rollback(
     metadata: &RemoteLogSegmentMetadata,
     broker_id: i32,
     rsm: &Arc<dyn RemoteStorageManager>,
-    rlmm: &dyn RemoteLogMetadataManager,
+    rlmm: &Arc<dyn RemoteLogMetadataManager>,
 ) {
     let id = metadata.remote_log_segment_id().clone();
     let rsm_del = rsm.clone();
@@ -620,13 +650,14 @@ async fn rollback(
         RemoteLogSegmentState::DeleteSegmentStarted,
         RemoteLogSegmentState::DeleteSegmentFinished,
     ] {
-        let _ = rlmm.update_remote_log_segment_metadata(RemoteLogSegmentMetadataUpdate {
+        let upd = RemoteLogSegmentMetadataUpdate {
             remote_log_segment_id: id.clone(),
             event_timestamp_ms: now_ms(),
             custom_metadata: None,
             state,
             broker_id,
-        });
+        };
+        let _ = rlmm_mutate(rlmm, move |m| m.update_remote_log_segment_metadata(upd)).await;
     }
 }
 
@@ -748,7 +779,8 @@ mod tests {
 
         let rsm: Arc<dyn RemoteStorageManager> =
             Arc::new(LocalTieredStorage::new(remote_dir.path()));
-        let rlmm = InmemoryRemoteLogMetadataManager::new();
+        let rlmm: Arc<dyn RemoteLogMetadataManager> =
+            Arc::new(InmemoryRemoteLogMetadataManager::new());
 
         let copied = copy_eligible(&tp(), 1, 0, exports.clone(), &rsm, &rlmm).await;
         assert_eq!(copied, exports.len());
@@ -777,7 +809,8 @@ mod tests {
 
         let rsm: Arc<dyn RemoteStorageManager> =
             Arc::new(LocalTieredStorage::new(remote_dir.path()));
-        let rlmm = InmemoryRemoteLogMetadataManager::new();
+        let rlmm: Arc<dyn RemoteLogMetadataManager> =
+            Arc::new(InmemoryRemoteLogMetadataManager::new());
 
         let first = copy_eligible(&tp(), 1, 0, exports.clone(), &rsm, &rlmm).await;
         assert_eq!(first, exports.len());
@@ -795,7 +828,8 @@ mod tests {
         let remote_dir = tempfile::tempdir().unwrap();
         let rsm: Arc<dyn RemoteStorageManager> =
             Arc::new(LocalTieredStorage::new(remote_dir.path()));
-        let rlmm = InmemoryRemoteLogMetadataManager::new();
+        let rlmm: Arc<dyn RemoteLogMetadataManager> =
+            Arc::new(InmemoryRemoteLogMetadataManager::new());
         let copied = copy_eligible(&tp(), 1, 0, Vec::new(), &rsm, &rlmm).await;
         assert_eq!(copied, 0);
         assert!(rlmm.list_remote_log_segments(&tp()).unwrap().is_empty());
@@ -809,7 +843,8 @@ mod tests {
         assert!(!exports.is_empty());
 
         let rsm: Arc<dyn RemoteStorageManager> = Arc::new(AlwaysFailRsm);
-        let rlmm = InmemoryRemoteLogMetadataManager::new();
+        let rlmm: Arc<dyn RemoteLogMetadataManager> =
+            Arc::new(InmemoryRemoteLogMetadataManager::new());
 
         let copied = copy_eligible(&tp(), 1, 0, exports.clone(), &rsm, &rlmm).await;
         assert_eq!(copied, 0, "every copy failed");
@@ -827,7 +862,8 @@ mod tests {
         let remote_dir = tempfile::tempdir().unwrap();
         let rsm: Arc<dyn RemoteStorageManager> =
             Arc::new(LocalTieredStorage::new(remote_dir.path()));
-        let rlmm = InmemoryRemoteLogMetadataManager::new();
+        let rlmm: Arc<dyn RemoteLogMetadataManager> =
+            Arc::new(InmemoryRemoteLogMetadataManager::new());
 
         // Hand-build an export with no leader epochs but real files on disk.
         let src = tempfile::tempdir().unwrap();
@@ -999,7 +1035,8 @@ mod tests {
 
         let rsm: Arc<dyn RemoteStorageManager> =
             Arc::new(LocalTieredStorage::new(remote_dir.path()));
-        let rlmm = InmemoryRemoteLogMetadataManager::new();
+        let rlmm: Arc<dyn RemoteLogMetadataManager> =
+            Arc::new(InmemoryRemoteLogMetadataManager::new());
         let copied = copy_eligible(&tp(), 1, 0, exports.clone(), &rsm, &rlmm).await;
         assert_eq!(copied, exports.len());
 
@@ -1034,7 +1071,7 @@ mod tests {
         assert_eq!(removed_again, 0);
     }
 
-    // ── Slice 48e: remote-retention helper + cascade tests ────────────
+    // ── remote-retention helper + cascade tests ────────────
 
     fn synth_remote_md(
         id: u128,
@@ -1145,7 +1182,8 @@ mod tests {
         let exports = log.tierable_segments();
         let rsm: Arc<dyn RemoteStorageManager> =
             Arc::new(LocalTieredStorage::new(remote_dir.path()));
-        let rlmm = InmemoryRemoteLogMetadataManager::new();
+        let rlmm: Arc<dyn RemoteLogMetadataManager> =
+            Arc::new(InmemoryRemoteLogMetadataManager::new());
         let copied = copy_eligible(&tp(), 1, 0, exports.clone(), &rsm, &rlmm).await;
         assert_eq!(copied, exports.len());
         let pre = rlmm.list_remote_log_segments(&tp()).unwrap();
@@ -1181,7 +1219,8 @@ mod tests {
         let exports = log.tierable_segments();
         let rsm: Arc<dyn RemoteStorageManager> =
             Arc::new(LocalTieredStorage::new(remote_dir.path()));
-        let rlmm = InmemoryRemoteLogMetadataManager::new();
+        let rlmm: Arc<dyn RemoteLogMetadataManager> =
+            Arc::new(InmemoryRemoteLogMetadataManager::new());
         copy_eligible(&tp(), 1, 0, exports.clone(), &rsm, &rlmm).await;
 
         let cfg = LogConfig {
@@ -1208,7 +1247,8 @@ mod tests {
         let remote_dir = tempfile::tempdir().unwrap();
         let rsm: Arc<dyn RemoteStorageManager> =
             Arc::new(LocalTieredStorage::new(remote_dir.path()));
-        let rlmm = InmemoryRemoteLogMetadataManager::new();
+        let rlmm: Arc<dyn RemoteLogMetadataManager> =
+            Arc::new(InmemoryRemoteLogMetadataManager::new());
         let cfg = LogConfig {
             retention_ms: None,
             retention_bytes: None,
@@ -1228,7 +1268,7 @@ mod tests {
             Arc::new(LocalTieredStorage::new(remote_dir.path()));
         let rlmm: Arc<dyn RemoteLogMetadataManager> =
             Arc::new(InmemoryRemoteLogMetadataManager::new());
-        let copied = copy_eligible(&tp(), 1, 0, exports.clone(), &rsm, rlmm.as_ref()).await;
+        let copied = copy_eligible(&tp(), 1, 0, exports.clone(), &rsm, &rlmm).await;
         assert_eq!(copied, exports.len());
 
         cascade_remote_partition_delete(tp(), 1, rsm.clone(), rlmm.clone()).await;

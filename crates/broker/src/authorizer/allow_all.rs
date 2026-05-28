@@ -1,8 +1,7 @@
-//! Slice 53: default authorizer when `Kafka.spec.authorization` is
-//! unset. Returns `Allow` for any request. Replaces the slice-13
-//! "no super-users + no ACLs → allow" compat shim with an explicit
-//! type so the "allow everything" behavior is spelled out at config
-//! time rather than emerging from the ACL impl's empty-input path.
+//! Default authorizer when `Kafka.spec.authorization` is unset.
+//! Returns `Allow` for any request. Provides an explicit type so the
+//! "allow everything" behavior is spelled out at config time rather
+//! than emerging from the ACL impl's empty-input path.
 
 use crabka_metadata::MetadataImage;
 

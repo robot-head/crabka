@@ -11,7 +11,7 @@
 //! producer client ever sends). If a v4+ request carries more than one
 //! transaction entry we process them all sequentially.
 //!
-//! ## slice-13 ACL preamble
+//! ## ACL preamble
 //!
 //! Per transaction in the request:
 //! * `Write` on `TransactionalId(tid)`. Deny → every topic row in that
@@ -55,8 +55,8 @@ pub(crate) async fn handle(
     let mut cur: &[u8] = req_bytes;
     let req = AddPartitionsToTxnRequest::decode(&mut cur, version)?;
 
-    // Mirror Task 12's race-fix pattern: refresh leader-partition view
-    // from the current metadata image before checking coordinator-ness.
+    // Refresh leader-partition view from the current metadata image
+    // before checking coordinator-ness, to avoid a race.
     let image = controller.current_image();
     coord.refresh_leader_partitions(&image).await;
 
@@ -100,7 +100,7 @@ async fn handle_v4(
         Vec::with_capacity(req.transactions.len());
 
     for txn in &req.transactions {
-        // ── slice-13 ACL preamble: per-txn Write on TransactionalId ─────
+        // ── ACL preamble: per-txn Write on TransactionalId ─────
         let tid_req = AuthorizationRequest {
             principal,
             host: peer,
@@ -149,7 +149,7 @@ async fn handle_v3(
     principal: &Principal,
     peer: &SocketAddr,
 ) -> Result<Bytes, BrokerError> {
-    // ── slice-13 ACL preamble: Write on TransactionalId ────────────────
+    // ── ACL preamble: Write on TransactionalId ────────────────
     let tid_req = AuthorizationRequest {
         principal,
         host: peer,

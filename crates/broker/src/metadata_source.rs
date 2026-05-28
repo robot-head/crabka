@@ -11,7 +11,10 @@ use std::sync::Arc;
 use tokio::sync::watch;
 
 use crabka_metadata::{MetadataImage, MetadataRecord};
-use crabka_raft::{ControllerHandle, NodeId, OutboundDialer, QuorumState, RaftError};
+use crabka_raft::{
+    AddVoter, ControllerHandle, Node, NodeId, OutboundDialer, QuorumState, RaftError,
+    ReconfigOutcome, RemoveVoter, UpdateVoter,
+};
 
 use crate::metadata_observer::MetadataObserver;
 
@@ -23,7 +26,14 @@ pub trait MetadataSource: Send + Sync {
     fn quorum_state(&self) -> QuorumState;
     async fn submit_change(&self, records: Vec<MetadataRecord>) -> Result<(), RaftError>;
     async fn change_membership(&self, new_voters: BTreeSet<NodeId>) -> Result<(), RaftError>;
-    async fn add_learner(&self, node_id: NodeId, addr: SocketAddr) -> Result<(), RaftError>;
+    async fn add_learner(&self, node_id: NodeId, node: Node) -> Result<(), RaftError>;
+    /// The controller listener's bound address. Meaningful only on
+    /// controller/combined nodes; broker-only observers have no controller
+    /// listener and report an unspecified address.
+    fn controller_bound_addr(&self) -> SocketAddr;
+    async fn add_voter(&self, req: AddVoter) -> Result<ReconfigOutcome, RaftError>;
+    async fn remove_voter(&self, req: RemoveVoter) -> Result<ReconfigOutcome, RaftError>;
+    async fn update_voter(&self, req: UpdateVoter) -> Result<ReconfigOutcome, RaftError>;
     async fn cancel(&self);
 }
 
@@ -47,8 +57,20 @@ impl MetadataSource for ControllerHandle {
     async fn change_membership(&self, new_voters: BTreeSet<NodeId>) -> Result<(), RaftError> {
         ControllerHandle::change_membership(self, new_voters).await
     }
-    async fn add_learner(&self, node_id: NodeId, addr: SocketAddr) -> Result<(), RaftError> {
-        ControllerHandle::add_learner(self, node_id, addr).await
+    async fn add_learner(&self, node_id: NodeId, node: Node) -> Result<(), RaftError> {
+        ControllerHandle::add_learner(self, node_id, node).await
+    }
+    fn controller_bound_addr(&self) -> SocketAddr {
+        ControllerHandle::controller_bound_addr(self)
+    }
+    async fn add_voter(&self, req: AddVoter) -> Result<ReconfigOutcome, RaftError> {
+        ControllerHandle::add_voter(self, req).await
+    }
+    async fn remove_voter(&self, req: RemoveVoter) -> Result<ReconfigOutcome, RaftError> {
+        ControllerHandle::remove_voter(self, req).await
+    }
+    async fn update_voter(&self, req: UpdateVoter) -> Result<ReconfigOutcome, RaftError> {
+        ControllerHandle::update_voter(self, req).await
     }
     async fn cancel(&self) {
         ControllerHandle::cancel(self).await;
@@ -97,6 +119,7 @@ impl MetadataSource for ObserverSource {
             last_applied_index: 0,
             current_leader: *self.observer.watch_leader().borrow(),
             voters: Vec::new(),
+            voter_nodes: std::collections::BTreeMap::new(),
             per_voter_matched_index: std::collections::BTreeMap::new(),
         }
     }
@@ -108,7 +131,28 @@ impl MetadataSource for ObserverSource {
             current_leader: None,
         })
     }
-    async fn add_learner(&self, _node_id: NodeId, _addr: SocketAddr) -> Result<(), RaftError> {
+    async fn add_learner(&self, _node_id: NodeId, _node: Node) -> Result<(), RaftError> {
+        Err(RaftError::NotLeader {
+            current_leader: None,
+        })
+    }
+    fn controller_bound_addr(&self) -> SocketAddr {
+        // A broker-only node runs no controller listener. The only callers
+        // (DescribeQuorum / KIP-853 reconfiguration) live on controllers, so
+        // this is never reached in practice; report an unspecified address.
+        SocketAddr::from(([0, 0, 0, 0], 0))
+    }
+    async fn add_voter(&self, _req: AddVoter) -> Result<ReconfigOutcome, RaftError> {
+        Err(RaftError::NotLeader {
+            current_leader: None,
+        })
+    }
+    async fn remove_voter(&self, _req: RemoveVoter) -> Result<ReconfigOutcome, RaftError> {
+        Err(RaftError::NotLeader {
+            current_leader: None,
+        })
+    }
+    async fn update_voter(&self, _req: UpdateVoter) -> Result<ReconfigOutcome, RaftError> {
         Err(RaftError::NotLeader {
             current_leader: None,
         })

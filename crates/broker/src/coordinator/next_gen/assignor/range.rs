@@ -6,6 +6,7 @@ use std::collections::HashMap;
 
 use super::{Assignment, Assignor, MemberSubscription, TopicMetadata};
 
+#[derive(Debug)]
 pub struct RangeAssignor;
 
 impl Assignor for RangeAssignor {

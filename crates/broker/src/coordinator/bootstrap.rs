@@ -308,19 +308,11 @@ mod tests {
 
     /// Spin up a controller, wait until it reports a leader, return the handle.
     async fn controller_with_leader(log_dir: std::path::PathBuf) -> Arc<ControllerHandle> {
-        let addr: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
         let cfg = crabka_raft::ControllerConfig {
-            node_id: 1,
-            voters: vec![(1, addr)],
-            controller_listen_addr: addr,
-            log_dir,
             election_timeout: Duration::from_millis(200),
             heartbeat_interval: Duration::from_millis(50),
             client_id: "test".into(),
-            bootstrap_mode: crabka_raft::BootstrapMode::Bootstrap,
-            cluster_id: None,
-            dialer: None,
-            handshake: None,
+            ..crabka_raft::ControllerConfig::for_tests(1, log_dir)
         };
         let handle = Arc::new(crabka_raft::Controller::start(cfg).await.unwrap());
         let mut rx = handle.watch_leader();

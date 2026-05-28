@@ -4,11 +4,10 @@
 //! payload IS the serialized entry. Future KRaft-wire-compat work will
 //! revisit the record layout; today the wrapping is internal only.
 //!
-//! Slice-7 note: only the smoke tests and (in later tasks) `Controller`
-//! reach into this module, so the `dead_code` lint fires for the parts
-//! the trait impl alone doesn't consume from the lib crate root. The
-//! allow at module scope keeps the surface narrow while letting tests
-//! drive the inner helpers.
+//! Only the smoke tests and `Controller` reach into this module, so the
+//! `dead_code` lint fires for the parts the trait impl alone doesn't
+//! consume from the lib crate root. The allow at module scope keeps the
+//! surface narrow while letting tests drive the inner helpers.
 
 #![allow(dead_code)]
 
@@ -36,7 +35,7 @@ use crate::types::{NodeId, TypeConfig};
 /// entries cached until commit (and slightly past).
 #[derive(Debug, Default)]
 struct EntryCache {
-    /// Sorted by index. We never compact in slice 7 (snapshots deferred).
+    /// Sorted by index. We never compact (snapshots not implemented).
     entries: BTreeMap<u64, Entry<TypeConfig>>,
     last_purged: u64,
 }
@@ -204,9 +203,8 @@ impl RaftLogStorage<TypeConfig> for Arc<RaftLogStore> {
     async fn get_log_state(&mut self) -> Result<LogState<TypeConfig>, StorageError<NodeId>> {
         let last_log_id = self.last_log_id().await;
         let last_purged = self.last_purged().await;
-        // Slice 7: snapshots deferred. We never purge, so last_purged_log_id
-        // tracks only what truncate-from-below would do. Future snapshot
-        // work will restore precision.
+        // Snapshots not implemented. We never purge, so last_purged_log_id
+        // tracks only what truncate-from-below would do.
         let last_purged_log_id = (last_purged > 0).then(|| LogId {
             leader_id: openraft::LeaderId::new(0, 0),
             index: last_purged - 1,
@@ -253,8 +251,7 @@ impl RaftLogStorage<TypeConfig> for Arc<RaftLogStore> {
     }
 
     async fn purge(&mut self, _log_id: LogId<NodeId>) -> Result<(), StorageError<NodeId>> {
-        // Slice 7: snapshots deferred, so purge is a no-op. Future snapshot
-        // work will compact the log behind the snapshot index.
+        // Snapshots not implemented, so purge is a no-op.
         Ok(())
     }
 

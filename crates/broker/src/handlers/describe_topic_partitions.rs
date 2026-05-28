@@ -203,10 +203,9 @@ pub(crate) async fn handle(
                 // calls `.stream()` on the decoded list without a null
                 // guard — i.e. a null value NPEs the client. Real
                 // Kafka brokers emit empty lists rather than null;
-                // mirror that to stay compatible. (See
-                // `kt-describe` failure in
-                // PR #241: "Cannot invoke java.util.List.stream() because
-                // the return value of …eligibleLeaderReplicas() is null".)
+                // mirror that to stay compatible. A null value produces
+                // "Cannot invoke java.util.List.stream() because
+                // the return value of …eligibleLeaderReplicas() is null".
                 eligible_leader_replicas: Some(Vec::new()),
                 last_known_elr: Some(Vec::new()),
                 offline_replicas: Vec::new(),

@@ -1,4 +1,4 @@
-//! Hot-reloadable TLS server config (slice 33).
+//! Hot-reloadable TLS server config.
 //!
 //! Wraps a [`rustls::ServerConfig`] in an [`arc_swap::ArcSwap`] so the
 //! broker can swap cert/key/client-CA without restarting the listener

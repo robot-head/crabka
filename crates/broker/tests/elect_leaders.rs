@@ -15,7 +15,7 @@
 // `clippy::too_many_lines` fires on the auto-rebalance integration test body.
 #![allow(clippy::too_many_lines)]
 
-//! Slice 14. Broker-side integration tests for the operator-triggered
+//! Broker-side integration tests for the operator-triggered
 //! `ElectLeaders` RPC. Drives the wire path end-to-end with a Rust
 //! PLAINTEXT client; verifies the resulting partition state via
 //! `BrokerHandle` test accessors.
@@ -562,7 +562,7 @@ async fn non_super_user_without_acl_denied() {
     cfg.plain_credentials
         .insert("alice".to_string(), "alice-secret".to_string());
     cfg.super_users = std::iter::once("admin".to_string()).collect();
-    // Slice 53: install `SimpleAclAuthorizer` so the cluster-Alter gate
+    // Install `SimpleAclAuthorizer` so the cluster-Alter gate
     // fires for non-super principals; default is `AllowAllAuthorizer`.
     cfg.authorizer = std::sync::Arc::new(SimpleAclAuthorizer::new(cfg.super_users.clone()));
 

@@ -67,7 +67,7 @@ pub(crate) async fn handle(
         })
         .sum();
 
-    // ── slice-13 ACL preamble ────────────────────────────────────────
+    // ── ACL preamble ────────────────────────────────────────
     // Batch-authorize every topic name for `Delete`. Topics that come
     // back `Deny` short-circuit the delete loop and emit
     // TOPIC_AUTHORIZATION_FAILED on that topic row.
@@ -113,7 +113,7 @@ pub(crate) async fn handle(
             continue;
         }
 
-        // Slice 48e: snapshot the (topic_id, partition_id) of every tiered
+        // Snapshot the (topic_id, partition_id) of every tiered
         // partition BEFORE the controller commits the delete and we tear
         // down in-memory state. After teardown the `Partition` is gone
         // and we lose the `remote.storage.enable` flag plus the topic_id;
@@ -168,7 +168,7 @@ pub(crate) async fn handle(
                     let dir = log_dir::place_partition_dir(&log_dirs, &k.0, k.1);
                     let _ = std::fs::remove_dir_all(dir);
                 }
-                // Slice 48e: now that the local tear-down is done, fire off
+                // Now that the local tear-down is done, fire off
                 // detached tasks that walk each tiered partition's remote
                 // segments through `DeletePartitionMarked` →
                 // `DeletePartitionStarted` → per-segment lifecycle →

@@ -1,7 +1,7 @@
-//! Slice 44: Connect-RPC client for the standalone `crabka-rebalancer`
+//! Connect-RPC client for the standalone `crabka-rebalancer`
 //! service.
 //!
-//! The rebalancer exposes a Connect-RPC service (slice 43a). Connect's
+//! The rebalancer exposes a Connect-RPC service. Connect's
 //! unary protocol is a plain `POST` to
 //! `/{package}.{Service}/{Method}` with a JSON (or protobuf) body; the
 //! response is JSON with HTTP 200 on success, or a non-2xx status with a

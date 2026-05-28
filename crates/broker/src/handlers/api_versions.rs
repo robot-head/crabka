@@ -24,36 +24,41 @@ use crate::broker::Broker;
 use crate::codes;
 use crate::error::BrokerError;
 
-/// KIP-584 finalized-features epoch. JVM clients treat values `>= 0`
-/// as authoritative feature-level state and call
-/// `MetadataVersion.fromFeatureLevel(N)` for every finalized level —
-/// which throws `IllegalArgumentException` on any client whose
-/// `MetadataVersion` enum doesn't enumerate `N` (breaks
-/// `kafka-acls`, `kafka-configs`, and every other JVM admin tool
-/// that handshakes `ApiVersions` first). `-1` is the schema sentinel
-/// for "unknown / no finalized features"; JVM clients fall back to
-/// `MetadataVersion.UNKNOWN` and skip per-level validation. We sit
-/// at `-1` until `UpdateFeatures` (`api_key` 57) lands a Raft-
-/// persisted feature transition path with a real epoch.
-const FINALIZED_FEATURES_EPOCH: i64 = -1;
+// KIP-584 feature surface. `supported_features` is advertised from the
+// broker-wide `crate::features` table (currently `metadata.version` at a
+// single conservative level). `finalized_features` + the epoch are read from
+// the live metadata image: a fresh broker (no `UpdateFeatures` ever applied)
+// surfaces no finalized features and the schema sentinel epoch `-1`
+// ("unknown"), which JVM admin clients consume as `MetadataVersion.UNKNOWN`
+// and short-circuit per-level validation. `UpdateFeatures` (api_key 57) lands
+// a Raft-persisted `V1FeatureLevel` record, after which the finalized list and
+// a real (`>= 0`) epoch appear here.
 
 fn supported_feature_keys() -> Vec<SupportedFeatureKey> {
-    // Empty until we either (a) ship at least one feature whose
-    // numeric level is in every JVM client we test against
-    // (cp-kafka 3.1/6.1/7.5, apache/kafka 4.0), or (b) wire a
-    // per-client-version negotiation path. Advertising
-    // `metadata.version` with a max above what the connecting
-    // client knows broke 19 `broker-jvm-acceptance` tests on the
-    // first attempt — see `tests/api_versions_features.rs` for
-    // the regression note.
-    Vec::new()
+    crate::features::supported_features()
+        .iter()
+        .map(|f| SupportedFeatureKey {
+            name: f.name.to_string(),
+            min_version: f.min_version,
+            max_version: f.max_version,
+            ..Default::default()
+        })
+        .collect()
 }
 
-fn finalized_feature_keys() -> Vec<FinalizedFeatureKey> {
-    // No finalized features advertised until `UpdateFeatures`
-    // (`api_key` 57) lands. See `FINALIZED_FEATURES_EPOCH` for
-    // the rationale.
-    Vec::new()
+fn finalized_feature_keys(image: &crabka_metadata::MetadataImage) -> Vec<FinalizedFeatureKey> {
+    image
+        .finalized_features()
+        .iter()
+        .map(|(name, level)| FinalizedFeatureKey {
+            name: name.clone(),
+            // Kafka reports the finalized level as both the min and max
+            // finalized version level.
+            max_version_level: *level,
+            min_version_level: *level,
+            ..Default::default()
+        })
+        .collect()
 }
 
 /// Static table mirrored from each API's generated `MIN_VERSION`/`MAX_VERSION`
@@ -93,10 +98,10 @@ fn supported_apis() -> Vec<ApiVersion> {
         v!(leave_group_request),
         v!(sasl_handshake_request),
         v!(sasl_authenticate_request),
-        // OffsetCommit and OffsetFetch: MVP only handles the legacy
+        // OffsetCommit and OffsetFetch only handle the legacy
         // single-group / name-keyed shape. v8+ (OffsetFetch) and v10+
         // (OffsetCommit) switch to topic_id / per-group arrays which
-        // require a topic-id index this slice doesn't wire up. Cap the
+        // require a topic-id index that is not wired up. Cap the
         // advertised max so clients negotiate down to a version we can
         // serve cleanly.
         ApiVersion {
@@ -137,6 +142,9 @@ fn supported_apis() -> Vec<ApiVersion> {
         // broker registration from the cluster's metadata image.
         v!(unregister_broker_request),
         v!(alter_user_scram_credentials_request),
+        // UpdateFeatures (api_key 57, KIP-584) — `kafka-features` admin tool
+        // finalizes broker-supported features through a Raft-persisted path.
+        v!(update_features_request),
         v!(describe_acls_request),
         v!(create_acls_request),
         v!(delete_acls_request),
@@ -149,7 +157,7 @@ fn supported_apis() -> Vec<ApiVersion> {
         v!(describe_client_quotas_request),
         v!(alter_client_quotas_request),
         v!(describe_user_scram_credentials_request),
-        // Slice 51 (KIP-48): delegation-token RPCs. Conditional on the
+        // KIP-48: delegation-token RPCs. Conditional on the
         // broker having a master key configured is tempting, but Kafka
         // always advertises these — clients discover support at this
         // level then get DELEGATION_TOKEN_AUTH_DISABLED (61) on the
@@ -188,6 +196,12 @@ fn supported_apis() -> Vec<ApiVersion> {
         // KIP-848 next-gen consumer group protocol.
         v!(consumer_group_heartbeat_request),
         v!(consumer_group_describe_request),
+        // KIP-853 dynamic-quorum reconfiguration — `kafka-metadata-quorum
+        // --add-controller / --remove-controller` and the controller
+        // auto-join path.
+        v!(add_raft_voter_request),
+        v!(remove_raft_voter_request),
+        v!(update_raft_voter_request),
     ]
 }
 
@@ -227,6 +241,7 @@ pub(crate) fn handle(
 ) -> BoxFuture<'static, Result<Bytes, BrokerError>> {
     let req_bytes = req_bytes.to_vec();
     let metrics = broker.metrics.clone();
+    let image = broker.controller.current_image();
     Box::pin(async move {
         let mut cur: &[u8] = &req_bytes;
         let req = ApiVersionsRequest::decode(&mut cur, version)?;
@@ -262,17 +277,15 @@ pub(crate) fn handle(
             error_code: codes::NONE,
             api_keys: supported_apis(),
             throttle_time_ms: 0,
-            // KIP-584 read-side. Both feature lists stay empty and
-            // the epoch is the schema sentinel `-1` until
-            // `UpdateFeatures` (api_key 57) lands. JVM admin clients
-            // read this as `MetadataVersion.UNKNOWN` and skip
-            // per-level validation. Populating either list ahead of
-            // a real Raft-tracked epoch breaks every JVM admin tool
-            // whose `MetadataVersion` enum doesn't enumerate the
-            // advertised level — see `tests/api_versions_features.rs`.
+            // KIP-584 write-side. `supported_features` advertises the
+            // broker's `crate::features` table; `finalized_features` + the
+            // epoch are read from the live metadata image. A fresh broker
+            // surfaces no finalized features and epoch `-1`
+            // (`MetadataVersion.UNKNOWN` to JVM clients) until
+            // `UpdateFeatures` (api_key 57) lands a `V1FeatureLevel` record.
             supported_features: supported_feature_keys(),
-            finalized_features_epoch: FINALIZED_FEATURES_EPOCH,
-            finalized_features: finalized_feature_keys(),
+            finalized_features_epoch: image.finalized_features_epoch(),
+            finalized_features: finalized_feature_keys(&image),
             ..Default::default()
         };
         let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
@@ -288,17 +301,24 @@ mod tests {
     // ── KIP-584 feature surface ────────────────────────────────────────────
 
     #[test]
-    fn feature_surface_is_empty_with_unknown_epoch() {
-        // KIP-584 read-side: until `UpdateFeatures` (api_key 57)
-        // lands a Raft-persisted feature transition path, both
-        // feature lists stay empty and the epoch sits at the
-        // schema sentinel `-1` (consumed by JVM clients as
-        // `MetadataVersion.UNKNOWN`). Populating either list
-        // without a real epoch breaks JVM admin tooling — see the
-        // module-level note on `FINALIZED_FEATURES_EPOCH`.
-        assert!(supported_feature_keys().is_empty());
-        assert!(finalized_feature_keys().is_empty());
-        assert_eq!(FINALIZED_FEATURES_EPOCH, -1);
+    fn supported_features_advertise_metadata_version() {
+        let keys = supported_feature_keys();
+        let mv = keys
+            .iter()
+            .find(|k| k.name == "metadata.version")
+            .expect("metadata.version advertised");
+        assert_eq!(mv.min_version, 1);
+        assert_eq!(mv.max_version, crate::features::METADATA_VERSION_MAX);
+    }
+
+    #[test]
+    fn fresh_image_surfaces_no_finalized_features() {
+        // A fresh metadata image (no `UpdateFeatures` ever applied) has no
+        // finalized features and the schema sentinel epoch `-1`, which JVM
+        // clients consume as `MetadataVersion.UNKNOWN`.
+        let image = crabka_metadata::MetadataImage::new(uuid::Uuid::nil());
+        assert!(finalized_feature_keys(&image).is_empty());
+        assert_eq!(image.finalized_features_epoch(), -1);
     }
 
     #[test]
@@ -314,6 +334,33 @@ mod tests {
             fetch.min_version, 0,
             "Fetch min must be 0 to advertise the legacy v0-3 support"
         );
+    }
+
+    #[test]
+    fn api_versions_advertises_kip853_rpcs_and_describe_quorum_v2() {
+        use crabka_protocol::owned;
+        let table = supported_apis();
+        let by_key = |k: i16| table.iter().find(|v| v.api_key == k);
+
+        for (key, max) in [
+            (80i16, owned::add_raft_voter_request::MAX_VERSION),
+            (81, owned::remove_raft_voter_request::MAX_VERSION),
+            (82, owned::update_raft_voter_request::MAX_VERSION),
+        ] {
+            let v = by_key(key).unwrap_or_else(|| panic!("api_key {key} advertised"));
+            assert_eq!(v.min_version, 0);
+            assert_eq!(v.max_version, max, "api_key {key} max matches codegen");
+        }
+
+        // DescribeQuorum (55) max follows its schema const — now v2 (KIP-853
+        // adds VoterDirectoryId + Nodes).
+        let dq = by_key(55).expect("describe_quorum advertised");
+        assert_eq!(
+            dq.max_version,
+            owned::describe_quorum_request::MAX_VERSION,
+            "DescribeQuorum max tracks the codegen const",
+        );
+        assert_eq!(dq.max_version, 2, "DescribeQuorum is v2 after KIP-853");
     }
 
     // ── KIP-511 client-info validation ─────────────────────────────────────

@@ -1,10 +1,9 @@
 //! TOML file-config surface for the `crabka-broker` binary.
 //!
 //! Deserialized by `--config-file PATH` in `bin/broker.rs` and merged
-//! into [`crate::BrokerConfig`]. Slice 25a only consumes
-//! `[[listeners]]`, `inter_broker_listener_name`, and (passively)
-//! `[server_properties]`. Other top-level keys are reserved for
-//! future slices and are accepted but ignored.
+//! into [`crate::BrokerConfig`]. Only `[[listeners]]`,
+//! `inter_broker_listener_name`, and (passively) `[server_properties]`
+//! are consumed; other top-level keys are accepted but ignored.
 
 use std::net::SocketAddr;
 
@@ -39,7 +38,7 @@ pub enum FileConfigError {
 }
 
 /// Top-level shape of `broker.toml`. `serde(deny_unknown_fields)` is
-/// off — future slices add fields and old binaries should warn rather
+/// off — new fields may be added and old binaries should warn rather
 /// than refuse to start.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 pub struct FileConfig {
@@ -55,29 +54,29 @@ pub struct FileConfig {
     #[serde(default)]
     pub server_properties: std::collections::BTreeMap<String, String>,
 
-    /// Slice 30: controller listener security protocol. When `Some(Ssl)`
+    /// Controller listener security protocol. When `Some(Ssl)`
     /// the controller listener terminates TLS using `tls_config`.
     #[serde(default)]
     pub controller_listener_protocol: Option<ListenerProtocol>,
 
-    /// Slice 30: TLS material for the controller listener (and any
+    /// TLS material for the controller listener (and any
     /// listener whose `protocol` is TLS-bearing).
     #[serde(default)]
     pub tls_config: Option<FileTlsConfig>,
 
-    /// Slice 49 / 49b: SASL/OAUTHBEARER validator tuning. Only relevant when a
+    /// SASL/OAUTHBEARER validator tuning. Only relevant when a
     /// listener enables the `OAUTHBEARER` mechanism.
     #[serde(default)]
     pub oauthbearer: Option<FileOAuthBearerConfig>,
 
-    /// Slice 51 (KIP-48): delegation-token master key + lifetime knobs.
+    /// KIP-48: delegation-token master key + lifetime knobs.
     /// Env var `CRABKA_DELEGATION_TOKEN_SECRET_KEY` wins over `secret_key`
     /// here. When neither source provides a key, the broker disables
     /// delegation-token auth.
     #[serde(default)]
     pub delegation_token: Option<FileDelegationTokenConfig>,
 
-    /// Slice 51b: principals that are unconditionally authorized for
+    /// Principals that are unconditionally authorized for
     /// all operations, including KIP-48 delegation-token `act-as`. The
     /// operator emits `super_users = ["ANONYMOUS"]` when
     /// `Kafka.spec.delegationToken` is set so its PLAINTEXT
@@ -87,13 +86,13 @@ pub struct FileConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub super_users: Option<Vec<String>>,
 
-    /// Slice 48b (KIP-405): tiered-storage enablement. Setting
+    /// KIP-405: tiered-storage enablement. Setting
     /// `storage_dir` turns tiered storage on broker-wide and roots the
     /// local reference `RemoteStorageManager` there.
     #[serde(default)]
     pub remote_storage: Option<FileRemoteStorageConfig>,
 
-    /// Slice 53: pluggable cluster authorizer + super-user list.
+    /// Pluggable cluster authorizer + super-user list.
     /// `None` ⇒ [`crate::authorizer::AllowAllAuthorizer`] with empty
     /// super-users (default-on-no-config behavior). When `Some`, the
     /// `type` field selects the authorizer implementation; for
@@ -120,7 +119,7 @@ pub struct FileRemoteStorageConfig {
     pub storage_dir: Option<String>,
     /// S3-compatible backend parameters. Omit to use `storage_dir`.
     pub s3: Option<FileRemoteStorageS3Config>,
-    /// Slice 48f: opt-in to the topic-backed
+    /// Opt-in to the topic-backed
     /// [`RemoteLogMetadataManager`](crabka_remote_storage::RemoteLogMetadataManager).
     /// When absent, the broker uses the in-memory fixture.
     pub kafka_metadata: Option<FileKafkaRlmmConfig>,
@@ -283,24 +282,24 @@ pub struct FileProcessConfig {
 
 /// TOML shape of `[oauthbearer]`. Maps to
 /// [`crabka_security::OAuthBearerValidator`]. Setting `jwks_endpoint_uri`
-/// selects the signed-JWT validator (slice 49b); setting
+/// selects the signed-JWT validator; setting
 /// `introspection_endpoint_uri` selects the RFC 7662 introspection
-/// validator (slice 49d); the two endpoint URIs are mutually
+/// validator; the two endpoint URIs are mutually
 /// exclusive. With neither set, the unsecured-JWS validator
-/// (slice 49, development only) is used.
+/// (development only) is used.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 pub struct FileOAuthBearerConfig {
     /// Claim whose value becomes the principal name. Default `sub`.
     #[serde(default)]
     pub principal_claim_name: Option<String>,
-    /// Slice 49g: optional `JsonPath` expression (RFC 9535, via
+    /// Optional `JsonPath` expression (RFC 9535, via
     /// jsonpath-rust) evaluated against the token claim set. Token is
     /// rejected when the expression yields empty/null/false. Compiled
     /// once at broker startup; malformed expressions panic with a
     /// descriptive error.
     #[serde(default)]
     pub custom_claim_check: Option<String>,
-    /// Slice 49g: optional JWT `typ` header check. When set, JWT-mode
+    /// Optional JWT `typ` header check. When set, JWT-mode
     /// validators (unsecured + signed JWS) require the JWT header's
     /// `typ` field to equal this string. Introspection-mode skips
     /// (no JWT header). Ignored when unset.
@@ -311,42 +310,42 @@ pub struct FileOAuthBearerConfig {
     #[serde(default)]
     pub allowable_clock_skew_ms: Option<i64>,
 
-    /// Slice 49b: JWKS endpoint URL. When set, tokens are validated as signed
+    /// JWKS endpoint URL. When set, tokens are validated as signed
     /// JWTs (RS256 / ES256) against the keys fetched from this URL, and the
     /// broker spawns a background refresher. When unset, the unsecured-JWS
     /// (`alg:none`) development validator is used.
     #[serde(default)]
     pub jwks_endpoint_uri: Option<String>,
-    /// Slice 49b: when set, the token `iss` claim must equal this. Signed
+    /// When set, the token `iss` claim must equal this. Signed
     /// validator only.
     #[serde(default)]
     pub valid_issuer_uri: Option<String>,
-    /// Slice 49b: when set, the token `aud` claim must contain this. Signed
+    /// When set, the token `aud` claim must contain this. Signed
     /// validator only.
     #[serde(default)]
     pub expected_audience: Option<String>,
-    /// Slice 49b: JWKS re-fetch interval, in milliseconds. Default 300000
+    /// JWKS re-fetch interval, in milliseconds. Default 300000
     /// (5 minutes). Signed validator only.
     #[serde(default)]
     pub jwks_refresh_interval_ms: Option<u64>,
 
-    /// Slice 49c (renamed in 49d): PEM file containing the CA
+    /// PEM file containing the CA
     /// certificate(s) used to verify the `IdP`'s TLS certificate on ALL
-    /// outbound HTTPS to the `IdP` — JWKS endpoint (49b), introspection
-    /// endpoint (49d), and userinfo endpoint (49d). When set, these are
+    /// outbound HTTPS to the `IdP` — JWKS endpoint, introspection
+    /// endpoint, and userinfo endpoint. When set, these are
     /// the *only* trust roots used for the outbound HTTPS (replaces the
     /// default webpki-roots — Strimzi-shaped). When unset, the broker
     /// uses reqwest's default rustls webpki-roots.
     #[serde(default)]
     pub idp_tls_trust: Option<std::path::PathBuf>,
 
-    /// Slice 49d: RFC 7662 introspection endpoint URL. When set,
+    /// RFC 7662 introspection endpoint URL. When set,
     /// selects the introspection validator (mutually exclusive with
     /// `jwks_endpoint_uri`).
     #[serde(default)]
     pub introspection_endpoint_uri: Option<String>,
 
-    /// Slice 49d: optional OIDC userinfo endpoint URL. When set, the
+    /// Optional OIDC userinfo endpoint URL. When set, the
     /// introspection validator calls `GET userinfo` after a successful
     /// introspection and merges the profile claims over the
     /// introspection claims (introspection wins for `active`, `exp`,
@@ -354,13 +353,13 @@ pub struct FileOAuthBearerConfig {
     #[serde(default)]
     pub userinfo_endpoint_uri: Option<String>,
 
-    /// Slice 49d: `client_id` the broker uses to authenticate (HTTP Basic
+    /// `client_id` the broker uses to authenticate (HTTP Basic
     /// Auth) against the introspection endpoint. Required when
     /// `introspection_endpoint_uri` is set.
     #[serde(default)]
     pub introspection_client_id: Option<String>,
 
-    /// Slice 49d: filesystem path to a file containing the client
+    /// Filesystem path to a file containing the client
     /// secret the broker uses to authenticate against the introspection
     /// endpoint. Required when `introspection_endpoint_uri` is set.
     /// File-based (not literal) so secret material doesn't sit in the
@@ -369,48 +368,48 @@ pub struct FileOAuthBearerConfig {
     #[serde(default)]
     pub introspection_client_secret_path: Option<std::path::PathBuf>,
 
-    /// Slice 49d: timeout for the introspection (and userinfo) HTTP
+    /// Timeout for the introspection (and userinfo) HTTP
     /// requests, in milliseconds. Default 10 000 (10 s).
     #[serde(default)]
     pub introspection_http_timeout_ms: Option<u64>,
 
-    /// Slice 50d: optional ceiling on OAUTHBEARER session lifetime, in
+    /// Optional ceiling on OAUTHBEARER session lifetime, in
     /// seconds. When set, the broker clamps `session_lifetime_ms` to
     /// `min(token_exp_ms - now_ms, cap * 1000)`. When unset, sessions
     /// last until the token's natural `exp`.
     #[serde(default)]
     pub max_session_lifetime_seconds: Option<u32>,
 
-    /// Slice 49h: alternate claim name for principal-name fallback.
+    /// Alternate claim name for principal-name fallback.
     #[serde(default)]
     pub fallback_user_name_claim: Option<String>,
-    /// Slice 49h: prepended on fallback only.
+    /// Prepended on fallback only.
     #[serde(default)]
     pub fallback_user_name_prefix: Option<String>,
-    /// Slice 49h: `JsonPath` expression (RFC 9535) extracting groups.
+    /// `JsonPath` expression (RFC 9535) extracting groups.
     /// Compiled once at broker startup; malformed expression panics
     /// with descriptive error.
     #[serde(default)]
     pub groups_claim: Option<String>,
-    /// Slice 49h: when `groups_claim` resolves to a string, split on
+    /// When `groups_claim` resolves to a string, split on
     /// this delimiter.
     #[serde(default)]
     pub groups_claim_delimiter: Option<String>,
 
-    /// Slice 49i: minimum pause (seconds) between on-demand JWKS refreshes
+    /// Minimum pause (seconds) between on-demand JWKS refreshes
     /// triggered by validator signals (unknown-kid / bad-signature tokens).
     /// Defaults to 1 (Strimzi parity). Signed validator only.
     #[serde(default)]
     pub jwks_min_refresh_pause_seconds: Option<u32>,
 
-    /// Slice 49i: maximum age (seconds) of the cached JWKS before validators
+    /// Maximum age (seconds) of the cached JWKS before validators
     /// reject tokens until the next successful refresh. Strimzi default 360
-    /// (6 minutes). Unset = no expiry check (slice 49b behavior). Fails
+    /// (6 minutes). Unset = no expiry check. Fails
     /// closed on prolonged `IdP` outage. Signed validator only.
     #[serde(default)]
     pub jwks_expiry_seconds: Option<u32>,
 
-    /// Slice 49i: when true, the JWKS parser keeps keys regardless of `use`
+    /// When true, the JWKS parser keeps keys regardless of `use`
     /// field. Default false (filter out `use=enc`). Some identity providers
     /// publish signing keys with `use="enc"` by mistake; operators set this
     /// to true to accept them. Signed validator only.
@@ -524,7 +523,7 @@ impl FileConfig {
         if let Some(name) = self.inter_broker_listener_name {
             cfg.inter_broker_listener_name = name;
         }
-        // `[server_properties]` is intentionally ignored in slice 25a.
+        // `[server_properties]` is intentionally ignored.
         if let Some(proto) = self.controller_listener_protocol
             && cfg.controller_listener_protocol == defaults.controller_listener_protocol
         {
@@ -547,16 +546,16 @@ impl FileConfig {
             });
         }
         if let Some(oauth) = self.oauthbearer {
-            // Slice 49c (renamed in 49d): thread the IdP trust-store path
+            // Thread the IdP trust-store path
             // unconditionally. Inert when no HTTPS-bound endpoint is set,
             // and harmlessly carried for the unsecured validator.
             cfg.oauthbearer_idp_tls_trust
                 .clone_from(&oauth.idp_tls_trust);
-            // Slice 50d: optional session-lifetime cap. Carried unconditionally;
-            // the auth handler interprets None as "no cap" (= 49e behavior).
+            // Optional session-lifetime cap. Carried unconditionally;
+            // the auth handler interprets None as "no cap".
             cfg.oauthbearer_max_session_lifetime_seconds = oauth.max_session_lifetime_seconds;
 
-            // Slice 49g: compile the JsonPath expression once at load time;
+            // Compile the JsonPath expression once at load time;
             // a malformed expression panics with a descriptive error.
             let custom_claim_check_compiled = oauth
                 .custom_claim_check
@@ -569,7 +568,7 @@ impl FileConfig {
                     })
                 });
 
-            // Slice 49h: compile groups_claim JsonPath at load time.
+            // Compile groups_claim JsonPath at load time.
             let groups_claim_compiled = oauth.groups_claim.as_deref().map(|expr| {
                 jsonpath_rust::parser::parse_json_path(expr).unwrap_or_else(|e| {
                     panic!("[oauthbearer]: invalid groups_claim JsonPath expression {expr:?}: {e}")
@@ -586,11 +585,11 @@ impl FileConfig {
                     );
                 }
                 (Some(_), None) => {
-                    // Signed-JWT validation (slice 49b). The empty key handle is
+                    // Signed-JWT validation. The empty key handle is
                     // populated by the refresher `Broker::start` spawns.
                     let jwks_uri = oauth.jwks_endpoint_uri.clone().unwrap();
 
-                    // Slice 49i: create the signal channel + the shared
+                    // Create the signal channel + the shared
                     // timestamps here so the validator's `JwksHandle` and
                     // the refresher (constructed in `Broker::start`) point at
                     // the same Arc-shared state. Channel capacity 1 +
@@ -614,11 +613,11 @@ impl FileConfig {
                     }
                     v.valid_issuer = oauth.valid_issuer_uri;
                     v.expected_audience = oauth.expected_audience;
-                    // Slice 49g: JsonPath custom_claim_check + JWT typ check.
+                    // JsonPath custom_claim_check + JWT typ check.
                     v.custom_claim_check
                         .clone_from(&custom_claim_check_compiled);
                     v.valid_token_type.clone_from(&oauth.valid_token_type);
-                    // Slice 49h: claims mapping.
+                    // Claims mapping.
                     v.fallback_user_name_claim
                         .clone_from(&oauth.fallback_user_name_claim);
                     v.fallback_user_name_prefix
@@ -626,7 +625,7 @@ impl FileConfig {
                     v.groups_claim.clone_from(&groups_claim_compiled);
                     v.groups_claim_delimiter
                         .clone_from(&oauth.groups_claim_delimiter);
-                    // Slice 49i: hard cache-expiry threshold.
+                    // Hard cache-expiry threshold.
                     v.expiry_ms = oauth.jwks_expiry_seconds.map(|s| i64::from(s) * 1000);
                     cfg.oauthbearer_validator = crabka_security::OAuthBearerValidator::Signed(v);
                     cfg.oauthbearer_jwks_endpoint = Some(jwks_uri);
@@ -635,7 +634,7 @@ impl FileConfig {
                             std::time::Duration::from_millis(ms);
                     }
 
-                    // Slice 49i: park signal_rx + shared state for Broker::start.
+                    // Park signal_rx + shared state for Broker::start.
                     *cfg.oauthbearer_jwks_signal_rx.lock().unwrap() = Some(signal_rx);
                     cfg.oauthbearer_jwks_last_successful_fetch_ms = last_successful;
                     cfg.oauthbearer_jwks_last_on_demand_refresh_ms = last_on_demand;
@@ -646,7 +645,7 @@ impl FileConfig {
                         oauth.jwks_ignore_key_use.unwrap_or(false);
                 }
                 (None, Some(introspect_uri)) => {
-                    // Slice 49d: RFC 7662 introspection validator. The
+                    // RFC 7662 introspection validator. The
                     // client secret is read from disk at config-load.
                     let client_id =
                         oauth.introspection_client_id.clone().unwrap_or_else(|| {
@@ -692,12 +691,12 @@ impl FileConfig {
                             .principal_claim_name
                             .clone()
                             .unwrap_or_else(|| "sub".into()),
-                        // Slice 49g: JsonPath custom_claim_check. No typ
+                        // JsonPath custom_claim_check. No typ
                         // check for introspection (no JWT header).
                         custom_claim_check: custom_claim_check_compiled.clone(),
                         call_userinfo: oauth.userinfo_endpoint_uri.is_some(),
                         allowable_clock_skew_ms: oauth.allowable_clock_skew_ms.unwrap_or(30_000),
-                        // Slice 49h: claims mapping.
+                        // Claims mapping.
                         fallback_user_name_claim: oauth.fallback_user_name_claim.clone(),
                         fallback_user_name_prefix: oauth.fallback_user_name_prefix.clone(),
                         groups_claim: groups_claim_compiled.clone(),
@@ -707,7 +706,7 @@ impl FileConfig {
                         crabka_security::OAuthBearerValidator::Introspection(v);
                 }
                 (None, None) => {
-                    // Unsecured-JWS validation (slice 49, development only).
+                    // Unsecured-JWS validation (development only).
                     let mut v = crabka_security::UnsecuredJwsValidator::default();
                     if let Some(name) = oauth.principal_claim_name {
                         v.principal_claim_name = name;
@@ -715,10 +714,10 @@ impl FileConfig {
                     if let Some(skew) = oauth.allowable_clock_skew_ms {
                         v.allowable_clock_skew_ms = skew;
                     }
-                    // Slice 49g: JsonPath custom_claim_check + JWT typ check.
+                    // JsonPath custom_claim_check + JWT typ check.
                     v.custom_claim_check = custom_claim_check_compiled;
                     v.valid_token_type.clone_from(&oauth.valid_token_type);
-                    // Slice 49h: claims mapping.
+                    // Claims mapping.
                     v.fallback_user_name_claim = oauth.fallback_user_name_claim;
                     v.fallback_user_name_prefix = oauth.fallback_user_name_prefix;
                     v.groups_claim = groups_claim_compiled;
@@ -728,7 +727,7 @@ impl FileConfig {
             }
         }
 
-        // Slice 51 (KIP-48): delegation-token master key + lifetime knobs.
+        // KIP-48: delegation-token master key + lifetime knobs.
         // `CRABKA_DELEGATION_TOKEN_SECRET_KEY` env var wins over the TOML
         // `secret_key`; when neither source provides a key the broker
         // leaves the field as `None` and the four DT RPCs return
@@ -754,16 +753,16 @@ impl FileConfig {
             }
         }
 
-        // Slice 51b: merge the TOML super-user list into the broker's
+        // Merge the TOML super-user list into the broker's
         // set (initially empty). `extend` over `clone_from` because a
         // future CLI/programmatic source may pre-populate entries that
-        // we should preserve. The slice-53 `[authorization]` block
+        // we should preserve. The `[authorization]` block
         // below may overwrite this with its own super-user list.
         if let Some(vec) = self.super_users {
             cfg.super_users.extend(vec.iter().cloned());
         }
 
-        // Slice 48b: `[remote_storage]` enables tiered storage broker-
+        // `[remote_storage]` enables tiered storage broker-
         // wide. Either `storage_dir` (local filesystem) or
         // `[remote_storage.s3]` (S3-compatible object store) selects the
         // backend. Both set → error.
@@ -803,7 +802,7 @@ impl FileConfig {
                 (None, None) => {}
             }
 
-            // Slice 48f: `[remote_storage.kafka_metadata]` opts in to the
+            // `[remote_storage.kafka_metadata]` opts in to the
             // topic-backed RLMM. Defaults to in-memory when absent.
             if let Some(km) = &rs.kafka_metadata {
                 cfg.remote_log_metadata_kafka = Some(crate::config::KafkaRlmmConfig {
@@ -814,13 +813,13 @@ impl FileConfig {
             }
         }
 
-        // Slice 53: pluggable cluster authorizer. When `[authorization]`
+        // Pluggable cluster authorizer. When `[authorization]`
         // is present, its `super_users` list becomes the broker's
         // authoritative super-user set (overwriting whatever the
-        // top-level slice-51b list contributed above — operator O2
+        // top-level list contributed above — operator O2
         // emits exactly one of the two sources). When absent, fall
         // through to the default [`AllowAllAuthorizer`] and leave
-        // `cfg.super_users` as whatever the slice-51b extend produced.
+        // `cfg.super_users` as whatever the earlier extend produced.
         if let Some(a) = self.authorization.as_ref() {
             let auth_super_users: std::collections::HashSet<String> =
                 a.super_users.iter().cloned().collect();
@@ -1720,7 +1719,7 @@ super_users = ["ANONYMOUS", "admin"]
         assert_eq!(cfg.super_users.len(), 2);
     }
 
-    // Slice 53 — `[authorization]` TOML section → `Arc<dyn Authorizer>`.
+    // `[authorization]` TOML section → `Arc<dyn Authorizer>`.
 
     fn test_principal(name: &str) -> crabka_security::Principal {
         crabka_security::Principal {
@@ -1746,12 +1745,12 @@ super_users = ["admin"]
 
         assert!(
             cfg.super_users.contains("admin"),
-            "[authorization].super_users must populate BrokerConfig.super_users for slice-51 act-as parity"
+            "[authorization].super_users must populate BrokerConfig.super_users for act-as parity"
         );
         // `admin` is a super-user → bypass returns Allow even with an
         // empty MetadataImage (no ACLs). This is the SimpleAclAuthorizer
         // contract; AllowAllAuthorizer would also Allow, but the
-        // slice-53 default-deny SimpleAcl behavior is exercised by the
+        // default-deny SimpleAcl behavior is exercised by the
         // explicit `type = "simple"` branch's own unit tests.
         let img = MetadataImage::new(uuid::Uuid::nil());
         let admin = test_principal("admin");

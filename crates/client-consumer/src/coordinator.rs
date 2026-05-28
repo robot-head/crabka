@@ -1,6 +1,5 @@
 //! Background coordinator task — owns the join/sync/heartbeat/rebalance
-//! lifecycle for a [`Consumer`](crate::consumer::Consumer). Replaces the
-//! slice-5 standalone heartbeat task.
+//! lifecycle for a [`Consumer`](crate::consumer::Consumer).
 //!
 //! On each tick we either send a `Heartbeat` (steady-state) or run a
 //! full `JoinGroup` + `SyncGroup` round (`needs_rejoin`). The broker
@@ -66,7 +65,13 @@ pub(crate) struct CoordinatorState {
 enum HeartbeatOutcome {
     /// `error_code == 0`.
     Ok,
-    /// `REBALANCE_IN_PROGRESS (27)` — rejoin with the current `member_id`.
+    /// `REBALANCE_IN_PROGRESS (27)` or `ILLEGAL_GENERATION (22)` — rejoin
+    /// with the current `member_id`. `ILLEGAL_GENERATION` fires when our
+    /// heartbeat tick lands after the broker has already advanced past
+    /// the generation we last synced on (e.g. a rebalance completed
+    /// while we were between heartbeat windows); without a rejoin we'd
+    /// keep heartbeating the dead generation forever and never pick up
+    /// the new assignment.
     NeedRejoin,
     /// `UNKNOWN_MEMBER_ID (25)` — clear `member_id` + rejoin from scratch.
     RejoinFromScratch,
@@ -125,7 +130,7 @@ async fn heartbeat_once(state: &CoordinatorState) -> HeartbeatOutcome {
         .await;
     match result {
         Ok(r) if r.error_code == 0 => HeartbeatOutcome::Ok,
-        Ok(r) if r.error_code == 27 => HeartbeatOutcome::NeedRejoin,
+        Ok(r) if r.error_code == 27 || r.error_code == 22 => HeartbeatOutcome::NeedRejoin,
         Ok(r) if r.error_code == 25 => HeartbeatOutcome::RejoinFromScratch,
         Ok(r) => {
             tracing::warn!(error_code = r.error_code, "unexpected heartbeat error");
@@ -372,7 +377,7 @@ async fn join_and_sync(
 
 /// Populate `next_offsets` for newly added partitions by batch-fetching
 /// committed offsets, falling back to `auto.offset.reset` semantics
-/// when no commit exists. Mirrors the slice-5 initial-prime in
+/// when no commit exists. Mirrors the initial-prime in
 /// `consumer.rs::start` step 5.
 async fn prime_offsets(
     state: &CoordinatorState,

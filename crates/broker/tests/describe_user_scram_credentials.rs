@@ -3,7 +3,7 @@
 #![allow(clippy::pedantic)]
 #![allow(clippy::unnecessary_unwrap)]
 
-//! Slice 17a. Broker-side integration tests for DescribeUserScramCredentials
+//! Broker-side integration tests for DescribeUserScramCredentials
 //! (api_key 50, KIP-554 read half).
 //!
 //! Tests:
