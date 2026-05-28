@@ -1,8 +1,8 @@
 //! openraft `RaftNetwork` over Kafka TCP framing using the existing
 //! `crabka-client-core::Connection`. One cached connection per peer.
 //!
-//! Wire shape: `RequestHeader v2` (flexible) carries a Crabka-private
-//! api key (1000 = `AppendEntries`, 1001 = `Vote`) at version 0.
+//! Wire shape: `RequestHeader v2` (flexible) carries a Crabka-
+//! private api key (1000 = `AppendEntries`, 1001 = `Vote`) at version 0.
 //! Bodies are encoded by [`crate::wire`] and travel as opaque bytes
 //! through [`crabka_client_core::Connection::raw_request`]. The response
 //! body decodes back into the openraft response types.
@@ -17,7 +17,7 @@
 //!   `PartialSuccess` paths collapse onto `HigherVote` for now — the
 //!   v0 response codec only carries `success/term/last_log_index`, which
 //!   is enough to make progress in a healthy 3-node quorum with no
-//!   network faults, so the simpler decoding is acceptable.
+//!   network faults.
 //! - `Vote`: full semantics with the caveat that the peer's
 //!   `last_log_id` is not returned (the v0 response carries only
 //!   `vote_granted` + `term`).
@@ -25,8 +25,8 @@
 //!   prefix has been compacted; the response carries the follower's
 //!   `vote` so the leader can detect a higher term.
 //!
-//! These limitations are intentional; the `wire::Crabka*Response` types
-//! can evolve without breaking the `RaftNetworkFactory` interface.
+//! `wire::Crabka*Response` can evolve to carry richer fields without
+//! breaking the `RaftNetworkFactory` interface.
 
 #![allow(dead_code)]
 

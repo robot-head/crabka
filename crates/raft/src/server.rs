@@ -333,7 +333,6 @@ async fn dispatch(api_key: i16, body: &[u8], raft: &Raft) -> Result<Bytes, RaftE
             let vote_bytes = <SerdeCompat<openraft::Vote<NodeId>>>::serialize(&resp.vote)?;
             let mut out = Vec::new();
             CrabkaInstallSnapshotResponse {
-                error_code: 0,
                 vote: Bytes::from(vote_bytes),
             }
             .encode_v0(&mut out)?;

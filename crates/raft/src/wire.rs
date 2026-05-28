@@ -4,7 +4,7 @@
 //! hand-written `encode_v0`/`decode_v0` methods living here because they're
 //! controller-only and Crabka-specific.
 //!
-//! Api keys: 1000 `AppendEntries`, 1001 `Vote`, 1002 `InstallSnapshot` (stub).
+//! Api keys: 1000 `AppendEntries`, 1001 `Vote`, 1002 `InstallSnapshot`.
 //!
 //! Explicit `encode_v0`/`decode_v0` methods are used rather than the
 //! generic `Encode`/`Decode` traits from `crabka-protocol` because the
@@ -21,9 +21,9 @@ pub const API_KEY_APPEND_ENTRIES: i16 = 1000;
 pub const API_KEY_VOTE: i16 = 1001;
 pub const API_KEY_INSTALL_SNAPSHOT: i16 = 1002;
 /// Forward a `Controller::submit_change` from a follower to the leader.
-/// The body is the bincode-encoded `Vec<MetadataRecord>` and the
-/// response carries a single `error_code` (0 = applied, non-zero =
-/// openraft / metadata-validation failure).
+/// The body is the bincode-encoded `Vec<MetadataRecord>` and the response
+/// carries a single `error_code` (0 = applied, non-zero = openraft /
+/// metadata-validation failure).
 pub const API_KEY_SUBMIT_CHANGE: i16 = 1003;
 
 /// Payload kind discriminator inside `AppendEntries.entries[].payload`.
@@ -414,7 +414,6 @@ impl CrabkaInstallSnapshotRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CrabkaInstallSnapshotResponse {
-    pub error_code: i16,
     /// bincode `Vote<NodeId>` the follower reports back so the leader can
     /// detect a higher term and step down.
     pub vote: Bytes,
@@ -422,20 +421,13 @@ pub struct CrabkaInstallSnapshotResponse {
 
 impl CrabkaInstallSnapshotResponse {
     pub fn encode_v0(&self, out: &mut Vec<u8>) -> Result<(), ProtocolError> {
-        out.put_i16(self.error_code);
         put_len_prefixed(out, &self.vote)?;
         Ok(())
     }
 
     pub fn decode_v0(buf: &mut &[u8]) -> Result<Self, ProtocolError> {
-        if buf.remaining() < 2 {
-            return Err(ProtocolError::UnexpectedEof {
-                needed: 2 - buf.remaining(),
-            });
-        }
-        let error_code = buf.get_i16();
         let vote = get_len_prefixed(buf)?;
-        Ok(Self { error_code, vote })
+        Ok(Self { vote })
     }
 }
 
@@ -503,7 +495,6 @@ mod tests {
         );
 
         let resp = CrabkaInstallSnapshotResponse {
-            error_code: 0,
             vote: Bytes::from_static(b"resp-vote"),
         };
         let mut out = Vec::new();
