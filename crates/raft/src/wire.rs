@@ -334,49 +334,108 @@ impl CrabkaSubmitChangeResponse {
     }
 }
 
-/// Stub for the deferred snapshot path. Encoded as a single byte `0`
-/// so the wire stays well-defined.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct CrabkaInstallSnapshotRequest;
+/// Write an `i32`-length-prefixed byte field, mirroring the framing
+/// `CrabkaSubmitChangeRequest` uses for its opaque `records` blob.
+fn put_len_prefixed(out: &mut Vec<u8>, bytes: &[u8]) -> Result<(), ProtocolError> {
+    out.put_i32(
+        i32::try_from(bytes.len())
+            .map_err(|_| ProtocolError::InvalidValue("length exceeds i32::MAX"))?,
+    );
+    out.put_slice(bytes);
+    Ok(())
+}
+
+/// Read an `i32`-length-prefixed byte field written by [`put_len_prefixed`].
+fn get_len_prefixed(buf: &mut &[u8]) -> Result<Bytes, ProtocolError> {
+    if buf.remaining() < 4 {
+        return Err(ProtocolError::UnexpectedEof {
+            needed: 4 - buf.remaining(),
+        });
+    }
+    let len = buf.get_i32();
+    let len =
+        usize::try_from(len).map_err(|_| ProtocolError::InvalidValue("negative length prefix"))?;
+    if buf.remaining() < len {
+        return Err(ProtocolError::UnexpectedEof {
+            needed: len - buf.remaining(),
+        });
+    }
+    let bytes = Bytes::copy_from_slice(&buf[..len]);
+    buf.advance(len);
+    Ok(bytes)
+}
+
+/// One chunk of an openraft `InstallSnapshot` RPC. `vote` and `meta` are
+/// the bincode-encoded `Vote<NodeId>` / `SnapshotMeta<NodeId, Node>`;
+/// `data` is the raw checkpoint-byte chunk starting at `offset`, with
+/// `done` set on the final chunk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CrabkaInstallSnapshotRequest {
+    pub vote: Bytes,
+    pub meta: Bytes,
+    pub offset: i64,
+    pub data: Bytes,
+    pub done: bool,
+}
 
 impl CrabkaInstallSnapshotRequest {
     pub fn encode_v0(&self, out: &mut Vec<u8>) -> Result<(), ProtocolError> {
-        out.put_u8(0);
+        put_len_prefixed(out, &self.vote)?;
+        put_len_prefixed(out, &self.meta)?;
+        out.put_i64(self.offset);
+        put_len_prefixed(out, &self.data)?;
+        out.put_u8(u8::from(self.done));
         Ok(())
     }
 
     pub fn decode_v0(buf: &mut &[u8]) -> Result<Self, ProtocolError> {
-        if buf.remaining() < 1 {
+        let vote = get_len_prefixed(buf)?;
+        let meta = get_len_prefixed(buf)?;
+        if buf.remaining() < 8 {
             return Err(ProtocolError::UnexpectedEof {
-                needed: 1 - buf.remaining(),
+                needed: 8 - buf.remaining(),
             });
         }
-        let _ = buf.get_u8();
-        Ok(Self)
+        let offset = buf.get_i64();
+        let data = get_len_prefixed(buf)?;
+        if buf.remaining() < 1 {
+            return Err(ProtocolError::UnexpectedEof { needed: 1 });
+        }
+        let done = buf.get_u8() != 0;
+        Ok(Self {
+            vote,
+            meta,
+            offset,
+            data,
+            done,
+        })
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CrabkaInstallSnapshotResponse {
     pub error_code: i16,
+    /// bincode `Vote<NodeId>` the follower reports back so the leader can
+    /// detect a higher term and step down.
+    pub vote: Bytes,
 }
 
 impl CrabkaInstallSnapshotResponse {
     pub fn encode_v0(&self, out: &mut Vec<u8>) -> Result<(), ProtocolError> {
         out.put_i16(self.error_code);
+        put_len_prefixed(out, &self.vote)?;
         Ok(())
     }
 
     pub fn decode_v0(buf: &mut &[u8]) -> Result<Self, ProtocolError> {
-        const LEN: usize = 2;
-        if buf.remaining() < LEN {
+        if buf.remaining() < 2 {
             return Err(ProtocolError::UnexpectedEof {
-                needed: LEN - buf.remaining(),
+                needed: 2 - buf.remaining(),
             });
         }
-        Ok(Self {
-            error_code: buf.get_i16(),
-        })
+        let error_code = buf.get_i16();
+        let vote = get_len_prefixed(buf)?;
+        Ok(Self { error_code, vote })
     }
 }
 
@@ -427,14 +486,32 @@ mod tests {
     }
 
     #[test]
-    fn install_snapshot_stub_round_trip() {
-        let req = CrabkaInstallSnapshotRequest;
+    fn install_snapshot_round_trip() {
+        let req = CrabkaInstallSnapshotRequest {
+            vote: Bytes::from_static(b"vote-bytes"),
+            meta: Bytes::from_static(b"meta-bytes"),
+            offset: 4096,
+            data: Bytes::from_static(b"chunk-of-checkpoint"),
+            done: true,
+        };
         let mut out = Vec::new();
         req.encode_v0(&mut out).unwrap();
         let mut cur: &[u8] = &out;
         assert_eq!(
             CrabkaInstallSnapshotRequest::decode_v0(&mut cur).unwrap(),
             req
+        );
+
+        let resp = CrabkaInstallSnapshotResponse {
+            error_code: 0,
+            vote: Bytes::from_static(b"resp-vote"),
+        };
+        let mut out = Vec::new();
+        resp.encode_v0(&mut out).unwrap();
+        let mut cur: &[u8] = &out;
+        assert_eq!(
+            CrabkaInstallSnapshotResponse::decode_v0(&mut cur).unwrap(),
+            resp
         );
     }
 }
