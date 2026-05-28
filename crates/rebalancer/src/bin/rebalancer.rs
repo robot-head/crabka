@@ -77,9 +77,21 @@ struct Args {
     broker_capacity_file: String,
 
     /// Per-broker metric scrape targets. Format: "id:host:port,id:host:port,…".
-    /// Empty = scraper disabled (usage-driven goals are no-ops).
+    /// When set, overrides `--metrics-port` and uses these static targets
+    /// instead of live discovery from the ingester's `Metadata` snapshot.
+    /// Empty = fall back to discovered targets via `--metrics-port`.
     #[arg(long, env = "CRABKA_METRICS_SCRAPE_TARGETS", default_value = "")]
     metrics_scrape_targets: String,
+
+    /// Broker metrics-endpoint port used by live scrape-target discovery.
+    ///
+    /// When `--metrics-scrape-targets` is unset, the scraper derives its
+    /// target list from the ingester's `Metadata` snapshot, addressing
+    /// each broker at `host:METRICS_PORT`. Ignored when
+    /// `--metrics-scrape-targets` is set. Defaults to `crabka-broker`'s
+    /// slice-39 default (`9404`).
+    #[arg(long, env = "CRABKA_REBALANCER_METRICS_PORT", default_value_t = 9404)]
+    metrics_port: u16,
 
     /// How often the scraper polls each target's /metrics endpoint.
     #[arg(
@@ -341,31 +353,42 @@ async fn main() -> anyhow::Result<()> {
         },
     ));
 
-    if !args.metrics_scrape_targets.is_empty() {
-        match crabka_rebalancer::scraper::parse_targets(&args.metrics_scrape_targets) {
-            Ok(targets) => {
-                info!(
-                    target_count = targets.len(),
-                    scrape_interval_secs = args.metrics_scrape_interval_secs,
-                    retention_secs = args.metrics_retention_secs,
-                    "starting metrics scraper"
-                );
-                let scraper = crabka_rebalancer::scraper::Scraper::new(
-                    targets,
-                    std::time::Duration::from_secs(args.metrics_scrape_interval_secs),
-                    usage_store.clone(),
-                    shutdown.clone(),
-                );
-                tokio::spawn(scraper.run());
+    let source: crabka_rebalancer::scraper::TargetSource =
+        if args.metrics_scrape_targets.trim().is_empty() {
+            info!(
+                metrics_port = args.metrics_port,
+                scrape_interval_secs = args.metrics_scrape_interval_secs,
+                retention_secs = args.metrics_retention_secs,
+                "starting metrics scraper (discovered targets via Metadata)"
+            );
+            crabka_rebalancer::scraper::TargetSource::Discovered {
+                snapshot: snapshot.clone(),
+                metrics_port: args.metrics_port,
             }
-            Err(e) => {
-                return Err(anyhow::anyhow!(
+        } else {
+            let targets = crabka_rebalancer::scraper::parse_targets(&args.metrics_scrape_targets)
+                .map_err(|e| {
+                anyhow::anyhow!(
                     "failed to parse --metrics-scrape-targets `{}`: {e}",
                     args.metrics_scrape_targets
-                ));
-            }
-        }
-    }
+                )
+            })?;
+            info!(
+                target_count = targets.len(),
+                scrape_interval_secs = args.metrics_scrape_interval_secs,
+                retention_secs = args.metrics_retention_secs,
+                "starting metrics scraper (static targets)"
+            );
+            crabka_rebalancer::scraper::TargetSource::Static(targets)
+        };
+
+    let scraper = crabka_rebalancer::scraper::Scraper::new(
+        source,
+        std::time::Duration::from_secs(args.metrics_scrape_interval_secs),
+        usage_store.clone(),
+        shutdown.clone(),
+    );
+    tokio::spawn(scraper.run());
 
     let goal_registry = Arc::new(GoalRegistry::default_registry());
 

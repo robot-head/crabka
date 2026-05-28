@@ -74,3 +74,236 @@ mod tests {
         assert!(matches!(err, TargetParseError::BadId(_)));
     }
 }
+
+use std::sync::Arc;
+use std::sync::OnceLock;
+
+use arc_swap::ArcSwap;
+use tracing::warn;
+
+use crate::model::ClusterState;
+
+/// Where the scraper finds its targets each tick.
+///
+/// `Static` matches the pre-43h behavior (explicit `id:host:port` list
+/// from `--metrics-scrape-targets`). `Discovered` reads from the
+/// ingester's `ClusterState` snapshot and synthesizes targets at
+/// `host:metrics_port` for every broker in the snapshot.
+pub enum TargetSource {
+    Static(Vec<ScrapeTarget>),
+    Discovered {
+        snapshot: Arc<ArcSwap<Option<ClusterState>>>,
+        metrics_port: u16,
+    },
+}
+
+impl TargetSource {
+    /// Materialize the current set of scrape targets.
+    ///
+    /// Called by the scraper's main loop each tick. Cheap: the `Static`
+    /// arm clones a small `Vec`; the `Discovered` arm reads the snapshot
+    /// guard and emits one `ScrapeTarget` per broker (skipping brokers
+    /// with empty `host`).
+    #[must_use]
+    pub fn current(&self) -> Vec<ScrapeTarget> {
+        match self {
+            Self::Static(targets) => targets.clone(),
+            Self::Discovered {
+                snapshot,
+                metrics_port,
+            } => {
+                let guard = snapshot.load();
+                let state: &Option<ClusterState> = &guard;
+                let Some(state) = state.as_ref() else {
+                    return Vec::new();
+                };
+                let mut out = Vec::with_capacity(state.brokers.len());
+                for b in &state.brokers {
+                    if b.host.is_empty() {
+                        warn_once_empty_host(b.id);
+                        continue;
+                    }
+                    out.push(ScrapeTarget {
+                        broker_id: b.id,
+                        addr: format!("{}:{}", b.host, metrics_port),
+                    });
+                }
+                out
+            }
+        }
+    }
+}
+
+/// One-time WARN per `broker_id` when the broker advertises an empty host.
+fn warn_once_empty_host(broker_id: i32) {
+    static SEEN: OnceLock<std::sync::Mutex<std::collections::HashSet<i32>>> = OnceLock::new();
+    let mut seen = SEEN
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+        .lock()
+        .expect("empty-host seen-set");
+    if seen.insert(broker_id) {
+        warn!(
+            broker_id,
+            "broker advertises empty host in metadata; skipping in scrape discovery"
+        );
+    }
+}
+
+#[cfg(test)]
+mod target_source_tests {
+    use super::*;
+    use crate::model::{BrokerView, ClusterState, InFlightReassignment, PartitionView};
+
+    fn cluster_state_with(brokers: Vec<BrokerView>) -> ClusterState {
+        ClusterState {
+            cluster_id: Some("test-cluster".into()),
+            snapshot_at_ms: 0,
+            brokers,
+            partitions: Vec::<PartitionView>::new(),
+            in_flight_reassignments: Vec::<InFlightReassignment>::new(),
+        }
+    }
+
+    #[test]
+    fn static_source_returns_underlying_list() {
+        let targets = vec![
+            ScrapeTarget {
+                broker_id: 1,
+                addr: "h1:9404".into(),
+            },
+            ScrapeTarget {
+                broker_id: 2,
+                addr: "h2:9404".into(),
+            },
+        ];
+        let src = TargetSource::Static(targets.clone());
+        assert_eq!(src.current(), targets);
+    }
+
+    #[test]
+    fn discovered_source_with_no_snapshot_returns_empty() {
+        let snapshot: Arc<ArcSwap<Option<ClusterState>>> = Arc::new(ArcSwap::from_pointee(None));
+        let src = TargetSource::Discovered {
+            snapshot,
+            metrics_port: 9404,
+        };
+        assert!(src.current().is_empty());
+    }
+
+    #[test]
+    fn discovered_source_emits_one_target_per_broker() {
+        let state = cluster_state_with(vec![
+            BrokerView {
+                id: 1,
+                host: "broker1".into(),
+                port: 9092,
+                rack: None,
+            },
+            BrokerView {
+                id: 2,
+                host: "broker2".into(),
+                port: 9092,
+                rack: None,
+            },
+            BrokerView {
+                id: 3,
+                host: "broker3".into(),
+                port: 9092,
+                rack: None,
+            },
+        ]);
+        let snapshot = Arc::new(ArcSwap::from_pointee(Some(state)));
+        let src = TargetSource::Discovered {
+            snapshot,
+            metrics_port: 9404,
+        };
+        let mut out = src.current();
+        out.sort_by_key(|t| t.broker_id);
+        assert_eq!(out.len(), 3);
+        assert_eq!(
+            out[0],
+            ScrapeTarget {
+                broker_id: 1,
+                addr: "broker1:9404".into()
+            }
+        );
+        assert_eq!(
+            out[1],
+            ScrapeTarget {
+                broker_id: 2,
+                addr: "broker2:9404".into()
+            }
+        );
+        assert_eq!(
+            out[2],
+            ScrapeTarget {
+                broker_id: 3,
+                addr: "broker3:9404".into()
+            }
+        );
+    }
+
+    #[test]
+    fn discovered_source_skips_brokers_with_empty_host() {
+        let state = cluster_state_with(vec![
+            BrokerView {
+                id: 1,
+                host: "broker1".into(),
+                port: 9092,
+                rack: None,
+            },
+            BrokerView {
+                id: 2,
+                host: String::new(),
+                port: 9092,
+                rack: None,
+            },
+            BrokerView {
+                id: 3,
+                host: "broker3".into(),
+                port: 9092,
+                rack: None,
+            },
+        ]);
+        let snapshot = Arc::new(ArcSwap::from_pointee(Some(state)));
+        let src = TargetSource::Discovered {
+            snapshot,
+            metrics_port: 9404,
+        };
+        let mut out = src.current();
+        out.sort_by_key(|t| t.broker_id);
+        assert_eq!(out.len(), 2);
+        assert_eq!(
+            out.iter().map(|t| t.broker_id).collect::<Vec<_>>(),
+            vec![1, 3]
+        );
+    }
+
+    #[test]
+    fn discovered_source_reflects_snapshot_updates() {
+        let snapshot: Arc<ArcSwap<Option<ClusterState>>> = Arc::new(ArcSwap::from_pointee(None));
+        let src = TargetSource::Discovered {
+            snapshot: snapshot.clone(),
+            metrics_port: 9404,
+        };
+        assert!(src.current().is_empty());
+
+        // Now publish a snapshot.
+        let state = cluster_state_with(vec![BrokerView {
+            id: 7,
+            host: "newbie".into(),
+            port: 9092,
+            rack: None,
+        }]);
+        snapshot.store(Arc::new(Some(state)));
+
+        let out = src.current();
+        assert_eq!(
+            out,
+            vec![ScrapeTarget {
+                broker_id: 7,
+                addr: "newbie:9404".into()
+            }]
+        );
+    }
+}
