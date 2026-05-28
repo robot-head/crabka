@@ -5,6 +5,9 @@
 pub mod range;
 pub mod uniform;
 
+pub use range::RangeAssignor;
+pub use uniform::UniformAssignor;
+
 use std::collections::HashMap;
 
 use crabka_protocol::primitives::uuid::Uuid;
