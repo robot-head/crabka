@@ -1,0 +1,251 @@
+// Rust 1.95 annotate-snippets ICE on clippy::pedantic in test files.
+#![allow(clippy::pedantic)]
+
+//! KIP-664 `ListTransactions` (api_key 66) + `DescribeTransactions`
+//! (api_key 65). Both surface the broker's local `TxnCoordinator`
+//! state — `(transactional_id, producer_id, state)` summary for List,
+//! full per-tid detail (timeout, start time, partitions) for Describe.
+
+#![cfg(not(target_os = "windows"))]
+
+use std::time::Duration;
+
+use bytes::Bytes;
+use tempfile::TempDir;
+
+use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
+use crabka_client_producer::{Producer, ProducerRecord};
+use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
+use crabka_protocol::owned::describe_transactions_request::DescribeTransactionsRequest;
+use crabka_protocol::owned::list_transactions_request::ListTransactionsRequest;
+
+async fn boot_single() -> (BrokerHandle, String, TempDir) {
+    let dir = TempDir::new().unwrap();
+    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+        .await
+        .unwrap();
+    let bootstrap = broker.listen_addr().to_string();
+    (broker, bootstrap, dir)
+}
+
+async fn create_topic(bootstrap: &str, name: &str) {
+    let client = crabka_client_core::Client::builder()
+        .bootstrap(bootstrap)
+        .build()
+        .await
+        .unwrap();
+    let cr = client
+        .send(CreateTopicsRequest {
+            topics: vec![CreatableTopic {
+                name: name.into(),
+                num_partitions: 1,
+                replication_factor: 1,
+                ..Default::default()
+            }],
+            timeout_ms: 5_000,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(
+        cr.topics[0].error_code == 0 || cr.topics[0].error_code == 36,
+        "create_topic {name}: error_code={}",
+        cr.topics[0].error_code
+    );
+}
+
+fn rec(topic: &str, v: &str) -> ProducerRecord {
+    ProducerRecord {
+        topic: topic.into(),
+        value: Some(Bytes::from(v.to_string())),
+        ..Default::default()
+    }
+}
+
+async fn admin_client(bootstrap: &str) -> crabka_client_core::Client {
+    crabka_client_core::Client::builder()
+        .bootstrap(bootstrap)
+        .build()
+        .await
+        .unwrap()
+}
+
+/// Boot a broker, init a transactional producer with the given tid,
+/// begin a txn, and produce one record to `topic`. Leaves the txn
+/// in `Ongoing` so the admin APIs can see it. Returns the broker +
+/// producer (caller closes both).
+async fn boot_with_ongoing_txn(
+    tid: &str,
+    topic: &str,
+) -> (BrokerHandle, String, TempDir, Producer) {
+    let (broker, bootstrap, dir) = boot_single().await;
+    create_topic(&bootstrap, topic).await;
+
+    let producer = Producer::builder()
+        .bootstrap(bootstrap.clone())
+        .transactional_id(tid)
+        .build()
+        .await
+        .unwrap();
+    producer.init_transactions().await.unwrap();
+    producer.begin_transaction().await.unwrap();
+    // `send` returns a future-record-metadata handle; we only need
+    // the side effect of enrolling the partition in the txn. Drop
+    // the awaited result explicitly so clippy's
+    // `let_underscore_future` doesn't fire.
+    drop(producer.send(rec(topic, "v")).await);
+    // Don't commit/abort — we want the txn to stay Ongoing.
+
+    (broker, bootstrap, dir, producer)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn list_transactions_returns_ongoing_txn() {
+    let (broker, bootstrap, _dir, producer) = boot_with_ongoing_txn("my-tid", "t-list").await;
+
+    let client = admin_client(&bootstrap).await;
+    // Retry briefly — AddPartitionsToTxn races the visibility of the
+    // partitions set in the coordinator's TxnEntry.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let resp = loop {
+        let r = client
+            .send(ListTransactionsRequest::default())
+            .await
+            .expect("ListTransactions");
+        if !r.transaction_states.is_empty() {
+            break r;
+        }
+        if std::time::Instant::now() > deadline {
+            panic!("ListTransactions never saw the ongoing txn: {r:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+
+    assert_eq!(resp.error_code, 0);
+    let row = resp
+        .transaction_states
+        .iter()
+        .find(|r| r.transactional_id == "my-tid")
+        .expect("my-tid not present");
+    assert_eq!(row.transaction_state, "Ongoing");
+    assert!(row.producer_id > 0);
+    assert!(
+        resp.unknown_state_filters.is_empty(),
+        "no filters sent → no unknowns: {:?}",
+        resp.unknown_state_filters,
+    );
+
+    producer.close().await.unwrap();
+    broker.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn list_transactions_state_filter_excludes_non_matching() {
+    let (broker, bootstrap, _dir, producer) =
+        boot_with_ongoing_txn("my-tid", "t-state-filter").await;
+
+    let client = admin_client(&bootstrap).await;
+    // Filter to "Empty" only — our txn is Ongoing, so the row should
+    // be excluded.
+    let r = client
+        .send(ListTransactionsRequest {
+            state_filters: vec!["Empty".into()],
+            ..Default::default()
+        })
+        .await
+        .expect("ListTransactions(state=Empty)");
+    assert_eq!(r.error_code, 0);
+    assert!(
+        r.transaction_states
+            .iter()
+            .all(|t| t.transactional_id != "my-tid"),
+        "Ongoing txn must not match an Empty state filter: {r:?}",
+    );
+
+    producer.close().await.unwrap();
+    broker.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn list_transactions_reports_unknown_state_filters() {
+    let (broker, bootstrap, _dir) = boot_single().await;
+
+    let client = admin_client(&bootstrap).await;
+    let r = client
+        .send(ListTransactionsRequest {
+            state_filters: vec!["Ongoing".into(), "BogusState".into(), "Empty".into()],
+            ..Default::default()
+        })
+        .await
+        .expect("ListTransactions");
+    assert_eq!(r.error_code, 0);
+    // The known names round-trip silently; the bogus one rides on the
+    // unknown_state_filters echo per KIP-664.
+    assert_eq!(r.unknown_state_filters, vec!["BogusState".to_string()]);
+
+    broker.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn describe_transactions_returns_full_state_for_known_tid() {
+    let (broker, bootstrap, _dir, producer) =
+        boot_with_ongoing_txn("describe-tid", "t-describe").await;
+
+    let client = admin_client(&bootstrap).await;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let row = loop {
+        let r = client
+            .send(DescribeTransactionsRequest {
+                transactional_ids: vec!["describe-tid".into()],
+                ..Default::default()
+            })
+            .await
+            .expect("DescribeTransactions");
+        assert_eq!(r.transaction_states.len(), 1);
+        let row = &r.transaction_states[0];
+        if row.error_code == 0 && !row.topics.is_empty() {
+            break row.clone();
+        }
+        if std::time::Instant::now() > deadline {
+            panic!("Ongoing txn never showed its partitions: {row:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+
+    assert_eq!(row.transactional_id, "describe-tid");
+    assert_eq!(row.transaction_state, "Ongoing");
+    assert!(row.producer_id > 0);
+    assert_eq!(row.transaction_timeout_ms, 60_000);
+    assert!(row.transaction_start_time_ms > 0);
+    // Exactly one topic + partition, since we produced one record to
+    // a 1-partition topic.
+    assert_eq!(row.topics.len(), 1);
+    assert_eq!(row.topics[0].topic, "t-describe");
+    assert_eq!(row.topics[0].partitions, vec![0]);
+
+    producer.close().await.unwrap();
+    broker.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn describe_transactions_returns_not_found_for_unknown_tid() {
+    let (broker, bootstrap, _dir) = boot_single().await;
+
+    let client = admin_client(&bootstrap).await;
+    let r = client
+        .send(DescribeTransactionsRequest {
+            transactional_ids: vec!["ghost-tid".into()],
+            ..Default::default()
+        })
+        .await
+        .expect("DescribeTransactions");
+    assert_eq!(r.transaction_states.len(), 1);
+    assert_eq!(
+        r.transaction_states[0].error_code, 75,
+        "expected TRANSACTIONAL_ID_NOT_FOUND (75), got {:?}",
+        r.transaction_states[0],
+    );
+    assert_eq!(r.transaction_states[0].transactional_id, "ghost-tid");
+
+    broker.shutdown().await;
+}

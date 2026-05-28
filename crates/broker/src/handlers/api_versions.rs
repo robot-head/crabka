@@ -124,6 +124,10 @@ fn supported_apis() -> Vec<ApiVersion> {
         // DescribeProducers (KIP-664) — admin introspection of
         // per-(topic, partition) idempotent / transactional producer state.
         v!(describe_producers_request),
+        // DescribeTransactions + ListTransactions (KIP-664) — admin
+        // introspection of the TxnCoordinator's local state map.
+        v!(describe_transactions_request),
+        v!(list_transactions_request),
         // DescribeTopicPartitions (KIP-966) — paginated topic listing
         // used by JVM admin clients 3.7+ in place of fanned-out Metadata
         // calls for `kafka-topics --describe`.

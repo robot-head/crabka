@@ -4422,3 +4422,85 @@ introspection metadata).
     helper iterates the underlying `HashMap`, so producer rows come
     back in non-deterministic order. The JVM admin sorts client-side;
     no broker-side guarantee is documented in KIP-664.
+
+## Slice — ListTransactions + DescribeTransactions admin APIs (KIP-664) (2026-05-28)
+
+- **Goal.** Land the KIP-664 transactional-introspection admin RPCs —
+  `ListTransactions` (api_key 66) and `DescribeTransactions`
+  (api_key 65) — surfacing the in-memory `TxnCoordinator` state
+  through the wire. JVM `Admin.listTransactions` /
+  `Admin.describeTransactions` (and `kafka-transactions
+  --list` / `--describe`) drive these to find stuck or
+  long-running transactions. The companion `DescribeProducers`
+  handler from the previous slice covers per-partition producer
+  state; this slice closes the txn-coordinator-introspection half.
+- **Snapshot helper.** New `TxnCoordinator::snapshot()` walks the
+  internal `DashMap<tid, Arc<Mutex<TxnEntry>>>`, collects the handles
+  while still on the DashMap shard locks, then awaits each
+  per-entry mutex in turn. Returns `Vec<TxnEntry>` — internally
+  consistent per-entry but not across the batch, which matches the
+  JVM coordinator's behavior and is acceptable for admin
+  introspection.
+- **`handlers/list_transactions.rs`** (api_key 66):
+  - Filters by `state_filters` (empty = all) and `producer_id_filters`
+    (empty = all).
+  - KIP-664 `unknown_state_filters` echo: any filter string the
+    broker doesn't recognize rides out on the response so clients
+    know their filter is over-conservative.
+  - Per-tid `Describe` on `TransactionalId` — Deny → silent filter
+    (matches JVM).
+  - Emits the wire `transaction_state` strings ("Empty", "Ongoing",
+    "PrepareCommit", "PrepareAbort", "CompleteCommit",
+    "CompleteAbort", "Dead") matching JVM `TransactionState.toString()`.
+- **`handlers/describe_transactions.rs`** (api_key 65):
+  - Per-tid `Describe` on `TransactionalId` — Deny → row with
+    `TRANSACTIONAL_ID_AUTHORIZATION_FAILED (53)`.
+  - Unknown tid → row with `TRANSACTIONAL_ID_NOT_FOUND (75)`
+    (inlined as a const; not yet promoted to `codes.rs`).
+  - Allow row populates `producer_id`, `producer_epoch`,
+    `transaction_state` string, `transaction_timeout_ms`,
+    `transaction_start_time_ms`, and the `Topics[]` list
+    (alphabetical by topic, ascending partitions — deterministic so
+    snapshot tests stay stable).
+- **Wiring.** Both handlers register through inline-intercept in
+  `network::dispatch::run_session` (both need `RequestContext` for
+  ACL). `handler_body_flexible` returns true for both api_keys
+  (flexible from v0). `ApiVersions::supported_apis()` advertises
+  both at the codegen's `(MIN_VERSION, MAX_VERSION)` range — v0 for
+  both today.
+- **Tests.** 5 integration tests in `tests/list_describe_transactions.rs`
+  driving a real transactional producer through `init →
+  begin → send` and leaving the txn `Ongoing` so admin APIs see it:
+  - `list_transactions_returns_ongoing_txn` — list returns the
+    `Ongoing` txn with the right tid + non-zero producer_id and
+    empty `unknown_state_filters`.
+  - `list_transactions_state_filter_excludes_non_matching` —
+    `state_filters = ["Empty"]` filters out the `Ongoing` row.
+  - `list_transactions_reports_unknown_state_filters` — filtering
+    with an unknown state name round-trips that name back on
+    `unknown_state_filters`.
+  - `describe_transactions_returns_full_state_for_known_tid` —
+    full state (timeout 60 s, start_ms > 0, one topic with one
+    partition).
+  - `describe_transactions_returns_not_found_for_unknown_tid` —
+    unknown tid → `TRANSACTIONAL_ID_NOT_FOUND (75)`.
+  - Plus 1 handler-level unit test for the txn-state string mapping
+    and 1 for the topic-grouping helper.
+- **README.** KIP-664 row updated to list all three admin APIs
+  (`DescribeProducers` + `ListTransactions` + `DescribeTransactions`).
+- **Workspace fmt + `clippy -p crabka-broker --all-targets -- -D warnings`
+  + broker lib (613 tests) + new `list_describe_transactions` (5 tests) +
+  regression sweep of `transactions` + `describe_producers`** — all green.
+- **Out of scope.**
+  - `DurationFilter` (v1+) and `TransactionalIdPattern` (v2+) — Crabka
+    advertises the codegen's v0..=v0 range so the new filter fields
+    don't ride in. Bumping `MAX_VERSION` and wiring those filters is
+    a clean follow-up.
+  - JVM's per-tid lock ordering (it locks all matching entries before
+    walking them to avoid mid-walk state drift). Our snapshot is
+    per-entry consistent only — acceptable for admin introspection;
+    Kafka has the same property in practice on its own JVM tx
+    coordinator.
+  - Promoting `TRANSACTIONAL_ID_NOT_FOUND = 75` from an inline const
+    to `codes.rs`. It's used by exactly one handler today; the
+    codes module already holds the heavy hitters.
