@@ -2,14 +2,12 @@
 //! synchronous + infallible; we swap the `Arc<MetadataImage>` after
 //! mutating a fresh clone so readers always observe a consistent view.
 //!
-//! Snapshots are not implemented; the snapshot methods return a typed
-//! "Unsupported" `StorageError` so openraft falls back to plain
-//! append-entries replication for lagging followers. The metadata log
-//! stays small, so missing snapshots is fine.
-//!
-//! The inner type is consumed only by `state_machine.rs` and
-//! `Controller`, so the lib-crate root sees it as "dead". The
-//! module-scoped allow keeps the surface narrow.
+//! Snapshot generation (`build_snapshot`/`get_current_snapshot`) and
+//! recovery (seeding the image from the newest on-disk checkpoint at
+//! construction) are implemented here. The receiving side —
+//! `begin_receiving_snapshot`/`install_snapshot` for follower catch-up
+//! over openraft's `InstallSnapshot` RPC — is not yet wired, so those
+//! methods return a typed "Unsupported" `StorageError`.
 
 #![allow(dead_code)]
 

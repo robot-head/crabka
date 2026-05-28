@@ -186,8 +186,14 @@ impl SnapshotReader {
 /// into `dir`. The checkpoint stays pure KIP-630 (record batches only);
 /// openraft's `SnapshotMeta` (`last_log_id` + `last_membership` + id) rides
 /// alongside in `<id>.checkpoint.meta` as bincode, mirroring the
-/// `vote.bin` sidecar pattern. Both files land via temp + rename so a
-/// crash mid-write never leaves a torn checkpoint visible to readers.
+/// `vote.bin` sidecar pattern.
+///
+/// The `.meta` is written *before* the `.checkpoint`, making the
+/// `.checkpoint` the commit marker: [`load_latest`] keys off `.checkpoint`
+/// files, so a crash between the two writes leaves at worst an orphan
+/// `.meta` (ignored on recovery), never a `.checkpoint` whose sidecar is
+/// missing. Each file lands via temp + rename so neither is ever seen
+/// half-written.
 pub(crate) fn persist(
     dir: &Path,
     id: SnapshotId,
@@ -195,10 +201,9 @@ pub(crate) fn persist(
     meta: &SnapshotMeta<NodeId, Node>,
 ) -> Result<(), RaftError> {
     std::fs::create_dir_all(dir).map_err(crabka_log::LogError::Io)?;
-    let checkpoint = dir.join(id.file_name());
     let meta_bytes = <SerdeCompat<SnapshotMeta<NodeId, Node>>>::serialize(meta)?;
-    write_atomic(&checkpoint, bytes)?;
     write_atomic(&dir.join(format!("{}.meta", id.file_name())), &meta_bytes)?;
+    write_atomic(&dir.join(id.file_name()), bytes)?;
     Ok(())
 }
 
@@ -289,6 +294,42 @@ mod tests {
         let records = SnapshotReader::read_records(&bytes).unwrap();
         assert!(records.is_empty());
         assert_eq!(MetadataImage::from_records(cid, &records), image);
+    }
+
+    #[test]
+    fn persist_then_load_latest_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = SnapshotId {
+            end_offset: 42,
+            epoch: 1,
+        };
+        let bytes = b"checkpoint-bytes".to_vec();
+        let meta = SnapshotMeta {
+            last_log_id: None,
+            last_membership: openraft::StoredMembership::default(),
+            snapshot_id: id.file_name(),
+        };
+        persist(dir.path(), id, &bytes, &meta).unwrap();
+
+        let (loaded_id, loaded_bytes, loaded_meta) =
+            load_latest(dir.path()).unwrap().expect("checkpoint present");
+        assert_eq!(loaded_id, id);
+        assert_eq!(loaded_bytes, bytes);
+        assert_eq!(loaded_meta.snapshot_id, id.file_name());
+    }
+
+    #[test]
+    fn load_latest_ignores_orphan_meta() {
+        // A crash between persist's two writes can leave a `.meta` with no
+        // `.checkpoint`. Since the `.checkpoint` is the commit marker,
+        // load_latest must treat that directory as having no snapshot.
+        let dir = tempfile::tempdir().unwrap();
+        let id = SnapshotId {
+            end_offset: 7,
+            epoch: 0,
+        };
+        std::fs::write(dir.path().join(format!("{}.meta", id.file_name())), b"orphan").unwrap();
+        assert!(load_latest(dir.path()).unwrap().is_none());
     }
 
     #[test]

@@ -4,10 +4,9 @@
 //! payload IS the serialized entry. Future KRaft-wire-compat work will
 //! revisit the record layout; today the wrapping is internal only.
 //!
-//! Only the smoke tests and `Controller` reach into this module, so the
-//! `dead_code` lint fires for the parts the trait impl alone doesn't
-//! consume from the lib crate root. The allow at module scope keeps the
-//! surface narrow while letting tests drive the inner helpers.
+//! Some inner helpers are reached only by tests and `Controller` rather
+//! than the trait impl, so a module-scoped `dead_code` allow keeps the
+//! surface narrow without per-item annotations.
 
 #![allow(dead_code)]
 
@@ -35,7 +34,8 @@ use crate::types::{NodeId, TypeConfig};
 /// entries cached until commit (and slightly past).
 #[derive(Debug, Default)]
 struct EntryCache {
-    /// Sorted by index. We never compact (snapshots not implemented).
+    /// Sorted by index. `purge` drops entries at or below the snapshot's
+    /// last-included index once a checkpoint covers them.
     entries: BTreeMap<u64, Entry<TypeConfig>>,
     last_purged: u64,
 }
