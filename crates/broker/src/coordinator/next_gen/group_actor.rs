@@ -148,6 +148,10 @@ fn apply_seed(state: &mut GroupState, seed: super::GroupSeed) {
             client_id: meta.client_id,
             client_host: meta.client_host,
             subscribed_topic_names: sub,
+            // Persisted MemberMetadataValue doesn't carry the regex yet
+            // (slice 64a deferred), so we hydrate with None; the client's
+            // next heartbeat re-supplies it within a few seconds.
+            subscribed_topic_regex: None,
             server_assignor: meta.server_assignor,
             rebalance_timeout: Duration::from_millis(
                 u64::try_from(meta.rebalance_timeout_ms.max(0)).unwrap_or(60_000),
@@ -234,6 +238,15 @@ fn handle_heartbeat(
                 state.dirty = true;
             }
         }
+        // KIP-848 v1+: `subscribed_topic_regex` may change independently
+        // of `subscribed_topic_names`. Only mark dirty when it actually
+        // changes; the client re-sends the same regex on every
+        // heartbeat as long as the subscription is stable.
+        if req.subscribed_topic_regex != m.subscribed_topic_regex {
+            m.subscribed_topic_regex
+                .clone_from(&req.subscribed_topic_regex);
+            state.dirty = true;
+        }
         if let Some(ref tp) = req.topic_partitions {
             let owned: HashMap<Uuid, Vec<i32>> = tp
                 .iter()
@@ -291,6 +304,7 @@ fn build_member(
         client_id: String::new(),
         client_host: host.into(),
         subscribed_topic_names: subs,
+        subscribed_topic_regex: req.subscribed_topic_regex.clone(),
         server_assignor: req.server_assignor.clone(),
         rebalance_timeout: Duration::from_millis(
             u64::try_from(req.rebalance_timeout_ms.max(0)).unwrap_or(60_000),

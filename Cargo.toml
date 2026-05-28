@@ -51,6 +51,12 @@ tokio-util = { version = "0.7", default-features = false }
 tokio-metrics = { version = "0.5", default-features = false }
 dashmap = "6"
 tracing = "0.1"
+# KIP-848: client-supplied `subscribed_topic_regex` matched against the
+# metadata image. Uses RE2-compatible syntax (same regex engine family as
+# the JVM's `java.util.regex` for the cases KIP-848 expects to portably
+# support); diverges on lookahead/lookbehind which aren't in the KIP-848
+# operator-readable subset.
+regex = "1"
 memmap2 = "0.9"
 testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["kafka"] }

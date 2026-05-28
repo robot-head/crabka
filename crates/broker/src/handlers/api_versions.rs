@@ -16,11 +16,45 @@ use futures_util::future::BoxFuture;
 use crabka_protocol::Decode;
 use crabka_protocol::Encode;
 use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
-use crabka_protocol::owned::api_versions_response::{ApiVersion, ApiVersionsResponse};
+use crabka_protocol::owned::api_versions_response::{
+    ApiVersion, ApiVersionsResponse, FinalizedFeatureKey, SupportedFeatureKey,
+};
 
 use crate::broker::Broker;
 use crate::codes;
 use crate::error::BrokerError;
+
+/// KIP-584 finalized-features epoch. JVM clients treat values `>= 0`
+/// as authoritative feature-level state and call
+/// `MetadataVersion.fromFeatureLevel(N)` for every finalized level —
+/// which throws `IllegalArgumentException` on any client whose
+/// `MetadataVersion` enum doesn't enumerate `N` (breaks
+/// `kafka-acls`, `kafka-configs`, and every other JVM admin tool
+/// that handshakes `ApiVersions` first). `-1` is the schema sentinel
+/// for "unknown / no finalized features"; JVM clients fall back to
+/// `MetadataVersion.UNKNOWN` and skip per-level validation. We sit
+/// at `-1` until `UpdateFeatures` (`api_key` 57) lands a Raft-
+/// persisted feature transition path with a real epoch.
+const FINALIZED_FEATURES_EPOCH: i64 = -1;
+
+fn supported_feature_keys() -> Vec<SupportedFeatureKey> {
+    // Empty until we either (a) ship at least one feature whose
+    // numeric level is in every JVM client we test against
+    // (cp-kafka 3.1/6.1/7.5, apache/kafka 4.0), or (b) wire a
+    // per-client-version negotiation path. Advertising
+    // `metadata.version` with a max above what the connecting
+    // client knows broke 19 `broker-jvm-acceptance` tests on the
+    // first attempt — see `tests/api_versions_features.rs` for
+    // the regression note.
+    Vec::new()
+}
+
+fn finalized_feature_keys() -> Vec<FinalizedFeatureKey> {
+    // No finalized features advertised until `UpdateFeatures`
+    // (`api_key` 57) lands. See `FINALIZED_FEATURES_EPOCH` for
+    // the rationale.
+    Vec::new()
+}
 
 /// Static table mirrored from each API's generated `MIN_VERSION`/`MAX_VERSION`
 /// constants. Update this when adding a handler.
@@ -228,6 +262,17 @@ pub(crate) fn handle(
             error_code: codes::NONE,
             api_keys: supported_apis(),
             throttle_time_ms: 0,
+            // KIP-584 read-side. Both feature lists stay empty and
+            // the epoch is the schema sentinel `-1` until
+            // `UpdateFeatures` (api_key 57) lands. JVM admin clients
+            // read this as `MetadataVersion.UNKNOWN` and skip
+            // per-level validation. Populating either list ahead of
+            // a real Raft-tracked epoch breaks every JVM admin tool
+            // whose `MetadataVersion` enum doesn't enumerate the
+            // advertised level — see `tests/api_versions_features.rs`.
+            supported_features: supported_feature_keys(),
+            finalized_features_epoch: FINALIZED_FEATURES_EPOCH,
+            finalized_features: finalized_feature_keys(),
             ..Default::default()
         };
         let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
@@ -239,6 +284,22 @@ pub(crate) fn handle(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── KIP-584 feature surface ────────────────────────────────────────────
+
+    #[test]
+    fn feature_surface_is_empty_with_unknown_epoch() {
+        // KIP-584 read-side: until `UpdateFeatures` (api_key 57)
+        // lands a Raft-persisted feature transition path, both
+        // feature lists stay empty and the epoch sits at the
+        // schema sentinel `-1` (consumed by JVM clients as
+        // `MetadataVersion.UNKNOWN`). Populating either list
+        // without a real epoch breaks JVM admin tooling — see the
+        // module-level note on `FINALIZED_FEATURES_EPOCH`.
+        assert!(supported_feature_keys().is_empty());
+        assert!(finalized_feature_keys().is_empty());
+        assert_eq!(FINALIZED_FEATURES_EPOCH, -1);
+    }
 
     #[test]
     fn api_versions_advertises_legacy_produce_and_fetch_min() {
