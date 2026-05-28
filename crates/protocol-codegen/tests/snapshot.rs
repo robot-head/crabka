@@ -16,6 +16,12 @@ const CURATED: &[&str] = &[
     "ResponseHeader",
     "DescribeGroupsRequest",
     "DescribeGroupsResponse",
+    // Exercises a field nullable only above its valid range (Records: versions
+    // "0+", nullableVersions "0") — the per-version nullable/non-nullable split.
+    "ShareFetchResponse",
+    // Exercises a field nullable only within a sub-range (Topics: versions "0-7",
+    // nullableVersions "2-7") — the lower-bound side of the split.
+    "OffsetFetchRequest",
 ];
 
 fn schemas_dir() -> PathBuf {
