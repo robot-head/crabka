@@ -1,0 +1,104 @@
+// Tests the coordinator's safety guards against an in-memory mock (no real raft).
+use crabka_metadata::{KRaftVersionRange, Voter, VoterEndpoint, VoterSet};
+use crabka_raft::reconfig::{AddVoter, Coordinator, ReconfigOps, ReconfigOutcome, RemoveVoter};
+use crabka_raft::{Node, NodeId, RaftError};
+use std::collections::BTreeSet;
+use std::sync::Mutex as StdMutex;
+
+#[derive(Default)]
+struct MockState {
+    voters: VoterSet,
+    leader_index: u64,
+    observer_index: std::collections::HashMap<NodeId, u64>,
+    is_leader: bool,
+    submitted: Vec<crabka_metadata::MetadataRecord>,
+    membership: Option<BTreeSet<NodeId>>,
+}
+
+struct Mock(StdMutex<MockState>);
+
+#[async_trait::async_trait]
+impl ReconfigOps for Mock {
+    fn current_voters(&self) -> VoterSet { self.0.lock().unwrap().voters.clone() }
+    fn leader(&self) -> Option<NodeId> { Some(1) }
+    fn is_leader(&self) -> bool { self.0.lock().unwrap().is_leader }
+    fn leader_last_index(&self) -> u64 { self.0.lock().unwrap().leader_index }
+    fn observer_index(&self, id: NodeId) -> Option<u64> { self.0.lock().unwrap().observer_index.get(&id).copied() }
+    async fn add_learner(&self, id: NodeId, _node: Node) -> Result<(), RaftError> {
+        self.0.lock().unwrap().observer_index.entry(id).or_insert(0);
+        Ok(())
+    }
+    async fn change_membership(&self, ids: BTreeSet<NodeId>) -> Result<(), RaftError> {
+        self.0.lock().unwrap().membership = Some(ids);
+        Ok(())
+    }
+    async fn submit_records(&self, records: Vec<crabka_metadata::MetadataRecord>) -> Result<(), RaftError> {
+        self.0.lock().unwrap().submitted.extend(records);
+        Ok(())
+    }
+}
+
+fn voter(id: NodeId) -> Voter {
+    Voter {
+        id,
+        directory_id: uuid::Uuid::from_u128(u128::from(id)),
+        endpoints: vec![VoterEndpoint { name: "CONTROLLER".into(), host: "127.0.0.1".into(), port: 9093 }],
+        kraft_version: KRaftVersionRange::default(),
+    }
+}
+
+#[tokio::test]
+async fn add_voter_rejects_lagging_observer() {
+    let mock = Mock(StdMutex::new(MockState {
+        voters: VoterSet::from_voters([voter(1)]),
+        leader_index: 1000,
+        is_leader: true,
+        ..Default::default()
+    }));
+    let lock = tokio::sync::Mutex::new(());
+    let coord = Coordinator::new(&mock, &lock, 10);
+    let err = coord.add_voter(AddVoter { voter: voter(2) }).await.unwrap_err();
+    assert!(matches!(err, RaftError::VoterNotCaughtUp { id: 2, .. }));
+}
+
+#[tokio::test]
+async fn add_voter_succeeds_when_caught_up() {
+    let mut observer_index = std::collections::HashMap::new();
+    observer_index.insert(2u64, 1000u64);
+    let mock = Mock(StdMutex::new(MockState {
+        voters: VoterSet::from_voters([voter(1)]),
+        leader_index: 1000,
+        is_leader: true,
+        observer_index,
+        ..Default::default()
+    }));
+    let lock = tokio::sync::Mutex::new(());
+    let coord = Coordinator::new(&mock, &lock, 10);
+    let out = coord.add_voter(AddVoter { voter: voter(2) }).await.unwrap();
+    assert_eq!(out, ReconfigOutcome::Committed);
+    let st = mock.0.lock().unwrap();
+    assert_eq!(st.membership.as_ref().unwrap(), &BTreeSet::from([1, 2]));
+    assert_eq!(st.submitted.len(), 1); // one V1Voters record
+}
+
+#[tokio::test]
+async fn remove_last_voter_is_rejected() {
+    let mock = Mock(StdMutex::new(MockState {
+        voters: VoterSet::from_voters([voter(1)]),
+        is_leader: true,
+        ..Default::default()
+    }));
+    let lock = tokio::sync::Mutex::new(());
+    let coord = Coordinator::new(&mock, &lock, 10);
+    let err = coord.remove_voter(RemoveVoter { id: 1, directory_id: uuid::Uuid::from_u128(1) }).await.unwrap_err();
+    assert!(matches!(err, RaftError::ReconfigRejected(_)));
+}
+
+#[tokio::test]
+async fn add_voter_on_follower_reports_not_leader() {
+    let mock = Mock(StdMutex::new(MockState { is_leader: false, ..Default::default() }));
+    let lock = tokio::sync::Mutex::new(());
+    let coord = Coordinator::new(&mock, &lock, 10);
+    let out = coord.add_voter(AddVoter { voter: voter(2) }).await.unwrap();
+    assert!(matches!(out, ReconfigOutcome::NotLeader { .. }));
+}

@@ -71,6 +71,16 @@ pub struct ControllerHandle {
     listener_task: Mutex<Option<JoinHandle<()>>>,
     leader_pump_task: Mutex<Option<JoinHandle<()>>>,
     client_id: String,
+    /// This node's own raft id. Used by [`ReconfigOps::is_leader`] to compare
+    /// against the leader reported by `quorum_state`.
+    self_node_id: NodeId,
+    /// Max allowed observer lag (in log entries) before an `AddVoter`
+    /// candidate may be promoted. Cloned from `ControllerConfig`.
+    observer_lag_bound: u64,
+    /// Serializes KIP-853 reconfigurations. A single in-flight add/remove/
+    /// update at a time so the membership change and the authoritative
+    /// `V1Voters` record stay in lockstep.
+    reconfig_lock: Mutex<()>,
     /// Outbound dialer cloned from the factory at construction time.
     /// `forward_submit_to` uses it to reach the leader's controller
     /// listener with the same TLS / SASL handshake that openraft's
@@ -294,6 +304,57 @@ impl ControllerHandle {
         }
     }
 
+    /// Add a single voter (KIP-853 `AddVoter`). The candidate must already be
+    /// reachable as a learner; the coordinator registers it, waits for it to
+    /// catch up within `observer_lag_bound`, promotes it, and writes the
+    /// authoritative `V1Voters` record. Serialized against other
+    /// reconfigurations by the per-handle lock.
+    ///
+    /// # Errors
+    ///
+    /// Surfaces the coordinator's guard errors ([`RaftError::ReconfigInProgress`],
+    /// [`RaftError::VoterNotCaughtUp`]) and any underlying raft failure.
+    pub async fn add_voter(
+        &self,
+        req: crate::reconfig::AddVoter,
+    ) -> Result<crate::reconfig::ReconfigOutcome, RaftError> {
+        crate::reconfig::Coordinator::new(self, &self.reconfig_lock, self.observer_lag_bound)
+            .add_voter(req)
+            .await
+    }
+
+    /// Remove a single voter (KIP-853 `RemoveVoter`), refusing to drop the
+    /// last voter. Serialized against other reconfigurations.
+    ///
+    /// # Errors
+    ///
+    /// Surfaces the coordinator's guard errors ([`RaftError::ReconfigInProgress`],
+    /// [`RaftError::ReconfigRejected`]) and any underlying raft failure.
+    pub async fn remove_voter(
+        &self,
+        req: crate::reconfig::RemoveVoter,
+    ) -> Result<crate::reconfig::ReconfigOutcome, RaftError> {
+        crate::reconfig::Coordinator::new(self, &self.reconfig_lock, self.observer_lag_bound)
+            .remove_voter(req)
+            .await
+    }
+
+    /// Update a voter's endpoints / supported version range (KIP-853
+    /// `UpdateVoter`). Serialized against other reconfigurations.
+    ///
+    /// # Errors
+    ///
+    /// Surfaces the coordinator's guard errors ([`RaftError::ReconfigInProgress`],
+    /// [`RaftError::ReconfigRejected`]) and any underlying raft failure.
+    pub async fn update_voter(
+        &self,
+        req: crate::reconfig::UpdateVoter,
+    ) -> Result<crate::reconfig::ReconfigOutcome, RaftError> {
+        crate::reconfig::Coordinator::new(self, &self.reconfig_lock, self.observer_lag_bound)
+            .update_voter(req)
+            .await
+    }
+
     /// Resolve a voter's controller listener address from openraft's current
     /// membership config. KIP-853 voters carry their endpoints in the `Node`
     /// payload, so the address is read directly from the replicated
@@ -422,6 +483,66 @@ impl ControllerHandle {
         if let Some(h) = self.listener_task.lock().await.take() {
             let _ = h.await;
         }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::reconfig::ReconfigOps for ControllerHandle {
+    fn current_voters(&self) -> crabka_metadata::VoterSet {
+        // Rebuild a `VoterSet` from the replicated membership's voter nodes.
+        let voters = self
+            .quorum_state()
+            .voter_nodes
+            .into_iter()
+            .map(|(id, node)| crabka_metadata::Voter {
+                id,
+                directory_id: node.directory_id,
+                endpoints: node.endpoints,
+                kraft_version: node.kraft_version,
+            });
+        crabka_metadata::VoterSet::from_voters(voters)
+    }
+
+    fn leader(&self) -> Option<NodeId> {
+        self.quorum_state().current_leader
+    }
+
+    fn is_leader(&self) -> bool {
+        self.quorum_state().current_leader == Some(self.self_node_id)
+    }
+
+    fn leader_last_index(&self) -> u64 {
+        // openraft's metrics don't expose a separate `last_log_index` we can
+        // read cheaply here; `last_applied_index` is the high-watermark this
+        // node has committed and is a safe (never-overshooting) basis for the
+        // observer-lag check.
+        self.quorum_state().last_applied_index
+    }
+
+    fn observer_index(&self, id: NodeId) -> Option<u64> {
+        // openraft only populates `replication` on the leader, and learners
+        // may be absent. Returning `None` is conservative — the lag check
+        // then treats the candidate as fully behind (lag == leader_last_index)
+        // and refuses promotion until catch-up is observed.
+        self.quorum_state().per_voter_matched_index.get(&id).copied()
+    }
+
+    async fn add_learner(&self, id: NodeId, node: crate::Node) -> Result<(), RaftError> {
+        ControllerHandle::add_learner(self, id, node).await
+    }
+
+    async fn change_membership(
+        &self,
+        ids: std::collections::BTreeSet<NodeId>,
+    ) -> Result<(), RaftError> {
+        ControllerHandle::change_membership(self, ids).await
+    }
+
+    async fn submit_records(
+        &self,
+        records: Vec<crabka_metadata::MetadataRecord>,
+    ) -> Result<(), RaftError> {
+        ControllerHandle::submit_change(self, records).await
     }
 }
 
@@ -605,6 +726,9 @@ impl Controller {
             listener_task: Mutex::new(Some(listener_task)),
             leader_pump_task: Mutex::new(Some(leader_pump_task)),
             client_id: config.client_id.clone(),
+            self_node_id: config.node_id,
+            observer_lag_bound: config.observer_lag_bound,
+            reconfig_lock: Mutex::new(()),
             dialer,
         })
     }
