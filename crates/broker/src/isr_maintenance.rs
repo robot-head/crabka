@@ -7,7 +7,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crabka_raft::{ControllerHandle, NodeId};
+use crabka_raft::NodeId;
 use dashmap::DashMap;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
@@ -17,7 +17,7 @@ use crate::partition::Partition;
 pub(crate) struct Config {
     pub node_id: NodeId,
     pub partitions: Arc<DashMap<(String, i32), Arc<Partition>>>,
-    pub controller: Arc<ControllerHandle>,
+    pub controller: Arc<dyn crate::metadata_source::MetadataSource>,
     pub replica_lag_time_max: Duration,
     pub broker_id: i32,
     pub shutdown: CancellationToken,
@@ -118,7 +118,7 @@ async fn compute_proposal(part: &Partition, lag_max: Duration) -> Option<(Vec<No
 }
 
 async fn send_alter_partition(
-    controller: &Arc<ControllerHandle>,
+    controller: &Arc<dyn crate::metadata_source::MetadataSource>,
     broker_id: i32,
     topic: &str,
     partition: i32,

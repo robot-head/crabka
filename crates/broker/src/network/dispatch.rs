@@ -1497,7 +1497,7 @@ async fn handle_sasl_frame(
                         crate::network::auth::handle_authenticate_scram(
                             &req,
                             auth,
-                            &broker.controller,
+                            &*broker.controller,
                         )
                     }
                     crabka_security::SaslMechanism::OAuthBearer => {
@@ -2721,7 +2721,7 @@ async fn handle_create_delegation_token_frame(
         broker.config.delegation_token_secret_key.as_ref(),
         broker.config.delegation_token_max_lifetime_ms,
         broker.config.delegation_token_default_renew_period_ms,
-        &broker.controller,
+        &*broker.controller,
         &broker.config.super_users,
     )
     .await;
@@ -2765,7 +2765,7 @@ async fn handle_renew_delegation_token_frame(
         auth,
         broker.config.delegation_token_secret_key.as_ref(),
         broker.config.delegation_token_default_renew_period_ms,
-        &broker.controller,
+        &*broker.controller,
         &broker.config.super_users,
     )
     .await;
@@ -2805,7 +2805,7 @@ async fn handle_expire_delegation_token_frame(
         &req,
         auth,
         broker.config.delegation_token_secret_key.as_ref(),
-        &broker.controller,
+        &*broker.controller,
         &broker.config.super_users,
     )
     .await;
@@ -2846,7 +2846,7 @@ async fn handle_describe_delegation_token_frame(
         &req,
         auth,
         broker.config.delegation_token_secret_key.as_ref(),
-        &broker.controller,
+        &*broker.controller,
         peer,
         broker.config.authorizer.as_ref(),
     )

@@ -25,10 +25,12 @@ use crate::partition::{Partition, WriterMessage};
 #[allow(dead_code)]
 pub struct Broker {
     pub(crate) config: BrokerConfig,
-    /// Quorum-backed metadata controller. Replaces the slice-4 in-memory
-    /// `MetadataImage`; every metadata read goes through
-    /// [`crabka_raft::ControllerHandle::current_image`].
-    pub(crate) controller: Arc<crabka_raft::ControllerHandle>,
+    /// Metadata authority for this broker. For combined/controller nodes
+    /// this is a live openraft `ControllerHandle`; for broker-only nodes it
+    /// is an observer-backed source that fetches `__cluster_metadata` and
+    /// forwards writes to the controller quorum. Handlers reach it via the
+    /// `MetadataSource` trait, so the concrete backing is invisible to them.
+    pub(crate) controller: Arc<dyn crate::metadata_source::MetadataSource>,
     /// Wrapped in `Arc` so handlers cloning the field share the same
     /// underlying map. `DashMap::clone` is a deep copy by default.
     pub(crate) partitions: Arc<DashMap<(String, i32), Arc<Partition>>>,
@@ -665,7 +667,7 @@ impl BrokerHandle {
 /// [`crate::leader_rebalance::ControllerLike`] trait required by the
 /// auto-rebalance background task.
 struct ControllerAdapter {
-    handle: Arc<crabka_raft::ControllerHandle>,
+    handle: Arc<dyn crate::metadata_source::MetadataSource>,
     node_id: crabka_raft::NodeId,
 }
 
@@ -694,7 +696,7 @@ impl crate::leader_rebalance::ControllerLike for ControllerAdapter {
 /// [`crate::reassignment::ReassignmentController`] trait required by the
 /// reassignment-completion background task.
 struct ReassignmentControllerAdapter {
-    handle: Arc<crabka_raft::ControllerHandle>,
+    handle: Arc<dyn crate::metadata_source::MetadataSource>,
     node_id: crabka_raft::NodeId,
 }
 
@@ -728,7 +730,7 @@ impl crate::reassignment::ReassignmentController for ReassignmentControllerAdapt
 /// background task. Every broker runs this (not just the controller leader)
 /// since each broker manages its own throttle buckets.
 struct ThrottleControllerAdapter {
-    handle: Arc<crabka_raft::ControllerHandle>,
+    handle: Arc<dyn crate::metadata_source::MetadataSource>,
 }
 
 impl crate::throttle::ImageWatcher for ThrottleControllerAdapter {
@@ -746,7 +748,7 @@ impl crate::throttle::ImageWatcher for ThrottleControllerAdapter {
 /// background task. Every broker runs this (not just the controller leader)
 /// since each broker enforces its own quotas via its own buckets.
 struct QuotaControllerAdapter {
-    handle: Arc<crabka_raft::ControllerHandle>,
+    handle: Arc<dyn crate::metadata_source::MetadataSource>,
 }
 
 impl crate::quota::ImageWatcher for QuotaControllerAdapter {
@@ -764,7 +766,7 @@ impl crate::quota::ImageWatcher for QuotaControllerAdapter {
 /// trait required by the delegation-token expiry sweep. Every broker runs
 /// the sweep; raft serializes duplicate tombstones so each becomes a no-op.
 struct DelegationTokenCleanupControllerAdapter {
-    handle: Arc<crabka_raft::ControllerHandle>,
+    handle: Arc<dyn crate::metadata_source::MetadataSource>,
 }
 
 #[async_trait::async_trait]
@@ -890,35 +892,68 @@ impl Broker {
                 "localhost".to_string(),
             )) as Arc<dyn crabka_raft::OutboundDialer>);
 
-        let controller_cfg = crabka_raft::ControllerConfig {
-            node_id: config.node_id,
-            voters: config.controller_quorum_voters.clone(),
-            controller_listen_addr: config.controller_listen_addr,
-            log_dir: config.log_dir.join("__cluster_metadata"),
-            // Sourced from `BrokerConfig` — see the docstrings there for
-            // the production-vs-test tradeoff. Crucially this also sets
-            // openraft's `leader_lease` to `election_timeout × 2`, which
-            // is the floor on how fast a 3-broker cluster can elect a
-            // replacement when the controller leader dies.
-            election_timeout: config.controller_election_timeout,
-            heartbeat_interval: config.controller_heartbeat_interval,
-            client_id: format!("crabka-broker-{}-controller", config.broker_id),
-            bootstrap_mode: config.bootstrap_mode,
-            cluster_id: config.cluster_id,
-            dialer: raft_dialer,
-            handshake: handshake_opt,
+        let metadata: Arc<dyn crate::metadata_source::MetadataSource> = if config.is_controller() {
+            let controller_cfg = crabka_raft::ControllerConfig {
+                node_id: config.node_id,
+                voters: config.controller_quorum_voters.clone(),
+                controller_listen_addr: config.controller_listen_addr,
+                log_dir: config.log_dir.join("__cluster_metadata"),
+                // Sourced from `BrokerConfig` — see the docstrings there for
+                // the production-vs-test tradeoff. Crucially this also sets
+                // openraft's `leader_lease` to `election_timeout × 2`, which
+                // is the floor on how fast a 3-broker cluster can elect a
+                // replacement when the controller leader dies.
+                election_timeout: config.controller_election_timeout,
+                heartbeat_interval: config.controller_heartbeat_interval,
+                client_id: format!("crabka-broker-{}-controller", config.broker_id),
+                bootstrap_mode: config.bootstrap_mode,
+                cluster_id: config.cluster_id,
+                dialer: raft_dialer.clone(),
+                handshake: handshake_opt,
+            };
+            let controller = Arc::new(
+                crabka_raft::Controller::start(controller_cfg)
+                    .await
+                    .map_err(|e| BrokerError::Startup(e.to_string()))?,
+            );
+            // Populate the late-bound controller handle so the inbound
+            // `BrokerRaftHandshake` (already wired into the controller's
+            // accept loop) can perform SCRAM credential lookups on the next
+            // authenticated connection. The `set` cannot fail in practice
+            // because we hold the only writer; swallow the `SetError` defensively.
+            let _ = controller_cell.set(controller.clone());
+            controller as Arc<dyn crate::metadata_source::MetadataSource>
+        } else {
+            // Broker-only node: no openraft voter. Keep the `MetadataImage`
+            // current by fetching `__cluster_metadata` from the controller
+            // quorum (the observer), and forward writes to the quorum leader.
+            // `controller_cell` is left unset — a broker-only node runs no
+            // controller listener, so nothing performs SCRAM lookups on it.
+            let dialer = raft_dialer
+                .clone()
+                .expect("broker-only node requires a raft dialer");
+            let observer = crate::metadata_observer::MetadataObserver::start(
+                crate::metadata_observer::ObserverConfig {
+                    voters: config.controller_quorum_voters.clone(),
+                    dialer: dialer.clone(),
+                    client_id: format!("crabka-broker-{}-observer", config.broker_id),
+                    cluster_id: config.cluster_id.unwrap_or_else(uuid::Uuid::nil),
+                    max_bytes: 1_048_576,
+                    poll_interval: std::time::Duration::from_millis(100),
+                },
+            );
+            let forwarder = crate::metadata_source::QuorumForwarder {
+                voters: config.controller_quorum_voters.clone(),
+                dialer,
+                client_id: format!("crabka-broker-{}-writer", config.broker_id),
+                leader: observer.watch_leader(),
+            };
+            Arc::new(crate::metadata_source::ObserverSource::new(
+                observer,
+                Arc::new(forwarder),
+            )) as Arc<dyn crate::metadata_source::MetadataSource>
         };
-        let controller = Arc::new(
-            crabka_raft::Controller::start(controller_cfg)
-                .await
-                .map_err(|e| BrokerError::Startup(e.to_string()))?,
-        );
-        // Populate the late-bound controller handle so the inbound
-        // `BrokerRaftHandshake` (already wired into the controller's
-        // accept loop) can perform SCRAM credential lookups on the next
-        // authenticated connection. The `set` cannot fail in practice
-        // because we hold the only writer; swallow the `SetError` defensively.
-        let _ = controller_cell.set(controller.clone());
+        let controller = metadata;
 
         // 2. Wait for a leader, then submit a self-registration record so
         //    other brokers can discover us. Best-effort: if the submit

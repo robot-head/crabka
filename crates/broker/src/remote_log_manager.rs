@@ -26,7 +26,6 @@ use uuid::Uuid;
 
 use crabka_log::{LogConfig, SegmentExport};
 use crabka_metadata::NodeId;
-use crabka_raft::ControllerHandle;
 use crabka_remote_storage::{
     LogSegmentData, RemoteLogMetadataManager, RemoteLogSegmentId, RemoteLogSegmentMetadata,
     RemoteLogSegmentMetadataUpdate, RemoteLogSegmentState, RemotePartitionDeleteMetadata,
@@ -53,7 +52,7 @@ impl Default for RemoteLogManagerConfig {
 #[allow(clippy::too_many_arguments)] // task dependencies; bundling would obscure them
 pub(crate) async fn run(
     partitions: Arc<DashMap<(String, i32), Arc<Partition>>>,
-    controller: Arc<ControllerHandle>,
+    controller: Arc<dyn crate::metadata_source::MetadataSource>,
     rsm: Arc<dyn RemoteStorageManager>,
     rlmm: Arc<dyn RemoteLogMetadataManager>,
     node_id: NodeId,
@@ -72,7 +71,7 @@ pub(crate) async fn run(
         }
         tick_all(
             &partitions,
-            &controller,
+            &*controller,
             &rsm,
             rlmm.as_ref(),
             node_id,
@@ -84,7 +83,7 @@ pub(crate) async fn run(
 
 async fn tick_all(
     partitions: &DashMap<(String, i32), Arc<Partition>>,
-    controller: &ControllerHandle,
+    controller: &dyn crate::metadata_source::MetadataSource,
     rsm: &Arc<dyn RemoteStorageManager>,
     rlmm: &dyn RemoteLogMetadataManager,
     node_id: NodeId,

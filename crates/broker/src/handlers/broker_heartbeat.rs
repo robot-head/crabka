@@ -12,7 +12,7 @@ use crabka_metadata::{MetadataImage, MetadataRecord};
 use crabka_protocol::owned::broker_heartbeat_request::BrokerHeartbeatRequest;
 use crabka_protocol::owned::broker_heartbeat_response::BrokerHeartbeatResponse;
 use crabka_protocol::{Decode, Encode};
-use crabka_raft::{ControllerHandle, NodeId};
+use crabka_raft::NodeId;
 
 use crate::broker::Broker;
 use crate::codes;
@@ -100,7 +100,7 @@ pub(crate) fn handle(
 /// is the only side-effect channel. On submit failure we log and
 /// return `Ok(false)` so the client will retry rather than crash.
 async fn drain_leaderships_for_shutdown(
-    controller: &Arc<ControllerHandle>,
+    controller: &Arc<dyn crate::metadata_source::MetadataSource>,
     liveness: &Arc<ControllerLivenessState>,
     shutting_down: u64,
 ) -> Result<bool, BrokerError> {

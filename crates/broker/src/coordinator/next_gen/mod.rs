@@ -248,7 +248,7 @@ impl NextGenCoordinator {
 
 /// `MetadataProvider` backed by `crabka_raft::ControllerHandle::current_image()`.
 pub struct ImageMetadataProvider {
-    pub controller: Arc<crabka_raft::ControllerHandle>,
+    pub controller: Arc<dyn crate::metadata_source::MetadataSource>,
 }
 
 impl std::fmt::Debug for ImageMetadataProvider {

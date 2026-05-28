@@ -16,7 +16,7 @@
 use std::sync::Arc;
 
 use crabka_metadata::{MetadataImage, MetadataRecord, PartitionRecord};
-use crabka_raft::{ControllerHandle, NodeId};
+use crabka_raft::NodeId;
 use tracing::warn;
 
 use crate::config_keys::UNCLEAN_LEADER_ELECTION_ENABLE;
@@ -136,7 +136,7 @@ pub(crate) async fn compute_failover_changes(
 /// No-op unless `controller` is currently the openraft leader (only
 /// the leader can `submit_change`).
 pub(crate) async fn on_broker_dead(
-    controller: &Arc<ControllerHandle>,
+    controller: &Arc<dyn crate::metadata_source::MetadataSource>,
     node_id: NodeId,
     dead: NodeId,
     liveness: &Arc<ControllerLivenessState>,
@@ -167,7 +167,7 @@ pub(crate) async fn on_broker_dead(
 /// The hook is here for future enhancements (e.g. auto-rebalance).
 #[allow(clippy::unused_async)]
 pub(crate) async fn on_broker_alive(
-    _controller: &Arc<ControllerHandle>,
+    _controller: &Arc<dyn crate::metadata_source::MetadataSource>,
     _node_id: NodeId,
     _alive: NodeId,
     _liveness: &Arc<ControllerLivenessState>,

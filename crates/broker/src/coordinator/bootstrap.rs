@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use crabka_metadata::{MetadataRecord, PartitionRecord, TopicRecord};
 use crabka_protocol::records::RecordBatch;
-use crabka_raft::{ControllerHandle, RaftError};
+use crabka_raft::RaftError;
 
 use crate::broker::spawn_partition;
 use crate::config::BrokerConfig;
@@ -31,7 +31,7 @@ pub const OFFSETS_PARTITION: i32 = 0;
 /// and AFTER the controller has elected a leader (see `Broker::start`).
 pub async fn bootstrap(
     config: &BrokerConfig,
-    controller: &Arc<ControllerHandle>,
+    controller: &Arc<dyn crate::metadata_source::MetadataSource>,
     partitions: &Arc<dashmap::DashMap<(String, i32), Arc<Partition>>>,
     group_manager: &GroupManager,
     log_dir_status: &crate::log_dir_status::LogDirRegistry,
@@ -301,6 +301,7 @@ fn apply_group_metadata(g: &mut Group, v: GroupMetadataValue, replay_timestamp_m
 mod tests {
     use super::*;
     use crate::config::BrokerConfig;
+    use crabka_raft::ControllerHandle;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
     use tempfile::tempdir;
@@ -335,7 +336,8 @@ mod tests {
     async fn bootstrap_creates_topic_dir() {
         let dir = tempdir().unwrap();
         let config = BrokerConfig::for_tests(dir.path().to_path_buf());
-        let controller = controller_with_leader(dir.path().join("__cluster_metadata_test")).await;
+        let controller: Arc<dyn crate::metadata_source::MetadataSource> =
+            controller_with_leader(dir.path().join("__cluster_metadata_test")).await;
         let partitions: Arc<dashmap::DashMap<(String, i32), Arc<Partition>>> =
             Arc::new(dashmap::DashMap::new());
         let gm = GroupManager::new();

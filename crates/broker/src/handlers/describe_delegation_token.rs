@@ -34,7 +34,6 @@ use crabka_protocol::owned::describe_delegation_token_request::DescribeDelegatio
 use crabka_protocol::owned::describe_delegation_token_response::{
     DescribeDelegationTokenResponse, DescribedDelegationToken, DescribedDelegationTokenRenewer,
 };
-use crabka_raft::ControllerHandle;
 use crabka_security::{KafkaPrincipal, SecretBytes};
 
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult, Authorizer};
@@ -47,7 +46,7 @@ pub(crate) async fn handle(
     req: &DescribeDelegationTokenRequest,
     auth: &ConnectionAuth,
     secret_key: Option<&SecretBytes>,
-    controller: &ControllerHandle,
+    controller: &dyn crate::metadata_source::MetadataSource,
     peer: &SocketAddr,
     authorizer: &dyn Authorizer,
 ) -> DescribeDelegationTokenResponse {
@@ -198,6 +197,7 @@ mod tests {
     use super::*;
     use crabka_metadata::{DelegationTokenRecord, MetadataRecord};
     use crabka_protocol::owned::describe_delegation_token_request::DescribeDelegationTokenOwner;
+    use crabka_raft::ControllerHandle;
     use crabka_security::{AuthMethod, Principal, SaslMechanism};
     use std::net::SocketAddr;
     use std::sync::Arc;
@@ -310,7 +310,7 @@ mod tests {
             &req,
             &authed("alice"),
             None,
-            &controller,
+            &*controller,
             &peer(),
             &simple_authz(),
         )
@@ -338,7 +338,7 @@ mod tests {
             &req,
             &authed("alice"),
             Some(&secret),
-            &controller,
+            &*controller,
             &peer(),
             &simple_authz(),
         )
@@ -384,7 +384,7 @@ mod tests {
             &req,
             &authed("alice"),
             Some(&secret),
-            &controller,
+            &*controller,
             &peer(),
             &simple_authz(),
         )
@@ -420,7 +420,7 @@ mod tests {
             &req,
             &authed_with_token("alice", true),
             Some(&secret),
-            &controller,
+            &*controller,
             &peer(),
             &simple_authz(),
         )
@@ -468,7 +468,7 @@ mod tests {
             &req,
             &authed("bob"),
             Some(&secret),
-            &controller,
+            &*controller,
             &peer(),
             &simple_authz(),
         )
@@ -511,7 +511,7 @@ mod tests {
             &req,
             &authed_with_token("bob", true),
             Some(&secret),
-            &controller,
+            &*controller,
             &peer(),
             &simple_authz(),
         )
