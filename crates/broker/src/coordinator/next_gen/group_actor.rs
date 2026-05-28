@@ -60,6 +60,7 @@ pub struct DescribeMember {
     pub assigned_partitions: HashMap<Uuid, Vec<i32>>,
 }
 
+#[derive(Debug)]
 pub struct GroupActorHandle {
     pub tx: mpsc::Sender<GroupActorMessage>,
     _task: JoinHandle<()>,
