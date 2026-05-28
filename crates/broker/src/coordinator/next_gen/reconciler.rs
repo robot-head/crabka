@@ -13,6 +13,10 @@ use super::group_state::GroupState;
 pub struct ReconcileInput {
     pub topic_id_by_name: HashMap<String, Uuid>,
     pub partitions_per_topic: HashMap<Uuid, i32>,
+    /// Slice 64b: per-`(topic_id, partition_index)` set of replica racks.
+    /// Empty / missing entries mean "no rack data for this partition" —
+    /// `UniformAssignor` then falls back to its non-rack-aware path.
+    pub partition_racks: HashMap<(Uuid, i32), Vec<String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,6 +51,7 @@ pub fn reconcile_if_dirty(
         .collect();
     let topics = TopicMetadata {
         partitions_per_topic: input.partitions_per_topic.clone(),
+        partition_racks: input.partition_racks.clone(),
     };
     let assignment = impl_.assign(&subscriptions, &topics);
     group.bump_epoch();
@@ -102,6 +107,7 @@ mod tests {
             ReconcileInput {
                 topic_id_by_name: [(topic_name.into(), t)].into(),
                 partitions_per_topic: [(t, partitions)].into(),
+                ..Default::default()
             },
             t,
         )

@@ -19,6 +19,12 @@ pub struct MemberSubscription {
 #[derive(Debug, Clone, Default)]
 pub struct TopicMetadata {
     pub partitions_per_topic: HashMap<Uuid, i32>,
+    /// Per-`(topic_id, partition_index)` set of racks on which the
+    /// partition has at least one replica. Empty (or the key missing
+    /// entirely) for partitions whose replicas have no rack info — the
+    /// assignor then falls back to its non-rack-aware behavior.
+    /// Populated by the coordinator's metadata snapshot (slice 64b).
+    pub partition_racks: HashMap<(Uuid, i32), Vec<String>>,
 }
 
 pub type Assignment = HashMap<String, HashMap<Uuid, Vec<i32>>>;
