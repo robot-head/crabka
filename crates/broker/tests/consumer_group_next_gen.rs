@@ -35,7 +35,10 @@ async fn create_topic(client: &Client, topic: &str, partitions: i32) {
         })
         .await
         .expect("CreateTopics");
-    assert_eq!(resp.topics[0].error_code, 0, "topic create failed: {resp:?}");
+    assert_eq!(
+        resp.topics[0].error_code, 0,
+        "topic create failed: {resp:?}"
+    );
 }
 
 fn heartbeat(group: &str, member_id: &str, epoch: i32) -> ConsumerGroupHeartbeatRequest {
@@ -169,9 +172,8 @@ async fn classic_group_locked_against_next_gen() {
 async fn kill_switch_returns_group_id_not_found() {
     let dir = tempfile::TempDir::new().unwrap();
     let mut config = BrokerConfig::for_tests(dir.path().to_path_buf());
-    config.next_gen_consumer_group.rebalance_protocols = vec![
-        crabka_broker::coordinator::next_gen::config::RebalanceProtocol::Classic,
-    ];
+    config.next_gen_consumer_group.rebalance_protocols =
+        vec![crabka_broker::coordinator::next_gen::config::RebalanceProtocol::Classic];
     let broker = Broker::start(config).await.unwrap();
     let bootstrap = broker.listen_addr().to_string();
     let client = Arc::new(
