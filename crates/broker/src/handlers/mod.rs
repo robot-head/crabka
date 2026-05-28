@@ -95,6 +95,9 @@ pub(crate) mod incremental_alter_configs;
 pub(crate) mod init_producer_id;
 pub(crate) mod join_group;
 pub(crate) mod leave_group;
+// KIP-1142 list-config-resources admin RPC (api_key 74). Generalises the
+// v0 ListClientMetricsResources call (KIP-714) into a typed enumeration.
+pub(crate) mod list_config_resources;
 pub(crate) mod list_groups;
 pub(crate) mod list_offsets;
 // KIP-664 transaction-summary admin RPC (api_key 66).
