@@ -1,4 +1,4 @@
-//! Broker restart preserves next-gen group state via __consumer_offsets replay.
+//! Broker restart preserves next-gen group state via `__consumer_offsets` replay.
 
 #![cfg(not(target_os = "windows"))]
 #![allow(clippy::pedantic)]
