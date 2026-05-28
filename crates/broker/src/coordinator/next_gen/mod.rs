@@ -166,14 +166,34 @@ impl MetadataProvider for ImageMetadataProvider {
         let image = self.controller.current_image();
         let mut topic_id_by_name = std::collections::HashMap::new();
         let mut partitions_per_topic = std::collections::HashMap::new();
+        let mut partition_racks: std::collections::HashMap<(ProtoUuid, i32), Vec<String>> =
+            std::collections::HashMap::new();
         for topic in image.topics() {
             let proto_id = ProtoUuid(*topic.topic_id.as_bytes());
             topic_id_by_name.insert(topic.name.clone(), proto_id);
             partitions_per_topic.insert(proto_id, topic.partitions);
+            // Slice 64b: collect the set of racks the partition's
+            // replicas are on, so the rack-aware UniformAssignor can
+            // prefer rack-collocated subscribers. Partitions whose
+            // replicas have no rack info don't get an entry — the
+            // assignor then falls back to its non-rack-aware path.
+            for pr in image.partitions_of(&topic.name) {
+                let mut racks: Vec<String> = pr
+                    .replicas
+                    .iter()
+                    .filter_map(|&node_id| image.broker(node_id).and_then(|b| b.rack.clone()))
+                    .collect();
+                racks.sort();
+                racks.dedup();
+                if !racks.is_empty() {
+                    partition_racks.insert((proto_id, pr.partition), racks);
+                }
+            }
         }
         reconciler::ReconcileInput {
             topic_id_by_name,
             partitions_per_topic,
+            partition_racks,
         }
     }
 }

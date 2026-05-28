@@ -73,6 +73,7 @@ mod tests {
         let t = tid(1);
         let topics = TopicMetadata {
             partitions_per_topic: [(t, 6)].into(),
+            ..Default::default()
         };
         let a = RangeAssignor.assign(&[member("m1", &[t]), member("m2", &[t])], &topics);
         assert_eq!(a["m1"][&t], vec![0, 1, 2]);
@@ -84,6 +85,7 @@ mod tests {
         let t = tid(1);
         let topics = TopicMetadata {
             partitions_per_topic: [(t, 7)].into(),
+            ..Default::default()
         };
         let a = RangeAssignor.assign(
             &[member("m1", &[t]), member("m2", &[t]), member("m3", &[t])],
@@ -100,6 +102,7 @@ mod tests {
         let t2 = tid(2);
         let topics = TopicMetadata {
             partitions_per_topic: [(t1, 4), (t2, 4)].into(),
+            ..Default::default()
         };
         let a = RangeAssignor.assign(&[member("m1", &[t1, t2]), member("m2", &[t1, t2])], &topics);
         assert_eq!(a["m1"][&t1], vec![0, 1]);
@@ -113,6 +116,7 @@ mod tests {
         let t = tid(1);
         let topics = TopicMetadata {
             partitions_per_topic: [(t, 2)].into(),
+            ..Default::default()
         };
         let a = RangeAssignor.assign(
             &[member("m1", &[t]), member("m2", &[t]), member("m3", &[t])],
@@ -128,6 +132,7 @@ mod tests {
         let t = tid(1);
         let topics = TopicMetadata {
             partitions_per_topic: [(t, 4)].into(),
+            ..Default::default()
         };
         let a = RangeAssignor.assign(&[member("m1", &[t]), member("m2", &[])], &topics);
         assert_eq!(a["m1"][&t], vec![0, 1, 2, 3]);
@@ -138,6 +143,7 @@ mod tests {
         let t = tid(1);
         let topics = TopicMetadata {
             partitions_per_topic: [(t, 6)].into(),
+            ..Default::default()
         };
         let a1 = RangeAssignor.assign(&[member("m1", &[t]), member("m2", &[t])], &topics);
         let a2 = RangeAssignor.assign(&[member("m2", &[t]), member("m1", &[t])], &topics);
