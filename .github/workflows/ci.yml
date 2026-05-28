@@ -218,10 +218,10 @@ jobs:
       - name: Broker JVM acceptance coverage
         run: |
           mkdir -p coverage
-          cargo llvm-cov -p crabka-broker \
-            --test jvm_acceptance \
-            --lcov --output-path coverage/broker-jvm-acceptance.lcov \
-            -- --ignored --nocapture --test-threads=1
+          cargo llvm-cov clean --workspace
+          cargo llvm-cov --no-report -p crabka-broker --test jvm_consumer_group_next_gen -- --nocapture --test-threads=1
+          cargo llvm-cov --no-report -p crabka-broker --test jvm_acceptance -- --ignored --nocapture --test-threads=1
+          cargo llvm-cov report --lcov --output-path coverage/broker-jvm-acceptance.lcov
       - uses: codecov/codecov-action@v6
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
