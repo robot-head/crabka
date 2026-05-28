@@ -1062,6 +1062,7 @@ dependencies = [
  "pbkdf2 0.13.0",
  "prometheus-client",
  "rcgen",
+ "regex",
  "reqwest 0.13.4",
  "ring",
  "rustix",
