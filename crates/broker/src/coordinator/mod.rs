@@ -6,6 +6,7 @@
 
 pub(crate) mod bootstrap;
 pub(crate) mod group;
+pub mod next_gen;
 pub(crate) mod persistence;
 
 use std::sync::Arc;
