@@ -151,6 +151,9 @@ fn supported_apis() -> Vec<ApiVersion> {
         // DescribeQuorum (KIP-595) — `kafka-metadata-quorum --describe`
         // admin introspection of the controller-raft quorum.
         v!(describe_quorum_request),
+        // KIP-848 next-gen consumer group protocol.
+        v!(consumer_group_heartbeat_request),
+        v!(consumer_group_describe_request),
     ]
 }
 

@@ -235,6 +235,11 @@ pub struct BrokerConfig {
     /// ISR. Matches Kafka's `auto.leader.rebalance.enable`.
     pub auto_leader_rebalance_enable: bool,
 
+    /// KIP-848 next-gen consumer group protocol configuration. Controls
+    /// which rebalance protocols are advertised, session/heartbeat
+    /// timeout bounds, and the set of enabled server-side assignors.
+    pub next_gen_consumer_group: crate::coordinator::next_gen::config::NextGenConfig,
+
     /// How often the auto-rebalance ticker fires, in seconds. Default
     /// 300 (5 minutes). Matches Kafka's
     /// `leader.imbalance.check.interval.seconds`.
@@ -444,6 +449,7 @@ impl BrokerConfig {
             oauthbearer_jwks_min_on_demand_pause: std::time::Duration::from_secs(1),
             oauthbearer_jwks_ignore_key_use: false,
             auto_leader_rebalance_enable: false, // tests opt in explicitly
+            next_gen_consumer_group: crate::coordinator::next_gen::config::NextGenConfig::default(),
             leader_imbalance_check_interval_secs: 300,
             leader_imbalance_per_broker_percentage: 10,
             #[cfg(any(test, feature = "test-helpers"))]
@@ -637,6 +643,7 @@ impl Default for BrokerConfig {
             oauthbearer_jwks_min_on_demand_pause: std::time::Duration::from_secs(1),
             oauthbearer_jwks_ignore_key_use: false,
             auto_leader_rebalance_enable: true,
+            next_gen_consumer_group: crate::coordinator::next_gen::config::NextGenConfig::default(),
             leader_imbalance_check_interval_secs: 300,
             leader_imbalance_per_broker_percentage: 10,
             #[cfg(any(test, feature = "test-helpers"))]

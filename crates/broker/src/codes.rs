@@ -31,6 +31,10 @@ pub const KAFKA_STORAGE_ERROR: i16 = 56;
 /// `log.dirs`.
 pub const LOG_DIR_NOT_FOUND: i16 = 57;
 pub const COORDINATOR_NOT_AVAILABLE: i16 = 15;
+/// `COORDINATOR_LOAD_IN_PROGRESS` (14, KIP-848) — the group coordinator is
+/// still loading state from `__consumer_offsets`; clients should retry after
+/// a brief back-off.
+pub const COORDINATOR_LOAD_IN_PROGRESS: i16 = 14;
 pub const NOT_COORDINATOR: i16 = 16;
 pub const INVALID_TOPIC_EXCEPTION: i16 = 17;
 /// `ILLEGAL_SASL_STATE` (34) — request received on a SASL listener before
@@ -85,6 +89,18 @@ pub const FENCED_INSTANCE_ID: i16 = 82;
 /// `STALE_MEMBER_EPOCH` (113, KIP-848) — the supplied member epoch is older
 /// than the coordinator's current epoch for the consumer group member.
 pub const STALE_MEMBER_EPOCH: i16 = 113;
+/// `FENCED_MEMBER_EPOCH` (110, KIP-848) — the supplied member epoch is
+/// newer than the coordinator's; the consumer must rejoin from epoch 0.
+pub const FENCED_MEMBER_EPOCH: i16 = 110;
+/// `UNSUPPORTED_ASSIGNOR` (111, KIP-848) — the requested `server_assignor`
+/// is not enabled on this broker.
+pub const UNSUPPORTED_ASSIGNOR: i16 = 111;
+/// `UNRELEASED_INSTANCE_ID` (114, KIP-848 + KIP-345) — the static
+/// `instance_id` is still bound to a live member of the group.
+pub const UNRELEASED_INSTANCE_ID: i16 = 114;
+/// `UNKNOWN_SUBSCRIPTION_ID` (117, KIP-848) — the consumer's persisted
+/// subscription identifier was not found by the coordinator.
+pub const UNKNOWN_SUBSCRIPTION_ID: i16 = 117;
 
 // Slice 11 additions — admin handler codes.
 /// `INVALID_CONFIG` (40) — a config key/value pair is invalid or unknown.

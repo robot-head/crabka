@@ -1035,6 +1035,14 @@ impl Broker {
 
         // Group coordinator bootstrap (slice 5).
         let group_manager = Arc::new(crate::coordinator::GroupManager::new());
+        let next_gen_coord =
+            std::sync::Arc::new(crate::coordinator::next_gen::NextGenCoordinator::new(
+                config.next_gen_consumer_group.clone(),
+                std::sync::Arc::new(crate::coordinator::next_gen::ImageMetadataProvider {
+                    controller: controller.clone(),
+                }),
+            ));
+        group_manager.set_next_gen(next_gen_coord);
         let producer_ids = Arc::new(crate::producer_id_manager::ProducerIdManager::new());
         let producer_state = Arc::new(crate::producer_state::ProducerState::new());
         crate::coordinator::bootstrap::bootstrap(

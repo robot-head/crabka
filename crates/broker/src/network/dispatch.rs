@@ -3714,6 +3714,9 @@ fn handler_body_flexible(api_key: i16, version: i16) -> bool {
         // DescribeTransactions (65, KIP-664) and ListTransactions (66) — both flexible from v0.
         65 => version >= owned::describe_transactions_request::FLEXIBLE_MIN,
         66 => version >= owned::list_transactions_request::FLEXIBLE_MIN,
+        // KIP-848 next-gen consumer group pair; both are flexible from v0.
+        68 => version >= owned::consumer_group_heartbeat_request::FLEXIBLE_MIN,
+        69 => version >= owned::consumer_group_describe_request::FLEXIBLE_MIN,
         // KIP-714 client-metrics push pair; both are flexible from v0.
         71 => version >= owned::get_telemetry_subscriptions_request::FLEXIBLE_MIN,
         72 => version >= owned::push_telemetry_request::FLEXIBLE_MIN,

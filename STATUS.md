@@ -4566,3 +4566,65 @@ introspection metadata).
     `BrokerIdNotRegisteredException` as `INVALID_REQUEST` (42) on
     the wire, so the message-level diagnostic is the discriminating
     signal anyway.
+## Slice 64a — KIP-848 next-gen consumer group protocol foundations + JVM acceptance (2026-05-28)
+
+- 2 new handlers wired: `ConsumerGroupHeartbeat` (api_key 68),
+  `ConsumerGroupDescribe` (api_key 69).
+- New module `crates/broker/src/coordinator/next_gen/`:
+  - `group_actor` — per-group tokio actor with mpsc message protocol +
+    `tokio::time::interval`-driven session-timeout eviction.
+  - `group_state` — `MemberState`, target/current assignment, dirty-bit
+    tracking, instance-id binding (KIP-345 integration).
+  - `reconciler` — trigger-driven target recompute on dirty.
+  - `assignor` — `Assignor` trait, `UniformAssignor` (default), `RangeAssignor`.
+  - `persistence` — wire codecs for KIP-848 record keys 3/5/6/7/8 +
+    associated value types in `__consumer_offsets` (encode/decode).
+  - `config` — `NextGenConfig` + `RebalanceProtocol` enum.
+- Classic↔next-gen coexistence via `GroupType` lock on first persisted
+  record per `group_id`. `JoinGroup` marks classic; ConsumerGroupHeartbeat
+  marks next-gen.
+- 5 new error codes added to `crates/broker/src/codes.rs`:
+  `COORDINATOR_LOAD_IN_PROGRESS` (14), `FENCED_MEMBER_EPOCH` (110),
+  `UNSUPPORTED_ASSIGNOR` (111), `UNRELEASED_INSTANCE_ID` (114),
+  `UNKNOWN_SUBSCRIPTION_ID` (117).
+- New broker config struct `NextGenConfig` exposed via
+  `BrokerConfig.next_gen_consumer_group` — fields:
+  `rebalance_protocols`, `session_timeout`, `heartbeat_interval`,
+  min/max session and heartbeat bounds, `assignors`, `max_size`.
+- `OffsetCommit` extended: when the group is next-gen, validates
+  `member_epoch` via the actor (`STALE_MEMBER_EPOCH` / `FENCED_MEMBER_EPOCH`).
+  Classic groups unchanged.
+- Bootstrap replay (`coordinator::bootstrap`) extended to dispatch v3–8
+  records into `NextGenCoordinator::seeds`; `finalize_bootstrap` spawns
+  actors seeded from collected records.
+- Tests:
+  - 34 unit tests across `next_gen/{assignor, group_state, reconciler,
+    persistence}`.
+  - 6 broker integration tests (raw RPC) in
+    `crates/broker/tests/consumer_group_next_gen.rs` covering
+    single-member lifecycle, two-member rebalance, classic-group type lock,
+    kill-switch config, describe round trip, stale-epoch rejection.
+  - 4 ignored JVM-acceptance tests in
+    `crates/broker/tests/jvm_consumer_group_next_gen.rs` driving
+    `apache/kafka:4.0.0` with `group.protocol=consumer`. The Kafka 4.0
+    `kafka-console-consumer` falls back to the classic protocol against
+    the current broker — engaging the next-gen path end-to-end requires
+    the persistence write path below plus alignment of the heartbeat-loop
+    response shape with what kafka-clients 4.0 actually waits on.
+  - 2 ignored bootstrap-replay tests in
+    `crates/broker/tests/consumer_group_next_gen_persistence.rs` —
+    documented intent; actor does not yet write KIP-848 records to
+    `__consumer_offsets`. Tracked as 64a follow-up.
+- CI: `apache/kafka:4.0.0` preloaded; the JVM-acceptance binary is
+  carried but not yet invoked by `broker-jvm-acceptance` until the
+  next-gen integration depth lands.
+- Out of scope (follow-up slices):
+  - Actor → `__consumer_offsets` persistence write path (64a follow-up).
+  - JVM-client integration depth — heartbeat-loop response shape,
+    offset-fetch `member_epoch` plumbing, anything else needed to keep
+    `apache/kafka:4.0.0` clients on the next-gen path end-to-end
+    (64a follow-up; runs the four `jvm_kip848_*` tests today).
+  - Rack-aware `UniformAssignor` (64b).
+  - Custom server-side assignor plugin point (64c).
+  - Group migration policy classic → next-gen (64d).
+  - Share groups KIP-932.

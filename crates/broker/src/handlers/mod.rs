@@ -58,6 +58,8 @@ pub(crate) mod api_versions;
 // describe_cluster, describe_groups when the request opts in.
 pub(crate) mod authorized_operations;
 pub(crate) mod broker_heartbeat;
+pub(crate) mod consumer_group_describe;
+pub(crate) mod consumer_group_heartbeat;
 pub(crate) mod create_acls;
 pub(crate) mod create_delegation_token;
 pub(crate) mod create_partitions;
@@ -220,6 +222,8 @@ pub(crate) fn build_table() -> HandlerTable {
     t.register(56, alter_partition::handle);
     // 60 (DescribeCluster) intercepted inline — see comment above.
     t.register(63, broker_heartbeat::handle);
+    t.register(68, consumer_group_heartbeat::handle);
+    t.register(69, consumer_group_describe::handle);
     // KIP-714 (client metrics push). Both handlers are no-ops: get returns
     // an empty subscription so JVM clients skip push; push silently
     // discards anything that races the subscription re-fetch.

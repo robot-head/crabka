@@ -6,6 +6,7 @@
 
 pub(crate) mod bootstrap;
 pub(crate) mod group;
+pub mod next_gen;
 pub(crate) mod persistence;
 
 use std::sync::Arc;
@@ -76,6 +77,8 @@ pub(crate) struct GroupManager {
     shutdown: CancellationToken,
     /// Held so the ticker is reaped when `GroupManager` drops.
     _ticker: JoinHandle<()>,
+    /// KIP-848 next-gen coordinator; set once after construction.
+    pub(crate) next_gen: std::sync::OnceLock<std::sync::Arc<next_gen::NextGenCoordinator>>,
 }
 
 impl GroupManager {
@@ -87,7 +90,16 @@ impl GroupManager {
             groups,
             shutdown,
             _ticker: ticker,
+            next_gen: std::sync::OnceLock::new(),
         }
+    }
+
+    pub fn next_gen(&self) -> Option<&std::sync::Arc<next_gen::NextGenCoordinator>> {
+        self.next_gen.get()
+    }
+
+    pub fn set_next_gen(&self, ng: std::sync::Arc<next_gen::NextGenCoordinator>) {
+        let _ = self.next_gen.set(ng);
     }
 
     pub fn get_or_create(&self, group_id: &str) -> Arc<GroupHandle> {

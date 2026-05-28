@@ -28,6 +28,8 @@ pub enum Key {
     },
     /// Just `group_id` — value carries the whole `GroupMetadataValue`.
     GroupMetadata { group_id: String },
+    /// KIP-848 next-gen consumer group record types (versions 3, 5–8).
+    NextGen(crate::coordinator::next_gen::persistence::NextGenKey),
 }
 
 pub fn parse_key(mut buf: &[u8]) -> Result<Key, BrokerError> {
@@ -52,6 +54,9 @@ pub fn parse_key(mut buf: &[u8]) -> Result<Key, BrokerError> {
             let group_id = get_string(&mut buf)?;
             Ok(Key::GroupMetadata { group_id })
         }
+        3 | 5 | 6 | 7 | 8 => Ok(Key::NextGen(
+            crate::coordinator::next_gen::persistence::parse_key(version, buf)?,
+        )),
         _ => Err(BrokerError::Protocol(
             crabka_protocol::ProtocolError::InvalidValue("unknown __consumer_offsets key version"),
         )),
@@ -221,7 +226,7 @@ impl GroupMetadataValue {
 
 // ── primitives (non-flexible Kafka encoding) ───────────────────────────────
 
-fn get_i16(buf: &mut &[u8]) -> Result<i16, BrokerError> {
+pub(crate) fn get_i16(buf: &mut &[u8]) -> Result<i16, BrokerError> {
     if buf.remaining() < 2 {
         return Err(BrokerError::Protocol(
             crabka_protocol::ProtocolError::InvalidValue("offsets buf < i16"),
@@ -230,7 +235,7 @@ fn get_i16(buf: &mut &[u8]) -> Result<i16, BrokerError> {
     Ok(buf.get_i16())
 }
 
-fn get_i32(buf: &mut &[u8]) -> Result<i32, BrokerError> {
+pub(crate) fn get_i32(buf: &mut &[u8]) -> Result<i32, BrokerError> {
     if buf.remaining() < 4 {
         return Err(BrokerError::Protocol(
             crabka_protocol::ProtocolError::InvalidValue("offsets buf < i32"),
@@ -239,7 +244,7 @@ fn get_i32(buf: &mut &[u8]) -> Result<i32, BrokerError> {
     Ok(buf.get_i32())
 }
 
-fn get_i64(buf: &mut &[u8]) -> Result<i64, BrokerError> {
+pub(crate) fn get_i64(buf: &mut &[u8]) -> Result<i64, BrokerError> {
     if buf.remaining() < 8 {
         return Err(BrokerError::Protocol(
             crabka_protocol::ProtocolError::InvalidValue("offsets buf < i64"),
@@ -248,7 +253,7 @@ fn get_i64(buf: &mut &[u8]) -> Result<i64, BrokerError> {
     Ok(buf.get_i64())
 }
 
-fn get_string(buf: &mut &[u8]) -> Result<String, BrokerError> {
+pub(crate) fn get_string(buf: &mut &[u8]) -> Result<String, BrokerError> {
     let len = get_i16(buf)?;
     if len < 0 {
         return Err(BrokerError::Protocol(
@@ -270,7 +275,7 @@ fn get_string(buf: &mut &[u8]) -> Result<String, BrokerError> {
     })
 }
 
-fn get_nullable_string(buf: &mut &[u8]) -> Result<Option<String>, BrokerError> {
+pub(crate) fn get_nullable_string(buf: &mut &[u8]) -> Result<Option<String>, BrokerError> {
     let len = get_i16(buf)?;
     if len < 0 {
         return Ok(None);
@@ -290,7 +295,7 @@ fn get_nullable_string(buf: &mut &[u8]) -> Result<Option<String>, BrokerError> {
     })
 }
 
-fn get_bytes(buf: &mut &[u8]) -> Result<Bytes, BrokerError> {
+pub(crate) fn get_bytes(buf: &mut &[u8]) -> Result<Bytes, BrokerError> {
     let len = get_i32(buf)?;
     if len < 0 {
         return Ok(Bytes::new());
@@ -306,20 +311,20 @@ fn get_bytes(buf: &mut &[u8]) -> Result<Bytes, BrokerError> {
     Ok(Bytes::from(out))
 }
 
-fn put_string<B: BufMut>(buf: &mut B, s: &str) {
+pub(crate) fn put_string<B: BufMut>(buf: &mut B, s: &str) {
     let n = i16::try_from(s.len()).expect("string < 32k");
     buf.put_i16(n);
     buf.put_slice(s.as_bytes());
 }
 
-fn put_nullable_string<B: BufMut>(buf: &mut B, s: Option<&str>) {
+pub(crate) fn put_nullable_string<B: BufMut>(buf: &mut B, s: Option<&str>) {
     match s {
         None => buf.put_i16(-1),
         Some(s) => put_string(buf, s),
     }
 }
 
-fn put_bytes<B: BufMut>(buf: &mut B, b: &Bytes) {
+pub(crate) fn put_bytes<B: BufMut>(buf: &mut B, b: &Bytes) {
     let n = i32::try_from(b.len()).expect("bytes < 2GiB");
     buf.put_i32(n);
     buf.put_slice(b);
@@ -384,7 +389,9 @@ mod tests {
                 assert_eq!(topic, "topic");
                 assert_eq!(partition, 7);
             }
-            k @ Key::GroupMetadata { .. } => panic!("expected OffsetCommit, got {k:?}"),
+            k @ (Key::GroupMetadata { .. } | Key::NextGen(_)) => {
+                panic!("expected OffsetCommit, got {k:?}")
+            }
         }
     }
 
@@ -393,7 +400,9 @@ mod tests {
         let key = GroupMetadataValue::encode_key("grp");
         match parse_key(&key).unwrap() {
             Key::GroupMetadata { group_id } => assert_eq!(group_id, "grp"),
-            k @ Key::OffsetCommit { .. } => panic!("expected GroupMetadata, got {k:?}"),
+            k @ (Key::OffsetCommit { .. } | Key::NextGen(_)) => {
+                panic!("expected GroupMetadata, got {k:?}")
+            }
         }
     }
 }

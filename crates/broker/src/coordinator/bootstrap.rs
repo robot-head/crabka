@@ -86,6 +86,9 @@ pub async fn bootstrap(
 
     // Replay before spawning the writer so reads see consistent state.
     replay_records(&log, group_manager).await?;
+    if let Some(ng) = group_manager.next_gen() {
+        ng.finalize_bootstrap();
+    }
 
     // Spawn a writer + register the partition handle.
     let partition = spawn_partition(
@@ -159,10 +162,74 @@ async fn apply_record(
             );
         }
         Key::GroupMetadata { group_id } => {
+            if let Some(ng) = group_manager.next_gen() {
+                ng.mark_classic(&group_id);
+            }
             let v = GroupMetadataValue::decode_value(value_bytes)?;
             let handle = group_manager.get_or_create(&group_id);
             let mut g = handle.state.lock().await;
             apply_group_metadata(&mut g, v, batch.max_timestamp);
+        }
+        Key::NextGen(ng_key) => {
+            apply_next_gen_record(group_manager, ng_key, value_bytes)?;
+        }
+    }
+    Ok(())
+}
+
+fn apply_next_gen_record(
+    group_manager: &GroupManager,
+    key: crate::coordinator::next_gen::persistence::NextGenKey,
+    value_bytes: &bytes::Bytes,
+) -> Result<(), BrokerError> {
+    use crate::coordinator::next_gen::persistence as ng;
+    let Some(ng_coord) = group_manager.next_gen().cloned() else {
+        return Ok(());
+    };
+    match key {
+        ng::NextGenKey::GroupMetadata { group_id } => {
+            ng_coord.mark_next_gen(&group_id);
+            ng_coord.replay_group_metadata(&group_id, ng::GroupMetadataValue::decode(value_bytes)?);
+        }
+        ng::NextGenKey::MemberMetadata {
+            group_id,
+            member_id,
+        } => {
+            ng_coord.mark_next_gen(&group_id);
+            ng_coord.replay_member_metadata(
+                &group_id,
+                &member_id,
+                ng::MemberMetadataValue::decode(value_bytes)?,
+            );
+        }
+        ng::NextGenKey::TargetAssignmentMetadata { group_id } => {
+            ng_coord.mark_next_gen(&group_id);
+            ng_coord.replay_target_assignment_metadata(
+                &group_id,
+                ng::TargetAssignmentMetadataValue::decode(value_bytes)?,
+            );
+        }
+        ng::NextGenKey::TargetAssignmentMember {
+            group_id,
+            member_id,
+        } => {
+            ng_coord.mark_next_gen(&group_id);
+            ng_coord.replay_target_assignment_member(
+                &group_id,
+                &member_id,
+                ng::TargetAssignmentMemberValue::decode(value_bytes)?,
+            );
+        }
+        ng::NextGenKey::CurrentMemberAssignment {
+            group_id,
+            member_id,
+        } => {
+            ng_coord.mark_next_gen(&group_id);
+            ng_coord.replay_current_member_assignment(
+                &group_id,
+                &member_id,
+                ng::CurrentMemberAssignmentValue::decode(value_bytes)?,
+            );
         }
     }
     Ok(())
