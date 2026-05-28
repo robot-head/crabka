@@ -1,11 +1,10 @@
 //! End-to-end: produce a v2 batch via the modern Produce path, then
-//! Fetch v3 and expect a v0/v1 `MessageSet` on the wire that decodes
-//! back to the same records. Includes a zstd-compressed batch case
-//! that must come back as snappy.
-//!
-//! The control-record drop path is verified via unit tests in
-//! `fetch_downconvert.rs` rather than end-to-end (the standard producer
-//! path doesn't produce control batches).
+//! Fetch on a legacy version and expect a v0/v1 `MessageSet` on the wire
+//! that decodes back to the same records. Covers:
+//!   - Fetch v3 → `Magic::V1` (KIP-32 timestamps preserved).
+//!   - Fetch v0 → `Magic::V0` (per-message timestamps stripped).
+//!   - zstd-compressed batches re-compressed as snappy.
+//!   - control batches dropped from the down-converted response.
 
 #![allow(clippy::too_many_lines)]
 
@@ -87,6 +86,28 @@ async fn topic_id_for(client: &crabka_client_core::Client, name: &str) -> WireUu
         .unwrap_or_default()
 }
 
+/// Create a single-partition topic via the modern client, asserting success.
+async fn create_topic(client: &crabka_client_core::Client, name: &str) {
+    let cr = client
+        .send(CreateTopicsRequest {
+            topics: vec![CreatableTopic {
+                name: name.into(),
+                num_partitions: 1,
+                replication_factor: 1,
+                ..Default::default()
+            }],
+            timeout_ms: 5_000,
+            ..Default::default()
+        })
+        .await
+        .expect("CreateTopics");
+    assert_eq!(
+        cr.topics[0].error_code, 0,
+        "CreateTopics error: {}",
+        cr.topics[0].error_code
+    );
+}
+
 /// Produce a single v2 batch to (topic, partition=0) via a modern flexible
 /// `ProduceRequest` (version 9). Returns `Ok(())` on success.
 async fn produce_batch(addr: std::net::SocketAddr, topic: &str, batch: RecordBatch) {
@@ -149,13 +170,15 @@ async fn produce_batch(addr: std::net::SocketAddr, topic: &str, batch: RecordBat
     );
 }
 
-/// Send a Fetch v3 request for (topic, partition=0) from offset 0 and
-/// return the raw response body bytes (`correlation_id` stripped).
-async fn fetch_v3_raw(addr: std::net::SocketAddr, topic: &str) -> Vec<u8> {
+/// Send a Fetch request at the given legacy `version` for (topic,
+/// partition=0) from offset 0 and return the raw response body bytes
+/// (`correlation_id` stripped). Encoding at a low version drops fields
+/// absent in that version (e.g. `max_bytes` is v3+), so the same struct
+/// works for v0–v3.
+async fn fetch_legacy_raw(addr: std::net::SocketAddr, topic: &str, version: i16) -> Vec<u8> {
     use crabka_protocol::kafka_3_6_2::owned::fetch_request::{
         FetchPartition, FetchRequest, FetchTopic,
     };
-    const FETCH_VERSION: i16 = 3;
 
     let req = FetchRequest {
         replica_id: -1,
@@ -175,14 +198,14 @@ async fn fetch_v3_raw(addr: std::net::SocketAddr, topic: &str) -> Vec<u8> {
         ..Default::default()
     };
     let mut body = BytesMut::new();
-    req.encode(&mut body, FETCH_VERSION)
-        .expect("encode FetchRequest v3");
+    req.encode(&mut body, version)
+        .expect("encode legacy FetchRequest");
 
     let mut stream = TcpStream::connect(addr)
         .await
-        .expect("connect for fetch v3");
+        .expect("connect for legacy fetch");
     stream.set_nodelay(true).ok();
-    round_trip_nonflexible(&mut stream, 1, FETCH_VERSION, 42, &body).await
+    round_trip_nonflexible(&mut stream, 1, version, 42, &body).await
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -235,7 +258,7 @@ async fn fetch_v3_downconverts_v2_batch_to_v0_messageset() {
     produce_batch(addr, "legacy_fetch_basic", batch).await;
 
     // 3. Fetch v3 via raw TCP.
-    let resp_body = fetch_v3_raw(addr, "legacy_fetch_basic").await;
+    let resp_body = fetch_legacy_raw(addr, "legacy_fetch_basic", 3).await;
 
     // 4. Decode as LegacyFetchResponse (Fetch v3 is non-flexible).
     let mut cur: &[u8] = &resp_body;
@@ -344,7 +367,7 @@ async fn fetch_v3_recompresses_zstd_as_snappy() {
     produce_batch(addr, "legacy_fetch_zstd", batch).await;
 
     // 3. Fetch v3 via raw TCP.
-    let resp_body = fetch_v3_raw(addr, "legacy_fetch_zstd").await;
+    let resp_body = fetch_legacy_raw(addr, "legacy_fetch_zstd", 3).await;
 
     // 4. Decode as LegacyFetchResponse.
     let mut cur: &[u8] = &resp_body;
@@ -399,6 +422,114 @@ async fn fetch_v3_recompresses_zstd_as_snappy() {
         recs[49].key.as_deref(),
         Some(b"key-0049".as_ref()),
         "last record key mismatch"
+    );
+
+    p.broker.shutdown().await;
+}
+
+/// Fetch v0 maps to `Magic::V0`, which has no per-message timestamp.
+/// Produce a batch carrying timestamps via the modern path, then fetch
+/// at v0 and confirm the down-converted `MessageSet` strips them — the
+/// `request_version < 2` branch of `down_convert_for_fetch`, exercised
+/// through the full Fetch handler rather than the unit helper.
+#[tokio::test]
+async fn fetch_v0_downconverts_to_magic_v0_without_timestamps() {
+    let p = support::start().await;
+    create_topic(&p.client, "legacy_fetch_v0").await;
+
+    // base_timestamp + per-record delta give a non-zero create-time that
+    // a v1 MessageSet would carry but v0 must drop.
+    let batch = RecordBatch {
+        base_timestamp: 1_700_000_000,
+        last_offset_delta: 0,
+        records: vec![Record {
+            offset_delta: 0,
+            timestamp_delta: 500,
+            key: Some(Bytes::from_static(b"k")),
+            value: Some(Bytes::from_static(b"v")),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let addr = p.broker.listen_addr();
+    produce_batch(addr, "legacy_fetch_v0", batch).await;
+
+    let resp_body = fetch_legacy_raw(addr, "legacy_fetch_v0", 0).await;
+    let mut cur: &[u8] = &resp_body;
+    let fetch_resp =
+        LegacyFetchResponse::decode(&mut cur, 0).expect("decode LegacyFetchResponse v0");
+
+    let part = &fetch_resp.responses[0].partitions[0];
+    assert_eq!(
+        part.error_code, 0,
+        "fetch partition error: {}",
+        part.error_code
+    );
+
+    let legacy_bytes = match part.records.as_ref().expect("records field should be Some") {
+        RecordsPayload::Legacy(b) => b.clone(),
+        RecordsPayload::V2(_) => panic!("expected Legacy MessageSet in Fetch v0 response"),
+    };
+
+    // MessageSet layout: offset(8) + message_size(4) + crc(4) + magic(1).
+    // The magic byte sits at index 16 and must be 0 for a v0 MessageSet.
+    assert!(legacy_bytes.len() > 16, "legacy bytes too short");
+    assert_eq!(legacy_bytes[16], 0, "expected v0 MessageSet magic byte 0");
+
+    let mut ms_cur: &[u8] = &legacy_bytes;
+    let recs = decode_message_set(&mut ms_cur, legacy_bytes.len()).expect("decode_message_set");
+    assert_eq!(recs.len(), 1, "expected 1 record");
+    assert_eq!(recs[0].key.as_deref(), Some(b"k".as_ref()));
+    assert_eq!(recs[0].value.as_deref(), Some(b"v".as_ref()));
+    assert_eq!(
+        recs[0].timestamp, None,
+        "v0 MessageSet must carry no timestamp"
+    );
+
+    p.broker.shutdown().await;
+}
+
+/// Control batches (txn markers) have no representation in the v0/v1
+/// `MessageSet` format and must be dropped from a down-converted Fetch
+/// response. Produce a single control batch, fetch at v3, and confirm the
+/// partition comes back with no records and no error — the `Ok(None)` arm
+/// of the Fetch handler's down-conversion loop.
+#[tokio::test]
+async fn fetch_v3_drops_control_batch() {
+    let p = support::start().await;
+    create_topic(&p.client, "legacy_fetch_ctrl").await;
+
+    // Only the control bit matters for the down-conversion drop. Keep the
+    // batch non-transactional / non-idempotent so the produce path appends
+    // it directly without txn-coordinator or producer-state validation.
+    let batch = RecordBatch {
+        attributes: Attributes::default().with_control(true),
+        last_offset_delta: 0,
+        records: vec![Record {
+            offset_delta: 0,
+            key: Some(Bytes::from_static(b"\x00\x00\x00\x00")),
+            value: Some(Bytes::from_static(b"\x00\x00")),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let addr = p.broker.listen_addr();
+    produce_batch(addr, "legacy_fetch_ctrl", batch).await;
+
+    let resp_body = fetch_legacy_raw(addr, "legacy_fetch_ctrl", 3).await;
+    let mut cur: &[u8] = &resp_body;
+    let fetch_resp =
+        LegacyFetchResponse::decode(&mut cur, 3).expect("decode LegacyFetchResponse v3");
+
+    let part = &fetch_resp.responses[0].partitions[0];
+    assert_eq!(
+        part.error_code, 0,
+        "fetch partition error: {}",
+        part.error_code
+    );
+    assert!(
+        part.records.is_none(),
+        "control batch must be dropped, leaving no records on the wire"
     );
 
     p.broker.shutdown().await;
