@@ -21,9 +21,9 @@
 //! - `Vote`: full semantics with the caveat that the peer's
 //!   `last_log_id` is not returned (the v0 response carries only
 //!   `vote_granted` + `term`).
-//! - `InstallSnapshot`: not used — snapshots are not implemented per
-//!   `state_machine.rs`. The trait method falls through to openraft's
-//!   default error.
+//! - `InstallSnapshot`: ships checkpoint chunks to a follower whose log
+//!   prefix has been compacted; the response carries the follower's
+//!   `vote` so the leader can detect a higher term.
 //!
 //! These limitations are intentional; the `wire::Crabka*Response` types
 //! can evolve without breaking the `RaftNetworkFactory` interface.
@@ -93,8 +93,8 @@ impl OutboundDialer for PlaintextDialer {
     }
 }
 use crate::wire::{
-    API_KEY_APPEND_ENTRIES, API_KEY_VOTE, CrabkaAppendEntriesRequest, CrabkaAppendEntriesResponse,
-    CrabkaLogEntry, CrabkaVoteRequest, CrabkaVoteResponse,
+    API_KEY_APPEND_ENTRIES, API_KEY_INSTALL_SNAPSHOT, API_KEY_VOTE, CrabkaAppendEntriesRequest,
+    CrabkaAppendEntriesResponse, CrabkaLogEntry, CrabkaVoteRequest, CrabkaVoteResponse,
 };
 
 /// Factory of per-peer `RaftNetwork` adapters. Maintains a `DashMap` of
@@ -202,25 +202,50 @@ impl openraft::network::RaftNetwork<TypeConfig> for CrabkaRaftNetworkConn {
         decode_append_entries_resp(&resp_body, &rpc).map_err(|e| map_encode_err(&e))
     }
 
-    /// Snapshots are not implemented. The state machine's snapshot
-    /// methods return `Unsupported`, so openraft falls back to plain
-    /// append-entries replication. If the engine still calls this — e.g.,
-    /// to ship an explicit snapshot for a far-behind follower — we
-    /// surface a `Network` error so it logs + retries; in practice this
-    /// path stays cold since metadata logs are small.
+    /// Ship one `InstallSnapshot` chunk to the peer: serialize `vote` +
+    /// `meta` as bincode, frame the chunk via [`crate::wire`], and decode
+    /// the peer's returned `vote`. A far-behind follower whose log prefix
+    /// has been compacted behind a checkpoint catches up through this
+    /// path rather than append-entries.
     async fn install_snapshot(
         &mut self,
-        _rpc: InstallSnapshotRequest<TypeConfig>,
+        rpc: InstallSnapshotRequest<TypeConfig>,
         _option: RPCOption,
     ) -> Result<
         InstallSnapshotResponse<NodeId>,
         RPCError<NodeId, Node, RaftError<NodeId, InstallSnapshotError>>,
     > {
-        let err = std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "install_snapshot is not implemented",
-        );
-        Err(RPCError::Network(NetworkError::new(&err)))
+        use serde_wincode::SerdeCompat;
+        use wincode::{Deserialize as _, Serialize as _};
+
+        let conn = self
+            .factory
+            .connect(self.target, &self.addr)
+            .await
+            .map_err(|e| RPCError::Unreachable(Unreachable::new(&e)))?;
+        let vote = <SerdeCompat<Vote<NodeId>>>::serialize(&rpc.vote).map_err(snapshot_net_err)?;
+        let meta = <SerdeCompat<openraft::SnapshotMeta<NodeId, Node>>>::serialize(&rpc.meta)
+            .map_err(snapshot_net_err)?;
+        let mut body = Vec::new();
+        crate::wire::CrabkaInstallSnapshotRequest {
+            vote: Bytes::from(vote),
+            meta: Bytes::from(meta),
+            offset: i64::try_from(rpc.offset).unwrap_or(i64::MAX),
+            data: Bytes::from(rpc.data),
+            done: rpc.done,
+        }
+        .encode_v0(&mut body)
+        .map_err(snapshot_net_err)?;
+        let resp_body = conn
+            .raw_request(API_KEY_INSTALL_SNAPSHOT, 0, Bytes::from(body))
+            .await
+            .map_err(|e| RPCError::Network(NetworkError::new(&e)))?;
+        let mut cur: &[u8] = &resp_body;
+        let resp =
+            crate::wire::CrabkaInstallSnapshotResponse::decode_v0(&mut cur).map_err(snapshot_net_err)?;
+        let vote: Vote<NodeId> =
+            <SerdeCompat<Vote<NodeId>>>::deserialize(&resp.vote).map_err(snapshot_net_err)?;
+        Ok(InstallSnapshotResponse { vote })
     }
 
     async fn vote(
@@ -259,6 +284,16 @@ fn map_client_err(e: &ClientError) -> RPCError<NodeId, Node, RaftError<NodeId>> 
 /// transient so openraft logs + retries.
 fn map_encode_err(e: &CrabkaRaftError) -> RPCError<NodeId, Node, RaftError<NodeId>> {
     RPCError::Network(NetworkError::new(e))
+}
+
+/// Map a codec failure on the `InstallSnapshot` path to `Network`. The
+/// install path carries `InstallSnapshotError` in its `RPCError`, a
+/// different generic param than the append/vote mappers, so it needs its
+/// own helper.
+fn snapshot_net_err<E: std::error::Error + 'static>(
+    e: E,
+) -> RPCError<NodeId, Node, RaftError<NodeId, InstallSnapshotError>> {
+    RPCError::Network(NetworkError::new(&e))
 }
 
 fn encode_append_entries(rpc: &AppendEntriesRequest<TypeConfig>) -> Result<Bytes, CrabkaRaftError> {
