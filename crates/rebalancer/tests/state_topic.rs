@@ -60,7 +60,28 @@ async fn write_load_round_trip_via_real_broker() {
         .await
         .expect("create topic");
 
-    // Round 1: write a record, then start the loader, expect to see it.
+    // Round 1: write a record, then start a fresh loader, expect to see it.
+    //
+    // Production startup ordering: ensure_topic → spawn loader →
+    // (executor writes later, gated on /readyz). The loader's first
+    // Fetch RPCs nudge the broker into fully loading the topic's
+    // partition into its data plane, so by the time the executor
+    // writes, UNKNOWN_TOPIC_OR_PARTITION isn't a concern. We mirror
+    // that ordering here: start a "warmup" loader (separate state)
+    // before the first write, wait for it to settle, then write.
+    let warmup_state = LoadedState::new();
+    let warmup_shutdown = CancellationToken::new();
+    let warmup_loader = StateTopicLoader {
+        client: client.clone(),
+        topic: topic.clone(),
+        state: warmup_state.clone(),
+        shutdown: warmup_shutdown.clone(),
+    };
+    let warmup_handle = tokio::spawn(warmup_loader.run());
+    drive_loader_until_loaded(warmup_state.clone(), Duration::from_secs(10)).await;
+    warmup_shutdown.cancel();
+    warmup_handle.await.unwrap();
+
     let state = LoadedState::new();
     let st = StateTopic::new(client.clone(), topic.clone(), state.clone());
     let f = InFlightFile::new("p-1".into(), Phase::Wait, 1_111, 50_000_000);
