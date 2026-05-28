@@ -89,11 +89,14 @@ async fn boot_with_ongoing_txn(
         .unwrap();
     producer.init_transactions().await.unwrap();
     producer.begin_transaction().await.unwrap();
-    // `send` returns a future-record-metadata handle; we only need
-    // the side effect of enrolling the partition in the txn. Drop
-    // the awaited result explicitly so clippy's
-    // `let_underscore_future` doesn't fire.
+    // `send` enqueues into the producer's local batch; without
+    // `flush()` the AddPartitionsToTxn round-trip that registers
+    // `(topic, partition)` on the coordinator's TxnEntry may not run
+    // before the admin call. The drop pattern around `send` is
+    // intentional — it's a future-of-record-metadata handle we don't
+    // need (commits will never fire on this test path).
     drop(producer.send(rec(topic, "v")).await);
+    producer.flush().await.unwrap();
     // Don't commit/abort — we want the txn to stay Ongoing.
 
     (broker, bootstrap, dir, producer)
@@ -105,8 +108,10 @@ async fn list_transactions_returns_ongoing_txn() {
 
     let client = admin_client(&bootstrap).await;
     // Retry briefly — AddPartitionsToTxn races the visibility of the
-    // partitions set in the coordinator's TxnEntry.
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    // partitions set in the coordinator's TxnEntry. macOS runners are
+    // measurably slower than ubuntu/linux on the in-process
+    // transactional path, so the deadline is generous.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
     let resp = loop {
         let r = client
             .send(ListTransactionsRequest::default())
@@ -118,7 +123,7 @@ async fn list_transactions_returns_ongoing_txn() {
         if std::time::Instant::now() > deadline {
             panic!("ListTransactions never saw the ongoing txn: {r:?}");
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
     };
 
     assert_eq!(resp.error_code, 0);
@@ -192,7 +197,11 @@ async fn describe_transactions_returns_full_state_for_known_tid() {
         boot_with_ongoing_txn("describe-tid", "t-describe").await;
 
     let client = admin_client(&bootstrap).await;
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    // 30 s deadline matches `list_transactions_returns_ongoing_txn` —
+    // the txn's `Ongoing` state + partition set both ride on the same
+    // AddPartitionsToTxn round-trip the producer's `send()` triggers,
+    // and macOS scheduling can be slow.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
     let row = loop {
         let r = client
             .send(DescribeTransactionsRequest {
@@ -209,7 +218,7 @@ async fn describe_transactions_returns_full_state_for_known_tid() {
         if std::time::Instant::now() > deadline {
             panic!("Ongoing txn never showed its partitions: {row:?}");
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
     };
 
     assert_eq!(row.transactional_id, "describe-tid");
