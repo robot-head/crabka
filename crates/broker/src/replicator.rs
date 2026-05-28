@@ -76,6 +76,10 @@ pub(crate) struct Config {
     /// `spawn_partition` so the per-partition writer can flip the
     /// owning dir offline on a segment-write / fsync failure.
     pub log_dir_status: crate::log_dir_status::LogDirRegistry,
+    /// Slice 48k: broker-wide metrics handle so the replicator can
+    /// increment `replication_bytes_in` after a successful follower-
+    /// side append.
+    pub metrics: crate::metrics::BrokerMetrics,
 }
 
 /// Entry point: drive a single (topic, partition) replication loop until
@@ -313,9 +317,18 @@ async fn handle_response(resp: &FetchResponse, cfg: &Config) -> LoopAction {
                         "replicator: local partition vanished between fetches");
                     return LoopAction::Continue;
                 };
+                // Capture byte count before the move into replicate_batch
+                // so the metrics update only fires on a successful append.
+                let batch_bytes = batch.encoded_len();
                 if let Err(e) = entry.value().replicate_batch(batch.clone()).await {
                     warn!(error = %e, topic = %cfg.topic, partition = cfg.partition,
                         "replicator: replicate_batch failed");
+                } else {
+                    cfg.metrics.record_replication_in(
+                        &cfg.topic,
+                        cfg.partition,
+                        u64::try_from(batch_bytes).unwrap_or(0),
+                    );
                 }
             }
             LoopAction::Continue

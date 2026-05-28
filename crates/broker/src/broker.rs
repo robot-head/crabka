@@ -1077,6 +1077,12 @@ impl Broker {
             .iter()
             .find(|l| l.name == config.inter_broker_listener_name)
             .map_or(crabka_security::ListenerProtocol::Plaintext, |l| l.protocol);
+
+        // Slice 48k: build the broker metrics handle early so the
+        // replicator supervisor (constructed next) can clone it; the
+        // `/metrics` HTTP listener and any other later consumers
+        // still reuse the same `metrics` value.
+        let metrics = crate::metrics::BrokerMetrics::new();
         // KIP-113 offline-dir handling: feed the supervisor the online
         // subset so newly materialized partitions never land on a dir
         // the startup probe flagged unwritable.
@@ -1094,6 +1100,7 @@ impl Broker {
             config.inter_broker_listener_name.clone(),
             throttle_state.clone(),
             log_dir_status.clone(),
+            metrics.clone(),
         );
         let supervisor_handle = supervisor.spawn();
 
@@ -1216,7 +1223,8 @@ impl Broker {
         // a cheap `BrokerMetrics` (single Arc bump). The HTTP
         // `/metrics` server is spawned only when configured; ISR
         // maintenance / produce / fetch always update counters.
-        let metrics = crate::metrics::BrokerMetrics::new();
+        // (Slice 48k: the `BrokerMetrics` value itself was constructed
+        // earlier so the replicator supervisor could share it.)
         let metrics_bound_addr = if let Some(addr) = config.metrics_listen_addr {
             let shutdown = supervisor_shutdown.child_token();
             let registry = metrics.registry.clone();
