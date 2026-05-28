@@ -39,11 +39,11 @@ pub struct Log {
     /// simulate retention-driven truncation in integration tests.
     log_start_override: Option<i64>,
 
-    /// Slice 48c (KIP-405): override for `local_log_start_offset()`. Tracks
+    /// Override for `local_log_start_offset()` (KIP-405). Tracks
     /// the local-only floor advanced by `delete_local_segments_through`.
-    /// In 48c this co-advances with `log_start_override`; the accessor
+    /// This co-advances with `log_start_override`; the accessor
     /// delegates to `log_start_offset()` so the two pointers remain a
-    /// single source of truth. They split in 48e.
+    /// single source of truth.
     local_log_start_override: Option<i64>,
 
     /// Last-Stable-Offset: the offset before the first record of any
@@ -103,8 +103,8 @@ impl RawRead {
     }
 }
 
-/// Slice 48b (KIP-405): a sealed segment described for tiered-storage
-/// offload. Carries the on-disk file paths plus the offset / timestamp /
+/// A sealed segment described for tiered-storage
+/// offload (KIP-405). Carries the on-disk file paths plus the offset / timestamp /
 /// size metadata and the leader-epoch ranges a `RemoteLogManager` needs to
 /// build remote-segment metadata. Produced by [`Log::tierable_segments`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,7 +140,7 @@ impl Log {
         let dir = dir.as_ref().to_path_buf();
         fs::create_dir_all(&dir)?;
 
-        // Slice 18: heal any orphaned compaction `.swap` files before
+        // Heal any orphaned compaction `.swap` files before
         // we scan the directory for segments.
         crate::recovery::swap_orphan_recover(&dir)?;
 
@@ -336,8 +336,8 @@ impl Log {
     /// Return all aborted transactions from the active segment's
     /// `.txnindex` whose offset range overlaps `[start, end)`.
     ///
-    /// For the slice-9 MVP only the active segment's index is consulted
-    /// (older sealed segments' `.txnindex` files are not loaded into
+    /// Only the active segment's index is consulted (older sealed
+    /// segments' `.txnindex` files are not loaded into
     /// memory). The window `[fetch_offset, lso)` always falls within
     /// the active segment in practice because LSO can only advance past
     /// a committed/aborted marker, which lands in the same segment as
@@ -765,7 +765,7 @@ impl Log {
     /// segment would otherwise be evicted we retain at least one.
     /// (Active-roll-on-age is a placeholder per the plan; skip it.)
     pub fn tick(&mut self, now: SystemTime) -> Result<(), LogError> {
-        // Slice 48c: tiered topics' segment lifecycle is owned by the RemoteLogManager.
+        // Tiered topics' segment lifecycle is owned by the RemoteLogManager.
         if self.config.read().unwrap().remote_storage_enable {
             return Ok(());
         }
@@ -799,18 +799,17 @@ impl Log {
         Ok(())
     }
 
-    /// Slice 48c (KIP-405): first absolute offset still present on this
-    /// broker's local disk. In 48c this delegates to
-    /// [`Log::log_start_offset`] — the two pointers co-advance until 48e
-    /// (remote-retention) lets them diverge.
+    /// First absolute offset still present on this
+    /// broker's local disk (KIP-405). This delegates to
+    /// [`Log::log_start_offset`] — the two pointers co-advance.
     #[must_use]
     pub fn local_log_start_offset(&self) -> i64 {
         self.log_start_offset()
     }
 
-    /// Slice 48c (KIP-405): physically delete every sealed segment whose
+    /// Physically delete every sealed segment whose
     /// `last_offset < target`, then bump both `log_start_override` and
-    /// `local_log_start_override` to `target`. The active segment is
+    /// `local_log_start_override` to `target` (KIP-405). The active segment is
     /// never touched. Returns the count of segments removed; a no-op
     /// (returns `Ok(0)`) when `target <= local_log_start_offset()`.
     ///
@@ -872,8 +871,8 @@ impl Log {
         Ok(removed)
     }
 
-    /// Slice 48b (KIP-405): describe every sealed segment for
-    /// tiered-storage offload. The active segment is never included — only
+    /// Describe every sealed segment for
+    /// tiered-storage offload (KIP-405). The active segment is never included — only
     /// sealed segments are immutable and safe to copy.
     ///
     /// `last_offset` is derived from the next segment's `base_offset` (the
@@ -1818,7 +1817,7 @@ mod tests {
         assert_eq!(leo1, leo2);
     }
 
-    // ---- Slice 48c (KIP-405): local-retention helpers ----
+    // ---- Local-retention helpers (KIP-405) ----
 
     /// Build a log rolled into several sealed segments under `dir`. Mirror
     /// of the `remote_log_manager` test helper, kept local to this module.

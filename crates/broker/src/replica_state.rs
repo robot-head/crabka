@@ -2,13 +2,13 @@
 //!
 //! `ReplicaState` records each follower's last-fetched offset (= the
 //! follower's persisted LEO from the leader's perspective) and caches
-//! the High Watermark = min LEO over the ISR. Slice 10b adds ISR-lag
-//! tracking via `FollowerStats` (`last_fetch`, `last_caught_up`) so that
+//! the High Watermark = min LEO over the ISR. ISR-lag
+//! tracking via `FollowerStats` (`last_fetch`, `last_caught_up`) lets
 //! the `isr_maintenance` task can shrink/expand the ISR.
 //!
 //! See `docs/superpowers/specs/2026-05-12-crabka-bulletproof-eos-10a-design.md`.
 
-#![allow(dead_code)] // wired in later batches (slice 10b phase D+)
+#![allow(dead_code)] // wired in by the ISR-maintenance path
 
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;

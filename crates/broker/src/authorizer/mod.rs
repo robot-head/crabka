@@ -1,15 +1,11 @@
-//! Slice 53: pluggable cluster authorizer. Single [`Authorizer`] trait
+//! Pluggable cluster authorizer. Single [`Authorizer`] trait
 //! with three impls ([`AllowAllAuthorizer`], [`SimpleAclAuthorizer`],
 //! [`opa::OpaAuthorizer`]); the broker holds one boxed instance
 //! configured via `[authorization]` in `broker.toml`.
 //!
-//! Background — the slice-13 free function `authorize(image, super_users,
-//! &req)` was the original ACL decision point. It carried a
-//! "compat shim" that returned `Allow` when both super-users and ACLs
-//! were empty (pre-ACL deployments). Slice 53 makes the authorizer an
-//! explicit type: the default is [`AllowAllAuthorizer`], so the
-//! "no config = allow everything" behavior is now spelled out rather
-//! than hiding inside the ACL impl.
+//! The authorizer is an explicit type: the default is
+//! [`AllowAllAuthorizer`], so the "no config = allow everything"
+//! behavior is spelled out rather than hiding inside the ACL impl.
 
 mod allow_all;
 pub mod opa;

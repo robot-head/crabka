@@ -17,13 +17,13 @@
 //!
 //! # What this crate doesn't do
 //!
-//! - Replication, leader election, ISR (slice 8).
-//! - `KRaft` metadata quorum (slice 7) — the metadata image is in-memory.
-//! - Consumer groups, offset commits, coordinators (slice 5) —
+//! - Replication, leader election, ISR.
+//! - `KRaft` metadata quorum — the metadata image is in-memory.
+//! - Consumer groups, offset commits, coordinators —
 //!   `FindCoordinator` stubs to `COORDINATOR_NOT_AVAILABLE`; consumers
 //!   must use `--partition` to bypass groups.
-//! - Idempotent / transactional producers (slices 6, 9).
-//! - Authentication, TLS, SASL, ACLs (slice 11).
+//! - Idempotent / transactional producers.
+//! - Authentication, TLS, SASL, ACLs.
 //! - Log compaction, tiered storage, quotas.
 //!
 //! # Quick start
@@ -49,7 +49,7 @@
 //!   broker id, per-log [`LogConfig`](crabka_log::LogConfig).
 //! - [`BrokerError`] — error returned by [`Broker::start`].
 //!
-//! ## Replication (slice 8)
+//! ## Replication
 //!
 //! `CreateTopics` with `replication_factor > 1` assigns N replicas per
 //! partition via round-robin over `MetadataImage::brokers()`. The
@@ -62,9 +62,9 @@
 //!
 //! ISR shrink/expand, high-watermark tracking, `acks=all` blocking,
 //! `AlterPartition` RPC, leader-election-on-failure, and cross-broker
-//! producer routing are deferred — see the slice 8 design spec.
+//! producer routing are deferred.
 //!
-//! ## Transactions (slice 9)
+//! ## Transactions
 //!
 //! Kafka transactions (KIP-98 + full KIP-1319 v2) via a per-broker
 //! `txn::coordinator::TxnCoordinator` backed by the `__transaction_state`
@@ -75,14 +75,14 @@
 //! `isolation_level=read_committed` to filter aborted records via the
 //! per-segment `.txnindex` and partition-level LSO.
 //!
-//! Soft-EOS caveat: slice-8 deferrals (HW + acks=all blocking,
+//! Soft-EOS caveat: the replication deferrals (HW + acks=all blocking,
 //! leader-election-on-failure, KIP-101 leader-epoch) remain deferred.
 //! The transactional control plane is correct; a partition-leader
 //! crash mid-transaction can lose records the producer believed
-//! durably committed. Bulletproof EOS lands when those slice-8
+//! durably committed. Bulletproof EOS lands when those replication
 //! follow-ups ship.
 //!
-//! ## Bulletproof EOS — sub-slice 10a (HW + acks=all)
+//! ## Bulletproof EOS — HW + acks=all
 //!
 //! Per-partition High Watermark tracking via `ReplicaState`
 //! (lives on `Partition`). The leader maintains each follower's LEO from
@@ -93,12 +93,12 @@
 //! (`replica_id == -1`) clamp visible batches and `last_stable_offset`
 //! at HW; `read_committed` LSO becomes `min(HW, log.lso())`.
 //!
-//! Sub-slice 10b will add KIP-101 leader-epoch fencing,
-//! leader-election-on-failure, and ISR shrink/expand to close the
-//! remaining bulletproof-EOS gap (a leader crash mid-transaction still
-//! loses records as of 10a).
+//! On its own, this leaves a remaining bulletproof-EOS gap: a leader
+//! crash mid-transaction still loses records. KIP-101 leader-epoch
+//! fencing, leader-election-on-failure, and ISR shrink/expand (below)
+//! close that gap.
 //!
-//! ## Bulletproof EOS — sub-slice 10b (leader-epoch + election + ISR)
+//! ## Bulletproof EOS — leader-epoch + election + ISR
 //!
 //! KIP-101 leader-epoch fencing tagged onto every appended batch via
 //! `Partition::current_leader_epoch`. Per-partition
@@ -114,7 +114,7 @@
 //! whenever a follower's last-fetch time exceeds
 //! `replica_lag_time_max_ms`.
 //!
-//! Together with slice-10a, the bulletproof-EOS promise is complete:
+//! Together with the HW + acks=all work above, the bulletproof-EOS promise is complete:
 //! `acks=all` produces survive arbitrary single-broker failures with
 //! no data loss and no zombie writes.
 
@@ -131,6 +131,7 @@ pub mod coordinator;
 pub(crate) mod delegation_token_cleanup;
 pub mod disk_scanner;
 mod error;
+mod features;
 pub mod fetch_session;
 pub mod file_config;
 pub(crate) mod future_log;
@@ -165,6 +166,6 @@ pub(crate) mod tls_reload;
 mod txn;
 
 pub use broker::{Broker, BrokerHandle};
-pub use config::{BootstrapMode, BrokerConfig, RemoteStorageBackend};
+pub use config::{BootstrapMode, BrokerConfig, KafkaRlmmConfig, RemoteStorageBackend};
 pub use crabka_raft::NodeId;
 pub use error::BrokerError;

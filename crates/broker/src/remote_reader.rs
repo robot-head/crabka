@@ -1,4 +1,4 @@
-//! Slice 48d (KIP-405): remote read path. Wraps the broker's shared
+//! KIP-405: remote read path. Wraps the broker's shared
 //! [`RemoteStorageManager`] + [`RemoteLogMetadataManager`] pair and serves
 //! `Fetch` / `ListOffsets` requests for offsets that no longer have a local
 //! copy.
@@ -17,6 +17,32 @@ use crabka_remote_storage::{
     RemoteStorageError, RemoteStorageManager, TopicIdPartition,
 };
 use tracing::warn;
+use zerocopy::byteorder::{I64, U32};
+use zerocopy::{BigEndian, FromBytes, Immutable, KnownLayout, Unaligned};
+
+/// 8 bytes per entry: rel u32 BE + pos u32 BE. Mirrors
+/// `crabka_log::index::OffsetEntryRaw` so the remote-tier copy of an
+/// `OffsetIndex` file decodes through the same byte layout the local index
+/// was written with.
+#[derive(Debug, Clone, Copy, FromBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+struct OffsetIndexEntry {
+    relative_offset: U32<BigEndian>,
+    position: U32<BigEndian>,
+}
+
+const _: () = assert!(std::mem::size_of::<OffsetIndexEntry>() == 8);
+
+/// 12 bytes per entry: ts i64 BE + rel u32 BE. Mirrors
+/// `crabka_log::index::TimeEntryRaw`.
+#[derive(Debug, Clone, Copy, FromBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+struct TimeIndexEntry {
+    timestamp: I64<BigEndian>,
+    relative_offset: U32<BigEndian>,
+}
+
+const _: () = assert!(std::mem::size_of::<TimeIndexEntry>() == 12);
 
 /// Holds the broker's shared `RSM` + `RLMM` and serves remote reads.
 pub(crate) struct RemoteReader {
@@ -192,13 +218,12 @@ pub(crate) fn end_position_for(
 /// pos u32 BE).
 #[must_use]
 pub(crate) fn parse_offset_index(bytes: &[u8]) -> Vec<(u32, u32)> {
-    bytes
-        .chunks_exact(8)
-        .map(|c| {
-            let rel = u32::from_be_bytes([c[0], c[1], c[2], c[3]]);
-            let pos = u32::from_be_bytes([c[4], c[5], c[6], c[7]]);
-            (rel, pos)
-        })
+    let truncated_len = (bytes.len() / 8) * 8;
+    let entries = <[OffsetIndexEntry]>::ref_from_bytes(&bytes[..truncated_len])
+        .expect("len is multiple of 8 and OffsetIndexEntry is Unaligned");
+    entries
+        .iter()
+        .map(|e| (e.relative_offset.get(), e.position.get()))
         .collect()
 }
 
@@ -217,13 +242,12 @@ pub(crate) fn position_for_relative_offset(entries: &[(u32, u32)], target_rel: u
 /// u32 BE).
 #[must_use]
 pub(crate) fn parse_time_index(bytes: &[u8]) -> Vec<(i64, u32)> {
-    bytes
-        .chunks_exact(12)
-        .map(|c| {
-            let ts = i64::from_be_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]);
-            let rel = u32::from_be_bytes([c[8], c[9], c[10], c[11]]);
-            (ts, rel)
-        })
+    let truncated_len = (bytes.len() / 12) * 12;
+    let entries = <[TimeIndexEntry]>::ref_from_bytes(&bytes[..truncated_len])
+        .expect("len is multiple of 12 and TimeIndexEntry is Unaligned");
+    entries
+        .iter()
+        .map(|e| (e.timestamp.get(), e.relative_offset.get()))
         .collect()
 }
 
@@ -394,8 +418,8 @@ mod tests {
     // ── Integration tests against `LocalTieredStorage` +
     // ── `InmemoryRemoteLogMetadataManager`. These exercise the full RSM/RLMM
     // ── plumbing through `RemoteReader` (the actual SPI calls, not just
-    // ── helpers), using slice 48b's `copy_eligible` to populate the tier
-    // ── from a real `Log`.
+    // ── helpers), using the copy path's `copy_eligible` to populate the
+    // ── tier from a real `Log`.
 
     use crabka_log::{Log, LogConfig};
     use crabka_protocol::records::Record;
@@ -455,8 +479,8 @@ mod tests {
         let rlmm: Arc<dyn RemoteLogMetadataManager> =
             Arc::new(InmemoryRemoteLogMetadataManager::new());
         // Manually copy each segment as `CopySegmentStarted` →
-        // `CopySegmentFinished` (mirrors slice 48b's copy_eligible without
-        // the broker-side dependencies).
+        // `CopySegmentFinished` (mirrors the copy path's copy_eligible
+        // without the broker-side dependencies).
         for ex in &exports {
             let id = crabka_remote_storage::RemoteLogSegmentId::new(tp(), Uuid::new_v4());
             let epochs: BTreeMap<i32, i64> = if ex.leader_epochs.is_empty() {
@@ -477,8 +501,8 @@ mod tests {
             )
             .unwrap();
             rlmm.add_remote_log_segment_metadata(md.clone()).unwrap();
-            // Render the leader-epoch checkpoint the same way slice 48b does
-            // so `fetch_index(LeaderEpoch)` returns real bytes.
+            // Render the leader-epoch checkpoint the same way the copy path
+            // does so `fetch_index(LeaderEpoch)` returns real bytes.
             let mut s = String::from("0\n");
             let _ = writeln!(s, "{}", epochs.len());
             for (e, st) in &epochs {

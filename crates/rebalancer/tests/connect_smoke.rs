@@ -1,4 +1,4 @@
-//! Slice 43a Connect protocol smoke test. Builds the binary, runs it
+//! Connect protocol smoke test. Builds the binary, runs it
 //! against a temporary single-broker Crabka, hits the Connect endpoint
 //! over HTTP+JSON, asserts a sane response. Proves the axum mount +
 //! Connect-axum glue work end-to-end.

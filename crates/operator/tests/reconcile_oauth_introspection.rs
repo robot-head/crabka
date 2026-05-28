@@ -1,5 +1,5 @@
 #![allow(clippy::doc_markdown, clippy::doc_lazy_continuation)]
-//! Integration tests for slice 50c — operator's OAUTHBEARER
+//! Integration tests for the operator's OAUTHBEARER
 //! introspection-secret surface. Verifies the full reconcile path:
 //! source-Secret validation (presence / key / value), the
 //! short-circuit when the listener is in JWT mode, the rendered
@@ -602,7 +602,7 @@ async fn statefulset_mounts_oauth_introspection_secret_when_introspection_mode()
 
 /// Symmetric absence assertion: a JWT-mode parent Kafka produces a
 /// StatefulSet pod template with no `oauth-introspection-secret`
-/// volume or mount. Mirrors slice 50b's
+/// volume or mount. Mirrors
 /// `statefulset_omits_oauth_jwks_trust_volume_when_no_trust_certs`
 /// shape.
 #[tokio::test]

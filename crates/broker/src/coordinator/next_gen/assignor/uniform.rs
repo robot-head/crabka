@@ -1,7 +1,7 @@
 //! `UniformAssignor` — KIP-848's default. Distributes partitions as evenly
 //! as possible across members subscribed to each topic.
 //!
-//! Slice 64b: rack-aware. When the coordinator's `TopicMetadata` carries
+//! Rack-aware: when the coordinator's `TopicMetadata` carries
 //! a `partition_racks` entry for `(topic_id, partition_index)`, the
 //! assignor prefers subscribers whose `rack_id` matches one of the
 //! partition's replica racks. If no subscriber matches (or the partition
@@ -18,6 +18,7 @@ use std::collections::HashMap;
 
 use super::{Assignment, Assignor, MemberSubscription, TopicMetadata};
 
+#[derive(Debug)]
 pub struct UniformAssignor;
 
 impl Assignor for UniformAssignor {
@@ -205,7 +206,7 @@ mod tests {
         assert!(a.is_empty());
     }
 
-    // ── slice 64b: rack-aware ────────────────────────────────────────────────
+    // ── rack-aware ────────────────────────────────────────────────
 
     /// Build a `TopicMetadata` with rack info on every partition of `t`.
     fn topics_with_racks(

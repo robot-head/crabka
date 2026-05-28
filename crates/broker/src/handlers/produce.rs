@@ -69,7 +69,7 @@ pub(crate) async fn handle(
     };
     let timeout = Duration::from_millis(u64::try_from(req.timeout_ms.max(0)).unwrap_or(0));
 
-    // ── slice-13 ACL preamble ────────────────────────────────────────
+    // ── ACL preamble ────────────────────────────────────────
     // For transactional Produce (request carries a non-empty
     // `transactional_id`), authorize `Write` on
     // `TransactionalId(transactional_id)` FIRST. On Deny, emit
@@ -81,7 +81,7 @@ pub(crate) async fn handle(
     // short-circuit the per-partition append below and emit
     // TOPIC_AUTHORIZATION_FAILED on every partition row of that topic.
     // Topic name resolution for v ≥ 13 (topic_id only on the wire) is
-    // re-done inline below — but the slice-13 plan keys ACLs by topic
+    // re-done inline below — but ACLs are keyed by topic
     // *name*, so we resolve the names here too for the authorize call.
     let image = controller.current_image();
     let txn_id_denied = match req.transactional_id.as_deref() {
@@ -164,7 +164,7 @@ pub(crate) async fn handle(
             String::new()
         };
 
-        // Slice 39: account for the topic in Prometheus before
+        // Account for the topic in Prometheus before
         // consuming `partition_data`. Sum the record-batch encoded
         // lengths so the bytes-in counter matches the wire-level
         // payload. We count even for authorize-denied / unknown-topic
@@ -172,11 +172,11 @@ pub(crate) async fn handle(
         // Kafka's BrokerTopicMetrics semantics.
         if !topic_name.is_empty() {
             let mut topic_bytes: u64 = 0;
-            // Slice 12j: also tally records-per-batch for
+            // Also tally records-per-batch for
             // `messages_in_total`. V2 payloads expose
             // `records.len()` directly; legacy MessageSet payloads
-            // remain opaque here and the upconversion-time slice
-            // (12g) already counts those arrivals.
+            // remain opaque here and the upconversion-time
+            // accounting already counts those arrivals.
             let mut topic_messages: u64 = 0;
             for p in &topic.partition_data {
                 let partition_bytes = p.records.as_ref().map_or(0, |r| r.payload_len() as u64);
@@ -197,7 +197,7 @@ pub(crate) async fn handle(
         let mut partition_results: Vec<PartitionProduceResponse> =
             Vec::with_capacity(topic.partition_data.len());
 
-        // slice-13: if the topic was denied by the ACL preamble, every
+        // If the topic was denied by the ACL preamble, every
         // partition row for it gets TOPIC_AUTHORIZATION_FAILED and the
         // real append is skipped. An empty topic_name (v ≥ 13 with an
         // unknown topic_id) maps to "" in the denied set if and only if
@@ -207,7 +207,7 @@ pub(crate) async fn handle(
 
         for part_data in topic.partition_data {
             let idx = part_data.index;
-            // Slice 43f: time the per-partition handler work for the
+            // Time the per-partition handler work for the
             // rebalancer's CpuUsage / CpuCapacity goals via
             // tokio_metrics::TaskMonitor — only on-CPU poll duration is
             // charged (not wall-time spent awaiting the writer queue,
@@ -235,7 +235,7 @@ pub(crate) async fn handle(
                 broker
                     .metrics
                     .record_partition_cpu_micros(&topic_name, idx, micros);
-                // Slice 12k: per-partition failure accounting. Bumps
+                // Per-partition failure accounting. Bumps
                 // once per partition whose response carries a non-zero
                 // error code (TOPIC_AUTHORIZATION_FAILED,
                 // NOT_ENOUGH_REPLICAS, INVALID_RECORD, etc.) —
@@ -352,7 +352,7 @@ async fn process_partition(
         }
         RecordsPayload::Legacy(bytes) => match crabka_records_legacy::legacy_to_v2(&bytes) {
             Ok(rb) => {
-                // Slice 12g: account this Produce-path up-conversion. Kept
+                // Account this Produce-path up-conversion. Kept
                 // inside the success arm so failed conversions (counted as
                 // INVALID_RECORD errors) don't double-count.
                 if !topic_name.is_empty() {
@@ -492,8 +492,8 @@ async fn process_partition(
             }
             // else: we don't hold this tid's state — not our coordinator.
             // Trust the producer to have called AddPartitionsToTxn through the
-            // correct coordinator. Inter-broker v2 auto-add is deferred
-            // (slice 10+).
+            // correct coordinator. Inter-broker v2 auto-add is not yet
+            // supported.
         }
     }
 

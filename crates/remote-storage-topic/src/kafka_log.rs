@@ -7,7 +7,7 @@
 //! [`crabka_client_consumer::Consumer`] using a unique random
 //! `group_id` (so concurrent brokers do not contend on offsets) and
 //! `AutoOffsetReset::Earliest` (so every startup replays the whole
-//! topic). Topic provisioning runs once at [`Self::start`] via the
+//! topic). Topic provisioning runs once at [`KafkaMetadataEventLog::start`] via the
 //! [`crabka_client_admin::AdminClient`]: an existing topic is reused
 //! (the configured `num_partitions` is overridden by the topic's
 //! actual count), an absent topic is created with

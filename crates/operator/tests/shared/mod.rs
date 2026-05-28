@@ -151,13 +151,13 @@ pub fn fake_sts_body(
 }
 
 /// JSON body shaped like an `apps/v1/StatefulSet`, with optional
-/// `volumeClaimTemplates` injected into the spec. Slice-24 monotonic-
+/// `volumeClaimTemplates` injected into the spec. Monotonic-
 /// storage validation reads the `data` PVC template's `size` and
 /// `storageClassName` off the pre-apply GET response, so the shrink-
 /// rejection path needs a way to seed those fields.
 ///
 /// `storage = None` produces an STS body with no `volumeClaimTemplates`
-/// (slice-19/20 shape — the pod-template `emptyDir` volume is implied
+/// (the pod-template `emptyDir` volume is implied
 /// by the absence of a template). `Some((size, class))` embeds:
 ///
 /// ```yaml
@@ -359,7 +359,7 @@ pub fn fake_parent_kafka_body(name: &str, namespace: &str) -> serde_json::Value 
     })
 }
 
-/// Build an `OperatorConfig` with the slice-19/20 fixture defaults.
+/// Build an `OperatorConfig` with the fixture defaults.
 pub fn op_config(namespace: &str) -> OperatorConfig {
     OperatorConfig {
         watch_namespaces: vec![],
@@ -373,7 +373,7 @@ pub fn op_config(namespace: &str) -> OperatorConfig {
 }
 
 /// Build a `Context` wired to the supplied mock client. Mirrors the
-/// slice-19 fixture used by `tests/reconcile.rs`.
+/// fixture used by `tests/reconcile.rs`.
 pub fn fixture_ctx(client: kube::Client, namespace: &str) -> Context {
     Context::new(
         client,

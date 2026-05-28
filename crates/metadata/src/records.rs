@@ -23,7 +23,7 @@ pub struct PartitionRecord {
     pub replicas: Vec<NodeId>,
     pub isr: Vec<NodeId>,
     /// Per-partition leader epoch. Bumped on every leader change.
-    /// Slice-10b adds this; older on-disk metadata is not migrated.
+    /// Older on-disk metadata is not migrated.
     pub leader_epoch: i32,
     /// Replicas being added in an in-flight reassignment. Empty when no
     /// reassignment in flight. KIP-455.
@@ -55,8 +55,8 @@ pub struct BrokerRegistrationRecord {
     pub host: String,
     pub port: u16,
     pub rack: Option<String>,
-    /// Per-listener endpoints (slice 12, Task 11). Empty on records
-    /// written before this field was added; populated from
+    /// Per-listener endpoints. Empty on records written before this
+    /// field was added; populated from
     /// `BrokerConfig::effective_listeners()` for self-registration.
     pub endpoints: Vec<BrokerEndpoint>,
 }
@@ -128,7 +128,7 @@ pub struct DeleteScramCredentialRecord {
     pub mechanism: crabka_security::SaslMechanism,
 }
 
-/// Slice 51 (KIP-48): A single delegation token's authoritative state.
+/// A single delegation token's authoritative state (KIP-48).
 /// Replacement semantics — appending a new record with the same
 /// `token_id` overwrites the prior one in the image (used by both
 /// Create and Renew). Removal goes through
@@ -149,12 +149,23 @@ pub struct DelegationTokenRecord {
     pub renewers: Vec<crabka_security::KafkaPrincipal>,
 }
 
-/// Slice 51 (KIP-48): Tombstone record removing a delegation token
+/// Tombstone record removing a delegation token (KIP-48)
 /// from the image. Emitted by `ExpireDelegationToken` handlers and the
 /// background expiry sweep.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeleteDelegationTokenRecord {
     pub token_id: String,
+}
+
+/// KIP-584 finalized feature level. `level` is the finalized
+/// `max_version_level` for `name`. `level == 0` is the KIP-584 sentinel
+/// for "delete this finalized feature" — `MetadataImage::apply` removes the
+/// entry rather than storing a zero. Replacement semantics: a later record
+/// with the same `name` overwrites the previous level.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeatureLevelRecord {
+    pub name: String,
+    pub level: i16,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -174,6 +185,7 @@ pub enum MetadataRecord {
     V1DelegationToken(DelegationTokenRecord),
     V1DeleteDelegationToken(DeleteDelegationTokenRecord),
     V1UnregisterBroker(UnregisterBrokerRecord),
+    V1FeatureLevel(FeatureLevelRecord),
 }
 
 #[cfg(test)]
@@ -185,6 +197,15 @@ mod tests {
     fn round_trip(r: &MetadataRecord) -> MetadataRecord {
         let bytes = <SerdeCompat<MetadataRecord>>::serialize(r).unwrap();
         <SerdeCompat<MetadataRecord>>::deserialize(&bytes).unwrap()
+    }
+
+    #[test]
+    fn feature_level_round_trip() {
+        let r = MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+            name: "metadata.version".into(),
+            level: 1,
+        });
+        assert_eq!(round_trip(&r), r);
     }
 
     #[test]

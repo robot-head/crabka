@@ -7,7 +7,7 @@
 //! Crabka surfaces three resource types — `TOPIC` (2), `BROKER` (4), and
 //! `CLIENT_METRICS` (16). `BROKER_LOGGER` (8) and `GROUP` (32) are
 //! intentionally omitted: dynamic per-broker `log4j`-style loggers aren't a
-//! concept here (the broker reads `RUST_LOG` from its `ConfigMap`; slice 41),
+//! concept here (the broker reads `RUST_LOG` from its `ConfigMap`),
 //! and Crabka has no group-config knobs today. Clients filtering for those
 //! types get an empty list — the same surface the JVM client expects when
 //! the broker doesn't recognise the type.

@@ -1,4 +1,4 @@
-//! Slice 12 broker-side auth tests. No Docker.
+//! Broker-side auth tests. No Docker.
 //!
 //! T10 contributes a single smoke test that proves a TLS-only listener
 //! completes a TLS handshake with a stock `tokio_rustls::TlsConnector`
@@ -173,7 +173,7 @@ impl ServerCertVerifier for PinnedDevCertVerifier {
     }
 }
 
-/// Task 11: every configured listener should appear as a `BrokerEndpoint`
+/// Every configured listener should appear as a `BrokerEndpoint`
 /// on this broker's self-registration record, and the projection should
 /// survive a Metadata round-trip end-to-end. The Kafka v9+ Metadata wire
 /// response carries a single `host:port` per broker (the codec has no
@@ -186,7 +186,7 @@ impl ServerCertVerifier for PinnedDevCertVerifier {
 ///    the configured advertised endpoints.
 ///
 /// The two-listener config uses PLAINTEXT + SSL (the SSL listener uses
-/// the slice-12 dev cert so `BrokerConfig::validate` is satisfied). We
+/// the dev cert so `BrokerConfig::validate` is satisfied). We
 /// only dial the PLAINTEXT listener — the goal here is the metadata
 /// projection, not TLS termination (that's `tls_listener_accepts_*`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -282,7 +282,7 @@ async fn metadata_response_carries_listener_endpoints() {
     let bootstrap = plaintext_addr.to_string();
     let client = Client::builder()
         .bootstrap(&bootstrap)
-        .client_id("crabka-task11-test")
+        .client_id("crabka-auth-test")
         .build()
         .await
         .expect("client build");
@@ -304,14 +304,14 @@ async fn metadata_response_carries_listener_endpoints() {
 }
 
 // ────────────────────────────────────────────────────────────────────────
-// Task 13: SASL/PLAIN end-to-end.
+// SASL/PLAIN end-to-end.
 // ────────────────────────────────────────────────────────────────────────
 
 /// Happy-path drive of a SASL/PLAIN session: `ApiVersions` → `SaslHandshake`
 /// → `SaslAuthenticate` → Metadata. Asserts the connection survives every step
 /// and the final Metadata response carries this broker. The dial-side runs
 /// raw bytes against `TcpStream` rather than `Client` because `Client`
-/// doesn't (yet) speak SASL — that's task 16.
+/// doesn't (yet) speak SASL.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sasl_plain_happy_path() {
     let log_dir = tempfile::tempdir().unwrap();
@@ -336,7 +336,7 @@ async fn sasl_plain_happy_path() {
     result.expect("SASL/PLAIN session must succeed end-to-end");
 }
 
-/// Slice 12l: SASL PLAIN — one happy-path + one wrong-password
+/// SASL PLAIN — one happy-path + one wrong-password
 /// session ticks both `successful_authentication_total` and
 /// `failed_authentication_total` per-mechanism counters on the
 /// `/metrics` scrape. Validates the end-to-end wire path from the
@@ -538,12 +538,12 @@ async fn drive_sasl_plain_session(
 }
 
 // ────────────────────────────────────────────────────────────────────────
-// Task 14: SASL/SCRAM-SHA-512 end-to-end.
+// SASL/SCRAM-SHA-512 end-to-end.
 // ────────────────────────────────────────────────────────────────────────
 
 /// Happy-path drive of a SASL/SCRAM-SHA-512 session: provisions a credential
 /// for "alice" with password "wonderland" directly through the controller
-/// (the public `AlterUserScramCredentials` handler lands in Task 15), then
+/// (rather than via the public `AlterUserScramCredentials` handler), then
 /// runs the two-round RFC 5802 dance end-to-end and asserts the post-auth
 /// Metadata request succeeds.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -563,8 +563,8 @@ async fn sasl_scram_sha512_happy_path() {
 
     let handle = Broker::start(cfg).await.expect("broker must start");
 
-    // Provision alice/wonderland directly via the controller. The public
-    // path (AlterUserScramCredentials, api_key 51) is built in Task 15.
+    // Provision alice/wonderland directly via the controller, rather than
+    // through the public path (AlterUserScramCredentials, api_key 51).
     let cred =
         crabka_security::hash_scram_password(b"wonderland", SaslMechanism::ScramSha512, 4096);
     handle
@@ -636,7 +636,7 @@ async fn sasl_scram_sha512_wrong_password_closes_connection() {
     );
 }
 
-/// Slice 32: SASL/SCRAM-SHA-256 happy path. Mirrors the SHA-512 test but
+/// SASL/SCRAM-SHA-256 happy path. Mirrors the SHA-512 test but
 /// provisions a SHA-256 credential and configures the listener to enable
 /// only SHA-256, proving the new mechanism is wired end-to-end and not
 /// accidentally piggybacking on SHA-512 plumbing.
@@ -903,7 +903,7 @@ async fn round_trip(
 }
 
 // ────────────────────────────────────────────────────────────────────────
-// Slice 49: SASL/OAUTHBEARER (KIP-255 / RFC 7628) end-to-end (no Docker).
+// SASL/OAUTHBEARER (KIP-255 / RFC 7628) end-to-end (no Docker).
 // ────────────────────────────────────────────────────────────────────────
 
 /// Build an unsecured JWS (`alg:none`) bearer token with a `sub` principal and
@@ -956,7 +956,7 @@ async fn start_oauthbearer_broker(
     Broker::start(cfg).await.expect("broker must start")
 }
 
-/// Slice 50d: same as [`start_oauthbearer_broker`] but with a configurable
+/// Same as [`start_oauthbearer_broker`] but with a configurable
 /// server-side ceiling on OAUTHBEARER session lifetime. Passing
 /// `Some(seconds)` clamps `session_lifetime_ms` (and the dispatch-loop
 /// re-auth deadline) to `min(token_exp - now, seconds * 1000)`. Passing
@@ -1140,7 +1140,7 @@ async fn sasl_oauthbearer_invalid_token_two_round_failure() {
 }
 
 // ────────────────────────────────────────────────────────────────────────
-// Slice 49b: SASL/OAUTHBEARER signed-JWT (JWKS) validation end-to-end.
+// SASL/OAUTHBEARER signed-JWT (JWKS) validation end-to-end.
 // ────────────────────────────────────────────────────────────────────────
 
 /// Generate a fresh ES256 key, returning `(key_pair, jwks_json)` where the
@@ -1279,7 +1279,7 @@ async fn sasl_oauthbearer_signed_token_wrong_key_two_round_failure() {
 }
 
 // ────────────────────────────────────────────────────────────────────────
-// Slice 49e: SASL/OAUTHBEARER re-authentication (KIP-368) end-to-end.
+// SASL/OAUTHBEARER re-authentication (KIP-368) end-to-end.
 //
 // Six integration scenarios that exercise the full session-lifetime +
 // in-band re-auth surface:
@@ -1304,7 +1304,7 @@ async fn sasl_oauthbearer_signed_token_wrong_key_two_round_failure() {
 
 /// Build an unsecured-JWS validator with zero clock skew (so `exp` is
 /// the exact session boundary) and the default `sub` principal claim.
-/// Mirrors the existing slice-49 OAuth tests, but pinned to zero skew so
+/// Mirrors the existing OAuth tests, but pinned to zero skew so
 /// the assertion windows in the re-auth tests don't drift.
 fn oauthbearer_zero_skew_validator() -> crabka_security::OAuthBearerValidator {
     crabka_security::OAuthBearerValidator::Unsecured(crabka_security::UnsecuredJwsValidator {
@@ -1419,7 +1419,7 @@ async fn oauthbearer_session_lifetime_ms_set_from_token_exp() {
     handle.shutdown().await;
 }
 
-/// Slice 50d: when the broker is configured with
+/// When the broker is configured with
 /// `[oauthbearer].max_session_lifetime_seconds`, the response's
 /// `session_lifetime_ms` is clamped to `min(token_exp_ms - now_ms, cap *
 /// 1000)`, and the dispatch loop's deadline is anchored to the CLAMPED
@@ -1751,7 +1751,7 @@ async fn plain_listener_session_lifetime_ms_is_zero_and_no_timer() {
 }
 
 // ────────────────────────────────────────────────────────────────────────
-// Task 15: AlterUserScramCredentials (api_key 51, KIP-554).
+// AlterUserScramCredentials (api_key 51, KIP-554).
 // ────────────────────────────────────────────────────────────────────────
 
 /// SCRAM mechanism byte on the `AlterUserScramCredentials` wire (KIP-554):
@@ -1829,7 +1829,7 @@ async fn alter_scram_creds_super_user_can_provision() {
     }
 }
 
-/// Slice 32 wire-mapping proof: `AlterUserScramCredentials` accepts
+/// Wire-mapping proof: `AlterUserScramCredentials` accepts
 /// `mechanism=1` (SCRAM-SHA-256) and stores a credential the broker
 /// can later authenticate against over SHA-256. Mirrors
 /// `alter_scram_creds_super_user_can_provision` but with the SHA-256
@@ -1917,7 +1917,7 @@ async fn alter_scram_creds_non_super_user_rejected() {
     cfg.plain_credentials
         .insert("bob".to_string(), "hunter2".to_string());
     cfg.super_users = std::collections::HashSet::from(["admin".to_string()]);
-    // Slice 53: install `SimpleAclAuthorizer` so the cluster-Alter gate
+    // Install `SimpleAclAuthorizer` so the cluster-Alter gate
     // fires for non-super principals; the default `AllowAllAuthorizer`
     // would let alice through.
     cfg.authorizer = std::sync::Arc::new(SimpleAclAuthorizer::new(cfg.super_users.clone()));
@@ -2136,7 +2136,7 @@ fn pbkdf2_salt_and_salted(password: &[u8], iterations: u32) -> (Vec<u8>, [u8; 64
 }
 
 /// SHA-256 analog of [`pbkdf2_salt_and_salted`]: produces the 32-byte
-/// PBKDF2-HMAC-SHA-256 output for slice-32 wire tests.
+/// PBKDF2-HMAC-SHA-256 output for the wire tests.
 fn pbkdf2_salt_and_salted_sha256(password: &[u8], iterations: u32) -> (Vec<u8>, [u8; 32]) {
     let salt: Vec<u8> = (0..16).collect();
     let salted: [u8; 32] =
@@ -2145,7 +2145,7 @@ fn pbkdf2_salt_and_salted_sha256(password: &[u8], iterations: u32) -> (Vec<u8>, 
 }
 
 // ────────────────────────────────────────────────────────────────────────
-// Task 19: fill in the remaining SASL gate integration test matrix.
+// SASL gate integration test matrix.
 // ────────────────────────────────────────────────────────────────────────
 
 /// `ApiVersions` is on the pre-auth allowlist (`api_key` 18) and must
@@ -2333,7 +2333,7 @@ async fn unsupported_mechanism_rejected_but_handshake_retryable() {
 }
 
 // ────────────────────────────────────────────────────────────────────────
-// Task 16: InterBrokerClient — outbound TLS + SASL handshake.
+// InterBrokerClient — outbound TLS + SASL handshake.
 // ────────────────────────────────────────────────────────────────────────
 
 /// Spin up a broker with a `SASL_PLAINTEXT` listener and one PLAIN
@@ -2431,7 +2431,7 @@ async fn drive_inter_broker_client_plain(
 }
 
 // ────────────────────────────────────────────────────────────────────────
-// Task 17: InterBrokerClient wired into replicator / heartbeat — proves a
+// InterBrokerClient wired into replicator / heartbeat — proves a
 // two-broker cluster with a SASL_PLAINTEXT inter-broker listener
 // authenticates outbound fetch + heartbeat traffic and replicates records
 // end-to-end.

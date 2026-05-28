@@ -1,4 +1,4 @@
-//! Slice 35: `KafkaTopic` reconciler — unidirectional (CRD wins).
+//! `KafkaTopic` reconciler — unidirectional (CRD wins).
 //!
 //! Watches `KafkaTopic` (primary) and `Kafka` (secondary, so a cluster
 //! becoming Ready wakes pending topic reconciles). Diff-and-apply
@@ -234,7 +234,7 @@ pub async fn reconcile(obj: Arc<KafkaTopic>, ctx: Arc<Context>) -> Result<Action
                     &obj,
                     "False",
                     "ImmutableFieldChanged",
-                    "spec.replicas change requires partition reassignment (slice 43+)",
+                    "spec.replicas change requires partition reassignment",
                     cur.topic_id.map(|u| u.to_string()),
                     false,
                 )

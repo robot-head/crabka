@@ -1,4 +1,4 @@
-//! Slice 44 end-to-end: drive the operator's real `ConnectRebalancerClient`
+//! End-to-end: drive the operator's real `ConnectRebalancerClient`
 //! over HTTP against the real `crabka-rebalancer` Connect-RPC router,
 //! served in-process against a real single-broker Crabka.
 //!
@@ -35,7 +35,7 @@ use crabka_rebalancer::metrics::RebalancerMetrics;
 use crabka_rebalancer::model::{Movement, ProposalStore};
 use crabka_rebalancer::scraper::UsageStore;
 
-/// Stand-in for the executor's client facade — slice 44 only exercises
+/// Stand-in for the executor's client facade — these tests only exercise
 /// CreateProposal / GetProposal / (failed) ExecuteProposal, never the
 /// reassignment path, so every method is a no-op.
 struct NoopClient;

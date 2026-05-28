@@ -8,8 +8,8 @@ records" is currently deferred.
 
 **Why.** The `testcontainers-modules` v0.10 Confluent Kafka module doesn't
 expose a way to mount a host-built log dir into the container's
-`/var/lib/kafka/data` *before the broker starts*. We hit the same
-testcontainers-modules gap in slice 2 (`crabka-client-core`); revisiting it
+`/var/lib/kafka/data` *before the broker starts*. The same
+testcontainers-modules gap affects `crabka-client-core`; revisiting it
 here would duplicate that work without buying additional confidence.
 
 **Path forward.** Either:

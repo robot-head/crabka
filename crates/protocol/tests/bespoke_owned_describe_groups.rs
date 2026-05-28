@@ -1,6 +1,6 @@
 // Bespoke tests for the owned DescribeGroups wrappers. The hand-written tests
 // used non-standard function names ("roundtrip_default_*"). Both are preserved
-// here for continuity. Relocated from hand-written wrappers (sub-plan 1d, Task 1).
+// here for continuity. Relocated from hand-written wrappers.
 
 use bytes::BytesMut;
 use crabka_protocol::owned::describe_groups_request::{

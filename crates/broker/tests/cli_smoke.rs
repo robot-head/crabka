@@ -34,7 +34,7 @@ fn version_returns_zero() {
     assert!(out.status.success());
 }
 
-/// Slice 25a: boot `crabka-broker` with `--config-file` pointing at a
+/// Boot `crabka-broker` with `--config-file` pointing at a
 /// minimal TOML and assert the process binds the listener declared in
 /// the file (port comes from the file, not from a CLI flag).
 #[test]

@@ -60,11 +60,11 @@ pub(crate) fn handle(
 
         // Record the heartbeat. If it's a revival, the liveness ticker
         // will pick up the transition next cycle and the heartbeat-side
-        // wakeup is a no-op for slice 10b — slice 11's controlled-shutdown
-        // path will add explicit on-revival handling.
+        // wakeup is a no-op; the controlled-shutdown path handles
+        // explicit on-revival handling.
         let _transition = liveness.record_heartbeat(broker_id_u64).await;
 
-        // Slice 22: track want_shut_down state and drive leader transfer.
+        // Track want_shut_down state and drive leader transfer.
         liveness
             .set_wants_shutdown(broker_id_u64, req.want_shut_down)
             .await;

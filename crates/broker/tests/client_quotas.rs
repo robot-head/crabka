@@ -10,7 +10,7 @@
 #![allow(clippy::unnecessary_unwrap)]
 #![allow(clippy::type_complexity)]
 
-//! Slice 16. Broker-side integration tests for KIP-13/124/257 client quotas.
+//! Broker-side integration tests for KIP-13/124/257 client quotas.
 //!
 //! Tests:
 //! 1. `alter_then_describe_round_trip` — AlterClientQuotas sets
@@ -209,7 +209,7 @@ async fn start_single_broker_sasl_plaintext_with_users(
             .insert((*name).to_string(), (*pass).to_string());
     }
     cfg.super_users = std::iter::once(super_user.to_string()).collect();
-    // Slice 53: install `SimpleAclAuthorizer` so the cluster-Alter gate
+    // Install `SimpleAclAuthorizer` so the cluster-Alter gate
     // fires for non-super principals; the default `AllowAllAuthorizer`
     // would let every AlterClientQuotas through.
     cfg.authorizer = std::sync::Arc::new(SimpleAclAuthorizer::new(cfg.super_users.clone()));
@@ -651,7 +651,7 @@ async fn alter_then_describe_round_trip() {
 /// 8 KB = 8192 bytes means ~7168 bytes over budget. At 128 bytes/sec that is
 /// ~56 seconds of debt, but the response throttle_time_ms is capped at 1000ms.
 /// We only assert throttle_time_ms > 0 here — the exact value is not load-
-/// bearing for the slice.
+/// bearing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn producer_byte_rate_throttles_produce() {
     let (handle, _dir, addr) = start_single_broker_sasl_plaintext_with_users(

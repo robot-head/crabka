@@ -4,7 +4,7 @@
 #![allow(clippy::unnecessary_unwrap)]
 #![allow(clippy::type_complexity)]
 
-//! Slice 18 — log compaction end-to-end broker integration test.
+//! Log compaction end-to-end broker integration test.
 //!
 //! Produces 30 records across 3 keys (k1, k2, k3) into a compacted topic,
 //! sleeps for 2+ cleaner ticks, force-rolls the active segment, sleeps again,

@@ -2,7 +2,7 @@
 // matching the convention in auth_handlers.rs / elect_leaders.rs.
 #![allow(clippy::pedantic)]
 
-//! Slice 29 — mTLS client authentication.
+//! mTLS client authentication.
 //!
 //! Drives the full stack: rustls client cert handshake → broker
 //! verifies the cert chain against `client_ca_path` → dispatch layer

@@ -1,6 +1,6 @@
 //! HTTP transport for RFC 7662 introspection + OIDC userinfo. Lives
 //! here (not in `crates/security`) so the security crate stays
-//! I/O-free, mirroring slice-49b's JWKS-refresher pattern.
+//! I/O-free, mirroring the JWKS-refresher pattern.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -36,7 +36,7 @@ pub enum BuildError {
 impl ReqwestIntrospectionClient {
     /// Build a new client. When `tls_trust` is `Some`, the rustls
     /// `ClientConfig` is built via `crabka_security::build_client_config_from_pem`
-    /// (slice 49c) — the same trust bundle covers JWKS, introspection,
+    /// — the same trust bundle covers JWKS, introspection,
     /// and userinfo. When `None`, reqwest's default webpki-roots apply.
     // Returns Arc<dyn IntrospectionClient> to fit the validator's trait-object
     // slot; constructing the concrete type would just be unwrapped immediately

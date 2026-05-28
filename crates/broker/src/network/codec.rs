@@ -1,7 +1,7 @@
 //! Kafka uses a 4-byte big-endian length prefix followed by the frame body.
 //! Both directions of every connection share this framing.
 
-#![allow(dead_code)] // accept loop materializes in Phase D (Task 11).
+#![allow(dead_code)] // accept loop materializes elsewhere.
 
 use tokio::net::TcpStream;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};

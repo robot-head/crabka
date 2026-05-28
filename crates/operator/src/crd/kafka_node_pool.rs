@@ -20,11 +20,11 @@ use serde::{Deserialize, Serialize};
 )]
 #[serde(rename_all = "camelCase")]
 pub struct KafkaNodePoolSpec {
-    /// Roles each node in this pool fulfills. Slice 20 supports only
-    /// the union `{Controller, Broker}`.
+    /// Roles each node in this pool fulfills. Only
+    /// the union `{Controller, Broker}` is supported.
     pub roles: Vec<NodeRole>,
 
-    /// Number of pods. Slice 20 validation: must equal 1.
+    /// Number of pods. Validation: must equal 1.
     #[serde(default = "default_replicas")]
     #[schemars(range(min = 1, max = 1))]
     pub replicas: i32,
@@ -46,7 +46,7 @@ pub struct KafkaNodePoolSpec {
     pub template: Option<PodTemplate>,
 
     /// Storage configuration. `None` (field absent) → emptyDir (the
-    /// slice 19/20 default). See [`Storage`].
+    /// default). See [`Storage`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage: Option<Storage>,
 }
@@ -62,12 +62,12 @@ pub enum NodeRole {
 }
 
 /// Storage configuration for the pool's pods. Three variants:
-/// - `Ephemeral` (or field absent) — `emptyDir` volume, no PVC. Matches
-///   slice 19/20 behavior; suitable for dev clusters.
+/// - `Ephemeral` (or field absent) — `emptyDir` volume, no PVC.
+///   Suitable for dev clusters.
 /// - `PersistentClaim` — single PVC per pod via the `StatefulSet`'s
 ///   `volumeClaimTemplates`. Production-shaped.
-/// - `Jbod` (slice 46) — multiple PVCs per pod, one per JBOD disk. The
-///   broker spreads partition data across every disk (slice 45). The
+/// - `Jbod` — multiple PVCs per pod, one per JBOD disk. The
+///   broker spreads partition data across every disk. The
 ///   lowest-`id` volume is the primary metadata disk.
 ///
 /// The wire shape is flat (Strimzi-shaped): `type` is the discriminator
@@ -137,10 +137,10 @@ pub struct PersistentClaimSpec {
     pub delete_claim: bool,
 }
 
-/// `Jbod` configuration (slice 46): a set of persistent disks, one PVC
-/// per disk. The broker spreads partition data across all of them (slice
-/// 45 JBOD / KIP-113). The lowest-`id` volume is the primary metadata
-/// disk and keeps the slice-24 PVC name `data` / mount
+/// `Jbod` configuration: a set of persistent disks, one PVC
+/// per disk. The broker spreads partition data across all of them
+/// (JBOD / KIP-113). The lowest-`id` volume is the primary metadata
+/// disk and keeps the PVC name `data` / mount
 /// `/var/lib/crabka/data`; every other volume `id = N` is mounted at
 /// `/var/lib/crabka/data-{N}` (PVC `data-{N}`) and handed to the broker
 /// via `CRABKA_EXTRA_LOG_DIRS`.

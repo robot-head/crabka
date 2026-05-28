@@ -8,7 +8,7 @@
 #![allow(clippy::pedantic)]
 #![allow(clippy::unnecessary_unwrap)]
 
-//! Slice 15. Broker-side integration tests for `AlterPartitionReassignments`
+//! Broker-side integration tests for `AlterPartitionReassignments`
 //! (api_key 45) and `ListPartitionReassignments` (api_key 46).
 //!
 //! Uses a 3-broker PLAINTEXT cluster. The authorizer's compatibility shim
@@ -587,7 +587,7 @@ async fn start_single_broker_sasl_plaintext_with_users(
             .insert((*name).to_string(), (*pass).to_string());
     }
     cfg.super_users = std::iter::once(super_user.to_string()).collect();
-    // Slice 53: install `SimpleAclAuthorizer` so the cluster-Alter gate
+    // Install `SimpleAclAuthorizer` so the cluster-Alter gate
     // fires for non-super principals; default is `AllowAllAuthorizer`.
     cfg.authorizer = std::sync::Arc::new(SimpleAclAuthorizer::new(cfg.super_users.clone()));
 

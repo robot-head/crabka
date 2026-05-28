@@ -3,7 +3,7 @@
 //! [`crabka_client_consumer::Consumer`] reads them back.
 //!
 //! `flavor = "multi_thread", worker_threads = 2` is required for the same
-//! reason as the slice-4 / slice-5 acceptance tests: a single-threaded
+//! reason as the acceptance tests: a single-threaded
 //! runtime can't drive the broker's accept loop concurrently with the
 //! producer's sender task and the test body.
 

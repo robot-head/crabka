@@ -410,22 +410,26 @@ async fn handle_leave(
 
 fn run_reconcile(state: &mut GroupState, config: &NextGenConfig, metadata: &dyn MetadataProvider) {
     let input = metadata.snapshot();
-    let assignor_name = pick_assignor(state, config);
-    reconciler::reconcile_if_dirty(state, &input, &assignor_name);
+    let assignor = pick_assignor(state, config);
+    reconciler::reconcile_if_dirty(state, &input, &*assignor);
 }
 
-fn pick_assignor(state: &GroupState, config: &NextGenConfig) -> String {
-    state
-        .members
-        .values()
-        .find_map(|m| m.server_assignor.clone())
-        .unwrap_or_else(|| {
-            config
-                .assignors
-                .first()
-                .cloned()
-                .unwrap_or_else(|| "uniform".into())
-        })
+fn pick_assignor(
+    state: &GroupState,
+    config: &NextGenConfig,
+) -> std::sync::Arc<dyn super::assignor::Assignor> {
+    for m in state.members.values() {
+        if let Some(name) = m.server_assignor.as_deref()
+            && let Some(a) = config.find_assignor(name)
+        {
+            return a;
+        }
+    }
+    config
+        .assignors
+        .first()
+        .cloned()
+        .expect("NextGenConfig must have at least one registered assignor")
 }
 
 fn build_member(
@@ -1066,5 +1070,85 @@ mod tests {
         let batch = p.into_batch("g", 0);
         assert_eq!(batch.records.len(), 1);
         assert!(batch.records[0].value.is_none());
+    }
+
+    // ---------------------------------------------------------------------
+    // custom assignor registry
+    // ---------------------------------------------------------------------
+
+    use crate::coordinator::next_gen::assignor::{
+        Assignment, Assignor, MemberSubscription, TopicMetadata,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Debug)]
+    struct CountingAssignor {
+        calls: Arc<AtomicUsize>,
+    }
+    impl Assignor for CountingAssignor {
+        fn name(&self) -> &'static str {
+            "counting"
+        }
+        fn assign(&self, _members: &[MemberSubscription], _topics: &TopicMetadata) -> Assignment {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            std::collections::HashMap::new()
+        }
+    }
+
+    #[test]
+    fn pick_assignor_skips_unregistered_member_preference() {
+        let config = NextGenConfig::default();
+        let mut state = crate::coordinator::next_gen::group_state::GroupState::new("g");
+        let mut m = build_member(
+            "m1",
+            &ConsumerGroupHeartbeatRequest::default(),
+            "h",
+            Instant::now(),
+        );
+        m.server_assignor = Some("ghost".into());
+        state.members.insert("m1".into(), m);
+
+        let picked = pick_assignor(&state, &config);
+        assert_eq!(picked.name(), "uniform");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn custom_assignor_invoked_when_requested() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut config = NextGenConfig::default();
+        config
+            .register_assignor(Arc::new(CountingAssignor {
+                calls: calls.clone(),
+            }))
+            .unwrap();
+
+        let log = Arc::new(InMemoryOffsetsLog::default());
+        let coord = Arc::new(NextGenCoordinator::new(config, empty_metadata(), log));
+        let handle = coord.get_or_create("g");
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::Heartbeat {
+                request: ConsumerGroupHeartbeatRequest {
+                    group_id: "g".into(),
+                    member_id: String::new(),
+                    member_epoch: 0,
+                    subscribed_topic_names: Some(vec!["t".into()]),
+                    server_assignor: Some("counting".into()),
+                    rebalance_timeout_ms: 60_000,
+                    ..Default::default()
+                },
+                client_host: String::new(),
+                reply: tx,
+            })
+            .await
+            .unwrap();
+        let resp = rx.await.unwrap();
+        assert_eq!(resp.error_code, 0);
+        assert!(
+            calls.load(Ordering::SeqCst) >= 1,
+            "custom assignor must be invoked at least once",
+        );
     }
 }

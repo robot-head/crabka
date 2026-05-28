@@ -2,7 +2,7 @@
 // (same upstream bug as `tests/mtls.rs` etc).
 #![allow(clippy::pedantic)]
 
-//! Slice 39 — Prometheus `/metrics` HTTP endpoint.
+//! Prometheus `/metrics` HTTP endpoint.
 //!
 //! Boots a broker with a metrics listener on `127.0.0.1:0`, scrapes
 //! `/metrics`, exercises the Produce wire path, and verifies that the
@@ -245,7 +245,7 @@ async fn metrics_endpoint_serves_openmetrics_and_counters_tick() {
             "post-traffic scrape missing {needle} in:\n{body}"
         );
     }
-    // Slice 12j: `produce_one` writes a single v2 record into the
+    // `produce_one` writes a single v2 record into the
     // topic, so `messages_in_total{topic=TOPIC}` must read exactly 1.
     let messages_needle = format!("crabka_broker_messages_in_total{{topic=\"{TOPIC}\"}} 1");
     assert!(
@@ -287,7 +287,7 @@ async fn metrics_endpoint_serves_openmetrics_and_counters_tick() {
     handle.shutdown().await;
 }
 
-/// Slice 43e-core: confirm that per-partition counters land alongside
+/// Confirm that per-partition counters land alongside
 /// topic-level ones, and that the disk-scanner gauge picks up
 /// non-zero values for materialized partitions.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -326,21 +326,21 @@ async fn partition_level_metrics_and_disk_gauge_render() {
 
     let body = scrape(metrics_addr).await;
 
-    // Topic-level (slice 39) still present.
+    // Topic-level still present.
     let topic_needle = format!("crabka_broker_topic_bytes_in_total{{topic=\"{TOPIC}\"}}");
     assert!(
         body.contains(&topic_needle),
         "missing topic-level bytes_in in:\n{body}"
     );
 
-    // Partition-level (slice 43e-core) present with non-zero value.
+    // Partition-level present with non-zero value.
     let partition_needle =
         format!("crabka_broker_partition_bytes_in_total{{topic=\"{TOPIC}\",partition=\"0\"}}");
     assert!(
         body.contains(&partition_needle),
         "missing partition-level bytes_in in:\n{body}"
     );
-    // Slice 43f: per-partition CPU micros counter must be emitted with
+    // Per-partition CPU micros counter must be emitted with
     // the topic/partition label set after the produce + fetch path
     // runs. Value is timing-dependent (could be 0 if the handler was
     // sub-microsecond), so we only assert presence of the series name,

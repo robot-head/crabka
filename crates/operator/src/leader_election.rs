@@ -16,8 +16,8 @@ fn now() -> jiff::Timestamp {
 /// Block until this process holds the Lease.
 ///
 /// Simplistic implementation: poll every 2s, try to take the Lease if it
-/// is unowned or expired, otherwise wait. Sufficient for slice 17's
-/// scaffold; KIP-style precise election can be a follow-up if needed.
+/// is unowned or expired, otherwise wait. KIP-style precise election
+/// can be a follow-up if needed.
 ///
 /// # Errors
 ///

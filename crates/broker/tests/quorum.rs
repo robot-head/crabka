@@ -2,7 +2,7 @@
 //! 3 brokers on distinct loopback ports, all listed as voters in
 //! each other's config.
 //!
-//! These tests exercise the slice-7 metadata quorum end-to-end: leader
+//! These tests exercise the metadata quorum end-to-end: leader
 //! election, log replication, follower-forwarding via `submit_change`,
 //! and openraft's per-leader `client_write` serialization.
 //!
@@ -15,9 +15,9 @@
 //! runner's task scheduler reorders openraft's internal callbacks
 //! enough to trip a `debug_assert!` in openraft's
 //! `LogStateReader::has_log_id` (`Some(log_id) <= self.committed()`).
-//! Linux + macOS never hit this; the slice-7 spec called the
-//! hand-rolled wire's openraft drift an explicit risk, and tightening
-//! it is a slice-7-followup. Until then, Linux + macOS cover the
+//! Linux + macOS never hit this; the hand-rolled wire's openraft
+//! drift is an explicit known risk, and tightening it is still
+//! pending. Until then, Linux + macOS cover the
 //! quorum and the Docker JVM acceptance test covers end-to-end.
 
 #![cfg(not(target_os = "windows"))]
@@ -261,8 +261,8 @@ async fn follower_forwards_create_topic() {
 
 // macOS-gated for the same reason quorum.rs is windows-gated at the
 // module level: the hosted macos-latest runner's task scheduler
-// reorders openraft's internal callbacks under the short raft timings
-// introduced by the slice-10b follow-up, tripping a
+// reorders openraft's internal callbacks under the short raft timings,
+// tripping a
 // `debug_assert!(Some(log_id) <= self.committed())` in
 // `openraft::raft_state::log_state_reader`. Linux never hits it; the
 // other 4 tests in this file also never hit it on macOS. Gating only

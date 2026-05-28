@@ -1,4 +1,4 @@
-//! Slice 13. Wire ↔ metadata enum mapping for ACL handlers.
+//! Wire ↔ metadata enum mapping for ACL handlers.
 //!
 //! Kafka serializes ACL enums as `i8` discriminants. This module
 //! provides the conversions and a tiny error type for "unknown
@@ -212,7 +212,7 @@ mod tests {
         }
     }
 
-    /// Slice 51 T9: the KIP-48 `TOKEN` (a.k.a. `DELEGATION_TOKEN`)
+    /// The KIP-48 `TOKEN` (a.k.a. `DELEGATION_TOKEN`)
     /// resource type, wire byte 6, must round-trip through the wire
     /// codec so `CreateAcls`/`DeleteAcls`/`DescribeAcls` can carry
     /// ACLs guarding delegation tokens.

@@ -18,7 +18,7 @@
 //!
 //! - Log compaction (separate subsystem; deferred).
 //! - Transactional marker interpretation (broker concern).
-//! - Tiered storage (Kafka-2-slice 12).
+//! - Tiered storage (broker concern).
 //! - Concurrent writes (single-writer; broker enforces above).
 //!
 //! ## Quick start

@@ -1,4 +1,4 @@
-//! Slice 41: `Kafka.spec.logging` — operator-side surface for the broker's
+//! `Kafka.spec.logging` — operator-side surface for the broker's
 //! `tracing` log filter. Strimzi-shaped `Logging`: `type: inline` carries a
 //! `loggers` map (tracing target → level) that the operator composes into a
 //! single `RUST_LOG` env-filter directive; `type: external` references a

@@ -1,5 +1,5 @@
 // Bespoke tests for borrowed Produce wrappers. Relocated from hand-written
-// wrappers (sub-plan 1d, Task 1).
+// wrappers.
 
 use bytes::BytesMut;
 use crabka_protocol::borrowed::produce_request::{MAX_VERSION, MIN_VERSION, ProduceRequest};

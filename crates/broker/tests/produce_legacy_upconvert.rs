@@ -1,4 +1,4 @@
-//! Slice 3 — Produce up-conversion from v0/v1 `MessageSet` to v2.
+//! Produce up-conversion from v0/v1 `MessageSet` to v2.
 //!
 //! The broker's Produce handler now accepts a `RecordsPayload::Legacy`
 //! arm: incoming v0/v1 `MessageSet` bytes are passed through

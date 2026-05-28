@@ -6,14 +6,14 @@ use std::collections::{HashMap, HashSet};
 
 use crabka_protocol::primitives::uuid::Uuid;
 
-use super::assignor::{self, MemberSubscription, TopicMetadata};
+use super::assignor::{Assignor, MemberSubscription, TopicMetadata};
 use super::group_state::GroupState;
 
 #[derive(Debug, Clone, Default)]
 pub struct ReconcileInput {
     pub topic_id_by_name: HashMap<String, Uuid>,
     pub partitions_per_topic: HashMap<Uuid, i32>,
-    /// Slice 64b: per-`(topic_id, partition_index)` set of replica racks.
+    /// Per-`(topic_id, partition_index)` set of replica racks.
     /// Empty / missing entries mean "no rack data for this partition" —
     /// `UniformAssignor` then falls back to its non-rack-aware path.
     pub partition_racks: HashMap<(Uuid, i32), Vec<String>>,
@@ -28,14 +28,11 @@ pub enum ReconcileOutcome {
 pub fn reconcile_if_dirty(
     group: &mut GroupState,
     input: &ReconcileInput,
-    assignor_name: &str,
+    assignor: &dyn Assignor,
 ) -> ReconcileOutcome {
     if !group.dirty {
         return ReconcileOutcome::NoChange;
     }
-    let Some(impl_) = assignor::select(assignor_name) else {
-        return ReconcileOutcome::NoChange;
-    };
     let subscriptions: Vec<MemberSubscription> = group
         .members
         .values()
@@ -53,7 +50,7 @@ pub fn reconcile_if_dirty(
         partitions_per_topic: input.partitions_per_topic.clone(),
         partition_racks: input.partition_racks.clone(),
     };
-    let assignment = impl_.assign(&subscriptions, &topics);
+    let assignment = assignor.assign(&subscriptions, &topics);
     group.bump_epoch();
     group.install_target(assignment);
     group.dirty = false;
@@ -121,6 +118,7 @@ pub fn membership_topic_ids(group: &GroupState, input: &ReconcileInput) -> HashS
 
 #[cfg(test)]
 mod tests {
+    use super::super::assignor::UniformAssignor;
     use super::*;
     use crate::coordinator::next_gen::group_state::MemberState;
     use crate::coordinator::next_gen::persistence::MemberAssignmentState;
@@ -165,7 +163,7 @@ mod tests {
         let mut g = GroupState::new("g");
         g.add_or_update_member(fresh_member("m1", "t"));
         let (inp, t) = input("t", 4);
-        let outcome = reconcile_if_dirty(&mut g, &inp, "uniform");
+        let outcome = reconcile_if_dirty(&mut g, &inp, &UniformAssignor);
         assert_eq!(outcome, ReconcileOutcome::Recomputed);
         assert_eq!(g.target.per_member["m1"][&t], vec![0, 1, 2, 3]);
         assert!(!g.dirty);
@@ -177,21 +175,9 @@ mod tests {
         g.dirty = false;
         let (inp, _) = input("t", 4);
         assert_eq!(
-            reconcile_if_dirty(&mut g, &inp, "uniform"),
+            reconcile_if_dirty(&mut g, &inp, &UniformAssignor),
             ReconcileOutcome::NoChange
         );
-    }
-
-    #[test]
-    fn unknown_assignor_is_no_op() {
-        let mut g = GroupState::new("g");
-        g.add_or_update_member(fresh_member("m1", "t"));
-        let (inp, _) = input("t", 4);
-        assert_eq!(
-            reconcile_if_dirty(&mut g, &inp, "doesnotexist"),
-            ReconcileOutcome::NoChange
-        );
-        assert!(g.dirty, "unknown assignor must leave dirty bit set");
     }
 
     #[test]
@@ -199,9 +185,9 @@ mod tests {
         let mut g = GroupState::new("g");
         g.add_or_update_member(fresh_member("m1", "t"));
         let (inp, _) = input("t", 2);
-        reconcile_if_dirty(&mut g, &inp, "uniform");
+        reconcile_if_dirty(&mut g, &inp, &UniformAssignor);
         let epoch1 = g.group_epoch;
-        let outcome = reconcile_if_dirty(&mut g, &inp, "uniform");
+        let outcome = reconcile_if_dirty(&mut g, &inp, &UniformAssignor);
         assert_eq!(outcome, ReconcileOutcome::NoChange);
         assert_eq!(g.group_epoch, epoch1);
     }
@@ -211,11 +197,11 @@ mod tests {
         let mut g = GroupState::new("g");
         g.add_or_update_member(fresh_member("m1", "t"));
         let (inp1, _) = input("t", 2);
-        reconcile_if_dirty(&mut g, &inp1, "uniform");
+        reconcile_if_dirty(&mut g, &inp1, &UniformAssignor);
         let epoch_before = g.group_epoch;
         let (inp2, _) = input("t", 4);
         g.dirty = true;
-        let outcome = reconcile_if_dirty(&mut g, &inp2, "uniform");
+        let outcome = reconcile_if_dirty(&mut g, &inp2, &UniformAssignor);
         assert_eq!(outcome, ReconcileOutcome::Recomputed);
         assert!(g.group_epoch > epoch_before);
     }
@@ -229,7 +215,7 @@ mod tests {
         assert!(ids.contains(&t));
     }
 
-    // ── slice 64a-regex: subscribed_topic_regex resolution ───────────────────
+    // ── subscribed_topic_regex resolution ───────────────────
 
     fn input_with_topics(topics: &[(&str, i32)]) -> ReconcileInput {
         let mut topic_id_by_name = HashMap::new();
@@ -278,7 +264,7 @@ mod tests {
         let orders_eu = inp.topic_id_by_name["orders-eu"];
         let orders_us = inp.topic_id_by_name["orders-us"];
         let shipments = inp.topic_id_by_name["shipments"];
-        reconcile_if_dirty(&mut g, &inp, "uniform");
+        reconcile_if_dirty(&mut g, &inp, &UniformAssignor);
         let assigned: HashSet<Uuid> = g.target.per_member["m1"].keys().copied().collect();
         assert!(assigned.contains(&orders_eu));
         assert!(assigned.contains(&orders_us));
@@ -296,7 +282,7 @@ mod tests {
         let orders_eu = inp.topic_id_by_name["orders-eu"];
         let audit = inp.topic_id_by_name["audit"];
         let shipments = inp.topic_id_by_name["shipments"];
-        reconcile_if_dirty(&mut g, &inp, "uniform");
+        reconcile_if_dirty(&mut g, &inp, &UniformAssignor);
         let assigned: HashSet<Uuid> = g.target.per_member["m1"].keys().copied().collect();
         assert!(assigned.contains(&orders_eu), "regex match");
         assert!(assigned.contains(&audit), "explicit name");
@@ -313,7 +299,7 @@ mod tests {
         let inp = input_with_topics(&[("audit", 1), ("orders-eu", 1)]);
         let audit = inp.topic_id_by_name["audit"];
         let orders_eu = inp.topic_id_by_name["orders-eu"];
-        reconcile_if_dirty(&mut g, &inp, "uniform");
+        reconcile_if_dirty(&mut g, &inp, &UniformAssignor);
         let assigned: HashSet<Uuid> = g.target.per_member["m1"].keys().copied().collect();
         assert!(
             assigned.contains(&audit),
@@ -333,7 +319,7 @@ mod tests {
         let mut g = GroupState::new("g");
         g.add_or_update_member(member_with_regex("m1", &[], Some("")));
         let inp = input_with_topics(&[("a", 1), ("b", 1), ("c", 1)]);
-        reconcile_if_dirty(&mut g, &inp, "uniform");
+        reconcile_if_dirty(&mut g, &inp, &UniformAssignor);
         let assigned: HashSet<Uuid> = g.target.per_member["m1"].keys().copied().collect();
         assert_eq!(
             assigned.len(),
@@ -347,7 +333,7 @@ mod tests {
         let mut g = GroupState::new("g");
         g.add_or_update_member(member_with_regex("m1", &[], Some("^a")));
         let inp = input_with_topics(&[("a1", 1), ("b1", 1)]);
-        reconcile_if_dirty(&mut g, &inp, "uniform");
+        reconcile_if_dirty(&mut g, &inp, &UniformAssignor);
         assert!(!g.dirty, "fresh recompute clears dirty");
         let epoch_before = g.group_epoch;
 
@@ -355,7 +341,7 @@ mod tests {
         // reconcile re-runs.
         g.add_or_update_member(member_with_regex("m1", &[], Some("^b")));
         assert!(g.dirty, "regex change must mark group dirty");
-        let outcome = reconcile_if_dirty(&mut g, &inp, "uniform");
+        let outcome = reconcile_if_dirty(&mut g, &inp, &UniformAssignor);
         assert_eq!(outcome, ReconcileOutcome::Recomputed);
         assert!(g.group_epoch > epoch_before);
     }

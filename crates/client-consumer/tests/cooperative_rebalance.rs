@@ -415,6 +415,13 @@ async fn build_cooperative_consumer(
     client_id: &str,
     topic: &str,
 ) -> Consumer {
+    // 500ms heartbeats keep cascading-rebalance round-trips well inside the
+    // broker's 3s INITIAL_REBALANCE_DELAY wait: detect-via-heartbeat (≤500ms)
+    // + rejoin-on-next-tick (≤500ms) = ≤1s, leaving ~2s of headroom for
+    // scheduler jitter on busy CI runners. With the 1s heartbeat that lived
+    // here previously, the detect+rejoin worst case was ~2s and could blow
+    // past the broker's wait under macOS-CI contention, causing the leader
+    // to compute the next round with stale member metadata.
     Consumer::builder()
         .bootstrap(bootstrap)
         .client_id(client_id)
@@ -422,7 +429,7 @@ async fn build_cooperative_consumer(
         .assignor(Assignor::CooperativeSticky)
         .session_timeout(Duration::from_secs(30))
         .rebalance_timeout(Duration::from_secs(2))
-        .heartbeat_interval(Duration::from_secs(1))
+        .heartbeat_interval(Duration::from_millis(500))
         .auto_offset_reset(AutoOffsetReset::Earliest)
         .subscribe([topic.to_string()])
         .build()

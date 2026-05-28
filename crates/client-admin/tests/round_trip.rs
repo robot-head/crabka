@@ -1,6 +1,6 @@
 //! Integration test: spin up an in-process broker via the existing
-//! `crates/broker/tests/support` harness, drive every admin RPC slice
-//! 35 needs through `AdminClient`, assert the visible cluster state.
+//! `crates/broker/tests/support` harness, drive every admin RPC
+//! through `AdminClient`, assert the visible cluster state.
 //!
 //! # Coverage map for `NOT_CONTROLLER` retry
 //!

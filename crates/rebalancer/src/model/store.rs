@@ -1,5 +1,5 @@
 //! Ring buffer of recent `Proposal`s, UUID-keyed, with atomic on-disk
-//! persistence. Slice 43b persists to `{data_dir}/proposals.json` so
+//! persistence. Persists to `{data_dir}/proposals.json` so
 //! proposals survive a rebalancer restart.
 
 use std::collections::VecDeque;

@@ -9,8 +9,7 @@
 //! `is_satisfied` returns `true` unconditionally because the `Goal`
 //! trait signature doesn't expose `GoalContext` to `is_satisfied`
 //! (the per-broker limits live in the context). Capacity enforcement
-//! happens at `propose` time only. See slice 43d's design doc for
-//! the trade.
+//! happens at `propose` time only.
 
 use std::collections::HashMap;
 
@@ -195,9 +194,8 @@ impl Goal for ReplicaCapacity {
     fn is_satisfied(&self, _state: &ClusterState) -> bool {
         // ReplicaCapacity's invariant depends on GoalContext.broker_capacities
         // which is_satisfied doesn't see. Returns true so soft goals can
-        // proceed; propose-time enforcement is the real safety. See
-        // slice 43d's design doc for the trade. The 43e
-        // `is_satisfied_with_ctx` override below closes that trade.
+        // proceed; propose-time enforcement is the real safety. The
+        // `is_satisfied_with_ctx` override below closes that gap.
         true
     }
 

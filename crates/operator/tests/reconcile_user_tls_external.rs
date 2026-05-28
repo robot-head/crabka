@@ -1,4 +1,4 @@
-//! Slice 50: reconcile-level tests for the `tls-external` `KafkaUser`
+//! Reconcile-level tests for the `tls-external` `KafkaUser`
 //! arm — credential-less users whose ACLs + quotas are reconciled under
 //! the bare-name principal `User:<metadata.name>` but for whom the
 //! operator creates no Secret and issues no cert.

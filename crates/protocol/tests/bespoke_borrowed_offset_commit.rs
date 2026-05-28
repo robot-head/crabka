@@ -1,5 +1,5 @@
 // Bespoke tests for borrowed OffsetCommit wrappers. Relocated from
-// hand-written wrappers (sub-plan 1d, Task 1).
+// hand-written wrappers.
 
 use bytes::BytesMut;
 use crabka_protocol::borrowed::offset_commit_request::{

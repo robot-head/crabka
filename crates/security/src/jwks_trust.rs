@@ -1,5 +1,5 @@
 //! Build a rustls `ClientConfig` whose trust roots are exclusively the
-//! certificates in a user-supplied PEM bundle. Slice 49c: backs the
+//! certificates in a user-supplied PEM bundle. Backs the
 //! broker's outbound HTTPS to the JWKS endpoint when the operator
 //! configures a private `IdP` CA (Strimzi-shaped tlsTrustedCertificates
 //! "replace" semantic — webpki-roots are not consulted when this is
