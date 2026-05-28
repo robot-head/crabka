@@ -91,6 +91,39 @@ impl NextGenCoordinator {
     }
 }
 
+impl NextGenCoordinator {
+    pub fn replay_group_metadata(&self, group_id: &str, v: persistence::GroupMetadataValue) {
+        let mut seed = self.seeds.entry(group_id.into()).or_default();
+        seed.group_epoch = v.epoch;
+    }
+    pub fn replay_member_metadata(&self, group_id: &str, member_id: &str, v: persistence::MemberMetadataValue) {
+        let mut seed = self.seeds.entry(group_id.into()).or_default();
+        seed.members.insert(member_id.into(), v);
+    }
+    pub fn replay_target_assignment_metadata(&self, group_id: &str, v: persistence::TargetAssignmentMetadataValue) {
+        let mut seed = self.seeds.entry(group_id.into()).or_default();
+        seed.target_epoch = v.assignment_epoch;
+    }
+    pub fn replay_target_assignment_member(&self, group_id: &str, member_id: &str, v: persistence::TargetAssignmentMemberValue) {
+        let mut seed = self.seeds.entry(group_id.into()).or_default();
+        seed.target_per_member.insert(member_id.into(), v);
+    }
+    pub fn replay_current_member_assignment(&self, group_id: &str, member_id: &str, v: persistence::CurrentMemberAssignmentValue) {
+        let mut seed = self.seeds.entry(group_id.into()).or_default();
+        seed.current_per_member.insert(member_id.into(), v);
+    }
+
+    pub fn finalize_bootstrap(&self) {
+        let group_ids: Vec<String> = self.seeds.iter().map(|e| e.key().clone()).collect();
+        for gid in group_ids {
+            if let Some((_, seed)) = self.seeds.remove(&gid) {
+                let handle = self.get_or_create(&gid);
+                let _ = handle.tx.try_send(group_actor::GroupActorMessage::Seed(seed));
+            }
+        }
+    }
+}
+
 /// `MetadataProvider` backed by `crabka_raft::ControllerHandle::current_image()`.
 pub struct ImageMetadataProvider {
     pub controller: Arc<crabka_raft::ControllerHandle>,
