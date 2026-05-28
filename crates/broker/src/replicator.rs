@@ -311,19 +311,21 @@ async fn handle_response(resp: &FetchResponse, cfg: &Config) -> LoopAction {
 
     match part_resp.error_code {
         codes::NONE => {
-            if let Some(batch) = part_resp.records.as_ref().and_then(|p| p.as_v2()) {
+            if let Some(batches) = part_resp.records.as_ref().and_then(|p| p.as_v2()) {
                 let Some(entry) = cfg.partitions.get(&(cfg.topic.clone(), cfg.partition)) else {
                     warn!(topic = %cfg.topic, partition = cfg.partition,
                         "replicator: local partition vanished between fetches");
                     return LoopAction::Continue;
                 };
-                // Capture byte count before the move into replicate_batch
-                // so the metrics update only fires on a successful append.
-                let batch_bytes = batch.encoded_len();
-                if let Err(e) = entry.value().replicate_batch(batch.clone()).await {
-                    warn!(error = %e, topic = %cfg.topic, partition = cfg.partition,
-                        "replicator: replicate_batch failed");
-                } else {
+                for batch in batches {
+                    // Capture byte count before the move into replicate_batch
+                    // so the metrics update only fires on a successful append.
+                    let batch_bytes = batch.encoded_len();
+                    if let Err(e) = entry.value().replicate_batch(batch.clone()).await {
+                        warn!(error = %e, topic = %cfg.topic, partition = cfg.partition,
+                            "replicator: replicate_batch failed");
+                        break;
+                    }
                     cfg.metrics.record_replication_in(
                         &cfg.topic,
                         cfg.partition,

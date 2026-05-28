@@ -9,14 +9,20 @@ use crabka_protocol::owned::list_offsets_request::{
     ListOffsetsPartition, ListOffsetsRequest, ListOffsetsTopic,
 };
 
+use crate::builder::IsolationLevel;
 use crate::consumer::{Consumer, ConsumerRecord};
 use crate::error::ConsumerError;
 
 impl Consumer {
-    /// Returns at most one batch's worth of records per assigned partition,
-    /// or an empty vec on timeout. Rebalances are handled transparently by
-    /// the internal coordinator task, which mutates the live `assigned`
-    /// snapshot in place; `poll()` simply reads it on each call.
+    /// Returns the records from every v2 batch the broker returned per
+    /// assigned partition, or an empty vec on timeout. Under
+    /// `read_committed` isolation, control batches and records belonging to
+    /// aborted transactions are filtered client-side using the response's
+    /// `aborted_transactions` list (the broker returns verbatim bytes).
+    /// Rebalances are handled transparently by the internal coordinator
+    /// task, which mutates the live `assigned` snapshot in place; `poll()`
+    /// simply reads it on each call.
+    #[allow(clippy::too_many_lines)]
     pub async fn poll(&mut self, timeout: Duration) -> Result<Vec<ConsumerRecord>, ConsumerError> {
         // 1. Resolve any i64::MAX sentinels (auto.offset.reset=Latest) via
         //    ListOffsets(timestamp=-1).
@@ -102,7 +108,60 @@ impl Consumer {
                 let Some(batches) = payload.as_v2() else {
                     continue;
                 };
+                // read_committed filtering happens entirely client-side: the
+                // broker returns verbatim on-disk bytes (control batches,
+                // aborted records and all) plus an `aborted_transactions`
+                // list. We replay Kafka's algorithm — walk batches in offset
+                // order, tracking which producer_ids have an open aborted
+                // transaction, and drop transactional records from those.
+                let read_committed = self.isolation_level == IsolationLevel::ReadCommitted;
+                // Aborted txns sorted by first_offset; consumed front-to-back
+                // as batch offsets advance past each entry's start.
+                let mut aborted: std::collections::VecDeque<(i64, i64)> = if read_committed {
+                    let mut v: Vec<(i64, i64)> = part
+                        .aborted_transactions
+                        .as_deref()
+                        .unwrap_or(&[])
+                        .iter()
+                        .map(|a| (a.first_offset, a.producer_id))
+                        .collect();
+                    v.sort_unstable();
+                    v.into()
+                } else {
+                    std::collections::VecDeque::new()
+                };
+                // producer_ids with a currently-open aborted transaction.
+                let mut aborted_pids: std::collections::HashSet<i64> =
+                    std::collections::HashSet::new();
                 for batch in batches {
+                    // Move every aborted txn that starts at or before this
+                    // batch into the active set.
+                    if read_committed {
+                        while let Some(&(first_offset, pid)) = aborted.front() {
+                            if first_offset <= batch.base_offset {
+                                aborted_pids.insert(pid);
+                                aborted.pop_front();
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                    // Control batches (commit/abort markers) carry no user
+                    // records. A control batch for a producer ends its aborted
+                    // transaction; drop the batch either way.
+                    if batch.attributes.is_control_batch() {
+                        if read_committed {
+                            aborted_pids.remove(&batch.producer_id);
+                        }
+                        continue;
+                    }
+                    // Drop transactional records belonging to an aborted txn.
+                    if read_committed
+                        && batch.attributes.is_transactional()
+                        && aborted_pids.contains(&batch.producer_id)
+                    {
+                        continue;
+                    }
                     for r in &batch.records {
                         let offset = batch.base_offset + i64::from(r.offset_delta);
                         out.push(ConsumerRecord {

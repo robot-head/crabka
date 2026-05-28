@@ -223,6 +223,7 @@ async fn produce_v0_upconverts_and_is_readable_via_fetch() {
         .records
         .as_ref()
         .and_then(|p| p.as_v2())
+        .and_then(<[_]>::first)
         .expect("v2 RecordBatch present after up-converted produce");
 
     assert_eq!(batch.records.len(), 1, "expected 1 record in fetched batch");

@@ -184,8 +184,8 @@ pub(crate) async fn handle(
                     .metrics
                     .record_partition_produce(&topic_name, p.index, partition_bytes);
                 topic_bytes += partition_bytes;
-                if let Some(rb) = p.records.as_ref().and_then(RecordsPayload::as_v2) {
-                    topic_messages += rb.records.len() as u64;
+                if let Some(batches) = p.records.as_ref().and_then(RecordsPayload::as_v2) {
+                    topic_messages += batches.iter().map(|b| b.records.len() as u64).sum::<u64>();
                 }
             }
             broker.metrics.record_produce(&topic_name, topic_bytes);
@@ -329,7 +329,27 @@ async fn process_partition(
         return Ok(out);
     };
     let mut batch = match payload {
-        RecordsPayload::V2(rb) => rb,
+        RecordsPayload::V2(batches) => {
+            let Some(rb) = batches.into_iter().next() else {
+                out.error_code = codes::INVALID_REQUEST;
+                return Ok(out);
+            };
+            rb
+        }
+        RecordsPayload::Raw(bytes) => {
+            // A producer that sent verbatim v2 bytes: decode the sole batch.
+            let sole = RecordsPayload::from_bytes(bytes)
+                .ok()
+                .and_then(|p| match p {
+                    RecordsPayload::V2(mut v) => v.drain(..).next(),
+                    _ => None,
+                });
+            let Some(rb) = sole else {
+                out.error_code = codes::INVALID_REQUEST;
+                return Ok(out);
+            };
+            rb
+        }
         RecordsPayload::Legacy(bytes) => match crabka_records_legacy::legacy_to_v2(&bytes) {
             Ok(rb) => {
                 // Slice 12g: account this Produce-path up-conversion. Kept
