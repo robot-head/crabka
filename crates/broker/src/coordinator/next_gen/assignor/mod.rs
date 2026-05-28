@@ -5,6 +5,9 @@
 pub mod range;
 pub mod uniform;
 
+pub use range::RangeAssignor;
+pub use uniform::UniformAssignor;
+
 use std::collections::HashMap;
 
 use crabka_protocol::primitives::uuid::Uuid;
@@ -29,16 +32,7 @@ pub struct TopicMetadata {
 
 pub type Assignment = HashMap<String, HashMap<Uuid, Vec<i32>>>;
 
-pub trait Assignor: Send + Sync {
+pub trait Assignor: Send + Sync + std::fmt::Debug {
     fn name(&self) -> &'static str;
     fn assign(&self, members: &[MemberSubscription], topics: &TopicMetadata) -> Assignment;
-}
-
-#[must_use]
-pub fn select(name: &str) -> Option<Box<dyn Assignor>> {
-    match name {
-        "uniform" => Some(Box::new(uniform::UniformAssignor)),
-        "range" => Some(Box::new(range::RangeAssignor)),
-        _ => None,
-    }
 }
