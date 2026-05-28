@@ -13,7 +13,6 @@ pub(crate) fn encode(f: &InFlightFile) -> Result<Bytes, StateTopicError> {
     Ok(Bytes::from(v))
 }
 
-#[allow(dead_code)]
 pub(crate) fn decode(bytes: &[u8]) -> Result<InFlightFile, StateTopicError> {
     let f: InFlightFile = serde_json::from_slice(bytes)?;
     Ok(f)

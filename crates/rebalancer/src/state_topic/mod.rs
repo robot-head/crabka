@@ -4,11 +4,13 @@
 //! for multi-replica HA (slice 43j).
 
 mod error;
+pub mod loader;
 pub(crate) mod producer;
 pub(crate) mod serde_format;
 pub(crate) mod topic_admin;
 
 pub use error::StateTopicError;
+pub use loader::StateTopicLoader;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -45,12 +47,10 @@ impl LoadedState {
         self.is_loaded.load(Ordering::Acquire)
     }
 
-    #[allow(dead_code)]
     pub(crate) fn store(&self, value: Option<InFlightFile>) {
         self.value.store(Arc::new(value));
     }
 
-    #[allow(dead_code)]
     pub(crate) fn mark_loaded(&self) {
         self.is_loaded.store(true, Ordering::Release);
     }
