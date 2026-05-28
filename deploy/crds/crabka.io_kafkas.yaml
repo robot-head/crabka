@@ -670,6 +670,16 @@ spec:
                         description: Storage class name. `None` = cluster default.
                         nullable: true
                         type: string
+                      deleteClaim:
+                        default: false
+                        description: |-
+                          `true` → `persistentVolumeClaimRetentionPolicy.whenDeleted: Delete`.
+                          Must match the parent `KafkaNodePool.spec.storage.deleteClaim`
+                          when both PVCs are present (K8s `StatefulSets` have a single
+                          set-wide retention policy with no per-template override).
+                          Validated at reconcile time; mismatch surfaces as
+                          `TieredStorageInvalid`.
+                        type: boolean
                       size:
                         description: |-
                           K8s `Quantity` (e.g., `"50Gi"`, `"500Mi"`). Non-empty;
