@@ -52,6 +52,18 @@ pub struct ClientSoftwareLabel {
     pub software_version: String,
 }
 
+/// Slice 12h: per-Kafka-API request fingerprint, paired with the
+/// `api_requests` counter family. `api_key` is the
+/// `ApiKey::IntoStaticStr`-derived variant name (e.g. `"Produce"`,
+/// `"DescribeQuorum"`) so operators see human-readable api-name
+/// labels. Cardinality is bounded by `ApiKey::ALL.len()` (~80
+/// entries); requests for unknown api keys land under the
+/// `"Unknown"` sentinel label.
+#[derive(Debug, Clone, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct ApiKeyLabel {
+    pub api_key: String,
+}
+
 /// Cheaply-clonable bundle of counter / gauge handles. Construct once
 /// in `Broker::start`; hand out clones (each clone is a single
 /// `Arc::clone`) to every subsystem that emits.
@@ -131,6 +143,13 @@ pub struct BrokerMetrics {
     /// handshakes. Operators graph this to see which client libraries
     /// and versions are connecting.
     pub client_software_versions: Family<ClientSoftwareLabel, Counter>,
+    /// Slice 12h: per-Kafka-API request counter. Bumped once per
+    /// dispatched request from the network dispatcher, labelled by
+    /// the `ApiKey` variant name (or `"Unknown"` for unrecognised
+    /// keys). Mirrors Kafka's `RequestMetrics.RequestsPerSec`; rate(...)
+    /// gives operators per-API request throughput across the
+    /// broker without needing to slice the dashboard by handler.
+    pub api_requests: Family<ApiKeyLabel, Counter>,
     /// Slice 48l (KIP-405): `1` when this broker has finished swapping in
     /// the topic-backed `RemoteLogMetadataManager` (slice 48f) and is
     /// answering metadata queries from the durable
@@ -197,6 +216,7 @@ impl BrokerMetrics {
         let incremental_fetch_session_evictions_total = Counter::default();
         let incremental_fetch_partitions_cached = Gauge::default();
         let client_software_versions: Family<ClientSoftwareLabel, Counter> = Family::default();
+        let api_requests: Family<ApiKeyLabel, Counter> = Family::default();
         let tiered_storage_rlmm_topic_backed = Gauge::default();
         let produce_message_conversions: Family<TopicLabel, Counter> = Family::default();
         let fetch_message_conversions: Family<TopicLabel, Counter> = Family::default();
@@ -352,6 +372,16 @@ impl BrokerMetrics {
             client_software_versions.clone(),
         );
         registry.register(
+            "api_requests",
+            "Slice 12h: cumulative count of dispatched requests per \
+             Kafka API key (variant name from the `ApiKey` enum, e.g. \
+             Produce / Fetch / DescribeQuorum). Unknown api keys land \
+             under the `Unknown` label. Mirrors Kafka's \
+             RequestMetrics.RequestsPerSec; rate(...) yields per-API \
+             throughput.",
+            api_requests.clone(),
+        );
+        registry.register(
             "tiered_storage_rlmm_topic_backed",
             "Slice 48l (KIP-405): 1 when this broker is answering remote-log \
              metadata queries from the durable __remote_log_metadata topic \
@@ -418,6 +448,7 @@ impl BrokerMetrics {
             incremental_fetch_session_evictions_total,
             incremental_fetch_partitions_cached,
             client_software_versions,
+            api_requests,
             tiered_storage_rlmm_topic_backed,
             produce_message_conversions,
             fetch_message_conversions,
@@ -435,6 +466,20 @@ impl BrokerMetrics {
             software_version: version.to_string(),
         };
         self.client_software_versions.get_or_create(&lbl).inc();
+    }
+
+    /// Slice 12h: account one dispatched request for `api_key`. The
+    /// label is the human-readable variant name from
+    /// `ApiKey::IntoStaticStr`; unknown keys fold under `"Unknown"`.
+    pub fn record_api_request(&self, api_key: i16) {
+        let name: &'static str = match crabka_protocol::api_key::ApiKey::from_i16(api_key) {
+            Some(k) => k.into(),
+            None => "Unknown",
+        };
+        let lbl = ApiKeyLabel {
+            api_key: name.to_string(),
+        };
+        self.api_requests.get_or_create(&lbl).inc();
     }
 
     /// Convenience: record a Produce hit on `topic` with the given
@@ -583,6 +628,8 @@ mod tests {
         m.record_produce_message_conversion("topic-a");
         m.record_fetch_message_conversion("topic-a");
         m.record_unclean_leader_election();
+        m.record_api_request(0); // Produce
+        m.record_api_request(999); // unknown → "Unknown" label
         m.partition_disk_bytes
             .get_or_create(&PartitionLabel {
                 topic: "topic-a".into(),
@@ -628,6 +675,7 @@ mod tests {
             "crabka_broker_produce_message_conversions_total",
             "crabka_broker_fetch_message_conversions_total",
             "crabka_broker_unclean_leader_elections_total",
+            "crabka_broker_api_requests_total",
         ] {
             assert!(buf.contains(needle), "missing {needle} in:\n{buf}");
         }
@@ -761,6 +809,29 @@ mod tests {
             m.fetch_message_conversions.get_or_create(&payments).get(),
             2
         );
+    }
+
+    #[test]
+    fn api_requests_label_resolves_known_keys_and_folds_unknown() {
+        let m = BrokerMetrics::new();
+        // Three known + one unknown api_key. Verify per-label tallies.
+        m.record_api_request(0); // Produce
+        m.record_api_request(0); // Produce again
+        m.record_api_request(1); // Fetch
+        m.record_api_request(12_345); // out-of-range → Unknown
+
+        let produce = ApiKeyLabel {
+            api_key: "Produce".into(),
+        };
+        let fetch = ApiKeyLabel {
+            api_key: "Fetch".into(),
+        };
+        let unknown = ApiKeyLabel {
+            api_key: "Unknown".into(),
+        };
+        assert_eq!(m.api_requests.get_or_create(&produce).get(), 2);
+        assert_eq!(m.api_requests.get_or_create(&fetch).get(), 1);
+        assert_eq!(m.api_requests.get_or_create(&unknown).get(), 1);
     }
 
     #[test]
