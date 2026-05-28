@@ -1,0 +1,308 @@
+# Slices 20a + 20b: KRaft Role Separation & Per-Broker Metadata-Partition Assignment — Design
+
+**Status:** Draft 2026-05-28.
+
+**Goal:** Reach Strimzi/Kafka parity for KRaft role separation. Support dedicated
+**controller-only** and **broker-only** `KafkaNodePool`s (and multi-replica pools),
+where controllers form the `__cluster_metadata` raft voter quorum and brokers
+replicate that metadata as **true observers** — fetching the metadata log via the
+Kafka `Fetch` protocol (KIP-595 semantics) rather than participating in openraft
+membership. This is the single combined spec for the work the slice-20 design
+deferred as 20a (multi-replica) and 20b (role separation), together with the
+broker-side observer-fetch subsystem that makes broker-only nodes possible.
+
+This document supersedes the deferral rows for slices 20a/20b in
+`2026-05-17-crabka-operator-kafkanodepool-20-design.md`.
+
+---
+
+## 1. Scope
+
+### In
+
+**Broker runtime (`crates/broker`, `crates/raft`, `crates/metadata`):**
+- `process.roles` config on the broker: a node is a `controller`, a `broker`, or both.
+- Controller-only nodes: raft **voter**, host **no** data partitions, never emit a
+  `BrokerRegistration`, and are therefore absent from `Metadata`/`DescribeCluster`.
+- Broker-only nodes: **true observers** of `__cluster_metadata`. They never join
+  openraft membership; instead they run a metadata replica-fetcher that issues Kafka
+  `Fetch` requests against `__cluster_metadata`-0 to the controller quorum and replays
+  the returned records into a local `MetadataImage`.
+- Combined nodes (`[controller, broker]`): today's behavior — voter + data + advertised.
+- Controllers serve `__cluster_metadata`-0 over the standard `Fetch` path, sourced from
+  the openraft `RaftLogStore`.
+- A defined Kafka wire-format record schema for `__cluster_metadata` (the serialization
+  bridge between the openraft log and the Fetch path).
+- `DescribeQuorum` reports real voters (controllers) **and** observers (brokers).
+
+**Operator (`crates/operator`):**
+- `KafkaNodePool` validation relaxed: `roles` ∈ {`[Controller]`, `[Broker]`,
+  `[Controller, Broker]`}; `replicas >= 1`; cross-pool node-id range uniqueness.
+- Enumerate one node **per replica** (`node_id = nodeIdStart + ordinal`), partitioned
+  into controllers vs brokers.
+- Compute the voter set from controller-role nodes; render `process.roles`, the voter
+  set, and the bootstrap/join mode into each node's TOML.
+- Brokers render as observers (not in the voter set; pointed at the controller quorum).
+- Rollout ordering: controller pods reach Ready (quorum forms) before broker pods start.
+
+### Out (deferred)
+
+| Concern | Where |
+|---|---|
+| Dynamic voter-set reconfiguration after boot (scaling the controller quorum up/down at runtime) | follow-up; v1 fixes the voter set at format/bootstrap time |
+| KIP-853 dynamic quorum reconfiguration wire APIs (`AddRaftVoter`/`RemoveRaftVoter`) | follow-up |
+| `kafka-metadata-quorum --status`/`--add-controller` admin CLI parity beyond `--describe` | follow-up |
+| Pod templates / affinity per role | already shipped (slice 20c) |
+| Migration from ZK or combined→separated rebalance of an existing cluster | N/A (greenfield, per CLAUDE.md) |
+
+### Non-goals / greenfield assumptions
+
+Per CLAUDE.md: no backwards-compat shims. The `replicas == 1` and
+`{Controller, Broker}`-only validation are simply removed and replaced. On-disk raft
+log format and the `__cluster_metadata` record schema may change freely; wipe data dirs
+during development.
+
+---
+
+## 2. Core model (Kafka/KRaft parity)
+
+A node's `process.roles` determines its relationship to `__cluster_metadata`:
+
+| Role set | Raft relationship | Data partitions | `BrokerRegistration` / advertised | `controller.quorum.voters` member |
+|---|---|---|---|---|
+| `controller` | **voter** | none | no | yes |
+| `broker` | **observer** (Fetch) | yes | yes | no |
+| `controller,broker` | **voter** | yes | yes | yes |
+
+The voter set ≡ the set of controller-role nodes. This is exactly Kafka's
+`controller.quorum.voters` semantics: brokers learn the controller endpoints, fetch
+metadata from them, and are never voters.
+
+---
+
+## 3. Component A — Broker `process.roles`
+
+### 3.1 Config
+
+Add to `BrokerConfig` (`crates/broker/src/config.rs`):
+
+```rust
+pub roles: Vec<NodeRole>,   // NodeRole::{Controller, Broker}
+```
+
+- Parsed from TOML `process.roles = ["controller", "broker"]` (Kafka key name).
+- Default `[Controller, Broker]` so every existing single-node test keeps working
+  unchanged (no test churn).
+- `validate()` additions: `roles` non-empty; only known variants; if `roles` omits
+  `Broker`, the node must not be assigned data partitions; if it omits `Controller`,
+  it must not appear in its own voter set.
+
+`NodeRole` lives in the broker crate (not the operator crate) to avoid a dependency
+inversion; the operator's `crd::kafka_node_pool::NodeRole` maps to it at render time.
+
+### 3.2 Raft boot path (controllers)
+
+Reuse the existing `Bootstrap`/`Join`/`Rejoin` enum
+(`2026-05-14-crabka-bootstrap-then-join-design.md`). Controllers initialize/join as
+**voters** exactly as today's multi-node quorum design intends. Broker-only nodes do
+**not** call `Raft::new` for `__cluster_metadata` as a member at all — they run the
+observer fetcher instead (§4).
+
+### 3.3 Data-partition gating
+
+A node without the `Broker` role:
+- skips `log_dir::scan_all` partition recovery at startup,
+- rejects any attempt to place a partition replica on it (defensive; the controller
+  should never assign one — see §3.4),
+- never emits a `BrokerRegistration` metadata record.
+
+### 3.4 Broker registration / advertisement
+
+Only `Broker`-role nodes register. Because controller-only nodes never write a
+`V1BrokerRegistration` record, they:
+- are excluded from the controller's set of assignable broker ids (replica placement,
+  `CreateTopics`, reassignment),
+- do not appear in `Metadata` or `DescribeCluster` responses.
+
+This falls out of registration; no special-casing in the Metadata handler is required
+beyond confirming it reads the broker registry (it already does).
+
+---
+
+## 4. Component B — True observer fetch (the load-bearing piece)
+
+Broker-only nodes keep their `MetadataImage` current by **fetching** the
+`__cluster_metadata` log, not by openraft replication. (Combined nodes are voters and
+already get metadata through the raft state-machine apply path, so they do **not** run
+the observer fetcher.)
+
+### 4.1 Serving `__cluster_metadata` from controllers
+
+The raft log is persisted in a crabka `Log` wrapped by `RaftLogStore`
+(`crates/raft/src/log_store.rs`); committed entries are readable as an ordered
+offset→entry stream via `read_range` (currently `pub(crate)` — to be exposed).
+
+- Add a `ControllerHandle` method to read a committed offset range as records, e.g.
+  `async fn metadata_records(&self, fetch_offset: u64, max_bytes: usize) -> MetadataFetchSlice`
+  returning `{ records, log_start_offset, high_watermark }` where `high_watermark` =
+  last *applied* (committed) index.
+- Special-case the **Fetch handler** (`crates/broker/src/handlers/fetch.rs`): when the
+  requested topic is `__cluster_metadata` and partition `0`, read from the controller
+  handle instead of the `partitions` DashMap, and serialize a `PartitionData` whose
+  record batches carry the metadata records (§4.3). Only controllers (voters) can serve
+  this; a broker-only node receiving such a Fetch returns `NOT_LEADER_OR_FOLLOWER`-style
+  redirection toward the quorum.
+
+### 4.2 Observer fetcher on the broker
+
+Adapt the existing replica fetcher (`crates/broker/src/replicator.rs`) into a
+`MetadataObserver`:
+- targets the controller quorum (leader, with failover to other voters) and
+  `__cluster_metadata`-0,
+- tracks its own fetch offset = number of records applied,
+- on each `FetchResponse`, decodes record batches into `MetadataRecord`s and feeds them
+  through `MetadataImage::validate` + `MetadataImage::apply` (both already public and
+  incremental/idempotent), publishing each new image via the existing
+  `watch::Sender<Arc<MetadataImage>>` so handlers observe updates with no change.
+
+The observer replaces, for broker-only nodes, the role the openraft state-machine apply
+loop plays for voters.
+
+### 4.3 Serialization bridge (`__cluster_metadata` wire schema)
+
+Today the raft log stores wincode-serialized openraft `Entry`s; Fetch serves Kafka
+wire-format record batches. Define a stable Kafka-record encoding for `MetadataRecord`
+(real KRaft has exactly such a schema — `ApiMessage` frames keyed by record type +
+version). Concretely:
+- a `to_kafka_record(&MetadataRecord) -> Record` / `from_kafka_record(&Record) ->
+  Result<MetadataRecord>` pair in `crates/metadata`,
+- the controller's Fetch path emits these; the observer decodes them.
+
+This is the one genuinely new wire surface and the highest-risk area; it gets its own
+plan phase and byte-exactness tests.
+
+### 4.4 Offset alignment
+
+The metadata Fetch offset is the openraft **log index** (entries are stored with
+`base_offset == log_id.index`). `log_start_offset` follows raft log truncation/snapshot;
+an observer that falls behind the start offset must reset from a snapshot of the current
+image (v1: fetch from `log_start_offset` and rebuild, since snapshots are full images).
+
+---
+
+## 5. Component C — Operator role-aware node pools
+
+### 5.1 CRD validation (`crates/operator/src/controller/kafka_node_pool.rs`)
+
+- Replace `RolesNotMixed` check: accept `[Controller]`, `[Broker]`, or
+  `[Controller, Broker]`; reject empty.
+- Remove `ReplicasNotOne`: accept `replicas >= 1`.
+- Add cross-pool validation at the `Kafka` reconciler level: node-id ranges
+  `[nodeIdStart, nodeIdStart + replicas)` must not overlap across sibling pools.
+
+### 5.2 Enumeration (`crates/operator/src/controller/kafka.rs`)
+
+`enumerate_brokers` becomes node-level: for each pool, for each ordinal `i in
+0..replicas`, emit a node `{ node_id: nodeIdStart + i, pod, fqdn, roles }`. Partition
+the result into `voters` (role ⊇ Controller) and `observers` (role == [Broker] only).
+
+### 5.3 TOML rendering (`crates/operator/src/controller/listeners.rs`, `common.rs`)
+
+Per-node TOML gains:
+- `process.roles`,
+- `controller.quorum.voters` = the controller nodes' `(node_id, controller_fqdn:9093)`,
+- bootstrap mode: lowest-node-id controller → `Bootstrap`; other controllers → `Join`;
+  brokers → not a member (observer; no bootstrap mode needed). Restarts → `Rejoin` is
+  decided broker-side from on-disk raft log presence (existing design).
+
+### 5.4 Rollout ordering
+
+Extend `plan_rollout` so controller pools reach Ready before broker pools are created —
+a broker cannot observe a quorum that does not yet exist. Within controllers, keep the
+deterministic single-bootstrapper ordering from the bootstrap-then-join design.
+
+---
+
+## 6. Component D — Admin / wire parity
+
+- **`Metadata` / `DescribeCluster`:** controllers excluded (falls out of §3.4).
+- **`DescribeQuorum`** (`crates/broker/src/handlers/describe_quorum.rs`): voters already
+  come from openraft membership metrics; add observer tracking. The leader knows each
+  observer's fetched offset from the Fetch requests it serves (§4.1), so extend
+  `QuorumState` with `observers: Vec<(NodeId, u64)>` and populate the currently-hardcoded
+  empty `observers` field so `kafka-metadata-quorum --describe` matches Kafka.
+
+---
+
+## 7. Data flow (end to end)
+
+1. Operator renders TOML: 3 controller nodes (voters, one Bootstrap), N broker nodes
+   (observers), each with `process.roles` + `controller.quorum.voters`.
+2. Controllers come up first; bootstrap-then-join forms the `__cluster_metadata` quorum.
+3. Broker nodes come up, register themselves (`BrokerRegistration` submitted to the
+   quorum leader via the existing write-forwarding path), and start their
+   `MetadataObserver` loop fetching `__cluster_metadata`-0.
+4. A client `CreateTopics` against any broker → forwarded to the controller leader →
+   committed to the raft log → controllers apply via state machine; brokers observe the
+   new records via Fetch and update their images → partition replicas are assigned only
+   to `Broker`-role nodes.
+5. `kafka-metadata-quorum --describe` shows controllers as voters and brokers as
+   observers with their fetch offsets.
+
+---
+
+## 8. Testing strategy
+
+**Broker unit:**
+- `process.roles` parse + validate matrix (empty, unknown, each combination).
+- controller-only node hosts no partitions and emits no `BrokerRegistration`.
+- broker-only node never joins openraft membership.
+
+**Serialization (highest risk):**
+- round-trip `MetadataRecord` ↔ Kafka record for every variant; byte-exactness golden
+  vectors.
+
+**Raft / integration:**
+- 3 controllers + 2 brokers: quorum forms; brokers reach a consistent image via Fetch.
+- kill a controller → quorum survives, brokers keep observing.
+- kill a broker → no quorum impact; on restart it catches up from its last offset (and
+  from `log_start_offset` if it fell behind).
+- a `CreateTopics` on a broker propagates to all observers.
+
+**Operator:**
+- validation matrix (roles, replicas, cross-pool node-id overlap).
+- enumeration with `replicas > 1`; voter-set computation; TOML render snapshot.
+- rollout ordering: controllers Ready before brokers created.
+- `DescribeQuorum` output includes observers.
+
+**Conformance (if feasible):** JVM `kafka-metadata-quorum --describe` against a
+controller; JVM client metadata round-trip through a broker-only node.
+
+---
+
+## 9. Risks & open questions
+
+1. **Serialization bridge (§4.3)** is the riskiest surface — a new wire schema for
+   `__cluster_metadata` records. Mitigation: dedicated plan phase, golden-vector tests,
+   model on Kafka's `ApiMessage`/`metadata.json` record types.
+2. **Observer offset vs raft snapshot/truncation (§4.4):** v1 rebuilds from
+   `log_start_offset` when an observer falls behind; if snapshots compact aggressively
+   this could be heavy. Acceptable for v1 (metadata volume is low).
+3. **Fetch handler coupling:** special-casing `__cluster_metadata` in the data-plane
+   Fetch handler adds a branch to a hot path. Keep it a cheap topic-name check at the top.
+4. **Who tracks observer offsets for DescribeQuorum (§6):** the leader sees observer
+   Fetches, but a follower controller serving `--describe` may not. v1: report observers
+   only when the queried node is the leader (Kafka behavior is leader-authoritative here).
+5. **Bootstrap ordering across pools (§5.4):** needs the rollout planner to understand
+   roles, which it currently does not. Confirm this composes with the existing
+   one-at-a-time config-hash gating.
+
+---
+
+## 10. References
+
+- `2026-05-17-crabka-operator-kafkanodepool-20-design.md` — slice 20 (this is its
+  deferred 20a + 20b).
+- `2026-05-14-crabka-bootstrap-then-join-design.md` — `Bootstrap`/`Join`/`Rejoin`.
+- `2026-05-14-crabka-raft-membership-design.md` — voter membership mechanics.
+- `2026-05-12-crabka-metadata-quorum-design.md` — openraft-backed `__cluster_metadata`.
