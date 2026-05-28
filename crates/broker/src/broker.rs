@@ -1207,6 +1207,12 @@ impl Broker {
             let liveness_seed = liveness.clone();
             let controller_seed = controller.clone();
             let seed_shutdown = supervisor_shutdown.child_token();
+            let metrics_seed = metrics.clone();
+            // Slice 7c: track the leader value across `changed()`
+            // notifications so we only bump the counter on actual
+            // transitions (the watch may signal-without-change in some
+            // raft impls; ignore those).
+            let mut last_leader: Option<crabka_raft::NodeId> = *leader_watch.borrow();
             tokio::spawn(async move {
                 loop {
                     tokio::select! {
@@ -1214,6 +1220,10 @@ impl Broker {
                         () = seed_shutdown.cancelled() => return,
                     }
                     let new_leader = *leader_watch.borrow();
+                    if new_leader != last_leader {
+                        metrics_seed.controller_leader_changes_total.inc();
+                        last_leader = new_leader;
+                    }
                     if new_leader == Some(this_node) {
                         // We just became the raft leader. Seed liveness for
                         // every broker currently in the metadata image.
