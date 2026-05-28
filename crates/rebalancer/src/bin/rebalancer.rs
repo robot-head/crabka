@@ -265,11 +265,16 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let in_flight_slot: Arc<Mutex<Option<ExecutionHandle>>> = Arc::new(Mutex::new(None));
+    // TODO(43i Task 6): replace with the topic-backed StateTopic once binary
+    // wiring lands. The fake is compile-correct but doesn't survive restarts.
+    let state_topic: Arc<dyn crabka_rebalancer::state_topic::StateBackend> =
+        Arc::new(crabka_rebalancer::state_topic::fake::InMemoryBackend::new_loaded());
     let executor_state = ExecutorState {
         store: store.clone(),
         config: executor_config,
         metrics: metrics.clone(),
         in_flight: in_flight_slot.clone(),
+        state_topic,
     };
 
     let live_client: Arc<dyn crabka_rebalancer::executor::phases::ClientFacade> =

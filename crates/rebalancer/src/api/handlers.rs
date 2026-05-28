@@ -523,6 +523,9 @@ mod tests {
             },
             metrics: metrics.clone(),
             in_flight: Arc::new(tokio::sync::Mutex::new(None)),
+            state_topic: std::sync::Arc::new(
+                crate::state_topic::fake::InMemoryBackend::new_loaded(),
+            ),
         };
         let client_facade: Arc<dyn ClientFacade> = Arc::new(NoopClient);
         Arc::new(AppState {

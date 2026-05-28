@@ -16,7 +16,6 @@ use crate::state_topic::error::StateTopicError;
 /// Produce a single record to `(topic, partition=0)`. `value=None` is
 /// a tombstone (null value), matching Kafka compaction semantics.
 /// `acks=all`, `timeout_ms=10_000`.
-#[allow(dead_code)] // wired in Task 5
 pub(crate) async fn produce_state(
     client: &Client,
     topic: &str,

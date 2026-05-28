@@ -7,7 +7,6 @@ use bytes::Bytes;
 use crate::executor::state::InFlightFile;
 use crate::state_topic::error::StateTopicError;
 
-#[allow(dead_code)]
 pub(crate) fn encode(f: &InFlightFile) -> Result<Bytes, StateTopicError> {
     let v = serde_json::to_vec(f)?;
     Ok(Bytes::from(v))
