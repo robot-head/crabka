@@ -75,6 +75,8 @@ pub(crate) mod describe_groups;
 pub(crate) mod describe_log_dirs;
 // KIP-664 producer-state introspection (api_key 61).
 pub(crate) mod describe_producers;
+// KIP-595 raft-quorum introspection (api_key 55).
+pub(crate) mod describe_quorum;
 // KIP-664 transaction introspection (api_key 65).
 pub(crate) mod describe_transactions;
 // KIP-966 paginated topic listing (api_key 75).
