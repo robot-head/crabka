@@ -125,6 +125,10 @@ pub struct MemberMetadataValue {
     pub client_id: String,
     pub client_host: String,
     pub subscribed_topic_names: Vec<String>,
+    /// KIP-848 v1+ `subscribed_topic_regex`. `None` = exact-name
+    /// subscription only. The reconciler unions regex matches with
+    /// `subscribed_topic_names` against the current metadata image.
+    pub subscribed_topic_regex: Option<String>,
     pub server_assignor: Option<String>,
     pub rebalance_timeout_ms: i32,
 }
@@ -143,6 +147,7 @@ impl MemberMetadataValue {
         for s in &self.subscribed_topic_names {
             put_string(&mut buf, s);
         }
+        put_nullable_string(&mut buf, self.subscribed_topic_regex.as_deref());
         put_nullable_string(&mut buf, self.server_assignor.as_deref());
         buf.put_i32(self.rebalance_timeout_ms);
         buf.freeze()
@@ -159,6 +164,7 @@ impl MemberMetadataValue {
         for _ in 0..n.max(0) {
             subscribed_topic_names.push(get_string(&mut buf)?);
         }
+        let subscribed_topic_regex = get_nullable_string(&mut buf)?;
         let server_assignor = get_nullable_string(&mut buf)?;
         let rebalance_timeout_ms = get_i32(&mut buf)?;
         Ok(Self {
@@ -167,6 +173,7 @@ impl MemberMetadataValue {
             client_id,
             client_host,
             subscribed_topic_names,
+            subscribed_topic_regex,
             server_assignor,
             rebalance_timeout_ms,
         })
@@ -374,6 +381,25 @@ mod tests {
             client_id: "c1".into(),
             client_host: "/127.0.0.1".into(),
             subscribed_topic_names: vec!["a".into(), "b".into()],
+            subscribed_topic_regex: None,
+            server_assignor: Some("uniform".into()),
+            rebalance_timeout_ms: 60_000,
+        };
+        assert_eq!(MemberMetadataValue::decode(&v.encode()).unwrap(), v);
+    }
+
+    #[test]
+    fn member_metadata_with_regex_roundtrip() {
+        // KIP-848 v1+: `subscribed_topic_regex` survives encode/decode
+        // so bootstrap replay can hydrate the regex subscription
+        // without waiting for a heartbeat.
+        let v = MemberMetadataValue {
+            instance_id: Some("i1".into()),
+            rack_id: Some("us-east-1a".into()),
+            client_id: "c1".into(),
+            client_host: "/127.0.0.1".into(),
+            subscribed_topic_names: vec!["audit".into()],
+            subscribed_topic_regex: Some("^orders-.*".into()),
             server_assignor: Some("uniform".into()),
             rebalance_timeout_ms: 60_000,
         };
