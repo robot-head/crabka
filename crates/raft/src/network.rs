@@ -241,8 +241,8 @@ impl openraft::network::RaftNetwork<TypeConfig> for CrabkaRaftNetworkConn {
             .await
             .map_err(|e| RPCError::Network(NetworkError::new(&e)))?;
         let mut cur: &[u8] = &resp_body;
-        let resp =
-            crate::wire::CrabkaInstallSnapshotResponse::decode_v0(&mut cur).map_err(snapshot_net_err)?;
+        let resp = crate::wire::CrabkaInstallSnapshotResponse::decode_v0(&mut cur)
+            .map_err(snapshot_net_err)?;
         let vote: Vote<NodeId> =
             <SerdeCompat<Vote<NodeId>>>::deserialize(&resp.vote).map_err(snapshot_net_err)?;
         Ok(InstallSnapshotResponse { vote })
