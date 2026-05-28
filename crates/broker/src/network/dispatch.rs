@@ -3956,6 +3956,8 @@ fn handler_body_flexible(api_key: i16, version: i16) -> bool {
         56 => version >= owned::alter_partition_request::FLEXIBLE_MIN,
         // UpdateFeatures (57, KIP-584) is flexible from v0.
         57 => version >= owned::update_features_request::FLEXIBLE_MIN,
+        // FetchSnapshot (59, KIP-630) is flexible from v0.
+        59 => version >= owned::fetch_snapshot_request::FLEXIBLE_MIN,
         60 => version >= owned::describe_cluster_request::FLEXIBLE_MIN,
         // DescribeProducers (61, KIP-664) is flexible from v0.
         61 => version >= owned::describe_producers_request::FLEXIBLE_MIN,

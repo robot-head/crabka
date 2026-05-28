@@ -16,6 +16,7 @@
 //! match this cluster gets a top-level `INCONSISTENT_CLUSTER_ID` (104).
 
 use bytes::{Bytes, BytesMut};
+use futures_util::future::BoxFuture;
 
 use crabka_protocol::owned::fetch_snapshot_request::FetchSnapshotRequest;
 use crabka_protocol::owned::fetch_snapshot_response::{
@@ -33,23 +34,26 @@ use crate::error::BrokerError;
 /// log. Mirrors `org.apache.kafka.common.Topic.CLUSTER_METADATA_TOPIC_NAME`.
 const CLUSTER_METADATA_TOPIC: &str = "__cluster_metadata";
 
-#[allow(clippy::unused_async)]
-pub(crate) async fn handle(
+pub(crate) fn handle(
     broker: &Broker,
     version: i16,
     _correlation_id: i32,
     req_bytes: &[u8],
-) -> Result<Bytes, BrokerError> {
-    let mut cur = req_bytes;
-    let req = FetchSnapshotRequest::decode(&mut cur, version)?;
-    let max_bytes = req.max_bytes;
-    let resolve =
-        |position: i64, _max: i32| broker.controller.read_snapshot_range(position, max_bytes);
-    let local_cluster_id = broker.controller.current_image().cluster_id();
-    let resp = build_response(local_cluster_id, &req, &resolve);
-    let mut out = BytesMut::with_capacity(resp.encoded_len(version));
-    resp.encode(&mut out, version)?;
-    Ok(out.freeze())
+) -> BoxFuture<'static, Result<Bytes, BrokerError>> {
+    let req_bytes = req_bytes.to_vec();
+    let controller = broker.controller.clone();
+    Box::pin(async move {
+        let mut cur: &[u8] = &req_bytes;
+        let req = FetchSnapshotRequest::decode(&mut cur, version)?;
+        let max_bytes = req.max_bytes;
+        let resolve =
+            |position: i64, _max: i32| controller.read_snapshot_range(position, max_bytes);
+        let local_cluster_id = controller.current_image().cluster_id();
+        let resp = build_response(local_cluster_id, &req, &resolve);
+        let mut out = BytesMut::with_capacity(resp.encoded_len(version));
+        resp.encode(&mut out, version)?;
+        Ok(out.freeze())
+    })
 }
 
 /// Build the response from a decoded request. Pure — testable without a
