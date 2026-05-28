@@ -4,3 +4,4 @@ pub mod assignor;
 pub mod config;
 pub mod group_state;
 pub mod persistence;
+pub mod reconciler;
