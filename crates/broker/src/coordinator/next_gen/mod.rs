@@ -2,3 +2,4 @@
 
 pub mod assignor;
 pub mod config;
+pub mod persistence;

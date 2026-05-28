@@ -164,6 +164,9 @@ async fn apply_record(
             let mut g = handle.state.lock().await;
             apply_group_metadata(&mut g, v, batch.max_timestamp);
         }
+        // KIP-848 next-gen records — handled by the next-gen coordinator's
+        // own replay path (Task 10); skip here.
+        Key::NextGen(_) => {}
     }
     Ok(())
 }
