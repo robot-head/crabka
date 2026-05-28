@@ -28,7 +28,7 @@ fn is_transient_produce_code(code: i16) -> bool {
     matches!(code, 3 | 5 | 9)
 }
 
-const PRODUCE_RETRY_ATTEMPTS: usize = 10;
+const PRODUCE_RETRY_ATTEMPTS: usize = 50;
 const PRODUCE_RETRY_BACKOFF: Duration = Duration::from_millis(200);
 
 /// Produce a single record to `(topic, partition=0)`. `value=None` is
