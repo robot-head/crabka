@@ -34,6 +34,10 @@ This document supersedes the deferral rows for slices 20a/20b in
 - A defined Kafka wire-format record schema for `__cluster_metadata` (the serialization
   bridge between the openraft log and the Fetch path).
 - `DescribeQuorum` reports real voters (controllers) **and** observers (brokers).
+- **Runtime quorum reconfiguration (KIP-853):** the controller voter set can grow and
+  shrink at runtime — `AddRaftVoter` / `RemoveRaftVoter` / `UpdateRaftVoter` RPC handlers
+  wired to openraft `add_learner` + `change_membership`, plus the broker-side
+  promotion-from-learner flow. Not fixed at bootstrap.
 
 **Operator (`crates/operator`):**
 - `KafkaNodePool` validation relaxed: `roles` ∈ {`[Controller]`, `[Broker]`,
@@ -44,14 +48,13 @@ This document supersedes the deferral rows for slices 20a/20b in
   set, and the bootstrap/join mode into each node's TOML.
 - Brokers render as observers (not in the voter set; pointed at the controller quorum).
 - Rollout ordering: controller pods reach Ready (quorum forms) before broker pods start.
+- Reconcile controller-pool scaling at runtime: scaling a controller pool's `replicas`
+  adds/removes voters via the KIP-853 path (not just at bootstrap).
 
 ### Out (deferred)
 
 | Concern | Where |
 |---|---|
-| Dynamic voter-set reconfiguration after boot (scaling the controller quorum up/down at runtime) | follow-up; v1 fixes the voter set at format/bootstrap time |
-| KIP-853 dynamic quorum reconfiguration wire APIs (`AddRaftVoter`/`RemoveRaftVoter`) | follow-up |
-| `kafka-metadata-quorum --status`/`--add-controller` admin CLI parity beyond `--describe` | follow-up |
 | Pod templates / affinity per role | already shipped (slice 20c) |
 | Migration from ZK or combined→separated rebalance of an existing cluster | N/A (greenfield, per CLAUDE.md) |
 
@@ -234,7 +237,53 @@ deterministic single-bootstrapper ordering from the bootstrap-then-join design.
 
 ---
 
-## 7. Data flow (end to end)
+## 7. Component E — Runtime quorum reconfiguration (KIP-853)
+
+The controller voter set is **not** frozen at bootstrap. Scaling a controller pool, or
+replacing a failed controller, changes the voter set at runtime. openraft already
+supports this dynamically (`crates/raft/src/controller.rs` exposes `add_learner` and
+`change_membership`); this component wires those into the Kafka admin surface and the
+operator.
+
+### 7.1 Raft / broker side
+
+- The two-phase Kafka promotion model maps onto openraft directly: a new controller
+  first joins as a **learner** (`add_learner`), catches up to the leader's log, then is
+  promoted to **voter** (`change_membership` adding its id). Removal is
+  `change_membership` minus the id, then the node is decommissioned.
+- A new controller boots in `Join` mode (it is in `process.roles=[controller]` and the
+  rendered voter set, but does not `initialize`); the leader brings it in as a learner
+  and promotes it once caught up. This reuses the bootstrap-then-join machinery rather
+  than adding a parallel path.
+
+### 7.2 Wire parity (KIP-853 RPCs)
+
+Implement the controller-quorum admin RPCs so JVM tooling
+(`kafka-metadata-quorum add-controller` / `remove-controller`, `Admin.addRaftVoter` /
+`removeRaftVoter`) works against crabka:
+
+- `AddRaftVoter`, `RemoveRaftVoter`, `UpdateRaftVoter` request/response handlers in the
+  broker dispatch, served only by the quorum leader (others return
+  `NOT_LEADER_OR_FOLLOWER` / forward).
+- Exact API keys and versions are confirmed empirically against the latest cp-kafka image
+  during planning (per CLAUDE.md), not assumed from the KIP text.
+- Handlers translate to `add_learner` + `change_membership`, enforcing KIP-853 safety
+  (one voter change at a time; new voter must catch up as a learner before promotion).
+
+### 7.3 Operator side
+
+- When a controller pool's `replicas` increases, the operator (after the new pod is
+  Ready and observing) issues `AddRaftVoter` for the new node id; when it decreases, it
+  issues `RemoveRaftVoter` **before** scaling the StatefulSet down, so the quorum never
+  loses a voter it still counts on.
+- The operator drives these changes itself (it already holds cluster credentials and
+  reconciles pool state); it does not rely on an external admin invoking the CLI.
+- Voter-set changes respect quorum-safety: the operator changes one voter at a time and
+  waits for the membership change to commit before the next.
+
+---
+
+## 8. Data flow (end to end)
 
 1. Operator renders TOML: 3 controller nodes (voters, one Bootstrap), N broker nodes
    (observers), each with `process.roles` + `controller.quorum.voters`.
@@ -248,10 +297,13 @@ deterministic single-bootstrapper ordering from the bootstrap-then-join design.
    to `Broker`-role nodes.
 5. `kafka-metadata-quorum --describe` shows controllers as voters and brokers as
    observers with their fetch offsets.
+6. Scaling the controller pool from 3 → 5 → operator adds the two new nodes as learners,
+   waits for catch-up, then promotes them to voters one at a time; `--describe` reflects
+   5 voters. Scaling back down removes voters before the pods are deleted.
 
 ---
 
-## 8. Testing strategy
+## 9. Testing strategy
 
 **Broker unit:**
 - `process.roles` parse + validate matrix (empty, unknown, each combination).
@@ -275,12 +327,20 @@ deterministic single-bootstrapper ordering from the bootstrap-then-join design.
 - rollout ordering: controllers Ready before brokers created.
 - `DescribeQuorum` output includes observers.
 
+**Runtime reconfiguration (KIP-853):**
+- `AddRaftVoter`/`RemoveRaftVoter`/`UpdateRaftVoter` handler unit tests (leader-only,
+  one-change-at-a-time enforcement, learner-catch-up-before-promotion).
+- integration: scale controllers 3→5 and 5→3; quorum stays available throughout; a
+  removed voter is gone from `--describe` before its pod is deleted.
+- conformance (if feasible): JVM `kafka-metadata-quorum add-controller` /
+  `remove-controller` against crabka.
+
 **Conformance (if feasible):** JVM `kafka-metadata-quorum --describe` against a
 controller; JVM client metadata round-trip through a broker-only node.
 
 ---
 
-## 9. Risks & open questions
+## 10. Risks & open questions
 
 1. **Serialization bridge (§4.3)** is the riskiest surface — a new wire schema for
    `__cluster_metadata` records. Mitigation: dedicated plan phase, golden-vector tests,
@@ -296,10 +356,17 @@ controller; JVM client metadata round-trip through a broker-only node.
 5. **Bootstrap ordering across pools (§5.4):** needs the rollout planner to understand
    roles, which it currently does not. Confirm this composes with the existing
    one-at-a-time config-hash gating.
+6. **KIP-853 wire exactness (§7.2):** `AddRaftVoter`/`RemoveRaftVoter`/`UpdateRaftVoter`
+   are newer, less-exercised APIs; their exact api keys/versions/field shapes must be
+   verified empirically against cp-kafka rather than from the KIP text.
+7. **Reconfig vs node failure (§7.3):** the operator must distinguish a deliberate
+   scale-down (remove voter, then delete pod) from a transient pod crash (do **not**
+   remove the voter). v1 keys off the `KafkaNodePool.spec.replicas` intent, not live pod
+   health, to avoid removing a voter during a rolling restart.
 
 ---
 
-## 10. References
+## 11. References
 
 - `2026-05-17-crabka-operator-kafkanodepool-20-design.md` — slice 20 (this is its
   deferred 20a + 20b).
