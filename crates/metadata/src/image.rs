@@ -708,10 +708,7 @@ mod tests {
             partitions: 3,
             replication_factor: 2,
         }));
-        assert_eq!(
-            MetadataImage::from_records(cid, &image.to_records()),
-            image
-        );
+        assert_eq!(MetadataImage::from_records(cid, &image.to_records()), image);
     }
 
     /// Exercises every stored variant the image can hold (the 9

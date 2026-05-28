@@ -221,7 +221,8 @@ impl RaftStateMachine<TypeConfig> for Arc<CrabkaStateMachine> {
     async fn get_current_snapshot(
         &mut self,
     ) -> Result<Option<Snapshot<TypeConfig>>, StorageError<NodeId>> {
-        let loaded = crate::snapshot::load_latest(&self.snapshot_dir).map_err(|e| io_storage_err(&e))?;
+        let loaded =
+            crate::snapshot::load_latest(&self.snapshot_dir).map_err(|e| io_storage_err(&e))?;
         Ok(loaded.map(|(_, bytes, meta)| Snapshot {
             meta,
             snapshot: Box::new(io::Cursor::new(bytes)),
@@ -235,8 +236,9 @@ impl RaftSnapshotBuilder<TypeConfig> for Arc<CrabkaStateMachine> {
         let membership = self.last_membership.lock().await.clone();
         let image = self.current_image();
 
-        let end_offset =
-            last_applied.map_or(0, |l| i64::try_from(l.index).unwrap_or(i64::MAX).saturating_add(1));
+        let end_offset = last_applied.map_or(0, |l| {
+            i64::try_from(l.index).unwrap_or(i64::MAX).saturating_add(1)
+        });
         let epoch = last_applied.map_or(0, |l| i32::try_from(l.leader_id.term).unwrap_or(i32::MAX));
         let id = SnapshotId { end_offset, epoch };
 
@@ -322,7 +324,9 @@ mod tests {
         assert_eq!(snap.meta.last_log_id, Some(log_id));
 
         // end_offset = index + 1 = 6, epoch = leader term = 1.
-        let checkpoint = dir.path().join("00000000000000000006-0000000001.checkpoint");
+        let checkpoint = dir
+            .path()
+            .join("00000000000000000006-0000000001.checkpoint");
         assert!(checkpoint.exists(), "checkpoint file should exist");
         let has_meta = std::fs::read_dir(dir.path())
             .unwrap()

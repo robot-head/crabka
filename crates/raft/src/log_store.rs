@@ -325,6 +325,12 @@ mod tests {
         let state = RaftLogStorage::get_log_state(&mut store).await.unwrap();
         assert_eq!(state.last_purged_log_id.map(|l| l.index), Some(3));
         // Entries at or below the purge point are gone from the cache.
-        assert!(store.read_range(..).await.iter().all(|e| e.log_id.index > 3));
+        assert!(
+            store
+                .read_range(..)
+                .await
+                .iter()
+                .all(|e| e.log_id.index > 3)
+        );
     }
 }

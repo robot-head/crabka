@@ -234,8 +234,8 @@ pub(crate) fn load_latest(dir: &Path) -> Result<Option<LoadedSnapshot>, RaftErro
     }
     let Some(id) = latest else { return Ok(None) };
     let bytes = std::fs::read(dir.join(id.file_name())).map_err(crabka_log::LogError::Io)?;
-    let meta_bytes =
-        std::fs::read(dir.join(format!("{}.meta", id.file_name()))).map_err(crabka_log::LogError::Io)?;
+    let meta_bytes = std::fs::read(dir.join(format!("{}.meta", id.file_name())))
+        .map_err(crabka_log::LogError::Io)?;
     let meta = <SerdeCompat<SnapshotMeta<NodeId, Node>>>::deserialize(&meta_bytes)?;
     Ok(Some((id, bytes, meta)))
 }
@@ -310,8 +310,9 @@ mod tests {
         };
         persist(dir.path(), id, &bytes, &meta).unwrap();
 
-        let (loaded_id, loaded_bytes, loaded_meta) =
-            load_latest(dir.path()).unwrap().expect("checkpoint present");
+        let (loaded_id, loaded_bytes, loaded_meta) = load_latest(dir.path())
+            .unwrap()
+            .expect("checkpoint present");
         assert_eq!(loaded_id, id);
         assert_eq!(loaded_bytes, bytes);
         assert_eq!(loaded_meta.snapshot_id, id.file_name());
@@ -327,7 +328,11 @@ mod tests {
             end_offset: 7,
             epoch: 0,
         };
-        std::fs::write(dir.path().join(format!("{}.meta", id.file_name())), b"orphan").unwrap();
+        std::fs::write(
+            dir.path().join(format!("{}.meta", id.file_name())),
+            b"orphan",
+        )
+        .unwrap();
         assert!(load_latest(dir.path()).unwrap().is_none());
     }
 
