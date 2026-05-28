@@ -59,6 +59,18 @@ pub struct QuorumState {
     pub per_voter_matched_index: BTreeMap<NodeId, u64>,
 }
 
+/// A contiguous byte window of the latest metadata `.checkpoint`,
+/// returned by [`ControllerHandle::read_snapshot_range`] to back the
+/// broker's `FetchSnapshot` handler. `end_offset` / `epoch` identify the
+/// snapshot, and `total_size` is its full byte length so the handler can
+/// drive paging.
+pub struct SnapshotSlice {
+    pub end_offset: i64,
+    pub epoch: i32,
+    pub total_size: i64,
+    pub bytes: bytes::Bytes,
+}
+
 /// Handle returned by [`Controller::start`]. Carries the live openraft
 /// node, the state machine, a leader-id watcher, and the background task
 /// join handles. Drop is NOT a clean shutdown — call [`Self::shutdown`]
@@ -72,6 +84,10 @@ pub struct ControllerHandle {
     listener_task: Mutex<Option<JoinHandle<()>>>,
     leader_pump_task: Mutex<Option<JoinHandle<()>>>,
     snapshot_task: Mutex<Option<JoinHandle<()>>>,
+    /// Directory holding the latest KIP-630 metadata `.checkpoint`. Read
+    /// by [`Self::read_snapshot_range`] to serve the broker's
+    /// `FetchSnapshot` handler.
+    snapshot_dir: std::path::PathBuf,
     client_id: String,
     /// This node's own raft id. Used by [`ReconfigOps::is_leader`] to compare
     /// against the leader reported by `quorum_state`.
@@ -113,6 +129,24 @@ impl ControllerHandle {
     #[must_use]
     pub fn controller_bound_addr(&self) -> SocketAddr {
         self.controller_bound_addr
+    }
+
+    /// Read up to `max_bytes` of the latest metadata snapshot starting at
+    /// `position`. `None` when no snapshot exists.
+    #[must_use]
+    pub fn read_snapshot_range(&self, position: i64, max_bytes: i32) -> Option<SnapshotSlice> {
+        let (id, bytes, _meta) = crate::snapshot::load_latest(&self.snapshot_dir)
+            .ok()
+            .flatten()?;
+        let pos = usize::try_from(position.max(0)).unwrap_or(0);
+        let max = usize::try_from(max_bytes.max(0)).unwrap_or(0);
+        let slice = crate::snapshot::SnapshotReader::byte_range(&bytes, pos, max);
+        Some(SnapshotSlice {
+            end_offset: id.end_offset,
+            epoch: id.epoch,
+            total_size: i64::try_from(bytes.len()).unwrap_or(i64::MAX),
+            bytes: bytes::Bytes::copy_from_slice(slice),
+        })
     }
 
     /// Subscribe to leader-id changes. The receiver's initial value is
@@ -635,7 +669,7 @@ impl Controller {
         let snapshot_dir = config.log_dir.join("@metadata-0");
         let state_machine = Arc::new(CrabkaStateMachine::new(
             config.cluster_id.unwrap_or_else(Uuid::nil),
-            snapshot_dir,
+            snapshot_dir.clone(),
         ));
 
         // 2. openraft engine config. Times are millis; we widen the
@@ -844,6 +878,7 @@ impl Controller {
             listener_task: Mutex::new(Some(listener_task)),
             leader_pump_task: Mutex::new(Some(leader_pump_task)),
             snapshot_task: Mutex::new(Some(snapshot_task)),
+            snapshot_dir,
             client_id: config.client_id.clone(),
             self_node_id: config.node_id,
             observer_lag_bound: config.observer_lag_bound,
