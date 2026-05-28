@@ -910,6 +910,16 @@ mod tests {
     }
 
     #[test]
+    fn controller_only_hosts_no_partitions() {
+        let c = BrokerConfig {
+            roles: vec![NodeRole::Controller],
+            ..BrokerConfig::default()
+        };
+        // Partition scan/recovery is gated on is_broker().
+        assert!(!c.is_broker());
+    }
+
+    #[test]
     fn rejects_controller_tls_without_config() {
         let c = BrokerConfig {
             controller_listener_protocol: ListenerProtocol::Ssl,

@@ -1024,18 +1024,22 @@ impl Broker {
         //    fail the whole startup on the first IO error, and we want
         //    to keep recovering partitions on the surviving dirs.
         let partitions: Arc<DashMap<(String, i32), Arc<Partition>>> = Arc::new(DashMap::new());
-        let scan_dirs = log_dir_status.online_subset(&config.all_log_dirs());
-        for (topic, partition_id, owning_dir) in log_dir::scan_all(&scan_dirs)? {
-            let dir = log_dir::partition_dir(&owning_dir, &topic, partition_id);
-            let log = crabka_log::Log::open(&dir, config.log_config.clone())?;
-            let part = spawn_partition(
-                topic.clone(),
-                partition_id,
-                owning_dir,
-                log,
-                log_dir_status.clone(),
-            );
-            partitions.insert((topic.clone(), partition_id), part);
+        // Controller-only nodes host no data partitions, so they skip the
+        // disk scan/recovery entirely.
+        if config.is_broker() {
+            let scan_dirs = log_dir_status.online_subset(&config.all_log_dirs());
+            for (topic, partition_id, owning_dir) in log_dir::scan_all(&scan_dirs)? {
+                let dir = log_dir::partition_dir(&owning_dir, &topic, partition_id);
+                let log = crabka_log::Log::open(&dir, config.log_config.clone())?;
+                let part = spawn_partition(
+                    topic.clone(),
+                    partition_id,
+                    owning_dir,
+                    log,
+                    log_dir_status.clone(),
+                );
+                partitions.insert((topic.clone(), partition_id), part);
+            }
         }
 
         // Group coordinator bootstrap (slice 5).
