@@ -664,6 +664,7 @@ pub(crate) fn snapshot_seed(state: &super::group_state::GroupState) -> super::Gr
             client_id: m.client_id.clone(),
             client_host: m.client_host.clone(),
             subscribed_topic_names: m.subscribed_topic_names.iter().cloned().collect(),
+            subscribed_topic_regex: m.subscribed_topic_regex.clone(),
             server_assignor: m.server_assignor.clone(),
             rebalance_timeout_ms: i32::try_from(m.rebalance_timeout.as_millis()).unwrap_or(60_000),
         };
@@ -750,6 +751,7 @@ fn snapshot_pending_after_change(
                     client_id: m.client_id.clone(),
                     client_host: m.client_host.clone(),
                     subscribed_topic_names: m.subscribed_topic_names.iter().cloned().collect(),
+                    subscribed_topic_regex: m.subscribed_topic_regex.clone(),
                     server_assignor: m.server_assignor.clone(),
                     rebalance_timeout_ms: i32::try_from(m.rebalance_timeout.as_millis())
                         .unwrap_or(60_000),
@@ -1038,6 +1040,7 @@ mod tests {
                     client_id: "c".into(),
                     client_host: "h".into(),
                     subscribed_topic_names: vec!["t".into()],
+                    subscribed_topic_regex: None,
                     server_assignor: None,
                     rebalance_timeout_ms: 60_000,
                 }),
