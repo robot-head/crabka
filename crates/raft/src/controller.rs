@@ -9,6 +9,7 @@
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -70,6 +71,7 @@ pub struct ControllerHandle {
     shutdown: CancellationToken,
     listener_task: Mutex<Option<JoinHandle<()>>>,
     leader_pump_task: Mutex<Option<JoinHandle<()>>>,
+    snapshot_task: Mutex<Option<JoinHandle<()>>>,
     client_id: String,
     /// This node's own raft id. Used by [`ReconfigOps::is_leader`] to compare
     /// against the leader reported by `quorum_state`.
@@ -498,6 +500,9 @@ impl ControllerHandle {
         if let Some(h) = self.leader_pump_task.lock().await.take() {
             let _ = h.await;
         }
+        if let Some(h) = self.snapshot_task.lock().await.take() {
+            let _ = h.await;
+        }
     }
 
     /// Stop the openraft engine and cancel the controller listener without
@@ -516,6 +521,9 @@ impl ControllerHandle {
         // Drain the listener task so its `TcpListener` is dropped (and the
         // port is released by the OS) before we return.
         if let Some(h) = self.listener_task.lock().await.take() {
+            let _ = h.await;
+        }
+        if let Some(h) = self.snapshot_task.lock().await.take() {
             let _ = h.await;
         }
     }
@@ -787,6 +795,40 @@ impl Controller {
             }
         });
 
+        // 8. Snapshot trigger pump. openraft's policy is
+        //    `SnapshotPolicy::Never`, so the Kafka-faithful heuristics live
+        //    here: only the current leader fires, and only when the on-disk
+        //    metadata-log byte size since the last snapshot crosses
+        //    `max_bytes_between_snapshots` or the interval elapses.
+        let raft_for_snap = raft.clone();
+        let shutdown_for_snap = shutdown.clone();
+        let meta_dir = config.log_dir.join("@metadata-0");
+        let max_bytes = config.max_bytes_between_snapshots;
+        let interval = config.max_snapshot_interval;
+        let snapshot_task = tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_millis(500));
+            let mut last_snapshot_at = tokio::time::Instant::now();
+            loop {
+                tokio::select! {
+                    () = shutdown_for_snap.cancelled() => break,
+                    _ = tick.tick() => {
+                        let m = raft_for_snap.metrics().borrow().clone();
+                        if m.current_leader != Some(m.id) {
+                            continue;
+                        }
+                        let log_bytes = dir_log_bytes(&meta_dir);
+                        let interval_elapsed =
+                            interval > Duration::ZERO && last_snapshot_at.elapsed() >= interval;
+                        if (log_bytes >= max_bytes || interval_elapsed)
+                            && raft_for_snap.trigger().snapshot().await.is_ok()
+                        {
+                            last_snapshot_at = tokio::time::Instant::now();
+                        }
+                    }
+                }
+            }
+        });
+
         Ok(ControllerHandle {
             raft,
             state_machine,
@@ -794,6 +836,7 @@ impl Controller {
             shutdown,
             listener_task: Mutex::new(Some(listener_task)),
             leader_pump_task: Mutex::new(Some(leader_pump_task)),
+            snapshot_task: Mutex::new(Some(snapshot_task)),
             client_id: config.client_id.clone(),
             self_node_id: config.node_id,
             observer_lag_bound: config.observer_lag_bound,
@@ -802,6 +845,20 @@ impl Controller {
             controller_bound_addr: actual_addr,
         })
     }
+}
+
+/// Sum the byte sizes of the `*.log` segment files in the metadata dir.
+/// Returns 0 if the dir is absent or unreadable.
+fn dir_log_bytes(dir: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "log"))
+        .filter_map(|e| e.metadata().ok())
+        .map(|m| m.len())
+        .sum()
 }
 
 #[cfg(test)]

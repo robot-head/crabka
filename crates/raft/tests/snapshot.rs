@@ -224,3 +224,69 @@ async fn lagging_learner_catches_up_via_snapshot() {
     learner.shutdown().await;
     leader.shutdown().await;
 }
+
+fn has_checkpoint(meta_dir: &std::path::Path) -> bool {
+    std::fs::read_dir(meta_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|e| e.file_name().to_string_lossy().ends_with(".checkpoint"))
+}
+
+#[tokio::test]
+async fn byte_threshold_triggers_snapshot() {
+    let dir = TempDir::new().unwrap();
+    let mut cfg = ControllerConfig::for_tests(1, dir.path().to_path_buf());
+    cfg.max_bytes_between_snapshots = 1;
+    cfg.max_snapshot_interval = Duration::from_hours(1);
+    let ctrl = Controller::start(cfg).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    ctrl.submit_change(vec![MetadataRecord::V1Topic(TopicRecord {
+        name: "t".into(),
+        topic_id: Uuid::from_u128(9),
+        partitions: 1,
+        replication_factor: 1,
+    })])
+    .await
+    .unwrap();
+    let meta_dir = dir.path().join("@metadata-0");
+    let mut found = false;
+    for _ in 0..40 {
+        if has_checkpoint(&meta_dir) {
+            found = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(found, "expected an automatic snapshot");
+    ctrl.shutdown().await;
+}
+
+#[tokio::test]
+async fn interval_triggers_snapshot() {
+    let dir = TempDir::new().unwrap();
+    let mut cfg = ControllerConfig::for_tests(1, dir.path().to_path_buf());
+    cfg.max_bytes_between_snapshots = u64::MAX;
+    cfg.max_snapshot_interval = Duration::from_millis(300);
+    let ctrl = Controller::start(cfg).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    ctrl.submit_change(vec![MetadataRecord::V1Topic(TopicRecord {
+        name: "t".into(),
+        topic_id: Uuid::from_u128(7),
+        partitions: 1,
+        replication_factor: 1,
+    })])
+    .await
+    .unwrap();
+    let meta_dir = dir.path().join("@metadata-0");
+    let mut found = false;
+    for _ in 0..40 {
+        if has_checkpoint(&meta_dir) {
+            found = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(found, "expected an interval-driven snapshot");
+    ctrl.shutdown().await;
+}

@@ -105,6 +105,11 @@ impl std::fmt::Debug for ControllerConfig {
             .field("cluster_id", &self.cluster_id)
             .field("dialer", &self.dialer.is_some())
             .field("handshake", &self.handshake.is_some())
+            .field(
+                "max_bytes_between_snapshots",
+                &self.max_bytes_between_snapshots,
+            )
+            .field("max_snapshot_interval", &self.max_snapshot_interval)
             .finish()
     }
 }
@@ -140,7 +145,7 @@ impl ControllerConfig {
             dialer: None,
             handshake: None,
             max_bytes_between_snapshots: 20 * 1024 * 1024,
-            max_snapshot_interval: Duration::from_secs(3600),
+            max_snapshot_interval: Duration::from_hours(1),
         }
     }
 }
