@@ -128,6 +128,14 @@ pub struct BrokerMetrics {
     /// member returns or an unclean election runs.
     pub offline_partitions_count: Gauge,
     pub active_controller: Gauge,
+    /// Slice 7c: cumulative count of distinct controller-leader
+    /// transitions this broker has observed (any change in the raft
+    /// leader, including this broker becoming or ceasing to be
+    /// leader). Mirrors Kafka's
+    /// `KafkaController.LeaderElectionRateAndTimeMs`. Operators alert
+    /// on `rate(controller_leader_changes_total[5m]) > 0` for sustained
+    /// periods to spot flapping raft leadership.
+    pub controller_leader_changes_total: Counter,
     pub isr_shrinks_total: Counter,
     pub isr_expands_total: Counter,
     /// KIP-227: current count of live incremental-fetch sessions across the
@@ -219,6 +227,7 @@ impl BrokerMetrics {
         let under_min_isr_partition_count = Gauge::default();
         let offline_partitions_count = Gauge::default();
         let active_controller = Gauge::default();
+        let controller_leader_changes_total = Counter::default();
         let isr_shrinks_total = Counter::default();
         let isr_expands_total = Counter::default();
         let incremental_fetch_sessions = Gauge::default();
@@ -299,6 +308,16 @@ impl BrokerMetrics {
             "active_controller",
             "1 if this broker is the raft (controller) leader, 0 otherwise.",
             active_controller.clone(),
+        );
+        registry.register(
+            "controller_leader_changes",
+            "Slice 7c: cumulative count of distinct controller-leader \
+             transitions this broker has observed (any change in the \
+             raft leader, including this broker becoming or ceasing \
+             to be leader). Mirrors Kafka's \
+             KafkaController.LeaderElectionRateAndTimeMs; alert on a \
+             sustained rate() > 0 to spot flapping raft leadership.",
+            controller_leader_changes_total.clone(),
         );
         // Counter names omit the `_total` suffix — `prometheus-client`
         // appends it automatically when encoding (so emitting
@@ -462,6 +481,7 @@ impl BrokerMetrics {
             under_min_isr_partition_count,
             offline_partitions_count,
             active_controller,
+            controller_leader_changes_total,
             isr_shrinks_total,
             isr_expands_total,
             incremental_fetch_sessions,
@@ -679,6 +699,7 @@ mod tests {
         m.under_min_isr_partition_count.set(2);
         m.offline_partitions_count.set(1);
         m.active_controller.set(1);
+        m.controller_leader_changes_total.inc();
         m.isr_shrinks_total.inc();
         m.isr_expands_total.inc_by(2);
 
@@ -697,6 +718,7 @@ mod tests {
             "crabka_broker_under_min_isr_partition_count",
             "crabka_broker_offline_partitions_count",
             "crabka_broker_active_controller",
+            "crabka_broker_controller_leader_changes_total",
             "crabka_broker_isr_shrinks_total",
             "crabka_broker_isr_expands_total",
             "crabka_broker_partition_bytes_in_total",
