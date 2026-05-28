@@ -65,6 +65,12 @@ pub struct MetadataImage {
     acls_prefixed: HashMap<ResourceType, Vec<AclEntry>>,
     client_quotas: HashMap<EntityKey, BTreeMap<String, f64>>,
     delegation_tokens: HashMap<String, DelegationToken>,
+    feature_levels: BTreeMap<String, i16>,
+    /// KIP-584 finalized-features epoch. `-1` until the first
+    /// `V1FeatureLevel` record applies, then monotonically increasing
+    /// (one bump per applied record). Deterministic across replicas
+    /// because records apply in committed-log order on every node.
+    features_epoch: i64,
 }
 
 /// Selects which KIP-73 throttle rate config key to read.
@@ -89,6 +95,8 @@ impl MetadataImage {
             acls_prefixed: HashMap::new(),
             client_quotas: HashMap::new(),
             delegation_tokens: HashMap::new(),
+            feature_levels: BTreeMap::new(),
+            features_epoch: -1,
         }
     }
 
@@ -283,6 +291,20 @@ impl MetadataImage {
         self.delegation_tokens.values().find(|t| t.hmac == hmac)
     }
 
+    /// KIP-584: finalized feature levels, keyed by feature name. Empty
+    /// until an `UpdateFeatures` call lands a `V1FeatureLevel` record.
+    #[must_use]
+    pub fn finalized_features(&self) -> &BTreeMap<String, i16> {
+        &self.feature_levels
+    }
+
+    /// KIP-584 finalized-features epoch. `-1` ("unknown") until the first
+    /// feature is finalized.
+    #[must_use]
+    pub fn finalized_features_epoch(&self) -> i64 {
+        self.features_epoch
+    }
+
     /// Apply one record. Returns the previous record (for `V1Topic` /
     /// `V1BrokerRegistration`) so the caller can observe overwrite cases.
     /// Infallible — pre-validation against the current image happens
@@ -397,6 +419,15 @@ impl MetadataImage {
                 // a no-op.
                 self.brokers.remove(&rec.node_id);
             }
+            MetadataRecord::V1FeatureLevel(rec) => {
+                if rec.level == 0 {
+                    self.feature_levels.remove(&rec.name);
+                } else {
+                    self.feature_levels.insert(rec.name.clone(), rec.level);
+                }
+                // Monotonic epoch: -1 -> 0 on the first record, then +1.
+                self.features_epoch = self.features_epoch.saturating_add(1).max(0);
+            }
         }
     }
 
@@ -460,7 +491,11 @@ impl MetadataImage {
             // UnregisterBroker (KIP-185 / api_key 64). The handler-side
             // existence check + Cluster:Alter ACL gate provide all the
             // pre-validation we need; image-level apply is idempotent.
-            | MetadataRecord::V1UnregisterBroker(_) => Ok(()),
+            | MetadataRecord::V1UnregisterBroker(_)
+            // KIP-584: feature-level admission is fully gated by the
+            // UpdateFeatures handler (supported-range + downgrade checks);
+            // image-level apply is an idempotent map upsert.
+            | MetadataRecord::V1FeatureLevel(_) => Ok(()),
         }
     }
 }
@@ -471,11 +506,53 @@ mod tests {
     use crate::acl::{AclEntryFilter, AclOperation, PermissionType};
     use crate::records::{
         BrokerConfigRecord, ClientQuotaRecord, DeleteDelegationTokenRecord,
-        DeleteScramCredentialRecord, DeleteTopicRecord, QuotaEntity, ScramCredentialRecord,
+        DeleteScramCredentialRecord, DeleteTopicRecord, FeatureLevelRecord, QuotaEntity,
+        ScramCredentialRecord,
     };
 
     fn img() -> MetadataImage {
         MetadataImage::new(Uuid::nil())
+    }
+
+    #[test]
+    fn fresh_image_has_no_features_and_unknown_epoch() {
+        let m = img();
+        assert!(m.finalized_features().is_empty());
+        assert_eq!(m.finalized_features_epoch(), -1);
+    }
+
+    #[test]
+    fn apply_feature_level_sets_level_and_bumps_epoch() {
+        let mut m = img();
+        m.apply(&MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+            name: "metadata.version".into(),
+            level: 1,
+        }));
+        assert_eq!(m.finalized_features().get("metadata.version"), Some(&1));
+        assert_eq!(m.finalized_features_epoch(), 0);
+
+        // A second apply bumps the epoch again (monotonic).
+        m.apply(&MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+            name: "metadata.version".into(),
+            level: 1,
+        }));
+        assert_eq!(m.finalized_features_epoch(), 1);
+    }
+
+    #[test]
+    fn apply_feature_level_zero_deletes_entry() {
+        let mut m = img();
+        m.apply(&MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+            name: "metadata.version".into(),
+            level: 1,
+        }));
+        m.apply(&MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+            name: "metadata.version".into(),
+            level: 0,
+        }));
+        assert!(m.finalized_features().get("metadata.version").is_none());
+        // Epoch still advanced — it is monotonic, not a count of live features.
+        assert_eq!(m.finalized_features_epoch(), 1);
     }
 
     fn topic(name: &str, partitions: i32) -> MetadataRecord {

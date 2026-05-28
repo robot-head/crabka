@@ -131,6 +131,7 @@ pub mod coordinator;
 pub(crate) mod delegation_token_cleanup;
 pub mod disk_scanner;
 mod error;
+mod features;
 pub mod fetch_session;
 pub mod file_config;
 pub(crate) mod future_log;

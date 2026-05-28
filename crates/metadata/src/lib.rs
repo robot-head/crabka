@@ -24,6 +24,6 @@ pub use image::{DelegationToken, EntityKey, MetadataImage, ThrottleKind, canonic
 pub use records::{
     BrokerConfigRecord, BrokerEndpoint, BrokerRegistrationRecord, ClientQuotaRecord,
     DelegationTokenRecord, DeleteDelegationTokenRecord, DeleteScramCredentialRecord,
-    DeleteTopicRecord, MetadataRecord, NodeId, PartitionRecord, QuotaEntity, ScramCredentialRecord,
-    TopicConfigRecord, TopicRecord, UnregisterBrokerRecord,
+    DeleteTopicRecord, FeatureLevelRecord, MetadataRecord, NodeId, PartitionRecord, QuotaEntity,
+    ScramCredentialRecord, TopicConfigRecord, TopicRecord, UnregisterBrokerRecord,
 };
