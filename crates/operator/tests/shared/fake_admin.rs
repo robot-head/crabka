@@ -605,6 +605,17 @@ impl AdminClientLike for FakeAdminClient {
         Ok(out)
     }
 
+    async fn alter_user_scram_credentials_sha256(
+        &mut self,
+        upsertions: &[ScramUpsertion],
+        deletions: &[ScramDeletion],
+    ) -> Result<Vec<ScramUserOutcome>, AdminError> {
+        // Same in-memory model as SHA-512; the fake doesn't care about
+        // the mechanism wire byte, only the recorded-call trace.
+        self.alter_user_scram_credentials_sha512(upsertions, deletions)
+            .await
+    }
+
     async fn describe_acls(
         &mut self,
         filter: &AclEntryFilter,

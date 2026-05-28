@@ -61,6 +61,7 @@ spec:
                   type:
                     enum:
                     - scram-sha-512
+                    - scram-sha-256
                     - tls
                     - tls-external
                     - delegation-token
@@ -276,6 +277,10 @@ spec:
                   True once the spec's `quotas` (if any) have been reflected in the
                   broker's `(user)` client-quota state. False when `spec.quotas`
                   is `None` (the operator does not touch broker quotas).
+                type: boolean
+              scramSha256:
+                default: false
+                description: 'Slice 36b: true once SCRAM-SHA-256 credentials are provisioned.'
                 type: boolean
               scramSha512:
                 default: false
