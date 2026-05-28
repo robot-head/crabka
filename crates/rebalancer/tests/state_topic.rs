@@ -1,4 +1,4 @@
-//! Slice 43i: end-to-end round-trip against a real broker.
+//! End-to-end round-trip against a real broker.
 //!
 //! Requires Docker; gated `#[ignore]` and CI runs with `--include-ignored`.
 

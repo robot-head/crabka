@@ -88,7 +88,7 @@ struct Args {
     /// target list from the ingester's `Metadata` snapshot, addressing
     /// each broker at `host:METRICS_PORT`. Ignored when
     /// `--metrics-scrape-targets` is set. Defaults to `crabka-broker`'s
-    /// slice-39 default (`9404`).
+    /// metrics port (`9404`).
     #[arg(long, env = "CRABKA_REBALANCER_METRICS_PORT", default_value_t = 9404)]
     metrics_port: u16,
 
@@ -295,7 +295,7 @@ async fn main() -> anyhow::Result<()> {
 
     let in_flight_slot: Arc<Mutex<Option<ExecutionHandle>>> = Arc::new(Mutex::new(None));
 
-    // Slice 43i: ensure the state topic exists; spawn the background loader.
+    // Ensure the state topic exists; spawn the background loader.
     // `topic_admin::ensure_topic` takes `&mut crabka_client_admin::AdminClient`.
     // We connect a short-lived admin client just for topic creation; the
     // `StateTopic` and `StateTopicLoader` then run on the main `Client`.

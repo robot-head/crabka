@@ -1,6 +1,6 @@
-//! Slice 44: `KafkaRebalance` CRD. Strimzi-shaped. The operator
+//! `KafkaRebalance` CRD. Strimzi-shaped. The operator
 //! translates the spec into Connect-RPC calls against the standalone
-//! `crabka-rebalancer` service (slices 43a–g) and surfaces the proposal
+//! `crabka-rebalancer` service and surfaces the proposal
 //! lifecycle back through the CRD's `status` subresource.
 //!
 //! Workflow mirrors Strimzi's annotation-driven state machine: the

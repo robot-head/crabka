@@ -55,7 +55,7 @@ pub async fn run(
     while let Some(msg) = rx.recv().await {
         match msg {
             WriterMessage::Produce(ProduceJob { mut batch, ack }) => {
-                // Slice 67: broker-side recompression. If the topic's
+                // Broker-side recompression. If the topic's
                 // `compression.type` is a concrete codec (i.e. not
                 // Kafka's `producer` pass-through), force the batch's
                 // attributes to that codec before append — the

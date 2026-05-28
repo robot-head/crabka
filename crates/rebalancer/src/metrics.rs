@@ -1,7 +1,6 @@
 //! Process-level `OpenMetrics` surface for the rebalancer.
 //!
-//! Three metrics are exposed in slice 43a; later slices add usage /
-//! latency counters off the same `Registry`.
+//! Usage and latency counters are registered off the same `Registry`.
 //!
 //! The `Counter` / `Gauge` handles from `prometheus-client` are cheaply
 //! clonable (internally `Arc`-backed), so [`RebalancerMetrics`] itself

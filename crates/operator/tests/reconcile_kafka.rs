@@ -1,13 +1,13 @@
-//! Mocked-client integration tests for the slice-20 `Kafka` reconciler.
+//! Mocked-client integration tests for the `Kafka` reconciler.
 //!
-//! Slice 20: `Kafka` is the parent/coordinator. It owns the cluster-level
+//! `Kafka` is the parent/coordinator. It owns the cluster-level
 //! `Service`, `ConfigMap`, and cluster-id `Secret`, lists sibling
 //! `KafkaNodePool`s by label, and aggregates their statuses. Broker
 //! `StatefulSet`s live on the pool reconciler — the Kafka reconciler
 //! must never touch `/statefulsets/`.
 //!
 //! Request sequence on a fresh Kafka with no `spec.listeners` set
-//! (slice 25 synthesized internal-default path):
+//! (synthesized internal-default path):
 //!   1. PATCH services/<name>-broker-headless   (SSA)
 //!   2. GET   secrets/<name>-cluster-id         (-> 404)
 //!   3. POST  secrets                           (-> 201)
@@ -16,7 +16,7 @@
 //!   6. PATCH kafkanodepools/<pool>             (owner-ref adopt)
 //!   7. PATCH kafkas/<name>/status              (merge)
 //!
-//! The `ConfigMap` moved after the pool list because slice 25 derives one
+//! The `ConfigMap` comes after the pool list because the operator derives one
 //! `broker-{id}.toml` key per pool — we have to enumerate the pools
 //! first to know which keys to emit.
 
@@ -65,7 +65,7 @@ fn kafka_cr(name: &str, namespace: &str) -> Kafka {
     k
 }
 
-/// Variant carrying a `spec.metricsConfig` for slice-40 tests.
+/// Variant carrying a `spec.metricsConfig`.
 fn kafka_cr_with_metrics(name: &str, namespace: &str, metrics: Option<MetricsConfig>) -> Kafka {
     let mut k = Kafka::new(
         name,
@@ -91,7 +91,7 @@ fn kafka_cr_with_metrics(name: &str, namespace: &str, metrics: Option<MetricsCon
     k
 }
 
-/// Variant carrying `spec.networkPolicy` for slice-23 tests.
+/// Variant carrying `spec.networkPolicy`.
 fn kafka_cr_with_network_policy(
     name: &str,
     namespace: &str,
@@ -121,7 +121,7 @@ fn kafka_cr_with_network_policy(
     k
 }
 
-/// Variant carrying a `spec.config` for slice-21 tests. Uses
+/// Variant carrying a `spec.config`. Uses
 /// `log.retention.hours=24` because the plan pins the expected hash on
 /// exactly that key/value pair.
 fn kafka_cr_with_config(
@@ -157,12 +157,12 @@ fn kafka_cr_with_config(
 /// `<namespace>`. The caller controls the rendered pool list (and thus
 /// the rolled-up status reason) via `pool_items`.
 ///
-/// Slice 30 adds CA and keystore secret lifecycle calls:
+/// The rules cover CA and keystore secret lifecycle calls:
 ///   - 4 GET + 4 PATCH for cluster-ca + clients-ca secret pairs (no pre-existing CAs
 ///     → operator generates new ones).
 ///   - 1 GET + 1 PATCH for the broker keystore Secret (runs only in the
 ///     validation-ok branch, which `happy_path` always exercises).
-#[allow(clippy::too_many_lines)] // slice 30 adds 10 CA+keystore rules; the function length is inherent to mock-rule enumeration
+#[allow(clippy::too_many_lines)] // the 10 CA+keystore rules make the function length inherent to mock-rule enumeration
 fn happy_path_rules(
     name: &str,
     namespace: &str,
@@ -203,7 +203,7 @@ fn happy_path_rules(
             path_substr: format!("/services/{svc_name}"),
             response: json_response(200, &fake_service_body(&svc_name, namespace)),
         },
-        // 2. GET cluster-id secret -> 404 (slice-20 one-shot create).
+        // 2. GET cluster-id secret -> 404 (one-shot create).
         MockRule {
             method: Method::GET,
             path_substr: format!("/secrets/{secret_name}"),
@@ -226,7 +226,7 @@ fn happy_path_rules(
                 ),
             ),
         },
-        // 4-7. Slice 30: cluster CA — no pre-existing secrets → operator generates.
+        // 4-7. Cluster CA — no pre-existing secrets → operator generates.
         //   GET cluster-ca key → 404
         MockRule {
             method: Method::GET,
@@ -259,7 +259,7 @@ fn happy_path_rules(
             path_substr: format!("/secrets/{cluster_ca_cert}"),
             response: json_response(200, &fake_ca_secret(&cluster_ca_cert)),
         },
-        // 8-11. Slice 30: clients CA — no pre-existing secrets → operator generates.
+        // 8-11. Clients CA — no pre-existing secrets → operator generates.
         //   GET clients-ca key → 404
         MockRule {
             method: Method::GET,
@@ -298,7 +298,7 @@ fn happy_path_rules(
             path_substr: format!("/namespaces/{namespace}/kafkanodepools"),
             response: json_response(200, &fake_pool_list_body(pool_items)),
         },
-        // 13-14. Slice 30: broker keystore — no pre-existing → operator creates.
+        // 13-14. Broker keystore — no pre-existing → operator creates.
         //   GET keystore → 404
         MockRule {
             method: Method::GET,
@@ -373,7 +373,7 @@ async fn kafka_applies_service_configmap_secret_no_statefulset() {
         .map(|r| (r.method().clone(), r.uri().to_string()))
         .collect();
 
-    // Slice 30 adds CA + keystore calls. With 1 pool the sequence is:
+    // The reconcile makes CA + keystore calls. With 1 pool the sequence is:
     //   1. PATCH service
     //   2. GET cluster-id secret (404)  3. POST cluster-id secret (201)
     //   4-7. GET/PATCH cluster-ca key+cert (new CA generated)
@@ -386,7 +386,7 @@ async fn kafka_applies_service_configmap_secret_no_statefulset() {
     assert_eq!(
         observed.len(),
         17,
-        "expected exactly 17 requests (slice 30 includes CA + keystore calls), \
+        "expected exactly 17 requests (includes CA + keystore calls), \
          saw {}: {:?}",
         observed.len(),
         methods_and_uris,
@@ -423,7 +423,7 @@ async fn kafka_applies_service_configmap_secret_no_statefulset() {
         methods_and_uris[2].1
     );
 
-    // Steps 4-11: CA secret lifecycle (slice 30).
+    // Steps 4-11: CA secret lifecycle.
     // After the POST, the next 8 requests are CA-related GETs and PATCHes.
 
     // Step 12: pool list.
@@ -560,7 +560,7 @@ async fn kafka_patches_pool_label_with_config_hash() {
 
     let body: serde_json::Value =
         serde_json::from_slice(pool_patch.body()).expect("pool PATCH body is JSON");
-    // Slice 30: the config-hash now includes the generated CA cert PEM, so we
+    // The config-hash includes the generated CA cert PEM, so we
     // can't compute the expected hash upfront without access to the generated
     // material. Assert the hash is exactly 16 hex chars — that is the
     // contract config_hash produces (first 8 bytes of SHA-256, 2 hex chars
@@ -584,7 +584,7 @@ async fn kafka_patches_pool_label_with_config_hash() {
 }
 
 /// Variant carrying explicit `spec.kafkaVersion` + `spec.metadataVersion`
-/// for slice-28 version tests.
+/// for version tests.
 fn kafka_cr_with_versions(
     name: &str,
     namespace: &str,
@@ -615,7 +615,7 @@ fn kafka_cr_with_versions(
     k
 }
 
-/// Slice 41 variant carrying `spec.logging`.
+/// Variant carrying `spec.logging`.
 fn kafka_cr_with_logging(name: &str, namespace: &str, logging: Option<Logging>) -> Kafka {
     let mut k = Kafka::new(
         name,
@@ -660,7 +660,7 @@ fn logging_condition<B: AsRef<[u8]>>(observed: &[http::Request<B>]) -> serde_jso
         .unwrap_or_else(|| panic!("LoggingReady present, body = {body}"))
 }
 
-/// Slice 41: inline logging composes a sorted `RUST_LOG` filter into the
+/// Inline logging composes a sorted `RUST_LOG` filter into the
 /// broker `ConfigMap`'s `rust.log` key and surfaces `LoggingReady=True`.
 #[tokio::test]
 async fn kafka_inline_logging_renders_rust_log_key() {
@@ -693,7 +693,7 @@ async fn kafka_inline_logging_renders_rust_log_key() {
     assert_eq!(state.remaining_rules(), 0);
 }
 
-/// Slice 41: a logging-unset cluster surfaces `LoggingReady=False/Disabled`
+/// A logging-unset cluster surfaces `LoggingReady=False/Disabled`
 /// and renders no `rust.log` key.
 #[tokio::test]
 async fn kafka_no_logging_omits_rust_log_key() {
@@ -714,7 +714,7 @@ async fn kafka_no_logging_omits_rust_log_key() {
     assert_eq!(cond["reason"], "Disabled");
 }
 
-/// Slice 41: external logging reads the referenced `ConfigMap` key and uses it
+/// External logging reads the referenced `ConfigMap` key and uses it
 /// verbatim as the `RUST_LOG` filter.
 #[tokio::test]
 async fn kafka_external_logging_reads_user_configmap() {
@@ -760,7 +760,7 @@ async fn kafka_external_logging_reads_user_configmap() {
     assert_eq!(cond["status"], "True");
 }
 
-/// Slice 41: an external logging reference to a missing `ConfigMap` surfaces
+/// An external logging reference to a missing `ConfigMap` surfaces
 /// `LoggingReady=False` and renders no `rust.log` key (the broker keeps its
 /// built-in default filter).
 #[tokio::test]
@@ -819,7 +819,7 @@ fn configmap_data<B: AsRef<[u8]>>(observed: &[http::Request<B>]) -> serde_json::
     body["data"].clone()
 }
 
-/// Slice 28: a valid cluster echoes `kafkaVersion`, finalizes
+/// A valid cluster echoes `kafkaVersion`, finalizes
 /// `metadataVersion`, surfaces `KafkaVersionValid=True`, and injects
 /// `metadata.version` into the rendered broker TOML.
 #[tokio::test]
@@ -871,7 +871,7 @@ async fn kafka_status_and_configmap_carry_metadata_version() {
     assert_eq!(state.remaining_rules(), 0);
 }
 
-/// Slice 28: a metadata version newer than the binary is rejected — no
+/// A metadata version newer than the binary is rejected — no
 /// roll, `metadata.version` not injected, finalized version not advanced.
 #[tokio::test]
 async fn kafka_metadata_version_too_high_blocks() {
@@ -948,7 +948,7 @@ async fn kafka_status_includes_rolling_condition_stable() {
     assert_eq!(state.remaining_rules(), 0);
 }
 
-/// Slice 25: when `spec.listeners` is empty the operator synthesizes a
+/// When `spec.listeners` is empty the operator synthesizes a
 /// single internal `PLAIN` listener. The status PATCH must include
 /// `ListenersValid=True`, `ListenersReady=True`, and a one-entry
 /// `listeners[]` array describing the synthesized listener.
@@ -1108,7 +1108,7 @@ fn metrics_ready_cond(body: &serde_json::Value) -> &serde_json::Value {
         .unwrap_or_else(|| panic!("MetricsReady condition present, body = {body}"))
 }
 
-/// Slice 40: `metricsConfig` absent. No dynamic monitoring resources may
+/// `metricsConfig` absent. No dynamic monitoring resources may
 /// be applied, and the status carries `MetricsReady=False reason=Disabled`.
 #[tokio::test]
 async fn metrics_disabled_no_dynamic_apply() {
@@ -1166,7 +1166,7 @@ fn fake_service_monitor_body(name: &str, namespace: &str) -> serde_json::Value {
     })
 }
 
-/// Slice 40: `podMonitor` set. Reconcile applies exactly one `PodMonitor`
+/// `podMonitor` set. Reconcile applies exactly one `PodMonitor`
 /// via SSA against `monitoring.coreos.com/v1`, then best-effort deletes
 /// the abandoned `ServiceMonitor` + metrics `Service`. The status surfaces
 /// `MetricsReady=True reason=Available`.
@@ -1255,7 +1255,7 @@ async fn pod_monitor_path_applies_one_resource() {
     assert_eq!(state.remaining_rules(), 0);
 }
 
-/// Slice 40: `serviceMonitor` set. Reconcile applies the headless metrics
+/// `serviceMonitor` set. Reconcile applies the headless metrics
 /// `Service` and then the `ServiceMonitor`. The abandoned `PodMonitor` is
 /// best-effort deleted. Status surfaces `MetricsReady=True reason=Available`.
 #[tokio::test]
@@ -1346,7 +1346,7 @@ async fn service_monitor_path_applies_service_and_servicemonitor() {
     assert_eq!(state.remaining_rules(), 0);
 }
 
-/// Slice 40: both `podMonitor` and `serviceMonitor` set. Reconcile must
+/// Both `podMonitor` and `serviceMonitor` set. Reconcile must
 /// short-circuit before any dynamic apply and surface
 /// `MetricsReady=False reason=MutuallyExclusive`. No request to the
 /// monitoring API may be issued — the harness's fallback 404 would itself
@@ -1392,7 +1392,7 @@ async fn mutually_exclusive_sets_condition_and_skips_apply() {
     assert_eq!(state.remaining_rules(), 0);
 }
 
-/// Slice 40: the Prometheus Operator CRDs are not installed — the dynamic
+/// The Prometheus Operator CRDs are not installed — the dynamic
 /// PATCH against `monitoring.coreos.com/v1` 404s. Reconcile must surface
 /// `MetricsReady=False reason=PrometheusOperatorCrdsMissing` rather than
 /// fail; the status patch still lands.
@@ -1442,7 +1442,7 @@ async fn prom_operator_missing_sets_condition() {
     assert_eq!(state.remaining_rules(), 0);
 }
 
-/// Slice 23: `spec.networkPolicy=None` (the default in `kafka_cr`)
+/// `spec.networkPolicy=None` (the default in `kafka_cr`)
 /// must not touch `/networkpolicies/` at all and must surface
 /// `NetworkPolicyReady=False reason=Disabled`.
 #[tokio::test]
@@ -1479,7 +1479,7 @@ async fn network_policy_disabled_no_apply() {
     assert_eq!(cond["reason"], "Disabled", "body = {body}");
 }
 
-/// Slice 23: `spec.networkPolicy=Some(NetworkPolicySpec::default())`
+/// `spec.networkPolicy=Some(NetworkPolicySpec::default())`
 /// applies exactly one `NetworkPolicy` via SSA and surfaces
 /// `NetworkPolicyReady=True reason=Available`.
 #[tokio::test]
@@ -1542,7 +1542,7 @@ async fn network_policy_enabled_applies_one_resource() {
     assert_eq!(state.remaining_rules(), 0);
 }
 
-/// Slice 23: a Kafka CR with `status.conditions[NetworkPolicyReady].reason
+/// A Kafka CR with `status.conditions[NetworkPolicyReady].reason
 /// = "Available"` and `spec.networkPolicy = None` issues exactly one
 /// DELETE on `<name>-broker-policy` (orphan cleanup).
 #[tokio::test]
@@ -1600,7 +1600,7 @@ async fn network_policy_transition_deletes_on_disable() {
     assert_eq!(deletes.len(), 1, "exactly one DELETE call on transition");
 }
 
-/// Slice 23: cold disable (no prior `NetworkPolicyReady=Available`) must
+/// Cold disable (no prior `NetworkPolicyReady=Available`) must
 /// not call DELETE at all — avoids gratuitous API calls for clusters that
 /// never opted into `NetworkPolicy`.
 #[tokio::test]
@@ -1621,7 +1621,7 @@ async fn network_policy_cold_disable_no_delete() {
     );
 }
 
-/// Slice 23: when one listener has `network_policy_peers=Some(vec![])`,
+/// When one listener has `network_policy_peers=Some(vec![])`,
 /// the rendered `NetworkPolicy` body sent on the PATCH must NOT contain a
 /// per-listener rule with empty `from` for that listener's port. (The
 /// operator-allow rule for that port is still present.)

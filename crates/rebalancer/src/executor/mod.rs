@@ -1,8 +1,8 @@
 //! Execute-path state machine. `Executor` runs one `Execution` at a
 //! time against the cluster via a `ClientFacade`.
 //!
-//! Slice 43b adds the full state machine (`ApplyThrottle` -> `Submit` ->
-//! `Wait` -> `ClearThrottle`) and on-disk persistence with restart resume.
+//! The full state machine (`ApplyThrottle` -> `Submit` ->
+//! `Wait` -> `ClearThrottle`) provides on-disk persistence with restart resume.
 
 pub mod client_impl;
 pub mod phases;
@@ -47,8 +47,8 @@ pub struct ExecutorState {
     pub in_flight: Arc<Mutex<Option<ExecutionHandle>>>,
     /// State backend for in-flight executor state. Production: topic-backed
     /// `StateTopic`; tests: `fake::InMemoryBackend`. Replaces the
-    /// slice-43b `{data_dir}/in_flight.json` file. (`data_dir` is now used
-    /// only by the anomaly store.)
+    /// file-backed `{data_dir}/in_flight.json` store. (`data_dir` is now
+    /// used only by the anomaly store.)
     pub state_topic: Arc<dyn crate::state_topic::StateBackend>,
 }
 

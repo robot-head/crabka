@@ -37,7 +37,7 @@ spec:
                 type: integer
               replicas:
                 default: 1
-                description: 'Number of pods. Slice 20 validation: must equal 1.'
+                description: 'Number of pods. Validation: must equal 1.'
                 format: int32
                 maximum: 1.0
                 minimum: 1.0
@@ -81,8 +81,8 @@ spec:
                 type: object
               roles:
                 description: |-
-                  Roles each node in this pool fulfills. Slice 20 supports only
-                  the union `{Controller, Broker}`.
+                  Roles each node in this pool fulfills. Only
+                  the union `{Controller, Broker}` is supported.
                 items:
                   enum:
                   - Controller
@@ -92,7 +92,7 @@ spec:
               storage:
                 description: |-
                   Storage configuration. `None` (field absent) → emptyDir (the
-                  slice 19/20 default). See [`Storage`].
+                  default). See [`Storage`].
                 nullable: true
                 properties:
                   class:

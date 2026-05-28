@@ -38,9 +38,9 @@
 //!
 //! - `assign()` (manual partition consumption) — use `crabka-client-core`
 //!   directly.
-//! - Admin RPCs (`DescribeGroups`, `ListGroups`) — slice 10.
-//! - KIP-848 / cooperative-sticky rebalance — slice 5b.
-//! - Full EOS transactional consumer guarantees — slice 9 integration tests.
+//! - Admin RPCs (`DescribeGroups`, `ListGroups`).
+//! - KIP-848 / cooperative-sticky rebalance.
+//! - Full EOS transactional consumer guarantees.
 //!
 //! ## Cargo features
 //!

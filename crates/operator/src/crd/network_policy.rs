@@ -1,4 +1,4 @@
-//! Slice 23: `Kafka.spec.networkPolicy` — operator-side surface for
+//! `Kafka.spec.networkPolicy` — operator-side surface for
 //! generating a cluster-level `networking.k8s.io/v1.NetworkPolicy`.
 
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector;
@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 /// `None` disables and triggers a one-shot orphan cleanup gated on the
 /// previous `NetworkPolicyReady=Available` condition.
 ///
-/// The struct intentionally carries no fields today — future slices can
+/// The struct intentionally carries no fields today — future work can
 /// add `metrics_peers`, `controller_peers`, etc. without a breaking schema
 /// change.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 pub struct NetworkPolicySpec {}
 
 /// Subset of `networking.k8s.io/v1.NetworkPolicyPeer`. `ipBlock` is
-/// intentionally omitted; a future slice can add it if external CIDR
+/// intentionally omitted; it can be added later if external CIDR
 /// allow-lists become a real need.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]

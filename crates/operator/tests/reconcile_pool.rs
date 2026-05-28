@@ -1,15 +1,15 @@
-//! Mocked-client integration tests for the slice-20 `KafkaNodePool`
+//! Mocked-client integration tests for the `KafkaNodePool`
 //! reconciler.
 //!
 //! Happy-path request sequence on a fresh pool:
 //!   1. GET   kafkas/<parent>                  (-> 200 parent Kafka)
-//!   2. GET   statefulsets/<parent>-<pool>     (pre-apply; slice-24 monotonic-storage check)
+//!   2. GET   statefulsets/<parent>-<pool>     (pre-apply; monotonic-storage check)
 //!   3. PATCH statefulsets/<parent>-<pool>     (SSA)
 //!   4. GET   statefulsets/<parent>-<pool>     (post-apply status read)
 //!   5. PATCH kafkanodepools/<pool>/status     (merge)
 //!
 //! Validation-failure paths short-circuit to step 5 (or skip step 1
-//! entirely when the cluster label is missing). Slice-24 monotonic-
+//! entirely when the cluster label is missing). Monotonic-
 //! storage failures short-circuit after step 2.
 
 use std::collections::BTreeMap;
@@ -53,8 +53,8 @@ fn pool_cr(name: &str, namespace: &str, parent: Option<&str>, replicas: i32) -> 
 /// Happy-path rules: parent Kafka exists, STS apply succeeds, STS status
 /// read returns `ready_replicas`, pool status patch echoes the pool.
 ///
-/// Slice 24 added a pre-apply STS GET to the reconcile flow (for
-/// monotonic-storage validation), so the rule sequence is now:
+/// The reconcile flow includes a pre-apply STS GET (for
+/// monotonic-storage validation), so the rule sequence is:
 ///   1. GET parent Kafka.
 ///   2. GET STS (pre-apply): 404 → first-reconcile, validation accepts any spec.
 ///   3. PATCH STS (SSA).
@@ -75,7 +75,7 @@ fn happy_path_rules(
             path_substr: format!("/kafkas/{parent}"),
             response: json_response(200, &fake_parent_kafka_body(parent, namespace)),
         },
-        // 2. GET statefulset (pre-apply, slice-24 monotonic-storage check):
+        // 2. GET statefulset (pre-apply, monotonic-storage check):
         //    no live STS on first reconcile.
         MockRule {
             method: Method::GET,
@@ -220,7 +220,7 @@ async fn pool_validation_rejects_replicas_two() {
 async fn pool_validation_rejects_missing_cluster_label() {
     // With no `crabka.io/cluster` label, validation passes (label is
     // checked separately) but the parent lookup short-circuits via the
-    // `PoolMissingClusterLabel` error. Slice-20 design surfaces that as
+    // `PoolMissingClusterLabel` error, surfaced as
     // a `Ready=False / MissingClusterLabel` condition without any
     // parent / STS I/O.
     //
@@ -486,7 +486,7 @@ async fn pool_storage_shrink_is_rejected() {
     assert_eq!(state.remaining_rules(), 0);
 }
 
-/// Slice 46: a JBOD pool renders one `volumeClaimTemplate` per disk
+/// A JBOD pool renders one `volumeClaimTemplate` per disk
 /// (`data` + `data-{id}`), a set-wide retention policy, and the broker
 /// container's `CRABKA_EXTRA_LOG_DIRS` env listing every non-primary disk.
 #[tokio::test]
@@ -608,7 +608,7 @@ async fn pool_jbod_renders_multiple_volume_claim_templates() {
     assert_eq!(state.remaining_rules(), 0);
 }
 
-/// Slice 25/10: the rendered `StatefulSet` must:
+/// The rendered `StatefulSet` must:
 ///   1. Include a `broker-config` `ConfigMap` volume in the pod template.
 ///   2. Pass `--config-file=/run/crabka/broker.toml` in the broker container args.
 ///   3. Mount the `ConfigMap` at `/etc/crabka/config` (readOnly) in the broker container.

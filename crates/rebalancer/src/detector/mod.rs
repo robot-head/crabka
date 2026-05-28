@@ -1,4 +1,4 @@
-//! Anomaly detector — slice 43g.
+//! Anomaly detector.
 //!
 //! The detector watches `SharedSnapshot` + `UsageStore` for trouble
 //! (broker death, sustained under-replicated partitions, disk pressure,

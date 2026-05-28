@@ -1,5 +1,5 @@
-//! Slice 35: admin client for the operator. Targets one cluster's
-//! controller; plaintext only (slice 36 will add TLS / SASL).
+//! Admin client for the operator. Targets one cluster's
+//! controller; plaintext only.
 //!
 //! Built on `crabka_client_core::Connection`'s typed
 //! `send::<R: ProtocolRequest>` so request-version negotiation is
@@ -68,7 +68,7 @@ pub trait AdminClientLike: Send {
         upsertions: &[ScramUpsertion],
         deletions: &[ScramDeletion],
     ) -> Result<Vec<ScramUserOutcome>, AdminError>;
-    /// Slice 36b: SCRAM-SHA-256 sibling of
+    /// SCRAM-SHA-256 sibling of
     /// [`Self::alter_user_scram_credentials_sha512`]. The operator
     /// calls this when a `KafkaUser.spec.authentication.type ==
     /// scram-sha-256`.
@@ -96,7 +96,7 @@ pub trait AdminClientLike: Send {
         validate_only: bool,
     ) -> Result<Option<KafkaError>, AdminError>;
 
-    // ── Slice 51b: delegation-token RPCs (KIP-48) ─────────────────────
+    // ── delegation-token RPCs (KIP-48) ────────────────────────────────
     //
     // Trait-level return type is `crabka_metadata::DelegationToken`
     // (the image type) rather than the raw `Create/RenewDelegationToken`
@@ -206,7 +206,7 @@ impl AdminClientLike for AdminClient {
         AdminClient::alter_user_quotas(self, username, ops, validate_only).await
     }
 
-    // ── Slice 51b: delegation-token RPCs ──────────────────────────────
+    // ── delegation-token RPCs ─────────────────────────────────────────
     //
     // The inherent `AdminClient` methods in `delegation_tokens.rs`
     // return the wire-shaped response (`CreateDelegationTokenResponse`

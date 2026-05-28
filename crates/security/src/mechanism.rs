@@ -20,7 +20,7 @@ pub enum SaslMechanism {
     #[strum(serialize = "SCRAM-SHA-512")]
     ScramSha512,
     /// SASL/OAUTHBEARER (KIP-255 / RFC 7628). The bearer token is validated
-    /// by the broker's configured token validator (slice 49).
+    /// by the broker's configured token validator.
     #[strum(serialize = "OAUTHBEARER")]
     OAuthBearer,
 }

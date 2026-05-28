@@ -134,75 +134,75 @@ pub(crate) mod update_raft_voter;
 pub(crate) fn build_table() -> HandlerTable {
     let mut t = HandlerTable::new();
     // Produce (api_key 0) is intercepted inline in `network::dispatch`
-    // (slice-13 T10) so the handler can receive the per-connection
+    // so the handler can receive the per-connection
     // principal + peer `SocketAddr` for per-topic Write ACL enforcement.
     // Fetch (api_key 1) is intercepted inline in `network::dispatch`
-    // (slice-13 T11) so the handler can receive the per-connection
+    // so the handler can receive the per-connection
     // principal + peer `SocketAddr` for per-topic Read ACL enforcement.
     // Metadata (api_key 3) is intercepted inline in `network::dispatch`
-    // (slice-13 T12) so the handler can receive the per-connection
+    // so the handler can receive the per-connection
     // principal + peer `SocketAddr` for per-topic Describe ACL enforcement.
     // CreateTopics (api_key 19) is intercepted inline in `network::dispatch`
-    // (slice-13 T13) so the handler can receive the per-connection
+    // so the handler can receive the per-connection
     // principal + peer `SocketAddr` for Cluster Create ACL enforcement.
     // DeleteTopics (api_key 20) is intercepted inline in `network::dispatch`
-    // (slice-13 T13) so the handler can receive the per-connection
+    // so the handler can receive the per-connection
     // principal + peer `SocketAddr` for per-topic Delete ACL enforcement.
     // AlterConfigs (api_key 33) is intercepted inline in `network::dispatch`
-    // (slice-13 T14) so the handler can receive the per-connection
+    // so the handler can receive the per-connection
     // principal + peer `SocketAddr` for per-resource AlterConfigs ACL enforcement.
     // IncrementalAlterConfigs (api_key 44) is intercepted inline in `network::dispatch`
-    // (slice-13 T14) so the handler can receive the per-connection
+    // so the handler can receive the per-connection
     // principal + peer `SocketAddr` for per-resource AlterConfigs ACL enforcement.
     // DeleteRecords (api_key 21) is intercepted inline in `network::dispatch`
-    // (slice-13 T15) so the handler can receive the per-connection
+    // so the handler can receive the per-connection
     // principal + peer `SocketAddr` for per-topic Delete ACL enforcement.
     // CreatePartitions (api_key 37) is intercepted inline in `network::dispatch`
-    // (slice-13 T15) so the handler can receive the per-connection
+    // so the handler can receive the per-connection
     // principal + peer `SocketAddr` for per-topic Alter ACL enforcement.
     // DescribeGroups (api_key 15) is intercepted inline in `network::dispatch`
-    // (slice-13 T16) so the handler can receive the per-connection
+    // so the handler can receive the per-connection
     // principal + peer `SocketAddr` for per-group Describe ACL enforcement.
     // ListGroups (api_key 16) is intercepted inline in `network::dispatch`
-    // (slice-13 T16) so the handler can receive the per-connection
+    // so the handler can receive the per-connection
     // principal + peer `SocketAddr` for per-group Describe ACL enforcement
     // (silent filter — denied groups are omitted, not error-coded).
     // DeleteGroups (api_key 42) is intercepted inline in `network::dispatch`
-    // (slice-13 T16) so the handler can receive the per-connection
+    // so the handler can receive the per-connection
     // principal + peer `SocketAddr` for per-group Delete ACL enforcement.
     // JoinGroup (api_key 11) is intercepted inline in `network::dispatch`
-    // (slice-13 T17) so the handler can receive the per-connection
+    // so the handler can receive the per-connection
     // principal + peer `SocketAddr` for per-group Read ACL enforcement.
     // OffsetCommit (api_key 8) is intercepted inline in `network::dispatch`
-    // (slice-13 T18) so the handler can receive the per-connection
+    // so the handler can receive the per-connection
     // principal + peer `SocketAddr` for Group Read + per-topic Read ACL
     // enforcement.
     // OffsetFetch (api_key 9) is intercepted inline in `network::dispatch`
-    // (slice-13 T18) so the handler can receive the per-connection
+    // so the handler can receive the per-connection
     // principal + peer `SocketAddr` for Group Describe + per-topic Read ACL
     // enforcement (including the fetch-all `topics: None` sentinel).
     // DescribeCluster (api_key 60) is intercepted inline in `network::dispatch`
-    // (slice-13 T19) so the handler can receive the per-connection
+    // so the handler can receive the per-connection
     // principal + peer `SocketAddr` for Cluster Describe ACL enforcement.
     // AlterUserScramCredentials (api_key 51) is intercepted inline in
-    // `network::dispatch` (slice-13 T19) so the handler can receive the
+    // `network::dispatch` so the handler can receive the
     // per-connection principal + peer `SocketAddr` for Cluster Alter ACL
-    // enforcement (replacing the slice-12 super-user-name equality check).
+    // enforcement.
     // InitProducerId (api_key 22) is intercepted inline in `network::dispatch`
-    // (slice-13 T20) so the handler can receive the per-connection
+    // so the handler can receive the per-connection
     // principal + peer `SocketAddr` for either `Write` on
     // `TransactionalId` (transactional path) or `IdempotentWrite` on
     // `Cluster` (idempotent-only path).
     // AddPartitionsToTxn (api_key 24) is intercepted inline in `network::dispatch`
-    // (slice-13 T20) so the handler can receive the per-connection
+    // so the handler can receive the per-connection
     // principal + peer `SocketAddr` for `Write` on `TransactionalId` and
     // per-topic `Write` on `Topic` ACL enforcement.
     // EndTxn (api_key 26) is intercepted inline in `network::dispatch`
-    // (slice-13 T20) so the handler can receive the per-connection
+    // so the handler can receive the per-connection
     // principal + peer `SocketAddr` for `Write` on `TransactionalId` ACL
     // enforcement.
     // TxnOffsetCommit (api_key 28) is intercepted inline in `network::dispatch`
-    // (slice-13 T20) so the handler can receive the per-connection
+    // so the handler can receive the per-connection
     // principal + peer `SocketAddr` for `Write` on `TransactionalId` +
     // `Read` on `Group` + per-topic `Read` on `Topic` ACL enforcement.
     t.register(2, list_offsets::handle);

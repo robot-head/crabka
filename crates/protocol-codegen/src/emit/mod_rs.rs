@@ -10,8 +10,8 @@ use crate::name_conv;
 /// Emit a `mod.rs` that declares one `pub mod` per active spec, sorted
 /// alphabetically by snake-case module name.
 ///
-/// Pass only the specs whose wrapper files actually exist (i.e., the curated
-/// set in Task 2; expanded to all active schemas in Task 3).
+/// Pass only the specs whose wrapper files actually exist (i.e., the set
+/// covering all active schemas).
 /// If `has_common` is true, a `pub mod common;` entry is also emitted.
 #[must_use]
 pub fn emit(

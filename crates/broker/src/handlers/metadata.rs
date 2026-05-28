@@ -39,7 +39,7 @@ pub(crate) async fn handle(
 
     let image = controller.current_image();
 
-    // ── slice-13 ACL preamble ────────────────────────────────────────
+    // ── ACL preamble ────────────────────────────────────────
     // Metadata has asymmetric authorization semantics for `Describe`:
     //   • Named-topic request (`req.topics = Some([...])`): every
     //     requested topic appears in the response — Allow rows carry
@@ -231,8 +231,8 @@ pub(crate) async fn handle(
 ///
 /// The Kafka `MetadataResponse` wire format (v0..v12 at time of writing)
 /// carries exactly one `host:port`/`rack` tuple per broker — there is no
-/// `endpoints[]` array on `MetadataResponseBroker`. To honor the Task-11
-/// per-listener registration we pick the broker's inter-broker endpoint
+/// `endpoints[]` array on `MetadataResponseBroker`. To honor per-listener
+/// registration we pick the broker's inter-broker endpoint
 /// (matched by name) and fall back to the first recorded endpoint, then
 /// to the legacy top-level `host`/`port` if `endpoints` is empty.
 /// Clamps `node_id` to `i32::MAX` if the openraft `u64` overflows — broker

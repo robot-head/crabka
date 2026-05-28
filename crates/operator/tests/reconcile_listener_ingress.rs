@@ -1,4 +1,4 @@
-//! Integration tests for slice 27 — `ingress` / `route` external listeners.
+//! Integration tests for `ingress` / `route` external listeners.
 //!
 //! Drives `reconcile` against the FIFO mock transport (see `shared/mod.rs`) and
 //! asserts the operator renders the `ClusterIP` backend Services, the

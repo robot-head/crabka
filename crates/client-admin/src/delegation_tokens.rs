@@ -1,4 +1,4 @@
-//! Slice 51b (KIP-48): delegation-token RPCs on `AdminClient`.
+//! KIP-48: delegation-token RPCs on `AdminClient`.
 //!
 //! Four operations the `KafkaUser` (`authentication.type: delegation-token`)
 //! reconciler drives via the cluster's admin connection:
@@ -32,7 +32,7 @@ impl AdminClient {
     /// KIP-48 act-as create: mint a delegation token whose owner is
     /// `owner_principal_name` (type always `"User"`).
     ///
-    /// The caller MUST be a broker super-user (per slice 51b broker
+    /// The caller MUST be a broker super-user (per broker
     /// semantics) for the act-as path to take effect; non-super callers
     /// get `DELEGATION_TOKEN_AUTHORIZATION_FAILED` (65). The full
     /// response is returned so callers can pluck out `token_id`, `hmac`,

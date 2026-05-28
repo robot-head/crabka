@@ -1,6 +1,6 @@
-//! Integration tests for sub-slice 10a (bulletproof EOS — HW + acks=all).
+//! Integration tests for bulletproof EOS — HW + acks=all.
 //!
-//! Windows-gated like slice-7/8/9 multi-broker tests: openraft +
+//! Windows-gated like the other multi-broker tests: openraft +
 //! `tokio` scheduling on Windows runners cause flakes that have
 //! nothing to do with the protocol being tested.
 
@@ -230,11 +230,11 @@ async fn consumer_clamps_at_hw_when_followers_lag() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-// Regression-pin for slice-10a's `min(HW, lso)` change, which is equivalent to
-// slice-9's `lso` for rf=1 (HW = LEO immediately). Previously flaked with the
+// Regression-pin for the `min(HW, lso)` behavior, which is equivalent to
+// plain `lso` for rf=1 (HW = LEO immediately). Previously flaked with the
 // `INVALID_TXN_STATE` race fixed in `Producer::flush` (it now waits for
 // in-flight Produce batches before `EndTxn`).
-async fn read_committed_under_rf1_unchanged_from_slice9() {
+async fn read_committed_under_rf1_unchanged() {
     let (broker, bootstrap, _dir) = boot_single().await;
     create_topic(&broker, &bootstrap, "rctxn", 1).await;
 

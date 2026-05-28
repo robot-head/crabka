@@ -33,7 +33,7 @@ pub(crate) async fn handle(
 
     let image = broker.controller.current_image();
 
-    // ── slice-13 ACL preamble ────────────────────────────────────────
+    // ── ACL preamble ────────────────────────────────────────
     // Batch-authorize every topic name for `Delete`. Topics that come
     // back `Deny` short-circuit the trim loop and emit
     // TOPIC_AUTHORIZATION_FAILED on every partition row for that topic.

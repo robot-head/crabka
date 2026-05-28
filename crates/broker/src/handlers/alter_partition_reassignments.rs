@@ -1,7 +1,7 @@
 //! `AlterPartitionReassignments` (`api_key` 45, KIP-455).
 //!
-//! The wire handler lives here too (task 5). This task focuses on the
-//! pure-logic `process_one_partition` helper that turns one alter row
+//! The wire handler lives here too. The pure-logic
+//! `process_one_partition` helper turns one alter row
 //! into a `PartitionRecord` ready to submit, or a wire error code.
 
 use crabka_metadata::{MetadataImage, PartitionRecord};

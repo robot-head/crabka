@@ -1,4 +1,4 @@
-//! Slice 51b: reconcile-level integration tests for the delegation-token
+//! Reconcile-level integration tests for the delegation-token
 //! `KafkaUser` arm.
 //!
 //! These tests exercise the production dispatch path in
@@ -14,7 +14,7 @@
 //! reconcile path is unit-isolated from broker I/O — the
 //! `DelegationTokenAdmin` trait gives us a substitution seam. The
 //! broker-side act-as wire path is covered by `crabka_broker`'s own
-//! integration tests (slice 51 B1+B2).
+//! integration tests.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

@@ -76,7 +76,7 @@ pub(crate) struct Config {
     /// `spawn_partition` so the per-partition writer can flip the
     /// owning dir offline on a segment-write / fsync failure.
     pub log_dir_status: crate::log_dir_status::LogDirRegistry,
-    /// Slice 48k: broker-wide metrics handle so the replicator can
+    /// Broker-wide metrics handle so the replicator can
     /// increment `replication_bytes_in` after a successful follower-
     /// side append.
     pub metrics: crate::metrics::BrokerMetrics,
@@ -289,7 +289,7 @@ enum LoopAction {
 }
 
 async fn handle_response(resp: &FetchResponse, cfg: &Config) -> LoopAction {
-    // Slice 8 only ever requests one (topic, partition) per Fetch.
+    // The replicator only ever requests one (topic, partition) per Fetch.
     // Match by either `topic` (v ≤ 12) or `topic_id` (v ≥ 13) so that
     // when the negotiated wire format drops the topic-name field
     // (KIP-516) we still find our partition. Without this fallback

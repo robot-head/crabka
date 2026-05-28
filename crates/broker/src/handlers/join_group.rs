@@ -35,7 +35,7 @@ pub(crate) async fn handle(
     let mut cur: &[u8] = req_bytes;
     let req = JoinGroupRequest::decode(&mut cur, version)?;
 
-    // ── slice-13 ACL preamble ────────────────────────────────────────────
+    // ── ACL preamble ────────────────────────────────────────────
     // `Read` on `Group(group_id)`. On Deny → whole-response
     // `error_code = GROUP_AUTHORIZATION_FAILED (30)`.
     {

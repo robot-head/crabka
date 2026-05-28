@@ -1,4 +1,4 @@
-//! Slice 12b. Read `bootstrap.records.bin` (produced by
+//! Read `bootstrap.records.bin` (produced by
 //! `crabka format --add-scram`) on broker first start.
 //!
 //! File framing (matches `crates/cli/src/format.rs`):

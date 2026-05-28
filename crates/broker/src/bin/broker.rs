@@ -74,7 +74,7 @@ struct Args {
     )]
     metrics_listen_addr: String,
 
-    /// Slice 43e: partition disk-usage scan cadence, in seconds. `0`
+    /// Partition disk-usage scan cadence, in seconds. `0`
     /// disables the scanner entirely. The rebalancer's usage scraper
     /// reads the `partition_disk_bytes` gauge this populates.
     #[arg(
@@ -106,7 +106,7 @@ struct Args {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
-    // Slice 42: install the tracing subscriber — stdout `fmt` plus an
+    // Install the tracing subscriber — stdout `fmt` plus an
     // optional OTLP export layer. OTLP stays off unless the environment
     // opts in (see `crabka_broker::telemetry`). Built here, inside the
     // tokio runtime, so the gRPC exporter captures the runtime handle.

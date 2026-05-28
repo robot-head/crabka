@@ -160,7 +160,7 @@ spec:
                 type: object
               quotas:
                 description: |-
-                  Slice 38: optional per-user client quotas (KIP-13/124/257).
+                  Optional per-user client quotas (KIP-13/124/257).
                   Maps onto Kafka's `(user)` quota entity via `AlterClientQuotas`
                   (`api_key` 49). Absent → operator does not touch the broker's
                   quota state; present → the operator drives the broker's quota
@@ -233,7 +233,7 @@ spec:
                 type: array
               delegationTokenExpiryTimestampMs:
                 description: |-
-                  Slice 51b: current `expiry_timestamp_ms` of the operator-managed
+                  Current `expiry_timestamp_ms` of the operator-managed
                   delegation token (extended on each successful renew). Compared
                   against `now` to decide when to renew per
                   `spec.authentication.renewBeforeExpiryMs`.
@@ -242,7 +242,7 @@ spec:
                 type: integer
               delegationTokenId:
                 description: |-
-                  Slice 51b: persisted `token_id` (UUID) of the operator-managed
+                  Persisted `token_id` (UUID) of the operator-managed
                   delegation token for this user. Used across reconciles to find
                   the same token via `DescribeDelegationToken`. Present once the
                   operator has successfully issued a token via
@@ -251,7 +251,7 @@ spec:
                 type: string
               delegationTokenMaxTimestampMs:
                 description: |-
-                  Slice 51b: token's absolute upper bound (`max_timestamp_ms`).
+                  Token's absolute upper bound (`max_timestamp_ms`).
                   Renew can never push `expiry_timestamp_ms` past this — the
                   operator stops renewing and surfaces `TokenExpiring` once
                   further extension is impossible.
@@ -261,7 +261,7 @@ spec:
               external:
                 default: false
                 description: |-
-                  Slice 50: `true` once a credential-less user
+                  `true` once a credential-less user
                   (`type: tls-external`) has been reconciled. Surfaces in
                   `kubectl describe ku` so operators can tell at a glance that
                   the operator does not own this user's credentials.
@@ -280,7 +280,7 @@ spec:
                 type: boolean
               scramSha256:
                 default: false
-                description: 'Slice 36b: true once SCRAM-SHA-256 credentials are provisioned.'
+                description: True once SCRAM-SHA-256 credentials are provisioned.
                 type: boolean
               scramSha512:
                 default: false

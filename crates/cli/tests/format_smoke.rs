@@ -1,7 +1,7 @@
 //! Smoke tests: run the `crabka format` binary as a subprocess and
-//! assert on its exit code + on-disk output. The plan's intent is that
-//! these tests prove the clap surface + the bootstrap-write path
-//! survive end-to-end without booting a broker.
+//! assert on its exit code + on-disk output. These tests prove the clap
+//! surface + the bootstrap-write path survive end-to-end without booting
+//! a broker.
 
 use std::process::Command;
 

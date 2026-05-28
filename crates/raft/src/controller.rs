@@ -5,7 +5,7 @@
 //! Cluster formation is driven by `BootstrapMode`: one broker boots as
 //! the singleton voter (`Bootstrap`), remaining fresh brokers skip
 //! `initialize` (`Join`), and restarted brokers replay their on-disk log
-//! (`Rejoin`). Snapshot replay is deferred to a later slice.
+//! (`Rejoin`). Snapshot replay is not implemented.
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -84,8 +84,8 @@ pub struct ControllerHandle {
     /// Outbound dialer cloned from the factory at construction time.
     /// `forward_submit_to` uses it to reach the leader's controller
     /// listener with the same TLS / SASL handshake that openraft's
-    /// `AppendEntries` / `Vote` RPCs ride on top of (slice 12). For the
-    /// legacy PLAINTEXT path the broker doesn't inject a dialer, and
+    /// `AppendEntries` / `Vote` RPCs ride on top of. For the PLAINTEXT
+    /// path the broker doesn't inject a dialer, and
     /// `Controller::start` substitutes `PlaintextDialer` — equivalent
     /// to a bare `Connection::connect`.
     dialer: Arc<dyn OutboundDialer>,
@@ -205,7 +205,7 @@ impl ControllerHandle {
                     // derive `serde`, so we carry the rendered string
                     // through `AppDataResponse` and reconstruct here.
                     // The "topic '<name>' already exists" prefix is the
-                    // only signal we need for slice 7's
+                    // only signal we need for the
                     // `TopicExists`-vs-`InvalidRecord` discrimination.
                     if let Some(msg) = resp.data.rejected.into_iter().next() {
                         let err = if let Some(rest) = msg.strip_prefix("topic '")
@@ -225,7 +225,7 @@ impl ControllerHandle {
                     last_known_leader = f.leader_id;
                     // If openraft tells us who the leader is and it isn't
                     // us, forward the change directly to the leader's
-                    // controller listener via the slice-7
+                    // controller listener via the
                     // `API_KEY_SUBMIT_CHANGE` RPC. Otherwise (transient
                     // `leader_id: None` during election) fall through to
                     // the retry loop.
@@ -389,12 +389,12 @@ impl ControllerHandle {
     ///
     /// Routes through [`OutboundDialer::dial`] so the same TLS / SASL
     /// handshake openraft's `AppendEntries` / `Vote` RPCs ride on top
-    /// of (slice 12) applies here too. For the legacy PLAINTEXT path,
+    /// of applies here too. For the PLAINTEXT path,
     /// `Controller::start` substitutes `PlaintextDialer`, which is
     /// byte-equivalent to a bare `Connection::connect`.
     ///
-    /// A fresh connection per call mirrors the pre-slice-12b raw
-    /// `TcpStream::connect` behaviour — `submit_change` forwarding is
+    /// A fresh connection per call mirrors a raw
+    /// `TcpStream::connect` — `submit_change` forwarding is
     /// rare (only on follower-side writes) and reusing the openraft
     /// network factory's cache from here would complicate ownership for
     /// negligible gain.
@@ -447,8 +447,8 @@ impl ControllerHandle {
         let resp = crate::wire::CrabkaSubmitChangeResponse::decode_v0(&mut cur)?;
         match resp.error_code {
             0 => Ok(()),
-            // `error_code = 2` => leader rejected at apply-time. Slice 7
-            // collapses the typed `MetadataError` into a generic
+            // `error_code = 2` => leader rejected at apply-time. We
+            // collapse the typed `MetadataError` into a generic
             // `TopicExists` here since the wire only carries an error
             // code; the topic name is what the caller had in hand.
             2 => Err(RaftError::Metadata(
@@ -626,10 +626,9 @@ impl Controller {
         // 3. Network factory. Resolves each peer addr from the KIP-853
         //    voter `Node` surfaced by openraft membership (the CONTROLLER
         //    endpoint via `Node::controller_addr`).
-        // Use the injected dialer if the broker provided one (slice-12
-        // inter-broker TLS / SASL), otherwise fall back to plain
-        // `TcpStream::connect`. This keeps every existing PLAINTEXT-only
-        // test path identical to slice 11.
+        // Use the injected dialer if the broker provided one
+        // (inter-broker TLS / SASL), otherwise fall back to plain
+        // `TcpStream::connect` for the PLAINTEXT path.
         let dialer: Arc<dyn OutboundDialer> = config
             .dialer
             .clone()

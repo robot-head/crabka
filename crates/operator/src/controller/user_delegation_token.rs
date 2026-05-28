@@ -1,4 +1,4 @@
-//! Slice 51b: reconcile arm for
+//! Reconcile arm for
 //! `KafkaUser.spec.authentication.type: delegation-token`.
 //!
 //! Talks to the cluster's admin API (the operator is a super-user and
@@ -580,7 +580,7 @@ pub(crate) async fn expire_owned_tokens(
 /// Production `DelegationTokenAdmin` impl over the operator's
 /// `AdminClientHandle` (an `Arc<Mutex<dyn AdminClientLike + Send>>`).
 /// Each method locks the inner mutex and delegates to the four
-/// `AdminClientLike` methods added in this slice.
+/// `AdminClientLike` delegation-token methods.
 ///
 /// The trait surface uses `&self`, so the mutex is taken per call —
 /// matching the SCRAM/ACL/quota arms in `user.rs` which also lock the

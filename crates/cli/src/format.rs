@@ -4,32 +4,18 @@
 //! - a randomly-generated (or operator-supplied) cluster id
 //! - any seed SCRAM credentials supplied via `--add-scram`
 //!
-//! ## Bootstrap-path deferral
+//! ## Bootstrap output format
 //!
-//! The slice-12 plan envisaged this command writing a real raft-log
-//! snapshot that the broker would pick up on first boot
-//! (`crabka_raft::bootstrap_log_dir`). Factoring that out of the existing
-//! `Controller::start` + `RaftLogStore::open` flow cleanly is out of
-//! scope for slice 12 — the bootstrap state is currently tangled with
-//! the live openraft engine's `initialize` call. The plan explicitly
-//! sanctions a placeholder file as an acceptable fallback (see plan
-//! batch 7, task 18, "Bootstrapping options"):
-//!
-//! > write a placeholder file (e.g. `bootstrap.json`) listing the
-//! > records the broker should pre-load.
-//!
-//! That is what this implementation does. The output is:
+//! Rather than writing a real raft-log snapshot directly (the bootstrap
+//! state is currently tangled with the live openraft engine's
+//! `initialize` call), this command writes a placeholder manifest listing
+//! the records the broker should pre-load. The output is:
 //!
 //! - `<log_dir>/bootstrap.json` — a human-readable manifest with the
 //!   cluster id and a base64'd `serde_wincode` blob per metadata record.
 //! - `<log_dir>/bootstrap.records.bin` — the same records concatenated
 //!   as length-prefixed `serde_wincode<SerdeCompat<MetadataRecord>>`
 //!   payloads, so the broker can stream them without touching JSON.
-//!
-//! A future slice will add a `crabka-raft` API that consumes this file
-//! and seeds the raft log on `BootstrapMode::Bootstrap`; until then the
-//! CLI gets us the operational shape (clap surface + serialized seed
-//! credentials) so JVM acceptance tests can flow.
 
 use std::path::PathBuf;
 
@@ -46,7 +32,7 @@ use serde_wincode::SerdeCompat;
 use uuid::Uuid;
 use wincode::Serialize as _;
 
-/// Exit codes (mirror the plan):
+/// Exit codes:
 /// - 0: success
 /// - 2: iterations < 4096
 /// - 3: `log_dir` non-empty
@@ -57,7 +43,7 @@ const EXIT_DIRTY_LOG_DIR: i32 = 3;
 const EXIT_BOOTSTRAP_FAIL: i32 = 4;
 
 /// SCRAM iteration floor — matches Kafka's recommended minimum and the
-/// `AlterUserScramCredentials` handler's pre-check from task 15.
+/// `AlterUserScramCredentials` handler's pre-check.
 const MIN_SCRAM_ITERATIONS: u32 = 4096;
 
 #[derive(Args, Debug)]

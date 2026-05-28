@@ -98,10 +98,10 @@ fn supported_apis() -> Vec<ApiVersion> {
         v!(leave_group_request),
         v!(sasl_handshake_request),
         v!(sasl_authenticate_request),
-        // OffsetCommit and OffsetFetch: MVP only handles the legacy
+        // OffsetCommit and OffsetFetch only handle the legacy
         // single-group / name-keyed shape. v8+ (OffsetFetch) and v10+
         // (OffsetCommit) switch to topic_id / per-group arrays which
-        // require a topic-id index this slice doesn't wire up. Cap the
+        // require a topic-id index that is not wired up. Cap the
         // advertised max so clients negotiate down to a version we can
         // serve cleanly.
         ApiVersion {
@@ -157,7 +157,7 @@ fn supported_apis() -> Vec<ApiVersion> {
         v!(describe_client_quotas_request),
         v!(alter_client_quotas_request),
         v!(describe_user_scram_credentials_request),
-        // Slice 51 (KIP-48): delegation-token RPCs. Conditional on the
+        // KIP-48: delegation-token RPCs. Conditional on the
         // broker having a master key configured is tempting, but Kafka
         // always advertises these — clients discover support at this
         // level then get DELEGATION_TOKEN_AUTH_DISABLED (61) on the

@@ -1,11 +1,11 @@
-//! Slice 51 (KIP-48): `ExpireDelegationToken` (`api_key` 40).
+//! KIP-48: `ExpireDelegationToken` (`api_key` 40).
 //!
 //! Per spec §1.4: caller must be SASL-authenticated; the request's
 //! `hmac` selects an existing token; only the owner, a `renewers`
 //! entry, or a configured super-user may expire it (else
 //! `DELEGATION_TOKEN_AUTHORIZATION_FAILED`). The super-user bypass
 //! matches Kafka's `DelegationTokenManager.isAuthorizedToOperateOnToken`
-//! (via `SecurityUtils.isAuthorized`) and is what slice 51b's operator
+//! (via `SecurityUtils.isAuthorized`) and is what the operator
 //! relies on for cleaning up tokens it minted via act-as on behalf of
 //! `KafkaUser` principals.
 //!
@@ -357,10 +357,10 @@ mod tests {
         controller.cancel().await;
     }
 
-    /// Slice 51c regression: a super-user caller may expire a token they
+    /// A super-user caller may expire a token they
     /// neither own nor are listed as a renewer on. Mirrors Kafka's
     /// `DelegationTokenManager.isAuthorizedToOperateOnToken` and is the
-    /// load-bearing gate for the operator's finalizer (slice 51b) — on
+    /// load-bearing gate for the operator's finalizer — on
     /// `KafkaUser` delete, the operator tombstones the act-as-minted
     /// token by calling `ExpireDelegationToken` with period = -1.
     #[tokio::test]
@@ -408,7 +408,7 @@ mod tests {
         controller.cancel().await;
     }
 
-    /// Slice 51c regression: a non-super-user caller who is also not the
+    /// A non-super-user caller who is also not the
     /// owner and not a listed renewer must still be rejected with
     /// `DELEGATION_TOKEN_AUTHORIZATION_FAILED`. Guards against
     /// accidentally widening the bypass beyond `super_users`.

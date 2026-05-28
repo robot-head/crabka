@@ -1,4 +1,4 @@
-//! Slice 43a end-to-end: spin up a single-broker Crabka in-process,
+//! End-to-end: spin up a single-broker Crabka in-process,
 //! snapshot it, drive the Connect-RPC handlers directly, and assert
 //! the propose/get/list paths plus the `Unavailable` / `Unimplemented`
 //! / `NotFound` / `InvalidArgument` error codes.
@@ -1012,7 +1012,7 @@ async fn disk_usage_evicts_hot_broker() {
     );
 }
 
-// ===== Slice 43g T12: anomaly detector integration tests =====
+// ===== Anomaly detector integration tests =====
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn get_anomalies_returns_empty_when_detector_quiet() {

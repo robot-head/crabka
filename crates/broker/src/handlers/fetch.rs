@@ -56,7 +56,7 @@ struct PendingRead {
     partition: Option<Arc<Partition>>,
     /// Per-partition output, mutated in place by `do_read`.
     out: PartitionData,
-    /// Slice 43f: accumulator for handler-thread on-CPU microseconds spent
+    /// Accumulator for handler-thread on-CPU microseconds spent
     /// polling this partition's `do_read` futures (first pass plus any
     /// long-poll re-reads). Measured via `tokio_metrics::TaskMonitor` so we
     /// charge only actual poll time, not wall-clock awaiting the writer or
@@ -146,15 +146,15 @@ pub(crate) async fn handle(
             .collect(),
     };
 
-    // ── slice-13 ACL preamble ────────────────────────────────────────
+    // ── ACL preamble ────────────────────────────────────────
     // Batch-authorize every topic in the request for `Read` (the
     // operation Fetch requires). Topics that come back `Deny` will
     // short-circuit the per-partition log read below and emit
     // TOPIC_AUTHORIZATION_FAILED on every partition row of that topic
     // with empty records.
     //
-    // Fetch v ≥ 13 sends only topic_id on the wire; the slice-13 plan
-    // keys ACLs by topic *name*, so we resolve the names here too for
+    // Fetch v ≥ 13 sends only topic_id on the wire; ACLs are keyed
+    // by topic *name*, so we resolve the names here too for
     // the authorize call (and re-resolve inline below for log lookup).
     let image = controller.current_image();
     let topic_names_for_acl: Vec<String> = effective_topics
@@ -218,7 +218,7 @@ pub(crate) async fn handle(
             topic.topic_id
         };
 
-        // slice-13: if the topic was denied by the ACL preamble,
+        // If the topic was denied by the ACL preamble,
         // every partition row gets TOPIC_AUTHORIZATION_FAILED and
         // the real log read is skipped. `records` stays `None`
         // (no batch returned). An empty topic_name (v ≥ 13 with
@@ -314,9 +314,8 @@ pub(crate) async fn handle(
                 continue;
             }
 
-            // Restore follower-fetch HW maintenance (slice-10a removed this
-            // because of stalls; slice-10b's ISR maintenance prevents stalls
-            // by shrinking lagging followers out of the ISR within 2s on CI).
+            // Follower-fetch HW maintenance. ISR maintenance prevents stalls
+            // by shrinking lagging followers out of the ISR within 2s on CI.
             if is_follower_fetch && let Some(part) = part_opt.as_ref() {
                 let leader_leo = part.log_end_offset();
                 let advanced = {
@@ -388,7 +387,7 @@ pub(crate) async fn handle(
             u64::try_from(monitor.cumulative().total_poll_duration.as_micros()).unwrap_or(u64::MAX);
         p.cpu_micros = p.cpu_micros.saturating_add(micros);
 
-        // Slice 48d (KIP-405): if the local read came back
+        // KIP-405: if the local read came back
         // OFFSET_OUT_OF_RANGE because the requested offset is below
         // `local_log_start_offset()` on a tiered topic, attempt to
         // serve the batch from the remote tier.
@@ -406,7 +405,7 @@ pub(crate) async fn handle(
         long_poll_then_reread(broker, &mut pending, req.max_wait_ms).await?;
     }
 
-    // Slice 43f: drain per-partition cpu_micros accumulators before
+    // Drain per-partition cpu_micros accumulators before
     // `group_into_topic_responses` consumes `pending`. Looked up in the
     // response-emit loop below alongside `record_partition_fetch`.
     let cpu_micros_map: std::collections::HashMap<(String, i32), u64> = pending
@@ -432,7 +431,7 @@ pub(crate) async fn handle(
                                 if converted.payload_len() > 0 {
                                     part.records = Some(converted);
                                 }
-                                // Slice 12g: account this Fetch-path
+                                // Account this Fetch-path
                                 // down-conversion. Counted even when the
                                 // converted batch was empty (drops + control
                                 // skips) — the work happened.
@@ -493,10 +492,10 @@ pub(crate) async fn handle(
     }
 
     // Consumer fetches (replica_id < 0) use client quotas; inter-broker
-    // fetches (replica_id >= 0) use KIP-73 throttle from slice 15b.
+    // fetches (replica_id >= 0) use the KIP-73 throttle.
     let mut throttle_time_ms_val: i32 = 0;
     if !is_follower_fetch {
-        // KIP-13 consumer_byte_rate. Mutually exclusive with slice-15b's
+        // KIP-13 consumer_byte_rate. Mutually exclusive with the
         // inter-broker leader throttle (which fires only when replica_id >= 0).
         let total_bytes = sum_response_bytes(&responses);
         let delay = consume_consumer_quota(
@@ -512,7 +511,7 @@ pub(crate) async fn handle(
         }
     }
 
-    // Slice 39: per-topic Prometheus accounting. Sum the encoded
+    // Per-topic Prometheus accounting. Sum the encoded
     // record-batch bytes the response is about to ship, per topic.
     // Topics that returned an error (empty `records`) still get a
     // request count (the fetch arrived), matching Kafka's
@@ -529,7 +528,7 @@ pub(crate) async fn handle(
                 p.partition_index,
                 partition_bytes,
             );
-            // Slice 12k: per-partition failure accounting. Each
+            // Per-partition failure accounting. Each
             // partition-response error row (OFFSET_OUT_OF_RANGE,
             // KAFKA_STORAGE_ERROR, FENCED_LEADER_EPOCH, etc.) bumps
             // the per-topic counter — mirrors JVM's
@@ -537,7 +536,7 @@ pub(crate) async fn handle(
             if p.error_code != 0 {
                 broker.metrics.record_failed_fetch(&topic_resp.topic);
             }
-            // Slice 48k: when this Fetch arrived from a follower
+            // When this Fetch arrived from a follower
             // (`replica_id >= 0`), the bytes leaving the leader are
             // replication outbound, not consumer outbound. We emit a
             // separate counter rather than splitting `partition_bytes_out`
@@ -552,7 +551,7 @@ pub(crate) async fn handle(
                     partition_bytes,
                 );
             }
-            // Slice 43f: drain the per-partition CPU accumulator. Tracks
+            // Drain the per-partition CPU accumulator. Tracks
             // actual poll duration across both the first read pass and any
             // long-poll re-reads, attributing only on-CPU time.
             if let Some(micros) = cpu_micros_map
@@ -963,7 +962,7 @@ async fn do_read(
     Ok(bytes_est)
 }
 
-/// Slice 48d (KIP-405): try to serve `p`'s requested offset from the remote
+/// KIP-405: try to serve `p`'s requested offset from the remote
 /// tier when the local log returned `OFFSET_OUT_OF_RANGE` and the topic has
 /// `remote.storage.enable=true`. On success, replaces the partition's error +
 /// records and returns the encoded batch size; on miss / error / non-tiered,
@@ -1055,7 +1054,7 @@ async fn long_poll_then_reread(
             partition_index: p.partition_index,
             ..Default::default()
         };
-        // Slice 43f: instrument the re-read so its poll time accumulates
+        // Instrument the re-read so its poll time accumulates
         // into the same per-partition CPU counter as the first pass.
         let monitor = tokio_metrics::TaskMonitor::new();
         monitor
@@ -1072,7 +1071,7 @@ async fn long_poll_then_reread(
             u64::try_from(monitor.cumulative().total_poll_duration.as_micros()).unwrap_or(u64::MAX);
         p.cpu_micros = p.cpu_micros.saturating_add(micros);
 
-        // Slice 48d: re-attempt the remote-tier read on the re-read pass
+        // Re-attempt the remote-tier read on the re-read pass
         // so a long-poll that fires on a non-tiered partition doesn't
         // clobber the remote batch we'd already served on this one.
         if p.out.error_code == codes::OFFSET_OUT_OF_RANGE {

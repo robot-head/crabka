@@ -1,5 +1,4 @@
-//! In-memory `RebalancerClientLike` for `KafkaRebalance` reconcile tests
-//! (slice 44).
+//! In-memory `RebalancerClientLike` for `KafkaRebalance` reconcile tests.
 //!
 //! Records every Connect-RPC the reconcile issues and serves a scripted
 //! response per method, so the controller's state machine can be exercised
