@@ -193,6 +193,45 @@ impl NextGenCoordinator {
         cached.current_per_member.insert(member_id.into(), v);
     }
 
+    /// Apply a tombstone for a next-gen key. Removes the corresponding
+    /// entry from both `seeds` and `seeds_cache`. Used by bootstrap replay
+    /// to honor records with `value = None`.
+    pub fn replay_next_gen_tombstone(&self, key: &persistence::NextGenKey) {
+        use persistence::NextGenKey as K;
+        let group_id = match key {
+            K::GroupMetadata { group_id }
+            | K::MemberMetadata { group_id, .. }
+            | K::TargetAssignmentMetadata { group_id }
+            | K::TargetAssignmentMember { group_id, .. }
+            | K::CurrentMemberAssignment { group_id, .. } => group_id.as_str(),
+        };
+        let scrub = |seed: &mut GroupSeed| match key {
+            K::GroupMetadata { .. } => {
+                seed.group_epoch = 0;
+            }
+            K::MemberMetadata { member_id, .. } => {
+                seed.members.remove(member_id);
+            }
+            K::TargetAssignmentMetadata { .. } => {
+                seed.target_epoch = 0;
+            }
+            K::TargetAssignmentMember { member_id, .. } => {
+                seed.target_per_member.remove(member_id);
+            }
+            K::CurrentMemberAssignment { member_id, .. } => {
+                seed.current_per_member.remove(member_id);
+            }
+        };
+        {
+            if let Some(mut s) = self.seeds.get_mut(group_id) {
+                scrub(s.value_mut());
+            }
+        }
+        if let Some(mut s) = self.seeds_cache.get_mut(group_id) {
+            scrub(s.value_mut());
+        }
+    }
+
     pub fn finalize_bootstrap(self: &Arc<Self>) {
         let group_ids: Vec<String> = self.seeds.iter().map(|e| e.key().clone()).collect();
         for gid in group_ids {

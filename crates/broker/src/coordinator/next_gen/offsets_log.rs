@@ -17,29 +17,35 @@ pub trait OffsetsLog: Send + Sync + std::fmt::Debug {
     async fn append(&self, batch: RecordBatch) -> Result<(), BrokerError>;
 }
 
+/// Resolves `__consumer_offsets-0` at every `append` call. The partition
+/// is registered by bootstrap *after* `NextGenCoordinator` is constructed,
+/// so a snapshot taken at construction time would be permanently empty.
 #[derive(Debug)]
 pub struct ProductionOffsetsLog {
-    partition: Arc<Partition>,
+    partitions: Arc<DashMap<(String, i32), Arc<Partition>>>,
 }
 
 impl ProductionOffsetsLog {
-    pub fn from_partitions(
-        partitions: &Arc<DashMap<(String, i32), Arc<Partition>>>,
-    ) -> Option<Self> {
-        partitions
-            .get(&(OFFSETS_TOPIC.to_string(), OFFSETS_PARTITION))
-            .map(|e| Self {
-                partition: e.value().clone(),
-            })
+    pub fn new(partitions: Arc<DashMap<(String, i32), Arc<Partition>>>) -> Self {
+        Self { partitions }
     }
 }
 
 #[async_trait]
 impl OffsetsLog for ProductionOffsetsLog {
     async fn append(&self, batch: RecordBatch) -> Result<(), BrokerError> {
+        let Some(partition) = self
+            .partitions
+            .get(&(OFFSETS_TOPIC.to_string(), OFFSETS_PARTITION))
+            .map(|e| e.value().clone())
+        else {
+            return Err(BrokerError::PartitionWriterDied {
+                topic: OFFSETS_TOPIC.into(),
+                partition: OFFSETS_PARTITION,
+            });
+        };
         let (ack_tx, ack_rx) = oneshot::channel();
-        if self
-            .partition
+        if partition
             .writer_tx
             .send(WriterMessage::Produce(ProduceJob { batch, ack: ack_tx }))
             .await
