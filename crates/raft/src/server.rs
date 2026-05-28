@@ -410,28 +410,23 @@ async fn dispatch_metadata_fetch(
 ) -> Result<Bytes, RaftError> {
     let mut cur = body;
     let req = CrabkaMetadataFetchRequest::decode_v0(&mut cur)?;
-    let metrics = raft.metrics().borrow().clone();
-    let high_watermark = metrics.last_applied.as_ref().map_or(0, |l| l.index);
-    let leader_hint = metrics
+    let leader_hint = raft
+        .metrics()
+        .borrow()
         .current_leader
         .map_or(-1, |l| i64::try_from(l).unwrap_or(-1));
-    let log_start_offset = log_store.log_start_index().await;
 
     let fetch_offset = u64::try_from(req.fetch_offset.max(0)).unwrap_or(0);
     let max_bytes = usize::try_from(req.max_bytes.max(0)).unwrap_or(0);
-    let entries = if fetch_offset > high_watermark {
-        Vec::new()
-    } else {
-        log_store.read_range(fetch_offset..=high_watermark).await
-    };
-    let records = crate::metadata_fetch::encode_committed_records(&entries, max_bytes);
+    let slice =
+        crate::metadata_fetch::read_committed_slice(raft, log_store, fetch_offset, max_bytes).await;
 
     let resp = CrabkaMetadataFetchResponse {
         error_code: 0,
         leader_hint,
-        log_start_offset: i64::try_from(log_start_offset).unwrap_or(i64::MAX),
-        high_watermark: i64::try_from(high_watermark).unwrap_or(i64::MAX),
-        records,
+        log_start_offset: i64::try_from(slice.log_start_offset).unwrap_or(i64::MAX),
+        high_watermark: i64::try_from(slice.high_watermark).unwrap_or(i64::MAX),
+        records: slice.records,
     };
     let mut out = Vec::new();
     resp.encode_v0(&mut out)?;

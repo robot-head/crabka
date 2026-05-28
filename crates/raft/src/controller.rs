@@ -166,27 +166,13 @@ impl ControllerHandle {
         fetch_offset: u64,
         max_bytes: usize,
     ) -> crate::metadata_fetch::MetadataFetchSlice {
-        let high_watermark = self
-            .raft
-            .metrics()
-            .borrow()
-            .last_applied
-            .as_ref()
-            .map_or(0, |l| l.index);
-        let log_start_offset = self.log_store.log_start_index().await;
-        let entries = if fetch_offset > high_watermark {
-            Vec::new()
-        } else {
-            self.log_store
-                .read_range(fetch_offset..=high_watermark)
-                .await
-        };
-        let records = crate::metadata_fetch::encode_committed_records(&entries, max_bytes);
-        crate::metadata_fetch::MetadataFetchSlice {
-            records,
-            log_start_offset,
-            high_watermark,
-        }
+        crate::metadata_fetch::read_committed_slice(
+            &self.raft,
+            &self.log_store,
+            fetch_offset,
+            max_bytes,
+        )
+        .await
     }
 
     /// Submit a batch of metadata records.

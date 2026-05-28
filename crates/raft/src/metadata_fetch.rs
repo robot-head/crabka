@@ -7,13 +7,16 @@
 //! `crabka_metadata` bridge); `Blank`/`Membership` entries become empty
 //! batches so the observer's fetch offset still advances past them.
 
+use std::sync::Arc;
+
 use bytes::{BufMut, Bytes, BytesMut};
 use openraft::{Entry, EntryPayload};
 
 use crabka_metadata::to_kafka_record;
 use crabka_protocol::records::RecordBatch;
 
-use crate::types::TypeConfig;
+use crate::log_store::RaftLogStore;
+use crate::types::{Raft, TypeConfig};
 
 /// A committed-range read result handed back by the controller's
 /// metadata-fetch path. `records` is a concatenation of `RecordBatch`es
@@ -24,6 +27,36 @@ pub struct MetadataFetchSlice {
     pub records: Bytes,
     pub log_start_offset: u64,
     pub high_watermark: u64,
+}
+
+/// Read the committed `__cluster_metadata` range starting at
+/// `fetch_offset` (an openraft log index) and encode it as Kafka record
+/// batches for an observer. The high watermark is the last applied/committed
+/// index; entries beyond it are never served. `max_bytes` caps the encoded
+/// payload (at least one batch is always emitted so the observer progresses).
+pub async fn read_committed_slice(
+    raft: &Raft,
+    log_store: &Arc<RaftLogStore>,
+    fetch_offset: u64,
+    max_bytes: usize,
+) -> MetadataFetchSlice {
+    let high_watermark = raft
+        .metrics()
+        .borrow()
+        .last_applied
+        .as_ref()
+        .map_or(0, |l| l.index);
+    let log_start_offset = log_store.log_start_index().await;
+    let entries = if fetch_offset > high_watermark {
+        Vec::new()
+    } else {
+        log_store.read_range(fetch_offset..=high_watermark).await
+    };
+    MetadataFetchSlice {
+        records: encode_committed_records(&entries, max_bytes),
+        log_start_offset,
+        high_watermark,
+    }
 }
 
 /// Encode committed log entries as concatenated Kafka record batches,
