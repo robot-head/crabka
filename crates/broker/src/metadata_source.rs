@@ -11,7 +11,7 @@ use std::sync::Arc;
 use tokio::sync::watch;
 
 use crabka_metadata::{MetadataImage, MetadataRecord};
-use crabka_raft::{ControllerHandle, NodeId, QuorumState, RaftError};
+use crabka_raft::{ControllerHandle, NodeId, OutboundDialer, QuorumState, RaftError};
 
 use crate::metadata_observer::MetadataObserver;
 
@@ -114,17 +114,15 @@ impl MetadataSource for ObserverSource {
     }
 }
 
-use crabka_raft::OutboundDialer;
-
 /// Forwards metadata writes from a broker-only node to the controller
 /// quorum. Tries the leader hint first (from the observer), then walks the
 /// voter list. Mirrors the `API_KEY_SUBMIT_CHANGE` request the controller
 /// already serves.
 pub struct QuorumForwarder {
-    pub voters: Vec<(NodeId, SocketAddr)>,
-    pub dialer: Arc<dyn OutboundDialer>,
-    pub client_id: String,
-    pub leader: watch::Receiver<Option<NodeId>>,
+    pub(crate) voters: Vec<(NodeId, SocketAddr)>,
+    pub(crate) dialer: Arc<dyn OutboundDialer>,
+    pub(crate) client_id: String,
+    pub(crate) leader: watch::Receiver<Option<NodeId>>,
 }
 
 impl QuorumForwarder {
@@ -168,6 +166,7 @@ impl MetadataWriter for QuorumForwarder {
         let req = crabka_raft::CrabkaSubmitChangeRequest {
             records: bytes::Bytes::from(payload),
         };
+        // + 4 for the length-prefix encode_v0 writes ahead of the records.
         let mut body = Vec::with_capacity(req.records.len() + 4);
         req.encode_v0(&mut body).map_err(RaftError::Protocol)?;
 
@@ -190,9 +189,14 @@ impl MetadataWriter for QuorumForwarder {
         for (target, addr) in order {
             match self.try_submit(target, addr, &body).await {
                 Ok(resp) if resp.error_code == 0 => return Ok(()),
+                // error_code 2 => leader rejected at apply-time. Match the
+                // controller's own forward path (`forward_submit_to`), which
+                // collapses the typed `MetadataError` into `TopicExists` since
+                // the wire carries only an error code and the forwarded write
+                // of record is CreateTopics (-> Kafka TOPIC_ALREADY_EXISTS).
                 Ok(resp) if resp.error_code == 2 => {
                     return Err(RaftError::Metadata(
-                        crabka_metadata::MetadataError::InvalidRecord("validation failed"),
+                        crabka_metadata::MetadataError::TopicExists(String::new()),
                     ));
                 }
                 Ok(resp) => {
