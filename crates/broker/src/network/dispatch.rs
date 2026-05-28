@@ -3810,6 +3810,8 @@ fn handler_body_flexible(api_key: i16, version: i16) -> bool {
         74 => version >= owned::list_config_resources_request::FLEXIBLE_MIN,
         // DescribeTopicPartitions (75, KIP-966) is flexible from v0.
         75 => version >= owned::describe_topic_partitions_request::FLEXIBLE_MIN,
+        // GetReplicaLogInfo (93, KIP-966) is flexible from v0.
+        93 => version >= owned::get_replica_log_info_request::FLEXIBLE_MIN,
         _ => false,
     }
 }

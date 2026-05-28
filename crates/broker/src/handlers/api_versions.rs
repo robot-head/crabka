@@ -196,6 +196,10 @@ fn supported_apis() -> Vec<ApiVersion> {
         // KIP-848 next-gen consumer group protocol.
         v!(consumer_group_heartbeat_request),
         v!(consumer_group_describe_request),
+        // GetReplicaLogInfo (KIP-966) — inter-broker RPC the controller's
+        // unclean recovery manager uses to read each replica's LEO + leader
+        // epoch. Advertised so InterBrokerClient version negotiation succeeds.
+        v!(get_replica_log_info_request),
     ]
 }
 

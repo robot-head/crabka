@@ -89,6 +89,7 @@ pub(crate) mod expire_delegation_token;
 pub(crate) mod fetch;
 pub(crate) mod fetch_downconvert;
 pub(crate) mod find_coordinator;
+pub(crate) mod get_replica_log_info;
 // KIP-714 client telemetry. Pair of no-op handlers — `get` advertises
 // "no metrics subscribed" so well-behaved clients skip `push` entirely;
 // `push` is wired defensively in case a client races the subscription
@@ -226,6 +227,9 @@ pub(crate) fn build_table() -> HandlerTable {
     t.register(56, alter_partition::handle);
     // 60 (DescribeCluster) intercepted inline — see comment above.
     t.register(63, broker_heartbeat::handle);
+    // GetReplicaLogInfo (93, KIP-966) — inter-broker RPC the controller's
+    // unclean recovery manager uses to read each replica's LEO + leader epoch.
+    t.register(93, get_replica_log_info::handle);
     t.register(68, consumer_group_heartbeat::handle);
     t.register(69, consumer_group_describe::handle);
     // KIP-714 (client metrics push). Both handlers are no-ops: get returns
