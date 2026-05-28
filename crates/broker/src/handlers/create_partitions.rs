@@ -1,17 +1,21 @@
 //! `CreatePartitions` (`api_key=37`). `kafka-topics --alter --partitions
 //! N`. Round-robin replica placement matches the slice-7 `CreateTopics`
-//! path. Operator-supplied `assignments` are ignored in this slice
-//! (round-robin only); honoring them is deferred.
+//! path when the caller omits `assignments`; an explicit, validated
+//! `assignments` list (one entry per *new* partition) overrides round-robin
+//! and gets used verbatim — matching the JVM `kafka-topics
+//! --alter --partitions N --replica-assignment 0:1,1:2,...` flow.
 
 use bytes::{Bytes, BytesMut};
 
 use crabka_metadata::{AclOperation, MetadataRecord, PartitionRecord, TopicRecord};
-use crabka_protocol::owned::create_partitions_request::CreatePartitionsRequest;
+use crabka_protocol::owned::create_partitions_request::{
+    CreatePartitionsAssignment, CreatePartitionsRequest,
+};
 use crabka_protocol::owned::create_partitions_response::{
     CreatePartitionsResponse, CreatePartitionsTopicResult,
 };
 use crabka_protocol::{Decode, Encode};
-use crabka_raft::RaftError;
+use crabka_raft::{NodeId, RaftError};
 
 use crate::authorizer::{AuthorizationResult, authorize_topics};
 use crate::broker::Broker;
@@ -19,6 +23,96 @@ use crate::codes;
 use crate::error::BrokerError;
 use crate::handlers::create_topics::round_robin_replicas;
 use crate::replicator_supervisor::materialize_partition;
+
+/// Resolve the replica list for each newly-added partition.
+///
+/// `provided` is the caller's `assignments` field (`None` ≙ round-robin,
+/// `Some(...)` ≙ honor verbatim after validating against `known_brokers` and
+/// `rf`). `existing` is the current partition count; `new_partition_count`
+/// is `new_count - existing` (always > 0 by the time this helper runs; the
+/// `INVALID_PARTITIONS` check fires earlier). On the round-robin path the
+/// helper computes the full `0..new_count` assignment and returns only the
+/// tail so the new partitions keep rotating from where the existing ones
+/// left off — matching JVM behavior on `kafka-topics --alter --partitions`.
+///
+/// Returns one replica list per new partition (in `existing..new_count`
+/// order), or an `(error_code, error_message)` pair the caller stamps into
+/// the per-topic result.
+fn resolve_new_partition_assignments(
+    provided: Option<&Vec<CreatePartitionsAssignment>>,
+    known_brokers: &[NodeId],
+    existing: i32,
+    new_partition_count: usize,
+    rf: i16,
+) -> Result<Vec<Vec<NodeId>>, (i16, String)> {
+    let rf_usize = usize::try_from(rf).unwrap_or(0);
+    if let Some(provided) = provided {
+        // Length must match new-partition count. Empty `Some(vec![])` with
+        // any new partitions fails here too — matches JVM.
+        if provided.len() != new_partition_count {
+            return Err((
+                codes::INVALID_REPLICA_ASSIGNMENT,
+                format!(
+                    "assignments.len()={} does not match new partition count={new_partition_count}",
+                    provided.len()
+                ),
+            ));
+        }
+        let mut out: Vec<Vec<NodeId>> = Vec::with_capacity(new_partition_count);
+        for (i, a) in provided.iter().enumerate() {
+            if a.broker_ids.len() != rf_usize {
+                return Err((
+                    codes::INVALID_REPLICA_ASSIGNMENT,
+                    format!(
+                        "assignment[{i}].broker_ids.len()={} does not match replication_factor={rf}",
+                        a.broker_ids.len()
+                    ),
+                ));
+            }
+            let mut seen: std::collections::HashSet<i32> = std::collections::HashSet::new();
+            let mut replicas: Vec<NodeId> = Vec::with_capacity(rf_usize);
+            for b in &a.broker_ids {
+                if !seen.insert(*b) {
+                    return Err((
+                        codes::INVALID_REPLICA_ASSIGNMENT,
+                        format!("assignment[{i}] contains duplicate broker id {b}"),
+                    ));
+                }
+                let Ok(b_u64) = u64::try_from(*b) else {
+                    return Err((
+                        codes::INVALID_REPLICA_ASSIGNMENT,
+                        format!("assignment[{i}] references negative broker id {b}"),
+                    ));
+                };
+                if !known_brokers.contains(&b_u64) {
+                    return Err((
+                        codes::INVALID_REPLICA_ASSIGNMENT,
+                        format!("assignment[{i}] references unknown broker id {b}"),
+                    ));
+                }
+                replicas.push(b_u64);
+            }
+            out.push(replicas);
+        }
+        Ok(out)
+    } else {
+        let total = existing
+            .checked_add(i32::try_from(new_partition_count).unwrap_or(i32::MAX))
+            .unwrap_or(i32::MAX);
+        let all = round_robin_replicas(known_brokers, total, rf);
+        if all.is_empty() {
+            return Err((
+                codes::INVALID_REPLICATION_FACTOR,
+                format!(
+                    "replication_factor={rf} > broker_count={}",
+                    known_brokers.len()
+                ),
+            ));
+        }
+        let start = usize::try_from(existing).unwrap_or(0);
+        Ok(all.into_iter().skip(start).collect())
+    }
+}
 
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn handle(
@@ -122,16 +216,22 @@ pub(crate) async fn handle(
         let rf = topic_rec.replication_factor;
         let new_count = t.count;
         let new_partition_indices: Vec<i32> = (existing..new_count).collect();
-        let assignments = round_robin_replicas(&sorted_brokers, new_count, rf);
-        if assignments.is_empty() {
-            out.error_code = codes::INVALID_REPLICATION_FACTOR;
-            out.error_message = Some(format!(
-                "replication_factor={rf} > broker_count={}",
-                sorted_brokers.len()
-            ));
-            results.push(out);
-            continue;
-        }
+        let new_partition_count = new_partition_indices.len();
+        let new_assignments = match resolve_new_partition_assignments(
+            t.assignments.as_ref(),
+            &sorted_brokers,
+            existing,
+            new_partition_count,
+            rf,
+        ) {
+            Ok(a) => a,
+            Err((code, msg)) => {
+                out.error_code = code;
+                out.error_message = Some(msg);
+                results.push(out);
+                continue;
+            }
+        };
 
         if req.validate_only {
             results.push(out);
@@ -140,16 +240,15 @@ pub(crate) async fn handle(
 
         // Build batch: one updated V1Topic (new partition count) +
         // one V1Partition per new index.
-        let mut records: Vec<MetadataRecord> = Vec::with_capacity(new_partition_indices.len() + 1);
+        let mut records: Vec<MetadataRecord> = Vec::with_capacity(new_partition_count + 1);
         records.push(MetadataRecord::V1Topic(TopicRecord {
             name: t.name.clone(),
             topic_id: topic_rec.topic_id,
             partitions: new_count,
             replication_factor: rf,
         }));
-        for p in &new_partition_indices {
-            let p_usize = usize::try_from(*p).unwrap_or(0);
-            let replicas = assignments[p_usize].clone();
+        for (i, p) in new_partition_indices.iter().enumerate() {
+            let replicas = new_assignments[i].clone();
             records.push(MetadataRecord::V1Partition(PartitionRecord {
                 topic: t.name.clone(),
                 partition: *p,
@@ -165,9 +264,8 @@ pub(crate) async fn handle(
         match controller.submit_change(records).await {
             Ok(()) => {
                 // Materialize new partitions on local disk where self in replicas.
-                for p in &new_partition_indices {
-                    let p_usize = usize::try_from(*p).unwrap_or(0);
-                    let replicas = &assignments[p_usize];
+                for (i, p) in new_partition_indices.iter().enumerate() {
+                    let replicas = &new_assignments[i];
                     if !replicas.contains(&node_id) {
                         continue;
                     }
@@ -227,4 +325,121 @@ pub(crate) async fn handle(
     let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
     resp.encode(&mut buf, version)?;
     Ok(buf.freeze())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crabka_protocol::owned::create_partitions_request::CreatePartitionsAssignment;
+
+    fn assn(broker_ids: &[i32]) -> CreatePartitionsAssignment {
+        CreatePartitionsAssignment {
+            broker_ids: broker_ids.to_vec(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn round_robin_when_assignments_none() {
+        let brokers: Vec<NodeId> = vec![0, 1, 2];
+        let out = resolve_new_partition_assignments(None, &brokers, 0, 3, 2)
+            .expect("round-robin should succeed");
+        assert_eq!(out.len(), 3);
+        for r in &out {
+            assert_eq!(r.len(), 2, "each replica list must be rf=2");
+            for b in r {
+                assert!(brokers.contains(b));
+            }
+        }
+    }
+
+    #[test]
+    fn round_robin_continues_rotation_from_existing() {
+        let brokers: Vec<NodeId> = vec![0, 1, 2];
+        // Topic already has 2 partitions; adding 2 more (so partitions 2..4).
+        // Helper must return the *tail* of `round_robin_replicas(...,4,2)`,
+        // i.e. the assignments for indices 2 and 3 — not start from rotation 0.
+        let new_tail = resolve_new_partition_assignments(None, &brokers, 2, 2, 2)
+            .expect("round-robin tail should succeed");
+        let full = crate::handlers::create_topics::round_robin_replicas(&brokers, 4, 2);
+        assert_eq!(new_tail, full[2..]);
+    }
+
+    #[test]
+    fn round_robin_rf_exceeds_broker_count_returns_invalid_rf() {
+        let brokers: Vec<NodeId> = vec![0, 1];
+        let err = resolve_new_partition_assignments(None, &brokers, 0, 1, 3)
+            .expect_err("rf=3 against 2 brokers must fail");
+        assert_eq!(err.0, codes::INVALID_REPLICATION_FACTOR);
+    }
+
+    #[test]
+    fn honored_assignments_pass_through_verbatim() {
+        let brokers: Vec<NodeId> = vec![0, 1, 2, 3];
+        let provided = vec![assn(&[3, 1]), assn(&[2, 0]), assn(&[1, 3])];
+        let out = resolve_new_partition_assignments(Some(&provided), &brokers, 0, 3, 2)
+            .expect("explicit assignments should pass validation");
+        assert_eq!(out, vec![vec![3, 1], vec![2, 0], vec![1, 3]]);
+    }
+
+    #[test]
+    fn explicit_length_mismatch_returns_invalid_replica_assignment() {
+        let brokers: Vec<NodeId> = vec![0, 1, 2];
+        let provided = vec![assn(&[0, 1]), assn(&[1, 2])];
+        let err = resolve_new_partition_assignments(Some(&provided), &brokers, 0, 3, 2)
+            .expect_err("2 assignments for 3 new partitions must fail");
+        assert_eq!(err.0, codes::INVALID_REPLICA_ASSIGNMENT);
+        assert!(err.1.contains("assignments.len()=2"));
+        assert!(err.1.contains("new partition count=3"));
+    }
+
+    #[test]
+    fn explicit_wrong_rf_returns_invalid_replica_assignment() {
+        let brokers: Vec<NodeId> = vec![0, 1, 2];
+        let provided = vec![assn(&[0, 1, 2])]; // 3 replicas, but rf=2
+        let err = resolve_new_partition_assignments(Some(&provided), &brokers, 0, 1, 2)
+            .expect_err("rf mismatch must fail");
+        assert_eq!(err.0, codes::INVALID_REPLICA_ASSIGNMENT);
+        assert!(err.1.contains("does not match replication_factor=2"));
+    }
+
+    #[test]
+    fn explicit_duplicate_broker_in_assignment_returns_invalid_replica_assignment() {
+        let brokers: Vec<NodeId> = vec![0, 1, 2];
+        let provided = vec![assn(&[1, 1])]; // duplicate
+        let err = resolve_new_partition_assignments(Some(&provided), &brokers, 0, 1, 2)
+            .expect_err("duplicate broker must fail");
+        assert_eq!(err.0, codes::INVALID_REPLICA_ASSIGNMENT);
+        assert!(err.1.contains("duplicate broker id 1"));
+    }
+
+    #[test]
+    fn explicit_unknown_broker_returns_invalid_replica_assignment() {
+        let brokers: Vec<NodeId> = vec![0, 1, 2];
+        let provided = vec![assn(&[0, 9])]; // 9 unknown
+        let err = resolve_new_partition_assignments(Some(&provided), &brokers, 0, 1, 2)
+            .expect_err("unknown broker must fail");
+        assert_eq!(err.0, codes::INVALID_REPLICA_ASSIGNMENT);
+        assert!(err.1.contains("unknown broker id 9"));
+    }
+
+    #[test]
+    fn explicit_negative_broker_id_returns_invalid_replica_assignment() {
+        let brokers: Vec<NodeId> = vec![0, 1, 2];
+        let provided = vec![assn(&[0, -1])];
+        let err = resolve_new_partition_assignments(Some(&provided), &brokers, 0, 1, 2)
+            .expect_err("negative broker id must fail");
+        assert_eq!(err.0, codes::INVALID_REPLICA_ASSIGNMENT);
+        assert!(err.1.contains("negative broker id -1"));
+    }
+
+    #[test]
+    fn empty_assignments_some_with_new_partitions_fails() {
+        let brokers: Vec<NodeId> = vec![0, 1];
+        let provided: Vec<CreatePartitionsAssignment> = vec![];
+        let err = resolve_new_partition_assignments(Some(&provided), &brokers, 0, 2, 1)
+            .expect_err("Some(empty) for >0 new partitions must fail");
+        assert_eq!(err.0, codes::INVALID_REPLICA_ASSIGNMENT);
+        assert!(err.1.contains("assignments.len()=0"));
+    }
 }

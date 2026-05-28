@@ -222,6 +222,94 @@ async fn create_partitions_extends_topic() {
     }
 }
 
+/// CreatePartitions: explicit `assignments` list. The topic's rf is 1 on a
+/// single-broker cluster, and the operator pins the new partition to
+/// broker 0. The handler must accept it (error_code == 0) and materialise
+/// the partition. A second call with a wrong-length assignment list must
+/// return `INVALID_REPLICA_ASSIGNMENT` (39).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn create_partitions_honors_explicit_assignments() {
+    use crabka_protocol::owned::create_partitions_request::CreatePartitionsAssignment;
+
+    let cluster = start_n_node(1).await.expect("start_n_node");
+    let (broker, cfg, _dir) = &cluster[0];
+    let client = build_client(cfg.listen_addr).await;
+
+    create_topic_helper(&client, "t-cpa", 1).await;
+
+    // Happy path: 1 existing partition → 2 partitions, explicit assignment
+    // pins broker 0 (the only one available).
+    let req = CreatePartitionsRequest {
+        topics: vec![CreatePartitionsTopic {
+            name: "t-cpa".into(),
+            count: 2,
+            assignments: Some(vec![CreatePartitionsAssignment {
+                broker_ids: vec![1],
+                ..Default::default()
+            }]),
+            ..Default::default()
+        }],
+        timeout_ms: 5_000,
+        validate_only: false,
+        ..Default::default()
+    };
+    let resp = client
+        .send(req)
+        .await
+        .expect("create_partitions (explicit)");
+    assert_eq!(
+        resp.results[0].error_code, 0,
+        "explicit assignment must succeed: {:?}",
+        resp.results[0].error_message
+    );
+
+    // Wait for the new partition to materialise locally.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !broker.partition_exists_for_test("t-cpa", 1) {
+        if std::time::Instant::now() > deadline {
+            panic!("partition 1 did not materialize after 10 s");
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // Invalid path: ask for 1 more partition (total 3) but supply 2
+    // assignments. Must surface INVALID_REPLICA_ASSIGNMENT and NOT add a
+    // partition.
+    let bad = CreatePartitionsRequest {
+        topics: vec![CreatePartitionsTopic {
+            name: "t-cpa".into(),
+            count: 3,
+            assignments: Some(vec![
+                CreatePartitionsAssignment {
+                    broker_ids: vec![1],
+                    ..Default::default()
+                },
+                CreatePartitionsAssignment {
+                    broker_ids: vec![1],
+                    ..Default::default()
+                },
+            ]),
+            ..Default::default()
+        }],
+        timeout_ms: 5_000,
+        validate_only: false,
+        ..Default::default()
+    };
+    let bad_resp = client
+        .send(bad)
+        .await
+        .expect("create_partitions (length-mismatch)");
+    assert_eq!(
+        bad_resp.results[0].error_code, 39,
+        "length-mismatch must return INVALID_REPLICA_ASSIGNMENT (39): {:?}",
+        bad_resp.results[0].error_message,
+    );
+    assert!(
+        !broker.partition_exists_for_test("t-cpa", 2),
+        "partition 2 must NOT have been created on an INVALID_REPLICA_ASSIGNMENT path",
+    );
+}
+
 // ── DeleteRecords (api_key 21) ───────────────────────────────────────────────
 
 /// DeleteRecords: producing 100 records and then trimming from offset 50
