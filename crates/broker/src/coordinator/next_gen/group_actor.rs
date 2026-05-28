@@ -319,9 +319,16 @@ fn build_assignment_resp(
         .members
         .get(member_id)
         .expect("member exists at build_assignment_resp");
+    // KIP-848: the `assignment` field in the heartbeat response carries the
+    // server's TARGET assignment for this member — the full set of partitions
+    // the member should eventually own.  The client acknowledges receipt by
+    // echoing its current partition set back in subsequent heartbeats
+    // (`topic_partitions` on the request side).  Using the target here
+    // (rather than the client-acked subset) ensures new members learn their
+    // initial assignment on the very first heartbeat.
+    let target_partitions = state.target.per_member.get(member_id).cloned().unwrap_or_default();
     let assignment = Some(RespAssignment {
-        topic_partitions: m
-            .assigned_partitions
+        topic_partitions: target_partitions
             .iter()
             .map(|(tid, parts)| {
                 crabka_protocol::owned::common::topic_partitions::TopicPartitions {

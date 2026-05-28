@@ -58,6 +58,14 @@ pub(crate) async fn handle(
         }
     }
 
+    // Mark the group as Classic-protocol in the next-gen coordinator so that
+    // a subsequent ConsumerGroupHeartbeat for the same group_id is rejected
+    // with GROUP_ID_NOT_FOUND.  The `or_insert` ensures the first registration
+    // wins; a next-gen heartbeat that races a JoinGroup cannot overwrite it.
+    if let Some(ng) = broker.group_manager.next_gen() {
+        ng.mark_classic(&req.group_id);
+    }
+
     // 1. Empty member_id on first join → broker generates one (KIP-394).
     //    KIP-345: for static members, derive the bootstrap id from the
     //    instance id so debug logs are readable, and check the
