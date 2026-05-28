@@ -1,6 +1,6 @@
 //! Topic-config whitelist for `AlterConfigs` / `IncrementalAlterConfigs`.
 //!
-//! Ten keys are recognized. Five propagate live to `Log.config`
+//! Eleven keys are recognized. Five propagate live to `Log.config`
 //! (`retention.ms`, `retention.bytes`, `segment.bytes`, `cleanup.policy`,
 //! `compression.type`), plus the slice-48c tiered-storage local-retention
 //! pair (`local.retention.ms`, `local.retention.bytes`). One is accepted
@@ -8,7 +8,9 @@
 //! not yet enforced — see the design spec for the rationale). Two are
 //! KIP-73 throttle keys (`leader.replication.throttled.replicas`,
 //! `follower.replication.throttled.replicas`) validated via
-//! `ThrottledReplicas::parse`.
+//! `ThrottledReplicas::parse`. One is the KIP-841 unclean-recovery toggle
+//! (`unclean.leader.election.enable`) read by the controller's automatic
+//! failover path on ISR-empty.
 //!
 //! Unknown keys are rejected with `INVALID_CONFIG`.
 
@@ -27,6 +29,14 @@ pub(crate) const SEGMENT_BYTES: &str = "segment.bytes";
 pub(crate) const CLEANUP_POLICY: &str = "cleanup.policy";
 pub(crate) const COMPRESSION_TYPE: &str = "compression.type";
 pub(crate) const MIN_INSYNC_REPLICAS: &str = "min.insync.replicas";
+/// KIP-841: gates whether the controller may auto-elect an out-of-ISR
+/// replica as leader on ISR-empty failover. Default `false` matches
+/// Apache Kafka — partition stays unavailable until a former ISR member
+/// returns. `true` accepts possible data loss in exchange for
+/// availability. Consumed at runtime by
+/// `crate::leader_election::on_broker_dead` via
+/// [`MetadataImage::topic_config`].
+pub(crate) const UNCLEAN_LEADER_ELECTION_ENABLE: &str = "unclean.leader.election.enable";
 /// Slice 48b (KIP-405): per-topic tiered-storage opt-in.
 pub(crate) const REMOTE_STORAGE_ENABLE: &str = "remote.storage.enable";
 /// Slice 48c (KIP-405): per-topic local-retention time window for tiered partitions.
@@ -50,6 +60,12 @@ pub(crate) fn validate_topic_config(key: &str, value: &str) -> Result<(), String
         },
         COMPRESSION_TYPE => parse_compression_type(value).map(|_| ()),
         MIN_INSYNC_REPLICAS => parse_i64_at_least(1, value).map(|_| ()),
+        UNCLEAN_LEADER_ELECTION_ENABLE => match value {
+            "true" | "false" => Ok(()),
+            _ => Err(format!(
+                "unclean.leader.election.enable={value} not supported; expected `true` or `false`"
+            )),
+        },
         REMOTE_STORAGE_ENABLE => match value {
             "true" | "false" => Ok(()),
             _ => Err(format!(
@@ -118,6 +134,7 @@ pub(crate) fn is_recognized(key: &str) -> bool {
             | CLEANUP_POLICY
             | COMPRESSION_TYPE
             | MIN_INSYNC_REPLICAS
+            | UNCLEAN_LEADER_ELECTION_ENABLE
             | REMOTE_STORAGE_ENABLE
             | LOCAL_RETENTION_MS
             | LOCAL_RETENTION_BYTES
@@ -381,8 +398,24 @@ mod tests {
     #[test]
     fn is_recognized_returns_false_for_unknown_keys() {
         assert!(!is_recognized("flush.ms"));
-        assert!(!is_recognized("unclean.leader.election.enable"));
         assert!(!is_recognized(""));
+    }
+
+    #[test]
+    fn validate_unclean_leader_election_enable_accepts_bools() {
+        assert!(validate_topic_config(UNCLEAN_LEADER_ELECTION_ENABLE, "true").is_ok());
+        assert!(validate_topic_config(UNCLEAN_LEADER_ELECTION_ENABLE, "false").is_ok());
+    }
+
+    #[test]
+    fn validate_unclean_leader_election_enable_rejects_junk() {
+        let err = validate_topic_config(UNCLEAN_LEADER_ELECTION_ENABLE, "yes").unwrap_err();
+        assert!(err.contains("unclean.leader.election.enable"), "got: {err}");
+    }
+
+    #[test]
+    fn is_recognized_includes_unclean_leader_election_enable() {
+        assert!(is_recognized(UNCLEAN_LEADER_ELECTION_ENABLE));
     }
 
     #[test]
