@@ -1,4 +1,4 @@
-//! FetchSnapshot (api_key 59, KIP-630) end-to-end. Boots a single
+//! `FetchSnapshot` (`api_key` 59, KIP-630) end-to-end. Boots a single
 //! in-process broker, creates a topic so the metadata image is non-empty,
 //! triggers a controller snapshot, then fetches the `__cluster_metadata`
 //! snapshot byte range over the wire and asserts the page is served.
@@ -79,12 +79,11 @@ async fn fetch_snapshot_serves_metadata_snapshot() {
             );
             break;
         }
-        if Instant::now() > deadline {
-            panic!(
-                "snapshot not served within 30s; last partition error_code={}",
-                part.error_code
-            );
-        }
+        assert!(
+            Instant::now() <= deadline,
+            "snapshot not served within 30s; last partition error_code={}",
+            part.error_code
+        );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
