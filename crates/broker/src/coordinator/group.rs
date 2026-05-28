@@ -182,7 +182,7 @@ pub struct Group {
     pub committed_offsets: HashMap<(String, i32), OffsetEntry>,
     pub rebalance_deadline: Option<Instant>,
     /// Members whose `JoinGroup` has arrived since the last transition into
-    /// `PreparingRebalance`. The JoinGroup handler runs the rebalance early
+    /// `PreparingRebalance`. The `JoinGroup` handler runs the rebalance early
     /// — without waiting out `INITIAL_REBALANCE_DELAY` — once every member
     /// still in `members` shows up here, which avoids the leader running
     /// the assignor on a stale-metadata snapshot when a slow member misses

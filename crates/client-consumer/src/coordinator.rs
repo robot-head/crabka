@@ -67,7 +67,7 @@ enum HeartbeatOutcome {
     /// `error_code == 0`.
     Ok,
     /// `REBALANCE_IN_PROGRESS (27)` or `ILLEGAL_GENERATION (22)` — rejoin
-    /// with the current `member_id`. ILLEGAL_GENERATION fires when our
+    /// with the current `member_id`. `ILLEGAL_GENERATION` fires when our
     /// heartbeat tick lands after the broker has already advanced past
     /// the generation we last synced on (e.g. a rebalance completed
     /// while we were between heartbeat windows); without a rejoin we'd
