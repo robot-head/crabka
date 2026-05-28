@@ -26,6 +26,8 @@ use uuid::Uuid;
 
 use crabka_metadata::MetadataImage;
 
+use crate::error::RaftError;
+use crate::snapshot::{SnapshotId, SnapshotWriter};
 use crate::types::{AppData, AppDataResponse, Node, NodeId, TypeConfig};
 
 pub(crate) struct CrabkaStateMachine {
@@ -109,6 +111,14 @@ fn snapshot_unsupported(verb: &'static str) -> StorageError<NodeId> {
     StorageIOError::read_snapshot(None, AnyError::new(&io_err)).into()
 }
 
+/// Map a snapshot-build/persist `RaftError` into an openraft write-side
+/// snapshot `StorageError`. openraft treats this as fatal storage, which
+/// is correct: if we can't write a checkpoint to disk the node can't
+/// safely compact its log.
+fn io_storage_err(e: &RaftError) -> StorageError<NodeId> {
+    StorageIOError::write_snapshot(None, AnyError::new(e)).into()
+}
+
 impl RaftStateMachine<TypeConfig> for Arc<CrabkaStateMachine> {
     type SnapshotBuilder = Self;
 
@@ -172,15 +182,45 @@ impl RaftStateMachine<TypeConfig> for Arc<CrabkaStateMachine> {
     async fn get_current_snapshot(
         &mut self,
     ) -> Result<Option<Snapshot<TypeConfig>>, StorageError<NodeId>> {
-        // No snapshot exists yet; openraft treats `Ok(None)` as "no snapshot
-        // available" and falls back to append-entries replication.
-        Ok(None)
+        let loaded = crate::snapshot::load_latest(&self.snapshot_dir).map_err(|e| io_storage_err(&e))?;
+        Ok(loaded.map(|(_, bytes, meta)| Snapshot {
+            meta,
+            snapshot: Box::new(io::Cursor::new(bytes)),
+        }))
     }
 }
 
 impl RaftSnapshotBuilder<TypeConfig> for Arc<CrabkaStateMachine> {
     async fn build_snapshot(&mut self) -> Result<Snapshot<TypeConfig>, StorageError<NodeId>> {
-        Err(snapshot_unsupported("build_snapshot"))
+        let last_applied = *self.last_applied.lock().await;
+        let membership = self.last_membership.lock().await.clone();
+        let image = self.current_image();
+
+        let end_offset =
+            last_applied.map_or(0, |l| i64::try_from(l.index).unwrap_or(i64::MAX).saturating_add(1));
+        let epoch = last_applied.map_or(0, |l| i32::try_from(l.leader_id.term).unwrap_or(i32::MAX));
+        let id = SnapshotId { end_offset, epoch };
+
+        let now_ms = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis()),
+        )
+        .unwrap_or(i64::MAX);
+
+        let bytes = SnapshotWriter::serialize(&image, now_ms).map_err(|e| io_storage_err(&e))?;
+        let meta = SnapshotMeta {
+            last_log_id: last_applied,
+            last_membership: membership,
+            snapshot_id: format!("{end_offset}-{epoch}"),
+        };
+        crate::snapshot::persist(&self.snapshot_dir, id, &bytes, &meta)
+            .map_err(|e| io_storage_err(&e))?;
+
+        Ok(Snapshot {
+            meta,
+            snapshot: Box::new(io::Cursor::new(bytes.to_vec())),
+        })
     }
 }
 
@@ -213,5 +253,78 @@ mod tests {
         assert_eq!(resp.applied_index, 1);
         rx.changed().await.unwrap();
         assert!(rx.borrow().topic("t").is_some());
+    }
+
+    #[tokio::test]
+    async fn build_snapshot_writes_checkpoint_and_meta() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let sm = Arc::new(CrabkaStateMachine::new(
+            Uuid::nil(),
+            dir.path().to_path_buf(),
+        ));
+        let log_id = LogId {
+            leader_id: openraft::LeaderId::new(1, 1),
+            index: 5,
+        };
+        sm.apply_entry(
+            log_id,
+            &AppData {
+                records: vec![MetadataRecord::V1Topic(TopicRecord {
+                    name: "t".into(),
+                    topic_id: Uuid::new_v4(),
+                    partitions: 1,
+                    replication_factor: 1,
+                })],
+            },
+        )
+        .await;
+
+        let snap = sm.clone().build_snapshot().await.unwrap();
+        assert_eq!(snap.meta.last_log_id, Some(log_id));
+
+        // end_offset = index + 1 = 6, epoch = leader term = 1.
+        let checkpoint = dir.path().join("00000000000000000006-0000000001.checkpoint");
+        assert!(checkpoint.exists(), "checkpoint file should exist");
+        let has_meta = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|e| {
+                e.file_name()
+                    .to_str()
+                    .is_some_and(|n| n.ends_with(".checkpoint.meta"))
+            });
+        assert!(has_meta, "a .checkpoint.meta sidecar should exist");
+    }
+
+    #[tokio::test]
+    async fn get_current_snapshot_loads_latest() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let sm = Arc::new(CrabkaStateMachine::new(
+            Uuid::nil(),
+            dir.path().to_path_buf(),
+        ));
+        assert!(sm.clone().get_current_snapshot().await.unwrap().is_none());
+
+        let log_id = LogId {
+            leader_id: openraft::LeaderId::new(1, 1),
+            index: 3,
+        };
+        sm.apply_entry(
+            log_id,
+            &AppData {
+                records: vec![MetadataRecord::V1Topic(TopicRecord {
+                    name: "t".into(),
+                    topic_id: Uuid::new_v4(),
+                    partitions: 1,
+                    replication_factor: 1,
+                })],
+            },
+        )
+        .await;
+        sm.clone().build_snapshot().await.unwrap();
+
+        let loaded = sm.clone().get_current_snapshot().await.unwrap();
+        let loaded = loaded.expect("snapshot should be present");
+        assert_eq!(loaded.meta.last_log_id, Some(log_id));
     }
 }

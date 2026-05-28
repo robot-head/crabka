@@ -8,7 +8,10 @@
 
 #![allow(dead_code)]
 
+use std::path::Path;
+
 use bytes::{BufMut, Bytes, BytesMut};
+use openraft::SnapshotMeta;
 use serde_wincode::SerdeCompat;
 use wincode::{Deserialize as _, Serialize as _};
 
@@ -17,6 +20,7 @@ use crabka_protocol::records::header::Attributes;
 use crabka_protocol::records::{Record, RecordBatch};
 
 use crate::error::RaftError;
+use crate::types::{Node, NodeId};
 
 /// Control-record key type codes (KIP-630). The key of a control record
 /// is `i16 version` + `i16 type`.
@@ -176,6 +180,71 @@ impl SnapshotReader {
         let end = start.saturating_add(max).min(bytes.len());
         &bytes[start..end]
     }
+}
+
+/// Write the `.checkpoint` artifact plus its `.meta` sidecar for `id`
+/// into `dir`. The checkpoint stays pure KIP-630 (record batches only);
+/// openraft's `SnapshotMeta` (`last_log_id` + `last_membership` + id) rides
+/// alongside in `<id>.checkpoint.meta` as bincode, mirroring the
+/// `vote.bin` sidecar pattern. Both files land via temp + rename so a
+/// crash mid-write never leaves a torn checkpoint visible to readers.
+pub(crate) fn persist(
+    dir: &Path,
+    id: SnapshotId,
+    bytes: &[u8],
+    meta: &SnapshotMeta<NodeId, Node>,
+) -> Result<(), RaftError> {
+    std::fs::create_dir_all(dir).map_err(crabka_log::LogError::Io)?;
+    let checkpoint = dir.join(id.file_name());
+    let meta_bytes = <SerdeCompat<SnapshotMeta<NodeId, Node>>>::serialize(meta)?;
+    write_atomic(&checkpoint, bytes)?;
+    write_atomic(&dir.join(format!("{}.meta", id.file_name())), &meta_bytes)?;
+    Ok(())
+}
+
+/// A loaded checkpoint: its id, the raw `.checkpoint` bytes, and the
+/// `SnapshotMeta` recovered from the sidecar.
+pub(crate) type LoadedSnapshot = (SnapshotId, Vec<u8>, SnapshotMeta<NodeId, Node>);
+
+/// Scan `dir` for `.checkpoint` artifacts, pick the highest
+/// `(end_offset, epoch)`, and load its bytes plus the `SnapshotMeta`
+/// sidecar. Returns `None` when the directory is absent or holds no
+/// checkpoint.
+pub(crate) fn load_latest(dir: &Path) -> Result<Option<LoadedSnapshot>, RaftError> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(RaftError::Storage(crabka_log::LogError::Io(e))),
+    };
+    let mut latest: Option<SnapshotId> = None;
+    for entry in entries {
+        let entry = entry.map_err(crabka_log::LogError::Io)?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Some(id) = SnapshotId::parse(name) else {
+            continue;
+        };
+        if latest.is_none_or(|cur| (id.end_offset, id.epoch) > (cur.end_offset, cur.epoch)) {
+            latest = Some(id);
+        }
+    }
+    let Some(id) = latest else { return Ok(None) };
+    let bytes = std::fs::read(dir.join(id.file_name())).map_err(crabka_log::LogError::Io)?;
+    let meta_bytes =
+        std::fs::read(dir.join(format!("{}.meta", id.file_name()))).map_err(crabka_log::LogError::Io)?;
+    let meta = <SerdeCompat<SnapshotMeta<NodeId, Node>>>::deserialize(&meta_bytes)?;
+    Ok(Some((id, bytes, meta)))
+}
+
+/// Write `bytes` to `path` durably-ish: stage into a sibling `.tmp`
+/// file, then rename over `path`. Rename is atomic on the same
+/// filesystem, so concurrent readers see either the old file or the
+/// fully-written new one — never a partial write.
+fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), RaftError> {
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, bytes).map_err(crabka_log::LogError::Io)?;
+    std::fs::rename(&tmp, path).map_err(crabka_log::LogError::Io)?;
+    Ok(())
 }
 
 #[cfg(test)]
