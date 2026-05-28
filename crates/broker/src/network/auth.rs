@@ -1313,7 +1313,6 @@ mod tests {
         use crabka_metadata::{DelegationTokenRecord, MetadataRecord};
         use crabka_security::scram::hash_scram_password_with_salt;
         use crabka_security::{KafkaPrincipal, ScramClientExchange};
-        use std::net::SocketAddr;
         use std::sync::Arc;
         use std::time::Duration;
         use tempfile::TempDir;
@@ -1321,19 +1320,11 @@ mod tests {
         async fn test_controller(
             log_dir: std::path::PathBuf,
         ) -> Arc<crabka_raft::ControllerHandle> {
-            let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
             let cfg = crabka_raft::ControllerConfig {
-                node_id: 1,
-                voters: vec![(1, addr)],
-                controller_listen_addr: addr,
-                log_dir,
                 election_timeout: Duration::from_millis(200),
                 heartbeat_interval: Duration::from_millis(50),
                 client_id: "test".into(),
-                bootstrap_mode: crabka_raft::BootstrapMode::Bootstrap,
-                cluster_id: None,
-                dialer: None,
-                handshake: None,
+                ..crabka_raft::ControllerConfig::for_tests(1, log_dir)
             };
             let handle = Arc::new(crabka_raft::Controller::start(cfg).await.unwrap());
             let mut rx = handle.watch_leader();

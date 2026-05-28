@@ -222,9 +222,22 @@ impl BrokerHandle {
         node_id: crabka_raft::NodeId,
         addr: std::net::SocketAddr,
     ) -> Result<(), BrokerError> {
+        // KIP-853: openraft membership now keys on the full `Node` identity.
+        // This `SocketAddr`-shaped convenience wrapper (used by integration
+        // tests) synthesizes a single CONTROLLER endpoint and derives the
+        // directory id from the node id, matching the `for_tests` convention.
+        let node = crabka_raft::Node {
+            directory_id: uuid::Uuid::from_u128(u128::from(node_id)),
+            endpoints: vec![crabka_metadata::VoterEndpoint {
+                name: "CONTROLLER".into(),
+                host: addr.ip().to_string(),
+                port: addr.port(),
+            }],
+            kraft_version: crabka_metadata::KRaftVersionRange::default(),
+        };
         self._broker
             .controller
-            .add_learner(node_id, addr)
+            .add_learner(node_id, node)
             .await
             .map_err(|e| BrokerError::Replication(format!("add_learner: {e}")))
     }
@@ -890,9 +903,21 @@ impl Broker {
                 "localhost".to_string(),
             )) as Arc<dyn crabka_raft::OutboundDialer>);
 
+        // KIP-853: the bootstrap records carry the seed `VotersRecord`. Load
+        // them once here so the cold-boot voter set feeds `ControllerConfig`;
+        // the same records are submitted through raft after a leader is
+        // elected (step 2b below). A `Join` node has no seed set and relies
+        // on `bootstrap_servers` + auto-join instead.
+        let bootstrap_records = crate::bootstrap::load_bootstrap_records(&config.log_dir)?;
+        let initial_voters = crate::bootstrap::initial_voters(&bootstrap_records);
+
         let controller_cfg = crabka_raft::ControllerConfig {
             node_id: config.node_id,
-            voters: config.controller_quorum_voters.clone(),
+            bootstrap_servers: config.bootstrap_servers.clone(),
+            directory_id: config.directory_id,
+            auto_join: config.auto_join,
+            observer_lag_bound: config.observer_lag_bound,
+            initial_voters,
             controller_listen_addr: config.controller_listen_addr,
             log_dir: config.log_dir.join("__cluster_metadata"),
             // Sourced from `BrokerConfig` — see the docstrings there for
@@ -994,14 +1019,19 @@ impl Broker {
             //     Missing-file is treated as empty (handled by the loader),
             //     so the legacy zero-record path is a no-op and existing
             //     deployments / tests are byte-identical.
-            if matches!(config.bootstrap_mode, crate::BootstrapMode::Bootstrap) {
-                let records = crate::bootstrap::load_bootstrap_records(&config.log_dir)?;
-                if !records.is_empty() {
-                    tracing::info!(count = records.len(), "submitting bootstrap records");
-                    controller.submit_change(records).await.map_err(|e| {
+            if matches!(config.bootstrap_mode, crate::BootstrapMode::Bootstrap)
+                && !bootstrap_records.is_empty()
+            {
+                tracing::info!(
+                    count = bootstrap_records.len(),
+                    "submitting bootstrap records"
+                );
+                controller
+                    .submit_change(bootstrap_records)
+                    .await
+                    .map_err(|e| {
                         BrokerError::Replication(format!("bootstrap submit failed: {e}"))
                     })?;
-                }
             }
         }
 

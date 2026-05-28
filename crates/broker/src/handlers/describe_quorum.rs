@@ -211,6 +211,7 @@ mod tests {
             last_applied_index: applied,
             current_leader: leader,
             voters: voters.to_vec(),
+            voter_nodes: BTreeMap::new(),
             per_voter_matched_index: matched.iter().copied().collect::<BTreeMap<_, _>>(),
         }
     }

@@ -85,6 +85,24 @@ pub struct BrokerConfig {
     /// slice-1..6 tests upgrade to quorum-of-1 without config changes.
     pub controller_quorum_voters: Vec<(NodeId, SocketAddr)>,
 
+    /// KIP-853 dynamic quorum: controller endpoints used only to discover
+    /// the leader at cold start (the joiner path). Empty for a standalone
+    /// bootstrap node. Maps to Kafka's `controller.quorum.bootstrap.servers`.
+    pub bootstrap_servers: Vec<SocketAddr>,
+
+    /// KIP-853: this replica's stable directory id, recovered from
+    /// `meta.properties.json` at boot. Identifies which voter this node *is*.
+    pub directory_id: uuid::Uuid,
+
+    /// KIP-853: when true, an observer issues `AddVoter` for itself once it
+    /// has caught up to the leader, joining the quorum without operator
+    /// action. Maps to Kafka's `controller.quorum.auto.join.enable`.
+    pub auto_join: bool,
+
+    /// KIP-853: maximum log-entry lag an observer may have and still be
+    /// promotable to a voter. Forwarded to `ControllerConfig`.
+    pub observer_lag_bound: u64,
+
     /// How often each broker sends `BrokerHeartbeat` to the controller
     /// leader. Default 3,000ms.
     pub heartbeat_interval_ms: u64,
@@ -411,6 +429,10 @@ impl BrokerConfig {
             node_id: 1,
             controller_listen_addr: controller_addr,
             controller_quorum_voters: vec![(1, controller_addr)],
+            bootstrap_servers: vec![],
+            directory_id: uuid::Uuid::from_u128(1),
+            auto_join: false,
+            observer_lag_bound: 100,
             heartbeat_interval_ms: 200,
             heartbeat_timeout_ms: 2_000,
             replica_lag_time_max_ms: 2_000,
@@ -612,6 +634,10 @@ impl Default for BrokerConfig {
             node_id: 1,
             controller_listen_addr: controller_addr,
             controller_quorum_voters: vec![(1, controller_addr)],
+            bootstrap_servers: vec![],
+            directory_id: uuid::Uuid::from_u128(1),
+            auto_join: false,
+            observer_lag_bound: 100,
             heartbeat_interval_ms: 3_000,
             heartbeat_timeout_ms: 9_000,
             replica_lag_time_max_ms: 30_000,
