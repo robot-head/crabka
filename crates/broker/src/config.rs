@@ -125,6 +125,12 @@ pub struct BrokerConfig {
     /// `controller_election_timeout / 3` per raft consensus norms.
     pub controller_heartbeat_interval: std::time::Duration,
 
+    /// `metadata.log.max.record.bytes.between.snapshots` (default 20 MiB).
+    pub metadata_max_bytes_between_snapshots: u64,
+
+    /// `metadata.log.max.snapshot.interval.ms` (default 1 h; 0 = disabled).
+    pub metadata_max_snapshot_interval: std::time::Duration,
+
     /// How this broker participates in cluster formation. See
     /// [`crabka_raft::BootstrapMode`] for the trade-offs. The first broker
     /// of a fresh multi-broker cluster uses `Bootstrap`; subsequent brokers
@@ -445,6 +451,8 @@ impl BrokerConfig {
             // pass within its 5s assertion window.
             controller_election_timeout: std::time::Duration::from_millis(500),
             controller_heartbeat_interval: std::time::Duration::from_millis(100),
+            metadata_max_bytes_between_snapshots: 20 * 1024 * 1024,
+            metadata_max_snapshot_interval: std::time::Duration::from_secs(3600),
             bootstrap_mode: BootstrapMode::Bootstrap,
             cluster_id: None,
             listeners: vec![],
@@ -643,6 +651,8 @@ impl Default for BrokerConfig {
             replica_lag_time_max_ms: 30_000,
             controller_election_timeout: std::time::Duration::from_secs(5),
             controller_heartbeat_interval: std::time::Duration::from_millis(500),
+            metadata_max_bytes_between_snapshots: 20 * 1024 * 1024,
+            metadata_max_snapshot_interval: std::time::Duration::from_secs(3600),
             bootstrap_mode: BootstrapMode::Bootstrap,
             cluster_id: None,
             listeners: vec![],

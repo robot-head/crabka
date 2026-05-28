@@ -1085,6 +1085,8 @@ impl Broker {
             cluster_id: config.cluster_id,
             dialer: raft_dialer,
             handshake: handshake_opt,
+            max_bytes_between_snapshots: config.metadata_max_bytes_between_snapshots,
+            max_snapshot_interval: config.metadata_max_snapshot_interval,
         };
         let controller = Arc::new(
             crabka_raft::Controller::start_with_listener(controller_cfg, controller_listener)
