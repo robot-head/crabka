@@ -266,6 +266,7 @@ fn render_broker_container(
     oauth_introspection_mount_path: Option<&str>,
     delegation_token: Option<&crate::crd::kafka::DelegationTokenConfig>,
     tiered_storage: Option<&crate::crd::kafka::TieredStorage>,
+    tracing: Option<&crate::crd::kafka::Tracing>,
 ) -> serde_json::Value {
     use crate::crd::kafka::TieredStorageType;
     // Local pulls a writable emptyDir mount; S3 pulls credential env vars.
@@ -380,6 +381,39 @@ fn render_broker_container(
                 }
             }
         }));
+    }
+    // Slice 42b: cluster-wide tracing → broker pod env vars. The broker's
+    // `TelemetryConfig::from_env` reads these and installs the OTLP
+    // tracer at startup. Omitted entirely when `tracing` is `None` so
+    // the rendered pod template stays byte-identical to the pre-42b
+    // shape for non-tracing clusters.
+    if let Some(t) = tracing
+        && let crate::crd::kafka::TracingType::Otlp = t.kind
+        && let Some(otlp) = t.otlp.as_ref()
+    {
+        env.push(json!({ "name": "CRABKA_OTLP_ENABLED", "value": "true" }));
+        env.push(json!({ "name": "CRABKA_OTLP_ENDPOINT", "value": otlp.endpoint }));
+        if let Some(p) = otlp.protocol {
+            env.push(json!({
+                "name": "CRABKA_OTLP_PROTOCOL",
+                "value": p.as_env_value(),
+            }));
+        }
+        if let Some(r) = otlp.sample_ratio {
+            env.push(json!({
+                "name": "CRABKA_OTLP_SAMPLE_RATIO",
+                "value": r.to_string(),
+            }));
+        }
+        if let Some(name) = otlp.service_name.as_deref() {
+            env.push(json!({ "name": "OTEL_SERVICE_NAME", "value": name }));
+        }
+        if let Some(t) = otlp.timeout_secs {
+            env.push(json!({
+                "name": "CRABKA_OTLP_TIMEOUT_SECS",
+                "value": t.to_string(),
+            }));
+        }
     }
     let main_script = build_main_script(metrics_enabled);
     let mut volume_mounts = vec![
@@ -781,6 +815,7 @@ pub(crate) fn render_statefulset(
         oauth_introspection_mount_path,
         parent.spec.delegation_token.as_ref(),
         tiered_storage,
+        parent.spec.tracing.as_ref(),
     );
 
     // Merge user-provided pod metadata under operator-owned labels.
@@ -1310,6 +1345,7 @@ mod tests {
                 delegation_token: None,
                 authorization: None,
                 tiered_storage: None,
+                tracing: None,
             },
         );
         k.metadata.namespace = Some("default".into());
@@ -3173,5 +3209,146 @@ mod tests {
                 .is_none(),
             "no PVCs => no retention policy"
         );
+    }
+
+    // ── Slice 42b: tracing env-var rendering ─────────────────────────
+
+    fn parent_with_tracing(name: &str, otlp: crate::crd::kafka::OtlpTracing) -> Kafka {
+        let mut k = parent_fixture(name);
+        k.spec.tracing = Some(crate::crd::kafka::Tracing {
+            kind: crate::crd::kafka::TracingType::Otlp,
+            otlp: Some(otlp),
+        });
+        k
+    }
+
+    #[test]
+    fn pod_template_emits_otlp_env_when_tracing_set() {
+        let parent = parent_with_tracing(
+            "demo",
+            crate::crd::kafka::OtlpTracing {
+                endpoint: "http://otel:4317".into(),
+                protocol: Some(crate::crd::kafka::OtlpProtocol::HttpProtobuf),
+                sample_ratio: Some(0.25),
+                service_name: Some("svc".into()),
+                timeout_secs: Some(7),
+            },
+        );
+        let pool = pool_fixture("brokers", "demo", 1);
+        let sts = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE).unwrap();
+        let env = sts
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .spec
+            .as_ref()
+            .unwrap()
+            .containers
+            .iter()
+            .find(|c| c.name == "broker")
+            .expect("broker container")
+            .env
+            .as_ref()
+            .expect("env present")
+            .clone();
+
+        let by_name = |needle: &str| {
+            env.iter()
+                .find(|e| e.name == needle)
+                .unwrap_or_else(|| panic!("{needle} env missing"))
+                .value
+                .clone()
+                .unwrap_or_default()
+        };
+        assert_eq!(by_name("CRABKA_OTLP_ENABLED"), "true");
+        assert_eq!(by_name("CRABKA_OTLP_ENDPOINT"), "http://otel:4317");
+        assert_eq!(by_name("CRABKA_OTLP_PROTOCOL"), "http/protobuf");
+        assert_eq!(by_name("CRABKA_OTLP_SAMPLE_RATIO"), "0.25");
+        assert_eq!(by_name("OTEL_SERVICE_NAME"), "svc");
+        assert_eq!(by_name("CRABKA_OTLP_TIMEOUT_SECS"), "7");
+    }
+
+    #[test]
+    fn pod_template_omits_optional_otlp_env_when_unset() {
+        let parent = parent_with_tracing(
+            "demo",
+            crate::crd::kafka::OtlpTracing {
+                endpoint: "http://otel:4317".into(),
+                protocol: None,
+                sample_ratio: None,
+                service_name: None,
+                timeout_secs: None,
+            },
+        );
+        let pool = pool_fixture("brokers", "demo", 1);
+        let sts = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE).unwrap();
+        let env = sts
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .spec
+            .as_ref()
+            .unwrap()
+            .containers
+            .iter()
+            .find(|c| c.name == "broker")
+            .expect("broker container")
+            .env
+            .as_ref()
+            .expect("env present")
+            .clone();
+        // Required pair is present.
+        assert!(env.iter().any(|e| e.name == "CRABKA_OTLP_ENABLED"));
+        assert!(env.iter().any(|e| e.name == "CRABKA_OTLP_ENDPOINT"));
+        // Optional knobs are absent.
+        for unset in [
+            "CRABKA_OTLP_PROTOCOL",
+            "CRABKA_OTLP_SAMPLE_RATIO",
+            "OTEL_SERVICE_NAME",
+            "CRABKA_OTLP_TIMEOUT_SECS",
+        ] {
+            assert!(
+                env.iter().all(|e| e.name != unset),
+                "{unset} should not be emitted when unset"
+            );
+        }
+    }
+
+    #[test]
+    fn pod_template_omits_all_otlp_env_when_tracing_none() {
+        let parent = parent_fixture("demo");
+        let pool = pool_fixture("brokers", "demo", 1);
+        let sts = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE).unwrap();
+        let env = sts
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .spec
+            .as_ref()
+            .unwrap()
+            .containers
+            .iter()
+            .find(|c| c.name == "broker")
+            .expect("broker container")
+            .env
+            .as_ref()
+            .expect("env present")
+            .clone();
+        for never in [
+            "CRABKA_OTLP_ENABLED",
+            "CRABKA_OTLP_ENDPOINT",
+            "CRABKA_OTLP_PROTOCOL",
+            "CRABKA_OTLP_SAMPLE_RATIO",
+            "OTEL_SERVICE_NAME",
+            "CRABKA_OTLP_TIMEOUT_SECS",
+        ] {
+            assert!(
+                env.iter().all(|e| e.name != never),
+                "{never} must not leak when tracing is None"
+            );
+        }
     }
 }

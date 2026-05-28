@@ -931,6 +931,7 @@ mod service_rendering_tests {
                 delegation_token: None,
                 authorization: None,
                 tiered_storage: None,
+                tracing: None,
             },
         );
         k.meta_mut().namespace = Some("default".into());

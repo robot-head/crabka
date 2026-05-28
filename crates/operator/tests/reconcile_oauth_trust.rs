@@ -94,6 +94,7 @@ fn kafka_with_oauth_trust(name: &str, ns: &str, trust_certs: Vec<(&str, &str)>) 
             delegation_token: None,
             authorization: None,
             tiered_storage: None,
+            tracing: None,
         },
     );
     k.metadata.namespace = Some(ns.into());

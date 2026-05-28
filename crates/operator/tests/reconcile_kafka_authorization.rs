@@ -48,6 +48,7 @@ fn kafka_cr_with_authorization(
             delegation_token: None,
             authorization,
             tiered_storage: None,
+            tracing: None,
         },
     );
     k.metadata.namespace = Some(namespace.into());

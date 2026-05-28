@@ -792,6 +792,35 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
         }
     }
 
+    // Slice 42b: validate `spec.tracing` before rendering pods. Same
+    // pattern as the tiered-storage `TieredStorageReady` condition
+    // (slice 48j): emit a `TracingReady` condition on validation
+    // pass/fail so operators see *why* their OTLP spec was rejected
+    // instead of having to read controller logs.
+    if let Some(tr) = &obj.spec.tracing {
+        match tr.validate() {
+            Ok(()) => {
+                let cond = condition(
+                    "TracingReady",
+                    "True",
+                    "Validated",
+                    "tracing spec is well-formed",
+                );
+                patch_status_with_condition(&kafka_api_for_ts, &name, cond).await?;
+            }
+            Err(why) => {
+                let cond = condition(
+                    "TracingReady",
+                    "False",
+                    "TracingInvalid",
+                    &format!("tracing: {why}"),
+                );
+                patch_status_with_condition(&kafka_api_for_ts, &name, cond).await?;
+                return Err(ReconcileError::TracingInvalid(why));
+            }
+        }
+    }
+
     // Slice 28: evaluate the declared versions against the operator-
     // finalized metadata version (read from the watched object's status —
     // no extra API request). On a failure we surface KafkaVersionValid=
@@ -1798,6 +1827,7 @@ mod tests {
                 delegation_token: None,
                 authorization: None,
                 tiered_storage: None,
+                tracing: None,
             },
         );
         k.metadata.namespace = Some("ns".into());

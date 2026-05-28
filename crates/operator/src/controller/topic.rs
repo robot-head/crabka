@@ -528,6 +528,7 @@ mod tests {
                 delegation_token: None,
                 authorization: None,
                 tiered_storage: None,
+                tracing: None,
             },
         );
         k.metadata.namespace = Some(namespace.into());

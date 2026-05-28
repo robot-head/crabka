@@ -108,6 +108,15 @@ pub struct KafkaSpec {
     /// support pairs with the production RLMM (48f).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tiered_storage: Option<TieredStorage>,
+    /// Slice 42b: distributed-tracing wiring for the broker pods. When
+    /// `Some`, the operator renders the matching `CRABKA_OTLP_*` env
+    /// vars onto every broker pod — the broker's slice-42 telemetry
+    /// pipeline reads them via [`TelemetryConfig::from_env`] and
+    /// installs the OTLP tracer at startup. When `None`, no OTLP env
+    /// vars are emitted and the broker leaves tracing off (the
+    /// slice-42 default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracing: Option<Tracing>,
 }
 
 /// Slice 48g (KIP-405): cluster-wide tiered-storage configuration.
@@ -396,6 +405,124 @@ impl TopicMetadataManagerSpec {
     }
 }
 
+/// Slice 42b: cluster-wide distributed-tracing configuration. Maps to
+/// the slice-42 broker's `CRABKA_OTLP_*` env-var contract: the operator
+/// renders one env entry per populated field on every broker pod, and
+/// the broker's `TelemetryConfig::from_env` picks them up at startup.
+///
+/// The `type` discriminator is reserved for future tracing backends; for
+/// now only `Otlp` is meaningful, and the matching `otlp` block is
+/// required when `type = Otlp`.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Tracing {
+    /// Tracing backend selector.
+    #[serde(rename = "type")]
+    pub kind: TracingType,
+    /// OTLP-backend tuning. Required when `kind == Otlp`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub otlp: Option<OtlpTracing>,
+}
+
+/// Slice 42b: the tracing backends the operator knows how to render.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+pub enum TracingType {
+    /// OpenTelemetry OTLP exporter. Pair with [`Tracing::otlp`] for the
+    /// endpoint / protocol / sampling.
+    #[default]
+    Otlp,
+}
+
+/// Slice 42b: OTLP-specific tracing parameters. Each populated field is
+/// rendered as a separate env var on every broker pod.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct OtlpTracing {
+    /// Required. OTLP collector endpoint (`scheme://host:port`).
+    /// Rendered as `CRABKA_OTLP_ENDPOINT`; turning the field on
+    /// implicitly sets `CRABKA_OTLP_ENABLED=true` as well.
+    pub endpoint: String,
+    /// Optional protocol. Defaults to `Grpc` (matches Kafka /
+    /// OpenTelemetry SDK convention). Rendered as
+    /// `CRABKA_OTLP_PROTOCOL`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<OtlpProtocol>,
+    /// Optional sampling ratio in `[0.0, 1.0]`. Rendered as
+    /// `CRABKA_OTLP_SAMPLE_RATIO`. Defaults to the broker's `1.0`
+    /// (sample every trace).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample_ratio: Option<f64>,
+    /// Optional `service.name` resource attribute. Rendered as
+    /// `OTEL_SERVICE_NAME`. Defaults to the broker's
+    /// `"crabka-broker"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_name: Option<String>,
+    /// Optional export timeout in seconds. Rendered as
+    /// `CRABKA_OTLP_TIMEOUT_SECS`. Defaults to the broker's `10`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+}
+
+/// Slice 42b: OTLP wire protocol selector. Mirrors the broker's
+/// internal `OtlpProtocol` enum and the `OTEL_EXPORTER_OTLP_PROTOCOL`
+/// spec values.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OtlpProtocol {
+    /// gRPC over HTTP/2 (default; `:4317`).
+    Grpc,
+    /// HTTP/1 + protobuf payload (`:4318`).
+    HttpProtobuf,
+}
+
+impl OtlpProtocol {
+    /// Render the env-var value the broker's `OtlpProtocol::parse`
+    /// expects.
+    #[must_use]
+    pub fn as_env_value(self) -> &'static str {
+        match self {
+            Self::Grpc => "grpc",
+            Self::HttpProtobuf => "http/protobuf",
+        }
+    }
+}
+
+impl Tracing {
+    /// Shape-validate the tagged union.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `type=Otlp` is missing the `otlp` block, when
+    /// `otlp.endpoint` is empty, when `sampleRatio` is outside
+    /// `[0.0, 1.0]`, or when `timeoutSecs == 0`.
+    pub fn validate(&self) -> Result<(), String> {
+        match (self.kind, &self.otlp) {
+            (TracingType::Otlp, None) => {
+                Err("type=Otlp requires `otlp` (endpoint at minimum)".into())
+            }
+            (TracingType::Otlp, Some(otlp)) => {
+                if otlp.endpoint.trim().is_empty() {
+                    return Err("otlp.endpoint is required and must be non-empty".into());
+                }
+                if let Some(r) = otlp.sample_ratio
+                    && !(0.0..=1.0).contains(&r)
+                {
+                    return Err(format!("otlp.sampleRatio must be in [0.0, 1.0] (got {r})"));
+                }
+                if let Some(s) = otlp.service_name.as_deref()
+                    && s.trim().is_empty()
+                {
+                    return Err("otlp.serviceName, when set, must be non-empty".into());
+                }
+                if otlp.timeout_secs == Some(0) {
+                    return Err("otlp.timeoutSecs, when set, must be > 0".into());
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
 /// Slice 48-final (KIP-405): S3 access-key credential pair.
 ///
 /// Two [`SecretKeyRef`]s — one per AWS credential half — so an operator
@@ -617,6 +744,7 @@ mod tests {
                 delegation_token: None,
                 authorization: None,
                 tiered_storage: None,
+                tracing: None,
             },
         );
         let json = serde_json::to_string(&k).unwrap();
@@ -646,6 +774,7 @@ mod tests {
                 delegation_token: None,
                 authorization: None,
                 tiered_storage: None,
+                tracing: None,
             },
         );
         let j = serde_json::to_string(&k.spec).unwrap();
@@ -758,6 +887,7 @@ mod tests {
                 delegation_token: None,
                 authorization: None,
                 tiered_storage: None,
+                tracing: None,
             },
         );
         let j = serde_json::to_string(&k.spec).unwrap();
@@ -795,6 +925,7 @@ mod tests {
                 delegation_token: None,
                 authorization: None,
                 tiered_storage: None,
+                tracing: None,
             },
         );
         let j = serde_json::to_string(&k.spec).unwrap();
@@ -1319,5 +1450,88 @@ authorization:
         let yaml = "size: 5Gi\n";
         let p: TieredStoragePersistence = serde_yaml::from_str(yaml).unwrap();
         assert!(!p.delete_claim);
+    }
+
+    // ── Slice 42b: tracing validation ────────────────────────────────
+
+    #[test]
+    fn tracing_otlp_without_otlp_block_is_rejected() {
+        let t = Tracing {
+            kind: TracingType::Otlp,
+            otlp: None,
+        };
+        let err = t.validate().unwrap_err();
+        assert!(err.contains("type=Otlp requires `otlp`"), "got: {err}");
+    }
+
+    #[test]
+    fn tracing_otlp_requires_non_empty_endpoint() {
+        let t = Tracing {
+            kind: TracingType::Otlp,
+            otlp: Some(OtlpTracing {
+                endpoint: "   ".into(),
+                protocol: None,
+                sample_ratio: None,
+                service_name: None,
+                timeout_secs: None,
+            }),
+        };
+        let err = t.validate().unwrap_err();
+        assert!(err.contains("otlp.endpoint is required"), "got: {err}");
+    }
+
+    #[test]
+    fn tracing_otlp_rejects_out_of_range_sample_ratio() {
+        let t = Tracing {
+            kind: TracingType::Otlp,
+            otlp: Some(OtlpTracing {
+                endpoint: "http://otel:4317".into(),
+                protocol: None,
+                sample_ratio: Some(1.5),
+                service_name: None,
+                timeout_secs: None,
+            }),
+        };
+        let err = t.validate().unwrap_err();
+        assert!(err.contains("otlp.sampleRatio"), "got: {err}");
+    }
+
+    #[test]
+    fn tracing_otlp_rejects_zero_timeout() {
+        let t = Tracing {
+            kind: TracingType::Otlp,
+            otlp: Some(OtlpTracing {
+                endpoint: "http://otel:4317".into(),
+                protocol: None,
+                sample_ratio: None,
+                service_name: None,
+                timeout_secs: Some(0),
+            }),
+        };
+        let err = t.validate().unwrap_err();
+        assert!(err.contains("otlp.timeoutSecs"), "got: {err}");
+    }
+
+    #[test]
+    fn tracing_otlp_with_full_spec_validates() {
+        let t = Tracing {
+            kind: TracingType::Otlp,
+            otlp: Some(OtlpTracing {
+                endpoint: "http://otel-collector.observability:4317".into(),
+                protocol: Some(OtlpProtocol::Grpc),
+                sample_ratio: Some(0.1),
+                service_name: Some("prod-cluster".into()),
+                timeout_secs: Some(5),
+            }),
+        };
+        assert!(t.validate().is_ok());
+    }
+
+    #[test]
+    fn otlp_protocol_env_value_matches_broker_parse() {
+        // The broker's `OtlpProtocol::parse` accepts "grpc" and
+        // "http/protobuf" (spec values). Lock both ends.
+        assert_eq!(OtlpProtocol::Grpc.as_env_value(), "grpc");
+        assert_eq!(OtlpProtocol::HttpProtobuf.as_env_value(), "http/protobuf");
     }
 }
