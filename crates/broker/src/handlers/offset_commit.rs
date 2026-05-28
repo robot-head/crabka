@@ -59,12 +59,57 @@ pub(crate) async fn handle(
     let now_ms = now_ms();
     let group_handle = broker.group_manager.get_or_create(&req.group_id);
 
-    // 1. Validate (group, generation, member). Empty `member_id` means
-    //    a "simple" consumer that doesn't participate in a group — skip
-    //    the membership/generation check entirely.
-    if let Some(code) = validate(&req, &group_handle).await {
-        let resp = build_response_all(&req, code);
-        return encode(version, &resp);
+    // KIP-848: determine whether this group is managed by the next-gen coordinator.
+    let is_next_gen = broker.group_manager.next_gen().is_some_and(|ng| {
+        matches!(
+            ng.group_type(&req.group_id),
+            Some(crate::coordinator::next_gen::GroupType::NextGen)
+        )
+    });
+
+    if is_next_gen {
+        // Next-gen groups validate member_epoch via the per-group actor.
+        let ng = broker
+            .group_manager
+            .next_gen()
+            .expect("next_gen present: checked above");
+        let Some(ng_handle) = ng.find(&req.group_id) else {
+            let resp = build_response_all(&req, codes::GROUP_ID_NOT_FOUND);
+            return encode(version, &resp);
+        };
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let _ = ng_handle
+            .tx
+            .send(
+                crate::coordinator::next_gen::group_actor::GroupActorMessage::OffsetValidate {
+                    member_id: req.member_id.clone(),
+                    member_epoch: req.generation_id_or_member_epoch,
+                    reply: tx,
+                },
+            )
+            .await;
+        match rx.await {
+            Ok(Ok(())) => {
+                // Validation passed; proceed with topic ACL and persistence below.
+                let _ = &group_handle; // group_handle unused for next-gen path
+            }
+            Ok(Err(code)) => {
+                let resp = build_response_all(&req, code);
+                return encode(version, &resp);
+            }
+            Err(_) => {
+                let resp = build_response_all(&req, codes::UNKNOWN_SERVER_ERROR);
+                return encode(version, &resp);
+            }
+        }
+    } else {
+        // 1. Validate (group, generation, member). Empty `member_id` means
+        //    a "simple" consumer that doesn't participate in a group — skip
+        //    the membership/generation check entirely.
+        if let Some(code) = validate(&req, &group_handle).await {
+            let resp = build_response_all(&req, code);
+            return encode(version, &resp);
+        }
     }
 
     // ── slice-13 ACL preamble ────────────────────────────────────────────
