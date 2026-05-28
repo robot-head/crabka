@@ -137,6 +137,16 @@ pub struct BrokerConfig {
     /// `None` defaults to `Uuid::nil()` inside `Controller::start`.
     pub cluster_id: Option<uuid::Uuid>,
 
+    /// KIP-392: this broker's rack identifier (`broker.rack`). Reported in
+    /// its `BrokerRegistrationRecord` and used by the leader's rack-aware
+    /// replica selector. `None` (default) means no rack.
+    pub rack: Option<String>,
+
+    /// KIP-392: which replica selector the leader runs to populate
+    /// `FetchResponse.preferred_read_replica` for rack-aware consumers.
+    /// Default `Leader` (never redirect).
+    pub replica_selector: crate::replica_selector::ReplicaSelectorKind,
+
     // ── Auth / listener registry ─────────────────────────────────────────
     /// Named listener definitions. When empty, `effective_listeners()` synthesizes
     /// a single PLAINTEXT listener from `listen_addr` + `advertised_listener`,
@@ -447,6 +457,8 @@ impl BrokerConfig {
             controller_heartbeat_interval: std::time::Duration::from_millis(100),
             bootstrap_mode: BootstrapMode::Bootstrap,
             cluster_id: None,
+            rack: None,
+            replica_selector: crate::replica_selector::ReplicaSelectorKind::Leader,
             listeners: vec![],
             controller_listener_protocol: crabka_security::ListenerProtocol::Plaintext,
             inter_broker_listener_name: "PLAINTEXT".to_string(),
@@ -645,6 +657,8 @@ impl Default for BrokerConfig {
             controller_heartbeat_interval: std::time::Duration::from_millis(500),
             bootstrap_mode: BootstrapMode::Bootstrap,
             cluster_id: None,
+            rack: None,
+            replica_selector: crate::replica_selector::ReplicaSelectorKind::Leader,
             listeners: vec![],
             controller_listener_protocol: crabka_security::ListenerProtocol::Plaintext,
             inter_broker_listener_name: "PLAINTEXT".to_string(),
@@ -912,5 +926,21 @@ mod tests {
             c.validate(),
             Err(BrokerError::InvalidLeaderRebalanceThreshold { value: 101 })
         ));
+    }
+
+    #[test]
+    fn rack_and_selector_default_off() {
+        let c = BrokerConfig::default();
+        assert_eq!(c.rack, None);
+        assert_eq!(
+            c.replica_selector,
+            crate::replica_selector::ReplicaSelectorKind::Leader
+        );
+        let t = BrokerConfig::for_tests(std::path::PathBuf::from("/tmp"));
+        assert_eq!(t.rack, None);
+        assert_eq!(
+            t.replica_selector,
+            crate::replica_selector::ReplicaSelectorKind::Leader
+        );
     }
 }

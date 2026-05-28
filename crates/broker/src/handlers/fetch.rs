@@ -350,6 +350,35 @@ pub(crate) async fn handle(
                 continue;
             }
 
+            // KIP-392: for a consumer fetch advertising client.rack, ask the
+            // configured replica selector which replica it should prefer to
+            // read from, and report it in `preferred_read_replica`. The field
+            // only encodes at Fetch v11+ (where `rack_id` first appears), so
+            // older clients are unaffected. `-1` (the default) means
+            // "use the leader".
+            if !is_follower_fetch
+                && !req.rack_id.is_empty()
+                && let Some(pr) = image.partition(&topic_name, idx)
+            {
+                let isr: std::collections::HashSet<crabka_metadata::NodeId> =
+                    pr.isr.iter().copied().collect();
+                let views: Vec<crate::replica_selector::ReplicaView> = pr
+                    .replicas
+                    .iter()
+                    .map(|&nid| crate::replica_selector::ReplicaView {
+                        node_id: i32::try_from(nid).unwrap_or(-1),
+                        rack: image.broker(nid).and_then(|b| b.rack.clone()),
+                        in_isr: isr.contains(&nid),
+                    })
+                    .collect();
+                let leader_id = i32::try_from(pr.leader).unwrap_or(-1);
+                out.preferred_read_replica = broker.config.replica_selector.select(
+                    Some(req.rack_id.as_str()),
+                    leader_id,
+                    &views,
+                );
+            }
+
             pending.push(PendingRead {
                 topic_name: topic_name.clone(),
                 topic_id,
@@ -1028,10 +1057,18 @@ async fn long_poll_then_reread(
     pending: &mut [PendingRead],
     max_wait_ms: i32,
 ) -> Result<(), BrokerError> {
-    let notifies: Vec<Arc<Notify>> = pending
-        .iter()
-        .filter_map(|p| p.partition.as_ref().map(|part| part.append_notify.clone()))
-        .collect();
+    let mut notifies: Vec<Arc<Notify>> = Vec::new();
+    for p in pending.iter() {
+        if let Some(part) = p.partition.as_ref() {
+            notifies.push(part.append_notify.clone());
+            // KIP-392: a consumer reading from a follower becomes unblocked
+            // when the follower's HW advances (via set_follower_hw), not only
+            // on raw append. Follower (inter-broker) fetches don't need this.
+            if !p.is_follower_fetch {
+                notifies.push(part.hw_advance_notify.clone());
+            }
+        }
+    }
     if notifies.is_empty() {
         return Ok(());
     }
