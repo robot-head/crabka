@@ -88,6 +88,10 @@ impl MetadataSource for ObserverSource {
         self.observer.watch_leader()
     }
     fn quorum_state(&self) -> QuorumState {
+        // A broker-only node is not a voter and has no openraft state of its
+        // own, so only `current_leader` is meaningful here. `current_term` /
+        // `last_applied_index` / per-voter progress are unknown — DescribeQuorum
+        // on a broker-only node forwards to a controller in a later component.
         QuorumState {
             current_term: 0,
             last_applied_index: 0,
