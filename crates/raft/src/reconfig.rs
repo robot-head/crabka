@@ -134,8 +134,16 @@ impl<'a, O: ReconfigOps> Coordinator<'a, O> {
             .try_lock()
             .map_err(|_| RaftError::ReconfigInProgress)?;
         let current = self.ops.current_voters();
-        if !current.contains(req.id) {
-            return Ok(ReconfigOutcome::Committed); // idempotent
+        match current.get(req.id) {
+            // No voter with this id: already absent, idempotent no-op.
+            None => return Ok(ReconfigOutcome::Committed),
+            // A voter with this id exists, but it is a different incarnation than
+            // the one targeted (e.g. the node rejoined under a new directory_id
+            // after a restart). Do not remove the current voter on a stale request.
+            Some(v) if v.directory_id != req.directory_id => {
+                return Ok(ReconfigOutcome::Committed);
+            }
+            Some(_) => {}
         }
         let next = current.without_voter(req.id);
         if next.is_empty() {
