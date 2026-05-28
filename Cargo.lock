@@ -1230,6 +1230,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "crabka-log-iobench"
+version = "0.1.1"
+dependencies = [
+ "bytes",
+ "codspeed-criterion-compat",
+ "crabka-log",
+ "crabka-protocol",
+ "memmap2",
+ "tempfile",
+]
+
+[[package]]
 name = "crabka-metadata"
 version = "0.1.1"
 dependencies = [
