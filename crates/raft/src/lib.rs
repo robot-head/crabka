@@ -65,8 +65,9 @@ pub use metadata_fetch::{MetadataFetchSlice, encode_committed_records};
 pub use network::{OutboundDialer, PlaintextDialer};
 pub use types::{AppData, AppDataResponse, Node, NodeId, Raft, TypeConfig};
 pub use wire::{
-    API_KEY_APPEND_ENTRIES, API_KEY_INSTALL_SNAPSHOT, API_KEY_METADATA_FETCH, API_KEY_VOTE,
-    CrabkaAppendEntriesRequest, CrabkaAppendEntriesResponse, CrabkaInstallSnapshotRequest,
-    CrabkaInstallSnapshotResponse, CrabkaLogEntry, CrabkaMetadataFetchRequest,
-    CrabkaMetadataFetchResponse, CrabkaVoteRequest, CrabkaVoteResponse, PayloadKind,
+    API_KEY_APPEND_ENTRIES, API_KEY_INSTALL_SNAPSHOT, API_KEY_METADATA_FETCH,
+    API_KEY_SUBMIT_CHANGE, API_KEY_VOTE, CrabkaAppendEntriesRequest, CrabkaAppendEntriesResponse,
+    CrabkaInstallSnapshotRequest, CrabkaInstallSnapshotResponse, CrabkaLogEntry,
+    CrabkaMetadataFetchRequest, CrabkaMetadataFetchResponse, CrabkaSubmitChangeRequest,
+    CrabkaSubmitChangeResponse, CrabkaVoteRequest, CrabkaVoteResponse, PayloadKind,
 };

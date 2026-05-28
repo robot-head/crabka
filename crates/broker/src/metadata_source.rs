@@ -1,0 +1,209 @@
+//! `MetadataSource` — the metadata authority a broker reads from and
+//! writes through. Combined/controller nodes back it with a live
+//! `ControllerHandle` (openraft voter); broker-only nodes back it with a
+//! `MetadataObserver` (true `KRaft` observer) plus a write-forwarding path
+//! to the controller quorum. Handlers depend only on this trait.
+
+use std::collections::BTreeSet;
+use std::net::SocketAddr;
+use std::sync::Arc;
+
+use tokio::sync::watch;
+
+use crabka_metadata::{MetadataImage, MetadataRecord};
+use crabka_raft::{ControllerHandle, NodeId, QuorumState, RaftError};
+
+use crate::metadata_observer::MetadataObserver;
+
+#[async_trait::async_trait]
+pub trait MetadataSource: Send + Sync {
+    fn current_image(&self) -> Arc<MetadataImage>;
+    fn watch_image(&self) -> watch::Receiver<Arc<MetadataImage>>;
+    fn watch_leader(&self) -> watch::Receiver<Option<NodeId>>;
+    fn quorum_state(&self) -> QuorumState;
+    async fn submit_change(&self, records: Vec<MetadataRecord>) -> Result<(), RaftError>;
+    async fn change_membership(&self, new_voters: BTreeSet<NodeId>) -> Result<(), RaftError>;
+    async fn add_learner(&self, node_id: NodeId, addr: SocketAddr) -> Result<(), RaftError>;
+    async fn cancel(&self);
+}
+
+#[async_trait::async_trait]
+impl MetadataSource for ControllerHandle {
+    fn current_image(&self) -> Arc<MetadataImage> {
+        ControllerHandle::current_image(self)
+    }
+    fn watch_image(&self) -> watch::Receiver<Arc<MetadataImage>> {
+        ControllerHandle::watch_image(self)
+    }
+    fn watch_leader(&self) -> watch::Receiver<Option<NodeId>> {
+        ControllerHandle::watch_leader(self)
+    }
+    fn quorum_state(&self) -> QuorumState {
+        ControllerHandle::quorum_state(self)
+    }
+    async fn submit_change(&self, records: Vec<MetadataRecord>) -> Result<(), RaftError> {
+        ControllerHandle::submit_change(self, records).await
+    }
+    async fn change_membership(&self, new_voters: BTreeSet<NodeId>) -> Result<(), RaftError> {
+        ControllerHandle::change_membership(self, new_voters).await
+    }
+    async fn add_learner(&self, node_id: NodeId, addr: SocketAddr) -> Result<(), RaftError> {
+        ControllerHandle::add_learner(self, node_id, addr).await
+    }
+    async fn cancel(&self) {
+        ControllerHandle::cancel(self).await;
+    }
+}
+
+/// Broker-only metadata source: reads from a [`MetadataObserver`], writes
+/// by forwarding to the controller quorum.
+pub struct ObserverSource {
+    observer: Arc<MetadataObserver>,
+    writer: Arc<dyn MetadataWriter>,
+}
+
+/// Write side for broker-only nodes: forward a batch to the controller
+/// quorum leader.
+#[async_trait::async_trait]
+pub trait MetadataWriter: Send + Sync {
+    async fn submit_change(&self, records: Vec<MetadataRecord>) -> Result<(), RaftError>;
+}
+
+impl ObserverSource {
+    #[must_use]
+    pub fn new(observer: Arc<MetadataObserver>, writer: Arc<dyn MetadataWriter>) -> Self {
+        Self { observer, writer }
+    }
+}
+
+#[async_trait::async_trait]
+impl MetadataSource for ObserverSource {
+    fn current_image(&self) -> Arc<MetadataImage> {
+        self.observer.current_image()
+    }
+    fn watch_image(&self) -> watch::Receiver<Arc<MetadataImage>> {
+        self.observer.watch_image()
+    }
+    fn watch_leader(&self) -> watch::Receiver<Option<NodeId>> {
+        self.observer.watch_leader()
+    }
+    fn quorum_state(&self) -> QuorumState {
+        QuorumState {
+            current_term: 0,
+            last_applied_index: 0,
+            current_leader: *self.observer.watch_leader().borrow(),
+            voters: Vec::new(),
+            per_voter_matched_index: std::collections::BTreeMap::new(),
+        }
+    }
+    async fn submit_change(&self, records: Vec<MetadataRecord>) -> Result<(), RaftError> {
+        self.writer.submit_change(records).await
+    }
+    async fn change_membership(&self, _new_voters: BTreeSet<NodeId>) -> Result<(), RaftError> {
+        Err(RaftError::NotLeader {
+            current_leader: None,
+        })
+    }
+    async fn add_learner(&self, _node_id: NodeId, _addr: SocketAddr) -> Result<(), RaftError> {
+        Err(RaftError::NotLeader {
+            current_leader: None,
+        })
+    }
+    async fn cancel(&self) {
+        self.observer.cancel().await;
+    }
+}
+
+use crabka_raft::OutboundDialer;
+
+/// Forwards metadata writes from a broker-only node to the controller
+/// quorum. Tries the leader hint first (from the observer), then walks the
+/// voter list. Mirrors the `API_KEY_SUBMIT_CHANGE` request the controller
+/// already serves.
+pub struct QuorumForwarder {
+    pub voters: Vec<(NodeId, SocketAddr)>,
+    pub dialer: Arc<dyn OutboundDialer>,
+    pub client_id: String,
+    pub leader: watch::Receiver<Option<NodeId>>,
+}
+
+impl QuorumForwarder {
+    async fn try_submit(
+        &self,
+        target: NodeId,
+        addr: SocketAddr,
+        body: &[u8],
+    ) -> Result<crabka_raft::CrabkaSubmitChangeResponse, RaftError> {
+        let opts = crabka_client_core::ConnectionOptions {
+            client_id: self.client_id.clone(),
+            ..crabka_client_core::ConnectionOptions::default()
+        };
+        let conn = self
+            .dialer
+            .dial(target, &addr.to_string(), opts)
+            .await
+            .map_err(RaftError::Network)?;
+        let resp_body = conn
+            .raw_request(
+                crabka_raft::API_KEY_SUBMIT_CHANGE,
+                0,
+                bytes::Bytes::copy_from_slice(body),
+            )
+            .await
+            .map_err(RaftError::Network)?;
+        conn.close();
+        let mut cur: &[u8] = &resp_body;
+        crabka_raft::CrabkaSubmitChangeResponse::decode_v0(&mut cur).map_err(RaftError::Protocol)
+    }
+}
+
+#[async_trait::async_trait]
+impl MetadataWriter for QuorumForwarder {
+    async fn submit_change(&self, records: Vec<MetadataRecord>) -> Result<(), RaftError> {
+        let payload =
+            <serde_wincode::SerdeCompat<Vec<MetadataRecord>> as wincode::Serialize>::serialize(
+                &records,
+            )
+            .map_err(RaftError::from)?;
+        let req = crabka_raft::CrabkaSubmitChangeRequest {
+            records: bytes::Bytes::from(payload),
+        };
+        let mut body = Vec::with_capacity(req.records.len() + 4);
+        req.encode_v0(&mut body).map_err(RaftError::Protocol)?;
+
+        let hint = *self.leader.borrow();
+        let mut order: Vec<(NodeId, SocketAddr)> = Vec::new();
+        if let Some(l) = hint
+            && let Some(t) = self.voters.iter().find(|(id, _)| *id == l)
+        {
+            order.push(*t);
+        }
+        for v in &self.voters {
+            if Some(v.0) != hint {
+                order.push(*v);
+            }
+        }
+
+        let mut last_err = RaftError::NotLeader {
+            current_leader: hint,
+        };
+        for (target, addr) in order {
+            match self.try_submit(target, addr, &body).await {
+                Ok(resp) if resp.error_code == 0 => return Ok(()),
+                Ok(resp) if resp.error_code == 2 => {
+                    return Err(RaftError::Metadata(
+                        crabka_metadata::MetadataError::InvalidRecord("validation failed"),
+                    ));
+                }
+                Ok(resp) => {
+                    last_err = RaftError::NotLeader {
+                        current_leader: (resp.leader_hint >= 0)
+                            .then(|| u64::try_from(resp.leader_hint).unwrap_or(0)),
+                    };
+                }
+                Err(e) => last_err = e,
+            }
+        }
+        Err(last_err)
+    }
+}
