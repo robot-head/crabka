@@ -59,7 +59,7 @@ mod types;
 mod wire;
 
 pub use config::{BootstrapMode, ControllerConfig};
-pub use controller::{Controller, ControllerHandle, QuorumState, SnapshotSlice};
+pub use controller::{Controller, ControllerHandle, QuorumState, SnapshotRange, SnapshotSlice};
 pub use error::RaftError;
 pub use handshake::{DuplexStream, RaftHandshakeError, RaftListenerHandshake};
 pub use network::OutboundDialer;

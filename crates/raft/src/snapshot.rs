@@ -5,8 +5,6 @@
 //! `RecordBatch`es), plus the `persist`/`load_latest` helpers that write
 //! and recover the artifact and its `.meta` sidecar.
 
-#![allow(dead_code)]
-
 use std::path::Path;
 
 use bytes::{BufMut, Bytes, BytesMut};

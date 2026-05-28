@@ -5,7 +5,8 @@
 //! Cluster formation is driven by `BootstrapMode`: one broker boots as
 //! the singleton voter (`Bootstrap`), remaining fresh brokers skip
 //! `initialize` (`Join`), and restarted brokers replay their on-disk log
-//! (`Rejoin`). Snapshot replay is not implemented.
+//! (`Rejoin`), seeding state from the newest metadata checkpoint when one
+//! exists before replaying the log entries that follow it.
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -71,6 +72,19 @@ pub struct SnapshotSlice {
     pub bytes: bytes::Bytes,
 }
 
+/// Outcome of [`ControllerHandle::read_snapshot_range`]. The broker's
+/// `FetchSnapshot` handler maps each variant to its Kafka error code:
+/// `NoSnapshot` → `SNAPSHOT_NOT_FOUND`, `OutOfRange` → `POSITION_OUT_OF_RANGE`.
+pub enum SnapshotRange {
+    /// No `.checkpoint` exists yet.
+    NoSnapshot,
+    /// `position` is strictly past the snapshot's end byte. A `position`
+    /// exactly at the end is valid and yields an empty `Slice`.
+    OutOfRange,
+    /// The requested byte window.
+    Slice(SnapshotSlice),
+}
+
 /// Handle returned by [`Controller::start`]. Carries the live openraft
 /// node, the state machine, a leader-id watcher, and the background task
 /// join handles. Drop is NOT a clean shutdown — call [`Self::shutdown`]
@@ -132,16 +146,22 @@ impl ControllerHandle {
     }
 
     /// Read up to `max_bytes` of the latest metadata snapshot starting at
-    /// `position`. `None` when no snapshot exists.
+    /// `position`.
     #[must_use]
-    pub fn read_snapshot_range(&self, position: i64, max_bytes: i32) -> Option<SnapshotSlice> {
-        let (id, bytes, _meta) = crate::snapshot::load_latest(&self.snapshot_dir)
+    pub fn read_snapshot_range(&self, position: i64, max_bytes: i32) -> SnapshotRange {
+        let Some((id, bytes, _meta)) = crate::snapshot::load_latest(&self.snapshot_dir)
             .ok()
-            .flatten()?;
+            .flatten()
+        else {
+            return SnapshotRange::NoSnapshot;
+        };
         let pos = usize::try_from(position.max(0)).unwrap_or(0);
+        if pos > bytes.len() {
+            return SnapshotRange::OutOfRange;
+        }
         let max = usize::try_from(max_bytes.max(0)).unwrap_or(0);
         let slice = crate::snapshot::SnapshotReader::byte_range(&bytes, pos, max);
-        Some(SnapshotSlice {
+        SnapshotRange::Slice(SnapshotSlice {
             end_offset: id.end_offset,
             epoch: id.epoch,
             total_size: i64::try_from(bytes.len()).unwrap_or(i64::MAX),
@@ -208,11 +228,11 @@ impl ControllerHandle {
 
     /// Manually trigger a metadata snapshot on this node. openraft's
     /// snapshot policy is [`SnapshotPolicy::Never`], so checkpoints are
-    /// only ever produced through this path (a later slice owns the
-    /// Kafka-faithful trigger heuristics). Returns once openraft has
-    /// accepted the request; the build runs asynchronously in the
-    /// engine. After the build completes openraft purges the log behind
-    /// the snapshot (we keep zero in-snapshot logs).
+    /// produced either through this path or the config-driven background
+    /// trigger task. Returns once openraft has accepted the request; the
+    /// build runs asynchronously in the engine. After the build completes
+    /// openraft purges the log behind the snapshot (we keep zero
+    /// in-snapshot logs).
     ///
     /// # Errors
     ///
@@ -684,11 +704,11 @@ impl Controller {
             election_timeout_max: election_max,
             heartbeat_interval: heartbeat,
             install_snapshot_timeout: 5_000,
-            // Never auto-snapshot — a later slice owns the Kafka-faithful
-            // trigger heuristics; checkpoints come only via
-            // `ControllerHandle::trigger_snapshot`. Keep zero in-snapshot
-            // logs so a completed snapshot immediately drives `purge`,
-            // compacting the metadata log behind the checkpoint.
+            // Never auto-snapshot — Crabka drives checkpoints itself via
+            // `trigger_snapshot` and the config-driven background trigger
+            // task. Keep zero in-snapshot logs so a completed snapshot
+            // immediately drives `purge`, compacting the metadata log
+            // behind the checkpoint.
             snapshot_policy: openraft::SnapshotPolicy::Never,
             max_in_snapshot_log_to_keep: 0,
             ..Default::default()

@@ -24,7 +24,7 @@ use crabka_protocol::owned::fetch_snapshot_response::{
 };
 use crabka_protocol::records::RecordsPayload;
 use crabka_protocol::{Decode, Encode};
-use crabka_raft::SnapshotSlice;
+use crabka_raft::SnapshotRange;
 
 use crate::broker::Broker;
 use crate::codes;
@@ -33,6 +33,21 @@ use crate::error::BrokerError;
 /// The single Kafka-side topic name that represents the `KRaft` metadata
 /// log. Mirrors `org.apache.kafka.common.Topic.CLUSTER_METADATA_TOPIC_NAME`.
 const CLUSTER_METADATA_TOPIC: &str = "__cluster_metadata";
+
+/// An error-carrying partition entry: every field zeroed except `index`
+/// and `error_code`.
+fn err_partition(index: i32, error_code: i16) -> PartitionSnapshot {
+    PartitionSnapshot {
+        index,
+        error_code,
+        snapshot_id: SnapshotId::default(),
+        size: 0,
+        position: 0,
+        unaligned_records: RecordsPayload::default(),
+        current_leader: LeaderIdAndEpoch::default(),
+        ..Default::default()
+    }
+}
 
 pub(crate) fn handle(
     broker: &Broker,
@@ -62,7 +77,7 @@ pub(crate) fn handle(
 fn build_response(
     local_cluster_id: uuid::Uuid,
     req: &FetchSnapshotRequest,
-    resolve: &dyn Fn(i64, i32) -> Option<SnapshotSlice>,
+    resolve: &dyn Fn(i64, i32) -> SnapshotRange,
 ) -> FetchSnapshotResponse {
     if let Some(s) = req.cluster_id.as_deref()
         && s != local_cluster_id.to_string()
@@ -86,29 +101,12 @@ fn build_response(
                 .iter()
                 .map(|part| {
                     if !is_metadata || part.partition != 0 {
-                        return PartitionSnapshot {
-                            index: part.partition,
-                            error_code: codes::INVALID_TOPIC_EXCEPTION,
-                            snapshot_id: SnapshotId::default(),
-                            size: 0,
-                            position: 0,
-                            unaligned_records: RecordsPayload::default(),
-                            current_leader: LeaderIdAndEpoch::default(),
-                            ..Default::default()
-                        };
+                        return err_partition(part.partition, codes::INVALID_TOPIC_EXCEPTION);
                     }
                     match resolve(part.position, req.max_bytes) {
-                        None => PartitionSnapshot {
-                            index: 0,
-                            error_code: codes::SNAPSHOT_NOT_FOUND,
-                            snapshot_id: SnapshotId::default(),
-                            size: 0,
-                            position: 0,
-                            unaligned_records: RecordsPayload::default(),
-                            current_leader: LeaderIdAndEpoch::default(),
-                            ..Default::default()
-                        },
-                        Some(slice) => PartitionSnapshot {
+                        SnapshotRange::NoSnapshot => err_partition(0, codes::SNAPSHOT_NOT_FOUND),
+                        SnapshotRange::OutOfRange => err_partition(0, codes::POSITION_OUT_OF_RANGE),
+                        SnapshotRange::Slice(slice) => PartitionSnapshot {
                             index: 0,
                             error_code: codes::NONE,
                             snapshot_id: SnapshotId {
@@ -145,6 +143,7 @@ fn build_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crabka_raft::SnapshotSlice;
 
     #[test]
     fn build_response_serves_requested_range() {
@@ -176,7 +175,7 @@ mod tests {
             ..Default::default()
         };
         let resolve = |_pos: i64, _max: i32| {
-            Some(SnapshotSlice {
+            SnapshotRange::Slice(SnapshotSlice {
                 end_offset: 6,
                 epoch: 1,
                 total_size: 100,
@@ -225,9 +224,38 @@ mod tests {
             cluster_id: Some("different".into()),
             ..Default::default()
         };
-        let resolve = |_pos: i64, _max: i32| None;
+        let resolve = |_pos: i64, _max: i32| SnapshotRange::NoSnapshot;
         let resp = build_response(cid, &req, &resolve);
         assert_eq!(resp.error_code, codes::INCONSISTENT_CLUSTER_ID);
         assert!(resp.topics.is_empty());
+    }
+
+    #[test]
+    fn build_response_position_past_end_returns_out_of_range() {
+        use crabka_protocol::owned::fetch_snapshot_request::{
+            FetchSnapshotRequest, PartitionSnapshot as ReqPartition, TopicSnapshot as ReqTopic,
+        };
+        use uuid::Uuid;
+        let cid = Uuid::from_u128(7);
+        let req = FetchSnapshotRequest {
+            replica_id: -1,
+            max_bytes: 1024,
+            topics: vec![ReqTopic {
+                name: CLUSTER_METADATA_TOPIC.into(),
+                partitions: vec![ReqPartition {
+                    partition: 0,
+                    position: 9_999,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            cluster_id: None,
+            ..Default::default()
+        };
+        let resolve = |_pos: i64, _max: i32| SnapshotRange::OutOfRange;
+        let resp = build_response(cid, &req, &resolve);
+        let part = &resp.topics[0].partitions[0];
+        assert_eq!(resp.error_code, codes::NONE);
+        assert_eq!(part.error_code, codes::POSITION_OUT_OF_RANGE);
     }
 }

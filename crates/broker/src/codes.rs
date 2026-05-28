@@ -219,10 +219,8 @@ pub const DELEGATION_TOKEN_EXPIRED: i16 = 66;
 /// `SNAPSHOT_NOT_FOUND` (98) — the requested `__cluster_metadata` snapshot
 /// does not exist (the controller has not generated one yet).
 pub const SNAPSHOT_NOT_FOUND: i16 = 98;
-/// `POSITION_OUT_OF_RANGE` (99) — reserved for a strict snapshot-position
-/// bounds check; `read_snapshot_range` clamps past-EOF reads to an empty
-/// end-of-snapshot page, so the `FetchSnapshot` handler does not emit this.
-#[allow(dead_code)]
+/// `POSITION_OUT_OF_RANGE` (99) — the requested `position` is past the end
+/// of the `__cluster_metadata` snapshot.
 pub const POSITION_OUT_OF_RANGE: i16 = 99;
 /// `INCONSISTENT_CLUSTER_ID` (104) — the request's `cluster_id` does not
 /// match this cluster's id.
