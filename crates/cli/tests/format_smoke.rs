@@ -34,9 +34,11 @@ fn format_with_add_scram_writes_credential_record() {
     assert!(!entries.is_empty(), "format must write something");
     let manifest = std::fs::read_to_string(dir.path().join("bootstrap.json"))
         .expect("bootstrap.json must exist");
+    // KIP-853 format seeds an initial `kraft.version`/VotersRecord, so the
+    // SCRAM credential is the second record.
     assert!(
-        manifest.contains("\"record_count\": 1"),
-        "manifest must list one seed record, got: {manifest}",
+        manifest.contains("\"record_count\": 2"),
+        "manifest must list the KIP-853 seed record + one SCRAM record, got: {manifest}",
     );
     assert!(
         manifest.contains("cluster_id"),
