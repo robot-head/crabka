@@ -87,6 +87,19 @@ pub struct BrokerMetrics {
     /// counters are `u64`.
     pub partition_cpu_micros: Family<PartitionLabel, Counter>,
     pub partitions_led: Gauge,
+    /// Slice 8b: total number of partitions (leader + follower
+    /// replicas) this broker hosts. Mirrors Kafka's
+    /// `ReplicaManager.PartitionCount`. Sampled in the same per-second
+    /// tick as `partitions_led`.
+    pub partitions_total: Gauge,
+    /// Slice 8b: count of partitions this broker leads whose ISR is
+    /// smaller than the assigned replica set — Kafka's
+    /// `ReplicaManager.UnderReplicatedPartitions`. Sampled by reading
+    /// the current `MetadataImage` and matching partitions where this
+    /// broker is the leader. Operators alert on
+    /// `under_replicated_partitions > 0` to spot stuck followers
+    /// before they fail an unclean election.
+    pub under_replicated_partitions: Gauge,
     pub active_controller: Gauge,
     pub isr_shrinks_total: Counter,
     pub isr_expands_total: Counter,
@@ -158,6 +171,8 @@ impl BrokerMetrics {
         let partition_disk_bytes: Family<PartitionLabel, Gauge> = Family::default();
         let partition_cpu_micros: Family<PartitionLabel, Counter> = Family::default();
         let partitions_led = Gauge::default();
+        let partitions_total = Gauge::default();
+        let under_replicated_partitions = Gauge::default();
         let active_controller = Gauge::default();
         let isr_shrinks_total = Counter::default();
         let isr_expands_total = Counter::default();
@@ -197,6 +212,22 @@ impl BrokerMetrics {
             "partitions_led",
             "Number of partitions for which this broker is currently leader.",
             partitions_led.clone(),
+        );
+        registry.register(
+            "partitions_total",
+            "Slice 8b: total number of partitions (leader + follower \
+             replicas) this broker hosts. Mirrors Kafka's \
+             ReplicaManager.PartitionCount.",
+            partitions_total.clone(),
+        );
+        registry.register(
+            "under_replicated_partitions",
+            "Slice 8b: count of partitions this broker leads whose ISR \
+             is smaller than the assigned replica set. Mirrors Kafka's \
+             ReplicaManager.UnderReplicatedPartitions; alert on > 0 \
+             to spot stuck followers before they fail an unclean \
+             election.",
+            under_replicated_partitions.clone(),
         );
         registry.register(
             "active_controller",
@@ -340,6 +371,8 @@ impl BrokerMetrics {
             partition_disk_bytes,
             partition_cpu_micros,
             partitions_led,
+            partitions_total,
+            under_replicated_partitions,
             active_controller,
             isr_shrinks_total,
             isr_expands_total,
@@ -519,6 +552,8 @@ mod tests {
             })
             .set(42);
         m.partitions_led.set(7);
+        m.partitions_total.set(42);
+        m.under_replicated_partitions.set(3);
         m.active_controller.set(1);
         m.isr_shrinks_total.inc();
         m.isr_expands_total.inc_by(2);
@@ -533,6 +568,8 @@ mod tests {
             "crabka_broker_topic_produce_requests_total",
             "crabka_broker_topic_fetch_requests_total",
             "crabka_broker_partitions_led",
+            "crabka_broker_partitions_total",
+            "crabka_broker_under_replicated_partitions",
             "crabka_broker_active_controller",
             "crabka_broker_isr_shrinks_total",
             "crabka_broker_isr_expands_total",
