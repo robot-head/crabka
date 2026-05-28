@@ -1,6 +1,6 @@
 //! Broker-only metadata observer (Component B).
 //!
-//! A broker-only KRaft node is not an openraft voter — it keeps its
+//! A broker-only `KRaft` node is not an openraft voter — it keeps its
 //! `MetadataImage` current by *fetching* the committed `__cluster_metadata`
 //! log from the controller quorum over `API_KEY_METADATA_FETCH`, decoding
 //! each record batch through the `crabka_metadata` Kafka-record bridge, and
@@ -199,24 +199,21 @@ async fn run_loop(
             () = shutdown.cancelled() => return,
             r = fetch_once(&config, addr, target, fetch_offset, &observer.image) => r,
         };
-        match result {
-            Some(new_offset) => {
-                let _ = observer.leader.send_replace(Some(target));
-                if new_offset == fetch_offset {
-                    tokio::select! {
-                        () = shutdown.cancelled() => return,
-                        () = tokio::time::sleep(config.poll_interval) => {}
-                    }
-                } else {
-                    fetch_offset = new_offset;
-                }
-            }
-            None => {
-                target_idx = target_idx.wrapping_add(1);
+        if let Some(new_offset) = result {
+            let _ = observer.leader.send_replace(Some(target));
+            if new_offset == fetch_offset {
                 tokio::select! {
                     () = shutdown.cancelled() => return,
                     () = tokio::time::sleep(config.poll_interval) => {}
                 }
+            } else {
+                fetch_offset = new_offset;
+            }
+        } else {
+            target_idx = target_idx.wrapping_add(1);
+            tokio::select! {
+                () = shutdown.cancelled() => return,
+                () = tokio::time::sleep(config.poll_interval) => {}
             }
         }
     }
@@ -267,9 +264,10 @@ mod tests {
             if img_rx.borrow().topic("observed").is_some() {
                 break;
             }
-            if tokio::time::Instant::now() > deadline {
-                panic!("observer did not replicate topic within 5s");
-            }
+            assert!(
+                tokio::time::Instant::now() <= deadline,
+                "observer did not replicate topic within 5s"
+            );
             let _ = tokio::time::timeout(Duration::from_millis(200), img_rx.changed()).await;
         }
 

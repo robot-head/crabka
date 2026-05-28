@@ -767,10 +767,10 @@ mod bootstrap_mode_tests {
         while !buf.is_empty() {
             let batch = RecordBatch::decode(&mut buf).expect("decode");
             for r in &batch.records {
-                if let Ok(MetadataRecord::V1Topic(t)) = from_kafka_record(r) {
-                    if t.name == "t" {
-                        found = true;
-                    }
+                if let Ok(MetadataRecord::V1Topic(t)) = from_kafka_record(r)
+                    && t.name == "t"
+                {
+                    found = true;
                 }
             }
         }
@@ -818,10 +818,10 @@ mod bootstrap_mode_tests {
         while !buf.is_empty() {
             let batch = RecordBatch::decode(&mut buf).expect("decode");
             for r in &batch.records {
-                if let Ok(MetadataRecord::V1Topic(t)) = from_kafka_record(r) {
-                    if t.name == "fetched" {
-                        found = true;
-                    }
+                if let Ok(MetadataRecord::V1Topic(t)) = from_kafka_record(r)
+                    && t.name == "fetched"
+                {
+                    found = true;
                 }
             }
         }
