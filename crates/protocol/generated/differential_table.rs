@@ -326,6 +326,8 @@ pub const CASES: &[Case] = &[
     Case { name: "FindCoordinatorResponse", api_key: 10, version: 4, kind: Kind::Response },
     Case { name: "FindCoordinatorResponse", api_key: 10, version: 5, kind: Kind::Response },
     Case { name: "FindCoordinatorResponse", api_key: 10, version: 6, kind: Kind::Response },
+    Case { name: "GetReplicaLogInfoRequest", api_key: 93, version: 0, kind: Kind::Request },
+    Case { name: "GetReplicaLogInfoResponse", api_key: 93, version: 0, kind: Kind::Response },
     Case { name: "GetTelemetrySubscriptionsRequest", api_key: 71, version: 0, kind: Kind::Request },
     Case { name: "GetTelemetrySubscriptionsResponse", api_key: 71, version: 0, kind: Kind::Response },
     Case { name: "HeartbeatRequest", api_key: 12, version: 0, kind: Kind::Request },
@@ -1230,6 +1232,18 @@ pub fn encode_default(name: &str, version: i16) -> Vec<u8> {
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
         }
+        "GetReplicaLogInfoRequest" => {
+            let msg = crabka_protocol::owned::get_replica_log_info_request::GetReplicaLogInfoRequest::default();
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "GetReplicaLogInfoResponse" => {
+            let msg = crabka_protocol::owned::get_replica_log_info_response::GetReplicaLogInfoResponse::default();
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
         "GetTelemetrySubscriptionsRequest" => {
             let msg = crabka_protocol::owned::get_telemetry_subscriptions_request::GetTelemetrySubscriptionsRequest::default();
             let mut buf = BytesMut::new();
@@ -1818,6 +1832,8 @@ pub fn default_json_for(name: &str, version: i16) -> ::serde_json::Value {
         "FetchSnapshotResponse" => crabka_protocol::owned::fetch_snapshot_response::default_json(version),
         "FindCoordinatorRequest" => crabka_protocol::owned::find_coordinator_request::default_json(version),
         "FindCoordinatorResponse" => crabka_protocol::owned::find_coordinator_response::default_json(version),
+        "GetReplicaLogInfoRequest" => crabka_protocol::owned::get_replica_log_info_request::default_json(version),
+        "GetReplicaLogInfoResponse" => crabka_protocol::owned::get_replica_log_info_response::default_json(version),
         "GetTelemetrySubscriptionsRequest" => crabka_protocol::owned::get_telemetry_subscriptions_request::default_json(version),
         "GetTelemetrySubscriptionsResponse" => crabka_protocol::owned::get_telemetry_subscriptions_response::default_json(version),
         "HeartbeatRequest" => crabka_protocol::owned::heartbeat_request::default_json(version),

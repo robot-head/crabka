@@ -191,6 +191,8 @@ pub enum ApiKey {
     AlterShareGroupOffsets = 91,
     /// `DeleteShareGroupOffsetsRequest` (versions 0–0).
     DeleteShareGroupOffsets = 92,
+    /// `GetReplicaLogInfoRequest` (versions 0–0).
+    GetReplicaLogInfo = 93,
 }
 
 impl ApiKey {
@@ -285,6 +287,7 @@ impl ApiKey {
         ApiKey::DescribeShareGroupOffsets,
         ApiKey::AlterShareGroupOffsets,
         ApiKey::DeleteShareGroupOffsets,
+        ApiKey::GetReplicaLogInfo,
     ];
 
     /// Resolve from numeric key; returns `None` for unknown keys.
@@ -379,6 +382,7 @@ impl ApiKey {
             90 => Some(ApiKey::DescribeShareGroupOffsets),
             91 => Some(ApiKey::AlterShareGroupOffsets),
             92 => Some(ApiKey::DeleteShareGroupOffsets),
+            93 => Some(ApiKey::GetReplicaLogInfo),
             _ => None,
         }
     }

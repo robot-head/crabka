@@ -107,6 +107,8 @@ pub mod fetch_snapshot_request;
 pub mod fetch_snapshot_response;
 pub mod find_coordinator_request;
 pub mod find_coordinator_response;
+pub mod get_replica_log_info_request;
+pub mod get_replica_log_info_response;
 pub mod get_telemetry_subscriptions_request;
 pub mod get_telemetry_subscriptions_response;
 pub mod heartbeat_request;
