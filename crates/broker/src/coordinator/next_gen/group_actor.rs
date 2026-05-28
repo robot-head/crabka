@@ -148,10 +148,7 @@ fn apply_seed(state: &mut GroupState, seed: super::GroupSeed) {
             client_id: meta.client_id,
             client_host: meta.client_host,
             subscribed_topic_names: sub,
-            // Persisted MemberMetadataValue doesn't carry the regex yet
-            // (slice 64a deferred), so we hydrate with None; the client's
-            // next heartbeat re-supplies it within a few seconds.
-            subscribed_topic_regex: None,
+            subscribed_topic_regex: meta.subscribed_topic_regex,
             server_assignor: meta.server_assignor,
             rebalance_timeout: Duration::from_millis(
                 u64::try_from(meta.rebalance_timeout_ms.max(0)).unwrap_or(60_000),
