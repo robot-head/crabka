@@ -163,7 +163,7 @@ pub struct Partition {
     pub log: Arc<Mutex<Log>>,
     pub writer_tx: mpsc::Sender<WriterMessage>,
     pub append_notify: Arc<Notify>,
-    pub replica_state: Arc<tokio::sync::Mutex<ReplicaState>>,
+    pub(crate) replica_state: Arc<tokio::sync::Mutex<ReplicaState>>,
     pub hw_advance_notify: Arc<Notify>,
     /// Current leader's `NodeId` from the metadata image. Atomic for
     /// lock-free reads in the Produce/Fetch hot paths.
@@ -171,8 +171,9 @@ pub struct Partition {
     /// Current `leader_epoch` from the metadata image. Stamped on every
     /// appended batch; validated on every follower Fetch.
     pub current_leader_epoch: Arc<AtomicI32>,
-    /// Held so the writer task is reaped when every Partition handle is
-    /// dropped. Not used directly.
+    /// Held so the writer task is reaped when every `Partition` handle is
+    /// dropped. Not accessed after construction.
+    #[allow(clippy::pub_underscore_fields)]
     pub _writer_handle: Arc<JoinHandle<()>>,
 }
 

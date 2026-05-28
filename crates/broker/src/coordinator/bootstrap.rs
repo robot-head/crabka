@@ -118,9 +118,17 @@ async fn replay_records(
         let mut advanced_to = next;
         for batch in &out.batches {
             for record in &batch.records {
-                if let (Some(key_bytes), Some(value_bytes)) = (&record.key, &record.value) {
-                    let key = persistence::parse_key(key_bytes)?;
-                    apply_record(group_manager, key, value_bytes, batch).await?;
+                let Some(key_bytes) = &record.key else {
+                    continue;
+                };
+                let key = persistence::parse_key(key_bytes)?;
+                match &record.value {
+                    Some(value_bytes) => {
+                        apply_record(group_manager, key, value_bytes, batch).await?;
+                    }
+                    None => {
+                        apply_tombstone(group_manager, key);
+                    }
                 }
             }
             advanced_to = batch.base_offset + i64::from(batch.last_offset_delta) + 1;
@@ -233,6 +241,19 @@ fn apply_next_gen_record(
         }
     }
     Ok(())
+}
+
+/// Apply a tombstone (record with `value = None`) for any key type.
+/// Classic offset-commit tombstones are no-ops during foundation replay
+/// (the classic coordinator's snapshot is rebuilt fresh on restart); we
+/// only need to honor next-gen tombstones so leave/eviction semantics
+/// survive a broker restart.
+fn apply_tombstone(group_manager: &GroupManager, key: Key) {
+    if let Key::NextGen(ng_key) = key
+        && let Some(ng_coord) = group_manager.next_gen().cloned()
+    {
+        ng_coord.replay_next_gen_tombstone(&ng_key);
+    }
 }
 
 fn apply_group_metadata(g: &mut Group, v: GroupMetadataValue, replay_timestamp_ms: i64) {
