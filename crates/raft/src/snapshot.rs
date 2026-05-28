@@ -170,7 +170,7 @@ impl SnapshotReader {
     /// Return the `[position, position + max)` slice of `bytes`, clamped
     /// to the buffer length. A `position` at or past EOF yields an empty
     /// slice. Used to serve `FetchSnapshot` byte-range requests (KIP-595
-    /// §FetchSnapshot).
+    /// §`FetchSnapshot`).
     pub(crate) fn byte_range(bytes: &[u8], position: usize, max: usize) -> &[u8] {
         let start = position.min(bytes.len());
         let end = start.saturating_add(max).min(bytes.len());
@@ -220,5 +220,16 @@ mod tests {
         let records = SnapshotReader::read_records(&bytes).unwrap();
         assert!(records.is_empty());
         assert_eq!(MetadataImage::from_records(cid, &records), image);
+    }
+
+    #[test]
+    fn byte_range_returns_expected_slice() {
+        let buf: Vec<u8> = (0u8..=255).collect();
+        // In-range read.
+        assert_eq!(SnapshotReader::byte_range(&buf, 10, 5), &buf[10..15]);
+        // Position past EOF → empty.
+        assert!(SnapshotReader::byte_range(&buf, 1000, 5).is_empty());
+        // Length clamps to buffer end.
+        assert_eq!(SnapshotReader::byte_range(&buf, 250, 100), &buf[250..]);
     }
 }
