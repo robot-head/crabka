@@ -196,11 +196,19 @@ pub(crate) async fn handle(
                     .iter()
                     .map(|&r| i32::try_from(r).unwrap_or(i32::MAX))
                     .collect(),
-                // ELR / last-known-ELR / offline are reported as null/empty
-                // in the in-process broker; the operator-visible signal
-                // for these lives on AlterPartitionReassignments.
-                eligible_leader_replicas: None,
-                last_known_elr: None,
+                // ELR / last-known-ELR: the schema marks both
+                // `nullableVersions: 0+` and `default: null`, but the
+                // Kafka 3.8 admin client's
+                // `DescribeTopicPartitionsResponse.partitionToTopicPartitionInfo`
+                // calls `.stream()` on the decoded list without a null
+                // guard — i.e. a null value NPEs the client. Real
+                // Kafka brokers emit empty lists rather than null;
+                // mirror that to stay compatible. (See
+                // `kt-describe` failure in
+                // PR #241: "Cannot invoke java.util.List.stream() because
+                // the return value of …eligibleLeaderReplicas() is null".)
+                eligible_leader_replicas: Some(Vec::new()),
+                last_known_elr: Some(Vec::new()),
                 offline_replicas: Vec::new(),
                 ..Default::default()
             });

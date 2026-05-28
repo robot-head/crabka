@@ -219,6 +219,49 @@ async fn internal_topics_carry_is_internal_flag() {
     p.broker.shutdown().await;
 }
 
+/// JVM 3.8 admin client NPEs (in
+/// `DescribeTopicPartitionsResponse.partitionToTopicPartitionInfo`) when
+/// `eligibleLeaderReplicas` or `lastKnownElr` decode as `null`. The
+/// schema marks both nullable, but real Kafka brokers always emit empty
+/// lists. Pin the empty-list shape so we don't regress.
+#[tokio::test]
+async fn elr_lists_are_empty_not_null_for_jvm_3_8_admin_compatibility() {
+    let p = support::start().await;
+    create_topic(&p, "t", 1).await;
+
+    let resp = p
+        .client
+        .send(DescribeTopicPartitionsRequest {
+            topics: vec![TopicRequest {
+                name: "t".into(),
+                ..Default::default()
+            }],
+            response_partition_limit: 2000,
+            cursor: None,
+            ..Default::default()
+        })
+        .await
+        .expect("DescribeTopicPartitions");
+
+    assert_eq!(resp.topics.len(), 1);
+    assert_eq!(resp.topics[0].partitions.len(), 1);
+    let part = &resp.topics[0].partitions[0];
+    // MUST be Some(_), not None. Both fields stay as empty vecs so the
+    // JVM 3.8 admin client's unconditional `.stream()` call doesn't NPE.
+    assert_eq!(
+        part.eligible_leader_replicas.as_deref(),
+        Some(&[][..]),
+        "eligible_leader_replicas must be empty list, not null",
+    );
+    assert_eq!(
+        part.last_known_elr.as_deref(),
+        Some(&[][..]),
+        "last_known_elr must be empty list, not null",
+    );
+
+    p.broker.shutdown().await;
+}
+
 #[tokio::test]
 async fn topic_authorized_operations_populated_for_super_user() {
     let p = support::start().await;
