@@ -4187,3 +4187,88 @@ introspection metadata).
   - Other group-coordination request shapes (`Heartbeat`, `LeaveGroup`,
     `OffsetCommit`, `OffsetFetch`) don't carry protocol fields per
     the JVM schemas; KIP-559's scope is exactly the three covered here.
+
+## Slice — DescribeTopicPartitions admin API (KIP-966) (2026-05-28)
+
+- **Goal.** Land the paginated topic-+-partition admin API the JVM
+  admin client uses for `kafka-topics --describe` against Kafka 3.7+
+  brokers. The handler had been dark — the schemas were vendored and
+  the codegen produced the request/response types, but no handler
+  existed and `api_key=75` wasn't advertised on `ApiVersions`. Adds
+  the row to the README KIPs table as ✅.
+- **Handler.** New `crates/broker/src/handlers/describe_topic_partitions.rs`:
+  - **Topic selection.** Empty `topics` → fetch-all in alphabetical
+    order (deterministic for pagination + matches JVM iteration).
+    Non-empty → exactly those, in request order. Unknown names in a
+    named request surface as `UNKNOWN_TOPIC_OR_PARTITION (3)` rows.
+  - **ACL.** Per-topic `Describe` on `Topic(name)` via the existing
+    `authorize_topics` batch helper. Deny on a *named* request →
+    `TOPIC_AUTHORIZATION_FAILED (29)` row; Deny on *fetch-all* →
+    silent omit (matches Metadata-fetch-all so the broker doesn't
+    leak existence to unauthorized principals).
+  - **Pagination.** Honors `response_partition_limit` (default 2000)
+    by walking topics in order and emitting partition rows until the
+    budget is exhausted. When the budget runs out mid-topic, emits
+    `next_cursor = (topic_name, partition_index)` so the JVM admin
+    can resume. The request's `cursor` is honored on the way in:
+    topics strictly before the cursor's topic are skipped; the
+    cursor's `partition_index` skips the leading partitions on the
+    resume-topic only (subsequent topics in the same response start
+    at partition 0).
+  - **`is_internal` flag.** True for the three internal topics
+    (`__consumer_offsets`, `__transaction_state`,
+    `__remote_log_metadata`); helper guards against accidental
+    prefix matches like `__consumer_offsets-2`.
+  - **KIP-430 reuse.** Every Allow row's `topic_authorized_operations`
+    is populated via the existing
+    `handlers::authorized_operations::authorized_operations_bits`
+    helper — the v0 schema always encodes the bitfield (no opt-in
+    flag, unlike Metadata), so it's always populated on success.
+- **Dispatch.** Inline-intercept block in `network::dispatch::run_session`
+  for `api_key == 75`, plus a `handle_describe_topic_partitions_frame`
+  helper that builds the `RequestContext` (principal + peer + client_id)
+  the handler needs for ACL evaluation. Mirrors the
+  `handle_describe_cluster_frame` shape.
+- **ApiVersions.** `supported_apis()` advertises
+  `describe_topic_partitions_request` at v0-v0 (the only valid version
+  per the upstream schema). `handler_body_flexible` returns true for
+  api_key 75 since the schema is `flexibleVersions: 0+`.
+- **Tests.**
+  - 1 unit test (`is_internal_topic_matches_known_internal_names`)
+    covering the three internal names + the no-accidental-prefix
+    guard.
+  - 6 integration tests in `tests/describe_topic_partitions.rs`:
+    - `named_request_returns_listed_topics_with_partitions` —
+      basic request-order preservation + per-partition fields.
+    - `fetch_all_returns_topics_in_alphabetical_order` — creates
+      topics out-of-order, asserts the response sorts.
+    - `unknown_topic_in_named_request_returns_error_row` —
+      `UNKNOWN_TOPIC_OR_PARTITION` on the unknown row, sibling
+      served on the same response.
+    - `internal_topics_carry_is_internal_flag` — internal topics
+      flagged, user-created topics not.
+    - `topic_authorized_operations_populated_for_super_user` —
+      `AllowAllAuthorizer` driver sees the full topic mask
+      (8|16|32|64|128|256|1024|2048) on every Allow row.
+    - `pagination_caps_response_at_partition_limit_and_returns_next_cursor`
+      — 5-partition topic with `response_partition_limit = 3`
+      returns 3 partitions + `next_cursor = (topic, 3)`. Resuming
+      from that cursor returns partitions 3+4 only and no
+      further cursor.
+- **README.** New KIP-966 row added as ✅ in the protocol-features
+  KIP table.
+- **Workspace fmt + `clippy -p crabka-broker --all-targets -- -D warnings`
+  + broker lib (581 tests) + new `describe_topic_partitions` (6 tests) +
+  regression sweep of `unit`, `acl_handlers`, `admin_handlers`,
+  `authorized_operations`, `client_software_versions`,
+  `kip559_l7_proxy_fields`** — all green.
+- **Out of scope.**
+  - `EligibleLeaderReplicas` / `LastKnownElr` / `OfflineReplicas` are
+    emitted as null/empty. The broker doesn't track ELR (KIP-966's
+    sibling KIP — that's the "ELR" half of KIP-966, separate from
+    this admin API). When KIP-966 ELR support lands, only the row
+    builder needs to fill these in from the partition's stored ELR.
+  - The JVM admin's auto-fan-out across multiple `DescribeTopicPartitions`
+    calls (when one response truncates) is the client's job; the
+    broker just emits a cursor and lets the client keep asking. No
+    broker change needed.
