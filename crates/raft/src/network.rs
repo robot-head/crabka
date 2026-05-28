@@ -1,8 +1,8 @@
 //! openraft `RaftNetwork` over Kafka TCP framing using the existing
 //! `crabka-client-core::Connection`. One cached connection per peer.
 //!
-//! Slice-7 wire shape: `RequestHeader v2` (flexible) carries a Crabka-
-//! private api key (1000 = `AppendEntries`, 1001 = `Vote`) at version 0.
+//! Wire shape: `RequestHeader v2` (flexible) carries a Crabka-private
+//! api key (1000 = `AppendEntries`, 1001 = `Vote`) at version 0.
 //! Bodies are encoded by [`crate::wire`] and travel as opaque bytes
 //! through [`crabka_client_core::Connection::raw_request`]. The response
 //! body decodes back into the openraft response types.
@@ -11,24 +11,22 @@
 //! prefixed `Crabka` to avoid colliding with the openraft trait names
 //! when both are imported into the same scope.
 //!
-//! Slice-7 scope:
+//! Scope:
 //!
 //! - `AppendEntries`: full Raft semantics, except the `Conflict` /
 //!   `PartialSuccess` paths collapse onto `HigherVote` for now — the
 //!   v0 response codec only carries `success/term/last_log_index`, which
-//!   is enough to make progress in a healthy 3-node quorum. Task 13's
-//!   smoke test runs against three local nodes with no network faults,
-//!   so the simpler decoding is acceptable.
+//!   is enough to make progress in a healthy 3-node quorum with no
+//!   network faults, so the simpler decoding is acceptable.
 //! - `Vote`: full semantics with the caveat that the peer's
 //!   `last_log_id` is not returned (the v0 response carries only
 //!   `vote_granted` + `term`).
-//! - `InstallSnapshot`: not used — snapshots are deferred per
+//! - `InstallSnapshot`: not used — snapshots are not implemented per
 //!   `state_machine.rs`. The trait method falls through to openraft's
 //!   default error.
 //!
-//! These limitations are intentional for slice 7; later slices can
-//! evolve `wire::Crabka*Response` without breaking the
-//! `RaftNetworkFactory` interface.
+//! These limitations are intentional; the `wire::Crabka*Response` types
+//! can evolve without breaking the `RaftNetworkFactory` interface.
 
 #![allow(dead_code)]
 
@@ -57,7 +55,7 @@ use crate::types::{Node, NodeId, TypeConfig};
 /// `InterBrokerClient` (TLS + SASL) and injects it via
 /// [`ControllerConfig::dialer`]. When no dialer is injected, the
 /// factory falls back to a plain `Connection::connect(addr)` — the
-/// legacy PLAINTEXT path used by every pre-slice-12 test.
+/// PLAINTEXT path used when no TLS/SASL dialer is injected.
 #[async_trait::async_trait]
 pub trait OutboundDialer: Send + Sync {
     /// Open a `Connection` to the raft peer at `target` reachable on
@@ -187,12 +185,12 @@ impl openraft::network::RaftNetwork<TypeConfig> for CrabkaRaftNetworkConn {
         decode_append_entries_resp(&resp_body, &rpc).map_err(|e| map_encode_err(&e))
     }
 
-    /// Snapshots are deferred in slice 7. The state machine's snapshot
+    /// Snapshots are not implemented. The state machine's snapshot
     /// methods return `Unsupported`, so openraft falls back to plain
     /// append-entries replication. If the engine still calls this — e.g.,
     /// to ship an explicit snapshot for a far-behind follower — we
     /// surface a `Network` error so it logs + retries; in practice this
-    /// path stays cold since metadata logs are small in slice 7.
+    /// path stays cold since metadata logs are small.
     async fn install_snapshot(
         &mut self,
         _rpc: InstallSnapshotRequest<TypeConfig>,
@@ -203,7 +201,7 @@ impl openraft::network::RaftNetwork<TypeConfig> for CrabkaRaftNetworkConn {
     > {
         let err = std::io::Error::new(
             std::io::ErrorKind::Unsupported,
-            "install_snapshot is deferred in slice 7",
+            "install_snapshot is not implemented",
         );
         Err(RPCError::Network(NetworkError::new(&err)))
     }
@@ -303,7 +301,7 @@ fn encode_append_entries(rpc: &AppendEntriesRequest<TypeConfig>) -> Result<Bytes
 
 /// Decode an `AppendEntriesResponse`.
 ///
-/// Slice-7 mapping (see module doc for context):
+/// Response mapping (see module doc for context):
 ///
 /// - `success == true` => `Success`.
 /// - `success == false` and `resp.term > req_vote.term` => `HigherVote`

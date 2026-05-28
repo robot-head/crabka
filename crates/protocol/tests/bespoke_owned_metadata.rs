@@ -1,6 +1,6 @@
 // Bespoke tests for the owned Metadata wrappers that verify specific semantic
 // behaviour (e.g. None-topics encoding quirk at v0). Relocated from
-// hand-written wrappers (sub-plan 1d, Task 1).
+// hand-written wrappers.
 
 use bytes::BytesMut;
 use crabka_protocol::owned::metadata_request::{MAX_VERSION, MIN_VERSION, MetadataRequest};

@@ -21,7 +21,7 @@ pub(crate) struct Config {
     pub replica_lag_time_max: Duration,
     pub broker_id: i32,
     pub shutdown: CancellationToken,
-    /// Slice 39: bumped on each proposed shrink / expand.
+    /// Bumped on each proposed shrink / expand.
     pub metrics: crate::metrics::BrokerMetrics,
 }
 
@@ -50,7 +50,7 @@ pub(crate) async fn run(cfg: Config) {
             else {
                 continue;
             };
-            // Slice 39: classify the proposal as shrink/expand by
+            // Classify the proposal as shrink/expand by
             // comparing membership against the pre-proposal ISR.
             // `compute_proposal` already filtered for "actually
             // changed", so at least one of these bumps fires.

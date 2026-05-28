@@ -1,6 +1,6 @@
 // Bespoke tests for borrowed ApiVersionsRequest: the to_owned conversion test
 // and the specific-values roundtrip. Relocated from the hand-written wrapper
-// (sub-plan 1d, Task 1).
+// wrapper.
 
 use bytes::BytesMut;
 use crabka_protocol::borrowed::api_versions_request::ApiVersionsRequest;

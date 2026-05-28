@@ -10,8 +10,8 @@ use thiserror::Error;
 /// `Required` rejects connections that don't present a cert chaining to
 /// `client_ca_path`. `Optional` requests a cert but still accepts
 /// anonymous handshakes — the dispatch layer is responsible for
-/// surfacing the `Anonymous` outcome to gating logic. `Disabled` is the
-/// pre-slice-29 behaviour: no client cert is requested.
+/// surfacing the `Anonymous` outcome to gating logic. `Disabled` requests
+/// no client cert.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ClientAuthMode {
     /// No client certificate requested. The handshake completes
@@ -35,13 +35,13 @@ pub struct TlsConfig {
     /// inter-broker dialer) to verify server certs. Mirrors Kafka's
     /// `ssl.truststore.location` on the client.
     pub trust_roots_path: Option<PathBuf>,
-    /// Slice 29: PEM file containing the CA(s) used to verify
+    /// PEM file containing the CA(s) used to verify
     /// *incoming* client certs when `client_auth != Disabled`. Mirrors
     /// Kafka's `ssl.client.auth.truststore.location` (operator-supplied
     /// clients CA secret).
     pub client_ca_path: Option<PathBuf>,
-    /// Slice 29: client-cert request mode. Defaults to `Disabled`
-    /// (pre-slice-29 behaviour).
+    /// Client-cert request mode. Defaults to `Disabled`
+    /// (no client cert requested).
     pub client_auth: ClientAuthMode,
 }
 

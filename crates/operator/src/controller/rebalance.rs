@@ -1,4 +1,4 @@
-//! Slice 44: `KafkaRebalance` reconciler.
+//! `KafkaRebalance` reconciler.
 //!
 //! Drives the standalone `crabka-rebalancer` service through its
 //! Connect-RPC API and reflects the proposal lifecycle into the CRD

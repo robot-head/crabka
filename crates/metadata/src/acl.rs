@@ -1,4 +1,4 @@
-//! Slice 13. Wire-stable ACL types replicated through the raft quorum
+//! Wire-stable ACL types replicated through the raft quorum
 //! via `MetadataRecord::V1AccessControlEntry` /
 //! `V1DeleteAccessControlEntry`. Mirrors the shape Kafka exposes on the
 //! `CreateAcls` / `DeleteAcls` / `DescribeAcls` wire messages, but stays

@@ -1,4 +1,4 @@
-//! Slice 12b. `crabka format --add-scram` -> broker bootstrap consumption.
+//! `crabka format --add-scram` -> broker bootstrap consumption.
 //!
 //! Each test either runs the `crabka` CLI to produce a `log_dir` containing
 //! a `bootstrap.records.bin` file, or writes that file directly (for the
@@ -16,10 +16,9 @@
 //! `tests/auth_handlers.rs`. Cargo's integration-test model gives each
 //! `tests/*.rs` file its own crate root — sharing code between two such
 //! files requires either a `tests/common/mod.rs` submodule or a copy.
-//! For a self-contained slice-12b test file that consumes only these two
+//! For a self-contained test file that consumes only these two
 //! helpers, a verbatim copy keeps blast radius small and avoids touching
-//! the (1500+ line) slice-12 auth test file. The plan explicitly
-//! sanctions either approach (see plan task 10, step 1 NOTE).
+//! the (1500+ line) auth test file.
 
 #![cfg(not(target_os = "windows"))]
 
@@ -155,10 +154,10 @@ async fn bootstrap_absent_legacy_path() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// Helpers copied verbatim from `tests/auth_handlers.rs` (slice 12 T14).
+// Helpers copied verbatim from `tests/auth_handlers.rs`.
 // Cargo's integration-test model gives each `tests/*.rs` its own crate
-// root; sharing helpers requires a `tests/common/mod.rs` submodule. Copy
-// is plan-sanctioned for this slice — see file-level docs above.
+// root; sharing helpers requires a `tests/common/mod.rs` submodule. The
+// verbatim copy is intentional — see file-level docs above.
 // ─────────────────────────────────────────────────────────────────────────
 
 /// Drive a complete SASL/SCRAM-SHA-512 session against a `SASL_PLAINTEXT`

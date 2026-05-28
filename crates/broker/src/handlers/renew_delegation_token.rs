@@ -1,4 +1,4 @@
-//! Slice 51 (KIP-48): `RenewDelegationToken` (`api_key` 39).
+//! KIP-48: `RenewDelegationToken` (`api_key` 39).
 //!
 //! Per spec §1.3: caller must be SASL-authenticated; the request's
 //! `hmac` selects an existing token by HMAC bytes; only the owner, a
@@ -9,7 +9,7 @@
 //!
 //! The super-user bypass matches Kafka's `DelegationTokenManager.
 //! isAuthorizedToOperateOnToken` (via `SecurityUtils.isAuthorized`),
-//! and is what slice 51b's operator relies on: the operator is a
+//! and is what the operator relies on: the operator is a
 //! super-user that mints tokens on behalf of `KafkaUser` principals
 //! via act-as, then must be able to renew/expire them despite being
 //! neither the owner nor a listed renewer.
@@ -47,7 +47,7 @@ pub(crate) async fn handle<S: BuildHasher>(
         return err_response(crate::codes::DELEGATION_TOKEN_NOT_FOUND);
     };
 
-    // KIP-48: super-users bypass the owner/renewer gate. Slice 51b's
+    // KIP-48: super-users bypass the owner/renewer gate. The
     // operator-driven issuance flow depends on this — the operator is
     // a super-user that mints tokens via act-as for other principals,
     // so it is neither the owner nor a listed renewer when it later
@@ -355,10 +355,10 @@ mod tests {
         controller.cancel().await;
     }
 
-    /// Slice 51c regression: a super-user caller may renew a token they
+    /// A super-user caller may renew a token they
     /// neither own nor are listed as a renewer on. This mirrors Kafka's
     /// `DelegationTokenManager.isAuthorizedToOperateOnToken` and is the
-    /// load-bearing gate for slice 51b's operator flow — the operator
+    /// load-bearing gate for the operator flow — the operator
     /// is a super-user that act-as-mints tokens on behalf of `KafkaUser`
     /// principals, then must be able to renew them ahead of expiry.
     #[tokio::test]
@@ -407,7 +407,7 @@ mod tests {
         controller.cancel().await;
     }
 
-    /// Slice 51c regression: a non-super-user caller who is also not the
+    /// A non-super-user caller who is also not the
     /// owner and not a listed renewer must still be rejected with
     /// `DELEGATION_TOKEN_OWNER_MISMATCH`. Guards against accidentally
     /// widening the bypass beyond `super_users`.

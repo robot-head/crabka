@@ -1,7 +1,7 @@
-//! Slice 43i: rebalancer state persistence via an internal compacted
-//! topic on the Crabka cluster being managed. Replaces the slice-43b
-//! `{data_dir}/in_flight.json` file. Survives pod restart; prerequisite
-//! for multi-replica HA (slice 43j).
+//! Rebalancer state persistence via an internal compacted topic on the
+//! Crabka cluster being managed. Replaces the file-backed
+//! `{data_dir}/in_flight.json` store. Survives pod restart; prerequisite
+//! for multi-replica HA.
 
 mod error;
 pub mod loader;

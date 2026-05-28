@@ -38,7 +38,7 @@
 //!
 //! ## Out of scope
 //!
-//! - Transactions (slice 9).
+//! - Transactions.
 //! - Persisted producer-state snapshots (broker restart resets sequences).
 //! - Custom partitioner trait — sticky+hash only; `ProducerRecord::partition`
 //!   bypasses the partitioner per record.

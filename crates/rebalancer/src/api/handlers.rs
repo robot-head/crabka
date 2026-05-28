@@ -232,8 +232,7 @@ pub async fn create_proposal(
     Ok(ConnectResponse::new(proposal_to_proto(&out.proposal)))
 }
 
-/// Look up a stored proposal and return summary + estimated cost
-/// (estimated cost is 0 in 43a; slice 43e fills it in).
+/// Look up a stored proposal and return summary + estimated cost.
 pub async fn dry_run_proposal(
     Extension(state): Extension<Arc<AppState>>,
     req: ConnectRequest<pb::DryRunProposalRequest>,

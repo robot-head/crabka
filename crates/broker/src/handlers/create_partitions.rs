@@ -1,5 +1,5 @@
 //! `CreatePartitions` (`api_key=37`). `kafka-topics --alter --partitions
-//! N`. Round-robin replica placement matches the slice-7 `CreateTopics`
+//! N`. Round-robin replica placement matches the `CreateTopics`
 //! path when the caller omits `assignments`; an explicit, validated
 //! `assignments` list (one entry per *new* partition) overrides round-robin
 //! and gets used verbatim — matching the JVM `kafka-topics
@@ -148,7 +148,7 @@ pub(crate) async fn handle(
         })
         .sum();
 
-    // ── slice-13 ACL preamble ────────────────────────────────────────
+    // ── ACL preamble ────────────────────────────────────────
     // Batch-authorize every topic name for `Alter`. Topics that come
     // back `Deny` short-circuit the partition-change loop and emit
     // TOPIC_AUTHORIZATION_FAILED on that topic row.

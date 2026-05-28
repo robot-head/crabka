@@ -33,10 +33,10 @@
 //!
 //! ## Out of scope
 //!
-//! - Producer / consumer semantics (slices 5/6).
-//! - Transactions (slice 9).
+//! - Producer / consumer semantics.
+//! - Transactions.
 //! - Partition-aware routing.
-//! - TLS / SASL (slice 11).
+//! - TLS / SASL.
 //! - Automatic mid-request retry.
 //!
 //! ## Cargo features

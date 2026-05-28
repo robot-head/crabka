@@ -1,4 +1,4 @@
-//! Slice 30: integration tests for inter-broker mTLS rendering
+//! Integration tests for inter-broker mTLS rendering
 //! (broker config-file TLS block + `StatefulSet` mounts + idempotency).
 
 use std::sync::Arc;
@@ -46,7 +46,7 @@ fn kafka_cr(name: &str, namespace: &str) -> Kafka {
 
 // ── test 1: TLS block in broker TOML ─────────────────────────────────────────
 
-/// Slice 30 (T11 test 1): the `ConfigMap` PATCH body must carry a
+/// The `ConfigMap` PATCH body must carry a
 /// `broker-{id}.toml` key for every replica, and each TOML must contain:
 /// - `controller_listener_protocol = "Ssl"`
 /// - `[tls_config]`
@@ -279,7 +279,7 @@ fn pool_reconcile_rules(parent: &str, pool_name: &str, ns: &str) -> Vec<MockRule
     ]
 }
 
-/// Slice 30 (T11 test 3): the `StatefulSet` pod spec must include
+/// The `StatefulSet` pod spec must include
 /// `volumeMounts` for `cluster-ca-cert`, `broker-tls`, and
 /// `clients-ca-cert`, and the corresponding pod `volumes` must reference
 /// the right Secret names: `c1-cluster-ca-cert`, `c1-kafka-brokers`,
@@ -377,7 +377,7 @@ async fn statefulset_mounts_cluster_ca_broker_tls_clients_ca() {
 
 // ── test 4: render is idempotent across reconciles ───────────────────────────
 
-/// Slice 30 (T11 test 4): running reconcile twice with the same spec must
+/// Running reconcile twice with the same spec must
 /// produce byte-identical `broker-0.toml` output. The second reconcile's
 /// GET-Secret calls return the bodies written by the first reconcile (the
 /// mock FIFO state is extended with second-pass rules after first-pass

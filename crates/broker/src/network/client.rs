@@ -2,9 +2,8 @@
 //! optionally runs SASL client handshake. Returns a generic `AsyncRead +
 //! `AsyncWrite` stream the caller uses for normal RPCs.
 //!
-//! Used (in T17) by the replicator's Fetch path, the raft transport's
-//! outbound dial, and the controller-heartbeat loop. T16 only ships the
-//! client itself plus a SASL/PLAIN integration test.
+//! Used by the replicator's Fetch path, the raft transport's
+//! outbound dial, and the controller-heartbeat loop.
 
 use bytes::{Buf, BufMut, BytesMut};
 use crabka_protocol::owned::sasl_authenticate_request::SaslAuthenticateRequest;
@@ -188,7 +187,7 @@ where
             .await
         }
         // OAUTHBEARER inter-broker auth would require an outbound token source;
-        // not supported as an inter-broker mechanism this slice (slice 49).
+        // not supported as an inter-broker mechanism.
         SaslMechanism::OAuthBearer => Err(InterBrokerError::Sasl(
             "OAUTHBEARER is not supported for inter-broker authentication".to_string(),
         )),
@@ -201,7 +200,7 @@ where
 /// Wire framing: `SaslHandshake v1` uses the non-flexible request header
 /// (v1 — no trailing tagged-fields byte) and a non-flexible response
 /// header (v0 — bare `correlation_id`). This matches the server-side
-/// `drive_sasl_plain_session` helper in T13's integration test.
+/// `drive_sasl_plain_session` helper in the integration test.
 async fn send_sasl_handshake<S>(
     stream: &mut S,
     mechanism: SaslMechanism,
@@ -334,14 +333,14 @@ where
 
 // ────────────────────────────────────────────────────────────────────────
 // Framing helpers — Kafka request/response framing on the client side.
-// Mirrors T13's `round_trip` helper in `crates/broker/tests/auth_handlers.rs`.
+// Mirrors the `round_trip` helper in `crates/broker/tests/auth_handlers.rs`.
 // ────────────────────────────────────────────────────────────────────────
 
 /// Build a `RequestHeader v1` (or v2 when `flexible`), append `body`, write
 /// the length-prefixed frame, read one response frame, strip the
 /// `ResponseHeader`. Returns the response body bytes.
 ///
-/// Header rules (matching Kafka and T13's helper):
+/// Header rules (matching Kafka and the integration-test helper):
 /// - Request header: v1 for non-flexible, v2 for flexible (trailing 0x00
 ///   tagged-fields byte).
 /// - Response header: v0 for non-flexible *and* for `ApiVersions(18)`

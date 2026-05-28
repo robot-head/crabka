@@ -12,7 +12,7 @@ use bytes::Bytes;
 use crabka_protocol::records::{Attributes, Record, RecordBatch};
 
 // `MarkerType` and `build_marker_batch` are intentionally `pub` for reuse
-// by the EndTxn handler (Task 14). Suppress dead_code until then.
+// by the EndTxn handler. Suppress dead_code until then.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MarkerType {

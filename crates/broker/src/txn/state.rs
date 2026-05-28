@@ -1,4 +1,4 @@
-#![allow(dead_code)] // consumed by TxnCoordinator in Task 9+.
+#![allow(dead_code)] // consumed by TxnCoordinator.
 
 use std::collections::HashSet;
 

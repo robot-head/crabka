@@ -355,7 +355,7 @@ mod tests {
         assert_eq!(server_key.len(), 32);
     }
 
-    /// Slice 51 (KIP-48): `new_with_principal` stamps an override
+    /// KIP-48: `new_with_principal` stamps an override
     /// principal that wins on the `Done` arm — used by the
     /// delegation-token SCRAM fallback so a client authenticating
     /// with a `tokenId` as the SCRAM username surfaces as the token's

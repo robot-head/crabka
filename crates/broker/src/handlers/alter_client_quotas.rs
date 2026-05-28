@@ -23,7 +23,7 @@ const KNOWN_QUOTA_KEYS: &[&str] = &[
     "consumer_byte_rate",
     "request_percentage",
     "connection_creation_rate", // KIP-612 — only enforced when paired with ip entity
-    "controller_mutation_rate", // KIP-599 (slice 16c)
+    "controller_mutation_rate", // KIP-599
 ];
 const SUPPORTED_ENTITY_TYPES: &[&str] = &["user", "client-id", "ip"];
 
