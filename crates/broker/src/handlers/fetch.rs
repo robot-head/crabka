@@ -529,6 +529,14 @@ pub(crate) async fn handle(
                 p.partition_index,
                 partition_bytes,
             );
+            // Slice 12k: per-partition failure accounting. Each
+            // partition-response error row (OFFSET_OUT_OF_RANGE,
+            // KAFKA_STORAGE_ERROR, FENCED_LEADER_EPOCH, etc.) bumps
+            // the per-topic counter — mirrors JVM's
+            // `failedFetchRequestRate.mark()`.
+            if p.error_code != 0 {
+                broker.metrics.record_failed_fetch(&topic_resp.topic);
+            }
             // Slice 48k: when this Fetch arrived from a follower
             // (`replica_id >= 0`), the bytes leaving the leader are
             // replication outbound, not consumer outbound. We emit a
