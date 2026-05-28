@@ -100,6 +100,21 @@ pub struct BrokerMetrics {
     /// `under_replicated_partitions > 0` to spot stuck followers
     /// before they fail an unclean election.
     pub under_replicated_partitions: Gauge,
+    /// Slice 8c: count of partitions this broker leads whose ISR is
+    /// strictly less than the topic's `min.insync.replicas`. Mirrors
+    /// Kafka's `ReplicaManager.UnderMinIsrPartitionCount`. Operators
+    /// alert on `under_min_isr_partition_count > 0`: partitions in
+    /// this state reject `acks=all` produces with
+    /// `NOT_ENOUGH_REPLICAS` (slice-251 enforcement), so the metric
+    /// surfaces "writes are blocked" before clients start retrying.
+    pub under_min_isr_partition_count: Gauge,
+    /// Slice 8c: count of partitions this broker leads that
+    /// currently have no live leader (leader broker dead with no
+    /// eligible ISR replacement). Mirrors Kafka's
+    /// `ReplicaManager.OfflinePartitionsCount`. Operators alert on
+    /// `> 0`: such partitions are wholly unavailable until an ISR
+    /// member returns or an unclean election runs.
+    pub offline_partitions_count: Gauge,
     pub active_controller: Gauge,
     pub isr_shrinks_total: Counter,
     pub isr_expands_total: Counter,
@@ -173,6 +188,8 @@ impl BrokerMetrics {
         let partitions_led = Gauge::default();
         let partitions_total = Gauge::default();
         let under_replicated_partitions = Gauge::default();
+        let under_min_isr_partition_count = Gauge::default();
+        let offline_partitions_count = Gauge::default();
         let active_controller = Gauge::default();
         let isr_shrinks_total = Counter::default();
         let isr_expands_total = Counter::default();
@@ -228,6 +245,25 @@ impl BrokerMetrics {
              to spot stuck followers before they fail an unclean \
              election.",
             under_replicated_partitions.clone(),
+        );
+        registry.register(
+            "under_min_isr_partition_count",
+            "Slice 8c: count of partitions this broker leads whose ISR \
+             is strictly less than the topic's min.insync.replicas. \
+             Mirrors Kafka's ReplicaManager.UnderMinIsrPartitionCount; \
+             alert on > 0 — these partitions reject acks=all produces \
+             with NOT_ENOUGH_REPLICAS.",
+            under_min_isr_partition_count.clone(),
+        );
+        registry.register(
+            "offline_partitions_count",
+            "Slice 8c: count of partitions this broker leads that have \
+             no live leader (leader dead with no eligible ISR \
+             replacement). Mirrors Kafka's \
+             ReplicaManager.OfflinePartitionsCount; alert on > 0 — \
+             these partitions are wholly unavailable until an ISR \
+             member returns or an unclean election runs.",
+            offline_partitions_count.clone(),
         );
         registry.register(
             "active_controller",
@@ -373,6 +409,8 @@ impl BrokerMetrics {
             partitions_led,
             partitions_total,
             under_replicated_partitions,
+            under_min_isr_partition_count,
+            offline_partitions_count,
             active_controller,
             isr_shrinks_total,
             isr_expands_total,
@@ -554,6 +592,8 @@ mod tests {
         m.partitions_led.set(7);
         m.partitions_total.set(42);
         m.under_replicated_partitions.set(3);
+        m.under_min_isr_partition_count.set(2);
+        m.offline_partitions_count.set(1);
         m.active_controller.set(1);
         m.isr_shrinks_total.inc();
         m.isr_expands_total.inc_by(2);
@@ -570,6 +610,8 @@ mod tests {
             "crabka_broker_partitions_led",
             "crabka_broker_partitions_total",
             "crabka_broker_under_replicated_partitions",
+            "crabka_broker_under_min_isr_partition_count",
+            "crabka_broker_offline_partitions_count",
             "crabka_broker_active_controller",
             "crabka_broker_isr_shrinks_total",
             "crabka_broker_isr_expands_total",

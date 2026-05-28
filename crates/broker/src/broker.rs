@@ -1245,6 +1245,7 @@ impl Broker {
         {
             let partitions_for_gauge = partitions.clone();
             let controller_for_gauge = controller.clone();
+            let liveness_for_gauge = liveness.clone();
             let node_id = config.node_id;
             let m = metrics.clone();
             let shutdown = supervisor_shutdown.child_token();
@@ -1275,17 +1276,57 @@ impl Broker {
                     // among partitions this broker leads. Read-only walk
                     // of the image; matches Kafka's
                     // ReplicaManager.UnderReplicatedPartitions semantics.
+                    //
+                    // Slice 8c: same walk also tallies UnderMinIsr (ISR <
+                    // topic's min.insync.replicas) and Offline (leader is
+                    // a dead broker, no live ISR replacement) so all three
+                    // health gauges land in lockstep from a single image
+                    // snapshot. Defaults to min.insync.replicas=1 when the
+                    // topic config is missing or unparseable, matching the
+                    // slice-251 produce-path gate.
                     let image = controller_for_gauge.current_image();
                     let mut urp: usize = 0;
+                    let mut under_min_isr: usize = 0;
+                    let mut offline: usize = 0;
                     for topic in image.topics() {
+                        let min_isr = image
+                            .topic_config(&topic.name)
+                            .and_then(|m| m.get("min.insync.replicas"))
+                            .and_then(|v| v.parse::<usize>().ok())
+                            .unwrap_or(1);
                         for pr in image.partitions_of(&topic.name) {
-                            if pr.leader == node_id && pr.isr.len() < pr.replicas.len() {
-                                urp += 1;
+                            if pr.leader == node_id {
+                                if pr.isr.len() < pr.replicas.len() {
+                                    urp += 1;
+                                }
+                                if pr.isr.len() < min_isr {
+                                    under_min_isr += 1;
+                                }
+                            }
+                            // Offline = the leader broker isn't
+                            // alive. Crabka's NodeId is `u64`, so
+                            // there's no in-band "leader unknown"
+                            // sentinel — the controller leaves a
+                            // PartitionRecord pointing at the dead
+                            // broker until a successor election (or
+                            // an unclean election, slice 10c) runs.
+                            // Only count partitions in the local
+                            // broker's owned set so the metric stays
+                            // per-broker; cluster-wide rollup can
+                            // sum across brokers.
+                            if pr.replicas.contains(&node_id)
+                                && !liveness_for_gauge.is_alive(pr.leader).await
+                            {
+                                offline += 1;
                             }
                         }
                     }
                     m.under_replicated_partitions
                         .set(i64::try_from(urp).unwrap_or(i64::MAX));
+                    m.under_min_isr_partition_count
+                        .set(i64::try_from(under_min_isr).unwrap_or(i64::MAX));
+                    m.offline_partitions_count
+                        .set(i64::try_from(offline).unwrap_or(i64::MAX));
                     let is_ctrl_leader = controller_for_gauge
                         .watch_leader()
                         .borrow()
