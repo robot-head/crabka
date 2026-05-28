@@ -53,6 +53,7 @@ mod log_store;
 mod network;
 pub mod reconfig;
 mod server;
+mod snapshot;
 mod state_machine;
 mod types;
 mod wire;
