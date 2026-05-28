@@ -5,22 +5,20 @@
 //! configured via `controller_quorum_voters`) and applies committed
 //! records to `MetadataImage`. Clients (the JVM
 //! `kafka-metadata-quorum --describe` admin tool) ask for
-//! `__cluster_metadata` partition 0; we respond with:
+//! `__cluster_metadata` partition 0; we respond from
+//! [`crabka_raft::ControllerHandle::quorum_state`]:
 //!
-//! - `leader_id` = current openraft leader from `ControllerHandle::watch_leader`
-//!   (`-1` when unknown — e.g. mid-election).
-//! - `leader_epoch` = `-1` (sentinel). Real epoch surface is a follow-up
-//!   that needs to expose `openraft::Metrics::current_term`.
-//! - `high_watermark` = `-1` (sentinel). Same follow-up.
-//! - `current_voters` = `node_id`s from
-//!   `BrokerConfig::controller_quorum_voters`, each with `log_end_offset = -1`.
+//! - `leader_id` = `current_leader` (`-1` when unknown — e.g. mid-election).
+//! - `leader_epoch` = `current_term` (capped at `i32::MAX`).
+//! - `high_watermark` = `last_applied_index` on this node's state machine
+//!   (capped at `i64::MAX`).
+//! - `current_voters` = openraft's voter set, with each voter's
+//!   `log_end_offset` = openraft's `replication.matched.index`.
+//!   openraft only populates the per-voter replication map on the
+//!   leader, so on followers every voter falls back to the JVM `-1`
+//!   ("Unknown") sentinel — `kafka-metadata-quorum --describe` is
+//!   meant to be routed to the leader anyway.
 //! - `observers` = empty (Crabka has no observer-role concept yet).
-//!
-//! Sentinel values are honest about what we know today — the JVM admin
-//! tool prints `-1` as "Unknown", which is the right operator-facing
-//! signal. Wiring real `openraft::Metrics` through `ControllerHandle`
-//! is deferred to a sub-slice; the structural-only response is enough
-//! for `kafka-metadata-quorum --describe` to surface the voter set.
 //!
 //! For any topic OTHER than `__cluster_metadata`, the per-partition row
 //! gets `INVALID_TOPIC_EXCEPTION` (17) — matches the JVM behavior on
@@ -35,21 +33,17 @@ use crabka_protocol::owned::describe_quorum_response::{
     DescribeQuorumResponse, PartitionData, TopicData,
 };
 use crabka_protocol::{Decode, Encode};
+use crabka_raft::QuorumState;
 
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 use crate::broker::Broker;
 use crate::codes;
 use crate::error::BrokerError;
 
-/// Sentinel `log_end_offset` for a voter whose progress we don't yet
-/// surface. JVM admin tool renders `-1` as "Unknown".
+/// JVM "Unknown" sentinel for a voter's `log_end_offset` when openraft
+/// isn't tracking peer progress (i.e. this node is a follower — only
+/// the leader's `replication` map is populated).
 const UNKNOWN_LOG_END_OFFSET: i64 = -1;
-
-/// Sentinel `leader_epoch` / `high_watermark`. Crabka doesn't yet expose
-/// `openraft::Metrics::current_term` or the last-applied log index
-/// through `ControllerHandle`; emit `-1` (the JVM "Unknown" sentinel)
-/// until that wiring lands.
-const UNKNOWN_RAFT_PROGRESS: i64 = -1;
 
 /// The single Kafka-side topic name that represents the `KRaft` metadata
 /// log. Mirrors `org.apache.kafka.common.Topic.CLUSTER_METADATA_TOPIC_NAME`.
@@ -90,23 +84,13 @@ pub(crate) async fn handle(
         return Ok(buf.freeze());
     }
 
-    // Snapshot raft state once. `watch_leader().borrow()` is a cheap
-    // read of the cached leader id; we cast to `i32` for the wire
-    // (clamping to `-1` on overflow — operator-visible "Unknown").
-    let leader_id_i32: i32 = broker
-        .controller
-        .watch_leader()
-        .borrow()
-        .map_or(-1, |n| i32::try_from(n).unwrap_or(-1));
+    // Snapshot raft state once — cheap clone of openraft's metrics
+    // watch value. Carries the live current_term, last_applied_index,
+    // and per-voter matched-log indexes (the last one populated only
+    // when this node is the leader).
+    let quorum = broker.controller.quorum_state();
 
-    let voter_ids: Vec<u64> = broker
-        .config
-        .controller_quorum_voters
-        .iter()
-        .map(|(id, _addr)| *id)
-        .collect();
-
-    let topics = build_topic_responses(&req.topics, leader_id_i32, &voter_ids);
+    let topics = build_topic_responses(&req.topics, &quorum);
 
     let resp = DescribeQuorumResponse {
         error_code: codes::NONE,
@@ -121,12 +105,17 @@ pub(crate) async fn handle(
 /// Build a `TopicData` row per requested topic. The metadata raft topic
 /// gets a populated `PartitionData` for partition 0; any other topic
 /// gets a per-partition `INVALID_TOPIC_EXCEPTION` row. Pure — testable
-/// without a controller.
+/// without a controller by feeding a hand-built `QuorumState`.
 fn build_topic_responses(
     requested: &[crabka_protocol::owned::describe_quorum_request::TopicData],
-    leader_id: i32,
-    voter_ids: &[u64],
+    quorum: &QuorumState,
 ) -> Vec<TopicData> {
+    let leader_id = quorum
+        .current_leader
+        .map_or(-1, |n| i32::try_from(n).unwrap_or(-1));
+    let leader_epoch = i32::try_from(quorum.current_term).unwrap_or(i32::MAX);
+    let high_watermark = i64::try_from(quorum.last_applied_index).unwrap_or(i64::MAX);
+
     requested
         .iter()
         .map(|t| {
@@ -140,16 +129,25 @@ fn build_topic_responses(
                             error_code: codes::NONE,
                             error_message: None,
                             leader_id,
-                            leader_epoch: i32::try_from(UNKNOWN_RAFT_PROGRESS).unwrap_or(-1),
-                            high_watermark: UNKNOWN_RAFT_PROGRESS,
-                            current_voters: voter_ids
+                            leader_epoch,
+                            high_watermark,
+                            current_voters: quorum
+                                .voters
                                 .iter()
-                                .map(|&id| ReplicaState {
-                                    replica_id: i32::try_from(id).unwrap_or(-1),
-                                    log_end_offset: UNKNOWN_LOG_END_OFFSET,
-                                    last_fetch_timestamp: -1,
-                                    last_caught_up_timestamp: -1,
-                                    ..Default::default()
+                                .map(|&id| {
+                                    let matched = quorum
+                                        .per_voter_matched_index
+                                        .get(&id)
+                                        .map_or(UNKNOWN_LOG_END_OFFSET, |&idx| {
+                                            i64::try_from(idx).unwrap_or(i64::MAX)
+                                        });
+                                    ReplicaState {
+                                        replica_id: i32::try_from(id).unwrap_or(-1),
+                                        log_end_offset: matched,
+                                        last_fetch_timestamp: -1,
+                                        last_caught_up_timestamp: -1,
+                                        ..Default::default()
+                                    }
                                 })
                                 .collect(),
                             observers: Vec::new(),
@@ -187,6 +185,7 @@ mod tests {
     use crabka_protocol::owned::describe_quorum_request::{
         PartitionData as ReqPartitionData, TopicData as ReqTopicData,
     };
+    use std::collections::BTreeMap;
 
     fn req_for(topic: &str, partition: i32) -> Vec<ReqTopicData> {
         vec![ReqTopicData {
@@ -199,32 +198,93 @@ mod tests {
         }]
     }
 
+    /// Helper to build a `QuorumState` for a test.
+    fn quorum_state(
+        leader: Option<u64>,
+        term: u64,
+        applied: u64,
+        voters: &[u64],
+        matched: &[(u64, u64)],
+    ) -> QuorumState {
+        QuorumState {
+            current_term: term,
+            last_applied_index: applied,
+            current_leader: leader,
+            voters: voters.to_vec(),
+            per_voter_matched_index: matched.iter().copied().collect::<BTreeMap<_, _>>(),
+        }
+    }
+
     #[test]
     fn metadata_topic_partition_zero_returns_voter_list_with_leader() {
         let req = req_for(CLUSTER_METADATA_TOPIC, 0);
-        let out = build_topic_responses(&req, /*leader=*/ 2, &[1, 2, 3]);
+        let q = quorum_state(
+            Some(2),
+            /*term=*/ 7,
+            /*applied=*/ 42,
+            &[1, 2, 3],
+            &[(1, 40), (2, 42), (3, 38)],
+        );
+        let out = build_topic_responses(&req, &q);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].topic_name, CLUSTER_METADATA_TOPIC);
-        assert_eq!(out[0].partitions.len(), 1);
         let pd = &out[0].partitions[0];
         assert_eq!(pd.error_code, codes::NONE);
-        assert_eq!(pd.leader_id, 2, "leader_id must propagate from caller");
-        assert_eq!(pd.current_voters.len(), 3, "all voters present");
+        assert_eq!(pd.leader_id, 2);
+        assert_eq!(pd.leader_epoch, 7, "current_term surfaces as leader_epoch");
+        assert_eq!(pd.high_watermark, 42, "last_applied_index surfaces as HW");
         let voter_ids: Vec<i32> = pd.current_voters.iter().map(|v| v.replica_id).collect();
         assert_eq!(voter_ids, vec![1, 2, 3]);
+        // Each voter's `log_end_offset` comes from the per-voter map.
+        let leos: Vec<i64> = pd.current_voters.iter().map(|v| v.log_end_offset).collect();
+        assert_eq!(leos, vec![40, 42, 38]);
+        assert!(pd.observers.is_empty(), "no observers in Crabka yet");
+    }
+
+    #[test]
+    fn voters_missing_from_replication_map_get_unknown_sentinel() {
+        // Follower case: replication map is empty (only the leader knows
+        // peers' progress). Every voter's log_end_offset should be -1.
+        let req = req_for(CLUSTER_METADATA_TOPIC, 0);
+        let q = quorum_state(
+            Some(1),
+            /*term=*/ 3,
+            /*applied=*/ 10,
+            &[1, 2, 3],
+            &[],
+        );
+        let out = build_topic_responses(&req, &q);
+        let pd = &out[0].partitions[0];
         for v in &pd.current_voters {
             assert_eq!(
                 v.log_end_offset, UNKNOWN_LOG_END_OFFSET,
-                "log_end_offset is the `Unknown` sentinel until raft metrics are wired in"
+                "follower replication map empty → voter LEOs all -1"
             );
         }
-        assert!(pd.observers.is_empty(), "no observers in Crabka yet");
+    }
+
+    #[test]
+    fn voter_with_partial_replication_map_uses_per_voter_value_where_available() {
+        // Mixed: leader knows progress for voter 1 only.
+        let req = req_for(CLUSTER_METADATA_TOPIC, 0);
+        let q = quorum_state(Some(1), 4, 50, &[1, 2, 3], &[(1, 50)]);
+        let out = build_topic_responses(&req, &q);
+        let pd = &out[0].partitions[0];
+        let by_id: BTreeMap<i32, i64> = pd
+            .current_voters
+            .iter()
+            .map(|v| (v.replica_id, v.log_end_offset))
+            .collect();
+        assert_eq!(by_id[&1], 50, "matched index for voter 1");
+        assert_eq!(by_id[&2], UNKNOWN_LOG_END_OFFSET, "missing → -1");
+        assert_eq!(by_id[&3], UNKNOWN_LOG_END_OFFSET, "missing → -1");
     }
 
     #[test]
     fn unknown_topic_returns_invalid_topic_exception() {
         let req = req_for("__consumer_offsets", 0);
-        let out = build_topic_responses(&req, 1, &[1]);
+        let q = quorum_state(Some(1), 1, 0, &[1], &[]);
+        let out = build_topic_responses(&req, &q);
         let pd = &out[0].partitions[0];
         assert_eq!(pd.error_code, codes::INVALID_TOPIC_EXCEPTION);
         assert!(pd.current_voters.is_empty());
@@ -241,7 +301,8 @@ mod tests {
     fn metadata_topic_partition_nonzero_returns_invalid_topic_exception() {
         // KRaft cluster-metadata topic has exactly one partition (id 0).
         let req = req_for(CLUSTER_METADATA_TOPIC, 7);
-        let out = build_topic_responses(&req, 1, &[1]);
+        let q = quorum_state(Some(1), 1, 0, &[1], &[]);
+        let out = build_topic_responses(&req, &q);
         let pd = &out[0].partitions[0];
         assert_eq!(
             pd.error_code,
@@ -254,7 +315,8 @@ mod tests {
     #[test]
     fn unknown_leader_emits_minus_one() {
         let req = req_for(CLUSTER_METADATA_TOPIC, 0);
-        let out = build_topic_responses(&req, /*leader=*/ -1, &[1, 2]);
+        let q = quorum_state(/*leader=*/ None, 0, 0, &[1, 2], &[]);
+        let out = build_topic_responses(&req, &q);
         let pd = &out[0].partitions[0];
         assert_eq!(pd.leader_id, -1, "leader unknown surfaces as -1 sentinel");
         // Voter list still populated even when leader is unknown.
@@ -263,7 +325,8 @@ mod tests {
 
     #[test]
     fn empty_request_returns_no_topics() {
-        let out = build_topic_responses(&[], 1, &[1]);
+        let q = quorum_state(Some(1), 1, 0, &[1], &[]);
+        let out = build_topic_responses(&[], &q);
         assert!(out.is_empty());
     }
 
@@ -287,12 +350,24 @@ mod tests {
                 ..Default::default()
             },
         ];
-        let out = build_topic_responses(&req, 1, &[1]);
+        let q = quorum_state(Some(1), 1, 0, &[1], &[]);
+        let out = build_topic_responses(&req, &q);
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].partitions[0].error_code, codes::NONE);
         assert_eq!(
             out[1].partitions[0].error_code,
             codes::INVALID_TOPIC_EXCEPTION
         );
+    }
+
+    #[test]
+    fn current_term_above_i32_max_saturates() {
+        // Defensive: openraft's term is u64; KRaft wire is i32. A term
+        // beyond i32::MAX (huge cluster history) saturates so we don't
+        // wrap silently into a negative epoch.
+        let req = req_for(CLUSTER_METADATA_TOPIC, 0);
+        let q = quorum_state(Some(1), u64::MAX, 0, &[1], &[]);
+        let out = build_topic_responses(&req, &q);
+        assert_eq!(out[0].partitions[0].leader_epoch, i32::MAX);
     }
 }
