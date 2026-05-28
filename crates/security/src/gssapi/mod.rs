@@ -2,6 +2,7 @@
 //! docs/superpowers/specs/2026-05-28-crabka-sasl-gssapi-kerberos-design.md
 
 pub mod client;
+pub mod keytab;
 pub mod name;
 pub mod provider;
 pub mod security_layer;
