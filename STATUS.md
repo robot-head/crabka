@@ -4624,7 +4624,6 @@ introspection metadata).
     (response shape, fetch behavior for next-gen consumers) tracked as
     a separate slice.
   - Rack-aware `UniformAssignor` (64b).
-  - Custom server-side assignor plugin point (64c).
   - Group migration policy classic → next-gen (64d).
   - Share groups KIP-932.
 
@@ -4763,3 +4762,28 @@ introspection metadata).
 - CI: `broker-jvm-acceptance` continues to run `jvm_acceptance` only;
   `jvm_consumer_group_next_gen` is back in source as `#[ignore]`d
   documentation of intent.
+## Slice 64c — KIP-848 custom server-side assignor plugin point (2026-05-28)
+
+- `NextGenConfig.assignors` is now `Vec<Arc<dyn Assignor>>` (was
+  `Vec<String>`). The list is the registry — no separate registry
+  struct, no string-to-impl indirection layer.
+- New `NextGenConfig::register_assignor(Arc<dyn Assignor>) ->
+  Result<(), AssignorRegistrationError>` is the public registration
+  API; rejects duplicate names (including the built-ins).
+- `Assignor` trait gains a `std::fmt::Debug` supertrait to satisfy
+  `#[derive(Debug)]` on `NextGenConfig`; `UniformAssignor` and
+  `RangeAssignor` derive `Debug`. Not an API break (trait is meant for
+  internal impls).
+- `assignor::select(name)` deleted. `reconciler::reconcile_if_dirty`
+  takes `&dyn Assignor` directly. `pick_assignor` in `group_actor.rs`
+  resolves the name once and passes the `Arc<dyn Assignor>` through.
+- Built-in `UniformAssignor` and `RangeAssignor` re-exported at
+  `crate::coordinator::next_gen::assignor::{UniformAssignor, RangeAssignor}`.
+- Tests:
+  - 5 new `NextGenConfig` unit tests covering default-registers-both,
+    register success, duplicate-name rejection, find_assignor, and
+    `assignor_enabled` parity with `find_assignor`.
+  - 2 new actor tests covering `pick_assignor` ghost-preference
+    fallback and end-to-end custom-assignor invocation.
+  - Reconciler's `unknown_assignor_is_no_op` test dropped (the new
+    signature makes the failure impossible at that layer).
