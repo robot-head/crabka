@@ -48,6 +48,34 @@ async fn start_host_broker() -> (crabka_broker::BrokerHandle, tempfile::TempDir)
     (handle, dir)
 }
 
+/// Pre-create a topic via the classic admin tooling. Crabka's broker does
+/// not auto-create topics on the produce path; tests must establish them
+/// explicitly, matching the existing `jvm_acceptance.rs` convention.
+fn create_topic(name: &str, partitions: i32) {
+    let out = docker_run(
+        KAFKA_IMAGE_CLASSIC,
+        &[
+            "kafka-topics",
+            "--create",
+            "--if-not-exists",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--topic",
+            name,
+            "--partitions",
+            &partitions.to_string(),
+            "--replication-factor",
+            "1",
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "create topic {name} failed: stdout={:?} stderr={:?}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+}
+
 /// Run a docker container and return its output without asserting success.
 /// Consumer commands often exit non-zero on timeout even when they consumed
 /// messages, so callers are responsible for checking what matters.
@@ -74,6 +102,7 @@ fn docker_run(image: &str, args: &[&str]) -> std::process::Output {
 #[ignore = "requires docker + apache/kafka:4.0.0; run with --include-ignored"]
 async fn jvm_kip848_single_consumer_round_trip() {
     let (_broker, _dir) = start_host_broker().await;
+    create_topic("kip848-rt", 1);
     let produced = docker_run(
         KAFKA_IMAGE_CLASSIC,
         &[
@@ -107,6 +136,7 @@ async fn jvm_kip848_single_consumer_round_trip() {
 #[ignore = "requires docker + apache/kafka:4.0.0; run with --include-ignored"]
 async fn jvm_kip848_describe_group() {
     let (_broker, _dir) = start_host_broker().await;
+    create_topic("kip848-d", 1);
     docker_run(
         KAFKA_IMAGE_CLASSIC,
         &[
@@ -148,6 +178,7 @@ async fn jvm_kip848_describe_group() {
 #[ignore = "requires docker + apache/kafka:4.0.0; run with --include-ignored"]
 async fn jvm_kip848_delete_group() {
     let (_broker, _dir) = start_host_broker().await;
+    create_topic("kip848-del", 1);
     docker_run(
         KAFKA_IMAGE_CLASSIC,
         &[
@@ -185,6 +216,7 @@ async fn jvm_kip848_delete_group() {
 #[ignore = "requires docker + apache/kafka:4.0.0; run with --include-ignored"]
 async fn jvm_kip848_coexists_with_classic() {
     let (_broker, _dir) = start_host_broker().await;
+    create_topic("kip848-coex", 1);
     docker_run(
         KAFKA_IMAGE_CLASSIC,
         &[
