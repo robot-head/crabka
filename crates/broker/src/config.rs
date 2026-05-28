@@ -13,6 +13,14 @@ use crate::BrokerError;
 
 pub use crabka_raft::BootstrapMode;
 
+/// KRaft `process.roles`. A node is a metadata-quorum `Controller`, a data
+/// `Broker`, or both. Default is the combined set `[Controller, Broker]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NodeRole {
+    Controller,
+    Broker,
+}
+
 /// A single named listener: the port the broker binds + what it tells clients.
 #[derive(Debug, Clone)]
 pub struct ListenerSpec {
@@ -48,6 +56,11 @@ pub struct InterBrokerCredentials {
 pub struct BrokerConfig {
     /// Broker id reported in `Metadata` responses. Default: 1.
     pub broker_id: i32,
+
+    /// KRaft `process.roles`. Controls whether this node is a metadata
+    /// quorum voter (`Controller`), hosts data partitions + registers as a
+    /// broker (`Broker`), or both. Default: `[Controller, Broker]`.
+    pub roles: Vec<NodeRole>,
 
     /// TCP address to listen on. Default: `127.0.0.1:9092`.
     pub listen_addr: SocketAddr,
@@ -403,6 +416,7 @@ impl BrokerConfig {
         let controller_addr: SocketAddr = "127.0.0.1:0".parse().expect("static");
         Self {
             broker_id: 1,
+            roles: vec![NodeRole::Controller, NodeRole::Broker],
             listen_addr,
             advertised_listener: "127.0.0.1:0".into(),
             log_dir,
@@ -596,6 +610,18 @@ impl BrokerConfig {
             sasl_mechanisms: None,
         }]
     }
+
+    /// True when this node hosts data partitions and registers as a broker.
+    #[must_use]
+    pub fn is_broker(&self) -> bool {
+        self.roles.contains(&NodeRole::Broker)
+    }
+
+    /// True when this node participates in the `__cluster_metadata` quorum.
+    #[must_use]
+    pub fn is_controller(&self) -> bool {
+        self.roles.contains(&NodeRole::Controller)
+    }
 }
 
 impl Default for BrokerConfig {
@@ -604,6 +630,7 @@ impl Default for BrokerConfig {
         let controller_addr: SocketAddr = "127.0.0.1:9093".parse().expect("hard-coded valid addr");
         Self {
             broker_id: 1,
+            roles: vec![NodeRole::Controller, NodeRole::Broker],
             listen_addr: addr,
             advertised_listener: addr.to_string(),
             log_dir: PathBuf::from("./crabka-data"),
@@ -789,6 +816,41 @@ mod tests {
     fn for_tests_uses_bootstrap_mode() {
         let c = BrokerConfig::for_tests(std::path::PathBuf::from("/tmp"));
         assert_eq!(c.bootstrap_mode, BootstrapMode::Bootstrap);
+    }
+
+    #[test]
+    fn defaults_to_combined_roles() {
+        let d = BrokerConfig::default();
+        assert!(d.is_controller(), "default node is a controller");
+        assert!(d.is_broker(), "default node is a broker");
+        assert_eq!(
+            d.roles,
+            vec![NodeRole::Controller, NodeRole::Broker],
+            "default roles are the combined set"
+        );
+
+        let t = BrokerConfig::for_tests(std::path::PathBuf::from("/tmp"));
+        assert!(t.is_controller() && t.is_broker());
+    }
+
+    #[test]
+    fn controller_only_is_not_a_broker() {
+        let c = BrokerConfig {
+            roles: vec![NodeRole::Controller],
+            ..BrokerConfig::default()
+        };
+        assert!(c.is_controller());
+        assert!(!c.is_broker());
+    }
+
+    #[test]
+    fn broker_only_is_not_a_controller() {
+        let c = BrokerConfig {
+            roles: vec![NodeRole::Broker],
+            ..BrokerConfig::default()
+        };
+        assert!(c.is_broker());
+        assert!(!c.is_controller());
     }
 
     #[test]
