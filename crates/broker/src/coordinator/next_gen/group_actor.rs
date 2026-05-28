@@ -164,6 +164,37 @@ async fn actor_loop(
                 if !evicted.is_empty() {
                     state.bump_epoch();
                     run_reconcile(&mut state, &config, &*metadata);
+                    let mut pending = PendingRecords::default();
+                    pending.group_metadata = Some(GroupMetadataValue {
+                        epoch: state.group_epoch,
+                    });
+                    if state.target.epoch > 0 {
+                        pending.target_metadata = Some(TargetAssignmentMetadataValue {
+                            assignment_epoch: state.target.epoch,
+                        });
+                    }
+                    for mid in &evicted {
+                        pending.member_metadata.push((mid.clone(), None));
+                        pending.target_per_member.push((mid.clone(), None));
+                        pending.current_per_member.push((mid.clone(), None));
+                    }
+                    let now_ms = chrono_now_ms();
+                    if let Err(e) = flush_pending(
+                        &state,
+                        &pending,
+                        &*offsets_log,
+                        &coordinator,
+                        now_ms,
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            group_id = %state.group_id,
+                            error = %e,
+                            "next-gen actor exiting after tick log-write failure",
+                        );
+                        break;
+                    }
                 }
             }
         }
