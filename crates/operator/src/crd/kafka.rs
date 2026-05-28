@@ -171,6 +171,14 @@ pub struct TieredStoragePersistence {
     /// Storage class name. `None` = cluster default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub class: Option<String>,
+    /// `true` → `persistentVolumeClaimRetentionPolicy.whenDeleted: Delete`.
+    /// Must match the parent `KafkaNodePool.spec.storage.deleteClaim`
+    /// when both PVCs are present (K8s `StatefulSets` have a single
+    /// set-wide retention policy with no per-template override).
+    /// Validated at reconcile time; mismatch surfaces as
+    /// `TieredStorageInvalid`.
+    #[serde(default)]
+    pub delete_claim: bool,
 }
 
 /// Slice 48g (KIP-405): the set of RSM backends the operator knows how
@@ -1255,6 +1263,7 @@ authorization:
             persistence: Some(TieredStoragePersistence {
                 size: "50Gi".into(),
                 class: None,
+                delete_claim: false,
             }),
         };
         let err = ts.validate().unwrap_err();
@@ -1270,6 +1279,7 @@ authorization:
             persistence: Some(TieredStoragePersistence {
                 size: "  ".into(),
                 class: None,
+                delete_claim: false,
             }),
         };
         let err = ts.validate().unwrap_err();
@@ -1285,8 +1295,29 @@ authorization:
             persistence: Some(TieredStoragePersistence {
                 size: "100Gi".into(),
                 class: Some("fast-ssd".into()),
+                delete_claim: false,
             }),
         };
         assert!(ts.validate().is_ok());
+    }
+
+    #[test]
+    fn persistence_delete_claim_round_trips() {
+        let p = TieredStoragePersistence {
+            size: "10Gi".into(),
+            class: None,
+            delete_claim: true,
+        };
+        let yaml = serde_yaml::to_string(&p).unwrap();
+        assert!(yaml.contains("deleteClaim: true"));
+        let back: TieredStoragePersistence = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(back, p);
+    }
+
+    #[test]
+    fn persistence_delete_claim_defaults_false() {
+        let yaml = "size: 5Gi\n";
+        let p: TieredStoragePersistence = serde_yaml::from_str(yaml).unwrap();
+        assert!(!p.delete_claim);
     }
 }
