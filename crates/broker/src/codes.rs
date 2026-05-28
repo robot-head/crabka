@@ -31,6 +31,10 @@ pub const KAFKA_STORAGE_ERROR: i16 = 56;
 /// `log.dirs`.
 pub const LOG_DIR_NOT_FOUND: i16 = 57;
 pub const COORDINATOR_NOT_AVAILABLE: i16 = 15;
+/// `COORDINATOR_LOAD_IN_PROGRESS` (14, KIP-848) — the group coordinator is
+/// still loading state from `__consumer_offsets`; clients should retry after
+/// a brief back-off.
+pub const COORDINATOR_LOAD_IN_PROGRESS: i16 = 14;
 pub const NOT_COORDINATOR: i16 = 16;
 pub const INVALID_TOPIC_EXCEPTION: i16 = 17;
 /// `ILLEGAL_SASL_STATE` (34) — request received on a SASL listener before
