@@ -5,6 +5,7 @@
 
 mod error;
 pub(crate) mod serde_format;
+pub(crate) mod topic_admin;
 
 pub use error::StateTopicError;
 
