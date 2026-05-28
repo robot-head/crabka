@@ -73,13 +73,11 @@ impl Consumer {
             })
             .await?;
 
-        // 3. Decode each partition's RecordBatch, advance next-offsets.
+        // 3. Decode each partition's RecordBatches, advance next-offsets.
         //
         // The wire-level `records` field can carry multiple concatenated
-        // RecordBatches, but the generated FetchResponse codec decodes a
-        // single RecordBatch out of the bytes — which is good enough for
-        // the MVP. We emit one ConsumerRecord per Record and bump
-        // next_offsets to the highest seen offset + 1.
+        // RecordBatches; we iterate every v2 batch, emit one ConsumerRecord
+        // per Record, and bump next_offsets to the highest seen offset + 1.
         // Reverse-map topic_id → name. At Fetch v ≥ 13 the response carries
         // only `topic_id`; `topic.topic` is empty.
         let id_to_name: HashMap<_, _> = topic_ids
@@ -101,20 +99,22 @@ impl Consumer {
                 };
                 // Legacy MessageSet payloads are skipped here; the consumer
                 // only handles v2 batches in this slice.
-                let Some(batch) = payload.as_v2() else {
+                let Some(batches) = payload.as_v2() else {
                     continue;
                 };
-                for r in &batch.records {
-                    let offset = batch.base_offset + i64::from(r.offset_delta);
-                    out.push(ConsumerRecord {
-                        topic: topic_name.clone(),
-                        partition: part.partition_index,
-                        offset,
-                        timestamp: batch.base_timestamp + r.timestamp_delta,
-                        key: r.key.clone(),
-                        value: r.value.clone(),
-                    });
-                    offsets.insert((topic_name.clone(), part.partition_index), offset + 1);
+                for batch in batches {
+                    for r in &batch.records {
+                        let offset = batch.base_offset + i64::from(r.offset_delta);
+                        out.push(ConsumerRecord {
+                            topic: topic_name.clone(),
+                            partition: part.partition_index,
+                            offset,
+                            timestamp: batch.base_timestamp + r.timestamp_delta,
+                            key: r.key.clone(),
+                            value: r.value.clone(),
+                        });
+                        offsets.insert((topic_name.clone(), part.partition_index), offset + 1);
+                    }
                 }
             }
         }
