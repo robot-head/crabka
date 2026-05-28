@@ -78,7 +78,7 @@ pub trait Goal: Send + Sync {
 
     /// Inspect `state` and return movements that satisfy or improve
     /// this goal. The optimizer validates each movement against the
-    /// post-application state (slice 43c) before accepting it.
+    /// post-application state before accepting it.
     fn propose(&self, state: &ClusterState, ctx: &GoalContext) -> Vec<Movement>;
 
     /// Returns true if the goal's invariant holds against `state`

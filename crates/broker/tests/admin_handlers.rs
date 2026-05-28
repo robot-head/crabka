@@ -3,7 +3,7 @@
 // the workspace still enforces the full pedantic gate.
 #![allow(clippy::pedantic)]
 
-//! Broker-side integration tests for the slice-11 admin handlers.
+//! Broker-side integration tests for the admin handlers.
 //!
 //! Each test spins up a 1-broker cluster via [`support::start_n_node`],
 //! dispatches the relevant request through `crabka-client-core`, and

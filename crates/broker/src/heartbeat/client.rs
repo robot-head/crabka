@@ -26,11 +26,11 @@ pub(crate) struct Config {
     pub inter_broker_client: Arc<crate::network::client::InterBrokerClient>,
     pub inter_broker_listener_protocol: ListenerProtocol,
     pub inter_broker_listener_name: String,
-    /// Slice 22: when `true`, stamp `want_shut_down=true` on outbound
+    /// When `true`, stamp `want_shut_down=true` on outbound
     /// `BrokerHeartbeat` requests. Driven by
     /// [`crate::BrokerHandle::controlled_shutdown`].
     pub want_shutdown: tokio::sync::watch::Receiver<bool>,
-    /// Slice 22: set to `true` when the controller responds with
+    /// Set to `true` when the controller responds with
     /// `should_shut_down=true`. The caller of `controlled_shutdown`
     /// awaits this flag.
     pub should_shutdown: Arc<tokio::sync::watch::Sender<bool>>,

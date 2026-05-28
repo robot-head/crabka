@@ -13,7 +13,7 @@
 //! There is no end-of-stream marker; chunks run until EOF.
 //!
 //! JVM xerial-snappy byte equality is verified by the differential test
-//! suite (Task 10) once the oracle gains a `compress` op (Task 9).
+//! suite once the oracle gains a `compress` op.
 
 use bytes::{BufMut, Bytes, BytesMut};
 

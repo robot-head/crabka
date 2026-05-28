@@ -69,8 +69,8 @@ pub struct Producer {
     pub(crate) producer_epoch: i16,
     // The following config knobs are also copied into `SenderConfig` at
     // construction time. They live on `Producer` for diagnostic
-    // introspection and to support future reconnect / re-init flows
-    // (Task 17+). Suppressing the dead-code warning is honest about
+    // introspection and to support future reconnect / re-init flows.
+    // Suppressing the dead-code warning is honest about
     // their current role.
     #[allow(dead_code)]
     pub(crate) acks: Acks,
@@ -553,7 +553,7 @@ impl Producer {
 
     /// Return the partition count for `topic`, fetching metadata on cache
     /// miss. Falls back to `1` if the broker reports an error or the
-    /// topic is absent — Task 17 / production code can revisit retry
+    /// topic is absent — production code can revisit retry
     /// policy here.
     async fn partitions_for(&self, topic: &str) -> i32 {
         {

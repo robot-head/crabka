@@ -1,6 +1,6 @@
 // Bespoke tests for owned ApiVersions wrappers that go beyond the standard
 // min/max-version roundtrip. Relocated here from the hand-written wrappers as
-// part of making those wrappers uniformly generated (sub-plan 1d, Task 1).
+// part of making those wrappers uniformly generated.
 
 use bytes::BytesMut;
 use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;

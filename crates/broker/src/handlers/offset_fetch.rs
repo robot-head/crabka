@@ -30,7 +30,7 @@ pub(crate) async fn handle(
     let mut cur: &[u8] = req_bytes;
     let req = OffsetFetchRequest::decode(&mut cur, version)?;
 
-    // ── slice-13 ACL preamble ────────────────────────────────────────────
+    // ── ACL preamble ────────────────────────────────────────────
     // Step 1: `Describe` on `Group(group_id)`. On Deny → whole-response
     // `error_code = GROUP_AUTHORIZATION_FAILED (30)`.
     {
@@ -78,7 +78,7 @@ pub(crate) async fn handle(
                 });
         }
 
-        // ── slice-13 ACL preamble ─────────────────────────────────────
+        // ── ACL preamble ─────────────────────────────────────
         // Step 2 (fetch-all): `Read` on each discovered topic. On Deny →
         // per-topic `error_code = TOPIC_AUTHORIZATION_FAILED (29)`.
         let discovered_topics: Vec<String> = by_topic.keys().cloned().collect();
@@ -131,7 +131,7 @@ pub(crate) async fn handle(
     } else {
         let req_topics = req.topics.as_deref().unwrap_or(&[]);
 
-        // ── slice-13 ACL preamble ─────────────────────────────────────
+        // ── ACL preamble ─────────────────────────────────────
         // Step 2 (named topics): `Read` on each requested topic. On Deny →
         // per-topic `error_code = TOPIC_AUTHORIZATION_FAILED (29)`.
         let topic_decisions = {

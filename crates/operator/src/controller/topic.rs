@@ -1,4 +1,4 @@
-//! Slice 35: `KafkaTopic` reconciler — unidirectional (CRD wins).
+//! `KafkaTopic` reconciler — unidirectional (CRD wins).
 //!
 //! Watches `KafkaTopic` (primary) and `Kafka` (secondary, so a cluster
 //! becoming Ready wakes pending topic reconciles). Diff-and-apply

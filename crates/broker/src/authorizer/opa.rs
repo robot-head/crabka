@@ -1,4 +1,4 @@
-//! Slice 53: OPA authorizer. POSTs Strimzi-compatible JSON to a
+//! OPA authorizer. POSTs Strimzi-compatible JSON to a
 //! configurable OPA decision endpoint, with super-user bypass + LRU+TTL
 //! decision cache + fail-open-or-closed.
 //!

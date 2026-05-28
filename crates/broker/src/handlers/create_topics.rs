@@ -57,7 +57,7 @@ pub(crate) async fn handle(
     req_bytes: &[u8],
     ctx: &crate::handlers::RequestContext<'_>,
 ) -> Result<Bytes, BrokerError> {
-    // ── slice-13 ACL preamble ────────────────────────────────────────
+    // ── ACL preamble ────────────────────────────────────────
     // Whole-request Cluster Create gate. On Deny, return
     // CLUSTER_AUTHORIZATION_FAILED on every topic row and short-circuit.
     {

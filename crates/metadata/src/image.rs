@@ -17,8 +17,8 @@ use crate::records::{
 
 pub type EntityKey = Vec<(String, Option<String>)>;
 
-/// Slice 51 (KIP-48): In-memory image type for a single delegation
-/// token. Mirrors [`DelegationTokenRecord`] minus any tombstone
+/// In-memory image type for a single delegation
+/// token (KIP-48). Mirrors [`DelegationTokenRecord`] minus any tombstone
 /// concerns — tombstones are handled as removals on the apply path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DelegationToken {
@@ -241,13 +241,13 @@ impl MetadataImage {
             .chain(self.acls_prefixed.values().flatten())
     }
 
-    /// Slice 51 (KIP-48): lookup a delegation token by its `token_id`.
+    /// Look up a delegation token by its `token_id` (KIP-48).
     #[must_use]
     pub fn delegation_token_by_id(&self, token_id: &str) -> Option<&DelegationToken> {
         self.delegation_tokens.get(token_id)
     }
 
-    /// Slice 51 (KIP-48): all tokens owned by `owner` (exact match on
+    /// All tokens owned by `owner` (KIP-48; exact match on
     /// the owning [`KafkaPrincipal`]). Order is unspecified.
     #[must_use]
     pub fn delegation_tokens_by_owner(&self, owner: &KafkaPrincipal) -> Vec<&DelegationToken> {
@@ -257,9 +257,9 @@ impl MetadataImage {
             .collect()
     }
 
-    /// Slice 51 (KIP-48): tokens that `principal` is allowed to see via
+    /// Tokens that `principal` is allowed to see via
     /// `DescribeDelegationToken` without `DescribeToken` permission —
-    /// either as the owner or as a listed renewer. Order is
+    /// either as the owner or as a listed renewer (KIP-48). Order is
     /// unspecified.
     #[must_use]
     pub fn delegation_tokens_visible_to(
@@ -272,17 +272,17 @@ impl MetadataImage {
             .collect()
     }
 
-    /// Slice 51 (KIP-48): every delegation token currently in the
-    /// image. Used by `DescribeDelegationToken` for callers with
+    /// Every delegation token currently in the
+    /// image (KIP-48). Used by `DescribeDelegationToken` for callers with
     /// `DescribeToken` permission on the cluster.
     pub fn all_delegation_tokens(&self) -> impl Iterator<Item = &DelegationToken> {
         self.delegation_tokens.values()
     }
 
-    /// Slice 51 (KIP-48): lookup a delegation token by its HMAC bytes.
+    /// KIP-48: lookup a delegation token by its HMAC bytes.
     /// `RenewDelegationToken` / `ExpireDelegationToken` identify a token
-    /// by HMAC on the wire (not by `token_id`), and the upcoming SCRAM
-    /// delegation-token fallback (slice 51 T8) needs the same lookup at
+    /// by HMAC on the wire (not by `token_id`), and the SCRAM
+    /// delegation-token fallback needs the same lookup at
     /// the auth path. Implementation is a linear scan over the small
     /// (per-broker, in-memory) token map — clarity over an explicit
     /// `HMAC→token_id` index until cardinality justifies it.
@@ -404,7 +404,7 @@ impl MetadataImage {
                     }
                 }
             }
-            // Slice 51 (KIP-48): replacement semantics — same
+            // Replacement semantics (KIP-48) — same
             // `token_id` overwrites the prior entry (used by Create
             // and Renew). Tombstone removes by `token_id`.
             MetadataRecord::V1DelegationToken(rec) => {
@@ -482,7 +482,7 @@ impl MetadataImage {
             | MetadataRecord::V1DeleteAccessControlEntry(_)
             | MetadataRecord::V1BrokerConfig(_)
             | MetadataRecord::V1ClientQuota(_)
-            // Slice 51 (KIP-48): delegation-token records have no
+            // Delegation-token records have no
             // topic-store concerns and admission is gated by the
             // handler-side checks (KIP-48 §protocol errors), so the
             // image-level validate is unconditional Ok.

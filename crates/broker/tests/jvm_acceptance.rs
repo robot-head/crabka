@@ -50,10 +50,10 @@ const KAFKA_IMAGE: &str = "confluentinc/cp-kafka:6.1.1";
 /// NOTE: `cp-kafka:7.5.0`'s bundled `kafka-verifiable-producer` does NOT
 /// support `--transactional-id` despite shipping Kafka 3.5. The test that
 /// requires that flag is gated behind `CRABKA_RUN_TXN_JVM_TEST` and
-/// deferred to slice 10 pending a custom Java snippet harness.
+/// deferred pending a custom Java snippet harness.
 const KAFKA_IMAGE_TXN: &str = "confluentinc/cp-kafka:7.5.0";
 /// Kafka 0.10.1 console tools (Confluent Platform 3.1.2), used by the
-/// slice-2d legacy-client acceptance tests (`jvm_legacy_010_*`). The
+/// legacy-client acceptance tests (`jvm_legacy_010_*`). The
 /// 0.10.x-era producer emits v1 `MessageSet` (KIP-32 per-message
 /// timestamps) by default; the consumer negotiates Fetch v0–3. This
 /// exercises the broker's `kafka_3_6_2`-namespace handlers and the
@@ -733,10 +733,10 @@ async fn three_node_jvm_round_trip() {
     // 3. Produce via kafka-console-producer (JVM). The JVM AdminClient
     //    transparently follows the partition leader: it asks any node's
     //    Metadata for the leader of partition 0 and opens a fresh
-    //    connection to that broker's advertised address. The slice-6
+    //    connection to that broker's advertised address. The
     //    Rust producer doesn't yet route across brokers per partition,
     //    so we use the JVM tool here; cross-broker producer routing is
-    //    a slice-8 follow-up that the Rust client will pick up.
+    //    a follow-up that the Rust client will pick up.
     let mut producer_child = Command::new("docker")
         .args([
             "run",
@@ -835,7 +835,7 @@ async fn three_node_jvm_round_trip() {
 // Why fixed ports + `host.docker.internal`: the JVM client opens a
 // per-broker connection per partition leader, so every broker's
 // advertised listener must be reachable from inside the Kafka tool
-// container. Slice-6 CI workflow already wires `host.docker.internal` on
+// container. The CI workflow already wires `host.docker.internal` on
 // the host's `/etc/hosts` to the bridge gateway IP. Controller traffic
 // uses host loopback (`127.0.0.1`) — Docker reachability is irrelevant
 // for inter-broker.
@@ -858,7 +858,7 @@ async fn three_node_replication_byte_compare() {
         .with_test_writer()
         .try_init();
 
-    // Distinct ports from slice-7's `three_node_jvm_round_trip` (which uses
+    // Distinct ports from `three_node_jvm_round_trip` (which uses
     // 9192/9292/9392 + 9193/9293/9393). Linux's TIME_WAIT keeps the prior
     // test's sockets bound for ~60s after teardown; running this test
     // back-to-back on the same ports causes `Broker::start` to either fail
@@ -988,7 +988,7 @@ async fn three_node_replication_byte_compare() {
         &bootstrap_1,
     ]);
 
-    // 2. Wait for the ISR to include all three brokers. Slice 8 makes ISR
+    // 2. Wait for the ISR to include all three brokers. ISR
     //    == replicas always, so this is "did the metadata propagate".
     //    Poll `kafka-topics --describe` until the Isr line lists 1, 2, 3
     //    in any permutation. 2-minute deadline matches the other JVM
@@ -1118,7 +1118,7 @@ async fn three_node_replication_byte_compare() {
 // committed records, then verify `kafka-console-consumer --isolation-level
 // read_committed` sees at least 6 records.
 //
-// Fixed ports 9792/9892/9992 + 9793/9893/9993 (offset 300 from slice-8's
+// Fixed ports 9792/9892/9992 + 9793/9893/9993 (offset 300 from the
 // replication test which uses 9492/9592/9692) to dodge TIME_WAIT collisions
 // when running all JVM tests in sequence.
 //
@@ -1132,7 +1132,7 @@ async fn transactional_console_producer_eos() {
     // Gated behind an env var because `cp-kafka:7.5.0`'s bundled
     // `kafka-verifiable-producer` does not support `--transactional-id`
     // despite shipping Kafka 3.5. A custom Java snippet harness is needed
-    // and is deferred to slice 10. Set CRABKA_RUN_TXN_JVM_TEST=1 to run.
+    // and is deferred. Set CRABKA_RUN_TXN_JVM_TEST=1 to run.
     if std::env::var("CRABKA_RUN_TXN_JVM_TEST").is_err() {
         eprintln!(
             "Skipping transactional_console_producer_eos: set \
@@ -1301,9 +1301,9 @@ async fn transactional_console_producer_eos() {
 // read_committed` reads them all back. Confirms HW+acks=all works
 // against an unmodified JVM client.
 //
-// Fixed ports above 10000 — slice-7/8/9 use 9092-9992; this test steps
-// into 10000+ to dodge TIME_WAIT + raft-quorum collisions when JVM
-// tests run sequentially via --test-threads=1.
+// Fixed ports above 10000 — the other multi-broker tests use 9092-9992;
+// this test steps into 10000+ to dodge TIME_WAIT + raft-quorum collisions
+// when JVM tests run sequentially via --test-threads=1.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires Docker"]
 #[allow(clippy::too_many_lines)]
@@ -1319,8 +1319,9 @@ async fn acks_all_durability() {
         .try_init();
 
     // Ports 10092/10192/10292 + 10093/10193/10293 — the next free hundred
-    // above slice-9's transactional test (9792-9992). Slice-7/8/9 use the
-    // 9092-9992 range; we step into 10000+ to avoid TIME_WAIT collisions.
+    // above the transactional test (9792-9992). The other multi-broker
+    // tests use the 9092-9992 range; we step into 10000+ to avoid TIME_WAIT
+    // collisions.
     let client_ports = [10092u16, 10192, 10292];
     let controller_ports = [10093u16, 10193, 10293];
 
@@ -1508,7 +1509,7 @@ async fn acks_all_durability() {
 // 100 records are eventually visible to a `read_committed` consumer.
 //
 // Fixed ports 10392/10492/10592 + 10393/10493/10593 — next free hundred
-// above slice-10a's acks_all_durability (10092/10192/10292) to dodge
+// above acks_all_durability (10092/10192/10292) to dodge
 // TIME_WAIT collisions when JVM tests run sequentially via --test-threads=1.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires Docker"]
@@ -2285,7 +2286,7 @@ async fn kafka_cluster_describe() {
 }
 
 // ────────────────────────────────────────────────────────────────────────
-// Task 20+: SASL / TLS JVM acceptance tests.
+// SASL / TLS JVM acceptance tests.
 // ────────────────────────────────────────────────────────────────────────
 
 /// Build a JAAS config string for the `PlainLoginModule`. The trailing `;`
@@ -2298,7 +2299,7 @@ fn plain_jaas(user: &str, pass: &str) -> String {
 }
 
 /// Build a JAAS config string for the `ScramLoginModule`. Used by the
-/// SCRAM-SHA-512 acceptance test in task 21.
+/// SCRAM-SHA-512 acceptance test.
 fn scram_jaas(user: &str, pass: &str) -> String {
     format!(
         "org.apache.kafka.common.security.scram.ScramLoginModule required \
@@ -2375,8 +2376,8 @@ async fn start_sasl_plaintext_broker(
 /// --entity-type users` tool — which the admin runs over PLAIN — can
 /// provision SCRAM credentials for other users.
 ///
-/// Used by `jvm_sasl_scram_sha512_produce_consume` (slice 12) and
-/// `jvm_sasl_scram_sha256_produce_consume` (slice 32).
+/// Used by `jvm_sasl_scram_sha512_produce_consume` and
+/// `jvm_sasl_scram_sha256_produce_consume`.
 async fn start_dual_mech_broker(
     admin: &str,
     admin_pass: &str,
@@ -2481,11 +2482,11 @@ fn docker_run_kafka_tool_with_mount(mount: &str, args: &[&str]) -> std::process:
 }
 
 /// Like [`docker_run_kafka_tool_with_mount`] but lets the caller choose the
-/// image. Used by the SCRAM-SHA-512 acceptance test (task 21), which needs
+/// image. Used by the SCRAM-SHA-512 acceptance test, which needs
 /// `cp-kafka:7.5.0` because `kafka-configs --alter --entity-type users` in
 /// `cp-kafka:6.1.1` (Kafka 2.7) sends `IncrementalAlterConfigs (api_key 44)`
 /// rather than `AlterUserScramCredentials (51)`. Kafka 3.5+ uses the typed
-/// KIP-554 request, which is what slice 12 implements.
+/// KIP-554 request, which is what the broker implements.
 fn docker_run_kafka_tool_with_image_and_mount(
     image: &str,
     mount: &str,
@@ -2635,7 +2636,7 @@ async fn jvm_sasl_plain_produce_consume() {
 }
 
 /// JAAS config for the JVM `OAuthBearerLoginModule` built-in *unsecured*
-/// token issuer (slice 49). `unsecuredLoginStringClaim_sub` mints an
+/// token issuer. `unsecuredLoginStringClaim_sub` mints an
 /// `alg:none` JWS with `sub=<user>`, `iat=now`, `exp=now+3600s` — exactly the
 /// token shape Crabka's [`crabka_security::UnsecuredJwsValidator`] accepts.
 /// Pairs with `OAuthBearerUnsecuredLoginCallbackHandler` on the client.
@@ -2699,7 +2700,7 @@ async fn start_oauthbearer_broker() -> (crabka_broker::BrokerHandle, tempfile::T
 
 /// End-to-end `SASL_PLAINTEXT` + OAUTHBEARER drive of the JVM
 /// `kafka-topics` / `kafka-console-producer` / `kafka-console-consumer`
-/// tools (slice 49). The JVM client uses the built-in unsecured login module
+/// tools. The JVM client uses the built-in unsecured login module
 /// to mint an `alg:none` JWS for `sub=admin`; Crabka parses the RFC 7628
 /// client initial response and validates the token, deriving `User:admin`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2819,10 +2820,10 @@ async fn jvm_sasl_oauthbearer_produce_consume() {
 ///    runs `kafka-configs --alter --entity-type users --add-config
 ///    'SCRAM-SHA-512=[password=...]'`. On `cp-kafka:7.5.0` (Kafka 3.5+) the
 ///    JVM tool translates this to `AlterUserScramCredentials (api_key 51)`
-///    — the KIP-554 typed request, which is what slice 12's handler
+///    — the KIP-554 typed request, which is what the broker's handler
 ///    accepts. (On the older `cp-kafka:6.1.1` / Kafka 2.7 image the same
 ///    CLI invocation falls back to `IncrementalAlterConfigs (44)` with
-///    `entity_type=USER`, which slice 12 does not implement.)
+///    `entity_type=USER`, which the broker does not implement.)
 ///
 /// 2. **SCRAM-SHA-512 as the provisioned user.** Alice then drives
 ///    `kafka-topics`, `kafka-console-producer`, and `kafka-console-consumer`
@@ -2872,7 +2873,7 @@ async fn jvm_sasl_scram_sha512_produce_consume() {
     );
 
     // Step B: drive produce + consume as alice over SCRAM-SHA-512.
-    // Slice 13: disable idempotent producer mode (cp-kafka 7.5 default) so
+    // Disable idempotent producer mode (cp-kafka 7.5 default) so
     // the producer doesn't request `InitProducerId`, which would require
     // `Cluster IdempotentWrite` ACL alice doesn't hold. acks=1 is a
     // single-broker setup default that pairs cleanly with that.
@@ -2886,7 +2887,7 @@ async fn jvm_sasl_scram_sha512_produce_consume() {
     ));
     let alice_mount = alice_props.mount_str();
 
-    // 1. Create the topic. Run as `admin` (super-user) so the slice-13
+    // 1. Create the topic. Run as `admin` (super-user) so the
     //    `CreateTopics` Cluster-Create authorize check passes via the
     //    super-user bypass. Alice has no Cluster ACLs.
     docker_run_kafka_tool_with_image_and_mount(
@@ -2910,7 +2911,7 @@ async fn jvm_sasl_scram_sha512_produce_consume() {
     );
 
     // 1b. Grant alice the topic ACLs required for produce/consume.
-    //     Slice-13b implications: Read/Write each auto-grant Describe on
+    //     ACL implications: Read/Write each auto-grant Describe on
     //     the same topic, so Describe is no longer seeded explicitly.
     //     Consumer uses `--partition 0` (no consumer group)
     //     so no Group ACL is required.
@@ -3008,7 +3009,7 @@ async fn jvm_sasl_scram_sha512_produce_consume() {
     broker.shutdown().await;
 }
 
-/// Slice 32: SHA-256 analog of `jvm_sasl_scram_sha512_produce_consume`.
+/// SHA-256 analog of `jvm_sasl_scram_sha512_produce_consume`.
 /// Provisions alice's credential via `kafka-configs --add-config
 /// 'SCRAM-SHA-256=[password=...]'` (KIP-554 wire byte 1) then drives
 /// produce + consume with `sasl.mechanism=SCRAM-SHA-256`.
@@ -3081,7 +3082,7 @@ async fn jvm_sasl_scram_sha256_produce_consume() {
         ],
     );
 
-    // Grant alice Read + Write on the topic. Slice-13b implications cover
+    // Grant alice Read + Write on the topic. ACL implications cover
     // Describe.
     for op in ["Read", "Write"] {
         docker_run_kafka_tool_with_image_and_mount(
@@ -3271,8 +3272,8 @@ async fn start_ssl_broker() -> (crabka_broker::BrokerHandle, tempfile::TempDir) 
 /// non-root user can read it once bind-mounted).
 ///
 /// Caches the result under `<tmp>/crabka-jvm-truststore/ts.jks` so
-/// repeated invocations (across both this test and the `SASL_SSL` test in
-/// task 23) skip the keytool round-trip.
+/// repeated invocations (across both this test and the `SASL_SSL` test)
+/// skip the keytool round-trip.
 ///
 /// The cp-kafka:6.1.1 image ships its own JRE + `keytool` binary, so we
 /// reuse it via `--entrypoint keytool` rather than pulling `openjdk:17`.
@@ -3406,11 +3407,11 @@ async fn jvm_ssl_handshake_succeeds() {
 }
 
 // ────────────────────────────────────────────────────────────────────────
-// Task 23: SASL_SSL full stack + JVM-driven inter-broker SASL replication.
+// SASL_SSL full stack + JVM-driven inter-broker SASL replication.
 // ────────────────────────────────────────────────────────────────────────
 
 /// Like [`docker_run_kafka_tool_with_image_and_mount`] but supports multiple
-/// bind mounts. Needed by the `SASL_SSL` test (task 23), which mounts both
+/// bind mounts. Needed by the `SASL_SSL` test, which mounts both
 /// a `client.properties` file and a JKS truststore into the same container.
 fn docker_run_kafka_tool_with_image_and_mounts(
     image: &str,
@@ -3535,14 +3536,14 @@ async fn start_sasl_ssl_broker(
 
 /// End-to-end `SASL_SSL` drive of the JVM tools — the production-shape auth
 /// path: TLS handshake + SCRAM-SHA-512 SASL exchange over the encrypted
-/// channel. Mirrors `jvm_sasl_scram_sha512_produce_consume` (task 21) but
+/// channel. Mirrors `jvm_sasl_scram_sha512_produce_consume` but
 /// with the `SASL_PLAINTEXT` listener swapped for `SASL_SSL` and the JVM
 /// client configured with a JKS truststore.
 ///
 /// Uses cp-kafka:7.5.0 so admin's `kafka-configs --alter --entity-type users
 /// --add-config 'SCRAM-SHA-512=[...]'` translates to KIP-554's
 /// `AlterUserScramCredentials (api_key 51)` rather than the legacy
-/// `IncrementalAlterConfigs (44)` path that slice 12 doesn't implement.
+/// `IncrementalAlterConfigs (44)` path that the broker doesn't implement.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker"]
 #[allow(clippy::too_many_lines)]
@@ -3589,7 +3590,7 @@ async fn jvm_sasl_ssl_full_stack() {
     );
 
     // Step B: drive produce + consume as alice over SASL_SSL + SCRAM-SHA-512.
-    // Slice 13: disable idempotent producer mode so alice doesn't need
+    // Disable idempotent producer mode so alice doesn't need
     // `Cluster IdempotentWrite`.
     let alice_props = write_client_props(&format!(
         "security.protocol=SASL_SSL\n\
@@ -3604,9 +3605,9 @@ async fn jvm_sasl_ssl_full_stack() {
     ));
     let alice_props_mount = alice_props.mount_str();
 
-    // 1. Create the topic. Run as `admin` (super-user) so the slice-13
+    // 1. Create the topic. Run as `admin` (super-user) so the
     //    `CreateTopics` Cluster-Create authorize check passes. Then grant
-    //    alice Read/Write on the topic; slice-13b implications auto-grant
+    //    alice Read/Write on the topic; the implications auto-grant
     //    Describe via Read and Write.
     docker_run_kafka_tool_with_image_and_mounts(
         KAFKA_IMAGE_TXN,
@@ -4031,7 +4032,7 @@ async fn jvm_inter_broker_replication_authed() {
     broker1.shutdown().await;
 }
 
-/// Slice 12b: spawn two in-process brokers that share an inter-broker SASL
+/// Spawn two in-process brokers that share an inter-broker SASL
 /// credential AND both terminate TLS on the data plane and the controller
 /// quorum listener. Mirrors [`start_two_sasl_brokers`] but with the `SASL_SSL`
 /// listener protocol + `controller_listener_protocol = ctrl` (typically
@@ -4194,9 +4195,9 @@ async fn start_two_sasl_ssl_brokers_with_controller_protocol(
     (broker0, broker1, dir0, dir1)
 }
 
-/// Slice 12b: two-broker `SASL_SSL` cluster with `controller_listener_protocol =
+/// Two-broker `SASL_SSL` cluster with `controller_listener_protocol =
 /// SaslSsl`. Provisions a SCRAM user, produces rf=2 via JVM client, asserts
-/// both brokers replicate the records. Supersedes slice 12 T23's simplified
+/// both brokers replicate the records. Supersedes the earlier simplified
 /// inter-broker test (which only proved metadata convergence) by exercising
 /// the full production-shape stack: TLS-terminated controller raft RPC,
 /// TLS-terminated data-plane SASL, and rf=2 follower replication.
@@ -4279,7 +4280,7 @@ async fn jvm_inter_broker_sasl_ssl_raft_replication() {
     );
 
     // Step B: drive create-topic + produce as alice over SASL_SSL+SCRAM.
-    // Slice 13: disable idempotent producer mode so alice doesn't need
+    // Disable idempotent producer mode so alice doesn't need
     // `Cluster IdempotentWrite`.
     let alice_props = write_client_props(&format!(
         "security.protocol=SASL_SSL\n\
@@ -4295,8 +4296,8 @@ async fn jvm_inter_broker_sasl_ssl_raft_replication() {
     let alice_props_mount = alice_props.mount_str();
 
     // Create topic rf=2 across both brokers. Run as `admin` (super-user)
-    //  for slice-13's CreateTopics Cluster-Create authorize check, then
-    //  grant alice Read/Write on the topic; slice-13b implications
+    //  for the CreateTopics Cluster-Create authorize check, then
+    //  grant alice Read/Write on the topic; the implications
     //  auto-grant Describe via Read and Write.
     docker_run_kafka_tool_with_image_and_mounts(
         KAFKA_IMAGE_TXN,
@@ -4420,7 +4421,7 @@ async fn jvm_inter_broker_sasl_ssl_raft_replication() {
 
 /// Spawn the broker with a single `SASL_PLAINTEXT` listener that enables
 /// PLAIN, plus a configured PLAIN super-user. Mirrors
-/// [`start_sasl_plaintext_broker`] otherwise. Used by the slice-13 ACL
+/// [`start_sasl_plaintext_broker`] otherwise. Used by the ACL
 /// JVM acceptance tests: the super-user authenticates via PLAIN and runs
 /// `kafka-acls --add/--remove/--list` (which hit `CreateAcls (30)` /
 /// `DeleteAcls (31)` / `DescribeAcls (29)`, all of which require the
@@ -4617,7 +4618,7 @@ async fn jvm_kafka_acls_provision_via_cli() {
 /// - `Allow Read+Write Topic LITERAL "foo"`
 /// - `Allow Read Group LITERAL "cg-foo"`
 ///
-/// Slice-13b implies Describe from Read/Write on the same resource, so no
+/// ACL implications grant Describe from Read/Write on the same resource, so no
 /// explicit Describe ACL is seeded here — the Metadata per-topic check
 /// relies on the implication path.
 ///
@@ -4676,7 +4677,7 @@ async fn jvm_authorized_produce_consume() {
         ],
     );
 
-    // Allow Read+Write on Topic foo for User:alice. Slice-13b implies
+    // Allow Read+Write on Topic foo for User:alice. ACL implications grant
     // Describe from Read/Write on the same topic, so no explicit Describe
     // ACL is required here.
     docker_run_kafka_tool_with_image_and_mount(
@@ -4700,7 +4701,7 @@ async fn jvm_authorized_produce_consume() {
         ],
     );
 
-    // Allow Read on Group cg-foo for User:alice. Slice-13b implies Describe
+    // Allow Read on Group cg-foo for User:alice. ACL implications grant Describe
     // from Read on the same group resource, so no explicit Describe is
     // needed.
     docker_run_kafka_tool_with_image_and_mount(
@@ -4816,7 +4817,7 @@ async fn jvm_authorized_produce_consume() {
 /// JVM acceptance — produce by an unauthorized principal must fail.
 ///
 /// Admin (PLAIN super-user) provisions alice with Read+Write on topic `foo`
-/// (Describe is implied by slice-13b; same effective ACLs as
+/// (Describe is implied by Read; same effective ACLs as
 /// `jvm_authorized_produce_consume`). Bob has valid PLAIN credentials but
 /// no ACLs at all. Bob's `kafka-console-producer` must be denied.
 ///
@@ -4876,7 +4877,7 @@ async fn jvm_unauthorized_produce_fails() {
     );
 
     // alice gets Read+Write — proves that the broker has ACLs configured
-    // (i.e. the empty-ACL ALLOW shim is not active). Slice-13b implies
+    // (i.e. the empty-ACL ALLOW shim is not active). ACL implications grant
     // Describe from Read/Write so no explicit Describe ACL is needed.
     docker_run_kafka_tool_with_image_and_mount(
         KAFKA_IMAGE_TXN,
@@ -4958,7 +4959,7 @@ async fn jvm_unauthorized_produce_fails() {
 
 /// JVM acceptance — consumer denied on the group-resource path.
 ///
-/// Alice has Read on topic `foo` (Describe implied by slice-13b) but no ACL
+/// Alice has Read on topic `foo` (Describe implied by Read) but no ACL
 /// on group `cg-other`. `kafka-console-consumer --group cg-other` must fail
 /// with `GroupAuthorizationException` (denied at `JoinGroup`/`OffsetFetch`,
 /// before any Fetch happens).
@@ -5012,7 +5013,7 @@ async fn jvm_unauthorized_consumer_fails_group_check() {
         ],
     );
 
-    // alice: Read on Topic foo (Describe implied by slice-13b). Deliberately
+    // alice: Read on Topic foo (Describe implied by Read). Deliberately
     // no group ACL so the consumer hits GroupAuthorizationException.
     docker_run_kafka_tool_with_image_and_mount(
         KAFKA_IMAGE_TXN,
@@ -5086,8 +5087,8 @@ async fn jvm_unauthorized_consumer_fails_group_check() {
 /// JVM acceptance — prefixed topic ACL grants exactly the prefix.
 ///
 /// Admin provisions:
-/// - `Allow Read Topic PREFIXED "team-"` for alice (Describe implied by slice-13b)
-/// - `Allow Read Group LITERAL "cg-prefixed"` for alice (Describe implied by slice-13b)
+/// - `Allow Read Topic PREFIXED "team-"` for alice (Describe implied by Read)
+/// - `Allow Read Group LITERAL "cg-prefixed"` for alice (Describe implied by Read)
 ///
 /// Then pre-creates two topics: `team-foo` (covered by the prefix) and
 /// `other-foo` (NOT covered). Seeds one record into each via the admin
@@ -5148,7 +5149,7 @@ async fn jvm_prefixed_topic_acl_works() {
         );
     }
 
-    // Prefixed Read on `team-*` for alice. Slice-13b implies Describe from
+    // Prefixed Read on `team-*` for alice. ACL implications grant Describe from
     // Read on the same topic resource.
     docker_run_kafka_tool_with_image_and_mount(
         KAFKA_IMAGE_TXN,
@@ -5171,7 +5172,7 @@ async fn jvm_prefixed_topic_acl_works() {
         ],
     );
 
-    // Literal Read on group `cg-prefixed`. Slice-13b implies Describe from
+    // Literal Read on group `cg-prefixed`. ACL implications grant Describe from
     // Read on the same group resource.
     docker_run_kafka_tool_with_image_and_mount(
         KAFKA_IMAGE_TXN,
@@ -5320,7 +5321,7 @@ async fn jvm_prefixed_topic_acl_works() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Task 10: JVM kafka-leader-election --election-type preferred
+// JVM kafka-leader-election --election-type preferred
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Third broker for the 3-broker `SASL_PLAINTEXT` JVM cluster.
@@ -5924,7 +5925,7 @@ async fn jvm_kafka_reassign_partitions_end_to_end() {
     // Inject ISR including new_node so the background reassignment-completion
     // task can see the new broker in ISR without relying on inter-broker
     // replication (which is broken under WSL2 due to host-gateway routing;
-    // see slice-14 T10 for the same technique).
+    // the reassignment tests use the same technique).
     let pr_after = h1
         .partition_record_for_test(TOPIC, 0)
         .expect("partition record after alter");
@@ -5993,8 +5994,8 @@ async fn jvm_kafka_reassign_partitions_end_to_end() {
         String::from_utf8_lossy(&verify_out.stdout),
         String::from_utf8_lossy(&verify_out.stderr),
     );
-    // Slice 15b supports broker-scoped IncrementalAlterConfigs (resource_type=4),
-    // so --verify can now clear throttles and exit 0.
+    // Broker-scoped IncrementalAlterConfigs (resource_type=4) is supported,
+    // so --verify can clear throttles and exit 0.
     assert!(
         verify_out.status.success(),
         "kafka-reassign-partitions --verify failed: stderr={}",
@@ -6007,7 +6008,7 @@ async fn jvm_kafka_reassign_partitions_end_to_end() {
 }
 
 // ---------------------------------------------------------------------------
-// JVM acceptance test: kafka-reassign-partitions --throttle (slice 15b)
+// JVM acceptance test: kafka-reassign-partitions --throttle
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -6158,7 +6159,7 @@ async fn jvm_kafka_reassign_partitions_with_throttle_end_to_end() {
     // Inject ISR including new_node so the background reassignment-completion
     // task can see the new broker in ISR without relying on inter-broker
     // replication (which is broken under WSL2 due to host-gateway routing;
-    // see slice-14 T10 for the same technique).
+    // the reassignment tests use the same technique).
     let pr_after = h1
         .partition_record_for_test(TOPIC, 0)
         .expect("partition record after execute");
@@ -6198,8 +6199,8 @@ async fn jvm_kafka_reassign_partitions_with_throttle_end_to_end() {
     }
     eprintln!("CRABKA[test] reassignment completed; running --verify");
 
-    // --verify clears throttle configs and exits 0 (slice 15b supports
-    // broker-scoped IncrementalAlterConfigs).
+    // --verify clears throttle configs and exits 0 (broker-scoped
+    // IncrementalAlterConfigs is supported).
     let verify_out = std::process::Command::new("docker")
         .args([
             "run",
@@ -6495,7 +6496,7 @@ async fn jvm_kafka_configs_alter_client_quota_end_to_end() {
     );
 
     // Describe — confirm visibility.
-    // api_key 50 (DescribeUserScramCredentials) is now implemented (slice 17a),
+    // api_key 50 (DescribeUserScramCredentials) is implemented,
     // so the JVM tool exits 0 cleanly. Use the helper which asserts success.
     let desc = docker_run_kafka_tool_with_image_and_mount(
         KAFKA_IMAGE_TXN,
@@ -6633,7 +6634,7 @@ async fn jvm_kafka_configs_alter_ip_quota_end_to_end() {
     );
 
     // Describe — confirm visibility.
-    // api_key 50 (DescribeUserScramCredentials) is now implemented (slice 17a),
+    // api_key 50 (DescribeUserScramCredentials) is implemented,
     // so the JVM tool exits 0 cleanly. Use the helper which asserts success.
     let desc = docker_run_kafka_tool_with_image_and_mount(
         KAFKA_IMAGE_TXN,
@@ -6780,7 +6781,7 @@ async fn jvm_kafka_configs_alter_controller_mutation_rate_end_to_end() {
     );
 
     // Describe — confirm visibility.
-    // api_key 50 (DescribeUserScramCredentials) is now implemented (slice 17a),
+    // api_key 50 (DescribeUserScramCredentials) is implemented,
     // so the JVM tool exits 0 cleanly. Use the helper which asserts success.
     let desc = docker_run_kafka_tool_with_image_and_mount(
         KAFKA_IMAGE_TXN,
@@ -6939,7 +6940,7 @@ async fn jvm_kafka_configs_describe_users_scram_credentials_end_to_end() {
     let _ = h1; // keep alive
 }
 
-/// Slice 18 — `kafka-console-consumer` sees a compacted topic with only
+/// `kafka-console-consumer` sees a compacted topic with only
 /// the latest value per key.
 ///
 /// 1. Spin up a single-broker cluster with a fast cleaner interval (3s).
@@ -7174,7 +7175,7 @@ async fn start_host_broker_jbod() -> (
     (handle, primary, extra)
 }
 
-/// Slice 45 — KIP-113: `kafka-log-dirs --describe` against a two-directory
+/// KIP-113: `kafka-log-dirs --describe` against a two-directory
 /// JBOD broker. Asserts the JVM tool sees both configured log directories
 /// and that the created topic's partitions are spread across them.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -7235,7 +7236,7 @@ async fn jvm_kafka_log_dirs_describe_reports_jbod_spread() {
 }
 
 // ────────────────────────────────────────────────────────────────────────
-// Slice 51 (KIP-48): delegation-token JVM acceptance.
+// KIP-48: delegation-token JVM acceptance.
 // ────────────────────────────────────────────────────────────────────────
 
 /// Like [`start_three_broker_sasl_plaintext_jvm_cluster_with_users`] but
@@ -8181,7 +8182,7 @@ async fn tiered_storage_round_trip_through_minio() {
     broker.shutdown().await;
     // `_minio` is dropped here; the container is removed via `docker rm -f`.
 }
-/// Slice 2d test 1: pure-legacy round-trip.
+/// Test 1: pure-legacy round-trip.
 ///
 /// A Kafka 0.10.1 console-producer (cp-kafka:3.1.2) sends 3 records
 /// via Produce v0–2 with v1 `MessageSet` records. A Kafka 0.10.1
@@ -8292,7 +8293,7 @@ async fn jvm_legacy_010_round_trip() {
     broker.shutdown().await;
 }
 
-/// Slice 2d test 2: legacy producer, modern consumer.
+/// Test 2: legacy producer, modern consumer.
 ///
 /// A Kafka 0.10.1 console-producer sends 3 records; a Kafka 2.6
 /// console-consumer (cp-kafka:6.1.1) reads them back via Fetch v11+.
@@ -8381,7 +8382,7 @@ async fn jvm_legacy_010_produce_modern_consume() {
     broker.shutdown().await;
 }
 
-/// Slice 2d test 3: modern producer, legacy consumer.
+/// Test 3: modern producer, legacy consumer.
 ///
 /// A Kafka 2.6 console-producer (cp-kafka:6.1.1) sends 3 records via
 /// Produce v9. A Kafka 0.10.1 console-consumer (cp-kafka:3.1.2) reads
@@ -8486,7 +8487,7 @@ async fn jvm_modern_produce_legacy_010_consume() {
     broker.shutdown().await;
 }
 
-/// Slice 2d test 4: gzip-compressed legacy round-trip.
+/// Test 4: gzip-compressed legacy round-trip.
 ///
 /// A Kafka 0.10.1 console-producer with `compression.type=gzip`
 /// sends ~50 records as a single outer-wrapped gzip `MessageSet`

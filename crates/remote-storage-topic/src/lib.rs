@@ -1,5 +1,5 @@
-//! Topic-backed [`RemoteLogMetadataManager`] for Crabka — slice 48f
-//! of the KIP-405 tiered-storage roadmap.
+//! Topic-backed [`RemoteLogMetadataManager`] for Crabka, part of the
+//! KIP-405 tiered-storage stack.
 //!
 //! This crate ships [`TopicBasedRemoteLogMetadataManager`], the
 //! production replacement for [`crabka_remote_storage::InmemoryRemoteLogMetadataManager`].

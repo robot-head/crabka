@@ -78,7 +78,7 @@ pub enum RecordedCall {
         ops: Vec<QuotaOp>,
         validate_only: bool,
     },
-    // ── Slice 51b: delegation-token RPCs ──────────────────────────────
+    // ── delegation-token RPCs ─────────────────────────────────────────
     CreateDelegationToken {
         owner_principal_name: String,
         renewers: Vec<String>,
@@ -115,7 +115,7 @@ pub struct FakeAdminClient {
     pub recorded_calls: StdMutex<Vec<RecordedCall>>,
     pub topics: StdMutex<HashMap<String, TopicState>>,
     pub injected: StdMutex<InjectedErrors>,
-    /// In-memory ACL store, keyed on the full tuple. Slice 36 reconcile
+    /// In-memory ACL store, keyed on the full tuple. Reconcile
     /// tests pre-seed this when verifying convergence; the trait
     /// implementations below diff against the live set.
     pub acls: StdMutex<BTreeSet<AclEntry>>,
@@ -123,10 +123,10 @@ pub struct FakeAdminClient {
     /// happy-path only inspects the recorded-call log; this set lets
     /// future deletion-path tests check eviction.
     pub scram_users: StdMutex<BTreeSet<String>>,
-    /// In-memory client-quota store, keyed by username. Slice 38 reconcile
+    /// In-memory client-quota store, keyed by username. Reconcile
     /// tests seed this when verifying convergence.
     pub user_quotas: StdMutex<BTreeMap<String, UserQuotaConfig>>,
-    /// Slice 51b: in-memory delegation-token store. The fake mirrors the
+    /// In-memory delegation-token store. The fake mirrors the
     /// broker's KIP-48 semantics enough for the reconciler's
     /// Describe → decide → Create/Renew/Expire loop to exercise its
     /// branches: `create_delegation_token_as_owner` mints a fresh token
@@ -723,7 +723,7 @@ impl AdminClientLike for FakeAdminClient {
         Ok(None)
     }
 
-    // ── Slice 51b: delegation-token RPCs ──────────────────────────────
+    // ── delegation-token RPCs ─────────────────────────────────────────
     //
     // In-memory KIP-48 model. Tokens carry:
     //   - `token_id`  — sequential `tok-<n>` strings

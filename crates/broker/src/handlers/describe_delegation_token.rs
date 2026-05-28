@@ -1,4 +1,4 @@
-//! Slice 51 (KIP-48): `DescribeDelegationToken` (`api_key` 41).
+//! KIP-48: `DescribeDelegationToken` (`api_key` 41).
 //!
 //! Per spec §1.5: SASL-authenticated callers can list tokens visible
 //! to them. Filtering rules:
@@ -17,15 +17,14 @@
 //! calling principal, include it in the visible set even if the caller
 //! is not owner or renewer.
 //!
-//! Slice 53: the slice-51b `acl_authorization_is_active` gate is gone.
-//! With the explicit [`crate::authorizer::Authorizer`] trait, the
-//! "no super-users + no ACLs ⇒ Allow" compat shim that used to surface
-//! every token to every caller now lives in [`crate::authorizer::
+//! Token visibility is governed entirely by the explicit
+//! [`crate::authorizer::Authorizer`] trait. The "no super-users + no
+//! ACLs ⇒ Allow" behavior lives in [`crate::authorizer::
 //! AllowAllAuthorizer`], which is the documented "allow everything"
 //! mode — so showing every token under `AllowAll` is the correct
 //! behavior (it's what the operator asked for). With `SimpleAcl` or
 //! `Opa` configured, the authorizer returns Deny for callers without a
-//! `Describe`-on-`TOKEN:<owner>` ACL, restoring the original filtering.
+//! `Describe`-on-`TOKEN:<owner>` ACL, filtering the visible set.
 
 use std::net::SocketAddr;
 
@@ -110,8 +109,7 @@ pub(crate) async fn handle(
         // the calling principal. Apply the same owner filter if one
         // was supplied so the filter remains authoritative.
         //
-        // Slice 53: the slice-51b `acl_authorization_is_active` gate
-        // is gone — we just consult the authorizer for every candidate
+        // We consult the authorizer for every candidate
         // token. With `AllowAllAuthorizer` every token surfaces (which
         // is correct: the operator opted into "allow everything"), but
         // dedup-by-token_id below means the base owner/renewer set
@@ -258,14 +256,10 @@ mod tests {
         "127.0.0.1:0".parse().unwrap()
     }
 
-    /// Slice 53: the tests below want the "real ACL" semantics — the
+    /// The tests below want the "real ACL" semantics — the
     /// describe-via-ACL extension should add tokens iff the caller holds
-    /// a matching `Describe` ACL on `TOKEN:<owner>`. Pre-slice-53 these
-    /// tests passed an empty `super_users` `HashSet` and got "real ACL"
-    /// behavior implicitly because the slice-13 compat shim only kicked
-    /// in when BOTH super-users AND ACLs were empty (and these tests
-    /// always seed at least one ACL). Now that the shim is gone we
-    /// construct a [`SimpleAclAuthorizer`] explicitly. With
+    /// a matching `Describe` ACL on `TOKEN:<owner>`. We construct a
+    /// [`SimpleAclAuthorizer`] explicitly for this. With
     /// [`AllowAllAuthorizer`] every token would surface, which is
     /// correct under "allow everything" but doesn't exercise the ACL
     /// filter the tests are written against.
@@ -433,7 +427,7 @@ mod tests {
         controller.cancel().await;
     }
 
-    /// Slice 51 T9 / spec §5.3: a caller who is neither owner nor a
+    /// Spec §5.3: a caller who is neither owner nor a
     /// listed renewer can still see a token when granted `Describe` on
     /// `TOKEN:<owner_principal_string>`. Token-authed callers do NOT
     /// pick this extension up — covered by

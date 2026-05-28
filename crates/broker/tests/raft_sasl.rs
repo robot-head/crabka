@@ -1,4 +1,4 @@
-//! Slice 12b. Inbound raft listener auth tests.
+//! Inbound raft listener auth tests.
 //!
 //! These exercise the controller listener under `SaslPlaintext` and prove
 //! both inbound (broker A accepts auth'd raft frames from broker B) and
@@ -252,7 +252,7 @@ async fn controller_listener_sasl_plaintext_rejects_mismatched_creds() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn controller_listener_plaintext_legacy_path_unchanged() {
     // Default `controller_listener_protocol = Plaintext` — no
-    // handshake injected. Two brokers converge as in slice 7.
+    // handshake injected. Two brokers converge over the plaintext path.
     init_tracing();
     let data = reserve_data_ports().await;
     let ctrl_addrs = reserve_ctrl_ports().await;

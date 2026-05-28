@@ -1,4 +1,4 @@
-//! Slice 37: TLS-auth helpers for the `KafkaUser` reconciler.
+//! TLS-auth helpers for the `KafkaUser` reconciler.
 //!
 //! Owns:
 //! - per-user X.509 cert issuance + renewal,

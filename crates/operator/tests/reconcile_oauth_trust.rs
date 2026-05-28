@@ -1,5 +1,5 @@
 #![allow(clippy::doc_markdown, clippy::doc_lazy_continuation)]
-//! Integration tests for slice 50b — operator-managed
+//! Integration tests for operator-managed
 //! oauth-jwks-trust Secret lifecycle. Verifies the full reconcile path:
 //! source Secret reads, PEM concatenation, managed Secret upsert,
 //! failure-mode status conditions, and pod-template volume/mount.

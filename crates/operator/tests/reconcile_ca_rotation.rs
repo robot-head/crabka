@@ -1,4 +1,4 @@
-//! Slice 34: integration tests for CA rotation via the full `reconcile`.
+//! Integration tests for CA rotation via the full `reconcile`.
 //!
 //! These drive the reconciler against the FIFO mock with *existing* cluster-CA
 //! Secrets seeded so the rotation paths (same-key renewal, staged key

@@ -1,6 +1,6 @@
 // Bespoke tests for borrowed RequestHeader and ResponseHeader: the to_owned
 // conversion tests and specific-value roundtrips. Relocated from hand-written
-// wrappers (sub-plan 1d, Task 1).
+// wrappers.
 
 use bytes::BytesMut;
 use crabka_protocol::borrowed::request_header::{MAX_VERSION, MIN_VERSION, RequestHeader};

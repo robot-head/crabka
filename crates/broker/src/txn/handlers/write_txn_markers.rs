@@ -1,5 +1,5 @@
 //! `WriteTxnMarkers` (`api_key=27`). Receives a fan-out from the transaction
-//! coordinator (`EndTxn`, Task 15) and appends control-marker batches to each
+//! coordinator (`EndTxn`) and appends control-marker batches to each
 //! locally-led partition named in the request.
 //!
 //! ## Flow

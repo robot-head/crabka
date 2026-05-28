@@ -4,7 +4,7 @@
 // workspace still enforces the full pedantic gate.
 #![allow(clippy::pedantic)]
 
-//! Slice 13 broker-side ACL integration tests. No Docker.
+//! Broker-side ACL integration tests. No Docker.
 //!
 //! T22 — the first of three integration test batches — drives the
 //! `CreateAcls` / `DescribeAcls` / `DeleteAcls` flow over a real
@@ -14,8 +14,8 @@
 //! because Rust integration tests don't easily allow sibling-module
 //! reuse across files in `tests/`.
 //!
-//! Gated to non-Windows to match the multi-broker test convention from
-//! slice 12 (the SASL listener startup is fine on Windows, but keeping
+//! Gated to non-Windows to match the multi-broker test convention
+//! (the SASL listener startup is fine on Windows, but keeping
 //! the gate uniform avoids one-off CI matrix surprises).
 
 #![cfg(not(target_os = "windows"))]
@@ -73,7 +73,7 @@ const PERMISSION_ANY: i8 = 1;
 const PERMISSION_ALLOW: i8 = 3;
 
 // API versions chosen so the request header is the flexible v2 form
-// (matches what's exercised by slice 12's `drive_sasl_plain_session`
+// (matches what's exercised by the `drive_sasl_plain_session`
 // helper for any flexible body). All three ACL APIs went flexible at v2.
 const CREATE_ACLS_VERSION: i16 = 3;
 const DESCRIBE_ACLS_VERSION: i16 = 3;
@@ -113,7 +113,7 @@ const ERR_MEMBER_ID_REQUIRED: i16 = 79;
 
 /// Build a `BrokerConfig` with a single `SASL_PLAINTEXT` listener, PLAIN
 /// enabled, and the given super-user. The non-super-user case still
-/// declares a super-user so the cluster-Alter gate applies. Slice 53:
+/// declares a super-user so the cluster-Alter gate applies. It also
 /// installs `SimpleAclAuthorizer` explicitly so the broker enforces ACLs
 /// (the new default is `AllowAllAuthorizer`, which would silently let
 /// every test through).
@@ -143,7 +143,7 @@ fn sasl_plain_broker_config(
 }
 
 /// Like `sasl_plain_broker_config` but accepts multiple super-users. Used by
-/// the slice-13b `multi_super_user_both_can_provision` test to verify that
+/// the `multi_super_user_both_can_provision` test to verify that
 /// any principal in the `super_users` set can drive privileged admin APIs.
 fn sasl_plain_broker_config_multi_super(
     log_dir: &std::path::Path,
@@ -420,9 +420,9 @@ async fn produce_denied_without_topic_acl() {
     create_topic_as_admin(addr, "foo", 1).await;
 
     // Seed a meaningless ACL via direct controller write. The super-user
-    // is already set so `authorize()`'s compat shim is off, but the plan
-    // is explicit about populating at least one ACL so the test reads
-    // closer to a "real" cluster post-bootstrap.
+    // is already set so `authorize()`'s compat shim is off, but populating
+    // at least one ACL makes the test read closer to a "real" cluster
+    // post-bootstrap.
     handle
         .submit_metadata_record_for_test(crabka_metadata::MetadataRecord::V1AccessControlEntry(
             crabka_metadata::AclEntry {
@@ -995,7 +995,7 @@ async fn init_producer_id_denied_without_txn_acl() {
 }
 
 // ────────────────────────────────────────────────────────────────────────
-// Slice 13b: operation-implication + multi-super-user integration tests.
+// Operation-implication + multi-super-user integration tests.
 //
 // These cover the end-to-end implications: a Read or Write ACL on a topic
 // also grants Describe (so Metadata-by-name no longer needs a separate
@@ -1019,7 +1019,7 @@ async fn implication_metadata_describes_after_read_acl() {
     create_topic_as_admin(addr, "foo", 1).await;
 
     // Seed Allow READ Topic LITERAL "foo" User:alice host=*. No explicit
-    // Describe ACL — relies on slice-13b's Read→Describe implication for
+    // Describe ACL — relies on the Read→Describe implication for
     // the Metadata-by-name visibility check.
     handle
         .submit_metadata_record_for_test(crabka_metadata::MetadataRecord::V1AccessControlEntry(
@@ -1073,7 +1073,7 @@ async fn implication_metadata_describes_after_write_acl() {
     create_topic_as_admin(addr, "foo", 1).await;
 
     // Seed Allow WRITE Topic LITERAL "foo" User:alice host=*. No explicit
-    // Describe ACL — relies on slice-13b's Write→Describe implication.
+    // Describe ACL — relies on the Write→Describe implication.
     handle
         .submit_metadata_record_for_test(crabka_metadata::MetadataRecord::V1AccessControlEntry(
             crabka_metadata::AclEntry {
@@ -1322,7 +1322,7 @@ async fn retry_join_group_until_allowed(
 // ────────────────────────────────────────────────────────────────────────
 // SASL/PLAIN + ACL wire helpers.
 //
-// Same shape as slice 12's `drive_alter_user_scram_credentials_as_plain`:
+// Same shape as `drive_alter_user_scram_credentials_as_plain`:
 // one ApiVersions warm-up, one SaslHandshake, one SaslAuthenticate, then
 // the typed ACL request. Each helper authenticates fresh on a new TCP
 // stream because that's the simplest model for "a client doing one

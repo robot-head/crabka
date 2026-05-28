@@ -1,4 +1,4 @@
-//! Slice 38 integration test: drive `DescribeClientQuotas` (`api_key` 48)
+//! Integration test: drive `DescribeClientQuotas` (`api_key` 48)
 //! and `AlterClientQuotas` (`api_key` 49) against a live in-process
 //! broker and assert end-to-end wire behavior.
 //!

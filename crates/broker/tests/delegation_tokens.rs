@@ -4,8 +4,8 @@
 #![allow(clippy::pedantic)]
 #![allow(clippy::unnecessary_unwrap)]
 
-//! Slice 51 (KIP-48) end-to-end integration: full delegation-token lifecycle
-//! against a single-broker test cluster. Plan task T11 / spec §8.2.
+//! KIP-48 end-to-end integration: full delegation-token lifecycle
+//! against a single-broker test cluster. Spec §8.2.
 //!
 //! One long `#[tokio::test]` walks every wire step the spec covers:
 //!
@@ -428,13 +428,13 @@ async fn start_broker() -> (BrokerHandle, TempDir, SocketAddr) {
     (handle, log_dir, addr)
 }
 
-/// Slice 51b act-as variant: boot a single-broker SASL_PLAINTEXT cluster with
+/// Act-as variant: boot a single-broker SASL_PLAINTEXT cluster with
 /// caller-specified PLAIN credentials and a caller-specified set of super-users.
 ///
 /// `plain_creds` is `&[(username, password)]`. `super_users` is `&[username]`
 /// — names listed here are inserted into `BrokerConfig.super_users` and bypass
 /// ACL checks (in particular, they're the only callers allowed to set
-/// `owner_principal_*` on `CreateDelegationToken` per the slice-51b spec §1).
+/// `owner_principal_*` on `CreateDelegationToken` per spec §1).
 ///
 /// Same protocol surface as `start_broker`: PLAIN + SCRAM-SHA-256 enabled,
 /// master delegation-token key set, 7d ceiling / 24h default renew period.
@@ -755,15 +755,15 @@ async fn wait_for_token_gone(handle: &BrokerHandle, token_id: &str) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Slice 51b act-as wire-path tests (spec §3.1). These exercise the
+// Act-as wire-path tests (spec §3.1). These exercise the
 // `owner_principal_type` + `owner_principal_name` request fields on
 // `CreateDelegationTokenRequest` (v3+), which let a super-user mint a token
-// owned by *another* principal. Implemented in slice-51b task B1
-// (`handlers/create_delegation_token.rs`); these are the integration-level
+// owned by *another* principal. Implemented in
+// `handlers/create_delegation_token.rs`; these are the integration-level
 // oracles for that wire path.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Spec §3.1 / Plan §B2 test 1.
+/// Spec §3.1 test 1.
 ///
 /// Super-user `admin` mints a delegation token owned by `alice` (act-as).
 /// Verifies:
@@ -868,11 +868,11 @@ async fn act_as_super_user_mints_token_owned_by_target() {
     }
 }
 
-/// Spec §3.1 / Plan §B2 test 2.
+/// Spec §3.1 test 2.
 ///
 /// Non-super-user `alice` attempts to act-as: requests a token owned by
 /// `bob`. Must be rejected with `DELEGATION_TOKEN_AUTHORIZATION_FAILED` (65).
-/// This is the load-bearing authorization gate for slice 51b — without it,
+/// This is the load-bearing authorization gate for act-as — without it,
 /// any authenticated user could mint tokens impersonating any other user.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn act_as_non_super_user_rejected_with_authorization_failed() {
@@ -912,24 +912,24 @@ async fn act_as_non_super_user_rejected_with_authorization_failed() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Slice 51c super-user bypass (Renew + Expire).
+// Super-user bypass (Renew + Expire).
 //
-// Slice 51's Renew/Expire handlers gated on `caller == owner || caller in
-// renewers` only. After slice 51b shipped operator-driven token issuance,
-// the operator (a super-user) was unable to renew/expire tokens it minted
-// via act-as on behalf of `KafkaUser` principals, because it was neither
-// owner nor renewer. Slice 51c adds the super-user fast path that Kafka's
-// `DelegationTokenManager.isAuthorizedToOperateOnToken` includes.
+// The Renew/Expire handlers originally gated on `caller == owner || caller in
+// renewers` only. With operator-driven token issuance, the operator (a
+// super-user) was unable to renew/expire tokens it minted via act-as on
+// behalf of `KafkaUser` principals, because it was neither owner nor
+// renewer. The super-user fast path that Kafka's
+// `DelegationTokenManager.isAuthorizedToOperateOnToken` includes fixes this.
 //
 // This integration test exercises the wire path end-to-end: admin act-as
 // mints a token owned by alice, then admin Renews and Expires it — both
 // must succeed (no err 63 / 65).
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Slice 51c regression / spec §1.3 + §1.4.
+/// Super-user-bypass regression / spec §1.3 + §1.4.
 ///
-/// Super-user `admin` mints a token owned by `alice` via act-as
-/// (slice 51b path), then renews + expires it via the wire. Both must
+/// Super-user `admin` mints a token owned by `alice` via act-as,
+/// then renews + expires it via the wire. Both must
 /// succeed despite admin being neither owner nor renewer. Mirrors the
 /// kind-kafkauser-delegation-token e2e flow that was red on main with
 /// `RenewDelegationToken: UNKNOWN (63)` before this fix.
@@ -946,7 +946,7 @@ async fn super_user_can_renew_other_owners_token() {
             .map_err(|e| format!("admin PLAIN auth: {e}"))?;
 
         // (2) admin act-as mints a token owned by alice — no renewers.
-        // This is exactly what the slice 51b operator does for a
+        // This is exactly what the operator does for a
         // delegation-token `KafkaUser`.
         let create_req = CreateDelegationTokenRequest {
             owner_principal_type: Some("User".to_string()),
@@ -983,8 +983,8 @@ async fn super_user_can_renew_other_owners_token() {
             "no renewers were specified, so admin is neither owner NOR renewer"
         );
 
-        // (3) admin Renews — this is the slice 51b operator's renewal
-        // path. Before slice 51c, this returned err 63
+        // (3) admin Renews — this is the operator's renewal
+        // path. Without the super-user bypass, this returned err 63
         // (DELEGATION_TOKEN_OWNER_MISMATCH); with the super-user bypass,
         // it must succeed and strictly extend the expiry.
         let renew_resp = send_renew_delegation_token(
@@ -1015,7 +1015,7 @@ async fn super_user_can_renew_other_owners_token() {
             "Renew must never push expiry past max_timestamp_ms",
         );
 
-        // (4) admin Expires (tombstone path) — this is the slice 51b
+        // (4) admin Expires (tombstone path) — this is the
         // operator's finalizer path on KafkaUser delete.
         let expire_resp = send_expire_delegation_token(
             &mut admin,

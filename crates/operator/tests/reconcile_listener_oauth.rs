@@ -1,6 +1,6 @@
 #![allow(clippy::doc_markdown, clippy::doc_lazy_continuation)]
-//! Integration tests for the `oauth` listener authentication variant
-//! (slice 50). Verifies the full reconcile path against the kube-mock
+//! Integration tests for the `oauth` listener authentication variant.
+//! Verifies the full reconcile path against the kube-mock
 //! harness: broker-config ConfigMap contents (`[oauthbearer]` TOML block
 //! + per-listener `sasl_config`), `ListenersValid` status conditions
 //! patched on per-listener validation failures, cross-listener config-
@@ -9,7 +9,7 @@
 //! T3's unit tests inside `controller/listeners.rs` already cover the
 //! pure validator + TOML render functions in isolation. The added value
 //! at this layer is verifying that the validator's `Err` becomes a
-//! correctly-shaped `Status.conditions[]` entry (mirroring the slice-31
+//! correctly-shaped `Status.conditions[]` entry (mirroring the
 //! `listener_mtls_requires_tls_validation_error_surfaces_status` test in
 //! `reconcile_listener_auth.rs`) and that the rendered TOML actually
 //! lands in the broker-config ConfigMap.
@@ -163,7 +163,7 @@ fn extract_broker0_toml(observed: &[http::Request<hyper::body::Bytes>], cluster:
 }
 
 /// Find the `ListenersValid` condition in the status PATCH and assert
-/// `status: "False"` with the expected `reason`. Mirrors the slice-31
+/// `status: "False"` with the expected `reason`. Mirrors the
 /// `listener_mtls_requires_tls_validation_error_surfaces_status` shape.
 fn assert_listeners_invalid_with_reason(
     observed: &[http::Request<hyper::body::Bytes>],
@@ -494,9 +494,9 @@ async fn oauth_listener_with_jwks_refresh_below_30_rejected() {
     assert_listeners_invalid_with_reason(&observed, "c8", "ListenerOauthInvalidRefresh");
 }
 
-// ── test 9 removed (slice 49g): the legacy
+// No test for the legacy
 // `ListenerOauthInvalidScope` / `OAuthCustomClaimCheckScopeEmpty`
-// variant is gone — `customClaimCheck` is now a free-form JsonPath
+// variant — `customClaimCheck` is a free-form JsonPath
 // string and CRD `minLength: 1` rejects empty values at admission
 // before the operator ever sees them.
 
@@ -644,7 +644,7 @@ async fn two_oauth_listeners_with_divergent_config_rejected_with_conflicting_oau
 
 // ── test 13: divergent trust-certs rejected with ConflictingOAuthConfig ─────
 
-/// Slice 50b. Two OAuth listeners whose `[oauthbearer]` config is
+/// Two OAuth listeners whose `[oauthbearer]` config is
 /// identical EXCEPT for `tls_trusted_certificates` (one empty, one
 /// pointing at a Secret) cannot share the broker-global block — the
 /// trust-bundle is part of the canonical OAuth fingerprint. The
@@ -680,7 +680,7 @@ async fn two_oauth_listeners_with_divergent_trust_certs_rejected_with_conflictin
 
 // ── test 14: trust-certs reconcile end-to-end → idp_tls_trust + managed Secret
 
-/// Slice 50b. A single OAuth listener with `tls_trusted_certificates`
+/// A single OAuth listener with `tls_trusted_certificates`
 /// pointing at a user-supplied Secret must:
 ///   1. drive `reconcile_oauth_jwks_trust` to GET the source Secret
 ///      and SSA the managed `{kafka}-oauth-jwks-trust` Secret with the
@@ -816,7 +816,7 @@ async fn oauth_listener_with_tls_trusted_certificates_reconciles_renders_idp_tls
 
 // ── test 15: divergent access_token_is_jwt rejected with ConflictingOAuthConfig
 
-/// Slice 50c. Two OAuth listeners that each pass per-listener
+/// Two OAuth listeners that each pass per-listener
 /// validation but disagree on `accessTokenIsJwt` (one JWT-mode with
 /// `jwksEndpointUri`, the other introspection-mode with
 /// `introspectionEndpointUri` + `clientId` + `clientSecret`) cannot
@@ -886,7 +886,7 @@ async fn two_oauth_listeners_with_divergent_access_token_is_jwt_rejected_with_co
 
 // ── test 16: maxSecondsWithoutReauthentication threads through to broker TOML ─
 
-/// Slice 50d. An OAuth listener with
+/// An OAuth listener with
 /// `maxSecondsWithoutReauthentication: 300` reconciles successfully and
 /// the rendered broker-config ConfigMap embeds the broker-global
 /// `max_session_lifetime_seconds = 300` line under `[oauthbearer]`. The
@@ -919,7 +919,7 @@ async fn oauth_listener_with_max_seconds_without_reauthentication_renders_broker
 
 // ── test 17: divergent maxSecondsWithoutReauthentication → ConflictingOAuthConfig
 
-/// Slice 50d. Two OAuth listeners that each pass per-listener validation
+/// Two OAuth listeners that each pass per-listener validation
 /// but disagree on `maxSecondsWithoutReauthentication` (one capped at
 /// 300s, the other at 600s) cannot share the broker-global
 /// `[oauthbearer]` block — the cap is part of the canonical fingerprint
@@ -950,9 +950,9 @@ async fn two_oauth_listeners_with_divergent_max_seconds_without_reauthentication
     assert_listeners_invalid_with_reason(&observed, "c17", "ConflictingOAuthConfig");
 }
 
-// ── test 18 (slice 49g): customClaimCheck JsonPath renders to broker TOML ──
+// ── customClaimCheck JsonPath renders to broker TOML ──────────────────────
 
-/// Slice 49g. An OAuth listener with a `customClaimCheck` JsonPath
+/// An OAuth listener with a `customClaimCheck` JsonPath
 /// expression (RFC 9535 syntax, evaluated by jsonpath-rust on the
 /// broker) reconciles cleanly and the rendered broker-config ConfigMap
 /// embeds the expression under `[oauthbearer].custom_claim_check` as a
@@ -982,9 +982,9 @@ async fn oauth_listener_with_custom_claim_check_expression_renders_broker_toml_k
     );
 }
 
-// ── test 19 (slice 49g): validTokenType renders to broker TOML ─────────────
+// ── validTokenType renders to broker TOML ─────────────────────────────────
 
-/// Slice 49g. An OAuth listener with `validTokenType: JWT` reconciles
+/// An OAuth listener with `validTokenType: JWT` reconciles
 /// cleanly (JWT-mode is the only mode that accepts the field) and the
 /// rendered broker-config ConfigMap embeds the value under
 /// `[oauthbearer].valid_token_type` as a basic TOML string. The broker
@@ -1013,9 +1013,9 @@ async fn oauth_listener_with_valid_token_type_renders_broker_toml_key() {
     );
 }
 
-// ── test 20 (slice 49g): validTokenType in introspection mode → reject ─────
+// ── validTokenType in introspection mode → reject ─────────────────────────
 
-/// Slice 49g. Setting `validTokenType` on an introspection-mode listener
+/// Setting `validTokenType` on an introspection-mode listener
 /// (`accessTokenIsJwt: false`) is rejected up front: introspection
 /// responses carry no JWT header so a `typ` check has nothing to bind
 /// against. The reconciler must patch `ListenersValid=False` with reason
@@ -1055,9 +1055,9 @@ async fn oauth_listener_valid_token_type_in_introspection_mode_rejected_with_lis
     );
 }
 
-// ── test 21 (slice 49h): fallbackUserNameClaim + prefix render to broker TOML ─
+// ── fallbackUserNameClaim + prefix render to broker TOML ──────────────────
 
-/// Slice 49h: an OAuth listener with `fallbackUserNameClaim: "client_id"`
+/// An OAuth listener with `fallbackUserNameClaim: "client_id"`
 /// and `fallbackUserNamePrefix: "service-account-"` reconciles cleanly
 /// and the rendered broker-config ConfigMap embeds both keys under
 /// `[oauthbearer]`. The broker's principal extractor consults the
@@ -1094,9 +1094,9 @@ async fn oauth_listener_with_fallback_user_name_claim_renders_broker_toml_key() 
     );
 }
 
-// ── test 22 (slice 49h): groupsClaim JsonPath + delimiter render to broker TOML
+// ── groupsClaim JsonPath + delimiter render to broker TOML ────────────────
 
-/// Slice 49h: an OAuth listener with `groupsClaim:
+/// An OAuth listener with `groupsClaim:
 /// "$.realm_access.roles[*]"` (RFC 9535 JsonPath, evaluated by
 /// jsonpath-rust on the broker) and `groupsClaimDelimiter: ","`
 /// reconciles cleanly and the rendered broker-config ConfigMap embeds
@@ -1105,7 +1105,7 @@ async fn oauth_listener_with_fallback_user_name_claim_renders_broker_toml_key() 
 /// selector and any future predicate single-quotes survive without
 /// escape collisions. The delimiter is a plain TOML basic string. The
 /// resolved groups are attached to the Kafka principal but no
-/// broker-side authorizer reads them yet (slice 53/54 will).
+/// broker-side authorizer reads them yet.
 #[tokio::test]
 async fn oauth_listener_with_groups_claim_renders_broker_toml_key() {
     let items = vec![shared::fake_pool_list_item("brokers", "ns22", "c22", 1, 1)];
@@ -1135,9 +1135,9 @@ async fn oauth_listener_with_groups_claim_renders_broker_toml_key() {
     );
 }
 
-// ── test 23 (slice 49i): JWKS refresher policy fields render to broker TOML ─
+// ── JWKS refresher policy fields render to broker TOML ────────────────────
 
-/// Slice 49i: an OAuth listener with `jwksMinRefreshPauseSeconds: 2`,
+/// An OAuth listener with `jwksMinRefreshPauseSeconds: 2`,
 /// `jwksExpirySeconds: 3600`, and `jwksIgnoreKeyUse: true` reconciles
 /// cleanly and the rendered broker-config ConfigMap embeds all three
 /// keys under `[oauthbearer]`. The broker's JWKS refresher consumes
@@ -1180,16 +1180,16 @@ async fn oauth_listener_with_jwks_policies_renders_broker_toml_keys() {
     );
 }
 
-// ── test 24 (slice 49i): JWKS policy fields rejected on introspection-mode ──
+// ── JWKS policy fields rejected on introspection-mode ─────────────────────
 
-/// Slice 49i: the 3 JWKS refresher policy fields
+/// The 3 JWKS refresher policy fields
 /// (`jwksMinRefreshPauseSeconds`, `jwksExpirySeconds`,
 /// `jwksIgnoreKeyUse`) are JWT-mode only — the broker's introspection
 /// validator does not consult a JWKS, so setting any of them on an
 /// `accessTokenIsJwt: false` listener is rejected at reconcile with
 /// `ListenersValid=False` reason
 /// `ListenerOauthJwksFieldsRejectedInIntrospectionMode`. Mirrors the
-/// slice 49g `validTokenType` and earlier cross-mode rejection shape.
+/// `validTokenType` and other cross-mode rejection shapes.
 #[tokio::test]
 async fn oauth_listener_jwks_fields_in_introspection_mode_rejected_with_listeners_valid_false() {
     let items = vec![shared::fake_pool_list_item("brokers", "ns24", "c24", 1, 1)];

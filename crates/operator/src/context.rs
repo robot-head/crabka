@@ -14,7 +14,7 @@ use crate::telemetry::SharedRegistry;
 /// `AdminClient`.
 pub type AdminClientHandle = Arc<Mutex<dyn AdminClientLike + Send>>;
 
-/// Boxed-dyn rebalancer client handle (slice 44). Production wraps a
+/// Boxed-dyn rebalancer client handle. Production wraps a
 /// [`ConnectRebalancerClient`]; reconcile tests substitute a fake. No
 /// `Mutex` — the client's methods take `&self` and the inner HTTP client
 /// is a shareable connection pool.
@@ -30,7 +30,7 @@ pub struct Context {
     /// Per-cluster admin-client cache. Keyed by `Kafka` resource name.
     /// Broken connections are replaced lazily on next use.
     pub admin_clients: Arc<Mutex<HashMap<String, AdminClientHandle>>>,
-    /// Per-endpoint rebalancer-client cache (slice 44). Keyed by the
+    /// Per-endpoint rebalancer-client cache. Keyed by the
     /// resolved Connect base URL. Dropped + re-created lazily on
     /// transport failure.
     pub rebalancer_clients: Arc<Mutex<HashMap<String, RebalancerClientHandle>>>,

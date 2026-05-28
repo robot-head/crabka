@@ -6,7 +6,7 @@
 //! headless `Service` owned by the parent `Kafka` (looked up via the
 //! `crabka.io/cluster` label).
 //!
-//! Slice 20 constraints: pools must be mixed `{Controller, Broker}`,
+//! Constraints: pools must be mixed `{Controller, Broker}`,
 //! `replicas` must equal 1, and `nodeIdStart` must lie in `0..=999_999`.
 //! Validation errors surface as a `Ready=False` condition without
 //! attempting any further reconcile.
@@ -35,7 +35,7 @@ use crate::crd::{
     JbodVolume, Kafka, KafkaCondition, KafkaNodePool, KafkaNodePoolStatus, NodeRole, Storage,
 };
 
-/// Slice 40: container port the broker binds for Prometheus `/metrics`
+/// Container port the broker binds for Prometheus `/metrics`
 /// when `Kafka.spec.metricsConfig` is `Some`. Kept here next to
 /// `BROKER_PORT` so the pod-template renderer has both numbers in one
 /// place; referenced by `controller::metrics` to build the
@@ -80,7 +80,7 @@ pub enum PoolValidationError {
     JbodVolumesImmutable,
 }
 
-/// Validate a `KafkaNodePool` spec against slice-20 invariants.
+/// Validate a `KafkaNodePool` spec against its invariants.
 pub(crate) fn validate(pool: &KafkaNodePool) -> Result<(), PoolValidationError> {
     let roles: HashSet<NodeRole> = pool.spec.roles.iter().copied().collect();
     let expected: HashSet<NodeRole> = [NodeRole::Controller, NodeRole::Broker]
@@ -139,7 +139,7 @@ fn jbod_volumes_sorted(storage: Option<&Storage>) -> Vec<JbodVolume> {
 }
 
 /// PVC-template name + pod mount path for one JBOD disk. The primary
-/// (lowest-id) disk reuses the slice-24 `data` / `/var/lib/crabka/data`
+/// (lowest-id) disk reuses the `data` / `/var/lib/crabka/data`
 /// so the metadata raft log, the init container, and the cluster-level
 /// broker TOML (`log_dir = "/var/lib/crabka/data"`) are all unchanged.
 /// Every other disk `id = N` lives at `data-{N}` / `/var/lib/crabka/data-{N}`.
@@ -202,7 +202,7 @@ cp /etc/crabka/config/broker-${NODE_ID}.toml /run/crabka/broker.toml\n\
 exec /usr/bin/crabka-broker \\\n  --config-file=/run/crabka/broker.toml \\\n  --broker-id=\"${NODE_ID}\"\n";
 
 /// Build the broker container's main shell script. The disabled variant
-/// returns `MAIN_SCRIPT` byte-for-byte so an upgrade from slice-25 with
+/// returns `MAIN_SCRIPT` byte-for-byte so a cluster with
 /// `metrics_config: None` produces a byte-identical pod template (the
 /// pod-template-hash stays put, so no broker pod rolls). The enabled
 /// variant appends `--metrics-listen-addr=0.0.0.0:9404` so the broker
@@ -287,7 +287,7 @@ fn render_broker_container(
         json!({ "name": "POD_NAMESPACE", "valueFrom": { "fieldRef": { "fieldPath": "metadata.namespace" } } }),
         json!({ "name": "CRABKA_CLUSTER_ID", "valueFrom": { "secretKeyRef": { "name": secret_name, "key": "clusterId" } } }),
     ];
-    // Slice 41: when spec.logging is set, point RUST_LOG at the broker
+    // When spec.logging is set, point RUST_LOG at the broker
     // ConfigMap's `rust.log` key (rendered by `common::render_configmap`).
     // `optional: true` keeps the pod bootable if the key is briefly absent
     // (e.g. external-ConfigMap resolution pending) — the broker then falls
@@ -302,12 +302,11 @@ fn render_broker_container(
             }
         }));
     }
-    // Slice 46: when storage is JBOD, tell the broker about the extra data
-    // disks via `CRABKA_EXTRA_LOG_DIRS` (slice 45 reads this env, splits on
+    // When storage is JBOD, tell the broker about the extra data
+    // disks via `CRABKA_EXTRA_LOG_DIRS` (the broker reads this env, splits on
     // commas, and spreads partitions across `[log_dir] + extras`). The
     // primary disk stays the broker's `log_dir` (`/var/lib/crabka/data`), so
-    // it's excluded here. The env is omitted entirely for non-JBOD pools, so
-    // their pod template is byte-identical to the pre-slice-46 render.
+    // it's excluded here. The env is omitted entirely for non-JBOD pools.
     if !jbod_extra_mounts.is_empty() {
         let value = jbod_extra_mounts
             .iter()
@@ -316,17 +315,16 @@ fn render_broker_container(
             .join(",");
         env.push(json!({ "name": "CRABKA_EXTRA_LOG_DIRS", "value": value }));
     }
-    // Slice 51b: when `Kafka.spec.delegationToken` is set, source the
+    // When `Kafka.spec.delegationToken` is set, source the
     // broker's master HMAC key from the referenced Secret via
     // `valueFrom.secretKeyRef`. Baking the env entry into the
-    // operator-rendered pod template removes the slice-51 e2e
+    // operator-rendered pod template removes the
     // `kubectl set env` race: every SSA reconcile re-asserts the env
     // entry, so it can't drift from beneath the broker. The broker's
-    // slice-51 config layer reads `CRABKA_DELEGATION_TOKEN_SECRET_KEY`
+    // config layer reads `CRABKA_DELEGATION_TOKEN_SECRET_KEY`
     // (env wins over TOML) and flips the four delegation-token RPCs
     // from `DELEGATION_TOKEN_AUTH_DISABLED` (err 61) to live. Omitted
-    // entirely when `delegation_token` is `None`, keeping the rendered
-    // pod template byte-identical to the pre-slice-51b shape.
+    // entirely when `delegation_token` is `None`.
     if let Some(dt) = delegation_token {
         let key = dt.secret_key_ref.key.as_deref().unwrap_or("secret-key");
         env.push(json!({
@@ -339,7 +337,7 @@ fn render_broker_container(
             }
         }));
     }
-    // Slice 48-final (KIP-405): S3 credentials from operator-CRD →
+    // KIP-405: S3 credentials from operator-CRD →
     // broker pod via the standard AWS env vars. `object_store`'s
     // `AmazonS3Builder` resolves these through the AWS credential chain
     // when the broker TOML omits explicit `access_key_id` /
@@ -382,7 +380,7 @@ fn render_broker_container(
             }
         }));
     }
-    // Slice 42b: cluster-wide tracing → broker pod env vars. The broker's
+    // Cluster-wide tracing → broker pod env vars. The broker's
     // `TelemetryConfig::from_env` reads these and installs the OTLP
     // tracer at startup. Omitted entirely when `tracing` is `None` so
     // the rendered pod template stays byte-identical to the pre-42b
@@ -427,7 +425,7 @@ fn render_broker_container(
     for (name, path) in jbod_extra_mounts {
         volume_mounts.push(json!({ "name": name, "mountPath": path }));
     }
-    // Slice 50b: when the parent Kafka has an OAuth listener with
+    // When the parent Kafka has an OAuth listener with
     // `tls_trusted_certificates`, mount the managed
     // `{kafka}-oauth-jwks-trust` Secret at
     // `/etc/crabka/oauth-jwks-trust` so the broker can read
@@ -440,7 +438,7 @@ fn render_broker_container(
             "readOnly": true,
         }));
     }
-    // Slice 50c: when the parent Kafka has an OAuth listener configured
+    // When the parent Kafka has an OAuth listener configured
     // for introspection mode (`accessTokenIsJwt: false` + `clientSecret`),
     // mount the source Secret directly at
     // `/etc/crabka/oauth-introspection` so the broker can read the
@@ -453,7 +451,7 @@ fn render_broker_container(
             "readOnly": true,
         }));
     }
-    // Slice 48g (KIP-405): mount the `tier-storage` emptyDir
+    // KIP-405: mount the `tier-storage` emptyDir
     // read-write at the broker's `remote_log_storage_dir` (matches
     // `[remote_storage].storage_dir` in the rendered TOML). Local-only
     // — the S3 backend writes through `object_store` directly to the
@@ -495,7 +493,7 @@ fn render_broker_container(
 
 /// Build one `volumeClaimTemplate` for a single PVC: `accessModes`,
 /// requested `size`, optional `storageClassName`, and inherited pod
-/// labels (so the slice-20 GC selector matches the bound PVC).
+/// labels (so the GC selector matches the bound PVC).
 fn pvc_template(
     name: &str,
     size: &str,
@@ -619,7 +617,7 @@ fn render_storage(
             )
         }
     };
-    // Slice 50b: append the managed `{kafka}-oauth-jwks-trust` Secret as
+    // Append the managed `{kafka}-oauth-jwks-trust` Secret as
     // a read-only pod volume when an OAuth listener carries
     // `tls_trusted_certificates`. The matching volumeMount is appended
     // by `render_broker_container`. Same `defaultMode` (0o400) as the
@@ -636,7 +634,7 @@ fn render_storage(
                 }
             }));
     }
-    // Slice 50c: append the user-owned source Secret as a read-only pod
+    // Append the user-owned source Secret as a read-only pod
     // volume when an OAuth listener is configured for introspection mode.
     // The projected `items` mapping pins the user's source key to a
     // fixed in-pod path (`client-secret`) so the broker always reads
@@ -656,9 +654,9 @@ fn render_storage(
                 }
             }));
     }
-    // Slice 48g (KIP-405): append a writable `tier-storage` volume
-    // when the parent `Kafka.spec.tieredStorage.type == Local`. Slice
-    // 48i extends this: when `spec.tieredStorage.persistence` is set,
+    // KIP-405: append a writable `tier-storage` volume
+    // when the parent `Kafka.spec.tieredStorage.type == Local`. When
+    // `spec.tieredStorage.persistence` is set,
     // render a `volumeClaimTemplate` named `tier-storage` instead of
     // an `emptyDir`, and let the StatefulSet controller mount the
     // bound PVC into each pod automatically (so the explicit
@@ -690,7 +688,7 @@ fn render_storage(
 /// the pool's data storage nor the tier-storage cache is a PVC.
 ///
 /// A `StatefulSet`'s retention policy applies set-wide to every
-/// `volumeClaimTemplate`. Validation upstream (Task 2) ensures that
+/// `volumeClaimTemplate`. Validation upstream ensures that
 /// when both data and tier PVCs exist, their `delete_claim` flags
 /// match — so we can pick the pool's value when present and the tier
 /// value otherwise.
@@ -764,7 +762,7 @@ pub(crate) fn render_statefulset(
     let logging_enabled = parent.spec.logging.is_some();
     let cm_name = format!("{parent_name}-broker-config");
     let jbod_extra = jbod_extra_mounts(pool.spec.storage.as_ref());
-    // Slice 50b: derive the managed `{kafka}-oauth-jwks-trust` Secret
+    // Derive the managed `{kafka}-oauth-jwks-trust` Secret
     // name from the parent Kafka CR's listeners. `Some` iff at least
     // one OAuth listener has non-empty `tls_trusted_certificates` —
     // i.e. iff `kafka.rs::reconcile_kafka` actually upserted the
@@ -773,18 +771,18 @@ pub(crate) fn render_statefulset(
     // both sides stay in lockstep without re-doing the bundle
     // assembly here.
     let oauth_jwks_trust_secret = crate::controller::kafka::oauth_jwks_trust_secret_name(parent);
-    // Slice 50b: the mount path is a stable contract with slice 49c's
+    // The mount path is a stable contract with the
     // broker (it reads the trust bundle from
     // `/etc/crabka/oauth-jwks-trust/ca.crt`), and matches the
-    // `idp_tls_trust` TOML key rendered by T2's listener reconciler.
+    // `idp_tls_trust` TOML key rendered by the listener reconciler.
     let oauth_jwks_trust_mount = oauth_jwks_trust_secret
         .as_deref()
         .map(|_| "/etc/crabka/oauth-jwks-trust");
-    // Slice 50c: derive the OAUTHBEARER introspection client-secret
-    // mount info from the parent CR's listeners (mirrors slice 50b's
+    // Derive the OAUTHBEARER introspection client-secret
+    // mount info from the parent CR's listeners (mirrors the
     // jwks-trust derivation above). `Some` iff at least one OAuth
     // listener uses `accessTokenIsJwt: false` with a `clientSecret`
-    // ref. The mount path is a stable contract with T3's TOML render —
+    // ref. The mount path is a stable contract with the TOML render —
     // the broker reads `<mount>/client-secret` regardless of the
     // user's source key name.
     let oauth_introspection_mount =
@@ -792,7 +790,7 @@ pub(crate) fn render_statefulset(
     let oauth_introspection_mount_path = oauth_introspection_mount
         .as_ref()
         .map(|_| "/etc/crabka/oauth-introspection");
-    // Slice 48g/48-final (KIP-405): cluster-wide tier-storage selector.
+    // KIP-405: cluster-wide tier-storage selector.
     // `Local` adds a writable `tier-storage` emptyDir + matching
     // volumeMount at `TIER_STORAGE_PATH`. `S3` adds no pod volume — the
     // broker writes through `object_store` directly to the bucket — but
@@ -882,7 +880,7 @@ pub(crate) fn render_statefulset(
 
     let tier_storage_persistence = tiered_storage.and_then(|t| t.persistence.as_ref());
 
-    // Slice 48i: K8s StatefulSets have a single set-wide PVC retention
+    // K8s StatefulSets have a single set-wide PVC retention
     // policy; per-template overrides don't exist. When the pool has both
     // a data PVC and a tier PVC, their `delete_claim` flags must match
     // (otherwise we'd silently pick one and lose data in a way the user
@@ -1943,7 +1941,7 @@ mod tests {
         assert!(matches!(err, PoolValidationError::StorageSizeInvalid(_, _)));
     }
 
-    // --- Slice 46: JBOD ---------------------------------------------------
+    // --- JBOD -------------------------------------------------------------
 
     fn pvc_template_named(name: &str, size: &str, class: Option<&str>) -> PersistentVolumeClaim {
         let mut t = pvc_template(size, class);
@@ -2004,7 +2002,7 @@ mod tests {
         let sts = render_statefulset(&parent_fixture("demo"), &pool, "img:1").unwrap();
         let vct = sts.spec.unwrap().volume_claim_templates.unwrap();
         assert_eq!(vct.len(), 2);
-        // Primary (lowest id) keeps the slice-24 `data` name.
+        // Primary (lowest id) keeps the `data` name.
         assert_eq!(vct[0].metadata.name.as_deref(), Some("data"));
         assert_eq!(vct[1].metadata.name.as_deref(), Some("data-1"));
         let req0 = vct[0]
@@ -2102,7 +2100,7 @@ mod tests {
     #[test]
     fn render_statefulset_jbod_no_extra_log_dirs_env_for_non_jbod() {
         // Regression: PersistentClaim / Ephemeral pools must NOT gain the
-        // env (keeps their pod template byte-identical pre/post slice 46).
+        // env (keeps their pod template byte-identical).
         let mut pool = pool_fixture("brokers", "demo", 1);
         pool.spec.storage = Some(pc("1Gi", None));
         let sts = render_statefulset(&parent_fixture("demo"), &pool, "img:1").unwrap();
@@ -2235,7 +2233,7 @@ mod tests {
     #[test]
     fn build_main_script_disabled_matches_slice_25_constant() {
         // Upgrade-stability contract: clusters with metrics_config=None
-        // must get a byte-identical pod template post-slice-40.
+        // must get a byte-identical pod template.
         assert_eq!(build_main_script(false), MAIN_SCRIPT);
     }
 
@@ -2367,9 +2365,9 @@ mod tests {
         assert!(rust_log.value.is_none());
     }
 
-    /// Slice 51b: without `spec.delegationToken`, the broker container's
+    /// Without `spec.delegationToken`, the broker container's
     /// env list must NOT carry `CRABKA_DELEGATION_TOKEN_SECRET_KEY` —
-    /// keeps the pod template byte-identical to pre-slice-51b clusters
+    /// keeps the pod template byte-identical for clusters without it
     /// (no spurious roll).
     #[test]
     fn render_statefulset_omits_dt_master_key_env_when_unset() {
@@ -2387,7 +2385,7 @@ mod tests {
         );
     }
 
-    /// Slice 51b: with `spec.delegationToken.secretKeyRef`, the operator
+    /// With `spec.delegationToken.secretKeyRef`, the operator
     /// must wire `CRABKA_DELEGATION_TOKEN_SECRET_KEY` via
     /// `valueFrom.secretKeyRef` (NOT a literal value — otherwise the
     /// Secret value leaks into the `StatefulSet` manifest). With the key
@@ -2425,7 +2423,7 @@ mod tests {
         assert_eq!(secret_ref.key, "secret-key");
     }
 
-    /// Slice 51b: explicit `key` override surfaces in the `SecretKeySelector`.
+    /// Explicit `key` override surfaces in the `SecretKeySelector`.
     #[test]
     fn render_statefulset_dt_master_key_env_honors_explicit_key() {
         use crate::crd::kafka::{DelegationTokenConfig, SecretKeyRef};
@@ -2474,7 +2472,7 @@ mod tests {
         );
     }
 
-    /// Slice 50b. Build a Kafka CR with one OAuth listener whose
+    /// Build a Kafka CR with one OAuth listener whose
     /// `tls_trusted_certificates` contains one entry — exercises the
     /// `Some(...)` branch of [`oauth_jwks_trust_secret_name`] from
     /// inside the pool reconcile's render path.
@@ -2532,7 +2530,7 @@ mod tests {
         let pod_spec = ss.spec.unwrap().template.spec.unwrap();
 
         // VolumeMount on the broker container points at the canonical
-        // path slice 49c's broker reads (`/etc/crabka/oauth-jwks-trust`).
+        // path the broker reads (`/etc/crabka/oauth-jwks-trust`).
         let mount = pod_spec.containers[0]
             .volume_mounts
             .as_ref()
@@ -2650,7 +2648,7 @@ mod tests {
         );
     }
 
-    /// Slice 50c. When the parent Kafka CR has an OAuth listener
+    /// When the parent Kafka CR has an OAuth listener
     /// configured for introspection mode (`accessTokenIsJwt: false` +
     /// `clientSecret`), the rendered `StatefulSet` must:
     /// - expose the user's source Secret as a pod volume with a
@@ -2739,7 +2737,7 @@ mod tests {
         assert_eq!(items[0].path, "client-secret");
     }
 
-    /// Slice 50c. JWT-mode OAuth listeners (the slice 50/50b default —
+    /// JWT-mode OAuth listeners (the default —
     /// `accessTokenIsJwt: true`, no `clientSecret`) must NOT cause the
     /// introspection volume / mount to be rendered. Confirms the
     /// short-circuit in `oauth_introspection_secret_mount` flows through
@@ -2774,7 +2772,7 @@ mod tests {
         );
     }
 
-    // ── Slice 48g: tieredStorage volume + mount tests ────────────────
+    // ── tieredStorage volume + mount tests ───────────────────────────
 
     fn parent_with_tiered_storage(name: &str) -> Kafka {
         let mut k = parent_fixture(name);
@@ -2855,12 +2853,12 @@ mod tests {
         );
     }
 
-    // ── Slice 48-final: S3 tiered storage env + volume gating ────────
+    // ── S3 tiered storage env + volume gating ────────────────────────
 
     /// S3 backend with credentials must inject AWS env vars from the
     /// referenced Secret via `valueFrom.secretKeyRef`. The literal env
     /// value must be empty so the secret never lands in the pod spec
-    /// JSON (same guarantee as the slice-51b delegation-token wiring).
+    /// JSON (same guarantee as the delegation-token wiring).
     #[test]
     fn pod_template_injects_aws_credentials_env_from_secret_when_s3() {
         let parent = parent_with_s3_tiered_storage("demo", true);
@@ -2989,7 +2987,7 @@ mod tests {
         );
     }
 
-    // ── Slice 48i: tier-storage PVC tests ────────────────────────────
+    // ── tier-storage PVC tests ───────────────────────────────────────
 
     fn parent_with_tier_storage_pvc(name: &str, size: &str, class: Option<&str>) -> Kafka {
         let mut k = parent_fixture(name);
@@ -3211,7 +3209,7 @@ mod tests {
         );
     }
 
-    // ── Slice 42b: tracing env-var rendering ─────────────────────────
+    // ── tracing env-var rendering ────────────────────────────────────
 
     fn parent_with_tracing(name: &str, otlp: crate::crd::kafka::OtlpTracing) -> Kafka {
         let mut k = parent_fixture(name);

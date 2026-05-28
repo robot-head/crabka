@@ -24,7 +24,7 @@ use crate::telemetry;
 /// Returns an error if Kubernetes client construction fails or if leader
 /// election surfaces an unrecoverable API error. Per-task failures inside
 /// the `tokio::select!` arms are logged but not propagated, since this is
-/// supervisor glue and the e2e test (Task 12) is the contract.
+/// supervisor glue and the e2e test is the contract.
 pub async fn run(config: OperatorConfig) -> anyhow::Result<()> {
     telemetry::init_tracing(&config.log_filter);
     let registry = Arc::new(Mutex::new(telemetry::new_registry()));

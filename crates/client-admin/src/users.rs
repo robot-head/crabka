@@ -1,4 +1,4 @@
-//! Slice 36: `KafkaUser` admin RPCs.
+//! `KafkaUser` admin RPCs.
 //!
 //! Five admin operations the `KafkaUser` reconciler drives:
 //! `AlterUserScramCredentials` (upsert + delete in a single call),
@@ -6,8 +6,8 @@
 //!
 //! Wire `i8` discriminants are kept private to this module; callers use
 //! the typed Rust enums below. `crates/client-admin` depends on
-//! `crabka-metadata` for shared image types (`DelegationToken`,
-//! introduced in slice 51b) but stays free of `crabka-broker` so the
+//! `crabka-metadata` for shared image types (`DelegationToken`)
+//! but stays free of `crabka-broker` so the
 //! crate remains usable from out-of-process clients — the local enum
 //! copies are unit-tested for wire round-trip.
 
@@ -25,11 +25,9 @@ use ring::rand::{SecureRandom, SystemRandom};
 
 use crate::{AdminClient, AdminError, KafkaError, kafka_error_name};
 
-/// KIP-554 wire byte for SCRAM-SHA-512. SHA-256 is byte `1`; only SHA-512
-/// is exercised by this slice (slice 32 ships SCRAM-SHA-256 in the
-/// broker; surfacing it via the operator is a follow-up).
+/// KIP-554 wire byte for SCRAM-SHA-512. SHA-256 is byte `1`.
 const SCRAM_SHA_512_WIRE: i8 = 2;
-/// Slice 36b: SCRAM mechanism byte for SCRAM-SHA-256 (1, KIP-554).
+/// SCRAM mechanism byte for SCRAM-SHA-256 (1, KIP-554).
 /// Paired with the `*_sha256` builders/helpers below.
 const SCRAM_SHA_256_WIRE: i8 = 1;
 
@@ -147,7 +145,7 @@ impl AdminClient {
         Ok(parse_alter_scram_results(resp))
     }
 
-    /// Slice 36b: SCRAM-SHA-256 sibling of
+    /// SCRAM-SHA-256 sibling of
     /// [`Self::alter_user_scram_credentials_sha512`]. Iteration counts,
     /// salt generation, and salted-password derivation are identical
     /// to the SHA-512 path; only the mechanism wire byte and HMAC
@@ -279,7 +277,7 @@ fn build_alter_scram_request_sha512(
     )
 }
 
-/// Slice 36b: SCRAM-SHA-256 sibling of
+/// SCRAM-SHA-256 sibling of
 /// [`build_alter_scram_request_sha512`]. Pulled into
 /// [`build_alter_scram_request`] so the two helpers can't drift.
 fn build_alter_scram_request_sha256(

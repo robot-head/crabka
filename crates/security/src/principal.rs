@@ -4,7 +4,7 @@ use thiserror::Error;
 
 /// How a [`Principal`] was authenticated. A strict superset of
 /// [`SaslMechanism`] that also covers mTLS client-cert authentication
-/// (slice 29) and the implicit ANONYMOUS path on PLAINTEXT / SSL-no-mTLS
+/// and the implicit ANONYMOUS path on PLAINTEXT / SSL-no-mTLS
 /// listeners.
 ///
 /// Kept distinct from `SaslMechanism` because the latter has a
@@ -17,14 +17,14 @@ pub enum AuthMethod {
     Anonymous,
     /// SASL/PLAIN.
     SaslPlain,
-    /// SASL/SCRAM-SHA-256 (slice 32).
+    /// SASL/SCRAM-SHA-256.
     SaslScramSha256,
-    /// SASL/SCRAM-SHA-512 (slice 12).
+    /// SASL/SCRAM-SHA-512.
     SaslScramSha512,
-    /// SASL/OAUTHBEARER (slice 49).
+    /// SASL/OAUTHBEARER.
     SaslOAuthBearer,
     /// mTLS client-cert verified against the listener's
-    /// `client_ca_path` (slice 29).
+    /// `client_ca_path`.
     MTls,
 }
 
@@ -45,12 +45,11 @@ impl AuthMethod {
 pub struct Principal {
     pub name: String,
     pub auth_method: AuthMethod,
-    /// Slice 49h: OAuth-derived group memberships from the listener's
+    /// OAuth-derived group memberships from the listener's
     /// `groupsClaim`. Empty vec for non-OAuth principals (PLAIN/SCRAM/
     /// mTLS/anonymous) and for OAuth principals whose listener has no
     /// `groupsClaim` configured. No broker-side authorizer reads this
-    /// yet (slice 53/54 will); populated as scaffolding + for
-    /// observability.
+    /// yet; populated as scaffolding + for observability.
     pub groups: Vec<String>,
 }
 
@@ -69,7 +68,7 @@ impl Principal {
     }
 }
 
-/// Slice 51 (KIP-48): Kafka wire-level principal — the `(principalType,
+/// KIP-48: Kafka wire-level principal — the `(principalType,
 /// name)` pair carried in delegation-token records, ACL entries, and
 /// `KafkaPrincipal`-shaped fields across the Kafka protocol. Distinct
 /// from [`Principal`] which models the *runtime session* identity
@@ -114,11 +113,11 @@ pub enum AuthError {
     UnsupportedMechanism,
     /// OAUTHBEARER token failed validation (expired, bad claims, signed token
     /// rejected by the unsecured validator, missing principal, …). Maps to the
-    /// RFC 7628 `invalid_token` server error status (slice 49).
+    /// RFC 7628 `invalid_token` server error status.
     #[error("invalid token")]
     InvalidToken,
-    /// OAUTHBEARER introspection HTTP round-trip failed at the transport layer
-    /// (slice 49d). Distinct from `InvalidToken` so the SASL handler can
+    /// OAUTHBEARER introspection HTTP round-trip failed at the transport layer.
+    /// Distinct from `InvalidToken` so the SASL handler can
     /// surface "`IdP` unreachable" separately from "client supplied a bad
     /// token". Maps to the RFC 7628 `invalid_token` server error status.
     #[error("oauthbearer introspection transport: {0}")]

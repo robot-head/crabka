@@ -2,7 +2,7 @@
 //!
 //! Handles primitive fields, tagged fields, primitive arrays, and nested
 //! struct fields. Nested anonymous structs become sibling types in the same
-//! generated file. `commonStructs` support is added in Task 14.
+//! generated file. Supports `commonStructs`.
 
 use std::collections::HashMap;
 use std::fmt::Write;

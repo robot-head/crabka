@@ -9,7 +9,7 @@
 #![allow(clippy::unnecessary_unwrap)]
 #![allow(clippy::type_complexity)]
 
-//! Slice 15b. Broker-side integration tests for KIP-73 replication throttle.
+//! Broker-side integration tests for KIP-73 replication throttle.
 //!
 //! Tests:
 //! 1. `broker_scoped_alter_persists_in_image` — `IncrementalAlterConfigs`

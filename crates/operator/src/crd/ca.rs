@@ -1,4 +1,4 @@
-//! Slice 30: `Kafka.spec.clusterCa` + `Kafka.spec.clientsCa` schema.
+//! `Kafka.spec.clusterCa` + `Kafka.spec.clientsCa` schema.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -58,19 +58,19 @@ pub struct CertificateAuthorityStatus {
     /// `true` when the operator generated this CA (i.e.
     /// `generateCertificateAuthority == true`); `false` for BYO.
     pub generated: bool,
-    /// Slice 34: monotonic generation of the active signing cert (bumped on
+    /// Monotonic generation of the active signing cert (bumped on
     /// same-key renewal and on key promotion).
     #[serde(default)]
     pub cert_generation: u64,
-    /// Slice 34: monotonic generation of the active signing key (bumped only on
+    /// Monotonic generation of the active signing key (bumped only on
     /// key replacement).
     #[serde(default)]
     pub key_generation: u64,
-    /// Slice 34: staged key-replacement phase
+    /// Staged key-replacement phase
     /// (`idle` | `key-replace-trust` | `key-replace-promote`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rotation_phase: Option<String>,
-    /// Slice 34: number of CA certs currently in the trust bundle.
+    /// Number of CA certs currently in the trust bundle.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trust_anchors: Option<usize>,
 }

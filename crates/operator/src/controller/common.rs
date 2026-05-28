@@ -60,7 +60,7 @@ pub enum ReconcileError {
         "BYO CA missing: {which} requires pre-existing Secret pair (generateCertificateAuthority=false)"
     )]
     ByoCaMissing { which: String },
-    #[allow(dead_code)] // reserved for T8/T10: surface BYO CA parse failures at reconcile time
+    #[allow(dead_code)] // reserved to surface BYO CA parse failures at reconcile time
     #[error("BYO CA malformed: {which}: {reason}")]
     ByoCaMalformed { which: String, reason: String },
     #[error("CA Secret missing: {name}")]
@@ -71,26 +71,26 @@ pub enum ReconcileError {
     MissingOauthTrustKey { secret: String, key: String },
     #[error("oauth trust Secret '{secret}' key '{key}' is empty")]
     EmptyOauthTrustValue { secret: String, key: String },
-    /// Slice 50c: an oauth listener's `accessTokenIsJwt` setting
+    /// An oauth listener's `accessTokenIsJwt` setting
     /// disagrees with which mode-specific fields are set (JWT-mode
     /// requires `jwksEndpointUri` and rejects introspection fields;
     /// introspection-mode requires `introspectionEndpointUri` + `clientId`
     /// + `clientSecret` and rejects `jwksEndpointUri`).
     #[error("listener OAuth: {0}")]
     InvalidListenerOauthAccessTokenIsJwt(String),
-    /// Slice 50c: an oauth listener's `clientSecret.secretName` doesn't
+    /// An oauth listener's `clientSecret.secretName` doesn't
     /// exist in the cluster's namespace.
     #[error("oauth introspection Secret '{0}' not found")]
     MissingOauthIntrospectionSecret(String),
-    /// Slice 50c: an oauth listener's `clientSecret.secretName` exists
+    /// An oauth listener's `clientSecret.secretName` exists
     /// but does not contain the named `key`.
     #[error("oauth introspection Secret '{secret}' has no key '{key}'")]
     MissingOauthIntrospectionKey { secret: String, key: String },
-    /// Slice 50c: an oauth listener's `clientSecret` Secret + key both
+    /// An oauth listener's `clientSecret` Secret + key both
     /// exist but the value is zero bytes.
     #[error("oauth introspection Secret '{secret}' key '{key}' is empty")]
     EmptyOauthIntrospectionValue { secret: String, key: String },
-    /// Slice 48-final (KIP-405): `spec.tieredStorage` failed shape
+    /// KIP-405: `spec.tieredStorage` failed shape
     /// validation. Concrete cases: `type = "S3"` without `spec.tieredStorage.s3`,
     /// `type = "Local"` with `spec.tieredStorage.s3` set, or an S3 spec
     /// missing required `bucket` / `region`. The reconciler returns this
@@ -99,7 +99,7 @@ pub enum ReconcileError {
     #[error("tieredStorage: {0}")]
     TieredStorageInvalid(String),
 
-    /// Slice 42b: `spec.tracing` failed shape validation. Concrete
+    /// `spec.tracing` failed shape validation. Concrete
     /// cases: `type = "Otlp"` without an `otlp` block; `otlp.endpoint`
     /// empty; `sampleRatio` outside `[0.0, 1.0]`; `timeoutSecs = 0`.
     /// The reconciler returns this before rendering any pod template
@@ -121,7 +121,7 @@ pub(crate) fn condition(type_: &str, status: &str, reason: &str, message: &str) 
 }
 
 /// Server-side apply a typed object. Field manager is `crabka-operator`,
-/// force-takeover is on so we wrest fields back from the slice-17 manager
+/// force-takeover is on so we wrest fields back from any previous manager
 /// if any happen to linger. Object shape is stable across reconciles
 /// because renderers are pure functions of the owner.
 pub(crate) async fn apply_object<K>(api: &Api<K>, name: &str, obj: &K) -> Result<(), ReconcileError>
@@ -286,31 +286,31 @@ pub(crate) fn render_configmap(
     let labels = common_labels(&name, &owner.spec.kafka_version, None);
 
     let mut data = BTreeMap::new();
-    // Slice 41: cluster-wide `RUST_LOG` filter, referenced by each broker
+    // Cluster-wide `RUST_LOG` filter, referenced by each broker
     // pod's `RUST_LOG` env via `configMapKeyRef` (see `render_broker_container`).
     if let Some(filter) = logging_filter {
         data.insert("rust.log".to_string(), filter.to_string());
     }
     let mut server_properties = owner.spec.config.clone().unwrap_or_default();
-    // Slice 28: the operator owns `metadata.version` — the KRaft analog of
+    // The operator owns `metadata.version` — the KRaft analog of
     // `inter.broker.protocol.version`. Rendered into the broker's inert
     // `[server_properties]` table (the broker has no runtime feature-level
     // enforcement yet). Operator value wins over any user-supplied key.
     if let Some(mv) = metadata_version {
         server_properties.insert("metadata.version".to_string(), mv.to_string());
     }
-    // Slice 51b: surface delegation-token enablement to the per-broker
-    // renderer. Slice 53 folded the slice-51b `super_users = ["ANONYMOUS"]`
-    // top-level emit into the new `[authorization]` block — passing this
+    // Surface delegation-token enablement to the per-broker
+    // renderer. The `super_users = ["ANONYMOUS"]`
+    // top-level emit is folded into the `[authorization]` block — passing this
     // flag still drives the auto-injected `[authorization]` shape (or the
     // ANONYMOUS-merge into a user-authored authorization).
     let delegation_token_enabled = owner.spec.delegation_token.is_some();
-    // Slice 53: optional broker authorizer config. `None` ⇒ broker
+    // Optional broker authorizer config. `None` ⇒ broker
     // defaults to AllowAll (or, with delegation tokens enabled, gets the
     // auto-injected `simple + ANONYMOUS` block — see
     // `render_broker_toml`).
     let authorization = owner.spec.authorization.as_ref();
-    // Slice 48g: thread `Kafka.spec.tieredStorage` into each broker's
+    // Thread `Kafka.spec.tieredStorage` into each broker's
     // TOML so the broker-wide `[remote_storage]` block (and the matching
     // `tier-storage` pod volume) light up together.
     let tiered_storage = owner.spec.tiered_storage.as_ref();
@@ -456,7 +456,7 @@ pub(crate) fn derive_status(
 }
 
 /// Truncated SHA-256 hex digest (16 hex chars / 8 bytes of entropy)
-/// of the given content. Used by slice 21 to detect `Kafka.spec.config`
+/// of the given content. Used to detect `Kafka.spec.config`
 /// changes that the K8s `StatefulSet` controller can't see directly.
 ///
 /// The full sha256 is 64 hex chars, which exceeds the 63-char K8s
@@ -478,12 +478,12 @@ pub fn config_hash(content: &str) -> String {
     out
 }
 
-/// Slice 25 (+ slice 40): combined hash over user `spec.config`, the
+/// Combined hash over user `spec.config`, the
 /// canonical listener intent, a `metrics_config.is_some()` bit, and
-/// (slice 30) the cluster CA cert PEM.
+/// the cluster CA cert PEM.
 /// Empty listeners produce empty intent and metrics-unset produces an
 /// empty third segment, so the combined hash is identical to the
-/// slice-24 hash for an unchanged `spec.config` with neither listeners
+/// bare `config_hash(spec.config)` for an unchanged `spec.config` with neither listeners
 /// nor metrics.
 ///
 /// The metrics segment is a coarse `metrics_enabled` bit, not a hash of
@@ -496,19 +496,19 @@ pub fn config_hash(content: &str) -> String {
 ///
 /// `cluster_ca_cert_pem` — when `Some`, the cluster CA cert PEM is
 /// included as a fourth segment. Rotating the cluster CA forces a
-/// cluster roll; leaf renewal does not (slice 33 hot-reload handles it).
+/// cluster roll; leaf renewal does not (hot-reload handles it).
 ///
-/// `metadata_version_pin` (slice 28) — when `Some`, an *explicit*
+/// `metadata_version_pin` — when `Some`, an *explicit*
 /// `spec.metadataVersion` pin is included as a fifth segment, so changing
 /// the pin rolls the cluster. A *defaulted* metadata version is passed as
 /// `None` here (a binary bump already rolls via the pod-template image
-/// change), which preserves the slice-24 empty-hash collapse.
+/// change), which preserves the empty-hash collapse.
 ///
-/// `logging_filter` (slice 41) — when `Some`, the resolved `RUST_LOG`
+/// `logging_filter` — when `Some`, the resolved `RUST_LOG`
 /// env-filter string is included as a sixth segment. The broker only re-reads
 /// `RUST_LOG` on restart, so a *value* change (not just on/off) must roll the
 /// cluster. `None` (logging unset, or external resolution failed) contributes
-/// an empty segment, preserving the slice-24 empty-hash collapse.
+/// an empty segment, preserving the empty-hash collapse.
 #[must_use]
 pub fn combined_config_hash(
     spec: &crate::crd::KafkaSpec,
@@ -542,11 +542,11 @@ pub fn combined_config_hash(
     let ca_part = cluster_ca_cert_pem.unwrap_or("");
     let metadata_part = metadata_version_pin.unwrap_or("");
     let logging_part = logging_filter.unwrap_or("");
-    // Slice-24 compatibility: when listeners, metricsConfig, the CA cert,
+    // Hash-collapse compatibility: when listeners, metricsConfig, the CA cert,
     // an explicit metadataVersion pin, and logging are all absent, the hash
     // collapses to `config_hash(config_part)` — byte-identical to the
-    // slice-24 hash for the same `spec.config`. This is what makes an
-    // in-place upgrade from slice 24 not trigger a hash-driven roll (the
+    // bare config hash for the same `spec.config`. This is what makes an
+    // in-place upgrade from a config-only cluster not trigger a hash-driven roll (the
     // unavoidable template-change roll fires separately and once).
     if intent.is_empty()
         && metrics_part.is_empty()
@@ -589,7 +589,7 @@ pub(crate) struct PoolRolloutState {
     pub ready: bool,
 }
 
-/// Slice 28: decide the config-hash to write to each pool for an ordered,
+/// Decide the config-hash to write to each pool for an ordered,
 /// one-node-at-a-time rollout. `pools` must be pre-sorted into the desired
 /// roll order (by `(node_id_start, name)`). Returns the target hash per
 /// pool name, in the same order.
@@ -661,7 +661,7 @@ pub(crate) fn plan_rollout(pools: &[PoolRolloutState], desired: &str) -> Vec<(St
 /// strings, or any value that doesn't match `<mantissa><suffix?>`.
 ///
 /// Returns the byte count as `i128` (1.5 Pi fits with headroom for
-/// arithmetic). Slice 24 only uses the result for ordered comparison
+/// arithmetic). The result is only used for ordered comparison
 /// — we never round-trip back to a string, so sub-byte rounding from
 /// the `f64` intermediate is acceptable. The in-tree implementation
 /// is ~50 lines and saves a workspace dependency; no third-party
@@ -792,11 +792,11 @@ mod config_hash_tests {
         let h_again = combined_config_hash(&spec_a, None, None, None);
         assert_eq!(h, h_again);
 
-        // Slice-24 compat: the hash for empty listeners + no metrics MUST
+        // Hash-collapse compat: the hash for empty listeners + no metrics MUST
         // equal `config_hash(serialized broker-properties)`. That's what
-        // lets an in-place slice-24 -> slice-25 upgrade avoid a
+        // lets an in-place config-only upgrade avoid a
         // hash-driven roll (the e2e job `kind-upgrade` asserts this
-        // against a real slice-24 cluster).
+        // against a real config-only cluster).
         let slice24_form = "log.retention.hours=24\n";
         assert_eq!(
             h,
@@ -902,7 +902,7 @@ mod config_hash_tests {
     #[test]
     fn combined_hash_stable_under_broker_keystore_changes() {
         // The keystore Secret's contents are never inputs to
-        // combined_config_hash (slice 33 hot-reload handles leaf renewal).
+        // combined_config_hash (hot-reload handles leaf renewal).
         // This test guards against a future regression where someone wires
         // a keystore digest into the hash.
         let spec = crate::crd::KafkaSpec {
@@ -981,7 +981,7 @@ mod config_hash_tests {
         assert!(data.contains_key("broker-1.toml"));
         assert!(data["broker-0.toml"].contains("demo-0.svc"));
         assert!(data["broker-1.toml"].contains("demo-1.svc"));
-        // Slice 25 drops the old broker.env / broker.properties keys.
+        // The old broker.env / broker.properties keys are dropped.
         assert!(!data.contains_key("broker.env"));
         assert!(!data.contains_key("broker.properties"));
     }
@@ -1006,7 +1006,7 @@ mod config_hash_tests {
             tiered_storage: None,
             tracing: None,
         };
-        // No explicit pin => slice-24 collapse preserved (== config_hash of
+        // No explicit pin => hash collapse preserved (== config_hash of
         // the empty config part).
         let h_default = combined_config_hash(&spec, None, None, None);
         assert_eq!(h_default, config_hash(""));

@@ -4,7 +4,7 @@
 // workspace still enforces the full pedantic gate.
 #![allow(clippy::pedantic)]
 
-//! Slice 53 (Task B4): end-to-end OPA authorizer enforcement via the
+//! End-to-end OPA authorizer enforcement via the
 //! wire path.
 //!
 //! Two integration tests boot a single-broker SASL_PLAINTEXT cluster
@@ -108,7 +108,7 @@ async fn start_broker_with_opa_authorizer(opa_url: String) -> (BrokerHandle, Tem
     });
     // Broker-level super-user set (used by handler code that reads
     // `broker.config.super_users` directly, independent of the authorizer
-    // trait dispatch — e.g. slice-51b's act-as gate).
+    // trait dispatch — e.g. the act-as gate).
     cfg.super_users.insert("admin".to_string());
 
     // OpaAuthorizer carries its own super-user set so it can bypass HTTP
@@ -379,7 +379,7 @@ async fn retry_produce_until_allowed(
 // Tests.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Spec §4.2 / Plan §B4 test 1.
+/// Spec §4.2 test 1.
 ///
 /// OPA mock returns `{"result": false}` for every POST. `alice`
 /// authenticates via SASL/PLAIN and sends Produce against a topic that
@@ -428,7 +428,7 @@ async fn produce_blocked_by_opa_returns_topic_authorization_failed() {
     );
 }
 
-/// Spec §4.2 / Plan §B4 test 2.
+/// Spec §4.2 test 2.
 ///
 /// OPA mock returns `{"result": true}` for every POST. `alice`
 /// authenticates and produces — must succeed with `error_code = 0` on

@@ -1,6 +1,5 @@
 //! Background coordinator task — owns the join/sync/heartbeat/rebalance
-//! lifecycle for a [`Consumer`](crate::consumer::Consumer). Replaces the
-//! slice-5 standalone heartbeat task.
+//! lifecycle for a [`Consumer`](crate::consumer::Consumer).
 //!
 //! On each tick we either send a `Heartbeat` (steady-state) or run a
 //! full `JoinGroup` + `SyncGroup` round (`needs_rejoin`). The broker
@@ -372,7 +371,7 @@ async fn join_and_sync(
 
 /// Populate `next_offsets` for newly added partitions by batch-fetching
 /// committed offsets, falling back to `auto.offset.reset` semantics
-/// when no commit exists. Mirrors the slice-5 initial-prime in
+/// when no commit exists. Mirrors the initial-prime in
 /// `consumer.rs::start` step 5.
 async fn prime_offsets(
     state: &CoordinatorState,

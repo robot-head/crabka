@@ -81,8 +81,8 @@ pub struct BrokerConfig {
     pub controller_listen_addr: SocketAddr,
 
     /// Static voter set: `[(node_id, controller_addr), …]`. Defaults to
-    /// a single-voter cluster of just this broker, so existing
-    /// slice-1..6 tests upgrade to quorum-of-1 without config changes.
+    /// a single-voter cluster of just this broker, so single-broker
+    /// setups upgrade to quorum-of-1 without config changes.
     pub controller_quorum_voters: Vec<(NodeId, SocketAddr)>,
 
     /// How often each broker sends `BrokerHeartbeat` to the controller
@@ -119,7 +119,7 @@ pub struct BrokerConfig {
     /// `None` defaults to `Uuid::nil()` inside `Controller::start`.
     pub cluster_id: Option<uuid::Uuid>,
 
-    // ── Auth / listener registry (Task 7+) ──────────────────────────────
+    // ── Auth / listener registry ─────────────────────────────────────────
     /// Named listener definitions. When empty, `effective_listeners()` synthesizes
     /// a single PLAINTEXT listener from `listen_addr` + `advertised_listener`,
     /// preserving full backward compatibility.
@@ -138,64 +138,64 @@ pub struct BrokerConfig {
     pub inter_broker_listener_name: String,
 
     /// Credentials the broker uses for outbound inter-broker connections.
-    /// `None` means no SASL — plaintext inter-broker traffic (slice 12 default).
+    /// `None` means no SASL — plaintext inter-broker traffic (the default).
     pub inter_broker_credentials: Option<InterBrokerCredentials>,
 
     /// Static PLAIN credentials: username → password.  Empty by default
     /// (PLAIN auth disabled until mechanisms are explicitly enabled).
     pub plain_credentials: HashMap<String, String>,
 
-    /// Usernames that bypass ACL checks (super-users). Slice 51's
+    /// Usernames that bypass ACL checks (super-users). The
     /// `create_delegation_token` act-as gate reads this directly; the
     /// active [`crate::authorizer::Authorizer`] impl also reads it
     /// (`SimpleAclAuthorizer` / `OpaAuthorizer`). Both are populated
     /// from the same `[authorization]` TOML stanza by `file_config`.
     pub super_users: std::collections::HashSet<String>,
 
-    /// Slice 53: pluggable cluster authorizer. One boxed instance per
+    /// Pluggable cluster authorizer. One boxed instance per
     /// broker; configured via `[authorization]` in `broker.toml`. The
     /// default is [`crate::authorizer::AllowAllAuthorizer`] — explicit
-    /// "allow everything" — which replaces the slice-13
+    /// "allow everything" — which replaces the earlier
     /// "no super-users + no ACLs ⇒ Allow" compat shim that previously
     /// lived inside the ACL impl.
     pub authorizer: std::sync::Arc<dyn crate::authorizer::Authorizer>,
 
-    /// TLS configuration. `None` — no TLS (slice 12 default).
+    /// TLS configuration. `None` — no TLS (the default).
     pub tls_config: Option<TlsConfig>,
 
     /// Which SASL mechanisms are enabled. Empty → no SASL.
     pub enabled_sasl_mechanisms: Vec<SaslMechanism>,
 
-    /// Slice 49 / 49b: validator for SASL/OAUTHBEARER bearer tokens. Only
+    /// Validator for SASL/OAUTHBEARER bearer tokens. Only
     /// consulted when `OAuthBearer` is in `enabled_sasl_mechanisms` (the
     /// handshake won't advertise it otherwise). Defaults to the unsecured-JWS
     /// validator with principal claim `sub`; configuring a JWKS endpoint
     /// (`[oauthbearer].jwks_endpoint_uri`) selects the signed-JWT validator.
     pub oauthbearer_validator: crabka_security::OAuthBearerValidator,
 
-    /// Slice 49b: JWKS endpoint to fetch OAUTHBEARER signing keys from. `Some`
+    /// JWKS endpoint to fetch OAUTHBEARER signing keys from. `Some`
     /// only when `oauthbearer_validator` is the signed variant. When set,
     /// `Broker::start` spawns a background refresher that fetches this URL and
     /// rotates the validator's key set on `oauthbearer_jwks_refresh_interval`.
     pub oauthbearer_jwks_endpoint: Option<String>,
 
-    /// Slice 49b: how often to re-fetch the JWKS. Default 5 minutes.
+    /// How often to re-fetch the JWKS. Default 5 minutes.
     pub oauthbearer_jwks_refresh_interval: std::time::Duration,
 
-    /// Slice 49c (renamed in 49d): optional PEM path for outbound
+    /// Optional PEM path for outbound
     /// HTTPS to the `IdP`. Shared across JWKS, introspection, and
     /// userinfo. None → reqwest's default webpki-roots.
     pub oauthbearer_idp_tls_trust: Option<std::path::PathBuf>,
 
-    /// Slice 50d: optional ceiling on OAUTHBEARER session lifetime, in
+    /// Optional ceiling on OAUTHBEARER session lifetime, in
     /// seconds. When set, the broker reports
     /// `session_lifetime_ms = min(token_exp_ms - now_ms, cap * 1000)`
     /// and the dispatch-loop re-auth timer fires at the clamped time.
     /// When unset, sessions last until the token's natural `exp`
-    /// (slice 49e default).
+    /// (the default).
     pub oauthbearer_max_session_lifetime_seconds: Option<u32>,
 
-    /// Slice 49i: receiver half of the JWKS refresher signal channel.
+    /// Receiver half of the JWKS refresher signal channel.
     /// `apply_to` creates the channel pair: the sender is wired into the
     /// signed validator's `JwksHandle`; the receiver is parked here for
     /// `Broker::start` to `take()` and pass to `JwksRefresher`. `None`
@@ -206,26 +206,26 @@ pub struct BrokerConfig {
     pub oauthbearer_jwks_signal_rx:
         std::sync::Arc<std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<()>>>>,
 
-    /// Slice 49i: shared timestamp of the last successful JWKS fetch.
+    /// Shared timestamp of the last successful JWKS fetch.
     /// `apply_to` creates it (`AtomicI64::new(0)`); the validator's
     /// `JwksHandle` and the refresher both clone this `Arc` so the
     /// refresher's writes are visible to the validator's expiry check.
     pub oauthbearer_jwks_last_successful_fetch_ms: std::sync::Arc<std::sync::atomic::AtomicI64>,
 
-    /// Slice 49i: shared on-demand-refresh timestamp for rate-limiting.
+    /// Shared on-demand-refresh timestamp for rate-limiting.
     /// `apply_to` creates it; `Broker::start` hands a clone to the
     /// refresher. The validator never reads this — it's refresher-only
     /// bookkeeping carried through `BrokerConfig` for symmetry.
     pub oauthbearer_jwks_last_on_demand_refresh_ms: std::sync::Arc<std::sync::atomic::AtomicI64>,
 
-    /// Slice 49i: minimum pause between on-demand JWKS refreshes
+    /// Minimum pause between on-demand JWKS refreshes
     /// triggered by validator signals. `apply_to` sets this from
     /// `FileOAuthBearerConfig::jwks_min_refresh_pause_seconds`;
     /// `Broker::start` passes it into `JwksRefresher`. Strimzi default
     /// 1 second; we default to 1 second too.
     pub oauthbearer_jwks_min_on_demand_pause: std::time::Duration,
 
-    /// Slice 49i: when true, the refresher's JWKS parser keeps keys
+    /// When true, the refresher's JWKS parser keeps keys
     /// regardless of `use` value (default behavior filters out `use=enc`).
     pub oauthbearer_jwks_ignore_key_use: bool,
 
@@ -255,7 +255,7 @@ pub struct BrokerConfig {
     #[cfg(any(test, feature = "test-helpers"))]
     pub cleaner_interval_override: Option<std::time::Duration>,
 
-    /// Slice 33: how often the TLS reload watcher polls cert / key /
+    /// How often the TLS reload watcher polls cert / key /
     /// client-CA file mtimes and rebuilds the `ServerConfig` if any
     /// changed. Defaults to 30s. Set lower in tests to keep watcher
     /// latency tight. `Duration::ZERO` disables the periodic watcher
@@ -263,7 +263,7 @@ pub struct BrokerConfig {
     /// [`crate::BrokerHandle::reload_tls`].
     pub tls_reload_interval: std::time::Duration,
 
-    /// Slice 39: bind address for the Prometheus `/metrics` HTTP
+    /// Bind address for the Prometheus `/metrics` HTTP
     /// endpoint. `None` disables the server entirely (the broker still
     /// updates its internal counters, but nothing scrapes them).
     /// Defaults to `Some(0.0.0.0:9404)` in production (the same port
@@ -280,7 +280,7 @@ pub struct BrokerConfig {
     /// (default 1000).
     pub max_incremental_fetch_session_cache_slots: usize,
 
-    /// Slice 43e: partition disk-usage scan cadence, in seconds. `0`
+    /// Partition disk-usage scan cadence, in seconds. `0`
     /// disables the scanner entirely (no background task spawned).
     /// Production default: 60s. The scanner walks every known
     /// (topic, partition) under `log_dir` each tick, sums regular-file
@@ -288,7 +288,7 @@ pub struct BrokerConfig {
     /// the rebalancer's usage scraper.
     pub partition_disk_scan_interval_secs: u64,
 
-    /// Slice 51 (KIP-48): HMAC-SHA-256 master key used to mint + verify
+    /// KIP-48: HMAC-SHA-256 master key used to mint + verify
     /// delegation tokens. When `None`, the broker rejects all four
     /// delegation-token RPCs with `DELEGATION_TOKEN_AUTH_DISABLED` and
     /// SCRAM cannot fall back to token lookup. Sourced from
@@ -297,20 +297,20 @@ pub struct BrokerConfig {
     /// `SecretBytes` so `Debug` redacts the bytes.
     pub delegation_token_secret_key: Option<crabka_security::SecretBytes>,
 
-    /// Slice 51 (KIP-48): hard upper bound on delegation-token lifetime,
+    /// KIP-48: hard upper bound on delegation-token lifetime,
     /// in milliseconds. A token's `max_timestamp_ms` is set to
     /// `issue_timestamp_ms + delegation_token_max_lifetime_ms` and the
     /// renew handler clamps any caller-requested expiry to this. Default
     /// 7 days (`delegation.token.max.lifetime.ms` in Kafka).
     pub delegation_token_max_lifetime_ms: i64,
 
-    /// Slice 51 (KIP-48): cadence of the background sweep task that
+    /// KIP-48: cadence of the background sweep task that
     /// proposes `V1DeleteDelegationToken` tombstones for tokens whose
     /// `expiry_timestamp_ms` or `max_timestamp_ms` is in the past. Default
     /// 1 hour (`delegation.token.expiry.check.interval.ms` in Kafka).
     pub delegation_token_expiry_check_interval_ms: i64,
 
-    /// Slice 51 (KIP-48): default renew period used as the *initial*
+    /// KIP-48: default renew period used as the *initial*
     /// `expiry_timestamp_ms` offset at create time, and as the implicit
     /// renew period when `RenewDelegationToken.renew_period_ms == -1`.
     /// Distinct from `delegation_token_max_lifetime_ms` (the absolute
@@ -321,7 +321,7 @@ pub struct BrokerConfig {
     /// (`delegation.token.expiry.time.ms` in Kafka).
     pub delegation_token_default_renew_period_ms: i64,
 
-    /// Slice 48b (KIP-405): tiered-storage backend selection. `Some(_)`
+    /// KIP-405: tiered-storage backend selection. `Some(_)`
     /// enables tiered storage broker-wide (collapsing Kafka's
     /// `remote.log.storage.system.enable` plus the RSM selection into one
     /// knob) and spawns the `RemoteLogManager` copy task; per-topic
@@ -333,24 +333,24 @@ pub struct BrokerConfig {
     /// - S3:    `[remote_storage.s3] bucket = "..." region = "..."`
     pub remote_storage_backend: Option<RemoteStorageBackend>,
 
-    /// Slice 48b (KIP-405): tick cadence of the `RemoteLogManager` copy /
+    /// KIP-405: tick cadence of the `RemoteLogManager` copy /
     /// retention task. Defaults to 30s (Kafka's
     /// `remote.log.manager.task.interval.ms`). Acceptance tests lower this
     /// so segments are tiered and locally evicted in seconds rather than
     /// minutes; production deployments leave it at the default.
     pub remote_log_manager_interval: std::time::Duration,
 
-    /// Slice 48f (KIP-405): which
+    /// KIP-405: which
     /// [`RemoteLogMetadataManager`](crabka_remote_storage::RemoteLogMetadataManager)
     /// implementation to construct when tiered storage is enabled.
-    /// `None` (default) keeps the in-memory fixture used by every
-    /// 48a-48e test path; `Some(KafkaRlmmConfig)` swaps in the
+    /// `None` (default) keeps the in-memory fixture used by the
+    /// test paths; `Some(KafkaRlmmConfig)` swaps in the
     /// production [`crabka_remote_storage_topic::TopicBasedRemoteLogMetadataManager`]
     /// backed by `__remote_log_metadata`.
     pub remote_log_metadata_kafka: Option<KafkaRlmmConfig>,
 }
 
-/// Slice 48f: parameters for the topic-backed
+/// Parameters for the topic-backed
 /// [`RemoteLogMetadataManager`](crabka_remote_storage::RemoteLogMetadataManager).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KafkaRlmmConfig {
@@ -380,15 +380,15 @@ pub enum RemoteStorageBackend {
     S3(crabka_remote_storage::S3Config),
 }
 
-/// Slice 51 (KIP-48): default hard upper bound on delegation-token lifetime.
+/// KIP-48: default hard upper bound on delegation-token lifetime.
 /// 7 days, matches Kafka's `delegation.token.max.lifetime.ms` default.
 pub const DEFAULT_DELEGATION_TOKEN_MAX_LIFETIME_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
 
-/// Slice 51 (KIP-48): default cadence of the background expiry sweep task.
+/// KIP-48: default cadence of the background expiry sweep task.
 /// 1 hour, matches Kafka's `delegation.token.expiry.check.interval.ms`.
 pub const DEFAULT_DELEGATION_TOKEN_EXPIRY_CHECK_INTERVAL_MS: i64 = 60 * 60 * 1_000;
 
-/// Slice 51 (KIP-48): default renew period used as the initial
+/// KIP-48: default renew period used as the initial
 /// `expiry_timestamp_ms` offset at create time, and as the implicit
 /// renew period when `RenewDelegationToken.renew_period_ms == -1`.
 /// 24 hours, matches Kafka's `delegation.token.expiry.time.ms` default.
@@ -466,7 +466,7 @@ impl BrokerConfig {
             // The dedicated 43e integration test enables it explicitly.
             partition_disk_scan_interval_secs: 0,
             max_incremental_fetch_session_cache_slots: 1000,
-            // Slice 51: tests opt into delegation tokens by setting
+            // Tests opt into delegation tokens by setting
             // `delegation_token_secret_key`; default off keeps the
             // four DT RPCs returning DELEGATION_TOKEN_AUTH_DISABLED.
             delegation_token_secret_key: None,
@@ -474,12 +474,12 @@ impl BrokerConfig {
             delegation_token_expiry_check_interval_ms:
                 DEFAULT_DELEGATION_TOKEN_EXPIRY_CHECK_INTERVAL_MS,
             delegation_token_default_renew_period_ms: DEFAULT_DELEGATION_TOKEN_RENEW_PERIOD_MS,
-            // Slice 48b: tiered storage off by default in tests.
+            // Tiered storage off by default in tests.
             remote_storage_backend: None,
             // Tests that turn tiered storage on want quick offload, so the
             // for_tests default is well below the 30s production value.
             remote_log_manager_interval: std::time::Duration::from_secs(2),
-            // Slice 48f: tests use the in-memory RLMM fixture.
+            // Tests use the in-memory RLMM fixture.
             remote_log_metadata_kafka: None,
         }
     }
@@ -522,7 +522,7 @@ impl BrokerConfig {
         }
 
         // Every SASL listener requires at least one mechanism. Per-listener
-        // sasl_mechanisms (slice 31) wins over the broker-wide default.
+        // sasl_mechanisms wins over the broker-wide default.
         for l in &listeners {
             if l.protocol.requires_sasl() {
                 let mechanisms = l
@@ -578,7 +578,7 @@ impl BrokerConfig {
 
     /// Returns the effective listener list.
     ///
-    /// When [`listeners`][Self::listeners] is empty (the pre-Task-7 default),
+    /// When [`listeners`][Self::listeners] is empty (the default),
     /// synthesizes a single `PLAINTEXT` listener from the legacy
     /// `listen_addr` + `advertised_listener` fields so all existing code
     /// continues to work without changes.
@@ -658,7 +658,7 @@ impl Default for BrokerConfig {
             metrics_listen_addr: None,
             partition_disk_scan_interval_secs: 60,
             max_incremental_fetch_session_cache_slots: 1000,
-            // Slice 51: master key off by default. Operators flip this on
+            // Master key off by default. Operators flip this on
             // via `CRABKA_DELEGATION_TOKEN_SECRET_KEY` env var or the
             // `[delegation_token] secret_key` TOML stanza.
             delegation_token_secret_key: None,
@@ -666,11 +666,11 @@ impl Default for BrokerConfig {
             delegation_token_expiry_check_interval_ms:
                 DEFAULT_DELEGATION_TOKEN_EXPIRY_CHECK_INTERVAL_MS,
             delegation_token_default_renew_period_ms: DEFAULT_DELEGATION_TOKEN_RENEW_PERIOD_MS,
-            // Slice 48b: tiered storage off by default. Operators enable it
+            // Tiered storage off by default. Operators enable it
             // via `[remote_storage] storage_dir` in `broker.toml`.
             remote_storage_backend: None,
             remote_log_manager_interval: std::time::Duration::from_secs(30),
-            // Slice 48f: production default keeps the in-memory RLMM
+            // Production default keeps the in-memory RLMM
             // until the operator opts into the topic-backed manager.
             remote_log_metadata_kafka: None,
         }
@@ -773,7 +773,7 @@ mod tests {
     fn for_tests_uses_short_raft_timings_for_fast_failover() {
         let c = BrokerConfig::for_tests(std::path::PathBuf::from("/tmp"));
         // Short enough that a 3-broker test can detect a dead leader and
-        // re-elect within a few hundred ms — the deferred slice-10b tests
+        // re-elect within a few hundred ms — the failover tests
         // need failover well under their 10s producer timeout.
         assert!(c.controller_election_timeout <= std::time::Duration::from_millis(750));
         assert!(c.controller_heartbeat_interval <= std::time::Duration::from_millis(200));
