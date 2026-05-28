@@ -148,6 +148,17 @@ fn io_storage_err(e: &RaftError) -> StorageError<NodeId> {
     StorageIOError::write_snapshot(None, AnyError::new(e)).into()
 }
 
+/// Derive the on-disk [`SnapshotId`] from an installed snapshot's meta:
+/// `end_offset` is the exclusive offset one past the last contained log
+/// index, and `epoch` is the leader term at that index. `None` when the
+/// meta carries no `last_log_id` (an empty snapshot needs no checkpoint).
+fn snapshot_id_from_meta(meta: &SnapshotMeta<NodeId, Node>) -> Option<SnapshotId> {
+    meta.last_log_id.map(|l| SnapshotId {
+        end_offset: i64::try_from(l.index).unwrap_or(i64::MAX).saturating_add(1),
+        epoch: i32::try_from(l.leader_id.term).unwrap_or(i32::MAX),
+    })
+}
+
 impl RaftStateMachine<TypeConfig> for Arc<CrabkaStateMachine> {
     type SnapshotBuilder = Self;
 
@@ -197,15 +208,25 @@ impl RaftStateMachine<TypeConfig> for Arc<CrabkaStateMachine> {
     async fn begin_receiving_snapshot(
         &mut self,
     ) -> Result<Box<io::Cursor<Vec<u8>>>, StorageError<NodeId>> {
-        Err(snapshot_unsupported("begin_receiving_snapshot"))
+        Ok(Box::new(io::Cursor::new(Vec::new())))
     }
 
     async fn install_snapshot(
         &mut self,
-        _meta: &SnapshotMeta<NodeId, Node>,
-        _snapshot: Box<io::Cursor<Vec<u8>>>,
+        meta: &SnapshotMeta<NodeId, Node>,
+        snapshot: Box<io::Cursor<Vec<u8>>>,
     ) -> Result<(), StorageError<NodeId>> {
-        Err(snapshot_unsupported("install_snapshot"))
+        let bytes = snapshot.into_inner();
+        let records = SnapshotReader::read_records(&bytes).map_err(|e| io_storage_err(&e))?;
+        let image = MetadataImage::from_records(self.cluster_id, &records);
+        let _ = self.image.send_replace(Arc::new(image));
+        *self.last_applied.lock().await = meta.last_log_id;
+        *self.last_membership.lock().await = meta.last_membership.clone();
+        if let Some(id) = snapshot_id_from_meta(meta) {
+            crate::snapshot::persist(&self.snapshot_dir, id, &bytes, meta)
+                .map_err(|e| io_storage_err(&e))?;
+        }
+        Ok(())
     }
 
     async fn get_current_snapshot(
@@ -355,5 +376,47 @@ mod tests {
         let loaded = sm.clone().get_current_snapshot().await.unwrap();
         let loaded = loaded.expect("snapshot should be present");
         assert_eq!(loaded.meta.last_log_id, Some(log_id));
+    }
+
+    #[tokio::test]
+    async fn install_snapshot_rebuilds_image() {
+        use crabka_metadata::{MetadataRecord, TopicRecord};
+        let src_dir = tempfile::TempDir::new().unwrap();
+        let src = Arc::new(CrabkaStateMachine::new(
+            Uuid::nil(),
+            src_dir.path().to_path_buf(),
+        ));
+        let log_id = LogId {
+            leader_id: openraft::LeaderId::new(1, 1),
+            index: 4,
+        };
+        src.apply_entry(
+            log_id,
+            &AppData {
+                records: vec![MetadataRecord::V1Topic(TopicRecord {
+                    name: "t".into(),
+                    topic_id: Uuid::from_u128(1),
+                    partitions: 1,
+                    replication_factor: 1,
+                })],
+            },
+        )
+        .await;
+        let snap = src.clone().build_snapshot().await.unwrap();
+
+        let dst_dir = tempfile::TempDir::new().unwrap();
+        let dst = Arc::new(CrabkaStateMachine::new(
+            Uuid::nil(),
+            dst_dir.path().to_path_buf(),
+        ));
+        let mut dst_mut = dst.clone();
+        let buf = dst_mut.begin_receiving_snapshot().await.unwrap();
+        let _ = buf;
+        let data = Box::new(io::Cursor::new(snap.snapshot.into_inner()));
+        dst_mut.install_snapshot(&snap.meta, data).await.unwrap();
+
+        assert!(dst.current_image().topic("t").is_some());
+        let (applied, _) = dst_mut.applied_state().await.unwrap();
+        assert_eq!(applied, Some(log_id));
     }
 }
