@@ -238,12 +238,20 @@ async fn metrics_endpoint_serves_openmetrics_and_counters_tick() {
         "crabka_broker_topic_bytes_out_total",
         "crabka_broker_topic_produce_requests_total",
         "crabka_broker_topic_fetch_requests_total",
+        "crabka_broker_messages_in_total",
     ] {
         assert!(
             body.contains(needle),
             "post-traffic scrape missing {needle} in:\n{body}"
         );
     }
+    // Slice 12j: `produce_one` writes a single v2 record into the
+    // topic, so `messages_in_total{topic=TOPIC}` must read exactly 1.
+    let messages_needle = format!("crabka_broker_messages_in_total{{topic=\"{TOPIC}\"}} 1");
+    assert!(
+        body.contains(&messages_needle),
+        "messages_in_total should be 1 for the lone produced record, body:\n{body}"
+    );
     assert!(
         body.contains(&format!(
             "crabka_broker_topic_produce_requests_total{{topic=\"{TOPIC}\"}}"
