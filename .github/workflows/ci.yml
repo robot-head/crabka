@@ -208,13 +208,21 @@ jobs:
       # host itself has no such resolution on Linux runners, so add it.
       - run: echo "127.0.0.1 host.docker.internal" | sudo tee -a /etc/hosts
       - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Preload Docker images
+        run: |
+          docker pull confluentinc/cp-kafka:7.4.0
+          docker pull apache/kafka:4.0.0
       # --test-threads=1: tests bind the Rust broker to a fixed host port
       # (so the `docker run --add-host` Kafka tools have a known bootstrap
       # target). Parallel execution would hit `AddrInUse`.
       - name: Broker JVM acceptance coverage
         run: |
           mkdir -p coverage
-          cargo llvm-cov -p crabka-broker --test jvm_acceptance --lcov --output-path coverage/broker-jvm-acceptance.lcov -- --ignored --nocapture --test-threads=1
+          cargo llvm-cov -p crabka-broker \
+            --test jvm_acceptance \
+            --test jvm_consumer_group_next_gen \
+            --lcov --output-path coverage/broker-jvm-acceptance.lcov \
+            -- --ignored --nocapture --test-threads=1
       - uses: codecov/codecov-action@v6
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
