@@ -3327,6 +3327,9 @@ fn handler_body_flexible(api_key: i16, version: i16) -> bool {
         56 => version >= owned::alter_partition_request::FLEXIBLE_MIN,
         60 => version >= owned::describe_cluster_request::FLEXIBLE_MIN,
         63 => version >= owned::broker_heartbeat_request::FLEXIBLE_MIN,
+        // KIP-714 client-metrics push pair; both are flexible from v0.
+        71 => version >= owned::get_telemetry_subscriptions_request::FLEXIBLE_MIN,
+        72 => version >= owned::push_telemetry_request::FLEXIBLE_MIN,
         // DescribeTopicPartitions (75, KIP-966) is flexible from v0.
         75 => version >= owned::describe_topic_partitions_request::FLEXIBLE_MIN,
         _ => false,

@@ -262,7 +262,7 @@ implements it today. Legend: ✅ implemented · ⚠️ partial · ❌ not yet ·
 | Structured logging via `tracing` | ✅ |
 | Prometheus metrics / JMX-equivalent exporter | ✅ |
 | OTLP distributed tracing (OpenTelemetry) | ✅ |
-| Client metrics push (KIP-714) | ❌ |
+| Client metrics push (KIP-714) | ⚠️ |
 
 ### Kubernetes operator (Strimzi-equivalent)
 
@@ -443,7 +443,7 @@ KIPs. Legend: ✅ implemented · ⚠️ partial · ❌ not yet · ⛔ out of sco
 
 | KIP | Title | Status |
 |-----|-------|:------:|
-| [KIP-714](https://cwiki.apache.org/confluence/display/KAFKA/KIP-714) | Client metrics & observability push | ❌ |
+| [KIP-714](https://cwiki.apache.org/confluence/display/KAFKA/KIP-714) | Client metrics & observability push | ⚠️ |
 | [KIP-932](https://cwiki.apache.org/confluence/display/KAFKA/KIP-932) | Queues for Kafka (share groups) | ❌ |
 | [KIP-1071](https://cwiki.apache.org/confluence/display/KAFKA/KIP-1071) | Streams rebalance protocol | ❌ |
 
