@@ -6,14 +6,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use crabka_protocol::records::RecordBatch;
+use bytes::{Bytes, BytesMut};
+use crabka_protocol::records::{HEADER_LEN, RecordBatch};
 
 use crate::config::LogConfig;
 use crate::error::LogError;
 use crate::leader_epoch_checkpoint::LeaderEpochCheckpoint;
 use crate::name;
 use crate::retention;
-use crate::segment::Segment;
+use crate::segment::{RawSegmentRead, Segment};
 use crate::txn_index::{AbortedTxn, TxnIndex};
 
 /// A Kafka-format log: a sorted collection of [`Segment`]s plus a single
@@ -77,6 +78,29 @@ pub struct ReadOutput {
     /// Decoded batches in offset order. May be empty if the log has no
     /// data at or after the requested offset.
     pub batches: Vec<RecordBatch>,
+}
+
+/// Verbatim, decode-free output of [`Log::read_raw`].
+#[derive(Debug, Clone)]
+pub struct RawRead {
+    /// Absolute offset of the first batch in [`Self::bytes`], or the
+    /// requested offset when no bytes were returned.
+    pub start_offset: i64,
+    /// Verbatim `.log` bytes — zero or more complete v2 batches, spanning
+    /// segment boundaries.
+    pub bytes: Bytes,
+    /// Length of [`Self::bytes`] in bytes.
+    pub total: usize,
+}
+
+impl RawRead {
+    fn empty(off: i64) -> Self {
+        Self {
+            start_offset: off,
+            bytes: Bytes::new(),
+            total: 0,
+        }
+    }
 }
 
 /// Slice 48b (KIP-405): a sealed segment described for tiered-storage
@@ -519,6 +543,86 @@ impl Log {
         })
     }
 
+    /// Like [`Log::read`] but returns verbatim wire bytes (no decode), walking
+    /// sealed segments then the active segment. Includes only batches with
+    /// `base_offset < limit_offset`, up to roughly `max_bytes` (≥ one batch).
+    pub fn read_raw(
+        &self,
+        fetch_offset: i64,
+        limit_offset: i64,
+        max_bytes: usize,
+    ) -> Result<RawRead, LogError> {
+        let log_start = self.log_start_offset();
+        if fetch_offset < log_start {
+            return Err(LogError::OffsetTooLow {
+                requested: fetch_offset,
+                log_start,
+            });
+        }
+        if fetch_offset >= limit_offset {
+            return Ok(RawRead::empty(fetch_offset));
+        }
+
+        let mut chunks: Vec<Bytes> = Vec::new();
+        let mut start_offset = fetch_offset;
+        let mut current = fetch_offset;
+        let mut remaining = max_bytes;
+        let mut got_first = false;
+
+        for seg in &self.segments {
+            if seg.last_offset() < current {
+                continue;
+            }
+            let r: RawSegmentRead =
+                seg.read_raw(current, limit_offset, remaining.max(HEADER_LEN))?;
+            if !r.is_empty() {
+                if !got_first {
+                    start_offset = r.start_offset;
+                    got_first = true;
+                }
+                remaining = remaining.saturating_sub(r.bytes.len());
+                current = r.last_offset + 1;
+                chunks.push(r.bytes);
+                if remaining == 0 || current >= limit_offset {
+                    break;
+                }
+            }
+        }
+
+        if (remaining > 0 || !got_first)
+            && current < limit_offset
+            && let Some(active) = &self.active
+            && current <= active.last_offset()
+        {
+            let r = active.read_raw(current, limit_offset, remaining.max(HEADER_LEN))?;
+            if !r.is_empty() {
+                if !got_first {
+                    start_offset = r.start_offset;
+                }
+                chunks.push(r.bytes);
+            }
+        }
+
+        let bytes = match chunks.len() {
+            0 => Bytes::new(),
+            1 => chunks.pop().expect("len==1"),
+            _ => {
+                let total: usize = chunks.iter().map(Bytes::len).sum();
+                let mut b = BytesMut::with_capacity(total);
+                for c in &chunks {
+                    b.extend_from_slice(c);
+                }
+                b.freeze()
+            }
+        };
+        let total = bytes.len();
+        Ok(RawRead {
+            start_offset,
+            bytes,
+            total,
+        })
+    }
+
     /// Truncate the log so no records at offset `>= offset` remain. Used
     /// by replication / leader election.
     pub fn truncate_to(&mut self, offset: i64) -> Result<(), LogError> {
@@ -916,6 +1020,47 @@ mod tests {
             });
         }
         b
+    }
+
+    fn test_log() -> (tempfile::TempDir, Log) {
+        let dir = tempdir().unwrap();
+        let log = Log::open(dir.path(), LogConfig::default()).unwrap();
+        (dir, log)
+    }
+
+    fn test_batch_at(_off: i64) -> RecordBatch {
+        // `Log::append` overwrites `base_offset`; one record per batch.
+        let mut b = RecordBatch {
+            base_offset: 0,
+            base_timestamp: 1_000,
+            max_timestamp: 1_000,
+            last_offset_delta: 0,
+            ..RecordBatch::default()
+        };
+        b.records.push(Record {
+            offset_delta: 0,
+            value: Some(Bytes::from("v")),
+            ..Default::default()
+        });
+        b
+    }
+
+    #[test]
+    fn log_read_raw_spans_and_is_byte_exact() {
+        let (dir, mut log) = test_log();
+        let mut wire = bytes::BytesMut::new();
+        for off in 0..4i64 {
+            let mut b = test_batch_at(off);
+            log.append(&mut b).unwrap();
+            b.encode(&mut wire).unwrap();
+        }
+        let wire = wire.freeze();
+        let log_end = log.log_end_offset();
+        let r = log.read_raw(0, log_end, 10 * 1024 * 1024).unwrap();
+        assert_eq!(r.start_offset, 0);
+        assert_eq!(r.total, wire.len());
+        assert_eq!(&r.bytes[..], &wire[..]);
+        drop(dir);
     }
 
     #[test]
