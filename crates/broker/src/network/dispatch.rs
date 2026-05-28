@@ -921,6 +921,26 @@ async fn serve_connection_stream<S>(
                 }
             }
         }
+        // DescribeQuorum (55, KIP-595) needs the principal + peer for the
+        // whole-request `Cluster` `Describe` ACL gate.
+        if peek_api_key(&frame).ok() == Some(55) {
+            match handle_describe_quorum_frame(&broker, &frame, &auth, &peer)
+                .instrument(req_span.clone())
+                .await
+            {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during DescribeQuorum, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "DescribeQuorum dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
         // DescribeAcls (29, slice-13 T7) needs both the authenticated
         // principal AND the peer's `SocketAddr` for host-based ACL
         // matching; neither is reachable from the `&Broker`-only handler
@@ -1901,6 +1921,45 @@ async fn handle_list_config_resources_frame(
         &ctx,
     )
     .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch a `DescribeQuorum` (`api_key` 55, KIP-595) frame.
+/// Needs the authenticated principal and peer `SocketAddr` for the
+/// whole-request `Cluster` `Describe` ACL gate.
+async fn handle_describe_quorum_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 55);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let principal = auth
+        .principal()
+        .cloned()
+        .unwrap_or_else(|| crabka_security::Principal {
+            name: "ANONYMOUS".to_string(),
+            auth_method: crabka_security::AuthMethod::Anonymous,
+            groups: vec![],
+        });
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let ctx = crate::handlers::RequestContext {
+        principal: &principal,
+        peer,
+        client_id,
+    };
+
+    let resp_body =
+        crate::handlers::describe_quorum::handle(broker, api_version, correlation_id, body, &ctx)
+            .await?;
     Ok(encode_response(
         api_key,
         correlation_id,
@@ -3580,6 +3639,8 @@ fn handler_body_flexible(api_key: i16, version: i16) -> bool {
         50 => version >= owned::describe_user_scram_credentials_request::FLEXIBLE_MIN,
         // AlterUserScramCredentials (KIP-554, slice 12 T15) is flexible from v0.
         51 => version >= owned::alter_user_scram_credentials_request::FLEXIBLE_MIN,
+        // DescribeQuorum (55, KIP-595) is flexible from v0.
+        55 => version >= owned::describe_quorum_request::FLEXIBLE_MIN,
         56 => version >= owned::alter_partition_request::FLEXIBLE_MIN,
         60 => version >= owned::describe_cluster_request::FLEXIBLE_MIN,
         // DescribeProducers (61, KIP-664) is flexible from v0.

@@ -34,6 +34,10 @@ use crabka_protocol::owned::delete_records_request::{
     DeleteRecordsPartition, DeleteRecordsRequest, DeleteRecordsTopic,
 };
 use crabka_protocol::owned::describe_cluster_request::DescribeClusterRequest;
+use crabka_protocol::owned::describe_quorum_request::{
+    DescribeQuorumRequest, PartitionData as DescribeQuorumReqPartition,
+    TopicData as DescribeQuorumReqTopic,
+};
 use crabka_protocol::owned::list_config_resources_request::ListConfigResourcesRequest;
 use crabka_protocol::owned::list_groups_request::ListGroupsRequest;
 use crabka_protocol::owned::metadata_request::{MetadataRequest, MetadataRequestTopic};
@@ -528,6 +532,54 @@ async fn describe_cluster_lists_brokers() {
     assert_eq!(resp.error_code, 0, "describe_cluster error_code");
     assert_eq!(resp.brokers.len(), 1, "expected exactly 1 broker");
     assert_eq!(resp.controller_id, 1, "expected controller_id == 1");
+}
+
+// ── DescribeQuorum (api_key 55, KIP-595) ───────────────────────────────────
+
+/// DescribeQuorum against the cluster-metadata topic on a 1-broker
+/// cluster returns one partition row carrying the broker's voter id with
+/// leader_id == 1. Verifies the dispatch glue, the ACL allow path, and
+/// the response encoding — the pure `build_topic_responses` helper has
+/// its own unit tests in
+/// `crates/broker/src/handlers/describe_quorum.rs`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn describe_quorum_reports_cluster_metadata_voter_set() {
+    let cluster = start_n_node(1).await.expect("start_n_node");
+    let (_, cfg, _dir) = &cluster[0];
+    let client = build_client(cfg.listen_addr).await;
+
+    let req = DescribeQuorumRequest {
+        topics: vec![DescribeQuorumReqTopic {
+            topic_name: "__cluster_metadata".into(),
+            partitions: vec![DescribeQuorumReqPartition {
+                partition_index: 0,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let resp = client.send(req).await.expect("describe_quorum");
+    assert_eq!(resp.error_code, 0, "top-level error_code");
+    assert_eq!(resp.topics.len(), 1, "exactly one topic row");
+    assert_eq!(resp.topics[0].topic_name, "__cluster_metadata");
+    let pd = &resp.topics[0].partitions[0];
+    assert_eq!(pd.partition_index, 0);
+    assert_eq!(pd.error_code, 0, "metadata partition 0 succeeds");
+    assert_eq!(
+        pd.leader_id, 1,
+        "1-broker cluster: bootstrap voter id=1 is leader"
+    );
+    assert_eq!(
+        pd.current_voters.len(),
+        1,
+        "single voter for 1-broker cluster"
+    );
+    assert_eq!(pd.current_voters[0].replica_id, 1);
+    assert!(
+        pd.observers.is_empty(),
+        "Crabka has no observer-role concept"
+    );
 }
 
 // ── ListConfigResources (api_key 74, KIP-1142) ─────────────────────────────

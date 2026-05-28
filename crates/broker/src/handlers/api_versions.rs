@@ -145,6 +145,9 @@ fn supported_apis() -> Vec<ApiVersion> {
         // is the legacy ListClientMetricsResources surface (KIP-714); v1
         // adds the `resource_types` filter.
         v!(list_config_resources_request),
+        // DescribeQuorum (KIP-595) — `kafka-metadata-quorum --describe`
+        // admin introspection of the controller-raft quorum.
+        v!(describe_quorum_request),
     ]
 }
 
