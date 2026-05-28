@@ -2,15 +2,14 @@
 //! synchronous + infallible; we swap the `Arc<MetadataImage>` after
 //! mutating a fresh clone so readers always observe a consistent view.
 //!
-//! Snapshots are deferred to a future slice; the snapshot methods
-//! return a typed "Unsupported" `StorageError` so openraft falls back
-//! to plain append-entries replication for lagging followers. The
-//! metadata log stays small in slice 7, so missing snapshots is fine.
+//! Snapshots are not implemented; the snapshot methods return a typed
+//! "Unsupported" `StorageError` so openraft falls back to plain
+//! append-entries replication for lagging followers. The metadata log
+//! stays small, so missing snapshots is fine.
 //!
-//! Slice-7 note: the inner type is consumed only by `state_machine.rs`
-//! and (in later tasks) `Controller`, so the lib-crate root sees it
-//! as "dead" until Task 12 wires it in. The module-scoped allow keeps
-//! the surface narrow.
+//! The inner type is consumed only by `state_machine.rs` and
+//! `Controller`, so the lib-crate root sees it as "dead". The
+//! module-scoped allow keeps the surface narrow.
 
 #![allow(dead_code)]
 
