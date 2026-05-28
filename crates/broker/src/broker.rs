@@ -505,6 +505,18 @@ impl BrokerHandle {
         self._broker.controller.current_image()
     }
 
+    /// Test-only: the raft voter set this node's metadata source reports.
+    /// A controller/combined node returns the openraft membership; a
+    /// broker-only (observer) node returns an empty set since it never
+    /// joins the quorum. Used by the role-separation test to assert a
+    /// broker-only node is absent from the controller's voters.
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[must_use]
+    #[allow(clippy::used_underscore_binding)]
+    pub fn quorum_voters_for_test(&self) -> Vec<crabka_raft::NodeId> {
+        self._broker.controller.quorum_state().voters
+    }
+
     /// Test-only: return the current leader node-id for `(topic, partition)`
     /// as seen by this broker's metadata image. Returns `None` if the
     /// partition is not yet in the image or the leader field is `0` (no
