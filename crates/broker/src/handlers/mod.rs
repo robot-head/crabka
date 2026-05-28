@@ -47,6 +47,8 @@ pub(crate) mod context;
 pub(crate) use context::RequestContext;
 
 pub(crate) mod acl_wire;
+// KIP-853 dynamic-quorum reconfiguration (api_keys 80/81/82).
+pub(crate) mod add_raft_voter;
 pub(crate) mod alter_client_quotas;
 pub(crate) mod alter_configs;
 pub(crate) mod alter_partition;
@@ -115,10 +117,12 @@ pub(crate) mod offset_for_leader_epoch;
 pub(crate) mod produce;
 // KIP-714 client-metrics push, paired with get_telemetry_subscriptions.
 pub(crate) mod push_telemetry;
+pub(crate) mod remove_raft_voter;
 pub(crate) mod renew_delegation_token;
 pub(crate) mod sync_group;
 // KIP-185 admin RPC to permanently drop a broker registration (api_key 64).
 pub(crate) mod unregister_broker;
+pub(crate) mod update_raft_voter;
 
 /// Build the dispatch table. Phase E registers concrete handlers; for
 /// now this is an empty table so the dispatch loop can still look up.

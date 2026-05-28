@@ -30,8 +30,9 @@ use crabka_metadata::AclOperation;
 use crabka_protocol::owned::common::replica_state::ReplicaState;
 use crabka_protocol::owned::describe_quorum_request::DescribeQuorumRequest;
 use crabka_protocol::owned::describe_quorum_response::{
-    DescribeQuorumResponse, PartitionData, TopicData,
+    DescribeQuorumResponse, Listener, Node, PartitionData, TopicData,
 };
+use crabka_protocol::primitives::uuid::Uuid;
 use crabka_protocol::{Decode, Encode};
 use crabka_raft::QuorumState;
 
@@ -92,9 +93,16 @@ pub(crate) async fn handle(
 
     let topics = build_topic_responses(&req.topics, &quorum);
 
+    // KIP-853 (v2+) adds a top-level `Nodes` block carrying each voter's
+    // directory id + listeners. Encoding skips it on v0/v1 (the fields are
+    // gated `versions: "2+"`), so populating it unconditionally stays
+    // byte-exact for older clients.
+    let nodes = build_nodes(&quorum);
+
     let resp = DescribeQuorumResponse {
         error_code: codes::NONE,
         topics,
+        nodes,
         ..Default::default()
     };
     let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
@@ -141,8 +149,18 @@ fn build_topic_responses(
                                         .map_or(UNKNOWN_LOG_END_OFFSET, |&idx| {
                                             i64::try_from(idx).unwrap_or(i64::MAX)
                                         });
+                                    // KIP-853 (v2+): the voter's directory
+                                    // id, read from the replicated
+                                    // membership. Zero (`Uuid::ZERO`) when
+                                    // unknown — and skipped entirely on
+                                    // v0/v1 encode.
+                                    let replica_directory_id = quorum
+                                        .voter_nodes
+                                        .get(&id)
+                                        .map_or(Uuid::ZERO, |n| Uuid(*n.directory_id.as_bytes()));
                                     ReplicaState {
                                         replica_id: i32::try_from(id).unwrap_or(-1),
+                                        replica_directory_id,
                                         log_end_offset: matched,
                                         last_fetch_timestamp: -1,
                                         last_caught_up_timestamp: -1,
@@ -175,6 +193,32 @@ fn build_topic_responses(
                 partitions,
                 ..Default::default()
             }
+        })
+        .collect()
+}
+
+/// Build the KIP-853 (v2+) `Nodes` block: one entry per voter with its
+/// directory id's listeners. Sourced from `quorum.voter_nodes`, which the
+/// raft layer populates from the replicated membership config (only fully
+/// known on the leader; followers may carry a partial map). Encoding drops
+/// this whole field on v0/v1, so it is harmless to build unconditionally.
+fn build_nodes(quorum: &QuorumState) -> Vec<Node> {
+    quorum
+        .voter_nodes
+        .iter()
+        .map(|(&id, node)| Node {
+            node_id: i32::try_from(id).unwrap_or(-1),
+            listeners: node
+                .endpoints
+                .iter()
+                .map(|e| Listener {
+                    name: e.name.clone(),
+                    host: e.host.clone(),
+                    port: e.port,
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
         })
         .collect()
 }
@@ -359,6 +403,81 @@ mod tests {
             out[1].partitions[0].error_code,
             codes::INVALID_TOPIC_EXCEPTION
         );
+    }
+
+    #[test]
+    fn v2_replica_directory_id_and_nodes_come_from_voter_nodes() {
+        use crabka_metadata::VoterEndpoint;
+        use crabka_raft::Node;
+
+        let req = req_for(CLUSTER_METADATA_TOPIC, 0);
+        let dir1 = uuid::Uuid::from_u128(1);
+        let dir2 = uuid::Uuid::from_u128(2);
+        let mut voter_nodes = BTreeMap::new();
+        voter_nodes.insert(
+            1u64,
+            Node {
+                directory_id: dir1,
+                endpoints: vec![VoterEndpoint {
+                    name: "CONTROLLER".into(),
+                    host: "10.0.0.1".into(),
+                    port: 9093,
+                }],
+                kraft_version: crabka_metadata::KRaftVersionRange::default(),
+            },
+        );
+        voter_nodes.insert(
+            2u64,
+            Node {
+                directory_id: dir2,
+                endpoints: vec![VoterEndpoint {
+                    name: "CONTROLLER".into(),
+                    host: "10.0.0.2".into(),
+                    port: 9094,
+                }],
+                kraft_version: crabka_metadata::KRaftVersionRange::default(),
+            },
+        );
+        let q = QuorumState {
+            current_term: 1,
+            last_applied_index: 5,
+            current_leader: Some(1),
+            voters: vec![1, 2],
+            voter_nodes,
+            per_voter_matched_index: BTreeMap::new(),
+        };
+
+        // Per-voter replica_directory_id is sourced from voter_nodes.
+        let topics = build_topic_responses(&req, &q);
+        let voters = &topics[0].partitions[0].current_voters;
+        let dir_by_id: BTreeMap<i32, Uuid> = voters
+            .iter()
+            .map(|v| (v.replica_id, v.replica_directory_id))
+            .collect();
+        assert_eq!(dir_by_id[&1], Uuid(*dir1.as_bytes()));
+        assert_eq!(dir_by_id[&2], Uuid(*dir2.as_bytes()));
+
+        // Top-level v2 Nodes block names each voter with its listeners.
+        let nodes = build_nodes(&q);
+        assert_eq!(nodes.len(), 2);
+        let first_voter = nodes.iter().find(|n| n.node_id == 1).unwrap();
+        assert_eq!(first_voter.listeners[0].name, "CONTROLLER");
+        assert_eq!(first_voter.listeners[0].host, "10.0.0.1");
+        assert_eq!(first_voter.listeners[0].port, 9093);
+    }
+
+    #[test]
+    fn unknown_voter_directory_id_falls_back_to_zero() {
+        // Follower with an empty voter_nodes map (only the leader fully
+        // knows membership endpoints) → each replica_directory_id is ZERO
+        // and the Nodes block is empty.
+        let req = req_for(CLUSTER_METADATA_TOPIC, 0);
+        let q = quorum_state(Some(1), 1, 0, &[1, 2], &[]);
+        let topics = build_topic_responses(&req, &q);
+        for v in &topics[0].partitions[0].current_voters {
+            assert_eq!(v.replica_directory_id, Uuid::ZERO);
+        }
+        assert!(build_nodes(&q).is_empty());
     }
 
     #[test]

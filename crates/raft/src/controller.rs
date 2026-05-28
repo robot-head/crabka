@@ -524,7 +524,10 @@ impl crate::reconfig::ReconfigOps for ControllerHandle {
         // may be absent. Returning `None` is conservative — the lag check
         // then treats the candidate as fully behind (lag == leader_last_index)
         // and refuses promotion until catch-up is observed.
-        self.quorum_state().per_voter_matched_index.get(&id).copied()
+        self.quorum_state()
+            .per_voter_matched_index
+            .get(&id)
+            .copied()
     }
 
     async fn add_learner(&self, id: NodeId, node: crate::Node) -> Result<(), RaftError> {

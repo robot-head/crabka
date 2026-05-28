@@ -961,6 +961,64 @@ async fn serve_connection_stream<S>(
                 }
             }
         }
+        // AddRaftVoter / RemoveRaftVoter / UpdateRaftVoter (80/81/82,
+        // KIP-853) are cluster-wide reconfiguration RPCs needing the
+        // principal + peer for the `Cluster` `Alter` ACL gate, so they
+        // intercept inline alongside UnregisterBroker.
+        if peek_api_key(&frame).ok() == Some(80) {
+            match handle_add_raft_voter_frame(&broker, &frame, &auth, &peer)
+                .instrument(req_span.clone())
+                .await
+            {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during AddRaftVoter, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "AddRaftVoter dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
+        if peek_api_key(&frame).ok() == Some(81) {
+            match handle_remove_raft_voter_frame(&broker, &frame, &auth, &peer)
+                .instrument(req_span.clone())
+                .await
+            {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during RemoveRaftVoter, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "RemoveRaftVoter dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
+        if peek_api_key(&frame).ok() == Some(82) {
+            match handle_update_raft_voter_frame(&broker, &frame, &auth, &peer)
+                .instrument(req_span.clone())
+                .await
+            {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during UpdateRaftVoter, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "UpdateRaftVoter dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
         // DescribeAcls (29, slice-13 T7) needs both the authenticated
         // principal AND the peer's `SocketAddr` for host-based ACL
         // matching; neither is reachable from the `&Broker`-only handler
@@ -1887,6 +1945,114 @@ async fn handle_unregister_broker_frame(
 
     let resp_body =
         crate::handlers::unregister_broker::handle(broker, api_version, correlation_id, body, &ctx)
+            .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch an `AddRaftVoter` (`api_key` 80, KIP-853) frame.
+/// `Alter` on `Cluster`; Deny → `CLUSTER_AUTHORIZATION_FAILED`.
+async fn handle_add_raft_voter_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 80);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+    let principal = auth
+        .principal()
+        .cloned()
+        .unwrap_or_else(|| crabka_security::Principal {
+            name: "ANONYMOUS".to_string(),
+            auth_method: crabka_security::AuthMethod::Anonymous,
+            groups: vec![],
+        });
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let ctx = crate::handlers::RequestContext {
+        principal: &principal,
+        peer,
+        client_id,
+    };
+    let resp_body =
+        crate::handlers::add_raft_voter::handle(broker, api_version, correlation_id, body, &ctx)
+            .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch a `RemoveRaftVoter` (`api_key` 81, KIP-853) frame.
+/// `Alter` on `Cluster`; Deny → `CLUSTER_AUTHORIZATION_FAILED`.
+async fn handle_remove_raft_voter_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 81);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+    let principal = auth
+        .principal()
+        .cloned()
+        .unwrap_or_else(|| crabka_security::Principal {
+            name: "ANONYMOUS".to_string(),
+            auth_method: crabka_security::AuthMethod::Anonymous,
+            groups: vec![],
+        });
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let ctx = crate::handlers::RequestContext {
+        principal: &principal,
+        peer,
+        client_id,
+    };
+    let resp_body =
+        crate::handlers::remove_raft_voter::handle(broker, api_version, correlation_id, body, &ctx)
+            .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch an `UpdateRaftVoter` (`api_key` 82, KIP-853) frame.
+/// `Alter` on `Cluster`; Deny → `CLUSTER_AUTHORIZATION_FAILED`.
+async fn handle_update_raft_voter_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 82);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+    let principal = auth
+        .principal()
+        .cloned()
+        .unwrap_or_else(|| crabka_security::Principal {
+            name: "ANONYMOUS".to_string(),
+            auth_method: crabka_security::AuthMethod::Anonymous,
+            groups: vec![],
+        });
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let ctx = crate::handlers::RequestContext {
+        principal: &principal,
+        peer,
+        client_id,
+    };
+    let resp_body =
+        crate::handlers::update_raft_voter::handle(broker, api_version, correlation_id, body, &ctx)
             .await?;
     Ok(encode_response(
         api_key,
@@ -3727,6 +3893,11 @@ fn handler_body_flexible(api_key: i16, version: i16) -> bool {
         74 => version >= owned::list_config_resources_request::FLEXIBLE_MIN,
         // DescribeTopicPartitions (75, KIP-966) is flexible from v0.
         75 => version >= owned::describe_topic_partitions_request::FLEXIBLE_MIN,
+        // AddRaftVoter / RemoveRaftVoter / UpdateRaftVoter (80/81/82,
+        // KIP-853) — all flexible from v0.
+        80 => version >= owned::add_raft_voter_request::FLEXIBLE_MIN,
+        81 => version >= owned::remove_raft_voter_request::FLEXIBLE_MIN,
+        82 => version >= owned::update_raft_voter_request::FLEXIBLE_MIN,
         _ => false,
     }
 }
@@ -3809,5 +3980,24 @@ mod tests {
         let out = encode_response(3, 7, true, &body);
         assert_eq!(out.len(), 5 + body.len());
         assert_eq!(out[4], 0); // tagged byte
+    }
+
+    /// KIP-853 RPCs (80/81/82) route through the inline-intercept path,
+    /// which keys off `peek_api_key`, and are flexible from v0. This guards
+    /// the wiring that decides whether each frame reaches its handler with
+    /// the correct flexible-header treatment.
+    #[test]
+    fn raft_voter_rpcs_peek_and_flex_routing() {
+        for api_key in [80i16, 81, 82] {
+            let mut buf = BytesMut::new();
+            buf.put_i16(api_key);
+            buf.put_i16(0); // version 0
+            buf.put_i32(1); // corr_id
+            assert_eq!(peek_api_key(&buf).unwrap(), api_key);
+            assert!(
+                handler_body_flexible(api_key, 0),
+                "api_key {api_key} is flexible from v0"
+            );
+        }
     }
 }
