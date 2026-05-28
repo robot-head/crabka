@@ -178,6 +178,7 @@ pub(crate) async fn handle(
         u64::try_from(req.rebalance_timeout_ms).unwrap_or(DEFAULT_REBALANCE_TIMEOUT_MS),
     );
     let static_rejoin_to_stable;
+    let wake_other_joiners;
     {
         let mut g = handle.state.lock().await;
         g.protocol_type = Some(req.protocol_type.clone());
@@ -198,6 +199,24 @@ pub(crate) async fn handle(
         if !static_rejoin_to_stable && g.rebalance_deadline.is_none() {
             g.rebalance_deadline = Some(std::time::Instant::now() + rebalance_timeout);
         }
+        // Once every still-live member has issued a JoinGroup since the
+        // rebalance opened, wake the other handlers parked on `join_complete`
+        // so the rebalance can finish without burning the full
+        // INITIAL_REBALANCE_DELAY. The wake fires AFTER the lock is
+        // released so the woken handlers can acquire it.
+        //
+        // Gate this on `generation_id > 0` so the very first rebalance of
+        // a group still burns the full INITIAL_REBALANCE_DELAY — that wait
+        // is Kafka's `group.initial.rebalance.delay.ms` semantic for
+        // batching racing first-time joiners, and short-circuiting it
+        // breaks tests (and real clients) that rely on every concurrent
+        // first-Join landing in the same generation.
+        wake_other_joiners = g.generation_id > 0
+            && matches!(g.state, GroupState::PreparingRebalance)
+            && g.all_members_joined_this_round();
+    }
+    if wake_other_joiners {
+        handle.join_complete.notify_waiters();
     }
 
     // 5. KIP-345 headline path: a static rejoin into a `Stable` group
@@ -242,8 +261,15 @@ pub(crate) async fn handle(
     // Use the SHORTER of `rebalance_timeout` and the initial-rebalance
     // delay so multi-member rebalances still batch new joins but a
     // single member completes quickly.
-    let wait = rebalance_timeout.min(INITIAL_REBALANCE_DELAY);
-    let _ = tokio::time::timeout(wait, handle.join_complete.notified()).await;
+    //
+    // Skip the wait entirely when this `JoinGroup` was the one that
+    // brought every still-live member into the round — the next block
+    // immediately runs `complete_rebalance` instead of burning the full
+    // wait window.
+    if !wake_other_joiners {
+        let wait = rebalance_timeout.min(INITIAL_REBALANCE_DELAY);
+        let _ = tokio::time::timeout(wait, handle.join_complete.notified()).await;
+    }
 
     // 5. Complete the rebalance if we're the one who fell out of the
     //    wait first. (Multiple JoinGroup handlers race; whoever wins

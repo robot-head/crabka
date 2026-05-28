@@ -66,7 +66,13 @@ pub(crate) struct CoordinatorState {
 enum HeartbeatOutcome {
     /// `error_code == 0`.
     Ok,
-    /// `REBALANCE_IN_PROGRESS (27)` — rejoin with the current `member_id`.
+    /// `REBALANCE_IN_PROGRESS (27)` or `ILLEGAL_GENERATION (22)` — rejoin
+    /// with the current `member_id`. `ILLEGAL_GENERATION` fires when our
+    /// heartbeat tick lands after the broker has already advanced past
+    /// the generation we last synced on (e.g. a rebalance completed
+    /// while we were between heartbeat windows); without a rejoin we'd
+    /// keep heartbeating the dead generation forever and never pick up
+    /// the new assignment.
     NeedRejoin,
     /// `UNKNOWN_MEMBER_ID (25)` — clear `member_id` + rejoin from scratch.
     RejoinFromScratch,
@@ -125,7 +131,7 @@ async fn heartbeat_once(state: &CoordinatorState) -> HeartbeatOutcome {
         .await;
     match result {
         Ok(r) if r.error_code == 0 => HeartbeatOutcome::Ok,
-        Ok(r) if r.error_code == 27 => HeartbeatOutcome::NeedRejoin,
+        Ok(r) if r.error_code == 27 || r.error_code == 22 => HeartbeatOutcome::NeedRejoin,
         Ok(r) if r.error_code == 25 => HeartbeatOutcome::RejoinFromScratch,
         Ok(r) => {
             tracing::warn!(error_code = r.error_code, "unexpected heartbeat error");
