@@ -91,6 +91,15 @@ impl Consumer {
             .map(|(name, id)| (*id, name.clone()))
             .collect();
 
+        // Re-snapshot the assignment: a cooperative rebalance may have
+        // revoked partitions while this Fetch was in flight. Records for
+        // partitions we no longer own must be dropped — the new owner will
+        // serve them from the offset we committed at revoke time. Snapshot
+        // before locking `next_offsets` to keep the coordinator's
+        // assigned→next_offsets lock order (avoids deadlock).
+        let still_owned: std::collections::HashSet<(String, i32)> =
+            self.assigned.lock().await.iter().cloned().collect();
+
         let mut out: Vec<ConsumerRecord> = Vec::new();
         let mut offsets = self.next_offsets.lock().await;
         for topic in &resp.responses {
@@ -100,6 +109,11 @@ impl Consumer {
                 topic.topic.clone()
             };
             for part in &topic.partitions {
+                // Drop records for partitions revoked while this Fetch was
+                // in flight (cooperative rebalance transparency).
+                if !still_owned.contains(&(topic_name.clone(), part.partition_index)) {
+                    continue;
+                }
                 let Some(payload) = &part.records else {
                     continue;
                 };
