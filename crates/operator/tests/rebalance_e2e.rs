@@ -71,6 +71,8 @@ fn build_state(snapshot: SharedSnapshot) -> Arc<AppState> {
     let metrics = RebalancerMetrics::register(&mut registry);
     let store = Arc::new(ProposalStore::new(20));
     let client_facade: Arc<dyn ClientFacade> = Arc::new(NoopClient);
+    let state_topic: Arc<dyn crabka_rebalancer::state_topic::StateBackend> =
+        Arc::new(crabka_rebalancer::state_topic::fake::InMemoryBackend::new_loaded());
     let executor = ExecutorState {
         store: store.clone(),
         config: ExecutorConfig {
@@ -82,6 +84,7 @@ fn build_state(snapshot: SharedSnapshot) -> Arc<AppState> {
         },
         metrics: metrics.clone(),
         in_flight: Arc::new(tokio::sync::Mutex::new(None)),
+        state_topic: state_topic.clone(),
     };
     Arc::new(AppState {
         snapshot,
@@ -98,6 +101,7 @@ fn build_state(snapshot: SharedSnapshot) -> Arc<AppState> {
         executor,
         client_facade,
         anomaly_store: Arc::new(crabka_rebalancer::detector::AnomalyStore::new(200)),
+        state_topic,
     })
 }
 
