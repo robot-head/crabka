@@ -25,58 +25,64 @@ use crate::records::owned::RecordBatch;
 /// Owned form of a records-field payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecordsPayload {
-    /// Parsed v2 batch.
-    V2(RecordBatch),
+    /// Zero or more parsed v2 batches (the records field is a *sequence*).
+    V2(Vec<RecordBatch>),
+    /// Verbatim, already-wire-format v2 bytes (one or more batches),
+    /// forwarded without parsing. Produced by the fetch pass-through path.
+    Raw(Bytes),
     /// Opaque pre-v2 bytes (v0/v1 `MessageSet`). Decode with
     /// `crabka_records_legacy::decode_message_set`.
     Legacy(Bytes),
 }
 
 impl RecordsPayload {
-    /// Construct from raw records-field bytes.
-    ///
-    /// Peeks the magic byte at offset 16; if it is `2`, eagerly parses
-    /// the bytes as a v2 batch. Anything else is preserved as opaque
-    /// legacy bytes.
+    /// Construct from raw records-field bytes. When the bytes look like v2,
+    /// decode *every* batch in the field; otherwise keep as opaque legacy.
     pub fn from_bytes(bytes: Bytes) -> Result<Self, RecordsError> {
         if looks_like_v2(&bytes) {
             let mut cur: &[u8] = &bytes;
-            let rb = RecordBatch::decode(&mut cur)?;
-            Ok(Self::V2(rb))
+            let mut batches = Vec::new();
+            while !cur.is_empty() {
+                batches.push(RecordBatch::decode(&mut cur)?);
+            }
+            Ok(Self::V2(batches))
         } else {
             Ok(Self::Legacy(bytes))
         }
     }
 
-    /// Wire size of the inner bytes (excluding the outer nullable-bytes
-    /// length prefix). For a v2 batch, this is the byte count of
-    /// `RecordBatch::encode`; for legacy it is the held byte length.
+    /// Wire size of the records-field bytes (no outer length prefix).
     #[must_use]
     pub fn payload_len(&self) -> usize {
         match self {
-            Self::V2(rb) => rb.encoded_len(),
-            Self::Legacy(b) => b.len(),
+            Self::V2(batches) => batches.iter().map(RecordBatch::encoded_len).sum(),
+            Self::Raw(b) | Self::Legacy(b) => b.len(),
         }
     }
 
-    /// Write the payload bytes into `buf`. Caller is responsible for the
-    /// outer nullable-bytes framing.
+    /// Write the payload bytes into `buf` (caller owns the outer framing).
     pub fn encode_to<B: BufMut>(&self, buf: &mut B) -> Result<(), RecordsError> {
         match self {
-            Self::V2(rb) => rb.encode(buf),
-            Self::Legacy(b) => {
+            Self::V2(batches) => {
+                for b in batches {
+                    b.encode(buf)?;
+                }
+                Ok(())
+            }
+            Self::Raw(b) | Self::Legacy(b) => {
                 buf.put_slice(b);
                 Ok(())
             }
         }
     }
 
-    /// Borrow as a parsed v2 batch, if that's what this payload is.
+    /// Borrow the parsed v2 batches, if this is a parsed `V2` payload.
+    /// Returns `None` for `Raw` (intentionally unparsed) and `Legacy`.
     #[must_use]
-    pub fn as_v2(&self) -> Option<&RecordBatch> {
+    pub fn as_v2(&self) -> Option<&[RecordBatch]> {
         match self {
-            Self::V2(rb) => Some(rb),
-            Self::Legacy(_) => None,
+            Self::V2(batches) => Some(batches),
+            Self::Raw(_) | Self::Legacy(_) => None,
         }
     }
 
@@ -85,20 +91,26 @@ impl RecordsPayload {
     pub fn as_legacy(&self) -> Option<&Bytes> {
         match self {
             Self::Legacy(b) => Some(b),
-            Self::V2(_) => None,
+            Self::V2(_) | Self::Raw(_) => None,
         }
     }
 }
 
 impl From<RecordBatch> for RecordsPayload {
     fn from(rb: RecordBatch) -> Self {
-        Self::V2(rb)
+        Self::V2(vec![rb])
+    }
+}
+
+impl From<Vec<RecordBatch>> for RecordsPayload {
+    fn from(v: Vec<RecordBatch>) -> Self {
+        Self::V2(v)
     }
 }
 
 impl Default for RecordsPayload {
     fn default() -> Self {
-        Self::V2(RecordBatch::default())
+        Self::V2(Vec::new())
     }
 }
 
@@ -125,18 +137,23 @@ impl crate::Decode<'_> for RecordsPayload {
 /// Borrowed form: zero-copy view into the input buffer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecordsPayloadBorrowed<'a> {
-    V2(RecordBatchBorrowed<'a>),
+    V2(Vec<RecordBatchBorrowed<'a>>),
     Legacy(&'a [u8]),
 }
 
 impl<'a> RecordsPayloadBorrowed<'a> {
     pub fn from_slice(bytes: &'a [u8]) -> Result<Self, RecordsError> {
         if looks_like_v2(bytes) {
-            let mut cur: &[u8] = bytes;
-            let rb =
-                <RecordBatchBorrowed<'a> as crate::DecodeBorrow<'a>>::decode_borrow(&mut cur, 0)
-                    .map_err(|e| RecordsError::RecordParse(format!("borrowed v2 decode: {e}")))?;
-            Ok(Self::V2(rb))
+            let mut cur: &'a [u8] = bytes;
+            let mut batches = Vec::new();
+            while !cur.is_empty() {
+                let rb = <RecordBatchBorrowed<'a> as crate::DecodeBorrow<'a>>::decode_borrow(
+                    &mut cur, 0,
+                )
+                .map_err(|e| RecordsError::RecordParse(format!("borrowed v2 decode: {e}")))?;
+                batches.push(rb);
+            }
+            Ok(Self::V2(batches))
         } else {
             Ok(Self::Legacy(bytes))
         }
@@ -145,15 +162,24 @@ impl<'a> RecordsPayloadBorrowed<'a> {
     #[must_use]
     pub fn payload_len(&self) -> usize {
         match self {
-            Self::V2(rb) => crate::Encode::encoded_len(rb, 0),
+            Self::V2(batches) => batches
+                .iter()
+                .map(|rb| crate::Encode::encoded_len(rb, 0))
+                .sum(),
             Self::Legacy(b) => b.len(),
         }
     }
 
     pub fn encode_to<B: BufMut>(&self, buf: &mut B) -> Result<(), RecordsError> {
         match self {
-            Self::V2(rb) => crate::Encode::encode(rb, buf, 0)
-                .map_err(|e| RecordsError::RecordParse(format!("borrowed v2 encode: {e}"))),
+            Self::V2(batches) => {
+                for rb in batches {
+                    crate::Encode::encode(rb, buf, 0).map_err(|e| {
+                        RecordsError::RecordParse(format!("borrowed v2 encode: {e}"))
+                    })?;
+                }
+                Ok(())
+            }
             Self::Legacy(b) => {
                 buf.put_slice(b);
                 Ok(())
@@ -164,7 +190,13 @@ impl<'a> RecordsPayloadBorrowed<'a> {
     /// Convert to the owned flavor, performing any necessary buffer copies.
     pub fn to_owned(&self) -> Result<RecordsPayload, RecordsError> {
         match self {
-            Self::V2(rb) => rb.to_owned().map(RecordsPayload::V2),
+            Self::V2(batches) => {
+                let mut owned = Vec::with_capacity(batches.len());
+                for rb in batches {
+                    owned.push(rb.to_owned()?);
+                }
+                Ok(RecordsPayload::V2(owned))
+            }
             Self::Legacy(b) => Ok(RecordsPayload::Legacy(Bytes::copy_from_slice(b))),
         }
     }
@@ -172,7 +204,7 @@ impl<'a> RecordsPayloadBorrowed<'a> {
 
 impl Default for RecordsPayloadBorrowed<'_> {
     fn default() -> Self {
-        Self::V2(RecordBatchBorrowed::default())
+        Self::V2(Vec::new())
     }
 }
 
@@ -238,9 +270,41 @@ mod tests {
         rb.encode(&mut buf).unwrap();
         let p = RecordsPayload::from_bytes(buf.freeze()).unwrap();
         match p {
-            RecordsPayload::V2(parsed) => assert_eq!(parsed, rb),
-            RecordsPayload::Legacy(_) => panic!("expected V2"),
+            RecordsPayload::V2(batches) => assert_eq!(batches, vec![rb]),
+            RecordsPayload::Raw(_) | RecordsPayload::Legacy(_) => panic!("expected V2"),
         }
+    }
+
+    #[test]
+    fn from_bytes_parses_all_batches() {
+        // Two v2 batches concatenated must both decode.
+        let mut b0 = sample_v2();
+        b0.base_offset = 0;
+        let mut b1 = sample_v2();
+        b1.base_offset = 1;
+        let mut buf = BytesMut::new();
+        b0.encode(&mut buf).unwrap();
+        b1.encode(&mut buf).unwrap();
+        let p = RecordsPayload::from_bytes(buf.freeze()).unwrap();
+        let batches = p.as_v2().expect("v2");
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].base_offset, 0);
+        assert_eq!(batches[1].base_offset, 1);
+    }
+
+    #[test]
+    fn raw_passthrough_roundtrips() {
+        let mut b = sample_v2();
+        b.base_offset = 7;
+        let mut wire = BytesMut::new();
+        b.encode(&mut wire).unwrap();
+        let wire = wire.freeze();
+        let p = RecordsPayload::Raw(wire.clone());
+        assert_eq!(p.payload_len(), wire.len());
+        let mut out = BytesMut::new();
+        p.encode_to(&mut out).unwrap();
+        assert_eq!(&out[..], &wire[..]); // verbatim
+        assert!(p.as_v2().is_none()); // Raw is unparsed
     }
 
     #[test]
@@ -252,7 +316,7 @@ mod tests {
         let p = RecordsPayload::from_bytes(Bytes::from(buf.clone())).unwrap();
         match p {
             RecordsPayload::Legacy(b) => assert_eq!(&b[..], &buf[..]),
-            RecordsPayload::V2(_) => panic!("expected Legacy"),
+            RecordsPayload::Raw(_) | RecordsPayload::V2(_) => panic!("expected Legacy"),
         }
     }
 
@@ -286,8 +350,8 @@ mod tests {
         assert!(matches!(p, RecordsPayloadBorrowed::V2(_)));
         let owned = p.to_owned().unwrap();
         match owned {
-            RecordsPayload::V2(parsed) => assert_eq!(parsed.base_offset, 42),
-            RecordsPayload::Legacy(_) => panic!(),
+            RecordsPayload::V2(batches) => assert_eq!(batches[0].base_offset, 42),
+            RecordsPayload::Raw(_) | RecordsPayload::Legacy(_) => panic!("expected V2"),
         }
     }
 
@@ -295,7 +359,7 @@ mod tests {
     fn from_record_batch() {
         let rb = sample_v2();
         let p: RecordsPayload = rb.clone().into();
-        assert_eq!(p.as_v2(), Some(&rb));
+        assert_eq!(p.as_v2(), Some(&[rb][..]));
         assert!(p.as_legacy().is_none());
     }
 
@@ -340,7 +404,7 @@ mod tests {
     #[test]
     fn owned_default_is_empty_v2() {
         let p = RecordsPayload::default();
-        assert!(matches!(p, RecordsPayload::V2(_)));
+        assert!(matches!(p, RecordsPayload::V2(ref v) if v.is_empty()));
     }
 
     #[test]
@@ -365,7 +429,7 @@ mod tests {
         let owned = p.to_owned().unwrap();
         match owned {
             RecordsPayload::Legacy(b) => assert_eq!(&b[..], &bytes[..]),
-            RecordsPayload::V2(_) => panic!("expected Legacy"),
+            RecordsPayload::Raw(_) | RecordsPayload::V2(_) => panic!("expected Legacy"),
         }
     }
 
@@ -407,6 +471,6 @@ mod tests {
     #[test]
     fn borrowed_default_is_empty_v2() {
         let p = RecordsPayloadBorrowed::default();
-        assert!(matches!(p, RecordsPayloadBorrowed::V2(_)));
+        assert!(matches!(p, RecordsPayloadBorrowed::V2(ref v) if v.is_empty()));
     }
 }
