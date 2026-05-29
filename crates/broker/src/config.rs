@@ -572,6 +572,23 @@ impl BrokerConfig {
             }
         }
 
+        // GSSAPI, wherever it is enabled (per-listener override or broker-wide
+        // default), requires a `gssapi` config block. Without it the dispatch
+        // path has nothing to authenticate against, so reject at startup rather
+        // than panicking when the first GSSAPI client connects.
+        let gssapi_enabled = listeners.iter().any(|l| {
+            l.protocol.requires_sasl()
+                && l.sasl_mechanisms
+                    .as_deref()
+                    .unwrap_or(&self.enabled_sasl_mechanisms)
+                    .contains(&SaslMechanism::Gssapi)
+        }) || self
+            .enabled_sasl_mechanisms
+            .contains(&SaslMechanism::Gssapi);
+        if gssapi_enabled && self.gssapi.is_none() {
+            return Err(BrokerError::GssapiConfigMissing);
+        }
+
         let cp = self.controller_listener_protocol;
         if cp.requires_tls() && self.tls_config.is_none() {
             return Err(BrokerError::Tls(
@@ -884,6 +901,20 @@ mod tests {
         };
         c.validate()
             .expect("per-listener mechanisms satisfy SASL validation");
+    }
+
+    #[test]
+    fn rejects_gssapi_mechanism_without_gssapi_config() {
+        let c = BrokerConfig {
+            controller_listener_protocol: ListenerProtocol::Plaintext,
+            enabled_sasl_mechanisms: vec![SaslMechanism::Gssapi],
+            gssapi: None,
+            ..BrokerConfig::default()
+        };
+        assert!(matches!(
+            c.validate(),
+            Err(BrokerError::GssapiConfigMissing)
+        ));
     }
 
     #[test]

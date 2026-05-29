@@ -70,7 +70,13 @@ impl Rule {
             rest = r;
         }
 
+        // The trailing `/L` lowercase modifier (Hadoop KerberosName grammar:
+        // `...(g)?)?/?(L)?`) sits after the optional substitution. When a subst
+        // is present the `L` rides in its flags segment (e.g. `s/x/y/L` or
+        // `s/x/y/gL`); without one it trails the regex as `/L`. Detect it by the
+        // presence of the `L` flag in either position rather than matching `/L`.
         let mut subst = None;
+        let lowercase;
         if let Some(after) = rest.strip_prefix("s/") {
             let parts: Vec<&str> = after.splitn(3, '/').collect();
             if parts.len() < 2 {
@@ -84,14 +90,11 @@ impl Rule {
                 to,
                 global: flags.contains('g'),
             });
-            rest = if flags.contains('g') {
-                flags.trim_start_matches('g')
-            } else {
-                flags
-            };
+            lowercase = flags.contains('L');
+        } else {
+            lowercase = rest.contains('L');
         }
 
-        let lowercase = rest.contains("/L");
         Ok(Rule::Translate {
             num_components,
             format,
@@ -214,6 +217,19 @@ mod tests {
     fn rule_lowercase_modifier() {
         let r = rules(&["RULE:[1:$1]/L"]);
         assert_eq!(apply(&r, "REALM", &["Alice"], "REALM").unwrap(), "alice");
+    }
+
+    #[test]
+    fn rule_lowercase_modifier_after_substitution() {
+        // `/L` riding in the substitution flags must still lowercase the result.
+        let r = rules(&["RULE:[1:$1](.*)s/$/-X/L"]);
+        assert_eq!(apply(&r, "REALM", &["Alice"], "REALM").unwrap(), "alice-x");
+    }
+
+    #[test]
+    fn rule_global_and_lowercase_flags_combined() {
+        let r = rules(&["RULE:[1:$1](.*)s/A/a/gL"]);
+        assert_eq!(apply(&r, "REALM", &["BANANA"], "REALM").unwrap(), "banana");
     }
 
     #[test]

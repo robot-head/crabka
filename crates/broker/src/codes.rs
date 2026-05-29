@@ -243,6 +243,7 @@ pub fn from_broker_error(err: &crate::error::BrokerError) -> i16 {
         | BrokerError::ListenerConflict { .. }
         | BrokerError::InvalidInterBrokerListener { .. }
         | BrokerError::SaslListenerNoMechanisms { .. }
+        | BrokerError::GssapiConfigMissing
         | BrokerError::Tls(_)
         | BrokerError::BootstrapFile { .. }
         | BrokerError::InvalidLeaderRebalanceInterval { .. }
