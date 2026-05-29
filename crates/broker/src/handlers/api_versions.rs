@@ -98,10 +98,10 @@ fn supported_apis() -> Vec<ApiVersion> {
         v!(leave_group_request),
         v!(sasl_handshake_request),
         v!(sasl_authenticate_request),
-        // OffsetCommit and OffsetFetch: MVP only handles the legacy
+        // OffsetCommit and OffsetFetch only handle the legacy
         // single-group / name-keyed shape. v8+ (OffsetFetch) and v10+
         // (OffsetCommit) switch to topic_id / per-group arrays which
-        // require a topic-id index this slice doesn't wire up. Cap the
+        // require a topic-id index that is not wired up. Cap the
         // advertised max so clients negotiate down to a version we can
         // serve cleanly.
         ApiVersion {
@@ -157,7 +157,7 @@ fn supported_apis() -> Vec<ApiVersion> {
         v!(describe_client_quotas_request),
         v!(alter_client_quotas_request),
         v!(describe_user_scram_credentials_request),
-        // Slice 51 (KIP-48): delegation-token RPCs. Conditional on the
+        // KIP-48: delegation-token RPCs. Conditional on the
         // broker having a master key configured is tempting, but Kafka
         // always advertises these — clients discover support at this
         // level then get DELEGATION_TOKEN_AUTH_DISABLED (61) on the
@@ -200,6 +200,12 @@ fn supported_apis() -> Vec<ApiVersion> {
         // unclean recovery manager uses to read each replica's LEO + leader
         // epoch. Advertised so InterBrokerClient version negotiation succeeds.
         v!(get_replica_log_info_request),
+        // KIP-853 dynamic-quorum reconfiguration — `kafka-metadata-quorum
+        // --add-controller / --remove-controller` and the controller
+        // auto-join path.
+        v!(add_raft_voter_request),
+        v!(remove_raft_voter_request),
+        v!(update_raft_voter_request),
     ]
 }
 
@@ -332,6 +338,33 @@ mod tests {
             fetch.min_version, 0,
             "Fetch min must be 0 to advertise the legacy v0-3 support"
         );
+    }
+
+    #[test]
+    fn api_versions_advertises_kip853_rpcs_and_describe_quorum_v2() {
+        use crabka_protocol::owned;
+        let table = supported_apis();
+        let by_key = |k: i16| table.iter().find(|v| v.api_key == k);
+
+        for (key, max) in [
+            (80i16, owned::add_raft_voter_request::MAX_VERSION),
+            (81, owned::remove_raft_voter_request::MAX_VERSION),
+            (82, owned::update_raft_voter_request::MAX_VERSION),
+        ] {
+            let v = by_key(key).unwrap_or_else(|| panic!("api_key {key} advertised"));
+            assert_eq!(v.min_version, 0);
+            assert_eq!(v.max_version, max, "api_key {key} max matches codegen");
+        }
+
+        // DescribeQuorum (55) max follows its schema const — now v2 (KIP-853
+        // adds VoterDirectoryId + Nodes).
+        let dq = by_key(55).expect("describe_quorum advertised");
+        assert_eq!(
+            dq.max_version,
+            owned::describe_quorum_request::MAX_VERSION,
+            "DescribeQuorum max tracks the codegen const",
+        );
+        assert_eq!(dq.max_version, 2, "DescribeQuorum is v2 after KIP-853");
     }
 
     // ── KIP-511 client-info validation ─────────────────────────────────────

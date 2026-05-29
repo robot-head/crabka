@@ -51,7 +51,6 @@ use std::time::Duration;
 
 use crabka_metadata::{MetadataRecord, PartitionRecord};
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
-use crabka_raft::ControllerHandle;
 use futures_util::FutureExt as _;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tracing::warn;
@@ -115,7 +114,7 @@ impl UncleanRecoveryHandle {
 /// dedups in-flight work per partition, queries surviving replicas for their
 /// log state, and elects the most-complete-log replica via `submit_change`.
 pub(crate) struct UncleanRecoveryManager {
-    controller: Arc<ControllerHandle>,
+    controller: Arc<dyn crate::metadata_source::MetadataSource>,
     liveness: Arc<ControllerLivenessState>,
     node_id: NodeId,
     inter_broker_client: Arc<InterBrokerClient>,
@@ -130,7 +129,7 @@ impl UncleanRecoveryManager {
     /// handle is dropped.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn spawn(
-        controller: Arc<ControllerHandle>,
+        controller: Arc<dyn crate::metadata_source::MetadataSource>,
         liveness: Arc<ControllerLivenessState>,
         node_id: NodeId,
         inter_broker_client: Arc<InterBrokerClient>,

@@ -181,6 +181,15 @@ pub struct Group {
     pub static_members: HashMap<String, String>,
     pub committed_offsets: HashMap<(String, i32), OffsetEntry>,
     pub rebalance_deadline: Option<Instant>,
+    /// Members whose `JoinGroup` has arrived since the last transition into
+    /// `PreparingRebalance`. The `JoinGroup` handler runs the rebalance early
+    /// — without waiting out `INITIAL_REBALANCE_DELAY` — once every member
+    /// still in `members` shows up here, which avoids the leader running
+    /// the assignor on a stale-metadata snapshot when a slow member misses
+    /// the wait window under load (the assignor's cooperative-sticky
+    /// Pass-3 omissions then strand partitions on no member). Cleared on
+    /// every transition into `PreparingRebalance`.
+    pub joined_this_round: std::collections::HashSet<String>,
 }
 
 impl Group {
@@ -197,6 +206,7 @@ impl Group {
             static_members: HashMap::new(),
             committed_offsets: HashMap::new(),
             rebalance_deadline: None,
+            joined_this_round: std::collections::HashSet::new(),
         }
     }
 
@@ -243,9 +253,17 @@ impl Group {
                         next.assignment = p.assignment;
                     }
                 }
+                let new_member_id = next.member_id.clone();
                 self.static_members
-                    .insert(instance_id, next.member_id.clone());
-                self.members.insert(next.member_id.clone(), next);
+                    .insert(instance_id, new_member_id.clone());
+                self.members.insert(new_member_id.clone(), next);
+                // If this static rejoin lands during PreparingRebalance,
+                // count the (potentially renamed) member as joined so the
+                // early-completion check still fires.
+                if matches!(self.state, GroupState::PreparingRebalance) {
+                    self.joined_this_round.remove(&prior_member_id);
+                    self.joined_this_round.insert(new_member_id);
+                }
                 // Crucially: do NOT touch self.state. Static rejoin from
                 // Stable stays Stable; from PreparingRebalance stays
                 // PreparingRebalance.
@@ -257,11 +275,31 @@ impl Group {
                 .insert(instance_id, member.member_id.clone());
         }
         let was_first_or_stable = matches!(self.state, GroupState::Empty | GroupState::Stable);
-        self.members.insert(member.member_id.clone(), member);
+        let member_id = member.member_id.clone();
+        self.members.insert(member_id.clone(), member);
         if was_first_or_stable {
             self.state = GroupState::PreparingRebalance;
+            self.joined_this_round.clear();
+        }
+        if matches!(self.state, GroupState::PreparingRebalance) {
+            self.joined_this_round.insert(member_id);
         }
         AddMemberOutcome::NewMember
+    }
+
+    /// True once every member currently in `members` has issued a
+    /// `JoinGroup` since the last transition into `PreparingRebalance`.
+    /// The `JoinGroup` handler uses this to short-circuit the rebalance
+    /// wait the moment all members are accounted for, so the leader runs
+    /// the assignor on a fresh snapshot of every member's owned set.
+    #[must_use]
+    pub fn all_members_joined_this_round(&self) -> bool {
+        if self.members.is_empty() {
+            return false;
+        }
+        self.members
+            .keys()
+            .all(|id| self.joined_this_round.contains(id))
     }
 
     /// Remove a member; transitions to `Empty` if no members remain.
@@ -276,6 +314,7 @@ impl Group {
                 self.static_members.remove(iid);
             }
         }
+        self.joined_this_round.remove(member_id);
         if self.members.is_empty() {
             self.state = GroupState::Empty;
             self.leader_id = None;
@@ -298,6 +337,7 @@ impl Group {
         self.generation_id += 1;
         self.state = GroupState::CompletingRebalance;
         self.rebalance_deadline = None;
+        self.joined_this_round.clear();
     }
 
     /// Set each member's `protocol_metadata` to its proposal for `name`.

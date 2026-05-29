@@ -1,12 +1,12 @@
 //! Lazy creation of the `__transaction_state` internal topic.
-//! Mirrors slice-5's `__consumer_offsets` bootstrap.
+//! Mirrors the `__consumer_offsets` bootstrap.
 
-#![allow(dead_code)] // wired in Task 11 (FindCoordinator-TXN handler)
+#![allow(dead_code)] // wired in by the FindCoordinator-TXN handler
 
 use std::sync::Arc;
 
 use crabka_metadata::{MetadataRecord, PartitionRecord, TopicRecord};
-use crabka_raft::{ControllerHandle, RaftError};
+use crabka_raft::RaftError;
 use uuid::Uuid;
 
 pub const TOPIC: &str = "__transaction_state";
@@ -16,7 +16,7 @@ pub const NUM_PARTITIONS: i32 = 50;
 /// No-op if it already does. Tolerate `TopicExists` in case a concurrent
 /// `FindCoordinator(TRANSACTION)` already created it.
 pub(crate) async fn ensure_topic(
-    controller: &Arc<ControllerHandle>,
+    controller: &Arc<dyn crate::metadata_source::MetadataSource>,
 ) -> Result<(), crate::error::BrokerError> {
     let image = controller.current_image();
     if image.topic(TOPIC).is_some() {

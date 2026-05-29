@@ -1,5 +1,4 @@
-//! Kafka version + metadata-version model for upgrade orchestration
-//! (slice 28).
+//! Kafka version + metadata-version model for upgrade orchestration.
 //!
 //! Crabka is `KRaft`-only, so the only feature-level knob we model is
 //! `metadata.version` — the runtime analog of the ZK-era

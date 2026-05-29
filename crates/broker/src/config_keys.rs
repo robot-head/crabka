@@ -1,8 +1,8 @@
 //! Topic-config whitelist for `AlterConfigs` / `IncrementalAlterConfigs`.
 //!
-//! Eleven keys are recognized. Five propagate live to `Log.config`
+//! Twelve keys are recognized. Five propagate live to `Log.config`
 //! (`retention.ms`, `retention.bytes`, `segment.bytes`, `cleanup.policy`,
-//! `compression.type`), plus the slice-48c tiered-storage local-retention
+//! `compression.type`), plus the tiered-storage local-retention
 //! pair (`local.retention.ms`, `local.retention.bytes`). One is read by
 //! the produce hot path's pre-flight gate: `min.insync.replicas`
 //! (integers >= 1) — `acks=-1` produces against a partition whose ISR is
@@ -11,7 +11,8 @@
 //! `follower.replication.throttled.replicas`) validated via
 //! `ThrottledReplicas::parse`. One is the KIP-841 unclean-recovery toggle
 //! (`unclean.leader.election.enable`) read by the controller's automatic
-//! failover path on ISR-empty.
+//! failover path on ISR-empty. One is the KIP-966 offset-aware recovery
+//! strategy (`unclean.recovery.strategy`) which supersedes it.
 //!
 //! Unknown keys are rejected with `INVALID_CONFIG`.
 
@@ -70,11 +71,11 @@ impl RecoveryStrategy {
         }
     }
 }
-/// Slice 48b (KIP-405): per-topic tiered-storage opt-in.
+/// KIP-405: per-topic tiered-storage opt-in.
 pub(crate) const REMOTE_STORAGE_ENABLE: &str = "remote.storage.enable";
-/// Slice 48c (KIP-405): per-topic local-retention time window for tiered partitions.
+/// KIP-405: per-topic local-retention time window for tiered partitions.
 pub(crate) const LOCAL_RETENTION_MS: &str = "local.retention.ms";
-/// Slice 48c (KIP-405): per-topic local-retention size budget for tiered partitions.
+/// KIP-405: per-topic local-retention size budget for tiered partitions.
 pub(crate) const LOCAL_RETENTION_BYTES: &str = "local.retention.bytes";
 
 /// Validate a single key/value pair. `Err(reason)` carries an
@@ -232,7 +233,7 @@ pub(crate) fn apply_to_log_config(
             }
             LOCAL_RETENTION_MS => {
                 if let Ok(ms) = v.parse::<i64>() {
-                    // Per the slice-48c design: -2 (inherit) and -1 (unlimited)
+                    // -2 (inherit) and -1 (unlimited)
                     // both collapse to `None` — the greenfield simplification noted
                     // in the spec. >=0 maps to `Some(Duration::from_millis(n))`.
                     out.local_retention_ms = if ms < 0 {

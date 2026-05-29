@@ -82,12 +82,12 @@ pub enum ValidationError {
         listener: String,
         got: u32,
     },
-    /// Slice 49g: `validTokenType` set on an `accessTokenIsJwt: false`
+    /// `validTokenType` set on an `accessTokenIsJwt: false`
     /// listener. Introspection-mode validation has no JWT header to
     /// check `typ` against; the field is rejected. The `String` carries
     /// the listener name + a human-readable description.
     ListenerOauthValidTokenTypeRejectedInIntrospectionMode(String),
-    /// Slice 49i: any of `jwksMinRefreshPauseSeconds`,
+    /// Any of `jwksMinRefreshPauseSeconds`,
     /// `jwksExpirySeconds`, `jwksIgnoreKeyUse` set on an
     /// `accessTokenIsJwt: false` listener. Introspection mode
     /// doesn't use JWKS; setting these fields is a configuration
@@ -95,10 +95,10 @@ pub enum ValidationError {
     /// listener name + which field(s) were rejected.
     ListenerOauthJwksFieldsRejectedInIntrospectionMode(String),
     /// Two or more OAuth listeners declare differing configs. The broker
-    /// `[oauthbearer]` block is broker-global (slice 49b), so per-listener
+    /// `[oauthbearer]` block is broker-global, so per-listener
     /// OAuth divergence is not representable.
     ConflictingOAuthListenerConfig,
-    /// Slice 50c: an OAuth listener's `accessTokenIsJwt` setting disagrees
+    /// An OAuth listener's `accessTokenIsJwt` setting disagrees
     /// with which mode-specific fields are set. The `String` carries a
     /// human-readable description (which listener + which invariant was
     /// violated). JWT mode requires `jwksEndpointUri` and forbids all
@@ -240,7 +240,7 @@ pub fn validate_listeners(
                     l.name.clone(),
                 ));
             }
-            // Slice 50c cross-mode invariants. Fire first so operators see
+            // Cross-mode invariants. Fire first so operators see
             // the mode-shape problem before any field-by-field complaint
             // (e.g. "no JWKS URI" is more actionable than "JWKS URI must
             // be http/https" when the user meant introspection mode).
@@ -309,7 +309,7 @@ pub fn validate_listeners(
                         ),
                     );
                 }
-                // Slice 49i: JWKS-only fields are rejected in introspection mode.
+                // JWKS-only fields are rejected in introspection mode.
                 let mut jwks_fields_set = Vec::new();
                 if cfg.jwks_min_refresh_pause_seconds.is_some() {
                     jwks_fields_set.push("jwksMinRefreshPauseSeconds");
@@ -384,7 +384,7 @@ pub fn validate_listeners(
     }
 
     // Cross-listener OAuth conflict check. The broker `[oauthbearer]` block is
-    // broker-global (slice 49b), so two OAuth listeners with diverging configs
+    // broker-global, so two OAuth listeners with diverging configs
     // (different issuer, audience, JWKS, claim names, …) can't be honored
     // simultaneously. Listeners that differ ONLY in whether they advertise
     // OAUTHBEARER on the wire (`enable_oauth_bearer`) are fine — the global
@@ -470,8 +470,8 @@ pub(crate) fn weak_auth_warnings(listeners: &[Listener]) -> Vec<String> {
 
 /// Pick the inter-broker listener name. Honors an explicit override;
 /// otherwise picks the first `internal` listener. Returns the synthesized
-/// default name (`"PLAIN"`) when `listeners` is empty (the slice-19
-/// compatibility path).
+/// default name (`"PLAIN"`) when `listeners` is empty (the
+/// no-listeners compatibility path).
 #[allow(dead_code)]
 #[must_use]
 pub fn effective_inter_broker_listener_name(
@@ -664,7 +664,7 @@ pub fn render_bootstrap_service(
 }
 
 // ---------------------------------------------------------------------------
-// Ingress / Route external listeners (slice 27)
+// Ingress / Route external listeners
 // ---------------------------------------------------------------------------
 
 /// Advertised port for `ingress` / `route` listeners — the standard HTTPS port
@@ -672,7 +672,7 @@ pub fn render_bootstrap_service(
 /// broker via `configuration.brokers[].advertisedPort`.
 pub(crate) const INGRESS_PORT: i32 = 443;
 
-/// Slice 48g (KIP-405): mount path for the local-tier RSM. Same path
+/// KIP-405: mount path for the local-tier RSM. Same path
 /// is used by the operator's broker TOML render
 /// (`[remote_storage].storage_dir`) and the broker pod template's
 /// `tier-storage` `volumeMount` so the broker's `LocalTieredStorage`
@@ -1638,7 +1638,7 @@ mod tests {
                     ..base.clone()
                 },
             ),
-            // Slice 50c: access_token_is_jwt flips the validator mode. The
+            // access_token_is_jwt flips the validator mode. The
             // perturbed config switches to introspection mode AND wires up
             // the introspection-mode required fields so the cross-mode
             // validation doesn't reject the perturbed config standalone
@@ -1828,7 +1828,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Slice 50c — cross-mode (accessTokenIsJwt) validation tests
+    // Cross-mode (accessTokenIsJwt) validation tests
     // -----------------------------------------------------------------
 
     fn oauth_introspection_cfg_minimal() -> crate::crd::ListenerAuthenticationOAuth {
@@ -2039,7 +2039,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Slice 49g — validTokenType cross-mode validation
+    // validTokenType cross-mode validation
     // -----------------------------------------------------------------
 
     #[test]
@@ -2048,7 +2048,7 @@ mod tests {
         // rejected: introspection responses carry no JWT header, so a
         // `typ` check has nothing to bind against. Mirrors the new
         // `ListenerOauthValidTokenTypeRejectedInIntrospectionMode`
-        // variant introduced in slice 49g.
+        // variant.
         let cfg = crate::crd::ListenerAuthenticationOAuth {
             valid_issuer_uri: "https://iss.example/".into(),
             jwks_endpoint_uri: None,
@@ -2094,7 +2094,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Slice 49i — JWKS-only fields cross-mode validation
+    // JWKS-only fields cross-mode validation
     // -----------------------------------------------------------------
 
     #[test]
@@ -2103,8 +2103,7 @@ mod tests {
         // be rejected: JWKS isn't consulted at all in introspection
         // mode, so a JWKS refresher policy field has nothing to bind
         // against. Mirrors the new
-        // `ListenerOauthJwksFieldsRejectedInIntrospectionMode` variant
-        // introduced in slice 49i.
+        // `ListenerOauthJwksFieldsRejectedInIntrospectionMode` variant.
         let cfg = crate::crd::ListenerAuthenticationOAuth {
             valid_issuer_uri: "https://iss.example/".into(),
             jwks_endpoint_uri: None,
@@ -2692,7 +2691,7 @@ pub struct BrokerTlsRender {
     pub client_auth: String,
 }
 
-/// Slice 53: intermediate shape for rendering the `[authorization]`
+/// Intermediate shape for rendering the `[authorization]`
 /// TOML block. Built from `Kafka.spec.authorization` (+ the
 /// delegation-token enablement flag) by
 /// [`AuthorizationRender::from_spec`] / [`AuthorizationRender::auto_injected_simple`].
@@ -2724,7 +2723,7 @@ impl AuthorizationRender {
     /// Build from an explicit `Kafka.spec.authorization`. When
     /// `delegation_token_enabled`, merges `"ANONYMOUS"` into
     /// `super_users` (de-duplicated, ordering preserved) — the
-    /// slice-51b act-as path requires the operator's PLAINTEXT
+    /// delegation-token act-as path requires the operator's PLAINTEXT
     /// inter-broker principal to be a super-user.
     fn from_spec(a: &crate::crd::kafka::Authorization, delegation_token_enabled: bool) -> Self {
         match a {
@@ -2746,7 +2745,7 @@ impl AuthorizationRender {
         }
     }
 
-    /// Slice-51b backcompat: when `delegation_token_enabled` is set but
+    /// When `delegation_token_enabled` is set but
     /// `Kafka.spec.authorization` is unset, the operator silently
     /// injects a `type = "simple", super_users = ["ANONYMOUS"]` block so
     /// the act-as path keeps working. Documented in the spec §2.2.
@@ -2780,7 +2779,7 @@ fn toml_string_array(items: &[String]) -> String {
 
 /// Render the complete TOML for one broker (cluster-wide content +
 /// this broker's advertised addresses). Deterministic — same input
-/// always produces byte-identical output so the slice-21 config-hash
+/// always produces byte-identical output so the config-hash
 /// is stable.
 // Each arg is an independent operator-owned broker-pod render input —
 // extraction obscures the single deterministic render shape.
@@ -2882,7 +2881,7 @@ pub fn render_broker_toml(
         out.push('\n');
     }
 
-    // Slice 48g (KIP-405): `[remote_storage]` block. Presence of
+    // KIP-405: `[remote_storage]` block. Presence of
     // `Kafka.spec.tieredStorage` flips on the broker-wide tiered-storage
     // stack (slices 48a-e). The storage path is operator-owned and
     // matches the `tier-storage` volume mounted at the same path by the
@@ -2932,7 +2931,7 @@ pub fn render_broker_toml(
             }
         }
 
-        // Slice 48h (KIP-405): `[remote_storage.kafka_metadata]` opts
+        // KIP-405: `[remote_storage.kafka_metadata]` opts
         // the broker pods into the topic-backed RLMM. Omitted when
         // `metadataManager` is unset or `type = InMemory`.
         if let Some(mm) = ts.metadata_manager.as_ref()
@@ -2954,7 +2953,7 @@ pub fn render_broker_toml(
         }
     }
 
-    // Slice 53: `[authorization]` block. Folds in the slice-51b
+    // `[authorization]` block. Folds in the
     // `super_users = ["ANONYMOUS"]` hack — the broker now consumes
     // super-users exclusively via `[authorization].super_users` when the
     // block is present.
@@ -2970,7 +2969,7 @@ pub fn render_broker_toml(
     //     ANONYMOUS-merge rule for delegation-token clusters.
     //   * `authorization = None` AND `delegation_token_enabled` → auto-
     //     inject `type = "simple", super_users = ["ANONYMOUS"]` so the
-    //     slice-51b act-as path keeps working without forcing the user
+    //     delegation-token act-as path keeps working without forcing the user
     //     to author an explicit `Kafka.spec.authorization`.
     //   * `authorization = None` AND not delegation-token → omit the
     //     block entirely; broker falls back to `AllowAllAuthorizer`.
@@ -3006,7 +3005,7 @@ pub fn render_broker_toml(
         }
     }
 
-    // Broker-global [oauthbearer] block (slice 49b TOML shape). Emitted
+    // Broker-global [oauthbearer] block. Emitted
     // when any listener declares `authentication: oauth`. Per-listener OAuth
     // divergence is rejected by `validate_listeners`, so picking the first
     // OAuth listener's config is unambiguous when we reach this point.
@@ -3015,11 +3014,11 @@ pub fn render_broker_toml(
         _ => None,
     }) {
         let _ = writeln!(out, "[oauthbearer]");
-        // Slice 50c: fork on access_token_is_jwt. JWT mode (true) emits
-        // jwks_endpoint_uri (slice 49b/49c). Introspection mode (false)
+        // Fork on access_token_is_jwt. JWT mode (true) emits
+        // jwks_endpoint_uri. Introspection mode (false)
         // emits introspection_endpoint_uri / userinfo_endpoint_uri /
         // introspection_client_id / introspection_client_secret_path /
-        // introspection_http_timeout_ms in 49d FileOAuthBearerConfig
+        // introspection_http_timeout_ms in FileOAuthBearerConfig
         // field order. The cross-mode validator in `validate_listeners`
         // guarantees the relevant Option fields are populated.
         if oauth_cfg.access_token_is_jwt {
@@ -3073,17 +3072,17 @@ pub fn render_broker_toml(
         if let Some(s) = oauth_cfg.max_seconds_without_reauthentication {
             let _ = writeln!(out, "max_session_lifetime_seconds = {s}");
         }
-        // Slice 49g: customClaimCheck (JsonPath expression) — use TOML multi-line
+        // customClaimCheck (JsonPath expression) — use TOML multi-line
         // literal `'''...'''` to avoid escape processing AND allow embedded `'`
         // and `"` in the expression. JsonPath expressions commonly contain both.
         if let Some(expr) = &oauth_cfg.custom_claim_check {
             let _ = writeln!(out, "custom_claim_check = '''{expr}'''");
         }
-        // Slice 49g: validTokenType (JWT typ header check).
+        // validTokenType (JWT typ header check).
         if let Some(typ) = &oauth_cfg.valid_token_type {
             let _ = writeln!(out, "valid_token_type = \"{typ}\"");
         }
-        // Slice 49h: claims mapping.
+        // Claims mapping.
         if let Some(c) = &oauth_cfg.fallback_user_name_claim {
             let _ = writeln!(out, "fallback_user_name_claim = \"{c}\"");
         }
@@ -3218,11 +3217,11 @@ mod toml_rendering_tests {
 
     #[test]
     fn render_broker_toml_emits_super_users_anonymous_when_delegation_token_set() {
-        // Slice 53: when `delegation_token_enabled` and no explicit
+        // When `delegation_token_enabled` and no explicit
         // `Kafka.spec.authorization`, the renderer auto-injects an
         // `[authorization]` block with `type = "simple", super_users =
-        // ["ANONYMOUS"]` — preserving the slice-51b act-as path through
-        // the new pluggable-authorizer plumbing.
+        // ["ANONYMOUS"]` — preserving the delegation-token act-as path through
+        // the pluggable-authorizer plumbing.
         let mut addrs = std::collections::BTreeMap::new();
         addrs.insert(
             "PLAIN".into(),
@@ -3301,7 +3300,7 @@ mod toml_rendering_tests {
     }
 
     // -----------------------------------------------------------------
-    // Slice 53 — `[authorization]` block render
+    // `[authorization]` block render
     // -----------------------------------------------------------------
 
     #[test]
@@ -3455,7 +3454,7 @@ mod toml_rendering_tests {
     fn render_broker_toml_auto_injects_simple_authorization_for_delegation_token() {
         // Bonus: when `delegation_token_enabled` but the CRD has no
         // explicit `Kafka.spec.authorization`, the operator auto-injects
-        // the slice-51b-shaped `type = "simple", super_users =
+        // the `type = "simple", super_users =
         // ["ANONYMOUS"]` block so the act-as path keeps working.
         let mut addrs = std::collections::BTreeMap::new();
         addrs.insert(
@@ -3504,7 +3503,7 @@ mod toml_rendering_tests {
         );
     }
 
-    // ── Slice 48g: tiered storage TOML render ────────────────────────
+    // ── tiered storage TOML render ───────────────────────────────────
 
     #[test]
     fn render_broker_toml_emits_remote_storage_when_tiered_local() {
@@ -3578,7 +3577,7 @@ mod toml_rendering_tests {
         );
     }
 
-    // ── Slice 48-final: S3 tiered storage TOML render ────────────────
+    // ── S3 tiered storage TOML render ────────────────────────────────
 
     /// Full S3 spec — bucket, region, prefix, endpoint, `allow_http`,
     /// multipart overrides — must render every field into
@@ -4221,7 +4220,7 @@ mod toml_rendering_tests {
 
     #[test]
     fn render_broker_toml_emits_max_session_lifetime_seconds_when_set() {
-        // Slice 50d: when the listener's maxSecondsWithoutReauthentication
+        // When the listener's maxSecondsWithoutReauthentication
         // is set, the rendered [oauthbearer] block carries
         // `max_session_lifetime_seconds = N` so the broker clamps
         // OAUTHBEARER session_lifetime_ms tighter than the token's exp.
@@ -4249,7 +4248,7 @@ mod toml_rendering_tests {
 
     #[test]
     fn render_broker_toml_omits_max_session_lifetime_seconds_when_unset() {
-        // Slice 50d: when maxSecondsWithoutReauthentication is unset
+        // When maxSecondsWithoutReauthentication is unset
         // (default), the rendered TOML must NOT contain the key — the
         // broker then leaves session lifetime at the token's natural exp
         // (49e default behavior).
@@ -4490,7 +4489,7 @@ mod toml_rendering_tests {
     }
 
     // -----------------------------------------------------------------
-    // Slice 50c — introspection-mode [oauthbearer] rendering
+    // Introspection-mode [oauthbearer] rendering
     // -----------------------------------------------------------------
 
     fn oauth_introspection_full_cfg() -> crate::crd::ListenerAuthenticationOAuth {
@@ -4704,7 +4703,7 @@ mod toml_rendering_tests {
     }
 
     // -----------------------------------------------------------------
-    // Slice 49g — customClaimCheck + validTokenType render
+    // customClaimCheck + validTokenType render
     // -----------------------------------------------------------------
 
     #[test]
@@ -4759,7 +4758,7 @@ mod toml_rendering_tests {
     }
 
     // -----------------------------------------------------------------
-    // Slice 49h — claims mapping render
+    // Claims mapping render
     // -----------------------------------------------------------------
 
     #[test]
@@ -4885,7 +4884,7 @@ mod toml_rendering_tests {
     }
 
     // -----------------------------------------------------------------
-    // Slice 49i — JWKS refresher policy fields render
+    // JWKS refresher policy fields render
     // -----------------------------------------------------------------
 
     #[test]
@@ -4996,7 +4995,7 @@ mod toml_rendering_tests {
 
 /// Deterministic serialization of `spec.listeners` intent. Empty
 /// (or absent) listeners produce the empty string so a cluster with
-/// no `spec.listeners` set keeps its slice-24 hash on upgrade.
+/// no `spec.listeners` set keeps its config hash on upgrade.
 #[allow(dead_code)]
 pub fn canonical_listener_intent(
     listeners: &[Listener],

@@ -50,7 +50,9 @@ mod controller;
 mod error;
 pub mod handshake;
 mod log_store;
+mod metadata_fetch;
 mod network;
+pub mod reconfig;
 mod server;
 mod state_machine;
 mod types;
@@ -60,10 +62,14 @@ pub use config::{BootstrapMode, ControllerConfig};
 pub use controller::{Controller, ControllerHandle, QuorumState};
 pub use error::RaftError;
 pub use handshake::{DuplexStream, RaftHandshakeError, RaftListenerHandshake};
-pub use network::OutboundDialer;
+pub use metadata_fetch::{MetadataFetchSlice, encode_committed_records};
+pub use network::{OutboundDialer, PlaintextDialer};
+pub use reconfig::{AddVoter, ReconfigOutcome, RemoveVoter, UpdateVoter};
 pub use types::{AppData, AppDataResponse, Node, NodeId, Raft, TypeConfig};
 pub use wire::{
-    API_KEY_APPEND_ENTRIES, API_KEY_INSTALL_SNAPSHOT, API_KEY_VOTE, CrabkaAppendEntriesRequest,
-    CrabkaAppendEntriesResponse, CrabkaInstallSnapshotRequest, CrabkaInstallSnapshotResponse,
-    CrabkaLogEntry, CrabkaVoteRequest, CrabkaVoteResponse, PayloadKind,
+    API_KEY_APPEND_ENTRIES, API_KEY_INSTALL_SNAPSHOT, API_KEY_METADATA_FETCH,
+    API_KEY_SUBMIT_CHANGE, API_KEY_VOTE, CrabkaAppendEntriesRequest, CrabkaAppendEntriesResponse,
+    CrabkaInstallSnapshotRequest, CrabkaInstallSnapshotResponse, CrabkaLogEntry,
+    CrabkaMetadataFetchRequest, CrabkaMetadataFetchResponse, CrabkaSubmitChangeRequest,
+    CrabkaSubmitChangeResponse, CrabkaVoteRequest, CrabkaVoteResponse, PayloadKind,
 };

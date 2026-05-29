@@ -1073,7 +1073,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // Slice 64c: custom assignor registry
+    // custom assignor registry
     // ---------------------------------------------------------------------
 
     use crate::coordinator::next_gen::assignor::{

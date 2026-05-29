@@ -1,4 +1,4 @@
-//! Slice 51: KIP-48 delegation token primitives — HMAC and secret-key
+//! KIP-48 delegation token primitives — HMAC and secret-key
 //! wrapper that keeps the bytes out of Debug.
 
 use bytes::Bytes;

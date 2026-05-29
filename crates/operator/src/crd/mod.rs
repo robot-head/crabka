@@ -28,7 +28,7 @@ pub use metrics::{MetricsConfig, MetricsType, PodMonitorSpec, ServiceMonitorSpec
 pub use network_policy::{NetworkPolicyPeer, NetworkPolicySpec};
 pub use rebalance::{KafkaRebalance, KafkaRebalanceSpec, KafkaRebalanceStatus, OptimizationResult};
 pub use topic::{KafkaTopic, KafkaTopicSpec, KafkaTopicStatus};
-// Slice 53: the cluster-level `Authorization` / `SimpleAuthorization` on
+// The cluster-level `Authorization` / `SimpleAuthorization` on
 // `KafkaSpec` (above) take the unqualified re-export names. The per-user
 // counterparts on `KafkaUserSpec` are re-exported with a `KafkaUser`
 // prefix to disambiguate — same role (drives ACL authorization) but at a

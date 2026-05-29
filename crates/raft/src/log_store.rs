@@ -4,11 +4,10 @@
 //! payload IS the serialized entry. Future KRaft-wire-compat work will
 //! revisit the record layout; today the wrapping is internal only.
 //!
-//! Slice-7 note: only the smoke tests and (in later tasks) `Controller`
-//! reach into this module, so the `dead_code` lint fires for the parts
-//! the trait impl alone doesn't consume from the lib crate root. The
-//! allow at module scope keeps the surface narrow while letting tests
-//! drive the inner helpers.
+//! Only the smoke tests and `Controller` reach into this module, so the
+//! `dead_code` lint fires for the parts the trait impl alone doesn't
+//! consume from the lib crate root. The allow at module scope keeps the
+//! surface narrow while letting tests drive the inner helpers.
 
 #![allow(dead_code)]
 
@@ -36,7 +35,7 @@ use crate::types::{NodeId, TypeConfig};
 /// entries cached until commit (and slightly past).
 #[derive(Debug, Default)]
 struct EntryCache {
-    /// Sorted by index. We never compact in slice 7 (snapshots deferred).
+    /// Sorted by index. We never compact (snapshots not implemented).
     entries: BTreeMap<u64, Entry<TypeConfig>>,
     last_purged: u64,
 }
@@ -97,7 +96,7 @@ impl RaftLogStore {
             .map(|e| e.log_id)
     }
 
-    pub(crate) async fn read_range<R: RangeBounds<u64>>(&self, range: R) -> Vec<Entry<TypeConfig>> {
+    pub async fn read_range<R: RangeBounds<u64>>(&self, range: R) -> Vec<Entry<TypeConfig>> {
         self.cache
             .lock()
             .await
@@ -105,6 +104,20 @@ impl RaftLogStore {
             .range(range)
             .map(|(_, e)| e.clone())
             .collect()
+    }
+
+    /// Lowest log index currently retained in the store, or `0` if the
+    /// log is empty. Tracks raft log truncation/snapshotting; an observer
+    /// that has fallen behind this offset must rebuild from a snapshot.
+    pub async fn log_start_index(&self) -> u64 {
+        self.cache
+            .lock()
+            .await
+            .entries
+            .keys()
+            .next()
+            .copied()
+            .unwrap_or(0)
     }
 
     pub(crate) async fn append(&self, entries: Vec<Entry<TypeConfig>>) -> Result<(), RaftError> {
@@ -190,9 +203,8 @@ impl RaftLogStorage<TypeConfig> for Arc<RaftLogStore> {
     async fn get_log_state(&mut self) -> Result<LogState<TypeConfig>, StorageError<NodeId>> {
         let last_log_id = self.last_log_id().await;
         let last_purged = self.last_purged().await;
-        // Slice 7: snapshots deferred. We never purge, so last_purged_log_id
-        // tracks only what truncate-from-below would do. Future snapshot
-        // work will restore precision.
+        // Snapshots not implemented. We never purge, so last_purged_log_id
+        // tracks only what truncate-from-below would do.
         let last_purged_log_id = (last_purged > 0).then(|| LogId {
             leader_id: openraft::LeaderId::new(0, 0),
             index: last_purged - 1,
@@ -239,8 +251,7 @@ impl RaftLogStorage<TypeConfig> for Arc<RaftLogStore> {
     }
 
     async fn purge(&mut self, _log_id: LogId<NodeId>) -> Result<(), StorageError<NodeId>> {
-        // Slice 7: snapshots deferred, so purge is a no-op. Future snapshot
-        // work will compact the log behind the snapshot index.
+        // Snapshots not implemented, so purge is a no-op.
         Ok(())
     }
 
@@ -279,5 +290,29 @@ mod tests {
         }
         let store2 = RaftLogStore::open(dir_path).await.unwrap();
         assert_eq!(store2.last_log_id().await.unwrap().index, 1);
+    }
+
+    #[tokio::test]
+    async fn read_range_and_log_start_index() {
+        let dir = TempDir::new().unwrap();
+        let store = RaftLogStore::open(dir.path().to_path_buf()).await.unwrap();
+        assert_eq!(store.log_start_index().await, 0);
+
+        let entries: Vec<Entry<TypeConfig>> = (1..=3)
+            .map(|i| Entry {
+                log_id: LogId {
+                    leader_id: LeaderId::new(1, 1),
+                    index: i,
+                },
+                payload: EntryPayload::<TypeConfig>::Blank,
+            })
+            .collect();
+        store.append(entries).await.unwrap();
+
+        assert_eq!(store.log_start_index().await, 1);
+        let got = store.read_range(2..=3).await;
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].log_id.index, 2);
+        assert_eq!(got[1].log_id.index, 3);
     }
 }

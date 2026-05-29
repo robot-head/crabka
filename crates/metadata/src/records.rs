@@ -23,7 +23,7 @@ pub struct PartitionRecord {
     pub replicas: Vec<NodeId>,
     pub isr: Vec<NodeId>,
     /// Per-partition leader epoch. Bumped on every leader change.
-    /// Slice-10b adds this; older on-disk metadata is not migrated.
+    /// Older on-disk metadata is not migrated.
     pub leader_epoch: i32,
     /// Replicas being added in an in-flight reassignment. Empty when no
     /// reassignment in flight. KIP-455.
@@ -55,8 +55,8 @@ pub struct BrokerRegistrationRecord {
     pub host: String,
     pub port: u16,
     pub rack: Option<String>,
-    /// Per-listener endpoints (slice 12, Task 11). Empty on records
-    /// written before this field was added; populated from
+    /// Per-listener endpoints. Empty on records written before this
+    /// field was added; populated from
     /// `BrokerConfig::effective_listeners()` for self-registration.
     pub endpoints: Vec<BrokerEndpoint>,
 }
@@ -128,7 +128,7 @@ pub struct DeleteScramCredentialRecord {
     pub mechanism: crabka_security::SaslMechanism,
 }
 
-/// Slice 51 (KIP-48): A single delegation token's authoritative state.
+/// A single delegation token's authoritative state (KIP-48).
 /// Replacement semantics — appending a new record with the same
 /// `token_id` overwrites the prior one in the image (used by both
 /// Create and Renew). Removal goes through
@@ -149,12 +149,24 @@ pub struct DelegationTokenRecord {
     pub renewers: Vec<crabka_security::KafkaPrincipal>,
 }
 
-/// Slice 51 (KIP-48): Tombstone record removing a delegation token
+/// Tombstone record removing a delegation token (KIP-48)
 /// from the image. Emitted by `ExpireDelegationToken` handlers and the
 /// background expiry sweep.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeleteDelegationTokenRecord {
     pub token_id: String,
+}
+
+/// KIP-853: finalizes the cluster-wide kraft.version feature level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KRaftVersionRecord {
+    pub kraft_version: u16,
+}
+
+/// KIP-853: full snapshot of the controller voter set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VotersRecord {
+    pub voters: crate::voters::VoterSet,
 }
 
 /// KIP-584 finalized feature level. `level` is the finalized
@@ -185,6 +197,8 @@ pub enum MetadataRecord {
     V1DelegationToken(DelegationTokenRecord),
     V1DeleteDelegationToken(DeleteDelegationTokenRecord),
     V1UnregisterBroker(UnregisterBrokerRecord),
+    V1KRaftVersion(KRaftVersionRecord),
+    V1Voters(VotersRecord),
     V1FeatureLevel(FeatureLevelRecord),
 }
 
@@ -396,5 +410,28 @@ mod tests {
             token_id: "tok-abc".into(),
         });
         assert_eq!(round_trip(&r), r);
+    }
+
+    #[test]
+    fn voters_record_round_trips() {
+        let rec = MetadataRecord::V1Voters(VotersRecord {
+            voters: crate::voters::VoterSet::from_voters([crate::voters::Voter {
+                id: 7,
+                directory_id: uuid::Uuid::from_u128(7),
+                endpoints: vec![crate::voters::VoterEndpoint {
+                    name: "CONTROLLER".into(),
+                    host: "h".into(),
+                    port: 1,
+                }],
+                kraft_version: crate::voters::KRaftVersionRange::default(),
+            }]),
+        });
+        assert_eq!(round_trip(&rec), rec);
+    }
+
+    #[test]
+    fn kraft_version_record_round_trips() {
+        let rec = MetadataRecord::V1KRaftVersion(KRaftVersionRecord { kraft_version: 1 });
+        assert_eq!(round_trip(&rec), rec);
     }
 }

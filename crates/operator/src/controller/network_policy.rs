@@ -1,4 +1,4 @@
-//! Slice 23: `NetworkPolicy` reconcile — opt-in via `Kafka.spec.networkPolicy`.
+//! `NetworkPolicy` reconcile — opt-in via `Kafka.spec.networkPolicy`.
 //!
 //! One `NetworkPolicy` per cluster, named `<cluster>-broker-policy`,
 //! owner-ref'd to the parent `Kafka`. Selector targets every cluster pod

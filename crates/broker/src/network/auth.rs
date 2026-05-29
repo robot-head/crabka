@@ -1,15 +1,14 @@
 //! Per-connection SASL authentication state machine.
 //!
-//! Slice 12. Drives `SaslHandshake` (17) and `SaslAuthenticate` (36).
+//! Drives `SaslHandshake` (17) and `SaslAuthenticate` (36).
 //!
 //! The state machine is deliberately separate from the byte-level I/O loop
-//! in `dispatch.rs`: handlers (added in T13/T14) mutate `ConnectionAuth`
+//! in `dispatch.rs`: handlers mutate `ConnectionAuth`
 //! based on decoded request bodies; the dispatcher only consults the state
 //! to gate non-allowlisted requests before authentication completes.
 
-// T12 lands the state machine + gate. Several variants and the `principal`
-// accessor are exercised by T13 (PLAIN), T14 (SCRAM), and T15 (admin) — keep
-// the surface in one place so those tasks add no churn here.
+// Several variants and the `principal` accessor are exercised by the PLAIN,
+// SCRAM, and admin paths — keep the surface in one place.
 #![allow(dead_code)]
 
 use std::collections::HashMap;
@@ -36,12 +35,12 @@ pub enum ConnectionAuth {
     Negotiating {
         mechanism: SaslMechanism,
         exchange: SaslExchange,
-        /// Slice 51 (KIP-48) side-channel: when the SCRAM round-1
+        /// KIP-48 side-channel: when the SCRAM round-1
         /// lookup falls back to a delegation token, the token's
         /// `expiry_timestamp_ms` is captured here so the round-2
         /// success arm can:
         /// 1. Set `ConnectionAuth::Authenticated.expires_at_ms` (the
-        ///    KIP-368 re-auth ceiling from slice 50d), and
+        ///    KIP-368 re-auth ceiling), and
         /// 2. Set `authenticated_via_token: true` (the KIP-48
         ///    token-to-token chain guard read by `CreateDelegationToken`).
         ///
@@ -54,7 +53,7 @@ pub enum ConnectionAuth {
     Authenticated {
         principal: Principal,
         /// SASL mechanism this connection authenticated with. Used by KIP-368
-        /// in-band re-auth (slice 49e) to reject a fresh `SaslHandshake` that
+        /// in-band re-auth to reject a fresh `SaslHandshake` that
         /// switches mechanisms mid-connection. For mTLS / anonymous
         /// connections (no SASL), this is `SaslMechanism::Plain` as a
         /// don't-care default (the in-band reauth path is unreachable since
@@ -62,10 +61,9 @@ pub enum ConnectionAuth {
         mechanism: SaslMechanism,
         /// Session expiry as Unix epoch ms. `None` = no expiry / no re-auth
         /// timer (PLAIN/SCRAM/mTLS/anonymous). `Some` = OAUTHBEARER token's
-        /// `exp`; the dispatch loop closes the connection when this elapses
-        /// (slice 49e).
+        /// `exp`; the dispatch loop closes the connection when this elapses.
         expires_at_ms: Option<i64>,
-        /// Slice 51 (KIP-48): whether this connection authenticated via a
+        /// KIP-48: whether this connection authenticated via a
         /// delegation token (SCRAM-SHA-256 with the token's HMAC as the
         /// password equivalent) rather than a "real" principal credential.
         /// The delegation-token RPCs check this flag — `CreateDelegationToken`
@@ -74,7 +72,7 @@ pub enum ConnectionAuth {
         /// token-creating-token chains), and `DescribeDelegationToken`
         /// restricts a token-authed caller to their own owned tokens
         /// regardless of any owner filter. Set to `true` only by the
-        /// token-auth path (T8); every other construction site defaults
+        /// token-auth path; every other construction site defaults
         /// to `false`.
         authenticated_via_token: bool,
     },
@@ -83,7 +81,7 @@ pub enum ConnectionAuth {
     /// session snapshot so the post-validate equality check (same principal
     /// name, same mechanism) has something to compare against, and so a
     /// failed re-auth's error message can reference the still-current
-    /// principal. (Slice 49e; KIP-368.)
+    /// principal. (KIP-368.)
     Reauthenticating {
         previous: AuthenticatedSnapshot,
         exchange: SaslExchange,
@@ -104,7 +102,7 @@ pub struct AuthenticatedSnapshot {
 /// In-flight SASL exchange. `Plain` carries no state because PLAIN is a
 /// single round-trip; `ScramPending` is the post-handshake / pre-client-first
 /// state for SCRAM (we need the client's `username` to materialise a
-/// `ScramServerExchange`, so the real exchange is built lazily in T14);
+/// `ScramServerExchange`, so the real exchange is built lazily);
 /// `Scram` wraps the live RFC 5802 server state machine once the first
 /// client message arrives.
 #[derive(Debug)]
@@ -112,8 +110,8 @@ pub enum SaslExchange {
     Plain,
     ScramPending,
     /// Boxed because `ScramServerExchange` grew past clippy's 200-byte
-    /// `large_enum_variant` threshold once slice 51 added the
-    /// `principal_override: Option<Principal>` field for delegation-token
+    /// `large_enum_variant` threshold once the
+    /// `principal_override: Option<Principal>` field was added for delegation-token
     /// SCRAM fallback. Keeps the cold path off the hot enum size.
     Scram(Box<ScramServerExchange>),
     /// OAUTHBEARER, post-handshake / pre-token. The bearer token arrives in
@@ -141,7 +139,7 @@ impl ConnectionAuth {
         }
     }
 
-    /// Slice 51 (KIP-48): whether the current session authenticated via a
+    /// KIP-48: whether the current session authenticated via a
     /// delegation token. Used by the four delegation-token RPC handlers
     /// to gate token-creating-token (`Create`) and visibility restriction
     /// (`Describe`). `false` for any non-`Authenticated` state.
@@ -209,7 +207,7 @@ pub fn handle_handshake(
     let enabled_names: Vec<String> = enabled.iter().map(|m| m.wire_name().to_string()).collect();
     let requested = SaslMechanism::from_wire(&req.mechanism);
 
-    // Slice 49e: in-band re-auth on an already-authenticated connection.
+    // In-band re-auth on an already-authenticated connection.
     // Per KIP-368, only the same mechanism is allowed; a mismatch is
     // ILLEGAL_SASL_STATE and the previous session stays in force (no
     // transition).
@@ -268,7 +266,7 @@ pub fn handle_handshake(
             *auth = ConnectionAuth::Negotiating {
                 mechanism: m,
                 exchange,
-                // Slice 51: fresh handshake; the token-fallback in
+                // Fresh handshake; the token-fallback in
                 // `handle_authenticate_scram` may populate this later
                 // during SCRAM round 1.
                 pending_token_expiry_ms: None,
@@ -306,7 +304,7 @@ fn exchange_for_mechanism(m: SaslMechanism) -> SaslExchange {
         // `Reauthenticating` variant.
         SaslMechanism::ScramSha256 | SaslMechanism::ScramSha512 => SaslExchange::ScramPending,
         // The token arrives in the first SaslAuthenticate; no pre-built
-        // state needed (slice 49).
+        // state needed.
         SaslMechanism::OAuthBearer => SaslExchange::OAuthBearer,
     }
 }
@@ -339,7 +337,7 @@ pub fn handle_authenticate_plain<S: BuildHasher>(
                 principal: p,
                 mechanism: SaslMechanism::Plain,
                 expires_at_ms: None,
-                // Slice 51: PLAIN never auths via a delegation token.
+                // PLAIN never auths via a delegation token.
                 authenticated_via_token: false,
             };
             SaslAuthenticateResponse {
@@ -376,7 +374,7 @@ pub fn handle_authenticate_plain<S: BuildHasher>(
 pub fn handle_authenticate_scram(
     req: &SaslAuthenticateRequest,
     auth: &mut ConnectionAuth,
-    controller: &crabka_raft::ControllerHandle,
+    controller: &dyn crate::metadata_source::MetadataSource,
 ) -> SaslAuthenticateResponse {
     // Round-1 case: still in `ScramPending` — build the exchange now that
     // we have the client-first bytes (and thus the username).
@@ -391,7 +389,7 @@ pub fn handle_authenticate_scram(
             return fail_authenticate("malformed SCRAM client-first");
         };
 
-        // Look up the SCRAM credential. Slice 51 (KIP-48): when the
+        // Look up the SCRAM credential. KIP-48: when the
         // user is unknown AND the mechanism is SCRAM-SHA-256, fall
         // back to the delegation-token table (KIP-48 scopes
         // token-SCRAM to SHA-256 only). On a token hit, synthesize a
@@ -400,7 +398,7 @@ pub fn handle_authenticate_scram(
         // `synthesize_token_scram_credential`), capture the owner
         // principal so the `Done` arm surfaces the caller as
         // `User:<owner>` rather than `User:<token-uuid>`, and capture
-        // the token's `expiry_timestamp_ms` for the slice 50d /
+        // the token's `expiry_timestamp_ms` for the
         // KIP-368 re-auth ceiling.
         let image = controller.current_image();
         let (cred, principal_override, token_expiry_ms) =
@@ -433,7 +431,7 @@ pub fn handle_authenticate_scram(
                 *auth = ConnectionAuth::Negotiating {
                     mechanism: mech,
                     exchange: SaslExchange::Scram(Box::new(server)),
-                    // Slice 51: side-channel — `Some` here is the
+                    // Side-channel — `Some` here is the
                     // unambiguous "this is a token-authed session"
                     // signal that the round-2 success arm consumes
                     // to set `Authenticated.authenticated_via_token`
@@ -472,12 +470,12 @@ pub fn handle_authenticate_scram(
                 fail_authenticate("SCRAM second round expected Done")
             }
             crabka_security::StepResult::Done(principal, bytes) => {
-                // Slice 51: when round-1 fell back to a delegation
+                // When round-1 fell back to a delegation
                 // token, `pending_token_expiry_ms` is `Some(expiry)`
                 // — its presence is both the marker for
                 // `authenticated_via_token: true` and the value of
-                // `expires_at_ms` (the KIP-368 re-auth ceiling, slice
-                // 50d). For regular SCRAM, it's `None` and the
+                // `expires_at_ms` (the KIP-368 re-auth ceiling).
+                // For regular SCRAM, it's `None` and the
                 // session has no expiry.
                 let session_lifetime_ms =
                     pending_token_expiry_ms.map_or(0, |e| (e - crate::time_util::now_ms()).max(0));
@@ -502,11 +500,11 @@ pub fn handle_authenticate_scram(
     }
 }
 
-/// Slice 51 (KIP-48): fixed SCRAM iteration count for delegation-token
+/// KIP-48: fixed SCRAM iteration count for delegation-token
 /// credentials. Specified by KIP-48 §"Token Format".
 const TOKEN_SCRAM_ITERS: u32 = 4096;
 
-/// Slice 51 (KIP-48): build a synthetic SCRAM-SHA-256 credential for
+/// KIP-48: build a synthetic SCRAM-SHA-256 credential for
 /// authenticating callers against a delegation token. KIP-48 fixes:
 ///   - mechanism = SCRAM-SHA-256 (the only token-SCRAM mechanism)
 ///   - "password" = base64-encoded token HMAC bytes (the same value
@@ -563,7 +561,7 @@ pub async fn handle_authenticate_oauthbearer(
         ConnectionAuth::Negotiating {
             exchange: SaslExchange::OAuthBearer,
             mechanism,
-            // Slice 51: OAUTHBEARER never carries a delegation-token expiry;
+            // OAUTHBEARER never carries a delegation-token expiry;
             // this side-channel is only ever populated by the SCRAM round-1
             // token-fallback path. Ignore here.
             pending_token_expiry_ms: _,
@@ -571,7 +569,7 @@ pub async fn handle_authenticate_oauthbearer(
             let mech = *mechanism;
             match validate_bearer(&req.auth_bytes, validator, now_ms).await {
                 Ok(outcome) => {
-                    // Slice 50d: clamp `session_lifetime_ms` to the optional
+                    // Clamp `session_lifetime_ms` to the optional
                     // broker cap, then anchor `Authenticated.expires_at_ms`
                     // to the CLAMPED value. The dispatch loop reads
                     // `expires_at_ms` to schedule the re-auth deadline — if
@@ -588,7 +586,7 @@ pub async fn handle_authenticate_oauthbearer(
                         principal: outcome.principal,
                         mechanism: mech,
                         expires_at_ms: effective_expires_at_ms,
-                        // Slice 51: OAUTHBEARER is a real SASL mechanism,
+                        // OAUTHBEARER is a real SASL mechanism,
                         // never a delegation token.
                         authenticated_via_token: false,
                     };
@@ -605,7 +603,7 @@ pub async fn handle_authenticate_oauthbearer(
                     *auth = ConnectionAuth::Negotiating {
                         mechanism: mech,
                         exchange: SaslExchange::OAuthBearerFailed,
-                        // Slice 51: OAUTHBEARER failure path never
+                        // OAUTHBEARER failure path never
                         // involves a delegation token.
                         pending_token_expiry_ms: None,
                     };
@@ -627,7 +625,7 @@ pub async fn handle_authenticate_oauthbearer(
             exchange: SaslExchange::OAuthBearerFailed,
             ..
         } => fail_authenticate("oauthbearer token rejected"),
-        // Slice 49e: in-band re-authentication. Validate the new token and,
+        // In-band re-authentication. Validate the new token and,
         // on success, require the principal name to match the previous
         // session (KIP-368 forbids principal switches mid-connection).
         ConnectionAuth::Reauthenticating {
@@ -656,7 +654,7 @@ pub async fn handle_authenticate_oauthbearer(
                             ..Default::default()
                         };
                     }
-                    // Slice 50d: same clamp as the Negotiating-success arm
+                    // Same clamp as the Negotiating-success arm
                     // so re-auth respects the broker cap.
                     let raw_session_ms = outcome.expires_at_ms.map_or(0, |e| (e - now_ms).max(0));
                     let session_lifetime_ms = match max_session_lifetime_seconds {
@@ -668,7 +666,7 @@ pub async fn handle_authenticate_oauthbearer(
                         principal: outcome.principal,
                         mechanism: prev_mech,
                         expires_at_ms: effective_expires_at_ms,
-                        // Slice 51: OAUTHBEARER re-auth never produces a
+                        // OAUTHBEARER re-auth never produces a
                         // token-authed session.
                         authenticated_via_token: false,
                     };
@@ -964,7 +962,7 @@ mod tests {
         assert_eq!(p.auth_method, crabka_security::AuthMethod::SaslScramSha512);
     }
 
-    // Slice 49e (KIP-368): in-band re-auth tests.
+    // KIP-368: in-band re-auth tests.
 
     #[test]
     fn authenticated_state_carries_mechanism_and_expires_at_ms() {
@@ -1187,7 +1185,7 @@ mod tests {
         assert!(auth.allows_request(36));
     }
 
-    // Slice 50d (KIP-368 ceiling): the server-side
+    // KIP-368 ceiling: the server-side
     // `max_session_lifetime_seconds` cap clamps both the response field and
     // the `Authenticated.expires_at_ms` stored on the connection.
 
@@ -1302,7 +1300,7 @@ mod tests {
         }
     }
 
-    // Slice 51 (KIP-48) — SCRAM-SHA-256 delegation-token fallback tests.
+    // KIP-48 — SCRAM-SHA-256 delegation-token fallback tests.
     //
     // The tests below spin up a single-voter raft controller so we can
     // append a `DelegationTokenRecord` and then exercise
@@ -1313,7 +1311,6 @@ mod tests {
         use crabka_metadata::{DelegationTokenRecord, MetadataRecord};
         use crabka_security::scram::hash_scram_password_with_salt;
         use crabka_security::{KafkaPrincipal, ScramClientExchange};
-        use std::net::SocketAddr;
         use std::sync::Arc;
         use std::time::Duration;
         use tempfile::TempDir;
@@ -1321,19 +1318,11 @@ mod tests {
         async fn test_controller(
             log_dir: std::path::PathBuf,
         ) -> Arc<crabka_raft::ControllerHandle> {
-            let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
             let cfg = crabka_raft::ControllerConfig {
-                node_id: 1,
-                voters: vec![(1, addr)],
-                controller_listen_addr: addr,
-                log_dir,
                 election_timeout: Duration::from_millis(200),
                 heartbeat_interval: Duration::from_millis(50),
                 client_id: "test".into(),
-                bootstrap_mode: crabka_raft::BootstrapMode::Bootstrap,
-                cluster_id: None,
-                dialer: None,
-                handshake: None,
+                ..crabka_raft::ControllerConfig::for_tests(1, log_dir)
             };
             let handle = Arc::new(crabka_raft::Controller::start(cfg).await.unwrap());
             let mut rx = handle.watch_leader();
@@ -1444,7 +1433,7 @@ mod tests {
                     ..Default::default()
                 },
                 &mut auth,
-                &controller,
+                &*controller,
             );
             assert_eq!(
                 resp1.error_code, 0,
@@ -1544,7 +1533,7 @@ mod tests {
                     ..Default::default()
                 },
                 &mut auth,
-                &controller,
+                &*controller,
             );
             assert_eq!(
                 resp.error_code, SASL_AUTHENTICATION_FAILED,
@@ -1583,7 +1572,7 @@ mod tests {
                     ..Default::default()
                 },
                 &mut auth,
-                &controller,
+                &*controller,
             );
             assert_eq!(
                 resp.error_code, SASL_AUTHENTICATION_FAILED,

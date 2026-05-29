@@ -103,7 +103,7 @@ message ExecuteProposalResponse { Proposal proposal = 1; }
 message CancelExecutionRequest { string id = 1; }
 message CancelExecutionResponse { Proposal proposal = 1; }
 
-// ─── Anomaly detector (slice 43g) ─────────────────────────────────────
+// ─── Anomaly detector ─────────────────────────────────────────────────
 
 enum AnomalyKind {
   ANOMALY_KIND_UNSPECIFIED = 0;

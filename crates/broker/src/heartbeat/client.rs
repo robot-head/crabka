@@ -10,7 +10,6 @@ use std::time::Duration;
 
 use crabka_client_core::ConnectionOptions;
 use crabka_protocol::owned::broker_heartbeat_request::BrokerHeartbeatRequest;
-use crabka_raft::ControllerHandle;
 use crabka_security::ListenerProtocol;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
@@ -18,7 +17,7 @@ use tracing::{debug, warn};
 pub(crate) struct Config {
     pub broker_id: i32,
     pub interval: Duration,
-    pub controller: Arc<ControllerHandle>,
+    pub controller: Arc<dyn crate::metadata_source::MetadataSource>,
     pub shutdown: CancellationToken,
     /// Shared inter-broker dialer used to reach the controller leader.
     /// Runs TLS / SASL when the inter-broker listener requires them,
@@ -26,11 +25,11 @@ pub(crate) struct Config {
     pub inter_broker_client: Arc<crate::network::client::InterBrokerClient>,
     pub inter_broker_listener_protocol: ListenerProtocol,
     pub inter_broker_listener_name: String,
-    /// Slice 22: when `true`, stamp `want_shut_down=true` on outbound
+    /// When `true`, stamp `want_shut_down=true` on outbound
     /// `BrokerHeartbeat` requests. Driven by
     /// [`crate::BrokerHandle::controlled_shutdown`].
     pub want_shutdown: tokio::sync::watch::Receiver<bool>,
-    /// Slice 22: set to `true` when the controller responds with
+    /// Set to `true` when the controller responds with
     /// `should_shut_down=true`. The caller of `controlled_shutdown`
     /// awaits this flag.
     pub should_shutdown: Arc<tokio::sync::watch::Sender<bool>>,

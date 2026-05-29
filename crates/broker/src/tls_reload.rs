@@ -1,4 +1,4 @@
-//! Background TLS hot-reload watcher (slice 33).
+//! Background TLS hot-reload watcher.
 //!
 //! Polls the cert / key / client-CA paths configured on the broker's
 //! [`crabka_security::TlsConfig`]. On any mtime change, rebuilds the

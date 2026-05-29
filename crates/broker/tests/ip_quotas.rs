@@ -3,7 +3,7 @@
 #![allow(clippy::unnecessary_unwrap)]
 #![allow(clippy::type_complexity)]
 
-//! Slice 16b. Broker-side integration tests for KIP-612 IP quotas.
+//! Broker-side integration tests for KIP-612 IP quotas.
 //!
 //! Tests:
 //! 1. `ip_quota_alter_then_describe_round_trip` — SASL/PLAIN; alter

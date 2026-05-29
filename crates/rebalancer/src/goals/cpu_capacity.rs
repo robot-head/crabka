@@ -331,9 +331,8 @@ mod tests {
 
     #[test]
     fn non_finite_capacity_treated_as_unlimited() {
-        // NaN limit must not trigger spurious movement. The 43d design
-        // deferred f64 validation to slice 43f — here we choose to
-        // ignore non-finite values rather than reject the proposal.
+        // NaN limit must not trigger spurious movement. Non-finite
+        // values are ignored rather than rejecting the proposal.
         let parts: Vec<_> = (0..3).map(|i| part("t", i, vec![1, 2], 1)).collect();
         let s = state_with(parts, vec![1, 2]);
         let samples: Vec<_> = (0..3).map(|i| (1, "t", i, 0.0, 600_000.0)).collect();

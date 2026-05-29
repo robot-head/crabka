@@ -248,7 +248,7 @@ impl NextGenCoordinator {
 
 /// `MetadataProvider` backed by `crabka_raft::ControllerHandle::current_image()`.
 pub struct ImageMetadataProvider {
-    pub controller: Arc<crabka_raft::ControllerHandle>,
+    pub controller: Arc<dyn crate::metadata_source::MetadataSource>,
 }
 
 impl std::fmt::Debug for ImageMetadataProvider {
@@ -270,7 +270,7 @@ impl MetadataProvider for ImageMetadataProvider {
             let proto_id = ProtoUuid(*topic.topic_id.as_bytes());
             topic_id_by_name.insert(topic.name.clone(), proto_id);
             partitions_per_topic.insert(proto_id, topic.partitions);
-            // Slice 64b: collect the set of racks the partition's
+            // Collect the set of racks the partition's
             // replicas are on, so the rack-aware UniformAssignor can
             // prefer rack-collocated subscribers. Partitions whose
             // replicas have no rack info don't get an entry — the

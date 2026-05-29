@@ -24,7 +24,7 @@ tracing            = { workspace = true }
 uuid               = { workspace = true }
 
 [dev-dependencies]
-crabka-broker = { version = "0.1", path = "../broker" }
+crabka-broker = { version = "0.1", path = "../broker", features = ["test-helpers"] }
 tempfile      = { workspace = true }
 tokio         = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 tracing-subscriber = { workspace = true }

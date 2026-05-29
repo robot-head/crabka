@@ -48,8 +48,7 @@ spec:
               replicas:
                 description: |-
                   Replication factor. Changes rejected with
-                  `ImmutableFieldChanged` until partition reassignment lands
-                  (slice 43+).
+                  `ImmutableFieldChanged` until partition reassignment lands.
                 format: int32
                 maximum: 1000.0
                 minimum: 1.0

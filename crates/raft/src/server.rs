@@ -26,8 +26,9 @@ use tracing::{error, info};
 use crate::error::RaftError;
 use crate::types::{AppData, Raft, TypeConfig};
 use crate::wire::{
-    API_KEY_APPEND_ENTRIES, API_KEY_INSTALL_SNAPSHOT, API_KEY_SUBMIT_CHANGE, API_KEY_VOTE,
-    CrabkaAppendEntriesRequest, CrabkaAppendEntriesResponse, CrabkaInstallSnapshotResponse,
+    API_KEY_APPEND_ENTRIES, API_KEY_INSTALL_SNAPSHOT, API_KEY_METADATA_FETCH,
+    API_KEY_SUBMIT_CHANGE, API_KEY_VOTE, CrabkaAppendEntriesRequest, CrabkaAppendEntriesResponse,
+    CrabkaInstallSnapshotResponse, CrabkaMetadataFetchRequest, CrabkaMetadataFetchResponse,
     CrabkaSubmitChangeRequest, CrabkaSubmitChangeResponse, CrabkaVoteRequest, CrabkaVoteResponse,
 };
 
@@ -43,6 +44,7 @@ const API_KEY_API_VERSIONS: i16 = 18;
 pub(crate) async fn run(
     listener: TcpListener,
     raft: Arc<Raft>,
+    log_store: Arc<crate::log_store::RaftLogStore>,
     shutdown: CancellationToken,
     handshake: Option<Arc<dyn crate::RaftListenerHandshake>>,
 ) {
@@ -57,6 +59,7 @@ pub(crate) async fn run(
                 match accept {
                     Ok((stream, peer)) => {
                         let raft = raft.clone();
+                        let log_store = log_store.clone();
                         let shutdown = shutdown.clone();
                         let handshake = handshake.clone();
                         tokio::spawn(async move {
@@ -71,7 +74,7 @@ pub(crate) async fn run(
                             } else {
                                 Box::new(stream) as Box<dyn crate::DuplexStream>
                             };
-                            if let Err(e) = handle_conn(boxed, raft, shutdown).await {
+                            if let Err(e) = handle_conn(boxed, raft, log_store, shutdown).await {
                                 error!(%peer, error = %e, "controller connection error");
                             }
                         });
@@ -88,6 +91,7 @@ pub(crate) async fn run(
 async fn handle_conn<S>(
     mut stream: S,
     raft: Arc<Raft>,
+    log_store: Arc<crate::log_store::RaftLogStore>,
     shutdown: CancellationToken,
 ) -> Result<(), RaftError>
 where
@@ -123,7 +127,7 @@ where
                     write_response_no_tagged_fields(&mut stream, correlation_id, resp).await?;
                     continue;
                 }
-                let resp = dispatch(api_key, &body, &raft).await?;
+                let resp = dispatch(api_key, &body, &raft, &log_store).await?;
                 write_response(&mut stream, correlation_id, resp).await?;
             }
         }
@@ -243,7 +247,12 @@ fn api_versions_response_body() -> Bytes {
     out.freeze()
 }
 
-async fn dispatch(api_key: i16, body: &[u8], raft: &Raft) -> Result<Bytes, RaftError> {
+async fn dispatch(
+    api_key: i16,
+    body: &[u8],
+    raft: &Raft,
+    log_store: &Arc<crate::log_store::RaftLogStore>,
+) -> Result<Bytes, RaftError> {
     match api_key {
         API_KEY_APPEND_ENTRIES => {
             let mut cur = body;
@@ -321,6 +330,7 @@ async fn dispatch(api_key: i16, body: &[u8], raft: &Raft) -> Result<Bytes, RaftE
             Ok(Bytes::from(out))
         }
         API_KEY_SUBMIT_CHANGE => dispatch_submit_change(body, raft).await,
+        API_KEY_METADATA_FETCH => dispatch_metadata_fetch(body, raft, log_store).await,
         _ => Err(RaftError::Protocol(
             crabka_protocol::ProtocolError::InvalidValue("unknown controller api key"),
         )),
@@ -331,7 +341,7 @@ async fn dispatch(api_key: i16, body: &[u8], raft: &Raft) -> Result<Bytes, RaftE
 /// follower has wrapped the bincode-encoded `Vec<MetadataRecord>` in a
 /// `CrabkaSubmitChangeRequest`; we hand the records to the local raft
 /// (which is presumably the leader) via `client_write`, then translate
-/// the openraft response into the slice-7 `error_code` enum:
+/// the openraft response into the `error_code` enum:
 ///
 /// - `0`: applied cleanly (no per-record rejections).
 /// - `1`: not leader (the response carries `leader_hint` so the
@@ -386,6 +396,40 @@ async fn dispatch_submit_change(body: &[u8], raft: &Raft) -> Result<Bytes, RaftE
     };
     let mut out = Vec::with_capacity(16);
     resp.encode_v0(&mut out);
+    Ok(Bytes::from(out))
+}
+
+/// Serve a slice of committed `__cluster_metadata` entries to a
+/// broker-only observer. Reads `[fetch_offset, high_watermark]` from the
+/// log store, encodes each entry as a Kafka record batch, and returns
+/// them plus `log_start_offset`, `high_watermark`, and a `leader_hint`.
+async fn dispatch_metadata_fetch(
+    body: &[u8],
+    raft: &Raft,
+    log_store: &Arc<crate::log_store::RaftLogStore>,
+) -> Result<Bytes, RaftError> {
+    let mut cur = body;
+    let req = CrabkaMetadataFetchRequest::decode_v0(&mut cur)?;
+    let leader_hint = raft
+        .metrics()
+        .borrow()
+        .current_leader
+        .map_or(-1, |l| i64::try_from(l).unwrap_or(-1));
+
+    let fetch_offset = u64::try_from(req.fetch_offset.max(0)).unwrap_or(0);
+    let max_bytes = usize::try_from(req.max_bytes.max(0)).unwrap_or(0);
+    let slice =
+        crate::metadata_fetch::read_committed_slice(raft, log_store, fetch_offset, max_bytes).await;
+
+    let resp = CrabkaMetadataFetchResponse {
+        error_code: 0,
+        leader_hint,
+        log_start_offset: i64::try_from(slice.log_start_offset).unwrap_or(i64::MAX),
+        high_watermark: i64::try_from(slice.high_watermark).unwrap_or(i64::MAX),
+        records: slice.records,
+    };
+    let mut out = Vec::new();
+    resp.encode_v0(&mut out)?;
     Ok(Bytes::from(out))
 }
 

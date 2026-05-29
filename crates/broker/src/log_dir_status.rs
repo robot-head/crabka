@@ -17,7 +17,7 @@
 //! 3. Future runtime fsync-failure detection (deferred) will mutate the
 //!    registry to flip a dir online → offline mid-life.
 //!
-//! Only startup-time detection is wired in this slice; the registry is
+//! Only startup-time detection is wired up currently; the registry is
 //! shaped so the runtime path can be plugged in later (`mark_offline`
 //! is interior-mutable via `DashMap`).
 

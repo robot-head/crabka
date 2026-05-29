@@ -31,7 +31,7 @@ x509-parser = { workspace = true, features = ["verify"] }
 arc-swap.workspace = true
 async-trait = { workspace = true }
 jsonpath-rust = { workspace = true }
-# Slice 49i: validators carry an Option<tokio::sync::mpsc::Sender<()>> for
+# Validators carry an Option<tokio::sync::mpsc::Sender<()>> for
 # fire-and-forget on-demand JWKS refresh signals. The "sync" feature is
 # enough — no runtime / no I/O surface in this crate.
 tokio = { workspace = true, features = ["sync"] }

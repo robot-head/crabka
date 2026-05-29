@@ -1,4 +1,4 @@
-//! Slice 40: metrics reconcile — `PodMonitor` / `ServiceMonitor` rendering,
+//! Metrics reconcile — `PodMonitor` / `ServiceMonitor` rendering,
 //! dynamic SSA apply against `monitoring.coreos.com/v1`, and the
 //! `reconcile_metrics` orchestrator. Mutually exclusive variants; the
 //! abandoned variant's leftover objects are garbage-collected best-effort.

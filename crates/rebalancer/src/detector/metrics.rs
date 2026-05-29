@@ -1,4 +1,4 @@
-//! Detector-specific metrics surface — slice 43g.
+//! Detector-specific metrics surface.
 //!
 //! Mirrors the shape of [`crate::metrics::RebalancerMetrics`]: a flat
 //! struct of `Counter` / `Gauge` handles, all registered against the

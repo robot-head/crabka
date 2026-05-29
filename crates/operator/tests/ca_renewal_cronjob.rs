@@ -1,4 +1,4 @@
-//! Slice 30: integration tests for the `ca-renewal-check` `CronJob` entry
+//! Integration tests for the `ca-renewal-check` `CronJob` entry
 //! (`crabka_operator::controller::cluster_ca::run_renewal_check`).
 //!
 //! Each test seeds the mock client with canned CA + broker-keystore Secrets
@@ -312,7 +312,7 @@ async fn cronjob_reissues_aging_broker_leafs() {
 // ---------------------------------------------------------------------------
 
 /// Seed a cluster CA with `notAfter = now + 25 days` (< 30-day renewal
-/// window). Slice 34: the `CronJob` no longer flags rotation disruptively — it
+/// window). The `CronJob` does not flag rotation disruptively — it
 /// nudges the reconciler. `run_renewal_check` must:
 ///   1. NOT PATCH the cluster-ca Secret (the reconciler owns rotation).
 ///   2. PATCH the Kafka CR metadata stamping `crabka.io/ca-renew-after`.
@@ -390,7 +390,7 @@ async fn cronjob_flags_expiring_cluster_ca_without_rotating() {
                 ),
             ),
         },
-        // 6. flag_ca_if_expiring (slice 34): stamp the ca-renew-after annotation
+        // 6. flag_ca_if_expiring: stamp the ca-renew-after annotation
         //    on the Kafka CR (nudges the reconciler to run a same-key renewal).
         MockRule {
             method: Method::PATCH,

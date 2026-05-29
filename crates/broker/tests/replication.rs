@@ -1,11 +1,11 @@
-//! Multi-node in-process tests for slice-8 basic replication. Gated
+//! Multi-node in-process tests for basic replication. Gated
 //! `#[cfg(not(target_os = "windows"))]` to mirror `quorum.rs` (openraft
 //! `debug_assert!` race on the hosted Windows runner).
 //!
 //! Spins up a 3-broker cluster on loopback, creates a topic with
 //! replication-factor 3, produces records to the leader, and asserts
 //! every follower's local log converges to the leader's
-//! `log_end_offset`. Exercises the full slice-8 replication path:
+//! `log_end_offset`. Exercises the full replication path:
 //! supervisor reconcile, follower Fetch loop, and
 //! `Partition::replicate_batch`.
 //!
@@ -258,8 +258,8 @@ async fn out_of_range_truncates_and_recovers() {
     }
 
     // Produce 50 records in 50 separate single-record batches so the
-    // leader's log holds them as discrete batches. The plan called for
-    // one 50-record batch, but `Fetch` returns the whole batch as the
+    // leader's log holds them as discrete batches. A single 50-record
+    // batch won't do, because `Fetch` returns the whole batch as the
     // smallest unit, so after advancing leader's `log_start` to 25 the
     // follower would still pull a batch with `base_offset=0` and reject
     // it with `OffsetMismatch`. Per-record batches let
