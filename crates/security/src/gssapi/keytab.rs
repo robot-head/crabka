@@ -230,6 +230,44 @@ pub fn load_service_key(
         })
 }
 
+/// Find every distinct service principal whose FIRST component equals
+/// `service_name`, returning the highest-kvno key for each (one [`KeytabKey`]
+/// per distinct principal-name component list).
+///
+/// A keytab routinely holds keys for several host SPNs of the same service
+/// (e.g. `kafka/localhost` and `kafka/host.docker.internal`). The GSSAPI
+/// acceptor needs all of them so it can validate an incoming ticket against
+/// whichever SPN the client actually named — matching the JVM broker, which
+/// keys off the whole keytab rather than one pinned hostname.
+///
+/// Results are ordered by their component lists for determinism. Empty when no
+/// entry matches.
+///
+/// # Errors
+///
+/// Returns the same parse errors as [`parse_keytab`].
+pub fn load_service_keys(
+    keytab_bytes: &[u8],
+    service_name: &str,
+    enctype: u16,
+) -> Result<Vec<KeytabKey>, KeytabError> {
+    let entries = parse_keytab(keytab_bytes)?;
+    let mut best: std::collections::BTreeMap<Vec<String>, KeytabKey> =
+        std::collections::BTreeMap::new();
+    for e in entries {
+        if e.enctype != enctype || e.components.first().is_none_or(|c| c != service_name) {
+            continue;
+        }
+        match best.get(&e.components) {
+            Some(existing) if existing.kvno >= e.kvno => {}
+            _ => {
+                best.insert(e.components.clone(), e);
+            }
+        }
+    }
+    Ok(best.into_values().collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

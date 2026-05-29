@@ -26,7 +26,15 @@ kdb5_util create -r "${REALM}" -s -P "${MASTER_PW}"
 # Service + client principals. -randkey for the service (key only ever lives in
 # the keytab); a fixed password for alice so the spike can also exercise the
 # password-based client path if needed.
+#
+# Two service SPNs share one keytab:
+#   kafka/localhost          — the SPN Rust in-process clients target (they dial
+#                              "localhost"), used by the inter-broker GSSAPI test.
+#   kafka/host.docker.internal — the SPN a containerized cp-kafka client derives,
+#                              since the broker advertises host.docker.internal:9092
+#                              and the stock client builds serviceName/<advertised-host>.
 kadmin.local -q "addprinc -randkey kafka/localhost@${REALM}"
+kadmin.local -q "addprinc -randkey kafka/host.docker.internal@${REALM}"
 kadmin.local -q "addprinc -pw alicepw alice@${REALM}"
 
 # sspi-rs's client AS-exchange REQUIRES the KDC to demand pre-authentication:
@@ -37,9 +45,13 @@ kadmin.local -q "addprinc -pw alicepw alice@${REALM}"
 # pre-auth on the client principal.
 kadmin.local -q "modprinc +requires_preauth alice@${REALM}"
 
-# Export keytabs into the shared volume the host reads from.
+# Export keytabs into the shared volume the host reads from. Both service SPNs
+# land in the single kafka.keytab (ktadd appends), so one broker keytab serves
+# both the "localhost" (Rust) and "host.docker.internal" (containerized cp-kafka)
+# clients.
 rm -f "${FIXTURES}/kafka.keytab" "${FIXTURES}/alice.keytab"
 kadmin.local -q "ktadd -k ${FIXTURES}/kafka.keytab -norandkey kafka/localhost@${REALM}"
+kadmin.local -q "ktadd -k ${FIXTURES}/kafka.keytab -norandkey kafka/host.docker.internal@${REALM}"
 kadmin.local -q "ktadd -k ${FIXTURES}/alice.keytab  -norandkey alice@${REALM}"
 chmod 0644 "${FIXTURES}/kafka.keytab" "${FIXTURES}/alice.keytab"
 

@@ -16,7 +16,7 @@ use sspi::{
     Username,
 };
 
-use super::keytab::{ENCTYPE_AES256_CTS_HMAC_SHA1_96, load_service_key};
+use super::keytab::{ENCTYPE_AES256_CTS_HMAC_SHA1_96, load_service_key, load_service_keys};
 use super::{AcceptStep, GssAcceptor, GssError, GssInitiator, InitStep};
 
 /// Default KDC URL used when `SSPI_KDC_URL` is unset. The accept path does not
@@ -100,14 +100,34 @@ impl SspiAcceptor {
     pub fn new(keytab_path: &str, service_name: &str) -> Result<Self, GssError> {
         let bytes = std::fs::read(keytab_path)
             .map_err(|e| GssError::Keytab(format!("reading {keytab_path}: {e}")))?;
-        let entry = load_service_key(&bytes, service_name, ENCTYPE_AES256_CTS_HMAC_SHA1_96)
+        // A keytab may hold keys for several host SPNs of this service (e.g.
+        // `kafka/localhost` and `kafka/host.docker.internal`). Load them all so
+        // the acceptor honors whichever SPN an incoming ticket names, matching
+        // the JVM broker.
+        let mut keys = load_service_keys(&bytes, service_name, ENCTYPE_AES256_CTS_HMAC_SHA1_96)
             .map_err(|e| GssError::Keytab(e.to_string()))?;
+        if keys.is_empty() {
+            return Err(GssError::Keytab(format!(
+                "no aes256 key for service '{service_name}' in keytab {keytab_path}"
+            )));
+        }
+        let primary = keys.remove(0);
 
         // sname = SPN components WITHOUT realm, e.g. ["kafka", "localhost"].
-        let sname: Vec<&str> = entry.components.iter().map(String::as_str).collect();
-        let server_properties =
-            ServerProperties::new(&sname, None, MAX_TIME_SKEW, Some(Secret::new(entry.key)))
+        let primary_sname: Vec<&str> = primary.components.iter().map(String::as_str).collect();
+        let mut server_properties = ServerProperties::new(
+            &primary_sname,
+            None,
+            MAX_TIME_SKEW,
+            Some(Secret::new(primary.key)),
+        )
+        .map_err(ctx_err)?;
+        for extra in keys {
+            let sname: Vec<&str> = extra.components.iter().map(String::as_str).collect();
+            server_properties
+                .add_service_key(&sname, Secret::new(extra.key))
                 .map_err(ctx_err)?;
+        }
 
         let server = Kerberos::new_server_from_config(
             KerberosConfig::new(&kdc_url_from_env(), "crabka-broker".to_string()),
