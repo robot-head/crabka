@@ -296,21 +296,23 @@ async fn fetch_all(addr: SocketAddr, topic: &str, topic_id: Uuid) -> Vec<FlatRec
                     "Fetch partition error: {}",
                     part_resp.error_code
                 );
-                if let Some(batch) = part_resp.records.as_ref().and_then(|p| p.as_v2()) {
-                    got_any = true;
-                    let batch_last_abs = batch.base_offset + i64::from(batch.last_offset_delta);
-                    for record in &batch.records {
-                        let key = match &record.key {
-                            Some(k) => k.to_vec(),
-                            None => continue,
-                        };
-                        let value = match &record.value {
-                            Some(v) => v.to_vec(),
-                            None => Vec::new(),
-                        };
-                        out.push(FlatRecord { key, value });
+                if let Some(batches) = part_resp.records.as_ref().and_then(|p| p.as_v2()) {
+                    for batch in batches {
+                        got_any = true;
+                        let batch_last_abs = batch.base_offset + i64::from(batch.last_offset_delta);
+                        for record in &batch.records {
+                            let key = match &record.key {
+                                Some(k) => k.to_vec(),
+                                None => continue,
+                            };
+                            let value = match &record.value {
+                                Some(v) => v.to_vec(),
+                                None => Vec::new(),
+                            };
+                            out.push(FlatRecord { key, value });
+                        }
+                        next_offset = batch_last_abs + 1;
                     }
-                    next_offset = batch_last_abs + 1;
                 }
             }
         }

@@ -13,6 +13,7 @@ use tokio_util::sync::CancellationToken;
 
 use crabka_client_core::Client;
 use crabka_protocol::owned::join_group_request::{JoinGroupRequest, JoinGroupRequestProtocol};
+use crabka_protocol::owned::leave_group_request::{LeaveGroupRequest, MemberIdentity};
 use crabka_protocol::owned::metadata_request::MetadataRequest;
 use crabka_protocol::owned::offset_fetch_request::{OffsetFetchRequest, OffsetFetchRequestTopic};
 use crabka_protocol::owned::sync_group_request::{SyncGroupRequest, SyncGroupRequestAssignment};
@@ -269,14 +270,33 @@ impl Consumer {
             }
         }
 
-        // 6. Spawn the coordinator task (heartbeat + rebalance loop).
+        // 6. Spawn the coordinator task (heartbeat + rebalance loop) on its
+        //    own connection.
+        //
+        //    The broker processes requests serially per TCP connection: a
+        //    JoinGroup parked in the rebalance-join purgatory (up to
+        //    INITIAL_REBALANCE_DELAY per round, and cooperative rounds
+        //    cascade) blocks every later request on that same socket. If the
+        //    coordinator shared `poll()`'s connection, a `Fetch` issued
+        //    mid-rebalance would head-of-line-block behind the parked
+        //    JoinGroup and stall until the client request timeout. A dedicated
+        //    coordinator connection keeps the data path (`poll`/commit)
+        //    independent of the group-protocol path. (The JVM client never
+        //    hits this because real brokers serve a connection's requests
+        //    concurrently.)
+        let coordinator_client = Client::builder()
+            .bootstrap(&bootstrap)
+            .client_id(client_id.clone())
+            .build()
+            .await?;
+
         let assigned = Arc::new(Mutex::new(assigned_partitions));
         let next_offsets = Arc::new(Mutex::new(next_offsets));
         let topic_ids = Arc::new(Mutex::new(topic_ids));
 
         let shutdown = CancellationToken::new();
         let state = CoordinatorState {
-            client: client.clone(),
+            client: coordinator_client,
             group_id: group_id.clone(),
             member_id: member_id.clone(),
             generation_id: r2.generation_id,
@@ -342,12 +362,35 @@ impl Consumer {
         self.assigned.lock().await.clone()
     }
 
-    /// Stop the coordinator task. Returns immediately if already shut down.
+    /// Stop the coordinator task and best-effort `LeaveGroup` so the broker
+    /// evicts this member immediately rather than after `session_timeout`.
+    ///
+    /// We cancel + join the coordinator first (now prompt — its in-tick RPCs
+    /// race the shutdown token) so the connection is idle, then send the
+    /// `LeaveGroup` ourselves. The send is best-effort: a failure just means
+    /// the broker falls back to session-timeout eviction, which is harmless
+    /// on close. Mirrors the Java client, which leaves the group on close for
+    /// dynamic members.
     pub async fn close(mut self) -> Result<(), ConsumerError> {
         self.coordinator_shutdown.cancel();
         if let Some(h) = self.coordinator_handle.take() {
             let _ = h.await;
         }
+        // `member_id` is populated for both the v0–v2 (top-level) and v3+
+        // (`members` array) wire shapes so the negotiated version picks up
+        // whichever it serializes.
+        let _ = self
+            .client
+            .send(LeaveGroupRequest {
+                group_id: self.group_id.clone(),
+                member_id: self.member_id.clone(),
+                members: vec![MemberIdentity {
+                    member_id: self.member_id.clone(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })
+            .await;
         Ok(())
     }
 }

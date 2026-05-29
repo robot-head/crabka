@@ -13,7 +13,7 @@ use tokio::sync::watch;
 use crabka_metadata::{MetadataImage, MetadataRecord};
 use crabka_raft::{
     AddVoter, ControllerHandle, Node, NodeId, OutboundDialer, QuorumState, RaftError,
-    ReconfigOutcome, RemoveVoter, UpdateVoter,
+    ReconfigOutcome, RemoveVoter, SnapshotRange, UpdateVoter,
 };
 
 use crate::metadata_observer::MetadataObserver;
@@ -31,6 +31,13 @@ pub trait MetadataSource: Send + Sync {
     /// controller/combined nodes; broker-only observers have no controller
     /// listener and report an unspecified address.
     fn controller_bound_addr(&self) -> SocketAddr;
+    /// Read a byte window of the latest metadata snapshot to serve
+    /// `FetchSnapshot`. Controller/combined nodes back this with their
+    /// on-disk checkpoint; broker-only observers have none to serve.
+    fn read_snapshot_range(&self, position: i64, max_bytes: i32) -> SnapshotRange;
+    /// Schedule a metadata snapshot. Meaningful only on controller/combined
+    /// nodes; broker-only observers have no log of their own to snapshot.
+    async fn trigger_snapshot(&self) -> Result<(), RaftError>;
     async fn add_voter(&self, req: AddVoter) -> Result<ReconfigOutcome, RaftError>;
     async fn remove_voter(&self, req: RemoveVoter) -> Result<ReconfigOutcome, RaftError>;
     async fn update_voter(&self, req: UpdateVoter) -> Result<ReconfigOutcome, RaftError>;
@@ -62,6 +69,12 @@ impl MetadataSource for ControllerHandle {
     }
     fn controller_bound_addr(&self) -> SocketAddr {
         ControllerHandle::controller_bound_addr(self)
+    }
+    fn read_snapshot_range(&self, position: i64, max_bytes: i32) -> SnapshotRange {
+        ControllerHandle::read_snapshot_range(self, position, max_bytes)
+    }
+    async fn trigger_snapshot(&self) -> Result<(), RaftError> {
+        ControllerHandle::trigger_snapshot(self).await
     }
     async fn add_voter(&self, req: AddVoter) -> Result<ReconfigOutcome, RaftError> {
         ControllerHandle::add_voter(self, req).await
@@ -141,6 +154,16 @@ impl MetadataSource for ObserverSource {
         // (DescribeQuorum / KIP-853 reconfiguration) live on controllers, so
         // this is never reached in practice; report an unspecified address.
         SocketAddr::from(([0, 0, 0, 0], 0))
+    }
+    fn read_snapshot_range(&self, _position: i64, _max_bytes: i32) -> SnapshotRange {
+        // A broker-only observer holds no checkpoint of its own to serve;
+        // FetchSnapshot is answered by the controller quorum.
+        SnapshotRange::NoSnapshot
+    }
+    async fn trigger_snapshot(&self) -> Result<(), RaftError> {
+        Err(RaftError::NotLeader {
+            current_leader: None,
+        })
     }
     async fn add_voter(&self, _req: AddVoter) -> Result<ReconfigOutcome, RaftError> {
         Err(RaftError::NotLeader {

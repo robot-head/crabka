@@ -90,6 +90,8 @@ pub(crate) mod elect_leaders;
 pub(crate) mod expire_delegation_token;
 pub(crate) mod fetch;
 pub(crate) mod fetch_downconvert;
+// KIP-630 controller-snapshot fetch (api_key 59).
+pub(crate) mod fetch_snapshot;
 pub(crate) mod find_coordinator;
 pub(crate) mod get_replica_log_info;
 // KIP-714 client telemetry. Pair of no-op handlers — `get` advertises
@@ -229,6 +231,9 @@ pub(crate) fn build_table() -> HandlerTable {
     // 42 (DeleteGroups) intercepted inline — see comment above.
     // 44 (IncrementalAlterConfigs) intercepted inline — see comment above.
     t.register(56, alter_partition::handle);
+    // FetchSnapshot (api_key 59, KIP-630) — controller-snapshot byte-range
+    // fetch. Plain 4-arg signature: no per-connection ACL context needed.
+    t.register(59, fetch_snapshot::handle);
     // 60 (DescribeCluster) intercepted inline — see comment above.
     t.register(63, broker_heartbeat::handle);
     // GetReplicaLogInfo (93, KIP-966) — inter-broker RPC the controller's

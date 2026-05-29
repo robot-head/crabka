@@ -166,12 +166,13 @@ async fn end_to_end_create_produce_fetch_delete() {
         .unwrap();
     let part = &fr.responses[0].partitions[0];
     assert_eq!(part.error_code, 0);
-    let batch = part
+    let batches = part
         .records
         .as_ref()
         .and_then(|p| p.as_v2())
         .expect("v2 records present after produce");
-    assert_eq!(batch.records.len(), 3);
+    let total: usize = batches.iter().map(|b| b.records.len()).sum();
+    assert_eq!(total, 3);
 
     p.broker.shutdown().await;
 }

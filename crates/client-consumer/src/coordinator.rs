@@ -27,6 +27,7 @@ use crabka_client_core::Client;
 use crabka_protocol::owned::heartbeat_request::HeartbeatRequest;
 use crabka_protocol::owned::join_group_request::{JoinGroupRequest, JoinGroupRequestProtocol};
 use crabka_protocol::owned::metadata_request::MetadataRequest;
+use crabka_protocol::owned::offset_commit_request::OffsetCommitRequest;
 use crabka_protocol::owned::offset_fetch_request::{OffsetFetchRequest, OffsetFetchRequestTopic};
 use crabka_protocol::owned::sync_group_request::{SyncGroupRequest, SyncGroupRequestAssignment};
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
@@ -35,6 +36,7 @@ use crate::assignor::{Assignor, RebalanceProtocol};
 use crate::builder::{
     AutoOffsetReset, decode_assignment, decode_subscription, encode_assignment, encode_subscription,
 };
+use crate::commit::build_commit_topics;
 use crate::error::ConsumerError;
 
 /// Mutable state owned exclusively by the coordinator task.
@@ -93,17 +95,31 @@ pub(crate) async fn run(mut state: CoordinatorState, shutdown: CancellationToken
     loop {
         tokio::select! {
             () = shutdown.cancelled() => break,
-            _ = ticker.tick() => {
-                if needs_rejoin {
-                    match rejoin(&mut state).await {
-                        Ok(()) => needs_rejoin = false,
-                        Err(e) => {
-                            tracing::warn!(error = %e, "rejoin failed; will retry on next tick");
-                        }
+            _ = ticker.tick() => {}
+        }
+
+        // Race the per-tick RPCs against shutdown so `close()` returns
+        // promptly even when we're mid-rebalance and the broker is holding
+        // a JoinGroup / SyncGroup open. Without this, cancellation is only
+        // observed *between* ticks, so a `rejoin()` in flight against an
+        // open broker call would stall `close()` for up to session_timeout.
+        // The RPC futures are cancellation-safe: `Client` multiplexes on
+        // correlation ids, so dropping an in-flight send only abandons its
+        // pending response — it can't corrupt the connection.
+        if needs_rejoin {
+            tokio::select! {
+                () = shutdown.cancelled() => break,
+                result = rejoin(&mut state) => match result {
+                    Ok(()) => needs_rejoin = false,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "rejoin failed; will retry on next tick");
                     }
-                    continue;
-                }
-                match heartbeat_once(&state).await {
+                },
+            }
+        } else {
+            tokio::select! {
+                () = shutdown.cancelled() => break,
+                outcome = heartbeat_once(&state) => match outcome {
                     HeartbeatOutcome::Ok | HeartbeatOutcome::Transient => {}
                     HeartbeatOutcome::NeedRejoin => needs_rejoin = true,
                     HeartbeatOutcome::RejoinFromScratch => {
@@ -111,7 +127,7 @@ pub(crate) async fn run(mut state: CoordinatorState, shutdown: CancellationToken
                         state.generation_id = -1;
                         needs_rejoin = true;
                     }
-                }
+                },
             }
         }
     }
@@ -198,13 +214,22 @@ async fn rejoin(state: &mut CoordinatorState) -> Result<(), ConsumerError> {
                     let mut a = state.assigned.lock().await;
                     a.retain(|p| !revoked.contains(p));
                 }
+                // Adopt the generation from round 1 *before* committing: the
+                // broker advanced the group epoch when we rejoined above, so
+                // an OffsetCommit carrying the pre-rebalance generation is
+                // rejected with ILLEGAL_GENERATION. Commit the revoked
+                // partitions' positions under the current generation so the
+                // member that picks them up in phase 2 primes from the offset
+                // we'd consumed to, rather than re-delivering records we
+                // already saw (KIP-429 onPartitionsRevoked semantics).
+                state.generation_id = new_generation;
+                commit_revoked(state, &revoked).await;
                 {
                     let mut off = state.next_offsets.lock().await;
                     for p in &revoked {
                         off.remove(p);
                     }
                 }
-                state.generation_id = new_generation;
 
                 // Phase 2: rejoin with the reduced owned-set.
                 let owned_after_revoke: Vec<(String, i32)> = state.assigned.lock().await.clone();
@@ -226,6 +251,49 @@ async fn rejoin(state: &mut CoordinatorState) -> Result<(), ConsumerError> {
         }
     }
     Ok(())
+}
+
+/// Best-effort `OffsetCommit` for partitions being revoked in a
+/// cooperative rebalance, using the current (pre-rebalance) generation.
+///
+/// Failures are logged and swallowed: a revoke-time commit racing the
+/// generation bump can return `ILLEGAL_GENERATION`, and surfacing that
+/// into `poll()` would break the KIP-429 transparency guarantee. Worst
+/// case the new owner re-delivers a few records (at-least-once).
+async fn commit_revoked(state: &CoordinatorState, revoked: &[(String, i32)]) {
+    let revoked_set: HashSet<&(String, i32)> = revoked.iter().collect();
+    let offsets: HashMap<(String, i32), i64> = {
+        let off = state.next_offsets.lock().await;
+        off.iter()
+            // Only commit partitions where we actually consumed something. A
+            // next_offset still at its reset baseline (0 = Earliest, i64::MAX =
+            // Latest) means no records were polled, so there is no progress to
+            // preserve — committing it just adds a blocking round-trip that
+            // widens the mid-rebalance generation-race window.
+            .filter(|(k, v)| revoked_set.contains(k) && **v > 0 && **v != i64::MAX)
+            .map(|(k, v)| (k.clone(), *v))
+            .collect()
+    };
+    if offsets.is_empty() {
+        return;
+    }
+    let topics = build_commit_topics(offsets);
+    let res = state
+        .client
+        .send(OffsetCommitRequest {
+            group_id: state.group_id.clone(),
+            generation_id_or_member_epoch: state.generation_id,
+            member_id: state.member_id.clone(),
+            topics,
+            ..Default::default()
+        })
+        .await;
+    match res {
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!(error = %e, "revoke-time offset commit failed; partitions may re-deliver");
+        }
+    }
 }
 
 /// Issue `JoinGroup` (handling the `MEMBER_ID_REQUIRED` two-step when

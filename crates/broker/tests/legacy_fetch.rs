@@ -119,7 +119,7 @@ async fn produce_batch(addr: std::net::SocketAddr, topic: &str, batch: RecordBat
             name: topic.into(),
             partition_data: vec![PartitionProduceData {
                 index: 0,
-                records: Some(RecordsPayload::V2(batch)),
+                records: Some(RecordsPayload::V2(vec![batch])),
                 ..Default::default()
             }],
             ..Default::default()
@@ -281,8 +281,9 @@ async fn fetch_v3_downconverts_v2_batch_to_v0_messageset() {
     let records_payload = part.records.as_ref().expect("records field should be Some");
     let legacy_bytes = match records_payload {
         crabka_protocol::records::RecordsPayload::Legacy(b) => b.clone(),
-        crabka_protocol::records::RecordsPayload::V2(_) => {
-            panic!("expected Legacy MessageSet in Fetch v3 response, got V2 batch")
+        crabka_protocol::records::RecordsPayload::V2(_)
+        | crabka_protocol::records::RecordsPayload::Raw(_) => {
+            panic!("expected Legacy MessageSet in Fetch v3 response, got V2/Raw batch")
         }
     };
 
@@ -385,8 +386,9 @@ async fn fetch_v3_recompresses_zstd_as_snappy() {
     let records_payload = part.records.as_ref().expect("records field should be Some");
     let legacy_bytes = match records_payload {
         crabka_protocol::records::RecordsPayload::Legacy(b) => b.clone(),
-        crabka_protocol::records::RecordsPayload::V2(_) => {
-            panic!("expected Legacy MessageSet in Fetch v3 response, got V2 batch")
+        crabka_protocol::records::RecordsPayload::V2(_)
+        | crabka_protocol::records::RecordsPayload::Raw(_) => {
+            panic!("expected Legacy MessageSet in Fetch v3 response, got V2/Raw batch")
         }
     };
 
@@ -468,7 +470,9 @@ async fn fetch_v0_downconverts_to_magic_v0_without_timestamps() {
 
     let legacy_bytes = match part.records.as_ref().expect("records field should be Some") {
         RecordsPayload::Legacy(b) => b.clone(),
-        RecordsPayload::V2(_) => panic!("expected Legacy MessageSet in Fetch v0 response"),
+        RecordsPayload::V2(_) | RecordsPayload::Raw(_) => {
+            panic!("expected Legacy MessageSet in Fetch v0 response")
+        }
     };
 
     // MessageSet layout: offset(8) + message_size(4) + crc(4) + magic(1).

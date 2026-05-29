@@ -1,13 +1,14 @@
 //! `Fetch` (`api_key=1`) with long-poll support via per-partition
 //! `Notify::notified()` futures.
 //!
-//! MVP scope: returns at most the *first* `RecordBatch` covering the
-//! requested offset for each partition. The generated
-//! `PartitionData.records` field is `Option<RecordsPayload>` (the codegen
-//! models it as a single batch wrapped in nullable bytes), so emitting a
-//! concatenated stream of batches would require bypassing the codegen.
-//! Clients pulling small batches one at a time and re-fetching from
-//! `last.base_offset + last.last_offset_delta + 1` see correct data.
+//! Records are returned as verbatim `RecordsPayload::Raw` bytes — the
+//! on-disk `.log` bytes for whole v2 batches, read decode-free via
+//! `Log::read_raw` and clamped at the visibility window: the high watermark
+//! for `read_uncommitted` consumer fetches, `lso.min(hw)` for
+//! `read_committed`, and the log-end offset (LEO) for follower fetches.
+//! `read_committed` does NO server-side batch filtering — aborted/control
+//! batches stay in the byte stream and the consumer drops them client-side
+//! using the `aborted_transactions` list, matching Apache Kafka.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -451,35 +452,29 @@ pub(crate) async fn handle(
         for topic_resp in &mut responses {
             for part in &mut topic_resp.partitions {
                 if let Some(payload) = part.records.take() {
-                    if let Some(batch) = payload.as_v2().cloned() {
-                        match crate::handlers::fetch_downconvert::down_convert_for_fetch(
-                            &batch, version,
-                        ) {
-                            Ok(Some(converted)) => {
-                                // Only store the payload if it has content.
-                                if converted.payload_len() > 0 {
-                                    part.records = Some(converted);
-                                }
-                                // Account this Fetch-path
-                                // down-conversion. Counted even when the
-                                // converted batch was empty (drops + control
-                                // skips) — the work happened.
-                                if !topic_resp.topic.is_empty() {
-                                    broker
-                                        .metrics
-                                        .record_fetch_message_conversion(&topic_resp.topic);
-                                }
+                    match crate::handlers::fetch_downconvert::down_convert_payload_for_fetch(
+                        &payload, version,
+                    ) {
+                        Ok(Some(converted)) => {
+                            // Only store the payload if it has content.
+                            if converted.payload_len() > 0 {
+                                part.records = Some(converted);
                             }
-                            Ok(None) => {
-                                // Control batch dropped — records stays None.
-                            }
-                            Err(error_code) => {
-                                part.error_code = error_code;
+                            // Account this Fetch-path down-conversion.
+                            // Counted even when the converted batch was empty
+                            // (drops + control skips) — the work happened.
+                            if !topic_resp.topic.is_empty() {
+                                broker
+                                    .metrics
+                                    .record_fetch_message_conversion(&topic_resp.topic);
                             }
                         }
-                    } else {
-                        // Already Legacy bytes (shouldn't happen but preserve).
-                        part.records = Some(payload);
+                        Ok(None) => {
+                            // All batches dropped — records stays None.
+                        }
+                        Err(error_code) => {
+                            part.error_code = error_code;
+                        }
                     }
                 }
             }
@@ -855,23 +850,25 @@ fn hash_aborted_transactions(list: Option<&Vec<AbortedTransaction>>) -> u64 {
     h.finish()
 }
 
-/// Hold the partition's log mutex briefly to read offsets + (optionally) a
-/// batch. Populates `out` in place and returns the encoded-size estimate of
-/// the records placed in `out` (0 if none).
+/// Hold the partition's log mutex briefly to read offsets + (optionally) the
+/// verbatim on-disk batch bytes via `Log::read_raw`. Populates `out` in place
+/// (with `RecordsPayload::Raw`) and returns the byte-size estimate of the
+/// records placed in `out` (0 if none).
 ///
 /// When `read_committed` is `true` (consumer fetch with `isolation_level=1`):
-/// - batches with `base_offset >= min(lso, hw)` are dropped
-/// - control batches are hidden from consumers (Apache Kafka behavior)
+/// - raw bytes are clamped at `min(lso, hw)` (`base_offset < min(lso, hw)`)
+/// - NO server-side batch filtering: aborted/control batches stay in the
+///   byte stream; the consumer drops them client-side using the list below
 /// - `out.last_stable_offset` is set to `min(lso, hw)`
 /// - `out.aborted_transactions` is populated from the partition's `.txnindex`
 ///
 /// When `is_follower_fetch` is `true`:
-/// - all batches up to LEO are returned (no HW clamping)
+/// - raw bytes up to LEO are returned (no HW clamping)
 /// - `out.high_watermark` and `out.last_stable_offset` are set to `log_end`
 ///
 /// When `read_committed` is `false` and `is_follower_fetch` is `false`
 /// (consumer fetch in `read_uncommitted`):
-/// - batches are clamped at HW (`base_offset < hw`)
+/// - raw bytes are clamped at HW (`base_offset < hw`)
 /// - `out.high_watermark` and `out.last_stable_offset` are set to `hw`
 /// - `out.aborted_transactions` is `None`
 #[allow(clippy::too_many_lines)]
@@ -884,11 +881,11 @@ async fn do_read(
     out: &mut PartitionData,
 ) -> Result<usize, BrokerError> {
     let hw = part.high_watermark().await;
-    let (log_start, log_end, lso, batch_opt, aborted_txns): (
+    let (log_start, log_end, lso, raw, aborted_txns): (
         i64,
         i64,
         i64,
-        Option<RecordBatch>,
+        Option<crabka_log::RawRead>,
         Vec<AbortedTransaction>,
     ) = {
         let log = part.log.lock().expect("log mutex poisoned");
@@ -915,54 +912,40 @@ async fn do_read(
             };
             return Ok(0);
         }
+
+        let limit_offset = if is_follower_fetch {
+            log_end
+        } else if read_committed {
+            effective_lso
+        } else {
+            hw
+        };
+
         if fetch_offset >= upper_bound {
             (log_start, log_end, lso, None, Vec::new())
         } else {
             let read_max = usize::try_from(max_bytes.max(0)).unwrap_or(0);
-            let read = log.read(fetch_offset, read_max)?;
+            let raw = log.read_raw(fetch_offset, limit_offset, read_max)?;
 
-            if read_committed && !is_follower_fetch {
-                // Aborted-txn list for the window [fetch_offset, effective_lso).
-                let aborted_raw = log.aborted_in_range(fetch_offset, effective_lso);
-                let aborted_pids: std::collections::HashSet<(i64, i64, i64)> = aborted_raw
-                    .iter()
-                    .map(|e| (e.producer_id, e.start_offset, e.last_offset))
-                    .collect();
-                let aborted = aborted_raw
+            // read_committed does NO server-side batch filtering: verbatim
+            // bytes (including aborted/control batches) are returned and the
+            // consumer drops them client-side via `aborted_transactions`,
+            // matching Apache Kafka's behavior.
+            let aborted = if read_committed && !is_follower_fetch {
+                log.aborted_in_range(fetch_offset, effective_lso)
                     .into_iter()
                     .map(|e| AbortedTransaction {
                         producer_id: e.producer_id,
                         first_offset: e.start_offset,
                         ..Default::default()
                     })
-                    .collect();
-
-                let visible_batch = read
-                    .batches
-                    .into_iter()
-                    .filter(|b| b.base_offset < effective_lso)
-                    .filter(|b| !b.attributes.is_control_batch())
-                    .find(|b| {
-                        if !b.attributes.is_transactional() {
-                            return true;
-                        }
-                        let pid = b.producer_id;
-                        let batch_last = b.base_offset + i64::from(b.last_offset_delta);
-                        !aborted_pids.iter().any(|&(apid, astart, alast)| {
-                            apid == pid && b.base_offset >= astart && batch_last <= alast
-                        })
-                    });
-
-                (log_start, log_end, lso, visible_batch, aborted)
-            } else if !is_follower_fetch {
-                // Consumer fetch in read_uncommitted: clamp at HW.
-                let batch_opt = read.batches.into_iter().find(|b| b.base_offset < hw);
-                (log_start, log_end, lso, batch_opt, Vec::new())
+                    .collect()
             } else {
-                // Follower fetch: no clamping, no filtering.
-                let batch_opt = read.batches.into_iter().next();
-                (log_start, log_end, lso, batch_opt, Vec::new())
-            }
+                Vec::new()
+            };
+
+            let raw = if raw.total > 0 { Some(raw) } else { None };
+            (log_start, log_end, lso, raw, aborted)
         }
     };
 
@@ -984,10 +967,8 @@ async fn do_read(
         out.aborted_transactions = Some(aborted_txns);
     }
 
-    let bytes_est = batch_opt
-        .as_ref()
-        .map_or(0, |b| <RecordBatch as Encode>::encoded_len(b, 0));
-    out.records = batch_opt.map(RecordsPayload::from);
+    let bytes_est = raw.as_ref().map_or(0, |r| r.total);
+    out.records = raw.map(|r| RecordsPayload::Raw(r.bytes));
     Ok(bytes_est)
 }
 

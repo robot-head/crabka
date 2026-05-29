@@ -632,6 +632,19 @@ impl BrokerHandle {
         self._broker.controller.remove_voter(req).await
     }
 
+    /// Test-only: ask this broker's controller to generate a metadata
+    /// snapshot. The trigger only schedules the work; the snapshot
+    /// completes asynchronously, so callers poll for the result.
+    ///
+    /// # Errors
+    ///
+    /// Propagates any error from the underlying raft trigger.
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[allow(clippy::used_underscore_binding)]
+    pub async fn trigger_snapshot_for_test(&self) -> Result<(), crabka_raft::RaftError> {
+        self._broker.controller.trigger_snapshot().await
+    }
+
     /// Test-only: return the current leader node-id for `(topic, partition)`
     /// as seen by this broker's metadata image. Returns `None` if the
     /// partition is not yet in the image or the leader field is `0` (no
@@ -1111,6 +1124,8 @@ impl Broker {
                 cluster_id: config.cluster_id,
                 dialer: raft_dialer.clone(),
                 handshake: handshake_opt,
+                max_bytes_between_snapshots: config.metadata_max_bytes_between_snapshots,
+                max_snapshot_interval: config.metadata_max_snapshot_interval,
             };
             let handle = Arc::new(
                 crabka_raft::Controller::start_with_listener(controller_cfg, controller_listener)

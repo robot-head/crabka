@@ -54,12 +54,13 @@ mod metadata_fetch;
 mod network;
 pub mod reconfig;
 mod server;
+mod snapshot;
 mod state_machine;
 mod types;
 mod wire;
 
 pub use config::{BootstrapMode, ControllerConfig};
-pub use controller::{Controller, ControllerHandle, QuorumState};
+pub use controller::{Controller, ControllerHandle, QuorumState, SnapshotRange, SnapshotSlice};
 pub use error::RaftError;
 pub use handshake::{DuplexStream, RaftHandshakeError, RaftListenerHandshake};
 pub use metadata_fetch::{MetadataFetchSlice, encode_committed_records};
