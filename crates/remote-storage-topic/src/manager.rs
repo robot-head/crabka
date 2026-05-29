@@ -38,7 +38,7 @@ use crabka_remote_storage::{
 };
 
 use crate::error::MetadataLogError;
-use crate::log::{MetadataEventLog, MetadataEventStream};
+use crate::log::{AssignmentHandle, MetadataEventLog, MetadataEventStream, PartitionStart};
 use crate::partitioning::metadata_partition_for;
 use crate::serde::MetadataEvent;
 
@@ -57,6 +57,12 @@ pub struct TopicBasedRemoteLogMetadataManager {
     runtime: Handle,
     shutdown: CancellationToken,
     pump: std::sync::Mutex<Option<JoinHandle<()>>>,
+    /// Live assignment handle for the metadata-log subscription. Held so
+    /// 48p (resume from snapshot offsets) and 48q (per-broker partition
+    /// assignment) can mutate the consumed set at runtime. Unused in
+    /// 48o beyond construction (assign-all-from-0).
+    #[allow(dead_code)]
+    assignment: Arc<dyn AssignmentHandle>,
 }
 
 impl TopicBasedRemoteLogMetadataManager {
@@ -89,7 +95,13 @@ impl TopicBasedRemoteLogMetadataManager {
         let inner = Arc::new(InmemoryRemoteLogMetadataManager::new());
         let shutdown = CancellationToken::new();
 
-        let stream = log.subscribe();
+        let assignment: Vec<PartitionStart> = (0..log.partition_count())
+            .map(|partition| PartitionStart {
+                partition,
+                start_offset: 0,
+            })
+            .collect();
+        let (stream, assignment_handle) = log.subscribe(assignment);
         let pump = runtime.spawn(pump_loop(
             stream,
             inner.clone(),
@@ -106,6 +118,7 @@ impl TopicBasedRemoteLogMetadataManager {
             runtime,
             shutdown,
             pump: std::sync::Mutex::new(Some(pump)),
+            assignment: assignment_handle,
         });
 
         manager.wait_for_targets(&target_hwms).await;
