@@ -2,10 +2,10 @@
 #![allow(clippy::pedantic)]
 
 //! KIP-584 write-side surface — `ApiVersions` v3+ exposes the feature
-//! surface the JVM admin tooling consumes. `supported_features` now
-//! advertises `metadata.version` at a single conservative level (1 =
-//! `3.0-IV1`, known to every KRaft-aware client >= 3.0), driven by the
-//! broker-wide `features` table. A fresh broker has no `finalized_features`
+//! surface the JVM admin tooling consumes. `supported_features` advertises
+//! `metadata.version` over the supported range `min = 7` (`3.3-IV3`) ..
+//! `max = 25` (`4.0-IV3`), driven by the broker-wide `features` table. A
+//! fresh broker has no `finalized_features`
 //! and the epoch sits at the schema sentinel `-1` ("unknown"), which JVM
 //! admin clients consume as `MetadataVersion.UNKNOWN` and short-circuit
 //! per-level validation. Finalized features + a real (`>= 0`) epoch only
@@ -18,8 +18,9 @@
 //! JVM admin client whose enum doesn't enumerate the level — it throws
 //! `IllegalArgumentException` out of `MetadataVersion.fromFeatureLevel(N)` on
 //! the first handshake (this took down 19 `broker-jvm-acceptance` tests
-//! historically). Level 1 is the JVM-verified safe ceiling; this test guards
-//! the fresh-broker surface.
+//! historically). The advertised range `7 .. 25` (`3.3-IV3` .. `4.0-IV3`)
+//! tracks Kafka's own `MetadataVersion` enum; this test guards the
+//! fresh-broker surface.
 
 #![cfg(not(target_os = "windows"))]
 
@@ -52,8 +53,8 @@ async fn v3_response_advertises_supported_metadata_version_no_finalized() {
         .iter()
         .find(|f| f.name == "metadata.version")
         .expect("metadata.version advertised in supported_features");
-    assert_eq!(mv.min_version, 1, "{resp:?}");
-    assert_eq!(mv.max_version, 1, "{resp:?}");
+    assert_eq!(mv.min_version, 7, "{resp:?}");
+    assert_eq!(mv.max_version, 25, "{resp:?}");
     assert!(
         resp.finalized_features.is_empty(),
         "fresh broker has no finalized features: {:?}",
