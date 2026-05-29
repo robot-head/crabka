@@ -77,6 +77,8 @@ lru.workspace = true
 # Zero-copy: cast remote-tier OffsetIndex/TimeIndex byte buffers
 # to typed entry slices instead of per-entry from_be_bytes() in a hot path.
 zerocopy.workspace = true
+# JSON Schema generation for FileConfig — consumed by crabka-docgen.
+schemars = { workspace = true }
 
 [dev-dependencies]
 crabka-broker = { version = "0.1", path = ".", features = ["test-helpers"] }

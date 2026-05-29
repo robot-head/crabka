@@ -1,0 +1,72 @@
+name: docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "website/**"
+      - "crates/docgen/**"
+      - "crates/operator/**"
+      - "crates/broker/**"
+      - "crates/protocol/**"
+      - ".github/workflows/docs.yml"
+  pull_request:
+    paths:
+      - "website/**"
+      - "crates/docgen/**"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Generate reference markdown
+        run: cargo run -p crabka-docgen -- all --out website/content/reference
+      - name: Build rustdoc
+        run: cargo doc --no-deps --workspace
+      - name: Stage rustdoc into site
+        run: |
+          mkdir -p website/static/api/rust
+          cp -r target/doc/* website/static/api/rust/
+      - name: Stage branding images
+        run: |
+          mkdir -p website/static/images
+          cp docs/*.png website/static/images/ || true
+      - name: Install Zola
+        uses: taiki-e/install-action@v2
+        with:
+          tool: zola@0.22.1
+      - name: Build site
+        run: zola build
+        working-directory: website
+      - name: Upload Pages artifact
+        if: github.ref == 'refs/heads/main'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: website/public
+
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

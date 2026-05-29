@@ -20,3 +20,14 @@ crabka-operator.tar
 
 # OMB harness — upstream checkout fetched at run time
 .omb/
+
+# Generated docs-site content (produced by crabka-docgen / cargo doc at build time)
+/website/content/reference/_index.md
+/website/content/reference/operator/
+/website/content/reference/broker/_index.md
+/website/content/reference/broker/server-config.md
+/website/content/reference/broker/topic-configs.md
+/website/content/reference/broker/protocol-apis.md
+/website/static/api/
+/website/static/images/
+/website/public/

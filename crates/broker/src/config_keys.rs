@@ -282,6 +282,161 @@ pub(crate) fn apply_to_log_config(
     out
 }
 
+/// One whitelisted topic-config key, for the generated reference page.
+#[derive(Debug, Clone, Copy)]
+pub struct TopicConfigDoc {
+    pub key: &'static str,
+    pub value_type: &'static str,
+    pub default: Option<&'static str>,
+    pub kip: Option<&'static str>,
+    pub description: &'static str,
+}
+
+/// The full whitelist documented on the topic-configs reference page.
+#[must_use]
+pub fn topic_config_docs() -> Vec<TopicConfigDoc> {
+    vec![
+        TopicConfigDoc {
+            key: RETENTION_MS,
+            value_type: "long (ms)",
+            default: None,
+            kip: None,
+            description: "Retention time before log segments become eligible for deletion.",
+        },
+        TopicConfigDoc {
+            key: RETENTION_BYTES,
+            value_type: "long (bytes)",
+            default: None,
+            kip: None,
+            description: "Maximum partition size before old segments are deleted.",
+        },
+        TopicConfigDoc {
+            key: SEGMENT_BYTES,
+            value_type: "int (bytes)",
+            default: None,
+            kip: None,
+            description: "Target size of a single log segment file.",
+        },
+        TopicConfigDoc {
+            key: CLEANUP_POLICY,
+            value_type: "string",
+            default: Some("delete"),
+            kip: None,
+            description: "`delete`, `compact`, or `compact,delete`.",
+        },
+        TopicConfigDoc {
+            key: COMPRESSION_TYPE,
+            value_type: "string",
+            default: Some("producer"),
+            kip: None,
+            description: "Broker-side compression codec for the topic.",
+        },
+        TopicConfigDoc {
+            key: MIN_INSYNC_REPLICAS,
+            value_type: "int (>=1)",
+            default: Some("1"),
+            kip: None,
+            description: "With acks=all, the minimum in-sync replicas required to accept a write; otherwise NOT_ENOUGH_REPLICAS (19).",
+        },
+        TopicConfigDoc {
+            key: UNCLEAN_LEADER_ELECTION_ENABLE,
+            value_type: "boolean",
+            default: Some("false"),
+            kip: Some("KIP-841"),
+            description: "Allow electing an out-of-ISR replica as leader on ISR-empty failover (possible data loss).",
+        },
+        TopicConfigDoc {
+            key: UNCLEAN_RECOVERY_STRATEGY,
+            value_type: "string",
+            default: Some("None"),
+            kip: Some("KIP-966"),
+            description: "Offset-aware unclean recovery: `None`, `Balanced`, or `Aggressive`. Supersedes unclean.leader.election.enable.",
+        },
+        TopicConfigDoc {
+            key: REMOTE_STORAGE_ENABLE,
+            value_type: "boolean",
+            default: Some("false"),
+            kip: Some("KIP-405"),
+            description: "Opt this topic into tiered (remote) storage.",
+        },
+        TopicConfigDoc {
+            key: LOCAL_RETENTION_MS,
+            value_type: "long (ms)",
+            default: None,
+            kip: Some("KIP-405"),
+            description: "Local-tier retention time for tiered partitions.",
+        },
+        TopicConfigDoc {
+            key: LOCAL_RETENTION_BYTES,
+            value_type: "long (bytes)",
+            default: None,
+            kip: Some("KIP-405"),
+            description: "Local-tier retention size budget for tiered partitions.",
+        },
+        TopicConfigDoc {
+            key: crate::throttle::LEADER_THROTTLED_REPLICAS_KEY,
+            value_type: "string",
+            default: None,
+            kip: Some("KIP-73"),
+            description: "Replica list throttled on the leader side during reassignment.",
+        },
+        TopicConfigDoc {
+            key: crate::throttle::FOLLOWER_THROTTLED_REPLICAS_KEY,
+            value_type: "string",
+            default: None,
+            kip: Some("KIP-73"),
+            description: "Replica list throttled on the follower side during reassignment.",
+        },
+    ]
+}
+
+#[cfg(test)]
+mod doc_tests {
+    use super::*;
+
+    #[test]
+    fn topic_config_docs_cover_known_keys() {
+        use std::collections::HashSet;
+        let docs = topic_config_docs();
+        let doc_keys: HashSet<&str> = docs.iter().map(|d| d.key).collect();
+        // No duplicate keys in the doc table.
+        assert_eq!(
+            doc_keys.len(),
+            docs.len(),
+            "duplicate key in topic_config_docs"
+        );
+        // Every documented key is recognized by the validator.
+        for k in &doc_keys {
+            assert!(
+                is_recognized(k),
+                "documented key `{k}` not recognized by validator"
+            );
+        }
+        // Every recognized key is documented.
+        for k in [
+            RETENTION_MS,
+            RETENTION_BYTES,
+            SEGMENT_BYTES,
+            CLEANUP_POLICY,
+            COMPRESSION_TYPE,
+            MIN_INSYNC_REPLICAS,
+            UNCLEAN_LEADER_ELECTION_ENABLE,
+            UNCLEAN_RECOVERY_STRATEGY,
+            REMOTE_STORAGE_ENABLE,
+            LOCAL_RETENTION_MS,
+            LOCAL_RETENTION_BYTES,
+            crate::throttle::LEADER_THROTTLED_REPLICAS_KEY,
+            crate::throttle::FOLLOWER_THROTTLED_REPLICAS_KEY,
+        ] {
+            assert!(
+                doc_keys.contains(k),
+                "recognized key `{k}` missing from topic_config_docs"
+            );
+        }
+        assert!(docs.iter().all(|d| !d.description.is_empty()));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
