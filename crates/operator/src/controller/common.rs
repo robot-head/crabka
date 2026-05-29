@@ -314,6 +314,7 @@ pub(crate) fn render_configmap(
     // TOML so the broker-wide `[remote_storage]` block (and the matching
     // `tier-storage` pod volume) light up together.
     let tiered_storage = owner.spec.tiered_storage.as_ref();
+    let inter_broker_kerberos = owner.spec.inter_broker_kerberos.as_ref();
     for (broker_id, addrs) in addresses_per_broker {
         let tls_for_broker = tls_per_broker.and_then(|m| m.get(broker_id));
         let toml = crate::controller::listeners::render_broker_toml(
@@ -327,6 +328,7 @@ pub(crate) fn render_configmap(
             delegation_token_enabled,
             authorization,
             tiered_storage,
+            inter_broker_kerberos,
         );
         data.insert(format!("broker-{broker_id}.toml"), toml);
     }

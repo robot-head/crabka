@@ -770,6 +770,10 @@ pub(crate) const INGRESS_PORT: i32 = 443;
 /// writes through one canonical location.
 pub(crate) const TIER_STORAGE_PATH: &str = "/var/lib/crabka/remote";
 
+/// Fixed in-pod path where the operator mounts the GSSAPI keytab (Task 5).
+/// Both the `[gssapi]` and `[inter_broker_credentials]` TOML blocks reference it.
+pub(crate) const GSSAPI_KEYTAB_PATH: &str = "/etc/crabka/gssapi-keytab/keytab";
+
 /// Escape a string for embedding inside a TOML basic (double-quoted)
 /// string. Only `\` and `"` need escaping for our render — the operator
 /// rejects newlines and other control characters at CRD validation
@@ -2992,6 +2996,7 @@ pub fn render_broker_toml(
     delegation_token_enabled: bool,
     authorization: Option<&crate::crd::kafka::Authorization>,
     tiered_storage: Option<&crate::crd::kafka::TieredStorage>,
+    inter_broker_kerberos: Option<&crate::crd::kafka::InterBrokerKerberos>,
 ) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
@@ -3306,6 +3311,49 @@ pub fn render_broker_toml(
         out.push('\n');
     }
 
+    // Broker-global [gssapi] block. Emitted when any listener is type:gssapi.
+    // Per-listener divergence is rejected by validate_listeners, so the first
+    // GSSAPI listener's config is unambiguous here. Keytab is mounted at a
+    // fixed path by kafka_node_pool.rs (Task 5).
+    if let Some(g) = listeners.iter().find_map(|l| match &l.authentication {
+        Some(ListenerAuthentication::Gssapi(c)) => Some(c),
+        _ => None,
+    }) {
+        let _ = writeln!(out, "[gssapi]");
+        let _ = writeln!(out, "keytab_path = \"{GSSAPI_KEYTAB_PATH}\"");
+        let svc = g.service_name.as_deref().unwrap_or("kafka");
+        let _ = writeln!(out, "service_name = \"{svc}\"");
+        let _ = writeln!(
+            out,
+            "principal_to_local_rules = {}",
+            toml_string_array(&g.principal_to_local_rules)
+        );
+        if let Some(realm) = &g.realm {
+            let _ = writeln!(out, "realm = \"{realm}\"");
+        }
+        if let Some(kdc) = &g.kdc {
+            let _ = writeln!(out, "kdc = \"{kdc}\"");
+        }
+        out.push('\n');
+    }
+
+    // Inter-broker initiate credentials. Emitted only when the inter-broker
+    // listener is type:gssapi AND spec.interBrokerKerberos is provided.
+    let ib_is_gssapi = listeners.iter().any(|l| {
+        l.name == inter_broker_listener_name
+            && matches!(l.authentication, Some(ListenerAuthentication::Gssapi(_)))
+    });
+    if ib_is_gssapi && let Some(ibk) = inter_broker_kerberos {
+        let _ = writeln!(out, "[inter_broker_credentials]");
+        let _ = writeln!(out, "type = \"gssapi\"");
+        let _ = writeln!(out, "keytab_path = \"{GSSAPI_KEYTAB_PATH}\"");
+        let _ = writeln!(out, "client_principal = \"{}\"", ibk.client_principal);
+        let svc = ibk.service_name.as_deref().unwrap_or("kafka");
+        let _ = writeln!(out, "service_name = \"{svc}\"");
+        let _ = writeln!(out, "kdc_url = \"{}\"", ibk.kdc_url);
+        out.push('\n');
+    }
+
     if let Some(tls) = tls {
         let _ = writeln!(out, "[tls_config]");
         let _ = writeln!(out, "cert_path = \"{}\"", tls.cert_path);
@@ -3351,7 +3399,7 @@ mod toml_rendering_tests {
         let listeners = vec![synthesized_default_listener()];
         let props = std::collections::BTreeMap::new();
         let toml_str = render_broker_toml(
-            0, &listeners, &addrs, "PLAIN", &props, None, None, false, None, None,
+            0, &listeners, &addrs, "PLAIN", &props, None, None, false, None, None, None,
         );
 
         // Sanity: parses cleanly with the broker's FileConfig.
@@ -3378,8 +3426,12 @@ mod toml_rendering_tests {
         p.insert("z.last".into(), "1".into());
         p.insert("a.first".into(), "0".into());
 
-        let t1 = render_broker_toml(0, &l, &addrs, "PLAIN", &p, None, None, false, None, None);
-        let t2 = render_broker_toml(0, &l, &addrs, "PLAIN", &p, None, None, false, None, None);
+        let t1 = render_broker_toml(
+            0, &l, &addrs, "PLAIN", &p, None, None, false, None, None, None,
+        );
+        let t2 = render_broker_toml(
+            0, &l, &addrs, "PLAIN", &p, None, None, false, None, None, None,
+        );
         assert_eq!(t1, t2);
         // Sorted property keys (BTreeMap iteration).
         let a_pos = t1.find("a.first").unwrap();
@@ -3406,6 +3458,7 @@ mod toml_rendering_tests {
             None,
             None,
             false,
+            None,
             None,
             None,
         );
@@ -3436,6 +3489,7 @@ mod toml_rendering_tests {
             None,
             None,
             true,
+            None,
             None,
             None,
         );
@@ -3483,6 +3537,7 @@ mod toml_rendering_tests {
             false,
             None,
             None,
+            None,
         );
         assert!(
             !t.contains("super_users"),
@@ -3524,6 +3579,7 @@ mod toml_rendering_tests {
             None,
             false,
             Some(&authz),
+            None,
             None,
         );
         assert!(
@@ -3579,6 +3635,7 @@ mod toml_rendering_tests {
             None,
             false,
             Some(&authz),
+            None,
             None,
         );
         assert!(
@@ -3639,6 +3696,7 @@ mod toml_rendering_tests {
             false,
             None,
             None,
+            None,
         );
         assert!(
             !t.contains("[authorization]"),
@@ -3672,6 +3730,7 @@ mod toml_rendering_tests {
             true,
             None,
             None,
+            None,
         );
         assert!(t.contains("[authorization]"), "TOML:\n{t}");
         assert!(t.contains("type = \"simple\""), "TOML:\n{t}");
@@ -3692,6 +3751,7 @@ mod toml_rendering_tests {
             None,
             true,
             Some(&authz),
+            None,
             None,
         );
         assert!(
@@ -3729,6 +3789,7 @@ mod toml_rendering_tests {
             false,
             None,
             Some(&ts),
+            None,
         );
         assert!(
             t.contains("[remote_storage]"),
@@ -3765,6 +3826,7 @@ mod toml_rendering_tests {
             None,
             None,
             false,
+            None,
             None,
             None,
         );
@@ -3814,6 +3876,7 @@ mod toml_rendering_tests {
             false,
             None,
             Some(&ts),
+            None,
         );
         assert!(
             t.contains("[remote_storage.kafka_metadata]"),
@@ -3874,6 +3937,7 @@ mod toml_rendering_tests {
             false,
             None,
             Some(&ts),
+            None,
         );
         assert!(
             !t.contains("[remote_storage.kafka_metadata]"),
@@ -3917,6 +3981,7 @@ mod toml_rendering_tests {
             false,
             None,
             Some(&ts),
+            None,
         );
         assert!(t.contains("[remote_storage]"), "missing block:\n{t}");
         assert!(
@@ -3994,6 +4059,7 @@ mod toml_rendering_tests {
             false,
             None,
             Some(&ts),
+            None,
         );
         assert!(t.contains("[remote_storage.s3]"));
         assert!(t.contains("bucket = \"b\""));
@@ -4062,6 +4128,7 @@ mod toml_rendering_tests {
             false,
             None,
             Some(&ts),
+            None,
         );
         // The rendered TOML must parse; if escaping is broken the
         // broker's FileConfig would error out before the assertion below.
@@ -4105,6 +4172,7 @@ mod toml_rendering_tests {
             false,
             None,
             None,
+            None,
         );
 
         let parsed: crabka_broker::file_config::FileConfig =
@@ -4133,7 +4201,7 @@ mod toml_rendering_tests {
         let listeners = vec![synthesized_default_listener()];
         let props = std::collections::BTreeMap::new();
         let toml_str = render_broker_toml(
-            0, &listeners, &addrs, "PLAIN", &props, None, None, false, None, None,
+            0, &listeners, &addrs, "PLAIN", &props, None, None, false, None, None, None,
         );
         assert!(!toml_str.contains("[tls_config]"));
         assert!(!toml_str.contains("controller_listener_protocol"));
@@ -4174,6 +4242,7 @@ mod toml_rendering_tests {
             }),
             None,
             false,
+            None,
             None,
             None,
         );
@@ -4253,6 +4322,89 @@ mod toml_rendering_tests {
         }
     }
 
+    fn gssapi_cfg_with_service(svc: &str) -> crate::crd::ListenerAuthenticationGssapi {
+        crate::crd::ListenerAuthenticationGssapi {
+            keytab_secret_ref: crate::crd::KeytabSecretRef {
+                secret_name: "kt".into(),
+                key: "keytab".into(),
+            },
+            service_name: Some(svc.into()),
+            principal_to_local_rules: vec!["DEFAULT".into()],
+            realm: None,
+            kdc: None,
+        }
+    }
+
+    fn gssapi_listener(
+        name: &str,
+        port: i32,
+        tls: bool,
+        cfg: crate::crd::ListenerAuthenticationGssapi,
+    ) -> Listener {
+        Listener {
+            name: name.into(),
+            port,
+            type_: ListenerType::Internal,
+            tls,
+            authentication: Some(crate::crd::ListenerAuthentication::Gssapi(cfg)),
+            configuration: None,
+            network_policy_peers: None,
+        }
+    }
+
+    #[test]
+    fn render_emits_gssapi_block_and_mechanism() {
+        let l = gssapi_listener("gss", 9092, false, gssapi_cfg_with_service("kafka"));
+        let addrs = addrs_for("gss", 9092);
+        let toml = render_broker_toml(
+            0,
+            &[l],
+            &addrs,
+            "gss",
+            &Default::default(),
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+        );
+        assert!(toml.contains("[gssapi]"), "toml:\n{toml}");
+        assert!(toml.contains(r#"keytab_path = "/etc/crabka/gssapi-keytab/keytab""#));
+        assert!(toml.contains(r#"service_name = "kafka""#));
+        assert!(toml.contains(r#"principal_to_local_rules = ["DEFAULT"]"#));
+        assert!(toml.contains(r#"enabled_mechanisms = ["GSSAPI"]"#));
+        assert!(!toml.contains("[inter_broker_credentials]"));
+    }
+
+    #[test]
+    fn render_emits_inter_broker_credentials_when_ib_listener_is_gssapi() {
+        let l = gssapi_listener("gss", 9092, false, gssapi_cfg_with_service("kafka"));
+        let addrs = addrs_for("gss", 9092);
+        let ibk = crate::crd::kafka::InterBrokerKerberos {
+            client_principal: "kafka@EXAMPLE.COM".into(),
+            service_name: Some("kafka".into()),
+            kdc_url: "tcp://kdc:88".into(),
+        };
+        let toml = render_broker_toml(
+            0,
+            &[l],
+            &addrs,
+            "gss",
+            &Default::default(),
+            None,
+            None,
+            false,
+            None,
+            None,
+            Some(&ibk),
+        );
+        assert!(toml.contains("[inter_broker_credentials]"), "toml:\n{toml}");
+        assert!(toml.contains(r#"type = "gssapi""#));
+        assert!(toml.contains(r#"client_principal = "kafka@EXAMPLE.COM""#));
+        assert!(toml.contains(r#"kdc_url = "tcp://kdc:88""#));
+    }
+
     #[test]
     fn render_broker_toml_emits_oauthbearer_block_for_oauth_listener() {
         use std::collections::BTreeMap;
@@ -4271,6 +4423,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
             false,
+            None,
             None,
             None,
         );
@@ -4331,6 +4484,7 @@ mod toml_rendering_tests {
             false,
             None,
             None,
+            None,
         );
         assert!(toml.contains("[oauthbearer]"));
         assert!(toml.contains("jwks_endpoint_uri = \"https://issuer.example.com/jwks\""));
@@ -4361,6 +4515,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
             false,
+            None,
             None,
             None,
         );
@@ -4411,6 +4566,7 @@ mod toml_rendering_tests {
             false,
             None,
             None,
+            None,
         );
         assert!(!toml.contains("idp_tls_trust"), "TOML: {toml}");
     }
@@ -4434,6 +4590,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
             false,
+            None,
             None,
             None,
         );
@@ -4467,6 +4624,7 @@ mod toml_rendering_tests {
             false,
             None,
             None,
+            None,
         );
         assert!(
             !toml.contains("max_session_lifetime_seconds"),
@@ -4494,6 +4652,7 @@ mod toml_rendering_tests {
             false,
             None,
             None,
+            None,
         );
         assert!(
             toml.contains("sasl_config = { enabled_mechanisms = [\"OAUTHBEARER\"] }"),
@@ -4519,6 +4678,7 @@ mod toml_rendering_tests {
             false,
             None,
             None,
+            None,
         );
         assert!(toml.contains("[oauthbearer]"), "TOML: {toml}");
         assert!(!toml.contains("sasl_config"), "TOML: {toml}");
@@ -4536,6 +4696,7 @@ mod toml_rendering_tests {
             None,
             None,
             false,
+            None,
             None,
             None,
         );
@@ -4560,6 +4721,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
             false,
+            None,
             None,
             None,
         );
@@ -4607,6 +4769,7 @@ mod toml_rendering_tests {
             false,
             None,
             None,
+            None,
         );
         let b = render_broker_toml(
             0,
@@ -4617,6 +4780,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
             false,
+            None,
             None,
             None,
         );
@@ -4668,6 +4832,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
             false,
+            None,
             None,
             None,
         );
@@ -4741,6 +4906,7 @@ mod toml_rendering_tests {
             false,
             None,
             None,
+            None,
         );
         assert!(toml.contains("[oauthbearer]"), "TOML: {toml}");
         assert!(
@@ -4779,6 +4945,7 @@ mod toml_rendering_tests {
             false,
             None,
             None,
+            None,
         );
         assert!(!toml.contains("jwks_endpoint_uri"), "TOML: {toml}");
     }
@@ -4797,6 +4964,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
             false,
+            None,
             None,
             None,
         );
@@ -4821,6 +4989,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
             false,
+            None,
             None,
             None,
         );
@@ -4848,6 +5017,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
             false,
+            None,
             None,
             None,
         );
@@ -4893,6 +5063,7 @@ mod toml_rendering_tests {
             false,
             None,
             None,
+            None,
         );
         assert!(toml.contains("protocol = \"Ssl\""));
         assert!(toml.contains("client_ca_path = \"/etc/crabka/clients-ca/ca.crt\""));
@@ -4923,6 +5094,7 @@ mod toml_rendering_tests {
             false,
             None,
             None,
+            None,
         );
         assert!(
             toml.contains("custom_claim_check = '''$.scope[?@ == 'kafka.write']'''"),
@@ -4945,6 +5117,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
             false,
+            None,
             None,
             None,
         );
@@ -4975,6 +5148,7 @@ mod toml_rendering_tests {
             false,
             None,
             None,
+            None,
         );
         assert!(
             toml.contains("fallback_user_name_claim = \"client_id\""),
@@ -4997,6 +5171,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
             false,
+            None,
             None,
             None,
         );
@@ -5023,6 +5198,7 @@ mod toml_rendering_tests {
             false,
             None,
             None,
+            None,
         );
         assert!(
             toml.contains("groups_claim = '''$.realm_access.roles[*]'''"),
@@ -5045,6 +5221,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
             false,
+            None,
             None,
             None,
         );
@@ -5071,6 +5248,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
             false,
+            None,
             None,
             None,
         );
@@ -5101,6 +5279,7 @@ mod toml_rendering_tests {
             false,
             None,
             None,
+            None,
         );
         assert!(
             toml.contains("jwks_min_refresh_pause_seconds = 2"),
@@ -5123,6 +5302,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
             false,
+            None,
             None,
             None,
         );
@@ -5149,6 +5329,7 @@ mod toml_rendering_tests {
             false,
             None,
             None,
+            None,
         );
         assert!(
             toml.contains("jwks_ignore_key_use = true"),
@@ -5172,6 +5353,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
             false,
+            None,
             None,
             None,
         );
