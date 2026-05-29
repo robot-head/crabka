@@ -430,16 +430,15 @@ jobs:
           [ "$final_rev" != "$initial_rev" ] || { echo "::error::sts revision didn't change ($initial_rev -> $final_rev)"; exit 1; }
           echo "rolled: $initial_rev -> $final_rev"
 
-      - name: Smoke — metadata.version rendered + invalid pin rejected
+      - name: Smoke — metadata.version not rendered + invalid pin rejected
         run: |
           set -e
-          # kafkaVersion 0.1.1 default-tracks metadata.version 0.1; the
-          # operator injects it into the broker config.
+          # `metadata.version` is finalized via the bootstrap-seeded feature
+          # record (`crabka format --release-version`), NOT the broker config.
+          # The operator must not render it into server_properties.
           cm=$(kubectl get configmap demo-broker-config -n default -o jsonpath='{.data.broker-0\.toml}')
-          # render_broker_toml emits server_properties with quoted keys:
-          #   "metadata.version" = "0.1"
-          echo "$cm" | grep -F '"metadata.version" = "0.1"' \
-            || { echo "::error::broker config missing metadata.version=0.1"; echo "$cm"; exit 1; }
+          echo "$cm" | grep -F 'metadata.version' \
+            && { echo "::error::metadata.version must not be rendered into broker config"; echo "$cm"; exit 1; } || true
 
           # An invalid (too-high) metadata version must be rejected: the
           # operator surfaces KafkaVersionValid=False and does NOT roll.
@@ -462,11 +461,7 @@ jobs:
           done
           [ -n "$ok" ] || { echo "::error::KafkaVersionValid did not become False/MetadataVersionTooHigh"; kubectl get kafka demo -n default -o yaml; exit 1; }
 
-          # The rejected version must not be written to the broker config and
-          # must not roll the pod.
-          cm=$(kubectl get configmap demo-broker-config -n default -o jsonpath='{.data.broker-0\.toml}')
-          echo "$cm" | grep -F '"metadata.version" = "99.0"' \
-            && { echo "::error::rejected metadata.version was written to broker config"; exit 1; } || true
+          # The rejected pin must not roll the pod.
           post_uid=$(kubectl get pod demo-brokers-0 -n default -o jsonpath='{.metadata.uid}')
           [ "$pre_uid" = "$post_uid" ] || { echo "::error::invalid metadata pin rolled the pod ($pre_uid -> $post_uid)"; exit 1; }
           echo "invalid metadata.version rejected without rolling"
