@@ -101,8 +101,7 @@ async fn start_broker_with_opa_authorizer(opa_url: String) -> (BrokerHandle, Tem
         .insert("admin".to_string(), "admin-secret".to_string());
     cfg.plain_credentials
         .insert("alice".to_string(), "wonderland".to_string());
-    cfg.inter_broker_credentials = Some(crabka_broker::config::InterBrokerCredentials {
-        mechanism: SaslMechanism::Plain,
+    cfg.inter_broker_credentials = Some(crabka_broker::config::InterBrokerCredentials::Plain {
         username: "admin".to_string(),
         password: "admin-secret".to_string(),
     });

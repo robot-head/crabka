@@ -63,8 +63,7 @@ fn sasl_broker_config(
     cfg.enabled_sasl_mechanisms = vec![SaslMechanism::Plain];
     cfg.plain_credentials
         .insert(plain_user.to_string(), plain_pass.to_string());
-    cfg.inter_broker_credentials = Some(InterBrokerCredentials {
-        mechanism: SaslMechanism::Plain,
+    cfg.inter_broker_credentials = Some(InterBrokerCredentials::Plain {
         username: plain_user.to_string(),
         password: plain_pass.to_string(),
     });

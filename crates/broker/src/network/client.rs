@@ -18,6 +18,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 
+use std::path::Path;
 use std::sync::Arc;
 
 use crate::config::InterBrokerCredentials;
@@ -30,6 +31,11 @@ const API_KEY_SASL_AUTHENTICATE: i16 = 36;
 /// `client_id` advertised in outbound Kafka request headers. Visible in
 /// broker logs as the connection's reporter id.
 const OUTBOUND_CLIENT_ID: &str = "crabka-inter-broker";
+
+/// `max_recv_size` advertised in the client's RFC 4752 security-layer choice.
+/// Auth-only QOP means no data is wrapped post-handshake, so the value only
+/// needs to be a sane non-zero buffer; mirror the server's offer size.
+const GSSAPI_MAX_RECV_SIZE: u32 = 0x1_0000;
 
 #[derive(Debug, Error)]
 pub enum InterBrokerError {
@@ -102,7 +108,7 @@ impl InterBrokerClient {
             let creds = self.creds.clone().ok_or_else(|| {
                 InterBrokerError::Config("SASL listener without inter_broker_credentials".into())
             })?;
-            run_outbound_sasl(&mut *stream, &creds).await?;
+            run_outbound_sasl(&mut *stream, &creds, server_name).await?;
         }
         Ok(stream)
     }
@@ -146,7 +152,7 @@ impl InterBrokerClient {
             let creds = self.creds.clone().ok_or_else(|| {
                 InterBrokerError::Config("SASL listener without inter_broker_credentials".into())
             })?;
-            run_outbound_sasl(&mut *stream, &creds).await?;
+            run_outbound_sasl(&mut *stream, &creds, server_name).await?;
         }
         crabka_client_core::Connection::from_stream(stream, options)
             .await
@@ -161,6 +167,7 @@ impl InterBrokerClient {
 async fn run_outbound_sasl<S>(
     stream: &mut S,
     creds: &InterBrokerCredentials,
+    server_name: &str,
 ) -> Result<(), InterBrokerError>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + ?Sized,
@@ -171,32 +178,35 @@ where
     // Step 2: SaslHandshake with the chosen mechanism — establishes
     //         which SASL flow the broker will run.
     let mut corr_id: i32 = 1;
-    send_sasl_handshake(stream, creds.mechanism, &mut corr_id).await?;
-    // Step 3: SaslAuthenticate (one round for PLAIN, two for SCRAM).
-    match creds.mechanism {
-        SaslMechanism::Plain => {
-            send_plain_authenticate(stream, &creds.username, &creds.password, &mut corr_id).await
+    send_sasl_handshake(stream, creds.mechanism(), &mut corr_id).await?;
+    // Step 3: SaslAuthenticate (one round for PLAIN, two for SCRAM, three
+    //         for GSSAPI).
+    match creds {
+        InterBrokerCredentials::Plain { username, password } => {
+            send_plain_authenticate(stream, username, password, &mut corr_id).await
         }
-        SaslMechanism::ScramSha256 | SaslMechanism::ScramSha512 => {
-            run_scram_client(
+        InterBrokerCredentials::Scram {
+            mechanism,
+            username,
+            password,
+        } => run_scram_client(stream, username, password, *mechanism, &mut corr_id).await,
+        InterBrokerCredentials::Gssapi {
+            keytab_path,
+            client_principal,
+            service_name,
+            kdc_url,
+        } => {
+            run_gssapi_client(
                 stream,
-                &creds.username,
-                &creds.password,
-                creds.mechanism,
+                keytab_path,
+                client_principal,
+                service_name,
+                server_name,
+                kdc_url,
                 &mut corr_id,
             )
             .await
         }
-        // OAUTHBEARER inter-broker auth would require an outbound token source;
-        // not supported as an inter-broker mechanism this slice (slice 49).
-        SaslMechanism::OAuthBearer => Err(InterBrokerError::Sasl(
-            "OAUTHBEARER is not supported for inter-broker authentication".to_string(),
-        )),
-        // GSSAPI inter-broker initiate is wired in a later GSSAPI task; until
-        // then it is not a usable inter-broker mechanism.
-        SaslMechanism::Gssapi => Err(InterBrokerError::Sasl(
-            "GSSAPI is not yet wired for inter-broker authentication".to_string(),
-        )),
     }
 }
 
@@ -309,6 +319,66 @@ where
     exch.verify_server_final(&resp2.auth_bytes)
         .map_err(|e| InterBrokerError::Sasl(format!("server-final verify: {e:?}")))?;
     Ok(())
+}
+
+/// Run the SASL/GSSAPI (Kerberos) client state machine over
+/// `SaslAuthenticate v2` round-trips.
+///
+/// Builds an `sspi`-backed initiator that authenticates as `client_principal`
+/// using the long-term key in `keytab_path` (no password), targeting the SPN
+/// `service_name/server_name` of the broker being dialed. `server_name` is the
+/// broker's canonical hostname (the same value used for TLS SNI), not the
+/// dialed IP — the SPN must match the service key in the broker's keytab.
+/// Drives [`GssapiClientExchange`]: the GSS context establishment
+/// (AP-REQ → AP-REP) followed by the RFC 4752 auth-only security-layer
+/// negotiation. Each non-terminal client token is sent as request
+/// `auth_bytes`; the server's reply token feeds the next step until the
+/// exchange reports `Done`.
+///
+/// The first initiator step performs the synchronous AS/TGS exchange with the
+/// KDC; subsequent steps only process tokens locally.
+async fn run_gssapi_client<S>(
+    stream: &mut S,
+    keytab_path: &Path,
+    client_principal: &str,
+    service_name: &str,
+    server_name: &str,
+    kdc_url: &str,
+    corr_id: &mut i32,
+) -> Result<(), InterBrokerError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + ?Sized,
+{
+    use crabka_security::gssapi::client::{ClientStep, GssapiClientExchange};
+    use crabka_security::gssapi::provider::SspiInitiator;
+
+    let target_spn = format!("{service_name}/{server_name}");
+    let keytab = keytab_path.to_string_lossy();
+    let initiator = SspiInitiator::new(&keytab, client_principal, &target_spn, kdc_url)
+        .map_err(|e| InterBrokerError::Sasl(format!("GSSAPI initiator init failed: {e}")))?;
+    let mut exchange = GssapiClientExchange::new(Box::new(initiator), GSSAPI_MAX_RECV_SIZE, None);
+
+    // Seed the exchange with no server token; this produces the AP-REQ.
+    let mut step = exchange
+        .step(None)
+        .map_err(|e| InterBrokerError::Sasl(format!("GSSAPI initiate failed: {e}")))?;
+    loop {
+        match step {
+            ClientStep::Token(token) => {
+                let resp = send_sasl_authenticate(stream, token, corr_id).await?;
+                if resp.error_code != 0 {
+                    return Err(InterBrokerError::Sasl(format!(
+                        "SaslAuthenticate(GSSAPI) error_code={} error_message={:?}",
+                        resp.error_code, resp.error_message
+                    )));
+                }
+                step = exchange
+                    .step(Some(&resp.auth_bytes))
+                    .map_err(|e| InterBrokerError::Sasl(format!("GSSAPI step failed: {e}")))?;
+            }
+            ClientStep::Done => return Ok(()),
+        }
+    }
 }
 
 /// Frame a `SaslAuthenticate v2` request carrying `auth_bytes`, send it,

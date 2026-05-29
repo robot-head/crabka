@@ -407,8 +407,7 @@ async fn start_broker() -> (BrokerHandle, TempDir, SocketAddr) {
     // Inter-broker auth uses PLAIN as alice (the cluster only has one broker
     // so this is not exercised, but `BrokerConfig::validate` requires it
     // when the inter-broker listener is SASL).
-    cfg.inter_broker_credentials = Some(crabka_broker::config::InterBrokerCredentials {
-        mechanism: SaslMechanism::Plain,
+    cfg.inter_broker_credentials = Some(crabka_broker::config::InterBrokerCredentials::Plain {
         username: "alice".to_string(),
         password: "wonderland".to_string(),
     });
@@ -468,8 +467,7 @@ async fn start_broker_with_super_users(
     let (ib_user, ib_pw) = plain_creds
         .first()
         .expect("must supply at least one PLAIN credential for inter-broker auth");
-    cfg.inter_broker_credentials = Some(crabka_broker::config::InterBrokerCredentials {
-        mechanism: SaslMechanism::Plain,
+    cfg.inter_broker_credentials = Some(crabka_broker::config::InterBrokerCredentials::Plain {
         username: (*ib_user).to_string(),
         password: (*ib_pw).to_string(),
     });

@@ -32,12 +32,41 @@ pub struct ListenerSpec {
     pub sasl_mechanisms: Option<Vec<SaslMechanism>>,
 }
 
-/// Credentials the broker uses when connecting *to* other brokers.
+/// Credentials the broker uses when connecting *to* other brokers, one
+/// variant per SASL mechanism the inter-broker client can speak.
 #[derive(Debug, Clone)]
-pub struct InterBrokerCredentials {
-    pub mechanism: SaslMechanism,
-    pub username: String,
-    pub password: String,
+pub enum InterBrokerCredentials {
+    /// SASL/PLAIN: `\0username\0password`.
+    Plain { username: String, password: String },
+    /// SASL/SCRAM (SHA-256 or SHA-512).
+    Scram {
+        mechanism: SaslMechanism,
+        username: String,
+        password: String,
+    },
+    /// SASL/GSSAPI: authenticate as `client_principal` using the long-term
+    /// key in `keytab_path` (no password). `service_name` is the target
+    /// broker's SPN primary (combined with the dialed host into
+    /// `service_name/host` at connect time); `kdc_url` is the KDC endpoint
+    /// (e.g. `tcp://kdc:88`).
+    Gssapi {
+        keytab_path: PathBuf,
+        client_principal: String,
+        service_name: String,
+        kdc_url: String,
+    },
+}
+
+impl InterBrokerCredentials {
+    /// The SASL mechanism this credential set authenticates with.
+    #[must_use]
+    pub fn mechanism(&self) -> SaslMechanism {
+        match self {
+            Self::Plain { .. } => SaslMechanism::Plain,
+            Self::Scram { mechanism, .. } => *mechanism,
+            Self::Gssapi { .. } => SaslMechanism::Gssapi,
+        }
+    }
 }
 
 /// Construction-time configuration for [`crate::Broker::start`].
