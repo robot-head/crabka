@@ -68,7 +68,8 @@ pub use kafka_log::{
     METADATA_TOPIC,
 };
 pub use log::{
-    InProcessMetadataEventLog, MetadataEventLog, MetadataEventRecord, MetadataEventStream,
+    AssignmentHandle, InProcessMetadataEventLog, MetadataEventLog, MetadataEventRecord,
+    MetadataEventStream, PartitionStart,
 };
 pub use manager::TopicBasedRemoteLogMetadataManager;
 pub use partitioning::metadata_partition_for;
