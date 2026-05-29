@@ -100,6 +100,27 @@ create_topic() {
     --partitions "$parts" --replication-factor "$rf" >/dev/null 2>&1
 }
 
+# Warm the group + producer-id coordinators with the JDK's own clients
+# before measuring. A freshly-started broker returns transient
+# COORDINATOR_LOAD_IN_PROGRESS (14) / NOT_COORDINATOR (16) for the first
+# InitProducerId / JoinGroup until the relevant __consumer_offsets and
+# producer-id state is loaded; production clients retry through this, and
+# we warm it explicitly so the measured window reflects broker
+# steady-state rather than cold-start coordinator routing. Applied
+# identically to both stacks. Best-effort; never aborts a run.
+warm_coordinators() {
+  local name="$1"
+  echo warmup | "$KAFKA_HOME/bin/kafka-console-producer.sh" \
+    --bootstrap-server "$BOOTSTRAP" --topic "$TOPIC" \
+    --producer-property enable.idempotence=true \
+    --producer-property acks=all >/dev/null 2>&1 || true
+  # Load the exact group the driver will use, without committing offsets.
+  timeout 15 "$KAFKA_HOME/bin/kafka-console-consumer.sh" \
+    --bootstrap-server "$BOOTSTRAP" --topic "$TOPIC" \
+    --group "crabka-bench-${name}" --from-beginning --timeout-ms 3000 \
+    --consumer-property enable.auto.commit=false >/dev/null 2>&1 || true
+}
+
 scenario_field() {
   # crude YAML scalar reader: scenario_field <file> <key>
   awk -v k="$2" '$1==k":"{print $2; exit}' "$1"
@@ -174,6 +195,7 @@ run_one() {
   if ! create_topic "$parts" "$rf"; then
     log "!! failed to create topic on $stack"; stop_broker; return 1
   fi
+  warm_coordinators "$name"
 
   local cpu_before peak_rss
   cpu_before="$(cpu_seconds "$BROKER_PID")"
