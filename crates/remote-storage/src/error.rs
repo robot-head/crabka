@@ -59,4 +59,16 @@ pub enum RemoteStorageError {
     /// cleanly to one of the structured variants above.
     #[error("remote storage backend error: {0}")]
     Backend(String),
+
+    /// The metadata partition that would answer this query is assigned to
+    /// this broker but its consumer has not yet caught up to the high-water
+    /// mark observed when the partition was assigned. The answer is unknown,
+    /// not "no segment" — callers should retry rather than treat it as a
+    /// definitive miss. `Ok(None)` is reserved for "caught up, no covering
+    /// segment" and for partitions this broker does not consume at all.
+    #[error("remote log metadata partition {partition} not ready (assigned but not caught up)")]
+    NotReady {
+        /// The `__remote_log_metadata` partition that is still catching up.
+        partition: i32,
+    },
 }

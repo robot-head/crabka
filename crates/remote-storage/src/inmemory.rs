@@ -238,6 +238,33 @@ mod tests {
     }
 
     #[test]
+    fn inmemory_read_outcomes_are_some_none_never_not_ready() {
+        let m = InmemoryRemoteLogMetadataManager::new();
+        m.add_remote_log_segment_metadata(started(10, 0, 99))
+            .unwrap();
+        m.update_remote_log_segment_metadata(finish(10)).unwrap();
+
+        // Found.
+        assert!(matches!(
+            m.remote_log_segment_metadata(&tp(), 0, 42),
+            Ok(Some(_))
+        ));
+        // Caught up, no covering segment → genuine miss.
+        assert!(matches!(
+            m.remote_log_segment_metadata(&tp(), 0, 10_000),
+            Ok(None)
+        ));
+        // Unknown partition → genuine miss, NOT NotReady.
+        let other = TopicIdPartition::new(Uuid::from_u128(999), "nope", 0);
+        let got = m.remote_log_segment_metadata(&other, 0, 0);
+        assert!(matches!(got, Ok(None)));
+        assert!(
+            !matches!(got, Err(RemoteStorageError::NotReady { .. })),
+            "in-memory manager has no consumer lag; never NotReady"
+        );
+    }
+
+    #[test]
     fn update_before_add_errors() {
         let m = InmemoryRemoteLogMetadataManager::new();
         let err = m
