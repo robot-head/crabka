@@ -1165,7 +1165,10 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
                         .as_ref()
                         .is_some_and(|d| d.contains_key(&key));
                 if !has_key {
-                    return Err(ReconcileError::MissingKrb5ConfSecret(secret_name));
+                    return Err(ReconcileError::MissingKrb5ConfKey {
+                        secret: secret_name,
+                        key,
+                    });
                 }
             }
             Ok(())
@@ -1176,12 +1179,14 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
             Err(
                 e @ (ReconcileError::MissingGssapiKeytabSecret(_)
                 | ReconcileError::MissingGssapiKeytabKey { .. }
-                | ReconcileError::MissingKrb5ConfSecret(_)),
+                | ReconcileError::MissingKrb5ConfSecret(_)
+                | ReconcileError::MissingKrb5ConfKey { .. }),
             ) => {
                 let reason = match &e {
                     ReconcileError::MissingGssapiKeytabSecret(_) => "MissingGssapiKeytabSecret",
                     ReconcileError::MissingGssapiKeytabKey { .. } => "MissingGssapiKeytabKey",
                     ReconcileError::MissingKrb5ConfSecret(_) => "MissingKrb5ConfSecret",
+                    ReconcileError::MissingKrb5ConfKey { .. } => "MissingKrb5ConfKey",
                     _ => unreachable!(),
                 };
                 let cond = condition("Ready", "False", reason, &e.to_string());

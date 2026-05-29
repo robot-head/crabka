@@ -96,9 +96,12 @@ pub enum ReconcileError {
     /// keytab Secret exists but lacks the referenced key.
     #[error("gssapi keytab Secret '{secret}' has no key '{key}'")]
     MissingGssapiKeytabKey { secret: String, key: String },
-    /// `spec.krb5ConfSecretRef` references a Secret/key that doesn't exist.
-    #[error("krb5.conf Secret '{0}' not found (or missing referenced key)")]
+    /// `spec.krb5ConfSecretRef` references a Secret that doesn't exist.
+    #[error("krb5.conf Secret '{0}' not found")]
     MissingKrb5ConfSecret(String),
+    /// `spec.krb5ConfSecretRef` Secret exists but lacks the referenced key.
+    #[error("krb5.conf Secret {secret:?} is missing key {key:?}")]
+    MissingKrb5ConfKey { secret: String, key: String },
     /// KIP-405: `spec.tieredStorage` failed shape
     /// validation. Concrete cases: `type = "S3"` without `spec.tieredStorage.s3`,
     /// `type = "Local"` with `spec.tieredStorage.s3` set, or an S3 spec

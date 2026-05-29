@@ -460,7 +460,7 @@ fn render_broker_container(
     if gssapi_keytab {
         volume_mounts.push(json!({
             "name": "gssapi-keytab",
-            "mountPath": "/etc/crabka/gssapi-keytab",
+            "mountPath": crate::controller::listeners::GSSAPI_KEYTAB_DIR,
             "readOnly": true,
         }));
     }

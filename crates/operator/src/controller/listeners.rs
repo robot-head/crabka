@@ -772,6 +772,10 @@ pub(crate) const TIER_STORAGE_PATH: &str = "/var/lib/crabka/remote";
 /// Both the `[gssapi]` and `[inter_broker_credentials]` TOML blocks reference it.
 pub(crate) const GSSAPI_KEYTAB_PATH: &str = "/etc/crabka/gssapi-keytab/keytab";
 
+/// Directory the GSSAPI keytab Secret is mounted into; the projected item
+/// path `keytab` under it yields `GSSAPI_KEYTAB_PATH`.
+pub(crate) const GSSAPI_KEYTAB_DIR: &str = "/etc/crabka/gssapi-keytab";
+
 /// Escape a string for embedding inside a TOML basic (double-quoted)
 /// string. Only `\` and `"` need escaping for our render — the operator
 /// rejects newlines and other control characters at CRD validation
@@ -1272,6 +1276,15 @@ mod tests {
     #[test]
     fn empty_listeners_is_valid() {
         assert!(validate_listeners(&[], None).is_ok());
+    }
+
+    #[test]
+    fn gssapi_keytab_path_is_dir_plus_keytab() {
+        assert_eq!(
+            GSSAPI_KEYTAB_PATH,
+            format!("{GSSAPI_KEYTAB_DIR}/keytab"),
+            "the mounted keytab dir + item path must equal the rendered keytab_path"
+        );
     }
 
     #[test]
