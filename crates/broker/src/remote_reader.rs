@@ -126,6 +126,46 @@ impl RemoteReader {
         Ok(batch)
     }
 
+    /// Aborted transactions overlapping the inclusive offset range
+    /// `[from_offset, to_offset]` in the finished remote segment covering
+    /// `from_offset`. Returns an empty `Vec` when no finished segment covers
+    /// the offset, when the segment carries no transaction index
+    /// (`SegmentNotFound` from `fetch_index`), or when nothing overlaps.
+    pub(crate) async fn aborted_transactions(
+        &self,
+        tp: &TopicIdPartition,
+        leader_epoch: i32,
+        from_offset: i64,
+        to_offset: i64,
+    ) -> Result<Vec<AbortedTxnEntry>, RemoteStorageError> {
+        let Some(metadata) =
+            self.rlmm
+                .remote_log_segment_metadata(tp, leader_epoch, from_offset)?
+        else {
+            return Ok(Vec::new());
+        };
+        if metadata.state() != RemoteLogSegmentState::CopySegmentFinished {
+            return Ok(Vec::new());
+        }
+
+        let index_bytes = match self
+            .fetch_index_blocking(metadata, IndexType::Transaction)
+            .await
+        {
+            Ok(bytes) => bytes,
+            // The transaction index is optional: a segment with no aborted
+            // transactions has no `.txnindex`, surfaced as SegmentNotFound.
+            Err(RemoteStorageError::SegmentNotFound(_)) => return Ok(Vec::new()),
+            Err(e) => return Err(e),
+        };
+
+        let entries = parse_txn_index(&index_bytes);
+        Ok(entries
+            .into_iter()
+            .filter(|e| txn_overlaps(e, from_offset, to_offset))
+            .collect())
+    }
+
     /// Lowest `start_offset` across finished segments for `tp`, or `None` when
     /// no finished segment exists. Drives `ListOffsets` EARLIEST below
     /// `local_log_start_offset()`.
@@ -678,6 +718,22 @@ mod tests {
         // RLMM is empty → no segment for `tp` at epoch 0.
         let got = reader.fetch_batch(&tp(), 0, 0, 4096).await.unwrap();
         assert!(got.is_none());
+    }
+
+    #[tokio::test]
+    async fn aborted_transactions_empty_when_no_segment() {
+        let remote_dir = tempfile::tempdir().unwrap();
+        let rsm: Arc<dyn RemoteStorageManager> =
+            Arc::new(LocalTieredStorage::new(remote_dir.path()));
+        let rlmm: Arc<dyn RemoteLogMetadataManager> =
+            Arc::new(InmemoryRemoteLogMetadataManager::new());
+        let reader = RemoteReader::new(rsm, rlmm);
+        // RLMM is empty → no covering segment → empty list, not an error.
+        let got = reader
+            .aborted_transactions(&tp(), 0, 0, 100)
+            .await
+            .expect("ok");
+        assert!(got.is_empty());
     }
 
     #[tokio::test]
