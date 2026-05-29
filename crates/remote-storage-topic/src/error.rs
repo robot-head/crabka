@@ -72,3 +72,24 @@ pub enum CodecError {
     #[error("decoded event rejected: {0}")]
     Domain(String),
 }
+
+/// Errors from the on-disk RLMM snapshot (slice 48p).
+#[derive(Debug, thiserror::Error)]
+pub enum SnapshotError {
+    /// The snapshot file could not be read or written.
+    #[error("snapshot io error: {0}")]
+    Io(#[from] std::io::Error),
+
+    /// A snapshot format version the loader does not understand.
+    #[error("unsupported snapshot format version {0}")]
+    UnsupportedVersion(u16),
+
+    /// The snapshot bytes were malformed (truncated, bad framing, or a
+    /// contained event failed to decode).
+    #[error("malformed snapshot: {0}")]
+    Malformed(#[from] CodecError),
+
+    /// Trailing bytes remained after the declared entries were read.
+    #[error("snapshot has {0} trailing bytes")]
+    TrailingBytes(usize),
+}

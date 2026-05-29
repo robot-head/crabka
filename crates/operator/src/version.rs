@@ -5,12 +5,10 @@
 //! `inter.broker.protocol.version`. There is no
 //! `inter.broker.protocol.version` / `log.message.format.version` lineage.
 //!
-//! The broker has no runtime feature-level enforcement yet (the
-//! `UpdateFeatures` codec exists but no handler consumes it), so the
-//! resolved metadata version is rendered into the broker's inert
-//! `[server_properties]` config. All upgrade safety lives here, in the
-//! operator: the binary must always be `>= resolved metadata >= finalized
-//! metadata`, which is the downgrade window.
+//! The broker enforces metadata.version at runtime (`UpdateFeatures` handler +
+//! fail-fast range guard), consuming the value seeded by `crabka format
+//! --release-version`. The operator owns upgrade-window safety: the binary
+//! must always be `>= resolved metadata >= finalized metadata`.
 
 /// A parsed Kafka version. Ordering is by `(major, minor, patch)`, but
 /// metadata-version comparisons use only `(major, minor)` — Kafka feature
@@ -85,6 +83,8 @@ pub enum VersionReason {
     InvalidVersion,
     /// The resolved metadata version is newer than the binary.
     MetadataVersionTooHigh,
+    /// The resolved metadata version is below the broker's supported floor.
+    MetadataVersionTooLow,
     /// The resolved metadata version is older than the finalized one.
     MetadataVersionDowngrade,
 }
@@ -152,6 +152,28 @@ pub fn evaluate(
                 "metadata.version {} is newer than kafkaVersion {}; upgrade the binary first",
                 resolved.short(),
                 binary.short()
+            ),
+        };
+    }
+
+    // The broker aborts on a finalized metadata.version below its
+    // supported floor (3.3-IV3). Refuse to inject one.
+    if let Some(mv) = crabka_metadata::metadata_version::from_version_string(&resolved.short()) {
+        if mv.feature_level() < crabka_metadata::metadata_version::METADATA_VERSION_MIN {
+            return VersionOutcome::Invalid {
+                reason: VersionReason::MetadataVersionTooLow,
+                message: format!(
+                    "metadata.version {} is below the broker's supported floor (3.3-IV3)",
+                    resolved.short()
+                ),
+            };
+        }
+    } else {
+        return VersionOutcome::Invalid {
+            reason: VersionReason::MetadataVersionTooLow,
+            message: format!(
+                "metadata.version {} is not a supported level",
+                resolved.short()
             ),
         };
     }
@@ -349,5 +371,24 @@ mod tests {
                 resolved_metadata: "3.7".into()
             }
         );
+    }
+
+    #[test]
+    fn resolved_below_broker_min_is_too_low() {
+        // 3.2 maps below the broker's metadata.version floor (3.3-IV3).
+        let out = evaluate("3.2.0", None, None);
+        assert!(matches!(
+            out,
+            VersionOutcome::Invalid {
+                reason: VersionReason::MetadataVersionTooLow,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn resolved_at_or_above_min_is_valid() {
+        let out = evaluate("3.7.0", None, None);
+        assert!(matches!(out, VersionOutcome::Valid { .. }));
     }
 }

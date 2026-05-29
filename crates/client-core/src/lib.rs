@@ -36,8 +36,12 @@
 //! - Producer / consumer semantics.
 //! - Transactions.
 //! - Partition-aware routing.
-//! - TLS / SASL.
 //! - Automatic mid-request retry.
+//!
+//! TLS / SASL: a client-side security surface lives in [`security`] and
+//! [`sasl`] — set [`ConnectionOptions::security`] (or the `Client`
+//! builder's `.security(...)`) to negotiate TLS then SASL before the
+//! API-versions bootstrap. `None` (the default) is plaintext.
 //!
 //! ## Cargo features
 //!
@@ -48,8 +52,11 @@ mod bootstrap;
 mod client;
 mod connection;
 mod error;
+mod fetch;
 mod pool;
 mod request;
+pub mod sasl;
+pub mod security;
 mod transport;
 mod version;
 
@@ -59,8 +66,11 @@ mod mock;
 pub use client::{BrokerHandle, Client};
 pub use connection::{ClientDuplex, Connection, ConnectionOptions};
 pub use error::ClientError;
+pub use fetch::{FetchedRecord, fetch_partition};
 pub use pool::{BrokerInfo, BrokerPool};
 pub use request::ProtocolRequest;
+pub use sasl::{OutboundSaslError, SaslCredentials, outbound_sasl};
+pub use security::{ClientSecurity, TlsConnectorConfig};
 pub use version::ApiVersionTable;
 
 #[cfg(any(test, feature = "mock"))]

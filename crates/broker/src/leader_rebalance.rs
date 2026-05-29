@@ -85,6 +85,15 @@ pub(crate) async fn rebalance_tick(
     if total == 0 {
         return;
     }
+    // Nothing imbalanced → nothing to do. Submitting an empty batch still
+    // writes a raft entry and re-broadcasts the metadata image, churning
+    // every broker's reconcile loop once per tick — which, at a 0%
+    // threshold + 1s interval, starves ISR re-admission of catching-up
+    // replicas. Bail before the threshold math (which can't gate the
+    // empty case at threshold 0, since `0 < 0` is false).
+    if to_submit.is_empty() {
+        return;
+    }
     let pct = (imbalanced * 100) / total;
     if pct < u64::from(cfg.imbalance_threshold_pct) {
         debug!(imbalanced, total, pct, "auto-rebalance: below threshold");
@@ -107,6 +116,18 @@ mod tests {
         image: Arc<MetadataImage>,
         is_leader: bool,
         submitted: Mutex<Vec<MetadataRecord>>,
+        submit_calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl MockController {
+        fn new(image: Arc<MetadataImage>, is_leader: bool) -> Self {
+            Self {
+                image,
+                is_leader,
+                submitted: Mutex::new(Vec::new()),
+                submit_calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
     }
 
     #[async_trait]
@@ -118,6 +139,8 @@ mod tests {
             self.image.clone()
         }
         async fn submit_change(&self, records: Vec<MetadataRecord>) -> Result<(), String> {
+            self.submit_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             self.submitted.lock().unwrap().extend(records);
             Ok(())
         }
@@ -174,11 +197,7 @@ mod tests {
     #[tokio::test]
     async fn below_threshold_skips_submit() {
         // 5 imbalanced out of 100 → 5%; threshold 10% → no submit.
-        let mock = MockController {
-            image: img_with_n_partitions(5, 95),
-            is_leader: true,
-            submitted: Mutex::new(Vec::new()),
-        };
+        let mock = MockController::new(img_with_n_partitions(5, 95), true);
         let liveness = liveness_all_alive().await;
         let cfg = AutoRebalanceConfig {
             check_interval: Duration::from_mins(5),
@@ -189,13 +208,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn zero_imbalance_does_not_submit_empty_batch() {
+        // Every partition is already balanced (leader == preferred). Even
+        // with threshold 0% the tick must NOT call submit_change: an empty
+        // batch still writes a spurious raft entry, which broadcasts the
+        // metadata image and churns every broker's reconcile loop once per
+        // tick (starving ISR re-admission of catching-up replicas).
+        let mock = MockController::new(img_with_n_partitions(0, 5), true);
+        let liveness = liveness_all_alive().await;
+        let cfg = AutoRebalanceConfig {
+            check_interval: Duration::from_secs(1),
+            imbalance_threshold_pct: 0,
+        };
+        rebalance_tick(&mock, &liveness, &cfg).await;
+        assert_eq!(
+            mock.submit_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "must not submit when there is nothing to rebalance"
+        );
+    }
+
+    #[tokio::test]
     async fn above_threshold_submits_imbalanced_set() {
         // 20 imbalanced out of 100 → 20%; threshold 10% → submit 20.
-        let mock = MockController {
-            image: img_with_n_partitions(20, 80),
-            is_leader: true,
-            submitted: Mutex::new(Vec::new()),
-        };
+        let mock = MockController::new(img_with_n_partitions(20, 80), true);
         let liveness = liveness_all_alive().await;
         let cfg = AutoRebalanceConfig {
             check_interval: Duration::from_mins(5),

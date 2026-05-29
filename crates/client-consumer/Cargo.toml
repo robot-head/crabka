@@ -27,6 +27,7 @@ futures-util = { workspace = true }
 [dev-dependencies]
 crabka-broker = { version = "0.1", path = "../broker" }
 crabka-log = { version = "0.1", path = "../log" }
+crabka-security = { version = "0.1", path = "../security" }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 proptest = { workspace = true }

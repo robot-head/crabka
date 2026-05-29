@@ -142,6 +142,8 @@ pub enum ListenerAuthentication {
     ScramSha256,
     #[serde(rename = "oauth")]
     OAuth(ListenerAuthenticationOAuth),
+    #[serde(rename = "gssapi")]
+    Gssapi(ListenerAuthenticationGssapi),
 }
 
 /// Config for `authentication: { type: oauth }` on a listener. The
@@ -353,6 +355,44 @@ pub struct OauthClientSecretRef {
     pub key: String,
 }
 
+/// Config for `authentication: { type: gssapi }`. Full parity with the
+/// broker's `GssapiConfig`. The reconciler renders these into the
+/// broker-global `[gssapi]` TOML block and appends `GSSAPI` to the
+/// listener's `sasl_mechanisms`. `[gssapi]` is broker-global, so all
+/// GSSAPI listeners on a cluster must agree (validated in a later task).
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ListenerAuthenticationGssapi {
+    /// Secret (same namespace as the `Kafka` CR) holding the service
+    /// keytab. Mounted into broker pods at a fixed path via projected items.
+    pub keytab_secret_ref: KeytabSecretRef,
+    /// `sasl.kerberos.service.name` (the SPN primary). Defaults to `kafka`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_name: Option<String>,
+    /// `auth_to_local` rule specs, applied in order; first match wins.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub principal_to_local_rules: Vec<String>,
+    /// Default Kerberos realm (used when a principal omits its realm).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub realm: Option<String>,
+    /// KDC endpoint (e.g. `tcp://kdc:88`) for the initiate path; falls
+    /// back to krb5.conf discovery when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kdc: Option<String>,
+}
+
+/// Reference to a Secret (same namespace as the `Kafka` CR) holding a
+/// Kerberos keytab. The operator mounts `key` at a fixed in-pod path so
+/// the broker reads it regardless of the user's key name.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct KeytabSecretRef {
+    /// Name of the Secret holding the keytab.
+    pub secret_name: String,
+    /// Key within the Secret whose value is the keytab bytes. Mounted at a fixed in-pod path regardless of this key name.
+    pub key: String,
+}
+
 fn listener_authentication_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
     schemars::json_schema!({
         "type": "object",
@@ -360,7 +400,7 @@ fn listener_authentication_schema(_: &mut schemars::SchemaGenerator) -> schemars
         "properties": {
             "type": {
                 "type": "string",
-                "enum": ["tls", "scram-sha-512", "scram-sha-256", "oauth"],
+                "enum": ["tls", "scram-sha-512", "scram-sha-256", "oauth", "gssapi"],
             },
             "validIssuerUri": { "type": "string", "minLength": 1 },
             "jwksEndpointUri": { "type": "string", "minLength": 1 },
@@ -403,6 +443,21 @@ fn listener_authentication_schema(_: &mut schemars::SchemaGenerator) -> schemars
             "jwksMinRefreshPauseSeconds": { "type": "integer", "format": "int32", "minimum": 0 },
             "jwksExpirySeconds":          { "type": "integer", "format": "int32", "minimum": 1 },
             "jwksIgnoreKeyUse":           { "type": "boolean" },
+            "keytabSecretRef": {
+                "type": "object",
+                "required": ["secretName", "key"],
+                "properties": {
+                    "secretName": { "type": "string", "minLength": 1 },
+                    "key":        { "type": "string", "minLength": 1 },
+                },
+            },
+            "serviceName": { "type": "string", "minLength": 1 },
+            "principalToLocalRules": {
+                "type": "array",
+                "items": { "type": "string", "minLength": 1 },
+            },
+            "realm": { "type": "string", "minLength": 1 },
+            "kdc": { "type": "string", "minLength": 1 },
         },
     })
 }
@@ -733,13 +788,13 @@ authentication:
         let schema = listener_authentication_schema(&mut generator);
         let v = serde_json::to_value(&schema).unwrap();
 
-        // Discriminator enum contains all four variants.
+        // Discriminator enum contains all five variants.
         let type_enum = v
             .pointer("/properties/type/enum")
             .and_then(|x| x.as_array())
             .expect("schema must have properties.type.enum array");
         let names: Vec<&str> = type_enum.iter().filter_map(|x| x.as_str()).collect();
-        for want in ["tls", "scram-sha-512", "scram-sha-256", "oauth"] {
+        for want in ["tls", "scram-sha-512", "scram-sha-256", "oauth", "gssapi"] {
             assert!(names.contains(&want), "missing {want} in {names:?}");
         }
 
@@ -776,6 +831,7 @@ authentication:
             "jwksMinRefreshPauseSeconds",
             "jwksExpirySeconds",
             "jwksIgnoreKeyUse",
+            "keytabSecretRef",
         ] {
             assert!(props.contains_key(want), "missing property {want}");
         }

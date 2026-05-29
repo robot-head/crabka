@@ -42,6 +42,13 @@ pub(crate) async fn handle<S: BuildHasher>(
     let caller = principal.to_kafka();
 
     let image = controller.current_image();
+    // KIP-48/KIP-778: KRaft delegation tokens require metadata.version >= 3.6-IV2.
+    if crate::features::metadata_version_blocks(
+        image.finalized_metadata_version(),
+        crabka_metadata::metadata_version::DELEGATION_TOKEN_MIN_LEVEL,
+    ) {
+        return err_response(crate::codes::UNSUPPORTED_VERSION);
+    }
     let Some(token) = image.delegation_token_by_hmac(req.hmac.as_ref()).cloned() else {
         return err_response(crate::codes::DELEGATION_TOKEN_NOT_FOUND);
     };

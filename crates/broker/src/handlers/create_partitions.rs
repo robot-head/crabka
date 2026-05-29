@@ -287,7 +287,8 @@ pub(crate) async fn handle(
                         let leader = replicas[0];
                         part.install_leader_change(leader, 0).await;
                         if leader == node_id {
-                            part.install_isr(replicas, leader).await;
+                            // At creation the ISR equals the full replica set.
+                            part.install_isr(replicas, replicas, leader).await;
                         }
                     }
                 }

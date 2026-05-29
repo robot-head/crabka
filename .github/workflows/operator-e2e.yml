@@ -231,7 +231,7 @@ jobs:
             name: demo
             namespace: default
           spec:
-            kafkaVersion: "0.1.1"
+            kafkaVersion: "3.7.0"
             config:
               log.retention.hours: "24"
           ---
@@ -332,7 +332,7 @@ jobs:
             name: jdemo
             namespace: jbod
           spec:
-            kafkaVersion: "0.1.1"
+            kafkaVersion: "3.7.0"
           ---
           apiVersion: crabka.io/v1alpha1
           kind: KafkaNodePool
@@ -521,7 +521,7 @@ jobs:
             name: ext
             namespace: default
           spec:
-            kafkaVersion: "0.1.1"
+            kafkaVersion: "3.7.0"
             listeners:
               - name: PLAIN
                 port: 9092
@@ -608,7 +608,7 @@ jobs:
             name: lb
             namespace: default
           spec:
-            kafkaVersion: "0.1.1"
+            kafkaVersion: "3.7.0"
             listeners:
               - name: PLAIN
                 port: 9092
@@ -937,7 +937,7 @@ jobs:
           kind: Kafka
           metadata: { name: demo, namespace: default }
           spec:
-            kafkaVersion: "0.1.1"
+            kafkaVersion: "3.7.0"
             listeners:
             - name: PLAIN
               port: 9092
@@ -1128,7 +1128,7 @@ jobs:
           kind: Kafka
           metadata: { name: demo, namespace: default }
           spec:
-            kafkaVersion: "0.1.1"
+            kafkaVersion: "3.7.0"
           ---
           apiVersion: crabka.io/v1alpha1
           kind: KafkaNodePool
@@ -1426,7 +1426,7 @@ jobs:
             name: demo
             namespace: default
           spec:
-            kafkaVersion: "0.1.1"
+            kafkaVersion: "3.7.0"
             listeners:
               - name: PLAIN
                 port: 9092
@@ -1759,7 +1759,7 @@ jobs:
             name: demo-mtls
             namespace: default
           spec:
-            kafkaVersion: "0.1.1"
+            kafkaVersion: "3.7.0"
             listeners:
               - name: PLAIN
                 port: 9092
@@ -2143,7 +2143,7 @@ jobs:
             name: demo
             namespace: default
           spec:
-            kafkaVersion: "0.1.1"
+            kafkaVersion: "3.7.0"
             delegationToken:
               secretKeyRef:
                 name: delegation-token-key
@@ -2492,7 +2492,7 @@ jobs:
             name: demo
             namespace: default
           spec:
-            kafkaVersion: "0.1.1"
+            kafkaVersion: "3.7.0"
             listeners:
               - name: PLAIN
                 port: 9092
@@ -3043,7 +3043,7 @@ jobs:
             name: demo
             namespace: default
           spec:
-            kafkaVersion: "0.1.1"
+            kafkaVersion: "3.7.0"
             listeners:
               - name: PLAIN
                 port: 9092
@@ -3720,7 +3720,7 @@ jobs:
             name: demo
             namespace: default
           spec:
-            kafkaVersion: "0.1.1"
+            kafkaVersion: "3.7.0"
             listeners:
               - name: PLAIN
                 port: 9092

@@ -208,6 +208,104 @@ impl Segment {
         self.max_timestamp
     }
 
+    /// Absolute offset and record timestamp of the first record in this
+    /// segment whose timestamp is `>= target_ts`. Uses the sparse time
+    /// index for a floor position, then scans `.log` batches forward
+    /// (the index is sparse, so an exact answer needs the post-index
+    /// scan — matching Kafka's `LogSegment.findOffsetByTimestamp`).
+    /// Returns `None` when no record in this segment qualifies.
+    #[must_use]
+    pub fn offset_for_timestamp(&self, target_ts: i64) -> Option<(i64, i64)> {
+        let floor_rel = self.time_index.lookup(target_ts);
+        let scan_from = self.base_offset + i64::from(floor_rel);
+        self.scan_from_floor(scan_from, |ts| ts >= target_ts)
+    }
+
+    /// Absolute offset and timestamp of the record carrying this
+    /// segment's `max_timestamp`. Ties resolve to the earliest offset
+    /// (Kafka). Returns `None` for an empty segment. Uses the time
+    /// index's floor for the max to start the scan, then scans forward
+    /// for the first record whose timestamp equals the segment max.
+    #[must_use]
+    pub fn offset_of_max_timestamp(&self) -> Option<(i64, i64)> {
+        if self.max_timestamp == i64::MIN {
+            return None;
+        }
+        let floor_rel = self.time_index.lookup(self.max_timestamp);
+        let scan_from = self.base_offset + i64::from(floor_rel);
+        // Equality against `max_timestamp` is safe because Kafka's batch
+        // `max_timestamp` is always a real record timestamp (the largest
+        // among the batch's records), so some record's timestamp equals
+        // the segment max exactly.
+        self.scan_from_floor(scan_from, |ts| ts == self.max_timestamp)
+    }
+
+    /// Scan `.log` batches forward from `floor_offset`, returning the
+    /// (absolute offset, timestamp) of the first record whose timestamp
+    /// satisfies `pred`, or `None` at end of segment.
+    ///
+    /// Reads in bounded windows rather than slurping the whole segment
+    /// tail: the common case (a match within the first window) costs one
+    /// small read. When a window yields no match, the cursor advances
+    /// past the last batch read and the next window is fetched. The loop
+    /// terminates once the cursor passes `last_offset` (see termination
+    /// argument in [`Segment::scan_from_floor_windowed`]).
+    fn scan_from_floor(&self, floor_offset: i64, pred: impl Fn(i64) -> bool) -> Option<(i64, i64)> {
+        // One window roughly covers a default index interval's worth of
+        // log bytes, so a floor lookup typically lands a match in the
+        // first read.
+        const SCAN_WINDOW_BYTES: usize = 64 * 1024;
+        self.scan_from_floor_windowed(floor_offset, SCAN_WINDOW_BYTES, pred)
+    }
+
+    /// Window-size-parameterized core of [`Segment::scan_from_floor`].
+    /// Split out so tests can force multi-window scans with a tiny window.
+    ///
+    /// Termination: each iteration either (a) returns a match, (b) returns
+    /// `None` because `cursor > last_offset`, or (c) decodes at least one
+    /// full batch and advances `cursor` strictly past it. `read` caps
+    /// reads at `max_bytes` and (unlike `read_raw`) has no anti-stall
+    /// guarantee, so a single batch larger than the window decodes to an
+    /// empty `Vec`; we detect that (empty result while `cursor` is still
+    /// within the segment) and double the window before retrying, so the
+    /// window is bounded by the largest batch rather than the whole tail.
+    fn scan_from_floor_windowed(
+        &self,
+        floor_offset: i64,
+        window_bytes: usize,
+        pred: impl Fn(i64) -> bool,
+    ) -> Option<(i64, i64)> {
+        let mut cursor = floor_offset;
+        let mut window = window_bytes.max(1);
+        loop {
+            if cursor > self.last_offset {
+                return None;
+            }
+            let batches = self.read(cursor, window).ok()?;
+            if batches.is_empty() {
+                // The batch at `cursor` is larger than the window, so it
+                // could not be fully decoded. Grow the window and retry
+                // the same cursor; bounded by the largest batch size.
+                window = window.saturating_mul(2);
+                continue;
+            }
+            for batch in &batches {
+                for rec in &batch.records {
+                    let ts = batch.base_timestamp + rec.timestamp_delta;
+                    if pred(ts) {
+                        return Some((batch.base_offset + i64::from(rec.offset_delta), ts));
+                    }
+                }
+            }
+            // No match in this window; resume just past the last batch
+            // read. `read` includes the batch covering `cursor`, so
+            // `last_read` >= cursor and the cursor strictly advances.
+            let last = batches.last().expect("non-empty checked above");
+            let last_read = last.base_offset + i64::from(last.last_offset_delta);
+            cursor = last_read + 1;
+        }
+    }
+
     /// `true` once the segment has been sealed via [`Segment::seal`];
     /// sealed segments reject appends.
     #[must_use]
@@ -479,7 +577,7 @@ mod tests {
         let mut b = RecordBatch {
             base_offset,
             base_timestamp: ts_base,
-            max_timestamp: ts_base + i64::from(n),
+            max_timestamp: ts_base + i64::from(n - 1),
             last_offset_delta: n - 1,
             ..RecordBatch::default()
         };
@@ -493,6 +591,103 @@ mod tests {
             });
         }
         b
+    }
+
+    #[test]
+    fn offset_for_timestamp_finds_first_ge() {
+        let dir = tempdir().unwrap();
+        let mut seg = Segment::create(dir.path(), 0).unwrap();
+        // Two batches: offsets 0..=2 ts 100..=102, offsets 3..=4 ts 200..=201.
+        seg.append(&sample_batch(0, 3, 100), 0).unwrap();
+        seg.append(&sample_batch(3, 2, 200), 0).unwrap();
+        // sample_batch sets per-record timestamp_delta = i, base_timestamp = ts_base.
+        // Batch 1 records: (off0,ts100),(off1,ts101),(off2,ts102).
+        // Batch 2 records: (off3,ts200),(off4,ts201).
+        assert_eq!(seg.offset_for_timestamp(100), Some((0, 100)));
+        assert_eq!(seg.offset_for_timestamp(101), Some((1, 101)));
+        assert_eq!(seg.offset_for_timestamp(150), Some((3, 200)));
+        assert_eq!(seg.offset_for_timestamp(201), Some((4, 201)));
+        assert_eq!(seg.offset_for_timestamp(202), None);
+        drop(dir);
+    }
+
+    #[test]
+    fn scan_from_floor_finds_match_beyond_first_window() {
+        let dir = tempdir().unwrap();
+        let mut seg = Segment::create(dir.path(), 0).unwrap();
+        // Many single-record batches with increasing timestamps. With a
+        // tiny scan window each batch lands in its own window, so a match
+        // at the tail forces the windowed loop to advance many times.
+        let n = 50i64;
+        for off in 0..n {
+            let mut b = RecordBatch {
+                base_offset: off,
+                base_timestamp: 1_000 + off,
+                max_timestamp: 1_000 + off,
+                last_offset_delta: 0,
+                ..RecordBatch::default()
+            };
+            b.records.push(Record {
+                offset_delta: 0,
+                timestamp_delta: 0,
+                value: Some(Bytes::from(format!("v{off}"))),
+                ..Default::default()
+            });
+            seg.append(&b, 0).unwrap();
+        }
+        // A window of 1 byte forces one batch per read (anti-stall rule).
+        // Target ts is the very last record's, so the loop must advance
+        // through every window before matching.
+        let target = 1_000 + (n - 1);
+        let got = seg.scan_from_floor_windowed(0, 1, |ts| ts >= target);
+        assert_eq!(got, Some((n - 1, target)));
+        // No-match case must terminate (cursor passes last_offset) → None.
+        let none = seg.scan_from_floor_windowed(0, 1, |ts| ts > 10_000);
+        assert_eq!(none, None);
+        drop(dir);
+    }
+
+    #[test]
+    fn offset_of_max_timestamp_earliest_on_tie() {
+        let dir = tempdir().unwrap();
+        let mut seg = Segment::create(dir.path(), 0).unwrap();
+        // Batch records ts: 100,101,102 (max in batch = 102 at offset 2).
+        seg.append(&sample_batch(0, 3, 100), 0).unwrap();
+        // Second batch: offsets 3,4 ts 200,201 — segment max becomes 201 @4.
+        seg.append(&sample_batch(3, 2, 200), 0).unwrap();
+        assert_eq!(seg.offset_of_max_timestamp(), Some((4, 201)));
+
+        // Empty segment → None.
+        let dir2 = tempdir().unwrap();
+        let empty = Segment::create(dir2.path(), 0).unwrap();
+        assert_eq!(empty.offset_of_max_timestamp(), None);
+        drop(dir);
+        drop(dir2);
+    }
+
+    #[test]
+    fn offset_of_max_timestamp_tie_picks_earliest() {
+        let dir = tempdir().unwrap();
+        let mut seg = Segment::create(dir.path(), 0).unwrap();
+        // All three records share timestamp 500; earliest offset is 0.
+        let mut b = RecordBatch {
+            base_offset: 0,
+            base_timestamp: 500,
+            max_timestamp: 500,
+            last_offset_delta: 2,
+            ..RecordBatch::default()
+        };
+        for i in 0..3 {
+            b.records.push(Record {
+                offset_delta: i,
+                timestamp_delta: 0,
+                value: Some(Bytes::from("v")),
+                ..Default::default()
+            });
+        }
+        seg.append(&b, 0).unwrap();
+        assert_eq!(seg.offset_of_max_timestamp(), Some((0, 500)));
+        drop(dir);
     }
 
     #[test]

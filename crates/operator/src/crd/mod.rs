@@ -15,8 +15,8 @@ pub mod user;
 
 pub use ca::{CertificateAuthority, CertificateAuthorityStatus};
 pub use kafka::{
-    Authorization, Kafka, KafkaCondition, KafkaSpec, KafkaStatus, OpaAuthorization,
-    SimpleAuthorization,
+    Authorization, InterBrokerKerberos, Kafka, KafkaCondition, KafkaSpec, KafkaStatus,
+    Krb5ConfSecretRef, OpaAuthorization, SimpleAuthorization,
 };
 pub use kafka_node_pool::{
     JbodSpec, JbodVolume, KafkaNodePool, KafkaNodePoolSpec, KafkaNodePoolStatus, MetadataTemplate,

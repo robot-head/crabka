@@ -38,6 +38,7 @@
 #![doc(html_root_url = "https://docs.rs/crabka-remote-storage/0.1.1")]
 
 mod cache;
+pub mod dump;
 mod error;
 mod inmemory;
 mod local;
@@ -46,6 +47,7 @@ mod metadata_manager;
 mod s3;
 mod storage_manager;
 
+pub use dump::{PartitionDump, RlmmCacheDump};
 pub use error::RemoteStorageError;
 pub use inmemory::InmemoryRemoteLogMetadataManager;
 pub use local::LocalTieredStorage;

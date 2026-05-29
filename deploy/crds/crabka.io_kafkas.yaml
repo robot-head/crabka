@@ -164,6 +164,30 @@ spec:
                 required:
                 - secretKeyRef
                 type: object
+              interBrokerKerberos:
+                description: |-
+                  Inter-broker Kerberos initiate config. Required when
+                  `interBrokerListenerName` resolves to a `type: gssapi` listener;
+                  supplies the shared client principal + KDC. The keytab is reused
+                  from that listener's `keytabSecretRef`.
+                nullable: true
+                properties:
+                  clientPrincipal:
+                    description: |-
+                      Principal every broker authenticates as when dialing peers, e.g.
+                      `kafka@EXAMPLE.COM`. Must exist in the shared keytab.
+                    type: string
+                  kdcUrl:
+                    description: KDC endpoint, e.g. `tcp://kdc:88`.
+                    type: string
+                  serviceName:
+                    description: Target SPN primary. Defaults to `kafka`.
+                    nullable: true
+                    type: string
+                required:
+                - clientPrincipal
+                - kdcUrl
+                type: object
               interBrokerListenerName:
                 description: |-
                   Name of the listener used for inter-broker traffic.
@@ -176,6 +200,22 @@ spec:
                   Crabka version label, propagated to all pool pods via the
                   `app.kubernetes.io/version` label.
                 type: string
+              krb5ConfSecretRef:
+                description: |-
+                  Optional process-wide `krb5.conf`. Mounted into broker pods and
+                  pointed at via `KRB5_CONFIG`; serves both accept and initiate paths.
+                nullable: true
+                properties:
+                  key:
+                    description: Key within the Secret whose value is the krb5.conf contents.
+                    type: string
+                  secretName:
+                    description: Name of the Secret holding the krb5.conf.
+                    type: string
+                required:
+                - key
+                - secretName
+                type: object
               listeners:
                 description: |-
                   Named listeners. Empty (or absent) synthesizes a
@@ -245,6 +285,21 @@ spec:
                         jwksRefreshSeconds:
                           minimum: 0.0
                           type: integer
+                        kdc:
+                          minLength: 1
+                          type: string
+                        keytabSecretRef:
+                          properties:
+                            key:
+                              minLength: 1
+                              type: string
+                            secretName:
+                              minLength: 1
+                              type: string
+                          required:
+                          - key
+                          - secretName
+                          type: object
                         maxClockSkewSeconds:
                           minimum: 0.0
                           type: integer
@@ -252,6 +307,17 @@ spec:
                           format: int32
                           minimum: 1.0
                           type: integer
+                        principalToLocalRules:
+                          items:
+                            minLength: 1
+                            type: string
+                          type: array
+                        realm:
+                          minLength: 1
+                          type: string
+                        serviceName:
+                          minLength: 1
+                          type: string
                         tlsTrustedCertificates:
                           items:
                             properties:
@@ -272,6 +338,7 @@ spec:
                           - scram-sha-512
                           - scram-sha-256
                           - oauth
+                          - gssapi
                           type: string
                         userInfoEndpointUri:
                           minLength: 1

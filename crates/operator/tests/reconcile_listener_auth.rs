@@ -10,9 +10,9 @@ use http::{Method, Response};
 mod shared;
 
 use shared::{
-    MockRule, build_ctx, fake_ca_secret, fake_kafka_body, fake_keystore_secret, fake_pool_body,
-    fake_pool_list_body, fake_pool_list_item, fake_secret_body, fake_service_body,
-    happy_path_rules, json_response, not_found_body,
+    MockRule, build_ctx, extract_broker0_toml, fake_ca_secret, fake_kafka_body,
+    fake_keystore_secret, fake_pool_body, fake_pool_list_body, fake_pool_list_item,
+    fake_secret_body, fake_service_body, happy_path_rules, json_response, not_found_body,
 };
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -36,6 +36,8 @@ fn kafka_cr_with_listeners(name: &str, namespace: &str, listeners: Vec<Listener>
             delegation_token: None,
             authorization: None,
             tiered_storage: None,
+            inter_broker_kerberos: None,
+            krb5_conf_secret_ref: None,
             tracing: None,
         },
     );
@@ -59,37 +61,6 @@ fn internal_listener(
         configuration: None,
         network_policy_peers: None,
     }
-}
-
-/// Extract the `broker-0.toml` string from a `ConfigMap` PATCH body captured
-/// in `observed`. Panics with a diagnostic message if not found.
-fn extract_broker0_toml(observed: &[http::Request<hyper::body::Bytes>], cluster: &str) -> String {
-    let cm_patch = observed
-        .iter()
-        .find(|r| {
-            r.method() == Method::PATCH
-                && r.uri()
-                    .to_string()
-                    .contains(&format!("/configmaps/{cluster}-broker-config"))
-        })
-        .unwrap_or_else(|| panic!("ConfigMap PATCH not found for cluster {cluster}"));
-
-    let body: serde_json::Value =
-        serde_json::from_slice(cm_patch.body()).expect("ConfigMap PATCH body is JSON");
-    let data = body
-        .get("data")
-        .and_then(|d| d.as_object())
-        .unwrap_or_else(|| panic!("ConfigMap PATCH has no data object; body = {body}"));
-
-    data.get("broker-0.toml")
-        .and_then(|v| v.as_str())
-        .unwrap_or_else(|| {
-            panic!(
-                "broker-0.toml missing; data keys = {:?}",
-                data.keys().collect::<Vec<_>>()
-            )
-        })
-        .to_string()
 }
 
 // ── test 1 ────────────────────────────────────────────────────────────────────

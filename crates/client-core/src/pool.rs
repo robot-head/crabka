@@ -52,7 +52,7 @@ impl BrokerPool {
             .get(&broker_id)
             .map(|e| *e)
             .ok_or(ClientError::Disconnected)?;
-        let conn = Arc::new(Connection::connect(addr, self.options.clone()).await?);
+        let conn = Arc::new(Connection::connect_with_options(addr, self.options.clone()).await?);
         self.by_id.insert(broker_id, conn.clone());
         Ok(conn)
     }
@@ -66,7 +66,7 @@ impl BrokerPool {
         }
         let mut last_err: Option<ClientError> = None;
         for addr in &self.bootstrap {
-            match Connection::connect(*addr, self.options.clone()).await {
+            match Connection::connect_with_options(*addr, self.options.clone()).await {
                 Ok(c) => {
                     let arc = Arc::new(c);
                     self.by_id.insert(BOOTSTRAP_ID, arc.clone());

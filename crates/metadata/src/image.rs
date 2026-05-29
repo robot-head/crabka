@@ -320,6 +320,35 @@ impl MetadataImage {
         self.features_epoch
     }
 
+    /// The finalized `metadata.version` level, or `None` if no
+    /// `V1FeatureLevel` for `metadata.version` has been applied
+    /// (a pre-bootstrap / legacy image — `MetadataVersion.UNKNOWN`).
+    #[must_use]
+    pub fn finalized_metadata_version(&self) -> Option<i16> {
+        self.feature_levels
+            .get(crate::metadata_version::METADATA_VERSION_FEATURE)
+            .copied()
+    }
+
+    /// The minimum `metadata.version` level the live image requires: the
+    /// floor a downgrade must not drop below. Rises with feature-gated
+    /// state present in the image (`KRaft` SCRAM creds, delegation tokens).
+    /// Baseline is `METADATA_VERSION_MIN`.
+    #[must_use]
+    pub fn min_required_metadata_version(&self) -> i16 {
+        use crate::metadata_version::{
+            DELEGATION_TOKEN_MIN_LEVEL, METADATA_VERSION_MIN, SCRAM_MIN_LEVEL,
+        };
+        let mut floor = METADATA_VERSION_MIN;
+        if !self.scram_credentials.is_empty() {
+            floor = floor.max(SCRAM_MIN_LEVEL);
+        }
+        if !self.delegation_tokens.is_empty() {
+            floor = floor.max(DELEGATION_TOKEN_MIN_LEVEL);
+        }
+        floor
+    }
+
     /// Apply one record. Returns the previous record (for `V1Topic` /
     /// `V1BrokerRegistration`) so the caller can observe overwrite cases.
     /// Infallible — pre-validation against the current image happens
@@ -1716,5 +1745,60 @@ mod tests {
         assert_eq!(pairs[0].0, SaslMechanism::ScramSha512);
         assert_eq!(pairs[0].1, 8192);
         assert!(img.scram_credentials_for_user("ghost").is_empty());
+    }
+
+    #[test]
+    fn finalized_metadata_version_reads_feature_map() {
+        use crate::records::FeatureLevelRecord;
+        let mut m = img();
+        assert_eq!(m.finalized_metadata_version(), None);
+        m.apply(&MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+            name: "metadata.version".into(),
+            level: 19,
+        }));
+        assert_eq!(m.finalized_metadata_version(), Some(19));
+    }
+
+    #[test]
+    fn min_required_metadata_version_baseline_is_min() {
+        use crate::metadata_version::METADATA_VERSION_MIN;
+        let m = img();
+        assert_eq!(m.min_required_metadata_version(), METADATA_VERSION_MIN);
+    }
+
+    #[test]
+    fn min_required_metadata_version_rises_with_scram_and_tokens() {
+        use crate::metadata_version::{DELEGATION_TOKEN_MIN_LEVEL, SCRAM_MIN_LEVEL};
+        use crabka_security::{KafkaPrincipal, SaslMechanism};
+        let mut m = img();
+        m.apply(&MetadataRecord::V1ScramCredential(
+            crate::records::ScramCredentialRecord {
+                user: "alice".into(),
+                mechanism: SaslMechanism::ScramSha512,
+                salt: vec![1; 16],
+                stored_key: vec![2; 64],
+                server_key: vec![3; 64],
+                iterations: 4096,
+            },
+        ));
+        assert_eq!(m.min_required_metadata_version(), SCRAM_MIN_LEVEL);
+        m.apply(&MetadataRecord::V1DelegationToken(
+            crate::records::DelegationTokenRecord {
+                token_id: "t1".into(),
+                owner: KafkaPrincipal {
+                    principal_type: "User".into(),
+                    name: "alice".into(),
+                },
+                hmac: vec![0x42; 32],
+                issue_timestamp_ms: 1,
+                expiry_timestamp_ms: 5,
+                max_timestamp_ms: 10,
+                renewers: vec![],
+            },
+        ));
+        assert_eq!(
+            m.min_required_metadata_version(),
+            DELEGATION_TOKEN_MIN_LEVEL
+        );
     }
 }
