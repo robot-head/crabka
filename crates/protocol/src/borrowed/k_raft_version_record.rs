@@ -46,24 +46,25 @@ mod tests {
     fn check(msg_bytes: &bytes::Bytes, v: i16) {
         let mut cur: &[u8] = msg_bytes;
         let decoded = KRaftVersionRecord::decode_borrow(&mut cur, v).unwrap();
-        assert!(cur.is_empty(), "decoder left trailing bytes at v{v}");
-        assert_eq!(decoded.encoded_len(v), msg_bytes.len(), "encoded_len != bytes at v{v}");
+        assert!(cur.is_empty());
+        assert_eq!(decoded.encoded_len(v), msg_bytes.len());
         let mut reencoded = BytesMut::new();
         decoded.encode(&mut reencoded, v).unwrap();
-        assert_eq!(&reencoded[..], &msg_bytes[..], "re-encode differs at v{v}");
+        assert_eq!(&reencoded[..], &msg_bytes[..]);
         // Exercise the zero-copy -> owned conversion, then confirm the owned
         // value still encodes to the same bytes.
         let owned = decoded.to_owned();
         let mut owned_buf = BytesMut::new();
         owned.encode(&mut owned_buf, v).unwrap();
-        assert_eq!(&owned_buf[..], &msg_bytes[..], "owned re-encode differs at v{v}");
+        assert_eq!(&owned_buf[..], &msg_bytes[..]);
     }
 
     #[test]
     fn default_roundtrips_all_versions() {
         for v in MIN_VERSION..=MAX_VERSION {
+            let msg = KRaftVersionRecord::default();
             let mut buf = BytesMut::new();
-            KRaftVersionRecord::default().encode(&mut buf, v).unwrap();
+            msg.encode(&mut buf, v).unwrap();
             check(&buf.freeze(), v);
         }
     }
@@ -71,8 +72,9 @@ mod tests {
     #[test]
     fn populated_roundtrips_all_versions() {
         for v in MIN_VERSION..=MAX_VERSION {
+            let msg = KRaftVersionRecord::populated(v);
             let mut buf = BytesMut::new();
-            KRaftVersionRecord::populated(v).encode(&mut buf, v).unwrap();
+            msg.encode(&mut buf, v).unwrap();
             check(&buf.freeze(), v);
         }
     }
