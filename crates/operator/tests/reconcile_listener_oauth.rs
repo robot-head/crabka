@@ -26,7 +26,7 @@ use http::Method;
 #[path = "shared/mod.rs"]
 mod shared;
 
-use shared::{MockRule, build_ctx, happy_path_rules, json_response};
+use shared::{MockRule, build_ctx, extract_broker0_toml, happy_path_rules, json_response};
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -47,6 +47,8 @@ fn kafka_cr_with_listeners(name: &str, namespace: &str, listeners: Vec<Listener>
             delegation_token: None,
             authorization: None,
             tiered_storage: None,
+            inter_broker_kerberos: None,
+            krb5_conf_secret_ref: None,
             tracing: None,
         },
     );
@@ -128,38 +130,6 @@ fn oauth_cfg_full() -> ListenerAuthenticationOAuth {
         jwks_expiry_seconds: None,
         jwks_ignore_key_use: None,
     }
-}
-
-/// Extract the `broker-0.toml` string from the `ConfigMap` PATCH captured
-/// in `observed`. Panics with a diagnostic message if the PATCH (or the
-/// key) is missing.
-fn extract_broker0_toml(observed: &[http::Request<hyper::body::Bytes>], cluster: &str) -> String {
-    let cm_patch = observed
-        .iter()
-        .find(|r| {
-            r.method() == Method::PATCH
-                && r.uri()
-                    .to_string()
-                    .contains(&format!("/configmaps/{cluster}-broker-config"))
-        })
-        .unwrap_or_else(|| panic!("ConfigMap PATCH not found for cluster {cluster}"));
-
-    let body: serde_json::Value =
-        serde_json::from_slice(cm_patch.body()).expect("ConfigMap PATCH body is JSON");
-    let data = body
-        .get("data")
-        .and_then(|d| d.as_object())
-        .unwrap_or_else(|| panic!("ConfigMap PATCH has no data object; body = {body}"));
-
-    data.get("broker-0.toml")
-        .and_then(|v| v.as_str())
-        .unwrap_or_else(|| {
-            panic!(
-                "broker-0.toml missing; data keys = {:?}",
-                data.keys().collect::<Vec<_>>()
-            )
-        })
-        .to_string()
 }
 
 /// Find the `ListenersValid` condition in the status PATCH and assert

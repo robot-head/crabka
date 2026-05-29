@@ -16,6 +16,7 @@ mock = []
 
 [dependencies]
 crabka-protocol = { version = "0.1", path = "../protocol", default-features = false }
+crabka-security = { version = "0.1", path = "../security" }
 bon = { workspace = true }
 bytes = { workspace = true }
 thiserror = { workspace = true }
@@ -24,6 +25,9 @@ tokio-util = { workspace = true, features = ["codec", "rt"] }
 dashmap = { workspace = true }
 tracing = { workspace = true }
 futures-util = { workspace = true }
+rustls = { workspace = true }
+rustls-pki-types = { workspace = true }
+tokio-rustls = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

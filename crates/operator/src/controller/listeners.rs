@@ -17,12 +17,14 @@ use crabka_security::ca::SubjectAltName;
 use crabka_security::{ListenerProtocol, SaslMechanism};
 
 pub(crate) fn listener_protocol(l: &Listener) -> ListenerProtocol {
-    use ListenerAuthentication::{OAuth, ScramSha256, ScramSha512, Tls};
+    use ListenerAuthentication::{Gssapi, OAuth, ScramSha256, ScramSha512, Tls};
     match (l.tls, &l.authentication) {
         (false, None) => ListenerProtocol::Plaintext,
         (true, None | Some(Tls)) => ListenerProtocol::Ssl,
-        (false, Some(ScramSha512 | ScramSha256 | OAuth(_))) => ListenerProtocol::SaslPlaintext,
-        (true, Some(ScramSha512 | ScramSha256 | OAuth(_))) => ListenerProtocol::SaslSsl,
+        (false, Some(ScramSha512 | ScramSha256 | OAuth(_) | Gssapi(_))) => {
+            ListenerProtocol::SaslPlaintext
+        }
+        (true, Some(ScramSha512 | ScramSha256 | OAuth(_) | Gssapi(_))) => ListenerProtocol::SaslSsl,
         (false, Some(Tls)) => unreachable!(
             "validation rejects mTLS without transport TLS; saw listener '{}'",
             l.name
@@ -41,6 +43,7 @@ fn sasl_mechanism(auth: &ListenerAuthentication) -> Option<SaslMechanism> {
                 None
             }
         }
+        ListenerAuthentication::Gssapi(_) => Some(SaslMechanism::Gssapi),
         ListenerAuthentication::Tls => None,
     }
 }
@@ -106,6 +109,16 @@ pub enum ValidationError {
     /// `introspectionEndpointUri` + `clientId` + `clientSecret` and forbids
     /// `jwksEndpointUri`.
     ListenerOauthAccessTokenIsJwtInvalid(String),
+    /// `type: gssapi` listener missing `keytabSecretRef` (secretName/key).
+    ListenerGssapiKeytabSecretMissing(String),
+    /// A `principalToLocalRules` entry failed `auth_to_local` parsing.
+    ListenerGssapiInvalidRule(String),
+    /// Two or more GSSAPI listeners declare differing config. The broker
+    /// `[gssapi]` block is broker-global, so divergence isn't representable.
+    ConflictingGssapiListenerConfig,
+    /// The inter-broker listener is `type: gssapi` but
+    /// `spec.interBrokerKerberos` is absent.
+    InterBrokerGssapiRequiresKerberosConfig(String),
 }
 
 #[allow(dead_code)]
@@ -134,6 +147,12 @@ impl ValidationError {
             }
             Self::ConflictingOAuthListenerConfig => "ConflictingOAuthConfig",
             Self::ListenerOauthAccessTokenIsJwtInvalid(_) => "ListenerOauthAccessTokenIsJwtInvalid",
+            Self::ListenerGssapiKeytabSecretMissing(_) => "ListenerGssapiKeytabSecretMissing",
+            Self::ListenerGssapiInvalidRule(_) => "ListenerGssapiInvalidRule",
+            Self::ConflictingGssapiListenerConfig => "ListenerGssapiConfigConflict",
+            Self::InterBrokerGssapiRequiresKerberosConfig(_) => {
+                "InterBrokerGssapiRequiresKerberosConfig"
+            }
         }
     }
 
@@ -187,7 +206,17 @@ impl ValidationError {
             }
             Self::ListenerOauthAccessTokenIsJwtInvalid(msg)
             | Self::ListenerOauthValidTokenTypeRejectedInIntrospectionMode(msg)
-            | Self::ListenerOauthJwksFieldsRejectedInIntrospectionMode(msg) => msg.clone(),
+            | Self::ListenerOauthJwksFieldsRejectedInIntrospectionMode(msg)
+            | Self::ListenerGssapiInvalidRule(msg) => msg.clone(),
+            Self::ListenerGssapiKeytabSecretMissing(n) => {
+                format!("listener '{n}': authentication.type=gssapi requires keytabSecretRef.secretName and .key")
+            }
+            Self::ConflictingGssapiListenerConfig => {
+                "all GSSAPI listeners must share identical config (the broker [gssapi] block is broker-global)".to_string()
+            }
+            Self::InterBrokerGssapiRequiresKerberosConfig(n) => format!(
+                "interBrokerListenerName='{n}' is type=gssapi but spec.interBrokerKerberos is not set"
+            ),
         }
     }
 }
@@ -204,6 +233,16 @@ fn oauth_canonical(cfg: &ListenerAuthenticationOAuth) -> ListenerAuthenticationO
     let mut out = cfg.clone();
     out.enable_oauth_bearer = true;
     out
+}
+
+/// Canonical form for cross-listener GSSAPI conflict detection. The broker
+/// `[gssapi]` block is broker-global, so every field must agree across
+/// GSSAPI listeners. Compare the whole struct.
+#[must_use]
+fn gssapi_canonical(
+    cfg: &crate::crd::ListenerAuthenticationGssapi,
+) -> crate::crd::ListenerAuthenticationGssapi {
+    cfg.clone()
 }
 
 /// Validate `spec.listeners` + `spec.interBrokerListenerName`. Returns
@@ -354,6 +393,22 @@ pub fn validate_listeners(
                 });
             }
         }
+        if let Some(ListenerAuthentication::Gssapi(cfg)) = &l.authentication {
+            if cfg.keytab_secret_ref.secret_name.is_empty() || cfg.keytab_secret_ref.key.is_empty()
+            {
+                return Err(ValidationError::ListenerGssapiKeytabSecretMissing(
+                    l.name.clone(),
+                ));
+            }
+            for spec in &cfg.principal_to_local_rules {
+                if crabka_security::gssapi::name::Rule::parse(spec).is_err() {
+                    return Err(ValidationError::ListenerGssapiInvalidRule(format!(
+                        "listener '{}': invalid principalToLocalRules entry {spec:?}",
+                        l.name
+                    )));
+                }
+            }
+        }
         if matches!(l.type_, ListenerType::Ingress | ListenerType::Route) {
             if !l.tls {
                 return Err(ValidationError::ListenerIngressRequiresTls(l.name.clone()));
@@ -411,6 +466,21 @@ pub fn validate_listeners(
         return Err(ValidationError::ConflictingOAuthListenerConfig);
     }
 
+    // Broker-global [gssapi] block: all GSSAPI listeners must agree.
+    let mut gssapi_canon: Option<crate::crd::ListenerAuthenticationGssapi> = None;
+    for l in listeners {
+        if let Some(ListenerAuthentication::Gssapi(cfg)) = &l.authentication {
+            let canon = gssapi_canonical(cfg);
+            match &gssapi_canon {
+                None => gssapi_canon = Some(canon),
+                Some(prev) if *prev != canon => {
+                    return Err(ValidationError::ConflictingGssapiListenerConfig);
+                }
+                Some(_) => {}
+            }
+        }
+    }
+
     // Inter-broker listener resolution.
     if !listeners.is_empty() {
         let has_internal = listeners.iter().any(|l| l.type_ == ListenerType::Internal);
@@ -428,6 +498,25 @@ pub fn validate_listeners(
         }
     }
 
+    Ok(())
+}
+
+/// When the resolved inter-broker listener uses GSSAPI, `spec.interBrokerKerberos`
+/// must be present. `ib_kerberos_present` is `spec.inter_broker_kerberos.is_some()`.
+pub fn validate_inter_broker_gssapi(
+    listeners: &[Listener],
+    inter_broker_listener_name: &str,
+    ib_kerberos_present: bool,
+) -> Result<(), ValidationError> {
+    let ib_is_gssapi = listeners.iter().any(|l| {
+        l.name == inter_broker_listener_name
+            && matches!(l.authentication, Some(ListenerAuthentication::Gssapi(_)))
+    });
+    if ib_is_gssapi && !ib_kerberos_present {
+        return Err(ValidationError::InterBrokerGssapiRequiresKerberosConfig(
+            inter_broker_listener_name.to_string(),
+        ));
+    }
     Ok(())
 }
 
@@ -678,6 +767,14 @@ pub(crate) const INGRESS_PORT: i32 = 443;
 /// `tier-storage` `volumeMount` so the broker's `LocalTieredStorage`
 /// writes through one canonical location.
 pub(crate) const TIER_STORAGE_PATH: &str = "/var/lib/crabka/remote";
+
+/// Fixed in-pod path where the operator mounts the GSSAPI keytab (Task 5).
+/// Both the `[gssapi]` and `[inter_broker_credentials]` TOML blocks reference it.
+pub(crate) const GSSAPI_KEYTAB_PATH: &str = "/etc/crabka/gssapi-keytab/keytab";
+
+/// Directory the GSSAPI keytab Secret is mounted into; the projected item
+/// path `keytab` under it yields `GSSAPI_KEYTAB_PATH`.
+pub(crate) const GSSAPI_KEYTAB_DIR: &str = "/etc/crabka/gssapi-keytab";
 
 /// Escape a string for embedding inside a TOML basic (double-quoted)
 /// string. Only `\` and `"` need escaping for our render — the operator
@@ -931,6 +1028,8 @@ mod service_rendering_tests {
                 delegation_token: None,
                 authorization: None,
                 tiered_storage: None,
+                inter_broker_kerberos: None,
+                krb5_conf_secret_ref: None,
                 tracing: None,
             },
         );
@@ -1177,6 +1276,15 @@ mod tests {
     #[test]
     fn empty_listeners_is_valid() {
         assert!(validate_listeners(&[], None).is_ok());
+    }
+
+    #[test]
+    fn gssapi_keytab_path_is_dir_plus_keytab() {
+        assert_eq!(
+            GSSAPI_KEYTAB_PATH,
+            format!("{GSSAPI_KEYTAB_DIR}/keytab"),
+            "the mounted keytab dir + item path must equal the rendered keytab_path"
+        );
     }
 
     #[test]
@@ -2094,6 +2202,110 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
+    // GSSAPI listener validation
+    // -----------------------------------------------------------------
+
+    fn gssapi_cfg_with_service(svc: &str) -> crate::crd::ListenerAuthenticationGssapi {
+        crate::crd::ListenerAuthenticationGssapi {
+            keytab_secret_ref: crate::crd::KeytabSecretRef {
+                secret_name: "kt".into(),
+                key: "keytab".into(),
+            },
+            service_name: Some(svc.into()),
+            principal_to_local_rules: vec!["DEFAULT".into()],
+            realm: None,
+            kdc: None,
+        }
+    }
+
+    fn gssapi_cfg_with_rules(rules: Vec<String>) -> crate::crd::ListenerAuthenticationGssapi {
+        let mut c = gssapi_cfg_with_service("kafka");
+        c.principal_to_local_rules = rules;
+        c
+    }
+
+    fn gssapi_listener(
+        name: &str,
+        port: i32,
+        tls: bool,
+        cfg: crate::crd::ListenerAuthenticationGssapi,
+    ) -> Listener {
+        Listener {
+            name: name.into(),
+            port,
+            type_: ListenerType::Internal,
+            tls,
+            authentication: Some(crate::crd::ListenerAuthentication::Gssapi(cfg)),
+            configuration: None,
+            network_policy_peers: None,
+        }
+    }
+
+    #[test]
+    fn gssapi_listener_without_keytab_is_invalid() {
+        let g = crate::crd::ListenerAuthenticationGssapi {
+            keytab_secret_ref: crate::crd::KeytabSecretRef {
+                secret_name: String::new(),
+                key: "k".into(),
+            },
+            service_name: None,
+            principal_to_local_rules: vec![],
+            realm: None,
+            kdc: None,
+        };
+        let l = gssapi_listener("gss", 9092, false, g);
+        assert_eq!(
+            validate_listeners(&[l], None).unwrap_err().reason(),
+            "ListenerGssapiKeytabSecretMissing"
+        );
+    }
+
+    #[test]
+    fn gssapi_listener_with_bad_rule_is_invalid() {
+        let g = gssapi_cfg_with_rules(vec!["NOT_A_RULE:::".into()]);
+        let l = gssapi_listener("gss", 9092, false, g);
+        assert_eq!(
+            validate_listeners(&[l], None).unwrap_err().reason(),
+            "ListenerGssapiInvalidRule"
+        );
+    }
+
+    #[test]
+    fn divergent_gssapi_listeners_conflict() {
+        let a = gssapi_cfg_with_service("kafka");
+        let b = gssapi_cfg_with_service("other");
+        let la = gssapi_listener("g1", 9092, false, a);
+        let lb = gssapi_listener("g2", 9093, false, b);
+        assert_eq!(
+            validate_listeners(&[la, lb], None).unwrap_err().reason(),
+            "ListenerGssapiConfigConflict"
+        );
+    }
+
+    #[test]
+    fn gssapi_listener_allows_plaintext_and_ssl() {
+        // GSSAPI brings its own RFC 4752 security layer — TLS is optional.
+        let plain = gssapi_listener("g", 9092, false, gssapi_cfg_with_service("kafka"));
+        validate_listeners(&[plain], None).expect("plaintext+gssapi is valid");
+        let ssl = gssapi_listener("g", 9092, true, gssapi_cfg_with_service("kafka"));
+        validate_listeners(&[ssl], None).expect("ssl+gssapi is valid");
+    }
+
+    #[test]
+    fn inter_broker_gssapi_without_kerberos_config_is_invalid() {
+        let g = gssapi_cfg_with_service("kafka");
+        let l = gssapi_listener("ib", 9092, false, g);
+        assert_eq!(
+            validate_inter_broker_gssapi(std::slice::from_ref(&l), "ib", false)
+                .unwrap_err()
+                .reason(),
+            "InterBrokerGssapiRequiresKerberosConfig"
+        );
+        validate_inter_broker_gssapi(&[l], "ib", true)
+            .expect("ok when interBrokerKerberos present");
+    }
+
+    // -----------------------------------------------------------------
     // JWKS-only fields cross-mode validation
     // -----------------------------------------------------------------
 
@@ -2795,6 +3007,7 @@ pub fn render_broker_toml(
     delegation_token_enabled: bool,
     authorization: Option<&crate::crd::kafka::Authorization>,
     tiered_storage: Option<&crate::crd::kafka::TieredStorage>,
+    inter_broker_kerberos: Option<&crate::crd::kafka::InterBrokerKerberos>,
 ) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
@@ -3109,6 +3322,53 @@ pub fn render_broker_toml(
         out.push('\n');
     }
 
+    // Broker-global [gssapi] block. Emitted when any listener is type:gssapi.
+    // Per-listener divergence is rejected by validate_listeners, so the first
+    // GSSAPI listener's config is unambiguous here. Keytab is mounted at a
+    // fixed path by kafka_node_pool.rs (Task 5).
+    if let Some(g) = listeners.iter().find_map(|l| match &l.authentication {
+        Some(ListenerAuthentication::Gssapi(c)) => Some(c),
+        _ => None,
+    }) {
+        let _ = writeln!(out, "[gssapi]");
+        let _ = writeln!(out, "keytab_path = \"{GSSAPI_KEYTAB_PATH}\"");
+        let svc = g.service_name.as_deref().unwrap_or("kafka");
+        let _ = writeln!(out, "service_name = \"{}\"", toml_escape(svc));
+        let _ = writeln!(
+            out,
+            "principal_to_local_rules = {}",
+            toml_string_array(&g.principal_to_local_rules)
+        );
+        if let Some(realm) = &g.realm {
+            let _ = writeln!(out, "realm = \"{}\"", toml_escape(realm));
+        }
+        if let Some(kdc) = &g.kdc {
+            let _ = writeln!(out, "kdc = \"{}\"", toml_escape(kdc));
+        }
+        out.push('\n');
+    }
+
+    // Inter-broker initiate credentials. Emitted only when the inter-broker
+    // listener is type:gssapi AND spec.interBrokerKerberos is provided.
+    let ib_is_gssapi = listeners.iter().any(|l| {
+        l.name == inter_broker_listener_name
+            && matches!(l.authentication, Some(ListenerAuthentication::Gssapi(_)))
+    });
+    if ib_is_gssapi && let Some(ibk) = inter_broker_kerberos {
+        let _ = writeln!(out, "[inter_broker_credentials]");
+        let _ = writeln!(out, "type = \"gssapi\"");
+        let _ = writeln!(out, "keytab_path = \"{GSSAPI_KEYTAB_PATH}\"");
+        let _ = writeln!(
+            out,
+            "client_principal = \"{}\"",
+            toml_escape(&ibk.client_principal)
+        );
+        let svc = ibk.service_name.as_deref().unwrap_or("kafka");
+        let _ = writeln!(out, "service_name = \"{}\"", toml_escape(svc));
+        let _ = writeln!(out, "kdc_url = \"{}\"", toml_escape(&ibk.kdc_url));
+        out.push('\n');
+    }
+
     if let Some(tls) = tls {
         let _ = writeln!(out, "[tls_config]");
         let _ = writeln!(out, "cert_path = \"{}\"", tls.cert_path);
@@ -3154,7 +3414,7 @@ mod toml_rendering_tests {
         let listeners = vec![synthesized_default_listener()];
         let props = std::collections::BTreeMap::new();
         let toml_str = render_broker_toml(
-            0, &listeners, &addrs, "PLAIN", &props, None, None, false, None, None,
+            0, &listeners, &addrs, "PLAIN", &props, None, None, false, None, None, None,
         );
 
         // Sanity: parses cleanly with the broker's FileConfig.
@@ -3181,8 +3441,12 @@ mod toml_rendering_tests {
         p.insert("z.last".into(), "1".into());
         p.insert("a.first".into(), "0".into());
 
-        let t1 = render_broker_toml(0, &l, &addrs, "PLAIN", &p, None, None, false, None, None);
-        let t2 = render_broker_toml(0, &l, &addrs, "PLAIN", &p, None, None, false, None, None);
+        let t1 = render_broker_toml(
+            0, &l, &addrs, "PLAIN", &p, None, None, false, None, None, None,
+        );
+        let t2 = render_broker_toml(
+            0, &l, &addrs, "PLAIN", &p, None, None, false, None, None, None,
+        );
         assert_eq!(t1, t2);
         // Sorted property keys (BTreeMap iteration).
         let a_pos = t1.find("a.first").unwrap();
@@ -3209,6 +3473,7 @@ mod toml_rendering_tests {
             None,
             None,
             false,
+            None,
             None,
             None,
         );
@@ -3239,6 +3504,7 @@ mod toml_rendering_tests {
             None,
             None,
             true,
+            None,
             None,
             None,
         );
@@ -3286,6 +3552,7 @@ mod toml_rendering_tests {
             false,
             None,
             None,
+            None,
         );
         assert!(
             !t.contains("super_users"),
@@ -3327,6 +3594,7 @@ mod toml_rendering_tests {
             None,
             false,
             Some(&authz),
+            None,
             None,
         );
         assert!(
@@ -3382,6 +3650,7 @@ mod toml_rendering_tests {
             None,
             false,
             Some(&authz),
+            None,
             None,
         );
         assert!(
@@ -3442,6 +3711,7 @@ mod toml_rendering_tests {
             false,
             None,
             None,
+            None,
         );
         assert!(
             !t.contains("[authorization]"),
@@ -3475,6 +3745,7 @@ mod toml_rendering_tests {
             true,
             None,
             None,
+            None,
         );
         assert!(t.contains("[authorization]"), "TOML:\n{t}");
         assert!(t.contains("type = \"simple\""), "TOML:\n{t}");
@@ -3495,6 +3766,7 @@ mod toml_rendering_tests {
             None,
             true,
             Some(&authz),
+            None,
             None,
         );
         assert!(
@@ -3532,6 +3804,7 @@ mod toml_rendering_tests {
             false,
             None,
             Some(&ts),
+            None,
         );
         assert!(
             t.contains("[remote_storage]"),
@@ -3568,6 +3841,7 @@ mod toml_rendering_tests {
             None,
             None,
             false,
+            None,
             None,
             None,
         );
@@ -3617,6 +3891,7 @@ mod toml_rendering_tests {
             false,
             None,
             Some(&ts),
+            None,
         );
         assert!(
             t.contains("[remote_storage.kafka_metadata]"),
@@ -3677,6 +3952,7 @@ mod toml_rendering_tests {
             false,
             None,
             Some(&ts),
+            None,
         );
         assert!(
             !t.contains("[remote_storage.kafka_metadata]"),
@@ -3720,6 +3996,7 @@ mod toml_rendering_tests {
             false,
             None,
             Some(&ts),
+            None,
         );
         assert!(t.contains("[remote_storage]"), "missing block:\n{t}");
         assert!(
@@ -3797,6 +4074,7 @@ mod toml_rendering_tests {
             false,
             None,
             Some(&ts),
+            None,
         );
         assert!(t.contains("[remote_storage.s3]"));
         assert!(t.contains("bucket = \"b\""));
@@ -3865,6 +4143,7 @@ mod toml_rendering_tests {
             false,
             None,
             Some(&ts),
+            None,
         );
         // The rendered TOML must parse; if escaping is broken the
         // broker's FileConfig would error out before the assertion below.
@@ -3908,6 +4187,7 @@ mod toml_rendering_tests {
             false,
             None,
             None,
+            None,
         );
 
         let parsed: crabka_broker::file_config::FileConfig =
@@ -3936,7 +4216,7 @@ mod toml_rendering_tests {
         let listeners = vec![synthesized_default_listener()];
         let props = std::collections::BTreeMap::new();
         let toml_str = render_broker_toml(
-            0, &listeners, &addrs, "PLAIN", &props, None, None, false, None, None,
+            0, &listeners, &addrs, "PLAIN", &props, None, None, false, None, None, None,
         );
         assert!(!toml_str.contains("[tls_config]"));
         assert!(!toml_str.contains("controller_listener_protocol"));
@@ -3977,6 +4257,7 @@ mod toml_rendering_tests {
             }),
             None,
             false,
+            None,
             None,
             None,
         );
@@ -4056,6 +4337,90 @@ mod toml_rendering_tests {
         }
     }
 
+    fn gssapi_cfg_with_service(svc: &str) -> crate::crd::ListenerAuthenticationGssapi {
+        crate::crd::ListenerAuthenticationGssapi {
+            keytab_secret_ref: crate::crd::KeytabSecretRef {
+                secret_name: "kt".into(),
+                key: "keytab".into(),
+            },
+            service_name: Some(svc.into()),
+            principal_to_local_rules: vec!["DEFAULT".into()],
+            realm: None,
+            kdc: None,
+        }
+    }
+
+    fn gssapi_listener(
+        name: &str,
+        port: i32,
+        tls: bool,
+        cfg: crate::crd::ListenerAuthenticationGssapi,
+    ) -> Listener {
+        Listener {
+            name: name.into(),
+            port,
+            type_: ListenerType::Internal,
+            tls,
+            authentication: Some(crate::crd::ListenerAuthentication::Gssapi(cfg)),
+            configuration: None,
+            network_policy_peers: None,
+        }
+    }
+
+    #[test]
+    fn render_emits_gssapi_block_and_mechanism() {
+        let l = gssapi_listener("gss", 9092, false, gssapi_cfg_with_service("kafka"));
+        let addrs = addrs_for("gss", 9092);
+        let toml = render_broker_toml(
+            0,
+            &[l],
+            &addrs,
+            "gss",
+            &std::collections::BTreeMap::new(),
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+        );
+        assert!(toml.contains("[gssapi]"), "toml:\n{toml}");
+        assert!(toml.contains(r#"keytab_path = "/etc/crabka/gssapi-keytab/keytab""#));
+        assert!(toml.contains(r#"service_name = "kafka""#));
+        assert!(toml.contains(r#"principal_to_local_rules = ["DEFAULT"]"#));
+        assert!(toml.contains(r#"enabled_mechanisms = ["GSSAPI"]"#));
+        assert!(!toml.contains("[inter_broker_credentials]"));
+    }
+
+    #[test]
+    fn render_emits_inter_broker_credentials_when_ib_listener_is_gssapi() {
+        let l = gssapi_listener("gss", 9092, false, gssapi_cfg_with_service("kafka"));
+        let addrs = addrs_for("gss", 9092);
+        let ibk = crate::crd::kafka::InterBrokerKerberos {
+            client_principal: "kafka@EXAMPLE.COM".into(),
+            service_name: Some("kafka".into()),
+            kdc_url: "tcp://kdc:88".into(),
+        };
+        let toml = render_broker_toml(
+            0,
+            &[l],
+            &addrs,
+            "gss",
+            &std::collections::BTreeMap::new(),
+            None,
+            None,
+            false,
+            None,
+            None,
+            Some(&ibk),
+        );
+        assert!(toml.contains("[inter_broker_credentials]"), "toml:\n{toml}");
+        assert!(toml.contains(r#"type = "gssapi""#));
+        assert!(toml.contains(r#"keytab_path = "/etc/crabka/gssapi-keytab/keytab""#));
+        assert!(toml.contains(r#"client_principal = "kafka@EXAMPLE.COM""#));
+        assert!(toml.contains(r#"kdc_url = "tcp://kdc:88""#));
+    }
+
     #[test]
     fn render_broker_toml_emits_oauthbearer_block_for_oauth_listener() {
         use std::collections::BTreeMap;
@@ -4074,6 +4439,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
             false,
+            None,
             None,
             None,
         );
@@ -4134,6 +4500,7 @@ mod toml_rendering_tests {
             false,
             None,
             None,
+            None,
         );
         assert!(toml.contains("[oauthbearer]"));
         assert!(toml.contains("jwks_endpoint_uri = \"https://issuer.example.com/jwks\""));
@@ -4164,6 +4531,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
             false,
+            None,
             None,
             None,
         );
@@ -4214,6 +4582,7 @@ mod toml_rendering_tests {
             false,
             None,
             None,
+            None,
         );
         assert!(!toml.contains("idp_tls_trust"), "TOML: {toml}");
     }
@@ -4237,6 +4606,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
             false,
+            None,
             None,
             None,
         );
@@ -4270,6 +4640,7 @@ mod toml_rendering_tests {
             false,
             None,
             None,
+            None,
         );
         assert!(
             !toml.contains("max_session_lifetime_seconds"),
@@ -4297,6 +4668,7 @@ mod toml_rendering_tests {
             false,
             None,
             None,
+            None,
         );
         assert!(
             toml.contains("sasl_config = { enabled_mechanisms = [\"OAUTHBEARER\"] }"),
@@ -4322,6 +4694,7 @@ mod toml_rendering_tests {
             false,
             None,
             None,
+            None,
         );
         assert!(toml.contains("[oauthbearer]"), "TOML: {toml}");
         assert!(!toml.contains("sasl_config"), "TOML: {toml}");
@@ -4339,6 +4712,7 @@ mod toml_rendering_tests {
             None,
             None,
             false,
+            None,
             None,
             None,
         );
@@ -4363,6 +4737,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
             false,
+            None,
             None,
             None,
         );
@@ -4410,6 +4785,7 @@ mod toml_rendering_tests {
             false,
             None,
             None,
+            None,
         );
         let b = render_broker_toml(
             0,
@@ -4420,6 +4796,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
             false,
+            None,
             None,
             None,
         );
@@ -4471,6 +4848,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
             false,
+            None,
             None,
             None,
         );
@@ -4544,6 +4922,7 @@ mod toml_rendering_tests {
             false,
             None,
             None,
+            None,
         );
         assert!(toml.contains("[oauthbearer]"), "TOML: {toml}");
         assert!(
@@ -4582,6 +4961,7 @@ mod toml_rendering_tests {
             false,
             None,
             None,
+            None,
         );
         assert!(!toml.contains("jwks_endpoint_uri"), "TOML: {toml}");
     }
@@ -4600,6 +4980,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
             false,
+            None,
             None,
             None,
         );
@@ -4624,6 +5005,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
             false,
+            None,
             None,
             None,
         );
@@ -4651,6 +5033,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
             false,
+            None,
             None,
             None,
         );
@@ -4696,6 +5079,7 @@ mod toml_rendering_tests {
             false,
             None,
             None,
+            None,
         );
         assert!(toml.contains("protocol = \"Ssl\""));
         assert!(toml.contains("client_ca_path = \"/etc/crabka/clients-ca/ca.crt\""));
@@ -4726,6 +5110,7 @@ mod toml_rendering_tests {
             false,
             None,
             None,
+            None,
         );
         assert!(
             toml.contains("custom_claim_check = '''$.scope[?@ == 'kafka.write']'''"),
@@ -4748,6 +5133,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
             false,
+            None,
             None,
             None,
         );
@@ -4778,6 +5164,7 @@ mod toml_rendering_tests {
             false,
             None,
             None,
+            None,
         );
         assert!(
             toml.contains("fallback_user_name_claim = \"client_id\""),
@@ -4800,6 +5187,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
             false,
+            None,
             None,
             None,
         );
@@ -4826,6 +5214,7 @@ mod toml_rendering_tests {
             false,
             None,
             None,
+            None,
         );
         assert!(
             toml.contains("groups_claim = '''$.realm_access.roles[*]'''"),
@@ -4848,6 +5237,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
             false,
+            None,
             None,
             None,
         );
@@ -4874,6 +5264,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
             false,
+            None,
             None,
             None,
         );
@@ -4904,6 +5295,7 @@ mod toml_rendering_tests {
             false,
             None,
             None,
+            None,
         );
         assert!(
             toml.contains("jwks_min_refresh_pause_seconds = 2"),
@@ -4926,6 +5318,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
             false,
+            None,
             None,
             None,
         );
@@ -4952,6 +5345,7 @@ mod toml_rendering_tests {
             false,
             None,
             None,
+            None,
         );
         assert!(
             toml.contains("jwks_ignore_key_use = true"),
@@ -4975,6 +5369,7 @@ mod toml_rendering_tests {
             Some(&render_tls()),
             None,
             false,
+            None,
             None,
             None,
         );

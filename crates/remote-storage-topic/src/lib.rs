@@ -30,9 +30,10 @@
 //!   `TopicIdPartition → metadata-topic-partition` hash.
 //! - [`KafkaMetadataEventLog`] — the production [`MetadataEventLog`]
 //!   adapter that wires the trait to
-//!   [`crabka_client_producer`] / [`crabka_client_consumer`] /
+//!   [`crabka_client_producer`] / [`crabka_client_core`] /
 //!   [`crabka_client_admin`], persisting events in the
-//!   `__remote_log_metadata` topic.
+//!   `__remote_log_metadata` topic. Reads use manual per-partition
+//!   `Fetch` loops over `crabka_client_core` (no consumer group).
 //! - [`SwappableRlmm`] — the hot-swap facade the broker boots behind so
 //!   it can start on the in-memory placeholder and upgrade to the
 //!   topic-backed manager once its listener is serving.
@@ -41,10 +42,6 @@
 //!
 //! ## What this crate does NOT do (yet)
 //!
-//! - **No per-broker metadata-partition assignment.** Every broker
-//!   consumes all `__remote_log_metadata` partitions; restricting the
-//!   consumed set to a broker's leader/follower assignments is a
-//!   follow-up.
 //! - **No log compaction or snapshot** of the metadata topic — every
 //!   restart re-reads from offset 0. Snapshot/fast-bootstrap is a
 //!   future optimization.
@@ -60,17 +57,20 @@ pub mod log;
 pub mod manager;
 pub mod partitioning;
 pub mod serde;
+pub mod snapshot;
 pub mod swappable;
 
-pub use error::{CodecError, MetadataLogError};
+pub use error::{CodecError, MetadataLogError, SnapshotError};
 pub use kafka_log::{
     DEFAULT_NUM_PARTITIONS, DEFAULT_REPLICATION, KafkaMetadataEventLog, KafkaMetadataLogConfig,
     METADATA_TOPIC,
 };
 pub use log::{
-    InProcessMetadataEventLog, MetadataEventLog, MetadataEventRecord, MetadataEventStream,
+    AssignmentHandle, InProcessMetadataEventLog, MetadataEventLog, MetadataEventRecord,
+    MetadataEventStream, PartitionStart,
 };
 pub use manager::TopicBasedRemoteLogMetadataManager;
-pub use partitioning::metadata_partition_for;
+pub use partitioning::{metadata_partition_for, metadata_partitions_for};
 pub use serde::{MetadataEvent, WIRE_VERSION};
+pub use snapshot::{SNAPSHOT_FILE_NAME, SNAPSHOT_FORMAT_VERSION, Snapshot};
 pub use swappable::SwappableRlmm;

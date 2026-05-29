@@ -15,24 +15,24 @@
 //! end-to-end, plus the integration-level pod-template mount via the
 //! pool reconciler.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use base64::Engine as _;
 use crabka_operator::controller::kafka::reconcile as reconcile_kafka;
 use crabka_operator::controller::kafka_node_pool::reconcile as reconcile_pool;
 use crabka_operator::crd::{
-    Kafka, KafkaNodePool, KafkaNodePoolSpec, KafkaSpec, Listener, ListenerAuthentication,
-    ListenerAuthenticationOAuth, ListenerType, NodeRole, OauthClientSecretRef,
+    Kafka, KafkaSpec, Listener, ListenerAuthentication, ListenerAuthenticationOAuth, ListenerType,
+    OauthClientSecretRef,
 };
-use http::{Method, Response};
+use http::Method;
 
 #[path = "shared/mod.rs"]
 mod shared;
 
 use shared::{
-    MockRule, MockState, build_ctx, fake_kafka_body, fake_pool_body, fake_pool_list_item,
-    fake_sts_body, fixture_ctx, happy_path_rules, json_response, mock_client, not_found_body,
+    assert_ready_false_with_reason, build_ctx, extract_broker0_toml, fake_pool_list_item,
+    happy_path_rules, pool_cr, pool_reconcile_rules, rule_get_secret, rule_get_secret_404,
+    rules_for_failure_path,
 };
 
 // ── fixtures ────────────────────────────────────────────────────────────────
@@ -112,6 +112,8 @@ fn kafka_cr(name: &str, namespace: &str, listeners: Vec<Listener>) -> Kafka {
             delegation_token: None,
             authorization: None,
             tiered_storage: None,
+            inter_broker_kerberos: None,
+            krb5_conf_secret_ref: None,
             tracing: None,
         },
     );
@@ -144,112 +146,6 @@ fn source_secret_body_no_data(name: &str, namespace: &str) -> serde_json::Value 
         "metadata": { "name": name, "namespace": namespace, "uid": format!("{name}-uid") },
         "type": "Opaque",
     })
-}
-
-/// Build a rule for `GET /secrets/<name>` returning a 404. Used by the
-/// `MissingOauthIntrospectionSecret` test.
-fn rule_get_secret_404(name: &str) -> MockRule {
-    MockRule {
-        method: Method::GET,
-        path_substr: format!("/secrets/{name}"),
-        response: Response::builder()
-            .status(404)
-            .header("content-type", "application/json")
-            .body(not_found_body("not found"))
-            .expect("404 builds"),
-    }
-}
-
-/// Build a rule for `GET /secrets/<name>` returning the supplied body.
-fn rule_get_secret(name: &str, body: &serde_json::Value) -> MockRule {
-    MockRule {
-        method: Method::GET,
-        path_substr: format!("/secrets/{name}"),
-        response: json_response(200, body),
-    }
-}
-
-/// Trim down `happy_path_rules` for the failure-path tests: when
-/// introspection-Secret validation fails the reconciler short-circuits
-/// to a status PATCH on the `Kafka` CR before reading the pool list
-/// (well — the pool list IS read for CA rotation convergence, so we
-/// keep that rule) or upserting per-broker objects. Drop the per-
-/// broker rules so an unconsumed rule doesn't mask a missing
-/// introspection-Secret assertion. Mirrors
-/// `reconcile_oauth_trust.rs::rules_for_failure_path`.
-fn rules_for_failure_path(name: &str, namespace: &str) -> Vec<MockRule> {
-    let mut rules = happy_path_rules(name, namespace, &[]);
-    rules.retain(|r| {
-        !r.path_substr.contains("-kafka-brokers")
-            && !r.path_substr.contains("/configmaps/")
-            && !r.path_substr.contains(&format!("/kafkas/{name}/status"))
-    });
-    // The failure path calls `patch_status_with_condition`, which does
-    // GET status + PATCH status.
-    rules.push(MockRule {
-        method: Method::GET,
-        path_substr: format!("/kafkas/{name}/status"),
-        response: json_response(200, &fake_kafka_body(name, namespace)),
-    });
-    rules.push(MockRule {
-        method: Method::PATCH,
-        path_substr: format!("/kafkas/{name}/status"),
-        response: json_response(200, &fake_kafka_body(name, namespace)),
-    });
-    rules
-}
-
-/// Find the `Ready=False` condition in the status PATCH body and
-/// assert its `reason` matches. The introspection-Secret failure path
-/// patches the `Ready` condition (not `ListenersValid` — per-listener
-/// validation already succeeded; the failure is in the Secret-touching
-/// code that runs *after* validation).
-fn assert_ready_false_with_reason(
-    observed: &[http::Request<hyper::body::Bytes>],
-    cluster: &str,
-    expected_reason: &str,
-) {
-    let status_patch = observed
-        .iter()
-        .find(|r| {
-            r.method() == Method::PATCH
-                && r.uri()
-                    .to_string()
-                    .contains(&format!("/kafkas/{cluster}/status"))
-        })
-        .expect("status PATCH captured");
-    let body: serde_json::Value =
-        serde_json::from_slice(status_patch.body()).expect("status body is JSON");
-    let conds = body["status"]["conditions"]
-        .as_array()
-        .expect("conditions array");
-    let ready = conds
-        .iter()
-        .find(|c| c["type"] == "Ready")
-        .unwrap_or_else(|| panic!("Ready condition present; body = {body}"));
-    assert_eq!(ready["status"], "False", "body = {body}");
-    assert_eq!(ready["reason"], expected_reason, "body = {body}");
-}
-
-/// Extract the `broker-0.toml` string from the `ConfigMap` PATCH
-/// captured in `observed`. Panics with a diagnostic message if the
-/// PATCH (or the key) is missing.
-fn extract_broker0_toml(observed: &[http::Request<hyper::body::Bytes>], cluster: &str) -> String {
-    let cm_patch = observed
-        .iter()
-        .find(|r| {
-            r.method() == Method::PATCH
-                && r.uri()
-                    .to_string()
-                    .contains(&format!("/configmaps/{cluster}-broker-config"))
-        })
-        .unwrap_or_else(|| panic!("ConfigMap PATCH not found for cluster {cluster}"));
-    let body: serde_json::Value =
-        serde_json::from_slice(cm_patch.body()).expect("ConfigMap PATCH body is JSON");
-    body["data"]["broker-0.toml"]
-        .as_str()
-        .unwrap_or_else(|| panic!("broker-0.toml missing; body = {body}"))
-        .to_string()
 }
 
 // ── test 1: happy path — source Secret read, mount derived ──────────────────
@@ -404,7 +300,7 @@ async fn oauth_introspection_jwt_mode_does_not_mount_anything() {
             "c5", "ns5", /* jwt_mode = */ true, /* userinfo = */ None,
         ),
     );
-    let (ctx, state) = pool_ctx("ns5", rules);
+    let (ctx, state) = build_ctx("ns5", rules);
     let pool = pool_cr("brokers", "ns5", "c5", 1);
     reconcile_pool(Arc::new(pool), ctx).await.unwrap();
 
@@ -459,7 +355,7 @@ async fn oauth_introspection_managed_pod_template_mounts_secret_with_projected_i
             "c6", "ns6", /* jwt_mode = */ false, /* userinfo = */ None,
         ),
     );
-    let (ctx, state) = pool_ctx("ns6", rules);
+    let (ctx, state) = build_ctx("ns6", rules);
     let pool = pool_cr("brokers", "ns6", "c6", 1);
     reconcile_pool(Arc::new(pool), ctx).await.unwrap();
 
@@ -551,7 +447,7 @@ async fn statefulset_mounts_oauth_introspection_secret_when_introspection_mode()
             "c8", "ns8", /* jwt_mode = */ false, /* userinfo = */ None,
         ),
     );
-    let (ctx, state) = pool_ctx("ns8", rules);
+    let (ctx, state) = build_ctx("ns8", rules);
     let pool = pool_cr("brokers", "ns8", "c8", 1);
     reconcile_pool(Arc::new(pool), ctx).await.unwrap();
 
@@ -615,7 +511,7 @@ async fn statefulset_omits_oauth_introspection_volume_when_jwt_mode() {
             "c9", "ns9", /* jwt_mode = */ true, /* userinfo = */ None,
         ),
     );
-    let (ctx, state) = pool_ctx("ns9", rules);
+    let (ctx, state) = build_ctx("ns9", rules);
     let pool = pool_cr("brokers", "ns9", "c9", 1);
     reconcile_pool(Arc::new(pool), ctx).await.unwrap();
 
@@ -653,27 +549,6 @@ async fn statefulset_omits_oauth_introspection_volume_when_jwt_mode() {
 }
 
 // ── pool-reconcile fixtures (tests 5, 6, 8, 9) ─────────────────────────────
-
-fn pool_cr(name: &str, namespace: &str, parent: &str, replicas: i32) -> KafkaNodePool {
-    let mut p = KafkaNodePool::new(
-        name,
-        KafkaNodePoolSpec {
-            roles: vec![NodeRole::Controller, NodeRole::Broker],
-            replicas,
-            node_id_start: 0,
-            image: None,
-            resources: None,
-            template: None,
-            storage: None,
-        },
-    );
-    p.metadata.namespace = Some(namespace.into());
-    p.metadata.uid = Some("pool-uid".into());
-    let mut labels = BTreeMap::new();
-    labels.insert("crabka.io/cluster".into(), parent.into());
-    p.metadata.labels = Some(labels);
-    p
-}
 
 /// Parent-Kafka body that carries an OAuth listener in either JWT or
 /// introspection mode (per `jwt_mode`). Used as the GET response for
@@ -727,61 +602,18 @@ fn parent_kafka_body_with_oauth(
                 "authentication": authentication,
             }]
         },
-        "status": { "conditions": [] }
+        // A reconciled parent carries a cleared version model; the pool
+        // reconciler gates pod creation on it (see
+        // `kafka_node_pool::version_gate`).
+        "status": {
+            "conditions": [{
+                "type": "KafkaVersionValid",
+                "status": "True",
+                "reason": "Valid",
+                "message": "kafkaVersion 0.1.1 metadata.version 0.1",
+                "lastTransitionTime": "2026-05-22T00:00:00Z"
+            }],
+            "metadataVersion": "0.1"
+        }
     })
-}
-
-/// Build the FIFO rule sequence the pool reconciler needs:
-///   1. GET kafkas/<parent>            → parent_body
-///   2. GET statefulsets/<parent>-<pool> → 404 (first reconcile)
-///   3. PATCH statefulsets/<parent>-<pool> (SSA)
-///   4. GET statefulsets/<parent>-<pool> (post-apply status read)
-///   5. PATCH kafkanodepools/<pool>/status
-fn pool_reconcile_rules(
-    parent: &str,
-    pool: &str,
-    namespace: &str,
-    parent_body: &serde_json::Value,
-) -> Vec<MockRule> {
-    let sts_name = format!("{parent}-{pool}");
-    vec![
-        MockRule {
-            method: Method::GET,
-            path_substr: format!("/kafkas/{parent}"),
-            response: json_response(200, parent_body),
-        },
-        MockRule {
-            method: Method::GET,
-            path_substr: format!("/statefulsets/{sts_name}"),
-            response: Response::builder()
-                .status(404)
-                .header("content-type", "application/json")
-                .body(not_found_body("first reconcile, no live STS"))
-                .expect("404 builds"),
-        },
-        MockRule {
-            method: Method::PATCH,
-            path_substr: format!("/statefulsets/{sts_name}"),
-            response: json_response(200, &fake_sts_body(&sts_name, namespace, 1, Some(1))),
-        },
-        MockRule {
-            method: Method::GET,
-            path_substr: format!("/statefulsets/{sts_name}"),
-            response: json_response(200, &fake_sts_body(&sts_name, namespace, 1, Some(1))),
-        },
-        MockRule {
-            method: Method::PATCH,
-            path_substr: format!("/kafkanodepools/{pool}/status"),
-            response: json_response(200, &fake_pool_body(pool, namespace, parent)),
-        },
-    ]
-}
-
-fn pool_ctx(
-    namespace: &str,
-    rules: Vec<MockRule>,
-) -> (Arc<crabka_operator::context::Context>, Arc<MockState>) {
-    let state = MockState::new(rules);
-    let client = mock_client(&state, namespace);
-    (Arc::new(fixture_ctx(client, namespace)), state)
 }

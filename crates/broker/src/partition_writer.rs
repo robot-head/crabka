@@ -530,7 +530,7 @@ mod tests {
         ));
         {
             let mut st = replica_state.lock().await;
-            st.install_isr(&[1], 1);
+            st.install_isr(&[1], &[1], 1);
         }
         let hw_advance_notify = Arc::new(Notify::new());
         let writer = tokio::spawn(run(
@@ -663,7 +663,7 @@ mod tests {
         ));
         {
             let mut st = replica_state.lock().await;
-            st.install_isr(&[1, 2, 3], 1);
+            st.install_isr(&[1, 2, 3], &[1, 2, 3], 1);
         }
         let hw_advance_notify = Arc::new(Notify::new());
         let writer = tokio::spawn(run(

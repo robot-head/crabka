@@ -35,6 +35,28 @@ pub fn metadata_partition_for(tp: &TopicIdPartition, partition_count: i32) -> i3
     p
 }
 
+/// Deduped, sorted set of `__remote_log_metadata` partitions that carry
+/// metadata for the given user-topic-partitions, given the metadata topic's
+/// `partition_count`. This is the set a broker must consume to serve remote
+/// reads for the partitions it leads or follows.
+///
+/// # Panics
+///
+/// Panics when `partition_count <= 0` (via [`metadata_partition_for`]).
+#[must_use]
+pub fn metadata_partitions_for<'a, I>(tps: I, partition_count: i32) -> Vec<i32>
+where
+    I: IntoIterator<Item = &'a TopicIdPartition>,
+{
+    let mut set: Vec<i32> = tps
+        .into_iter()
+        .map(|tp| metadata_partition_for(tp, partition_count))
+        .collect();
+    set.sort_unstable();
+    set.dedup();
+    set
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -96,5 +118,27 @@ mod tests {
     #[should_panic(expected = "partition_count must be positive")]
     fn rejects_zero_partition_count() {
         let _ = metadata_partition_for(&tp("t", 0), 0);
+    }
+
+    #[test]
+    fn metadata_partitions_for_dedupes_and_sorts() {
+        // Two user-partitions that hash to the same metadata partition must
+        // collapse to one entry; the result is sorted ascending.
+        let a = tp("orders", 0);
+        let b = tp("orders", 1);
+        let pa = metadata_partition_for(&a, 50);
+        let pb = metadata_partition_for(&b, 50);
+        let got = metadata_partitions_for([a.clone(), b.clone(), a.clone()].iter(), 50);
+        let mut expected: Vec<i32> = vec![pa, pb];
+        expected.sort_unstable();
+        expected.dedup();
+        assert_eq!(got, expected);
+        assert!(got.windows(2).all(|w| w[0] < w[1]), "sorted, deduped");
+    }
+
+    #[test]
+    fn metadata_partitions_for_empty_is_empty() {
+        let none: [TopicIdPartition; 0] = [];
+        assert!(metadata_partitions_for(none.iter(), 50).is_empty());
     }
 }

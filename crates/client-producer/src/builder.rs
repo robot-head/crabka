@@ -42,6 +42,7 @@ impl Producer {
         #[builder(default = 5)] max_in_flight_per_connection: usize,
         #[builder(into)] transactional_id: Option<String>,
         #[builder(default = std::time::Duration::new(60, 0))] transaction_timeout: Duration,
+        security: Option<crabka_client_core::security::ClientSecurity>,
     ) -> Result<Self, ProducerError> {
         // Validate config: idempotence forces acks=All, and acks=Zero is
         // incompatible with idempotence.
@@ -57,6 +58,7 @@ impl Producer {
             .bootstrap(bootstrap)
             .client_id(client_id.clone())
             .request_timeout(request_timeout)
+            .maybe_security(security)
             .build()
             .await?;
 
@@ -143,5 +145,36 @@ impl Producer {
             txn_coord_client: Mutex::new(None),
             txn_pid_epoch,
         })
+    }
+}
+
+#[cfg(test)]
+mod security_arg_tests {
+    use super::*;
+    use crabka_client_core::security::{ClientSecurity, SaslCredentials};
+    use crabka_security::ListenerProtocol;
+
+    #[tokio::test]
+    async fn producer_builder_accepts_security() {
+        let security = ClientSecurity {
+            protocol: ListenerProtocol::SaslPlaintext,
+            tls: None,
+            sasl: Some(SaslCredentials::Plain {
+                username: "u".into(),
+                password: "p".into(),
+            }),
+            sasl_host: None,
+        };
+        // 127.0.0.1:1 is unroutable for a listener; with idempotence on the
+        // build issues an InitProducerId, which must fail at connect —
+        // proving the security arg is threaded (not a type error). A lazy
+        // (non-idempotent) build would not connect, so keep idempotence on.
+        let res = Producer::builder()
+            .bootstrap("127.0.0.1:1")
+            .request_timeout(std::time::Duration::from_millis(500))
+            .security(security)
+            .build()
+            .await;
+        assert!(res.is_err(), "connect to closed port must fail");
     }
 }

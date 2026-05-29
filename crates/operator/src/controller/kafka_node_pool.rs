@@ -255,6 +255,7 @@ fn render_init_container(
 }
 
 #[allow(clippy::too_many_arguments)] // pure render helper: each arg names one independent feature toggle, struct-ifying buys nothing
+#[allow(clippy::fn_params_excessive_bools)] // each bool is an independent presence toggle (metrics / logging / gssapi keytab / krb5.conf)
 #[allow(clippy::too_many_lines)] // linear: per-feature env / mount segments are independent
 fn render_broker_container(
     broker_image: &str,
@@ -266,6 +267,8 @@ fn render_broker_container(
     jbod_extra_mounts: &[(String, String)],
     oauth_jwks_trust_mount: Option<&str>,
     oauth_introspection_mount_path: Option<&str>,
+    gssapi_keytab: bool,
+    krb5_conf: bool,
     delegation_token: Option<&crate::crd::kafka::DelegationTokenConfig>,
     tiered_storage: Option<&crate::crd::kafka::TieredStorage>,
     tracing: Option<&crate::crd::kafka::Tracing>,
@@ -453,6 +456,26 @@ fn render_broker_container(
             "readOnly": true,
         }));
     }
+    // SASL/GSSAPI: mount the service keytab at the fixed directory
+    // `/etc/crabka/gssapi-keytab` (projected item lands at
+    // `keytab`, so the broker reads `GSSAPI_KEYTAB_PATH`).
+    if gssapi_keytab {
+        volume_mounts.push(json!({
+            "name": "gssapi-keytab",
+            "mountPath": crate::controller::listeners::GSSAPI_KEYTAB_DIR,
+            "readOnly": true,
+        }));
+    }
+    // Optional krb5.conf: mount at `/etc/crabka/krb5/krb5.conf` and
+    // point the Kerberos libraries at it via `KRB5_CONFIG`.
+    if krb5_conf {
+        volume_mounts.push(json!({
+            "name": "krb5-conf",
+            "mountPath": "/etc/crabka/krb5",
+            "readOnly": true,
+        }));
+        env.push(json!({ "name": "KRB5_CONFIG", "value": "/etc/crabka/krb5/krb5.conf" }));
+    }
     // KIP-405: mount the `tier-storage` emptyDir
     // read-write at the broker's `remote_log_storage_dir` (matches
     // `[remote_storage].storage_dir` in the rendered TOML). Local-only
@@ -531,12 +554,15 @@ fn pvc_template(
 /// controller mounts each PVC into the pod under the template name
 /// automatically, so an explicit pod-volume entry would conflict.
 #[allow(clippy::too_many_lines)] // each branch + secret mount is independent
+#[allow(clippy::too_many_arguments)] // pure render helper: each arg names one independent secret-mount / storage toggle
 fn render_storage(
     storage: Option<&Storage>,
     pod_labels: &BTreeMap<String, String>,
     parent_name: &str,
     oauth_jwks_trust_secret: Option<&str>,
     oauth_introspection_mount: Option<&crate::controller::kafka::OauthIntrospectionMount>,
+    gssapi_keytab: Option<&crate::controller::kafka::GssapiKeytabMount>,
+    krb5_conf: Option<(&str, &str)>,
     tier_storage_local: bool,
     tier_storage_persistence: Option<&crate::crd::kafka::TieredStoragePersistence>,
 ) -> (serde_json::Value, Vec<serde_json::Value>) {
@@ -652,6 +678,39 @@ fn render_storage(
                 "secret": {
                     "secretName": mount.secret_name,
                     "items": [{ "key": mount.key, "path": "client-secret" }],
+                    "defaultMode": 0o400_i32,
+                }
+            }));
+    }
+    // SASL/GSSAPI: append the user-owned keytab Secret as a read-only
+    // pod volume, pinning the user's source key to the fixed in-pod
+    // path `keytab` (so the broker reads `GSSAPI_KEYTAB_PATH` =
+    // `/etc/crabka/gssapi-keytab/keytab` regardless of key name).
+    if let Some(m) = gssapi_keytab {
+        volumes
+            .as_array_mut()
+            .expect("render_storage built `volumes` via json!([...])")
+            .push(json!({
+                "name": "gssapi-keytab",
+                "secret": {
+                    "secretName": m.secret_name,
+                    "items": [{ "key": m.key, "path": "keytab" }],
+                    "defaultMode": 0o400_i32,
+                }
+            }));
+    }
+    // Optional krb5.conf: append the user-owned Secret as a read-only
+    // pod volume, pinning the user's key to `krb5.conf` so the broker
+    // reads `/etc/crabka/krb5/krb5.conf` (matching `KRB5_CONFIG`).
+    if let Some((secret_name, key)) = krb5_conf {
+        volumes
+            .as_array_mut()
+            .expect("render_storage built `volumes` via json!([...])")
+            .push(json!({
+                "name": "krb5-conf",
+                "secret": {
+                    "secretName": secret_name,
+                    "items": [{ "key": key, "path": "krb5.conf" }],
                     "defaultMode": 0o400_i32,
                 }
             }));
@@ -829,6 +888,12 @@ pub(crate) fn render_statefulset(
     let oauth_introspection_mount_path = oauth_introspection_mount
         .as_ref()
         .map(|_| "/etc/crabka/oauth-introspection");
+    // SASL/GSSAPI: the keytab Secret ref from the (first) `type: gssapi`
+    // listener, and the optional `spec.krb5ConfSecretRef`. Derived the
+    // same way the introspection mount is — the pool reconciler mounts
+    // the user-owned source Secrets directly via projected items.
+    let gssapi_keytab_mount = crate::controller::kafka::gssapi_keytab_mount(parent);
+    let krb5_conf_mount = crate::controller::kafka::krb5_conf_mount(parent);
     // KIP-405: cluster-wide tier-storage selector.
     // `Local` adds a writable `tier-storage` emptyDir + matching
     // volumeMount at `TIER_STORAGE_PATH`. `S3` adds no pod volume — the
@@ -850,6 +915,8 @@ pub(crate) fn render_statefulset(
         &jbod_extra,
         oauth_jwks_trust_mount,
         oauth_introspection_mount_path,
+        gssapi_keytab_mount.is_some(),
+        krb5_conf_mount.is_some(),
         parent.spec.delegation_token.as_ref(),
         tiered_storage,
         parent.spec.tracing.as_ref(),
@@ -948,6 +1015,10 @@ pub(crate) fn render_statefulset(
         &parent_name,
         oauth_jwks_trust_secret.as_deref(),
         oauth_introspection_mount.as_ref(),
+        gssapi_keytab_mount.as_ref(),
+        krb5_conf_mount
+            .as_ref()
+            .map(|(s, k)| (s.as_str(), k.as_str())),
         tier_storage_local,
         tier_storage_persistence,
     );
@@ -1231,6 +1302,78 @@ async fn patch_status_for_pool(
     common::patch_status::<KafkaNodePool, KafkaNodePoolStatus>(pool_api, name, status).await
 }
 
+/// Whether the parent `Kafka`'s version model has cleared this pool to
+/// render (and therefore format) broker pods.
+///
+/// Version validation lives in the *Kafka* controller ([`kafka::reconcile`]
+/// → [`crate::version::evaluate`]), which publishes the verdict as the
+/// parent's `KafkaVersionValid` condition and finalizes the resolved value
+/// in `status.metadataVersion`. The pool reconciler owns no version logic;
+/// it only reads that already-fetched parent status (no extra API request,
+/// mirroring [`common::plan_rollout`]'s status-from-the-watched-object
+/// posture) and refuses to format pods until the model has cleared —
+/// otherwise an invalid `spec.kafkaVersion` on a brand-new cluster would
+/// bring the brokers up at an unvalidated version instead of surfacing the
+/// error and waiting (Slice 28).
+#[derive(Debug)]
+enum VersionGate {
+    /// The parent's version model is valid (or already finalized): render
+    /// the `StatefulSet` as normal.
+    Cleared,
+    /// The parent's version model has not cleared: refrain from rendering
+    /// and surface `cond` (a `Ready=False`) on the pool.
+    Blocked(KafkaCondition),
+}
+
+/// Decide whether `parent`'s version model clears this pool to format pods.
+///
+/// Clears when EITHER the parent carries `KafkaVersionValid=True`, OR a
+/// finalized `status.metadataVersion` is present. The finalized-version
+/// fallback is deliberate: a value there means a prior reconcile already
+/// validated the model and formatted the pods, so a *later* spec edit that
+/// flips `KafkaVersionValid=False` must not tear a running cluster down —
+/// the Kafka controller holds the previous finalized version and simply
+/// declines to advance it (see `kafka.rs` status patch).
+fn version_gate(parent: &Kafka) -> VersionGate {
+    let status = parent.status.as_ref();
+    let version_cond =
+        status.and_then(|s| s.conditions.iter().find(|c| c.type_ == "KafkaVersionValid"));
+    let finalized = status.and_then(|s| s.metadata_version.as_deref());
+
+    let cleared = finalized.is_some() || version_cond.is_some_and(|c| c.status == "True");
+    if cleared {
+        return VersionGate::Cleared;
+    }
+
+    // Not cleared. Distinguish "the parent declared the version invalid"
+    // from "the parent hasn't published a verdict yet" so admins can tell
+    // a misconfiguration from a transient ordering gap.
+    let cond = match version_cond {
+        Some(c) => condition(
+            "Ready",
+            "False",
+            "KafkaVersionInvalid",
+            &format!(
+                "refusing to format brokers: parent Kafka '{}' KafkaVersionValid={} ({}): {}",
+                parent.name_any(),
+                c.status,
+                c.reason,
+                c.message
+            ),
+        ),
+        None => condition(
+            "Ready",
+            "False",
+            "WaitingForVersionValidation",
+            &format!(
+                "waiting for parent Kafka '{}' to publish a KafkaVersionValid verdict before formatting brokers",
+                parent.name_any()
+            ),
+        ),
+    };
+    VersionGate::Blocked(cond)
+}
+
 /// Run the `KafkaNodePool` controller forever. Returns only on
 /// irrecoverable stream error.
 pub async fn run(ctx: Context) -> anyhow::Result<()> {
@@ -1293,6 +1436,19 @@ pub async fn reconcile(
         patch_status_for_pool(&pool_api, &name, cond).await?;
         return Ok(Action::requeue(Duration::from_secs(30)));
     };
+
+    // 2b. Gate on the parent's version model. Version validation lives in
+    //     the Kafka controller; until it has declared the version valid
+    //     (KafkaVersionValid=True) or finalized a metadata version, refrain
+    //     from formatting/creating broker pods. This surfaces an invalid
+    //     spec.kafkaVersion as a clear CR condition and waits, rather than
+    //     bringing a cluster up at an unvalidated version. The requeue +
+    //     the Kafka controller's adopt-pools label patch re-trigger this
+    //     reconcile once the parent publishes its verdict.
+    if let VersionGate::Blocked(cond) = version_gate(&parent) {
+        patch_status_for_pool(&pool_api, &name, cond).await?;
+        return Ok(Action::requeue(Duration::from_secs(30)));
+    }
 
     // 3. Resolve broker image: spec override > operator default > built-in.
     let image = pool
@@ -1382,6 +1538,8 @@ mod tests {
                 delegation_token: None,
                 authorization: None,
                 tiered_storage: None,
+                inter_broker_kerberos: None,
+                krb5_conf_secret_ref: None,
                 tracing: None,
             },
         );
@@ -2386,6 +2544,106 @@ mod tests {
             mounts.contains(&"/etc/crabka/clients-ca"),
             "missing /etc/crabka/clients-ca; got {mounts:?}"
         );
+    }
+
+    #[test]
+    fn render_statefulset_mounts_gssapi_keytab() {
+        let mut parent = parent_fixture("kerb");
+        parent.spec.listeners = vec![crate::crd::Listener {
+            name: "gss".into(),
+            port: 9092,
+            type_: crate::crd::ListenerType::Internal,
+            tls: true,
+            authentication: Some(crate::crd::ListenerAuthentication::Gssapi(
+                crate::crd::ListenerAuthenticationGssapi {
+                    keytab_secret_ref: crate::crd::KeytabSecretRef {
+                        secret_name: "broker-keytab".into(),
+                        key: "krb5.keytab".into(),
+                    },
+                    service_name: None,
+                    principal_to_local_rules: vec![],
+                    realm: None,
+                    kdc: None,
+                },
+            )),
+            configuration: None,
+            network_policy_peers: None,
+        }];
+        let pool = pool_fixture("brokers", "kerb", 1);
+        let ss = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE).expect("render");
+        let pod_spec = ss.spec.unwrap().template.spec.unwrap();
+
+        // volumeMount at the fixed keytab directory.
+        let mounts: Vec<&str> = pod_spec.containers[0]
+            .volume_mounts
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|m| m.mount_path.as_str())
+            .collect();
+        assert!(
+            mounts.contains(&"/etc/crabka/gssapi-keytab"),
+            "missing /etc/crabka/gssapi-keytab; got {mounts:?}"
+        );
+
+        // Projected-items volume: source Secret name + key pinned to `keytab`.
+        let volumes = pod_spec.volumes.unwrap_or_default();
+        let kt = volumes
+            .iter()
+            .find(|v| v.name == "gssapi-keytab")
+            .expect("gssapi-keytab volume present");
+        let secret = kt.secret.as_ref().expect("keytab volume is a Secret");
+        assert_eq!(secret.secret_name.as_deref(), Some("broker-keytab"));
+        let items = secret.items.as_ref().expect("projected items");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].key, "krb5.keytab");
+        assert_eq!(items[0].path, "keytab");
+    }
+
+    #[test]
+    fn render_statefulset_mounts_krb5_conf_and_sets_env() {
+        let mut parent = parent_fixture("kerb");
+        parent.spec.krb5_conf_secret_ref = Some(crate::crd::Krb5ConfSecretRef {
+            secret_name: "krb5-conf".into(),
+            key: "config".into(),
+        });
+        let pool = pool_fixture("brokers", "kerb", 1);
+        let ss = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE).expect("render");
+        let pod_spec = ss.spec.unwrap().template.spec.unwrap();
+
+        let mounts: Vec<&str> = pod_spec.containers[0]
+            .volume_mounts
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|m| m.mount_path.as_str())
+            .collect();
+        assert!(
+            mounts.contains(&"/etc/crabka/krb5"),
+            "missing /etc/crabka/krb5; got {mounts:?}"
+        );
+
+        // KRB5_CONFIG env points at the projected krb5.conf file.
+        let env = pod_spec.containers[0].env.as_ref().expect("env present");
+        let krb5_config = env
+            .iter()
+            .find(|e| e.name == "KRB5_CONFIG")
+            .expect("KRB5_CONFIG env present");
+        assert_eq!(
+            krb5_config.value.as_deref(),
+            Some("/etc/crabka/krb5/krb5.conf")
+        );
+
+        let volumes = pod_spec.volumes.unwrap_or_default();
+        let kc = volumes
+            .iter()
+            .find(|v| v.name == "krb5-conf")
+            .expect("krb5-conf volume present");
+        let secret = kc.secret.as_ref().expect("krb5-conf volume is a Secret");
+        assert_eq!(secret.secret_name.as_deref(), Some("krb5-conf"));
+        let items = secret.items.as_ref().expect("projected items");
+        assert_eq!(items[0].key, "config");
+        assert_eq!(items[0].path, "krb5.conf");
     }
 
     #[test]
@@ -3461,5 +3719,109 @@ mod tests {
                 "{never} must not leak when tracing is None"
             );
         }
+    }
+
+    // --- Version gate: the pool reconciler must not format/create broker
+    // pods until the parent Kafka's version model has cleared (Slice 28
+    // "surface the error and wait"). The decision is the pure
+    // `version_gate`; the reconciler just acts on it. ---
+
+    /// Attach a `KafkaVersionValid` condition + finalized metadata version
+    /// to a parent fixture's status, mirroring what `kafka.rs` writes.
+    fn parent_with_version_status(
+        name: &str,
+        version_valid: Option<bool>,
+        finalized_metadata: Option<&str>,
+    ) -> Kafka {
+        let mut parent = parent_fixture(name);
+        let mut conditions = Vec::new();
+        if let Some(valid) = version_valid {
+            let (status, reason, message) = if valid {
+                ("True", "Valid", "kafkaVersion 3.7.0 metadata.version 3.7")
+            } else {
+                (
+                    "False",
+                    "InvalidVersion",
+                    "spec.kafkaVersion \"99.9\" is not a valid version",
+                )
+            };
+            conditions.push(condition("KafkaVersionValid", status, reason, message));
+        }
+        parent.status = Some(crate::crd::KafkaStatus {
+            conditions,
+            metadata_version: finalized_metadata.map(str::to_string),
+            ..Default::default()
+        });
+        parent
+    }
+
+    #[test]
+    fn version_gate_blocks_fresh_cluster_with_invalid_version() {
+        // Fresh cluster: the Kafka controller has evaluated the spec and
+        // published KafkaVersionValid=False, with no finalized metadata
+        // version. The pool must refrain from rendering pods.
+        let parent = parent_with_version_status("demo", Some(false), None);
+        match version_gate(&parent) {
+            VersionGate::Blocked(cond) => {
+                assert_eq!(cond.type_, "Ready");
+                assert_eq!(cond.status, "False");
+                assert_eq!(cond.reason, "KafkaVersionInvalid");
+                assert!(
+                    cond.message.contains("KafkaVersionValid=False"),
+                    "pool condition should surface the parent's verdict, got: {}",
+                    cond.message
+                );
+            }
+            VersionGate::Cleared => {
+                panic!("invalid parent version must block pod creation")
+            }
+        }
+    }
+
+    #[test]
+    fn version_gate_blocks_when_parent_has_no_version_status_yet() {
+        // The pool reconciled before the Kafka controller's first pass —
+        // no status at all. Hold off rather than format at a guessed
+        // version; the requeue + adopt-pools re-trigger will re-run us once
+        // the parent publishes its verdict.
+        let parent = parent_fixture("demo");
+        assert!(parent.status.is_none(), "fixture precondition");
+        match version_gate(&parent) {
+            VersionGate::Blocked(cond) => {
+                assert_eq!(cond.type_, "Ready");
+                assert_eq!(cond.status, "False");
+                assert_eq!(cond.reason, "WaitingForVersionValidation");
+            }
+            VersionGate::Cleared => {
+                panic!("missing parent version status must block pod creation")
+            }
+        }
+    }
+
+    #[test]
+    fn version_gate_clears_when_kafkaversionvalid_true() {
+        // Valid version: gate clears AND the StatefulSet renders as today.
+        let parent = parent_with_version_status("demo", Some(true), Some("3.7"));
+        assert!(
+            matches!(version_gate(&parent), VersionGate::Cleared),
+            "a valid parent version must clear the gate"
+        );
+        let pool = pool_fixture("brokers", "demo", 1);
+        let sts = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE)
+            .expect("pods are created as today when the version is valid");
+        assert_eq!(sts.metadata.name.as_deref(), Some("demo-brokers"));
+    }
+
+    #[test]
+    fn version_gate_clears_when_metadata_version_finalized() {
+        // An already-running cluster carries a finalized status.metadataVersion
+        // even if a later spec edit flips KafkaVersionValid=False. We must not
+        // tear the cluster down — the finalized version means a prior reconcile
+        // formatted the pods at a known-good version.
+        let parent = parent_with_version_status("demo", Some(false), Some("3.7"));
+        assert!(
+            matches!(version_gate(&parent), VersionGate::Cleared),
+            "a finalized metadata version keeps a running cluster's pods"
+        );
     }
 }
