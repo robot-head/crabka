@@ -685,6 +685,21 @@ mod tests {
         tokio::task::spawn_blocking(f).await.unwrap()
     }
 
+    /// Poll until `tp` reads `Ok(Some)` (assigned + caught up), or panic.
+    async fn wait_ready(m: &Arc<TopicBasedRemoteLogMetadataManager>, tp: &TopicIdPartition) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            if matches!(m.remote_log_segment_metadata(tp, 0, 42), Ok(Some(_))) {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "partition never became ready"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    }
+
     /// Start a manager that consumes NOTHING until the caller drives
     /// `reconcile_assignment`. Used by the assignment/readiness tests, which
     /// assert pre-assignment reads are a genuine miss.
@@ -1047,6 +1062,161 @@ mod tests {
         assert_eq!(m.remote_log_segment_metadata(&other, 0, 0).unwrap(), None);
         assert_eq!(m.highest_offset_for_epoch(&other, 0).unwrap(), None);
         assert!(m.list_remote_log_segments(&other).unwrap().is_empty());
+        m.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn two_brokers_split_metadata_partitions() {
+        use crate::partitioning::metadata_partition_for;
+
+        // Use a wide metadata topic so two user-partitions land in distinct
+        // buckets.
+        let n = 16;
+        let topic_id = Uuid::from_u128(0xFEED);
+        let tp_a = TopicIdPartition::new(topic_id, "orders", 0);
+        let tp_b = TopicIdPartition::new(topic_id, "orders", 1);
+        let mp_a = metadata_partition_for(&tp_a, n);
+        let mp_b = metadata_partition_for(&tp_b, n);
+        assert_ne!(
+            mp_a, mp_b,
+            "test needs the two partitions in distinct buckets"
+        );
+
+        let log: Arc<dyn MetadataEventLog> = InProcessMetadataEventLog::new(n);
+
+        // Seed one finished segment for each user-partition via a transient
+        // writer (consumes all partitions, no assignment gating).
+        for (tp, id) in [(tp_a.clone(), 100u128), (tp_b.clone(), 200)] {
+            let w = start_manager_all(log.clone()).await;
+            let started = RemoteLogSegmentMetadata::new(
+                RemoteLogSegmentId::new(tp.clone(), Uuid::from_u128(id)),
+                0,
+                99,
+                100,
+                1,
+                100,
+                2048,
+                RemoteLogSegmentState::CopySegmentStarted,
+                BTreeMap::from([(0, 0)]),
+            )
+            .unwrap();
+            let w2 = w.clone();
+            on_blocking(move || w2.add_remote_log_segment_metadata(started).unwrap()).await;
+            let upd = RemoteLogSegmentMetadataUpdate {
+                remote_log_segment_id: RemoteLogSegmentId::new(tp, Uuid::from_u128(id)),
+                event_timestamp_ms: 200,
+                custom_metadata: None,
+                state: RemoteLogSegmentState::CopySegmentFinished,
+                broker_id: 1,
+            };
+            let w2 = w.clone();
+            on_blocking(move || w2.update_remote_log_segment_metadata(upd).unwrap()).await;
+            w.shutdown();
+        }
+
+        // Broker A consumes mp_a only; Broker B consumes mp_b only.
+        let a = start_manager(log.clone()).await;
+        let b = start_manager(log).await;
+        a.reconcile_assignment(&[mp_a]).await;
+        b.reconcile_assignment(&[mp_b]).await;
+
+        assert_eq!(a.assigned_metadata_partitions(), vec![mp_a]);
+        assert_eq!(b.assigned_metadata_partitions(), vec![mp_b]);
+        // Disjoint shares.
+        assert!(
+            a.assigned_metadata_partitions()
+                .iter()
+                .all(|p| !b.assigned_metadata_partitions().contains(p)),
+            "shares must be disjoint"
+        );
+
+        // Poll until each is caught up and serves its own partition.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let a_own = a.remote_log_segment_metadata(&tp_a, 0, 42);
+            let b_own = b.remote_log_segment_metadata(&tp_b, 0, 42);
+            if matches!(a_own, Ok(Some(_))) && matches!(b_own, Ok(Some(_))) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "managers did not catch up: a={a_own:?} b={b_own:?}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+
+        // Cross reads (partition the broker does NOT consume) are a genuine
+        // miss, not NotReady.
+        assert!(
+            matches!(a.remote_log_segment_metadata(&tp_b, 0, 42), Ok(None)),
+            "A does not consume mp_b → genuine miss"
+        );
+        assert!(
+            matches!(b.remote_log_segment_metadata(&tp_a, 0, 42), Ok(None)),
+            "B does not consume mp_a → genuine miss"
+        );
+
+        a.shutdown();
+        b.shutdown();
+    }
+
+    /// 48o code-review guard: the runtime `remove` then `add` reassignment
+    /// path (which 48q is the first slice to actually drive) must not
+    /// double-deliver a metadata partition's events into the cache. A
+    /// re-applied `AddSegment` is harmlessly rejected by the lifecycle state
+    /// machine, so the segment list stays at exactly one entry — proving no
+    /// duplicate corruption after remove + re-add.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reassignment_remove_then_readd_applies_no_duplicates() {
+        use crate::partitioning::metadata_partition_for;
+
+        let log: Arc<dyn MetadataEventLog> = InProcessMetadataEventLog::new(4);
+        // Pre-seed a single finished segment for `tp()`.
+        {
+            let writer = start_manager_all(log.clone()).await;
+            let w2 = writer.clone();
+            on_blocking(move || {
+                w2.add_remote_log_segment_metadata(started(10, 0, 99))
+                    .unwrap();
+            })
+            .await;
+            let w2 = writer.clone();
+            on_blocking(move || w2.update_remote_log_segment_metadata(finish(10)).unwrap()).await;
+            writer.shutdown();
+        }
+
+        let mp = metadata_partition_for(&tp(), log.partition_count());
+        let m = start_manager(log).await;
+
+        // Add → catch up → exactly one segment.
+        m.reconcile_assignment(&[mp]).await;
+        wait_ready(&m, &tp()).await;
+        assert_eq!(
+            m.list_remote_log_segments(&tp()).unwrap().len(),
+            1,
+            "one segment after first assignment"
+        );
+
+        // Remove (drops the live fetch task mid-flight if one is running) …
+        m.reconcile_assignment(&[]).await;
+        assert!(m.assigned_metadata_partitions().is_empty());
+
+        // … then re-add. The 48o pump re-injects the backlog from the resume
+        // offset; the re-applied AddSegment is rejected by the lifecycle
+        // machine, so NO duplicate lands in the cache.
+        m.reconcile_assignment(&[mp]).await;
+        wait_ready(&m, &tp()).await;
+
+        let listed = m.list_remote_log_segments(&tp()).unwrap();
+        assert_eq!(
+            listed.len(),
+            1,
+            "remove + re-add must not duplicate the segment, got {listed:?}"
+        );
+        assert_eq!(listed[0].remote_log_segment_id().id, Uuid::from_u128(10));
+        // The finished state survived (no half-applied duplicate update).
+        assert_eq!(m.highest_offset_for_epoch(&tp(), 0).unwrap(), Some(99));
+
         m.shutdown();
     }
 }
