@@ -96,6 +96,7 @@ impl CrabkaStateMachine {
                 let records = SnapshotReader::read_records(&bytes)
                     .expect("checkpoint records must decode on recovery");
                 let image = MetadataImage::from_records(cluster_id, &records);
+                guard_metadata_version(&image);
                 (image, meta.last_log_id, meta.last_membership)
             }
             Ok(None) => (
