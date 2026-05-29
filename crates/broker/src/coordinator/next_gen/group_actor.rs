@@ -1194,7 +1194,14 @@ mod tests {
         use crate::coordinator::next_gen::group_state::GroupState;
 
         let (coord, log) = make_coordinator();
-        let config = NextGenConfig::default();
+        // Tiny session timeout so a member whose `last_seen` is a few ms in
+        // the past counts as expired — avoids subtracting a large duration
+        // from `Instant::now()`, which `checked_sub` rejects on low-uptime
+        // CI runners (e.g. a freshly-booted Windows agent).
+        let config = NextGenConfig {
+            session_timeout: Duration::from_millis(1),
+            ..NextGenConfig::default()
+        };
         let metadata = empty_metadata();
 
         // Seed a member and reconcile once so the join settles into a clean
@@ -1210,11 +1217,12 @@ mod tests {
             "h",
             Instant::now(),
         );
-        // Force the member to look session-expired.
-        let one_hour_secs: u64 = 3600;
+        // Force the member to look session-expired. 50ms is always within
+        // `Instant`'s range (no underflow on any host) yet far exceeds the
+        // 1ms `session_timeout` set above.
         m.last_seen = Instant::now()
-            .checked_sub(Duration::from_secs(one_hour_secs))
-            .unwrap();
+            .checked_sub(Duration::from_millis(50))
+            .expect("50ms is always within Instant range");
         state.add_or_update_member(m);
         run_reconcile(&mut state, &config, &*metadata);
         assert!(!state.dirty, "baseline must be clean before eviction");
