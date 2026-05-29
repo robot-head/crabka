@@ -3322,17 +3322,17 @@ pub fn render_broker_toml(
         let _ = writeln!(out, "[gssapi]");
         let _ = writeln!(out, "keytab_path = \"{GSSAPI_KEYTAB_PATH}\"");
         let svc = g.service_name.as_deref().unwrap_or("kafka");
-        let _ = writeln!(out, "service_name = \"{svc}\"");
+        let _ = writeln!(out, "service_name = \"{}\"", toml_escape(svc));
         let _ = writeln!(
             out,
             "principal_to_local_rules = {}",
             toml_string_array(&g.principal_to_local_rules)
         );
         if let Some(realm) = &g.realm {
-            let _ = writeln!(out, "realm = \"{realm}\"");
+            let _ = writeln!(out, "realm = \"{}\"", toml_escape(realm));
         }
         if let Some(kdc) = &g.kdc {
-            let _ = writeln!(out, "kdc = \"{kdc}\"");
+            let _ = writeln!(out, "kdc = \"{}\"", toml_escape(kdc));
         }
         out.push('\n');
     }
@@ -3347,10 +3347,14 @@ pub fn render_broker_toml(
         let _ = writeln!(out, "[inter_broker_credentials]");
         let _ = writeln!(out, "type = \"gssapi\"");
         let _ = writeln!(out, "keytab_path = \"{GSSAPI_KEYTAB_PATH}\"");
-        let _ = writeln!(out, "client_principal = \"{}\"", ibk.client_principal);
+        let _ = writeln!(
+            out,
+            "client_principal = \"{}\"",
+            toml_escape(&ibk.client_principal)
+        );
         let svc = ibk.service_name.as_deref().unwrap_or("kafka");
-        let _ = writeln!(out, "service_name = \"{svc}\"");
-        let _ = writeln!(out, "kdc_url = \"{}\"", ibk.kdc_url);
+        let _ = writeln!(out, "service_name = \"{}\"", toml_escape(svc));
+        let _ = writeln!(out, "kdc_url = \"{}\"", toml_escape(&ibk.kdc_url));
         out.push('\n');
     }
 
@@ -4401,6 +4405,7 @@ mod toml_rendering_tests {
         );
         assert!(toml.contains("[inter_broker_credentials]"), "toml:\n{toml}");
         assert!(toml.contains(r#"type = "gssapi""#));
+        assert!(toml.contains(r#"keytab_path = "/etc/crabka/gssapi-keytab/keytab""#));
         assert!(toml.contains(r#"client_principal = "kafka@EXAMPLE.COM""#));
         assert!(toml.contains(r#"kdc_url = "tcp://kdc:88""#));
     }
