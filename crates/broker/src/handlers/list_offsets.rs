@@ -5,8 +5,10 @@
 //! so offsets that have been deleted locally by local-retention but
 //! still live in the remote tier are visible.
 //!
-//! Local-segment timestamp-index lookup (positive timestamps on non-tiered
-//! topics) is still out of scope and returns -1 as before.
+//! Positive-timestamp lookups resolve against the remote tier first
+//! (it holds the oldest records) and fall back to the local log's
+//! time index (KIP-405/734). The `MAX_TIMESTAMP` (-3) and `EARLIEST_LOCAL`
+//! (-4) sentinels are resolved against the local log.
 
 use bytes::{Bytes, BytesMut};
 use futures_util::future::BoxFuture;
@@ -23,6 +25,8 @@ use crate::error::BrokerError;
 
 const EARLIEST: i64 = -2;
 const LATEST: i64 = -1;
+const MAX_TIMESTAMP: i64 = -3; // KIP-734
+const EARLIEST_LOCAL: i64 = -4; // KIP-405
 
 #[allow(clippy::too_many_lines)]
 pub(crate) fn handle(
@@ -57,11 +61,12 @@ pub(crate) fn handle(
                     continue;
                 };
 
-                let (local_start, local_end, remote_storage_enable) = {
+                let (local_start, local_end, local_log_start, remote_storage_enable) = {
                     let log = p.log.lock().expect("log mutex poisoned");
                     (
                         log.log_start_offset(),
                         log.log_end_offset(),
+                        log.local_log_start_offset(),
                         log.config_snapshot().remote_storage_enable,
                     )
                 };
@@ -76,7 +81,7 @@ pub(crate) fn handle(
                     None
                 };
 
-                let offset = match part.timestamp {
+                let (offset, resp_timestamp) = match part.timestamp {
                     EARLIEST => {
                         let mut earliest = local_start;
                         if let (Some(reader), Some(tid)) = (remote_reader.as_ref(), topic_id) {
@@ -94,36 +99,57 @@ pub(crate) fn handle(
                                 ),
                             }
                         }
-                        earliest
+                        (earliest, -1)
                     }
-                    LATEST => local_end,
-                    ts if ts > 0 => {
-                        if let (Some(reader), Some(tid)) = (remote_reader.as_ref(), topic_id) {
-                            let tp = crabka_remote_storage::TopicIdPartition::new(
-                                tid,
-                                topic.name.clone(),
-                                idx,
-                            );
-                            match reader.offset_for_timestamp(&tp, ts).await {
-                                Ok(Some(o)) => o,
-                                Ok(None) => -1,
-                                Err(e) => {
-                                    tracing::warn!(
-                                        topic = %topic.name, partition = idx, error = %e,
-                                        "list_offsets: remote offset_for_timestamp failed"
-                                    );
-                                    -1
-                                }
-                            }
-                        } else {
-                            -1
+                    LATEST => (local_end, -1),
+                    EARLIEST_LOCAL => (local_log_start, -1),
+                    MAX_TIMESTAMP => {
+                        let log = p.log.lock().expect("log mutex poisoned");
+                        match log.max_timestamp_offset_and_ts() {
+                            Some((offset, ts)) => (offset, ts),
+                            None => (log.offset_of_max_timestamp(), -1),
                         }
                     }
-                    _ => -1,
+                    ts if ts > 0 => {
+                        let remote_result =
+                            if let (Some(reader), Some(tid)) = (remote_reader.as_ref(), topic_id) {
+                                let tp = crabka_remote_storage::TopicIdPartition::new(
+                                    tid,
+                                    topic.name.clone(),
+                                    idx,
+                                );
+                                match reader.offset_for_timestamp(&tp, ts).await {
+                                    Ok(Some(o)) => Some(o),
+                                    Ok(None) => None,
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            topic = %topic.name, partition = idx, error = %e,
+                                            "list_offsets: remote offset_for_timestamp failed"
+                                        );
+                                        None
+                                    }
+                                }
+                            } else {
+                                None
+                            };
+                        if let Some(o) = remote_result {
+                            // Remote hit covers the oldest records; the remote reader
+                            // does not surface the matched record timestamp, so echo -1.
+                            (o, -1)
+                        } else {
+                            let local = {
+                                let log = p.log.lock().expect("log mutex poisoned");
+                                log.offset_for_timestamp(ts)
+                            };
+                            local.map_or((-1, -1), |(o, matched_ts)| (o, matched_ts))
+                        }
+                    }
+                    _ => (-1, -1),
                 };
 
                 out.error_code = codes::NONE;
                 out.offset = offset;
+                out.timestamp = resp_timestamp;
                 parts_out.push(out);
             }
             topics_out.push(ListOffsetsTopicResponse {
