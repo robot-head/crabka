@@ -93,7 +93,7 @@ Crabka is organized as a Rust workspace.
 | [`crabka-log`](crates/log) | Byte-compatible log segments, indexes, transaction index, compaction, retention |
 | [`crabka-metadata`](crates/metadata) | Versioned metadata records, immutable metadata image, ACL model |
 | [`crabka-raft`](crates/raft) | Metadata Raft quorum (`openraft` adapters + controller) |
-| [`crabka-security`](crates/security) | TLS (`rustls`), SASL/PLAIN, SASL/SCRAM-256/512, SASL/OAUTHBEARER, mTLS |
+| [`crabka-security`](crates/security) | TLS (`rustls`), SASL/PLAIN, SASL/SCRAM-256/512, SASL/OAUTHBEARER, SASL/GSSAPI, mTLS |
 
 ### Broker
 
@@ -284,7 +284,7 @@ implements it today. Legend: ✅ implemented · ⚠️ partial · ❌ not yet ·
 | Persistent (PVC) + JBOD storage | ✅ |
 | Listeners: internal / NodePort / LoadBalancer | ✅ |
 | Listeners: Ingress / Route | ⚠️ |
-| Listener auth wiring (TLS / SCRAM) | ✅ |
+| Listener auth wiring (TLS / SCRAM / OAuth / Kerberos) | ✅ |
 | Cluster CA + clients CA generation & rotation | ✅ |
 | `KafkaUser` mTLS + SCRAM + ACLs + quotas | ✅ |
 | `KafkaTopic` reconciliation (create / alter / partitions) | ✅ |

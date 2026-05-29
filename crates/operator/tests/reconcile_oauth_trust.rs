@@ -94,6 +94,8 @@ fn kafka_with_oauth_trust(name: &str, ns: &str, trust_certs: Vec<(&str, &str)>) 
             delegation_token: None,
             authorization: None,
             tiered_storage: None,
+            inter_broker_kerberos: None,
+            krb5_conf_secret_ref: None,
             tracing: None,
         },
     );

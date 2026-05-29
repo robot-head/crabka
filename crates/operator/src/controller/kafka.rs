@@ -442,6 +442,40 @@ pub(crate) fn oauth_introspection_secret_mount(kafka: &Kafka) -> Option<OauthInt
     })
 }
 
+/// In-pod mount info for the GSSAPI keytab. `key` is the user's source
+/// key; mounted via projected items to a fixed path so the broker reads
+/// `/etc/crabka/gssapi-keytab/keytab` regardless of key name.
+pub(crate) struct GssapiKeytabMount {
+    pub secret_name: String,
+    pub key: String,
+}
+
+/// The keytab Secret ref from the (first) GSSAPI listener, or `None` when
+/// no listener is `type: gssapi`. Validation guarantees all GSSAPI
+/// listeners agree, so the first is canonical.
+pub(crate) fn gssapi_keytab_mount(kafka: &Kafka) -> Option<GssapiKeytabMount> {
+    kafka
+        .spec
+        .listeners
+        .iter()
+        .find_map(|l| match &l.authentication {
+            Some(ListenerAuthentication::Gssapi(c)) => Some(GssapiKeytabMount {
+                secret_name: c.keytab_secret_ref.secret_name.clone(),
+                key: c.keytab_secret_ref.key.clone(),
+            }),
+            _ => None,
+        })
+}
+
+/// krb5.conf Secret ref, when `spec.krb5ConfSecretRef` is set.
+pub(crate) fn krb5_conf_mount(kafka: &Kafka) -> Option<(String, String)> {
+    kafka
+        .spec
+        .krb5_conf_secret_ref
+        .as_ref()
+        .map(|r| (r.secret_name.clone(), r.key.clone()))
+}
+
 /// Build the managed oauth-jwks-trust Secret from the
 /// canonical OAuth config's `tls_trusted_certificates`. Returns the
 /// Secret's name (so the `StatefulSet` can mount it), or `None` when no
@@ -1094,6 +1128,89 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
                 return Ok(Action::requeue(Duration::from_secs(30)));
             }
             Err(e) => return Err(e),
+        }
+
+        // Validate the GSSAPI keytab Secret (when a `type: gssapi`
+        // listener is configured) and the optional `spec.krb5ConfSecretRef`
+        // Secret. The pod template derives the same mounts independently
+        // via `gssapi_keytab_mount` / `krb5_conf_mount`, so we don't thread
+        // anything out — these checks are purely for the
+        // validate-Secret-exists side effect, mirroring the OAuth
+        // introspection check above.
+        let gssapi_secret_check: Result<(), ReconcileError> = async {
+            if let Some(m) = gssapi_keytab_mount(&obj) {
+                let secret = secret_api.get_opt(&m.secret_name).await?.ok_or_else(|| {
+                    ReconcileError::MissingGssapiKeytabSecret(m.secret_name.clone())
+                })?;
+                let has_key = secret.data.as_ref().is_some_and(|d| d.contains_key(&m.key))
+                    || secret
+                        .string_data
+                        .as_ref()
+                        .is_some_and(|d| d.contains_key(&m.key));
+                if !has_key {
+                    return Err(ReconcileError::MissingGssapiKeytabKey {
+                        secret: m.secret_name,
+                        key: m.key,
+                    });
+                }
+            }
+            if let Some((secret_name, key)) = krb5_conf_mount(&obj) {
+                let secret = secret_api
+                    .get_opt(&secret_name)
+                    .await?
+                    .ok_or_else(|| ReconcileError::MissingKrb5ConfSecret(secret_name.clone()))?;
+                let has_key = secret.data.as_ref().is_some_and(|d| d.contains_key(&key))
+                    || secret
+                        .string_data
+                        .as_ref()
+                        .is_some_and(|d| d.contains_key(&key));
+                if !has_key {
+                    return Err(ReconcileError::MissingKrb5ConfKey {
+                        secret: secret_name,
+                        key,
+                    });
+                }
+            }
+            Ok(())
+        }
+        .await;
+        match gssapi_secret_check {
+            Ok(()) => {}
+            Err(
+                e @ (ReconcileError::MissingGssapiKeytabSecret(_)
+                | ReconcileError::MissingGssapiKeytabKey { .. }
+                | ReconcileError::MissingKrb5ConfSecret(_)
+                | ReconcileError::MissingKrb5ConfKey { .. }),
+            ) => {
+                let reason = match &e {
+                    ReconcileError::MissingGssapiKeytabSecret(_) => "MissingGssapiKeytabSecret",
+                    ReconcileError::MissingGssapiKeytabKey { .. } => "MissingGssapiKeytabKey",
+                    ReconcileError::MissingKrb5ConfSecret(_) => "MissingKrb5ConfSecret",
+                    ReconcileError::MissingKrb5ConfKey { .. } => "MissingKrb5ConfKey",
+                    _ => unreachable!(),
+                };
+                let cond = condition("Ready", "False", reason, &e.to_string());
+                let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), &ns);
+                patch_status_with_condition(&kafka_api, &name, cond).await?;
+                return Ok(Action::requeue(Duration::from_secs(30)));
+            }
+            Err(e) => return Err(e),
+        }
+
+        // Inter-broker Kerberos: when the resolved inter-broker listener
+        // uses GSSAPI, `spec.interBrokerKerberos` must be present (the
+        // broker needs initiate-side credentials). Surface a failure the
+        // same way `validate_listeners` does — `ListenersValid=False` with
+        // the `ValidationError`'s `reason()`/`message()`.
+        if let Err(e) = listeners::validate_inter_broker_gssapi(
+            &effective_listeners,
+            &inter_broker_name,
+            obj.spec.inter_broker_kerberos.is_some(),
+        ) {
+            let cond = condition("ListenersValid", "False", e.reason(), &e.message());
+            let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), &ns);
+            patch_status_with_condition(&kafka_api, &name, cond).await?;
+            return Ok(Action::requeue(Duration::from_secs(30)));
         }
 
         // Enumerate brokers from sibling pools. Empty pool list ->
@@ -1827,6 +1944,8 @@ mod tests {
                 delegation_token: None,
                 authorization: None,
                 tiered_storage: None,
+                inter_broker_kerberos: None,
+                krb5_conf_secret_ref: None,
                 tracing: None,
             },
         );
@@ -1917,5 +2036,45 @@ mod tests {
         let mount = oauth_introspection_secret_mount(&kafka).expect("mount derived");
         assert_eq!(mount.secret_name, "oauth-cs");
         assert_eq!(mount.key, "client-secret");
+    }
+
+    #[test]
+    fn gssapi_keytab_mount_extracted_from_listener() {
+        let g = crate::crd::ListenerAuthenticationGssapi {
+            keytab_secret_ref: crate::crd::KeytabSecretRef {
+                secret_name: "kt".into(),
+                key: "krb5.keytab".into(),
+            },
+            service_name: None,
+            principal_to_local_rules: vec!["DEFAULT".into()],
+            realm: None,
+            kdc: None,
+        };
+        let k = kafka_with_listeners(vec![listener_with_auth(
+            "gss",
+            Some(ListenerAuthentication::Gssapi(g)),
+        )]);
+        let m = gssapi_keytab_mount(&k).expect("keytab mount present");
+        assert_eq!(m.secret_name, "kt");
+        assert_eq!(m.key, "krb5.keytab");
+    }
+
+    #[test]
+    fn no_keytab_mount_without_gssapi_listener() {
+        let k = kafka_with_listeners(vec![listener_with_auth("plain", None)]);
+        assert!(gssapi_keytab_mount(&k).is_none());
+    }
+
+    #[test]
+    fn krb5_conf_mount_extracted_from_spec() {
+        let mut k = kafka_with_listeners(vec![listener_with_auth("plain", None)]);
+        assert!(krb5_conf_mount(&k).is_none());
+        k.spec.krb5_conf_secret_ref = Some(crate::crd::Krb5ConfSecretRef {
+            secret_name: "krb5".into(),
+            key: "krb5.conf".into(),
+        });
+        let (secret_name, key) = krb5_conf_mount(&k).expect("krb5.conf mount present");
+        assert_eq!(secret_name, "krb5");
+        assert_eq!(key, "krb5.conf");
     }
 }

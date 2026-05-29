@@ -90,6 +90,18 @@ pub enum ReconcileError {
     /// exist but the value is zero bytes.
     #[error("oauth introspection Secret '{secret}' key '{key}' is empty")]
     EmptyOauthIntrospectionValue { secret: String, key: String },
+    /// `type: gssapi` listener references a keytab Secret that doesn't exist.
+    #[error("gssapi keytab Secret '{0}' not found")]
+    MissingGssapiKeytabSecret(String),
+    /// keytab Secret exists but lacks the referenced key.
+    #[error("gssapi keytab Secret '{secret}' has no key '{key}'")]
+    MissingGssapiKeytabKey { secret: String, key: String },
+    /// `spec.krb5ConfSecretRef` references a Secret that doesn't exist.
+    #[error("krb5.conf Secret '{0}' not found")]
+    MissingKrb5ConfSecret(String),
+    /// `spec.krb5ConfSecretRef` Secret exists but lacks the referenced key.
+    #[error("krb5.conf Secret {secret:?} is missing key {key:?}")]
+    MissingKrb5ConfKey { secret: String, key: String },
     /// KIP-405: `spec.tieredStorage` failed shape
     /// validation. Concrete cases: `type = "S3"` without `spec.tieredStorage.s3`,
     /// `type = "Local"` with `spec.tieredStorage.s3` set, or an S3 spec
@@ -314,6 +326,7 @@ pub(crate) fn render_configmap(
     // TOML so the broker-wide `[remote_storage]` block (and the matching
     // `tier-storage` pod volume) light up together.
     let tiered_storage = owner.spec.tiered_storage.as_ref();
+    let inter_broker_kerberos = owner.spec.inter_broker_kerberos.as_ref();
     for (broker_id, addrs) in addresses_per_broker {
         let tls_for_broker = tls_per_broker.and_then(|m| m.get(broker_id));
         let toml = crate::controller::listeners::render_broker_toml(
@@ -327,6 +340,7 @@ pub(crate) fn render_configmap(
             delegation_token_enabled,
             authorization,
             tiered_storage,
+            inter_broker_kerberos,
         );
         data.insert(format!("broker-{broker_id}.toml"), toml);
     }
@@ -786,6 +800,8 @@ mod config_hash_tests {
             delegation_token: None,
             authorization: None,
             tiered_storage: None,
+            inter_broker_kerberos: None,
+            krb5_conf_secret_ref: None,
             tracing: None,
         };
         let h = combined_config_hash(&spec_a, None, None, None);
@@ -832,6 +848,8 @@ mod config_hash_tests {
             delegation_token: None,
             authorization: None,
             tiered_storage: None,
+            inter_broker_kerberos: None,
+            krb5_conf_secret_ref: None,
             tracing: None,
         };
         let h_off = combined_config_hash(&spec_off, None, None, None);
@@ -880,6 +898,8 @@ mod config_hash_tests {
             delegation_token: None,
             authorization: None,
             tiered_storage: None,
+            inter_broker_kerberos: None,
+            krb5_conf_secret_ref: None,
             tracing: None,
         };
         let h_none = combined_config_hash(&spec, None, None, None);
@@ -919,6 +939,8 @@ mod config_hash_tests {
             delegation_token: None,
             authorization: None,
             tiered_storage: None,
+            inter_broker_kerberos: None,
+            krb5_conf_secret_ref: None,
             tracing: None,
         };
         let h1 = combined_config_hash(&spec, Some("ca-pem"), None, None);
@@ -947,6 +969,8 @@ mod config_hash_tests {
                 delegation_token: None,
                 authorization: None,
                 tiered_storage: None,
+                inter_broker_kerberos: None,
+                krb5_conf_secret_ref: None,
                 tracing: None,
             },
         );
@@ -1004,6 +1028,8 @@ mod config_hash_tests {
             delegation_token: None,
             authorization: None,
             tiered_storage: None,
+            inter_broker_kerberos: None,
+            krb5_conf_secret_ref: None,
             tracing: None,
         };
         // No explicit pin => hash collapse preserved (== config_hash of
@@ -1040,6 +1066,8 @@ mod config_hash_tests {
                 delegation_token: None,
                 authorization: None,
                 tiered_storage: None,
+                inter_broker_kerberos: None,
+                krb5_conf_secret_ref: None,
                 tracing: None,
             },
         );
