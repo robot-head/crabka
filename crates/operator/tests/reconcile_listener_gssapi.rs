@@ -287,7 +287,21 @@ fn parent_kafka_body_with_gssapi(name: &str, namespace: &str, krb5: bool) -> ser
         "kind": "Kafka",
         "metadata": { "name": name, "namespace": namespace, "uid": "kafka-uid" },
         "spec": spec,
-        "status": { "conditions": [] }
+        // The pool reconciler gates broker formatting on the parent's version
+        // verdict (KafkaVersionValid=True or a finalized metadata version; see
+        // kafka_node_pool::version_gate), so the parent must look like a
+        // validated cluster or no StatefulSet is rendered. Mirrors
+        // reconcile_oauth_trust::cleared_version_status.
+        "status": {
+            "conditions": [{
+                "type": "KafkaVersionValid",
+                "status": "True",
+                "reason": "Valid",
+                "message": "kafkaVersion 0.1.1 metadata.version 0.1",
+                "lastTransitionTime": "2026-05-22T00:00:00Z"
+            }],
+            "metadataVersion": "0.1"
+        }
     })
 }
 
