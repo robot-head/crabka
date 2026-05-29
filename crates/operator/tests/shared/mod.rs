@@ -352,12 +352,26 @@ pub fn fake_pool_list_item(
 /// JSON body shaped like the parent Kafka resource, returned by the
 /// pool reconciler's GET kafkas/<parent> step.
 pub fn fake_parent_kafka_body(name: &str, namespace: &str) -> serde_json::Value {
+    // A parent that the Kafka controller has already reconciled carries a
+    // cleared version model: `KafkaVersionValid=True` + a finalized
+    // `status.metadataVersion`. The pool reconciler gates pod creation on
+    // this (see `kafka_node_pool::version_gate`), so the fixture must look
+    // like a validated cluster for the happy-path STS-apply tests to fire.
     serde_json::json!({
         "apiVersion": "crabka.io/v1alpha1",
         "kind": "Kafka",
         "metadata": { "name": name, "namespace": namespace, "uid": "kafka-uid" },
         "spec": { "kafkaVersion": "0.1.1" },
-        "status": { "conditions": [] }
+        "status": {
+            "conditions": [{
+                "type": "KafkaVersionValid",
+                "status": "True",
+                "reason": "Valid",
+                "message": "kafkaVersion 0.1.1 metadata.version 0.1",
+                "lastTransitionTime": "2026-05-22T00:00:00Z"
+            }],
+            "metadataVersion": "0.1"
+        }
     })
 }
 

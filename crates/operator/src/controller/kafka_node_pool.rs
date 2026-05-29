@@ -1263,6 +1263,78 @@ async fn patch_status_for_pool(
     common::patch_status::<KafkaNodePool, KafkaNodePoolStatus>(pool_api, name, status).await
 }
 
+/// Whether the parent `Kafka`'s version model has cleared this pool to
+/// render (and therefore format) broker pods.
+///
+/// Version validation lives in the *Kafka* controller ([`kafka::reconcile`]
+/// → [`crate::version::evaluate`]), which publishes the verdict as the
+/// parent's `KafkaVersionValid` condition and finalizes the resolved value
+/// in `status.metadataVersion`. The pool reconciler owns no version logic;
+/// it only reads that already-fetched parent status (no extra API request,
+/// mirroring [`common::plan_rollout`]'s status-from-the-watched-object
+/// posture) and refuses to format pods until the model has cleared —
+/// otherwise an invalid `spec.kafkaVersion` on a brand-new cluster would
+/// bring the brokers up at an unvalidated version instead of surfacing the
+/// error and waiting (Slice 28).
+#[derive(Debug)]
+enum VersionGate {
+    /// The parent's version model is valid (or already finalized): render
+    /// the `StatefulSet` as normal.
+    Cleared,
+    /// The parent's version model has not cleared: refrain from rendering
+    /// and surface `cond` (a `Ready=False`) on the pool.
+    Blocked(KafkaCondition),
+}
+
+/// Decide whether `parent`'s version model clears this pool to format pods.
+///
+/// Clears when EITHER the parent carries `KafkaVersionValid=True`, OR a
+/// finalized `status.metadataVersion` is present. The finalized-version
+/// fallback is deliberate: a value there means a prior reconcile already
+/// validated the model and formatted the pods, so a *later* spec edit that
+/// flips `KafkaVersionValid=False` must not tear a running cluster down —
+/// the Kafka controller holds the previous finalized version and simply
+/// declines to advance it (see `kafka.rs` status patch).
+fn version_gate(parent: &Kafka) -> VersionGate {
+    let status = parent.status.as_ref();
+    let version_cond =
+        status.and_then(|s| s.conditions.iter().find(|c| c.type_ == "KafkaVersionValid"));
+    let finalized = status.and_then(|s| s.metadata_version.as_deref());
+
+    let cleared = finalized.is_some() || version_cond.is_some_and(|c| c.status == "True");
+    if cleared {
+        return VersionGate::Cleared;
+    }
+
+    // Not cleared. Distinguish "the parent declared the version invalid"
+    // from "the parent hasn't published a verdict yet" so admins can tell
+    // a misconfiguration from a transient ordering gap.
+    let cond = match version_cond {
+        Some(c) => condition(
+            "Ready",
+            "False",
+            "KafkaVersionInvalid",
+            &format!(
+                "refusing to format brokers: parent Kafka '{}' KafkaVersionValid={} ({}): {}",
+                parent.name_any(),
+                c.status,
+                c.reason,
+                c.message
+            ),
+        ),
+        None => condition(
+            "Ready",
+            "False",
+            "WaitingForVersionValidation",
+            &format!(
+                "waiting for parent Kafka '{}' to publish a KafkaVersionValid verdict before formatting brokers",
+                parent.name_any()
+            ),
+        ),
+    };
+    VersionGate::Blocked(cond)
+}
+
 /// Run the `KafkaNodePool` controller forever. Returns only on
 /// irrecoverable stream error.
 pub async fn run(ctx: Context) -> anyhow::Result<()> {
@@ -1325,6 +1397,19 @@ pub async fn reconcile(
         patch_status_for_pool(&pool_api, &name, cond).await?;
         return Ok(Action::requeue(Duration::from_secs(30)));
     };
+
+    // 2b. Gate on the parent's version model. Version validation lives in
+    //     the Kafka controller; until it has declared the version valid
+    //     (KafkaVersionValid=True) or finalized a metadata version, refrain
+    //     from formatting/creating broker pods. This surfaces an invalid
+    //     spec.kafkaVersion as a clear CR condition and waits, rather than
+    //     bringing a cluster up at an unvalidated version. The requeue +
+    //     the Kafka controller's adopt-pools label patch re-trigger this
+    //     reconcile once the parent publishes its verdict.
+    if let VersionGate::Blocked(cond) = version_gate(&parent) {
+        patch_status_for_pool(&pool_api, &name, cond).await?;
+        return Ok(Action::requeue(Duration::from_secs(30)));
+    }
 
     // 3. Resolve broker image: spec override > operator default > built-in.
     let image = pool
@@ -3521,5 +3606,109 @@ mod tests {
                 "{never} must not leak when tracing is None"
             );
         }
+    }
+
+    // --- Version gate: the pool reconciler must not format/create broker
+    // pods until the parent Kafka's version model has cleared (Slice 28
+    // "surface the error and wait"). The decision is the pure
+    // `version_gate`; the reconciler just acts on it. ---
+
+    /// Attach a `KafkaVersionValid` condition + finalized metadata version
+    /// to a parent fixture's status, mirroring what `kafka.rs` writes.
+    fn parent_with_version_status(
+        name: &str,
+        version_valid: Option<bool>,
+        finalized_metadata: Option<&str>,
+    ) -> Kafka {
+        let mut parent = parent_fixture(name);
+        let mut conditions = Vec::new();
+        if let Some(valid) = version_valid {
+            let (status, reason, message) = if valid {
+                ("True", "Valid", "kafkaVersion 3.7.0 metadata.version 3.7")
+            } else {
+                (
+                    "False",
+                    "InvalidVersion",
+                    "spec.kafkaVersion \"99.9\" is not a valid version",
+                )
+            };
+            conditions.push(condition("KafkaVersionValid", status, reason, message));
+        }
+        parent.status = Some(crate::crd::KafkaStatus {
+            conditions,
+            metadata_version: finalized_metadata.map(str::to_string),
+            ..Default::default()
+        });
+        parent
+    }
+
+    #[test]
+    fn version_gate_blocks_fresh_cluster_with_invalid_version() {
+        // Fresh cluster: the Kafka controller has evaluated the spec and
+        // published KafkaVersionValid=False, with no finalized metadata
+        // version. The pool must refrain from rendering pods.
+        let parent = parent_with_version_status("demo", Some(false), None);
+        match version_gate(&parent) {
+            VersionGate::Blocked(cond) => {
+                assert_eq!(cond.type_, "Ready");
+                assert_eq!(cond.status, "False");
+                assert_eq!(cond.reason, "KafkaVersionInvalid");
+                assert!(
+                    cond.message.contains("KafkaVersionValid=False"),
+                    "pool condition should surface the parent's verdict, got: {}",
+                    cond.message
+                );
+            }
+            VersionGate::Cleared => {
+                panic!("invalid parent version must block pod creation")
+            }
+        }
+    }
+
+    #[test]
+    fn version_gate_blocks_when_parent_has_no_version_status_yet() {
+        // The pool reconciled before the Kafka controller's first pass —
+        // no status at all. Hold off rather than format at a guessed
+        // version; the requeue + adopt-pools re-trigger will re-run us once
+        // the parent publishes its verdict.
+        let parent = parent_fixture("demo");
+        assert!(parent.status.is_none(), "fixture precondition");
+        match version_gate(&parent) {
+            VersionGate::Blocked(cond) => {
+                assert_eq!(cond.type_, "Ready");
+                assert_eq!(cond.status, "False");
+                assert_eq!(cond.reason, "WaitingForVersionValidation");
+            }
+            VersionGate::Cleared => {
+                panic!("missing parent version status must block pod creation")
+            }
+        }
+    }
+
+    #[test]
+    fn version_gate_clears_when_kafkaversionvalid_true() {
+        // Valid version: gate clears AND the StatefulSet renders as today.
+        let parent = parent_with_version_status("demo", Some(true), Some("3.7"));
+        assert!(
+            matches!(version_gate(&parent), VersionGate::Cleared),
+            "a valid parent version must clear the gate"
+        );
+        let pool = pool_fixture("brokers", "demo", 1);
+        let sts = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE)
+            .expect("pods are created as today when the version is valid");
+        assert_eq!(sts.metadata.name.as_deref(), Some("demo-brokers"));
+    }
+
+    #[test]
+    fn version_gate_clears_when_metadata_version_finalized() {
+        // An already-running cluster carries a finalized status.metadataVersion
+        // even if a later spec edit flips KafkaVersionValid=False. We must not
+        // tear the cluster down — the finalized version means a prior reconcile
+        // formatted the pods at a known-good version.
+        let parent = parent_with_version_status("demo", Some(false), Some("3.7"));
+        assert!(
+            matches!(version_gate(&parent), VersionGate::Cleared),
+            "a finalized metadata version keeps a running cluster's pods"
+        );
     }
 }

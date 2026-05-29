@@ -50,6 +50,27 @@ fn pool_cr(name: &str, namespace: &str, parent: Option<&str>, replicas: i32) -> 
     p
 }
 
+/// A parent Kafka whose version model has NOT cleared: the Kafka
+/// controller published `KafkaVersionValid=False` and finalized no
+/// metadata version (the fresh-cluster, invalid-`kafkaVersion` case).
+fn fake_parent_kafka_body_version_invalid(name: &str, namespace: &str) -> serde_json::Value {
+    serde_json::json!({
+        "apiVersion": "crabka.io/v1alpha1",
+        "kind": "Kafka",
+        "metadata": { "name": name, "namespace": namespace, "uid": "kafka-uid" },
+        "spec": { "kafkaVersion": "99.9.bogus" },
+        "status": {
+            "conditions": [{
+                "type": "KafkaVersionValid",
+                "status": "False",
+                "reason": "InvalidVersion",
+                "message": "spec.kafkaVersion \"99.9.bogus\" is not a valid version",
+                "lastTransitionTime": "2026-05-22T00:00:00Z"
+            }]
+        }
+    })
+}
+
 /// Happy-path rules: parent Kafka exists, STS apply succeeds, STS status
 /// read returns `ready_replicas`, pool status patch echoes the pool.
 ///
@@ -749,6 +770,69 @@ async fn statefulset_mounts_broker_config_volume_and_uses_config_file() {
         !has_advertised_listener,
         "CRABKA_ADVERTISED_LISTENER must not be in broker env (replaced by per-broker TOML); body = {body}"
     );
+
+    assert_eq!(state.remaining_rules(), 0);
+}
+
+/// A fresh cluster whose parent Kafka has an invalid `kafkaVersion` must
+/// NOT bring up broker pods. The pool reconciler reads the parent's
+/// `KafkaVersionValid=False` verdict and short-circuits to a `Ready=False`
+/// status patch — no `StatefulSet` GET/PATCH — so the error surfaces as a CR
+/// condition rather than a crash-looping (or silently-clamped) cluster.
+#[tokio::test]
+async fn pool_blocks_pod_creation_when_parent_version_invalid() {
+    let parent = "demo";
+    let pool_name = "brokers";
+    let ns = "y";
+
+    let rules = vec![
+        // 1. GET parent Kafka -> KafkaVersionValid=False.
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/kafkas/{parent}"),
+            response: json_response(200, &fake_parent_kafka_body_version_invalid(parent, ns)),
+        },
+        // 2. The version gate blocks before any StatefulSet I/O; the only
+        //    follow-up request is the pool status patch.
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/kafkanodepools/{pool_name}/status"),
+            response: json_response(200, &fake_pool_body(pool_name, ns, parent)),
+        },
+    ];
+
+    let (ctx, state) = build_ctx(ns, rules);
+    let pool = pool_cr(pool_name, ns, Some(parent), 1);
+
+    reconcile(Arc::new(pool), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    // No StatefulSet was touched at all — no pods get formatted/created.
+    for req in &observed {
+        let uri = req.uri().to_string();
+        assert!(
+            !uri.contains("/statefulsets/"),
+            "invalid-version path must not touch statefulsets: {uri}",
+        );
+    }
+
+    // The pool surfaces Ready=False / KafkaVersionInvalid, echoing the
+    // parent's verdict.
+    let status_patch = observed
+        .iter()
+        .find(|r| {
+            r.method() == Method::PATCH
+                && r.uri()
+                    .to_string()
+                    .contains(&format!("/kafkanodepools/{pool_name}/status"))
+        })
+        .expect("pool status PATCH must have been captured");
+    let body: serde_json::Value =
+        serde_json::from_slice(status_patch.body()).expect("status PATCH body is JSON");
+    let cond = &body["status"]["conditions"][0];
+    assert_eq!(cond["type"], "Ready", "body = {body}");
+    assert_eq!(cond["status"], "False", "body = {body}");
+    assert_eq!(cond["reason"], "KafkaVersionInvalid", "body = {body}");
 
     assert_eq!(state.remaining_rules(), 0);
 }

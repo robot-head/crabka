@@ -602,6 +602,18 @@ fn parent_kafka_body_with_oauth(
                 "authentication": authentication,
             }]
         },
-        "status": { "conditions": [] }
+        // A reconciled parent carries a cleared version model; the pool
+        // reconciler gates pod creation on it (see
+        // `kafka_node_pool::version_gate`).
+        "status": {
+            "conditions": [{
+                "type": "KafkaVersionValid",
+                "status": "True",
+                "reason": "Valid",
+                "message": "kafkaVersion 0.1.1 metadata.version 0.1",
+                "lastTransitionTime": "2026-05-22T00:00:00Z"
+            }],
+            "metadataVersion": "0.1"
+        }
     })
 }

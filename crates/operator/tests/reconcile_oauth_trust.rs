@@ -400,7 +400,7 @@ fn parent_kafka_body_with_oauth_trust(name: &str, namespace: &str) -> serde_json
                 }
             }]
         },
-        "status": { "conditions": [] }
+        "status": cleared_version_status()
     })
 }
 
@@ -412,7 +412,24 @@ fn parent_kafka_body_no_listeners(name: &str, namespace: &str) -> serde_json::Va
         "kind": "Kafka",
         "metadata": { "name": name, "namespace": namespace, "uid": "kafka-uid" },
         "spec": { "kafkaVersion": "0.1.1" },
-        "status": { "conditions": [] }
+        "status": cleared_version_status()
+    })
+}
+
+/// A reconciled parent's cleared version model: the pool reconciler gates
+/// pod creation on `KafkaVersionValid=True` / a finalized metadata version
+/// (see `kafka_node_pool::version_gate`), so a parent fed to the pool
+/// reconciler must look like a validated cluster.
+fn cleared_version_status() -> serde_json::Value {
+    serde_json::json!({
+        "conditions": [{
+            "type": "KafkaVersionValid",
+            "status": "True",
+            "reason": "Valid",
+            "message": "kafkaVersion 0.1.1 metadata.version 0.1",
+            "lastTransitionTime": "2026-05-22T00:00:00Z"
+        }],
+        "metadataVersion": "0.1"
     })
 }
 
