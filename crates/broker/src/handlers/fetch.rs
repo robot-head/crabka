@@ -631,9 +631,11 @@ pub(crate) async fn handle(
         SessionDecision::Error { .. } => unreachable!("returned above"),
     };
 
-    // Refresh KIP-227 gauges. Cheap (HashMap iteration over a few
-    // hundred entries at most) and avoids the need for a background
-    // sampling task.
+    // Refresh KIP-227 gauges. Cheap: `len()` and
+    // `total_partitions_cached()` read lock-free `AtomicUsize` counters
+    // (no mutex, no HashMap scan), so this never contends the cache lock
+    // on the hot fetch path and avoids the need for a background sampling
+    // task.
     broker
         .metrics
         .incremental_fetch_sessions

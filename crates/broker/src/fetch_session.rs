@@ -38,7 +38,7 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 
 use crabka_protocol::owned::fetch_request::FetchRequest;
@@ -153,6 +153,15 @@ pub struct FetchSessionCache {
     next_id: AtomicI32,
     max_slots: usize,
     evictions: AtomicU64,
+    /// Live session count, maintained under `inner`'s lock on every
+    /// insert/evict/close. Exposed lock-free via `len()` so the metrics
+    /// gauge refresh on the hot fetch path never touches the cache mutex.
+    num_sessions: AtomicUsize,
+    /// Sum of `session.partitions.len()` across every live session, kept
+    /// in sync as partitions are added (merge / allocate) and dropped
+    /// (forget / evict / close). Read lock-free via
+    /// `total_partitions_cached()`.
+    num_partitions: AtomicUsize,
 }
 
 impl FetchSessionCache {
@@ -167,13 +176,16 @@ impl FetchSessionCache {
             next_id: AtomicI32::new(1),
             max_slots,
             evictions: AtomicU64::new(0),
+            num_sessions: AtomicUsize::new(0),
+            num_partitions: AtomicUsize::new(0),
         }
     }
 
-    /// Number of live sessions in the cache. Cheap snapshot.
+    /// Number of live sessions in the cache. Lock-free read of an atomic
+    /// counter — does not touch the cache mutex.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.inner.lock().expect("poisoned").sessions.len()
+        self.num_sessions.load(Ordering::Relaxed)
     }
 
     #[must_use]
@@ -182,16 +194,11 @@ impl FetchSessionCache {
     }
 
     /// Sum of `session.partitions.len()` across every live session. Used
-    /// by the metrics sampler.
+    /// by the metrics sampler. Lock-free read of an atomic counter — does
+    /// not touch the cache mutex or scan the session map.
     #[must_use]
     pub fn total_partitions_cached(&self) -> usize {
-        self.inner
-            .lock()
-            .expect("poisoned")
-            .sessions
-            .values()
-            .map(|s| s.partitions.len())
-            .sum()
+        self.num_partitions.load(Ordering::Relaxed)
     }
 
     /// Cumulative count of eviction events since `new()`. One increment
@@ -254,6 +261,11 @@ impl FetchSessionCache {
 
         session.last_used = Instant::now();
 
+        // The forget + merge below add and drop partitions; snapshot the
+        // count now so we can fold the net delta into `num_partitions`
+        // (which backs the lock-free `total_partitions_cached()` gauge).
+        let partitions_before = session.partitions.len();
+
         // Drop forgotten partitions. A `ForgottenTopic` matches a cached
         // key by either topic_name (v ≤ 12) or topic_id (v ≥ 13).
         for ft in &req.forgotten_topics_data {
@@ -305,6 +317,15 @@ impl FetchSessionCache {
             }
         }
 
+        let partitions_after = session.partitions.len();
+        if partitions_after >= partitions_before {
+            self.num_partitions
+                .fetch_add(partitions_after - partitions_before, Ordering::Relaxed);
+        } else {
+            self.num_partitions
+                .fetch_sub(partitions_before - partitions_after, Ordering::Relaxed);
+        }
+
         let new_epoch = next_epoch(session.next_epoch);
         session.next_epoch = new_epoch;
 
@@ -354,7 +375,10 @@ impl FetchSessionCache {
                 .map(|(id, _)| *id);
             match victim {
                 Some(id) => {
-                    guard.sessions.remove(&id);
+                    let evicted = guard.sessions.remove(&id).expect("victim present");
+                    self.num_sessions.fetch_sub(1, Ordering::Relaxed);
+                    self.num_partitions
+                        .fetch_sub(evicted.partitions.len(), Ordering::Relaxed);
                     self.evictions.fetch_add(1, Ordering::Relaxed);
                 }
                 None => return INVALID_SESSION_ID,
@@ -392,7 +416,11 @@ impl FetchSessionCache {
             partitions,
             last_used: Instant::now(),
         };
+        let added_partitions = session.partitions.len();
         guard.sessions.insert(id, session);
+        self.num_sessions.fetch_add(1, Ordering::Relaxed);
+        self.num_partitions
+            .fetch_add(added_partitions, Ordering::Relaxed);
         id
     }
 
@@ -427,7 +455,11 @@ impl FetchSessionCache {
     /// invalidate the session.
     pub fn close(&self, session_id: i32) {
         let mut guard = self.inner.lock().expect("poisoned");
-        guard.sessions.remove(&session_id);
+        if let Some(session) = guard.sessions.remove(&session_id) {
+            self.num_sessions.fetch_sub(1, Ordering::Relaxed);
+            self.num_partitions
+                .fetch_sub(session.partitions.len(), Ordering::Relaxed);
+        }
     }
 }
 
@@ -860,5 +892,66 @@ mod tests {
         cache.try_allocate(false, "a".into(), vec![mk(0), mk(1)]);
         cache.try_allocate(false, "b".into(), vec![mk(2), mk(3), mk(4)]);
         assert_eq!(cache.total_partitions_cached(), 5);
+    }
+
+    #[test]
+    fn counters_track_merge_forget_and_close() {
+        let cache = FetchSessionCache::new(10);
+        let mk = |p| {
+            (
+                FetchSessionKey {
+                    topic_name: "t".into(),
+                    topic_id: WireUuid::ZERO,
+                    partition: p,
+                },
+                CachedPartitionState::default(),
+            )
+        };
+        // Two partitions on allocate.
+        let id = cache.try_allocate(false, "a".into(), vec![mk(0), mk(1)]);
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.total_partitions_cached(), 2);
+
+        // Incremental that forgets partition 1 and adds partitions 2 and 3:
+        // net partition count goes 2 -> 3.
+        let forgotten = vec![ForgottenTopic {
+            topic: "t".into(),
+            topic_id: WireUuid::ZERO,
+            partitions: vec![1],
+            ..Default::default()
+        }];
+        let r = req(id, 1, vec![topic("t", &[0, 2, 3])], forgotten);
+        assert!(matches!(
+            cache.classify(&r),
+            SessionDecision::Incremental { .. }
+        ));
+        assert_eq!(cache.total_partitions_cached(), 3);
+
+        // Close drops the whole session and its partitions.
+        cache.close(id);
+        assert_eq!(cache.len(), 0);
+        assert_eq!(cache.total_partitions_cached(), 0);
+    }
+
+    #[test]
+    fn counters_track_eviction() {
+        let cache = FetchSessionCache::new(1);
+        let mk = |p| {
+            (
+                FetchSessionKey {
+                    topic_name: "t".into(),
+                    topic_id: WireUuid::ZERO,
+                    partition: p,
+                },
+                CachedPartitionState::default(),
+            )
+        };
+        cache.try_allocate(false, "a".into(), vec![mk(0), mk(1)]);
+        assert_eq!(cache.total_partitions_cached(), 2);
+        // Allocating into the full cache evicts the lone session (2 parts)
+        // and inserts a fresh one (1 part).
+        cache.try_allocate(false, "b".into(), vec![mk(0)]);
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.total_partitions_cached(), 1);
     }
 }
