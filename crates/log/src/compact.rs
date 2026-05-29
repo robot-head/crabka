@@ -18,7 +18,7 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use crabka_protocol::records::RecordBatch;
 
 use crate::error::LogError;
@@ -51,20 +51,19 @@ fn read_all_batches(seg: &Segment) -> Result<Vec<RecordBatch>, LogError> {
 ///
 /// The map's value is the absolute offset of the **newest** record
 /// observed for each key (later writes overwrite earlier ones).
-pub fn build_offset_map(segments: &[&Segment]) -> Result<HashMap<Vec<u8>, i64>, LogError> {
-    let mut map: HashMap<Vec<u8>, i64> = HashMap::new();
+pub fn build_offset_map(segments: &[&Segment]) -> Result<HashMap<Bytes, i64>, LogError> {
+    // Keyed by `Bytes` (cheap refcounted clone of the record key) rather
+    // than `Vec<u8>` to avoid a heap copy of every key. Zero-length keys
+    // are legal in Kafka and dedup as a distinct "empty key" like any other.
+    let mut map: HashMap<Bytes, i64> = HashMap::new();
     for seg in segments {
         for batch in read_all_batches(seg)? {
             for record in &batch.records {
                 let Some(key_bytes) = record.key.as_ref() else {
                     continue;
                 };
-                if key_bytes.is_empty() {
-                    // Zero-length keys are legal in Kafka and dedup-able as a
-                    // distinct "empty key". Kafka treats them like any other key.
-                }
                 let absolute = batch.base_offset + i64::from(record.offset_delta);
-                map.insert(key_bytes.to_vec(), absolute);
+                map.insert(key_bytes.clone(), absolute);
             }
         }
     }
@@ -201,7 +200,7 @@ pub struct RewriteOutput {
 pub fn rewrite_segments(
     dir: &Path,
     segments: &[&Segment],
-    offset_map: &HashMap<Vec<u8>, i64>,
+    offset_map: &HashMap<Bytes, i64>,
     _index_interval_bytes: u32,
 ) -> Result<RewriteOutput, LogError> {
     let first = segments

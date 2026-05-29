@@ -51,10 +51,22 @@ impl OffsetIndex {
         let truncated_len = (buf.len() / OFFSET_ENTRY_SIZE) * OFFSET_ENTRY_SIZE;
         let raws = <[OffsetEntryRaw]>::ref_from_bytes(&buf[..truncated_len])
             .expect("length is a multiple of OFFSET_ENTRY_SIZE and OffsetEntryRaw is Unaligned");
-        let entries = raws
-            .iter()
-            .map(|r| (r.relative_offset.get(), r.position.get()))
-            .collect();
+        // Byte positions strictly increase across real entries. A Kafka
+        // index file is preallocated to `segment.index.bytes` and only
+        // truncated on clean roll/shutdown, so an unclean copy carries
+        // trailing zero-padding that decodes to `(0, 0)`. Stop at the
+        // first non-increasing position to keep `lookup`'s binary search
+        // operating over a monotonic slice.
+        let mut entries: Vec<(u32, u32)> = Vec::with_capacity(raws.len());
+        for r in raws {
+            let (rel, pos) = (r.relative_offset.get(), r.position.get());
+            if let Some(&(_, prev_pos)) = entries.last()
+                && pos <= prev_pos
+            {
+                break;
+            }
+            entries.push((rel, pos));
+        }
         Ok(Self { file, entries })
     }
 
@@ -96,6 +108,18 @@ impl OffsetIndex {
         self.file.set_len(new_file_len)?;
         self.file.seek(SeekFrom::End(0))?;
         Ok(())
+    }
+
+    /// Byte position of the first entry whose `relative_offset >= target`,
+    /// or `None` when every entry is below `target`. Every batch covering
+    /// an offset `< target` lives strictly below this position, so it
+    /// bounds a from-start scan that must stop at `target`.
+    #[must_use]
+    pub fn position_at_or_after(&self, target: u32) -> Option<u32> {
+        match self.entries.binary_search_by_key(&target, |&(rel, _)| rel) {
+            Ok(i) => Some(self.entries[i].1),
+            Err(i) => self.entries.get(i).map(|&(_, pos)| pos),
+        }
     }
 
     #[must_use]
@@ -158,6 +182,47 @@ mod tests {
     }
 
     #[test]
+    fn ignores_trailing_zero_padding() {
+        // Kafka preallocates `.index` to `segment.index.bytes` and only
+        // truncates on clean shutdown; an unclean copy carries trailing
+        // zero entries. Loading must stop at the real data so the binary
+        // search stays monotonic.
+        use std::io::Write;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("00000000000000000000.index");
+        {
+            let mut idx = OffsetIndex::open(&path).unwrap();
+            idx.append(0, 0).unwrap();
+            idx.append(100, 4096).unwrap();
+            idx.flush().unwrap();
+        }
+        // Append two zero-filled entries (preallocation padding).
+        let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+        f.write_all(&[0u8; OFFSET_ENTRY_SIZE * 2]).unwrap();
+        f.sync_data().unwrap();
+        drop(f);
+
+        let idx = OffsetIndex::open(&path).unwrap();
+        assert_eq!(idx.entry_count(), 2);
+        assert_eq!(idx.last_entry(), Some((100, 4096)));
+        assert_eq!(idx.lookup(150), 4096);
+    }
+
+    #[test]
+    fn position_at_or_after_finds_ceiling() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("00000000000000000000.index");
+        let mut idx = OffsetIndex::open(&path).unwrap();
+        idx.append(0, 0).unwrap();
+        idx.append(100, 4096).unwrap();
+        idx.append(200, 8192).unwrap();
+        assert_eq!(idx.position_at_or_after(100), Some(4096)); // exact
+        assert_eq!(idx.position_at_or_after(150), Some(8192)); // ceiling
+        assert_eq!(idx.position_at_or_after(0), Some(0));
+        assert_eq!(idx.position_at_or_after(201), None); // past last
+    }
+
+    #[test]
     fn truncate_by_position() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("00000000000000000000.index");
@@ -205,10 +270,21 @@ impl TimeIndex {
         let truncated_len = (buf.len() / TIME_ENTRY_SIZE) * TIME_ENTRY_SIZE;
         let raws = <[TimeEntryRaw]>::ref_from_bytes(&buf[..truncated_len])
             .expect("length is a multiple of TIME_ENTRY_SIZE and TimeEntryRaw is Unaligned");
-        let entries = raws
-            .iter()
-            .map(|r| (r.timestamp.get(), r.relative_offset.get()))
-            .collect();
+        // Relative offsets strictly increase across real entries; trailing
+        // `(0, 0)` padding from a preallocated Kafka index decodes as a
+        // non-increasing offset. Stop there. (Timestamps may repeat when
+        // `max_timestamp` is unchanged between index points, so the offset
+        // column — not the timestamp — is the monotonic discriminator.)
+        let mut entries: Vec<(i64, u32)> = Vec::with_capacity(raws.len());
+        for r in raws {
+            let (ts, rel) = (r.timestamp.get(), r.relative_offset.get());
+            if let Some(&(_, prev_rel)) = entries.last()
+                && rel <= prev_rel
+            {
+                break;
+            }
+            entries.push((ts, rel));
+        }
         Ok(Self { file, entries })
     }
 
@@ -298,5 +374,27 @@ mod time_tests {
         }
         let idx = TimeIndex::open(&path).unwrap();
         assert_eq!(idx.entry_count(), 2);
+    }
+
+    #[test]
+    fn ignores_trailing_zero_padding() {
+        use std::io::Write;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("00000000000000000000.timeindex");
+        {
+            let mut idx = TimeIndex::open(&path).unwrap();
+            idx.append(1_000, 0).unwrap();
+            idx.append(2_000, 100).unwrap();
+            idx.flush().unwrap();
+        }
+        let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+        f.write_all(&[0u8; TIME_ENTRY_SIZE * 2]).unwrap();
+        f.sync_data().unwrap();
+        drop(f);
+
+        let idx = TimeIndex::open(&path).unwrap();
+        assert_eq!(idx.entry_count(), 2);
+        assert_eq!(idx.last_entry(), Some((2_000, 100)));
+        assert_eq!(idx.lookup(2_500), 100);
     }
 }
