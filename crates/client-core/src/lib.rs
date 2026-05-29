@@ -52,6 +52,7 @@ mod fetch;
 mod pool;
 mod request;
 pub mod sasl;
+pub mod security;
 mod transport;
 mod version;
 
@@ -65,6 +66,7 @@ pub use fetch::{FetchedRecord, fetch_partition};
 pub use pool::{BrokerInfo, BrokerPool};
 pub use request::ProtocolRequest;
 pub use sasl::{OutboundSaslError, SaslCredentials, outbound_sasl};
+pub use security::{ClientSecurity, TlsConnectorConfig};
 pub use version::ApiVersionTable;
 
 #[cfg(any(test, feature = "mock"))]
