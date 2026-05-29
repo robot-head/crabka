@@ -43,8 +43,6 @@ pub(crate) fn lookup(name: &str) -> Option<SupportedFeature> {
 /// the `finalized` metadata.version. A missing finalized level (`None`,
 /// `MetadataVersion.UNKNOWN`) is permissive — there is no level to gate
 /// against — matching the runtime range guard's treatment.
-// Consumed by Batch 4 handlers; allow dead_code until then.
-#[allow(dead_code)]
 pub(crate) fn metadata_version_blocks(finalized: Option<i16>, required_level: i16) -> bool {
     finalized.is_some_and(|level| level < required_level)
 }
