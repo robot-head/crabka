@@ -503,8 +503,6 @@ pub fn validate_listeners(
 
 /// When the resolved inter-broker listener uses GSSAPI, `spec.interBrokerKerberos`
 /// must be present. `ib_kerberos_present` is `spec.inter_broker_kerberos.is_some()`.
-// Not yet called: wired into the reconcile path (kafka.rs) in a later task.
-#[allow(dead_code)]
 pub fn validate_inter_broker_gssapi(
     listeners: &[Listener],
     inter_broker_listener_name: &str,

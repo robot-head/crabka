@@ -90,6 +90,15 @@ pub enum ReconcileError {
     /// exist but the value is zero bytes.
     #[error("oauth introspection Secret '{secret}' key '{key}' is empty")]
     EmptyOauthIntrospectionValue { secret: String, key: String },
+    /// `type: gssapi` listener references a keytab Secret that doesn't exist.
+    #[error("gssapi keytab Secret '{0}' not found")]
+    MissingGssapiKeytabSecret(String),
+    /// keytab Secret exists but lacks the referenced key.
+    #[error("gssapi keytab Secret '{secret}' has no key '{key}'")]
+    MissingGssapiKeytabKey { secret: String, key: String },
+    /// `spec.krb5ConfSecretRef` references a Secret/key that doesn't exist.
+    #[error("krb5.conf Secret '{0}' not found (or missing referenced key)")]
+    MissingKrb5ConfSecret(String),
     /// KIP-405: `spec.tieredStorage` failed shape
     /// validation. Concrete cases: `type = "S3"` without `spec.tieredStorage.s3`,
     /// `type = "Local"` with `spec.tieredStorage.s3` set, or an S3 spec
