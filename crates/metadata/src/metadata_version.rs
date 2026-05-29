@@ -179,6 +179,8 @@ mod tests {
     fn min_max_levels() {
         assert_eq!(METADATA_VERSION_MIN, 7);
         assert_eq!(METADATA_VERSION_MAX, 25);
+        assert_eq!(TABLE.first().unwrap().level, METADATA_VERSION_MIN);
+        assert_eq!(TABLE.last().unwrap().level, METADATA_VERSION_MAX);
     }
 
     #[test]
@@ -215,5 +217,15 @@ mod tests {
     fn gate_level_constants() {
         assert_eq!(SCRAM_MIN_LEVEL, 11);
         assert_eq!(DELEGATION_TOKEN_MIN_LEVEL, 14);
+        assert_eq!(
+            from_feature_level(SCRAM_MIN_LEVEL).unwrap().ivn(),
+            "3.5-IV2"
+        );
+        assert_eq!(
+            from_feature_level(DELEGATION_TOKEN_MIN_LEVEL)
+                .unwrap()
+                .ivn(),
+            "3.6-IV2"
+        );
     }
 }
