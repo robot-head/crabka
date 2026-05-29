@@ -1016,16 +1016,32 @@ async fn try_remote_read(broker: &Broker, p: &mut PendingRead, part: &Partition)
 
             // KIP-405 read-committed: surface the aborted-transaction list
             // from the segment's `.txnindex` so the consumer drops aborted
-            // records client-side, exactly as the local path does at the
-            // `aborted_in_range` call in `do_read`. `Some(empty)` is the
-            // correct read-committed signal (read-uncommitted leaves it
-            // `None`). The batch's inclusive last offset bounds the query.
+            // records client-side, mirroring the local `aborted_in_range`
+            // call in `do_read` — bounded here to the single batch this read
+            // returns (inclusive last offset), since the local path bounds by
+            // the returned window over the LSO. `Some(empty)` is the correct
+            // read-committed signal (read-uncommitted leaves it `None`).
             if p.read_committed && !p.is_follower_fetch {
                 let batch_last_offset = batch.base_offset + i64::from(batch.last_offset_delta);
-                let aborts = reader
+                let aborts = match reader
                     .aborted_transactions(&tp, leader_epoch, p.fetch_offset, batch_last_offset)
                     .await
-                    .unwrap_or_default();
+                {
+                    Ok(aborts) => aborts,
+                    Err(e) => {
+                        // Degrade to "no aborts" but make it observable: an
+                        // empty list in read-committed means the consumer may
+                        // surface aborted records as committed.
+                        tracing::warn!(
+                            topic = %p.topic_name,
+                            partition = p.partition_index,
+                            offset = p.fetch_offset,
+                            error = %e,
+                            "remote-reader: aborted_transactions failed; returning empty abort list"
+                        );
+                        Vec::new()
+                    }
+                };
                 p.out.aborted_transactions = Some(
                     aborts
                         .into_iter()
