@@ -1,15 +1,15 @@
 codecov:
   notify:
-    # Wait for all six coverage uploads (one per CI flag) before posting
+    # Wait for all seven coverage uploads (one per CI flag) before posting
     # status checks or PR comments. Otherwise the first upload triggers a
     # report against the partial coverage, which shows a misleading drop
     # until the rest of the matrix lands. The flags below must match the
     # `flags:` values in .github/workflows/ci.yml.
-    after_n_builds: 6
+    after_n_builds: 7
     wait_for_ci: true
 
 comment:
-  after_n_builds: 6
+  after_n_builds: 7
   require_changes: false
 
 coverage:
@@ -27,6 +27,8 @@ flags:
   jvm-differential:
     carryforward: true
   client-core-integration:
+    carryforward: true
+  client-consumer-integration:
     carryforward: true
   log-integration:
     carryforward: true
