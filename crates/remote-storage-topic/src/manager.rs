@@ -69,6 +69,13 @@ pub struct TopicBasedRemoteLogMetadataManager {
     /// 48o beyond construction (assign-all-from-0).
     #[allow(dead_code)]
     assignment: Arc<dyn AssignmentHandle>,
+    /// Per-metadata-partition committed offsets loaded from the snapshot
+    /// at `start()`, indexed by metadata partition (`-1` == no committed
+    /// event for that partition / full replay). Retained as the single
+    /// canonical source for resume-offset lookups; 48q's assignment
+    /// reconciler reads it via [`Self::committed_offset`] when it
+    /// dynamically adds a partition (to start at `committed + 1`).
+    committed_offsets: Vec<i64>,
 }
 
 impl TopicBasedRemoteLogMetadataManager {
@@ -102,37 +109,30 @@ impl TopicBasedRemoteLogMetadataManager {
         let inner = Arc::new(InmemoryRemoteLogMetadataManager::new());
         let shutdown = CancellationToken::new();
 
-        // Load the snapshot (if any) ONCE: seed the cache from its dump and
-        // resume from its committed offsets. On absence/corruption,
+        // Load the snapshot (if any) ONCE and seed the cache from its
+        // dump. `resume_from_snapshot` is the single canonical place that
+        // turns a loaded snapshot into the per-partition committed offsets
+        // and the resume assignment (committed + 1). On absence/corruption,
         // committed[] is all -1 (full replay) and the cache stays empty —
         // never fatal.
-        let mut committed = vec![-1i64; n];
-        match crate::snapshot::Snapshot::load(
+        let snapshot = match crate::snapshot::Snapshot::load(
             &snapshot_dir.join(crate::snapshot::SNAPSHOT_FILE_NAME),
         ) {
-            Ok(Some(snap)) => {
-                for (i, &off) in snap.committed_offsets.iter().take(n).enumerate() {
-                    committed[i] = off;
-                }
-                inner.import(snap.dump);
-            }
-            Ok(None) => {}
+            Ok(snap) => snap,
             Err(e) => {
                 warn!(error = ?e, "topic-based RLMM: snapshot corrupt; starting from empty cache");
+                None
             }
+        };
+        if let Some(snap) = &snapshot {
+            inner.import(snap.dump.clone());
         }
+        let (committed, assignment) = Self::resume_from_snapshot(snapshot.as_ref(), n);
 
         // Pre-seed `applied` to the committed offsets so wait_for_targets
         // only blocks on the delta from committed+1 to HWM.
         let applied = Arc::new(std::sync::Mutex::new(committed.clone()));
 
-        // 48o assignment: resume each partition at committed + 1.
-        let assignment: Vec<PartitionStart> = (0..n)
-            .map(|i| PartitionStart {
-                partition: i32::try_from(i).expect("partition fits in i32"),
-                start_offset: committed[i] + 1,
-            })
-            .collect();
         let (stream, assignment_handle) = log.subscribe(assignment);
         let pump = runtime.spawn(pump_loop(
             stream,
@@ -153,6 +153,7 @@ impl TopicBasedRemoteLogMetadataManager {
             snapshot_dir,
             snapshotter: std::sync::Mutex::new(None),
             assignment: assignment_handle,
+            committed_offsets: committed,
         });
 
         // Spawn the periodic snapshotter: flush whenever the cache
@@ -231,6 +232,14 @@ impl TopicBasedRemoteLogMetadataManager {
     /// highest committed offset written (for the "advanced since last"
     /// check).
     fn write_snapshot(&self) -> Result<i64, crate::error::SnapshotError> {
+        // Benign-replay invariant: the pump updates `inner` BEFORE bumping
+        // `applied`, so the captured cache may lead the captured committed
+        // offset by at most one event (the in-flight one). On resume that
+        // single event is replayed from committed+1 and harmlessly
+        // re-rejected: a re-applied AddSegment hits already-exists, and a
+        // re-applied finished→finished update is a no-op. The dangerous
+        // direction — cache BEHIND committed, which would skip an event on
+        // resume — cannot occur because inner is always updated first.
         let (committed_offsets, dump) = {
             let applied = self.applied.lock().expect("applied mutex poisoned");
             let dump = self.inner.export();
@@ -246,42 +255,47 @@ impl TopicBasedRemoteLogMetadataManager {
         Ok(max)
     }
 
-    /// Build the metadata-consumer assignment from a snapshot on disk:
-    /// each metadata partition resumes at `committed + 1`. Absent or
-    /// corrupt snapshot → every partition starts at 0 (full replay).
-    #[must_use]
-    pub fn resume_assignment(
-        snapshot_dir: &std::path::Path,
-        partition_count: i32,
-    ) -> Vec<PartitionStart> {
-        let n = usize::try_from(partition_count).expect("partition_count fits in usize");
-        let committed = Self::load_committed(snapshot_dir, n);
-        (0..n)
+    /// Canonical resume-from-snapshot computation, shared by `start()` and
+    /// the resume tests. Given an already-loaded snapshot (or `None` for a
+    /// missing/corrupt one) and the metadata-partition count `n`, produce:
+    ///
+    /// - the per-partition committed offsets, indexed by metadata
+    ///   partition and padded/truncated to `n` (`-1` == no committed
+    ///   event → full replay for that partition), and
+    /// - the metadata-consumer assignment that resumes each partition at
+    ///   `committed + 1`.
+    ///
+    /// This is the ONLY place the `committed + 1` resume policy lives; do
+    /// not recompute it elsewhere.
+    fn resume_from_snapshot(
+        snapshot: Option<&crate::snapshot::Snapshot>,
+        n: usize,
+    ) -> (Vec<i64>, Vec<PartitionStart>) {
+        let mut committed = vec![-1i64; n];
+        if let Some(snap) = snapshot {
+            for (i, &off) in snap.committed_offsets.iter().take(n).enumerate() {
+                committed[i] = off;
+            }
+        }
+        let assignment = (0..n)
             .map(|i| PartitionStart {
                 partition: i32::try_from(i).expect("partition fits in i32"),
                 start_offset: committed[i] + 1,
             })
-            .collect()
+            .collect();
+        (committed, assignment)
     }
 
-    /// Load the per-partition committed offsets from a snapshot, padded /
-    /// truncated to `n` partitions. Absent or corrupt → all `-1`.
-    fn load_committed(snapshot_dir: &std::path::Path, n: usize) -> Vec<i64> {
-        let path = snapshot_dir.join(crate::snapshot::SNAPSHOT_FILE_NAME);
-        match crate::snapshot::Snapshot::load(&path) {
-            Ok(Some(snap)) => {
-                let mut out = vec![-1i64; n];
-                for (i, &off) in snap.committed_offsets.iter().take(n).enumerate() {
-                    out[i] = off;
-                }
-                out
-            }
-            Ok(None) => vec![-1i64; n],
-            Err(e) => {
-                warn!(error = ?e, "topic-based RLMM: snapshot corrupt; full replay");
-                vec![-1i64; n]
-            }
-        }
+    /// Committed offset loaded from the snapshot for a single metadata
+    /// partition, or `-1` when the partition is out of range or had no
+    /// committed event (full replay). 48q's assignment reconciler uses
+    /// this to start a dynamically-added partition at `committed + 1`.
+    #[must_use]
+    pub fn committed_offset(&self, partition: i32) -> i64 {
+        usize::try_from(partition)
+            .ok()
+            .and_then(|i| self.committed_offsets.get(i).copied())
+            .unwrap_or(-1)
     }
 
     async fn wait_for_targets(&self, targets: &[i64]) {
@@ -764,14 +778,17 @@ mod tests {
             "6 events (3 add + 3 finish) → committed >= 5"
         );
 
-        // The loader's assignment resumes the orders partition at committed + 1.
-        let assignment = TopicBasedRemoteLogMetadataManager::resume_assignment(&dir, 4);
+        // The canonical resume computation resumes the orders partition at
+        // committed + 1 (same path start() uses).
+        let (resumed_committed, assignment) =
+            TopicBasedRemoteLogMetadataManager::resume_from_snapshot(Some(&snap), 4);
         let orders_start = assignment
             .iter()
             .find(|s| s.partition == p)
             .map(|s| s.start_offset)
             .unwrap();
         assert_eq!(orders_start, committed + 1, "resume from N+1, not 0");
+        assert_eq!(resumed_committed[idx], committed);
 
         // Second lifetime against the SAME log + dir: must resume, not replay.
         let fresh = TopicBasedRemoteLogMetadataManager::start(
@@ -782,6 +799,9 @@ mod tests {
         )
         .await
         .unwrap();
+        // The manager exposes the same committed offset via its canonical
+        // accessor (what 48q's reconciler will read).
+        assert_eq!(fresh.committed_offset(p), committed);
         let post_cache = fresh.list_remote_log_segments(&tp()).unwrap();
         assert_eq!(
             post_cache, pre_cache,

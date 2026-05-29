@@ -151,8 +151,12 @@ impl Snapshot {
                     by_tp.entry(key).or_default().1 = Some(d.state);
                 }
                 MetadataEvent::UpdateSegment(_) => {
-                    // Snapshots only ever encode Add + PartitionDelete.
-                    return Err(SnapshotError::Malformed(CodecError::UnknownTag(1)));
+                    // Snapshots only ever encode Add + PartitionDelete;
+                    // segment updates are folded into the dumped cache, not
+                    // stored as standalone events.
+                    return Err(SnapshotError::Malformed(CodecError::Domain(
+                        "snapshot must not contain an UpdateSegment event".to_string(),
+                    )));
                 }
             }
         }
@@ -177,25 +181,44 @@ impl Snapshot {
         })
     }
 
-    /// Atomically write this snapshot to `path`: write to a sibling
-    /// temp file, fsync, then rename over `path`. A crash mid-write
-    /// leaves either the old snapshot or none — never a torn file.
+    /// Atomically write this snapshot to `path`: write to a sibling temp
+    /// file, fsync the file, rename over `path`, then fsync the parent
+    /// directory so the rename itself is durable. A crash at any point
+    /// leaves either the old snapshot or none — never a torn file. The
+    /// temp file is removed if any step before the rename fails, so a
+    /// persistent error does not litter a stale `.tmp`.
+    ///
+    /// The directory fsync is best-effort: filesystems that do not support
+    /// it (or platforms where opening a directory fails) are ignored
+    /// rather than failing the write.
     ///
     /// # Errors
     ///
-    /// Returns [`SnapshotError::Io`] on any filesystem failure.
+    /// Returns [`SnapshotError::Io`] on any filesystem failure up to and
+    /// including the rename.
     pub fn write_atomic(&self, path: &Path) -> Result<(), SnapshotError> {
         use std::io::Write;
         let bytes = self.encode();
         let parent = path.parent().unwrap_or_else(|| Path::new("."));
         std::fs::create_dir_all(parent)?;
         let tmp = path.with_extension("tmp");
-        {
+        let write_tmp = || -> Result<(), SnapshotError> {
             let mut f = std::fs::File::create(&tmp)?;
             f.write_all(&bytes)?;
             f.sync_all()?;
+            std::fs::rename(&tmp, path)?;
+            Ok(())
+        };
+        if let Err(e) = write_tmp() {
+            // Don't leave a stale temp file behind on a failed write.
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
         }
-        std::fs::rename(&tmp, path)?;
+        // Best-effort durable rename: fsync the parent directory so the
+        // rename survives a crash. Ignore unsupported/not-a-dir cases.
+        if let Ok(dir) = std::fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
         Ok(())
     }
 
