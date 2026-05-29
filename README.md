@@ -70,12 +70,13 @@ What works today:
 Notable gaps (see the [KIP matrix](#kip-implementation-status) for detail): the
 next-gen consumer group protocol (KIP-848) is in progress — broker-side
 foundations, `__consumer_offsets` persistence, a rack-aware `UniformAssignor`,
-`subscribed_topic_regex`, and the pluggable server-side assignor surface are in
-tree; classic→next-gen group migration and JVM-client engagement are still
-pending. Tiered storage (KIP-405) is partial: the `crabka-remote-storage-topic`
-(KIP-405 production RLMM) crate is in tree but not yet wired into the broker.
-Share groups / queues (KIP-932) and a Kafka Connect / Streams / MirrorMaker
-equivalent are not yet implemented. ZooKeeper mode and ZK→KRaft migration are
+the pluggable server-side assignor surface, and `subscribed_topic_regex` are in
+tree, and GA `group.protocol=consumer` clients (kafka-clients 4.0) now consume
+end to end; classic→next-gen group migration is still pending. Tiered storage
+(KIP-405) is partial: the `crabka-remote-storage-topic` (KIP-405 production
+RLMM) crate is in tree but not yet wired into the broker. Share groups /
+queues (KIP-932) and a Kafka Connect / Streams / MirrorMaker equivalent are not
+yet implemented. ZooKeeper mode and ZK→KRaft migration are
 deliberately out of scope — Crabka is KRaft-only.
 
 ## Architecture

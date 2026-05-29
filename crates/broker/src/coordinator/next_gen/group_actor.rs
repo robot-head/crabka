@@ -283,8 +283,17 @@ async fn handle_heartbeat(
     }
 
     // ─── First-join path ─────────────────────────────────────────
-    if req.member_epoch == 0 && req.member_id.is_empty() {
-        let new_member_id = uuid::Uuid::new_v4().to_string();
+    // KIP-848 (finalized): the consumer generates its own member UUID and
+    // sends it with `member_epoch == 0` on first join. Treat epoch 0 from a
+    // member we don't yet know as a first-join, adopting the client-supplied
+    // id. An empty `member_id` is tolerated as a fallback (raw-RPC / older
+    // callers) by minting a server-side UUID.
+    if req.member_epoch == 0 && !state.members.contains_key(&req.member_id) {
+        let new_member_id = if req.member_id.is_empty() {
+            uuid::Uuid::new_v4().to_string()
+        } else {
+            req.member_id.clone()
+        };
         if let Some(iid) = req.instance_id.as_deref()
             && state
                 .current_member_for_instance(iid)
@@ -887,6 +896,90 @@ mod tests {
         );
         // Minimum: k3 (group metadata) + k5 (member metadata) + k8 (current).
         assert!(batches[0].records.len() >= 3);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn first_join_adopts_client_member_id() {
+        let (coord, log) = make_coordinator();
+        let handle = coord.get_or_create("g");
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::Heartbeat {
+                request: ConsumerGroupHeartbeatRequest {
+                    group_id: "g".into(),
+                    member_id: "client-uuid-1".into(),
+                    member_epoch: 0,
+                    subscribed_topic_names: Some(vec!["t".into()]),
+                    rebalance_timeout_ms: 60_000,
+                    ..Default::default()
+                },
+                client_host: String::new(),
+                reply: tx,
+            })
+            .await
+            .unwrap();
+        let resp = rx.await.unwrap();
+        assert_eq!(resp.error_code, 0, "client-id first-join must succeed");
+        assert_eq!(
+            resp.member_id.as_deref(),
+            Some("client-uuid-1"),
+            "response must echo the client-supplied member id"
+        );
+        assert!(resp.member_epoch >= 1, "epoch must advance off 0 on join");
+        // The client-id first-join takes the same flush path as the empty-id case
+        // and persists exactly one batch.
+        assert_eq!(
+            log.batches().await.len(),
+            1,
+            "client-id first join writes exactly one batch"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn known_member_id_epoch_zero_is_stale() {
+        let (coord, _log) = make_coordinator();
+        let handle = coord.get_or_create("g");
+        // First join with a client id, epoch 0 → succeeds, epoch advances.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::Heartbeat {
+                request: ConsumerGroupHeartbeatRequest {
+                    group_id: "g".into(),
+                    member_id: "client-uuid-2".into(),
+                    member_epoch: 0,
+                    subscribed_topic_names: Some(vec!["t".into()]),
+                    rebalance_timeout_ms: 60_000,
+                    ..Default::default()
+                },
+                client_host: String::new(),
+                reply: tx,
+            })
+            .await
+            .unwrap();
+        assert_eq!(rx.await.unwrap().error_code, 0);
+
+        // Same id re-sending epoch 0 is now a known member at a higher epoch →
+        // stale, not a re-join.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::Heartbeat {
+                request: ConsumerGroupHeartbeatRequest {
+                    group_id: "g".into(),
+                    member_id: "client-uuid-2".into(),
+                    member_epoch: 0,
+                    subscribed_topic_names: Some(vec!["t".into()]),
+                    rebalance_timeout_ms: 60_000,
+                    ..Default::default()
+                },
+                client_host: String::new(),
+                reply: tx,
+            })
+            .await
+            .unwrap();
+        assert_eq!(rx.await.unwrap().error_code, codes::STALE_MEMBER_EPOCH);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
