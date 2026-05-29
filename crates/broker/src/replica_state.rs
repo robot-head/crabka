@@ -41,11 +41,25 @@ impl ReplicaState {
 
     /// Install (or reinstall) the ISR membership and seed non-leader
     /// `per_follower` entries to zero. Idempotent: re-installing the same
-    /// `(replicas, leader)` preserves existing follower progress.
-    pub(crate) fn install_isr(&mut self, replicas: &[NodeId], leader: NodeId) {
-        self.isr = replicas.iter().copied().collect();
+    /// `(isr, replicas, leader)` preserves existing follower progress.
+    ///
+    /// `isr` is the committed in-sync set; `replicas` is the full replica
+    /// assignment. `per_follower` is keyed by the **replica set** (minus
+    /// the leader), not the ISR: a replica that has been shrunk out of the
+    /// ISR — or hasn't yet rejoined after a restart — is still catching up
+    /// via follower-fetch, and its fetch-driven `last_caught_up` is exactly
+    /// what `isr_maintenance` reads to expand it back in. Keying retention
+    /// on the ISR instead would discard that progress on every
+    /// metadata-image reconcile and starve ISR re-admission under image
+    /// churn. Only nodes no longer in the replica set (e.g. removed by a
+    /// reassignment) are dropped.
+    pub(crate) fn install_isr(&mut self, isr: &[NodeId], replicas: &[NodeId], leader: NodeId) {
+        self.isr = isr.iter().copied().collect();
         let now = Instant::now();
-        for &r in replicas {
+        // Seed only ISR members: seeding a non-ISR replica with
+        // `last_caught_up = now` would let `isr_maintenance` falsely
+        // re-admit a replica that has not actually fetched up to the LEO.
+        for &r in isr {
             if r != leader {
                 self.per_follower.entry(r).or_insert(FollowerStats {
                     leo: 0,
@@ -54,8 +68,8 @@ impl ReplicaState {
                 });
             }
         }
-        let isr = self.isr.clone();
-        self.per_follower.retain(|k, _| isr.contains(k));
+        let keep: HashSet<NodeId> = replicas.iter().copied().collect();
+        self.per_follower.retain(|k, _| keep.contains(k));
     }
 
     pub(crate) fn update_follower_leo(
@@ -134,7 +148,7 @@ mod tests {
     #[test]
     fn install_isr_seeds_non_leader_followers_at_zero() {
         let mut s = fresh();
-        s.install_isr(&[1, 2, 3], 1);
+        s.install_isr(&[1, 2, 3], &[1, 2, 3], 1);
         assert_eq!(s.isr, [1, 2, 3].into_iter().collect());
         assert_eq!(s.per_follower.get(&2).map(|f| f.leo), Some(0));
         assert_eq!(s.per_follower.get(&3).map(|f| f.leo), Some(0));
@@ -144,27 +158,46 @@ mod tests {
     #[test]
     fn install_isr_idempotent_preserves_follower_progress() {
         let mut s = fresh();
-        s.install_isr(&[1, 2, 3], 1);
+        s.install_isr(&[1, 2, 3], &[1, 2, 3], 1);
         s.update_follower_leo(2, 50, 100);
         s.update_follower_leo(3, 75, 100);
-        s.install_isr(&[1, 2, 3], 1);
+        s.install_isr(&[1, 2, 3], &[1, 2, 3], 1);
         assert_eq!(s.per_follower.get(&2).map(|f| f.leo), Some(50));
         assert_eq!(s.per_follower.get(&3).map(|f| f.leo), Some(75));
     }
 
     #[test]
     fn install_isr_drops_stale_follower_leo_for_removed_replicas() {
+        // Node 3 leaves the *replica set* entirely (e.g. reassignment) →
+        // its progress entry is dropped.
         let mut s = fresh();
-        s.install_isr(&[1, 2, 3], 1);
+        s.install_isr(&[1, 2, 3], &[1, 2, 3], 1);
         s.update_follower_leo(3, 75, 100);
-        s.install_isr(&[1, 2], 1);
+        s.install_isr(&[1, 2], &[1, 2], 1);
         assert!(!s.per_follower.contains_key(&3));
+    }
+
+    #[test]
+    fn install_isr_keeps_catching_up_replica_shrunk_from_isr() {
+        // Node 3 is shrunk out of the ISR but stays a replica (it's
+        // catching back up). Its fetch-driven progress must survive an
+        // ISR reinstall so isr_maintenance can later expand it back in.
+        let mut s = fresh();
+        s.install_isr(&[1, 2, 3], &[1, 2, 3], 1);
+        s.update_follower_leo(3, 75, 100);
+        // Committed ISR shrinks to {1,2}; replica set is still {1,2,3}.
+        s.install_isr(&[1, 2], &[1, 2, 3], 1);
+        assert!(
+            s.per_follower.contains_key(&3),
+            "a replica catching up toward ISR re-admission must keep its progress"
+        );
+        assert_eq!(s.per_follower.get(&3).map(|f| f.leo), Some(75));
     }
 
     #[test]
     fn hw_advances_when_trailing_follower_catches_up() {
         let mut s = fresh();
-        s.install_isr(&[1, 2, 3], 1);
+        s.install_isr(&[1, 2, 3], &[1, 2, 3], 1);
         let hw1 = s.update_follower_leo(2, 50, 100);
         assert_eq!(hw1, 0);
         let hw2 = s.update_follower_leo(3, 75, 100);
@@ -176,7 +209,7 @@ mod tests {
     #[test]
     fn hw_pins_at_slowest_isr_follower() {
         let mut s = fresh();
-        s.install_isr(&[1, 2, 3], 1);
+        s.install_isr(&[1, 2, 3], &[1, 2, 3], 1);
         s.update_follower_leo(2, 100, 100);
         s.update_follower_leo(3, 30, 100);
         assert_eq!(s.hw, 30);
@@ -185,7 +218,7 @@ mod tests {
     #[test]
     fn non_isr_follower_leo_update_uses_leader_path() {
         let mut s = fresh();
-        s.install_isr(&[1, 2], 1);
+        s.install_isr(&[1, 2], &[1, 2], 1);
         // Node 3 is not in ISR. Its report falls through to
         // recompute_hw_for_leader_append. per_follower[2] = 0 from
         // install, so HW = min(100, 0) = 0.
@@ -197,7 +230,7 @@ mod tests {
     #[test]
     fn single_replica_isr_hw_equals_leader_leo() {
         let mut s = fresh();
-        s.install_isr(&[1], 1);
+        s.install_isr(&[1], &[1], 1);
         let hw = s.recompute_hw_for_leader_append(42);
         assert_eq!(hw, 42);
     }
@@ -205,7 +238,7 @@ mod tests {
     #[test]
     fn follower_overshoot_clamps_to_leader_leo() {
         let mut s = fresh();
-        s.install_isr(&[1, 2], 1);
+        s.install_isr(&[1, 2], &[1, 2], 1);
         let hw = s.update_follower_leo(2, 200, 100);
         assert_eq!(hw, 100);
         assert_eq!(s.per_follower.get(&2).map(|f| f.leo), Some(100));
@@ -221,7 +254,7 @@ mod tests {
     #[test]
     fn update_follower_leo_advances_last_fetch_time() {
         let mut s = fresh();
-        s.install_isr(&[1, 2], 1);
+        s.install_isr(&[1, 2], &[1, 2], 1);
         let t0 = s.per_follower.get(&2).unwrap().last_fetch;
         std::thread::sleep(std::time::Duration::from_millis(10));
         s.update_follower_leo(2, 5, 10);
@@ -232,7 +265,7 @@ mod tests {
     #[test]
     fn last_caught_up_set_when_leo_reaches_leader_leo() {
         let mut s = fresh();
-        s.install_isr(&[1, 2], 1);
+        s.install_isr(&[1, 2], &[1, 2], 1);
         s.update_follower_leo(2, 5, 10);
         let lag = s.per_follower.get(&2).unwrap().last_caught_up;
         let lag_install = s.per_follower.get(&2).map(|f| f.last_fetch).unwrap();

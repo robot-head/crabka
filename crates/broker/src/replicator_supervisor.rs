@@ -252,13 +252,16 @@ impl ReplicatorSupervisor {
             part.install_leader_change(part_record.leader, part_record.leader_epoch)
                 .await;
             if part_record.leader == self.node_id {
-                // Install the *current* ISR from the metadata image, not the
-                // full replica set. Using `replicas` would undo any shrink
-                // applied via AlterPartition: every metadata-image change
-                // would reset ISR back to [all replicas], so isr_maintenance's
-                // shrink would never stick (and producers with acks=-1 would
-                // stay blocked indefinitely on lagging followers).
-                part.install_isr(&part_record.isr, part_record.leader).await;
+                // Install the *current* ISR from the metadata image (not the
+                // full replica set) as ISR membership: using `replicas` would
+                // undo any shrink applied via AlterPartition, so
+                // isr_maintenance's shrink would never stick (and producers
+                // with acks=-1 would stay blocked on lagging followers). The
+                // replica set is passed separately so follower-progress
+                // tracking survives across reconciles for replicas catching
+                // up toward ISR re-admission.
+                part.install_isr(&part_record.isr, &part_record.replicas, part_record.leader)
+                    .await;
             }
         }
 
@@ -515,7 +518,7 @@ mod tests {
             .value()
             .clone();
         // Mirror what reconcile does for leader partitions.
-        part.install_isr(&[1, 2, 3], 1).await;
+        part.install_isr(&[1, 2, 3], &[1, 2, 3], 1).await;
         let st = part.replica_state.lock().await;
         assert_eq!(st.isr.len(), 3);
     }
