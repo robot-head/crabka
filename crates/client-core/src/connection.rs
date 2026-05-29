@@ -39,6 +39,8 @@ pub struct ConnectionOptions {
     pub client_id: String,
     pub connect_timeout: Duration,
     pub request_timeout: Duration,
+    /// Client-side TLS/SASL policy. `None` = plaintext (default).
+    pub security: Option<crate::security::ClientSecurity>,
 }
 
 impl Default for ConnectionOptions {
@@ -47,6 +49,7 @@ impl Default for ConnectionOptions {
             client_id: "crabka".into(),
             connect_timeout: Duration::from_secs(30),
             request_timeout: Duration::from_secs(30),
+            security: None,
         }
     }
 }
@@ -86,6 +89,65 @@ impl Connection {
         stream.set_nodelay(true).ok();
 
         Self::from_stream(Box::new(stream), options).await
+    }
+
+    /// Connect to `addr`, applying `security` (TLS then SASL) before the
+    /// API-versions bootstrap. `Plaintext` is identical to [`Self::connect`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError::Connect`] / [`ClientError::Timeout`] on the
+    /// TCP dial, or [`ClientError::Io`] if the TLS or SASL handshake fails
+    /// or the security policy is internally inconsistent (e.g. a TLS
+    /// protocol with no TLS config).
+    pub async fn connect_secured(
+        addr: SocketAddr,
+        options: ConnectionOptions,
+        security: &crate::security::ClientSecurity,
+    ) -> Result<Self, ClientError> {
+        let tcp = tokio::time::timeout(options.connect_timeout, TcpStream::connect(addr))
+            .await
+            .map_err(|_| ClientError::Timeout(options.connect_timeout))?
+            .map_err(|source| ClientError::Connect { addr, source })?;
+        tcp.set_nodelay(true).ok();
+
+        // 1. TLS (if the protocol demands it).
+        let mut stream: Box<dyn ClientDuplex> = if security.protocol.requires_tls() {
+            let tls = security.tls.as_ref().ok_or_else(|| {
+                ClientError::Io(std::io::Error::other("TLS protocol without tls config"))
+            })?;
+            let connector = tls
+                .connector()
+                .map_err(|e| ClientError::Io(std::io::Error::other(e)))?;
+            let sni =
+                tokio_rustls::rustls::pki_types::ServerName::try_from(tls.server_name.clone())
+                    .map_err(|e| {
+                        ClientError::Io(std::io::Error::other(format!("invalid SNI: {e}")))
+                    })?;
+            let s = connector
+                .connect(sni, tcp)
+                .await
+                .map_err(|e| ClientError::Io(std::io::Error::other(e.to_string())))?;
+            Box::new(s)
+        } else {
+            Box::new(tcp)
+        };
+
+        // 2. SASL (if the protocol demands it).
+        if security.protocol.requires_sasl() {
+            let creds = security.sasl.as_ref().ok_or_else(|| {
+                ClientError::Io(std::io::Error::other("SASL protocol without credentials"))
+            })?;
+            let server_name = security
+                .tls
+                .as_ref()
+                .map_or("localhost", |t| t.server_name.as_str());
+            crate::sasl::outbound_sasl(&mut *stream, creds, server_name)
+                .await
+                .map_err(|e| ClientError::Io(std::io::Error::other(e.to_string())))?;
+        }
+
+        Self::from_stream(stream, options).await
     }
 
     /// Build a `Connection` over a pre-established, optionally
@@ -434,4 +496,86 @@ async fn fetch_api_versions(conn: &Connection) -> Result<ApiVersionTable, Client
         .iter()
         .map(|k| (k.api_key, k.min_version, k.max_version));
     Ok(ApiVersionTable::from_entries(entries))
+}
+
+#[cfg(test)]
+mod secured_tests {
+    use super::*;
+    use crate::security::{ClientSecurity, SaslCredentials};
+    use crabka_security::ListenerProtocol;
+
+    // A SASL_PLAINTEXT connect drives the handshake then ApiVersions.
+    // The fake broker answers SaslHandshake(0), SaslAuthenticate(0),
+    // then a minimal ApiVersionsResponse v0 so from_stream succeeds.
+    #[tokio::test]
+    async fn connect_secured_runs_sasl_then_api_versions() {
+        use crabka_protocol::Encode;
+        use crabka_protocol::owned::api_versions_response::ApiVersionsResponse;
+        use crabka_protocol::owned::sasl_authenticate_response::SaslAuthenticateResponse;
+        use crabka_protocol::owned::sasl_handshake_response::SaslHandshakeResponse;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            // (body, flexible_response_header)
+            let replies: [(BytesMut, bool); 3] = [
+                {
+                    let mut b = BytesMut::new();
+                    SaslHandshakeResponse {
+                        error_code: 0,
+                        ..Default::default()
+                    }
+                    .encode(&mut b, 1)
+                    .unwrap();
+                    (b, false)
+                },
+                {
+                    let mut b = BytesMut::new();
+                    SaslAuthenticateResponse {
+                        error_code: 0,
+                        ..Default::default()
+                    }
+                    .encode(&mut b, 2)
+                    .unwrap();
+                    (b, true)
+                },
+                {
+                    let mut b = BytesMut::new();
+                    ApiVersionsResponse::default().encode(&mut b, 0).unwrap();
+                    // ApiVersions always uses a v0 response header.
+                    (b, false)
+                },
+            ];
+            for (body, flex_header) in replies {
+                let req_len = s.read_u32().await.unwrap();
+                let mut req = vec![0u8; req_len as usize];
+                s.read_exact(&mut req).await.unwrap();
+                let corr = i32::from_be_bytes([req[4], req[5], req[6], req[7]]);
+                let mut frame = BytesMut::new();
+                frame.put_i32(corr);
+                if flex_header {
+                    frame.put_u8(0);
+                }
+                frame.put_slice(&body);
+                s.write_u32(frame.len() as u32).await.unwrap();
+                s.write_all(&frame).await.unwrap();
+                s.flush().await.unwrap();
+            }
+        });
+        let security = ClientSecurity {
+            protocol: ListenerProtocol::SaslPlaintext,
+            tls: None,
+            sasl: Some(SaslCredentials::Plain {
+                username: "u".into(),
+                password: "p".into(),
+            }),
+        };
+        let conn = Connection::connect_secured(addr, ConnectionOptions::default(), &security)
+            .await
+            .expect("secured connect completes");
+        conn.close();
+        server.await.unwrap();
+    }
 }

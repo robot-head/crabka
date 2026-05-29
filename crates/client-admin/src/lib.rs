@@ -375,6 +375,7 @@ impl AdminClient {
             connect_timeout: Duration::from_secs(5),
             request_timeout: Duration::from_secs(30),
             client_id: "crabka-operator".to_string(),
+            security: None,
         };
         for host_port in bootstrap_addrs {
             match Self::connect_one(host_port, opts.clone()).await {
@@ -416,6 +417,7 @@ impl AdminClient {
             connect_timeout: Duration::from_secs(5),
             request_timeout: Duration::from_secs(30),
             client_id: "crabka-operator".to_string(),
+            security: None,
         };
         self.conn = Self::connect_one(host_port, opts).await?;
         Ok(())

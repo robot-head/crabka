@@ -33,11 +33,13 @@ impl Client {
         connect_timeout: std::time::Duration,
         #[builder(default = std::time::Duration::from_secs(30))]
         request_timeout: std::time::Duration,
+        security: Option<crate::security::ClientSecurity>,
     ) -> Result<Self, ClientError> {
         let options = ConnectionOptions {
             client_id,
             connect_timeout,
             request_timeout,
+            security,
         };
         Self::start_with_options(bootstrap, options).await
     }

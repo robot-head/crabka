@@ -9,6 +9,19 @@ use dashmap::DashMap;
 use crate::connection::{Connection, ConnectionOptions};
 use crate::error::ClientError;
 
+/// Open a connection honouring `options.security`: a secured (TLS/SASL)
+/// dial when a policy is set, plaintext otherwise. Centralises the branch
+/// so every pool connect site inherits the policy identically.
+async fn connect_with_options(
+    addr: SocketAddr,
+    options: ConnectionOptions,
+) -> Result<Connection, ClientError> {
+    match options.security.clone() {
+        Some(sec) => Connection::connect_secured(addr, options, &sec).await,
+        None => Connection::connect(addr, options).await,
+    }
+}
+
 /// Information about a single Kafka broker, as reported by a `MetadataResponse`.
 #[derive(Debug, Clone)]
 pub struct BrokerInfo {
@@ -52,7 +65,7 @@ impl BrokerPool {
             .get(&broker_id)
             .map(|e| *e)
             .ok_or(ClientError::Disconnected)?;
-        let conn = Arc::new(Connection::connect(addr, self.options.clone()).await?);
+        let conn = Arc::new(connect_with_options(addr, self.options.clone()).await?);
         self.by_id.insert(broker_id, conn.clone());
         Ok(conn)
     }
@@ -66,7 +79,7 @@ impl BrokerPool {
         }
         let mut last_err: Option<ClientError> = None;
         for addr in &self.bootstrap {
-            match Connection::connect(*addr, self.options.clone()).await {
+            match connect_with_options(*addr, self.options.clone()).await {
                 Ok(c) => {
                     let arc = Arc::new(c);
                     self.by_id.insert(BOOTSTRAP_ID, arc.clone());

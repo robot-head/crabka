@@ -36,8 +36,12 @@
 //! - Producer / consumer semantics.
 //! - Transactions.
 //! - Partition-aware routing.
-//! - TLS / SASL.
 //! - Automatic mid-request retry.
+//!
+//! TLS / SASL: a client-side security surface lives in [`security`] and
+//! [`sasl`] — set [`ConnectionOptions::security`] (or the `Client`
+//! builder's `.security(...)`) to negotiate TLS then SASL before the
+//! API-versions bootstrap. `None` (the default) is plaintext.
 //!
 //! ## Cargo features
 //!
