@@ -61,9 +61,10 @@ pub mod log;
 pub mod manager;
 pub mod partitioning;
 pub mod serde;
+pub mod snapshot;
 pub mod swappable;
 
-pub use error::{CodecError, MetadataLogError};
+pub use error::{CodecError, MetadataLogError, SnapshotError};
 pub use kafka_log::{
     DEFAULT_NUM_PARTITIONS, DEFAULT_REPLICATION, KafkaMetadataEventLog, KafkaMetadataLogConfig,
     METADATA_TOPIC,
@@ -75,4 +76,5 @@ pub use log::{
 pub use manager::TopicBasedRemoteLogMetadataManager;
 pub use partitioning::metadata_partition_for;
 pub use serde::{MetadataEvent, WIRE_VERSION};
+pub use snapshot::{SNAPSHOT_FILE_NAME, SNAPSHOT_FORMAT_VERSION, Snapshot};
 pub use swappable::SwappableRlmm;
