@@ -1,0 +1,28 @@
+[package]
+name = "crabka-docgen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "crabka-docgen"
+path = "src/main.rs"
+
+[dependencies]
+crabka-operator = { version = "0.1", path = "../operator" }
+crabka-broker = { version = "0.1", path = "../broker" }
+crabka-protocol = { version = "0.1", path = "../protocol" }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde_json = { workspace = true }
+schemars = { workspace = true }
+kube = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
