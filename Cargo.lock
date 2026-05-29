@@ -1178,6 +1178,7 @@ dependencies = [
  "rustix",
  "rustls",
  "rustls-pki-types",
+ "schemars 1.2.1",
  "serde",
  "serde-wincode",
  "serde_json",
