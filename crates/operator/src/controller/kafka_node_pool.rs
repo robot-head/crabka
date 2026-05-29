@@ -765,17 +765,21 @@ pub(crate) fn render_statefulset(
     // value to `status.metadataVersion` once version validation passes; on a
     // first-ever reconcile (status absent) we fall back to the spec pin, then
     // to the kafka_version so the formatter always receives a concrete level.
-    let resolved_metadata_version = parent
+    let chosen = parent
         .status
         .as_ref()
         .and_then(|s| s.metadata_version.as_deref())
         .or(parent.spec.metadata_version.as_deref())
         .unwrap_or(&parent.spec.kafka_version);
+    // Normalize to major.minor — `crabka format --release-version` resolves
+    // a short form (e.g. "3.7"); a 3-part version string would not resolve.
+    let resolved_metadata_version = crate::version::KafkaVersion::parse(chosen)
+        .map_or_else(|_| chosen.to_string(), |v| v.short());
     let init = render_init_container(
         broker_image,
         &secret_name,
         pool.spec.node_id_start,
-        resolved_metadata_version,
+        &resolved_metadata_version,
     );
     let metrics_enabled = parent.spec.metrics_config.is_some();
     let logging_enabled = parent.spec.logging.is_some();
@@ -1494,6 +1498,29 @@ mod tests {
             .find(|e| e["name"] == "CRABKA_METADATA_VERSION")
             .expect("CRABKA_METADATA_VERSION env present");
         assert_eq!(mv["value"], "4.0");
+    }
+
+    #[test]
+    fn statefulset_init_normalizes_metadata_version_to_short() {
+        // kafka_version "3.7.1", no spec/status metadata_version -> "3.7" reaches the init env.
+        let parent = parent_fixture("demo"); // spec.kafka_version = "0.1.1", no metadata_version
+        // Use a parent with a real 3-part kafka_version to exercise the normalization path.
+        let mut parent37 = parent.clone();
+        parent37.spec.kafka_version = "3.7.1".into();
+        let pool = pool_fixture("brokers", "demo", 1);
+        let sts = render_statefulset(&parent37, &pool, DEFAULT_BROKER_IMAGE).unwrap();
+        let pod = sts.spec.unwrap().template.spec.unwrap();
+        let init = &pod.init_containers.expect("init containers")[0];
+        let env = init.env.as_ref().expect("init env");
+        let mv = env
+            .iter()
+            .find(|e| e.name == "CRABKA_METADATA_VERSION")
+            .expect("CRABKA_METADATA_VERSION env present");
+        assert_eq!(
+            mv.value.as_deref(),
+            Some("3.7"),
+            "init container must receive short major.minor form, not the 3-part kafka_version"
+        );
     }
 
     #[test]
