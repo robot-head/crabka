@@ -186,14 +186,29 @@ impl Consumer {
                             key: r.key.clone(),
                             value: r.value.clone(),
                         });
-                        offsets.insert((topic_name.clone(), part.partition_index), offset + 1);
                     }
+                }
+                if let Some(next) = next_offset_after(batches) {
+                    offsets.insert((topic_name.clone(), part.partition_index), next);
                 }
             }
         }
         Ok(out)
     }
+}
 
+/// The offset to fetch next after consuming `batches`: one past the highest
+/// `base_offset + last_offset_delta` across all decoded batches. `None` when
+/// there are no batches (offset unchanged). Used so the consumer advances past
+/// control/aborted batches that emit no records, instead of re-fetching them.
+fn next_offset_after(batches: &[crabka_protocol::records::RecordBatch]) -> Option<i64> {
+    batches
+        .iter()
+        .map(|b| b.base_offset + i64::from(b.last_offset_delta) + 1)
+        .max()
+}
+
+impl Consumer {
     /// Replace any `i64::MAX` sentinels in `next_offsets` (planted by
     /// `auto_offset_reset = Latest` at build time) with the real log-end
     /// offset from `ListOffsets(timestamp=-1)`.
@@ -240,5 +255,31 @@ impl Consumer {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod offset_advance_tests {
+    use crabka_protocol::records::{RecordBatch, RecordsPayload};
+
+    #[test]
+    fn advance_target_uses_last_offset_delta_not_record_count() {
+        // A batch spanning offsets 10..=14 (last_offset_delta = 4) but carrying
+        // zero surviving records must still advance the fetch offset to 15.
+        let batch = RecordBatch {
+            base_offset: 10,
+            last_offset_delta: 4,
+            records: vec![],
+            ..Default::default()
+        };
+        let payload = RecordsPayload::V2(vec![batch]);
+        let batches = payload.as_v2().unwrap();
+        assert_eq!(super::next_offset_after(batches), Some(15));
+    }
+
+    #[test]
+    fn advance_target_none_for_empty() {
+        let payload = RecordsPayload::V2(vec![]);
+        assert_eq!(super::next_offset_after(payload.as_v2().unwrap()), None);
     }
 }

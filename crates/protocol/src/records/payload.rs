@@ -94,6 +94,50 @@ impl RecordsPayload {
             Self::V2(_) | Self::Raw(_) => None,
         }
     }
+
+    /// Decode a **response-side** records field, tolerating a truncated
+    /// trailing batch. Kafka returns a partial final `RecordBatch` when a
+    /// partition's fetch byte budget is hit mid-batch; the JVM consumer stops
+    /// at the first incomplete batch and re-fetches it from the next offset.
+    /// We mirror that: decode every complete batch, and on the first
+    /// `HeaderTooShort` / `BodyTooShort` stop and drop the remainder. A
+    /// *corrupt* complete batch (bad CRC/magic/content) still errors — leniency
+    /// forgives truncation only. Strict [`from_bytes`](Self::from_bytes) is
+    /// retained for Produce-request validation.
+    ///
+    /// Only `HeaderTooShort`/`BodyTooShort` are treated as truncation; a genuinely
+    /// invalid `batch_length` (`RecordParse`) is corruption and still errors —
+    /// legitimate Kafka truncation always preserves a valid `batch_length` prefix,
+    /// so it can only manifest as the too-short variants.
+    pub fn from_fetch_bytes(bytes: Bytes) -> Result<Self, RecordsError> {
+        if !looks_like_v2(&bytes) {
+            return Ok(Self::Legacy(bytes));
+        }
+        let mut cur: &[u8] = &bytes;
+        let mut batches = Vec::new();
+        while !cur.is_empty() {
+            match RecordBatch::decode(&mut cur) {
+                Ok(rb) => batches.push(rb),
+                Err(RecordsError::HeaderTooShort { .. } | RecordsError::BodyTooShort { .. }) => {
+                    break;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(Self::V2(batches))
+    }
+
+    /// `Decode`-shaped lenient entry point the generated codec calls for
+    /// records fields in **response** messages. Consumes the whole sliced
+    /// field buffer (the caller has already framed it) and parses leniently
+    /// via [`from_fetch_bytes`](Self::from_fetch_bytes).
+    pub fn decode_lenient<B: Buf>(
+        buf: &mut B,
+        _version: i16,
+    ) -> Result<Self, crate::ProtocolError> {
+        let bytes = buf.copy_to_bytes(buf.remaining());
+        Self::from_fetch_bytes(bytes).map_err(Into::into)
+    }
 }
 
 impl From<RecordBatch> for RecordsPayload {
@@ -472,5 +516,55 @@ mod tests {
     fn borrowed_default_is_empty_v2() {
         let p = RecordsPayloadBorrowed::default();
         assert!(matches!(p, RecordsPayloadBorrowed::V2(ref v) if v.is_empty()));
+    }
+
+    #[test]
+    fn from_fetch_bytes_drops_incomplete_trailing_batch() {
+        // Two complete batches followed by a truncated third (only a few
+        // bytes of its header). Kafka sends this when the partition byte
+        // budget cuts the final batch; the consumer must keep the two
+        // complete batches and drop the fragment.
+        let mut b0 = sample_v2();
+        b0.base_offset = 0;
+        let mut b1 = sample_v2();
+        b1.base_offset = 1;
+        let mut buf = BytesMut::new();
+        b0.encode(&mut buf).unwrap();
+        b1.encode(&mut buf).unwrap();
+        buf.extend_from_slice(&[0u8; 7]); // partial trailing batch header
+        let p = RecordsPayload::from_fetch_bytes(buf.freeze()).unwrap();
+        let batches = p.as_v2().expect("v2");
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].base_offset, 0);
+        assert_eq!(batches[1].base_offset, 1);
+    }
+
+    #[test]
+    fn from_fetch_bytes_still_errors_on_corrupt_batch() {
+        // A complete-looking batch whose CRC is wrong must still error, even
+        // leniently — leniency only forgives truncation, not corruption.
+        let rb = sample_v2();
+        let mut buf = BytesMut::new();
+        rb.encode(&mut buf).unwrap();
+        let mut bytes = buf.to_vec();
+        // Corrupt a body byte after the header (HEADER_LEN = 61) to break CRC.
+        bytes[61] ^= 0xFF;
+        let err = RecordsPayload::from_fetch_bytes(Bytes::from(bytes)).unwrap_err();
+        assert!(matches!(err, RecordsError::CrcMismatch { .. }));
+    }
+
+    #[test]
+    fn from_fetch_bytes_legacy_passes_through() {
+        let bytes = legacy_bytes();
+        let p = RecordsPayload::from_fetch_bytes(bytes.clone()).unwrap();
+        assert_eq!(p.as_legacy(), Some(&bytes));
+    }
+
+    #[test]
+    fn from_fetch_bytes_empty_is_empty_v2() {
+        // Empty bytes do not carry a magic byte, so looks_like_v2 returns false
+        // and from_fetch_bytes yields an empty Legacy payload (no panic, no error).
+        let p = RecordsPayload::from_fetch_bytes(Bytes::new()).unwrap();
+        assert!(matches!(p, RecordsPayload::Legacy(ref b) if b.is_empty()));
     }
 }

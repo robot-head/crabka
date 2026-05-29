@@ -248,7 +248,7 @@ impl<'de> Decode<'de> for PartitionData {
         if version >= 5 { out.log_start_offset = get_i64(buf)?; }
         if version >= 4 { out.aborted_transactions = { let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?; match opt { None => None, Some(n) => { let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(AbortedTransaction::decode(buf, version)?); } Some(v) } } }; }
         if version >= 11 { out.preferred_read_replica = get_i32(buf)?; }
-        if version >= 0 { out.records = { let __rb_opt = if flex { get_compact_nullable_bytes_owned(buf)? } else { get_nullable_bytes_owned(buf)? }; match __rb_opt { None => None, Some(__rb_bytes) => { let mut __rb_cur: &[u8] = &__rb_bytes; Some(<crate::records::RecordsPayload as crate::Decode>::decode(&mut __rb_cur, version)?) } } }; }
+        if version >= 0 { out.records = { let __rb_opt = if flex { get_compact_nullable_bytes_owned(buf)? } else { get_nullable_bytes_owned(buf)? }; match __rb_opt { None => None, Some(__rb_bytes) => { let mut __rb_cur: &[u8] = &__rb_bytes; Some(crate::records::RecordsPayload::decode_lenient(&mut __rb_cur, version)?) } } }; }
         if flex {
             // Pre-declare typed slots for known tagged fields.
             let mut tag_diverging_epoch = None;
