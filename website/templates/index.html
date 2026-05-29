@@ -1,0 +1,151 @@
+{% extends "base.html" %}
+{% import "macros/icons.html" as ic %}
+
+{% block seo %}
+  {{ super() }}
+
+  {% if config.title %}
+    {% set title = config.title %}
+  {% else %}
+    {% set title = "" %}
+  {% endif %}
+
+  {% if config.extra.title_addition and title %}
+    {% set title_addition = title_separator ~ config.extra.title_addition %}
+  {% elif config.extra.title_addition %}
+    {% set title_addition = config.extra.title_addition %}
+  {% else %}
+    {% set title_addition = "" %}
+  {% endif %}
+
+  {% set description = config.description %}
+
+  {{ macros_head::seo(title=title, title_addition=title_addition, description=description, is_home=true) }}
+{% endblock seo %}
+
+{% block content %}
+{# ---------------------------------------------------------------- Hero #}
+<div class="hero-glow"></div>
+<section class="ck-hero">
+  <div class="container text-center">
+    <img class="hero-logo logo-light" src="{{ get_url(path='crabka-logo.png') | safe }}"
+         alt="Crabka" width="300" height="204" fetchpriority="high">
+    <img class="hero-logo logo-dark" src="{{ get_url(path='crabka-logo-dark.png') | safe }}"
+         alt="Crabka" width="300" height="215" fetchpriority="high">
+    <h1 class="visually-hidden">Crabka</h1>
+    {% if section.extra.lead %}<p class="lead hero-lead">{{ section.extra.lead | safe }}</p>{% endif %}
+    <div class="hero-cta">
+      <a class="btn btn-primary btn-lg" href="{{ get_url(path=section.extra.url | default(value='/')) | safe }}" role="button">{{ section.extra.url_button | default(value="Get started") }}</a>
+      {% if section.extra.url2 %}
+        <a class="btn btn-outline-primary btn-lg" href="{{ get_url(path=section.extra.url2) | safe }}" role="button">{{ section.extra.url2_button | default(value="Learn more") }}</a>
+      {% endif %}
+    </div>
+    <p class="hero-meta">
+      {{ section.extra.repo_license | default(value="Apache 2.0") }}
+      <span class="dot">·</span> {{ section.extra.repo_version | default(value="v0.1") }}
+      <span class="dot">·</span>
+      <a href="{{ section.extra.repo_url | default(value='https://github.com/robot-head/crabka') | safe }}">GitHub</a>
+    </p>
+  </div>
+</section>
+
+{# -------------------------------------------------------- Headline stats #}
+{% if section.extra.list %}
+<section class="ck-stats">
+  <div class="container">
+    <div class="row justify-content-center">
+      {% for val in section.extra.list %}
+      <div class="col-sm-6 col-lg-3 mb-4">
+        <div class="stat-card h-100">
+          <span class="stat-icon">{{ ic::icon(name=val.icon | default(value="")) }}</span>
+          <h2 class="stat-title">{{ val.title }}</h2>
+          <p class="stat-body">{{ val.content | safe }}</p>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+</section>
+{% endif %}
+
+{# ---------------------------------------------------- Crabka vs. Kafka #}
+{% if section.extra.compare %}
+<section class="ck-vs">
+  <div class="container">
+    <div class="text-center">
+      <h2 class="section-title">Crabka vs. Apache Kafka</h2>
+      <p class="section-sub">Same wire protocol. Same admin tools. A fraction of the footprint.</p>
+    </div>
+    <figure class="vs-figure">
+      <img src="{{ get_url(path='crabka-vs-kafka.jpg') | safe }}"
+           alt="Crabka versus Apache Kafka" width="1400" height="788" loading="lazy">
+    </figure>
+    <div class="table-responsive">
+      <table class="compare-table">
+        <thead>
+          <tr>
+            <th scope="col"><span class="visually-hidden">Capability</span></th>
+            <th scope="col" class="col-kafka">Apache Kafka 4.3</th>
+            <th scope="col" class="col-crabka">
+              <img class="th-mark logo-light" src="{{ get_url(path='crabka-mark.png') | safe }}" alt="" width="22" height="17" aria-hidden="true">
+              <img class="th-mark logo-dark" src="{{ get_url(path='crabka-mark-dark.png') | safe }}" alt="" width="22" height="18" aria-hidden="true">
+              Crabka
+            </th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in section.extra.compare %}
+          <tr>
+            <th scope="row">{{ row.feature | safe }}</th>
+            <td class="col-kafka">{{ row.kafka | safe }}</td>
+            <td class="col-crabka">{{ row.crabka | safe }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <p class="compare-foot">
+      <span class="asterisk">*</span> Producer write path, single-box like-for-like.
+      <a href="{{ get_url(path='/benchmarks/crabka-vs-kafka/') | safe }}">See the full benchmark methodology →</a>
+    </p>
+  </div>
+</section>
+{% endif %}
+
+{# ------------------------------------------------------ Why Crabka #}
+{% if section.extra.features %}
+<section class="ck-features">
+  <div class="container">
+    <div class="text-center">
+      <h2 class="section-title">Built different, on purpose</h2>
+      <p class="section-sub">Kafka semantics, re-engineered in safe Rust.</p>
+    </div>
+    <div class="row">
+      {% for f in section.extra.features %}
+      <div class="col-md-6 col-lg-4 mb-4">
+        <div class="feature-card h-100">
+          <span class="feature-icon">{{ ic::icon(name=f.icon | default(value="")) }}</span>
+          <h3 class="feature-title">{{ f.title | safe }}</h3>
+          <p class="feature-body">{{ f.content | safe }}</p>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+</section>
+{% endif %}
+
+{# --------------------------------------------------------------- CTA #}
+<section class="ck-cta">
+  <div class="container text-center">
+    <img class="cta-mark logo-light" src="{{ get_url(path='crabka-mark.png') | safe }}" alt="" width="84" height="64" loading="lazy" aria-hidden="true">
+    <img class="cta-mark logo-dark" src="{{ get_url(path='crabka-mark-dark.png') | safe }}" alt="" width="84" height="71" loading="lazy" aria-hidden="true">
+    <h2 class="cta-title">Drop-in Kafka, without the JVM.</h2>
+    <p class="cta-sub">Point your existing producers, consumers, and <code>kafka-*.sh</code> tooling at a Crabka broker and keep moving.</p>
+    <div class="hero-cta">
+      <a class="btn btn-primary btn-lg" href="{{ get_url(path=section.extra.url | default(value='/')) | safe }}" role="button">{{ section.extra.url_button | default(value="Get started") }}</a>
+      <a class="btn btn-outline-primary btn-lg" href="{{ section.extra.repo_url | default(value='https://github.com/robot-head/crabka') | safe }}" role="button">View on GitHub</a>
+    </div>
+  </div>
+</section>
+{% endblock content %}
