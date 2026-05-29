@@ -208,6 +208,52 @@ impl Segment {
         self.max_timestamp
     }
 
+    /// Absolute offset and record timestamp of the first record in this
+    /// segment whose timestamp is `>= target_ts`. Uses the sparse time
+    /// index for a floor position, then scans `.log` batches forward
+    /// (the index is sparse, so an exact answer needs the post-index
+    /// scan — matching Kafka's `LogSegment.findOffsetByTimestamp`).
+    /// Returns `None` when no record in this segment qualifies.
+    #[must_use]
+    pub fn offset_for_timestamp(&self, target_ts: i64) -> Option<(i64, i64)> {
+        let floor_rel = self.time_index.lookup(target_ts);
+        let scan_from = self.base_offset + i64::from(floor_rel);
+        let batches = self.read(scan_from, usize::MAX).ok()?;
+        for batch in &batches {
+            for rec in &batch.records {
+                let ts = batch.base_timestamp + rec.timestamp_delta;
+                if ts >= target_ts {
+                    return Some((batch.base_offset + i64::from(rec.offset_delta), ts));
+                }
+            }
+        }
+        None
+    }
+
+    /// Absolute offset and timestamp of the record carrying this
+    /// segment's `max_timestamp`. Ties resolve to the earliest offset
+    /// (Kafka). Returns `None` for an empty segment. Uses the time
+    /// index's floor for the max to start the scan, then scans forward
+    /// for the first record whose timestamp equals the segment max.
+    #[must_use]
+    pub fn offset_of_max_timestamp(&self) -> Option<(i64, i64)> {
+        if self.max_timestamp == i64::MIN {
+            return None;
+        }
+        let floor_rel = self.time_index.lookup(self.max_timestamp);
+        let scan_from = self.base_offset + i64::from(floor_rel);
+        let batches = self.read(scan_from, usize::MAX).ok()?;
+        for batch in &batches {
+            for rec in &batch.records {
+                let ts = batch.base_timestamp + rec.timestamp_delta;
+                if ts == self.max_timestamp {
+                    return Some((batch.base_offset + i64::from(rec.offset_delta), ts));
+                }
+            }
+        }
+        None
+    }
+
     /// `true` once the segment has been sealed via [`Segment::seal`];
     /// sealed segments reject appends.
     #[must_use]
@@ -479,7 +525,7 @@ mod tests {
         let mut b = RecordBatch {
             base_offset,
             base_timestamp: ts_base,
-            max_timestamp: ts_base + i64::from(n),
+            max_timestamp: ts_base + i64::from(n - 1),
             last_offset_delta: n - 1,
             ..RecordBatch::default()
         };
@@ -493,6 +539,67 @@ mod tests {
             });
         }
         b
+    }
+
+    #[test]
+    fn offset_for_timestamp_finds_first_ge() {
+        let dir = tempdir().unwrap();
+        let mut seg = Segment::create(dir.path(), 0).unwrap();
+        // Two batches: offsets 0..=2 ts 100..=102, offsets 3..=4 ts 200..=201.
+        seg.append(&sample_batch(0, 3, 100), 0).unwrap();
+        seg.append(&sample_batch(3, 2, 200), 0).unwrap();
+        // sample_batch sets per-record timestamp_delta = i, base_timestamp = ts_base.
+        // Batch 1 records: (off0,ts100),(off1,ts101),(off2,ts102).
+        // Batch 2 records: (off3,ts200),(off4,ts201).
+        assert_eq!(seg.offset_for_timestamp(100), Some((0, 100)));
+        assert_eq!(seg.offset_for_timestamp(101), Some((1, 101)));
+        assert_eq!(seg.offset_for_timestamp(150), Some((3, 200)));
+        assert_eq!(seg.offset_for_timestamp(201), Some((4, 201)));
+        assert_eq!(seg.offset_for_timestamp(202), None);
+        drop(dir);
+    }
+
+    #[test]
+    fn offset_of_max_timestamp_earliest_on_tie() {
+        let dir = tempdir().unwrap();
+        let mut seg = Segment::create(dir.path(), 0).unwrap();
+        // Batch records ts: 100,101,102 (max in batch = 102 at offset 2).
+        seg.append(&sample_batch(0, 3, 100), 0).unwrap();
+        // Second batch: offsets 3,4 ts 200,201 — segment max becomes 201 @4.
+        seg.append(&sample_batch(3, 2, 200), 0).unwrap();
+        assert_eq!(seg.offset_of_max_timestamp(), Some((4, 201)));
+
+        // Empty segment → None.
+        let dir2 = tempdir().unwrap();
+        let empty = Segment::create(dir2.path(), 0).unwrap();
+        assert_eq!(empty.offset_of_max_timestamp(), None);
+        drop(dir);
+        drop(dir2);
+    }
+
+    #[test]
+    fn offset_of_max_timestamp_tie_picks_earliest() {
+        let dir = tempdir().unwrap();
+        let mut seg = Segment::create(dir.path(), 0).unwrap();
+        // All three records share timestamp 500; earliest offset is 0.
+        let mut b = RecordBatch {
+            base_offset: 0,
+            base_timestamp: 500,
+            max_timestamp: 500,
+            last_offset_delta: 2,
+            ..RecordBatch::default()
+        };
+        for i in 0..3 {
+            b.records.push(Record {
+                offset_delta: i,
+                timestamp_delta: 0,
+                value: Some(Bytes::from("v")),
+                ..Default::default()
+            });
+        }
+        seg.append(&b, 0).unwrap();
+        assert_eq!(seg.offset_of_max_timestamp(), Some((0, 500)));
+        drop(dir);
     }
 
     #[test]
