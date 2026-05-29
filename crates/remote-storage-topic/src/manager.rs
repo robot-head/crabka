@@ -57,6 +57,12 @@ pub struct TopicBasedRemoteLogMetadataManager {
     runtime: Handle,
     shutdown: CancellationToken,
     pump: std::sync::Mutex<Option<JoinHandle<()>>>,
+    /// 48p: directory the on-disk RLMM cache snapshot is written to (one
+    /// [`SNAPSHOT_FILE_NAME`](crate::snapshot::SNAPSHOT_FILE_NAME) file).
+    snapshot_dir: std::path::PathBuf,
+    /// 48p: handle of the background snapshotter task; aborted on `Drop`,
+    /// joined on [`Self::shutdown_and_flush`].
+    snapshotter: std::sync::Mutex<Option<JoinHandle<()>>>,
     /// Live assignment handle for the metadata-log subscription. Held so
     /// 48p (resume from snapshot offsets) and 48q (per-broker partition
     /// assignment) can mutate the consumed set at runtime. Unused in
@@ -84,6 +90,8 @@ impl TopicBasedRemoteLogMetadataManager {
     pub async fn start(
         log: Arc<dyn MetadataEventLog>,
         runtime: Handle,
+        snapshot_dir: std::path::PathBuf,
+        snapshot_interval: std::time::Duration,
     ) -> Result<Arc<Self>, RemoteStorageError> {
         let target_hwms = log
             .high_water_marks()
@@ -91,14 +99,38 @@ impl TopicBasedRemoteLogMetadataManager {
             .map_err(MetadataLogError::into_storage)?;
         let n = usize::try_from(log.partition_count()).expect("partition_count fits in usize");
         let (applied_tx, _) = watch::channel(0u64);
-        let applied = Arc::new(std::sync::Mutex::new(vec![-1i64; n]));
         let inner = Arc::new(InmemoryRemoteLogMetadataManager::new());
         let shutdown = CancellationToken::new();
 
-        let assignment: Vec<PartitionStart> = (0..log.partition_count())
-            .map(|partition| PartitionStart {
-                partition,
-                start_offset: 0,
+        // Load the snapshot (if any) ONCE: seed the cache from its dump and
+        // resume from its committed offsets. On absence/corruption,
+        // committed[] is all -1 (full replay) and the cache stays empty —
+        // never fatal.
+        let mut committed = vec![-1i64; n];
+        match crate::snapshot::Snapshot::load(
+            &snapshot_dir.join(crate::snapshot::SNAPSHOT_FILE_NAME),
+        ) {
+            Ok(Some(snap)) => {
+                for (i, &off) in snap.committed_offsets.iter().take(n).enumerate() {
+                    committed[i] = off;
+                }
+                inner.import(snap.dump);
+            }
+            Ok(None) => {}
+            Err(e) => {
+                warn!(error = ?e, "topic-based RLMM: snapshot corrupt; starting from empty cache");
+            }
+        }
+
+        // Pre-seed `applied` to the committed offsets so wait_for_targets
+        // only blocks on the delta from committed+1 to HWM.
+        let applied = Arc::new(std::sync::Mutex::new(committed.clone()));
+
+        // 48o assignment: resume each partition at committed + 1.
+        let assignment: Vec<PartitionStart> = (0..n)
+            .map(|i| PartitionStart {
+                partition: i32::try_from(i).expect("partition fits in i32"),
+                start_offset: committed[i] + 1,
             })
             .collect();
         let (stream, assignment_handle) = log.subscribe(assignment);
@@ -118,8 +150,45 @@ impl TopicBasedRemoteLogMetadataManager {
             runtime,
             shutdown,
             pump: std::sync::Mutex::new(Some(pump)),
+            snapshot_dir,
+            snapshotter: std::sync::Mutex::new(None),
             assignment: assignment_handle,
         });
+
+        // Spawn the periodic snapshotter: flush whenever the cache
+        // advanced since the last write, plus a final flush on shutdown.
+        let snapshotter = {
+            let weak = Arc::downgrade(&manager);
+            let shutdown = manager.shutdown.clone();
+            manager.runtime.spawn(async move {
+                let mut last_written: i64 = -1;
+                loop {
+                    tokio::select! {
+                        biased;
+                        () = shutdown.cancelled() => return,
+                        () = tokio::time::sleep(snapshot_interval) => {}
+                    }
+                    let Some(m) = weak.upgrade() else { return };
+                    // Only write when the cache advanced since the last snapshot.
+                    let highest = {
+                        let applied = m.applied.lock().expect("applied mutex poisoned");
+                        applied.iter().copied().max().unwrap_or(-1)
+                    };
+                    if highest > last_written {
+                        match m.write_snapshot() {
+                            Ok(written) => last_written = written,
+                            Err(e) => {
+                                warn!(error = ?e, "topic-based RLMM: periodic snapshot failed");
+                            }
+                        }
+                    }
+                }
+            })
+        };
+        *manager
+            .snapshotter
+            .lock()
+            .expect("snapshotter mutex poisoned") = Some(snapshotter);
 
         manager.wait_for_targets(&target_hwms).await;
         Ok(manager)
@@ -130,6 +199,89 @@ impl TopicBasedRemoteLogMetadataManager {
     /// will time out / fail to make progress.
     pub fn shutdown(&self) {
         self.shutdown.cancel();
+    }
+
+    /// Cancel the pump + snapshotter, then write a final snapshot
+    /// capturing everything applied so far. Safe to call once on
+    /// graceful shutdown.
+    pub async fn shutdown_and_flush(&self) {
+        self.shutdown.cancel();
+        // Take the handle out of the lock BEFORE awaiting it, so the
+        // (sync) mutex is not held across the await point.
+        let handle = self
+            .snapshotter
+            .lock()
+            .expect("snapshotter mutex poisoned")
+            .take();
+        // Let the snapshotter observe cancellation and stop touching
+        // `applied` before we take the final consistent capture.
+        if let Some(h) = handle {
+            let _ = h.await;
+        }
+        if let Err(e) = self.write_snapshot() {
+            warn!(error = ?e, "topic-based RLMM: final snapshot flush failed");
+        }
+    }
+
+    /// Capture the pump's committed offsets together with a cache
+    /// export under a consistent lock, and write a snapshot. The
+    /// `applied` lock is held only long enough to clone the offsets and
+    /// run `export()` (which takes the inner partitions lock); no Kafka
+    /// round-trips happen inside, so the hold is bounded. Returns the
+    /// highest committed offset written (for the "advanced since last"
+    /// check).
+    fn write_snapshot(&self) -> Result<i64, crate::error::SnapshotError> {
+        let (committed_offsets, dump) = {
+            let applied = self.applied.lock().expect("applied mutex poisoned");
+            let dump = self.inner.export();
+            (applied.clone(), dump)
+        };
+        let max = committed_offsets.iter().copied().max().unwrap_or(-1);
+        let snap = crate::snapshot::Snapshot {
+            committed_offsets,
+            dump,
+        };
+        let path = self.snapshot_dir.join(crate::snapshot::SNAPSHOT_FILE_NAME);
+        snap.write_atomic(&path)?;
+        Ok(max)
+    }
+
+    /// Build the metadata-consumer assignment from a snapshot on disk:
+    /// each metadata partition resumes at `committed + 1`. Absent or
+    /// corrupt snapshot → every partition starts at 0 (full replay).
+    #[must_use]
+    pub fn resume_assignment(
+        snapshot_dir: &std::path::Path,
+        partition_count: i32,
+    ) -> Vec<PartitionStart> {
+        let n = usize::try_from(partition_count).expect("partition_count fits in usize");
+        let committed = Self::load_committed(snapshot_dir, n);
+        (0..n)
+            .map(|i| PartitionStart {
+                partition: i32::try_from(i).expect("partition fits in i32"),
+                start_offset: committed[i] + 1,
+            })
+            .collect()
+    }
+
+    /// Load the per-partition committed offsets from a snapshot, padded /
+    /// truncated to `n` partitions. Absent or corrupt → all `-1`.
+    fn load_committed(snapshot_dir: &std::path::Path, n: usize) -> Vec<i64> {
+        let path = snapshot_dir.join(crate::snapshot::SNAPSHOT_FILE_NAME);
+        match crate::snapshot::Snapshot::load(&path) {
+            Ok(Some(snap)) => {
+                let mut out = vec![-1i64; n];
+                for (i, &off) in snap.committed_offsets.iter().take(n).enumerate() {
+                    out[i] = off;
+                }
+                out
+            }
+            Ok(None) => vec![-1i64; n],
+            Err(e) => {
+                warn!(error = ?e, "topic-based RLMM: snapshot corrupt; full replay");
+                vec![-1i64; n]
+            }
+        }
     }
 
     async fn wait_for_targets(&self, targets: &[i64]) {
@@ -191,6 +343,14 @@ impl Drop for TopicBasedRemoteLogMetadataManager {
     fn drop(&mut self) {
         self.shutdown.cancel();
         if let Some(handle) = self.pump.lock().expect("pump mutex poisoned").take() {
+            handle.abort();
+        }
+        if let Some(handle) = self
+            .snapshotter
+            .lock()
+            .expect("snapshotter mutex poisoned")
+            .take()
+        {
             handle.abort();
         }
     }
@@ -331,6 +491,16 @@ mod tests {
 
     use crate::log::InProcessMetadataEventLog;
 
+    static SNAP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    fn snapshot_test_dir(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "crabka-rlmm-{label}-{}-{}",
+            std::process::id(),
+            SNAP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ))
+    }
+
     fn tp() -> TopicIdPartition {
         TopicIdPartition::new(Uuid::from_u128(1), "orders", 0)
     }
@@ -373,9 +543,14 @@ mod tests {
     async fn start_manager(
         log: Arc<dyn MetadataEventLog>,
     ) -> Arc<TopicBasedRemoteLogMetadataManager> {
-        TopicBasedRemoteLogMetadataManager::start(log, Handle::current())
-            .await
-            .unwrap()
+        TopicBasedRemoteLogMetadataManager::start(
+            log,
+            Handle::current(),
+            snapshot_test_dir("test"),
+            std::time::Duration::from_hours(1),
+        )
+        .await
+        .unwrap()
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -503,6 +678,118 @@ mod tests {
             .await;
         }
         m.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn shutdown_flushes_a_snapshot_covering_applied_events() {
+        let dir = snapshot_test_dir("mgr-snap");
+        let log: Arc<dyn MetadataEventLog> = InProcessMetadataEventLog::new(4);
+        let m = TopicBasedRemoteLogMetadataManager::start(
+            log.clone(),
+            Handle::current(),
+            dir.clone(),
+            std::time::Duration::from_hours(1), // long interval: only shutdown flushes
+        )
+        .await
+        .unwrap();
+        let m2 = m.clone();
+        on_blocking(move || {
+            m2.add_remote_log_segment_metadata(started(10, 0, 99))
+                .unwrap();
+        })
+        .await;
+        let m2 = m.clone();
+        on_blocking(move || m2.update_remote_log_segment_metadata(finish(10)).unwrap()).await;
+
+        m.shutdown_and_flush().await;
+
+        let path = dir.join(crate::snapshot::SNAPSHOT_FILE_NAME);
+        let snap = crate::snapshot::Snapshot::load(&path)
+            .unwrap()
+            .expect("snapshot written");
+        // The orders partition's committed offset covers both events.
+        let p = crate::partitioning::metadata_partition_for(&tp(), 4);
+        let idx = usize::try_from(p).unwrap();
+        assert!(
+            snap.committed_offsets[idx] >= 1,
+            "committed >= last applied offset"
+        );
+        // The dump contains the finished segment.
+        assert_eq!(snap.dump.partitions.len(), 1);
+        assert_eq!(snap.dump.partitions[0].segments.len(), 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn restart_resumes_from_snapshot_without_replaying_from_zero() {
+        let dir = snapshot_test_dir("resume");
+        let log: Arc<dyn MetadataEventLog> = InProcessMetadataEventLog::new(4);
+        let interval = std::time::Duration::from_hours(1);
+
+        // First lifetime: seed three finished segments, then shutdown-flush.
+        let pre_cache;
+        {
+            let m = TopicBasedRemoteLogMetadataManager::start(
+                log.clone(),
+                Handle::current(),
+                dir.clone(),
+                interval,
+            )
+            .await
+            .unwrap();
+            for (id, start, end) in [(10u128, 0, 99), (11, 100, 199), (12, 200, 299)] {
+                let m2 = m.clone();
+                on_blocking(move || {
+                    m2.add_remote_log_segment_metadata(started(id, start, end))
+                        .unwrap();
+                })
+                .await;
+                let m2 = m.clone();
+                on_blocking(move || m2.update_remote_log_segment_metadata(finish(id)).unwrap())
+                    .await;
+            }
+            pre_cache = m.list_remote_log_segments(&tp()).unwrap();
+            m.shutdown_and_flush().await;
+        }
+
+        // Snapshot now records committed offset N for the orders partition.
+        let p = crate::partitioning::metadata_partition_for(&tp(), 4);
+        let idx = usize::try_from(p).unwrap();
+        let snap = crate::snapshot::Snapshot::load(&dir.join(crate::snapshot::SNAPSHOT_FILE_NAME))
+            .unwrap()
+            .expect("snapshot present");
+        let committed = snap.committed_offsets[idx];
+        assert!(
+            committed >= 5,
+            "6 events (3 add + 3 finish) → committed >= 5"
+        );
+
+        // The loader's assignment resumes the orders partition at committed + 1.
+        let assignment = TopicBasedRemoteLogMetadataManager::resume_assignment(&dir, 4);
+        let orders_start = assignment
+            .iter()
+            .find(|s| s.partition == p)
+            .map(|s| s.start_offset)
+            .unwrap();
+        assert_eq!(orders_start, committed + 1, "resume from N+1, not 0");
+
+        // Second lifetime against the SAME log + dir: must resume, not replay.
+        let fresh = TopicBasedRemoteLogMetadataManager::start(
+            log.clone(),
+            Handle::current(),
+            dir.clone(),
+            interval,
+        )
+        .await
+        .unwrap();
+        let post_cache = fresh.list_remote_log_segments(&tp()).unwrap();
+        assert_eq!(
+            post_cache, pre_cache,
+            "post-load cache equals pre-restart cache"
+        );
+        assert_eq!(fresh.highest_offset_for_epoch(&tp(), 0).unwrap(), Some(299));
+        fresh.shutdown();
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[tokio::test(flavor = "multi_thread")]
