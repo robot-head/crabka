@@ -251,7 +251,12 @@ async fn commit_revoked(state: &CoordinatorState, revoked: &[(String, i32)]) {
     let offsets: HashMap<(String, i32), i64> = {
         let off = state.next_offsets.lock().await;
         off.iter()
-            .filter(|(k, _)| revoked_set.contains(k))
+            // Only commit partitions where we actually consumed something. A
+            // next_offset still at its reset baseline (0 = Earliest, i64::MAX =
+            // Latest) means no records were polled, so there is no progress to
+            // preserve — committing it just adds a blocking round-trip that
+            // widens the mid-rebalance generation-race window.
+            .filter(|(k, v)| revoked_set.contains(k) && **v > 0 && **v != i64::MAX)
             .map(|(k, v)| (k.clone(), *v))
             .collect()
     };
