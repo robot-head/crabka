@@ -2,4 +2,5 @@
 //! source-of-truth data structures (CRDs, broker config schema, topic
 //! configs, protocol API catalog).
 
+pub mod operator;
 pub mod schema_md;
