@@ -508,9 +508,10 @@ fn encode_response(version: i16, error_code: i16) -> Result<Bytes, BrokerError> 
 
 #[cfg(test)]
 mod tests {
-    use super::{ReacquireDecision, validate_complete_reacquire};
-    use crate::codes;
-    use crate::txn::state::{TxnEntry, TxnState};
+    use super::*;
+    use crabka_metadata::{BrokerEndpoint, BrokerRegistrationRecord, MetadataRecord};
+
+    // ── Phase-3 re-validation: validate_complete_reacquire ──────────────────
 
     /// Build a `TxnEntry` in a given (pid, epoch, state) for the re-validation
     /// tests. Partition sets are irrelevant to the decision, so leave empty.
@@ -644,6 +645,132 @@ mod tests {
                 TxnState::CompleteAbort
             ),
             ReacquireDecision::AlreadyComplete
+        );
+    }
+
+    // ── Remote marker fan-out: send_write_txn_markers error / fallback
+    //    branches the happy-path integration test does not reach. ───────────
+
+    fn marker_entry() -> TxnEntry {
+        TxnEntry::new_empty("tid".to_string(), 7, 0, 60_000, 0)
+    }
+
+    fn tps() -> Vec<TopicPartition> {
+        vec![TopicPartition {
+            topic: "t".to_string(),
+            partition: 0,
+        }]
+    }
+
+    /// A client with no TLS connector and no SASL creds — fine here, every
+    /// case fails at the TCP connect (unreachable address) before any
+    /// handshake would run.
+    fn plaintext_client() -> InterBrokerClient {
+        InterBrokerClient::new(None, None)
+    }
+
+    /// Leader node absent from the metadata image → descriptive `Txn` error,
+    /// no dial attempted.
+    #[tokio::test]
+    async fn errors_when_leader_node_missing_from_image() {
+        let image = MetadataImage::default();
+        let err = send_write_txn_markers(
+            1,
+            99,
+            &marker_entry(),
+            MarkerType::Commit,
+            &tps(),
+            &image,
+            &plaintext_client(),
+            ListenerProtocol::Plaintext,
+            "PLAINTEXT",
+        )
+        .await
+        .expect_err("missing leader must error");
+        assert!(
+            matches!(&err, BrokerError::Txn(m) if m.contains("not found")),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    /// Leader resolves to its inter-broker endpoint, but the address is
+    /// unreachable → the dial fails and the error names the resolved
+    /// `host:port` (the endpoint, not the top-level fallback).
+    #[tokio::test]
+    async fn errors_when_inter_broker_endpoint_unreachable() {
+        let mut image = MetadataImage::default();
+        image.apply(&MetadataRecord::V1BrokerRegistration(
+            BrokerRegistrationRecord {
+                node_id: 2,
+                host: "127.0.0.1".to_string(),
+                port: 9,
+                rack: None,
+                endpoints: vec![BrokerEndpoint {
+                    name: "INTERNAL".to_string(),
+                    host: "127.0.0.1".to_string(),
+                    // Discard port: refuses connections immediately.
+                    port: 9,
+                    protocol: ListenerProtocol::Plaintext,
+                }],
+            },
+        ));
+        let err = send_write_txn_markers(
+            1,
+            2,
+            &marker_entry(),
+            MarkerType::Commit,
+            &tps(),
+            &image,
+            &plaintext_client(),
+            ListenerProtocol::Plaintext,
+            "INTERNAL",
+        )
+        .await
+        .expect_err("unreachable endpoint must error");
+        assert!(
+            matches!(&err, BrokerError::Txn(m) if m.contains("connect to 127.0.0.1:9")),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    /// No endpoint matches the inter-broker listener name → fall back to the
+    /// record's top-level `host`/`port`. Still unreachable, so the dial fails
+    /// against the fallback address.
+    #[tokio::test]
+    async fn falls_back_to_top_level_host_port_when_no_matching_endpoint() {
+        let mut image = MetadataImage::default();
+        image.apply(&MetadataRecord::V1BrokerRegistration(
+            BrokerRegistrationRecord {
+                node_id: 2,
+                host: "127.0.0.1".to_string(),
+                port: 9,
+                rack: None,
+                // Endpoint exists but under a different listener name, so the
+                // `find(name == inter_broker_listener_name)` misses.
+                endpoints: vec![BrokerEndpoint {
+                    name: "SOMETHING_ELSE".to_string(),
+                    host: "127.0.0.1".to_string(),
+                    port: 65000,
+                    protocol: ListenerProtocol::Plaintext,
+                }],
+            },
+        ));
+        let err = send_write_txn_markers(
+            1,
+            2,
+            &marker_entry(),
+            MarkerType::Commit,
+            &tps(),
+            &image,
+            &plaintext_client(),
+            ListenerProtocol::Plaintext,
+            "INTERNAL",
+        )
+        .await
+        .expect_err("unreachable fallback must error");
+        assert!(
+            matches!(&err, BrokerError::Txn(m) if m.contains("connect to 127.0.0.1:9")),
+            "expected fallback to top-level 127.0.0.1:9, got: {err:?}"
         );
     }
 }
