@@ -16,14 +16,19 @@
 pub mod acl;
 mod error;
 mod image;
+pub mod kafka_record;
 mod records;
+pub mod voters;
 
 pub use acl::{AclEntry, AclEntryFilter, AclOperation, PatternType, PermissionType, ResourceType};
 pub use error::MetadataError;
 pub use image::{DelegationToken, EntityKey, MetadataImage, ThrottleKind, canonicalize_entity};
+pub use kafka_record::{KafkaRecordError, from_kafka_record, to_kafka_record};
 pub use records::{
     BrokerConfigRecord, BrokerEndpoint, BrokerRegistrationRecord, ClientQuotaRecord,
     DelegationTokenRecord, DeleteDelegationTokenRecord, DeleteScramCredentialRecord,
-    DeleteTopicRecord, FeatureLevelRecord, MetadataRecord, NodeId, PartitionRecord, QuotaEntity,
-    ScramCredentialRecord, TopicConfigRecord, TopicRecord, UnregisterBrokerRecord,
+    DeleteTopicRecord, FeatureLevelRecord, KRaftVersionRecord, MetadataRecord, NodeId,
+    PartitionRecord, QuotaEntity, ScramCredentialRecord, TopicConfigRecord, TopicRecord,
+    UnregisterBrokerRecord, VotersRecord,
 };
+pub use voters::{KRaftVersionRange, Voter, VoterEndpoint, VoterSet};

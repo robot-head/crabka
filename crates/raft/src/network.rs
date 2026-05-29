@@ -42,6 +42,7 @@ use openraft::raft::{
     VoteRequest, VoteResponse,
 };
 use openraft::{LogId, Vote};
+use tracing::warn;
 
 use crabka_client_core::{ClientError, Connection, ConnectionOptions};
 
@@ -72,7 +73,7 @@ pub trait OutboundDialer: Send + Sync {
 /// Default no-op dialer: opens a raw `TcpStream` via
 /// `Connection::connect`. Used when the broker hasn't injected a
 /// `InterBrokerClient`-backed dialer (legacy PLAINTEXT path).
-pub(crate) struct PlaintextDialer;
+pub struct PlaintextDialer;
 
 #[async_trait::async_trait]
 impl OutboundDialer for PlaintextDialer {
@@ -151,9 +152,25 @@ impl openraft::network::RaftNetworkFactory<TypeConfig> for CrabkaRaftNetworkFact
     type Network = CrabkaRaftNetworkConn;
 
     async fn new_client(&mut self, target: NodeId, node: &Node) -> Self::Network {
+        // KIP-853 voter nodes carry their listener endpoints; openraft dials
+        // the CONTROLLER endpoint. A node with no resolvable controller
+        // endpoint yields an empty addr — `connect` then fails to parse it
+        // and surfaces `Unreachable`, which is the correct backoff behavior.
+        let addr = if let Some(a) = node.controller_addr() {
+            a.to_string()
+        } else {
+            warn!(
+                target_node = target,
+                directory_id = %node.directory_id,
+                endpoints = ?node.endpoints,
+                "raft node has no resolvable controller endpoint; connection will fail \
+                 and openraft will back off"
+            );
+            String::new()
+        };
         CrabkaRaftNetworkConn {
             target,
-            addr: node.addr.clone(),
+            addr,
             factory: self.clone(),
         }
     }

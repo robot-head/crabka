@@ -13,6 +13,46 @@ use wincode::Deserialize;
 
 use crate::error::BrokerError;
 
+/// Read this replica's stable directory id from `meta.properties.json`
+/// (written by `crabka format`). KIP-853 identifies each voter by
+/// `(node_id, directory_id)`, so the broker must recover its id across
+/// restarts rather than minting a fresh one.
+pub fn read_directory_id(log_dir: &Path) -> Result<uuid::Uuid, BrokerError> {
+    let path = log_dir.join("meta.properties.json");
+    let bytes = std::fs::read(&path).map_err(|e| BrokerError::BootstrapFile {
+        path: path.clone(),
+        source: Box::new(e),
+    })?;
+    let v: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|e| BrokerError::BootstrapFile {
+            path: path.clone(),
+            source: Box::new(e),
+        })?;
+    v["directory_id"]
+        .as_str()
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| BrokerError::BootstrapFile {
+            path,
+            source: "missing or invalid directory_id".into(),
+        })
+}
+
+/// Extract the initial voter set from the bootstrap records. The last
+/// `V1Voters` record wins (mirrors how the controller applies a stream of
+/// `VotersRecord`s — the most recent one is authoritative). Returns an
+/// empty set when no `V1Voters` record is present (joiner path).
+#[must_use]
+pub fn initial_voters(records: &[MetadataRecord]) -> crabka_metadata::VoterSet {
+    records
+        .iter()
+        .rev()
+        .find_map(|r| match r {
+            MetadataRecord::V1Voters(v) => Some(v.voters.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
 pub fn load_bootstrap_records(log_dir: &Path) -> Result<Vec<MetadataRecord>, BrokerError> {
     let path = log_dir.join("bootstrap.records.bin");
     if !path.exists() {
@@ -96,6 +136,75 @@ mod tests {
             MetadataRecord::V1ScramCredential(r) => assert_eq!(r.user, "alice"),
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn initial_voters_roundtrips_seeded_set() {
+        use crabka_metadata::{Voter, VoterEndpoint, VoterSet, VotersRecord};
+        let dir = tempfile::tempdir().unwrap();
+        let seeded = VoterSet::from_voters([Voter {
+            id: 7,
+            directory_id: uuid::Uuid::from_u128(7),
+            endpoints: vec![VoterEndpoint {
+                name: "CONTROLLER".into(),
+                host: "h7".into(),
+                port: 9093,
+            }],
+            kraft_version: crabka_metadata::KRaftVersionRange::default(),
+        }]);
+        // Frame the records exactly like `crabka format` does.
+        let mut bytes = Vec::new();
+        write_frame(
+            &mut bytes,
+            &MetadataRecord::V1KRaftVersion(crabka_metadata::KRaftVersionRecord {
+                kraft_version: 1,
+            }),
+        );
+        write_frame(
+            &mut bytes,
+            &MetadataRecord::V1Voters(VotersRecord {
+                voters: seeded.clone(),
+            }),
+        );
+        std::fs::write(dir.path().join("bootstrap.records.bin"), &bytes).unwrap();
+
+        let records = load_bootstrap_records(dir.path()).unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(initial_voters(&records), seeded);
+    }
+
+    #[test]
+    fn initial_voters_empty_when_no_voters_record() {
+        let recs = vec![MetadataRecord::V1KRaftVersion(
+            crabka_metadata::KRaftVersionRecord { kraft_version: 1 },
+        )];
+        assert!(initial_voters(&recs).is_empty());
+    }
+
+    #[test]
+    fn read_directory_id_roundtrips() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = uuid::Uuid::new_v4();
+        let meta = serde_json::json!({
+            "cluster_id": uuid::Uuid::new_v4().to_string(),
+            "directory_id": id.to_string(),
+            "version": 1,
+        });
+        std::fs::write(
+            dir.path().join("meta.properties.json"),
+            serde_json::to_vec_pretty(&meta).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(read_directory_id(dir.path()).unwrap(), id);
+    }
+
+    #[test]
+    fn read_directory_id_errors_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            read_directory_id(dir.path()),
+            Err(BrokerError::BootstrapFile { .. })
+        ));
     }
 
     #[test]

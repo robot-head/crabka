@@ -13,6 +13,14 @@ use crate::BrokerError;
 
 pub use crabka_raft::BootstrapMode;
 
+/// `KRaft` `process.roles`. A node is a metadata-quorum `Controller`, a data
+/// `Broker`, or both. Default is the combined set `[Controller, Broker]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NodeRole {
+    Controller,
+    Broker,
+}
+
 /// A single named listener: the port the broker binds + what it tells clients.
 #[derive(Debug, Clone)]
 pub struct ListenerSpec {
@@ -48,6 +56,11 @@ pub struct InterBrokerCredentials {
 pub struct BrokerConfig {
     /// Broker id reported in `Metadata` responses. Default: 1.
     pub broker_id: i32,
+
+    /// `KRaft` `process.roles`. Controls whether this node is a metadata
+    /// quorum voter (`Controller`), hosts data partitions + registers as a
+    /// broker (`Broker`), or both. Default: `[Controller, Broker]`.
+    pub roles: Vec<NodeRole>,
 
     /// TCP address to listen on. Default: `127.0.0.1:9092`.
     pub listen_addr: SocketAddr,
@@ -85,6 +98,24 @@ pub struct BrokerConfig {
     /// setups upgrade to quorum-of-1 without config changes.
     pub controller_quorum_voters: Vec<(NodeId, SocketAddr)>,
 
+    /// KIP-853 dynamic quorum: controller endpoints used only to discover
+    /// the leader at cold start (the joiner path). Empty for a standalone
+    /// bootstrap node. Maps to Kafka's `controller.quorum.bootstrap.servers`.
+    pub bootstrap_servers: Vec<SocketAddr>,
+
+    /// KIP-853: this replica's stable directory id, recovered from
+    /// `meta.properties.json` at boot. Identifies which voter this node *is*.
+    pub directory_id: uuid::Uuid,
+
+    /// KIP-853: when true, an observer issues `AddVoter` for itself once it
+    /// has caught up to the leader, joining the quorum without operator
+    /// action. Maps to Kafka's `controller.quorum.auto.join.enable`.
+    pub auto_join: bool,
+
+    /// KIP-853: maximum log-entry lag an observer may have and still be
+    /// promotable to a voter. Forwarded to `ControllerConfig`.
+    pub observer_lag_bound: u64,
+
     /// How often each broker sends `BrokerHeartbeat` to the controller
     /// leader. Default 3,000ms.
     pub heartbeat_interval_ms: u64,
@@ -118,6 +149,16 @@ pub struct BrokerConfig {
     /// from the operator (the `KafkaCluster` UID) via `--cluster-id`.
     /// `None` defaults to `Uuid::nil()` inside `Controller::start`.
     pub cluster_id: Option<uuid::Uuid>,
+
+    /// KIP-392: this broker's rack identifier (`broker.rack`). Reported in
+    /// its `BrokerRegistrationRecord` and used by the leader's rack-aware
+    /// replica selector. `None` (default) means no rack.
+    pub rack: Option<String>,
+
+    /// KIP-392: which replica selector the leader runs to populate
+    /// `FetchResponse.preferred_read_replica` for rack-aware consumers.
+    /// Default `Leader` (never redirect).
+    pub replica_selector: crate::replica_selector::ReplicaSelectorKind,
 
     // ── Auth / listener registry ─────────────────────────────────────────
     /// Named listener definitions. When empty, `effective_listeners()` synthesizes
@@ -403,6 +444,7 @@ impl BrokerConfig {
         let controller_addr: SocketAddr = "127.0.0.1:0".parse().expect("static");
         Self {
             broker_id: 1,
+            roles: vec![NodeRole::Controller, NodeRole::Broker],
             listen_addr,
             advertised_listener: "127.0.0.1:0".into(),
             log_dir,
@@ -411,6 +453,10 @@ impl BrokerConfig {
             node_id: 1,
             controller_listen_addr: controller_addr,
             controller_quorum_voters: vec![(1, controller_addr)],
+            bootstrap_servers: vec![],
+            directory_id: uuid::Uuid::from_u128(1),
+            auto_join: false,
+            observer_lag_bound: 100,
             heartbeat_interval_ms: 200,
             heartbeat_timeout_ms: 2_000,
             replica_lag_time_max_ms: 2_000,
@@ -425,6 +471,8 @@ impl BrokerConfig {
             controller_heartbeat_interval: std::time::Duration::from_millis(100),
             bootstrap_mode: BootstrapMode::Bootstrap,
             cluster_id: None,
+            rack: None,
+            replica_selector: crate::replica_selector::ReplicaSelectorKind::Leader,
             listeners: vec![],
             controller_listener_protocol: crabka_security::ListenerProtocol::Plaintext,
             inter_broker_listener_name: "PLAINTEXT".to_string(),
@@ -497,6 +545,20 @@ impl BrokerConfig {
     /// - `inter_broker_listener_name` does not match any listener name.
     /// - A SASL listener is declared while `enabled_sasl_mechanisms` is empty.
     pub fn validate(&self) -> Result<(), BrokerError> {
+        if self.roles.is_empty() {
+            return Err(BrokerError::EmptyRoles);
+        }
+        if !self.is_controller()
+            && self
+                .controller_quorum_voters
+                .iter()
+                .any(|(id, _)| *id == self.node_id)
+        {
+            return Err(BrokerError::NonControllerIsVoter {
+                node_id: self.node_id,
+            });
+        }
+
         let listeners = self.effective_listeners();
 
         // Bind-address collisions.
@@ -596,6 +658,18 @@ impl BrokerConfig {
             sasl_mechanisms: None,
         }]
     }
+
+    /// True when this node hosts data partitions and registers as a broker.
+    #[must_use]
+    pub fn is_broker(&self) -> bool {
+        self.roles.contains(&NodeRole::Broker)
+    }
+
+    /// True when this node participates in the `__cluster_metadata` quorum.
+    #[must_use]
+    pub fn is_controller(&self) -> bool {
+        self.roles.contains(&NodeRole::Controller)
+    }
 }
 
 impl Default for BrokerConfig {
@@ -604,6 +678,7 @@ impl Default for BrokerConfig {
         let controller_addr: SocketAddr = "127.0.0.1:9093".parse().expect("hard-coded valid addr");
         Self {
             broker_id: 1,
+            roles: vec![NodeRole::Controller, NodeRole::Broker],
             listen_addr: addr,
             advertised_listener: addr.to_string(),
             log_dir: PathBuf::from("./crabka-data"),
@@ -612,6 +687,10 @@ impl Default for BrokerConfig {
             node_id: 1,
             controller_listen_addr: controller_addr,
             controller_quorum_voters: vec![(1, controller_addr)],
+            bootstrap_servers: vec![],
+            directory_id: uuid::Uuid::from_u128(1),
+            auto_join: false,
+            observer_lag_bound: 100,
             heartbeat_interval_ms: 3_000,
             heartbeat_timeout_ms: 9_000,
             replica_lag_time_max_ms: 30_000,
@@ -619,6 +698,8 @@ impl Default for BrokerConfig {
             controller_heartbeat_interval: std::time::Duration::from_millis(500),
             bootstrap_mode: BootstrapMode::Bootstrap,
             cluster_id: None,
+            rack: None,
+            replica_selector: crate::replica_selector::ReplicaSelectorKind::Leader,
             listeners: vec![],
             controller_listener_protocol: crabka_security::ListenerProtocol::Plaintext,
             inter_broker_listener_name: "PLAINTEXT".to_string(),
@@ -792,6 +873,93 @@ mod tests {
     }
 
     #[test]
+    fn defaults_to_combined_roles() {
+        let d = BrokerConfig::default();
+        assert!(d.is_controller(), "default node is a controller");
+        assert!(d.is_broker(), "default node is a broker");
+        assert_eq!(
+            d.roles,
+            vec![NodeRole::Controller, NodeRole::Broker],
+            "default roles are the combined set"
+        );
+
+        let t = BrokerConfig::for_tests(std::path::PathBuf::from("/tmp"));
+        assert!(t.is_controller() && t.is_broker());
+    }
+
+    #[test]
+    fn controller_only_is_not_a_broker() {
+        let c = BrokerConfig {
+            roles: vec![NodeRole::Controller],
+            ..BrokerConfig::default()
+        };
+        assert!(c.is_controller());
+        assert!(!c.is_broker());
+    }
+
+    #[test]
+    fn broker_only_is_not_a_controller() {
+        let c = BrokerConfig {
+            roles: vec![NodeRole::Broker],
+            ..BrokerConfig::default()
+        };
+        assert!(c.is_broker());
+        assert!(!c.is_controller());
+    }
+
+    #[test]
+    fn rejects_empty_roles() {
+        let c = BrokerConfig {
+            roles: vec![],
+            ..BrokerConfig::default()
+        };
+        assert!(matches!(c.validate(), Err(BrokerError::EmptyRoles)));
+    }
+
+    #[test]
+    fn rejects_broker_only_node_listed_as_its_own_voter() {
+        // node_id 1 is in the default single-voter quorum; a broker-only
+        // node must not be a voter of itself.
+        let c = BrokerConfig {
+            roles: vec![NodeRole::Broker],
+            node_id: 1,
+            controller_quorum_voters: vec![(1, "127.0.0.1:9093".parse().unwrap())],
+            ..BrokerConfig::default()
+        };
+        assert!(matches!(
+            c.validate(),
+            Err(BrokerError::NonControllerIsVoter { node_id: 1 })
+        ));
+    }
+
+    #[test]
+    fn combined_default_passes_role_validation() {
+        BrokerConfig::default()
+            .validate()
+            .expect("combined default validates");
+    }
+
+    #[test]
+    fn controller_only_does_not_register() {
+        let c = BrokerConfig {
+            roles: vec![NodeRole::Controller],
+            ..BrokerConfig::default()
+        };
+        // Registration is gated on is_broker(); a controller-only node skips it.
+        assert!(!c.is_broker());
+    }
+
+    #[test]
+    fn controller_only_hosts_no_partitions() {
+        let c = BrokerConfig {
+            roles: vec![NodeRole::Controller],
+            ..BrokerConfig::default()
+        };
+        // Partition scan/recovery is gated on is_broker().
+        assert!(!c.is_broker());
+    }
+
+    #[test]
     fn rejects_controller_tls_without_config() {
         let c = BrokerConfig {
             controller_listener_protocol: ListenerProtocol::Ssl,
@@ -886,5 +1054,21 @@ mod tests {
             c.validate(),
             Err(BrokerError::InvalidLeaderRebalanceThreshold { value: 101 })
         ));
+    }
+
+    #[test]
+    fn rack_and_selector_default_off() {
+        let c = BrokerConfig::default();
+        assert_eq!(c.rack, None);
+        assert_eq!(
+            c.replica_selector,
+            crate::replica_selector::ReplicaSelectorKind::Leader
+        );
+        let t = BrokerConfig::for_tests(std::path::PathBuf::from("/tmp"));
+        assert_eq!(t.rack, None);
+        assert_eq!(
+            t.replica_selector,
+            crate::replica_selector::ReplicaSelectorKind::Leader
+        );
     }
 }

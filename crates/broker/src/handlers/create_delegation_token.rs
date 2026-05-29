@@ -24,7 +24,6 @@ use std::hash::BuildHasher;
 use crabka_metadata::{DelegationTokenRecord, MetadataRecord};
 use crabka_protocol::owned::create_delegation_token_request::CreateDelegationTokenRequest;
 use crabka_protocol::owned::create_delegation_token_response::CreateDelegationTokenResponse;
-use crabka_raft::ControllerHandle;
 use crabka_security::{KafkaPrincipal, SecretBytes};
 
 use crate::network::auth::ConnectionAuth;
@@ -44,7 +43,7 @@ pub(crate) async fn handle<S: BuildHasher>(
     secret_key: Option<&SecretBytes>,
     max_lifetime_ms: i64,
     default_renew_period_ms: i64,
-    controller: &ControllerHandle,
+    controller: &dyn crate::metadata_source::MetadataSource,
     super_users: &HashSet<String, S>,
 ) -> CreateDelegationTokenResponse {
     let Some(secret_key) = secret_key else {
@@ -184,9 +183,9 @@ fn err_response(code: i16) -> CreateDelegationTokenResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crabka_raft::ControllerHandle;
     use crabka_security::{AuthMethod, Principal, SaslMechanism};
     use std::collections::HashSet;
-    use std::net::SocketAddr;
     use std::sync::Arc;
     use std::time::Duration;
     use tempfile::TempDir;
@@ -204,19 +203,11 @@ mod tests {
 
     /// Spin up a single-voter `Controller` for tests, wait for leader.
     async fn test_controller(log_dir: std::path::PathBuf) -> Arc<ControllerHandle> {
-        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let cfg = crabka_raft::ControllerConfig {
-            node_id: 1,
-            voters: vec![(1, addr)],
-            controller_listen_addr: addr,
-            log_dir,
             election_timeout: Duration::from_millis(200),
             heartbeat_interval: Duration::from_millis(50),
             client_id: "test".into(),
-            bootstrap_mode: crabka_raft::BootstrapMode::Bootstrap,
-            cluster_id: None,
-            dialer: None,
-            handshake: None,
+            ..crabka_raft::ControllerConfig::for_tests(1, log_dir)
         };
         let handle = Arc::new(crabka_raft::Controller::start(cfg).await.unwrap());
         let mut rx = handle.watch_leader();
@@ -261,7 +252,7 @@ mod tests {
             None,
             1_000,
             RENEW_24H_MS,
-            &controller,
+            &*controller,
             &empty_super_users(),
         )
         .await;
@@ -290,7 +281,7 @@ mod tests {
             Some(&secret),
             60_000,
             RENEW_24H_MS,
-            &controller,
+            &*controller,
             &empty_super_users(),
         )
         .await;
@@ -332,7 +323,7 @@ mod tests {
             Some(&secret),
             60_000,
             RENEW_24H_MS,
-            &controller,
+            &*controller,
             &empty_super_users(),
         )
         .await;
@@ -360,7 +351,7 @@ mod tests {
             Some(&secret),
             ceiling_ms,
             RENEW_24H_MS,
-            &controller,
+            &*controller,
             &empty_super_users(),
         )
         .await;
@@ -399,7 +390,7 @@ mod tests {
             Some(&secret),
             one_hour,
             RENEW_24H_MS,
-            &controller,
+            &*controller,
             &empty_super_users(),
         )
         .await;
@@ -434,7 +425,7 @@ mod tests {
             Some(&secret),
             seven_days,
             RENEW_24H_MS,
-            &controller,
+            &*controller,
             &empty_super_users(),
         )
         .await;
@@ -473,7 +464,7 @@ mod tests {
             Some(&secret),
             60_000,
             RENEW_24H_MS,
-            &controller,
+            &*controller,
             &empty_super_users(),
         )
         .await;
@@ -503,7 +494,7 @@ mod tests {
             Some(&secret),
             60_000,
             RENEW_24H_MS,
-            &controller,
+            &*controller,
             &super_users_with(&["admin"]),
         )
         .await;
@@ -546,7 +537,7 @@ mod tests {
             Some(&secret),
             60_000,
             RENEW_24H_MS,
-            &controller,
+            &*controller,
             &super_users_with(&["admin"]),
         )
         .await;
@@ -580,7 +571,7 @@ mod tests {
             Some(&secret),
             60_000,
             RENEW_24H_MS,
-            &controller,
+            &*controller,
             &super_users_with(&["admin"]),
         )
         .await;
@@ -599,7 +590,7 @@ mod tests {
             Some(&secret),
             60_000,
             RENEW_24H_MS,
-            &controller,
+            &*controller,
             &super_users_with(&["admin"]),
         )
         .await;
@@ -629,7 +620,7 @@ mod tests {
             Some(&secret),
             60_000,
             RENEW_24H_MS,
-            &controller,
+            &*controller,
             &super_users_with(&["admin"]),
         )
         .await;

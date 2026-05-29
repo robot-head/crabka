@@ -24,7 +24,7 @@ use tracing::warn;
 
 use crabka_log::{Log, LogConfig};
 use crabka_metadata::MetadataImage;
-use crabka_raft::{ControllerHandle, NodeId};
+use crabka_raft::NodeId;
 
 use crate::broker::spawn_partition;
 use crate::partition::Partition;
@@ -146,7 +146,7 @@ pub(crate) async fn push_topic_configs(
 
 pub(crate) struct ReplicatorSupervisor {
     node_id: NodeId,
-    controller: Arc<ControllerHandle>,
+    controller: Arc<dyn crate::metadata_source::MetadataSource>,
     partitions: Arc<DashMap<(String, i32), Arc<Partition>>>,
     log_dirs: Vec<PathBuf>,
     log_config: LogConfig,
@@ -185,7 +185,7 @@ impl ReplicatorSupervisor {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         node_id: NodeId,
-        controller: Arc<ControllerHandle>,
+        controller: Arc<dyn crate::metadata_source::MetadataSource>,
         partitions: Arc<DashMap<(String, i32), Arc<Partition>>>,
         log_dirs: Vec<PathBuf>,
         log_config: LogConfig,

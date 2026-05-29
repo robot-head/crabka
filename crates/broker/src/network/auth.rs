@@ -374,7 +374,7 @@ pub fn handle_authenticate_plain<S: BuildHasher>(
 pub fn handle_authenticate_scram(
     req: &SaslAuthenticateRequest,
     auth: &mut ConnectionAuth,
-    controller: &crabka_raft::ControllerHandle,
+    controller: &dyn crate::metadata_source::MetadataSource,
 ) -> SaslAuthenticateResponse {
     // Round-1 case: still in `ScramPending` — build the exchange now that
     // we have the client-first bytes (and thus the username).
@@ -1311,7 +1311,6 @@ mod tests {
         use crabka_metadata::{DelegationTokenRecord, MetadataRecord};
         use crabka_security::scram::hash_scram_password_with_salt;
         use crabka_security::{KafkaPrincipal, ScramClientExchange};
-        use std::net::SocketAddr;
         use std::sync::Arc;
         use std::time::Duration;
         use tempfile::TempDir;
@@ -1319,19 +1318,11 @@ mod tests {
         async fn test_controller(
             log_dir: std::path::PathBuf,
         ) -> Arc<crabka_raft::ControllerHandle> {
-            let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
             let cfg = crabka_raft::ControllerConfig {
-                node_id: 1,
-                voters: vec![(1, addr)],
-                controller_listen_addr: addr,
-                log_dir,
                 election_timeout: Duration::from_millis(200),
                 heartbeat_interval: Duration::from_millis(50),
                 client_id: "test".into(),
-                bootstrap_mode: crabka_raft::BootstrapMode::Bootstrap,
-                cluster_id: None,
-                dialer: None,
-                handshake: None,
+                ..crabka_raft::ControllerConfig::for_tests(1, log_dir)
             };
             let handle = Arc::new(crabka_raft::Controller::start(cfg).await.unwrap());
             let mut rx = handle.watch_leader();
@@ -1442,7 +1433,7 @@ mod tests {
                     ..Default::default()
                 },
                 &mut auth,
-                &controller,
+                &*controller,
             );
             assert_eq!(
                 resp1.error_code, 0,
@@ -1542,7 +1533,7 @@ mod tests {
                     ..Default::default()
                 },
                 &mut auth,
-                &controller,
+                &*controller,
             );
             assert_eq!(
                 resp.error_code, SASL_AUTHENTICATION_FAILED,
@@ -1581,7 +1572,7 @@ mod tests {
                     ..Default::default()
                 },
                 &mut auth,
-                &controller,
+                &*controller,
             );
             assert_eq!(
                 resp.error_code, SASL_AUTHENTICATION_FAILED,

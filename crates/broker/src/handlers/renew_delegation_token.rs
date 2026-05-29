@@ -20,7 +20,6 @@ use std::hash::BuildHasher;
 use crabka_metadata::{DelegationTokenRecord, MetadataRecord};
 use crabka_protocol::owned::renew_delegation_token_request::RenewDelegationTokenRequest;
 use crabka_protocol::owned::renew_delegation_token_response::RenewDelegationTokenResponse;
-use crabka_raft::ControllerHandle;
 use crabka_security::SecretBytes;
 
 use crate::network::auth::ConnectionAuth;
@@ -31,7 +30,7 @@ pub(crate) async fn handle<S: BuildHasher>(
     auth: &ConnectionAuth,
     secret_key: Option<&SecretBytes>,
     default_renew_period_ms: i64,
-    controller: &ControllerHandle,
+    controller: &dyn crate::metadata_source::MetadataSource,
     super_users: &HashSet<String, S>,
 ) -> RenewDelegationTokenResponse {
     if secret_key.is_none() {
@@ -99,9 +98,9 @@ fn err_response(code: i16) -> RenewDelegationTokenResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crabka_raft::ControllerHandle;
     use crabka_security::{AuthMethod, KafkaPrincipal, Principal, SaslMechanism};
     use std::collections::HashSet;
-    use std::net::SocketAddr;
     use std::sync::Arc;
     use std::time::Duration;
     use tempfile::TempDir;
@@ -120,19 +119,11 @@ mod tests {
 
     /// Spin up a single-voter `Controller` for tests, wait for leader.
     async fn test_controller(log_dir: std::path::PathBuf) -> Arc<ControllerHandle> {
-        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let cfg = crabka_raft::ControllerConfig {
-            node_id: 1,
-            voters: vec![(1, addr)],
-            controller_listen_addr: addr,
-            log_dir,
             election_timeout: Duration::from_millis(200),
             heartbeat_interval: Duration::from_millis(50),
             client_id: "test".into(),
-            bootstrap_mode: crabka_raft::BootstrapMode::Bootstrap,
-            cluster_id: None,
-            dialer: None,
-            handshake: None,
+            ..crabka_raft::ControllerConfig::for_tests(1, log_dir)
         };
         let handle = Arc::new(crabka_raft::Controller::start(cfg).await.unwrap());
         let mut rx = handle.watch_leader();
@@ -197,7 +188,7 @@ mod tests {
         let auth = authed("alice");
         let dir = TempDir::new().unwrap();
         let controller = test_controller(dir.path().into()).await;
-        let resp = handle(&req, &auth, None, 1_000, &controller, &empty_super_users()).await;
+        let resp = handle(&req, &auth, None, 1_000, &*controller, &empty_super_users()).await;
         assert_eq!(
             resp.error_code,
             crate::codes::DELEGATION_TOKEN_AUTH_DISABLED
@@ -234,7 +225,7 @@ mod tests {
             &authed("alice"),
             Some(&secret),
             1_000,
-            &controller,
+            &*controller,
             &empty_super_users(),
         )
         .await;
@@ -283,7 +274,7 @@ mod tests {
             &authed("bob"),
             Some(&secret),
             1_000,
-            &controller,
+            &*controller,
             &empty_super_users(),
         )
         .await;
@@ -307,7 +298,7 @@ mod tests {
             &authed("alice"),
             Some(&secret),
             1_000,
-            &controller,
+            &*controller,
             &empty_super_users(),
         )
         .await;
@@ -344,7 +335,7 @@ mod tests {
             &authed("eve"),
             Some(&secret),
             1_000,
-            &controller,
+            &*controller,
             &empty_super_users(),
         )
         .await;
@@ -392,7 +383,7 @@ mod tests {
             &authed("admin"),
             Some(&secret),
             1_000,
-            &controller,
+            &*controller,
             &super_users_with(&["admin"]),
         )
         .await;
@@ -442,7 +433,7 @@ mod tests {
             &authed("eve"),
             Some(&secret),
             1_000,
-            &controller,
+            &*controller,
             &super_users_with(&["admin"]),
         )
         .await;

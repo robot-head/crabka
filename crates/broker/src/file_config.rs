@@ -48,6 +48,14 @@ pub struct FileConfig {
     /// [`crate::BrokerConfig::extra_log_dirs`].
     #[serde(default)]
     pub extra_log_dirs: Vec<String>,
+    /// KIP-392: this broker's rack id. Maps to `BrokerConfig::rack`.
+    #[serde(default)]
+    pub rack: Option<String>,
+
+    /// KIP-392: replica selector name (`"leader"` | `"rack-aware"`).
+    /// Maps to `BrokerConfig::replica_selector`.
+    #[serde(default)]
+    pub replica_selector: Option<String>,
     pub inter_broker_listener_name: Option<String>,
     #[serde(default)]
     pub listeners: Vec<FileListener>,
@@ -99,6 +107,11 @@ pub struct FileConfig {
     /// `type = "opa"`, the `[authorization.opa]` subtable is required.
     #[serde(default)]
     pub authorization: Option<FileAuthorizationConfig>,
+
+    /// `[process]` section — `KRaft` `process.roles`. Absent / empty leaves
+    /// the `BrokerConfig` default `[Controller, Broker]`.
+    #[serde(default)]
+    pub process: Option<FileProcessConfig>,
 }
 
 /// TOML shape of `[remote_storage]`. Maps to
@@ -263,6 +276,16 @@ pub struct FileDelegationTokenConfig {
     /// `RenewDelegationToken.renew_period_ms == -1`. Distinct from
     /// `max_lifetime_ms` (the absolute ceiling). Default 24 hours.
     pub default_renew_period_ms: Option<i64>,
+}
+
+/// `[process]` TOML section — `KRaft` `process.roles`.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct FileProcessConfig {
+    /// Role strings: `"controller"`, `"broker"` (case-insensitive). Empty
+    /// or absent leaves the `BrokerConfig` default `[Controller, Broker]`.
+    #[serde(default)]
+    pub roles: Vec<String>,
 }
 
 /// TOML shape of `[oauthbearer]`. Maps to
@@ -485,6 +508,17 @@ impl FileConfig {
             && cfg.broker_id == defaults.broker_id
         {
             cfg.broker_id = id;
+        }
+        if let Some(rack) = self.rack {
+            cfg.rack = Some(rack);
+        }
+        if let Some(sel) = self.replica_selector {
+            cfg.replica_selector = crate::replica_selector::ReplicaSelectorKind::from_config_str(
+                &sel,
+            )
+            .map_err(|bad| {
+                FileConfigError::InvalidConfig(format!("unknown replica_selector: {bad}"))
+            })?;
         }
         if let Some(ld) = self.log_dir
             && cfg.log_dir == defaults.log_dir
@@ -829,6 +863,27 @@ impl FileConfig {
                     std::sync::Arc::new(built)
                 }
             };
+        }
+
+        // KRaft `process.roles`. Absent / empty leaves the BrokerConfig
+        // default (`[Controller, Broker]`).
+        if let Some(p) = &self.process
+            && !p.roles.is_empty()
+        {
+            let mut roles = Vec::with_capacity(p.roles.len());
+            for r in &p.roles {
+                let role = match r.to_ascii_lowercase().as_str() {
+                    "controller" => crate::config::NodeRole::Controller,
+                    "broker" => crate::config::NodeRole::Broker,
+                    other => {
+                        return Err(FileConfigError::InvalidConfig(format!(
+                            "unknown process.role `{other}` (expected `controller` or `broker`)"
+                        )));
+                    }
+                };
+                roles.push(role);
+            }
+            cfg.roles = roles;
         }
 
         Ok(())
@@ -1822,5 +1877,87 @@ expire_after_ms = 60000
             cfg.authorizer.authorize(&img, &req),
             AuthorizationResult::Allow
         );
+    }
+
+    #[test]
+    fn process_roles_controller_only_from_toml() {
+        let toml = r#"
+            [process]
+            roles = ["controller"]
+        "#;
+        let fc: FileConfig = toml::from_str(toml).expect("parse");
+        let mut cfg = crate::config::BrokerConfig::default();
+        fc.apply_to(&mut cfg).expect("apply");
+        assert_eq!(cfg.roles, vec![crate::config::NodeRole::Controller]);
+    }
+
+    #[test]
+    fn process_roles_both_from_toml() {
+        let toml = r#"
+            [process]
+            roles = ["broker", "controller"]
+        "#;
+        let fc: FileConfig = toml::from_str(toml).expect("parse");
+        let mut cfg = crate::config::BrokerConfig::default();
+        fc.apply_to(&mut cfg).expect("apply");
+        assert_eq!(
+            cfg.roles,
+            vec![
+                crate::config::NodeRole::Broker,
+                crate::config::NodeRole::Controller
+            ]
+        );
+    }
+
+    #[test]
+    fn process_roles_rejects_unknown_role() {
+        let toml = r#"
+            [process]
+            roles = ["wizard"]
+        "#;
+        let fc: FileConfig = toml::from_str(toml).expect("parse");
+        let mut cfg = crate::config::BrokerConfig::default();
+        let err = fc.apply_to(&mut cfg).expect_err("unknown role rejected");
+        assert!(matches!(err, FileConfigError::InvalidConfig(_)));
+    }
+
+    #[test]
+    fn process_section_absent_leaves_default_roles() {
+        let fc: FileConfig = toml::from_str("").expect("parse");
+        let mut cfg = crate::config::BrokerConfig::default();
+        fc.apply_to(&mut cfg).expect("apply");
+        assert_eq!(
+            cfg.roles,
+            vec![
+                crate::config::NodeRole::Controller,
+                crate::config::NodeRole::Broker
+            ]
+        );
+    }
+
+    #[test]
+    fn apply_to_parses_rack_and_replica_selector() {
+        use crate::replica_selector::ReplicaSelectorKind;
+        let src = r#"
+broker_id = 0
+rack = "az-1"
+replica_selector = "rack-aware"
+"#;
+        let cfg: FileConfig = toml::from_str(src).expect("parse");
+        let mut broker = crate::config::BrokerConfig::default();
+        cfg.apply_to(&mut broker).expect("apply");
+        assert_eq!(broker.rack.as_deref(), Some("az-1"));
+        assert_eq!(broker.replica_selector, ReplicaSelectorKind::RackAware);
+    }
+
+    #[test]
+    fn apply_to_rejects_unknown_replica_selector() {
+        let src = r#"
+broker_id = 0
+replica_selector = "nonsense"
+"#;
+        let cfg: FileConfig = toml::from_str(src).expect("parse");
+        let mut broker = crate::config::BrokerConfig::default();
+        assert!(cfg.apply_to(&mut broker).is_err());
     }
 }

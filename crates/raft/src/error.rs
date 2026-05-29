@@ -29,6 +29,15 @@ pub enum RaftError {
     #[error("change rejected: {0}")]
     ChangeRejected(String),
 
+    #[error("reconfiguration rejected: {0}")]
+    ReconfigRejected(String),
+
+    #[error("a reconfiguration is already in progress")]
+    ReconfigInProgress,
+
+    #[error("voter {id} is not a caught-up observer (lag {lag})")]
+    VoterNotCaughtUp { id: NodeId, lag: u64 },
+
     #[error("serialization: {0}")]
     SerdeFailed(#[from] wincode::error::WriteError),
 

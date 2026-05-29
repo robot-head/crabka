@@ -121,6 +121,7 @@
 #![doc(html_root_url = "https://docs.rs/crabka-broker/0.0.0")]
 
 pub mod authorizer;
+pub(crate) mod auto_join;
 pub mod bootstrap;
 mod broker;
 pub(crate) mod cleaner;
@@ -142,6 +143,8 @@ pub(crate) mod leader_election;
 pub mod leader_rebalance;
 mod log_dir;
 mod log_dir_status;
+pub mod metadata_observer;
+pub mod metadata_source;
 pub mod metrics;
 pub(crate) mod metrics_server;
 pub mod network;
@@ -156,6 +159,7 @@ pub mod raft_handshake;
 pub(crate) mod reassignment;
 pub(crate) mod remote_log_manager;
 pub(crate) mod remote_reader;
+pub mod replica_selector;
 pub(crate) mod replica_state;
 mod replicator;
 mod replicator_supervisor;
