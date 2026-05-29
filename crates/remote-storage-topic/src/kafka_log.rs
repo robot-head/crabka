@@ -373,7 +373,7 @@ async fn ensure_topic(cfg: &KafkaMetadataLogConfig) -> Result<(i32, WireUuid), M
             partition_count = entry.partition_count,
             "metadata topic already exists; reusing"
         );
-        let topic_id = entry.topic_id.map(to_wire_uuid).unwrap_or(WireUuid::ZERO);
+        let topic_id = entry.topic_id.map_or(WireUuid::ZERO, to_wire_uuid);
         return Ok((entry.partition_count, topic_id));
     }
 
@@ -418,8 +418,7 @@ async fn ensure_topic(cfg: &KafkaMetadataLogConfig) -> Result<(i32, WireUuid), M
             .iter()
             .find(|t| t.name == cfg.topic)
             .and_then(|t| t.topic_id)
-            .map(to_wire_uuid)
-            .unwrap_or(WireUuid::ZERO)
+            .map_or(WireUuid::ZERO, to_wire_uuid)
     };
     Ok((cfg.num_partitions, topic_id))
 }
@@ -447,17 +446,14 @@ async fn partition_fetch_loop(
     // Dedicated connection for this partition's fetch loop. Resolve the
     // bootstrap address; on failure, warn and exit (the manager's
     // wait_for_targets will then time out, matching prior behavior).
-    let addr = match state
+    let Some(addr) = state
         .bootstrap
         .to_socket_addrs()
         .ok()
         .and_then(|mut a| a.next())
-    {
-        Some(a) => a,
-        None => {
-            warn!(bootstrap = %state.bootstrap, "metadata consumer: bad bootstrap addr");
-            return;
-        }
+    else {
+        warn!(bootstrap = %state.bootstrap, "metadata consumer: bad bootstrap addr");
+        return;
     };
     let opts = ConnectionOptions {
         client_id: state.client_id.clone(),
