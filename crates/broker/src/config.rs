@@ -445,7 +445,19 @@ pub struct KafkaRlmmConfig {
     /// Replication factor to create `__remote_log_metadata` with on
     /// first startup. Ignored when the topic already exists.
     pub replication: i32,
+    /// 48p: how often the topic-backed manager flushes its RLMM cache
+    /// snapshot to disk. Maps to Kafka's
+    /// `remote.log.metadata.snapshot.interval`. Default
+    /// [`DEFAULT_RLMM_SNAPSHOT_INTERVAL`].
+    pub snapshot_interval: std::time::Duration,
+    /// 48p: directory the RLMM cache snapshot is written to (one
+    /// `snapshot` file). Derived from the broker `log.dir`.
+    pub snapshot_dir: std::path::PathBuf,
 }
+
+/// 48p: default cadence of the topic-backed RLMM snapshot flush. 60s,
+/// matching Kafka's `remote.log.metadata.snapshot.interval` default.
+pub const DEFAULT_RLMM_SNAPSHOT_INTERVAL: std::time::Duration = std::time::Duration::from_mins(1);
 
 /// What backs the broker's `RemoteStorageManager` when tiered storage is on.
 #[derive(Debug, Clone)]
@@ -825,6 +837,22 @@ impl Default for BrokerConfig {
 mod tests {
     use super::*;
     use crate::BrokerError as BrokerStartError;
+
+    #[test]
+    fn kafka_rlmm_config_carries_snapshot_settings() {
+        let c = KafkaRlmmConfig {
+            bootstrap: "127.0.0.1:9092".into(),
+            num_partitions: 50,
+            replication: 1,
+            snapshot_interval: std::time::Duration::from_mins(1),
+            snapshot_dir: std::path::PathBuf::from("/data/remote-log-metadata"),
+        };
+        assert_eq!(c.snapshot_interval, std::time::Duration::from_mins(1));
+        assert_eq!(
+            c.snapshot_dir,
+            std::path::PathBuf::from("/data/remote-log-metadata")
+        );
+    }
 
     /// A well-formed two-listener config used as the base for validation
     /// tests.

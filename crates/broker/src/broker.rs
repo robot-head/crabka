@@ -2145,19 +2145,23 @@ async fn bootstrap_topic_rlmm(
             return;
         }
     };
-    let manager =
-        match crabka_remote_storage_topic::TopicBasedRemoteLogMetadataManager::start(log, runtime)
-            .await
-        {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "topic-backed RLMM manager start failed; staying on in-memory placeholder"
-                );
-                return;
-            }
-        };
+    let manager = match crabka_remote_storage_topic::TopicBasedRemoteLogMetadataManager::start(
+        log,
+        runtime,
+        cfg.cfg.snapshot_dir.clone(),
+        cfg.cfg.snapshot_interval,
+    )
+    .await
+    {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "topic-backed RLMM manager start failed; staying on in-memory placeholder"
+            );
+            return;
+        }
+    };
     swap.swap(manager);
     metrics.tiered_storage_rlmm_topic_backed.set(1);
     tracing::info!("topic-backed RemoteLogMetadataManager activated");
