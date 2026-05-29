@@ -818,6 +818,61 @@ impl Log {
         self.log_start_offset()
     }
 
+    /// Earliest local `(offset, record_timestamp)` whose record
+    /// timestamp is `>= target_ts`, searching sealed segments
+    /// oldest-first then the active segment. The first segment whose
+    /// `max_timestamp >= target_ts` holds the answer; the per-segment
+    /// helper does the index lookup + forward scan. `None` when no
+    /// local record qualifies (including an empty log).
+    #[must_use]
+    pub fn offset_for_timestamp(&self, target_ts: i64) -> Option<(i64, i64)> {
+        for seg in &self.segments {
+            if seg.max_timestamp() >= target_ts
+                && let Some(hit) = seg.offset_for_timestamp(target_ts)
+            {
+                return Some(hit);
+            }
+        }
+        if let Some(active) = &self.active
+            && active.max_timestamp() >= target_ts
+        {
+            return active.offset_for_timestamp(target_ts);
+        }
+        None
+    }
+
+    /// Offset and timestamp of the record carrying the partition's
+    /// largest timestamp, scanning sealed segments then the active
+    /// segment. Ties resolve to the earliest offset (the first segment,
+    /// and the first record within it, wins). Returns `None` when the
+    /// log holds no records.
+    #[must_use]
+    pub fn max_timestamp_offset_and_ts(&self) -> Option<(i64, i64)> {
+        let mut best: Option<(i64, i64)> = None; // (timestamp, offset)
+        let candidates = self
+            .segments
+            .iter()
+            .map(AsRef::as_ref)
+            .chain(self.active.as_ref());
+        for seg in candidates {
+            if let Some((offset, ts)) = seg.offset_of_max_timestamp()
+                && best.is_none_or(|(best_ts, _)| ts > best_ts)
+            {
+                best = Some((ts, offset));
+            }
+        }
+        best.map(|(ts, offset)| (offset, ts))
+    }
+
+    /// Offset of the record carrying the partition's largest timestamp,
+    /// or `log_start_offset()` when the log holds no records (KIP-734
+    /// `MAX_TIMESTAMP`).
+    #[must_use]
+    pub fn offset_of_max_timestamp(&self) -> i64 {
+        self.max_timestamp_offset_and_ts()
+            .map_or_else(|| self.log_start_offset(), |(offset, _)| offset)
+    }
+
     /// Physically delete every sealed segment whose
     /// `last_offset < target`, then bump both `log_start_override` and
     /// `local_log_start_override` to `target` (KIP-405). The active segment is
@@ -2014,5 +2069,104 @@ mod tests {
             0,
             "standard retention deletes all sealed segments"
         );
+    }
+
+    fn ts_batch(ts: i64) -> RecordBatch {
+        let mut b = RecordBatch {
+            base_offset: 0, // overwritten by Log::append
+            base_timestamp: ts,
+            max_timestamp: ts,
+            last_offset_delta: 0,
+            ..RecordBatch::default()
+        };
+        b.records.push(Record {
+            offset_delta: 0,
+            timestamp_delta: 0,
+            value: Some(Bytes::from("v")),
+            ..Default::default()
+        });
+        b
+    }
+
+    #[test]
+    fn log_offset_for_timestamp_across_segments() {
+        let dir = tempdir().unwrap();
+        let config = LogConfig {
+            segment_bytes: 1, // roll after every batch → each record its own segment
+            ..LogConfig::default()
+        };
+        let mut log = Log::open(dir.path(), config).unwrap();
+        // offsets 0..=4 with timestamps 100,200,300,400,500.
+        for (i, ts) in [100, 200, 300, 400, 500].into_iter().enumerate() {
+            let mut b = ts_batch(ts);
+            assert_eq!(log.append(&mut b).unwrap(), i as i64);
+        }
+        // before-first → offset 0.
+        assert_eq!(log.offset_for_timestamp(50), Some((0, 100)));
+        // exact match on a sealed segment.
+        assert_eq!(log.offset_for_timestamp(300), Some((2, 300)));
+        // between records → next record up.
+        assert_eq!(log.offset_for_timestamp(350), Some((3, 400)));
+        // landing on the active segment's record.
+        assert_eq!(log.offset_for_timestamp(500), Some((4, 500)));
+        // after-last → None.
+        assert_eq!(log.offset_for_timestamp(600), None);
+        log.close();
+        drop(dir);
+    }
+
+    #[test]
+    fn log_offset_for_timestamp_empty_log_is_none() {
+        let dir = tempdir().unwrap();
+        let log = Log::open(dir.path(), LogConfig::default()).unwrap();
+        assert_eq!(log.offset_for_timestamp(0), None);
+        log.close();
+        drop(dir);
+    }
+
+    #[test]
+    fn log_offset_of_max_timestamp_in_active() {
+        let dir = tempdir().unwrap();
+        let config = LogConfig {
+            segment_bytes: 1, // each record its own segment
+            ..LogConfig::default()
+        };
+        let mut log = Log::open(dir.path(), config).unwrap();
+        // timestamps 100,300,200 at offsets 0,1,2. Max is 300 @ offset 1.
+        for ts in [100, 300, 200] {
+            let mut b = ts_batch(ts);
+            log.append(&mut b).unwrap();
+        }
+        assert_eq!(log.offset_of_max_timestamp(), 1);
+        log.close();
+        drop(dir);
+    }
+
+    #[test]
+    fn log_offset_of_max_timestamp_empty_is_log_start() {
+        let dir = tempdir().unwrap();
+        let log = Log::open(dir.path(), LogConfig::default()).unwrap();
+        assert_eq!(log.offset_of_max_timestamp(), log.log_start_offset());
+        assert_eq!(log.max_timestamp_offset_and_ts(), None);
+        log.close();
+        drop(dir);
+    }
+
+    #[test]
+    fn log_max_timestamp_offset_and_ts_returns_pair() {
+        let dir = tempdir().unwrap();
+        let config = LogConfig {
+            segment_bytes: 1,
+            ..LogConfig::default()
+        };
+        let mut log = Log::open(dir.path(), config).unwrap();
+        for ts in [100, 300, 200] {
+            let mut b = ts_batch(ts);
+            log.append(&mut b).unwrap();
+        }
+        // Max timestamp 300 lives at offset 1.
+        assert_eq!(log.max_timestamp_offset_and_ts(), Some((1, 300)));
+        log.close();
+        drop(dir);
     }
 }
