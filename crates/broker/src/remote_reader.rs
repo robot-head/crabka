@@ -44,6 +44,28 @@ struct TimeIndexEntry {
 
 const _: () = assert!(std::mem::size_of::<TimeIndexEntry>() == 12);
 
+/// 24 bytes per entry: start_offset i64 BE + last_offset i64 BE + producer_id
+/// i64 BE. Mirrors `crabka_log::txn_index::AbortedTxnRaw` so the remote-tier
+/// copy of a `.txnindex` file decodes through the same byte layout the local
+/// index was written with.
+#[derive(Debug, Clone, Copy, FromBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+struct AbortedTxnIndexEntry {
+    start_offset: I64<BigEndian>,
+    last_offset: I64<BigEndian>,
+    producer_id: I64<BigEndian>,
+}
+
+const _: () = assert!(std::mem::size_of::<AbortedTxnIndexEntry>() == 24);
+
+/// One decoded aborted-transaction entry from a remote segment's `.txnindex`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AbortedTxnEntry {
+    pub(crate) start_offset: i64,
+    pub(crate) last_offset: i64,
+    pub(crate) producer_id: i64,
+}
+
 /// Holds the broker's shared `RSM` + `RLMM` and serves remote reads.
 pub(crate) struct RemoteReader {
     pub(crate) rsm: Arc<dyn RemoteStorageManager>,
@@ -251,6 +273,24 @@ pub(crate) fn parse_time_index(bytes: &[u8]) -> Vec<(i64, u32)> {
         .collect()
 }
 
+/// Parse Kafka's transaction-index format (24 bytes / entry: start_offset i64
+/// BE, last_offset i64 BE, producer_id i64 BE). Trailing bytes that don't
+/// complete a 24-byte entry are ignored.
+#[must_use]
+pub(crate) fn parse_txn_index(bytes: &[u8]) -> Vec<AbortedTxnEntry> {
+    let truncated_len = (bytes.len() / 24) * 24;
+    let entries = <[AbortedTxnIndexEntry]>::ref_from_bytes(&bytes[..truncated_len])
+        .expect("len is multiple of 24 and AbortedTxnIndexEntry is Unaligned");
+    entries
+        .iter()
+        .map(|e| AbortedTxnEntry {
+            start_offset: e.start_offset.get(),
+            last_offset: e.last_offset.get(),
+            producer_id: e.producer_id.get(),
+        })
+        .collect()
+}
+
 /// First entry whose `ts >= target_ts`, returning the relative offset, or
 /// `None` when none qualify.
 #[must_use]
@@ -413,6 +453,44 @@ mod tests {
 
         // Empty buffer → None.
         assert!(first_batch_at_or_after(&[], 0).is_none());
+    }
+
+    #[test]
+    fn parse_txn_index_round_trips_known_entries() {
+        // Mirror TxnIndex::append: 8B start_offset BE, 8B last_offset BE,
+        // 8B producer_id BE.
+        let mut buf = Vec::new();
+        for (start, last, pid) in [(0_i64, 4_i64, 1000_i64), (10, 14, 2000)] {
+            buf.extend_from_slice(&start.to_be_bytes());
+            buf.extend_from_slice(&last.to_be_bytes());
+            buf.extend_from_slice(&pid.to_be_bytes());
+        }
+        let entries = parse_txn_index(&buf);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].start_offset, 0);
+        assert_eq!(entries[0].last_offset, 4);
+        assert_eq!(entries[0].producer_id, 1000);
+        assert_eq!(entries[1].start_offset, 10);
+        assert_eq!(entries[1].last_offset, 14);
+        assert_eq!(entries[1].producer_id, 2000);
+    }
+
+    #[test]
+    fn parse_txn_index_truncates_trailing_partial_bytes() {
+        let mut buf = Vec::new();
+        for v in [0_i64, 4, 1000] {
+            buf.extend_from_slice(&v.to_be_bytes());
+        }
+        // 5 trailing bytes that don't complete a 24-byte entry.
+        buf.extend_from_slice(&[0xAA; 5]);
+        let entries = parse_txn_index(&buf);
+        assert_eq!(entries.len(), 1, "partial trailing entry ignored");
+        assert_eq!(entries[0].producer_id, 1000);
+    }
+
+    #[test]
+    fn parse_txn_index_empty_is_empty() {
+        assert!(parse_txn_index(&[]).is_empty());
     }
 
     // ── Integration tests against `LocalTieredStorage` +
