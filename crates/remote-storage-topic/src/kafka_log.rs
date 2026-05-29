@@ -374,6 +374,7 @@ async fn ensure_topic(cfg: &KafkaMetadataLogConfig) -> Result<(i32, WireUuid), M
             "metadata topic already exists; reusing"
         );
         let topic_id = entry.topic_id.map_or(WireUuid::ZERO, to_wire_uuid);
+        warn_if_zero_topic_id(&cfg.topic, topic_id);
         return Ok((entry.partition_count, topic_id));
     }
 
@@ -420,7 +421,22 @@ async fn ensure_topic(cfg: &KafkaMetadataLogConfig) -> Result<(i32, WireUuid), M
             .and_then(|t| t.topic_id)
             .map_or(WireUuid::ZERO, to_wire_uuid)
     };
+    warn_if_zero_topic_id(&cfg.topic, topic_id);
     Ok((cfg.num_partitions, topic_id))
+}
+
+/// A zero topic id makes every Fetch v≥13 fail (it carries `topic_id`,
+/// not the name), which manifests as the metadata consumer spinning with
+/// no progress. Warn loudly so the misconfiguration is diagnosable
+/// rather than a silent hang.
+fn warn_if_zero_topic_id(topic: &str, topic_id: WireUuid) {
+    if topic_id == WireUuid::ZERO {
+        warn!(
+            topic = %topic,
+            "metadata topic resolved to a zero topic_id; Fetch v>=13 will fail \
+             and the consumer will make no progress"
+        );
+    }
 }
 
 /// Convert the admin client's `uuid::Uuid` to the wire `Uuid` Fetch
@@ -487,6 +503,16 @@ async fn partition_fetch_loop(
                 match res {
                     Ok(records) => {
                         for r in records {
+                            // Re-check cancellation before every send: a
+                            // remove() (e.g. 48q reassignment) that fires
+                            // after fetch_partition resolved must not flush
+                            // the rest of an already-fetched batch, or a
+                            // task spawned on re-add from a new start_offset
+                            // would double-deliver these same records.
+                            if cancel.is_cancelled() {
+                                conn.close();
+                                return;
+                            }
                             if r.offset < next_offset {
                                 continue; // defensive: never go backwards
                             }

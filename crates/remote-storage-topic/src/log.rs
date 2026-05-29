@@ -127,14 +127,31 @@ pub struct InProcessMetadataEventLog {
     inner: Arc<InProcessInner>,
 }
 
+/// Live-assignment cursor for one partition within a subscription.
+#[derive(Debug, Clone, Copy)]
+struct PartitionCursor {
+    /// Next offset that has NOT yet been delivered by the backlog/live
+    /// path. Records below this are filtered out.
+    next: i64,
+    /// When set, live records for this partition are forwarded through
+    /// the `inject` FIFO rather than emitted directly on the broadcast
+    /// path. A partition added mid-stream sets this so its live appends
+    /// queue *behind* its already-injected backlog — otherwise
+    /// `stream::select` could interleave a live record ahead of undrained
+    /// backlog, violating per-partition publish order. Initially-assigned
+    /// partitions leave this `false`: their backlog goes through the
+    /// chained snapshot stream, which fully drains before any live record.
+    via_inject: bool,
+}
+
 /// Per-subscription live assignment + a sender to inject backlog when a
 /// partition is added mid-stream. Keyed by a monotonically-increasing
 /// subscription id so multiple subscribers stay independent.
 struct SubscriptionState {
-    /// partition -> next offset that has NOT yet been delivered by the
-    /// backlog/live path. Presence in the map == assigned.
-    assigned: Mutex<HashMap<i32, i64>>,
-    /// Inject backlog records for a freshly-added partition.
+    /// partition -> cursor. Presence in the map == assigned.
+    assigned: Mutex<HashMap<i32, PartitionCursor>>,
+    /// Inject backlog (and, for `add`-ed partitions, live) records in
+    /// FIFO publish order.
     inject: mpsc::UnboundedSender<MetadataEventRecord>,
 }
 
@@ -222,7 +239,7 @@ impl MetadataEventLog for InProcessMetadataEventLog {
         // Initial assigned set: partition -> next live offset (= current
         // len), so the broadcast path forwards only records published after
         // subscribe; everything earlier comes from the snapshot below.
-        let mut assigned: HashMap<i32, i64> = HashMap::new();
+        let mut assigned: HashMap<i32, PartitionCursor> = HashMap::new();
         let mut snapshot: Vec<MetadataEventRecord> = Vec::new();
         for ps in &assignment {
             let Ok(idx) = usize::try_from(ps.partition) else {
@@ -242,7 +259,12 @@ impl MetadataEventLog for InProcessMetadataEventLog {
             }
             assigned.insert(
                 ps.partition,
-                i64::try_from(records.len()).expect("len fits in i64"),
+                PartitionCursor {
+                    next: i64::try_from(records.len()).expect("len fits in i64"),
+                    // Initially-assigned: backlog rides the chained
+                    // snapshot stream, so live records can go direct.
+                    via_inject: false,
+                },
             );
         }
 
@@ -290,6 +312,20 @@ struct InProcessAssignmentHandle {
     sub_id: u64,
 }
 
+impl Drop for InProcessAssignmentHandle {
+    fn drop(&mut self) {
+        // Evict this subscription's state so the map does not grow
+        // without bound as subscriptions come and go. The stream's live
+        // filter holds its own `Arc<SubscriptionState>`, so dropping the
+        // map entry never affects an in-flight stream — only `add`/
+        // `remove`/`assigned` (which go through the handle) stop working,
+        // and the handle is gone.
+        if let Ok(mut subs) = self.inner.subscriptions.lock() {
+            subs.remove(&self.sub_id);
+        }
+    }
+}
+
 impl AssignmentHandle for InProcessAssignmentHandle {
     fn add(&self, start: PartitionStart) {
         let subs = self
@@ -324,9 +360,19 @@ impl AssignmentHandle for InProcessAssignmentHandle {
             });
         }
         // Live records at or after the current end are forwarded by the
-        // broadcast path once `assigned` contains the partition.
+        // broadcast path once `assigned` contains the partition. They are
+        // routed through `inject` (via_inject) so they queue *behind* the
+        // backlog we just pushed above, preserving per-partition publish
+        // order: stream::select must not interleave a live record ahead of
+        // undrained backlog.
         let next_live = i64::try_from(records.len()).expect("len fits in i64");
-        assigned.insert(start.partition, next_live);
+        assigned.insert(
+            start.partition,
+            PartitionCursor {
+                next: next_live,
+                via_inject: true,
+            },
+        );
     }
 
     fn remove(&self, partition: i32) {
@@ -365,9 +411,24 @@ impl AssignmentHandle for InProcessAssignmentHandle {
     }
 }
 
+/// What [`filtered_broadcast`] does with a received live record.
+enum Forward {
+    /// Emit directly on the broadcast stream.
+    Emit,
+    /// Re-route through the `inject` FIFO (added-mid-stream partition).
+    Inject,
+    /// Not assigned / below cursor: discard.
+    Drop,
+}
+
 /// Forward a broadcast record only when its partition is currently
 /// assigned and its offset is at/after the recorded live cursor for
 /// that partition.
+///
+/// For a partition added mid-stream (`via_inject`), a passing record is
+/// re-routed into the `inject` FIFO instead of being emitted here, so it
+/// is ordered behind that partition's already-injected backlog rather
+/// than racing it through `stream::select`.
 fn filtered_broadcast(
     rx: broadcast::Receiver<MetadataEventRecord>,
     state: Arc<SubscriptionState>,
@@ -376,12 +437,27 @@ fn filtered_broadcast(
         loop {
             match rx.recv().await {
                 Ok(record) => {
-                    let pass = {
+                    let action = {
                         let assigned = state.assigned.lock().expect("assigned mutex poisoned");
-                        matches!(assigned.get(&record.partition), Some(&from) if record.offset >= from)
+                        match assigned.get(&record.partition) {
+                            Some(cur) if record.offset >= cur.next => {
+                                if cur.via_inject {
+                                    Forward::Inject
+                                } else {
+                                    Forward::Emit
+                                }
+                            }
+                            _ => Forward::Drop,
+                        }
                     };
-                    if pass {
-                        return Some((record, (rx, state)));
+                    match action {
+                        Forward::Emit => return Some((record, (rx, state))),
+                        Forward::Inject => {
+                            // Queue behind backlog; if the receiver is gone
+                            // the stream is being dropped anyway.
+                            let _ = state.inject.send(record);
+                        }
+                        Forward::Drop => {}
                     }
                 }
                 Err(broadcast::error::RecvError::Lagged(_)) => {
@@ -538,30 +614,65 @@ mod tests {
     #[tokio::test]
     async fn add_mid_stream_delivers_backlog_then_live() {
         let log = InProcessMetadataEventLog::new(2);
-        log.publish(1, Bytes::from_static(b"old0")).await.unwrap();
-        log.publish(1, Bytes::from_static(b"old1")).await.unwrap();
+        // Three backlog records on partition 1 (offsets 0,1,2).
+        for v in [b"old0".as_slice(), b"old1", b"old2"] {
+            log.publish(1, Bytes::copy_from_slice(v)).await.unwrap();
+        }
         let (mut stream, handle) = log.subscribe(vec![PartitionStart {
             partition: 0,
             start_offset: 0,
         }]);
-        // Add partition 1 from offset 1: should deliver backlog "old1"
-        // then a later live append.
+        // Add partition 1 from offset 0, then publish a live append
+        // IMMEDIATELY — without first draining the injected backlog.
+        //
+        // This is the ordering trap. The merged stream is
+        // `stream::select(inject_stream, live)`, which round-robins
+        // between its two inputs when both have a ready item. Under the
+        // OLD behavior the live "new" (offset 3) is emitted by the `live`
+        // input directly, so select interleaves it between backlog items:
+        // old0(inject), new(live), old1(inject), old2(inject) — "new"
+        // jumps ahead of old1/old2, violating per-partition publish
+        // order. The fix routes a just-added partition's live records
+        // through the SAME inject FIFO, so they queue strictly behind the
+        // backlog: old0, old1, old2, new.
         handle.add(PartitionStart {
             partition: 1,
-            start_offset: 1,
+            start_offset: 0,
         });
-        let r = stream.next().await.unwrap();
-        assert_eq!(
-            (r.partition, r.offset, r.payload.as_ref()),
-            (1, 1, b"old1".as_ref())
-        );
         log.publish(1, Bytes::from_static(b"new")).await.unwrap();
-        let r = stream.next().await.unwrap();
+
+        let mut got = Vec::new();
+        for _ in 0..4 {
+            let r = stream.next().await.unwrap();
+            got.push((r.partition, r.offset, r.payload.to_vec()));
+        }
         assert_eq!(
-            (r.partition, r.offset, r.payload.as_ref()),
-            (1, 2, b"new".as_ref())
+            got,
+            vec![
+                (1, 0, b"old0".to_vec()),
+                (1, 1, b"old1".to_vec()),
+                (1, 2, b"old2".to_vec()),
+                (1, 3, b"new".to_vec()),
+            ],
+            "backlog must drain fully (in offset order) before the live append"
         );
         assert!(handle.assigned().contains(&1));
+    }
+
+    #[tokio::test]
+    async fn dropping_handle_evicts_subscription_state() {
+        let log = InProcessMetadataEventLog::new(1);
+        let (_stream, handle) = log.subscribe(vec![PartitionStart {
+            partition: 0,
+            start_offset: 0,
+        }]);
+        assert_eq!(log.inner.subscriptions.lock().unwrap().len(), 1);
+        drop(handle);
+        assert_eq!(
+            log.inner.subscriptions.lock().unwrap().len(),
+            0,
+            "subscription state must be evicted when the handle drops"
+        );
     }
 
     #[tokio::test]

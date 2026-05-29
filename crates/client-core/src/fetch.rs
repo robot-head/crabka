@@ -33,7 +33,11 @@ pub struct FetchedRecord {
 ///
 /// # Errors
 ///
-/// Returns [`ClientError`] on transport / version-negotiation failure.
+/// Returns [`ClientError`] on transport / version-negotiation failure,
+/// or [`ClientError::Server`] when the broker reports a non-zero
+/// partition-level `error_code` (e.g. `OFFSET_OUT_OF_RANGE`,
+/// `NOT_LEADER_OR_FOLLOWER`, `UNKNOWN_TOPIC_ID`) so the caller can react
+/// instead of silently re-fetching the same offset forever.
 pub async fn fetch_partition(
     conn: &Connection,
     topic: &str,
@@ -62,22 +66,32 @@ pub async fn fetch_partition(
             ..Default::default()
         })
         .await?;
-    Ok(decode_fetch_response(&resp, partition))
+    decode_fetch_response(&resp, partition)
 }
 
 /// Decode every v2 `RecordBatch` for `partition` in `resp` into
 /// offset-ordered [`FetchedRecord`]s. Control batches and legacy
 /// (non-v2) payloads are skipped. Socket-free so it is unit-testable
 /// against a hand-built response.
+///
+/// A non-zero partition-level `error_code` is surfaced as
+/// [`ClientError::Server`] rather than swallowed as an empty result,
+/// which would otherwise make a fetch loop re-request the same offset
+/// indefinitely.
 fn decode_fetch_response(
     resp: &crabka_protocol::owned::fetch_response::FetchResponse,
     partition: i32,
-) -> Vec<FetchedRecord> {
+) -> Result<Vec<FetchedRecord>, ClientError> {
     let mut out = Vec::new();
     for t in &resp.responses {
         for p in &t.partitions {
             if p.partition_index != partition {
                 continue;
+            }
+            if p.error_code != 0 {
+                return Err(ClientError::Server {
+                    error_code: p.error_code,
+                });
             }
             let Some(payload) = &p.records else { continue };
             let Some(batches) = payload.as_v2() else {
@@ -98,7 +112,7 @@ fn decode_fetch_response(
         }
     }
     out.sort_by_key(|r| r.offset);
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -152,11 +166,34 @@ mod tests {
             }],
             ..Default::default()
         };
-        let got = decode_fetch_response(&resp, 0);
+        let got = decode_fetch_response(&resp, 0).unwrap();
         assert_eq!(got.len(), 2);
         assert_eq!(got[0].offset, 5);
         assert_eq!(got[0].value.as_deref(), Some(b"a".as_ref()));
         assert_eq!(got[1].offset, 6);
         assert_eq!(got[1].value.as_deref(), Some(b"b".as_ref()));
+    }
+
+    #[test]
+    fn partition_error_code_surfaces_as_server_error() {
+        // OFFSET_OUT_OF_RANGE (1) on the requested partition must become
+        // an Err rather than an empty Vec, otherwise the caller would
+        // re-fetch the same offset forever.
+        let resp = FetchResponse {
+            responses: vec![FetchableTopicResponse {
+                topic: "t".into(),
+                partitions: vec![PartitionData {
+                    partition_index: 0,
+                    error_code: 1,
+                    high_watermark: 0,
+                    records: None,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let err = decode_fetch_response(&resp, 0).unwrap_err();
+        assert!(matches!(err, ClientError::Server { error_code: 1 }));
     }
 }
