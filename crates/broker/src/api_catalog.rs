@@ -1,9 +1,9 @@
 //! Public catalog of the Kafka protocol APIs this broker advertises.
 //!
-//! Single source of truth for both the live `ApiVersions` (api_key 18)
+//! Single source of truth for both the live `ApiVersions` (`api_key` 18)
 //! response and the generated protocol-API reference page. The handler in
 //! `handlers::api_versions` calls [`supported_apis`]; `crabka-docgen` reads
-//! the same list out-of-process-free.
+//! the same list without spawning the broker binary.
 
 use crabka_protocol::owned::api_versions_response::ApiVersion;
 
@@ -20,6 +20,7 @@ macro_rules! v {
 
 /// The full advertised API set, mirrored from each API's generated
 /// `MIN_VERSION`/`MAX_VERSION` constants. Update when adding a handler.
+#[must_use]
 pub fn supported_apis() -> Vec<ApiVersion> {
     let mut apis = client_facing_apis();
     apis.extend(admin_apis());

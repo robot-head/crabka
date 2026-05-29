@@ -293,6 +293,7 @@ pub struct TopicConfigDoc {
 }
 
 /// The full whitelist documented on the topic-configs reference page.
+#[must_use]
 pub fn topic_config_docs() -> Vec<TopicConfigDoc> {
     vec![
         TopicConfigDoc {
@@ -395,12 +396,43 @@ mod doc_tests {
 
     #[test]
     fn topic_config_docs_cover_known_keys() {
+        use std::collections::HashSet;
         let docs = topic_config_docs();
-        assert!(!docs.is_empty());
-        let keys: Vec<&str> = docs.iter().map(|d| d.key).collect();
-        assert!(keys.contains(&"retention.ms"));
-        assert!(keys.contains(&"min.insync.replicas"));
-        assert!(keys.contains(&"cleanup.policy"));
+        let doc_keys: HashSet<&str> = docs.iter().map(|d| d.key).collect();
+        // No duplicate keys in the doc table.
+        assert_eq!(
+            doc_keys.len(),
+            docs.len(),
+            "duplicate key in topic_config_docs"
+        );
+        // Every documented key is recognized by the validator.
+        for k in &doc_keys {
+            assert!(
+                is_recognized(k),
+                "documented key `{k}` not recognized by validator"
+            );
+        }
+        // Every recognized key is documented.
+        for k in [
+            RETENTION_MS,
+            RETENTION_BYTES,
+            SEGMENT_BYTES,
+            CLEANUP_POLICY,
+            COMPRESSION_TYPE,
+            MIN_INSYNC_REPLICAS,
+            UNCLEAN_LEADER_ELECTION_ENABLE,
+            UNCLEAN_RECOVERY_STRATEGY,
+            REMOTE_STORAGE_ENABLE,
+            LOCAL_RETENTION_MS,
+            LOCAL_RETENTION_BYTES,
+            crate::throttle::LEADER_THROTTLED_REPLICAS_KEY,
+            crate::throttle::FOLLOWER_THROTTLED_REPLICAS_KEY,
+        ] {
+            assert!(
+                doc_keys.contains(k),
+                "recognized key `{k}` missing from topic_config_docs"
+            );
+        }
         assert!(docs.iter().all(|d| !d.description.is_empty()));
     }
 }
