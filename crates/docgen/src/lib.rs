@@ -3,5 +3,6 @@
 //! configs, protocol API catalog).
 
 pub mod broker;
+pub mod emit;
 pub mod operator;
 pub mod schema_md;
