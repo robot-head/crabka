@@ -436,6 +436,9 @@ pub struct FileOAuthBearerConfig {
     pub jwks_ignore_key_use: Option<bool>,
 }
 
+/// Kafka protocol default for `sasl.kerberos.service.name`.
+const DEFAULT_KERBEROS_SERVICE_NAME: &str = "kafka";
+
 /// TOML shape of `[gssapi]`. Maps to
 /// [`crabka_security::gssapi::GssapiConfig`]. `principal_to_local_rules`
 /// are parsed into `name::Rule` at `apply_to` time.
@@ -449,8 +452,11 @@ pub struct FileGssapiConfig {
     /// `auth_to_local` rule specs, applied in order (first match wins).
     #[serde(default)]
     pub principal_to_local_rules: Vec<String>,
+    /// Default Kerberos realm, used for principals that omit their realm.
     #[serde(default)]
     pub realm: Option<String>,
+    /// KDC endpoint (e.g. `tcp://kdc:88`) that bypasses krb5.conf discovery;
+    /// falls back to krb5.conf when omitted.
     #[serde(default)]
     pub kdc: Option<String>,
 }
@@ -943,7 +949,9 @@ impl FileConfig {
             }
             cfg.gssapi = Some(crabka_security::gssapi::GssapiConfig {
                 keytab_path: g.keytab_path,
-                service_name: g.service_name.unwrap_or_else(|| "kafka".to_string()),
+                service_name: g
+                    .service_name
+                    .unwrap_or_else(|| DEFAULT_KERBEROS_SERVICE_NAME.to_string()),
                 principal_to_local_rules: rules,
                 realm: g.realm,
                 kdc: g.kdc,
@@ -960,7 +968,8 @@ impl FileConfig {
                 } => crate::config::InterBrokerCredentials::Gssapi {
                     keytab_path,
                     client_principal,
-                    service_name: service_name.unwrap_or_else(|| "kafka".to_string()),
+                    service_name: service_name
+                        .unwrap_or_else(|| DEFAULT_KERBEROS_SERVICE_NAME.to_string()),
                     kdc_url,
                 },
             });
@@ -2062,6 +2071,11 @@ kdc = "tcp://kdc:88"
         );
         assert_eq!(g.service_name, "kafka");
         assert_eq!(g.principal_to_local_rules.len(), 2);
+        // Second rule in the fixture is the bare DEFAULT rule.
+        assert!(matches!(
+            g.principal_to_local_rules[1],
+            crabka_security::gssapi::name::Rule::Default
+        ));
         assert_eq!(g.realm.as_deref(), Some("EXAMPLE.COM"));
         assert_eq!(g.kdc.as_deref(), Some("tcp://kdc:88"));
     }
@@ -2133,5 +2147,25 @@ kdc_url = "tcp://kdc:88"
 type = "carrier-pigeon"
 "#;
         assert!(toml::from_str::<FileConfig>(src).is_err());
+    }
+
+    #[test]
+    fn apply_to_inter_broker_credentials_defaults_service_name_to_kafka() {
+        let src = r#"
+[inter_broker_credentials]
+type = "gssapi"
+keytab_path = "/k/keytab"
+client_principal = "kafka@EXAMPLE.COM"
+kdc_url = "tcp://kdc:88"
+"#;
+        let file: FileConfig = toml::from_str(src).unwrap();
+        let mut cfg = crate::config::BrokerConfig::default();
+        file.apply_to(&mut cfg).unwrap();
+        match cfg.inter_broker_credentials.unwrap() {
+            crate::config::InterBrokerCredentials::Gssapi { service_name, .. } => {
+                assert_eq!(service_name, "kafka");
+            }
+            other => panic!("expected Gssapi, got {other:?}"),
+        }
     }
 }
