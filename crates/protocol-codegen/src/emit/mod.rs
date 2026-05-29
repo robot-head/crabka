@@ -21,3 +21,77 @@ pub struct EmittedMessage {
     pub primary: String,
     pub commons: Vec<(String, String)>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ir, name_conv, validate};
+    use std::path::PathBuf;
+
+    fn schemas_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("protocol")
+            .join("schemas")
+    }
+
+    /// Drive the entire emit pipeline over a real schema directory, exercising
+    /// every emitter (owned, borrowed, wrappers, `default_json` /
+    /// `protocol_request` reached via `owned::emit`, common structs, `mod.rs`,
+    /// `ApiKey` enum, and the differential dispatch table) the same way
+    /// `main::run` does — but in the library's own test target so the work
+    /// counts toward `--lib` coverage.
+    fn emit_all(dir: &PathBuf, namespace: Option<&str>) {
+        let specs = ir::load_dir(dir).unwrap();
+        validate::validate(&specs).unwrap();
+        let sha = "0000000000000000000000000000000000000000";
+
+        let active: Vec<&ir::MessageSpec> = specs
+            .iter()
+            .filter(|s| !s.valid_versions.is_empty())
+            .collect();
+        assert!(!active.is_empty(), "no active specs in {dir:?}");
+
+        for s in &active {
+            let owned = owned::emit(s, sha).unwrap();
+            assert!(owned.primary.contains("MIN_VERSION") || owned.primary.contains("struct"));
+            let borrowed = borrowed::emit(s, sha, namespace).unwrap();
+            assert!(!borrowed.primary.is_empty());
+            for (_, body) in owned.commons.iter().chain(borrowed.commons.iter()) {
+                assert!(!body.is_empty());
+            }
+            if wrappers::should_emit_wrapper(s) {
+                let w_owned = wrappers::emit(s, wrappers::Flavor::Owned, sha, namespace);
+                let w_borrowed = wrappers::emit(s, wrappers::Flavor::Borrowed, sha, namespace);
+                assert!(w_owned.contains("mod tests"));
+                assert!(w_borrowed.contains("mod tests"));
+                assert!(!name_conv::module_name(&s.name).is_empty());
+            }
+        }
+
+        for flavor in [wrappers::Flavor::Owned, wrappers::Flavor::Borrowed] {
+            for has_common in [false, true] {
+                let m = mod_rs::emit(&active, flavor, sha, has_common);
+                assert!(m.contains("pub mod"));
+            }
+        }
+
+        if namespace.is_none() {
+            assert!(api_key_enum::emit(&specs, sha).contains("ApiKey"));
+            assert!(!differential_table::emit(&specs, sha).is_empty());
+        }
+        assert!(common::banner(sha).contains(sha));
+    }
+
+    #[test]
+    fn emit_all_top_level_schemas() {
+        emit_all(&schemas_dir(), None);
+    }
+
+    #[test]
+    fn emit_all_namespaced_schemas() {
+        let dir = schemas_dir().join("versions").join("kafka_3_6_2");
+        emit_all(&dir, Some("kafka_3_6_2"));
+    }
+}

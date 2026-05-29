@@ -95,6 +95,17 @@ impl<'de> DecodeBorrow<'de> for CreatePartitionsResponse<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> CreatePartitionsResponse<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.results = vec![CreatePartitionsTopicResult::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreatePartitionsTopicResult<'a> {
     pub name: &'a str,
@@ -164,5 +175,17 @@ impl<'de> DecodeBorrow<'de> for CreatePartitionsTopicResult<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> CreatePartitionsTopicResult<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.name = "x"; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.error_message = Some("x"); }
+        m
     }
 }

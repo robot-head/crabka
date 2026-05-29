@@ -80,6 +80,19 @@ impl<'de> Decode<'de> for OffsetFetchRequest {
     }
 }
 
+#[cfg(test)]
+impl OffsetFetchRequest {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 && version <= 7 { m.group_id = "x".to_string(); }
+        if version >= 0 && version <= 7 { m.topics = Some(vec![OffsetFetchRequestTopic::populated(version)]); }
+        if version >= 8 { m.groups = vec![OffsetFetchRequestGroup::populated(version)]; }
+        if version >= 7 { m.require_stable = true; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct OffsetFetchRequestTopic {
     pub name: String,
@@ -123,6 +136,17 @@ impl<'de> Decode<'de> for OffsetFetchRequestTopic {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl OffsetFetchRequestTopic {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 && version <= 7 { m.name = "x".to_string(); }
+        if version >= 0 && version <= 7 { m.partition_indexes = vec![1i32]; }
+        m
     }
 }
 
@@ -192,6 +216,19 @@ impl<'de> Decode<'de> for OffsetFetchRequestGroup {
     }
 }
 
+#[cfg(test)]
+impl OffsetFetchRequestGroup {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 8 { m.group_id = "x".to_string(); }
+        if version >= 9 { m.member_id = Some("x".to_string()); }
+        if version >= 9 { m.member_epoch = 1i32; }
+        if version >= 8 { m.topics = Some(vec![OffsetFetchRequestTopics::populated(version)]); }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct OffsetFetchRequestTopics {
     pub name: String,
@@ -239,6 +276,18 @@ impl<'de> Decode<'de> for OffsetFetchRequestTopics {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl OffsetFetchRequestTopics {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 8 && version <= 9 { m.name = "x".to_string(); }
+        if version >= 10 { m.topic_id = crate::primitives::uuid::Uuid([1u8; 16]); }
+        if version >= 8 { m.partition_indexes = vec![1i32]; }
+        m
     }
 }
 

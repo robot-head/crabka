@@ -66,6 +66,16 @@ impl<'de> Decode<'de> for WriteTxnMarkersResponse {
     }
 }
 
+#[cfg(test)]
+impl WriteTxnMarkersResponse {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.markers = vec![WritableTxnMarkerResult::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct WritableTxnMarkerResult {
     pub producer_id: i64,
@@ -109,6 +119,17 @@ impl<'de> Decode<'de> for WritableTxnMarkerResult {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl WritableTxnMarkerResult {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.producer_id = 1i64; }
+        if version >= 0 { m.topics = vec![WritableTxnMarkerTopicResult::populated(version)]; }
+        m
     }
 }
 
@@ -158,6 +179,17 @@ impl<'de> Decode<'de> for WritableTxnMarkerTopicResult {
     }
 }
 
+#[cfg(test)]
+impl WritableTxnMarkerTopicResult {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.name = "x".to_string(); }
+        if version >= 0 { m.partitions = vec![WritableTxnMarkerPartitionResult::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct WritableTxnMarkerPartitionResult {
     pub partition_index: i32,
@@ -201,6 +233,17 @@ impl<'de> Decode<'de> for WritableTxnMarkerPartitionResult {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl WritableTxnMarkerPartitionResult {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.partition_index = 1i32; }
+        if version >= 0 { m.error_code = 1i16; }
+        m
     }
 }
 

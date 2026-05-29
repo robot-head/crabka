@@ -68,6 +68,16 @@ impl<'de> Decode<'de> for DeleteAclsRequest {
     }
 }
 
+#[cfg(test)]
+impl DeleteAclsRequest {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.filters = vec![DeleteAclsFilter::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeleteAclsFilter {
     pub resource_type_filter: i8,
@@ -146,6 +156,22 @@ impl<'de> Decode<'de> for DeleteAclsFilter {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl DeleteAclsFilter {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.resource_type_filter = 1i8; }
+        if version >= 0 { m.resource_name_filter = Some("x".to_string()); }
+        if version >= 1 { m.pattern_type_filter = 1i8; }
+        if version >= 0 { m.principal_filter = Some("x".to_string()); }
+        if version >= 0 { m.host_filter = Some("x".to_string()); }
+        if version >= 0 { m.operation = 1i8; }
+        if version >= 0 { m.permission_type = 1i8; }
+        m
     }
 }
 

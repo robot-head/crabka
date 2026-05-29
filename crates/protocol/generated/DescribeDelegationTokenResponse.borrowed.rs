@@ -100,6 +100,18 @@ impl<'de> DecodeBorrow<'de> for DescribeDelegationTokenResponse<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> DescribeDelegationTokenResponse<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.tokens = vec![DescribedDelegationToken::populated(version)]; }
+        if version >= 0 { m.throttle_time_ms = 1i32; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DescribedDelegationToken<'a> {
     pub principal_type: &'a str,
@@ -214,6 +226,25 @@ impl<'de> DecodeBorrow<'de> for DescribedDelegationToken<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> DescribedDelegationToken<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.principal_type = "x"; }
+        if version >= 0 { m.principal_name = "x"; }
+        if version >= 3 { m.token_requester_principal_type = "x"; }
+        if version >= 3 { m.token_requester_principal_name = "x"; }
+        if version >= 0 { m.issue_timestamp = 1i64; }
+        if version >= 0 { m.expiry_timestamp = 1i64; }
+        if version >= 0 { m.max_timestamp = 1i64; }
+        if version >= 0 { m.token_id = "x"; }
+        if version >= 0 { m.hmac = &b"x"[..]; }
+        if version >= 0 { m.renewers = vec![DescribedDelegationTokenRenewer::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DescribedDelegationTokenRenewer<'a> {
     pub principal_type: &'a str,
@@ -277,5 +308,16 @@ impl<'de> DecodeBorrow<'de> for DescribedDelegationTokenRenewer<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> DescribedDelegationTokenRenewer<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.principal_type = "x"; }
+        if version >= 0 { m.principal_name = "x"; }
+        m
     }
 }

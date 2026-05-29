@@ -105,3 +105,17 @@ impl<'de> DecodeBorrow<'de> for PushTelemetryRequest<'de> {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+impl<'a> PushTelemetryRequest<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.client_instance_id = crate::primitives::uuid::Uuid([1u8; 16]); }
+        if version >= 0 { m.subscription_id = 1i32; }
+        if version >= 0 { m.terminating = true; }
+        if version >= 0 { m.compression_type = 1i8; }
+        if version >= 0 { m.metrics = &b"x"[..]; }
+        m
+    }
+}

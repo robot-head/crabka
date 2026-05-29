@@ -72,6 +72,17 @@ impl<'de> Decode<'de> for DescribeClientQuotasRequest {
     }
 }
 
+#[cfg(test)]
+impl DescribeClientQuotasRequest {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.components = vec![ComponentData::populated(version)]; }
+        if version >= 0 { m.strict = true; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ComponentData {
     pub entity_type: String,
@@ -119,6 +130,18 @@ impl<'de> Decode<'de> for ComponentData {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl ComponentData {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.entity_type = "x".to_string(); }
+        if version >= 0 { m.match_type = 1i8; }
+        if version >= 0 { m.match_ = Some("x".to_string()); }
+        m
     }
 }
 

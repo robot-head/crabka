@@ -62,6 +62,16 @@ impl<'de> Decode<'de> for ListConfigResourcesRequest {
     }
 }
 
+#[cfg(test)]
+impl ListConfigResourcesRequest {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 1 { m.resource_types = vec![1i8]; }
+        m
+    }
+}
+
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
 /// Only includes fields valid for the given version.
 #[must_use]

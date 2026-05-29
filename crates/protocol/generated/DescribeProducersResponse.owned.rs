@@ -72,6 +72,17 @@ impl<'de> Decode<'de> for DescribeProducersResponse {
     }
 }
 
+#[cfg(test)]
+impl DescribeProducersResponse {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.topics = vec![TopicResponse::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TopicResponse {
     pub name: String,
@@ -115,6 +126,17 @@ impl<'de> Decode<'de> for TopicResponse {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl TopicResponse {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.name = "x".to_string(); }
+        if version >= 0 { m.partitions = vec![PartitionResponse::populated(version)]; }
+        m
     }
 }
 
@@ -169,6 +191,19 @@ impl<'de> Decode<'de> for PartitionResponse {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl PartitionResponse {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.partition_index = 1i32; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.error_message = Some("x".to_string()); }
+        if version >= 0 { m.active_producers = vec![ProducerState::populated(version)]; }
+        m
     }
 }
 
@@ -245,6 +280,21 @@ impl<'de> Decode<'de> for ProducerState {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl ProducerState {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.producer_id = 1i64; }
+        if version >= 0 { m.producer_epoch = 1i32; }
+        if version >= 0 { m.last_sequence = 1i32; }
+        if version >= 0 { m.last_timestamp = 1i64; }
+        if version >= 0 { m.coordinator_epoch = 1i32; }
+        if version >= 0 { m.current_txn_start_offset = 1i64; }
+        m
     }
 }
 

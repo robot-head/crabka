@@ -108,3 +108,16 @@ impl<'de> DecodeBorrow<'de> for SaslAuthenticateResponse<'de> {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+impl<'a> SaslAuthenticateResponse<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.error_message = Some("x"); }
+        if version >= 0 { m.auth_bytes = &b"x"[..]; }
+        if version >= 1 { m.session_lifetime_ms = 1i64; }
+        m
+    }
+}

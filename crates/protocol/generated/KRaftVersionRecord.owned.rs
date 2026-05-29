@@ -64,6 +64,17 @@ impl<'de> Decode<'de> for KRaftVersionRecord {
     }
 }
 
+#[cfg(test)]
+impl KRaftVersionRecord {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.version = 1i16; }
+        if version >= 0 { m.k_raft_version = 1i16; }
+        m
+    }
+}
+
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
 /// Only includes fields valid for the given version.
 #[must_use]

@@ -95,3 +95,15 @@ impl<'de> DecodeBorrow<'de> for DefaultPrincipalData<'de> {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+impl<'a> DefaultPrincipalData<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.type_ = "x"; }
+        if version >= 0 { m.name = "x"; }
+        if version >= 0 { m.token_authenticated = true; }
+        m
+    }
+}

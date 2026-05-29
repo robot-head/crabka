@@ -81,6 +81,19 @@ impl<'de> Decode<'de> for ProduceRequest {
     }
 }
 
+#[cfg(test)]
+impl ProduceRequest {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 3 { m.transactional_id = Some("x".to_string()); }
+        if version >= 0 { m.acks = 1i16; }
+        if version >= 0 { m.timeout_ms = 1i32; }
+        if version >= 0 { m.topic_data = vec![TopicProduceData::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TopicProduceData {
     pub name: String,
@@ -127,6 +140,17 @@ impl<'de> Decode<'de> for TopicProduceData {
     }
 }
 
+#[cfg(test)]
+impl TopicProduceData {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.name = "x".to_string(); }
+        if version >= 0 { m.partition_data = vec![PartitionProduceData::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PartitionProduceData {
     pub index: i32,
@@ -170,6 +194,16 @@ impl<'de> Decode<'de> for PartitionProduceData {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl PartitionProduceData {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.index = 1i32; }
+        m
     }
 }
 

@@ -97,3 +97,15 @@ impl<'de> DecodeBorrow<'de> for FindCoordinatorRequest<'de> {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+impl<'a> FindCoordinatorRequest<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 && version <= 3 { m.key = "x"; }
+        if version >= 1 { m.key_type = 1i8; }
+        if version >= 4 { m.coordinator_keys = vec!["x"]; }
+        m
+    }
+}

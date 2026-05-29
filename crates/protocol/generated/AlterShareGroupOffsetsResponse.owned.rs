@@ -80,6 +80,19 @@ impl<'de> Decode<'de> for AlterShareGroupOffsetsResponse {
     }
 }
 
+#[cfg(test)]
+impl AlterShareGroupOffsetsResponse {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.error_message = Some("x".to_string()); }
+        if version >= 0 { m.responses = vec![AlterShareGroupOffsetsResponseTopic::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AlterShareGroupOffsetsResponseTopic {
     pub topic_name: String,
@@ -130,6 +143,18 @@ impl<'de> Decode<'de> for AlterShareGroupOffsetsResponseTopic {
     }
 }
 
+#[cfg(test)]
+impl AlterShareGroupOffsetsResponseTopic {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topic_name = "x".to_string(); }
+        if version >= 0 { m.topic_id = crate::primitives::uuid::Uuid([1u8; 16]); }
+        if version >= 0 { m.partitions = vec![AlterShareGroupOffsetsResponsePartition::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AlterShareGroupOffsetsResponsePartition {
     pub partition_index: i32,
@@ -177,6 +202,18 @@ impl<'de> Decode<'de> for AlterShareGroupOffsetsResponsePartition {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl AlterShareGroupOffsetsResponsePartition {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.partition_index = 1i32; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.error_message = Some("x".to_string()); }
+        m
     }
 }
 

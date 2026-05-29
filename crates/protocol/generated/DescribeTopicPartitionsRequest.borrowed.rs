@@ -98,6 +98,18 @@ impl<'de> DecodeBorrow<'de> for DescribeTopicPartitionsRequest<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> DescribeTopicPartitionsRequest<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topics = vec![TopicRequest::populated(version)]; }
+        if version >= 0 { m.response_partition_limit = 1i32; }
+        if version >= 0 { m.cursor = Some(Cursor::populated(version)); }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopicRequest<'a> {
     pub name: &'a str,
@@ -155,6 +167,16 @@ impl<'de> DecodeBorrow<'de> for TopicRequest<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> TopicRequest<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.name = "x"; }
+        m
     }
 }
 
@@ -221,5 +243,16 @@ impl<'de> DecodeBorrow<'de> for Cursor<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> Cursor<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topic_name = "x"; }
+        if version >= 0 { m.partition_index = 1i32; }
+        m
     }
 }

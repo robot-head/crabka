@@ -99,6 +99,20 @@ impl<'de> DecodeBorrow<'de> for ConsumerProtocolSubscription<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> ConsumerProtocolSubscription<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topics = vec!["x"]; }
+        if version >= 0 { m.user_data = Some(&b"x"[..]); }
+        if version >= 1 { m.owned_partitions = vec![TopicPartition::populated(version)]; }
+        if version >= 2 { m.generation_id = 1i32; }
+        if version >= 3 { m.rack_id = Some("x"); }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopicPartition<'a> {
     pub topic: &'a str,
@@ -149,5 +163,16 @@ impl<'de> DecodeBorrow<'de> for TopicPartition<'de> {
         if version >= 1 { out.topic = if flex { get_compact_string_borrowed(buf)? } else { get_string_borrowed(buf)? }; }
         if version >= 1 { out.partitions = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(get_i32(buf)?); } v }; }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> TopicPartition<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 1 { m.topic = "x"; }
+        if version >= 1 { m.partitions = vec![1i32]; }
+        m
     }
 }

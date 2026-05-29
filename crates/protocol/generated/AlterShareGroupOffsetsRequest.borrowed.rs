@@ -92,6 +92,17 @@ impl<'de> DecodeBorrow<'de> for AlterShareGroupOffsetsRequest<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> AlterShareGroupOffsetsRequest<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.group_id = "x"; }
+        if version >= 0 { m.topics = vec![AlterShareGroupOffsetsRequestTopic::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterShareGroupOffsetsRequestTopic<'a> {
     pub topic_name: &'a str,
@@ -158,6 +169,17 @@ impl<'de> DecodeBorrow<'de> for AlterShareGroupOffsetsRequestTopic<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> AlterShareGroupOffsetsRequestTopic<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topic_name = "x"; }
+        if version >= 0 { m.partitions = vec![AlterShareGroupOffsetsRequestPartition::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterShareGroupOffsetsRequestPartition {
     pub partition_index: i32,
@@ -221,5 +243,16 @@ impl<'de> DecodeBorrow<'de> for AlterShareGroupOffsetsRequestPartition {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl AlterShareGroupOffsetsRequestPartition {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.partition_index = 1i32; }
+        if version >= 0 { m.start_offset = 1i64; }
+        m
     }
 }

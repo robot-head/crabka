@@ -133,6 +133,23 @@ impl<'de> DecodeBorrow<'de> for JoinGroupRequest<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> JoinGroupRequest<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.group_id = "x"; }
+        if version >= 0 { m.session_timeout_ms = 1i32; }
+        if version >= 1 { m.rebalance_timeout_ms = 1i32; }
+        if version >= 0 { m.member_id = "x"; }
+        if version >= 5 { m.group_instance_id = Some("x"); }
+        if version >= 0 { m.protocol_type = "x"; }
+        if version >= 0 { m.protocols = vec![JoinGroupRequestProtocol::populated(version)]; }
+        if version >= 8 { m.reason = Some("x"); }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JoinGroupRequestProtocol<'a> {
     pub name: &'a str,
@@ -196,5 +213,16 @@ impl<'de> DecodeBorrow<'de> for JoinGroupRequestProtocol<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> JoinGroupRequestProtocol<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.name = "x"; }
+        if version >= 0 { m.metadata = &b"x"[..]; }
+        m
     }
 }

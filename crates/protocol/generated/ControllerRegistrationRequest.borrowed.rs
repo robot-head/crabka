@@ -110,6 +110,20 @@ impl<'de> DecodeBorrow<'de> for ControllerRegistrationRequest<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> ControllerRegistrationRequest<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.controller_id = 1i32; }
+        if version >= 0 { m.incarnation_id = crate::primitives::uuid::Uuid([1u8; 16]); }
+        if version >= 0 { m.zk_migration_ready = true; }
+        if version >= 0 { m.listeners = vec![Listener::populated(version)]; }
+        if version >= 0 { m.features = vec![Feature::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Listener<'a> {
     pub name: &'a str,
@@ -188,6 +202,19 @@ impl<'de> DecodeBorrow<'de> for Listener<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> Listener<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.name = "x"; }
+        if version >= 0 { m.host = "x"; }
+        if version >= 0 { m.port = 1u16; }
+        if version >= 0 { m.security_protocol = 1i16; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Feature<'a> {
     pub name: &'a str,
@@ -257,5 +284,17 @@ impl<'de> DecodeBorrow<'de> for Feature<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> Feature<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.name = "x"; }
+        if version >= 0 { m.min_supported_version = 1i16; }
+        if version >= 0 { m.max_supported_version = 1i16; }
+        m
     }
 }

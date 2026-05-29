@@ -118,3 +118,18 @@ impl<'de> DecodeBorrow<'de> for InitProducerIdRequest<'de> {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+impl<'a> InitProducerIdRequest<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.transactional_id = Some("x"); }
+        if version >= 0 { m.transaction_timeout_ms = 1i32; }
+        if version >= 3 { m.producer_id = 1i64; }
+        if version >= 3 { m.producer_epoch = 1i16; }
+        if version >= 6 { m.enable2_pc = true; }
+        if version >= 6 { m.keep_prepared_txn = true; }
+        m
+    }
+}

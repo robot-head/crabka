@@ -84,6 +84,18 @@ impl<'de> Decode<'de> for EndQuorumEpochResponse {
     }
 }
 
+#[cfg(test)]
+impl EndQuorumEpochResponse {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.topics = vec![TopicData::populated(version)]; }
+        if version >= 1 { m.node_endpoints = vec![NodeEndpoint::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TopicData {
     pub topic_name: String,
@@ -127,6 +139,17 @@ impl<'de> Decode<'de> for TopicData {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl TopicData {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topic_name = "x".to_string(); }
+        if version >= 0 { m.partitions = vec![PartitionData::populated(version)]; }
+        m
     }
 }
 
@@ -184,6 +207,19 @@ impl<'de> Decode<'de> for PartitionData {
     }
 }
 
+#[cfg(test)]
+impl PartitionData {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.partition_index = 1i32; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.leader_id = 1i32; }
+        if version >= 0 { m.leader_epoch = 1i32; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct NodeEndpoint {
     pub node_id: i32,
@@ -231,6 +267,18 @@ impl<'de> Decode<'de> for NodeEndpoint {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl NodeEndpoint {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 1 { m.node_id = 1i32; }
+        if version >= 1 { m.host = "x".to_string(); }
+        if version >= 1 { m.port = 1u16; }
+        m
     }
 }
 

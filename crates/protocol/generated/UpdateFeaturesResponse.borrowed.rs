@@ -107,6 +107,19 @@ impl<'de> DecodeBorrow<'de> for UpdateFeaturesResponse<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> UpdateFeaturesResponse<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.error_message = Some("x"); }
+        if version >= 0 && version <= 1 { m.results = vec![UpdatableFeatureResult::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdatableFeatureResult<'a> {
     pub feature: &'a str,
@@ -176,5 +189,17 @@ impl<'de> DecodeBorrow<'de> for UpdatableFeatureResult<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> UpdatableFeatureResult<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.feature = "x"; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.error_message = Some("x"); }
+        m
     }
 }

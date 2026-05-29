@@ -74,6 +74,18 @@ impl<'de> Decode<'de> for DescribeLogDirsResponse {
     }
 }
 
+#[cfg(test)]
+impl DescribeLogDirsResponse {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.throttle_time_ms = 1i32; }
+        if version >= 3 { m.error_code = 1i16; }
+        if version >= 0 { m.results = vec![DescribeLogDirsResult::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DescribeLogDirsResult {
     pub error_code: i16,
@@ -150,6 +162,21 @@ impl<'de> Decode<'de> for DescribeLogDirsResult {
     }
 }
 
+#[cfg(test)]
+impl DescribeLogDirsResult {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.log_dir = "x".to_string(); }
+        if version >= 0 { m.topics = vec![DescribeLogDirsTopic::populated(version)]; }
+        if version >= 4 { m.total_bytes = 1i64; }
+        if version >= 4 { m.usable_bytes = 1i64; }
+        if version >= 5 { m.is_cordoned = true; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DescribeLogDirsTopic {
     pub name: String,
@@ -193,6 +220,17 @@ impl<'de> Decode<'de> for DescribeLogDirsTopic {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl DescribeLogDirsTopic {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.name = "x".to_string(); }
+        if version >= 0 { m.partitions = vec![DescribeLogDirsPartition::populated(version)]; }
+        m
     }
 }
 
@@ -247,6 +285,19 @@ impl<'de> Decode<'de> for DescribeLogDirsPartition {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl DescribeLogDirsPartition {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.partition_index = 1i32; }
+        if version >= 0 { m.partition_size = 1i64; }
+        if version >= 0 { m.offset_lag = 1i64; }
+        if version >= 0 { m.is_future_key = true; }
+        m
     }
 }
 

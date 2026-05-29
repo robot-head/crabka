@@ -107,6 +107,19 @@ impl<'de> DecodeBorrow<'de> for DescribeUserScramCredentialsResponse<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> DescribeUserScramCredentialsResponse<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.error_message = Some("x"); }
+        if version >= 0 { m.results = vec![DescribeUserScramCredentialsResult::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DescribeUserScramCredentialsResult<'a> {
     pub user: &'a str,
@@ -185,6 +198,19 @@ impl<'de> DecodeBorrow<'de> for DescribeUserScramCredentialsResult<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> DescribeUserScramCredentialsResult<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.user = "x"; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.error_message = Some("x"); }
+        if version >= 0 { m.credential_infos = vec![CredentialInfo::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialInfo {
     pub mechanism: i8,
@@ -248,5 +274,16 @@ impl<'de> DecodeBorrow<'de> for CredentialInfo {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl CredentialInfo {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.mechanism = 1i8; }
+        if version >= 0 { m.iterations = 1i32; }
+        m
     }
 }

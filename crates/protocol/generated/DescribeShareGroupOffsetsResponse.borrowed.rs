@@ -95,6 +95,17 @@ impl<'de> DecodeBorrow<'de> for DescribeShareGroupOffsetsResponse<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> DescribeShareGroupOffsetsResponse<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.groups = vec![DescribeShareGroupOffsetsResponseGroup::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DescribeShareGroupOffsetsResponseGroup<'a> {
     pub group_id: &'a str,
@@ -173,6 +184,19 @@ impl<'de> DecodeBorrow<'de> for DescribeShareGroupOffsetsResponseGroup<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> DescribeShareGroupOffsetsResponseGroup<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.group_id = "x"; }
+        if version >= 0 { m.topics = vec![DescribeShareGroupOffsetsResponseTopic::populated(version)]; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.error_message = Some("x"); }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DescribeShareGroupOffsetsResponseTopic<'a> {
     pub topic_name: &'a str,
@@ -242,6 +266,18 @@ impl<'de> DecodeBorrow<'de> for DescribeShareGroupOffsetsResponseTopic<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> DescribeShareGroupOffsetsResponseTopic<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topic_name = "x"; }
+        if version >= 0 { m.topic_id = crate::primitives::uuid::Uuid([1u8; 16]); }
+        if version >= 0 { m.partitions = vec![DescribeShareGroupOffsetsResponsePartition::populated(version)]; }
+        m
     }
 }
 
@@ -332,5 +368,20 @@ impl<'de> DecodeBorrow<'de> for DescribeShareGroupOffsetsResponsePartition<'de> 
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> DescribeShareGroupOffsetsResponsePartition<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.partition_index = 1i32; }
+        if version >= 0 { m.start_offset = 1i64; }
+        if version >= 0 { m.leader_epoch = 1i32; }
+        if version >= 1 { m.lag = 1i64; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.error_message = Some("x"); }
+        m
     }
 }

@@ -63,3 +63,13 @@ impl<'de> DecodeBorrow<'de> for EndTxnMarker {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+impl EndTxnMarker {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.coordinator_epoch = 1i32; }
+        m
+    }
+}

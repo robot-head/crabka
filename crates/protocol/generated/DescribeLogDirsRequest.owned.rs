@@ -66,6 +66,16 @@ impl<'de> Decode<'de> for DescribeLogDirsRequest {
     }
 }
 
+#[cfg(test)]
+impl DescribeLogDirsRequest {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topics = Some(vec![DescribableLogDirTopic::populated(version)]); }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DescribableLogDirTopic {
     pub topic: String,
@@ -109,6 +119,17 @@ impl<'de> Decode<'de> for DescribableLogDirTopic {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl DescribableLogDirTopic {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topic = "x".to_string(); }
+        if version >= 0 { m.partitions = vec![1i32]; }
+        m
     }
 }
 

@@ -53,3 +53,14 @@ impl<'de> Decode<'de> for KeyValue {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+impl KeyValue {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.key = "x".to_string(); }
+        if version >= 0 { m.value = "x".to_string(); }
+        m
+    }
+}

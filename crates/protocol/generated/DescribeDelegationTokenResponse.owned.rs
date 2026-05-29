@@ -75,6 +75,18 @@ impl<'de> Decode<'de> for DescribeDelegationTokenResponse {
     }
 }
 
+#[cfg(test)]
+impl DescribeDelegationTokenResponse {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.tokens = vec![DescribedDelegationToken::populated(version)]; }
+        if version >= 0 { m.throttle_time_ms = 1i32; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DescribedDelegationToken {
     pub principal_type: String,
@@ -153,6 +165,25 @@ impl<'de> Decode<'de> for DescribedDelegationToken {
     }
 }
 
+#[cfg(test)]
+impl DescribedDelegationToken {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.principal_type = "x".to_string(); }
+        if version >= 0 { m.principal_name = "x".to_string(); }
+        if version >= 3 { m.token_requester_principal_type = "x".to_string(); }
+        if version >= 3 { m.token_requester_principal_name = "x".to_string(); }
+        if version >= 0 { m.issue_timestamp = 1i64; }
+        if version >= 0 { m.expiry_timestamp = 1i64; }
+        if version >= 0 { m.max_timestamp = 1i64; }
+        if version >= 0 { m.token_id = "x".to_string(); }
+        if version >= 0 { m.hmac = ::bytes::Bytes::from_static(b"x"); }
+        if version >= 0 { m.renewers = vec![DescribedDelegationTokenRenewer::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DescribedDelegationTokenRenewer {
     pub principal_type: String,
@@ -196,6 +227,17 @@ impl<'de> Decode<'de> for DescribedDelegationTokenRenewer {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl DescribedDelegationTokenRenewer {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.principal_type = "x".to_string(); }
+        if version >= 0 { m.principal_name = "x".to_string(); }
+        m
     }
 }
 

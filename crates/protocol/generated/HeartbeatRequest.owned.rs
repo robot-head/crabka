@@ -80,6 +80,19 @@ impl<'de> Decode<'de> for HeartbeatRequest {
     }
 }
 
+#[cfg(test)]
+impl HeartbeatRequest {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.group_id = "x".to_string(); }
+        if version >= 0 { m.generation_id = 1i32; }
+        if version >= 0 { m.member_id = "x".to_string(); }
+        if version >= 3 { m.group_instance_id = Some("x".to_string()); }
+        m
+    }
+}
+
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
 /// Only includes fields valid for the given version.
 #[must_use]

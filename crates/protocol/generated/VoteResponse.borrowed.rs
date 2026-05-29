@@ -108,6 +108,18 @@ impl<'de> DecodeBorrow<'de> for VoteResponse<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> VoteResponse<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.topics = vec![TopicData::populated(version)]; }
+        if version >= 1 { m.node_endpoints = vec![crate::owned::vote_response::NodeEndpoint::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopicData<'a> {
     pub topic_name: &'a str,
@@ -171,6 +183,17 @@ impl<'de> DecodeBorrow<'de> for TopicData<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> TopicData<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topic_name = "x"; }
+        if version >= 0 { m.partitions = vec![PartitionData::populated(version)]; }
+        m
     }
 }
 
@@ -258,6 +281,20 @@ impl<'de> DecodeBorrow<'de> for PartitionData {
     }
 }
 
+#[cfg(test)]
+impl PartitionData {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.partition_index = 1i32; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.leader_id = 1i32; }
+        if version >= 0 { m.leader_epoch = 1i32; }
+        if version >= 0 { m.vote_granted = true; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeEndpoint<'a> {
     pub node_id: i32,
@@ -327,5 +364,17 @@ impl<'de> DecodeBorrow<'de> for NodeEndpoint<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> NodeEndpoint<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 1 { m.node_id = 1i32; }
+        if version >= 1 { m.host = "x"; }
+        if version >= 1 { m.port = 1u16; }
+        m
     }
 }

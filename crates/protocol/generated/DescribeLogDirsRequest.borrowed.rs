@@ -86,6 +86,16 @@ impl<'de> DecodeBorrow<'de> for DescribeLogDirsRequest<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> DescribeLogDirsRequest<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topics = Some(vec![DescribableLogDirTopic::populated(version)]); }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DescribableLogDirTopic<'a> {
     pub topic: &'a str,
@@ -149,5 +159,16 @@ impl<'de> DecodeBorrow<'de> for DescribableLogDirTopic<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> DescribableLogDirTopic<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topic = "x"; }
+        if version >= 0 { m.partitions = vec![1i32]; }
+        m
     }
 }

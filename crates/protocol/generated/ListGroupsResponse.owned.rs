@@ -74,6 +74,18 @@ impl<'de> Decode<'de> for ListGroupsResponse {
     }
 }
 
+#[cfg(test)]
+impl ListGroupsResponse {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 1 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.groups = vec![ListedGroup::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ListedGroup {
     pub group_id: String,
@@ -125,6 +137,19 @@ impl<'de> Decode<'de> for ListedGroup {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl ListedGroup {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.group_id = "x".to_string(); }
+        if version >= 0 { m.protocol_type = "x".to_string(); }
+        if version >= 4 { m.group_state = "x".to_string(); }
+        if version >= 5 { m.group_type = "x".to_string(); }
+        m
     }
 }
 

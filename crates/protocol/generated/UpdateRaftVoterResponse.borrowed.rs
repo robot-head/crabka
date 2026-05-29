@@ -108,6 +108,18 @@ impl<'de> DecodeBorrow<'de> for UpdateRaftVoterResponse {
     }
 }
 
+#[cfg(test)]
+impl UpdateRaftVoterResponse {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.current_leader = crate::owned::update_raft_voter_response::CurrentLeader::populated(version); }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CurrentLeader<'a> {
     pub leader_id: i32,
@@ -183,5 +195,18 @@ impl<'de> DecodeBorrow<'de> for CurrentLeader<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> CurrentLeader<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.leader_id = 1i32; }
+        if version >= 0 { m.leader_epoch = 1i32; }
+        if version >= 0 { m.host = "x"; }
+        if version >= 0 { m.port = 1i32; }
+        m
     }
 }

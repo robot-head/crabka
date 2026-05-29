@@ -55,3 +55,14 @@ impl<'de> Decode<'de> for TopicPartition {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+impl TopicPartition {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topic = "x".to_string(); }
+        if version >= 0 { m.partitions = vec![1i32]; }
+        m
+    }
+}

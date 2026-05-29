@@ -72,6 +72,17 @@ impl<'de> Decode<'de> for IncrementalAlterConfigsRequest {
     }
 }
 
+#[cfg(test)]
+impl IncrementalAlterConfigsRequest {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.resources = vec![AlterConfigsResource::populated(version)]; }
+        if version >= 0 { m.validate_only = true; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AlterConfigsResource {
     pub resource_type: i8,
@@ -122,6 +133,18 @@ impl<'de> Decode<'de> for AlterConfigsResource {
     }
 }
 
+#[cfg(test)]
+impl AlterConfigsResource {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.resource_type = 1i8; }
+        if version >= 0 { m.resource_name = "x".to_string(); }
+        if version >= 0 { m.configs = vec![AlterableConfig::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AlterableConfig {
     pub name: String,
@@ -169,6 +192,18 @@ impl<'de> Decode<'de> for AlterableConfig {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl AlterableConfig {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.name = "x".to_string(); }
+        if version >= 0 { m.config_operation = 1i8; }
+        if version >= 0 { m.value = Some("x".to_string()); }
+        m
     }
 }
 

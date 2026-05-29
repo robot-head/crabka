@@ -86,6 +86,19 @@ impl<'de> Decode<'de> for EndTxnResponse {
     }
 }
 
+#[cfg(test)]
+impl EndTxnResponse {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 5 { m.producer_id = 1i64; }
+        if version >= 5 { m.producer_epoch = 1i16; }
+        m
+    }
+}
+
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
 /// Only includes fields valid for the given version.
 #[must_use]

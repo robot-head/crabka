@@ -98,6 +98,18 @@ impl<'de> DecodeBorrow<'de> for ListConfigResourcesResponse<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> ListConfigResourcesResponse<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.config_resources = vec![ConfigResource::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigResource<'a> {
     pub resource_name: &'a str,
@@ -161,5 +173,16 @@ impl<'de> DecodeBorrow<'de> for ConfigResource<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> ConfigResource<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.resource_name = "x"; }
+        if version >= 1 { m.resource_type = 1i8; }
+        m
     }
 }

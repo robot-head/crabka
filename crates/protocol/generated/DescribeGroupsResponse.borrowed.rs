@@ -97,6 +97,17 @@ impl<'de> DecodeBorrow<'de> for DescribeGroupsResponse<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> DescribeGroupsResponse<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 1 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.groups = vec![DescribedGroup::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DescribedGroup<'a> {
     pub error_code: i16,
@@ -199,6 +210,23 @@ impl<'de> DecodeBorrow<'de> for DescribedGroup<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> DescribedGroup<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 6 { m.error_message = Some("x"); }
+        if version >= 0 { m.group_id = "x"; }
+        if version >= 0 { m.group_state = "x"; }
+        if version >= 0 { m.protocol_type = "x"; }
+        if version >= 0 { m.protocol_data = "x"; }
+        if version >= 0 { m.members = vec![DescribedGroupMember::populated(version)]; }
+        if version >= 3 { m.authorized_operations = 1i32; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DescribedGroupMember<'a> {
     pub member_id: &'a str,
@@ -286,5 +314,20 @@ impl<'de> DecodeBorrow<'de> for DescribedGroupMember<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> DescribedGroupMember<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.member_id = "x"; }
+        if version >= 4 { m.group_instance_id = Some("x"); }
+        if version >= 0 { m.client_id = "x"; }
+        if version >= 0 { m.client_host = "x"; }
+        if version >= 0 { m.member_metadata = &b"x"[..]; }
+        if version >= 0 { m.member_assignment = &b"x"[..]; }
+        m
     }
 }

@@ -64,6 +64,16 @@ impl<'de> Decode<'de> for DescribeDelegationTokenRequest {
     }
 }
 
+#[cfg(test)]
+impl DescribeDelegationTokenRequest {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.owners = Some(vec![DescribeDelegationTokenOwner::populated(version)]); }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DescribeDelegationTokenOwner {
     pub principal_type: String,
@@ -107,6 +117,17 @@ impl<'de> Decode<'de> for DescribeDelegationTokenOwner {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl DescribeDelegationTokenOwner {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.principal_type = "x".to_string(); }
+        if version >= 0 { m.principal_name = "x".to_string(); }
+        m
     }
 }
 

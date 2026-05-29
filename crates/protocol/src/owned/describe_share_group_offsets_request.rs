@@ -14,6 +14,9 @@
     clippy::default_trait_access,
     clippy::derivable_impls,
     clippy::collapsible_if,
+    clippy::too_many_lines,
+    clippy::field_reassign_with_default,
+    unused_mut,
     clippy::new_without_default,
     clippy::unreadable_literal,
     clippy::redundant_closure_for_method_calls,
@@ -40,28 +43,32 @@ mod tests {
     use crate::{Decode, Encode};
     use bytes::BytesMut;
 
-    #[test]
-    fn min_version_roundtrips() {
-        let v = MIN_VERSION;
-        let msg = DescribeShareGroupOffsetsRequest::default();
+    fn roundtrip(msg: &DescribeShareGroupOffsetsRequest, v: i16) {
         let mut buf = BytesMut::new();
         msg.encode(&mut buf, v).unwrap();
         assert_eq!(msg.encoded_len(v), buf.len());
-        let mut cur = &buf[..];
-        let _decoded = DescribeShareGroupOffsetsRequest::decode(&mut cur, v).unwrap();
-        assert!(cur.is_empty(), "decoder left trailing bytes");
+        let bytes = buf.freeze();
+        let mut cur = &bytes[..];
+        let decoded = DescribeShareGroupOffsetsRequest::decode(&mut cur, v).unwrap();
+        assert!(cur.is_empty());
+        let mut reencoded = BytesMut::new();
+        decoded.encode(&mut reencoded, v).unwrap();
+        assert_eq!(&reencoded[..], &bytes[..]);
+        // Exercise the JVM-oracle default-JSON builder for this version.
+        let _ = default_json(v);
     }
 
     #[test]
-    fn max_version_roundtrips() {
-        let v = MAX_VERSION;
-        let msg = DescribeShareGroupOffsetsRequest::default();
-        let mut buf = BytesMut::new();
-        msg.encode(&mut buf, v).unwrap();
-        assert_eq!(msg.encoded_len(v), buf.len());
-        let mut cur = &buf[..];
-        let decoded = DescribeShareGroupOffsetsRequest::decode(&mut cur, v).unwrap();
-        assert_eq!(decoded, msg);
-        assert!(cur.is_empty(), "decoder left trailing bytes");
+    fn default_roundtrips_all_versions() {
+        for v in MIN_VERSION..=MAX_VERSION {
+            roundtrip(&DescribeShareGroupOffsetsRequest::default(), v);
+        }
+    }
+
+    #[test]
+    fn populated_roundtrips_all_versions() {
+        for v in MIN_VERSION..=MAX_VERSION {
+            roundtrip(&DescribeShareGroupOffsetsRequest::populated(v), v);
+        }
     }
 }

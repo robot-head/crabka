@@ -78,6 +78,19 @@ impl<'de> Decode<'de> for EndTxnRequest {
     }
 }
 
+#[cfg(test)]
+impl EndTxnRequest {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.transactional_id = "x".to_string(); }
+        if version >= 0 { m.producer_id = 1i64; }
+        if version >= 0 { m.producer_epoch = 1i16; }
+        if version >= 0 { m.committed = true; }
+        m
+    }
+}
+
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
 /// Only includes fields valid for the given version.
 #[must_use]

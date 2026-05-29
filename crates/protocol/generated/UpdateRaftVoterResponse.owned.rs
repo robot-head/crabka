@@ -84,6 +84,18 @@ impl<'de> Decode<'de> for UpdateRaftVoterResponse {
     }
 }
 
+#[cfg(test)]
+impl UpdateRaftVoterResponse {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.current_leader = CurrentLeader::populated(version); }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CurrentLeader {
     pub leader_id: i32,
@@ -147,6 +159,19 @@ impl<'de> Decode<'de> for CurrentLeader {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl CurrentLeader {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.leader_id = 1i32; }
+        if version >= 0 { m.leader_epoch = 1i32; }
+        if version >= 0 { m.host = "x".to_string(); }
+        if version >= 0 { m.port = 1i32; }
+        m
     }
 }
 

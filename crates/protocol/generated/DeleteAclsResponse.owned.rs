@@ -72,6 +72,17 @@ impl<'de> Decode<'de> for DeleteAclsResponse {
     }
 }
 
+#[cfg(test)]
+impl DeleteAclsResponse {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.filter_results = vec![DeleteAclsFilterResult::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DeleteAclsFilterResult {
     pub error_code: i16,
@@ -119,6 +130,18 @@ impl<'de> Decode<'de> for DeleteAclsFilterResult {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl DeleteAclsFilterResult {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.error_message = Some("x".to_string()); }
+        if version >= 0 { m.matching_acls = vec![DeleteAclsMatchingAcl::populated(version)]; }
+        m
     }
 }
 
@@ -210,6 +233,24 @@ impl<'de> Decode<'de> for DeleteAclsMatchingAcl {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl DeleteAclsMatchingAcl {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.error_message = Some("x".to_string()); }
+        if version >= 0 { m.resource_type = 1i8; }
+        if version >= 0 { m.resource_name = "x".to_string(); }
+        if version >= 1 { m.pattern_type = 1i8; }
+        if version >= 0 { m.principal = "x".to_string(); }
+        if version >= 0 { m.host = "x".to_string(); }
+        if version >= 0 { m.operation = 1i8; }
+        if version >= 0 { m.permission_type = 1i8; }
+        m
     }
 }
 

@@ -84,6 +84,20 @@ impl<'de> Decode<'de> for ShareGroupHeartbeatRequest {
     }
 }
 
+#[cfg(test)]
+impl ShareGroupHeartbeatRequest {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.group_id = "x".to_string(); }
+        if version >= 0 { m.member_id = "x".to_string(); }
+        if version >= 0 { m.member_epoch = 1i32; }
+        if version >= 0 { m.rack_id = Some("x".to_string()); }
+        if version >= 0 { m.subscribed_topic_names = Some(vec!["x".to_string()]); }
+        m
+    }
+}
+
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
 /// Only includes fields valid for the given version.
 #[must_use]

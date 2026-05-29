@@ -80,6 +80,17 @@ impl<'de> Decode<'de> for OffsetForLeaderEpochRequest {
     }
 }
 
+#[cfg(test)]
+impl OffsetForLeaderEpochRequest {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 3 { m.replica_id = 1i32; }
+        if version >= 0 { m.topics = vec![OffsetForLeaderTopic::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct OffsetForLeaderTopic {
     pub topic: String,
@@ -123,6 +134,17 @@ impl<'de> Decode<'de> for OffsetForLeaderTopic {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl OffsetForLeaderTopic {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topic = "x".to_string(); }
+        if version >= 0 { m.partitions = vec![OffsetForLeaderPartition::populated(version)]; }
+        m
     }
 }
 
@@ -184,6 +206,18 @@ impl<'de> Decode<'de> for OffsetForLeaderPartition {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl OffsetForLeaderPartition {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.partition = 1i32; }
+        if version >= 2 { m.current_leader_epoch = 1i32; }
+        if version >= 0 { m.leader_epoch = 1i32; }
+        m
     }
 }
 

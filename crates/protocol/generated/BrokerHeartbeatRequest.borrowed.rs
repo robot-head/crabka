@@ -132,3 +132,19 @@ impl<'de> DecodeBorrow<'de> for BrokerHeartbeatRequest {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+impl BrokerHeartbeatRequest {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.broker_id = 1i32; }
+        if version >= 0 { m.broker_epoch = 1i64; }
+        if version >= 0 { m.current_metadata_offset = 1i64; }
+        if version >= 0 { m.want_fence = true; }
+        if version >= 0 { m.want_shut_down = true; }
+        if version >= 1 { m.offline_log_dirs = vec![crate::primitives::uuid::Uuid([1u8; 16])]; }
+        if version >= 2 { m.cordoned_log_dirs = Some(vec![crate::primitives::uuid::Uuid([1u8; 16])]); }
+        m
+    }
+}

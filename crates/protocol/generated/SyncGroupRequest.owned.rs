@@ -93,6 +93,22 @@ impl<'de> Decode<'de> for SyncGroupRequest {
     }
 }
 
+#[cfg(test)]
+impl SyncGroupRequest {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.group_id = "x".to_string(); }
+        if version >= 0 { m.generation_id = 1i32; }
+        if version >= 0 { m.member_id = "x".to_string(); }
+        if version >= 3 { m.group_instance_id = Some("x".to_string()); }
+        if version >= 5 { m.protocol_type = Some("x".to_string()); }
+        if version >= 5 { m.protocol_name = Some("x".to_string()); }
+        if version >= 0 { m.assignments = vec![SyncGroupRequestAssignment::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SyncGroupRequestAssignment {
     pub member_id: String,
@@ -136,6 +152,17 @@ impl<'de> Decode<'de> for SyncGroupRequestAssignment {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl SyncGroupRequestAssignment {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.member_id = "x".to_string(); }
+        if version >= 0 { m.assignment = ::bytes::Bytes::from_static(b"x"); }
+        m
     }
 }
 

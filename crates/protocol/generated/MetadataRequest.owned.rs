@@ -92,6 +92,19 @@ impl<'de> Decode<'de> for MetadataRequest {
     }
 }
 
+#[cfg(test)]
+impl MetadataRequest {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topics = Some(vec![MetadataRequestTopic::populated(version)]); }
+        if version >= 4 { m.allow_auto_topic_creation = true; }
+        if version >= 8 && version <= 10 { m.include_cluster_authorized_operations = true; }
+        if version >= 8 { m.include_topic_authorized_operations = true; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct MetadataRequestTopic {
     pub topic_id: crate::primitives::uuid::Uuid,
@@ -135,6 +148,17 @@ impl<'de> Decode<'de> for MetadataRequestTopic {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl MetadataRequestTopic {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 10 { m.topic_id = crate::primitives::uuid::Uuid([1u8; 16]); }
+        if version >= 0 { m.name = Some("x".to_string()); }
+        m
     }
 }
 

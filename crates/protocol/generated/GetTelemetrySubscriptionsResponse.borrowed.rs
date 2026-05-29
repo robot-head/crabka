@@ -133,3 +133,21 @@ impl<'de> DecodeBorrow<'de> for GetTelemetrySubscriptionsResponse<'de> {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+impl<'a> GetTelemetrySubscriptionsResponse<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.client_instance_id = crate::primitives::uuid::Uuid([1u8; 16]); }
+        if version >= 0 { m.subscription_id = 1i32; }
+        if version >= 0 { m.accepted_compression_types = vec![1i8]; }
+        if version >= 0 { m.push_interval_ms = 1i32; }
+        if version >= 0 { m.telemetry_max_bytes = 1i32; }
+        if version >= 0 { m.delta_temporality = true; }
+        if version >= 0 { m.requested_metrics = vec!["x"]; }
+        m
+    }
+}

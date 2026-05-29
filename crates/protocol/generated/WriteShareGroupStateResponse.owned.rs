@@ -68,6 +68,16 @@ impl<'de> Decode<'de> for WriteShareGroupStateResponse {
     }
 }
 
+#[cfg(test)]
+impl WriteShareGroupStateResponse {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.results = vec![WriteStateResult::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct WriteStateResult {
     pub topic_id: crate::primitives::uuid::Uuid,
@@ -111,6 +121,17 @@ impl<'de> Decode<'de> for WriteStateResult {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl WriteStateResult {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topic_id = crate::primitives::uuid::Uuid([1u8; 16]); }
+        if version >= 0 { m.partitions = vec![PartitionResult::populated(version)]; }
+        m
     }
 }
 
@@ -161,6 +182,18 @@ impl<'de> Decode<'de> for PartitionResult {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl PartitionResult {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.partition = 1i32; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.error_message = Some("x".to_string()); }
+        m
     }
 }
 

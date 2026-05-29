@@ -113,6 +113,20 @@ impl<'de> DecodeBorrow<'de> for AlterPartitionReassignmentsResponse<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> AlterPartitionReassignmentsResponse<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.throttle_time_ms = 1i32; }
+        if version >= 1 { m.allow_replication_factor_change = true; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.error_message = Some("x"); }
+        if version >= 0 { m.responses = vec![ReassignableTopicResponse::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReassignableTopicResponse<'a> {
     pub name: &'a str,
@@ -176,6 +190,17 @@ impl<'de> DecodeBorrow<'de> for ReassignableTopicResponse<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> ReassignableTopicResponse<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.name = "x"; }
+        if version >= 0 { m.partitions = vec![ReassignablePartitionResponse::populated(version)]; }
+        m
     }
 }
 
@@ -248,5 +273,17 @@ impl<'de> DecodeBorrow<'de> for ReassignablePartitionResponse<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> ReassignablePartitionResponse<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.partition_index = 1i32; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.error_message = Some("x"); }
+        m
     }
 }

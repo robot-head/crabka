@@ -70,6 +70,17 @@ impl<'de> Decode<'de> for OffsetCommitResponse {
     }
 }
 
+#[cfg(test)]
+impl OffsetCommitResponse {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 3 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.topics = vec![OffsetCommitResponseTopic::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct OffsetCommitResponseTopic {
     pub name: String,
@@ -120,6 +131,18 @@ impl<'de> Decode<'de> for OffsetCommitResponseTopic {
     }
 }
 
+#[cfg(test)]
+impl OffsetCommitResponseTopic {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 && version <= 9 { m.name = "x".to_string(); }
+        if version >= 10 { m.topic_id = crate::primitives::uuid::Uuid([1u8; 16]); }
+        if version >= 0 { m.partitions = vec![OffsetCommitResponsePartition::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct OffsetCommitResponsePartition {
     pub partition_index: i32,
@@ -163,6 +186,17 @@ impl<'de> Decode<'de> for OffsetCommitResponsePartition {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl OffsetCommitResponsePartition {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.partition_index = 1i32; }
+        if version >= 0 { m.error_code = 1i16; }
+        m
     }
 }
 

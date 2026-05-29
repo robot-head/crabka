@@ -77,3 +77,13 @@ impl<'de> DecodeBorrow<'de> for ResponseHeader {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+impl ResponseHeader {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.correlation_id = 1i32; }
+        m
+    }
+}

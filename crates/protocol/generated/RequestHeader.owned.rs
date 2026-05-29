@@ -78,6 +78,19 @@ impl<'de> Decode<'de> for RequestHeader {
     }
 }
 
+#[cfg(test)]
+impl RequestHeader {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.request_api_key = 1i16; }
+        if version >= 0 { m.request_api_version = 1i16; }
+        if version >= 0 { m.correlation_id = 1i32; }
+        if version >= 1 { m.client_id = Some("x".to_string()); }
+        m
+    }
+}
+
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
 /// Only includes fields valid for the given version.
 #[must_use]

@@ -91,3 +91,14 @@ impl<'de> DecodeBorrow<'de> for ConsumerGroupDescribeRequest<'de> {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+impl<'a> ConsumerGroupDescribeRequest<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.group_ids = vec!["x"]; }
+        if version >= 0 { m.include_authorized_operations = true; }
+        m
+    }
+}

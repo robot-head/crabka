@@ -14,6 +14,9 @@
     clippy::default_trait_access,
     clippy::derivable_impls,
     clippy::collapsible_if,
+    clippy::too_many_lines,
+    clippy::field_reassign_with_default,
+    unused_mut,
     clippy::new_without_default,
     clippy::unreadable_literal,
     clippy::redundant_closure_for_method_calls,
@@ -40,27 +43,39 @@ mod tests {
     use crate::{DecodeBorrow, Encode};
     use bytes::BytesMut;
 
-    #[test]
-    fn min_version_roundtrips() {
-        let v = MIN_VERSION;
-        let msg = ShareAcknowledgeResponse::default();
-        let mut buf = BytesMut::new();
-        msg.encode(&mut buf, v).unwrap();
-        assert_eq!(msg.encoded_len(v), buf.len());
-        let frozen = buf.freeze();
-        let mut cur: &[u8] = &frozen;
-        let _decoded = ShareAcknowledgeResponse::decode_borrow(&mut cur, v).unwrap();
+    fn check(msg_bytes: &bytes::Bytes, v: i16) {
+        let mut cur: &[u8] = msg_bytes;
+        let decoded = ShareAcknowledgeResponse::decode_borrow(&mut cur, v).unwrap();
+        assert!(cur.is_empty());
+        assert_eq!(decoded.encoded_len(v), msg_bytes.len());
+        let mut reencoded = BytesMut::new();
+        decoded.encode(&mut reencoded, v).unwrap();
+        assert_eq!(&reencoded[..], &msg_bytes[..]);
+        // Exercise the zero-copy -> owned conversion, then confirm the owned
+        // value still encodes to the same bytes.
+        let owned = decoded.to_owned();
+        let mut owned_buf = BytesMut::new();
+        owned.encode(&mut owned_buf, v).unwrap();
+        assert_eq!(&owned_buf[..], &msg_bytes[..]);
     }
 
     #[test]
-    fn max_version_roundtrips() {
-        let v = MAX_VERSION;
-        let msg = ShareAcknowledgeResponse::default();
-        let mut buf = BytesMut::new();
-        msg.encode(&mut buf, v).unwrap();
-        assert_eq!(msg.encoded_len(v), buf.len());
-        let frozen = buf.freeze();
-        let mut cur: &[u8] = &frozen;
-        let _decoded = ShareAcknowledgeResponse::decode_borrow(&mut cur, v).unwrap();
+    fn default_roundtrips_all_versions() {
+        for v in MIN_VERSION..=MAX_VERSION {
+            let msg = ShareAcknowledgeResponse::default();
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, v).unwrap();
+            check(&buf.freeze(), v);
+        }
+    }
+
+    #[test]
+    fn populated_roundtrips_all_versions() {
+        for v in MIN_VERSION..=MAX_VERSION {
+            let msg = ShareAcknowledgeResponse::populated(v);
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, v).unwrap();
+            check(&buf.freeze(), v);
+        }
     }
 }

@@ -92,6 +92,17 @@ impl<'de> DecodeBorrow<'de> for ListOffsetsResponse<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> ListOffsetsResponse<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 2 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.topics = vec![ListOffsetsTopicResponse::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListOffsetsTopicResponse<'a> {
     pub name: &'a str,
@@ -155,6 +166,17 @@ impl<'de> DecodeBorrow<'de> for ListOffsetsTopicResponse<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> ListOffsetsTopicResponse<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.name = "x"; }
+        if version >= 0 { m.partitions = vec![ListOffsetsPartitionResponse::populated(version)]; }
+        m
     }
 }
 
@@ -239,5 +261,19 @@ impl<'de> DecodeBorrow<'de> for ListOffsetsPartitionResponse {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl ListOffsetsPartitionResponse {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.partition_index = 1i32; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 1 { m.timestamp = 1i64; }
+        if version >= 1 { m.offset = 1i64; }
+        if version >= 4 { m.leader_epoch = 1i32; }
+        m
     }
 }

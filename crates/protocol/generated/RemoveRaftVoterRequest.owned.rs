@@ -76,6 +76,18 @@ impl<'de> Decode<'de> for RemoveRaftVoterRequest {
     }
 }
 
+#[cfg(test)]
+impl RemoveRaftVoterRequest {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.cluster_id = Some("x".to_string()); }
+        if version >= 0 { m.voter_id = 1i32; }
+        if version >= 0 { m.voter_directory_id = crate::primitives::uuid::Uuid([1u8; 16]); }
+        m
+    }
+}
+
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
 /// Only includes fields valid for the given version.
 #[must_use]

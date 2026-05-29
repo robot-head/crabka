@@ -86,6 +86,18 @@ impl<'de> Decode<'de> for ProduceResponse {
     }
 }
 
+#[cfg(test)]
+impl ProduceResponse {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.responses = vec![TopicProduceResponse::populated(version)]; }
+        if version >= 1 { m.throttle_time_ms = 1i32; }
+        if version >= 10 { m.node_endpoints = vec![NodeEndpoint::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TopicProduceResponse {
     pub name: String,
@@ -133,6 +145,18 @@ impl<'de> Decode<'de> for TopicProduceResponse {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl TopicProduceResponse {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 && version <= 12 { m.name = "x".to_string(); }
+        if version >= 13 { m.topic_id = crate::primitives::uuid::Uuid([1u8; 16]); }
+        if version >= 0 { m.partition_responses = vec![PartitionProduceResponse::populated(version)]; }
+        m
     }
 }
 
@@ -232,6 +256,23 @@ impl<'de> Decode<'de> for PartitionProduceResponse {
     }
 }
 
+#[cfg(test)]
+impl PartitionProduceResponse {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.index = 1i32; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.base_offset = 1i64; }
+        if version >= 2 { m.log_append_time_ms = 1i64; }
+        if version >= 5 { m.log_start_offset = 1i64; }
+        if version >= 8 { m.record_errors = vec![BatchIndexAndErrorMessage::populated(version)]; }
+        if version >= 8 { m.error_message = Some("x".to_string()); }
+        if version >= 10 { m.current_leader = LeaderIdAndEpoch::populated(version); }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct BatchIndexAndErrorMessage {
     pub batch_index: i32,
@@ -275,6 +316,17 @@ impl<'de> Decode<'de> for BatchIndexAndErrorMessage {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl BatchIndexAndErrorMessage {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 8 { m.batch_index = 1i32; }
+        if version >= 8 { m.batch_index_error_message = Some("x".to_string()); }
+        m
     }
 }
 
@@ -334,6 +386,17 @@ impl<'de> Decode<'de> for LeaderIdAndEpoch {
     }
 }
 
+#[cfg(test)]
+impl LeaderIdAndEpoch {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 10 { m.leader_id = 1i32; }
+        if version >= 10 { m.leader_epoch = 1i32; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct NodeEndpoint {
     pub node_id: i32,
@@ -385,6 +448,19 @@ impl<'de> Decode<'de> for NodeEndpoint {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl NodeEndpoint {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 10 { m.node_id = 1i32; }
+        if version >= 10 { m.host = "x".to_string(); }
+        if version >= 10 { m.port = 1i32; }
+        if version >= 10 { m.rack = Some("x".to_string()); }
+        m
     }
 }
 

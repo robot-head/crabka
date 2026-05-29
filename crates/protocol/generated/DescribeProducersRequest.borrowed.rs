@@ -86,6 +86,16 @@ impl<'de> DecodeBorrow<'de> for DescribeProducersRequest<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> DescribeProducersRequest<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topics = vec![TopicRequest::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopicRequest<'a> {
     pub name: &'a str,
@@ -149,5 +159,16 @@ impl<'de> DecodeBorrow<'de> for TopicRequest<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> TopicRequest<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.name = "x"; }
+        if version >= 0 { m.partition_indexes = vec![1i32]; }
+        m
     }
 }

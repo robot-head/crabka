@@ -68,6 +68,17 @@ impl<'de> Decode<'de> for ApiVersionsRequest {
     }
 }
 
+#[cfg(test)]
+impl ApiVersionsRequest {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 3 { m.client_software_name = "x".to_string(); }
+        if version >= 3 { m.client_software_version = "x".to_string(); }
+        m
+    }
+}
+
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
 /// Only includes fields valid for the given version.
 #[must_use]

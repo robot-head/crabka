@@ -92,6 +92,22 @@ impl<'de> Decode<'de> for ShareGroupHeartbeatResponse {
     }
 }
 
+#[cfg(test)]
+impl ShareGroupHeartbeatResponse {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.error_message = Some("x".to_string()); }
+        if version >= 0 { m.member_id = Some("x".to_string()); }
+        if version >= 0 { m.member_epoch = 1i32; }
+        if version >= 0 { m.heartbeat_interval_ms = 1i32; }
+        if version >= 0 { m.assignment = Some(Assignment::populated(version)); }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Assignment {
     pub topic_partitions: Vec<super::common::topic_partitions::TopicPartitions>,
@@ -131,6 +147,16 @@ impl<'de> Decode<'de> for Assignment {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl Assignment {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topic_partitions = vec![super::common::topic_partitions::TopicPartitions::populated(version)]; }
+        m
     }
 }
 

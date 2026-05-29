@@ -79,3 +79,13 @@ impl<'de> DecodeBorrow<'de> for ListConfigResourcesRequest {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+impl ListConfigResourcesRequest {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 1 { m.resource_types = vec![1i8]; }
+        m
+    }
+}

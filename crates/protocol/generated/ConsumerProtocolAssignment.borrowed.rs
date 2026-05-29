@@ -78,6 +78,17 @@ impl<'de> DecodeBorrow<'de> for ConsumerProtocolAssignment<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> ConsumerProtocolAssignment<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.assigned_partitions = vec![TopicPartition::populated(version)]; }
+        if version >= 0 { m.user_data = Some(&b"x"[..]); }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopicPartition<'a> {
     pub topic: &'a str,
@@ -128,5 +139,16 @@ impl<'de> DecodeBorrow<'de> for TopicPartition<'de> {
         if version >= 0 { out.topic = if flex { get_compact_string_borrowed(buf)? } else { get_string_borrowed(buf)? }; }
         if version >= 0 { out.partitions = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(get_i32(buf)?); } v }; }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> TopicPartition<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topic = "x"; }
+        if version >= 0 { m.partitions = vec![1i32]; }
+        m
     }
 }

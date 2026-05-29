@@ -80,6 +80,19 @@ impl<'de> Decode<'de> for DescribeAclsResponse {
     }
 }
 
+#[cfg(test)]
+impl DescribeAclsResponse {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.error_message = Some("x".to_string()); }
+        if version >= 0 { m.resources = vec![DescribeAclsResource::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DescribeAclsResource {
     pub resource_type: i8,
@@ -146,6 +159,19 @@ impl<'de> Decode<'de> for DescribeAclsResource {
     }
 }
 
+#[cfg(test)]
+impl DescribeAclsResource {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.resource_type = 1i8; }
+        if version >= 0 { m.resource_name = "x".to_string(); }
+        if version >= 1 { m.pattern_type = 1i8; }
+        if version >= 0 { m.acls = vec![AclDescription::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AclDescription {
     pub principal: String,
@@ -197,6 +223,19 @@ impl<'de> Decode<'de> for AclDescription {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl AclDescription {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.principal = "x".to_string(); }
+        if version >= 0 { m.host = "x".to_string(); }
+        if version >= 0 { m.operation = 1i8; }
+        if version >= 0 { m.permission_type = 1i8; }
+        m
     }
 }
 

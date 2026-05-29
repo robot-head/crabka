@@ -76,6 +76,18 @@ impl<'de> Decode<'de> for EndQuorumEpochRequest {
     }
 }
 
+#[cfg(test)]
+impl EndQuorumEpochRequest {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.cluster_id = Some("x".to_string()); }
+        if version >= 0 { m.topics = vec![TopicData::populated(version)]; }
+        if version >= 1 { m.leader_endpoints = vec![LeaderEndpoint::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TopicData {
     pub topic_name: String,
@@ -119,6 +131,17 @@ impl<'de> Decode<'de> for TopicData {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl TopicData {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topic_name = "x".to_string(); }
+        if version >= 0 { m.partitions = vec![PartitionData::populated(version)]; }
+        m
     }
 }
 
@@ -180,6 +203,20 @@ impl<'de> Decode<'de> for PartitionData {
     }
 }
 
+#[cfg(test)]
+impl PartitionData {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.partition_index = 1i32; }
+        if version >= 0 { m.leader_id = 1i32; }
+        if version >= 0 { m.leader_epoch = 1i32; }
+        if version >= 0 && version <= 0 { m.preferred_successors = vec![1i32]; }
+        if version >= 1 { m.preferred_candidates = vec![ReplicaInfo::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ReplicaInfo {
     pub candidate_id: i32,
@@ -223,6 +260,17 @@ impl<'de> Decode<'de> for ReplicaInfo {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl ReplicaInfo {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 1 { m.candidate_id = 1i32; }
+        if version >= 1 { m.candidate_directory_id = crate::primitives::uuid::Uuid([1u8; 16]); }
+        m
     }
 }
 
@@ -273,6 +321,18 @@ impl<'de> Decode<'de> for LeaderEndpoint {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl LeaderEndpoint {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 1 { m.name = "x".to_string(); }
+        if version >= 1 { m.host = "x".to_string(); }
+        if version >= 1 { m.port = 1u16; }
+        m
     }
 }
 

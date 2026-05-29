@@ -131,6 +131,23 @@ impl<'de> DecodeBorrow<'de> for DescribeClusterResponse<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> DescribeClusterResponse<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.error_message = Some("x"); }
+        if version >= 1 { m.endpoint_type = 1i8; }
+        if version >= 0 { m.cluster_id = "x"; }
+        if version >= 0 { m.controller_id = 1i32; }
+        if version >= 0 { m.brokers = vec![DescribeClusterBroker::populated(version)]; }
+        if version >= 0 { m.cluster_authorized_operations = 1i32; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DescribeClusterBroker<'a> {
     pub broker_id: i32,
@@ -212,5 +229,19 @@ impl<'de> DecodeBorrow<'de> for DescribeClusterBroker<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> DescribeClusterBroker<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.broker_id = 1i32; }
+        if version >= 0 { m.host = "x"; }
+        if version >= 0 { m.port = 1i32; }
+        if version >= 0 { m.rack = Some("x"); }
+        if version >= 2 { m.is_fenced = true; }
+        m
     }
 }

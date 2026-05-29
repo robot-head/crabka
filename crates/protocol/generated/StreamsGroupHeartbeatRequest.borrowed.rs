@@ -185,6 +185,32 @@ impl<'de> DecodeBorrow<'de> for StreamsGroupHeartbeatRequest<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> StreamsGroupHeartbeatRequest<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.group_id = "x"; }
+        if version >= 0 { m.member_id = "x"; }
+        if version >= 0 { m.member_epoch = 1i32; }
+        if version >= 0 { m.endpoint_information_epoch = 1i32; }
+        if version >= 0 { m.instance_id = Some("x"); }
+        if version >= 0 { m.rack_id = Some("x"); }
+        if version >= 0 { m.rebalance_timeout_ms = 1i32; }
+        if version >= 0 { m.topology = Some(Topology::populated(version)); }
+        if version >= 0 { m.active_tasks = Some(vec![super::common::task_ids::TaskIds::populated(version)]); }
+        if version >= 0 { m.standby_tasks = Some(vec![super::common::task_ids::TaskIds::populated(version)]); }
+        if version >= 0 { m.warmup_tasks = Some(vec![super::common::task_ids::TaskIds::populated(version)]); }
+        if version >= 0 { m.process_id = Some("x"); }
+        if version >= 0 { m.user_endpoint = Some(super::common::endpoint::Endpoint::populated(version)); }
+        if version >= 0 { m.client_tags = Some(vec![super::common::key_value::KeyValue::populated(version)]); }
+        if version >= 0 { m.task_offsets = Some(vec![super::common::task_offset::TaskOffset::populated(version)]); }
+        if version >= 0 { m.task_end_offsets = Some(vec![super::common::task_offset::TaskOffset::populated(version)]); }
+        if version >= 0 { m.shutdown_application = true; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Topology<'a> {
     pub epoch: i32,
@@ -248,6 +274,17 @@ impl<'de> DecodeBorrow<'de> for Topology<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> Topology<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.epoch = 1i32; }
+        if version >= 0 { m.subtopologies = vec![Subtopology::populated(version)]; }
+        m
     }
 }
 
@@ -347,6 +384,22 @@ impl<'de> DecodeBorrow<'de> for Subtopology<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> Subtopology<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.subtopology_id = "x"; }
+        if version >= 0 { m.source_topics = vec!["x"]; }
+        if version >= 0 { m.source_topic_regex = vec!["x"]; }
+        if version >= 0 { m.state_changelog_topics = vec![super::common::topic_info::TopicInfo::populated(version)]; }
+        if version >= 0 { m.repartition_sink_topics = vec!["x"]; }
+        if version >= 0 { m.repartition_source_topics = vec![super::common::topic_info::TopicInfo::populated(version)]; }
+        if version >= 0 { m.copartition_groups = vec![CopartitionGroup::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CopartitionGroup {
     pub source_topics: Vec<i16>,
@@ -416,5 +469,17 @@ impl<'de> DecodeBorrow<'de> for CopartitionGroup {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl CopartitionGroup {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.source_topics = vec![1i16]; }
+        if version >= 0 { m.source_topic_regex = vec![1i16]; }
+        if version >= 0 { m.repartition_source_topics = vec![1i16]; }
+        m
     }
 }

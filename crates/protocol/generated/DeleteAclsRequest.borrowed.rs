@@ -89,6 +89,16 @@ impl<'de> DecodeBorrow<'de> for DeleteAclsRequest<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> DeleteAclsRequest<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.filters = vec![DeleteAclsFilter::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeleteAclsFilter<'a> {
     pub resource_type_filter: i8,
@@ -182,5 +192,21 @@ impl<'de> DecodeBorrow<'de> for DeleteAclsFilter<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> DeleteAclsFilter<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.resource_type_filter = 1i8; }
+        if version >= 0 { m.resource_name_filter = Some("x"); }
+        if version >= 1 { m.pattern_type_filter = 1i8; }
+        if version >= 0 { m.principal_filter = Some("x"); }
+        if version >= 0 { m.host_filter = Some("x"); }
+        if version >= 0 { m.operation = 1i8; }
+        if version >= 0 { m.permission_type = 1i8; }
+        m
     }
 }

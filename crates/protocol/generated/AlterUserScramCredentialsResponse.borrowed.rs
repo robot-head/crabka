@@ -95,6 +95,17 @@ impl<'de> DecodeBorrow<'de> for AlterUserScramCredentialsResponse<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> AlterUserScramCredentialsResponse<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.results = vec![AlterUserScramCredentialsResult::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterUserScramCredentialsResult<'a> {
     pub user: &'a str,
@@ -164,5 +175,17 @@ impl<'de> DecodeBorrow<'de> for AlterUserScramCredentialsResult<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> AlterUserScramCredentialsResult<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.user = "x"; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.error_message = Some("x"); }
+        m
     }
 }

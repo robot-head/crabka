@@ -89,3 +89,14 @@ impl<'de> DecodeBorrow<'de> for ApiVersionsRequest<'de> {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+impl<'a> ApiVersionsRequest<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 3 { m.client_software_name = "x"; }
+        if version >= 3 { m.client_software_version = "x"; }
+        m
+    }
+}

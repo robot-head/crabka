@@ -107,6 +107,19 @@ impl<'de> DecodeBorrow<'de> for DescribeQuorumResponse<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> DescribeQuorumResponse<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 2 { m.error_message = Some("x"); }
+        if version >= 0 { m.topics = vec![TopicData::populated(version)]; }
+        if version >= 2 { m.nodes = vec![Node::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopicData<'a> {
     pub topic_name: &'a str,
@@ -170,6 +183,17 @@ impl<'de> DecodeBorrow<'de> for TopicData<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> TopicData<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topic_name = "x"; }
+        if version >= 0 { m.partitions = vec![PartitionData::populated(version)]; }
+        m
     }
 }
 
@@ -275,6 +299,23 @@ impl<'de> DecodeBorrow<'de> for PartitionData<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> PartitionData<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.partition_index = 1i32; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 2 { m.error_message = Some("x"); }
+        if version >= 0 { m.leader_id = 1i32; }
+        if version >= 0 { m.leader_epoch = 1i32; }
+        if version >= 0 { m.high_watermark = 1i64; }
+        if version >= 0 { m.current_voters = vec![super::common::replica_state::ReplicaState::populated(version)]; }
+        if version >= 0 { m.observers = vec![super::common::replica_state::ReplicaState::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Node<'a> {
     pub node_id: i32,
@@ -338,6 +379,17 @@ impl<'de> DecodeBorrow<'de> for Node<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> Node<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 2 { m.node_id = 1i32; }
+        if version >= 2 { m.listeners = vec![Listener::populated(version)]; }
+        m
     }
 }
 
@@ -410,5 +462,17 @@ impl<'de> DecodeBorrow<'de> for Listener<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> Listener<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 2 { m.name = "x"; }
+        if version >= 2 { m.host = "x"; }
+        if version >= 2 { m.port = 1u16; }
+        m
     }
 }

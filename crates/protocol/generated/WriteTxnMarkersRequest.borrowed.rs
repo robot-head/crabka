@@ -86,6 +86,16 @@ impl<'de> DecodeBorrow<'de> for WriteTxnMarkersRequest<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> WriteTxnMarkersRequest<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.markers = vec![WritableTxnMarker::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WritableTxnMarker<'a> {
     pub producer_id: i64,
@@ -176,6 +186,21 @@ impl<'de> DecodeBorrow<'de> for WritableTxnMarker<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> WritableTxnMarker<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.producer_id = 1i64; }
+        if version >= 0 { m.producer_epoch = 1i16; }
+        if version >= 0 { m.transaction_result = true; }
+        if version >= 0 { m.topics = vec![WritableTxnMarkerTopic::populated(version)]; }
+        if version >= 0 { m.coordinator_epoch = 1i32; }
+        if version >= 2 { m.transaction_version = 1i8; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WritableTxnMarkerTopic<'a> {
     pub name: &'a str,
@@ -239,5 +264,16 @@ impl<'de> DecodeBorrow<'de> for WritableTxnMarkerTopic<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> WritableTxnMarkerTopic<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.name = "x"; }
+        if version >= 0 { m.partition_indexes = vec![1i32]; }
+        m
     }
 }

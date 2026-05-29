@@ -92,6 +92,19 @@ impl<'de> Decode<'de> for BeginQuorumEpochRequest {
     }
 }
 
+#[cfg(test)]
+impl BeginQuorumEpochRequest {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.cluster_id = Some("x".to_string()); }
+        if version >= 1 { m.voter_id = 1i32; }
+        if version >= 0 { m.topics = vec![TopicData::populated(version)]; }
+        if version >= 1 { m.leader_endpoints = vec![LeaderEndpoint::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TopicData {
     pub topic_name: String,
@@ -135,6 +148,17 @@ impl<'de> Decode<'de> for TopicData {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl TopicData {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topic_name = "x".to_string(); }
+        if version >= 0 { m.partitions = vec![PartitionData::populated(version)]; }
+        m
     }
 }
 
@@ -192,6 +216,19 @@ impl<'de> Decode<'de> for PartitionData {
     }
 }
 
+#[cfg(test)]
+impl PartitionData {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.partition_index = 1i32; }
+        if version >= 1 { m.voter_directory_id = crate::primitives::uuid::Uuid([1u8; 16]); }
+        if version >= 0 { m.leader_id = 1i32; }
+        if version >= 0 { m.leader_epoch = 1i32; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct LeaderEndpoint {
     pub name: String,
@@ -239,6 +276,18 @@ impl<'de> Decode<'de> for LeaderEndpoint {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl LeaderEndpoint {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 1 { m.name = "x".to_string(); }
+        if version >= 1 { m.host = "x".to_string(); }
+        if version >= 1 { m.port = 1u16; }
+        m
     }
 }
 

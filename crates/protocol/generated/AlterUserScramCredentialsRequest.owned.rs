@@ -71,6 +71,17 @@ impl<'de> Decode<'de> for AlterUserScramCredentialsRequest {
     }
 }
 
+#[cfg(test)]
+impl AlterUserScramCredentialsRequest {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.deletions = vec![ScramCredentialDeletion::populated(version)]; }
+        if version >= 0 { m.upsertions = vec![ScramCredentialUpsertion::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ScramCredentialDeletion {
     pub name: String,
@@ -114,6 +125,17 @@ impl<'de> Decode<'de> for ScramCredentialDeletion {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl ScramCredentialDeletion {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.name = "x".to_string(); }
+        if version >= 0 { m.mechanism = 1i8; }
+        m
     }
 }
 
@@ -172,6 +194,20 @@ impl<'de> Decode<'de> for ScramCredentialUpsertion {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl ScramCredentialUpsertion {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.name = "x".to_string(); }
+        if version >= 0 { m.mechanism = 1i8; }
+        if version >= 0 { m.iterations = 1i32; }
+        if version >= 0 { m.salt = ::bytes::Bytes::from_static(b"x"); }
+        if version >= 0 { m.salted_password = ::bytes::Bytes::from_static(b"x"); }
+        m
     }
 }
 

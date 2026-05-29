@@ -67,6 +67,17 @@ impl<'de> Decode<'de> for ExpireDelegationTokenRequest {
     }
 }
 
+#[cfg(test)]
+impl ExpireDelegationTokenRequest {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.hmac = ::bytes::Bytes::from_static(b"x"); }
+        if version >= 0 { m.expiry_time_period_ms = 1i64; }
+        m
+    }
+}
+
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
 /// Only includes fields valid for the given version.
 #[must_use]

@@ -112,3 +112,17 @@ impl<'de> DecodeBorrow<'de> for ShareGroupHeartbeatRequest<'de> {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+impl<'a> ShareGroupHeartbeatRequest<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.group_id = "x"; }
+        if version >= 0 { m.member_id = "x"; }
+        if version >= 0 { m.member_epoch = 1i32; }
+        if version >= 0 { m.rack_id = Some("x"); }
+        if version >= 0 { m.subscribed_topic_names = Some(vec!["x"]); }
+        m
+    }
+}

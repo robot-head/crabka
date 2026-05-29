@@ -98,6 +98,18 @@ impl<'de> DecodeBorrow<'de> for ListGroupsResponse<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> ListGroupsResponse<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 1 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.groups = vec![ListedGroup::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListedGroup<'a> {
     pub group_id: &'a str,
@@ -173,5 +185,18 @@ impl<'de> DecodeBorrow<'de> for ListedGroup<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> ListedGroup<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.group_id = "x"; }
+        if version >= 0 { m.protocol_type = "x"; }
+        if version >= 4 { m.group_state = "x"; }
+        if version >= 5 { m.group_type = "x"; }
+        m
     }
 }

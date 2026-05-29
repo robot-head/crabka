@@ -72,6 +72,18 @@ impl<'de> Decode<'de> for DefaultPrincipalData {
     }
 }
 
+#[cfg(test)]
+impl DefaultPrincipalData {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.type_ = "x".to_string(); }
+        if version >= 0 { m.name = "x".to_string(); }
+        if version >= 0 { m.token_authenticated = true; }
+        m
+    }
+}
+
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
 /// Only includes fields valid for the given version.
 #[must_use]

@@ -107,6 +107,19 @@ impl<'de> DecodeBorrow<'de> for CreateDelegationTokenRequest<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> CreateDelegationTokenRequest<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 3 { m.owner_principal_type = Some("x"); }
+        if version >= 3 { m.owner_principal_name = Some("x"); }
+        if version >= 0 { m.renewers = vec![CreatableRenewers::populated(version)]; }
+        if version >= 0 { m.max_lifetime_ms = 1i64; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreatableRenewers<'a> {
     pub principal_type: &'a str,
@@ -170,5 +183,16 @@ impl<'de> DecodeBorrow<'de> for CreatableRenewers<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> CreatableRenewers<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.principal_type = "x"; }
+        if version >= 0 { m.principal_name = "x"; }
+        m
     }
 }

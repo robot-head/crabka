@@ -92,6 +92,17 @@ impl<'de> DecodeBorrow<'de> for ListPartitionReassignmentsRequest<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> ListPartitionReassignmentsRequest<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.timeout_ms = 1i32; }
+        if version >= 0 { m.topics = Some(vec![ListPartitionReassignmentsTopics::populated(version)]); }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListPartitionReassignmentsTopics<'a> {
     pub name: &'a str,
@@ -155,5 +166,16 @@ impl<'de> DecodeBorrow<'de> for ListPartitionReassignmentsTopics<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> ListPartitionReassignmentsTopics<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.name = "x"; }
+        if version >= 0 { m.partition_indexes = vec![1i32]; }
+        m
     }
 }

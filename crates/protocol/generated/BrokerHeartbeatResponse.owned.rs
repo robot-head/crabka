@@ -91,6 +91,20 @@ impl<'de> Decode<'de> for BrokerHeartbeatResponse {
     }
 }
 
+#[cfg(test)]
+impl BrokerHeartbeatResponse {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.is_caught_up = true; }
+        if version >= 0 { m.is_fenced = true; }
+        if version >= 0 { m.should_shut_down = true; }
+        m
+    }
+}
+
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
 /// Only includes fields valid for the given version.
 #[must_use]

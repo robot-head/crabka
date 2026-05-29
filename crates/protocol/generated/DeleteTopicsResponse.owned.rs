@@ -72,6 +72,17 @@ impl<'de> Decode<'de> for DeleteTopicsResponse {
     }
 }
 
+#[cfg(test)]
+impl DeleteTopicsResponse {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 1 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.responses = vec![DeletableTopicResult::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DeletableTopicResult {
     pub name: Option<String>,
@@ -123,6 +134,19 @@ impl<'de> Decode<'de> for DeletableTopicResult {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl DeletableTopicResult {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.name = Some("x".to_string()); }
+        if version >= 6 { m.topic_id = crate::primitives::uuid::Uuid([1u8; 16]); }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 5 { m.error_message = Some("x".to_string()); }
+        m
     }
 }
 

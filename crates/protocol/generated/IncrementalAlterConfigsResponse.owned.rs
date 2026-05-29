@@ -72,6 +72,17 @@ impl<'de> Decode<'de> for IncrementalAlterConfigsResponse {
     }
 }
 
+#[cfg(test)]
+impl IncrementalAlterConfigsResponse {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.responses = vec![AlterConfigsResourceResponse::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AlterConfigsResourceResponse {
     pub error_code: i16,
@@ -123,6 +134,19 @@ impl<'de> Decode<'de> for AlterConfigsResourceResponse {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl AlterConfigsResourceResponse {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.error_message = Some("x".to_string()); }
+        if version >= 0 { m.resource_type = 1i8; }
+        if version >= 0 { m.resource_name = "x".to_string(); }
+        m
     }
 }
 

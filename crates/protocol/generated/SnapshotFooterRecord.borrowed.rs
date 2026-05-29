@@ -77,3 +77,13 @@ impl<'de> DecodeBorrow<'de> for SnapshotFooterRecord {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+impl SnapshotFooterRecord {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.version = 1i16; }
+        m
+    }
+}

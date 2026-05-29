@@ -76,6 +76,18 @@ impl<'de> Decode<'de> for LeaveGroupResponse {
     }
 }
 
+#[cfg(test)]
+impl LeaveGroupResponse {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 1 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 3 { m.members = vec![MemberResponse::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct MemberResponse {
     pub member_id: String,
@@ -123,6 +135,18 @@ impl<'de> Decode<'de> for MemberResponse {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl MemberResponse {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 3 { m.member_id = "x".to_string(); }
+        if version >= 3 { m.group_instance_id = Some("x".to_string()); }
+        if version >= 3 { m.error_code = 1i16; }
+        m
     }
 }
 

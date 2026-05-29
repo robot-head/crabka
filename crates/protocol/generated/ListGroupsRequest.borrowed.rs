@@ -89,3 +89,14 @@ impl<'de> DecodeBorrow<'de> for ListGroupsRequest<'de> {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+impl<'a> ListGroupsRequest<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 4 { m.states_filter = vec!["x"]; }
+        if version >= 5 { m.types_filter = vec!["x"]; }
+        m
+    }
+}

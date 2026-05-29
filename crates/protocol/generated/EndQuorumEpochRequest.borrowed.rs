@@ -101,6 +101,18 @@ impl<'de> DecodeBorrow<'de> for EndQuorumEpochRequest<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> EndQuorumEpochRequest<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.cluster_id = Some("x"); }
+        if version >= 0 { m.topics = vec![TopicData::populated(version)]; }
+        if version >= 1 { m.leader_endpoints = vec![LeaderEndpoint::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopicData<'a> {
     pub topic_name: &'a str,
@@ -164,6 +176,17 @@ impl<'de> DecodeBorrow<'de> for TopicData<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> TopicData<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topic_name = "x"; }
+        if version >= 0 { m.partitions = vec![PartitionData::populated(version)]; }
+        m
     }
 }
 
@@ -251,6 +274,20 @@ impl<'de> DecodeBorrow<'de> for PartitionData {
     }
 }
 
+#[cfg(test)]
+impl PartitionData {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.partition_index = 1i32; }
+        if version >= 0 { m.leader_id = 1i32; }
+        if version >= 0 { m.leader_epoch = 1i32; }
+        if version >= 0 && version <= 0 { m.preferred_successors = vec![1i32]; }
+        if version >= 1 { m.preferred_candidates = vec![ReplicaInfo::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplicaInfo {
     pub candidate_id: i32,
@@ -314,6 +351,17 @@ impl<'de> DecodeBorrow<'de> for ReplicaInfo {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl ReplicaInfo {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 1 { m.candidate_id = 1i32; }
+        if version >= 1 { m.candidate_directory_id = crate::primitives::uuid::Uuid([1u8; 16]); }
+        m
     }
 }
 
@@ -386,5 +434,17 @@ impl<'de> DecodeBorrow<'de> for LeaderEndpoint<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> LeaderEndpoint<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 1 { m.name = "x"; }
+        if version >= 1 { m.host = "x"; }
+        if version >= 1 { m.port = 1u16; }
+        m
     }
 }

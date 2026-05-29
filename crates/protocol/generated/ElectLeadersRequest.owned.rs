@@ -85,6 +85,18 @@ impl<'de> Decode<'de> for ElectLeadersRequest {
     }
 }
 
+#[cfg(test)]
+impl ElectLeadersRequest {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 1 { m.election_type = 1i8; }
+        if version >= 0 { m.topic_partitions = Some(vec![TopicPartitions::populated(version)]); }
+        if version >= 0 { m.timeout_ms = 1i32; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TopicPartitions {
     pub topic: String,
@@ -128,6 +140,17 @@ impl<'de> Decode<'de> for TopicPartitions {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl TopicPartitions {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topic = "x".to_string(); }
+        if version >= 0 { m.partitions = vec![1i32]; }
+        m
     }
 }
 

@@ -101,6 +101,18 @@ impl<'de> DecodeBorrow<'de> for DeleteTopicsRequest<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> DeleteTopicsRequest<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 6 { m.topics = vec![DeleteTopicState::populated(version)]; }
+        if version >= 0 && version <= 5 { m.topic_names = vec!["x"]; }
+        if version >= 0 { m.timeout_ms = 1i32; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeleteTopicState<'a> {
     pub name: Option<&'a str>,
@@ -164,5 +176,16 @@ impl<'de> DecodeBorrow<'de> for DeleteTopicState<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> DeleteTopicState<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 6 { m.name = Some("x"); }
+        if version >= 6 { m.topic_id = crate::primitives::uuid::Uuid([1u8; 16]); }
+        m
     }
 }

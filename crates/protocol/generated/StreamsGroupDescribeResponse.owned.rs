@@ -72,6 +72,17 @@ impl<'de> Decode<'de> for StreamsGroupDescribeResponse {
     }
 }
 
+#[cfg(test)]
+impl StreamsGroupDescribeResponse {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.groups = vec![DescribedGroup::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DescribedGroup {
     pub error_code: i16,
@@ -163,6 +174,24 @@ impl<'de> Decode<'de> for DescribedGroup {
     }
 }
 
+#[cfg(test)]
+impl DescribedGroup {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.error_message = Some("x".to_string()); }
+        if version >= 0 { m.group_id = "x".to_string(); }
+        if version >= 0 { m.group_state = "x".to_string(); }
+        if version >= 0 { m.group_epoch = 1i32; }
+        if version >= 0 { m.assignment_epoch = 1i32; }
+        if version >= 0 { m.topology = Some(Topology::populated(version)); }
+        if version >= 0 { m.members = vec![Member::populated(version)]; }
+        if version >= 0 { m.authorized_operations = 1i32; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Topology {
     pub epoch: i32,
@@ -206,6 +235,17 @@ impl<'de> Decode<'de> for Topology {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl Topology {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.epoch = 1i32; }
+        if version >= 0 { m.subtopologies = Some(vec![Subtopology::populated(version)]); }
+        m
     }
 }
 
@@ -264,6 +304,20 @@ impl<'de> Decode<'de> for Subtopology {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl Subtopology {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.subtopology_id = "x".to_string(); }
+        if version >= 0 { m.source_topics = vec!["x".to_string()]; }
+        if version >= 0 { m.repartition_sink_topics = vec!["x".to_string()]; }
+        if version >= 0 { m.state_changelog_topics = vec![super::common::topic_info::TopicInfo::populated(version)]; }
+        if version >= 0 { m.repartition_source_topics = vec![super::common::topic_info::TopicInfo::populated(version)]; }
+        m
     }
 }
 
@@ -362,6 +416,30 @@ impl<'de> Decode<'de> for Member {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl Member {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.member_id = "x".to_string(); }
+        if version >= 0 { m.member_epoch = 1i32; }
+        if version >= 0 { m.instance_id = Some("x".to_string()); }
+        if version >= 0 { m.rack_id = Some("x".to_string()); }
+        if version >= 0 { m.client_id = "x".to_string(); }
+        if version >= 0 { m.client_host = "x".to_string(); }
+        if version >= 0 { m.topology_epoch = 1i32; }
+        if version >= 0 { m.process_id = "x".to_string(); }
+        if version >= 0 { m.user_endpoint = Some(super::common::endpoint::Endpoint::populated(version)); }
+        if version >= 0 { m.client_tags = vec![super::common::key_value::KeyValue::populated(version)]; }
+        if version >= 0 { m.task_offsets = vec![super::common::task_offset::TaskOffset::populated(version)]; }
+        if version >= 0 { m.task_end_offsets = vec![super::common::task_offset::TaskOffset::populated(version)]; }
+        if version >= 0 { m.assignment = super::common::assignment::Assignment::populated(version); }
+        if version >= 0 { m.target_assignment = super::common::assignment::Assignment::populated(version); }
+        if version >= 0 { m.is_classic = true; }
+        m
     }
 }
 

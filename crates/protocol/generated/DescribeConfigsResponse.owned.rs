@@ -72,6 +72,17 @@ impl<'de> Decode<'de> for DescribeConfigsResponse {
     }
 }
 
+#[cfg(test)]
+impl DescribeConfigsResponse {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.results = vec![DescribeConfigsResult::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DescribeConfigsResult {
     pub error_code: i16,
@@ -127,6 +138,20 @@ impl<'de> Decode<'de> for DescribeConfigsResult {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl DescribeConfigsResult {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.error_message = Some("x".to_string()); }
+        if version >= 0 { m.resource_type = 1i8; }
+        if version >= 0 { m.resource_name = "x".to_string(); }
+        if version >= 0 { m.configs = vec![DescribeConfigsResourceResult::populated(version)]; }
+        m
     }
 }
 
@@ -216,6 +241,23 @@ impl<'de> Decode<'de> for DescribeConfigsResourceResult {
     }
 }
 
+#[cfg(test)]
+impl DescribeConfigsResourceResult {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.name = "x".to_string(); }
+        if version >= 0 { m.value = Some("x".to_string()); }
+        if version >= 0 { m.read_only = true; }
+        if version >= 1 { m.config_source = 1i8; }
+        if version >= 0 { m.is_sensitive = true; }
+        if version >= 1 { m.synonyms = vec![DescribeConfigsSynonym::populated(version)]; }
+        if version >= 3 { m.config_type = 1i8; }
+        if version >= 3 { m.documentation = Some("x".to_string()); }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DescribeConfigsSynonym {
     pub name: String,
@@ -263,6 +305,18 @@ impl<'de> Decode<'de> for DescribeConfigsSynonym {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl DescribeConfigsSynonym {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 1 { m.name = "x".to_string(); }
+        if version >= 1 { m.value = Some("x".to_string()); }
+        if version >= 1 { m.source = 1i8; }
+        m
     }
 }
 

@@ -77,3 +77,14 @@ impl<'de> DecodeBorrow<'de> for Status<'de> {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+impl<'a> Status<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.status_code = 1i8; }
+        if version >= 0 { m.status_detail = "x"; }
+        m
+    }
+}

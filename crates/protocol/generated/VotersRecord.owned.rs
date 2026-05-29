@@ -68,6 +68,17 @@ impl<'de> Decode<'de> for VotersRecord {
     }
 }
 
+#[cfg(test)]
+impl VotersRecord {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.version = 1i16; }
+        if version >= 0 { m.voters = vec![Voter::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Voter {
     pub voter_id: i32,
@@ -122,6 +133,19 @@ impl<'de> Decode<'de> for Voter {
     }
 }
 
+#[cfg(test)]
+impl Voter {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.voter_id = 1i32; }
+        if version >= 0 { m.voter_directory_id = crate::primitives::uuid::Uuid([1u8; 16]); }
+        if version >= 0 { m.endpoints = vec![Endpoint::populated(version)]; }
+        if version >= 0 { m.k_raft_version_feature = KRaftVersionFeature::populated(version); }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Endpoint {
     pub name: String,
@@ -172,6 +196,18 @@ impl<'de> Decode<'de> for Endpoint {
     }
 }
 
+#[cfg(test)]
+impl Endpoint {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.name = "x".to_string(); }
+        if version >= 0 { m.host = "x".to_string(); }
+        if version >= 0 { m.port = 1u16; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct KRaftVersionFeature {
     pub min_supported_version: i16,
@@ -215,6 +251,17 @@ impl<'de> Decode<'de> for KRaftVersionFeature {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl KRaftVersionFeature {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.min_supported_version = 1i16; }
+        if version >= 0 { m.max_supported_version = 1i16; }
+        m
     }
 }
 

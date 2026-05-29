@@ -92,6 +92,17 @@ impl<'de> DecodeBorrow<'de> for TxnOffsetCommitResponse<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> TxnOffsetCommitResponse<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.topics = vec![TxnOffsetCommitResponseTopic::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TxnOffsetCommitResponseTopic<'a> {
     pub name: &'a str,
@@ -158,6 +169,17 @@ impl<'de> DecodeBorrow<'de> for TxnOffsetCommitResponseTopic<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> TxnOffsetCommitResponseTopic<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.name = "x"; }
+        if version >= 0 { m.partitions = vec![TxnOffsetCommitResponsePartition::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TxnOffsetCommitResponsePartition {
     pub partition_index: i32,
@@ -221,5 +243,16 @@ impl<'de> DecodeBorrow<'de> for TxnOffsetCommitResponsePartition {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl TxnOffsetCommitResponsePartition {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.partition_index = 1i32; }
+        if version >= 0 { m.error_code = 1i16; }
+        m
     }
 }

@@ -78,6 +78,19 @@ impl<'de> Decode<'de> for ListTransactionsResponse {
     }
 }
 
+#[cfg(test)]
+impl ListTransactionsResponse {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.unknown_state_filters = vec!["x".to_string()]; }
+        if version >= 0 { m.transaction_states = vec![TransactionState::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TransactionState {
     pub transactional_id: String,
@@ -125,6 +138,18 @@ impl<'de> Decode<'de> for TransactionState {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl TransactionState {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.transactional_id = "x".to_string(); }
+        if version >= 0 { m.producer_id = 1i64; }
+        if version >= 0 { m.transaction_state = "x".to_string(); }
+        m
     }
 }
 

@@ -85,6 +85,18 @@ impl<'de> Decode<'de> for UpdateFeaturesRequest {
     }
 }
 
+#[cfg(test)]
+impl UpdateFeaturesRequest {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.timeout_ms = 1i32; }
+        if version >= 0 { m.feature_updates = vec![FeatureUpdateKey::populated(version)]; }
+        if version >= 1 { m.validate_only = true; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FeatureUpdateKey {
     pub feature: String,
@@ -148,6 +160,19 @@ impl<'de> Decode<'de> for FeatureUpdateKey {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl FeatureUpdateKey {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.feature = "x".to_string(); }
+        if version >= 0 { m.max_version_level = 1i16; }
+        if version >= 0 && version <= 0 { m.allow_downgrade = true; }
+        if version >= 1 { m.upgrade_type = 1i8; }
+        m
     }
 }
 

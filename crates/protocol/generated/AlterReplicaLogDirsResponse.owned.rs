@@ -70,6 +70,17 @@ impl<'de> Decode<'de> for AlterReplicaLogDirsResponse {
     }
 }
 
+#[cfg(test)]
+impl AlterReplicaLogDirsResponse {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.results = vec![AlterReplicaLogDirTopicResult::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AlterReplicaLogDirTopicResult {
     pub topic_name: String,
@@ -116,6 +127,17 @@ impl<'de> Decode<'de> for AlterReplicaLogDirTopicResult {
     }
 }
 
+#[cfg(test)]
+impl AlterReplicaLogDirTopicResult {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topic_name = "x".to_string(); }
+        if version >= 0 { m.partitions = vec![AlterReplicaLogDirPartitionResult::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AlterReplicaLogDirPartitionResult {
     pub partition_index: i32,
@@ -159,6 +181,17 @@ impl<'de> Decode<'de> for AlterReplicaLogDirPartitionResult {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl AlterReplicaLogDirPartitionResult {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.partition_index = 1i32; }
+        if version >= 0 { m.error_code = 1i16; }
+        m
     }
 }
 

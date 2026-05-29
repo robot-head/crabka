@@ -68,6 +68,17 @@ impl<'de> Decode<'de> for DeleteShareGroupOffsetsRequest {
     }
 }
 
+#[cfg(test)]
+impl DeleteShareGroupOffsetsRequest {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.group_id = "x".to_string(); }
+        if version >= 0 { m.topics = vec![DeleteShareGroupOffsetsRequestTopic::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DeleteShareGroupOffsetsRequestTopic {
     pub topic_name: String,
@@ -107,6 +118,16 @@ impl<'de> Decode<'de> for DeleteShareGroupOffsetsRequestTopic {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl DeleteShareGroupOffsetsRequestTopic {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topic_name = "x".to_string(); }
+        m
     }
 }
 

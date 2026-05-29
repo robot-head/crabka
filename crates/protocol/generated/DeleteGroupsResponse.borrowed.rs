@@ -92,6 +92,17 @@ impl<'de> DecodeBorrow<'de> for DeleteGroupsResponse<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> DeleteGroupsResponse<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.results = vec![DeletableGroupResult::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeletableGroupResult<'a> {
     pub group_id: &'a str,
@@ -155,5 +166,16 @@ impl<'de> DecodeBorrow<'de> for DeletableGroupResult<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> DeletableGroupResult<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.group_id = "x"; }
+        if version >= 0 { m.error_code = 1i16; }
+        m
     }
 }

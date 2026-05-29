@@ -76,3 +76,17 @@ impl<'de> Decode<'de> for ReplicaState {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+impl ReplicaState {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.replica_id = 1i32; }
+        if version >= 2 { m.replica_directory_id = crate::primitives::uuid::Uuid([1u8; 16]); }
+        if version >= 0 { m.log_end_offset = 1i64; }
+        if version >= 1 { m.last_fetch_timestamp = 1i64; }
+        if version >= 1 { m.last_caught_up_timestamp = 1i64; }
+        m
+    }
+}

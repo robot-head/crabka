@@ -89,6 +89,19 @@ impl<'de> Decode<'de> for FetchSnapshotResponse {
     }
 }
 
+#[cfg(test)]
+impl FetchSnapshotResponse {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.topics = vec![TopicSnapshot::populated(version)]; }
+        if version >= 1 { m.node_endpoints = vec![NodeEndpoint::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TopicSnapshot {
     pub name: String,
@@ -132,6 +145,17 @@ impl<'de> Decode<'de> for TopicSnapshot {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl TopicSnapshot {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.name = "x".to_string(); }
+        if version >= 0 { m.partitions = vec![PartitionSnapshot::populated(version)]; }
+        m
     }
 }
 
@@ -211,6 +235,21 @@ impl<'de> Decode<'de> for PartitionSnapshot {
     }
 }
 
+#[cfg(test)]
+impl PartitionSnapshot {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.index = 1i32; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.snapshot_id = SnapshotId::populated(version); }
+        if version >= 0 { m.size = 1i64; }
+        if version >= 0 { m.position = 1i64; }
+        if version >= 0 { m.current_leader = LeaderIdAndEpoch::populated(version); }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SnapshotId {
     pub end_offset: i64,
@@ -257,6 +296,17 @@ impl<'de> Decode<'de> for SnapshotId {
     }
 }
 
+#[cfg(test)]
+impl SnapshotId {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.end_offset = 1i64; }
+        if version >= 0 { m.epoch = 1i32; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct LeaderIdAndEpoch {
     pub leader_id: i32,
@@ -300,6 +350,17 @@ impl<'de> Decode<'de> for LeaderIdAndEpoch {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl LeaderIdAndEpoch {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.leader_id = 1i32; }
+        if version >= 0 { m.leader_epoch = 1i32; }
+        m
     }
 }
 
@@ -350,6 +411,18 @@ impl<'de> Decode<'de> for NodeEndpoint {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl NodeEndpoint {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 1 { m.node_id = 1i32; }
+        if version >= 1 { m.host = "x".to_string(); }
+        if version >= 1 { m.port = 1u16; }
+        m
     }
 }
 

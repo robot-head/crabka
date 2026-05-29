@@ -139,6 +139,24 @@ impl<'de> DecodeBorrow<'de> for JoinGroupResponse<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> JoinGroupResponse<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 2 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.generation_id = 1i32; }
+        if version >= 7 { m.protocol_type = Some("x"); }
+        if version >= 0 { m.protocol_name = Some("x"); }
+        if version >= 0 { m.leader = "x"; }
+        if version >= 9 { m.skip_assignment = true; }
+        if version >= 0 { m.member_id = "x"; }
+        if version >= 0 { m.members = vec![JoinGroupResponseMember::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JoinGroupResponseMember<'a> {
     pub member_id: &'a str,
@@ -208,5 +226,17 @@ impl<'de> DecodeBorrow<'de> for JoinGroupResponseMember<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> JoinGroupResponseMember<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.member_id = "x"; }
+        if version >= 5 { m.group_instance_id = Some("x"); }
+        if version >= 0 { m.metadata = &b"x"[..]; }
+        m
     }
 }

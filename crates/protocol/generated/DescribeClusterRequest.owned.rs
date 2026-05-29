@@ -81,6 +81,18 @@ impl<'de> Decode<'de> for DescribeClusterRequest {
     }
 }
 
+#[cfg(test)]
+impl DescribeClusterRequest {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.include_cluster_authorized_operations = true; }
+        if version >= 1 { m.endpoint_type = 1i8; }
+        if version >= 2 { m.include_fenced_brokers = true; }
+        m
+    }
+}
+
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
 /// Only includes fields valid for the given version.
 #[must_use]

@@ -87,6 +87,18 @@ impl<'de> Decode<'de> for CreateTopicsRequest {
     }
 }
 
+#[cfg(test)]
+impl CreateTopicsRequest {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topics = vec![CreatableTopic::populated(version)]; }
+        if version >= 0 { m.timeout_ms = 1i32; }
+        if version >= 1 { m.validate_only = true; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CreatableTopic {
     pub name: String,
@@ -145,6 +157,20 @@ impl<'de> Decode<'de> for CreatableTopic {
     }
 }
 
+#[cfg(test)]
+impl CreatableTopic {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.name = "x".to_string(); }
+        if version >= 0 { m.num_partitions = 1i32; }
+        if version >= 0 { m.replication_factor = 1i16; }
+        if version >= 0 { m.assignments = vec![CreatableReplicaAssignment::populated(version)]; }
+        if version >= 0 { m.configs = vec![CreatableTopicConfig::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CreatableReplicaAssignment {
     pub partition_index: i32,
@@ -191,6 +217,17 @@ impl<'de> Decode<'de> for CreatableReplicaAssignment {
     }
 }
 
+#[cfg(test)]
+impl CreatableReplicaAssignment {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.partition_index = 1i32; }
+        if version >= 0 { m.broker_ids = vec![1i32]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CreatableTopicConfig {
     pub name: String,
@@ -234,6 +271,17 @@ impl<'de> Decode<'de> for CreatableTopicConfig {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl CreatableTopicConfig {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.name = "x".to_string(); }
+        if version >= 0 { m.value = Some("x".to_string()); }
+        m
     }
 }
 

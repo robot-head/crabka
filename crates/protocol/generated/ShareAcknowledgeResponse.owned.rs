@@ -88,6 +88,21 @@ impl<'de> Decode<'de> for ShareAcknowledgeResponse {
     }
 }
 
+#[cfg(test)]
+impl ShareAcknowledgeResponse {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.error_message = Some("x".to_string()); }
+        if version >= 2 { m.acquisition_lock_timeout_ms = 1i32; }
+        if version >= 0 { m.responses = vec![ShareAcknowledgeTopicResponse::populated(version)]; }
+        if version >= 0 { m.node_endpoints = vec![NodeEndpoint::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ShareAcknowledgeTopicResponse {
     pub topic_id: crate::primitives::uuid::Uuid,
@@ -131,6 +146,17 @@ impl<'de> Decode<'de> for ShareAcknowledgeTopicResponse {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl ShareAcknowledgeTopicResponse {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topic_id = crate::primitives::uuid::Uuid([1u8; 16]); }
+        if version >= 0 { m.partitions = vec![PartitionData::populated(version)]; }
+        m
     }
 }
 
@@ -188,6 +214,19 @@ impl<'de> Decode<'de> for PartitionData {
     }
 }
 
+#[cfg(test)]
+impl PartitionData {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.partition_index = 1i32; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.error_message = Some("x".to_string()); }
+        if version >= 0 { m.current_leader = LeaderIdAndEpoch::populated(version); }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct LeaderIdAndEpoch {
     pub leader_id: i32,
@@ -231,6 +270,17 @@ impl<'de> Decode<'de> for LeaderIdAndEpoch {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl LeaderIdAndEpoch {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.leader_id = 1i32; }
+        if version >= 0 { m.leader_epoch = 1i32; }
+        m
     }
 }
 
@@ -285,6 +335,19 @@ impl<'de> Decode<'de> for NodeEndpoint {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl NodeEndpoint {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.node_id = 1i32; }
+        if version >= 0 { m.host = "x".to_string(); }
+        if version >= 0 { m.port = 1i32; }
+        if version >= 0 { m.rack = Some("x".to_string()); }
+        m
     }
 }
 

@@ -42,6 +42,9 @@ pub fn allow_header() -> &'static str {
         "    clippy::default_trait_access,\n",
         "    clippy::derivable_impls,\n",
         "    clippy::collapsible_if,\n",
+        "    clippy::too_many_lines,\n",
+        "    clippy::field_reassign_with_default,\n",
+        "    unused_mut,\n",
         "    clippy::new_without_default,\n",
         "    clippy::unreadable_literal,\n",
         "    clippy::redundant_closure_for_method_calls,\n",
@@ -106,24 +109,106 @@ pub fn emit(
 }
 
 fn write_owned_tests(out: &mut String, type_name: &str) {
-    // Note: we do not assert decoded == msg for min_version because some messages
-    // have encoding quirks at old versions where the default value does not survive
-    // a round-trip unchanged (e.g. MetadataRequest.topics = None encodes as an
-    // empty array at v0 and decodes as Some([])). The bespoke integration tests
+    // Each message is round-tripped across EVERY supported version, in two
+    // shapes: `default()` (empty collections / zero scalars) and `populated()`
+    // (one element per array, recursively populated nested structs, non-default
+    // scalars). The populated form drives the array-element, nested-struct, and
+    // tagged-field encode/decode paths that an empty default never reaches.
+    //
+    // Rather than assert structural equality (which has version-dependent quirks,
+    // e.g. `None` vs `Some([])` for nullable arrays at old versions), the helper
+    // re-encodes the decoded value and asserts byte-equality with the original
+    // encoding — a stronger, quirk-free invariant. Bespoke integration tests
     // under crates/protocol/tests/ cover semantic equality.
-    // Import order: crate:: before external crates to match rustfmt grouping.
     writeln!(
         out,
-        "#[cfg(test)]\nmod tests {{\n    use super::*;\n    use crate::{{Decode, Encode}};\n    use bytes::BytesMut;\n\n    #[test]\n    fn min_version_roundtrips() {{\n        let v = MIN_VERSION;\n        let msg = {type_name}::default();\n        let mut buf = BytesMut::new();\n        msg.encode(&mut buf, v).unwrap();\n        assert_eq!(msg.encoded_len(v), buf.len());\n        let mut cur = &buf[..];\n        let _decoded = {type_name}::decode(&mut cur, v).unwrap();\n        assert!(cur.is_empty(), \"decoder left trailing bytes\");\n    }}\n\n    #[test]\n    fn max_version_roundtrips() {{\n        let v = MAX_VERSION;\n        let msg = {type_name}::default();\n        let mut buf = BytesMut::new();\n        msg.encode(&mut buf, v).unwrap();\n        assert_eq!(msg.encoded_len(v), buf.len());\n        let mut cur = &buf[..];\n        let decoded = {type_name}::decode(&mut cur, v).unwrap();\n        assert_eq!(decoded, msg);\n        assert!(cur.is_empty(), \"decoder left trailing bytes\");\n    }}\n}}"
+        "#[cfg(test)]
+mod tests {{
+    use super::*;
+    use crate::{{Decode, Encode}};
+    use bytes::BytesMut;
+
+    fn roundtrip(msg: &{type_name}, v: i16) {{
+        let mut buf = BytesMut::new();
+        msg.encode(&mut buf, v).unwrap();
+        assert_eq!(msg.encoded_len(v), buf.len());
+        let bytes = buf.freeze();
+        let mut cur = &bytes[..];
+        let decoded = {type_name}::decode(&mut cur, v).unwrap();
+        assert!(cur.is_empty());
+        let mut reencoded = BytesMut::new();
+        decoded.encode(&mut reencoded, v).unwrap();
+        assert_eq!(&reencoded[..], &bytes[..]);
+        // Exercise the JVM-oracle default-JSON builder for this version.
+        let _ = default_json(v);
+    }}
+
+    #[test]
+    fn default_roundtrips_all_versions() {{
+        for v in MIN_VERSION..=MAX_VERSION {{
+            roundtrip(&{type_name}::default(), v);
+        }}
+    }}
+
+    #[test]
+    fn populated_roundtrips_all_versions() {{
+        for v in MIN_VERSION..=MAX_VERSION {{
+            roundtrip(&{type_name}::populated(v), v);
+        }}
+    }}
+}}"
     )
     .unwrap();
 }
 
 fn write_borrowed_tests(out: &mut String, type_name: &str) {
-    // Import order: crate:: before external crates to match rustfmt grouping.
+    // See `write_owned_tests` for rationale. The borrowed flavor is exercised by
+    // encoding a populated/default value, decoding it zero-copy, then re-encoding
+    // the decoded borrow and asserting byte-equality.
     writeln!(
         out,
-        "#[cfg(test)]\nmod tests {{\n    use super::*;\n    use crate::{{DecodeBorrow, Encode}};\n    use bytes::BytesMut;\n\n    #[test]\n    fn min_version_roundtrips() {{\n        let v = MIN_VERSION;\n        let msg = {type_name}::default();\n        let mut buf = BytesMut::new();\n        msg.encode(&mut buf, v).unwrap();\n        assert_eq!(msg.encoded_len(v), buf.len());\n        let frozen = buf.freeze();\n        let mut cur: &[u8] = &frozen;\n        let _decoded = {type_name}::decode_borrow(&mut cur, v).unwrap();\n    }}\n\n    #[test]\n    fn max_version_roundtrips() {{\n        let v = MAX_VERSION;\n        let msg = {type_name}::default();\n        let mut buf = BytesMut::new();\n        msg.encode(&mut buf, v).unwrap();\n        assert_eq!(msg.encoded_len(v), buf.len());\n        let frozen = buf.freeze();\n        let mut cur: &[u8] = &frozen;\n        let _decoded = {type_name}::decode_borrow(&mut cur, v).unwrap();\n    }}\n}}"
+        "#[cfg(test)]
+mod tests {{
+    use super::*;
+    use crate::{{DecodeBorrow, Encode}};
+    use bytes::BytesMut;
+
+    fn check(msg_bytes: &bytes::Bytes, v: i16) {{
+        let mut cur: &[u8] = msg_bytes;
+        let decoded = {type_name}::decode_borrow(&mut cur, v).unwrap();
+        assert!(cur.is_empty());
+        assert_eq!(decoded.encoded_len(v), msg_bytes.len());
+        let mut reencoded = BytesMut::new();
+        decoded.encode(&mut reencoded, v).unwrap();
+        assert_eq!(&reencoded[..], &msg_bytes[..]);
+        // Exercise the zero-copy -> owned conversion, then confirm the owned
+        // value still encodes to the same bytes.
+        let owned = decoded.to_owned();
+        let mut owned_buf = BytesMut::new();
+        owned.encode(&mut owned_buf, v).unwrap();
+        assert_eq!(&owned_buf[..], &msg_bytes[..]);
+    }}
+
+    #[test]
+    fn default_roundtrips_all_versions() {{
+        for v in MIN_VERSION..=MAX_VERSION {{
+            let msg = {type_name}::default();
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, v).unwrap();
+            check(&buf.freeze(), v);
+        }}
+    }}
+
+    #[test]
+    fn populated_roundtrips_all_versions() {{
+        for v in MIN_VERSION..=MAX_VERSION {{
+            let msg = {type_name}::populated(v);
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, v).unwrap();
+            check(&buf.freeze(), v);
+        }}
+    }}
+}}"
     )
     .unwrap();
 }

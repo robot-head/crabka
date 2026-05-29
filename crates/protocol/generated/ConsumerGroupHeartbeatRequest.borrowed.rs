@@ -143,6 +143,25 @@ impl<'de> DecodeBorrow<'de> for ConsumerGroupHeartbeatRequest<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> ConsumerGroupHeartbeatRequest<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.group_id = "x"; }
+        if version >= 0 { m.member_id = "x"; }
+        if version >= 0 { m.member_epoch = 1i32; }
+        if version >= 0 { m.instance_id = Some("x"); }
+        if version >= 0 { m.rack_id = Some("x"); }
+        if version >= 0 { m.rebalance_timeout_ms = 1i32; }
+        if version >= 0 { m.subscribed_topic_names = Some(vec!["x"]); }
+        if version >= 1 { m.subscribed_topic_regex = Some("x"); }
+        if version >= 0 { m.server_assignor = Some("x"); }
+        if version >= 0 { m.topic_partitions = Some(vec![TopicPartitions::populated(version)]); }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopicPartitions {
     pub topic_id: crate::primitives::uuid::Uuid,
@@ -206,5 +225,16 @@ impl<'de> DecodeBorrow<'de> for TopicPartitions {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl TopicPartitions {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topic_id = crate::primitives::uuid::Uuid([1u8; 16]); }
+        if version >= 0 { m.partitions = vec![1i32]; }
+        m
     }
 }

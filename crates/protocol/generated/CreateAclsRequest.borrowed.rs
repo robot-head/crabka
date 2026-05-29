@@ -86,6 +86,16 @@ impl<'de> DecodeBorrow<'de> for CreateAclsRequest<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> CreateAclsRequest<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.creations = vec![AclCreation::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AclCreation<'a> {
     pub resource_type: i8,
@@ -179,5 +189,21 @@ impl<'de> DecodeBorrow<'de> for AclCreation<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> AclCreation<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.resource_type = 1i8; }
+        if version >= 0 { m.resource_name = "x"; }
+        if version >= 1 { m.resource_pattern_type = 1i8; }
+        if version >= 0 { m.principal = "x"; }
+        if version >= 0 { m.host = "x"; }
+        if version >= 0 { m.operation = 1i8; }
+        if version >= 0 { m.permission_type = 1i8; }
+        m
     }
 }
