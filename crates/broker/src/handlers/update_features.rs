@@ -18,6 +18,14 @@ use crate::broker::Broker;
 use crate::codes;
 use crate::features;
 
+/// True if finalizing `metadata.version` to `level` would drop below the
+/// `floor` the live image requires (KIP-584 unsafe downgrade). `level == 0`
+/// (delete) is excluded — deletion is handled by the existing tombstone
+/// path, not the floor.
+fn violates_downgrade_floor(level: i16, floor: i16) -> bool {
+    level > 0 && level < floor
+}
+
 /// KIP-584 `FeatureUpdate.UpgradeType`: 1 = UPGRADE, 2 = `SAFE_DOWNGRADE`,
 /// 3 = `UNSAFE_DOWNGRADE`.
 fn downgrade_allowed(version: i16, allow_downgrade: bool, upgrade_type: i8) -> bool {
@@ -99,6 +107,17 @@ pub(crate) async fn handle(
                 "Provided version level is not in the supported range.",
             ));
             continue;
+        }
+        if name == crate::features::METADATA_VERSION {
+            let floor = image.min_required_metadata_version();
+            if violates_downgrade_floor(level, floor) {
+                results.push(row(
+                    name,
+                    codes::INVALID_UPDATE_VERSION,
+                    "Can not downgrade metadata.version below the level required by existing cluster state.",
+                ));
+                continue;
+            }
         }
         if level == 0 {
             // Delete the finalized feature; only valid if it exists and a
@@ -282,5 +301,16 @@ mod tests {
         let results = vec![row("b".into(), codes::INVALID_UPDATE_VERSION, "bad")];
         let resp = finalize(results, 1);
         assert_eq!(resp.error_code, codes::NONE);
+    }
+
+    #[test]
+    fn below_floor_is_rejected_even_with_downgrade_flag() {
+        // floor = 14 (delegation tokens present); a finalize to 11 is an
+        // unsafe downgrade and must be rejected regardless of the flag.
+        assert!(violates_downgrade_floor(11, 14));
+        assert!(!violates_downgrade_floor(14, 14));
+        assert!(!violates_downgrade_floor(19, 14));
+        // level 0 (delete) is handled separately; never a floor violation here.
+        assert!(!violates_downgrade_floor(0, 14));
     }
 }

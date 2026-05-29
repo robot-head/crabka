@@ -21,8 +21,8 @@ use std::path::PathBuf;
 
 use clap::Args;
 use crabka_metadata::{
-    AclEntry, KRaftVersionRange, KRaftVersionRecord, MetadataRecord, ScramCredentialRecord, Voter,
-    VoterEndpoint, VoterSet, VotersRecord,
+    AclEntry, FeatureLevelRecord, KRaftVersionRange, KRaftVersionRecord, MetadataRecord,
+    ScramCredentialRecord, Voter, VoterEndpoint, VoterSet, VotersRecord,
 };
 use crabka_security::SaslMechanism;
 use crabka_security::scram::hash_scram_password_with_salt;
@@ -54,6 +54,10 @@ pub struct FormatArgs {
     /// Cluster id. Generated if not provided.
     #[arg(long)]
     cluster_id: Option<Uuid>,
+    /// Bootstrap `metadata.version` (KIP-778), e.g. `4.0` or `4.0-IV3`.
+    /// Defaults to the broker's maximum supported level when omitted.
+    #[arg(long)]
+    release_version: Option<String>,
     /// Seed a SCRAM credential. May be repeated.
     /// Format: `SCRAM-SHA-256=[name=<u>,password=<p>,iterations=<n>]`
     /// or `SCRAM-SHA-512=[name=<u>,password=<p>,iterations=<n>]`
@@ -87,6 +91,20 @@ pub struct ScramSpec {
     name: String,
     password: String,
     iterations: u32,
+}
+
+/// Map a release string to a supported `metadata.version` feature level,
+/// erroring if it is unknown or outside `[MIN, MAX]`.
+fn resolve_release_level(s: &str) -> Result<i16, String> {
+    let mv = crabka_metadata::metadata_version::from_version_string(s)
+        .ok_or_else(|| format!("unknown metadata.version {s:?}"))?;
+    let level = mv.feature_level();
+    if !crabka_metadata::metadata_version::is_supported_level(level) {
+        return Err(format!(
+            "metadata.version {s:?} (level {level}) is outside the supported range"
+        ));
+    }
+    Ok(level)
 }
 
 fn parse_scram_spec(s: &str) -> Result<ScramSpec, String> {
@@ -296,7 +314,7 @@ struct BootstrapManifest {
 
 // `async` matches the entry point in `main.rs`; the body is sync today
 // (purely fs + crypto) but a real raft-log bootstrap would await tokio I/O.
-#[allow(clippy::unused_async)]
+#[allow(clippy::unused_async, clippy::too_many_lines)]
 pub async fn run(args: FormatArgs) -> i32 {
     // Refuse to overwrite a non-empty directory. We treat "exists with
     // any entry" as non-empty; an empty dir or missing path is OK.
@@ -359,6 +377,26 @@ pub async fn run(args: FormatArgs) -> i32 {
             voters: initial_voters,
         }));
     }
+
+    // KIP-778 bootstrap: every formatted cluster finalizes a real
+    // metadata.version so the image never sits at MetadataVersion.UNKNOWN.
+    let release = args
+        .release_version
+        .as_deref()
+        .map(resolve_release_level)
+        .transpose();
+    let release_level = match release {
+        Ok(Some(level)) => level,
+        Ok(None) => crabka_metadata::metadata_version::METADATA_VERSION_MAX,
+        Err(e) => {
+            eprintln!("crabka format: {e}");
+            return EXIT_BOOTSTRAP_FAIL;
+        }
+    };
+    records.push(MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+        name: crabka_metadata::metadata_version::METADATA_VERSION_FEATURE.to_string(),
+        level: release_level,
+    }));
 
     // Build the seed records. Each `--add-scram` is hashed *here* (CLI
     // side) using `hash_scram_password_with_salt` from `crabka-security`
@@ -493,6 +531,25 @@ fn base64_encode(input: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn release_version_maps_to_feature_level() {
+        assert_eq!(resolve_release_level("4.0").unwrap(), 25);
+        assert_eq!(resolve_release_level("3.7-IV4").unwrap(), 19);
+        assert!(resolve_release_level("2.8").is_err()); // below MIN / unknown
+        assert!(resolve_release_level("9.9-IV0").is_err()); // unknown
+    }
+
+    // The no-flag default path (`Ok(None) => METADATA_VERSION_MAX` in `run()`)
+    // is covered end-to-end by `format_smoke.rs`, which formats without
+    // `--release-version` and asserts the FeatureLevel record is present.
+    #[test]
+    fn max_version_string_resolves_to_max() {
+        assert_eq!(
+            resolve_release_level("4.0").unwrap(),
+            crabka_metadata::metadata_version::METADATA_VERSION_MAX
+        );
+    }
 
     #[test]
     fn parse_scram_spec_happy_path() {

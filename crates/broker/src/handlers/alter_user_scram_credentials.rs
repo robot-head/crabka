@@ -75,6 +75,26 @@ pub(crate) async fn handle(
         },
     ) == AuthorizationResult::Allow;
 
+    // KIP-554/KIP-778: KRaft SCRAM requires metadata.version >= 3.5-IV2.
+    if crate::features::metadata_version_blocks(
+        image.finalized_metadata_version(),
+        crabka_metadata::metadata_version::SCRAM_MIN_LEVEL,
+    ) {
+        let msg = "SCRAM is not enabled at the cluster's metadata.version.";
+        let mut results = Vec::new();
+        for d in &req.deletions {
+            results.push(err_result(d.name.clone(), codes::UNSUPPORTED_VERSION, msg));
+        }
+        for u in &req.upsertions {
+            results.push(err_result(u.name.clone(), codes::UNSUPPORTED_VERSION, msg));
+        }
+        return AlterUserScramCredentialsResponse {
+            throttle_time_ms: 0,
+            results,
+            ..Default::default()
+        };
+    }
+
     let mut seen: HashSet<(String, i8)> = HashSet::new();
     let mut user_results: Vec<AlterUserScramCredentialsResult> = Vec::new();
     let mut records: Vec<MetadataRecord> = Vec::new();
@@ -265,5 +285,22 @@ mod tests {
         let r = ok_result("alice".into());
         assert_eq!(r.error_code, 0);
         assert!(r.error_message.is_none());
+    }
+
+    #[test]
+    fn scram_gate_permits_unknown_and_at_or_above_level() {
+        use crabka_metadata::metadata_version::SCRAM_MIN_LEVEL;
+        assert!(!crate::features::metadata_version_blocks(
+            None,
+            SCRAM_MIN_LEVEL
+        ));
+        assert!(crate::features::metadata_version_blocks(
+            Some(10),
+            SCRAM_MIN_LEVEL
+        ));
+        assert!(!crate::features::metadata_version_blocks(
+            Some(11),
+            SCRAM_MIN_LEVEL
+        ));
     }
 }

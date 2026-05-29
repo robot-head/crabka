@@ -181,7 +181,7 @@ ORDINAL=\"${HOSTNAME##*-}\"\n\
 NODE_ID=$((NODE_ID_START + ORDINAL))\n\
 mkdir -p /var/lib/crabka/data\n\
 if [ ! -f /var/lib/crabka/data/.formatted ]; then\n\
-  /usr/bin/crabka format --log-dir /var/lib/crabka/data --cluster-id \"$CRABKA_CLUSTER_ID\"\n\
+  /usr/bin/crabka format --log-dir /var/lib/crabka/data --cluster-id \"$CRABKA_CLUSTER_ID\" --release-version \"$CRABKA_METADATA_VERSION\"\n\
   touch /var/lib/crabka/data/.formatted\n\
 fi\n\
 printf '%s' \"$NODE_ID\" > /var/lib/crabka/data/.node-id\n";
@@ -233,6 +233,7 @@ fn render_init_container(
     broker_image: &str,
     secret_name: &str,
     node_id_start: i32,
+    metadata_version: &str,
 ) -> serde_json::Value {
     json!({
         "name": "format",
@@ -241,7 +242,8 @@ fn render_init_container(
         "args": [INIT_SCRIPT],
         "env": [
             { "name": "NODE_ID_START", "value": node_id_start.to_string() },
-            { "name": "CRABKA_CLUSTER_ID", "valueFrom": { "secretKeyRef": { "name": secret_name, "key": "clusterId" } } }
+            { "name": "CRABKA_CLUSTER_ID", "valueFrom": { "secretKeyRef": { "name": secret_name, "key": "clusterId" } } },
+            { "name": "CRABKA_METADATA_VERSION", "value": metadata_version.to_string() }
         ],
         "volumeMounts": [{ "name": "data", "mountPath": "/var/lib/crabka/data" }],
         "securityContext": {
@@ -816,7 +818,44 @@ pub(crate) fn render_statefulset(
     let service_name = format!("{parent_name}-broker-headless");
     let sts_name = format!("{parent_name}-{pool_name}");
 
-    let init = render_init_container(broker_image, &secret_name, pool.spec.node_id_start);
+    // Resolve the metadata version to seed into `crabka format
+    // --release-version`. Priority: finalized status > operator-pinned spec
+    // > kafka_version (MAX default). The kafka reconciler writes the finalized
+    // value to `status.metadataVersion` once version validation passes; on a
+    // first-ever reconcile (status absent) we fall back to the spec pin, then
+    // to the kafka_version so the formatter always receives a concrete level.
+    let chosen = parent
+        .status
+        .as_ref()
+        .and_then(|s| s.metadata_version.as_deref())
+        .or(parent.spec.metadata_version.as_deref())
+        .unwrap_or(&parent.spec.kafka_version);
+    // Normalize to major.minor — `crabka format --release-version` resolves
+    // a short form (e.g. "3.7"); a 3-part version string would not resolve.
+    let normalized = crate::version::KafkaVersion::parse(chosen)
+        .map_or_else(|_| chosen.to_string(), |v| v.short());
+    // `crabka format --release-version` hard-rejects a value outside the
+    // broker's supported metadata.version table, which would crash-loop the
+    // init container. The broker always supports [MIN, MAX] regardless of the
+    // kafka_version compat label, so clamp an unsupported/out-of-range value
+    // to MAX. (`evaluate` still surfaces the misconfig as KafkaVersionValid=False.)
+    let resolved_metadata_version =
+        if crabka_metadata::metadata_version::from_version_string(&normalized).is_some() {
+            normalized
+        } else {
+            crabka_metadata::metadata_version::from_feature_level(
+                crabka_metadata::metadata_version::METADATA_VERSION_MAX,
+            )
+            .expect("MAX level is in the table")
+            .short()
+            .to_string()
+        };
+    let init = render_init_container(
+        broker_image,
+        &secret_name,
+        pool.spec.node_id_start,
+        &resolved_metadata_version,
+    );
     let metrics_enabled = parent.spec.metrics_config.is_some();
     let logging_enabled = parent.spec.logging.is_some();
     let cm_name = format!("{parent_name}-broker-config");
@@ -1613,6 +1652,80 @@ mod tests {
              Otherwise `crabka format` refuses to overwrite a non-empty \
              log_dir on the first boot of an empty PVC. \
              format at byte {format_pos}, .node-id at byte {node_id_write_pos}",
+        );
+    }
+
+    #[test]
+    fn init_script_passes_release_version() {
+        assert!(
+            INIT_SCRIPT.contains("--release-version \"$CRABKA_METADATA_VERSION\""),
+            "init script must pass the resolved metadata.version to crabka format"
+        );
+    }
+
+    #[test]
+    fn init_container_wires_metadata_version_env() {
+        let c = render_init_container("img:tag", "sec", 0, "4.0");
+        let env = c["env"].as_array().expect("env array");
+        let mv = env
+            .iter()
+            .find(|e| e["name"] == "CRABKA_METADATA_VERSION")
+            .expect("CRABKA_METADATA_VERSION env present");
+        assert_eq!(mv["value"], "4.0");
+    }
+
+    #[test]
+    fn statefulset_init_normalizes_metadata_version_to_short() {
+        // kafka_version "3.7.1", no spec/status metadata_version -> "3.7" reaches the init env.
+        let parent = parent_fixture("demo"); // spec.kafka_version = "0.1.1", no metadata_version
+        // Use a parent with a real 3-part kafka_version to exercise the normalization path.
+        let mut parent37 = parent.clone();
+        parent37.spec.kafka_version = "3.7.1".into();
+        let pool = pool_fixture("brokers", "demo", 1);
+        let sts = render_statefulset(&parent37, &pool, DEFAULT_BROKER_IMAGE).unwrap();
+        let pod = sts.spec.unwrap().template.spec.unwrap();
+        let init = &pod.init_containers.expect("init containers")[0];
+        let env = init.env.as_ref().expect("init env");
+        let mv = env
+            .iter()
+            .find(|e| e.name == "CRABKA_METADATA_VERSION")
+            .expect("CRABKA_METADATA_VERSION env present");
+        assert_eq!(
+            mv.value.as_deref(),
+            Some("3.7"),
+            "init container must receive short major.minor form, not the 3-part kafka_version"
+        );
+    }
+
+    #[test]
+    fn statefulset_init_clamps_out_of_range_version_to_max() {
+        // kafka_version "4.1.0" normalises to "4.1", which is NOT yet in the
+        // broker's supported metadata.version table. Without clamping,
+        // `crabka format --release-version 4.1` would exit non-zero and
+        // crash-loop the init container. The clamp must silently fall back to
+        // the broker's MAX short form ("4.0") so the pod can boot.
+        let mut parent = parent_fixture("demo");
+        parent.spec.kafka_version = "4.1.0".into();
+        // No spec.metadata_version pin, no status.metadataVersion.
+        let pool = pool_fixture("brokers", "demo", 1);
+        let sts = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE).unwrap();
+        let pod = sts.spec.unwrap().template.spec.unwrap();
+        let init = &pod.init_containers.expect("init containers")[0];
+        let env = init.env.as_ref().expect("init env");
+        let mv = env
+            .iter()
+            .find(|e| e.name == "CRABKA_METADATA_VERSION")
+            .expect("CRABKA_METADATA_VERSION env present");
+        let max_short = crabka_metadata::metadata_version::from_feature_level(
+            crabka_metadata::metadata_version::METADATA_VERSION_MAX,
+        )
+        .unwrap()
+        .short();
+        assert_eq!(
+            mv.value.as_deref(),
+            Some(max_short),
+            "out-of-range kafka_version must clamp to MAX short form ({max_short}), \
+             not the unsupported \"4.1\""
         );
     }
 

@@ -25,6 +25,33 @@ use uuid::Uuid;
 use crabka_metadata::MetadataImage;
 
 use crate::error::RaftError;
+
+/// True when a *present* finalized `metadata.version` is outside the
+/// binary's supported range. A missing level (`None`) is permitted — a
+/// pre-bootstrap / legacy image advertises `MetadataVersion.UNKNOWN`.
+fn metadata_version_out_of_range(finalized: Option<i16>) -> bool {
+    finalized.is_some_and(|level| !crabka_metadata::metadata_version::is_supported_level(level))
+}
+
+/// Abort the process if the image's finalized `metadata.version` is
+/// outside `[MIN, MAX]`. Apply is infallible (the committed record cannot
+/// be rejected), so an out-of-range level — applied via a snapshot from a
+/// newer binary or a record finalized by a newer controller — means this
+/// binary cannot safely interpret the metadata log. Fail loud and fast;
+/// the operator's `binary >= finalized` guard is what prevents this on a
+/// correctly-run cluster.
+fn guard_metadata_version(image: &crabka_metadata::MetadataImage) {
+    let finalized = image.finalized_metadata_version();
+    if metadata_version_out_of_range(finalized) {
+        tracing::error!(
+            finalized = ?finalized,
+            min = crabka_metadata::metadata_version::METADATA_VERSION_MIN,
+            max = crabka_metadata::metadata_version::METADATA_VERSION_MAX,
+            "finalized metadata.version is outside this binary's supported range; aborting"
+        );
+        std::process::abort();
+    }
+}
 use crate::snapshot::{SnapshotId, SnapshotReader, SnapshotWriter};
 use crate::types::{AppData, AppDataResponse, Node, NodeId, TypeConfig};
 
@@ -69,6 +96,7 @@ impl CrabkaStateMachine {
                 let records = SnapshotReader::read_records(&bytes)
                     .expect("checkpoint records must decode on recovery");
                 let image = MetadataImage::from_records(cluster_id, &records);
+                guard_metadata_version(&image);
                 (image, meta.last_log_id, meta.last_membership)
             }
             Ok(None) => (
@@ -121,6 +149,7 @@ impl CrabkaStateMachine {
         // reads via `borrow()` on the sender and must always see the
         // latest applied state.
         let _ = self.image.send_replace(Arc::new(next));
+        guard_metadata_version(self.image.borrow().as_ref());
         *self.last_applied.lock().await = Some(log_id);
         AppDataResponse {
             applied_index: log_id.index,
@@ -209,6 +238,7 @@ impl RaftStateMachine<TypeConfig> for Arc<CrabkaStateMachine> {
         let records = SnapshotReader::read_records(&bytes).map_err(|e| io_storage_err(&e))?;
         let image = MetadataImage::from_records(self.cluster_id, &records);
         let _ = self.image.send_replace(Arc::new(image));
+        guard_metadata_version(self.image.borrow().as_ref());
         *self.last_applied.lock().await = meta.last_log_id;
         *self.last_membership.lock().await = meta.last_membership.clone();
         if let Some(id) = snapshot_id_from_meta(meta) {
@@ -269,6 +299,15 @@ impl RaftSnapshotBuilder<TypeConfig> for Arc<CrabkaStateMachine> {
 mod tests {
     use super::*;
     use crabka_metadata::{MetadataRecord, TopicRecord};
+
+    #[test]
+    fn guard_rejects_out_of_range_finalized_level() {
+        assert!(metadata_version_out_of_range(Some(6))); // below MIN
+        assert!(metadata_version_out_of_range(Some(26))); // above MAX
+        assert!(!metadata_version_out_of_range(Some(7)));
+        assert!(!metadata_version_out_of_range(Some(25)));
+        assert!(!metadata_version_out_of_range(None)); // UNKNOWN is allowed
+    }
 
     #[tokio::test]
     async fn apply_publishes_image_to_watcher() {

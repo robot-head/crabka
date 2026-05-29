@@ -30,7 +30,7 @@ async fn finalizes_metadata_version_and_surfaces_in_api_versions() {
 
     let resp = p
         .client
-        .send(metadata_version_update(1))
+        .send(metadata_version_update(25))
         .await
         .expect("UpdateFeatures");
     assert_eq!(resp.error_code, 0, "{resp:?}");
@@ -57,7 +57,7 @@ async fn finalizes_metadata_version_and_surfaces_in_api_versions() {
         .iter()
         .find(|f| f.name == "metadata.version")
         .expect("metadata.version finalized");
-    assert_eq!(fin.max_version_level, 1, "{av:?}");
+    assert_eq!(fin.max_version_level, 25, "{av:?}");
     assert!(av.finalized_features_epoch >= 0, "{av:?}");
 
     p.broker.shutdown().await;
@@ -105,7 +105,7 @@ async fn rejects_level_above_supported_max() {
 #[tokio::test]
 async fn validate_only_does_not_persist() {
     let p = support::start().await;
-    let mut req = metadata_version_update(1);
+    let mut req = metadata_version_update(25);
     req.validate_only = true;
     let resp = p.client.send(req).await.expect("UpdateFeatures");
     assert_eq!(resp.error_code, 0, "{resp:?}");
@@ -125,5 +125,19 @@ async fn validate_only_does_not_persist() {
         "validate_only must not persist: {av:?}",
     );
     assert_eq!(av.finalized_features_epoch, -1, "{av:?}");
+    p.broker.shutdown().await;
+}
+
+#[tokio::test]
+async fn rejects_level_below_min_floor() {
+    let p = support::start().await;
+    // Level 6 is below the baseline floor (METADATA_VERSION_MIN = 7); the
+    // controller refuses it with INVALID_UPDATE_VERSION (95).
+    let resp = p
+        .client
+        .send(metadata_version_update(6))
+        .await
+        .expect("UpdateFeatures");
+    assert_feature_error(&resp, "metadata.version", 95);
     p.broker.shutdown().await;
 }

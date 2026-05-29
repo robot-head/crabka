@@ -64,6 +64,15 @@ pub(crate) async fn handle<S: BuildHasher>(
         return err_response(crate::codes::DELEGATION_TOKEN_REQUEST_NOT_ALLOWED);
     }
 
+    let image = controller.current_image();
+    // KIP-48/KIP-778: KRaft delegation tokens require metadata.version >= 3.6-IV2.
+    if crate::features::metadata_version_blocks(
+        image.finalized_metadata_version(),
+        crabka_metadata::metadata_version::DELEGATION_TOKEN_MIN_LEVEL,
+    ) {
+        return err_response(crate::codes::UNSUPPORTED_VERSION);
+    }
+
     // KIP-48 owner resolution. The wire `owner_principal_type/name`
     // pair drives the privileged "act-as" path: super-users may mint
     // tokens owned by *other* principals so an operator can pre-mint
@@ -597,6 +606,23 @@ mod tests {
         assert_eq!(resp.error_code, crate::codes::INVALID_REQUEST);
 
         controller.cancel().await;
+    }
+
+    #[test]
+    fn token_gate_uses_delegation_token_level() {
+        use crabka_metadata::metadata_version::DELEGATION_TOKEN_MIN_LEVEL;
+        assert!(!crate::features::metadata_version_blocks(
+            None,
+            DELEGATION_TOKEN_MIN_LEVEL
+        ));
+        assert!(crate::features::metadata_version_blocks(
+            Some(13),
+            DELEGATION_TOKEN_MIN_LEVEL
+        ));
+        assert!(!crate::features::metadata_version_blocks(
+            Some(14),
+            DELEGATION_TOKEN_MIN_LEVEL
+        ));
     }
 
     /// Spec §1.2: only `User` is supported as the act-as owner

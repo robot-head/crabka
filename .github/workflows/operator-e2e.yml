@@ -231,7 +231,7 @@ jobs:
             name: demo
             namespace: default
           spec:
-            kafkaVersion: "0.1.1"
+            kafkaVersion: "3.7.0"
             config:
               log.retention.hours: "24"
           ---
@@ -332,7 +332,7 @@ jobs:
             name: jdemo
             namespace: jbod
           spec:
-            kafkaVersion: "0.1.1"
+            kafkaVersion: "3.7.0"
           ---
           apiVersion: crabka.io/v1alpha1
           kind: KafkaNodePool
@@ -433,13 +433,13 @@ jobs:
       - name: Smoke — metadata.version rendered + invalid pin rejected
         run: |
           set -e
-          # kafkaVersion 0.1.1 default-tracks metadata.version 0.1; the
+          # kafkaVersion 3.7.0 default-tracks metadata.version 3.7; the
           # operator injects it into the broker config.
           cm=$(kubectl get configmap demo-broker-config -n default -o jsonpath='{.data.broker-0\.toml}')
           # render_broker_toml emits server_properties with quoted keys:
-          #   "metadata.version" = "0.1"
-          echo "$cm" | grep -F '"metadata.version" = "0.1"' \
-            || { echo "::error::broker config missing metadata.version=0.1"; echo "$cm"; exit 1; }
+          #   "metadata.version" = "3.7"
+          echo "$cm" | grep -F '"metadata.version" = "3.7"' \
+            || { echo "::error::broker config missing metadata.version=3.7"; echo "$cm"; exit 1; }
 
           # An invalid (too-high) metadata version must be rejected: the
           # operator surfaces KafkaVersionValid=False and does NOT roll.
@@ -526,7 +526,7 @@ jobs:
             name: ext
             namespace: default
           spec:
-            kafkaVersion: "0.1.1"
+            kafkaVersion: "3.7.0"
             listeners:
               - name: PLAIN
                 port: 9092
@@ -613,7 +613,7 @@ jobs:
             name: lb
             namespace: default
           spec:
-            kafkaVersion: "0.1.1"
+            kafkaVersion: "3.7.0"
             listeners:
               - name: PLAIN
                 port: 9092
@@ -942,7 +942,7 @@ jobs:
           kind: Kafka
           metadata: { name: demo, namespace: default }
           spec:
-            kafkaVersion: "0.1.1"
+            kafkaVersion: "3.7.0"
             listeners:
             - name: PLAIN
               port: 9092
@@ -1133,7 +1133,7 @@ jobs:
           kind: Kafka
           metadata: { name: demo, namespace: default }
           spec:
-            kafkaVersion: "0.1.1"
+            kafkaVersion: "3.7.0"
           ---
           apiVersion: crabka.io/v1alpha1
           kind: KafkaNodePool
@@ -1431,7 +1431,7 @@ jobs:
             name: demo
             namespace: default
           spec:
-            kafkaVersion: "0.1.1"
+            kafkaVersion: "3.7.0"
             listeners:
               - name: PLAIN
                 port: 9092
@@ -1764,7 +1764,7 @@ jobs:
             name: demo-mtls
             namespace: default
           spec:
-            kafkaVersion: "0.1.1"
+            kafkaVersion: "3.7.0"
             listeners:
               - name: PLAIN
                 port: 9092
@@ -2148,7 +2148,7 @@ jobs:
             name: demo
             namespace: default
           spec:
-            kafkaVersion: "0.1.1"
+            kafkaVersion: "3.7.0"
             delegationToken:
               secretKeyRef:
                 name: delegation-token-key
@@ -2497,7 +2497,7 @@ jobs:
             name: demo
             namespace: default
           spec:
-            kafkaVersion: "0.1.1"
+            kafkaVersion: "3.7.0"
             listeners:
               - name: PLAIN
                 port: 9092
@@ -3048,7 +3048,7 @@ jobs:
             name: demo
             namespace: default
           spec:
-            kafkaVersion: "0.1.1"
+            kafkaVersion: "3.7.0"
             listeners:
               - name: PLAIN
                 port: 9092
@@ -3725,7 +3725,7 @@ jobs:
             name: demo
             namespace: default
           spec:
-            kafkaVersion: "0.1.1"
+            kafkaVersion: "3.7.0"
             listeners:
               - name: PLAIN
                 port: 9092
