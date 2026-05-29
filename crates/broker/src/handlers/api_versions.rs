@@ -24,15 +24,14 @@ use crate::broker::Broker;
 use crate::codes;
 use crate::error::BrokerError;
 
-// KIP-584 feature surface. `supported_features` is advertised from the
-// broker-wide `crate::features` table (currently `metadata.version` at a
-// single conservative level). `finalized_features` + the epoch are read from
-// the live metadata image: a fresh broker (no `UpdateFeatures` ever applied)
-// surfaces no finalized features and the schema sentinel epoch `-1`
-// ("unknown"), which JVM admin clients consume as `MetadataVersion.UNKNOWN`
-// and short-circuit per-level validation. `UpdateFeatures` (api_key 57) lands
-// a Raft-persisted `V1FeatureLevel` record, after which the finalized list and
-// a real (`>= 0`) epoch appear here.
+// KIP-584 feature surface. `supported_features` advertises `metadata.version`
+// over the full Kafka-faithful range MIN=7 (3.3-IV3) .. MAX=25 (4.0-IV3),
+// sourced from the `crabka_metadata::metadata_version` table via
+// `crate::features`. `finalized_features` + the epoch are read from the live
+// metadata image: a fresh (unformatted) broker surfaces no finalized features
+// and epoch `-1` (`MetadataVersion.UNKNOWN` to JVM clients) until a
+// `V1FeatureLevel` is seeded by `crabka format --release-version` or
+// `UpdateFeatures` (api_key 57) lands one.
 
 fn supported_feature_keys() -> Vec<SupportedFeatureKey> {
     crate::features::supported_features()

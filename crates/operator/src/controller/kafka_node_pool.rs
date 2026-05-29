@@ -773,8 +773,24 @@ pub(crate) fn render_statefulset(
         .unwrap_or(&parent.spec.kafka_version);
     // Normalize to major.minor — `crabka format --release-version` resolves
     // a short form (e.g. "3.7"); a 3-part version string would not resolve.
-    let resolved_metadata_version = crate::version::KafkaVersion::parse(chosen)
+    let normalized = crate::version::KafkaVersion::parse(chosen)
         .map_or_else(|_| chosen.to_string(), |v| v.short());
+    // `crabka format --release-version` hard-rejects a value outside the
+    // broker's supported metadata.version table, which would crash-loop the
+    // init container. The broker always supports [MIN, MAX] regardless of the
+    // kafka_version compat label, so clamp an unsupported/out-of-range value
+    // to MAX. (`evaluate` still surfaces the misconfig as KafkaVersionValid=False.)
+    let resolved_metadata_version =
+        if crabka_metadata::metadata_version::from_version_string(&normalized).is_some() {
+            normalized
+        } else {
+            crabka_metadata::metadata_version::from_feature_level(
+                crabka_metadata::metadata_version::METADATA_VERSION_MAX,
+            )
+            .expect("MAX level is in the table")
+            .short()
+            .to_string()
+        };
     let init = render_init_container(
         broker_image,
         &secret_name,
