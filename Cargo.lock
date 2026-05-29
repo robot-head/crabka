@@ -1114,7 +1114,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-bench-driver"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1141,7 +1141,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-broker"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -1203,7 +1203,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-cli"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "clap",
  "crabka-metadata",
@@ -1223,7 +1223,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-client-admin"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1243,7 +1243,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-client-consumer"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "bon",
  "bytes",
@@ -1263,7 +1263,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-client-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "bon",
  "bytes",
@@ -1289,7 +1289,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-client-producer"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "bon",
  "bytes",
@@ -1310,7 +1310,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-compression"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "bytes",
  "codspeed-criterion-compat",
@@ -1328,7 +1328,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-docgen"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -1343,7 +1343,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-log"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "bytes",
  "codspeed-criterion-compat",
@@ -1363,7 +1363,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-log-iobench"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "bytes",
  "codspeed-criterion-compat",
@@ -1375,7 +1375,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-metadata"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "bytes",
  "codspeed-criterion-compat",
@@ -1391,7 +1391,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-operator"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1435,7 +1435,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-protocol"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "arbitrary",
  "bytes",
@@ -1455,7 +1455,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-protocol-codegen"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -1464,7 +1464,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-raft"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1488,7 +1488,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-rebalancer"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -1524,7 +1524,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-records-legacy"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "bytes",
  "crabka-compression",
@@ -1537,7 +1537,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-remote-storage"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "bytes",
  "object_store",
@@ -1550,7 +1550,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-remote-storage-topic"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1570,7 +1570,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-security"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "arc-swap",
  "async-trait",
