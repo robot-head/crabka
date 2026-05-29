@@ -3688,7 +3688,7 @@ jobs:
             --from-file=kafka-client-secret=/tmp/kc-out/kafka-client-secret \
             --from-file=kafka-client-noscope-secret=/tmp/kc-out/kafka-client-noscope-secret
 
-          # Broker-side intro­spection creds (Kafka CR's
+          # Broker-side introspection creds (Kafka CR's
           # `authentication.clientSecret.secretName` refs this).
           kubectl create secret generic keycloak-introspection-secret \
             --namespace=default \

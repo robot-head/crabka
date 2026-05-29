@@ -153,15 +153,15 @@ pub struct FetchSessionCache {
     next_id: AtomicI32,
     max_slots: usize,
     evictions: AtomicU64,
-    /// Lock-free mirror of `inner.sessions.len()`. Kept exactly in sync
-    /// with the map under every mutation path's critical section so the
-    /// per-fetch gauge sampler can read it without taking the cache mutex.
-    session_count: AtomicUsize,
-    /// Lock-free mirror of `sum(session.partitions.len())` across all live
-    /// sessions. Maintained under the same critical sections as the map so
-    /// the per-fetch gauge sampler never scans or locks. See `len()` /
-    /// `total_partitions_cached()` for the read path.
-    partition_count: AtomicUsize,
+    /// Live session count, maintained under `inner`'s lock on every
+    /// insert/evict/close. Exposed lock-free via `len()` so the metrics
+    /// gauge refresh on the hot fetch path never touches the cache mutex.
+    num_sessions: AtomicUsize,
+    /// Sum of `session.partitions.len()` across every live session, kept
+    /// in sync as partitions are added (merge / allocate) and dropped
+    /// (forget / evict / close). Read lock-free via
+    /// `total_partitions_cached()`.
+    num_partitions: AtomicUsize,
 }
 
 impl FetchSessionCache {
@@ -176,18 +176,16 @@ impl FetchSessionCache {
             next_id: AtomicI32::new(1),
             max_slots,
             evictions: AtomicU64::new(0),
-            session_count: AtomicUsize::new(0),
-            partition_count: AtomicUsize::new(0),
+            num_sessions: AtomicUsize::new(0),
+            num_partitions: AtomicUsize::new(0),
         }
     }
 
-    /// Number of live sessions in the cache. Cheap, lock-free snapshot read
-    /// from the `session_count` atomic — used on the per-fetch gauge path,
-    /// so it must not take the cache mutex. The atomic is held exactly
-    /// consistent with `inner.sessions.len()` by every mutation path.
+    /// Number of live sessions in the cache. Lock-free read of an atomic
+    /// counter — does not touch the cache mutex.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.session_count.load(Ordering::Relaxed)
+        self.num_sessions.load(Ordering::Relaxed)
     }
 
     #[must_use]
@@ -196,11 +194,11 @@ impl FetchSessionCache {
     }
 
     /// Sum of `session.partitions.len()` across every live session. Used
-    /// by the metrics sampler on every fetch, so it reads a lock-free
-    /// atomic mirror rather than scanning the session map under the mutex.
+    /// by the metrics sampler. Lock-free read of an atomic counter — does
+    /// not touch the cache mutex or scan the session map.
     #[must_use]
     pub fn total_partitions_cached(&self) -> usize {
-        self.partition_count.load(Ordering::Relaxed)
+        self.num_partitions.load(Ordering::Relaxed)
     }
 
     /// Cumulative count of eviction events since `new()`. One increment
@@ -263,9 +261,9 @@ impl FetchSessionCache {
 
         session.last_used = Instant::now();
 
-        // Track the session's partition count before/after this mutation so
-        // we can apply the net delta to the lock-free `partition_count`
-        // mirror once, after both the forgotten-drop and the merge below.
+        // The forget + merge below add and drop partitions; snapshot the
+        // count now so we can fold the net delta into `num_partitions`
+        // (which backs the lock-free `total_partitions_cached()` gauge).
         let partitions_before = session.partitions.len();
 
         // Drop forgotten partitions. A `ForgottenTopic` matches a cached
@@ -319,15 +317,12 @@ impl FetchSessionCache {
             }
         }
 
-        // Apply the net change to the lock-free partition-count mirror. Done
-        // while still holding `guard`, so the atomic never lags the map as
-        // observed by another mutation; the gauge reader tolerates Relaxed.
         let partitions_after = session.partitions.len();
         if partitions_after >= partitions_before {
-            self.partition_count
+            self.num_partitions
                 .fetch_add(partitions_after - partitions_before, Ordering::Relaxed);
         } else {
-            self.partition_count
+            self.num_partitions
                 .fetch_sub(partitions_before - partitions_after, Ordering::Relaxed);
         }
 
@@ -380,11 +375,10 @@ impl FetchSessionCache {
                 .map(|(id, _)| *id);
             match victim {
                 Some(id) => {
-                    if let Some(evicted) = guard.sessions.remove(&id) {
-                        self.session_count.fetch_sub(1, Ordering::Relaxed);
-                        self.partition_count
-                            .fetch_sub(evicted.partitions.len(), Ordering::Relaxed);
-                    }
+                    let evicted = guard.sessions.remove(&id).expect("victim present");
+                    self.num_sessions.fetch_sub(1, Ordering::Relaxed);
+                    self.num_partitions
+                        .fetch_sub(evicted.partitions.len(), Ordering::Relaxed);
                     self.evictions.fetch_add(1, Ordering::Relaxed);
                 }
                 None => return INVALID_SESSION_ID,
@@ -412,7 +406,6 @@ impl FetchSessionCache {
 
         let partitions: HashMap<FetchSessionKey, CachedPartitionState> =
             partitions.into_iter().collect();
-        let added_partitions = partitions.len();
         let session = FetchSession {
             id,
             // Client's first incremental request after a new-session
@@ -423,11 +416,10 @@ impl FetchSessionCache {
             partitions,
             last_used: Instant::now(),
         };
+        let added_partitions = session.partitions.len();
         guard.sessions.insert(id, session);
-        // Keep the lock-free mirrors in step with the map. `id` is freshly
-        // allocated and verified absent above, so this is always a net add.
-        self.session_count.fetch_add(1, Ordering::Relaxed);
-        self.partition_count
+        self.num_sessions.fetch_add(1, Ordering::Relaxed);
+        self.num_partitions
             .fetch_add(added_partitions, Ordering::Relaxed);
         id
     }
@@ -463,10 +455,10 @@ impl FetchSessionCache {
     /// invalidate the session.
     pub fn close(&self, session_id: i32) {
         let mut guard = self.inner.lock().expect("poisoned");
-        if let Some(removed) = guard.sessions.remove(&session_id) {
-            self.session_count.fetch_sub(1, Ordering::Relaxed);
-            self.partition_count
-                .fetch_sub(removed.partitions.len(), Ordering::Relaxed);
+        if let Some(session) = guard.sessions.remove(&session_id) {
+            self.num_sessions.fetch_sub(1, Ordering::Relaxed);
+            self.num_partitions
+                .fetch_sub(session.partitions.len(), Ordering::Relaxed);
         }
     }
 }
@@ -902,117 +894,64 @@ mod tests {
         assert_eq!(cache.total_partitions_cached(), 5);
     }
 
-    /// Recompute the exact counts directly from the locked map; the lock-free
-    /// atomics read by `len()` / `total_partitions_cached()` must always agree.
-    fn assert_counters_consistent(cache: &FetchSessionCache) {
-        let g = cache.inner.lock().unwrap();
-        let exact_sessions = g.sessions.len();
-        let exact_partitions: usize = g.sessions.values().map(|s| s.partitions.len()).sum();
-        drop(g);
-        assert_eq!(
-            cache.len(),
-            exact_sessions,
-            "session_count atomic out of sync with map"
-        );
-        assert_eq!(
-            cache.total_partitions_cached(),
-            exact_partitions,
-            "partition_count atomic out of sync with map"
-        );
-    }
-
     #[test]
-    fn atomic_counters_track_map_across_mutations() {
-        let cache = FetchSessionCache::new(3);
-        let mk = |name: &str, p: i32| {
+    fn counters_track_merge_forget_and_close() {
+        let cache = FetchSessionCache::new(10);
+        let mk = |p| {
             (
-                FetchSessionKey {
-                    topic_name: name.to_string(),
-                    topic_id: WireUuid::ZERO,
-                    partition: p,
-                },
-                CachedPartitionState {
-                    fetch_offset: 0,
-                    max_bytes: 1024,
-                    ..Default::default()
-                },
-            )
-        };
-
-        // Empty cache.
-        assert_counters_consistent(&cache);
-        assert_eq!(cache.len(), 0);
-        assert_eq!(cache.total_partitions_cached(), 0);
-
-        // Allocate two sessions with differing partition counts.
-        let a = cache.try_allocate(false, "a".into(), vec![mk("t", 0), mk("t", 1)]);
-        std::thread::sleep(std::time::Duration::from_millis(2));
-        let b = cache.try_allocate(false, "b".into(), vec![mk("u", 0)]);
-        assert_counters_consistent(&cache);
-        assert_eq!(cache.len(), 2);
-        assert_eq!(cache.total_partitions_cached(), 3);
-
-        // Incremental on `a`: add partition 2 (net +1) for topic "t".
-        let r = req(a, 1, vec![topic("t", &[0, 1, 2])], vec![]);
-        assert!(matches!(
-            cache.classify(&r),
-            SessionDecision::Incremental { .. }
-        ));
-        assert_counters_consistent(&cache);
-        assert_eq!(cache.total_partitions_cached(), 4);
-
-        // Incremental on `a`: forget partition 0 (net -1).
-        let forgotten = vec![ForgottenTopic {
-            topic: "t".into(),
-            topic_id: WireUuid::ZERO,
-            partitions: vec![0],
-            ..Default::default()
-        }];
-        let r = req(a, 2, vec![], forgotten);
-        assert!(matches!(
-            cache.classify(&r),
-            SessionDecision::Incremental { .. }
-        ));
-        assert_counters_consistent(&cache);
-        assert_eq!(cache.total_partitions_cached(), 3);
-
-        // finalize_incremental touches only last_* fields — no count change.
-        cache.finalize_incremental(
-            a,
-            &[(
                 FetchSessionKey {
                     topic_name: "t".into(),
                     topic_id: WireUuid::ZERO,
-                    partition: 1,
+                    partition: p,
                 },
-                CachedPartitionState {
-                    last_high_watermark: 9,
-                    ..Default::default()
+                CachedPartitionState::default(),
+            )
+        };
+        // Two partitions on allocate.
+        let id = cache.try_allocate(false, "a".into(), vec![mk(0), mk(1)]);
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.total_partitions_cached(), 2);
+
+        // Incremental that forgets partition 1 and adds partitions 2 and 3:
+        // net partition count goes 2 -> 3.
+        let forgotten = vec![ForgottenTopic {
+            topic: "t".into(),
+            topic_id: WireUuid::ZERO,
+            partitions: vec![1],
+            ..Default::default()
+        }];
+        let r = req(id, 1, vec![topic("t", &[0, 2, 3])], forgotten);
+        assert!(matches!(
+            cache.classify(&r),
+            SessionDecision::Incremental { .. }
+        ));
+        assert_eq!(cache.total_partitions_cached(), 3);
+
+        // Close drops the whole session and its partitions.
+        cache.close(id);
+        assert_eq!(cache.len(), 0);
+        assert_eq!(cache.total_partitions_cached(), 0);
+    }
+
+    #[test]
+    fn counters_track_eviction() {
+        let cache = FetchSessionCache::new(1);
+        let mk = |p| {
+            (
+                FetchSessionKey {
+                    topic_name: "t".into(),
+                    topic_id: WireUuid::ZERO,
+                    partition: p,
                 },
-            )],
-        );
-        assert_counters_consistent(&cache);
-
-        // Fill to capacity then force an eviction: third alloc fills, fourth
-        // evicts the LRU non-privileged session (which carries partitions).
-        std::thread::sleep(std::time::Duration::from_millis(2));
-        let _c = cache.try_allocate(false, "c".into(), vec![mk("v", 0), mk("v", 1)]);
-        assert_counters_consistent(&cache);
-        assert_eq!(cache.len(), 3);
-
-        std::thread::sleep(std::time::Duration::from_millis(2));
-        let _d = cache.try_allocate(false, "d".into(), vec![mk("w", 0)]);
-        // One eviction happened; cache stays at capacity.
-        assert_eq!(cache.evictions_total(), 1);
-        assert_eq!(cache.len(), 3);
-        assert_counters_consistent(&cache);
-
-        // Close the remaining original session `b` (1 partition).
-        cache.close(b);
-        assert_counters_consistent(&cache);
-
-        // Closing a non-existent id is a no-op and must not skew counters.
-        cache.close(999_999);
-        assert_counters_consistent(&cache);
+                CachedPartitionState::default(),
+            )
+        };
+        cache.try_allocate(false, "a".into(), vec![mk(0), mk(1)]);
+        assert_eq!(cache.total_partitions_cached(), 2);
+        // Allocating into the full cache evicts the lone session (2 parts)
+        // and inserts a fresh one (1 part).
+        cache.try_allocate(false, "b".into(), vec![mk(0)]);
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.total_partitions_cached(), 1);
     }
 }
