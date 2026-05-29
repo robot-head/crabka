@@ -176,10 +176,15 @@ async fn rejoin(state: &mut CoordinatorState) -> Result<(), ConsumerError> {
 
     match state.assignor.rebalance_protocol() {
         RebalanceProtocol::Eager => {
-            // Drop everything and reinstall in a single round. We still
-            // prime offsets explicitly for the new set so the first
-            // `poll()` after rebalance doesn't restart from 0 when the
-            // partition has a committed position.
+            // Drop everything and reinstall in a single round. Prime the
+            // added partitions' fetch offsets *before* publishing the new
+            // assignment: `poll()` defaults an assigned-but-unprimed
+            // partition to offset 0 (poll.rs's `unwrap_or(0)`), so a poll
+            // racing between the `assigned` publish and the prime would
+            // re-fetch from 0 and re-deliver already-consumed records. Prime
+            // first → a partition is only visible in `assigned` once its
+            // next_offset is established.
+            prime_offsets(state, &added).await?;
             {
                 let mut a = state.assigned.lock().await;
                 a.clone_from(&new_assignment);
@@ -188,13 +193,20 @@ async fn rejoin(state: &mut CoordinatorState) -> Result<(), ConsumerError> {
                 let mut off = state.next_offsets.lock().await;
                 off.retain(|k, _| new_set.contains(k));
             }
-            prime_offsets(state, &added).await?;
             state.generation_id = new_generation;
         }
         RebalanceProtocol::Cooperative => {
             if revoked.is_empty() {
                 // Pure additions: merge into the existing assigned set.
                 // No phase 2 needed because no member needed to revoke.
+                //
+                // Prime the added partitions' fetch offsets *before*
+                // publishing them into `assigned`: a `poll()` racing the
+                // rebalance would otherwise see an assigned-but-unprimed
+                // partition and fetch it from offset 0 (poll.rs's
+                // `unwrap_or(0)`), re-delivering records the previous owner
+                // already committed past at revoke time.
+                prime_offsets(state, &added).await?;
                 {
                     let mut a = state.assigned.lock().await;
                     for p in &added {
@@ -203,7 +215,6 @@ async fn rejoin(state: &mut CoordinatorState) -> Result<(), ConsumerError> {
                         }
                     }
                 }
-                prime_offsets(state, &added).await?;
                 state.generation_id = new_generation;
             } else {
                 // Phase 1: drop the partitions we're losing, then
@@ -241,11 +252,17 @@ async fn rejoin(state: &mut CoordinatorState) -> Result<(), ConsumerError> {
                     .filter(|p| !owned_after_revoke_set.contains(*p))
                     .cloned()
                     .collect();
+                // Prime the freshly placed partitions *before* publishing the
+                // phase-2 assignment, so a poll racing the rebalance can't
+                // observe them in `assigned` without a primed next_offset and
+                // fetch from 0 (poll.rs). That primed value is the offset the
+                // revoking member committed at revoke time; fetching from 0
+                // instead would re-deliver the records it already consumed.
+                prime_offsets(state, &added2).await?;
                 {
                     let mut a = state.assigned.lock().await;
                     *a = assignment2;
                 }
-                prime_offsets(state, &added2).await?;
                 state.generation_id = gen2;
             }
         }
