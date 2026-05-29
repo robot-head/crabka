@@ -279,7 +279,6 @@ pub(crate) fn render_configmap(
         &std::collections::BTreeMap<i32, crate::controller::listeners::BrokerTlsRender>,
     >,
     clients_ca_path: Option<&str>,
-    metadata_version: Option<&str>,
     logging_filter: Option<&str>,
 ) -> Result<ConfigMap, ReconcileError> {
     let name = owner.meta().name.clone().unwrap_or_default();
@@ -291,14 +290,12 @@ pub(crate) fn render_configmap(
     if let Some(filter) = logging_filter {
         data.insert("rust.log".to_string(), filter.to_string());
     }
-    let mut server_properties = owner.spec.config.clone().unwrap_or_default();
-    // The operator owns `metadata.version` — the KRaft analog of
-    // `inter.broker.protocol.version`. Rendered into the broker's inert
-    // `[server_properties]` table (the broker has no runtime feature-level
-    // enforcement yet). Operator value wins over any user-supplied key.
-    if let Some(mv) = metadata_version {
-        server_properties.insert("metadata.version".to_string(), mv.to_string());
-    }
+    // `metadata.version` is finalized via the bootstrap-seeded feature
+    // record (`crabka format --release-version`), not the broker config —
+    // so it is intentionally not rendered here. An explicit
+    // `spec.metadataVersion` pin still rolls the cluster via the config
+    // hash (see `combined_config_hash`), which is a separate channel.
+    let server_properties = owner.spec.config.clone().unwrap_or_default();
     // Surface delegation-token enablement to the per-broker
     // renderer. The `super_users = ["ANONYMOUS"]`
     // top-level emit is folded into the `[authorization]` block — passing this
@@ -974,8 +971,7 @@ mod config_hash_tests {
         per_broker.insert(0i32, addrs0);
         per_broker.insert(1i32, addrs1);
 
-        let cm =
-            render_configmap(&k, &listeners, &per_broker, "PLAIN", None, None, None, None).unwrap();
+        let cm = render_configmap(&k, &listeners, &per_broker, "PLAIN", None, None, None).unwrap();
         let data = cm.data.unwrap();
         assert!(data.contains_key("broker-0.toml"));
         assert!(data.contains_key("broker-1.toml"));
@@ -1020,10 +1016,13 @@ mod config_hash_tests {
     }
 
     #[test]
-    fn configmap_injects_metadata_version_into_server_properties() {
+    fn configmap_never_injects_metadata_version_into_server_properties() {
         use crate::controller::listeners::{AdvertisedAddress, synthesized_default_listener};
         use crate::crd::KafkaSpec;
 
+        // Even with an explicit `spec.metadataVersion` pin, the rendered
+        // broker config must not carry `metadata.version` — it is finalized
+        // via the bootstrap feature record, not the config channel.
         let mut k = Kafka::new(
             "demo",
             KafkaSpec {
@@ -1058,34 +1057,11 @@ mod config_hash_tests {
         );
         per_broker.insert(0i32, addrs0);
 
-        let cm = render_configmap(
-            &k,
-            &listeners,
-            &per_broker,
-            "PLAIN",
-            None,
-            None,
-            Some("3.6"),
-            None,
-        )
-        .unwrap();
+        let cm = render_configmap(&k, &listeners, &per_broker, "PLAIN", None, None, None).unwrap();
         let toml = &cm.data.unwrap()["broker-0.toml"];
         assert!(
-            toml.contains("[server_properties]"),
-            "expected a server_properties table, got:\n{toml}"
-        );
-        assert!(
-            toml.contains("\"metadata.version\" = \"3.6\""),
-            "expected metadata.version injected, got:\n{toml}"
-        );
-
-        // Absent when not supplied.
-        let cm_none =
-            render_configmap(&k, &listeners, &per_broker, "PLAIN", None, None, None, None).unwrap();
-        let toml_none = &cm_none.data.unwrap()["broker-0.toml"];
-        assert!(
-            !toml_none.contains("metadata.version"),
-            "metadata.version must be absent when not supplied, got:\n{toml_none}"
+            !toml.contains("metadata.version"),
+            "metadata.version must never be injected into broker config, got:\n{toml}"
         );
     }
 }

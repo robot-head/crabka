@@ -1218,7 +1218,6 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
                 &inter_broker_name,
                 Some(&tls_per_broker),
                 clients_ca_path,
-                resolved_metadata.as_deref(),
                 logging_filter.as_deref(),
             )?;
             apply_object(&cm_api, &cm_name(&name), &cm).await?;
