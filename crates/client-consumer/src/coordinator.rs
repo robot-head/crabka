@@ -73,9 +73,9 @@ where
     F: Fn() -> Fut,
     Fut: std::future::Future<Output = Result<R, ConsumerError>>,
 {
+    const MAX_BACKOFF: Duration = Duration::from_secs(1);
     let start = tokio::time::Instant::now();
     let mut backoff = Duration::from_millis(100);
-    const MAX_BACKOFF: Duration = Duration::from_millis(1000);
     loop {
         match make().await {
             Ok(r) if !is_retriable_coordinator_code(code(&r)) => return Ok(r),
@@ -642,5 +642,20 @@ mod retry_tests {
         .unwrap();
         assert_eq!(r.error_code, 25);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn disconnect_past_deadline_surfaces_coordinator_unavailable() {
+        let r = with_coordinator_retry(
+            Duration::from_secs(1),
+            |r: &Resp| r.error_code,
+            || async {
+                Err::<Resp, _>(ConsumerError::Client(
+                    crabka_client_core::ClientError::Disconnected,
+                ))
+            },
+        )
+        .await;
+        assert!(matches!(r, Err(ConsumerError::CoordinatorUnavailable)));
     }
 }
