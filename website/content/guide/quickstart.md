@@ -1,12 +1,13 @@
 +++
 title = "Quickstart"
 weight = 20
+template = "docs/page.html"
 +++
 
 ## Run a broker
 
 ```bash
-cargo run -p crabka-broker --bin broker -- --help
+cargo run -p crabka-broker -- --help
 ```
 
 ## Run the operator

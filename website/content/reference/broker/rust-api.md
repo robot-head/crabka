@@ -1,6 +1,7 @@
 +++
 title = "Rust API (rustdoc)"
 weight = 40
+template = "docs/page.html"
 +++
 
 Generated Rust API documentation for the Crabka crates:

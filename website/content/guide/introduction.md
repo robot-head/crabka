@@ -1,6 +1,7 @@
 +++
 title = "Introduction"
 weight = 10
+template = "docs/page.html"
 +++
 
 Crabka is a Rust reimplementation of Apache Kafka. It speaks the Apache
