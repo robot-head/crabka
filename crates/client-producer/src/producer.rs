@@ -12,6 +12,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crabka_client_core::Client;
+use crabka_client_core::security::ClientSecurity;
 use crabka_protocol::owned::add_offsets_to_txn_request::AddOffsetsToTxnRequest;
 use crabka_protocol::owned::end_txn_request::EndTxnRequest;
 use crabka_protocol::owned::find_coordinator_request::FindCoordinatorRequest;
@@ -65,6 +66,13 @@ pub(crate) struct TopicMetadata {
 pub struct Producer {
     pub(crate) client: Client,
     pub(crate) client_id: String,
+    /// TLS/SASL security policy used for the bootstrap connection. Retained
+    /// so every secondary connection the producer opens after construction
+    /// (transaction-coordinator and group-coordinator dials in the
+    /// transactional path) carries the same credentials. Without this, those
+    /// connections would be plaintext/unauthenticated and a secured listener
+    /// drops them, failing the transactional flow with `Client(Disconnected)`.
+    pub(crate) security: Option<ClientSecurity>,
     pub(crate) producer_id: i64,
     pub(crate) producer_epoch: i16,
     // The following config knobs are also copied into `SenderConfig` at
@@ -289,6 +297,7 @@ impl Producer {
         let coord = Client::builder()
             .bootstrap(coord_addr)
             .client_id(self.client_id.clone())
+            .maybe_security(self.security.clone())
             .build()
             .await?;
 
@@ -411,6 +420,7 @@ impl Producer {
         let group_client = Client::builder()
             .bootstrap(group_addr)
             .client_id(self.client_id.clone())
+            .maybe_security(self.security.clone())
             .build()
             .await?;
 

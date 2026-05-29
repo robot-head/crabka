@@ -15,10 +15,13 @@ use std::time::Duration;
 use bytes::Bytes;
 use tempfile::TempDir;
 
+use crabka_broker::config::ListenerSpec;
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_consumer::{AutoOffsetReset, Consumer, IsolationLevel};
+use crabka_client_core::security::{ClientSecurity, SaslCredentials};
 use crabka_client_producer::{Producer, ProducerRecord};
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
+use crabka_security::{ListenerProtocol, SaslMechanism};
 
 // ── shared helpers ────────────────────────────────────────────────────────────
 
@@ -53,6 +56,72 @@ async fn create_topic(bootstrap: &str, name: &str) {
     assert!(
         cr.topics[0].error_code == 0 || cr.topics[0].error_code == 36,
         "create_topic {name}: error_code={}",
+        cr.topics[0].error_code
+    );
+}
+
+/// Boot a single-broker cluster whose only listener is `SASL_PLAINTEXT`
+/// with `PLAIN` enabled and the given users provisioned. Returns the same
+/// `(handle, bootstrap, dir)` triple as [`boot_single`].
+async fn boot_single_sasl(users: &[(&str, &str)]) -> (BrokerHandle, String, TempDir) {
+    let dir = TempDir::new().unwrap();
+    let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
+    cfg.listeners = vec![ListenerSpec {
+        name: "SASL_PLAINTEXT".to_string(),
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        advertised: "127.0.0.1:0".to_string(),
+        protocol: ListenerProtocol::SaslPlaintext,
+        tls_config: None,
+        sasl_mechanisms: None,
+    }];
+    cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
+    cfg.enabled_sasl_mechanisms = vec![SaslMechanism::Plain];
+    for (name, pass) in users {
+        cfg.plain_credentials
+            .insert((*name).to_string(), (*pass).to_string());
+    }
+    let broker = Broker::start(cfg).await.unwrap();
+    let bootstrap = broker.listen_addr().to_string();
+    (broker, bootstrap, dir)
+}
+
+/// Client-side `SASL_PLAINTEXT` + `PLAIN` security for `(user, pass)`.
+fn sasl_plain_security(user: &str, pass: &str) -> ClientSecurity {
+    ClientSecurity {
+        protocol: ListenerProtocol::SaslPlaintext,
+        tls: None,
+        sasl: Some(SaslCredentials::Plain {
+            username: user.to_string(),
+            password: pass.to_string(),
+        }),
+        sasl_host: None,
+    }
+}
+
+/// Create `name` (1 partition) over a SASL-authenticated admin connection.
+async fn create_topic_sasl(bootstrap: &str, name: &str, security: ClientSecurity) {
+    let client = crabka_client_core::Client::builder()
+        .bootstrap(bootstrap)
+        .maybe_security(Some(security))
+        .build()
+        .await
+        .unwrap();
+    let cr = client
+        .send(CreateTopicsRequest {
+            topics: vec![CreatableTopic {
+                name: name.into(),
+                num_partitions: 1,
+                replication_factor: 1,
+                ..Default::default()
+            }],
+            timeout_ms: 5_000,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(
+        cr.topics[0].error_code == 0 || cr.topics[0].error_code == 36,
+        "create_topic_sasl {name}: error_code={}",
         cr.topics[0].error_code
     );
 }
@@ -398,5 +467,76 @@ async fn send_offsets_to_transaction_atomic_with_records() {
     assert_eq!(seen, 5, "expected 5 records on output topic");
 
     c2.close().await.unwrap();
+    broker.shutdown().await;
+}
+
+// ── test: SASL-authenticated transactional flow ────────────────────────────────
+
+/// Full transactional flow over a `SASL_PLAINTEXT`/`PLAIN` listener.
+///
+/// Regression test for the producer-side coordinator-connection credential
+/// omission: `init_transactions` opens a *dedicated* connection to the
+/// transaction coordinator and `send_offsets_to_transaction` opens another to
+/// the group coordinator. If either drops the retained `ClientSecurity`, the
+/// secured listener rejects the connection and the call fails with
+/// `Client(Disconnected)`. Driving init → begin → send →
+/// `send_offsets_to_transaction` → commit end-to-end with a SASL-authenticated
+/// producer exercises both secondary connections; a `read_committed` consumer
+/// then confirms the records actually committed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sasl_authenticated_transactional_flow_commits() {
+    let (broker, bootstrap, _dir) = boot_single_sasl(&[("alice", "alice-secret")]).await;
+    create_topic_sasl(
+        &bootstrap,
+        "sasl-txn",
+        sasl_plain_security("alice", "alice-secret"),
+    )
+    .await;
+
+    let producer = Producer::builder()
+        .bootstrap(bootstrap.clone())
+        .transactional_id("sasl-tid")
+        .security(sasl_plain_security("alice", "alice-secret"))
+        .build()
+        .await
+        .unwrap();
+
+    // init_transactions dials the txn coordinator on a fresh connection —
+    // this is the call that failed with Client(Disconnected) before the fix.
+    producer.init_transactions().await.unwrap();
+    producer.begin_transaction().await.unwrap();
+    for v in ["a", "b", "c"] {
+        drop(producer.send(rec("sasl-txn", v)).await);
+    }
+    // send_offsets_to_transaction dials the group coordinator on a *second*
+    // fresh connection — the other secondary connection that must carry SASL.
+    producer
+        .send_offsets_to_transaction([(("sasl-txn".to_string(), 0), 3i64)], "sasl-cpp-g")
+        .await
+        .unwrap();
+    producer.commit_transaction().await.unwrap();
+
+    let mut consumer = Consumer::builder()
+        .bootstrap(bootstrap)
+        .group_id("sasl-verify")
+        .auto_offset_reset(AutoOffsetReset::Earliest)
+        .isolation_level(IsolationLevel::ReadCommitted)
+        .security(sasl_plain_security("alice", "alice-secret"))
+        .subscribe(["sasl-txn".to_string()])
+        .build()
+        .await
+        .unwrap();
+
+    let mut seen: Vec<String> = Vec::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while seen.len() < 3 && std::time::Instant::now() < deadline {
+        for r in consumer.poll(Duration::from_millis(200)).await.unwrap() {
+            seen.push(String::from_utf8_lossy(r.value.as_deref().unwrap_or(b"")).into_owned());
+        }
+    }
+    assert_eq!(seen, vec!["a", "b", "c"]);
+
+    producer.close().await.unwrap();
+    consumer.close().await.unwrap();
     broker.shutdown().await;
 }
