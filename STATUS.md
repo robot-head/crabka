@@ -4863,7 +4863,9 @@ introspection metadata).
   a server-minted UUID (preserves raw-RPC callers).
 - **Tests.** 2 new actor unit tests (client-id adoption, known-id-epoch-0
   stale); 1 raw-RPC integration test (echo + assignment); the 4 `jvm_kip848_*`
-  acceptance tests un-`#[ignore]`d and passing against `apache/kafka:4.0.0`;
-  `broker-jvm-acceptance` CI job now runs `jvm_consumer_group_next_gen`.
+  acceptance tests now pass against `apache/kafka:4.0.0`. They stay
+  `#[ignore = "requires Docker"]` (matching `jvm_acceptance`) so the default
+  `cargo test` pass skips them; the `broker-jvm-acceptance` CI job runs them
+  via `--test jvm_consumer_group_next_gen ... -- --ignored --test-threads=1`.
 - **Image alignment.** `jvm_consumer_group_next_gen` classic image moved from
   `cp-kafka:7.5.0` to `cp-kafka:7.4.0` to match the existing CI preload.
