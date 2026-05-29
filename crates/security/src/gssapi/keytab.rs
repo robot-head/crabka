@@ -387,6 +387,84 @@ mod tests {
     }
 
     #[test]
+    fn load_service_keys_dedups_per_spn_and_filters_enctype() {
+        // Two distinct SPNs of the same service, the first with two kvnos, plus
+        // an aes128 decoy and a different-service entry that must be excluded.
+        let loc_v1 = vec![0x11u8; 32];
+        let loc_v3 = vec![0x33u8; 32];
+        let dock = vec![0x44u8; 32];
+        let loc_aes128 = vec![0x99u8; 16];
+        let http = vec![0x77u8; 32];
+        let kt = keytab(&[
+            entry_body(&EntrySpec {
+                components: &["kafka", "localhost"],
+                realm: "R",
+                kvno8: 1,
+                enctype: ENCTYPE_AES256_CTS_HMAC_SHA1_96,
+                key: &loc_v1,
+                kvno32: None,
+            }),
+            entry_body(&EntrySpec {
+                components: &["kafka", "localhost"],
+                realm: "R",
+                kvno8: 3,
+                enctype: ENCTYPE_AES256_CTS_HMAC_SHA1_96,
+                key: &loc_v3,
+                kvno32: None,
+            }),
+            entry_body(&EntrySpec {
+                components: &["kafka", "localhost"],
+                realm: "R",
+                kvno8: 9,
+                enctype: 17,
+                key: &loc_aes128,
+                kvno32: None,
+            }),
+            entry_body(&EntrySpec {
+                components: &["kafka", "host.docker.internal"],
+                realm: "R",
+                kvno8: 1,
+                enctype: ENCTYPE_AES256_CTS_HMAC_SHA1_96,
+                key: &dock,
+                kvno32: None,
+            }),
+            entry_body(&EntrySpec {
+                components: &["http", "localhost"],
+                realm: "R",
+                kvno8: 1,
+                enctype: ENCTYPE_AES256_CTS_HMAC_SHA1_96,
+                key: &http,
+                kvno32: None,
+            }),
+        ]);
+
+        let keys = load_service_keys(&kt, "kafka", ENCTYPE_AES256_CTS_HMAC_SHA1_96).expect("load");
+        // One key per distinct SPN, ordered by component list.
+        assert_eq!(keys.len(), 2);
+        assert_eq!(keys[0].components, vec!["kafka", "host.docker.internal"]);
+        assert_eq!(keys[0].key, dock);
+        assert_eq!(keys[1].components, vec!["kafka", "localhost"]);
+        // Highest kvno wins for the duplicated SPN; aes128 decoy excluded.
+        assert_eq!(keys[1].kvno, 3);
+        assert_eq!(keys[1].key, loc_v3);
+    }
+
+    #[test]
+    fn load_service_keys_empty_when_no_match() {
+        let key = vec![0x42u8; 32];
+        let kt = keytab(&[entry_body(&EntrySpec {
+            components: &["kafka", "localhost"],
+            realm: "R",
+            kvno8: 1,
+            enctype: ENCTYPE_AES256_CTS_HMAC_SHA1_96,
+            key: &key,
+            kvno32: None,
+        })]);
+        let keys = load_service_keys(&kt, "http", ENCTYPE_AES256_CTS_HMAC_SHA1_96).expect("load");
+        assert!(keys.is_empty());
+    }
+
+    #[test]
     fn holes_are_skipped() {
         let key = vec![0x42u8; 32];
         let good = entry_body(&EntrySpec {
