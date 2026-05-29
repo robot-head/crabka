@@ -180,6 +180,33 @@ jobs:
           flags: log-integration
           fail_ci_if_error: true
 
+  # crabka-client-consumer integration: cooperative-rebalance + poll/commit
+  # against an in-process Rust broker (no Docker). The `unit` flag's
+  # `--lib --bins` walk never descends into these `tests/` binaries, so the
+  # consumer's close()/coordinator-lifecycle code is only exercised here.
+  client-consumer-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.95.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: client-consumer-integration
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Client consumer integration coverage
+        run: |
+          mkdir -p coverage
+          cargo llvm-cov -p crabka-client-consumer --tests --lcov --output-path coverage/client-consumer-integration.lcov -- --nocapture
+      - uses: codecov/codecov-action@v6
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage/client-consumer-integration.lcov
+          disable_search: true
+          flags: client-consumer-integration
+          fail_ci_if_error: true
+
   # JVM kafka-console-{producer,consumer,topics} driving a Rust crabka-broker.
   # The broker binds 0.0.0.0:9092 on the runner; the in-container JVM tools
   # reach back via the Docker bridge gateway (typically 172.17.0.1). See

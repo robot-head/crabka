@@ -95,17 +95,31 @@ pub(crate) async fn run(mut state: CoordinatorState, shutdown: CancellationToken
     loop {
         tokio::select! {
             () = shutdown.cancelled() => break,
-            _ = ticker.tick() => {
-                if needs_rejoin {
-                    match rejoin(&mut state).await {
-                        Ok(()) => needs_rejoin = false,
-                        Err(e) => {
-                            tracing::warn!(error = %e, "rejoin failed; will retry on next tick");
-                        }
+            _ = ticker.tick() => {}
+        }
+
+        // Race the per-tick RPCs against shutdown so `close()` returns
+        // promptly even when we're mid-rebalance and the broker is holding
+        // a JoinGroup / SyncGroup open. Without this, cancellation is only
+        // observed *between* ticks, so a `rejoin()` in flight against an
+        // open broker call would stall `close()` for up to session_timeout.
+        // The RPC futures are cancellation-safe: `Client` multiplexes on
+        // correlation ids, so dropping an in-flight send only abandons its
+        // pending response — it can't corrupt the connection.
+        if needs_rejoin {
+            tokio::select! {
+                () = shutdown.cancelled() => break,
+                result = rejoin(&mut state) => match result {
+                    Ok(()) => needs_rejoin = false,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "rejoin failed; will retry on next tick");
                     }
-                    continue;
-                }
-                match heartbeat_once(&state).await {
+                },
+            }
+        } else {
+            tokio::select! {
+                () = shutdown.cancelled() => break,
+                outcome = heartbeat_once(&state) => match outcome {
                     HeartbeatOutcome::Ok | HeartbeatOutcome::Transient => {}
                     HeartbeatOutcome::NeedRejoin => needs_rejoin = true,
                     HeartbeatOutcome::RejoinFromScratch => {
@@ -113,7 +127,7 @@ pub(crate) async fn run(mut state: CoordinatorState, shutdown: CancellationToken
                         state.generation_id = -1;
                         needs_rejoin = true;
                     }
-                }
+                },
             }
         }
     }
