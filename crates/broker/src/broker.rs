@@ -69,6 +69,13 @@ pub struct Broker {
     /// to a plain `TcpStream::connect` — the new wiring is transparent
     /// for the legacy PLAINTEXT-only path.
     pub(crate) inter_broker_client: Arc<crate::network::client::InterBrokerClient>,
+    /// Resolved protocol of the inter-broker listener (matched from
+    /// `BrokerConfig::effective_listeners()` against
+    /// `inter_broker_listener_name`). Threaded into outbound inter-broker
+    /// dials — the replicator and heartbeat hold their own copies; the
+    /// `EndTxn` marker fan-out reads this one so TLS / SASL run when the
+    /// listener demands them.
+    pub(crate) inter_broker_listener_protocol: crabka_security::ListenerProtocol,
     /// KIP-966 offset-aware unclean recovery. Cloneable handle for
     /// enqueuing recovery jobs onto the Unclean Recovery Manager task.
     /// Used by the `ElectLeaders UNCLEAN` handler (which awaits the
@@ -2127,6 +2134,7 @@ impl Broker {
             liveness: liveness.clone(),
             tls_dynamic: tls_dynamic.clone(),
             inter_broker_client,
+            inter_broker_listener_protocol: inter_listener_proto,
             unclean_recovery,
             metrics: metrics.clone(),
             metrics_bound_addr,

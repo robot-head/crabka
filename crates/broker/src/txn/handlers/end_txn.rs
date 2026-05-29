@@ -8,7 +8,8 @@
 //! 2. `Ongoing` → `PrepareCommit` (or `PrepareAbort`); persist.
 //! 3. Fan out `WriteTxnMarkers` to every involved partition's leader:
 //!    - **local** leader  → `Partition::produce_batch`.
-//!    - **remote** leader → `WriteTxnMarkersRequest` via `crabka_client_core`.
+//!    - **remote** leader → `WriteTxnMarkersRequest` over the shared
+//!      `InterBrokerClient` (runs inter-broker TLS / SASL as the listener demands).
 //! 4. `PrepareCommit` → `CompleteCommit` (or `PrepareAbort` → `CompleteAbort`); persist.
 //! 5. Return `NONE` to the producer.
 //!
@@ -20,7 +21,6 @@ use std::collections::HashMap;
 
 use bytes::{Bytes, BytesMut};
 
-use crabka_client_core::Client;
 use crabka_metadata::{AclOperation, MetadataImage, NodeId, ResourceType};
 use crabka_protocol::Decode;
 use crabka_protocol::Encode;
@@ -29,12 +29,14 @@ use crabka_protocol::owned::end_txn_response::EndTxnResponse;
 use crabka_protocol::owned::write_txn_markers_request::{
     WritableTxnMarker, WritableTxnMarkerTopic, WriteTxnMarkersRequest,
 };
+use crabka_security::ListenerProtocol;
 
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 use crate::broker::Broker;
 use crate::codes;
 use crate::coordinator::bootstrap::OFFSETS_TOPIC;
 use crate::error::BrokerError;
+use crate::network::client::InterBrokerClient;
 use crate::txn::marker::{MarkerType, build_marker_batch};
 use crate::txn::partitioner::partition_for_tid;
 use crate::txn::state::{TopicPartition, TxnEntry, TxnState};
@@ -137,7 +139,17 @@ pub(crate) async fn handle(
 
     // ── Phase 2: Fan out WriteTxnMarkers ──────────────────────────────
 
-    if let Err(e) = dispatch_markers(node_id, &partitions, &prepare_snap, marker_type, &image).await
+    if let Err(e) = dispatch_markers(
+        node_id,
+        &partitions,
+        &prepare_snap,
+        marker_type,
+        &image,
+        &broker.inter_broker_client,
+        broker.inter_broker_listener_protocol,
+        &broker.config.inter_broker_listener_name,
+    )
+    .await
     {
         tracing::error!(
             tid,
@@ -287,17 +299,22 @@ fn validate_complete_reacquire(
 ///
 /// - **local** (leader == `node_id`): directly calls
 ///   [`Partition::produce_batch`] on the in-memory handle.
-/// - **remote**: sends a [`WriteTxnMarkersRequest`] over a fresh
-///   inter-broker `crabka_client_core` connection.
+/// - **remote**: sends a [`WriteTxnMarkersRequest`] over the shared
+///   [`InterBrokerClient`], which runs TLS / SASL when the inter-broker
+///   listener demands them.
 ///
 /// `__consumer_offsets` partitions are added for each group in
 /// `entry.offset_commit_groups`.
+#[allow(clippy::too_many_arguments)]
 async fn dispatch_markers(
     node_id: NodeId,
     partitions: &std::sync::Arc<crate::partition_registry::PartitionRegistry>,
     entry: &TxnEntry,
     marker_type: MarkerType,
     image: &MetadataImage,
+    inter_broker_client: &InterBrokerClient,
+    inter_broker_protocol: ListenerProtocol,
+    inter_broker_listener_name: &str,
 ) -> Result<(), BrokerError> {
     // Group every involved (topic, partition) by its current leader.
     let mut by_leader: HashMap<NodeId, Vec<TopicPartition>> = HashMap::new();
@@ -347,7 +364,18 @@ async fn dispatch_markers(
             }
         } else {
             // Remote path: send WriteTxnMarkersRequest to the leader.
-            send_write_txn_markers(node_id, leader, entry, marker_type, &tps, image).await?;
+            send_write_txn_markers(
+                node_id,
+                leader,
+                entry,
+                marker_type,
+                &tps,
+                image,
+                inter_broker_client,
+                inter_broker_protocol,
+                inter_broker_listener_name,
+            )
+            .await?;
         }
     }
 
@@ -357,36 +385,13 @@ async fn dispatch_markers(
 /// Send a `WriteTxnMarkersRequest` to a remote broker that leads one or more
 /// of the transaction's partitions.
 ///
-/// Opens a fresh `crabka_client_core::Client` (TCP + TLS + SASL) per remote
-/// leader per `EndTxn`, then closes it.
-///
-// PERF: this should reuse the shared, pooled inter-broker dialer
-// `crate::network::client::InterBrokerClient` (already used by `auto_join.rs`
-// and `heartbeat/client.rs` via `connect_as_connection` + `raw_request`)
-// instead of `Client::builder().bootstrap(...)`. Doing so would also FIX a
-// latent correctness gap: the current `Client::builder()` path carries no
-// TLS connector and no inter-broker SASL credentials, so it can only reach a
-// PLAINTEXT inter-broker listener — against a TLS/SASL listener the
-// connect/handshake fails. `InterBrokerClient` already holds the right
-// connector + creds.
-//
-// Why it is NOT done in this batch (would require editing OTHER files):
-//   * `Broker` exposes `inter_broker_client: Arc<InterBrokerClient>` but does
-//     NOT expose the resolved inter-broker `ListenerProtocol` nor an SNI
-//     `server_name`. The protocol is derived in `broker.rs` (`Broker::start`,
-//     ~line 1393: `config.effective_listeners().find(name ==
-//     inter_broker_listener_name).protocol`) and threaded into the replicator
-//     supervisor / heartbeat client — not stored on `Broker`. The SNI name has
-//     no single canonical broker field (auto_join hardcodes "localhost"; the
-//     replicator uses the advertised host).
-//   * To switch cleanly we must add accessors on `Broker`
-//     (`inter_broker_listener_protocol()` + a server-name source) in
-//     `broker.rs`, then thread `&InterBrokerClient` + protocol + server_name
-//     from `handle` (which has `broker`) through `dispatch_markers` into this
-//     fn. `dispatch_markers` and this fn are in THIS file, but the accessors
-//     live in `broker.rs`, which is out of scope for this single-file batch.
-// Guessing the SNI value here would risk breaking TLS verification, so the
-// conservative choice is to defer. Connection correctness > the optimization.
+/// Dials through the shared [`InterBrokerClient`] so the connection
+/// terminates TLS and runs the SASL client handshake whenever the
+/// inter-broker listener demands them. The previous implementation opened a
+/// one-shot `crabka_client_core::Client` per call, which carried no TLS
+/// connector and no inter-broker credentials — marker fan-out therefore only
+/// succeeded against a PLAINTEXT inter-broker listener and silently broke
+/// transactions spanning remote-led partitions on any secured cluster.
 ///
 /// ## Coordinator epoch
 ///
@@ -394,6 +399,7 @@ async fn dispatch_markers(
 /// leadership change. Leader-election-on-failure is not yet implemented, so we
 /// hard-code `coordinator_epoch = 0` here. Once coordinator failover is
 /// implemented the caller must supply the real epoch.
+#[allow(clippy::too_many_arguments)]
 async fn send_write_txn_markers(
     my_node_id: NodeId,
     leader_node: NodeId,
@@ -401,6 +407,9 @@ async fn send_write_txn_markers(
     marker_type: MarkerType,
     tps: &[TopicPartition],
     image: &MetadataImage,
+    inter_broker_client: &InterBrokerClient,
+    inter_broker_protocol: ListenerProtocol,
+    inter_broker_listener_name: &str,
 ) -> Result<(), BrokerError> {
     let Some(broker_info) = image.broker(leader_node) else {
         return Err(BrokerError::Txn(format!(
@@ -408,15 +417,19 @@ async fn send_write_txn_markers(
         )));
     };
 
-    let addr = format!("{}:{}", broker_info.host, broker_info.port);
-    let client_id = format!("crabka-broker-txn-{my_node_id}");
-
-    let client = Client::builder()
-        .bootstrap(addr.clone())
-        .client_id(client_id)
-        .build()
-        .await
-        .map_err(|e| BrokerError::Txn(format!("EndTxn: connect to {addr}: {e}")))?;
+    // Prefer the leader's inter-broker listener endpoint when it has projected
+    // one onto its registration record; fall back to the legacy top-level
+    // host/port. Mirrors the resolution in the replicator supervisor and
+    // heartbeat client — the marker RPC must target the same listener whose
+    // protocol we dial with.
+    let (host, port) = broker_info
+        .endpoints
+        .iter()
+        .find(|e| e.name == inter_broker_listener_name)
+        .map_or_else(
+            || (broker_info.host.clone(), broker_info.port),
+            |e| (e.host.clone(), e.port),
+        );
 
     // Group tps by topic for the nested WritableTxnMarkerTopic structure.
     let mut by_topic: HashMap<String, Vec<i32>> = HashMap::new();
@@ -450,13 +463,25 @@ async fn send_write_txn_markers(
         ..Default::default()
     };
 
-    // Use the minimum supported version for WriteTxnMarkersRequest (v1).
-    let _resp = client
+    // SNI server_name "localhost" matches the convention used by the
+    // replicator / heartbeat / auto-join inter-broker dials.
+    let opts = crabka_client_core::ConnectionOptions {
+        client_id: format!("crabka-broker-txn-{my_node_id}"),
+        ..crabka_client_core::ConnectionOptions::default()
+    };
+    let conn = inter_broker_client
+        .connect_as_connection(&host, port, inter_broker_protocol, "localhost", opts)
+        .await
+        .map_err(|e| BrokerError::Txn(format!("EndTxn: connect to {host}:{port}: {e}")))?;
+
+    // `Connection::send` negotiates the wire version from the broker-advertised
+    // ApiVersions table established during connect.
+    let _resp = conn
         .send(req)
         .await
-        .map_err(|e| BrokerError::Txn(format!("EndTxn: WriteTxnMarkers to {addr}: {e}")))?;
+        .map_err(|e| BrokerError::Txn(format!("EndTxn: WriteTxnMarkers to {host}:{port}: {e}")))?;
 
-    client.close();
+    conn.close();
     Ok(())
 }
 
