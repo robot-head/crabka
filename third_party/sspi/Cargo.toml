@@ -131,7 +131,7 @@ version = "0.13"
 version = "0.11"
 
 [dependencies.md4]
-version = "0.10"
+version = "0.11"
 
 [dependencies.num-derive]
 version = "0.4"
