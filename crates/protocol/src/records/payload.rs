@@ -104,6 +104,11 @@ impl RecordsPayload {
     /// *corrupt* complete batch (bad CRC/magic/content) still errors — leniency
     /// forgives truncation only. Strict [`from_bytes`](Self::from_bytes) is
     /// retained for Produce-request validation.
+    ///
+    /// Only `HeaderTooShort`/`BodyTooShort` are treated as truncation; a genuinely
+    /// invalid `batch_length` (`RecordParse`) is corruption and still errors —
+    /// legitimate Kafka truncation always preserves a valid `batch_length` prefix,
+    /// so it can only manifest as the too-short variants.
     pub fn from_fetch_bytes(bytes: Bytes) -> Result<Self, RecordsError> {
         if !looks_like_v2(&bytes) {
             return Ok(Self::Legacy(bytes));
@@ -553,5 +558,13 @@ mod tests {
         let bytes = legacy_bytes();
         let p = RecordsPayload::from_fetch_bytes(bytes.clone()).unwrap();
         assert_eq!(p.as_legacy(), Some(&bytes));
+    }
+
+    #[test]
+    fn from_fetch_bytes_empty_is_empty_v2() {
+        // Empty bytes do not carry a magic byte, so looks_like_v2 returns false
+        // and from_fetch_bytes yields an empty Legacy payload (no panic, no error).
+        let p = RecordsPayload::from_fetch_bytes(Bytes::new()).unwrap();
+        assert!(matches!(p, RecordsPayload::Legacy(ref b) if b.is_empty()));
     }
 }
