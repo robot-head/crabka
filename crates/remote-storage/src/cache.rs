@@ -155,6 +155,39 @@ impl RemoteLogMetadataCache {
         out
     }
 
+    /// Every tracked segment (all states), unordered. The owning
+    /// manager pairs this with [`Self::delete_state`] to dump the
+    /// partition for snapshotting.
+    pub(crate) fn dump_segments(&self) -> Vec<RemoteLogSegmentMetadata> {
+        self.id_to_metadata.values().cloned().collect()
+    }
+
+    /// Seed this (assumed-empty) cache from a dump, bypassing
+    /// lifecycle-transition validation. Rebuilds the per-epoch offset
+    /// index for every finished segment exactly as the live path does,
+    /// so reads after seeding behave identically. `delete_started` /
+    /// `delete_finished` segments are kept in `id_to_metadata` but not
+    /// indexed (`delete_finished` never reaches a dump, but we tolerate
+    /// it for robustness). Partition-delete state is set verbatim.
+    pub(crate) fn seed(
+        &mut self,
+        segments: Vec<RemoteLogSegmentMetadata>,
+        delete_state: Option<RemotePartitionDeleteState>,
+    ) {
+        for md in segments {
+            let id = md.remote_log_segment_id().id;
+            if md.state() == RemoteLogSegmentState::CopySegmentFinished {
+                self.index_epochs(&md);
+            }
+            // DeleteSegmentFinished segments are dropped entirely in the
+            // live path; if one somehow appears in a dump, skip it.
+            if md.state() != RemoteLogSegmentState::DeleteSegmentFinished {
+                self.id_to_metadata.insert(id, md);
+            }
+        }
+        self.delete_state = delete_state;
+    }
+
     pub(crate) fn delete_state(&self) -> Option<RemotePartitionDeleteState> {
         self.delete_state
     }
@@ -339,6 +372,41 @@ mod tests {
         c.add(seg(10, &[(0, 0)], 0, 99)).unwrap();
         let err = c.add(seg(10, &[(0, 0)], 0, 99)).unwrap_err();
         assert!(matches!(err, RemoteStorageError::InvalidAdd { .. }));
+    }
+
+    #[test]
+    fn dump_then_seed_rebuilds_epoch_index() {
+        let mut c = RemoteLogMetadataCache::default();
+        c.add(seg(10, &[(0, 0)], 0, 99)).unwrap();
+        c.add(seg(11, &[(0, 100)], 100, 199)).unwrap();
+        c.update(&finish(10)).unwrap();
+        c.update(&finish(11)).unwrap();
+        c.update(&transition(11, RemoteLogSegmentState::DeleteSegmentStarted))
+            .unwrap();
+        c.set_delete_state(RemotePartitionDeleteState::DeletePartitionMarked);
+
+        let segments = c.dump_segments();
+        let delete_state = c.delete_state();
+
+        let mut seeded = RemoteLogMetadataCache::default();
+        seeded.seed(segments, delete_state);
+
+        // Finished seg 10 is queryable; delete-started seg 11 is hidden
+        // but still listed; delete_state survives.
+        assert_eq!(
+            seeded
+                .segment_for(0, 50)
+                .unwrap()
+                .remote_log_segment_id()
+                .id,
+            Uuid::from_u128(10)
+        );
+        assert!(seeded.segment_for(0, 150).is_none());
+        assert_eq!(seeded.list().len(), 2);
+        assert_eq!(
+            seeded.delete_state(),
+            Some(RemotePartitionDeleteState::DeletePartitionMarked)
+        );
     }
 
     #[test]

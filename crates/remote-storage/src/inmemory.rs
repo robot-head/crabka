@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use crate::cache::RemoteLogMetadataCache;
+use crate::dump::{PartitionDump, RlmmCacheDump};
 use crate::error::RemoteStorageError;
 use crate::metadata::{
     RemoteLogSegmentMetadata, RemoteLogSegmentMetadataUpdate, RemotePartitionDeleteMetadata,
@@ -28,6 +29,56 @@ impl InmemoryRemoteLogMetadataManager {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Dump every partition's segment + partition-delete metadata for
+    /// snapshotting (slice 48p). The result is order-independent;
+    /// [`Self::import`] re-derives ordering and the epoch index.
+    #[must_use]
+    pub fn export(&self) -> RlmmCacheDump {
+        let guard = self.partitions.lock().expect("metadata mutex poisoned");
+        let mut partitions: Vec<PartitionDump> = guard
+            .iter()
+            .map(|(tp, cache)| PartitionDump {
+                topic_id_partition: tp.clone(),
+                segments: cache.dump_segments(),
+                delete_state: cache.delete_state(),
+            })
+            .collect();
+        // Stable order so `export()` is deterministic and comparable.
+        partitions.sort_by(|a, b| {
+            (
+                a.topic_id_partition.topic_id,
+                a.topic_id_partition.partition,
+            )
+                .cmp(&(
+                    b.topic_id_partition.topic_id,
+                    b.topic_id_partition.partition,
+                ))
+        });
+        // Within a partition, sort segments by (start_offset, id) so the
+        // dump is canonical regardless of HashMap iteration order.
+        for p in &mut partitions {
+            p.segments.sort_by(|a, b| {
+                a.start_offset().cmp(&b.start_offset()).then_with(|| {
+                    a.remote_log_segment_id()
+                        .id
+                        .cmp(&b.remote_log_segment_id().id)
+                })
+            });
+        }
+        RlmmCacheDump { partitions }
+    }
+
+    /// Seed the cache from a dump, bypassing transition validation
+    /// (slice 48p). Intended for a freshly-constructed manager during
+    /// snapshot restore; existing partitions are overwritten.
+    pub fn import(&self, dump: RlmmCacheDump) {
+        let mut guard = self.partitions.lock().expect("metadata mutex poisoned");
+        for p in dump.partitions {
+            let cache = guard.entry(p.topic_id_partition).or_default();
+            cache.seed(p.segments, p.delete_state);
+        }
     }
 }
 
@@ -225,6 +276,39 @@ mod tests {
             })
             .unwrap();
         }
+    }
+
+    #[test]
+    fn export_then_import_reproduces_cache() {
+        let m = InmemoryRemoteLogMetadataManager::new();
+        m.add_remote_log_segment_metadata(started(10, 0, 99))
+            .unwrap();
+        m.add_remote_log_segment_metadata(started(11, 100, 199))
+            .unwrap();
+        m.update_remote_log_segment_metadata(finish(10)).unwrap();
+        m.put_remote_partition_delete_metadata(RemotePartitionDeleteMetadata {
+            topic_id_partition: tp(),
+            state: RemotePartitionDeleteState::DeletePartitionMarked,
+            event_timestamp_ms: 500,
+            broker_id: 1,
+        })
+        .unwrap();
+
+        let dump = m.export();
+        let restored = InmemoryRemoteLogMetadataManager::new();
+        restored.import(dump);
+
+        // list_remote_log_segments matches across the partition.
+        let before = m.list_remote_log_segments(&tp()).unwrap();
+        let after = restored.list_remote_log_segments(&tp()).unwrap();
+        assert_eq!(before, after);
+        // Finished segment still queryable post-import.
+        assert_eq!(
+            restored.highest_offset_for_epoch(&tp(), 0).unwrap(),
+            Some(99)
+        );
+        // Re-exporting yields the same dump (idempotent round trip).
+        assert_eq!(m.export(), restored.export());
     }
 
     #[test]
