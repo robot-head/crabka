@@ -489,7 +489,8 @@ mod run_recovery_tests {
         BrokerRegistrationRecord, MetadataImage, MetadataRecord, PartitionRecord, TopicRecord,
     };
     use crabka_raft::{
-        AddVoter, Node, QuorumState, RaftError, ReconfigOutcome, RemoveVoter, UpdateVoter,
+        AddVoter, Node, QuorumState, RaftError, ReconfigOutcome, RemoveVoter, SnapshotRange,
+        UpdateVoter,
     };
     use std::collections::BTreeSet;
     use std::net::SocketAddr;
@@ -540,6 +541,12 @@ mod run_recovery_tests {
             unimplemented!()
         }
         fn controller_bound_addr(&self) -> SocketAddr {
+            unimplemented!()
+        }
+        fn read_snapshot_range(&self, _position: i64, _max_bytes: i32) -> SnapshotRange {
+            unimplemented!()
+        }
+        async fn trigger_snapshot(&self) -> Result<(), RaftError> {
             unimplemented!()
         }
         async fn add_voter(&self, _req: AddVoter) -> Result<ReconfigOutcome, RaftError> {
