@@ -832,10 +832,11 @@ fn configmap_data<B: AsRef<[u8]>>(observed: &[http::Request<B>]) -> serde_json::
 }
 
 /// A valid cluster echoes `kafkaVersion`, finalizes
-/// `metadataVersion`, surfaces `KafkaVersionValid=True`, and injects
-/// `metadata.version` into the rendered broker TOML.
+/// `metadataVersion` in status, and surfaces `KafkaVersionValid=True`.
+/// (`metadata.version` is finalized via the bootstrap feature record, not
+/// rendered into broker config — see `render_configmap`.)
 #[tokio::test]
-async fn kafka_status_and_configmap_carry_metadata_version() {
+async fn kafka_status_finalizes_metadata_version() {
     let items = vec![fake_pool_list_item("brokers", "y", "demo", 1, 1)];
     let (ctx, state) = build_ctx("y", happy_path_rules("demo", "y", &items));
     let kafka = kafka_cr_with_versions("demo", "y", "3.7.0", None);
@@ -843,14 +844,6 @@ async fn kafka_status_and_configmap_carry_metadata_version() {
     reconcile(Arc::new(kafka), ctx).await.unwrap();
 
     let observed = state.take_observed();
-
-    // ConfigMap carries the defaulted metadata.version (3.7 tracks 3.7.0).
-    let data = configmap_data(&observed);
-    let toml = data["broker-0.toml"].as_str().expect("broker-0.toml str");
-    assert!(
-        toml.contains("\"metadata.version\" = \"3.7\""),
-        "expected metadata.version in broker TOML, got:\n{toml}"
-    );
 
     // Status echoes the versions and reports validity.
     let status_patch = observed
@@ -884,7 +877,7 @@ async fn kafka_status_and_configmap_carry_metadata_version() {
 }
 
 /// A metadata version newer than the binary is rejected — no
-/// roll, `metadata.version` not injected, finalized version not advanced.
+/// roll, finalized version not advanced.
 #[tokio::test]
 async fn kafka_metadata_version_too_high_blocks() {
     let items = vec![fake_pool_list_item("brokers", "y", "demo", 1, 1)];
@@ -894,14 +887,6 @@ async fn kafka_metadata_version_too_high_blocks() {
     reconcile(Arc::new(kafka), ctx).await.unwrap();
 
     let observed = state.take_observed();
-
-    // ConfigMap renders, but without the (rejected) metadata.version.
-    let data = configmap_data(&observed);
-    let toml = data["broker-0.toml"].as_str().expect("broker-0.toml str");
-    assert!(
-        !toml.contains("metadata.version"),
-        "rejected metadata.version must not be injected, got:\n{toml}"
-    );
 
     let status_patch = observed
         .iter()
