@@ -1552,12 +1552,16 @@ Kafka client for ApiVersions.
 
 ## Slice 28 — Operator: Version upgrades (2026-05-22)
 
-- Closes the Phase-3 "Version upgrades" roadmap item. Pure operator work:
-  the broker has no runtime `metadata.version` feature (the `UpdateFeatures`
-  codec exists but no handler consumes it), so the resolved metadata
-  version is rendered into the broker's inert `[server_properties]` table
-  (same broker-inert-config pattern as slices 21/25). All upgrade safety
-  lives in the operator.
+- Closes the Phase-3 "Version upgrades" roadmap item. At the time of this
+  slice the broker had no runtime `metadata.version` feature, so the
+  resolved metadata version was rendered into the broker's inert
+  `[server_properties]` table (same broker-inert-config pattern as slices
+  21/25) and all upgrade safety lived in the operator. **Update
+  (2026-05-29):** broker-side runtime enforcement is now IMPLEMENTED — see
+  *Slice — Broker runtime `metadata.version` enforcement (KIP-584/778)*.
+  The operator now hands the resolved metadata version to `crabka format
+  --release-version`, which seeds a bootstrap feature level the broker
+  validates, finalizes via `UpdateFeatures`, and gates RPCs on.
 - New `Kafka.spec.metadataVersion: Option<String>` (Strimzi-shaped). Crabka
   is KRaft-only, so this is the *only* feature-level knob — the runtime
   analog of the ZK-era `inter.broker.protocol.version`; there is no
@@ -1607,8 +1611,10 @@ Kafka client for ApiVersions.
   invalid (too-high) `metadataVersion` pin surfaces
   `KafkaVersionValid=False reason=MetadataVersionTooHigh` without writing
   the rejected value or rolling the pod.
-- Out of scope (deferred): broker-side `metadata.version` feature-level
-  enforcement (`UpdateFeatures` handler) — a Crabka-core slice; a
+- Broker-side `metadata.version` feature-level enforcement
+  (`UpdateFeatures` handler) is now IMPLEMENTED (no longer deferred) — see
+  *Slice — Broker runtime `metadata.version` enforcement (KIP-584/778)*
+  (2026-05-29). Still out of scope (deferred): a
   `kafkaVersion` → image-tag mapping (image stays `pool.spec.image >
   operator default > built-in`); draining each node via slice-22
   `ControlledShutdown` before its roll (the gate orders + waits for Ready
@@ -4852,3 +4858,66 @@ introspection metadata).
     layer when an authenticated connection's `expires_at_ms`
     elapses; a separate counter family there is a small
     follow-up slice.
+
+## Slice — Broker runtime `metadata.version` enforcement (KIP-584/778) (2026-05-29)
+
+- **Goal.** Close the slice-28 deferral: give the broker a real,
+  Kafka-faithful runtime `metadata.version` feature with range
+  validation, a downgrade-safety floor, and per-RPC admission gates —
+  not just an inert operator-rendered config key.
+- **`MetadataVersion` table (`crabka_metadata::metadata_version`).**
+  Mirrors Kafka's `MetadataVersion` enum: `METADATA_VERSION_MIN = 7`
+  (`3.3-IV3`, the KRaft-GA floor) .. `METADATA_VERSION_MAX = 25`
+  (`4.0-IV3`), with `SCRAM_MIN_LEVEL = 11` and
+  `DELEGATION_TOKEN_MIN_LEVEL = 14`. Helpers: `from_feature_level`,
+  `from_version_string` (tolerates `X.Y` / `X.Y-IVn`),
+  `is_supported_level`. `broker/features.rs` re-exports the table
+  (MIN=7/MAX=25) plus a `metadata_version_blocks(Option<i16>, i16)`
+  admission helper (`None`/UNKNOWN is permissive).
+- **Bootstrap.** `crabka format --release-version` seeds a bootstrap
+  `V1FeatureLevel` (defaults to MAX). The operator (slice 28) now passes
+  the resolved metadata.version (normalized to `major.minor`) to the
+  format init container via `--release-version
+  "$CRABKA_METADATA_VERSION"` + a `CRABKA_METADATA_VERSION` env var.
+- **Fail-fast range guard.** The Raft state machine aborts on an
+  out-of-range finalized metadata.version at every entry point —
+  `recover` (startup), `apply_entry`, and `install_snapshot` — so a
+  corrupt or hand-edited log can never bring the controller up at an
+  unsupported level.
+- **Downgrade-safety floor.** `MetadataImage::min_required_metadata_version()`
+  computes a floor: baseline MIN, raised to ≥11 when SCRAM credentials
+  are present and ≥14 when delegation tokens are present. The
+  `UpdateFeatures` (api_key 57) handler refuses to finalize
+  metadata.version below the floor — even with the downgrade flag set —
+  returning `INVALID_UPDATE_VERSION` (95).
+- **Per-RPC admission gates.** `AlterUserScramCredentials` is gated on
+  finalized MV ≥ 11; the three delegation-token RPCs
+  (`CreateDelegationToken` / `RenewDelegationToken` /
+  `ExpireDelegationToken`) on MV ≥ 14. Below the level →
+  `UNSUPPORTED_VERSION` (35); `None`/UNKNOWN remains permissive so a
+  fresh, never-finalized broker is not gated.
+- **Operator.** `version::evaluate` now rejects a metadata.version below
+  MIN with `MetadataVersionTooLow`, complementing the existing
+  too-high / downgrade reasons; the resolved value is handed to the
+  format init container as above.
+- **Tests.** `crabka_metadata` lib: 84 unit tests green (incl. the
+  `MetadataVersion` table). Broker integration: `update_features` (1
+  binary, all `metadata.version` finalize / floor / unsupported-level
+  cases — adjusted for MIN=7/MAX=25, plus a new
+  `rejects_level_below_min_floor` asserting level 6 → 95) and
+  `api_versions_features` (5, advertises supported `metadata.version`
+  range `7..25`, fresh broker still has no finalized features / epoch
+  -1). Full `cargo test --workspace`: **3604 passed, 0 failed, 83
+  ignored**; `cargo clippy --workspace --all-targets -- -D warnings`
+  clean; `cargo fmt --all --check` clean.
+- **JVM acceptance.** `tests/jvm_acceptance.rs` compiles and the
+  metadata.version-affected paths were spot-checked against real
+  `cp-kafka` via Docker locally — `kafka_topics_describe_smokes_metadata`
+  (ApiVersions handshake with the new MAX=25 range) and
+  `jvm_kafka_configs_describe_users_scram_credentials_end_to_end` (the
+  SCRAM admission path) both pass. The **full 45-test live Docker
+  jvm_acceptance sweep should be re-run in CI** to fully re-baseline the
+  raised MAX; it was not run in its entirety locally.
+- Reference docs:
+  [`docs/superpowers/specs/2026-05-29-crabka-metadata-version-enforcement-design.md`],
+  [`docs/superpowers/plans/2026-05-29-crabka-metadata-version-enforcement.md`].
