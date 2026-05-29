@@ -2099,7 +2099,7 @@ mod tests {
         // offsets 0..=4 with timestamps 100,200,300,400,500.
         for (i, ts) in [100, 200, 300, 400, 500].into_iter().enumerate() {
             let mut b = ts_batch(ts);
-            assert_eq!(log.append(&mut b).unwrap(), i as i64);
+            assert_eq!(log.append(&mut b).unwrap(), i64::try_from(i).unwrap());
         }
         // before-first → offset 0.
         assert_eq!(log.offset_for_timestamp(50), Some((0, 100)));
