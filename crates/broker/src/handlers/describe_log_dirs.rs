@@ -23,7 +23,6 @@ use crate::codes;
 use crate::disk_scanner::scan::sum_partition_dir;
 use crate::error::BrokerError;
 use crate::log_dir;
-use crate::partition::Partition;
 
 /// Filter derived from the request `topics` field:
 /// - `None`  → report every partition (admin-client default).
@@ -179,14 +178,11 @@ pub(crate) fn handle(
 /// `LEO − HW`, clamped to ≥ 0, for a loaded current log; 0 when the
 /// partition isn't materialized on this broker.
 async fn offset_lag_for(
-    partitions: &dashmap::DashMap<(String, i32), std::sync::Arc<Partition>>,
+    partitions: &crate::partition_registry::PartitionRegistry,
     topic: &str,
     partition: i32,
 ) -> i64 {
-    let Some(part) = partitions
-        .get(&(topic.to_string(), partition))
-        .map(|e| e.value().clone())
-    else {
+    let Some(part) = partitions.get(topic, partition) else {
         return 0;
     };
     let leo = part.log_end_offset();
@@ -200,7 +196,7 @@ async fn offset_lag_for(
 /// has no entry (broker just started and the resume task hasn't yet
 /// opened the future log).
 fn future_offset_lag(
-    partitions: &dashmap::DashMap<(String, i32), std::sync::Arc<Partition>>,
+    partitions: &crate::partition_registry::PartitionRegistry,
     future_logs: &dashmap::DashMap<
         (String, i32),
         std::sync::Arc<crate::future_log::FutureLogState>,
@@ -208,10 +204,7 @@ fn future_offset_lag(
     topic: &str,
     partition: i32,
 ) -> i64 {
-    let Some(part) = partitions
-        .get(&(topic.to_string(), partition))
-        .map(|e| e.value().clone())
-    else {
+    let Some(part) = partitions.get(topic, partition) else {
         return 0;
     };
     let current_leo = part.log_end_offset();

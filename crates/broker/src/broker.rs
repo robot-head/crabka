@@ -16,6 +16,7 @@ use crate::error::BrokerError;
 use crate::handlers::HandlerTable;
 use crate::log_dir;
 use crate::partition::{Partition, WriterMessage};
+use crate::partition_registry::PartitionRegistry;
 
 /// The running broker. Library callers get a [`BrokerHandle`] from
 /// [`Broker::start`]; this struct is the shared internal state.
@@ -32,8 +33,10 @@ pub struct Broker {
     /// `MetadataSource` trait, so the concrete backing is invisible to them.
     pub(crate) controller: Arc<dyn crate::metadata_source::MetadataSource>,
     /// Wrapped in `Arc` so handlers cloning the field share the same
-    /// underlying map. `DashMap::clone` is a deep copy by default.
-    pub(crate) partitions: Arc<DashMap<(String, i32), Arc<Partition>>>,
+    /// underlying registry. Lookups take a borrowed `&str` topic, so the
+    /// produce/fetch hot path resolves partitions with no per-lookup `String`
+    /// allocation.
+    pub(crate) partitions: Arc<PartitionRegistry>,
     /// KIP-113 (`AlterReplicaLogDirs`): in-progress intra-broker
     /// log-dir moves. One entry per `(topic, partition)` currently
     /// being copied to a different log.dir. `DescribeLogDirs` reads
@@ -291,12 +294,7 @@ impl BrokerHandle {
     /// assert all followers caught up.
     #[allow(clippy::unused_async, clippy::used_underscore_binding)]
     pub async fn local_log_end_offset(&self, topic: &str, partition: i32) -> Option<i64> {
-        let part = self
-            ._broker
-            .partitions
-            .get(&(topic.to_string(), partition))?
-            .value()
-            .clone();
+        let part = self._broker.partitions.get(topic, partition)?;
         Some(part.log_end_offset())
     }
 
@@ -320,14 +318,12 @@ impl BrokerHandle {
         let part = self
             ._broker
             .partitions
-            .get(&(topic.to_string(), partition))
+            .get(topic, partition)
             .ok_or_else(|| {
                 crate::error::BrokerError::Replication(format!(
                     "partition {topic}-{partition} not local"
                 ))
-            })?
-            .value()
-            .clone();
+            })?;
         part.truncate_to(offset).await
     }
 
@@ -351,14 +347,12 @@ impl BrokerHandle {
         let part = self
             ._broker
             .partitions
-            .get(&(topic.to_string(), partition))
+            .get(topic, partition)
             .ok_or_else(|| {
                 crate::error::BrokerError::Replication(format!(
                     "partition {topic}-{partition} not local"
                 ))
-            })?
-            .value()
-            .clone();
+            })?;
         part.test_set_log_start(new_start).await
     }
 
@@ -369,8 +363,8 @@ impl BrokerHandle {
     #[cfg(any(test, feature = "test-helpers"))]
     #[allow(clippy::used_underscore_binding)]
     pub fn test_set_leader_epoch(&self, topic: &str, partition: i32, epoch: i32) {
-        if let Some(part) = self._broker.partitions.get(&(topic.to_string(), partition)) {
-            part.value().test_set_leader_epoch(epoch);
+        if let Some(part) = self._broker.partitions.get(topic, partition) {
+            part.test_set_leader_epoch(epoch);
         }
     }
 
@@ -382,9 +376,7 @@ impl BrokerHandle {
     #[must_use]
     #[allow(clippy::used_underscore_binding)]
     pub fn partition_exists_for_test(&self, topic: &str, partition: i32) -> bool {
-        self._broker
-            .partitions
-            .contains_key(&(topic.to_string(), partition))
+        self._broker.partitions.contains(topic, partition)
     }
 
     /// Test-only: return the `log_start_offset` of `(topic, partition)` as
@@ -394,12 +386,7 @@ impl BrokerHandle {
     #[must_use]
     #[allow(clippy::used_underscore_binding)]
     pub fn partition_log_start_for_test(&self, topic: &str, partition: i32) -> Option<i64> {
-        let part = self
-            ._broker
-            .partitions
-            .get(&(topic.to_string(), partition))?
-            .value()
-            .clone();
+        let part = self._broker.partitions.get(topic, partition)?;
         Some(part.log_start_offset())
     }
 
@@ -415,12 +402,7 @@ impl BrokerHandle {
         topic: &str,
         partition: i32,
     ) -> Option<Option<std::time::Duration>> {
-        let part = self
-            ._broker
-            .partitions
-            .get(&(topic.to_string(), partition))?
-            .value()
-            .clone();
+        let part = self._broker.partitions.get(topic, partition)?;
         let snap = part.log.lock().ok()?.config_snapshot();
         Some(snap.retention_ms)
     }
@@ -438,12 +420,7 @@ impl BrokerHandle {
         topic: &str,
         partition: i32,
     ) -> Option<crabka_log::LogConfig> {
-        let part = self
-            ._broker
-            .partitions
-            .get(&(topic.to_string(), partition))?
-            .value()
-            .clone();
+        let part = self._broker.partitions.get(topic, partition)?;
         Some(part.log.lock().ok()?.config_snapshot())
     }
 
@@ -469,14 +446,12 @@ impl BrokerHandle {
         let part = self
             ._broker
             .partitions
-            .get(&(topic.to_string(), partition))
+            .get(topic, partition)
             .ok_or_else(|| {
                 crate::error::BrokerError::Replication(format!(
                     "partition {topic}-{partition} not local"
                 ))
-            })?
-            .value()
-            .clone();
+            })?;
         let mut last_offset = 0i64;
         for i in 0..n {
             let batch = crabka_protocol::records::RecordBatch {
@@ -1317,7 +1292,7 @@ impl Broker {
         //    Skip dirs marked offline by the probe — `scan_all` would
         //    fail the whole startup on the first IO error, and we want
         //    to keep recovering partitions on the surviving dirs.
-        let partitions: Arc<DashMap<(String, i32), Arc<Partition>>> = Arc::new(DashMap::new());
+        let partitions: Arc<PartitionRegistry> = Arc::new(PartitionRegistry::new());
         // Controller-only nodes host no data partitions, so they skip the
         // disk scan/recovery entirely.
         if config.is_broker() {
@@ -1332,7 +1307,7 @@ impl Broker {
                     log,
                     log_dir_status.clone(),
                 );
-                partitions.insert((topic.clone(), partition_id), part);
+                partitions.insert(topic.clone(), partition_id, part);
             }
         }
 
@@ -1605,17 +1580,15 @@ impl Broker {
                         () = shutdown.cancelled() => return,
                     }
                     let led = partitions_for_gauge
+                        .arcs()
                         .iter()
-                        .filter(|e| {
-                            e.value()
-                                .current_leader
-                                .load(std::sync::atomic::Ordering::Acquire)
-                                == node_id
+                        .filter(|p| {
+                            p.current_leader.load(std::sync::atomic::Ordering::Acquire) == node_id
                         })
                         .count();
                     m.partitions_led.set(i64::try_from(led).unwrap_or(i64::MAX));
                     // Total replicas this broker hosts (leader
-                    // + follower). Cheap: just the DashMap length.
+                    // + follower). Cheap: just the registry length.
                     let total = partitions_for_gauge.len();
                     m.partitions_total
                         .set(i64::try_from(total).unwrap_or(i64::MAX));
@@ -1636,37 +1609,50 @@ impl Broker {
                     let mut urp: usize = 0;
                     let mut under_min_isr: usize = 0;
                     let mut offline: usize = 0;
-                    for topic in image.topics() {
-                        let min_isr = image
-                            .topic_config(&topic.name)
-                            .and_then(|m| m.get("min.insync.replicas"))
-                            .and_then(|v| v.parse::<usize>().ok())
-                            .unwrap_or(1);
-                        for pr in image.partitions_of(&topic.name) {
-                            if pr.leader == node_id {
-                                if pr.isr.len() < pr.replicas.len() {
-                                    urp += 1;
-                                }
-                                if pr.isr.len() < min_isr {
-                                    under_min_isr += 1;
-                                }
+                    // Snapshot the alive set once (single lock) rather than
+                    // taking the liveness lock per partition inside the scan.
+                    let alive = liveness_for_gauge.alive_snapshot().await;
+                    // Resolve each topic's min.insync.replicas once
+                    // (O(topics)); defaults to 1 when missing or unparseable,
+                    // matching the produce-path gate.
+                    let min_isr_by_topic: std::collections::HashMap<&str, usize> = image
+                        .topics()
+                        .map(|topic| {
+                            let min_isr = image
+                                .topic_config(&topic.name)
+                                .and_then(|m| m.get("min.insync.replicas"))
+                                .and_then(|v| v.parse::<usize>().ok())
+                                .unwrap_or(1);
+                            (topic.name.as_str(), min_isr)
+                        })
+                        .collect();
+                    // Single O(P) walk over every partition.
+                    for ((topic_name, _idx), pr) in image.all_partitions() {
+                        if pr.leader == node_id {
+                            if pr.isr.len() < pr.replicas.len() {
+                                urp += 1;
                             }
-                            // Offline = the leader broker isn't
-                            // alive. Crabka's NodeId is `u64`, so
-                            // there's no in-band "leader unknown"
-                            // sentinel — the controller leaves a
-                            // PartitionRecord pointing at the dead
-                            // broker until a successor election (or
-                            // an unclean election) runs.
-                            // Only count partitions in the local
-                            // broker's owned set so the metric stays
-                            // per-broker; cluster-wide rollup can
-                            // sum across brokers.
-                            if pr.replicas.contains(&node_id)
-                                && !liveness_for_gauge.is_alive(pr.leader).await
-                            {
-                                offline += 1;
+                            let min_isr = min_isr_by_topic
+                                .get(topic_name.as_str())
+                                .copied()
+                                .unwrap_or(1);
+                            if pr.isr.len() < min_isr {
+                                under_min_isr += 1;
                             }
+                        }
+                        // Offline = the leader broker isn't
+                        // alive. Crabka's NodeId is `u64`, so
+                        // there's no in-band "leader unknown"
+                        // sentinel — the controller leaves a
+                        // PartitionRecord pointing at the dead
+                        // broker until a successor election (or
+                        // an unclean election) runs.
+                        // Only count partitions in the local
+                        // broker's owned set so the metric stays
+                        // per-broker; cluster-wide rollup can
+                        // sum across brokers.
+                        if pr.replicas.contains(&node_id) && !alive.contains(&pr.leader) {
+                            offline += 1;
                         }
                     }
                     m.under_replicated_partitions
@@ -1797,6 +1783,33 @@ impl Broker {
                 liveness_clone,
                 shutdown_clone,
             ));
+        }
+
+        // Idempotent-producer state expiry sweep (KIP-360 /
+        // `producer.id.expiration.ms`). Without it the per-partition
+        // producer-state maps grow unbounded as idempotent producers churn.
+        // Kafka defaults: expire entries idle for 24h, checked every 10min.
+        {
+            const PRODUCER_ID_EXPIRATION_MS: i64 = 86_400_000;
+            const CHECK_INTERVAL_SECS: u64 = 600;
+            let producer_state = producer_state.clone();
+            let shutdown = supervisor_shutdown.child_token();
+            tokio::spawn(async move {
+                let mut tick =
+                    tokio::time::interval(std::time::Duration::from_secs(CHECK_INTERVAL_SECS));
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    tokio::select! {
+                        _ = tick.tick() => {
+                            let now_ms = crate::time_util::now_ms();
+                            producer_state
+                                .expire_older_than(now_ms, PRODUCER_ID_EXPIRATION_MS)
+                                .await;
+                        }
+                        () = shutdown.cancelled() => return,
+                    }
+                }
+            });
         }
 
         // Per-broker log compaction ticker. Always-on; the
@@ -2069,7 +2082,7 @@ impl Broker {
         for owning_dir in config.all_log_dirs() {
             let futures = log_dir::scan_future(&owning_dir).unwrap_or_default();
             for (topic, partition_id) in futures {
-                if !partitions.contains_key(&(topic.clone(), partition_id)) {
+                if !partitions.contains(&topic, partition_id) {
                     // Stranded future dir — partition is no longer
                     // hosted (e.g. topic deleted). Remove the leftover.
                     let stranded = log_dir::future_partition_dir(&owning_dir, &topic, partition_id);

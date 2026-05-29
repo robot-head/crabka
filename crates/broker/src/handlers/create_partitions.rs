@@ -281,9 +281,7 @@ pub(crate) async fn handle(
                             topic = %t.name, partition = *p, error = %e,
                             "CreatePartitions: materialize after quorum commit failed"
                         );
-                    } else if let Some(part) =
-                        partitions_map.get(&(t.name.clone(), *p)).map(|e| e.clone())
-                    {
+                    } else if let Some(part) = partitions_map.get(&t.name, *p) {
                         let leader = replicas[0];
                         part.install_leader_change(leader, 0).await;
                         if leader == node_id {

@@ -131,11 +131,20 @@ impl MetadataImage {
             .map(|(_, v)| v)
     }
 
+    /// Single-pass iterator over every partition in the image, yielding
+    /// the flat `(topic_name, partition_index)` key alongside the record.
+    /// O(P) in total partition count — the cluster-wide maintenance loops
+    /// (failover, rebalance, reassignment, metrics) use this instead of
+    /// `topics().flat_map(partitions_of)`, which is O(topics × P).
+    pub fn all_partitions(&self) -> impl Iterator<Item = (&(String, i32), &PartitionRecord)> {
+        self.partitions.iter()
+    }
+
     /// All partitions where a reassignment is currently in flight
     /// (`adding_replicas` or `removing_replicas` non-empty).
     pub fn reassignments_in_flight(&self) -> impl Iterator<Item = &PartitionRecord> + '_ {
-        self.topics()
-            .flat_map(move |t| self.partitions_of(&t.name))
+        self.all_partitions()
+            .map(|(_, p)| p)
             .filter(|p| !p.adding_replicas.is_empty() || !p.removing_replicas.is_empty())
     }
 
@@ -1333,6 +1342,41 @@ mod tests {
         m.apply(&MetadataRecord::V1AccessControlEntry(topic_read_for_alice()));
         m.apply(&MetadataRecord::V1AccessControlEntry(topic_prefixed_team()));
         assert_eq!(m.all_acls().count(), 2);
+    }
+
+    #[test]
+    fn all_partitions_count_matches_map_size() {
+        let mut m = img();
+        m.apply(&topic("t", 3));
+        for p in 0..3 {
+            m.apply(&MetadataRecord::V1Partition(PartitionRecord {
+                topic: "t".into(),
+                partition: p,
+                leader: 1,
+                replicas: vec![1],
+                isr: vec![1],
+                leader_epoch: 0,
+                adding_replicas: vec![],
+                removing_replicas: vec![],
+            }));
+        }
+        m.apply(&topic("u", 1));
+        m.apply(&MetadataRecord::V1Partition(PartitionRecord {
+            topic: "u".into(),
+            partition: 0,
+            leader: 1,
+            replicas: vec![1],
+            isr: vec![1],
+            leader_epoch: 0,
+            adding_replicas: vec![],
+            removing_replicas: vec![],
+        }));
+        // 3 partitions for "t" + 1 for "u" = 4, one walk, no per-topic filter.
+        assert_eq!(m.all_partitions().count(), 4);
+        assert_eq!(
+            m.all_partitions().count(),
+            m.partitions_of("t").count() + m.partitions_of("u").count()
+        );
     }
 
     #[test]

@@ -46,6 +46,7 @@ use crate::txn::util::now_millis;
 /// topology once we get there.
 const OFFSETS_NUM_PARTITIONS: i32 = 1;
 
+#[allow(clippy::too_many_lines)]
 pub(crate) async fn handle(
     broker: &Broker,
     version: i16,
@@ -148,15 +149,69 @@ pub(crate) async fn handle(
     }
 
     // ── Phase 3: Prepare{Commit,Abort} → Complete{Commit,Abort} ───────
+    //
+    // The entry lock was *intentionally* dropped before the Phase-2 marker
+    // fan-out (network I/O to remote brokers); holding it across the fan-out
+    // would serialize/deadlock the coordinator. That window lets a concurrent
+    // caller (another EndTxn, an AddPartitionsToTxn, or an InitProducerId that
+    // bumps the epoch) interleave on this same transactional-id.
+    //
+    // We must NOT re-lock the original `entry_mutex` captured at the top of the
+    // handler: `coord.put` replaces the coordinator's map slot with a *fresh*
+    // `Arc<Mutex<TxnEntry>>` on every persist (see `TxnCoordinator::put`), so a
+    // concurrent caller operates on a different Arc than the one we hold. The
+    // only authoritative view is the entry currently registered under `tid`.
+    //
+    // Re-fetch it and re-validate that nothing advanced underneath us BEFORE
+    // writing Complete. If the producer was fenced (epoch bumped) or the state
+    // was advanced by another caller, abort this handler's Complete write and
+    // return the matching Kafka error instead of blindly overwriting.
+    let Some(current_mutex) = coord.get(tid) else {
+        // The entry vanished (e.g. expired/deleted) while markers were in
+        // flight. Treat as a producer-mapping loss.
+        return encode_err(version, codes::INVALID_PRODUCER_ID_MAPPING);
+    };
 
     let complete_snap: TxnEntry = {
-        let mut entry = entry_mutex.lock().await;
+        let mut entry = current_mutex.lock().await;
+        match validate_complete_reacquire(
+            &entry,
+            req.producer_id,
+            req.producer_epoch,
+            prepare,
+            complete,
+        ) {
+            ReacquireDecision::Proceed => {}
+            ReacquireDecision::AlreadyComplete => {
+                // Another caller already drove this exact transition to
+                // completion (or we are an idempotent EndTxn retry that lost
+                // the race). The desired post-state is already persisted, so
+                // report success without re-writing.
+                return encode_ok(version);
+            }
+            ReacquireDecision::Reject(code) => {
+                tracing::warn!(
+                    tid,
+                    expected_epoch = req.producer_epoch,
+                    found_epoch = entry.producer_epoch,
+                    expected_state = ?prepare,
+                    found_state = ?entry.state,
+                    error_code = code,
+                    "EndTxn: entry changed underneath the marker fan-out; \
+                     aborting Complete write"
+                );
+                return encode_err(version, code);
+            }
+        }
         entry.state = complete;
         entry.last_update_ms = now_millis();
         entry.clone()
         // Lock dropped here.
     };
 
+    // FINAL put: move `complete_snap` in (no use-after-move below) to avoid the
+    // redundant full `TxnEntry` clone (incl. the partition / offset-commit-group
+    // sets) that the intermediate phases pay.
     if let Err(e) = coord.put(complete_snap).await {
         tracing::error!(
             tid,
@@ -168,6 +223,61 @@ pub(crate) async fn handle(
     }
 
     encode_ok(version)
+}
+
+/// Decision for the Phase-3 (Complete) re-acquire re-validation. See
+/// [`validate_complete_reacquire`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReacquireDecision {
+    /// State is exactly as this handler left it after Prepare; write Complete.
+    Proceed,
+    /// The entry already advanced to the Complete state this handler intended
+    /// (idempotent retry / lost race). Report success without re-writing.
+    AlreadyComplete,
+    /// The entry changed in a way that means this handler must NOT write
+    /// Complete. Return this Kafka error code to the producer.
+    Reject(i16),
+}
+
+/// Re-validate, after re-acquiring the coordinator's *current* entry for a
+/// transactional-id, that it is safe to finalise the transaction.
+///
+/// `expected_epoch` / `expected_pid` are the producer identity this `EndTxn`
+/// handler validated and acted on. `prepare` is the state this handler wrote
+/// in Phase 1; `complete` is the state it is about to write.
+///
+/// Returns:
+/// - [`ReacquireDecision::Reject`] with `INVALID_PRODUCER_EPOCH` if the pid or
+///   epoch no longer matches (a concurrent `InitProducerId` fenced us). Apache
+///   Kafka maps a stale producer epoch on `EndTxn` to `INVALID_PRODUCER_EPOCH`
+///   (a.k.a. `PRODUCER_FENCED` for the newer producer client).
+/// - [`ReacquireDecision::AlreadyComplete`] if the entry is already in the
+///   exact `complete` state we intended — another caller (or an `EndTxn` retry)
+///   finished the transition; finalising again would be a redundant overwrite.
+/// - [`ReacquireDecision::Reject`] with `INVALID_TXN_STATE` if the state is
+///   anything other than the `prepare` we left it in (e.g. advanced to
+///   `Ongoing` by a concurrent `AddPartitionsToTxn`, or into the *opposite*
+///   prepare/complete kind), meaning our marker fan-out no longer reflects the
+///   live transaction and we must not finalise.
+/// - [`ReacquireDecision::Proceed`] only when the epoch matches and the state
+///   is still exactly `prepare`.
+fn validate_complete_reacquire(
+    entry: &TxnEntry,
+    expected_pid: i64,
+    expected_epoch: i16,
+    prepare: TxnState,
+    complete: TxnState,
+) -> ReacquireDecision {
+    if entry.producer_id != expected_pid || entry.producer_epoch != expected_epoch {
+        return ReacquireDecision::Reject(codes::INVALID_PRODUCER_EPOCH);
+    }
+    if entry.state == prepare {
+        return ReacquireDecision::Proceed;
+    }
+    if entry.state == complete {
+        return ReacquireDecision::AlreadyComplete;
+    }
+    ReacquireDecision::Reject(codes::INVALID_TXN_STATE)
 }
 
 // ── marker fan-out ────────────────────────────────────────────────────────────
@@ -184,9 +294,7 @@ pub(crate) async fn handle(
 /// `entry.offset_commit_groups`.
 async fn dispatch_markers(
     node_id: NodeId,
-    partitions: &std::sync::Arc<
-        dashmap::DashMap<(String, i32), std::sync::Arc<crate::partition::Partition>>,
-    >,
+    partitions: &std::sync::Arc<crate::partition_registry::PartitionRegistry>,
     entry: &TxnEntry,
     marker_type: MarkerType,
     image: &MetadataImage,
@@ -220,10 +328,7 @@ async fn dispatch_markers(
         if leader == node_id {
             // Local path: directly append a marker batch to each partition.
             for tp in &tps {
-                let Some(part) = partitions
-                    .get(&(tp.topic.clone(), tp.partition))
-                    .map(|e| e.value().clone())
-                else {
+                let Some(part) = partitions.get(&tp.topic, tp.partition) else {
                     tracing::warn!(
                         topic = %tp.topic,
                         partition = tp.partition,
@@ -252,8 +357,36 @@ async fn dispatch_markers(
 /// Send a `WriteTxnMarkersRequest` to a remote broker that leads one or more
 /// of the transaction's partitions.
 ///
-/// Opens a fresh TCP connection per call — adequate for current correctness
-/// goals. A connection pool can be added later.
+/// Opens a fresh `crabka_client_core::Client` (TCP + TLS + SASL) per remote
+/// leader per `EndTxn`, then closes it.
+///
+// PERF: this should reuse the shared, pooled inter-broker dialer
+// `crate::network::client::InterBrokerClient` (already used by `auto_join.rs`
+// and `heartbeat/client.rs` via `connect_as_connection` + `raw_request`)
+// instead of `Client::builder().bootstrap(...)`. Doing so would also FIX a
+// latent correctness gap: the current `Client::builder()` path carries no
+// TLS connector and no inter-broker SASL credentials, so it can only reach a
+// PLAINTEXT inter-broker listener — against a TLS/SASL listener the
+// connect/handshake fails. `InterBrokerClient` already holds the right
+// connector + creds.
+//
+// Why it is NOT done in this batch (would require editing OTHER files):
+//   * `Broker` exposes `inter_broker_client: Arc<InterBrokerClient>` but does
+//     NOT expose the resolved inter-broker `ListenerProtocol` nor an SNI
+//     `server_name`. The protocol is derived in `broker.rs` (`Broker::start`,
+//     ~line 1393: `config.effective_listeners().find(name ==
+//     inter_broker_listener_name).protocol`) and threaded into the replicator
+//     supervisor / heartbeat client — not stored on `Broker`. The SNI name has
+//     no single canonical broker field (auto_join hardcodes "localhost"; the
+//     replicator uses the advertised host).
+//   * To switch cleanly we must add accessors on `Broker`
+//     (`inter_broker_listener_protocol()` + a server-name source) in
+//     `broker.rs`, then thread `&InterBrokerClient` + protocol + server_name
+//     from `handle` (which has `broker`) through `dispatch_markers` into this
+//     fn. `dispatch_markers` and this fn are in THIS file, but the accessors
+//     live in `broker.rs`, which is out of scope for this single-file batch.
+// Guessing the SNI value here would risk breaking TLS verification, so the
+// conservative choice is to defer. Connection correctness > the optimization.
 ///
 /// ## Coordinator epoch
 ///
@@ -346,4 +479,146 @@ fn encode_response(version: i16, error_code: i16) -> Result<Bytes, BrokerError> 
     let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
     resp.encode(&mut buf, version)?;
     Ok(buf.freeze())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ReacquireDecision, validate_complete_reacquire};
+    use crate::codes;
+    use crate::txn::state::{TxnEntry, TxnState};
+
+    /// Build a `TxnEntry` in a given (pid, epoch, state) for the re-validation
+    /// tests. Partition sets are irrelevant to the decision, so leave empty.
+    fn entry(pid: i64, epoch: i16, state: TxnState) -> TxnEntry {
+        let mut e = TxnEntry::new_empty("tid-x".into(), pid, epoch, 60_000, 1);
+        e.state = state;
+        e
+    }
+
+    #[test]
+    fn proceeds_when_unchanged() {
+        // Entry is exactly as Phase 1 left it: same pid/epoch, still in Prepare.
+        let e = entry(7, 3, TxnState::PrepareCommit);
+        assert_eq!(
+            validate_complete_reacquire(
+                &e,
+                7,
+                3,
+                TxnState::PrepareCommit,
+                TxnState::CompleteCommit
+            ),
+            ReacquireDecision::Proceed
+        );
+    }
+
+    #[test]
+    fn fenced_when_epoch_bumped() {
+        // A concurrent InitProducerId bumped the epoch during the marker
+        // fan-out. We must NOT overwrite with the stale epoch / Complete state.
+        let e = entry(7, 4, TxnState::PrepareCommit);
+        assert_eq!(
+            validate_complete_reacquire(
+                &e,
+                7,
+                3,
+                TxnState::PrepareCommit,
+                TxnState::CompleteCommit
+            ),
+            ReacquireDecision::Reject(codes::INVALID_PRODUCER_EPOCH)
+        );
+    }
+
+    #[test]
+    fn fenced_when_pid_changed() {
+        let e = entry(8, 3, TxnState::PrepareCommit);
+        assert_eq!(
+            validate_complete_reacquire(
+                &e,
+                7,
+                3,
+                TxnState::PrepareCommit,
+                TxnState::CompleteCommit
+            ),
+            ReacquireDecision::Reject(codes::INVALID_PRODUCER_EPOCH)
+        );
+    }
+
+    #[test]
+    fn idempotent_when_already_complete() {
+        // Another caller (or an EndTxn retry that lost the race) already drove
+        // this exact transition. Report success, do not re-write.
+        let e = entry(7, 3, TxnState::CompleteCommit);
+        assert_eq!(
+            validate_complete_reacquire(
+                &e,
+                7,
+                3,
+                TxnState::PrepareCommit,
+                TxnState::CompleteCommit
+            ),
+            ReacquireDecision::AlreadyComplete
+        );
+    }
+
+    #[test]
+    fn rejects_when_advanced_to_ongoing() {
+        // A concurrent AddPartitionsToTxn re-opened the txn (Complete→Ongoing
+        // reuse, or some other interleave). Our marker fan-out no longer
+        // reflects the live transaction; refuse to finalise.
+        let e = entry(7, 3, TxnState::Ongoing);
+        assert_eq!(
+            validate_complete_reacquire(
+                &e,
+                7,
+                3,
+                TxnState::PrepareCommit,
+                TxnState::CompleteCommit
+            ),
+            ReacquireDecision::Reject(codes::INVALID_TXN_STATE)
+        );
+    }
+
+    #[test]
+    fn rejects_when_opposite_prepare_kind() {
+        // We prepared a Commit, but the entry is now in PrepareAbort — a
+        // different finalisation kind raced us. Refuse to write CompleteCommit.
+        let e = entry(7, 3, TxnState::PrepareAbort);
+        assert_eq!(
+            validate_complete_reacquire(
+                &e,
+                7,
+                3,
+                TxnState::PrepareCommit,
+                TxnState::CompleteCommit
+            ),
+            ReacquireDecision::Reject(codes::INVALID_TXN_STATE)
+        );
+    }
+
+    #[test]
+    fn abort_path_proceeds_and_is_idempotent() {
+        // Mirror the abort branch: prepare=PrepareAbort, complete=CompleteAbort.
+        let prep = entry(7, 3, TxnState::PrepareAbort);
+        assert_eq!(
+            validate_complete_reacquire(
+                &prep,
+                7,
+                3,
+                TxnState::PrepareAbort,
+                TxnState::CompleteAbort
+            ),
+            ReacquireDecision::Proceed
+        );
+        let done = entry(7, 3, TxnState::CompleteAbort);
+        assert_eq!(
+            validate_complete_reacquire(
+                &done,
+                7,
+                3,
+                TxnState::PrepareAbort,
+                TxnState::CompleteAbort
+            ),
+            ReacquireDecision::AlreadyComplete
+        );
+    }
 }

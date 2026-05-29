@@ -64,21 +64,21 @@ pub(crate) async fn rebalance_tick(
     let image = controller.current_image();
     let mut to_submit: Vec<MetadataRecord> = Vec::new();
     let mut total: u64 = 0;
-    for topic in image.topics() {
-        for p in image.partitions_of(&topic.name) {
-            total += 1;
-            if let Ok(new_pr) = select_new_leader_for_partition(
-                &image,
-                liveness,
-                &topic.name,
-                p.partition,
-                ElectionType::Preferred,
-            )
-            .await
-            {
-                // PreferredAlreadyLeader and any other Err are silently skipped this tick.
-                to_submit.push(MetadataRecord::V1Partition(new_pr));
-            }
+    // Single O(P) walk over every partition instead of the quadratic
+    // topics() × partitions_of() scan.
+    for ((topic_name, partition), _pr) in image.all_partitions() {
+        total += 1;
+        if let Ok(new_pr) = select_new_leader_for_partition(
+            &image,
+            liveness,
+            topic_name,
+            *partition,
+            ElectionType::Preferred,
+        )
+        .await
+        {
+            // PreferredAlreadyLeader and any other Err are silently skipped this tick.
+            to_submit.push(MetadataRecord::V1Partition(new_pr));
         }
     }
     let imbalanced = to_submit.len() as u64;

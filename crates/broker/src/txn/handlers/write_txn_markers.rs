@@ -59,10 +59,7 @@ pub(crate) fn handle(
                 let mut partition_results: Vec<WritableTxnMarkerPartitionResult> = Vec::new();
 
                 for &p in &topic.partition_indexes {
-                    let error_code = match partitions
-                        .get(&(topic.name.clone(), p))
-                        .map(|e| e.value().clone())
-                    {
+                    let error_code = match partitions.get(&topic.name, p) {
                         None => {
                             tracing::debug!(
                                 topic = %topic.name,

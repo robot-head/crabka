@@ -232,11 +232,7 @@ async fn dispatch_abort_markers(
 ) -> Result<(), BrokerError> {
     use crate::txn::marker::{MarkerType, build_marker_batch};
     for tp in &entry.partitions {
-        let Some(part) = coord
-            .partitions
-            .get(&(tp.topic.clone(), tp.partition))
-            .map(|e| e.value().clone())
-        else {
+        let Some(part) = coord.partitions.get(&tp.topic, tp.partition) else {
             // Not locally-led; would require inter-broker WriteTxnMarkers
             // (Tasks 15-16). For abort-on-init-due-to-stale-Ongoing (rare),
             // log + skip; the data partition retains the dangling open txn

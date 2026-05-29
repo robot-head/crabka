@@ -19,7 +19,6 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, SystemTime};
 
 use bytes::Bytes;
-use dashmap::DashMap;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 use uuid::Uuid;
@@ -33,6 +32,7 @@ use crabka_remote_storage::{
 };
 
 use crate::partition::Partition;
+use crate::partition_registry::PartitionRegistry;
 
 /// Tunables for [`run`].
 #[derive(Debug, Clone)]
@@ -51,7 +51,7 @@ impl Default for RemoteLogManagerConfig {
 /// Spawned task entry point. Ticks every `cfg.interval` until `shutdown`.
 #[allow(clippy::too_many_arguments)] // task dependencies; bundling would obscure them
 pub(crate) async fn run(
-    partitions: Arc<DashMap<(String, i32), Arc<Partition>>>,
+    partitions: Arc<PartitionRegistry>,
     controller: Arc<dyn crate::metadata_source::MetadataSource>,
     rsm: Arc<dyn RemoteStorageManager>,
     rlmm: Arc<dyn RemoteLogMetadataManager>,
@@ -74,15 +74,15 @@ pub(crate) async fn run(
 }
 
 async fn tick_all(
-    partitions: &DashMap<(String, i32), Arc<Partition>>,
+    partitions: &PartitionRegistry,
     controller: &dyn crate::metadata_source::MetadataSource,
     rsm: &Arc<dyn RemoteStorageManager>,
     rlmm: &Arc<dyn RemoteLogMetadataManager>,
     node_id: NodeId,
     broker_id: i32,
 ) {
-    // Snapshot first to avoid holding the DashMap iterator across an await.
-    let snapshot: Vec<Arc<Partition>> = partitions.iter().map(|kv| kv.value().clone()).collect();
+    // Snapshot first to avoid holding any registry guard across an await.
+    let snapshot: Vec<Arc<Partition>> = partitions.arcs();
     let image = controller.current_image();
     for partition in snapshot {
         if partition.current_leader.load(Ordering::Relaxed) != node_id {

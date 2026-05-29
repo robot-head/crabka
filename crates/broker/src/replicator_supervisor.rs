@@ -27,7 +27,7 @@ use crabka_metadata::MetadataImage;
 use crabka_raft::NodeId;
 
 use crate::broker::spawn_partition;
-use crate::partition::Partition;
+use crate::partition_registry::PartitionRegistry;
 use crate::replicator;
 use crate::throttle::ThrottleState;
 use crate::txn::coordinator::TxnCoordinator;
@@ -67,54 +67,46 @@ pub(crate) fn desired_local_set(node_id: NodeId, image: &MetadataImage) -> HashS
 }
 
 /// Open (or recover) the on-disk `Partition` for `(topic, partition)` and
-/// insert it into `partitions` using `DashMap::entry().or_insert_with()`.
+/// insert it into `partitions` via `PartitionRegistry::materialize_if_vacant`.
 ///
 /// This is the canonical, race-free materialization helper. Both the
 /// `ReplicatorSupervisor` reconcile loop and the `InitProducerId` handler
-/// (first-touch path) call this function — the `DashMap` entry API ensures
-/// that two concurrent callers for the same key can never both spawn
-/// independent writer tasks.
+/// (first-touch path) call this function — `materialize_if_vacant` runs the
+/// build closure under the per-key lock so two concurrent callers for the
+/// same key can never both spawn independent writer tasks.
 ///
 /// Returns `Ok(())` if the partition is already present (no-op) or was
 /// successfully opened. Returns `Err(String)` on I/O failure.
 pub(crate) fn materialize_partition(
-    partitions: &DashMap<(String, i32), Arc<Partition>>,
+    partitions: &PartitionRegistry,
     topic: &str,
     partition: i32,
     log_dirs: &[PathBuf],
     log_config: &LogConfig,
     log_dir_status: &crate::log_dir_status::LogDirRegistry,
 ) -> Result<(), String> {
-    use dashmap::mapref::entry::Entry;
-
-    // `entry()` takes a write-lock on the shard for this key for the
-    // duration of the closure — only one thread can be inside
-    // `or_try_insert_with` for a given key at a time, eliminating the
-    // TOCTOU race that existed with the old `contains_key` + `insert`
-    // pattern. JBOD placement (KIP-113) happens under this lock too, so
-    // two concurrent materializations of the same partition can never
-    // pick two different log dirs.
-    match partitions.entry((topic.to_string(), partition)) {
-        Entry::Occupied(_) => Ok(()),
-        Entry::Vacant(slot) => {
-            let dir = crate::log_dir::place_partition_dir(log_dirs, topic, partition);
-            std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
-            let log = Log::open(&dir, log_config.clone()).map_err(|e| format!("Log::open: {e}"))?;
-            let owning_dir = dir
-                .parent()
-                .expect("placed partition dir always has a parent log.dir")
-                .to_path_buf();
-            let part = spawn_partition(
-                topic.to_string(),
-                partition,
-                owning_dir,
-                log,
-                log_dir_status.clone(),
-            );
-            slot.insert(part);
-            Ok(())
-        }
-    }
+    // `materialize_if_vacant` runs `build` under the per-key write lock —
+    // only one thread can be inside it for a given key at a time,
+    // eliminating the TOCTOU race that existed with the old
+    // `contains_key` + `insert` pattern. JBOD placement (KIP-113) happens
+    // under this lock too, so two concurrent materializations of the same
+    // partition can never pick two different log dirs.
+    partitions.materialize_if_vacant(topic, partition, || {
+        let dir = crate::log_dir::place_partition_dir(log_dirs, topic, partition);
+        std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
+        let log = Log::open(&dir, log_config.clone()).map_err(|e| format!("Log::open: {e}"))?;
+        let owning_dir = dir
+            .parent()
+            .expect("placed partition dir always has a parent log.dir")
+            .to_path_buf();
+        Ok(spawn_partition(
+            topic.to_string(),
+            partition,
+            owning_dir,
+            log,
+            log_dir_status.clone(),
+        ))
+    })
 }
 
 /// Push topic-config overrides onto every locally-hosted partition in
@@ -123,15 +115,12 @@ pub(crate) fn materialize_partition(
 /// logged via `warn!` but don't propagate.
 pub(crate) async fn push_topic_configs(
     desired: &HashSet<(String, i32)>,
-    partitions: &DashMap<(String, i32), Arc<Partition>>,
+    partitions: &PartitionRegistry,
     image: &MetadataImage,
 ) {
     let empty: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
     for (topic, partition) in desired {
-        let Some(part) = partitions
-            .get(&(topic.clone(), *partition))
-            .map(|e| e.value().clone())
-        else {
+        let Some(part) = partitions.get(topic, *partition) else {
             continue;
         };
         let overrides = image.topic_config(topic).unwrap_or(&empty);
@@ -147,7 +136,7 @@ pub(crate) async fn push_topic_configs(
 pub(crate) struct ReplicatorSupervisor {
     node_id: NodeId,
     controller: Arc<dyn crate::metadata_source::MetadataSource>,
-    partitions: Arc<DashMap<(String, i32), Arc<Partition>>>,
+    partitions: Arc<PartitionRegistry>,
     log_dirs: Vec<PathBuf>,
     log_config: LogConfig,
     client_id: String,
@@ -186,7 +175,7 @@ impl ReplicatorSupervisor {
     pub(crate) fn new(
         node_id: NodeId,
         controller: Arc<dyn crate::metadata_source::MetadataSource>,
-        partitions: Arc<DashMap<(String, i32), Arc<Partition>>>,
+        partitions: Arc<PartitionRegistry>,
         log_dirs: Vec<PathBuf>,
         log_config: LogConfig,
         client_id: String,
@@ -239,11 +228,7 @@ impl ReplicatorSupervisor {
             let Some(part_record) = image.partition(&key.0, key.1).cloned() else {
                 continue;
             };
-            let Some(part) = self
-                .partitions
-                .get(&(key.0.clone(), key.1))
-                .map(|e| e.value().clone())
-            else {
+            let Some(part) = self.partitions.get(&key.0, key.1) else {
                 continue;
             };
             // Always sync the partition's cached leader + epoch.
@@ -502,7 +487,7 @@ mod tests {
         use tempfile::tempdir;
 
         let dir = tempdir().expect("tempdir");
-        let partitions = Arc::new(DashMap::new());
+        let partitions = Arc::new(PartitionRegistry::new());
         materialize_partition(
             &partitions,
             "t",
@@ -512,11 +497,7 @@ mod tests {
             &crate::log_dir_status::LogDirRegistry::default(),
         )
         .expect("materialize");
-        let part = partitions
-            .get(&("t".to_string(), 0))
-            .expect("part")
-            .value()
-            .clone();
+        let part = partitions.get("t", 0).expect("part");
         // Mirror what reconcile does for leader partitions.
         part.install_isr(&[1, 2, 3], &[1, 2, 3], 1).await;
         let st = part.replica_state.lock().await;
@@ -613,7 +594,7 @@ mod tests {
 
         // Materialize the partition on disk.
         let dir = tempdir().expect("tempdir");
-        let partitions = Arc::new(DashMap::new());
+        let partitions = Arc::new(PartitionRegistry::new());
         materialize_partition(
             &partitions,
             "t",
@@ -633,11 +614,7 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         // Verify the partition's Log now has retention.ms=60s.
-        let part = partitions
-            .get(&("t".to_string(), 0))
-            .expect("partition materialized")
-            .value()
-            .clone();
+        let part = partitions.get("t", 0).expect("partition materialized");
         let snap = part.log.lock().expect("log lock").config_snapshot();
         assert_eq!(snap.retention_ms, Some(std::time::Duration::from_mins(1)));
     }
@@ -668,7 +645,7 @@ mod tests {
         }));
 
         let dir = tempdir().expect("tempdir");
-        let partitions = Arc::new(DashMap::new());
+        let partitions = Arc::new(PartitionRegistry::new());
         materialize_partition(
             &partitions,
             "t",
@@ -686,11 +663,7 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         // No overrides → default retention applies.
-        let part = partitions
-            .get(&("t".to_string(), 0))
-            .expect("partition")
-            .value()
-            .clone();
+        let part = partitions.get("t", 0).expect("partition");
         let snap = part.log.lock().expect("log lock").config_snapshot();
         assert_eq!(snap.retention_ms, LogConfig::default().retention_ms);
     }

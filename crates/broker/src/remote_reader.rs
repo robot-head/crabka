@@ -26,7 +26,7 @@ use zerocopy::{BigEndian, FromBytes, Immutable, KnownLayout, Unaligned};
 /// was written with.
 #[derive(Debug, Clone, Copy, FromBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C)]
-struct OffsetIndexEntry {
+pub(crate) struct OffsetIndexEntry {
     relative_offset: U32<BigEndian>,
     position: U32<BigEndian>,
 }
@@ -37,7 +37,7 @@ const _: () = assert!(std::mem::size_of::<OffsetIndexEntry>() == 8);
 /// `crabka_log::index::TimeEntryRaw`.
 #[derive(Debug, Clone, Copy, FromBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C)]
-struct TimeIndexEntry {
+pub(crate) struct TimeIndexEntry {
     timestamp: I64<BigEndian>,
     relative_offset: U32<BigEndian>,
 }
@@ -50,7 +50,7 @@ const _: () = assert!(std::mem::size_of::<TimeIndexEntry>() == 12);
 /// the local index was written with.
 #[derive(Debug, Clone, Copy, FromBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C)]
-struct AbortedTxnIndexEntry {
+pub(crate) struct AbortedTxnIndexEntry {
     start_offset: I64<BigEndian>,
     last_offset: I64<BigEndian>,
     producer_id: I64<BigEndian>,
@@ -107,9 +107,9 @@ impl RemoteReader {
         let index_bytes = self
             .fetch_index_blocking(metadata.clone(), IndexType::Offset)
             .await?;
-        let entries = parse_offset_index(&index_bytes);
+        let entries = parse_offset_index(&index_bytes)?;
         let target_rel = u32::try_from((offset - metadata.start_offset()).max(0)).unwrap_or(0);
-        let start_position = position_for_relative_offset(&entries, target_rel);
+        let start_position = position_for_relative_offset(entries, target_rel);
 
         // Cap the read so the broker doesn't pull an entire segment when the
         // Fetch asked for one batch. Always pull at least one full batch worth
@@ -159,10 +159,15 @@ impl RemoteReader {
             Err(e) => return Err(e),
         };
 
-        let entries = parse_txn_index(&index_bytes);
+        let entries = parse_txn_index(&index_bytes)?;
         Ok(entries
-            .into_iter()
+            .iter()
             .filter(|e| txn_overlaps(e, from_offset, to_offset))
+            .map(|e| AbortedTxnEntry {
+                start_offset: e.start_offset.get(),
+                last_offset: e.last_offset.get(),
+                producer_id: e.producer_id.get(),
+            })
             .collect())
     }
 
@@ -205,8 +210,8 @@ impl RemoteReader {
         let index_bytes = self
             .fetch_index_blocking(metadata.clone(), IndexType::Timestamp)
             .await?;
-        let entries = parse_time_index(&index_bytes);
-        let Some(rel) = relative_offset_for_timestamp(&entries, target_timestamp) else {
+        let entries = parse_time_index(&index_bytes)?;
+        let Some(rel) = relative_offset_for_timestamp(entries, target_timestamp) else {
             // No entry past the target — the first record in the segment is
             // the conservative answer.
             return Ok(Some(metadata.start_offset()));
@@ -276,59 +281,54 @@ pub(crate) fn end_position_for(
     }
 }
 
-/// Parse Kafka's `OffsetIndex` on-disk format (8 bytes / entry: rel u32 BE +
-/// pos u32 BE).
-#[must_use]
-pub(crate) fn parse_offset_index(bytes: &[u8]) -> Vec<(u32, u32)> {
+/// Helper for the `ref_from_bytes` parse error on the remote-read path. The
+/// `zerocopy` cast can only fail on a length mismatch, but the bytes come from
+/// the object store (S3 etc.), which can return corrupt/truncated data — so we
+/// surface a `RemoteStorageError` rather than panicking (a `DoS` surface).
+fn corrupt_index(kind: &str) -> RemoteStorageError {
+    RemoteStorageError::Io(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!("corrupt remote {kind} index bytes"),
+    ))
+}
+
+/// Borrow Kafka's `OffsetIndex` on-disk format as a zero-copy
+/// `&[OffsetIndexEntry]` (8 bytes / entry: rel u32 BE + pos u32 BE). Trailing
+/// bytes that don't complete an 8-byte entry are ignored. Borrows from `bytes`.
+pub(crate) fn parse_offset_index(bytes: &[u8]) -> Result<&[OffsetIndexEntry], RemoteStorageError> {
     let truncated_len = (bytes.len() / 8) * 8;
-    let entries = <[OffsetIndexEntry]>::ref_from_bytes(&bytes[..truncated_len])
-        .expect("len is multiple of 8 and OffsetIndexEntry is Unaligned");
-    entries
-        .iter()
-        .map(|e| (e.relative_offset.get(), e.position.get()))
-        .collect()
+    <[OffsetIndexEntry]>::ref_from_bytes(&bytes[..truncated_len])
+        .map_err(|_| corrupt_index("offset"))
 }
 
 /// Floor lookup: byte position of the largest entry with `rel <= target_rel`,
-/// or 0 when empty / target is before the first entry.
+/// or 0 when empty / target is before the first entry. Runs directly against
+/// the borrowed zero-copy slice — no owned `Vec` is materialized.
 #[must_use]
-pub(crate) fn position_for_relative_offset(entries: &[(u32, u32)], target_rel: u32) -> u32 {
-    match entries.binary_search_by_key(&target_rel, |&(rel, _)| rel) {
-        Ok(i) => entries[i].1,
+pub(crate) fn position_for_relative_offset(entries: &[OffsetIndexEntry], target_rel: u32) -> u32 {
+    match entries.binary_search_by_key(&target_rel, |e| e.relative_offset.get()) {
+        Ok(i) => entries[i].position.get(),
         Err(0) => 0,
-        Err(i) => entries[i - 1].1,
+        Err(i) => entries[i - 1].position.get(),
     }
 }
 
-/// Parse Kafka's `TimeIndex` on-disk format (12 bytes / entry: ts i64 BE + rel
-/// u32 BE).
-#[must_use]
-pub(crate) fn parse_time_index(bytes: &[u8]) -> Vec<(i64, u32)> {
+/// Borrow Kafka's `TimeIndex` on-disk format as a zero-copy
+/// `&[TimeIndexEntry]` (12 bytes / entry: ts i64 BE + rel u32 BE). Trailing
+/// bytes that don't complete a 12-byte entry are ignored. Borrows from `bytes`.
+pub(crate) fn parse_time_index(bytes: &[u8]) -> Result<&[TimeIndexEntry], RemoteStorageError> {
     let truncated_len = (bytes.len() / 12) * 12;
-    let entries = <[TimeIndexEntry]>::ref_from_bytes(&bytes[..truncated_len])
-        .expect("len is multiple of 12 and TimeIndexEntry is Unaligned");
-    entries
-        .iter()
-        .map(|e| (e.timestamp.get(), e.relative_offset.get()))
-        .collect()
+    <[TimeIndexEntry]>::ref_from_bytes(&bytes[..truncated_len]).map_err(|_| corrupt_index("time"))
 }
 
-/// Parse Kafka's transaction-index format (24 bytes / entry: `start_offset`
-/// i64 BE, `last_offset` i64 BE, `producer_id` i64 BE). Trailing bytes that
-/// don't complete a 24-byte entry are ignored.
-#[must_use]
-pub(crate) fn parse_txn_index(bytes: &[u8]) -> Vec<AbortedTxnEntry> {
+/// Borrow Kafka's transaction-index format as a zero-copy
+/// `&[AbortedTxnIndexEntry]` (24 bytes / entry: `start_offset` i64 BE,
+/// `last_offset` i64 BE, `producer_id` i64 BE). Trailing bytes that don't
+/// complete a 24-byte entry are ignored. Borrows from `bytes`.
+pub(crate) fn parse_txn_index(bytes: &[u8]) -> Result<&[AbortedTxnIndexEntry], RemoteStorageError> {
     let truncated_len = (bytes.len() / 24) * 24;
-    let entries = <[AbortedTxnIndexEntry]>::ref_from_bytes(&bytes[..truncated_len])
-        .expect("len is multiple of 24 and AbortedTxnIndexEntry is Unaligned");
-    entries
-        .iter()
-        .map(|e| AbortedTxnEntry {
-            start_offset: e.start_offset.get(),
-            last_offset: e.last_offset.get(),
-            producer_id: e.producer_id.get(),
-        })
-        .collect()
+    <[AbortedTxnIndexEntry]>::ref_from_bytes(&bytes[..truncated_len])
+        .map_err(|_| corrupt_index("transaction"))
 }
 
 /// Whether an aborted-transaction entry overlaps the inclusive offset range
@@ -336,18 +336,21 @@ pub(crate) fn parse_txn_index(bytes: &[u8]) -> Vec<AbortedTxnEntry> {
 /// test against an inclusive range: the entry's `[start, last]` intersects
 /// `[from, to]` iff `start <= to && last >= from`.
 #[must_use]
-pub(crate) fn txn_overlaps(entry: &AbortedTxnEntry, from_offset: i64, to_offset: i64) -> bool {
-    entry.start_offset <= to_offset && entry.last_offset >= from_offset
+pub(crate) fn txn_overlaps(entry: &AbortedTxnIndexEntry, from_offset: i64, to_offset: i64) -> bool {
+    entry.start_offset.get() <= to_offset && entry.last_offset.get() >= from_offset
 }
 
 /// First entry whose `ts >= target_ts`, returning the relative offset, or
 /// `None` when none qualify.
 #[must_use]
-pub(crate) fn relative_offset_for_timestamp(entries: &[(i64, u32)], target_ts: i64) -> Option<u32> {
+pub(crate) fn relative_offset_for_timestamp(
+    entries: &[TimeIndexEntry],
+    target_ts: i64,
+) -> Option<u32> {
     entries
         .iter()
-        .find(|(ts, _)| *ts >= target_ts)
-        .map(|(_, rel)| *rel)
+        .find(|e| e.timestamp.get() >= target_ts)
+        .map(|e| e.relative_offset.get())
 }
 
 /// Decode batches from `data` and return the first one whose last offset is
@@ -380,13 +383,37 @@ mod tests {
             buf.extend_from_slice(&rel.to_be_bytes());
             buf.extend_from_slice(&pos.to_be_bytes());
         }
-        let entries = parse_offset_index(&buf);
-        assert_eq!(entries, vec![(0, 0), (10, 256), (20, 512)]);
+        let entries = parse_offset_index(&buf).expect("valid offset index");
+        let decoded: Vec<(u32, u32)> = entries
+            .iter()
+            .map(|e| (e.relative_offset.get(), e.position.get()))
+            .collect();
+        assert_eq!(decoded, vec![(0, 0), (10, 256), (20, 512)]);
+    }
+
+    fn offset_entries(pairs: &[(u32, u32)]) -> Vec<OffsetIndexEntry> {
+        pairs
+            .iter()
+            .map(|&(rel, pos)| OffsetIndexEntry {
+                relative_offset: U32::new(rel),
+                position: U32::new(pos),
+            })
+            .collect()
+    }
+
+    fn time_entries(pairs: &[(i64, u32)]) -> Vec<TimeIndexEntry> {
+        pairs
+            .iter()
+            .map(|&(ts, rel)| TimeIndexEntry {
+                timestamp: I64::new(ts),
+                relative_offset: U32::new(rel),
+            })
+            .collect()
     }
 
     #[test]
     fn position_for_relative_offset_returns_floor() {
-        let entries = vec![(0_u32, 0_u32), (10, 256), (20, 512), (30, 1024)];
+        let entries = offset_entries(&[(0, 0), (10, 256), (20, 512), (30, 1024)]);
         assert_eq!(position_for_relative_offset(&entries, 10), 256, "exact");
         assert_eq!(position_for_relative_offset(&entries, 15), 256, "between");
         assert_eq!(
@@ -405,7 +432,7 @@ mod tests {
     #[test]
     fn position_for_relative_offset_below_first() {
         // Synthetic: first entry isn't at rel=0. Floor below it returns 0.
-        let entries = vec![(5_u32, 100_u32), (10, 200)];
+        let entries = offset_entries(&[(5, 100), (10, 200)]);
         assert_eq!(position_for_relative_offset(&entries, 3), 0);
     }
 
@@ -416,13 +443,17 @@ mod tests {
             buf.extend_from_slice(&ts.to_be_bytes());
             buf.extend_from_slice(&rel.to_be_bytes());
         }
-        let entries = parse_time_index(&buf);
-        assert_eq!(entries, vec![(1_000, 0), (2_000, 10), (3_000, 20)]);
+        let entries = parse_time_index(&buf).expect("valid time index");
+        let decoded: Vec<(i64, u32)> = entries
+            .iter()
+            .map(|e| (e.timestamp.get(), e.relative_offset.get()))
+            .collect();
+        assert_eq!(decoded, vec![(1_000, 0), (2_000, 10), (3_000, 20)]);
     }
 
     #[test]
     fn relative_offset_for_timestamp_returns_first_ge() {
-        let entries = vec![(1_000_i64, 0_u32), (2_000, 10), (3_000, 20)];
+        let entries = time_entries(&[(1_000, 0), (2_000, 10), (3_000, 20)]);
         assert_eq!(
             relative_offset_for_timestamp(&entries, 1_000),
             Some(0),
@@ -514,14 +545,14 @@ mod tests {
             buf.extend_from_slice(&last.to_be_bytes());
             buf.extend_from_slice(&pid.to_be_bytes());
         }
-        let entries = parse_txn_index(&buf);
+        let entries = parse_txn_index(&buf).expect("valid txn index");
         assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].start_offset, 0);
-        assert_eq!(entries[0].last_offset, 4);
-        assert_eq!(entries[0].producer_id, 1000);
-        assert_eq!(entries[1].start_offset, 10);
-        assert_eq!(entries[1].last_offset, 14);
-        assert_eq!(entries[1].producer_id, 2000);
+        assert_eq!(entries[0].start_offset.get(), 0);
+        assert_eq!(entries[0].last_offset.get(), 4);
+        assert_eq!(entries[0].producer_id.get(), 1000);
+        assert_eq!(entries[1].start_offset.get(), 10);
+        assert_eq!(entries[1].last_offset.get(), 14);
+        assert_eq!(entries[1].producer_id.get(), 2000);
     }
 
     #[test]
@@ -532,22 +563,22 @@ mod tests {
         }
         // 5 trailing bytes that don't complete a 24-byte entry.
         buf.extend_from_slice(&[0xAA; 5]);
-        let entries = parse_txn_index(&buf);
+        let entries = parse_txn_index(&buf).expect("valid txn index");
         assert_eq!(entries.len(), 1, "partial trailing entry ignored");
-        assert_eq!(entries[0].producer_id, 1000);
+        assert_eq!(entries[0].producer_id.get(), 1000);
     }
 
     #[test]
     fn parse_txn_index_empty_is_empty() {
-        assert!(parse_txn_index(&[]).is_empty());
+        assert!(parse_txn_index(&[]).expect("empty is valid").is_empty());
     }
 
     #[test]
     fn txn_overlaps_boundaries() {
-        let e = AbortedTxnEntry {
-            start_offset: 10,
-            last_offset: 14,
-            producer_id: 1,
+        let e = AbortedTxnIndexEntry {
+            start_offset: I64::new(10),
+            last_offset: I64::new(14),
+            producer_id: I64::new(1),
         };
         // Range fully before the entry → excluded.
         assert!(!txn_overlaps(&e, 0, 9), "range ends just before entry");

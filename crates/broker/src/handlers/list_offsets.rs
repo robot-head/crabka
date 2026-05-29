@@ -55,7 +55,7 @@ pub(crate) fn handle(
                     ..Default::default()
                 };
 
-                let Some(p) = partitions.get(&(topic.name.clone(), idx)) else {
+                let Some(p) = partitions.get(&topic.name, idx) else {
                     out.error_code = codes::UNKNOWN_TOPIC_OR_PARTITION;
                     parts_out.push(out);
                     continue;

@@ -54,105 +54,107 @@ pub(crate) async fn compute_failover_changes(
 ) -> FailoverPlan {
     let mut changes: Vec<MetadataRecord> = Vec::new();
     let mut recoveries: Vec<(String, i32, RecoveryStrategy)> = Vec::new();
-    for topic in image.topics() {
-        for pr in image.partitions_of(&topic.name) {
-            if !pr.replicas.contains(&dead) && !pr.isr.contains(&dead) {
-                continue;
+    // Snapshot the alive set once (single lock) rather than taking the
+    // liveness lock per ISR/replica entry inside the scan below.
+    let alive = liveness.alive_snapshot().await;
+    // Single O(P) walk over every partition in the image.
+    for (_, pr) in image.all_partitions() {
+        if !pr.replicas.contains(&dead) && !pr.isr.contains(&dead) {
+            continue;
+        }
+        // Compute the new ISR after dropping the dead broker AND any
+        // other replicas that aren't alive.
+        let mut alive_isr: Vec<NodeId> = Vec::with_capacity(pr.isr.len());
+        for n in &pr.isr {
+            if *n != dead && alive.contains(n) {
+                alive_isr.push(*n);
             }
-            // Compute the new ISR after dropping the dead broker AND any
-            // other replicas that aren't alive.
-            let mut alive_isr: Vec<NodeId> = Vec::with_capacity(pr.isr.len());
-            for n in &pr.isr {
-                if *n != dead && liveness.is_alive(*n).await {
-                    alive_isr.push(*n);
-                }
-            }
-            let needs_election = pr.leader == dead;
-            if needs_election {
-                if let Some(&new_leader) = alive_isr.first() {
-                    changes.push(MetadataRecord::V1Partition(PartitionRecord {
-                        topic: pr.topic.clone(),
-                        partition: pr.partition,
-                        leader: new_leader,
-                        replicas: pr.replicas.clone(),
-                        isr: alive_isr,
-                        leader_epoch: pr.leader_epoch + 1,
-                        adding_replicas: pr.adding_replicas.clone(),
-                        removing_replicas: pr.removing_replicas.clone(),
-                    }));
-                } else {
-                    // ISR is empty after dropping the dead broker. How we
-                    // proceed depends on the topic's recovery strategy.
-                    match resolve_recovery_strategy(image, &pr.topic) {
-                        RecoveryStrategy::Balanced | RecoveryStrategy::Aggressive => {
-                            // KIP-966: defer to the offset-aware Unclean
-                            // Recovery Manager — it polls surviving replicas
-                            // for log state and elects the most complete log.
-                            // Don't make an immediate (blind) change here.
-                            recoveries.push((
-                                pr.topic.clone(),
-                                pr.partition,
-                                resolve_recovery_strategy(image, &pr.topic),
-                            ));
-                        }
-                        RecoveryStrategy::None if unclean_election_enabled(image, &pr.topic) => {
-                            // KIP-841 legacy path: ISR is dead but operator
-                            // has opted into possible data loss. Pick the
-                            // first alive replica (in or out of ISR) and
-                            // elect with singleton-ISR.
-                            let mut elected: Option<NodeId> = None;
-                            for &n in &pr.replicas {
-                                if n != dead && liveness.is_alive(n).await {
-                                    elected = Some(n);
-                                    break;
-                                }
-                            }
-                            if let Some(new_leader) = elected {
-                                warn!(
-                                    topic = %pr.topic, partition = pr.partition, leader = new_leader,
-                                    "unclean leader election: ISR empty, electing out-of-ISR replica (possible data loss)"
-                                );
-                                // Slice 10c (KIP-841): account this election so
-                                // operators can alert on a non-zero rate of unclean
-                                // failovers in their cluster.
-                                metrics.record_unclean_leader_election();
-                                changes.push(MetadataRecord::V1Partition(PartitionRecord {
-                                    topic: pr.topic.clone(),
-                                    partition: pr.partition,
-                                    leader: new_leader,
-                                    replicas: pr.replicas.clone(),
-                                    isr: vec![new_leader],
-                                    leader_epoch: pr.leader_epoch + 1,
-                                    adding_replicas: pr.adding_replicas.clone(),
-                                    removing_replicas: pr.removing_replicas.clone(),
-                                }));
-                            } else {
-                                warn!(
-                                    topic = %pr.topic, partition = pr.partition,
-                                    "unclean leader election enabled but no alive replica; partition unavailable"
-                                );
-                            }
-                        }
-                        RecoveryStrategy::None => {
-                            warn!(
-                                topic = %pr.topic, partition = pr.partition,
-                                "no live ISR replica; partition unavailable (strategy None, unclean.leader.election.enable=false)"
-                            );
-                        }
-                    }
-                }
-            } else if alive_isr.len() < pr.isr.len() {
+        }
+        let needs_election = pr.leader == dead;
+        if needs_election {
+            if let Some(&new_leader) = alive_isr.first() {
                 changes.push(MetadataRecord::V1Partition(PartitionRecord {
                     topic: pr.topic.clone(),
                     partition: pr.partition,
-                    leader: pr.leader,
+                    leader: new_leader,
                     replicas: pr.replicas.clone(),
                     isr: alive_isr,
-                    leader_epoch: pr.leader_epoch,
+                    leader_epoch: pr.leader_epoch + 1,
                     adding_replicas: pr.adding_replicas.clone(),
                     removing_replicas: pr.removing_replicas.clone(),
                 }));
+            } else {
+                // ISR is empty after dropping the dead broker. How we
+                // proceed depends on the topic's recovery strategy.
+                match resolve_recovery_strategy(image, &pr.topic) {
+                    RecoveryStrategy::Balanced | RecoveryStrategy::Aggressive => {
+                        // KIP-966: defer to the offset-aware Unclean
+                        // Recovery Manager — it polls surviving replicas
+                        // for log state and elects the most complete log.
+                        // Don't make an immediate (blind) change here.
+                        recoveries.push((
+                            pr.topic.clone(),
+                            pr.partition,
+                            resolve_recovery_strategy(image, &pr.topic),
+                        ));
+                    }
+                    RecoveryStrategy::None if unclean_election_enabled(image, &pr.topic) => {
+                        // KIP-841 legacy path: ISR is dead but operator
+                        // has opted into possible data loss. Pick the
+                        // first alive replica (in or out of ISR) and
+                        // elect with singleton-ISR.
+                        let mut elected: Option<NodeId> = None;
+                        for &n in &pr.replicas {
+                            if n != dead && alive.contains(&n) {
+                                elected = Some(n);
+                                break;
+                            }
+                        }
+                        if let Some(new_leader) = elected {
+                            warn!(
+                                topic = %pr.topic, partition = pr.partition, leader = new_leader,
+                                "unclean leader election: ISR empty, electing out-of-ISR replica (possible data loss)"
+                            );
+                            // Slice 10c (KIP-841): account this election so
+                            // operators can alert on a non-zero rate of unclean
+                            // failovers in their cluster.
+                            metrics.record_unclean_leader_election();
+                            changes.push(MetadataRecord::V1Partition(PartitionRecord {
+                                topic: pr.topic.clone(),
+                                partition: pr.partition,
+                                leader: new_leader,
+                                replicas: pr.replicas.clone(),
+                                isr: vec![new_leader],
+                                leader_epoch: pr.leader_epoch + 1,
+                                adding_replicas: pr.adding_replicas.clone(),
+                                removing_replicas: pr.removing_replicas.clone(),
+                            }));
+                        } else {
+                            warn!(
+                                topic = %pr.topic, partition = pr.partition,
+                                "unclean leader election enabled but no alive replica; partition unavailable"
+                            );
+                        }
+                    }
+                    RecoveryStrategy::None => {
+                        warn!(
+                            topic = %pr.topic, partition = pr.partition,
+                            "no live ISR replica; partition unavailable (strategy None, unclean.leader.election.enable=false)"
+                        );
+                    }
+                }
             }
+        } else if alive_isr.len() < pr.isr.len() {
+            changes.push(MetadataRecord::V1Partition(PartitionRecord {
+                topic: pr.topic.clone(),
+                partition: pr.partition,
+                leader: pr.leader,
+                replicas: pr.replicas.clone(),
+                isr: alive_isr,
+                leader_epoch: pr.leader_epoch,
+                adding_replicas: pr.adding_replicas.clone(),
+                removing_replicas: pr.removing_replicas.clone(),
+            }));
         }
     }
     FailoverPlan {

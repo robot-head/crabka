@@ -47,7 +47,7 @@ pub(crate) fn handle(
             for &p in &tp.partitions {
                 let hosted = topic_name
                     .as_deref()
-                    .and_then(|name| broker.partitions.get(&(name.to_string(), p)));
+                    .and_then(|name| broker.partitions.get(name, p));
                 partition_log_info.push(match hosted {
                     Some(part) => {
                         let epoch = part.current_leader_epoch.load(Ordering::Acquire);

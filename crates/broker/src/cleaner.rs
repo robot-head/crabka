@@ -12,13 +12,13 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use dashmap::DashMap;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use crabka_metadata::NodeId;
 
 use crate::partition::Partition;
+use crate::partition_registry::PartitionRegistry;
 
 /// Tunables for [`run`].
 #[derive(Debug, Clone)]
@@ -36,7 +36,7 @@ impl Default for CleanerConfig {
 
 /// Spawned task entry point.
 pub(crate) async fn run(
-    partitions: Arc<DashMap<(String, i32), Arc<Partition>>>,
+    partitions: Arc<PartitionRegistry>,
     node_id: NodeId,
     cfg: CleanerConfig,
     shutdown: CancellationToken,
@@ -54,16 +54,22 @@ pub(crate) async fn run(
     }
 }
 
-pub(crate) async fn tick_all(partitions: &DashMap<(String, i32), Arc<Partition>>, node_id: NodeId) {
-    // Snapshot first to avoid holding the DashMap iter across await.
-    let snapshot: Vec<Arc<Partition>> = partitions.iter().map(|kv| kv.value().clone()).collect();
+pub(crate) async fn tick_all(partitions: &PartitionRegistry, node_id: NodeId) {
+    // Snapshot first to avoid holding any registry guard across await.
+    let snapshot: Vec<Arc<Partition>> = partitions.arcs();
     for partition in snapshot {
         let leader = partition.current_leader.load(Ordering::Relaxed);
         if leader != node_id {
             continue;
         }
         let policy = {
-            let log = partition.log.lock().expect("log mutex poisoned");
+            // Recover the guard if the mutex was poisoned by a panic
+            // elsewhere rather than killing the (discarded-JoinHandle)
+            // cleaner task. The config snapshot stays readable.
+            let log = partition
+                .log
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             log.config_snapshot().cleanup_policy
         };
         if policy != crabka_log::CleanupPolicy::Compact {

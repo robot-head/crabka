@@ -13,7 +13,6 @@ use crabka_protocol::owned::offset_commit_response::{
 };
 use crabka_protocol::records::{Record, RecordBatch};
 use crabka_protocol::{Decode, Encode};
-use dashmap::DashMap;
 use tokio::sync::oneshot;
 
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize_topics};
@@ -24,7 +23,8 @@ use crate::coordinator::bootstrap::{OFFSETS_PARTITION, OFFSETS_TOPIC};
 use crate::coordinator::group::OffsetEntry;
 use crate::coordinator::persistence::OffsetCommitValue;
 use crate::error::BrokerError;
-use crate::partition::{Partition, ProduceJob, WriterMessage};
+use crate::partition::{ProduceJob, WriterMessage};
+use crate::partition_registry::PartitionRegistry;
 
 #[allow(clippy::too_many_lines)] // ACL preamble (group + per-topic) + commit pipeline; splitting hurts readability
 pub(crate) async fn handle(
@@ -291,7 +291,7 @@ async fn validate(req: &OffsetCommitRequest, handle: &Arc<GroupHandle>) -> Optio
 /// failure to either find the partition or hear back from the writer.
 async fn append_batch(
     req: &OffsetCommitRequest,
-    partitions: &Arc<DashMap<(String, i32), Arc<Partition>>>,
+    partitions: &Arc<PartitionRegistry>,
     now_ms: i64,
 ) -> Result<(), i16> {
     let mut batch = RecordBatch {
@@ -323,10 +323,7 @@ async fn append_batch(
     }
     batch.last_offset_delta = (delta - 1).max(0);
 
-    let Some(part_handle) = partitions
-        .get(&(OFFSETS_TOPIC.to_string(), OFFSETS_PARTITION))
-        .map(|e| e.value().clone())
-    else {
+    let Some(part_handle) = partitions.get(OFFSETS_TOPIC, OFFSETS_PARTITION) else {
         return Err(codes::UNKNOWN_SERVER_ERROR);
     };
     let (ack_tx, ack_rx) = oneshot::channel();

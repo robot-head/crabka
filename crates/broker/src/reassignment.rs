@@ -74,6 +74,9 @@ pub(crate) async fn compute_reassignment_progress(
     liveness: &ControllerLivenessState,
 ) -> Vec<MetadataRecord> {
     let mut updates = Vec::new();
+    // Snapshot the alive set once (single lock) instead of taking the
+    // liveness lock per target replica in the leader-handoff branch.
+    let alive = liveness.alive_snapshot().await;
     for pr in image.reassignments_in_flight() {
         let target: Vec<NodeId> = pr
             .replicas
@@ -89,7 +92,7 @@ pub(crate) async fn compute_reassignment_progress(
             // Leader handoff phase. Find an eligible new leader in target ∩ isr that is alive.
             let mut new_leader: Option<NodeId> = None;
             for n in &target {
-                if pr.isr.contains(n) && liveness.is_alive(*n).await {
+                if pr.isr.contains(n) && alive.contains(n) {
                     new_leader = Some(*n);
                     break;
                 }

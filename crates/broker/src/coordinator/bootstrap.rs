@@ -15,7 +15,7 @@ use crate::coordinator::group::{Group, Member, OffsetEntry};
 use crate::coordinator::persistence::{self, GroupMetadataValue, Key, OffsetCommitValue};
 use crate::error::BrokerError;
 use crate::log_dir;
-use crate::partition::Partition;
+use crate::partition_registry::PartitionRegistry;
 
 pub const OFFSETS_TOPIC: &str = "__consumer_offsets";
 pub const OFFSETS_PARTITION: i32 = 0;
@@ -32,7 +32,7 @@ pub const OFFSETS_PARTITION: i32 = 0;
 pub async fn bootstrap(
     config: &BrokerConfig,
     controller: &Arc<dyn crate::metadata_source::MetadataSource>,
-    partitions: &Arc<dashmap::DashMap<(String, i32), Arc<Partition>>>,
+    partitions: &Arc<PartitionRegistry>,
     group_manager: &GroupManager,
     log_dir_status: &crate::log_dir_status::LogDirRegistry,
 ) -> Result<(), BrokerError> {
@@ -98,7 +98,7 @@ pub async fn bootstrap(
         log,
         log_dir_status.clone(),
     );
-    partitions.insert((OFFSETS_TOPIC.into(), OFFSETS_PARTITION), partition);
+    partitions.insert(OFFSETS_TOPIC.into(), OFFSETS_PARTITION, partition);
     Ok(())
 }
 
@@ -330,8 +330,7 @@ mod tests {
         let config = BrokerConfig::for_tests(dir.path().to_path_buf());
         let controller: Arc<dyn crate::metadata_source::MetadataSource> =
             controller_with_leader(dir.path().join("__cluster_metadata_test")).await;
-        let partitions: Arc<dashmap::DashMap<(String, i32), Arc<Partition>>> =
-            Arc::new(dashmap::DashMap::new());
+        let partitions: Arc<PartitionRegistry> = Arc::new(PartitionRegistry::new());
         let gm = GroupManager::new();
         let log_dir_status = crate::log_dir_status::LogDirRegistry::probe(&config.all_log_dirs());
         bootstrap(&config, &controller, &partitions, &gm, &log_dir_status)
@@ -339,7 +338,7 @@ mod tests {
             .unwrap();
         let topic_dir = log_dir::partition_dir(&config.log_dir, OFFSETS_TOPIC, OFFSETS_PARTITION);
         assert!(topic_dir.exists());
-        assert!(partitions.contains_key(&(OFFSETS_TOPIC.into(), OFFSETS_PARTITION)));
+        assert!(partitions.contains(OFFSETS_TOPIC, OFFSETS_PARTITION));
         assert!(controller.current_image().topic(OFFSETS_TOPIC).is_some());
     }
 }

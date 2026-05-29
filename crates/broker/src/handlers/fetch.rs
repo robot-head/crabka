@@ -57,12 +57,13 @@ struct PendingRead {
     partition: Option<Arc<Partition>>,
     /// Per-partition output, mutated in place by `do_read`.
     out: PartitionData,
-    /// Accumulator for handler-thread on-CPU microseconds spent
-    /// polling this partition's `do_read` futures (first pass plus any
-    /// long-poll re-reads). Measured via `tokio_metrics::TaskMonitor` so we
-    /// charge only actual poll time, not wall-clock awaiting the writer or
-    /// the long-poll wake. Drained into the response-emit loop's
-    /// `record_partition_cpu_micros` call.
+    /// Accumulator for microseconds spent in this partition's `do_read`
+    /// calls (first pass plus any long-poll re-reads). Measured as an
+    /// `Instant` elapsed delta around each `do_read`. The heavy byte read
+    /// runs in `spawn_blocking`, so this charges the read work without
+    /// allocating a `tokio_metrics::TaskMonitor` per partition per fetch.
+    /// Drained into the response-emit loop's `record_partition_cpu_micros`
+    /// call.
     cpu_micros: u64,
 }
 
@@ -202,7 +203,6 @@ pub(crate) async fn handle(
         // we look it up. The client populates whichever the negotiated
         // version requires.
         let topic_name = if topic.topic.is_empty() {
-            let image = controller.current_image();
             image
                 .topics()
                 .find(|t| t.topic_id.into_bytes() == topic.topic_id.0)
@@ -211,7 +211,6 @@ pub(crate) async fn handle(
             topic.topic.clone()
         };
         let topic_id = if topic.topic_id == WireUuid::ZERO {
-            let image = controller.current_image();
             image
                 .topic(&topic_name)
                 .map_or(WireUuid::ZERO, |t| WireUuid(t.topic_id.into_bytes()))
@@ -258,9 +257,7 @@ pub(crate) async fn handle(
                 continue;
             }
 
-            let part_opt = partitions
-                .get(&(topic_name.clone(), idx))
-                .map(|p| p.clone());
+            let part_opt = partitions.get(&topic_name, idx);
 
             // KIP-101 epoch fence. The follower (or consumer using KIP-320)
             // includes its `current_leader_epoch`; we reject stale or future
@@ -395,26 +392,29 @@ pub(crate) async fn handle(
         }
     }
 
-    // First read pass. TaskMonitor charges per-partition on-CPU poll time
-    // into p.cpu_micros — skipping wall-time spent awaiting I/O.
+    // First read pass. We time each `do_read` with a wall-clock `Instant`
+    // delta and charge it into p.cpu_micros. The heavy byte read now runs in
+    // `spawn_blocking` (see `do_read`), so the awaited future itself does
+    // little besides the cheap metadata lock + result application; a plain
+    // elapsed-time delta is an adequate stand-in for the previous
+    // per-partition `TaskMonitor` poll-duration sample without allocating a
+    // monitor per partition per fetch.
     let mut total_bytes = 0_usize;
     for p in &mut pending {
         let Some(part) = p.partition.clone() else {
             continue;
         };
-        let monitor = tokio_metrics::TaskMonitor::new();
-        total_bytes += monitor
-            .instrument(do_read(
-                &part,
-                p.fetch_offset,
-                p.max_bytes,
-                p.read_committed,
-                p.is_follower_fetch,
-                &mut p.out,
-            ))
-            .await?;
-        let micros =
-            u64::try_from(monitor.cumulative().total_poll_duration.as_micros()).unwrap_or(u64::MAX);
+        let read_start = std::time::Instant::now();
+        total_bytes += do_read(
+            &part,
+            p.fetch_offset,
+            p.max_bytes,
+            p.read_committed,
+            p.is_follower_fetch,
+            &mut p.out,
+        )
+        .await?;
+        let micros = u64::try_from(read_start.elapsed().as_micros()).unwrap_or(u64::MAX);
         p.cpu_micros = p.cpu_micros.saturating_add(micros);
 
         // KIP-405: if the local read came back
@@ -436,14 +436,12 @@ pub(crate) async fn handle(
     }
 
     // Drain per-partition cpu_micros accumulators before
-    // `group_into_topic_responses` consumes `pending`. Looked up in the
-    // response-emit loop below alongside `record_partition_fetch`.
-    let cpu_micros_map: std::collections::HashMap<(String, i32), u64> = pending
-        .iter()
-        .map(|p| ((p.topic_name.clone(), p.partition_index), p.cpu_micros))
-        .collect();
-
-    let mut responses = group_into_topic_responses(pending);
+    // `group_into_topic_responses` consumes `pending`. `cpu_micros_by_idx`
+    // is aligned positionally with `responses` — `cpu_micros_by_idx[ti][pi]`
+    // is the accumulator for `responses[ti].partitions[pi]` — so the
+    // response-emit loop indexes it directly rather than re-cloning topic
+    // names into a string-keyed map.
+    let (mut responses, cpu_micros_by_idx) = group_into_topic_responses(pending);
 
     // Down-convert v2 batches to legacy MessageSet bytes for Fetch v0-3.
     // Control batches are dropped (records set to None); zstd-compressed
@@ -540,12 +538,12 @@ pub(crate) async fn handle(
     // Topics that returned an error (empty `records`) still get a
     // request count (the fetch arrived), matching Kafka's
     // BrokerTopicMetrics:TotalFetchRequestsPerSec semantics.
-    for topic_resp in &responses {
+    for (ti, topic_resp) in responses.iter().enumerate() {
         if topic_resp.topic.is_empty() {
             continue;
         }
         let mut bytes: u64 = 0;
-        for p in &topic_resp.partitions {
+        for (pi, p) in topic_resp.partitions.iter().enumerate() {
             let partition_bytes = p.records.as_ref().map_or(0, RecordsPayload::payload_len) as u64;
             broker.metrics.record_partition_fetch(
                 &topic_resp.topic,
@@ -578,8 +576,13 @@ pub(crate) async fn handle(
             // Drain the per-partition CPU accumulator. Tracks
             // actual poll duration across both the first read pass and any
             // long-poll re-reads, attributing only on-CPU time.
-            if let Some(micros) = cpu_micros_map
-                .get(&(topic_resp.topic.clone(), p.partition_index))
+            // `cpu_micros_by_idx` is positionally aligned with `responses`
+            // (built by `group_into_topic_responses`); the down-convert and
+            // throttle passes above mutate `records` but never add or remove
+            // partition rows, so indexing by `(ti, pi)` stays valid here.
+            if let Some(micros) = cpu_micros_by_idx
+                .get(ti)
+                .and_then(|parts| parts.get(pi))
                 .copied()
             {
                 broker.metrics.record_partition_cpu_micros(
@@ -880,14 +883,27 @@ async fn do_read(
     is_follower_fetch: bool,
     out: &mut PartitionData,
 ) -> Result<usize, BrokerError> {
+    // Decision derived from a brief metadata-only hold of the log mutex.
+    // The actual byte read (`read_raw` + the optional `aborted_in_range`
+    // scan, both synchronous syscalls) is deferred to `spawn_blocking` so it
+    // never runs on the reactor thread under the lock.
+    enum ReadPlan {
+        /// `fetch_offset` is below `log_start` — `OFFSET_OUT_OF_RANGE` early
+        /// return; `out` has already been fully populated.
+        OffsetOutOfRange,
+        /// `fetch_offset >= upper_bound` — nothing to read.
+        Empty,
+        /// Read bytes in `[fetch_offset, limit_offset)`.
+        Read {
+            limit_offset: i64,
+            effective_lso: i64,
+            read_committed_aborts: bool,
+        },
+    }
+
     let hw = part.high_watermark().await;
-    let (log_start, log_end, lso, raw, aborted_txns): (
-        i64,
-        i64,
-        i64,
-        Option<crabka_log::RawRead>,
-        Vec<AbortedTransaction>,
-    ) = {
+
+    let (log_start, log_end, lso, plan) = {
         let log = part.log.lock().expect("log mutex poisoned");
         let log_start = log.log_start_offset();
         let log_end = log.log_end_offset();
@@ -899,7 +915,7 @@ async fn do_read(
             lso
         };
 
-        if fetch_offset < log_start {
+        let plan = if fetch_offset < log_start {
             out.error_code = codes::OFFSET_OUT_OF_RANGE;
             out.log_start_offset = log_start;
             out.high_watermark = if is_follower_fetch { log_end } else { hw };
@@ -910,42 +926,92 @@ async fn do_read(
             } else {
                 hw
             };
-            return Ok(0);
-        }
-
-        let limit_offset = if is_follower_fetch {
-            log_end
-        } else if read_committed {
-            effective_lso
+            ReadPlan::OffsetOutOfRange
         } else {
-            hw
-        };
-
-        if fetch_offset >= upper_bound {
-            (log_start, log_end, lso, None, Vec::new())
-        } else {
-            let read_max = usize::try_from(max_bytes.max(0)).unwrap_or(0);
-            let raw = log.read_raw(fetch_offset, limit_offset, read_max)?;
-
-            // read_committed does NO server-side batch filtering: verbatim
-            // bytes (including aborted/control batches) are returned and the
-            // consumer drops them client-side via `aborted_transactions`,
-            // matching Apache Kafka's behavior.
-            let aborted = if read_committed && !is_follower_fetch {
-                log.aborted_in_range(fetch_offset, effective_lso)
-                    .into_iter()
-                    .map(|e| AbortedTransaction {
-                        producer_id: e.producer_id,
-                        first_offset: e.start_offset,
-                        ..Default::default()
-                    })
-                    .collect()
+            let limit_offset = if is_follower_fetch {
+                log_end
+            } else if read_committed {
+                effective_lso
             } else {
-                Vec::new()
+                hw
+            };
+
+            if fetch_offset >= upper_bound {
+                ReadPlan::Empty
+            } else {
+                ReadPlan::Read {
+                    limit_offset,
+                    effective_lso,
+                    read_committed_aborts: read_committed && !is_follower_fetch,
+                }
+            }
+        };
+        (log_start, log_end, lso, plan)
+    };
+    // Log mutex released here.
+
+    let (raw, aborted_txns): (Option<crabka_log::RawRead>, Vec<AbortedTransaction>) = match plan {
+        ReadPlan::OffsetOutOfRange => return Ok(0),
+        ReadPlan::Empty => (None, Vec::new()),
+        ReadPlan::Read {
+            limit_offset,
+            effective_lso,
+            read_committed_aborts,
+        } => {
+            let read_max = usize::try_from(max_bytes.max(0)).unwrap_or(0);
+            // Run the blocking seek+read (and, for read_committed, the
+            // aborted-txn index scan) off the reactor thread. The lock is
+            // re-acquired inside the closure for the brief duration of the
+            // syscalls.
+            let log = part.log.clone();
+            let join = tokio::task::spawn_blocking(move || {
+                let log = log.lock().expect("log mutex poisoned");
+                let raw = log.read_raw(fetch_offset, limit_offset, read_max)?;
+
+                // read_committed does NO server-side batch filtering: verbatim
+                // bytes (including aborted/control batches) are returned and the
+                // consumer drops them client-side via `aborted_transactions`,
+                // matching Apache Kafka's behavior. Skip the Vec allocation
+                // entirely when there are no aborted txns in range.
+                let aborted = if read_committed_aborts {
+                    let mut it = log
+                        .aborted_in_range(fetch_offset, effective_lso)
+                        .into_iter();
+                    if let Some(first) = it.next() {
+                        let mut v = vec![AbortedTransaction {
+                            producer_id: first.producer_id,
+                            first_offset: first.start_offset,
+                            ..Default::default()
+                        }];
+                        v.extend(it.map(|e| AbortedTransaction {
+                            producer_id: e.producer_id,
+                            first_offset: e.start_offset,
+                            ..Default::default()
+                        }));
+                        v
+                    } else {
+                        Vec::new()
+                    }
+                } else {
+                    Vec::new()
+                };
+
+                Ok::<_, BrokerError>((raw, aborted))
+            });
+            let (raw, aborted) = match join.await {
+                Ok(res) => res?,
+                Err(join_err) => {
+                    // A panic inside the blocking read poisoned/aborted the
+                    // closure. Surface it as an I/O failure rather than
+                    // propagating the panic across the await point.
+                    return Err(BrokerError::Io(std::io::Error::other(format!(
+                        "fetch read task panicked: {join_err}"
+                    ))));
+                }
             };
 
             let raw = if raw.total > 0 { Some(raw) } else { None };
-            (log_start, log_end, lso, raw, aborted)
+            (raw, aborted)
         }
     };
 
@@ -1128,21 +1194,20 @@ async fn long_poll_then_reread(
             partition_index: p.partition_index,
             ..Default::default()
         };
-        // Instrument the re-read so its poll time accumulates
-        // into the same per-partition CPU counter as the first pass.
-        let monitor = tokio_metrics::TaskMonitor::new();
-        monitor
-            .instrument(do_read(
-                &part,
-                p.fetch_offset,
-                p.max_bytes,
-                p.read_committed,
-                p.is_follower_fetch,
-                &mut p.out,
-            ))
-            .await?;
-        let micros =
-            u64::try_from(monitor.cumulative().total_poll_duration.as_micros()).unwrap_or(u64::MAX);
+        // Time the re-read so its duration accumulates into the same
+        // per-partition CPU counter as the first pass (wall-clock delta;
+        // see the first-pass comment for why this replaces TaskMonitor).
+        let read_start = std::time::Instant::now();
+        do_read(
+            &part,
+            p.fetch_offset,
+            p.max_bytes,
+            p.read_committed,
+            p.is_follower_fetch,
+            &mut p.out,
+        )
+        .await?;
+        let micros = u64::try_from(read_start.elapsed().as_micros()).unwrap_or(u64::MAX);
         p.cpu_micros = p.cpu_micros.saturating_add(micros);
 
         // Re-attempt the remote-tier read on the re-read pass
@@ -1223,32 +1288,41 @@ fn consume_consumer_quota(
 }
 
 /// Group resolved `PendingRead`s back into per-topic response entries,
-/// preserving the order topics first appeared in the request.
-fn group_into_topic_responses(pending: Vec<PendingRead>) -> Vec<FetchableTopicResponse> {
+/// preserving the order topics first appeared in the request. Returns the
+/// per-topic `cpu_micros` accumulators alongside, positionally aligned with
+/// the returned `Vec` (`cpu_micros[ti][pi]` matches `responses[ti].partitions[pi]`)
+/// so the caller can attribute CPU without re-keying by topic name.
+type GroupedResponses = (Vec<FetchableTopicResponse>, Vec<Vec<u64>>);
+
+fn group_into_topic_responses(pending: Vec<PendingRead>) -> GroupedResponses {
     let mut topic_order: Vec<String> = Vec::new();
-    let mut by_topic: std::collections::HashMap<String, (WireUuid, Vec<PartitionData>)> =
+    // Value: (topic_id, partitions, cpu_micros) — the trailing Vec mirrors
+    // `partitions` positionally.
+    let mut by_topic: std::collections::HashMap<String, (WireUuid, Vec<PartitionData>, Vec<u64>)> =
         std::collections::HashMap::new();
     for p in pending {
         let entry = by_topic
             .entry(p.topic_name.clone())
-            .or_insert_with(|| (p.topic_id, Vec::new()));
+            .or_insert_with(|| (p.topic_id, Vec::new(), Vec::new()));
         entry.1.push(p.out);
+        entry.2.push(p.cpu_micros);
         if !topic_order.iter().any(|t| t == &p.topic_name) {
             topic_order.push(p.topic_name);
         }
     }
-    topic_order
-        .into_iter()
-        .map(|name| {
-            let (topic_id, parts) = by_topic.remove(&name).expect("topic order populated");
-            FetchableTopicResponse {
-                topic: name,
-                topic_id,
-                partitions: parts,
-                ..Default::default()
-            }
-        })
-        .collect()
+    let mut responses = Vec::with_capacity(topic_order.len());
+    let mut cpu_micros = Vec::with_capacity(topic_order.len());
+    for name in topic_order {
+        let (topic_id, parts, micros) = by_topic.remove(&name).expect("topic order populated");
+        responses.push(FetchableTopicResponse {
+            topic: name,
+            topic_id,
+            partitions: parts,
+            ..Default::default()
+        });
+        cpu_micros.push(micros);
+    }
+    (responses, cpu_micros)
 }
 
 /// Encode a `FetchResponse` into a `BytesMut`, choosing the legacy

@@ -137,6 +137,21 @@ impl ControllerLivenessState {
         )
     }
 
+    /// Snapshot the set of currently-`Alive` broker ids under a single
+    /// lock acquisition. Equivalent to calling [`is_alive`](Self::is_alive)
+    /// for every broker, but the cluster-wide maintenance loops (failover,
+    /// rebalance, metrics) take the `brokers` lock once and then do
+    /// synchronous set-membership checks instead of one `.await` lock per
+    /// partition. Unknown brokers are absent from the set (so membership
+    /// `false` == not alive), matching `is_alive`'s predicate exactly.
+    pub(crate) async fn alive_snapshot(&self) -> HashSet<u64> {
+        let map = self.brokers.lock().await;
+        map.iter()
+            .filter(|(_, e)| e.state == BrokerLivenessState::Alive)
+            .map(|(&id, _)| id)
+            .collect()
+    }
+
     /// Seed the liveness registry with the given broker ids. Each id that
     /// is not already present is inserted as `Alive` with
     /// `last_heartbeat = now`. This is called when this broker becomes the
