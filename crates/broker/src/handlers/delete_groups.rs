@@ -28,7 +28,7 @@ pub(crate) async fn handle(
 
     let mut results: Vec<DeletableGroupResult> = Vec::with_capacity(req.groups_names.len());
     for gid in req.groups_names {
-        // ── slice-13 ACL preamble ────────────────────────────────────
+        // ── ACL preamble ────────────────────────────────────
         // Per-group `Delete` check. On Deny → per-group
         // `error_code = GROUP_AUTHORIZATION_FAILED (30)`.
         let acl_req = AuthorizationRequest {

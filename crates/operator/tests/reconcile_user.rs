@@ -1,4 +1,4 @@
-//! Slice 36: reconcile-level tests for the `KafkaUser` controller.
+//! Reconcile-level tests for the `KafkaUser` controller.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -222,7 +222,7 @@ fn clients_ca_cert_secret_body(
     })
 }
 
-/// Slice 36: `KafkaUser` with cluster label, no Secret yet → reconcile
+/// `KafkaUser` with cluster label, no Secret yet → reconcile
 /// creates the Secret, upserts SCRAM, applies ACLs, sets Ready=True.
 #[tokio::test]
 async fn first_reconcile_provisions_scram_and_acls() {
@@ -321,7 +321,7 @@ async fn first_reconcile_provisions_scram_and_acls() {
     assert_eq!(body["status"]["scramSha512"], true);
 }
 
-/// Slice 36: reconcile with existing matching ACLs → no `CreateAcls` /
+/// Reconcile with existing matching ACLs → no `CreateAcls` /
 /// `DeleteAcls` calls.
 #[tokio::test]
 async fn noop_when_acls_already_match() {
@@ -383,7 +383,7 @@ async fn noop_when_acls_already_match() {
     );
 }
 
-/// Slice 36: reconcile drops out-of-band ACLs not in spec (CRD wins).
+/// Reconcile drops out-of-band ACLs not in spec (CRD wins).
 #[tokio::test]
 async fn deletes_orphan_acls() {
     let rules = vec![
@@ -473,7 +473,7 @@ fn quota_rules() -> Vec<MockRule> {
     ]
 }
 
-/// Slice 38: `spec.quotas` absent ⇒ reconciler never calls Describe /
+/// `spec.quotas` absent ⇒ reconciler never calls Describe /
 /// `AlterClientQuotas`. Status carries `quotasInSync: false`.
 #[tokio::test]
 async fn omitted_quotas_skips_broker_call() {
@@ -514,7 +514,7 @@ async fn omitted_quotas_skips_broker_call() {
     assert_eq!(body["status"]["quotasInSync"], false);
 }
 
-/// Slice 38: spec.quotas declares per-user limits, broker has nothing →
+/// spec.quotas declares per-user limits, broker has nothing →
 /// reconciler issues `AlterClientQuotas` with one `Set` per declared key.
 #[tokio::test]
 async fn first_reconcile_sets_declared_quotas() {
@@ -581,7 +581,7 @@ async fn first_reconcile_sets_declared_quotas() {
     assert_eq!(body["status"]["quotasInSync"], true);
 }
 
-/// Slice 38: broker matches spec exactly → no `AlterClientQuotas` is
+/// broker matches spec exactly → no `AlterClientQuotas` is
 /// issued. Describe still runs (the diff input source).
 #[tokio::test]
 async fn noop_when_quotas_already_match() {
@@ -618,7 +618,7 @@ async fn noop_when_quotas_already_match() {
     );
 }
 
-/// Slice 38: broker has a quota the spec doesn't declare → reconciler
+/// broker has a quota the spec doesn't declare → reconciler
 /// issues a `Remove` for it. (The CRD wins.)
 #[tokio::test]
 async fn drift_remove_path_emits_remove_op() {
@@ -660,7 +660,7 @@ async fn drift_remove_path_emits_remove_op() {
     ));
 }
 
-/// Slice 38: `spec.quotas: {}` (empty object) wipes the broker's quota
+/// `spec.quotas: {}` (empty object) wipes the broker's quota
 /// state for this user. Different from `spec.quotas: null` (=skip).
 #[tokio::test]
 async fn empty_quotas_object_tombstones_everything() {
@@ -698,9 +698,9 @@ async fn empty_quotas_object_tombstones_everything() {
     );
 }
 
-// --- Slice 37: TLS auth reconcile tests ----------------------------------
+// --- TLS auth reconcile tests --------------------------------------------
 
-/// Slice 37: first reconcile of a TLS-auth `KafkaUser` provisions the
+/// First reconcile of a TLS-auth `KafkaUser` provisions the
 /// clients CA (key + cert Secrets), the per-user cert Secret, and the
 /// ACLs by `User:CN=<name>` principal. No SCRAM call is made.
 #[allow(clippy::too_many_lines)] // straight-line fixture; splitting hurts more than it helps
@@ -852,7 +852,7 @@ async fn first_reconcile_tls_provisions_certs_and_acls() {
     );
 }
 
-/// Slice 37: TLS reconcile with an existing user Secret whose cert is
+/// TLS reconcile with an existing user Secret whose cert is
 /// well outside the renewal window reuses it — no PATCH on the user
 /// Secret is issued.
 #[tokio::test]
@@ -923,7 +923,7 @@ async fn tls_reconcile_reuses_existing_cert_when_not_near_expiry() {
     );
 }
 
-/// Slice 37: TLS reconcile with an existing cert inside the renewal
+/// TLS reconcile with an existing cert inside the renewal
 /// window reissues — exactly one PATCH on the per-user Secret.
 #[tokio::test]
 async fn tls_reconcile_reissues_cert_near_expiry() {
@@ -992,7 +992,7 @@ async fn tls_reconcile_reissues_cert_near_expiry() {
     );
 }
 
-/// Slice 37: TLS user finalizer cleanup filters ACL deletes by the
+/// TLS user finalizer cleanup filters ACL deletes by the
 /// `User:CN=<name>` principal (not the bare `User:<name>` SCRAM form).
 #[tokio::test]
 async fn tls_finalizer_filters_acls_by_dn() {
@@ -1045,7 +1045,7 @@ async fn tls_finalizer_filters_acls_by_dn() {
     );
 }
 
-/// Slice 37: TLS user with quotas keys broker quota calls by the
+/// TLS user with quotas keys broker quota calls by the
 /// DN (`CN=alice`), not the bare name.
 #[tokio::test]
 async fn tls_user_with_quotas_alters_quotas_by_dn() {

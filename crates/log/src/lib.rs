@@ -18,7 +18,7 @@
 //!
 //! - Log compaction (separate subsystem; deferred).
 //! - Transactional marker interpretation (broker concern).
-//! - Tiered storage (Kafka-2-slice 12).
+//! - Tiered storage (broker concern).
 //! - Concurrent writes (single-writer; broker enforces above).
 //!
 //! ## Quick start
@@ -56,6 +56,6 @@ mod txn_index;
 pub use config::{CleanupPolicy, LogConfig};
 pub use error::LogError;
 pub use leader_epoch_checkpoint::{EpochEntry, LeaderEpochCheckpoint};
-pub use log::{Log, ReadOutput, SegmentExport};
-pub use segment::Segment;
+pub use log::{Log, RawRead, ReadOutput, SegmentExport};
+pub use segment::{RawSegmentRead, Segment};
 pub use txn_index::{AbortedTxn, TxnIndex};

@@ -1,4 +1,4 @@
-//! Slice 36: `KafkaUser` reconciler — unidirectional (CRD wins).
+//! `KafkaUser` reconciler — unidirectional (CRD wins).
 //!
 //! Provisions SCRAM-SHA-512 credentials via `AlterUserScramCredentials`
 //! and keeps the ACL set in sync via `CreateAcls` / `DeleteAcls`. The
@@ -175,7 +175,7 @@ pub async fn reconcile(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Action,
         // Best-effort cleanup; errors are logged but don't block finalizer removal.
         if let Ok(client) = ctx.admin_client_for(&cluster, &bootstrap).await {
             let mut admin = client.lock().await;
-            // Slice 36b: SCRAM-SHA-256 + SCRAM-SHA-512 both reach
+            // SCRAM-SHA-256 + SCRAM-SHA-512 both reach
             // `alter_user_scram_credentials_*` for the finalizer
             // deletion — the broker stores credentials per mechanism,
             // so we tear down whichever mechanism this user used.
@@ -201,7 +201,7 @@ pub async fn reconcile(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Action,
                     tracing::warn!(error = %e, %name, "scram delete during finalizer failed");
                 }
             }
-            // Slice 51b: delegation-token finalizer — expire every token
+            // Delegation-token finalizer — expire every token
             // owned by `User:<name>` via `ExpireDelegationToken` (period
             // -1 = immediate tombstone). Best-effort: errors are logged
             // and never block finalizer removal.
@@ -273,7 +273,7 @@ pub async fn reconcile(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Action,
     let secret_api: Api<Secret> = Api::namespaced(ctx.client.clone(), &ns);
     let tls_not_after: Option<String> = match &obj.spec.authentication {
         Authentication::ScramSha512(_) | Authentication::ScramSha256(_) => {
-            // Slice 36b: SCRAM-SHA-256 + SCRAM-SHA-512 share the
+            // SCRAM-SHA-256 + SCRAM-SHA-512 share the
             // password-secret + admin-client + status-patch flow; the
             // only difference is which `_sha256` / `_sha512` admin
             // method we call. Pluck the per-variant knobs here.
@@ -382,7 +382,7 @@ pub async fn reconcile(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Action,
                     return Ok(Action::requeue(Duration::from_secs(15)));
                 }
             };
-            // Sign user certs with the clients CA's active signer (slice 34: the
+            // Sign user certs with the clients CA's active signer (the
             // first block of the trust bundle, paired with the active key).
             let ca = ca_outcome.signing_material;
             let cert_status =
@@ -406,7 +406,7 @@ pub async fn reconcile(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Action,
         // or issue a cert. ACL + quota reconciliation below is
         // principal-driven and Just Works for this arm.
         Authentication::TlsExternal => None,
-        // Slice 51b: dispatch the delegation-token reconcile.
+        // Dispatch the delegation-token reconcile.
         //
         // The token lifecycle (Describe → decide → Create/Renew/NoOp/Cycle
         // → Secret + status patch) lives in
@@ -512,7 +512,7 @@ pub async fn reconcile(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Action,
         return user_broker_error(&user_api, &name, &obj, e, "DeleteAcls").await;
     }
 
-    // 9. Reconcile quotas (slice 38). `spec.quotas == None` leaves the
+    // 9. Reconcile quotas. `spec.quotas == None` leaves the
     // broker's quota state untouched — a deliberate opt-in posture
     // matching Strimzi (the quotas section being absent ≠ "wipe all
     // quotas"). To clear quotas via the CRD, set `quotas: {}` (empty
@@ -587,7 +587,7 @@ pub async fn reconcile(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Action,
     // `tls-external` users have no operator-owned credential to rotate,
     // but ACLs + quotas can drift externally — keep the per-minute
     // requeue to detect that (same cadence as SCRAM, different reason).
-    // Slice 51b: delegation-token users do not reach this match — that
+    // Delegation-token users do not reach this match — that
     // arm returns its renew-driven `Action` earlier (see the
     // `Authentication::DelegationToken(dt)` arm above).
     #[allow(clippy::match_same_arms)]
@@ -720,7 +720,7 @@ pub(crate) fn principal_for(name: &str, auth: &Authentication) -> String {
         // metadata.name as the principal). Same string shape as SCRAM
         // but different rationale — kept as a distinct arm.
         Authentication::TlsExternal => format!("User:{name}"),
-        // Slice 51b: delegation tokens carry the owner principal
+        // Delegation tokens carry the owner principal
         // (`User:<metadata.name>`); ACLs continue to be authored
         // against the owner, not the token-id.
         Authentication::DelegationToken(_) => format!("User:{name}"),
@@ -960,7 +960,7 @@ struct StatusPatch<'a> {
     reason: &'a str,
     message: &'a str,
     scram_sha512: bool,
-    /// Slice 36b: `true` iff SCRAM-SHA-256 credentials are
+    /// `true` iff SCRAM-SHA-256 credentials are
     /// provisioned. Mirrors `scram_sha512`.
     scram_sha256: bool,
     tls: bool,

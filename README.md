@@ -144,7 +144,7 @@ implements it today. Legend: ✅ implemented · ⚠️ partial · ❌ not yet ·
 | Log compaction (`cleanup.policy=compact`) | ✅ |
 | Multiple log directories (JBOD) + `DescribeLogDirs` (KIP-113) | ✅ |
 | Intra-broker log-dir reassignment (`AlterReplicaLogDirs`, KIP-113) | ✅ |
-| Message format v0/v1 down-conversion | ⚠️ |
+| Message format v0/v1 down-conversion | ✅ |
 | Tiered storage (KIP-405) | ⚠️ |
 
 ### Producer

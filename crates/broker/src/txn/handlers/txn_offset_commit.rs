@@ -9,7 +9,7 @@
 //! Versions 3–5: flexible (tagged fields; adds `generation_id`, `member_id`,
 //!               `group_instance_id`).
 //!
-//! ## slice-13 ACL preamble
+//! ## ACL preamble
 //!
 //! Three gates run in order:
 //! * `Write` on `TransactionalId(transactional_id)`. Deny → whole-response
@@ -49,7 +49,7 @@ pub(crate) async fn handle(
     let mut cur: &[u8] = req_bytes;
     let req = TxnOffsetCommitRequest::decode(&mut cur, version)?;
 
-    // ── slice-13 ACL preamble: Write on TransactionalId ────────────────
+    // ── ACL preamble: Write on TransactionalId ────────────────
     {
         let image = broker.controller.current_image();
         let authorizer = broker.config.authorizer.as_ref();
@@ -76,7 +76,7 @@ pub(crate) async fn handle(
         }
     }
 
-    // ── slice-13 ACL preamble: per-topic Read ──────────────────────────
+    // ── ACL preamble: per-topic Read ──────────────────────────
     let topic_decisions = {
         let image = broker.controller.current_image();
         let topic_names: Vec<&str> = req.topics.iter().map(|t| t.name.as_str()).collect();
@@ -109,7 +109,7 @@ pub(crate) async fn handle(
     let _handle = group_manager.get_or_create(&req.group_id);
 
     // 2. KIP-1319 stale-member-epoch check (api_version >= 3 adds
-    //    generation_id/member_id). Slice-5's GroupManager does not yet
+    //    generation_id/member_id). The GroupManager does not yet
     //    expose a `member_epoch()` accessor, so we emit ILLEGAL_GENERATION
     //    only when the request carries a non-default generation_id that
     //    differs from the group's current generation_id (classic protocol).

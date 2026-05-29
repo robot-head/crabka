@@ -3,6 +3,7 @@
 //! markers) are dropped entirely; zstd-compressed batches are
 //! re-compressed as snappy (v0/v1 doesn't support zstd).
 
+use bytes::{Bytes, BytesMut};
 use crabka_compression::CompressionType;
 use crabka_protocol::records::RecordBatch;
 use crabka_protocol::records::RecordsPayload;
@@ -20,7 +21,7 @@ pub(crate) fn down_convert_for_fetch(
     request_version: i16,
 ) -> Result<Option<RecordsPayload>, i16> {
     if request_version >= 4 {
-        return Ok(Some(RecordsPayload::V2(batch.clone())));
+        return Ok(Some(RecordsPayload::V2(vec![batch.clone()])));
     }
     if batch.attributes.is_control_batch() {
         return Ok(None);
@@ -50,6 +51,42 @@ pub(crate) fn down_convert_for_fetch(
         codes::CORRUPT_MESSAGE
     })?;
     Ok(Some(RecordsPayload::Legacy(bytes)))
+}
+
+/// Down-convert a whole records-field payload for a Fetch v<4 requester.
+///
+/// Obtains the batch list (`Raw` is decoded here — the only place `Raw` is
+/// parsed, and only for legacy clients), down-converts each non-dropped
+/// batch, and concatenates the resulting legacy `MessageSet` bytes. Returns
+/// `Ok(None)` when every batch was dropped (e.g. all control batches).
+pub(crate) fn down_convert_payload_for_fetch(
+    payload: &RecordsPayload,
+    request_version: i16,
+) -> Result<Option<RecordsPayload>, i16> {
+    let batches: Vec<RecordBatch> = match payload {
+        RecordsPayload::V2(b) => b.clone(),
+        RecordsPayload::Raw(bytes) => match RecordsPayload::from_bytes(bytes.clone()) {
+            Ok(RecordsPayload::V2(b)) => b,
+            _ => return Err(crate::codes::CORRUPT_MESSAGE),
+        },
+        RecordsPayload::Legacy(_) => return Ok(Some(payload.clone())),
+    };
+
+    let mut out = BytesMut::new();
+    for batch in &batches {
+        match down_convert_for_fetch(batch, request_version)? {
+            Some(RecordsPayload::Legacy(b)) => out.extend_from_slice(&b),
+            Some(RecordsPayload::V2(_) | RecordsPayload::Raw(_)) => {
+                return Err(crate::codes::CORRUPT_MESSAGE);
+            }
+            None => {}
+        }
+    }
+    if out.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(RecordsPayload::Legacy(Bytes::from(out))))
+    }
 }
 
 #[cfg(test)]
@@ -91,8 +128,10 @@ mod tests {
         let result = down_convert_for_fetch(&batch, 5).unwrap();
         let payload = result.expect("should have Some payload");
         match payload {
-            RecordsPayload::V2(rb) => assert_eq!(rb, batch),
-            RecordsPayload::Legacy(_) => panic!("expected V2 for version >= 4"),
+            RecordsPayload::V2(v) => assert_eq!(v, vec![batch]),
+            RecordsPayload::Raw(_) | RecordsPayload::Legacy(_) => {
+                panic!("expected V2 for version >= 4")
+            }
         }
     }
 
@@ -127,7 +166,9 @@ mod tests {
         let payload = result.expect("zstd batch should produce Some payload");
         let bytes = match payload {
             RecordsPayload::Legacy(b) => b,
-            RecordsPayload::V2(_) => panic!("expected Legacy for version < 4"),
+            RecordsPayload::V2(_) | RecordsPayload::Raw(_) => {
+                panic!("expected Legacy for version < 4")
+            }
         };
         // The outer wrapper message's attributes byte is at a well-known offset.
         // MessageSet: first message starts at byte 0:
@@ -155,7 +196,7 @@ mod tests {
         let payload = result.expect("should have Some payload");
         let bytes = match payload {
             RecordsPayload::Legacy(b) => b,
-            RecordsPayload::V2(_) => panic!("expected Legacy"),
+            RecordsPayload::V2(_) | RecordsPayload::Raw(_) => panic!("expected Legacy"),
         };
         let mut cur: &[u8] = &bytes;
         let recs = decode_message_set(&mut cur, bytes.len()).unwrap();
@@ -176,11 +217,28 @@ mod tests {
         let payload = result.expect("should have Some payload");
         let bytes = match payload {
             RecordsPayload::Legacy(b) => b,
-            RecordsPayload::V2(_) => panic!("expected Legacy"),
+            RecordsPayload::V2(_) | RecordsPayload::Raw(_) => panic!("expected Legacy"),
         };
         let mut cur: &[u8] = &bytes;
         let recs = decode_message_set(&mut cur, bytes.len()).unwrap();
         // v0 has no timestamps; all timestamps are None
         assert_eq!(recs[0].timestamp, None, "v0 should have no timestamps");
+    }
+
+    /// payload-level conversion concatenates each batch's legacy `MessageSet`
+    #[test]
+    fn payload_multi_batch_concats_legacy() {
+        let b0 = make_batch(CompressionType::None, vec![sample_record("a", "1")]);
+        let b1 = make_batch(CompressionType::None, vec![sample_record("b", "2")]);
+        let payload = RecordsPayload::V2(vec![b0, b1]);
+        let out = down_convert_payload_for_fetch(&payload, 3)
+            .unwrap()
+            .expect("some");
+        let RecordsPayload::Legacy(bytes) = out else {
+            panic!("expected Legacy");
+        };
+        let mut cur: &[u8] = &bytes;
+        let recs = crabka_records_legacy::decode_message_set(&mut cur, bytes.len()).unwrap();
+        assert_eq!(recs.len(), 2);
     }
 }

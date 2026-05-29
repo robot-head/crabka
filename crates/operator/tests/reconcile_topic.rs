@@ -1,4 +1,4 @@
-//! Slice 35: reconcile-level tests for the `KafkaTopic` controller.
+//! Reconcile-level tests for the `KafkaTopic` controller.
 //!
 //! These tests assert the kube-side request sequence (status patches,
 //! finalizer patches). Admin-client behavior is covered by the
@@ -73,7 +73,7 @@ fn topic(name: &str, ns: &str, cluster: Option<&str>) -> KafkaTopic {
     kt
 }
 
-/// Slice 35: a `KafkaTopic` with no `crabka.io/cluster` label must surface
+/// A `KafkaTopic` with no `crabka.io/cluster` label must surface
 /// `MissingClusterLabel` and issue zero admin RPCs.
 #[tokio::test]
 async fn missing_cluster_label_sets_status() {
@@ -101,7 +101,7 @@ async fn missing_cluster_label_sets_status() {
     assert_eq!(cond["reason"], "MissingClusterLabel");
 }
 
-/// Slice 35: `KafkaTopic` referencing a Kafka that doesn't exist → status
+/// `KafkaTopic` referencing a Kafka that doesn't exist → status
 /// `ClusterNotReady`; no admin RPCs.
 #[tokio::test]
 async fn cluster_not_found_sets_status_cluster_not_ready() {
@@ -143,7 +143,7 @@ async fn cluster_not_found_sets_status_cluster_not_ready() {
     assert_eq!(cond["reason"], "ClusterNotReady");
 }
 
-/// Slice 35: `KafkaTopic` whose effective name is invalid
+/// `KafkaTopic` whose effective name is invalid
 /// (`spec.topicName="."`) → status `InvalidTopicName`; no Kafka GET, no
 /// admin RPCs.
 #[tokio::test]
@@ -178,7 +178,7 @@ async fn invalid_topic_name_sets_status() {
     assert_eq!(cond["reason"], "InvalidTopicName");
 }
 
-/// Slice 35: a `KafkaTopic` referencing a Ready Kafka but with no
+/// A `KafkaTopic` referencing a Ready Kafka but with no
 /// finalizer set must PATCH `/kafkatopics/<name>` adding the finalizer
 /// and request an immediate re-enter (`Action::requeue(Duration::ZERO)`).
 /// No admin RPCs are issued — the finalizer-add path returns before any
@@ -335,7 +335,7 @@ fn last_status_patch_body(state: &Arc<MockState>, topic_name: &str) -> serde_jso
     serde_json::from_slice(patch.body()).expect("status body parses as JSON")
 }
 
-/// Slice 35: Kafka Ready, topic absent → one `CreateTopics` call,
+/// Kafka Ready, topic absent → one `CreateTopics` call,
 /// status `Ready=True topic_id=Some(...)`.
 #[tokio::test]
 async fn creates_topic_on_first_reconcile() {
@@ -378,7 +378,7 @@ async fn creates_topic_on_first_reconcile() {
     );
 }
 
-/// Slice 35: Kafka Ready, topic already matches spec exactly → no mutating
+/// Kafka Ready, topic already matches spec exactly → no mutating
 /// admin calls, status `Ready=True`.
 #[tokio::test]
 async fn noop_when_spec_matches_cluster() {
@@ -428,7 +428,7 @@ async fn noop_when_spec_matches_cluster() {
     assert_eq!(cond["reason"], "Ready");
 }
 
-/// Slice 35: current=3 partitions, spec=5 → one CreatePartitions(5) call,
+/// current=3 partitions, spec=5 → one CreatePartitions(5) call,
 /// status Ready.
 #[tokio::test]
 async fn partition_increase_triggers_create_partitions() {
@@ -470,7 +470,7 @@ async fn partition_increase_triggers_create_partitions() {
     assert_eq!(body["status"]["conditions"][0]["reason"], "Ready");
 }
 
-/// Slice 35: current=5 partitions, spec=2 → no mutating admin calls,
+/// current=5 partitions, spec=2 → no mutating admin calls,
 /// status `Ready=False reason=ImmutableFieldChanged`.
 #[tokio::test]
 async fn partition_decrease_sets_immutable_field_changed() {
@@ -515,7 +515,7 @@ async fn partition_decrease_sets_immutable_field_changed() {
     assert_eq!(cond["reason"], "ImmutableFieldChanged");
 }
 
-/// Slice 35: `current.replication_factor=1`, spec=2 → no mutating admin
+/// `current.replication_factor=1`, spec=2 → no mutating admin
 /// calls, status `Ready=False reason=ImmutableFieldChanged`.
 #[tokio::test]
 async fn replicas_change_sets_immutable_field_changed() {
@@ -560,7 +560,7 @@ async fn replicas_change_sets_immutable_field_changed() {
     assert_eq!(cond["reason"], "ImmutableFieldChanged");
 }
 
-/// Slice 35: current overrides `{foo: 1}`, desired `{bar: 2}` →
+/// current overrides `{foo: 1}`, desired `{bar: 2}` →
 /// `IncrementalAlterConfigs` with Set(bar=2) and Delete(foo).
 #[tokio::test]
 async fn config_diff_sets_and_deletes() {
@@ -620,7 +620,7 @@ async fn config_diff_sets_and_deletes() {
     assert_eq!(body["status"]["conditions"][0]["reason"], "Ready");
 }
 
-/// Slice 35: deletionTimestamp set, preserveTopic=false → one `DeleteTopics`
+/// deletionTimestamp set, preserveTopic=false → one `DeleteTopics`
 /// call + finalizer removed via metadata PATCH.
 #[tokio::test]
 async fn delete_with_finalizer_calls_delete_topics() {
@@ -682,7 +682,7 @@ async fn delete_with_finalizer_calls_delete_topics() {
 // the `FakeAdminClient` and asserts the status / requeue / eviction the
 // reconcile takes in response.
 
-/// Slice 35: Kafka Ready, topic absent, broker rejects `CreateTopics` with
+/// Kafka Ready, topic absent, broker rejects `CreateTopics` with
 /// `TOPIC_ALREADY_EXISTS` → status `Ready=False reason=BrokerError`,
 /// message references the API + error name.
 #[tokio::test]
@@ -708,7 +708,7 @@ async fn creates_topic_broker_error_surfaces_in_status() {
     assert!(msg.contains("TOPIC_ALREADY_EXISTS"), "message {msg:?}");
 }
 
-/// Slice 35: topic exists at 3 partitions, spec=5; broker rejects
+/// topic exists at 3 partitions, spec=5; broker rejects
 /// `CreatePartitions` with `INVALID_PARTITIONS` → status
 /// `Ready=False reason=BrokerError` referencing `CreatePartitions`.
 #[tokio::test]
@@ -743,7 +743,7 @@ async fn create_partitions_broker_error_surfaces_in_status() {
     assert!(msg.contains("INVALID_PARTITIONS"), "message {msg:?}");
 }
 
-/// Slice 35: topic matches spec but has a stale config override; broker
+/// topic matches spec but has a stale config override; broker
 /// rejects `IncrementalAlterConfigs` with `INVALID_CONFIG` → status
 /// `Ready=False reason=BrokerError`.
 #[tokio::test]
@@ -784,7 +784,7 @@ async fn incremental_alter_configs_broker_error_surfaces_in_status() {
     assert!(msg.contains("INVALID_CONFIG"), "message {msg:?}");
 }
 
-/// Slice 35: `describe_configs` returns `AdminError::Broker` → the
+/// `describe_configs` returns `AdminError::Broker` → the
 /// reconcile logs + requeues 15s WITHOUT updating status.
 #[tokio::test]
 async fn describe_configs_broker_error_requeues_without_status_update() {
@@ -836,7 +836,7 @@ async fn describe_configs_broker_error_requeues_without_status_update() {
     );
 }
 
-/// Slice 35: `DeleteTopics` fails during finalizer cleanup with a broker
+/// `DeleteTopics` fails during finalizer cleanup with a broker
 /// error → the finalizer is STILL removed (best-effort path); the
 /// `DeleteTopics` call is still observed in the fake's call log.
 #[tokio::test]
@@ -893,7 +893,7 @@ async fn delete_topics_broker_error_during_finalizer_does_not_block_cleanup() {
     assert_eq!(body["metadata"]["finalizers"], serde_json::json!([]));
 }
 
-/// Slice 35 (T3-fix): a Transport error on `metadata` → reconcile
+/// A Transport error on `metadata` → reconcile
 /// requeues 15s, issues NO status patch, and EVICTS the cached admin
 /// client (so the next reconcile reopens the connection).
 #[tokio::test]
@@ -934,7 +934,7 @@ async fn metadata_transport_error_requeues_and_evicts_admin_client() {
     );
 }
 
-/// Slice 35: deletionTimestamp set, preserveTopic=true → no `DeleteTopics`
+/// deletionTimestamp set, preserveTopic=true → no `DeleteTopics`
 /// call, finalizer still removed.
 #[tokio::test]
 async fn delete_with_preserve_topic_skips_delete_topics() {

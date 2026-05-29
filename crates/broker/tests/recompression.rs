@@ -2,7 +2,7 @@
 // upstream bug as `tests/compaction.rs` / `tests/mtls.rs`).
 #![allow(clippy::pedantic)]
 
-//! Slice 67 — broker-side recompression.
+//! Broker-side recompression.
 //!
 //! Produces a gzip-compressed batch to a topic configured with
 //! `compression.type=lz4`, fetches it back, and asserts the served
@@ -11,8 +11,8 @@
 //! round-trip intact (gzip-decompressed on the broker, lz4-compressed,
 //! lz4-decompressed by the client).
 //!
-//! Gated to non-Windows to match the multi-broker test convention from
-//! slices 10b/12b/14/15/18 and the slice-18 compaction test.
+//! Gated to non-Windows to match the multi-broker test convention used
+//! by the other replication and compaction tests.
 
 #![cfg(not(target_os = "windows"))]
 
@@ -215,7 +215,8 @@ async fn fetch_first_batch(addr: SocketAddr, topic: &str, topic_id: Uuid) -> Rec
     assert_eq!(part.error_code, 0, "Fetch error: {}", part.error_code);
     part.records
         .as_ref()
-        .and_then(|p| p.as_v2().cloned())
+        .and_then(|p| p.as_v2())
+        .and_then(|batches| batches.first().cloned())
         .expect("Fetch returned at least one v2 batch")
 }
 
@@ -253,7 +254,7 @@ async fn topic_compression_lz4_recompresses_producer_gzip_batch() {
     wait_for_compression(&handle, TOPIC, Some(CompressionType::Lz4)).await;
 
     let topic_id = get_topic_id(addr, TOPIC).await;
-    let payload = b"slice-67 broker-side recompression smoke";
+    let payload = b"broker-side recompression smoke";
     produce_gzip(addr, TOPIC, topic_id, payload).await;
 
     let served = fetch_first_batch(addr, TOPIC, topic_id).await;

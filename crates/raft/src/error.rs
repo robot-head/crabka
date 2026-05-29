@@ -14,6 +14,9 @@ pub enum RaftError {
     #[error("protocol: {0}")]
     Protocol(#[from] crabka_protocol::ProtocolError),
 
+    #[error("records: {0}")]
+    Records(#[from] crabka_protocol::records::RecordsError),
+
     #[error("metadata: {0}")]
     Metadata(#[from] crabka_metadata::MetadataError),
 
@@ -28,6 +31,15 @@ pub enum RaftError {
 
     #[error("change rejected: {0}")]
     ChangeRejected(String),
+
+    #[error("reconfiguration rejected: {0}")]
+    ReconfigRejected(String),
+
+    #[error("a reconfiguration is already in progress")]
+    ReconfigInProgress,
+
+    #[error("voter {id} is not a caught-up observer (lag {lag})")]
+    VoterNotCaughtUp { id: NodeId, lag: u64 },
 
     #[error("serialization: {0}")]
     SerdeFailed(#[from] wincode::error::WriteError),

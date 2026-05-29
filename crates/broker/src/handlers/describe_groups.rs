@@ -37,7 +37,7 @@ pub(crate) async fn handle(
 
     let mut groups: Vec<DescribedGroup> = Vec::with_capacity(req.groups.len());
     for gid in req.groups {
-        // ── slice-13 ACL preamble ────────────────────────────────────
+        // ── ACL preamble ────────────────────────────────────
         // Per-group `Describe` check. On Deny → per-group
         // `error_code = GROUP_AUTHORIZATION_FAILED (30)`.
         let acl_req = AuthorizationRequest {

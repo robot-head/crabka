@@ -16,7 +16,7 @@ enum Command {
     Run(RunArgs),
     /// Emit CRD YAML manifests to a directory.
     GenCrds { out_dir: std::path::PathBuf },
-    /// Slice 30: scan all (or one namespace's) Kafka CRs and reissue any
+    /// Scan all (or one namespace's) Kafka CRs and reissue any
     /// broker leaf certs within renewalDays of expiry. Designed to be
     /// driven by the `CronJob` shipped in the operator Helm chart.
     CaRenewalCheck(CaRenewalCheckArgs),

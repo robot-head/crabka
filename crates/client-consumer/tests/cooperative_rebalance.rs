@@ -162,26 +162,52 @@ async fn cooperative_transparent_to_poll() {
         produce_to_partition(&producer, "cooppoll", p, &[&format!("b{p}")]).await;
     }
 
-    // Start m2 mid-stream — triggers a rebalance. Concurrently keep polling m1.
+    // m1 (sole owner of all 4 partitions) consumes the entire second wave
+    // *before* any rebalance. This is the scenario the revoke-time commit
+    // protects: m1 advances past `b0..b3`, so when a partition is later
+    // handed to m2 the committed position must prevent re-delivery.
+    let deadline_second_wave = Instant::now() + Duration::from_secs(15);
+    let mut m1_second_wave: HashSet<String> = HashSet::new();
+    while m1_second_wave.len() < 4 && Instant::now() < deadline_second_wave {
+        let recs = m1.poll(Duration::from_millis(200)).await.expect("m1 poll");
+        for r in recs {
+            let v = value_string(r.value.as_ref());
+            if v.starts_with('b') {
+                m1_second_wave.insert(v);
+            }
+            received
+                .get_mut("m1")
+                .unwrap()
+                .insert((r.partition, r.offset));
+        }
+    }
+    assert_eq!(
+        m1_second_wave.len(),
+        4,
+        "m1 consumed all 4 second-wave msgs"
+    );
+
+    // Start m2 — triggers a cooperative rebalance that moves two partitions
+    // off m1. m1 keeps polling so its coordinator can complete the rejoin;
+    // poll() must never surface a rebalance-specific error (KIP-429
+    // transparency guarantee).
     let bootstrap2 = bootstrap.clone();
     let m2_handle = tokio::spawn(async move {
         build_cooperative_consumer(&bootstrap2, "poll-grp", "m2", "cooppoll").await
     });
+    let mut m2 = m2_handle.await.expect("m2 builder task");
 
-    // Continue polling m1 for up to 15s; m1.poll() must never raise a
-    // `CommitInvalid` / `RebalanceFailed` (the KIP-429 "transparent
-    // rebalance" guarantee). Transient transport-layer errors are
-    // tolerated — a real cooperative client would just retry.
-    let deadline = Instant::now() + Duration::from_secs(15);
-    let mut m1_second_wave: HashSet<String> = HashSet::new();
-    while Instant::now() < deadline {
-        match m1.poll(Duration::from_millis(500)).await {
+    // Let the group settle: m1 sheds two partitions, m2 acquires them.
+    // Once m2 owns its partitions the leader has completed phase 2, which
+    // is sequenced *after* m1's revoke-time commit — so m2 primes from the
+    // committed position rather than from zero.
+    let settle_deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        // Keep m1 polling during the wait; ignore transient errors but
+        // still fail on rebalance-specific ones.
+        match m1.poll(Duration::from_millis(200)).await {
             Ok(recs) => {
                 for r in recs {
-                    let v = value_string(r.value.as_ref());
-                    if v.starts_with('b') {
-                        m1_second_wave.insert(v);
-                    }
                     received
                         .get_mut("m1")
                         .unwrap()
@@ -191,27 +217,30 @@ async fn cooperative_transparent_to_poll() {
             Err(
                 crabka_client_consumer::ConsumerError::CommitInvalid
                 | crabka_client_consumer::ConsumerError::RebalanceFailed(_),
-            ) => {
-                panic!("m1.poll surfaced a rebalance-specific error — KIP-429 violation");
-            }
-            Err(e) => {
-                // Transient transport error (e.g. fetch timeout while the
-                // broker is mid-rebalance). Backoff briefly and retry.
-                tracing::warn!(error = %e, "m1.poll transient error");
-                tokio::time::sleep(Duration::from_millis(200)).await;
-            }
+            ) => panic!("m1.poll surfaced a rebalance-specific error — KIP-429 violation"),
+            Err(_) => {}
         }
+        let m1_n = m1.assignment().await.len();
+        let m2_n = m2.assignment().await.len();
+        if m1_n == 2 && m2_n == 2 {
+            break;
+        }
+        assert!(
+            Instant::now() < settle_deadline,
+            "group did not settle to 2+2 (m1={m1_n} m2={m2_n})"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
-    let mut m2 = m2_handle.await.expect("m2 builder task");
-
-    // Drain m2 for any straggler messages from its newly-assigned partitions.
+    // Drain m2 for up to 10s. With the revoke-time commit in place m2 primes
+    // its two partitions at m1's committed offset (past `b*`), so it must
+    // deliver *none* of the second-wave messages. Re-delivery here means the
+    // commit was lost — a regression.
     let drain_deadline = Instant::now() + Duration::from_secs(10);
     let mut m2_second_wave: HashSet<String> = HashSet::new();
     while Instant::now() < drain_deadline {
         let recs = m2.poll(Duration::from_millis(200)).await.expect("m2 poll");
-        if recs.is_empty() && !m2_second_wave.is_empty() {
-            // Got something earlier; no more left — done.
+        if recs.is_empty() {
             break;
         }
         for r in recs {
@@ -224,28 +253,20 @@ async fn cooperative_transparent_to_poll() {
                 .unwrap()
                 .insert((r.partition, r.offset));
         }
-        if m1_second_wave.len() + m2_second_wave.len() >= 4 {
-            break;
-        }
     }
 
-    // Validate union of second-wave deliveries covers all 4 b-messages, no duplicates.
-    let mut all_second_wave: HashSet<String> = HashSet::new();
-    for v in m1_second_wave.iter().chain(m2_second_wave.iter()) {
-        all_second_wave.insert(v.clone());
-    }
+    // No message loss: m1 delivered the whole second wave.
     assert_eq!(
-        all_second_wave.len(),
+        m1_second_wave.len(),
         4,
-        "all 4 second-wave messages delivered (m1={m1_second_wave:?} m2={m2_second_wave:?})"
+        "all 4 second-wave messages delivered by m1 (m1={m1_second_wave:?})"
     );
-    // Cross-check: each second-wave value appears in at most one consumer.
+    // No re-delivery: each second-wave value appears in at most one consumer.
     let m1_inter_m2: HashSet<_> = m1_second_wave.intersection(&m2_second_wave).collect();
     assert!(
         m1_inter_m2.is_empty(),
         "no duplicate deliveries across consumers: {m1_inter_m2:?}"
     );
-
     m1.close().await.unwrap();
     m2.close().await.unwrap();
     broker.shutdown().await;
@@ -394,6 +415,13 @@ async fn build_cooperative_consumer(
     client_id: &str,
     topic: &str,
 ) -> Consumer {
+    // 500ms heartbeats keep cascading-rebalance round-trips well inside the
+    // broker's 3s INITIAL_REBALANCE_DELAY wait: detect-via-heartbeat (≤500ms)
+    // + rejoin-on-next-tick (≤500ms) = ≤1s, leaving ~2s of headroom for
+    // scheduler jitter on busy CI runners. With the 1s heartbeat that lived
+    // here previously, the detect+rejoin worst case was ~2s and could blow
+    // past the broker's wait under macOS-CI contention, causing the leader
+    // to compute the next round with stale member metadata.
     Consumer::builder()
         .bootstrap(bootstrap)
         .client_id(client_id)
@@ -401,7 +429,7 @@ async fn build_cooperative_consumer(
         .assignor(Assignor::CooperativeSticky)
         .session_timeout(Duration::from_secs(30))
         .rebalance_timeout(Duration::from_secs(2))
-        .heartbeat_interval(Duration::from_secs(1))
+        .heartbeat_interval(Duration::from_millis(500))
         .auto_offset_reset(AutoOffsetReset::Earliest)
         .subscribe([topic.to_string()])
         .build()

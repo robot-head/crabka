@@ -5,8 +5,8 @@
 //! `Broker::start` by replaying those partitions.
 
 // `is_coordinator_for`, `get`, `put`, and `TxnCoordinator` itself are
-// consumed by Phase-D handlers (Tasks 11-16). Remove this attribute once
-// those tasks land.
+// consumed by the transaction wire handlers. Remove this attribute once
+// those land.
 #![allow(dead_code)]
 
 use std::collections::HashSet;
@@ -28,8 +28,8 @@ use crate::txn::bootstrap;
 use crate::txn::partitioner::partition_for_tid;
 use crate::txn::state::TxnEntry;
 
-/// Per-broker transaction coordinator. Constructed in `Broker::start` (Task 10)
-/// and shared via `Arc` with Phase-D wire handlers.
+/// Per-broker transaction coordinator. Constructed in `Broker::start`
+/// and shared via `Arc` with the transaction wire handlers.
 pub(crate) struct TxnCoordinator {
     pub(crate) node_id: crabka_metadata::NodeId,
     pub(crate) partitions: Arc<DashMap<(String, i32), Arc<Partition>>>,
@@ -61,7 +61,7 @@ impl TxnCoordinator {
 
     /// Recompute which `__transaction_state` partitions this broker leads
     /// from the current `MetadataImage`. Called from `recover` and also
-    /// on every metadata change (Task 10 wires this).
+    /// on every metadata change.
     pub(crate) async fn refresh_leader_partitions(&self, image: &MetadataImage) {
         let mut set = HashSet::new();
         for p in image.partitions_of(bootstrap::TOPIC) {
@@ -158,7 +158,7 @@ impl TxnCoordinator {
     }
 
     /// Replay every locally-led `__transaction_state` partition into the
-    /// in-memory state map. Called from `Broker::start` (Task 10).
+    /// in-memory state map. Called from `Broker::start`.
     ///
     /// # Errors
     ///

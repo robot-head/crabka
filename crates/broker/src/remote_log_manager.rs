@@ -1,4 +1,4 @@
-//! `RemoteLogManager` — KIP-405 tiered-storage copy path (slice 48b).
+//! `RemoteLogManager` — KIP-405 tiered-storage copy path.
 //!
 //! Every `interval`, walks the partition registry and, for each partition
 //! where this broker is the leader and the topic has
@@ -26,7 +26,6 @@ use uuid::Uuid;
 
 use crabka_log::{LogConfig, SegmentExport};
 use crabka_metadata::NodeId;
-use crabka_raft::ControllerHandle;
 use crabka_remote_storage::{
     LogSegmentData, RemoteLogMetadataManager, RemoteLogSegmentId, RemoteLogSegmentMetadata,
     RemoteLogSegmentMetadataUpdate, RemoteLogSegmentState, RemotePartitionDeleteMetadata,
@@ -53,7 +52,7 @@ impl Default for RemoteLogManagerConfig {
 #[allow(clippy::too_many_arguments)] // task dependencies; bundling would obscure them
 pub(crate) async fn run(
     partitions: Arc<DashMap<(String, i32), Arc<Partition>>>,
-    controller: Arc<ControllerHandle>,
+    controller: Arc<dyn crate::metadata_source::MetadataSource>,
     rsm: Arc<dyn RemoteStorageManager>,
     rlmm: Arc<dyn RemoteLogMetadataManager>,
     node_id: NodeId,
@@ -70,13 +69,13 @@ pub(crate) async fn run(
                 return;
             }
         }
-        tick_all(&partitions, &controller, &rsm, &rlmm, node_id, broker_id).await;
+        tick_all(&partitions, &*controller, &rsm, &rlmm, node_id, broker_id).await;
     }
 }
 
 async fn tick_all(
     partitions: &DashMap<(String, i32), Arc<Partition>>,
-    controller: &ControllerHandle,
+    controller: &dyn crate::metadata_source::MetadataSource,
     rsm: &Arc<dyn RemoteStorageManager>,
     rlmm: &Arc<dyn RemoteLogMetadataManager>,
     node_id: NodeId,
@@ -149,7 +148,7 @@ pub(crate) async fn copy_eligible(
     copied
 }
 
-/// Slice 48c: compute the highest `target` to pass to
+/// Compute the highest `target` to pass to
 /// [`crabka_log::Log::delete_local_segments_through`] given the
 /// partition's local sealed-segment exports and the per-topic
 /// local-retention settings. Returns `None` when nothing is deletable.
@@ -199,7 +198,7 @@ pub(crate) fn local_retention_target(
     delete_through_last.map(|last| last + 1)
 }
 
-/// Slice 48c: after the copy pass, drop local sealed segments whose
+/// After the copy pass, drop local sealed segments whose
 /// remote copy is `CopySegmentFinished` and that fall outside the
 /// per-topic local-retention window. Returns the count of segments
 /// physically removed from disk.
@@ -265,7 +264,7 @@ pub(crate) async fn local_retention_pass(
     }
 }
 
-/// Slice 48e (KIP-405): compute the set of finished remote segments whose
+/// KIP-405: compute the set of finished remote segments whose
 /// total-retention window has expired (by time or by size budget), in
 /// oldest-first order. Mirrors [`local_retention_target`]'s walk; **stops at
 /// the first non-deletable segment** so the remaining remote prefix stays
@@ -311,7 +310,7 @@ pub(crate) fn remote_retention_eviction_set(
     out
 }
 
-/// Slice 48e (KIP-405): evict remote segments past the topic's total
+/// KIP-405: evict remote segments past the topic's total
 /// retention window (`retention.ms` / `retention.bytes`). For each
 /// deletable segment, runs the lifecycle:
 /// `CopySegmentFinished` → `DeleteSegmentStarted` → RSM delete →
@@ -363,7 +362,7 @@ pub(crate) async fn remote_retention_pass(
     deleted
 }
 
-/// Slice 48e (KIP-405): cascade the
+/// KIP-405: cascade the
 /// [`DeletePartitionMarked` → `DeletePartitionStarted` →
 /// `DeletePartitionFinished`] lifecycle for `tp`, deleting every remote
 /// segment along the way. Run as a detached task from the `DeleteTopics`
@@ -1072,7 +1071,7 @@ mod tests {
         assert_eq!(removed_again, 0);
     }
 
-    // ── Slice 48e: remote-retention helper + cascade tests ────────────
+    // ── remote-retention helper + cascade tests ────────────
 
     fn synth_remote_md(
         id: u128,

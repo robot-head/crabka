@@ -6,6 +6,45 @@ fn broker_bin() -> std::path::PathBuf {
     std::path::PathBuf::from(exe)
 }
 
+/// Format a fresh standalone log directory via `crabka format`. KIP-853
+/// requires every node be formatted (it seeds `meta.properties.json` + the
+/// singleton `VotersRecord`) before `crabka-broker` will boot; an unformatted
+/// dir is treated as operator error and aborts startup.
+///
+/// `crabka` lives in the `crabka-cli` package, so its `CARGO_BIN_EXE_*` isn't
+/// exported to this crate's test env — shell out via `env!("CARGO")` like
+/// `bootstrap_consumption.rs` does. The `crabka-cli` dev-dep keeps it in the
+/// compile graph so this is a cache hit, not a rebuild.
+fn run_crabka_format(log_dir: &std::path::Path, node_id: u32, controller_listener: &str) {
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let out = Command::new(cargo)
+        .args([
+            "run",
+            "--quiet",
+            "-p",
+            "crabka-cli",
+            "--bin",
+            "crabka",
+            "--",
+            "format",
+            "--log-dir",
+            log_dir.to_str().unwrap(),
+            "--standalone",
+            "--node-id",
+            &node_id.to_string(),
+            "--controller-listener",
+            controller_listener,
+        ])
+        .output()
+        .expect("spawn crabka format");
+    assert!(
+        out.status.success(),
+        "crabka format failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+}
+
 #[test]
 fn help_mentions_cluster_id_and_advertised_listener() {
     let out = Command::new(broker_bin()).arg("--help").output().unwrap();
@@ -34,7 +73,7 @@ fn version_returns_zero() {
     assert!(out.status.success());
 }
 
-/// Slice 25a: boot `crabka-broker` with `--config-file` pointing at a
+/// Boot `crabka-broker` with `--config-file` pointing at a
 /// minimal TOML and assert the process binds the listener declared in
 /// the file (port comes from the file, not from a CLI flag).
 #[test]
@@ -43,7 +82,11 @@ fn boots_with_config_file_listener() {
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let log_dir = tmp.path().join("data");
-    std::fs::create_dir_all(&log_dir).unwrap();
+
+    // KIP-853: the broker refuses to boot an unformatted log dir, so seed
+    // it first. `crabka format` creates the directory itself (it must be
+    // empty or non-existent), so don't pre-create it.
+    run_crabka_format(&log_dir, 1, "127.0.0.1:9093");
 
     // Pick an ephemeral port by binding briefly, then release it.
     let port = {

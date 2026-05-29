@@ -27,7 +27,7 @@ pub struct ScramServerExchange {
     username: String,
     credential: ScramCredential,
     state: State,
-    /// Slice 51 (KIP-48): when present, the `Done` arm yields this
+    /// KIP-48: when present, the `Done` arm yields this
     /// principal instead of one synthesized from `username`. Used by
     /// the delegation-token SCRAM fallback in
     /// `crabka_broker::network::auth::handle_authenticate_scram` so a
@@ -55,7 +55,7 @@ impl ScramServerExchange {
         }
     }
 
-    /// Slice 51 (KIP-48): variant of [`Self::new`] that stamps a
+    /// KIP-48: variant of [`Self::new`] that stamps a
     /// principal to be returned by the `Done` arm in place of one
     /// synthesized from `username`. Used by the delegation-token SCRAM
     /// fallback to surface the token's owner (e.g. `User:alice`) when
@@ -193,7 +193,7 @@ impl ScramServerExchange {
             return StepResult::Failed(AuthError::BadProof);
         }
         let server_final = format!("v={}", B64.encode(&server_signature));
-        // Slice 51 (KIP-48): prefer the override principal when set
+        // KIP-48: prefer the override principal when set
         // (delegation-token SCRAM fallback path). Otherwise build the
         // standard `User:<scram-username>` principal from the live
         // exchange state.

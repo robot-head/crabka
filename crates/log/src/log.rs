@@ -6,14 +6,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use crabka_protocol::records::RecordBatch;
+use bytes::{Bytes, BytesMut};
+use crabka_protocol::records::{HEADER_LEN, RecordBatch};
 
 use crate::config::LogConfig;
 use crate::error::LogError;
 use crate::leader_epoch_checkpoint::LeaderEpochCheckpoint;
 use crate::name;
 use crate::retention;
-use crate::segment::Segment;
+use crate::segment::{RawSegmentRead, Segment};
 use crate::txn_index::{AbortedTxn, TxnIndex};
 
 /// A Kafka-format log: a sorted collection of [`Segment`]s plus a single
@@ -38,11 +39,11 @@ pub struct Log {
     /// simulate retention-driven truncation in integration tests.
     log_start_override: Option<i64>,
 
-    /// Slice 48c (KIP-405): override for `local_log_start_offset()`. Tracks
+    /// Override for `local_log_start_offset()` (KIP-405). Tracks
     /// the local-only floor advanced by `delete_local_segments_through`.
-    /// In 48c this co-advances with `log_start_override`; the accessor
+    /// This co-advances with `log_start_override`; the accessor
     /// delegates to `log_start_offset()` so the two pointers remain a
-    /// single source of truth. They split in 48e.
+    /// single source of truth.
     local_log_start_override: Option<i64>,
 
     /// Last-Stable-Offset: the offset before the first record of any
@@ -79,8 +80,31 @@ pub struct ReadOutput {
     pub batches: Vec<RecordBatch>,
 }
 
-/// Slice 48b (KIP-405): a sealed segment described for tiered-storage
-/// offload. Carries the on-disk file paths plus the offset / timestamp /
+/// Verbatim, decode-free output of [`Log::read_raw`].
+#[derive(Debug, Clone)]
+pub struct RawRead {
+    /// Absolute offset of the first batch in [`Self::bytes`], or the
+    /// requested offset when no bytes were returned.
+    pub start_offset: i64,
+    /// Verbatim `.log` bytes — zero or more complete v2 batches, spanning
+    /// segment boundaries.
+    pub bytes: Bytes,
+    /// Length of [`Self::bytes`] in bytes.
+    pub total: usize,
+}
+
+impl RawRead {
+    fn empty(off: i64) -> Self {
+        Self {
+            start_offset: off,
+            bytes: Bytes::new(),
+            total: 0,
+        }
+    }
+}
+
+/// A sealed segment described for tiered-storage
+/// offload (KIP-405). Carries the on-disk file paths plus the offset / timestamp /
 /// size metadata and the leader-epoch ranges a `RemoteLogManager` needs to
 /// build remote-segment metadata. Produced by [`Log::tierable_segments`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,7 +140,7 @@ impl Log {
         let dir = dir.as_ref().to_path_buf();
         fs::create_dir_all(&dir)?;
 
-        // Slice 18: heal any orphaned compaction `.swap` files before
+        // Heal any orphaned compaction `.swap` files before
         // we scan the directory for segments.
         crate::recovery::swap_orphan_recover(&dir)?;
 
@@ -277,6 +301,17 @@ impl Log {
         0
     }
 
+    /// Total `.log` byte size across sealed and active segments. Read from
+    /// the segments' tracked logical size rather than a filesystem stat,
+    /// so it reflects buffered appends immediately and consistently across
+    /// platforms (a directory stat can lag an open, unflushed write handle
+    /// on some OSes).
+    #[must_use]
+    pub fn size_bytes(&self) -> u64 {
+        let sealed: u64 = self.segments.iter().map(|s| s.size_bytes()).sum();
+        sealed + self.active.as_ref().map_or(0, Segment::size_bytes)
+    }
+
     /// Last-Stable-Offset: the highest offset that consumers in
     /// `read_committed` isolation may see. Advances only when no
     /// transactions are in flight; held back at the first offset of any
@@ -312,8 +347,8 @@ impl Log {
     /// Return all aborted transactions from the active segment's
     /// `.txnindex` whose offset range overlaps `[start, end)`.
     ///
-    /// For the slice-9 MVP only the active segment's index is consulted
-    /// (older sealed segments' `.txnindex` files are not loaded into
+    /// Only the active segment's index is consulted (older sealed
+    /// segments' `.txnindex` files are not loaded into
     /// memory). The window `[fetch_offset, lso)` always falls within
     /// the active segment in practice because LSO can only advance past
     /// a committed/aborted marker, which lands in the same segment as
@@ -519,6 +554,86 @@ impl Log {
         })
     }
 
+    /// Like [`Log::read`] but returns verbatim wire bytes (no decode), walking
+    /// sealed segments then the active segment. Includes only batches with
+    /// `base_offset < limit_offset`, up to roughly `max_bytes` (≥ one batch).
+    pub fn read_raw(
+        &self,
+        fetch_offset: i64,
+        limit_offset: i64,
+        max_bytes: usize,
+    ) -> Result<RawRead, LogError> {
+        let log_start = self.log_start_offset();
+        if fetch_offset < log_start {
+            return Err(LogError::OffsetTooLow {
+                requested: fetch_offset,
+                log_start,
+            });
+        }
+        if fetch_offset >= limit_offset {
+            return Ok(RawRead::empty(fetch_offset));
+        }
+
+        let mut chunks: Vec<Bytes> = Vec::new();
+        let mut start_offset = fetch_offset;
+        let mut current = fetch_offset;
+        let mut remaining = max_bytes;
+        let mut got_first = false;
+
+        for seg in &self.segments {
+            if seg.last_offset() < current {
+                continue;
+            }
+            let r: RawSegmentRead =
+                seg.read_raw(current, limit_offset, remaining.max(HEADER_LEN))?;
+            if !r.is_empty() {
+                if !got_first {
+                    start_offset = r.start_offset;
+                    got_first = true;
+                }
+                remaining = remaining.saturating_sub(r.bytes.len());
+                current = r.last_offset + 1;
+                chunks.push(r.bytes);
+                if remaining == 0 || current >= limit_offset {
+                    break;
+                }
+            }
+        }
+
+        if (remaining > 0 || !got_first)
+            && current < limit_offset
+            && let Some(active) = &self.active
+            && current <= active.last_offset()
+        {
+            let r = active.read_raw(current, limit_offset, remaining.max(HEADER_LEN))?;
+            if !r.is_empty() {
+                if !got_first {
+                    start_offset = r.start_offset;
+                }
+                chunks.push(r.bytes);
+            }
+        }
+
+        let bytes = match chunks.len() {
+            0 => Bytes::new(),
+            1 => chunks.pop().expect("len==1"),
+            _ => {
+                let total: usize = chunks.iter().map(Bytes::len).sum();
+                let mut b = BytesMut::with_capacity(total);
+                for c in &chunks {
+                    b.extend_from_slice(c);
+                }
+                b.freeze()
+            }
+        };
+        let total = bytes.len();
+        Ok(RawRead {
+            start_offset,
+            bytes,
+            total,
+        })
+    }
+
     /// Truncate the log so no records at offset `>= offset` remain. Used
     /// by replication / leader election.
     pub fn truncate_to(&mut self, offset: i64) -> Result<(), LogError> {
@@ -661,7 +776,7 @@ impl Log {
     /// segment would otherwise be evicted we retain at least one.
     /// (Active-roll-on-age is a placeholder per the plan; skip it.)
     pub fn tick(&mut self, now: SystemTime) -> Result<(), LogError> {
-        // Slice 48c: tiered topics' segment lifecycle is owned by the RemoteLogManager.
+        // Tiered topics' segment lifecycle is owned by the RemoteLogManager.
         if self.config.read().unwrap().remote_storage_enable {
             return Ok(());
         }
@@ -695,18 +810,17 @@ impl Log {
         Ok(())
     }
 
-    /// Slice 48c (KIP-405): first absolute offset still present on this
-    /// broker's local disk. In 48c this delegates to
-    /// [`Log::log_start_offset`] — the two pointers co-advance until 48e
-    /// (remote-retention) lets them diverge.
+    /// First absolute offset still present on this
+    /// broker's local disk (KIP-405). This delegates to
+    /// [`Log::log_start_offset`] — the two pointers co-advance.
     #[must_use]
     pub fn local_log_start_offset(&self) -> i64 {
         self.log_start_offset()
     }
 
-    /// Slice 48c (KIP-405): physically delete every sealed segment whose
+    /// Physically delete every sealed segment whose
     /// `last_offset < target`, then bump both `log_start_override` and
-    /// `local_log_start_override` to `target`. The active segment is
+    /// `local_log_start_override` to `target` (KIP-405). The active segment is
     /// never touched. Returns the count of segments removed; a no-op
     /// (returns `Ok(0)`) when `target <= local_log_start_offset()`.
     ///
@@ -768,8 +882,8 @@ impl Log {
         Ok(removed)
     }
 
-    /// Slice 48b (KIP-405): describe every sealed segment for
-    /// tiered-storage offload. The active segment is never included — only
+    /// Describe every sealed segment for
+    /// tiered-storage offload (KIP-405). The active segment is never included — only
     /// sealed segments are immutable and safe to copy.
     ///
     /// `last_offset` is derived from the next segment's `base_offset` (the
@@ -916,6 +1030,101 @@ mod tests {
             });
         }
         b
+    }
+
+    fn test_log() -> (tempfile::TempDir, Log) {
+        let dir = tempdir().unwrap();
+        let log = Log::open(dir.path(), LogConfig::default()).unwrap();
+        (dir, log)
+    }
+
+    fn test_batch_at(_off: i64) -> RecordBatch {
+        // `Log::append` overwrites `base_offset`; one record per batch.
+        let mut b = RecordBatch {
+            base_offset: 0,
+            base_timestamp: 1_000,
+            max_timestamp: 1_000,
+            last_offset_delta: 0,
+            ..RecordBatch::default()
+        };
+        b.records.push(Record {
+            offset_delta: 0,
+            value: Some(Bytes::from("v")),
+            ..Default::default()
+        });
+        b
+    }
+
+    #[test]
+    fn log_read_raw_spans_and_is_byte_exact() {
+        let (dir, mut log) = test_log();
+        let mut wire = bytes::BytesMut::new();
+        for off in 0..4i64 {
+            let mut b = test_batch_at(off);
+            log.append(&mut b).unwrap();
+            b.encode(&mut wire).unwrap();
+        }
+        let wire = wire.freeze();
+        let log_end = log.log_end_offset();
+        let r = log.read_raw(0, log_end, 10 * 1024 * 1024).unwrap();
+        assert_eq!(r.start_offset, 0);
+        assert_eq!(r.total, wire.len());
+        assert_eq!(&r.bytes[..], &wire[..]);
+        drop(dir);
+    }
+
+    #[test]
+    fn log_read_raw_spans_multiple_segments() {
+        // A tiny `segment_bytes` forces a roll partway through, so the
+        // read must walk at least one sealed segment AND the active
+        // segment — exercising the multi-chunk `BytesMut` concat path
+        // that `log_read_raw_spans_and_is_byte_exact` (default ~1 GiB
+        // segments) never reaches.
+        let dir = tempdir().unwrap();
+        let config = LogConfig {
+            segment_bytes: 100, // tiny: roll after roughly each batch
+            ..LogConfig::default()
+        };
+        let mut log = Log::open(dir.path(), config).unwrap();
+
+        let n: i64 = 6;
+        let mut wire = bytes::BytesMut::new();
+        let mut expected_bases = Vec::new();
+        for off in 0..n {
+            let mut b = test_batch_at(off);
+            let base = log.append(&mut b).unwrap();
+            expected_bases.push(base);
+            b.encode(&mut wire).unwrap();
+        }
+        let wire = wire.freeze();
+
+        // The roll must actually have happened: at least one sealed
+        // segment plus the active segment.
+        assert!(
+            !log.segments.is_empty(),
+            "expected >=1 sealed segment (segment roll); got 0"
+        );
+        assert!(log.active.is_some());
+
+        let log_end = log.log_end_offset();
+        let r = log.read_raw(0, log_end, 10 * 1024 * 1024).unwrap();
+        assert_eq!(r.start_offset, 0);
+        assert_eq!(r.total, wire.len());
+        assert_eq!(
+            &r.bytes[..],
+            &wire[..],
+            "raw bytes must be byte-exact across the segment seam"
+        );
+
+        // Decode back to N batches with the expected base offsets.
+        let mut cur: &[u8] = &r.bytes;
+        let mut bases = Vec::new();
+        while !cur.is_empty() {
+            let b = crabka_protocol::records::RecordBatch::decode(&mut cur).unwrap();
+            bases.push(b.base_offset);
+        }
+        assert_eq!(bases, expected_bases);
+        drop(dir);
     }
 
     #[test]
@@ -1619,7 +1828,7 @@ mod tests {
         assert_eq!(leo1, leo2);
     }
 
-    // ---- Slice 48c (KIP-405): local-retention helpers ----
+    // ---- Local-retention helpers (KIP-405) ----
 
     /// Build a log rolled into several sealed segments under `dir`. Mirror
     /// of the `remote_log_manager` test helper, kept local to this module.

@@ -170,8 +170,8 @@ fn apply_movement(state: &mut ClusterState, m: &Movement) {
         // ISR: drop replicas that left the set; otherwise leave.
         p.isr.retain(|r| p.replicas.contains(r));
         // If the new leader isn't in ISR, add it (we assume the
-        // executor has caught up the replica; slice 43b's executor
-        // will gate on real ISR catch-up).
+        // executor has caught up the replica; the executor gates on
+        // real ISR catch-up).
         if !p.isr.contains(&p.leader) {
             p.isr.push(p.leader);
         }
@@ -380,8 +380,8 @@ mod tests {
 
     #[test]
     fn truncation_protects_hard_goal_movements() {
-        // Regression test for slice 43a review finding: prior to the
-        // priority-aware truncation, sort-then-truncate could drop
+        // Regression test: prior to the priority-aware truncation,
+        // sort-then-truncate could drop
         // hard-goal movements whose (topic, partition) sorted later
         // than soft-goal movements.
         //

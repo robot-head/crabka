@@ -18,7 +18,6 @@ async fn single_voter_create_topic_round_trip() {
     // Pin the controller listen addr to a real loopback port so the network
     // factory has something to dial when initialize wants to seed members.
     cfg.controller_listen_addr = "127.0.0.1:0".parse().unwrap();
-    cfg.voters = vec![(1, cfg.controller_listen_addr)];
 
     let controller = Controller::start(cfg).await.expect("controller start");
 
@@ -54,7 +53,6 @@ async fn single_voter_duplicate_topic_rejected() {
     let mut cfg = ControllerConfig::for_tests(1, dir.path().to_path_buf());
     cfg.election_timeout = Duration::from_millis(200);
     cfg.controller_listen_addr = "127.0.0.1:0".parse().unwrap();
-    cfg.voters = vec![(1, cfg.controller_listen_addr)];
     let controller = Controller::start(cfg).await.unwrap();
 
     let deadline = std::time::Instant::now() + Duration::from_mins(2);

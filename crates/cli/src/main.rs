@@ -1,4 +1,4 @@
-//! Crabka CLI. Slice 12: only the `format` subcommand exists.
+//! Crabka CLI. Only the `format` subcommand exists.
 
 use clap::{Parser, Subcommand};
 

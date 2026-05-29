@@ -27,7 +27,7 @@ use crabka_protocol::owned::offset_for_leader_epoch_request::{
     OffsetForLeaderEpochRequest, OffsetForLeaderPartition, OffsetForLeaderTopic,
 };
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
-use crabka_raft::{ControllerHandle, NodeId};
+use crabka_raft::NodeId;
 use crabka_security::ListenerProtocol;
 
 use crate::broker::spawn_partition;
@@ -71,12 +71,12 @@ pub(crate) struct Config {
     pub throttle_state: Arc<ThrottleState>,
     /// Controller handle used to read the current metadata image each
     /// Fetch round (for `follower.replication.throttled.replicas` lookup).
-    pub controller: Arc<ControllerHandle>,
+    pub controller: Arc<dyn crate::metadata_source::MetadataSource>,
     /// KIP-113 runtime offline-dir registry. Forwarded into
     /// `spawn_partition` so the per-partition writer can flip the
     /// owning dir offline on a segment-write / fsync failure.
     pub log_dir_status: crate::log_dir_status::LogDirRegistry,
-    /// Slice 48k: broker-wide metrics handle so the replicator can
+    /// Broker-wide metrics handle so the replicator can
     /// increment `replication_bytes_in` after a successful follower-
     /// side append.
     pub metrics: crate::metrics::BrokerMetrics,
@@ -289,7 +289,7 @@ enum LoopAction {
 }
 
 async fn handle_response(resp: &FetchResponse, cfg: &Config) -> LoopAction {
-    // Slice 8 only ever requests one (topic, partition) per Fetch.
+    // The replicator only ever requests one (topic, partition) per Fetch.
     // Match by either `topic` (v ≤ 12) or `topic_id` (v ≥ 13) so that
     // when the negotiated wire format drops the topic-name field
     // (KIP-516) we still find our partition. Without this fallback
@@ -311,19 +311,21 @@ async fn handle_response(resp: &FetchResponse, cfg: &Config) -> LoopAction {
 
     match part_resp.error_code {
         codes::NONE => {
-            if let Some(batch) = part_resp.records.as_ref().and_then(|p| p.as_v2()) {
-                let Some(entry) = cfg.partitions.get(&(cfg.topic.clone(), cfg.partition)) else {
-                    warn!(topic = %cfg.topic, partition = cfg.partition,
-                        "replicator: local partition vanished between fetches");
-                    return LoopAction::Continue;
-                };
-                // Capture byte count before the move into replicate_batch
-                // so the metrics update only fires on a successful append.
-                let batch_bytes = batch.encoded_len();
-                if let Err(e) = entry.value().replicate_batch(batch.clone()).await {
-                    warn!(error = %e, topic = %cfg.topic, partition = cfg.partition,
-                        "replicator: replicate_batch failed");
-                } else {
+            let Some(entry) = cfg.partitions.get(&(cfg.topic.clone(), cfg.partition)) else {
+                warn!(topic = %cfg.topic, partition = cfg.partition,
+                    "replicator: local partition vanished between fetches");
+                return LoopAction::Continue;
+            };
+            if let Some(batches) = part_resp.records.as_ref().and_then(|p| p.as_v2()) {
+                for batch in batches {
+                    // Capture byte count before the move into replicate_batch
+                    // so the metrics update only fires on a successful append.
+                    let batch_bytes = batch.encoded_len();
+                    if let Err(e) = entry.value().replicate_batch(batch.clone()).await {
+                        warn!(error = %e, topic = %cfg.topic, partition = cfg.partition,
+                            "replicator: replicate_batch failed");
+                        break;
+                    }
                     cfg.metrics.record_replication_in(
                         &cfg.topic,
                         cfg.partition,
@@ -331,6 +333,13 @@ async fn handle_response(resp: &FetchResponse, cfg: &Config) -> LoopAction {
                     );
                 }
             }
+            // KIP-392: record the leader's high watermark so consumer reads
+            // served from this follower are bounded correctly. Done on every
+            // successful response, including empty ones.
+            entry
+                .value()
+                .set_follower_hw(part_resp.high_watermark)
+                .await;
             LoopAction::Continue
         }
         codes::OFFSET_OUT_OF_RANGE => {

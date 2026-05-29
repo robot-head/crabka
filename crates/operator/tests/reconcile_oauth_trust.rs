@@ -1,5 +1,5 @@
 #![allow(clippy::doc_markdown, clippy::doc_lazy_continuation)]
-//! Integration tests for slice 50b — operator-managed
+//! Integration tests for operator-managed
 //! oauth-jwks-trust Secret lifecycle. Verifies the full reconcile path:
 //! source Secret reads, PEM concatenation, managed Secret upsert,
 //! failure-mode status conditions, and pod-template volume/mount.
@@ -649,7 +649,7 @@ async fn statefulset_mounts_oauth_jwks_trust_secret_when_trust_certs_present() {
         .unwrap_or_else(|| panic!("oauth-jwks-trust mount present; body = {body}"));
     assert_eq!(
         trust_mount["mountPath"], "/etc/crabka/oauth-jwks-trust",
-        "mount path is the slice-49c contract; body = {body}",
+        "mount path contract; body = {body}",
     );
     assert_eq!(
         trust_mount["readOnly"], true,

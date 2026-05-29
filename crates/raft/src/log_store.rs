@@ -4,11 +4,9 @@
 //! payload IS the serialized entry. Future KRaft-wire-compat work will
 //! revisit the record layout; today the wrapping is internal only.
 //!
-//! Slice-7 note: only the smoke tests and (in later tasks) `Controller`
-//! reach into this module, so the `dead_code` lint fires for the parts
-//! the trait impl alone doesn't consume from the lib crate root. The
-//! allow at module scope keeps the surface narrow while letting tests
-//! drive the inner helpers.
+//! Some inner helpers are reached only by tests and `Controller` rather
+//! than the trait impl, so a module-scoped `dead_code` allow keeps the
+//! surface narrow without per-item annotations.
 
 #![allow(dead_code)]
 
@@ -36,7 +34,8 @@ use crate::types::{NodeId, TypeConfig};
 /// entries cached until commit (and slightly past).
 #[derive(Debug, Default)]
 struct EntryCache {
-    /// Sorted by index. We never compact in slice 7 (snapshots deferred).
+    /// Sorted by index. `purge` drops entries at or below the snapshot's
+    /// last-included index once a checkpoint covers them.
     entries: BTreeMap<u64, Entry<TypeConfig>>,
     last_purged: u64,
 }
@@ -97,7 +96,13 @@ impl RaftLogStore {
             .map(|e| e.log_id)
     }
 
-    pub(crate) async fn read_range<R: RangeBounds<u64>>(&self, range: R) -> Vec<Entry<TypeConfig>> {
+    /// Authoritative on-disk byte size of the metadata log, read from the
+    /// log's tracked segment sizes rather than a directory stat.
+    pub(crate) async fn size_bytes(&self) -> u64 {
+        self.log.lock().await.size_bytes()
+    }
+
+    pub async fn read_range<R: RangeBounds<u64>>(&self, range: R) -> Vec<Entry<TypeConfig>> {
         self.cache
             .lock()
             .await
@@ -105,6 +110,20 @@ impl RaftLogStore {
             .range(range)
             .map(|(_, e)| e.clone())
             .collect()
+    }
+
+    /// Lowest log index currently retained in the store, or `0` if the
+    /// log is empty. Tracks raft log truncation/snapshotting; an observer
+    /// that has fallen behind this offset must rebuild from a snapshot.
+    pub async fn log_start_index(&self) -> u64 {
+        self.cache
+            .lock()
+            .await
+            .entries
+            .keys()
+            .next()
+            .copied()
+            .unwrap_or(0)
     }
 
     pub(crate) async fn append(&self, entries: Vec<Entry<TypeConfig>>) -> Result<(), RaftError> {
@@ -135,6 +154,23 @@ impl RaftLogStore {
         let mut log = self.log.lock().await;
         cache.entries.retain(|&k, _| k < since);
         log.truncate_to(i64::try_from(since).unwrap_or(i64::MAX))?;
+        Ok(())
+    }
+
+    /// Compact the log behind a snapshot: drop cached entries at or below
+    /// `index`, record `index` as the purged-through point, and advance
+    /// the on-disk log start offset to `index + 1` (the first retained
+    /// offset), physically deleting any sealed segment fully behind it.
+    pub(crate) async fn purge_upto(&self, index: u64) -> Result<(), RaftError> {
+        let mut cache = self.cache.lock().await;
+        let mut log = self.log.lock().await;
+        cache.entries.retain(|&k, _| k > index);
+        cache.last_purged = cache.last_purged.max(index);
+        // `delete_local_segments_through(first_retained)` both removes the
+        // sealed segments fully behind the snapshot AND advances the
+        // in-memory `log_start_offset` to the first retained offset.
+        let first_retained = i64::try_from(index).unwrap_or(i64::MAX).saturating_add(1);
+        log.delete_local_segments_through(first_retained)?;
         Ok(())
     }
 
@@ -190,12 +226,12 @@ impl RaftLogStorage<TypeConfig> for Arc<RaftLogStore> {
     async fn get_log_state(&mut self) -> Result<LogState<TypeConfig>, StorageError<NodeId>> {
         let last_log_id = self.last_log_id().await;
         let last_purged = self.last_purged().await;
-        // Slice 7: snapshots deferred. We never purge, so last_purged_log_id
-        // tracks only what truncate-from-below would do. Future snapshot
-        // work will restore precision.
+        // `last_purged` is the highest index purged through (inclusive), so
+        // `last_purged_log_id.index == last_purged`. The leader_id is lost
+        // by compaction; openraft only consumes the index here.
         let last_purged_log_id = (last_purged > 0).then(|| LogId {
             leader_id: openraft::LeaderId::new(0, 0),
-            index: last_purged - 1,
+            index: last_purged,
         });
         Ok(LogState {
             last_purged_log_id,
@@ -238,10 +274,10 @@ impl RaftLogStorage<TypeConfig> for Arc<RaftLogStore> {
             .map_err(|e| err_write(&e))
     }
 
-    async fn purge(&mut self, _log_id: LogId<NodeId>) -> Result<(), StorageError<NodeId>> {
-        // Slice 7: snapshots deferred, so purge is a no-op. Future snapshot
-        // work will compact the log behind the snapshot index.
-        Ok(())
+    async fn purge(&mut self, log_id: LogId<NodeId>) -> Result<(), StorageError<NodeId>> {
+        RaftLogStore::purge_upto(self, log_id.index)
+            .await
+            .map_err(|e| err_write(&e))
     }
 
     async fn get_log_reader(&mut self) -> Self::LogReader {
@@ -279,5 +315,66 @@ mod tests {
         }
         let store2 = RaftLogStore::open(dir_path).await.unwrap();
         assert_eq!(store2.last_log_id().await.unwrap().index, 1);
+    }
+
+    #[tokio::test]
+    async fn purge_advances_log_start_offset() {
+        let dir = TempDir::new().unwrap();
+        let mut store = Arc::new(RaftLogStore::open(dir.path().to_path_buf()).await.unwrap());
+        let entries: Vec<Entry<TypeConfig>> = (1..=5)
+            .map(|i| Entry {
+                log_id: LogId {
+                    leader_id: LeaderId::new(1, 1),
+                    index: i,
+                },
+                payload: EntryPayload::<TypeConfig>::Blank,
+            })
+            .collect();
+        RaftLogStore::append(&store, entries).await.unwrap();
+
+        RaftLogStorage::purge(
+            &mut store,
+            LogId {
+                leader_id: LeaderId::new(1, 1),
+                index: 3,
+            },
+        )
+        .await
+        .unwrap();
+
+        let state = RaftLogStorage::get_log_state(&mut store).await.unwrap();
+        assert_eq!(state.last_purged_log_id.map(|l| l.index), Some(3));
+        // Entries at or below the purge point are gone from the cache.
+        assert!(
+            store
+                .read_range(..)
+                .await
+                .iter()
+                .all(|e| e.log_id.index > 3)
+        );
+    }
+
+    #[tokio::test]
+    async fn read_range_and_log_start_index() {
+        let dir = TempDir::new().unwrap();
+        let store = RaftLogStore::open(dir.path().to_path_buf()).await.unwrap();
+        assert_eq!(store.log_start_index().await, 0);
+
+        let entries: Vec<Entry<TypeConfig>> = (1..=3)
+            .map(|i| Entry {
+                log_id: LogId {
+                    leader_id: LeaderId::new(1, 1),
+                    index: i,
+                },
+                payload: EntryPayload::<TypeConfig>::Blank,
+            })
+            .collect();
+        store.append(entries).await.unwrap();
+
+        assert_eq!(store.log_start_index().await, 1);
+        let got = store.read_range(2..=3).await;
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].log_id.index, 2);
+        assert_eq!(got[1].log_id.index, 3);
     }
 }

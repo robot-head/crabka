@@ -2,7 +2,7 @@
 // (same upstream bug as auth_handlers.rs / mtls.rs).
 #![allow(clippy::pedantic)]
 
-//! Slice 33 — TLS hot-reload.
+//! TLS hot-reload.
 //!
 //! Starts a broker with cert A, completes a handshake against it,
 //! overwrites the cert files with cert B, triggers

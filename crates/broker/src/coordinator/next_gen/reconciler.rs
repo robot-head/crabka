@@ -13,7 +13,7 @@ use super::group_state::GroupState;
 pub struct ReconcileInput {
     pub topic_id_by_name: HashMap<String, Uuid>,
     pub partitions_per_topic: HashMap<Uuid, i32>,
-    /// Slice 64b: per-`(topic_id, partition_index)` set of replica racks.
+    /// Per-`(topic_id, partition_index)` set of replica racks.
     /// Empty / missing entries mean "no rack data for this partition" —
     /// `UniformAssignor` then falls back to its non-rack-aware path.
     pub partition_racks: HashMap<(Uuid, i32), Vec<String>>,
@@ -215,7 +215,7 @@ mod tests {
         assert!(ids.contains(&t));
     }
 
-    // ── slice 64a-regex: subscribed_topic_regex resolution ───────────────────
+    // ── subscribed_topic_regex resolution ───────────────────
 
     fn input_with_topics(topics: &[(&str, i32)]) -> ReconcileInput {
         let mut topic_id_by_name = HashMap::new();

@@ -1,7 +1,7 @@
 //! openraft `RaftNetwork` over Kafka TCP framing using the existing
 //! `crabka-client-core::Connection`. One cached connection per peer.
 //!
-//! Slice-7 wire shape: `RequestHeader v2` (flexible) carries a Crabka-
+//! Wire shape: `RequestHeader v2` (flexible) carries a Crabka-
 //! private api key (1000 = `AppendEntries`, 1001 = `Vote`) at version 0.
 //! Bodies are encoded by [`crate::wire`] and travel as opaque bytes
 //! through [`crabka_client_core::Connection::raw_request`]. The response
@@ -11,24 +11,22 @@
 //! prefixed `Crabka` to avoid colliding with the openraft trait names
 //! when both are imported into the same scope.
 //!
-//! Slice-7 scope:
+//! Scope:
 //!
 //! - `AppendEntries`: full Raft semantics, except the `Conflict` /
 //!   `PartialSuccess` paths collapse onto `HigherVote` for now — the
 //!   v0 response codec only carries `success/term/last_log_index`, which
-//!   is enough to make progress in a healthy 3-node quorum. Task 13's
-//!   smoke test runs against three local nodes with no network faults,
-//!   so the simpler decoding is acceptable.
+//!   is enough to make progress in a healthy 3-node quorum with no
+//!   network faults.
 //! - `Vote`: full semantics with the caveat that the peer's
 //!   `last_log_id` is not returned (the v0 response carries only
 //!   `vote_granted` + `term`).
-//! - `InstallSnapshot`: not used — snapshots are deferred per
-//!   `state_machine.rs`. The trait method falls through to openraft's
-//!   default error.
+//! - `InstallSnapshot`: ships checkpoint chunks to a follower whose log
+//!   prefix has been compacted; the response carries the follower's
+//!   `vote` so the leader can detect a higher term.
 //!
-//! These limitations are intentional for slice 7; later slices can
-//! evolve `wire::Crabka*Response` without breaking the
-//! `RaftNetworkFactory` interface.
+//! `wire::Crabka*Response` can evolve to carry richer fields without
+//! breaking the `RaftNetworkFactory` interface.
 
 #![allow(dead_code)]
 
@@ -44,6 +42,7 @@ use openraft::raft::{
     VoteRequest, VoteResponse,
 };
 use openraft::{LogId, Vote};
+use tracing::warn;
 
 use crabka_client_core::{ClientError, Connection, ConnectionOptions};
 
@@ -57,7 +56,7 @@ use crate::types::{Node, NodeId, TypeConfig};
 /// `InterBrokerClient` (TLS + SASL) and injects it via
 /// [`ControllerConfig::dialer`]. When no dialer is injected, the
 /// factory falls back to a plain `Connection::connect(addr)` — the
-/// legacy PLAINTEXT path used by every pre-slice-12 test.
+/// PLAINTEXT path used when no TLS/SASL dialer is injected.
 #[async_trait::async_trait]
 pub trait OutboundDialer: Send + Sync {
     /// Open a `Connection` to the raft peer at `target` reachable on
@@ -74,7 +73,7 @@ pub trait OutboundDialer: Send + Sync {
 /// Default no-op dialer: opens a raw `TcpStream` via
 /// `Connection::connect`. Used when the broker hasn't injected a
 /// `InterBrokerClient`-backed dialer (legacy PLAINTEXT path).
-pub(crate) struct PlaintextDialer;
+pub struct PlaintextDialer;
 
 #[async_trait::async_trait]
 impl OutboundDialer for PlaintextDialer {
@@ -94,8 +93,8 @@ impl OutboundDialer for PlaintextDialer {
     }
 }
 use crate::wire::{
-    API_KEY_APPEND_ENTRIES, API_KEY_VOTE, CrabkaAppendEntriesRequest, CrabkaAppendEntriesResponse,
-    CrabkaLogEntry, CrabkaVoteRequest, CrabkaVoteResponse,
+    API_KEY_APPEND_ENTRIES, API_KEY_INSTALL_SNAPSHOT, API_KEY_VOTE, CrabkaAppendEntriesRequest,
+    CrabkaAppendEntriesResponse, CrabkaLogEntry, CrabkaVoteRequest, CrabkaVoteResponse,
 };
 
 /// Factory of per-peer `RaftNetwork` adapters. Maintains a `DashMap` of
@@ -153,9 +152,25 @@ impl openraft::network::RaftNetworkFactory<TypeConfig> for CrabkaRaftNetworkFact
     type Network = CrabkaRaftNetworkConn;
 
     async fn new_client(&mut self, target: NodeId, node: &Node) -> Self::Network {
+        // KIP-853 voter nodes carry their listener endpoints; openraft dials
+        // the CONTROLLER endpoint. A node with no resolvable controller
+        // endpoint yields an empty addr — `connect` then fails to parse it
+        // and surfaces `Unreachable`, which is the correct backoff behavior.
+        let addr = if let Some(a) = node.controller_addr() {
+            a.to_string()
+        } else {
+            warn!(
+                target_node = target,
+                directory_id = %node.directory_id,
+                endpoints = ?node.endpoints,
+                "raft node has no resolvable controller endpoint; connection will fail \
+                 and openraft will back off"
+            );
+            String::new()
+        };
         CrabkaRaftNetworkConn {
             target,
-            addr: node.addr.clone(),
+            addr,
             factory: self.clone(),
         }
     }
@@ -187,25 +202,50 @@ impl openraft::network::RaftNetwork<TypeConfig> for CrabkaRaftNetworkConn {
         decode_append_entries_resp(&resp_body, &rpc).map_err(|e| map_encode_err(&e))
     }
 
-    /// Snapshots are deferred in slice 7. The state machine's snapshot
-    /// methods return `Unsupported`, so openraft falls back to plain
-    /// append-entries replication. If the engine still calls this — e.g.,
-    /// to ship an explicit snapshot for a far-behind follower — we
-    /// surface a `Network` error so it logs + retries; in practice this
-    /// path stays cold since metadata logs are small in slice 7.
+    /// Ship one `InstallSnapshot` chunk to the peer: serialize `vote` +
+    /// `meta` as bincode, frame the chunk via [`crate::wire`], and decode
+    /// the peer's returned `vote`. A far-behind follower whose log prefix
+    /// has been compacted behind a checkpoint catches up through this
+    /// path rather than append-entries.
     async fn install_snapshot(
         &mut self,
-        _rpc: InstallSnapshotRequest<TypeConfig>,
+        rpc: InstallSnapshotRequest<TypeConfig>,
         _option: RPCOption,
     ) -> Result<
         InstallSnapshotResponse<NodeId>,
         RPCError<NodeId, Node, RaftError<NodeId, InstallSnapshotError>>,
     > {
-        let err = std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "install_snapshot is deferred in slice 7",
-        );
-        Err(RPCError::Network(NetworkError::new(&err)))
+        use serde_wincode::SerdeCompat;
+        use wincode::{Deserialize as _, Serialize as _};
+
+        let conn = self
+            .factory
+            .connect(self.target, &self.addr)
+            .await
+            .map_err(|e| RPCError::Unreachable(Unreachable::new(&e)))?;
+        let vote = <SerdeCompat<Vote<NodeId>>>::serialize(&rpc.vote).map_err(snapshot_net_err)?;
+        let meta = <SerdeCompat<openraft::SnapshotMeta<NodeId, Node>>>::serialize(&rpc.meta)
+            .map_err(snapshot_net_err)?;
+        let mut body = Vec::new();
+        crate::wire::CrabkaInstallSnapshotRequest {
+            vote: Bytes::from(vote),
+            meta: Bytes::from(meta),
+            offset: i64::try_from(rpc.offset).unwrap_or(i64::MAX),
+            data: Bytes::from(rpc.data),
+            done: rpc.done,
+        }
+        .encode_v0(&mut body)
+        .map_err(snapshot_net_err)?;
+        let resp_body = conn
+            .raw_request(API_KEY_INSTALL_SNAPSHOT, 0, Bytes::from(body))
+            .await
+            .map_err(|e| RPCError::Network(NetworkError::new(&e)))?;
+        let mut cur: &[u8] = &resp_body;
+        let resp = crate::wire::CrabkaInstallSnapshotResponse::decode_v0(&mut cur)
+            .map_err(snapshot_net_err)?;
+        let vote: Vote<NodeId> =
+            <SerdeCompat<Vote<NodeId>>>::deserialize(&resp.vote).map_err(snapshot_net_err)?;
+        Ok(InstallSnapshotResponse { vote })
     }
 
     async fn vote(
@@ -244,6 +284,16 @@ fn map_client_err(e: &ClientError) -> RPCError<NodeId, Node, RaftError<NodeId>> 
 /// transient so openraft logs + retries.
 fn map_encode_err(e: &CrabkaRaftError) -> RPCError<NodeId, Node, RaftError<NodeId>> {
     RPCError::Network(NetworkError::new(e))
+}
+
+/// Map a codec failure on the `InstallSnapshot` path to `Network`. The
+/// install path carries `InstallSnapshotError` in its `RPCError`, a
+/// different generic param than the append/vote mappers, so it needs its
+/// own helper.
+fn snapshot_net_err<E: std::error::Error + 'static>(
+    e: E,
+) -> RPCError<NodeId, Node, RaftError<NodeId, InstallSnapshotError>> {
+    RPCError::Network(NetworkError::new(&e))
 }
 
 fn encode_append_entries(rpc: &AppendEntriesRequest<TypeConfig>) -> Result<Bytes, CrabkaRaftError> {
@@ -303,7 +353,7 @@ fn encode_append_entries(rpc: &AppendEntriesRequest<TypeConfig>) -> Result<Bytes
 
 /// Decode an `AppendEntriesResponse`.
 ///
-/// Slice-7 mapping (see module doc for context):
+/// Response mapping (see module doc for context):
 ///
 /// - `success == true` => `Success`.
 /// - `success == false` and `resp.term > req_vote.term` => `HigherVote`

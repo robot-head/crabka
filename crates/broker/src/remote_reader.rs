@@ -1,4 +1,4 @@
-//! Slice 48d (KIP-405): remote read path. Wraps the broker's shared
+//! KIP-405: remote read path. Wraps the broker's shared
 //! [`RemoteStorageManager`] + [`RemoteLogMetadataManager`] pair and serves
 //! `Fetch` / `ListOffsets` requests for offsets that no longer have a local
 //! copy.
@@ -418,8 +418,8 @@ mod tests {
     // ── Integration tests against `LocalTieredStorage` +
     // ── `InmemoryRemoteLogMetadataManager`. These exercise the full RSM/RLMM
     // ── plumbing through `RemoteReader` (the actual SPI calls, not just
-    // ── helpers), using slice 48b's `copy_eligible` to populate the tier
-    // ── from a real `Log`.
+    // ── helpers), using the copy path's `copy_eligible` to populate the
+    // ── tier from a real `Log`.
 
     use crabka_log::{Log, LogConfig};
     use crabka_protocol::records::Record;
@@ -479,8 +479,8 @@ mod tests {
         let rlmm: Arc<dyn RemoteLogMetadataManager> =
             Arc::new(InmemoryRemoteLogMetadataManager::new());
         // Manually copy each segment as `CopySegmentStarted` →
-        // `CopySegmentFinished` (mirrors slice 48b's copy_eligible without
-        // the broker-side dependencies).
+        // `CopySegmentFinished` (mirrors the copy path's copy_eligible
+        // without the broker-side dependencies).
         for ex in &exports {
             let id = crabka_remote_storage::RemoteLogSegmentId::new(tp(), Uuid::new_v4());
             let epochs: BTreeMap<i32, i64> = if ex.leader_epochs.is_empty() {
@@ -501,8 +501,8 @@ mod tests {
             )
             .unwrap();
             rlmm.add_remote_log_segment_metadata(md.clone()).unwrap();
-            // Render the leader-epoch checkpoint the same way slice 48b does
-            // so `fetch_index(LeaderEpoch)` returns real bytes.
+            // Render the leader-epoch checkpoint the same way the copy path
+            // does so `fetch_index(LeaderEpoch)` returns real bytes.
             let mut s = String::from("0\n");
             let _ = writeln!(s, "{}", epochs.len());
             for (e, st) in &epochs {

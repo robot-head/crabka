@@ -1,8 +1,8 @@
 //! `ListOffsets` (`api_key=2`). Resolves the EARLIEST / LATEST sentinels
-//! using each partition's log. For tiered topics (KIP-405, slice 48d),
+//! using each partition's log. For tiered topics (KIP-405),
 //! EARLIEST and by-timestamp lookups consult the
 //! [`RemoteLogMetadataManager`](crabka_remote_storage::RemoteLogMetadataManager)
-//! so offsets that have been deleted locally by local-retention (48c) but
+//! so offsets that have been deleted locally by local-retention but
 //! still live in the remote tier are visible.
 //!
 //! Local-segment timestamp-index lookup (positive timestamps on non-tiered

@@ -1,6 +1,6 @@
 //! Inbound TLS + SASL handshake for the controller listener.
 //!
-//! Slice 12b. Mirror image of `network::client::InterBrokerClient`'s
+//! Mirror image of `network::client::InterBrokerClient`'s
 //! outbound auth flow. Reuses `network::auth::handle_handshake` +
 //! `handle_authenticate_*` state machines so the controller listener
 //! and data plane share one source of truth.
@@ -163,7 +163,7 @@ async fn run_inbound_sasl(
                     }
                     // The controller listener authenticates peer brokers, not
                     // token-bearing clients; OAUTHBEARER is a client mechanism
-                    // and is not offered for inter-broker auth (slice 49).
+                    // and is not offered for inter-broker auth.
                     SaslMechanism::OAuthBearer => {
                         return Err(RaftHandshakeError::Sasl(
                             "OAUTHBEARER is not supported on the controller listener".into(),

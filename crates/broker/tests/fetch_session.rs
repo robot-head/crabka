@@ -189,12 +189,13 @@ async fn new_session_then_incremental_filters_unchanged_partitions() {
     assert_eq!(r3.responses.len(), 1);
     assert_eq!(r3.responses[0].partitions.len(), 1);
     assert_eq!(r3.responses[0].partitions[0].partition_index, 0);
-    let batch = r3.responses[0].partitions[0]
+    let batches = r3.responses[0].partitions[0]
         .records
         .as_ref()
         .and_then(|p| p.as_v2())
         .expect("v2 records present");
-    assert_eq!(batch.records.len(), 5);
+    let total: usize = batches.iter().map(|b| b.records.len()).sum();
+    assert_eq!(total, 5);
 
     p.broker.shutdown().await;
 }
@@ -441,11 +442,12 @@ async fn sessionless_full_fetch_round_trip() {
     assert_eq!(r.error_code, 0);
     assert_eq!(r.session_id, 0, "sessionless → no allocation");
     assert_eq!(r.responses.len(), 1);
-    let batch = r.responses[0].partitions[0]
+    let batches = r.responses[0].partitions[0]
         .records
         .as_ref()
         .and_then(|p| p.as_v2())
         .expect("v2 records");
-    assert_eq!(batch.records.len(), 2);
+    let total: usize = batches.iter().map(|b| b.records.len()).sum();
+    assert_eq!(total, 2);
     p.broker.shutdown().await;
 }

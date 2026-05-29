@@ -319,12 +319,13 @@ async fn produce_then_fetch_round_trip() {
     assert_eq!(fresp.responses.len(), 1);
     let part = &fresp.responses[0].partitions[0];
     assert_eq!(part.error_code, 0);
-    let batch = part
+    let batches = part
         .records
         .as_ref()
         .and_then(|p| p.as_v2())
         .expect("v2 records must be present after produce");
-    assert_eq!(batch.records.len(), 3);
+    let total: usize = batches.iter().map(|b| b.records.len()).sum();
+    assert_eq!(total, 3);
 
     p.broker.shutdown().await;
 }

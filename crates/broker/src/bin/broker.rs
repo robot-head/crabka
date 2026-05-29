@@ -8,6 +8,21 @@ use clap::Parser;
 use crabka_broker::{BootstrapMode, Broker, BrokerConfig};
 use crabka_log::LogConfig;
 
+/// Parse `--process-roles` string values into `NodeRole`s.
+fn parse_roles_arg(roles: &[String]) -> Result<Vec<crabka_broker::config::NodeRole>, String> {
+    use crabka_broker::config::NodeRole;
+    roles
+        .iter()
+        .map(|r| match r.to_ascii_lowercase().as_str() {
+            "controller" => Ok(NodeRole::Controller),
+            "broker" => Ok(NodeRole::Broker),
+            other => Err(format!(
+                "unknown --process-roles value `{other}` (expected `controller` or `broker`)"
+            )),
+        })
+        .collect()
+}
+
 #[derive(Debug, Parser)]
 #[command(
     name = "crabka-broker",
@@ -57,6 +72,17 @@ struct Args {
     #[arg(long, default_value_t = 1)]
     broker_id: i32,
 
+    /// `KRaft` `process.roles`, comma-separated (`controller`, `broker`).
+    /// Defaults to the combined set when unset. The operator normally sets
+    /// this via the `[process]` section of `--config-file` instead.
+    #[arg(
+        long,
+        env = "CRABKA_PROCESS_ROLES",
+        value_delimiter = ',',
+        num_args = 0..
+    )]
+    process_roles: Vec<String>,
+
     /// Cluster UUID. Every broker in the same cluster must share this
     /// value. Set via env `CRABKA_CLUSTER_ID` from the operator
     /// (the `KafkaCluster` UID).
@@ -74,7 +100,7 @@ struct Args {
     )]
     metrics_listen_addr: String,
 
-    /// Slice 43e: partition disk-usage scan cadence, in seconds. `0`
+    /// Partition disk-usage scan cadence, in seconds. `0`
     /// disables the scanner entirely. The rebalancer's usage scraper
     /// reads the `partition_disk_bytes` gauge this populates.
     #[arg(
@@ -83,13 +109,30 @@ struct Args {
         default_value_t = 60
     )]
     partition_disk_scan_interval_secs: u64,
+
+    /// KIP-853: controller endpoints to discover the quorum leader at cold
+    /// start, comma-separated `host:port`. Used by joiner nodes (those
+    /// formatted without `--standalone` / `--initial-controllers`). Maps to
+    /// Kafka's `controller.quorum.bootstrap.servers`.
+    #[arg(
+        long,
+        env = "CRABKA_CONTROLLER_BOOTSTRAP_SERVERS",
+        value_delimiter = ',',
+        num_args = 0..
+    )]
+    controller_bootstrap_servers: Vec<SocketAddr>,
+
+    /// KIP-853: auto-join the quorum as a voter once caught up as an
+    /// observer. Maps to Kafka's `controller.quorum.auto.join.enable`.
+    #[arg(long, env = "CRABKA_CONTROLLER_AUTO_JOIN")]
+    controller_auto_join: bool,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
-    // Slice 42: install the tracing subscriber — stdout `fmt` plus an
+    // Install the tracing subscriber — stdout `fmt` plus an
     // optional OTLP export layer. OTLP stays off unless the environment
     // opts in (see `crabka_broker::telemetry`). Built here, inside the
     // tokio runtime, so the gRPC exporter captures the runtime handle.
@@ -135,6 +178,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         node_id,
         controller_listen_addr: controller_addr,
         controller_quorum_voters: vec![(node_id, controller_addr)],
+        bootstrap_servers: args.controller_bootstrap_servers,
+        // Placeholder — replaced from `meta.properties.json` (written by
+        // `crabka format`) once `log_dir` is resolved against the TOML.
+        directory_id: uuid::Uuid::nil(),
+        auto_join: args.controller_auto_join,
+        observer_lag_bound: 100,
         heartbeat_interval_ms: 3_000,
         heartbeat_timeout_ms: 9_000,
         replica_lag_time_max_ms: 30_000,
@@ -147,6 +196,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         partition_disk_scan_interval_secs: args.partition_disk_scan_interval_secs,
         ..BrokerConfig::default()
     };
+    if !args.process_roles.is_empty() {
+        config.roles = parse_roles_arg(&args.process_roles)?;
+    }
     if let Some(fc) = file_config {
         fc.apply_to(&mut config)?;
     }
@@ -155,8 +207,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // the difference between a fresh-pod Bootstrap and a rolled-pod
     // Rejoin against an existing PVC.
     config.bootstrap_mode = detect_bootstrap_mode(&config.log_dir);
+    // KIP-853: recover this replica's stable directory id, written by
+    // `crabka format`. Required for every formatted node; absence means the
+    // dir was never formatted, which is an operator error.
+    config.directory_id = crabka_broker::bootstrap::read_directory_id(&config.log_dir)?;
     tracing::info!(
         bootstrap_mode = ?config.bootstrap_mode,
+        directory_id = %config.directory_id,
         log_dir = %config.log_dir.display(),
         "selected bootstrap mode"
     );
@@ -218,6 +275,22 @@ mod tests {
     fn detect_bootstrap_when_log_dir_is_empty() {
         let dir = tempdir().unwrap();
         assert_eq!(detect_bootstrap_mode(dir.path()), BootstrapMode::Bootstrap);
+    }
+
+    #[test]
+    fn parse_roles_arg_maps_strings() {
+        assert_eq!(
+            parse_roles_arg(&["controller".to_string(), "broker".to_string()]).unwrap(),
+            vec![
+                crabka_broker::config::NodeRole::Controller,
+                crabka_broker::config::NodeRole::Broker
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_roles_arg_rejects_unknown() {
+        assert!(parse_roles_arg(&["nope".to_string()]).is_err());
     }
 
     #[test]

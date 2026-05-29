@@ -1,6 +1,6 @@
-//! Slice 51 (KIP-48): `CreateDelegationToken` (`api_key` 38).
+//! KIP-48: `CreateDelegationToken` (`api_key` 38).
 //!
-//! Per spec §1.2 (slice 51) + §1.2 (slice 51b act-as): caller must be
+//! Per spec §1.2 (including act-as): caller must be
 //! SASL-authenticated and NOT itself authenticated via a delegation
 //! token (KIP-48 forbids token-creating-token chains). Owner resolution:
 //!
@@ -8,8 +8,8 @@
 //!   empty/absent: owner = caller (self-mint).
 //! - If both are present + non-empty: caller must be a configured
 //!   super-user (per `broker.config.super_users`), and the owner becomes
-//!   the wire-specified `KafkaPrincipal`. Slice 51b restricts the type
-//!   to `"User"` (mTLS-DN owners deferred). Non-super-users get
+//!   the wire-specified `KafkaPrincipal`. The type is restricted
+//!   to `"User"` (mTLS-DN owners are not supported). Non-super-users get
 //!   `DELEGATION_TOKEN_AUTHORIZATION_FAILED` (65).
 //! - If exactly one is set: `INVALID_REQUEST` (42) — partial act-as is
 //!   never valid.
@@ -24,7 +24,6 @@ use std::hash::BuildHasher;
 use crabka_metadata::{DelegationTokenRecord, MetadataRecord};
 use crabka_protocol::owned::create_delegation_token_request::CreateDelegationTokenRequest;
 use crabka_protocol::owned::create_delegation_token_response::CreateDelegationTokenResponse;
-use crabka_raft::ControllerHandle;
 use crabka_security::{KafkaPrincipal, SecretBytes};
 
 use crate::network::auth::ConnectionAuth;
@@ -44,7 +43,7 @@ pub(crate) async fn handle<S: BuildHasher>(
     secret_key: Option<&SecretBytes>,
     max_lifetime_ms: i64,
     default_renew_period_ms: i64,
-    controller: &ControllerHandle,
+    controller: &dyn crate::metadata_source::MetadataSource,
     super_users: &HashSet<String, S>,
 ) -> CreateDelegationTokenResponse {
     let Some(secret_key) = secret_key else {
@@ -82,8 +81,8 @@ pub(crate) async fn handle<S: BuildHasher>(
             }
             let owner_type = req.owner_principal_type.as_deref().unwrap_or_default();
             let owner_name = req.owner_principal_name.as_deref().unwrap_or_default();
-            // Slice 51b restricts the act-as owner type to `User`
-            // (mTLS-DN owners deferred). Match Kafka's behavior of
+            // The act-as owner type is restricted to `User`
+            // (mTLS-DN owners are not supported). Match Kafka's behavior of
             // returning INVALID_REQUEST for unsupported types here
             // rather than authorization-failed — the request is
             // syntactically wrong, not unauthorized.
@@ -184,9 +183,9 @@ fn err_response(code: i16) -> CreateDelegationTokenResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crabka_raft::ControllerHandle;
     use crabka_security::{AuthMethod, Principal, SaslMechanism};
     use std::collections::HashSet;
-    use std::net::SocketAddr;
     use std::sync::Arc;
     use std::time::Duration;
     use tempfile::TempDir;
@@ -204,19 +203,11 @@ mod tests {
 
     /// Spin up a single-voter `Controller` for tests, wait for leader.
     async fn test_controller(log_dir: std::path::PathBuf) -> Arc<ControllerHandle> {
-        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let cfg = crabka_raft::ControllerConfig {
-            node_id: 1,
-            voters: vec![(1, addr)],
-            controller_listen_addr: addr,
-            log_dir,
             election_timeout: Duration::from_millis(200),
             heartbeat_interval: Duration::from_millis(50),
             client_id: "test".into(),
-            bootstrap_mode: crabka_raft::BootstrapMode::Bootstrap,
-            cluster_id: None,
-            dialer: None,
-            handshake: None,
+            ..crabka_raft::ControllerConfig::for_tests(1, log_dir)
         };
         let handle = Arc::new(crabka_raft::Controller::start(cfg).await.unwrap());
         let mut rx = handle.watch_leader();
@@ -261,7 +252,7 @@ mod tests {
             None,
             1_000,
             RENEW_24H_MS,
-            &controller,
+            &*controller,
             &empty_super_users(),
         )
         .await;
@@ -290,7 +281,7 @@ mod tests {
             Some(&secret),
             60_000,
             RENEW_24H_MS,
-            &controller,
+            &*controller,
             &empty_super_users(),
         )
         .await;
@@ -332,7 +323,7 @@ mod tests {
             Some(&secret),
             60_000,
             RENEW_24H_MS,
-            &controller,
+            &*controller,
             &empty_super_users(),
         )
         .await;
@@ -360,7 +351,7 @@ mod tests {
             Some(&secret),
             ceiling_ms,
             RENEW_24H_MS,
-            &controller,
+            &*controller,
             &empty_super_users(),
         )
         .await;
@@ -399,7 +390,7 @@ mod tests {
             Some(&secret),
             one_hour,
             RENEW_24H_MS,
-            &controller,
+            &*controller,
             &empty_super_users(),
         )
         .await;
@@ -434,7 +425,7 @@ mod tests {
             Some(&secret),
             seven_days,
             RENEW_24H_MS,
-            &controller,
+            &*controller,
             &empty_super_users(),
         )
         .await;
@@ -473,7 +464,7 @@ mod tests {
             Some(&secret),
             60_000,
             RENEW_24H_MS,
-            &controller,
+            &*controller,
             &empty_super_users(),
         )
         .await;
@@ -503,7 +494,7 @@ mod tests {
             Some(&secret),
             60_000,
             RENEW_24H_MS,
-            &controller,
+            &*controller,
             &super_users_with(&["admin"]),
         )
         .await;
@@ -511,8 +502,7 @@ mod tests {
         // Owner = the act-as target.
         assert_eq!(resp.principal_type, "User");
         assert_eq!(resp.principal_name, "alice");
-        // Requester = the caller (admin) — this is the slice-51b
-        // addition; slice-51 left these as empty strings.
+        // Requester = the caller (admin), set for act-as mints.
         assert_eq!(resp.token_requester_principal_type, "User");
         assert_eq!(resp.token_requester_principal_name, "admin");
         // Persisted owner matches the response owner.
@@ -547,7 +537,7 @@ mod tests {
             Some(&secret),
             60_000,
             RENEW_24H_MS,
-            &controller,
+            &*controller,
             &super_users_with(&["admin"]),
         )
         .await;
@@ -581,7 +571,7 @@ mod tests {
             Some(&secret),
             60_000,
             RENEW_24H_MS,
-            &controller,
+            &*controller,
             &super_users_with(&["admin"]),
         )
         .await;
@@ -600,7 +590,7 @@ mod tests {
             Some(&secret),
             60_000,
             RENEW_24H_MS,
-            &controller,
+            &*controller,
             &super_users_with(&["admin"]),
         )
         .await;
@@ -609,8 +599,8 @@ mod tests {
         controller.cancel().await;
     }
 
-    /// Spec §1.2: slice 51b only supports `User` as the act-as owner
-    /// type (mTLS-DN owners deferred). Any other type from a super-user
+    /// Spec §1.2: only `User` is supported as the act-as owner
+    /// type (mTLS-DN owners are not supported). Any other type from a super-user
     /// is `INVALID_REQUEST` (42) — the request is syntactically wrong,
     /// not unauthorized.
     #[tokio::test]
@@ -630,7 +620,7 @@ mod tests {
             Some(&secret),
             60_000,
             RENEW_24H_MS,
-            &controller,
+            &*controller,
             &super_users_with(&["admin"]),
         )
         .await;

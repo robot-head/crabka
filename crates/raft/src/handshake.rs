@@ -1,6 +1,6 @@
 //! Pluggable inbound handshake for the controller listener.
 //!
-//! Slice 12b. Lets the broker terminate TLS + SASL on every accepted
+//! Lets the broker terminate TLS + SASL on every accepted
 //! controller-listener connection before raft frames start flowing. The
 //! trait abstraction keeps `crabka-raft` free of any dependency on
 //! `crabka-broker` / `crabka-security`.

@@ -1,4 +1,4 @@
-//! Slice 53 (O3): integration tests for `Kafka.spec.authorization` —
+//! Integration tests for `Kafka.spec.authorization` —
 //! verifies the operator reconcile renders the `[authorization]` TOML
 //! block into the broker `ConfigMap` for both `simple` and `opa`
 //! variants.
@@ -78,7 +78,7 @@ fn broker_0_toml_from_observed(
 
 // ── test 1: type: opa renders [authorization] + [authorization.opa] ──────────
 
-/// Slice 53 (O3 test 1): a `Kafka` spec with `authorization: { type: opa,
+/// A `Kafka` spec with `authorization: { type: opa,
 /// url, superUsers: ["ANONYMOUS"] }` must produce a broker `ConfigMap`
 /// whose `broker-0.toml` data field carries the `[authorization]` block
 /// with `type = "opa"`, `super_users = ["ANONYMOUS"]`, and a nested
@@ -144,7 +144,7 @@ async fn kafka_with_opa_authorization_renders_correct_broker_toml() {
 
 // ── test 2: type: simple round-trips super_users ─────────────────────────────
 
-/// Slice 53 (O3 test 2): a `Kafka` spec with `authorization: { type:
+/// A `Kafka` spec with `authorization: { type:
 /// simple, superUsers: ["User:admin"] }` must produce a broker
 /// `ConfigMap` whose `broker-0.toml` carries `[authorization]` with
 /// `type = "simple"` and `super_users = ["User:admin"]`. No

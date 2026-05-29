@@ -3,7 +3,7 @@
 #![allow(clippy::unnecessary_unwrap)]
 #![allow(clippy::type_complexity)]
 
-//! Slice 16c. Broker-side integration tests for KIP-599 controller_mutation_rate.
+//! Broker-side integration tests for KIP-599 controller_mutation_rate.
 //!
 //! Tests:
 //! 1. `controller_mutation_rate_throttles_create_topics` — Set rate=2.0 for alice;
@@ -258,7 +258,7 @@ async fn drive_alter_client_quotas_sasl(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Wire drivers for CreateTopics and DeleteTopics — new for slice 16c.
+// Wire drivers for CreateTopics and DeleteTopics.
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Drive `CreateTopics` (api_key=19) over a SASL/PLAIN connection.
@@ -356,7 +356,7 @@ async fn controller_mutation_rate_throttles_create_topics() {
     .await;
 
     // Seed an ACL granting alice Cluster Create — this also disables the
-    // slice-13 compat shim (allow-all when no ACLs present in image).
+    // compat shim (allow-all when no ACLs present in image).
     let admin_acl = MetadataRecord::V1AccessControlEntry(AclEntry {
         resource_type: ResourceType::Cluster,
         resource_name: "kafka-cluster".into(),

@@ -1,4 +1,4 @@
-//! Slice 12b. Inbound raft listener auth tests.
+//! Inbound raft listener auth tests.
 //!
 //! These exercise the controller listener under `SaslPlaintext` and prove
 //! both inbound (broker A accepts auth'd raft frames from broker B) and
@@ -70,24 +70,30 @@ fn sasl_broker_config(
     cfg
 }
 
-/// Reserve two ephemeral loopback data-plane ports via bind-and-drop.
-async fn reserve_data_ports() -> [SocketAddr; 2] {
+/// Bind two ephemeral loopback controller listeners and return them
+/// alongside their addresses. The live listeners are handed to
+/// `Broker::start_with_controller_listener`, which adopts them directly
+/// instead of re-binding the address.
+///
+/// This defeats the bind-and-drop TOCTOU race: the classic pattern reads
+/// an ephemeral port then *drops* the probe socket before the broker
+/// re-binds it, leaving a window in which another process on the runner
+/// can claim the port — surfacing as `AddrInUse` from `Broker::start`.
+/// Keeping the socket bound and handing it over removes that window.
+async fn reserve_ctrl_listeners() -> ([SocketAddr; 2], [tokio::net::TcpListener; 2]) {
     let l0 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let l1 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let a0 = l0.local_addr().unwrap();
     let a1 = l1.local_addr().unwrap();
-    drop((l0, l1));
-    [a0, a1]
+    ([a0, a1], [l0, l1])
 }
 
-/// Reserve two ephemeral loopback controller ports via bind-and-drop.
-async fn reserve_ctrl_ports() -> [SocketAddr; 2] {
-    let l0 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let l1 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let a0 = l0.local_addr().unwrap();
-    let a1 = l1.local_addr().unwrap();
-    drop((l0, l1));
-    [a0, a1]
+/// Data-plane bind address for these tests: `127.0.0.1:0` lets the OS
+/// assign an ephemeral port at `Broker::start`, so there's no probe/drop
+/// gap to race on. Convergence here rides the controller listener; the
+/// data plane is never dialed, so the bound port is never read back.
+fn data_listen_addr() -> SocketAddr {
+    "127.0.0.1:0".parse().unwrap()
 }
 
 /// Boot two brokers with the supplied data-plane + controller listener
@@ -101,8 +107,7 @@ async fn start_two_brokers_with_controller_protocol(
     plain_pass: &str,
 ) -> (BrokerHandle, BrokerHandle, TempDir, TempDir) {
     init_tracing();
-    let data = reserve_data_ports().await;
-    let ctrl_addrs = reserve_ctrl_ports().await;
+    let (ctrl_addrs, [ctrl_l0, ctrl_l1]) = reserve_ctrl_listeners().await;
     let voters: Vec<(u64, SocketAddr)> = vec![(1, ctrl_addrs[0]), (2, ctrl_addrs[1])];
 
     let dir0 = TempDir::new().unwrap();
@@ -110,7 +115,7 @@ async fn start_two_brokers_with_controller_protocol(
 
     let cfg0 = sasl_broker_config(
         0,
-        data[0],
+        data_listen_addr(),
         ctrl,
         ctrl_addrs[0],
         &voters,
@@ -121,7 +126,7 @@ async fn start_two_brokers_with_controller_protocol(
     );
     let cfg1 = sasl_broker_config(
         1,
-        data[1],
+        data_listen_addr(),
         ctrl,
         ctrl_addrs[1],
         &voters,
@@ -131,10 +136,14 @@ async fn start_two_brokers_with_controller_protocol(
         plain_pass,
     );
 
-    let broker0 = Broker::start(cfg0).await.expect("start broker 0");
+    let broker0 = Broker::start_with_controller_listener(cfg0, Some(ctrl_l0))
+        .await
+        .expect("start broker 0");
 
     let cfg1_for_spawn = cfg1.clone();
-    let join = tokio::spawn(async move { Broker::start(cfg1_for_spawn).await });
+    let join = tokio::spawn(async move {
+        Broker::start_with_controller_listener(cfg1_for_spawn, Some(ctrl_l1)).await
+    });
 
     broker0
         .add_learner(2, ctrl_addrs[1])
@@ -193,8 +202,7 @@ async fn controller_listener_sasl_plaintext_rejects_mismatched_creds() {
     // Neither has the other's password, so inbound raft auth fails on
     // both sides. Expect they never converge.
     init_tracing();
-    let data = reserve_data_ports().await;
-    let ctrl_addrs = reserve_ctrl_ports().await;
+    let (ctrl_addrs, [ctrl_l1, ctrl_l2]) = reserve_ctrl_listeners().await;
     let voters: Vec<(u64, SocketAddr)> = vec![(1, ctrl_addrs[0]), (2, ctrl_addrs[1])];
 
     let dir1 = TempDir::new().unwrap();
@@ -202,7 +210,7 @@ async fn controller_listener_sasl_plaintext_rejects_mismatched_creds() {
 
     let c1 = sasl_broker_config(
         0,
-        data[0],
+        data_listen_addr(),
         ListenerProtocol::SaslPlaintext,
         ctrl_addrs[0],
         &voters,
@@ -213,7 +221,7 @@ async fn controller_listener_sasl_plaintext_rejects_mismatched_creds() {
     );
     let c2 = sasl_broker_config(
         1,
-        data[1],
+        data_listen_addr(),
         ListenerProtocol::SaslPlaintext,
         ctrl_addrs[1],
         &voters,
@@ -223,14 +231,18 @@ async fn controller_listener_sasl_plaintext_rejects_mismatched_creds() {
         "burgers",
     );
 
-    let b1 = Broker::start(c1).await.expect("start b1");
+    let b1 = Broker::start_with_controller_listener(c1, Some(ctrl_l1))
+        .await
+        .expect("start b1");
 
     // Spawn b2: its `Broker::start` will block waiting for a raft leader
     // (it's `Join` mode and will never see one because raft auth fails
     // on both sides). We don't await its `Broker::start` completion —
     // we just need its inbound listener up so b1 can attempt to dial it.
     let c2_for_spawn = c2.clone();
-    let b2_join = tokio::spawn(async move { Broker::start(c2_for_spawn).await });
+    let b2_join = tokio::spawn(async move {
+        Broker::start_with_controller_listener(c2_for_spawn, Some(ctrl_l2)).await
+    });
 
     // Give the brokers time to settle. With matched creds and add_learner +
     // change_membership, convergence happens within ~1s; here we don't call
@@ -251,10 +263,9 @@ async fn controller_listener_sasl_plaintext_rejects_mismatched_creds() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn controller_listener_plaintext_legacy_path_unchanged() {
     // Default `controller_listener_protocol = Plaintext` — no
-    // handshake injected. Two brokers converge as in slice 7.
+    // handshake injected. Two brokers converge over the plaintext path.
     init_tracing();
-    let data = reserve_data_ports().await;
-    let ctrl_addrs = reserve_ctrl_ports().await;
+    let (ctrl_addrs, [ctrl_l1, ctrl_l2]) = reserve_ctrl_listeners().await;
     let voters: Vec<(u64, SocketAddr)> = vec![(1, ctrl_addrs[0]), (2, ctrl_addrs[1])];
 
     let dir1 = TempDir::new().unwrap();
@@ -265,8 +276,8 @@ async fn controller_listener_plaintext_legacy_path_unchanged() {
     let mut c1 = BrokerConfig::for_tests(dir1.path().to_path_buf());
     c1.broker_id = 1;
     c1.node_id = 1;
-    c1.listen_addr = data[0];
-    c1.advertised_listener = data[0].to_string();
+    c1.listen_addr = data_listen_addr();
+    c1.advertised_listener = data_listen_addr().to_string();
     c1.controller_listen_addr = ctrl_addrs[0];
     c1.controller_quorum_voters = voters.clone();
     c1.bootstrap_mode = BootstrapMode::Bootstrap;
@@ -275,16 +286,20 @@ async fn controller_listener_plaintext_legacy_path_unchanged() {
     let mut c2 = BrokerConfig::for_tests(dir2.path().to_path_buf());
     c2.broker_id = 2;
     c2.node_id = 2;
-    c2.listen_addr = data[1];
-    c2.advertised_listener = data[1].to_string();
+    c2.listen_addr = data_listen_addr();
+    c2.advertised_listener = data_listen_addr().to_string();
     c2.controller_listen_addr = ctrl_addrs[1];
     c2.controller_quorum_voters = voters.clone();
     c2.bootstrap_mode = BootstrapMode::Join;
     c2.controller_listener_protocol = ListenerProtocol::Plaintext;
 
-    let b1 = Broker::start(c1).await.expect("start b1");
+    let b1 = Broker::start_with_controller_listener(c1, Some(ctrl_l1))
+        .await
+        .expect("start b1");
     let c2_for_spawn = c2.clone();
-    let join = tokio::spawn(async move { Broker::start(c2_for_spawn).await });
+    let join = tokio::spawn(async move {
+        Broker::start_with_controller_listener(c2_for_spawn, Some(ctrl_l2)).await
+    });
 
     b1.add_learner(2, ctrl_addrs[1])
         .await

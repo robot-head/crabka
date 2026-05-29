@@ -40,10 +40,10 @@ use crate::txn::partitioner::partition_for_tid;
 use crate::txn::state::{TopicPartition, TxnEntry, TxnState};
 use crate::txn::util::now_millis;
 
-/// Number of partitions in `__consumer_offsets`. Slice 5 bootstraps a
+/// Number of partitions in `__consumer_offsets`. Bootstrap creates a
 /// 1-partition topic (`OFFSETS_PARTITION = 0`), so all group-ids map to
-/// partition 0 for this slice. Document here so it's easy to wire up the
-/// 50-partition topology once we get there.
+/// partition 0. Documented here so it's easy to wire up the 50-partition
+/// topology once we get there.
 const OFFSETS_NUM_PARTITIONS: i32 = 1;
 
 pub(crate) async fn handle(
@@ -62,13 +62,13 @@ pub(crate) async fn handle(
     let req = EndTxnRequest::decode(&mut cur, version)?;
 
     // Refresh leader-partition view from the current metadata image
-    // before checking coordinator-ness (mirrors Task 12/13/14 pattern).
+    // before checking coordinator-ness.
     let image = controller.current_image();
     coord.refresh_leader_partitions(&image).await;
 
     let tid = req.transactional_id.as_str();
 
-    // ── slice-13 ACL preamble: Write on TransactionalId ─────────────
+    // ── ACL preamble: Write on TransactionalId ─────────────
     let tid_req = AuthorizationRequest {
         principal: ctx.principal,
         host: ctx.peer,
@@ -202,7 +202,7 @@ async fn dispatch_markers(
     }
 
     // Also add the `__consumer_offsets` partition for each transactional
-    // offset-commit group. Slice 5 uses a 1-partition `__consumer_offsets`
+    // offset-commit group. `__consumer_offsets` is currently a 1-partition
     // topic, so `partition_for_tid(group_id, 1)` always returns 0.
     for group_id in &entry.offset_commit_groups {
         let part_idx = partition_for_tid(group_id, OFFSETS_NUM_PARTITIONS);
@@ -252,13 +252,13 @@ async fn dispatch_markers(
 /// Send a `WriteTxnMarkersRequest` to a remote broker that leads one or more
 /// of the transaction's partitions.
 ///
-/// Opens a fresh TCP connection per call — adequate for slice 9's correctness
-/// goal. A connection pool can be added in slice 10+.
+/// Opens a fresh TCP connection per call — adequate for current correctness
+/// goals. A connection pool can be added later.
 ///
 /// ## Coordinator epoch
 ///
 /// Apache Kafka tracks a per-coordinator epoch that increments on each
-/// leadership change. Slice 9 defers leader-election-on-failure, so we
+/// leadership change. Leader-election-on-failure is not yet implemented, so we
 /// hard-code `coordinator_epoch = 0` here. Once coordinator failover is
 /// implemented the caller must supply the real epoch.
 async fn send_write_txn_markers(
@@ -309,9 +309,8 @@ async fn send_write_txn_markers(
             producer_epoch: entry.producer_epoch,
             transaction_result: marker_type == MarkerType::Commit,
             topics,
-            // Hard-coded to 0 for slice 9. Coordinator leader-change
-            // tracking (real epoch increment on failover) is deferred to
-            // slice 10+.
+            // Hard-coded to 0. Coordinator leader-change tracking (real
+            // epoch increment on failover) is not yet implemented.
             coordinator_epoch: 0,
             ..Default::default()
         }],

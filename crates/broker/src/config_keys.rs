@@ -2,7 +2,7 @@
 //!
 //! Eleven keys are recognized. Five propagate live to `Log.config`
 //! (`retention.ms`, `retention.bytes`, `segment.bytes`, `cleanup.policy`,
-//! `compression.type`), plus the slice-48c tiered-storage local-retention
+//! `compression.type`), plus the tiered-storage local-retention
 //! pair (`local.retention.ms`, `local.retention.bytes`). One is read by
 //! the produce hot path's pre-flight gate: `min.insync.replicas`
 //! (integers >= 1) — `acks=-1` produces against a partition whose ISR is
@@ -38,11 +38,11 @@ pub(crate) const MIN_INSYNC_REPLICAS: &str = "min.insync.replicas";
 /// `crate::leader_election::on_broker_dead` via
 /// [`MetadataImage::topic_config`].
 pub(crate) const UNCLEAN_LEADER_ELECTION_ENABLE: &str = "unclean.leader.election.enable";
-/// Slice 48b (KIP-405): per-topic tiered-storage opt-in.
+/// KIP-405: per-topic tiered-storage opt-in.
 pub(crate) const REMOTE_STORAGE_ENABLE: &str = "remote.storage.enable";
-/// Slice 48c (KIP-405): per-topic local-retention time window for tiered partitions.
+/// KIP-405: per-topic local-retention time window for tiered partitions.
 pub(crate) const LOCAL_RETENTION_MS: &str = "local.retention.ms";
-/// Slice 48c (KIP-405): per-topic local-retention size budget for tiered partitions.
+/// KIP-405: per-topic local-retention size budget for tiered partitions.
 pub(crate) const LOCAL_RETENTION_BYTES: &str = "local.retention.bytes";
 
 /// Validate a single key/value pair. `Err(reason)` carries an
@@ -179,7 +179,7 @@ pub(crate) fn apply_to_log_config(
             }
             LOCAL_RETENTION_MS => {
                 if let Ok(ms) = v.parse::<i64>() {
-                    // Per the slice-48c design: -2 (inherit) and -1 (unlimited)
+                    // -2 (inherit) and -1 (unlimited)
                     // both collapse to `None` — the greenfield simplification noted
                     // in the spec. >=0 maps to `Some(Duration::from_millis(n))`.
                     out.local_retention_ms = if ms < 0 {

@@ -1,5 +1,5 @@
 // Bespoke tests for the owned Produce wrappers (checks beyond default min/max).
-// Relocated from hand-written wrappers (sub-plan 1d, Task 1).
+// Relocated from hand-written wrappers.
 
 use bytes::BytesMut;
 use crabka_protocol::owned::produce_request::{MAX_VERSION, MIN_VERSION, ProduceRequest};

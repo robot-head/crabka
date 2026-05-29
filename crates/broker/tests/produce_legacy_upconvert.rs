@@ -1,4 +1,4 @@
-//! Slice 3 — Produce up-conversion from v0/v1 `MessageSet` to v2.
+//! Produce up-conversion from v0/v1 `MessageSet` to v2.
 //!
 //! The broker's Produce handler now accepts a `RecordsPayload::Legacy`
 //! arm: incoming v0/v1 `MessageSet` bytes are passed through
@@ -138,6 +138,7 @@ async fn produce_v1_message_set_is_upconverted_and_round_trips() {
         .records
         .as_ref()
         .and_then(|p| p.as_v2())
+        .and_then(<[_]>::first)
         .expect("Fetch returned a v2 batch");
     assert_eq!(batch.records.len(), 3);
     let values: Vec<&[u8]> = batch
