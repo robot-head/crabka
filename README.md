@@ -70,7 +70,7 @@ and `subscribed_topic_regex` are in tree; classic→next-gen group migration and
 the pluggable server-side assignor surface are still pending. Tiered storage
 (KIP-405) is partial: the `crabka-remote-storage-topic` (KIP-405 production
 RLMM) crate is in tree but not yet wired into the broker. Share groups /
-queues (KIP-932), SASL/GSSAPI (Kerberos), and dynamic KRaft quorum membership
+queues (KIP-932) and dynamic KRaft quorum membership
 (KIP-853) are not yet implemented. ZooKeeper mode and ZK→KRaft migration are
 deliberately out of scope — Crabka is KRaft-only.
 
@@ -88,7 +88,7 @@ Crabka is organized as a Rust workspace.
 | [`crabka-log`](crates/log) | Byte-compatible log segments, indexes, transaction index, compaction, retention |
 | [`crabka-metadata`](crates/metadata) | Versioned metadata records, immutable metadata image, ACL model |
 | [`crabka-raft`](crates/raft) | Metadata Raft quorum (`openraft` adapters + controller) |
-| [`crabka-security`](crates/security) | TLS (`rustls`), SASL/PLAIN, SASL/SCRAM-256/512, SASL/OAUTHBEARER, mTLS |
+| [`crabka-security`](crates/security) | TLS (`rustls`), SASL/PLAIN, SASL/SCRAM-256/512, SASL/OAUTHBEARER, SASL/GSSAPI, mTLS |
 
 ### Broker
 
@@ -232,7 +232,7 @@ implements it today. Legend: ✅ implemented · ⚠️ partial · ❌ not yet ·
 | mTLS client authentication | ✅ |
 | TLS cert hot-reload (non-disruptive rotation) | ✅ |
 | SASL re-authentication (KIP-368) | ✅ |
-| SASL/GSSAPI (Kerberos) | ❌ |
+| SASL/GSSAPI (Kerberos) | ✅ |
 | Delegation tokens (KIP-48 / KIP-373) | ✅ |
 
 ### Authorization
@@ -277,7 +277,7 @@ implements it today. Legend: ✅ implemented · ⚠️ partial · ❌ not yet ·
 | Persistent (PVC) + JBOD storage | ✅ |
 | Listeners: internal / NodePort / LoadBalancer | ✅ |
 | Listeners: Ingress / Route | ⚠️ |
-| Listener auth wiring (TLS / SCRAM) | ✅ |
+| Listener auth wiring (TLS / SCRAM / OAuth / Kerberos) | ✅ |
 | Cluster CA + clients CA generation & rotation | ✅ |
 | `KafkaUser` mTLS + SCRAM + ACLs + quotas | ✅ |
 | `KafkaTopic` reconciliation (create / alter / partitions) | ✅ |
@@ -416,7 +416,7 @@ KIPs. Legend: ✅ implemented · ⚠️ partial · ❌ not yet · ⛔ out of sco
 
 | KIP | Title | Status |
 |-----|-------|:------:|
-| [KIP-12](https://cwiki.apache.org/confluence/display/KAFKA/KIP-12) | SSL & SASL/Kerberos | ⚠️ |
+| [KIP-12](https://cwiki.apache.org/confluence/display/KAFKA/KIP-12) | SSL & SASL/Kerberos | ✅ |
 | [KIP-43](https://cwiki.apache.org/confluence/display/KAFKA/KIP-43) | SASL mechanism negotiation | ✅ |
 | [KIP-84](https://cwiki.apache.org/confluence/display/KAFKA/KIP-84) | SASL/SCRAM | ✅ |
 | [KIP-152](https://cwiki.apache.org/confluence/display/KAFKA/KIP-152) | SASL authentication failure diagnostics | ✅ |
