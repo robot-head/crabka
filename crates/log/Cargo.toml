@@ -23,7 +23,6 @@ crabka-protocol = { version = "0.1", path = "../protocol", default-features = fa
 crabka-compression = { version = "0.1", path = "../compression", default-features = false }
 bytes = { workspace = true }
 thiserror = { workspace = true }
-memmap2 = { workspace = true }
 tracing = { workspace = true }
 zerocopy = { workspace = true }
 

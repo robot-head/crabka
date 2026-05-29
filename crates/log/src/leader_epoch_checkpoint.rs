@@ -105,15 +105,20 @@ impl LeaderEpochCheckpoint {
     /// Returns -1 (`UNDEFINED_OFFSET`) if `epoch` is unknown.
     #[must_use]
     pub fn end_offset_for_epoch(&self, epoch: i32, log_end_offset: i64) -> i64 {
-        let mut sorted: Vec<EpochEntry> = self.entries.clone();
-        sorted.sort_by_key(|e| e.epoch);
-        let mut iter = sorted.iter().peekable();
-        while let Some(e) = iter.next() {
-            if e.epoch == epoch {
-                return iter.peek().map_or(log_end_offset, |next| next.start_offset);
-            }
+        if !self.entries.iter().any(|e| e.epoch == epoch) {
+            return -1;
         }
-        -1
+        // End of `epoch` is the start of the next-larger epoch. Higher
+        // epochs always carry higher start offsets, so the minimum start
+        // among epochs `> epoch` is that next epoch's start; if `epoch` is
+        // the latest, there is none and the end is the log end. No clone or
+        // sort — a single linear pass.
+        self.entries
+            .iter()
+            .filter(|e| e.epoch > epoch)
+            .map(|e| e.start_offset)
+            .min()
+            .unwrap_or(log_end_offset)
     }
 
     #[must_use]

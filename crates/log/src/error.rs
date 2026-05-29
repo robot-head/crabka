@@ -3,11 +3,7 @@
 use thiserror::Error;
 
 /// Errors returned by [`Log`](crate::Log) and [`Segment`](crate::Segment).
-///
-/// `#[non_exhaustive]` so additional variants can be added in patch
-/// releases without breaking downstream `match` arms.
 #[derive(Debug, Error)]
-#[non_exhaustive]
 pub enum LogError {
     /// An I/O operation against the filesystem failed.
     #[error("I/O: {0}")]
@@ -47,15 +43,6 @@ pub enum LogError {
         requested: i64,
         /// Current log start.
         log_start: i64,
-    },
-
-    /// A caller requested an offset at or past [`Log::log_end_offset`](crate::Log::log_end_offset).
-    #[error("offset {requested} >= log end {log_end}")]
-    OffsetTooHigh {
-        /// Offset the caller asked for.
-        requested: i64,
-        /// Current log end.
-        log_end: i64,
     },
 
     /// Encoding/decoding of a `RecordBatch` failed.

@@ -1,9 +1,8 @@
 //! `Log` — a sorted collection of `Segment`s with append/read/truncate.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::SystemTime;
 
 use bytes::{Bytes, BytesMut};
@@ -30,21 +29,17 @@ use crate::txn_index::{AbortedTxn, TxnIndex};
 pub struct Log {
     dir: PathBuf,
     config: std::sync::Arc<std::sync::RwLock<LogConfig>>,
-    segments: Vec<Arc<Segment>>,
+    segments: Vec<Segment>,
     active: Option<Segment>,
     /// Override for `log_start_offset()`. When `Some(n)`, the effective
     /// `log_start` is `max(derived_from_segments, n)`. Used by
     /// `trim_to_offset` (and in tests) to advance the log start pointer
     /// without physically deleting segments (active-segment case) or to
-    /// simulate retention-driven truncation in integration tests.
+    /// simulate retention-driven truncation in integration tests. KIP-405's
+    /// `local_log_start_offset` co-advances with this pointer, so
+    /// [`Log::local_log_start_offset`] delegates here — there is a single
+    /// source of truth.
     log_start_override: Option<i64>,
-
-    /// Override for `local_log_start_offset()` (KIP-405). Tracks
-    /// the local-only floor advanced by `delete_local_segments_through`.
-    /// This co-advances with `log_start_override`; the accessor
-    /// delegates to `log_start_offset()` so the two pointers remain a
-    /// single source of truth.
-    local_log_start_override: Option<i64>,
 
     /// Last-Stable-Offset: the offset before the first record of any
     /// in-flight transaction. Defaults to `log_end_offset()` when no
@@ -157,13 +152,13 @@ impl Log {
         base_offsets.sort_unstable();
         base_offsets.dedup();
 
-        let mut segments: Vec<Arc<Segment>> = Vec::with_capacity(base_offsets.len());
+        let mut segments: Vec<Segment> = Vec::with_capacity(base_offsets.len());
         let mut active: Option<Segment> = None;
         for (i, base) in base_offsets.iter().enumerate() {
             if i + 1 < base_offsets.len() {
                 let mut seg = Segment::open(&dir, *base)?;
                 seg.seal();
-                segments.push(Arc::new(seg));
+                segments.push(seg);
             } else {
                 active = Some(Segment::open_active(&dir, *base, config.validate_on_open)?);
             }
@@ -187,7 +182,6 @@ impl Log {
             segments,
             active: Some(active),
             log_start_override: None,
-            local_log_start_override: None,
             lso,
             pending: HashMap::new(),
             active_txn_index,
@@ -282,7 +276,6 @@ impl Log {
 
         // Clear the start override so the derived value takes over.
         self.log_start_override = None;
-        self.local_log_start_override = None;
 
         let new_active = Segment::create(&self.dir, new_base)?;
         self.active_txn_index = TxnIndex::open(new_active.txn_index_path())?;
@@ -308,7 +301,11 @@ impl Log {
     /// on some OSes).
     #[must_use]
     pub fn size_bytes(&self) -> u64 {
-        let sealed: u64 = self.segments.iter().map(|s| s.size_bytes()).sum();
+        let sealed: u64 = self
+            .segments
+            .iter()
+            .map(super::segment::Segment::size_bytes)
+            .sum();
         sealed + self.active.as_ref().map_or(0, Segment::size_bytes)
     }
 
@@ -492,7 +489,7 @@ impl Log {
             .take()
             .expect("active segment must exist before rolling");
         old.seal();
-        self.segments.push(Arc::new(old));
+        self.segments.push(old);
         let new_seg = Segment::create(&self.dir, new_base)?;
         self.active_txn_index = TxnIndex::open(new_seg.txn_index_path())?;
         self.active = Some(new_seg);
@@ -677,9 +674,7 @@ impl Log {
         // If no active segment, promote the last sealed one (if any) and
         // truncate it in place. Otherwise, create a fresh one at `offset`.
         if self.active.is_none() {
-            if let Some(last) = self.segments.pop() {
-                let mut seg =
-                    Arc::try_unwrap(last).expect("no outstanding readers during truncate");
+            if let Some(mut seg) = self.segments.pop() {
                 let rel = u32::try_from(offset - seg.base_offset())
                     .map_err(|_| LogError::BadSegmentName("offset overflow".into()))?;
                 seg.truncate_to_relative(rel)?;
@@ -739,7 +734,7 @@ impl Log {
         let next_bases: Vec<i64> = self
             .segments
             .iter()
-            .map(|s| s.base_offset())
+            .map(Segment::base_offset)
             .skip(1)
             .chain(std::iter::once(active_base))
             .collect();
@@ -753,8 +748,10 @@ impl Log {
             }
         }
 
+        let drop_set: HashSet<i64> = to_drop.iter().copied().collect();
+        self.segments
+            .retain(|s| !drop_set.contains(&s.base_offset()));
         for base in &to_drop {
-            self.segments.retain(|s| s.base_offset() != *base);
             let _ = retention::delete_segment_files(&self.dir, *base);
         }
 
@@ -764,7 +761,7 @@ impl Log {
         let new_log_start = self
             .segments
             .first()
-            .map_or(active_base, |s| s.base_offset());
+            .map_or(active_base, Segment::base_offset);
         if target > new_log_start {
             self.set_log_start_offset(target)?;
         }
@@ -780,7 +777,7 @@ impl Log {
         if self.config.read().unwrap().remote_storage_enable {
             return Ok(());
         }
-        let sealed_refs: Vec<&Segment> = self.segments.iter().map(AsRef::as_ref).collect();
+        let sealed_refs: Vec<&Segment> = self.segments.iter().collect();
         let active_size = self.active.as_ref().map_or(0, Segment::size_bytes);
 
         let cfg_guard = self.config.read().unwrap();
@@ -790,8 +787,9 @@ impl Log {
 
         // Union preserving order: time first (oldest first), then size.
         let mut to_evict: Vec<i64> = time_evict;
+        let mut seen: HashSet<i64> = to_evict.iter().copied().collect();
         for base in size_evict {
-            if !to_evict.contains(&base) {
+            if seen.insert(base) {
                 to_evict.push(base);
             }
         }
@@ -803,8 +801,9 @@ impl Log {
             to_evict.truncate(total_segments.saturating_sub(1));
         }
 
+        let evict: HashSet<i64> = to_evict.iter().copied().collect();
+        self.segments.retain(|s| !evict.contains(&s.base_offset()));
         for base in to_evict {
-            self.segments.retain(|s| s.base_offset() != base);
             let _ = retention::delete_segment_files(&self.dir, base);
         }
         Ok(())
@@ -849,11 +848,7 @@ impl Log {
     #[must_use]
     pub fn max_timestamp_offset_and_ts(&self) -> Option<(i64, i64)> {
         let mut best: Option<(i64, i64)> = None; // (timestamp, offset)
-        let candidates = self
-            .segments
-            .iter()
-            .map(AsRef::as_ref)
-            .chain(self.active.as_ref());
+        let candidates = self.segments.iter().chain(self.active.as_ref());
         for seg in candidates {
             if let Some((offset, ts)) = seg.offset_of_max_timestamp()
                 && best.is_none_or(|(best_ts, _)| ts > best_ts)
@@ -874,10 +869,10 @@ impl Log {
     }
 
     /// Physically delete every sealed segment whose
-    /// `last_offset < target`, then bump both `log_start_override` and
-    /// `local_log_start_override` to `target` (KIP-405). The active segment is
-    /// never touched. Returns the count of segments removed; a no-op
-    /// (returns `Ok(0)`) when `target <= local_log_start_offset()`.
+    /// `last_offset < target`, then advance `log_start_offset` to `target`
+    /// (KIP-405). The active segment is never touched. Returns the count of
+    /// segments removed; a no-op (returns `Ok(0)`) when
+    /// `target <= local_log_start_offset()`.
     ///
     /// The caller is responsible for verifying these segments are safely
     /// in the remote tier (`CopySegmentFinished`) before invoking this;
@@ -907,7 +902,7 @@ impl Log {
         let next_bases: Vec<i64> = self
             .segments
             .iter()
-            .map(|s| s.base_offset())
+            .map(Segment::base_offset)
             .skip(1)
             .chain(std::iter::once(active_base))
             .collect();
@@ -923,16 +918,16 @@ impl Log {
             .collect();
 
         let removed = to_drop.len();
+        let drop_set: HashSet<i64> = to_drop.iter().copied().collect();
+        self.segments
+            .retain(|s| !drop_set.contains(&s.base_offset()));
         for base in &to_drop {
-            self.segments.retain(|s| s.base_offset() != *base);
             let _ = retention::delete_segment_files(&self.dir, *base);
         }
 
-        // Write both overrides directly: `set_log_start_offset` only
-        // touches `log_start_override`, but 48c requires the local pointer
-        // to advance in lockstep.
+        // Advance the (single) log-start pointer. `local_log_start_offset`
+        // delegates here, so the local floor moves in lockstep.
         self.log_start_override = Some(target);
-        self.local_log_start_override = Some(target);
 
         Ok(removed)
     }
@@ -948,7 +943,10 @@ impl Log {
     /// value has not been populated.
     #[must_use]
     pub fn tierable_segments(&self) -> Vec<SegmentExport> {
-        let epoch_entries = self.epoch_checkpoint.entries();
+        // Sort the epoch entries once here rather than per-segment inside
+        // `epochs_for_range`.
+        let mut epoch_entries = self.epoch_checkpoint.entries().to_vec();
+        epoch_entries.sort_by_key(|e| e.start_offset);
         let active_base = self
             .active
             .as_ref()
@@ -956,7 +954,7 @@ impl Log {
         let next_bases: Vec<i64> = self
             .segments
             .iter()
-            .map(|s| s.base_offset())
+            .map(Segment::base_offset)
             .skip(1)
             .chain(std::iter::once(active_base))
             .collect();
@@ -978,7 +976,7 @@ impl Log {
                     offset_index_path: name::index_path(&self.dir, base),
                     time_index_path: name::timeindex_path(&self.dir, base),
                     transaction_index_path: txn.exists().then_some(txn),
-                    leader_epochs: epochs_for_range(epoch_entries, base, last),
+                    leader_epochs: epochs_for_range(&epoch_entries, base, last),
                 }
             })
             .collect()
@@ -1002,15 +1000,15 @@ impl Log {
         let index_interval = cfg_guard.index_interval_bytes;
         drop(cfg_guard);
 
-        let consumed_bases: Vec<i64> = self.segments.iter().map(|s| s.base_offset()).collect();
+        let consumed_bases: Vec<i64> = self.segments.iter().map(Segment::base_offset).collect();
 
         // Borrow sealed segments to run map + rewrite (which open
         // additional file handles internally for reading). Then drop the
-        // borrows and clear self.segments so the original Arc<Segment>
+        // borrows and clear self.segments so the original segments'
         // file handles close before atomic_swap deletes/renames
         // (Windows requires no open handle on a file before remove/rename).
         let rewrite = {
-            let sealed_refs: Vec<&Segment> = self.segments.iter().map(AsRef::as_ref).collect();
+            let sealed_refs: Vec<&Segment> = self.segments.iter().collect();
             let offset_map = crate::compact::build_offset_map(&sealed_refs)?;
             crate::compact::rewrite_segments(&self.dir, &sealed_refs, &offset_map, index_interval)?
         };
@@ -1022,7 +1020,7 @@ impl Log {
         // last_offset + max_timestamp; then seal() flips the flag.
         let mut new_seg = Segment::open_active(&self.dir, rewrite.new_base_offset, true)?;
         new_seg.seal();
-        self.segments.push(Arc::new(new_seg));
+        self.segments.push(new_seg);
         Ok(())
     }
 }
@@ -1031,13 +1029,14 @@ impl Log {
 /// segment range `[base, last]`, returned as `(epoch, start_offset)` with
 /// the start clamped up to `base` and ordered by offset. An epoch with no
 /// recorded entries yields an empty result.
+///
+/// `sorted` must be ordered by `start_offset` ascending (the caller sorts
+/// once and reuses the slice across segments).
 fn epochs_for_range(
-    entries: &[crate::leader_epoch_checkpoint::EpochEntry],
+    sorted: &[crate::leader_epoch_checkpoint::EpochEntry],
     base: i64,
     last: i64,
 ) -> Vec<(i32, i64)> {
-    let mut sorted: Vec<_> = entries.to_vec();
-    sorted.sort_by_key(|e| e.start_offset);
     let mut out = Vec::new();
     for (i, e) in sorted.iter().enumerate() {
         // Coverage of this epoch is [start_offset, next.start_offset).

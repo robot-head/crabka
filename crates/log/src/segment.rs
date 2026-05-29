@@ -2,7 +2,7 @@
 //! base offset.
 
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use bytes::Bytes;
@@ -12,6 +12,37 @@ use zerocopy::FromBytes;
 use crate::error::LogError;
 use crate::index::{OffsetIndex, TimeIndex};
 use crate::name;
+
+/// Positioned read: fill `buf` from `offset` in `file` without moving the
+/// file's cursor, looping over short reads until `buf` is full or EOF.
+/// Returns the number of bytes read. Lets readers share the writer's
+/// `File` handle (`&self`) with no `dup(2)`/`lseek(2)` per call — the
+/// hot fetch path runs this for every read.
+fn read_full_at(file: &File, mut offset: u64, buf: &mut [u8]) -> std::io::Result<usize> {
+    let mut total = 0;
+    while total < buf.len() {
+        match read_at(file, offset, &mut buf[total..]) {
+            Ok(0) => break, // EOF
+            Ok(n) => {
+                total += n;
+                offset += n as u64;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(total)
+}
+
+#[cfg(unix)]
+fn read_at(file: &File, offset: u64, buf: &mut [u8]) -> std::io::Result<usize> {
+    std::os::unix::fs::FileExt::read_at(file, buf, offset)
+}
+
+#[cfg(windows)]
+fn read_at(file: &File, offset: u64, buf: &mut [u8]) -> std::io::Result<usize> {
+    std::os::windows::fs::FileExt::seek_read(file, buf, offset)
+}
 
 /// A single log segment: the `.log` data file paired with its sparse
 /// `.index` (offset → byte position) and `.timeindex` (timestamp →
@@ -113,10 +144,9 @@ impl Segment {
             return Ok(());
         }
 
-        let mut f = self.log_file.try_clone()?;
-        f.seek(SeekFrom::Start(scan_start))?;
-        let mut buf = Vec::with_capacity(usize::try_from(self.log_size - scan_start).unwrap_or(0));
-        f.read_to_end(&mut buf)?;
+        let mut buf = Vec::new();
+        let to_read = usize::try_from(self.log_size - scan_start).unwrap_or(usize::MAX);
+        self.read_log_range(scan_start, &mut buf, to_read)?;
 
         let mut cur: &[u8] = &buf;
         let mut consumed: u64 = 0;
@@ -442,10 +472,11 @@ impl Segment {
     ) -> Result<(), LogError> {
         let available = self.log_size.saturating_sub(start_pos);
         let to_read = available.min(u64::try_from(max_bytes).unwrap_or(u64::MAX));
-        let mut f = self.log_file.try_clone()?;
-        f.seek(SeekFrom::Start(start_pos))?;
-        let mut bounded = f.take(to_read);
-        bounded.read_to_end(buf)?;
+        let to_read = usize::try_from(to_read).unwrap_or(usize::MAX);
+        let base = buf.len();
+        buf.resize(base + to_read, 0);
+        let n = read_full_at(&self.log_file, start_pos, &mut buf[base..])?;
+        buf.truncate(base + n);
         Ok(())
     }
 
@@ -526,10 +557,17 @@ impl Segment {
     /// Truncate `.log` and indexes so no batches at `relative_offset` `>= rel`
     /// remain. Used by `Log::truncate_to`. Leaves the segment unsealed.
     pub fn truncate_to_relative(&mut self, rel: u32) -> Result<(), LogError> {
-        let mut f = self.log_file.try_clone()?;
-        f.seek(SeekFrom::Start(0))?;
+        // Read only as far as the cut can be: every kept batch lives below
+        // the first index entry at or after `rel`. When `rel` is past the
+        // last index entry, fall back to the whole file. This avoids
+        // slurping the discarded tail on each truncate.
+        let read_limit = self
+            .offset_index
+            .position_at_or_after(rel)
+            .map_or(self.log_size, u64::from);
         let mut buf = Vec::new();
-        f.read_to_end(&mut buf)?;
+        let to_read = usize::try_from(read_limit).unwrap_or(usize::MAX);
+        self.read_log_range(0, &mut buf, to_read)?;
 
         let target_abs = self.base_offset + i64::from(rel);
         let mut cur: &[u8] = &buf;
