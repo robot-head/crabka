@@ -44,10 +44,10 @@ struct TimeIndexEntry {
 
 const _: () = assert!(std::mem::size_of::<TimeIndexEntry>() == 12);
 
-/// 24 bytes per entry: start_offset i64 BE + last_offset i64 BE + producer_id
-/// i64 BE. Mirrors `crabka_log::txn_index::AbortedTxnRaw` so the remote-tier
-/// copy of a `.txnindex` file decodes through the same byte layout the local
-/// index was written with.
+/// 24 bytes per entry: `start_offset` i64 BE + `last_offset` i64 BE +
+/// `producer_id` i64 BE. Mirrors `crabka_log::txn_index::AbortedTxnRaw` so the
+/// remote-tier copy of a `.txnindex` file decodes through the same byte layout
+/// the local index was written with.
 #[derive(Debug, Clone, Copy, FromBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C)]
 struct AbortedTxnIndexEntry {
@@ -313,9 +313,9 @@ pub(crate) fn parse_time_index(bytes: &[u8]) -> Vec<(i64, u32)> {
         .collect()
 }
 
-/// Parse Kafka's transaction-index format (24 bytes / entry: start_offset i64
-/// BE, last_offset i64 BE, producer_id i64 BE). Trailing bytes that don't
-/// complete a 24-byte entry are ignored.
+/// Parse Kafka's transaction-index format (24 bytes / entry: `start_offset`
+/// i64 BE, `last_offset` i64 BE, `producer_id` i64 BE). Trailing bytes that
+/// don't complete a 24-byte entry are ignored.
 #[must_use]
 pub(crate) fn parse_txn_index(bytes: &[u8]) -> Vec<AbortedTxnEntry> {
     let truncated_len = (bytes.len() / 24) * 24;
@@ -682,8 +682,8 @@ mod tests {
 
     /// Like `populated_reader`, but before copying, writes a single aborted-txn
     /// entry into the first sealed segment's `.txnindex` (24 BE bytes:
-    /// start_offset, last_offset, producer_id) so the copy path carries it to
-    /// the remote tier. Returns the reader, the log, and the
+    /// `start_offset`, `last_offset`, `producer_id`) so the copy path carries
+    /// it to the remote tier. Returns the reader, the log, and the
     /// `(start_offset, last_offset, producer_id)` written.
     fn populated_reader_with_abort(
         log_dir: &std::path::Path,
