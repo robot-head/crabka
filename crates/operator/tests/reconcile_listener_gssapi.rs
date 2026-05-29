@@ -559,6 +559,118 @@ async fn inter_broker_gssapi_renders_inter_broker_credentials_block() {
     assert!(toml.contains("kdc_url = \"tcp://kdc:88\""), "TOML: {toml}");
 }
 
+// ── test 5: cross-crate contract — round-trip through the real broker parser ─
+
+/// Closes the operator↔broker TOML contract loop end-to-end: the operator
+/// renders a `[gssapi]` block (with `realm`/`kdc` set) AND an
+/// `[inter_broker_credentials]` block for a gssapi listener that doubles as
+/// the inter-broker listener, then we feed that *rendered* TOML straight
+/// through the broker's own `FileConfig` parser + `apply_to`. This proves
+/// the broker's `deny_unknown_fields` schema accepts every key the operator
+/// emits and that each one maps through to the live `BrokerConfig` with the
+/// right value — i.e. the wire contract is byte-exact, not just
+/// string-shaped.
+#[tokio::test]
+async fn rendered_gssapi_toml_round_trips_through_broker_file_config() {
+    let items = vec![fake_pool_list_item("brokers", "ns5", "c5", 1, 1)];
+    let mut rules = happy_path_rules("c5", "ns5", &items);
+    rules.push(rule_get_secret(
+        KEYTAB_SECRET_NAME,
+        &secret_body(
+            KEYTAB_SECRET_NAME,
+            "ns5",
+            KEYTAB_KEY,
+            b"\x05\x02fake-keytab",
+        ),
+    ));
+
+    let (ctx, state) = build_ctx("ns5", rules);
+
+    // A gssapi listener with realm/kdc set, that is ALSO the inter-broker
+    // listener — exercises the [gssapi] block, the realm/kdc render
+    // branches, and the [inter_broker_credentials] block in one render.
+    let gss = Listener {
+        name: "gss".into(),
+        port: 9092,
+        type_: ListenerType::Internal,
+        tls: false,
+        authentication: Some(ListenerAuthentication::Gssapi(
+            ListenerAuthenticationGssapi {
+                keytab_secret_ref: KeytabSecretRef {
+                    secret_name: KEYTAB_SECRET_NAME.into(),
+                    key: KEYTAB_KEY.into(),
+                },
+                service_name: Some("kafka".into()),
+                principal_to_local_rules: vec![
+                    "RULE:[1:$1@$0](.*@EXAMPLE.COM)s/@.*//".into(),
+                    "DEFAULT".into(),
+                ],
+                realm: Some("EXAMPLE.COM".into()),
+                kdc: Some("tcp://kdc:88".into()),
+            },
+        )),
+        configuration: None,
+        network_policy_peers: None,
+    };
+
+    let mut kafka = kafka_cr("c5", "ns5", vec![gss]);
+    kafka.spec.inter_broker_listener_name = Some("gss".into());
+    kafka.spec.inter_broker_kerberos = Some(InterBrokerKerberos {
+        client_principal: "kafka@EXAMPLE.COM".into(),
+        service_name: Some("kafka".into()),
+        kdc_url: "tcp://kdc:88".into(),
+    });
+    reconcile_kafka(Arc::new(kafka), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    let toml = extract_broker0_toml(&observed, "c5");
+
+    // Parse through the REAL broker parser, then apply to a live BrokerConfig.
+    let fc: crabka_broker::file_config::FileConfig =
+        toml::from_str(&toml).expect("broker parses operator-rendered gssapi TOML");
+    let mut bc = crabka_broker::config::BrokerConfig::default();
+    fc.apply_to(&mut bc)
+        .expect("apply rendered gssapi TOML to BrokerConfig");
+
+    // [gssapi] survives the round trip with every field intact.
+    let g = bc.gssapi.expect("bc.gssapi must be Some after round trip");
+    assert_eq!(g.service_name, "kafka");
+    assert_eq!(
+        g.principal_to_local_rules.len(),
+        2,
+        "both auth_to_local rules must parse through"
+    );
+    assert_eq!(g.realm, Some("EXAMPLE.COM".into()));
+    assert_eq!(g.kdc, Some("tcp://kdc:88".into()));
+    assert_eq!(
+        g.keytab_path,
+        std::path::PathBuf::from("/etc/crabka/gssapi-keytab/keytab")
+    );
+
+    // [inter_broker_credentials] survives as the Gssapi variant with the
+    // shared client principal, service name, KDC URL, and keytab path.
+    match bc
+        .inter_broker_credentials
+        .expect("bc.inter_broker_credentials must be Some after round trip")
+    {
+        crabka_broker::config::InterBrokerCredentials::Gssapi {
+            keytab_path,
+            client_principal,
+            service_name,
+            kdc_url,
+        } => {
+            assert_eq!(client_principal, "kafka@EXAMPLE.COM");
+            assert_eq!(service_name, "kafka");
+            assert_eq!(kdc_url, "tcp://kdc:88");
+            assert_eq!(
+                keytab_path,
+                std::path::PathBuf::from("/etc/crabka/gssapi-keytab/keytab")
+            );
+        }
+        other => panic!("expected InterBrokerCredentials::Gssapi, got {other:?}"),
+    }
+}
+
 // ── test 4: krb5.conf → krb5-conf volume/mount + KRB5_CONFIG env ────────────
 
 /// `spec.krb5ConfSecretRef` drives a `krb5-conf` volume (sourcing the
