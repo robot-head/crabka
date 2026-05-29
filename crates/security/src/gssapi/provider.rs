@@ -2,9 +2,10 @@
 //!
 //! Both the acceptor and the initiator authenticate from a keytab: the
 //! acceptor uses the service key to decrypt incoming AP-REQs, and the
-//! initiator uses the client principal's long-term key (via the vendored
+//! initiator uses the client principal's long-term key (via the forked
 //! `sspi::Credentials::Keytab` extension) to drive the AS/TGS exchange with no
-//! password. See `third_party/sspi` for the keytab-client-auth fork.
+//! password. The fork is pulled in via `[patch.crates-io]` in the workspace
+//! `Cargo.toml` (Devolutions/sspi-rs#681).
 
 use std::sync::Mutex;
 
